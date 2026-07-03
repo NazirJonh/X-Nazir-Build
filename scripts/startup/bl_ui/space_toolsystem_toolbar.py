@@ -2163,6 +2163,23 @@ class _defs_image_paint_select:
         )
 
     @ToolDef.from_fn
+    def warp():
+        def draw_settings(context, layout, _tool):
+            imapaint = context.tool_settings.image_paint
+            layout.prop(imapaint, "warp_interpolation", text="Interpolation")
+            layout.prop(imapaint, "warp_grid_size", text="Grid Size")
+
+        return dict(
+            idname="builtin.select_warp",
+            label="Warp Selection",
+            # No dedicated warp icon asset; reuse the transform icon (see plan Task 8 Step 2).
+            icon="ops.transform.transform",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Warp Selection",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def box():
         def draw_settings(context, layout, tool):
             props = tool.operator_properties("paint.image_select_box")
@@ -3699,6 +3716,7 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_image_paint_select.lasso,
             _defs_image_paint_select.move,
             _defs_image_paint_select.transform,
+            _defs_image_paint_select.warp,
         ),
     )
 

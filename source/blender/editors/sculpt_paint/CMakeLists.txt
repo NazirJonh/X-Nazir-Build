@@ -85,6 +85,7 @@ set(SRC
   mesh/paint_image_select_move.cc
   mesh/paint_image_select_transform.cc
   mesh/paint_image_select_gradient.cc
+  mesh/paint_image_select_warp.cc
   mesh/paint_image_select_gizmo.cc
   mesh/paint_image_2d_curve_mask.cc
   mesh/paint_image_ops_paint.cc
@@ -217,6 +218,7 @@ if(WITH_GTESTS)
   set(TEST_SRC
     mesh/mesh_brush_common_tests.cc
     mesh/paint_test.cc
+    mesh/paint_image_select_warp_tests.cc
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc
     mesh/sculpt_undo_test.cc

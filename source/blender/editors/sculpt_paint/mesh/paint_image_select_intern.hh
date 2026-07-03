@@ -92,11 +92,13 @@ struct SelectionTileFragment {
 struct ImageSelectMoveState;
 struct ImageSelectTransformState;
 struct ImageSelectGradientState;
+struct ImageSelectWarpState;
 
 struct PaintSelectSession {
   ImageSelectMoveState *move = nullptr;
   ImageSelectTransformState *transform = nullptr;
   ImageSelectGradientState *gradient = nullptr;
+  ImageSelectWarpState *warp = nullptr;
 };
 
 /** \} */
@@ -176,6 +178,8 @@ void PAINT_OT_image_select_gradient_cancel(wmOperatorType *ot);
 } /* namespace blender */
 
 /* Subsystem declarations. Included here (after the shared types above) so the existing consumers
- * keep a single include; the move/transform declarations physically live in their own files. */
+ * keep a single include; the move/transform/warp declarations physically live in their own
+ * files. */
 #include "paint_image_select_move_intern.hh"
 #include "paint_image_select_transform_intern.hh"
+#include "paint_image_select_warp_intern.hh"

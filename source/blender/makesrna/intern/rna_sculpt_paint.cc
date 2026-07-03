@@ -129,6 +129,7 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 #  include "ED_particle.hh"
 
 #  include "../../editors/sculpt_paint/mesh/paint_image_select_gradient.hh"
+#  include "../../editors/sculpt_paint/mesh/paint_image_select_warp.hh"
 
 namespace blender {
 
@@ -331,6 +332,22 @@ static void rna_ImagePaintSettings_gradient_update(Main * /*bmain*/,
 {
   /* Invalidate the live gradient preview when any gradient setting (including a ramp stop) changes. */
   image_paint_gradient_bump_settings_revision();
+}
+
+static void rna_ImagePaintSettings_warp_update(Main * /*bmain*/,
+                                               Scene * /*scene*/,
+                                               PointerRNA * /*ptr*/)
+{
+  image_paint_warp_bump_settings_revision();
+  /* NC_SCENE | ND_TOOLSETTINGS (the notifier this property's RNA_def_property_update() call
+   * already sends) only reaches the Image Editor's header/tool-settings *region* listener --
+   * the main WINDOW region where the grid is drawn is not tagged, so the visible grid would stay
+   * stale until some other event happened to redraw it (e.g. the mouse re-entering the canvas
+   * and triggering the paint-cursor hover detector). NC_SPACE | ND_SPACE_IMAGE is handled by the
+   * Image Editor's *area* listener instead, which redraws every region -- forcing the WINDOW
+   * region to redraw immediately, where draw_select_warp_preview() picks up the bumped revision
+   * and resizes the grid before rendering. */
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
 }
 
 static PointerRNA rna_ImagePaintSettings_gradient_color_ramp_get(PointerRNA *ptr)
@@ -1639,6 +1656,34 @@ static void rna_def_image_paint(BlenderRNA *brna)
       "UV Island",
       "When selecting, expand the result to include entire UV islands that overlap the selection");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "warp_grid_size", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "warp_grid_size");
+  RNA_def_property_range(prop, 2, 10);
+  RNA_def_property_ui_text(
+      prop, "Grid Size", "Number of control points along each side of the Warp selection grid");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_warp_update");
+
+  static const EnumPropertyItem warp_interpolation_items[] = {
+      {IMAGE_PAINT_WARP_INTERP_LINEAR,
+       "LINEAR",
+       0,
+       "Linear",
+       "Piecewise bilinear deformation; fast, but creases along the grid lines"},
+      {IMAGE_PAINT_WARP_INTERP_SMOOTH,
+       "SMOOTH",
+       0,
+       "Smooth",
+       "Bicubic (Catmull-Rom) deformation with continuous curvature across the grid lines"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "warp_interpolation", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "warp_interpolation");
+  RNA_def_property_enum_items(prop, warp_interpolation_items);
+  RNA_def_property_ui_text(
+      prop, "Interpolation", "Interpolation used to deform the Warp selection grid");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_warp_update");
 
   static const EnumPropertyItem gradient_type_items[] = {
       {IMAGE_PAINT_GRADIENT_LINEAR, "LINEAR", 0, "Linear", "Interpolate along the gradient line"},

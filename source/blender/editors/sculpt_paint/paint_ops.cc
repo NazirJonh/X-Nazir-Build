@@ -694,6 +694,11 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_select_gradient_apply);
   WM_operatortype_append(PAINT_OT_image_select_gradient_cancel);
 
+  WM_operatortype_append(PAINT_OT_image_select_warp);
+  WM_operatortype_append(PAINT_OT_image_select_warp_confirm);
+  WM_operatortype_append(PAINT_OT_image_select_warp_cancel);
+  WM_operatortype_append(PAINT_OT_image_select_warp_undo_step);
+
   image_paint_clipboard_ensure_atexit_handler();
 }
 

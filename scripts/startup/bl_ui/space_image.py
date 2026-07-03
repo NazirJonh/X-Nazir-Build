@@ -155,6 +155,7 @@ class IMAGE_MT_select(Menu):
             layout.separator()
             layout.operator("paint.image_select_move", text="Move Selection")
             layout.operator("paint.image_select_transform", text="Transform Selection")
+            layout.operator("paint.image_select_warp", text="Warp Selection")
             layout.operator("paint.image_select_gradient", text="Gradient")
             layout.separator()
             layout.operator("paint.image_select_copy", text="Copy Selection")

@@ -1495,6 +1495,9 @@ static bool image_select_gradient_poll(bContext *C)
   if (image_select_transform_is_floating(C)) {
     return false;
   }
+  if (image_select_warp_is_floating(C)) {
+    return false;
+  }
   const ARegion *region = CTX_wm_region(C);
   if (!region || region->regiontype != RGN_TYPE_WINDOW) {
     return false;

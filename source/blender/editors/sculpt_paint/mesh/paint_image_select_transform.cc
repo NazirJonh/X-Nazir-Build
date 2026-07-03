@@ -687,6 +687,9 @@ static bool image_select_transform_poll(bContext *C)
   if (image_select_move_is_floating_in_space(sima)) {
     return true;
   }
+  if (image_select_warp_is_floating(C)) {
+    return false;
+  }
   if (!image_paint_selection_poll(C)) {
     return false;
   }

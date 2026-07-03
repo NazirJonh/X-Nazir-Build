@@ -147,6 +147,9 @@ bool image_paint_selection_poll(bContext *C)
   if (image_select_gradient_is_floating(C)) {
     return false;
   }
+  if (image_select_warp_is_floating(C)) {
+    return false;
+  }
   const ARegion *region = CTX_wm_region(C);
   if (!region || region->regiontype != RGN_TYPE_WINDOW) {
     return false;
@@ -1639,6 +1642,10 @@ void paint_select_session_free(PaintSelectSession &session)
   if (session.gradient) {
     image_select_gradient_state_free(session.gradient);
     session.gradient = nullptr;
+  }
+  if (session.warp) {
+    image_select_warp_state_free(session.warp);
+    session.warp = nullptr;
   }
 }
 

@@ -286,6 +286,9 @@ static bool image_paint_poll_ex(bContext *C, bool check_tool)
     }
     return false;
   }
+  if (image_select_warp_is_floating(C)) {
+    return false;
+  }
 
   if (!image_paint_brush(C)) {
     return false;

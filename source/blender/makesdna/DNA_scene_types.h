@@ -1310,6 +1310,12 @@ enum eImagePaint_GradientRepeat : int8_t {
   IMAGE_PAINT_GRADIENT_REPEAT_REFLECT = 2,
 };
 
+/** #ImagePaintSettings::warp_interpolation */
+enum eImagePaint_WarpInterpolation : int8_t {
+  IMAGE_PAINT_WARP_INTERP_LINEAR = 0,
+  IMAGE_PAINT_WARP_INTERP_SMOOTH = 1,
+};
+
 /** Texture/Image Editor. */
 struct ImagePaintSettings {
   Paint paint;
@@ -1353,11 +1359,14 @@ struct ImagePaintSettings {
   char gradient_repeat = IMAGE_PAINT_GRADIENT_REPEAT_NONE;
   /** IMB_BlendMode for the selection gradient tool. */
   short gradient_blend_mode = 0;
-  char _pad_gradient[2] = {};
+  /** Number of control points along each side of the Warp selection grid. */
+  short warp_grid_size = 4;
   float gradient_opacity = 1.0f;
+  /** #eImagePaint_WarpInterpolation */
+  char warp_interpolation = IMAGE_PAINT_WARP_INTERP_LINEAR;
   /* Pad so the embedded #ColorBand starts on an 8-byte boundary and the struct size (which holds
    * pointers) stays a multiple of 8. */
-  char _pad_gradient2[4] = {};
+  char _pad_gradient2[3] = {};
   /**
    * Color ramp (stops + interpolation) for the selection gradient tool. Embedded by value like
    * #ColorMapping::coba; initialized lazily (see #BKE_colorband_init) when empty.

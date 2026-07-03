@@ -937,6 +937,9 @@ static bool image_select_move_poll(bContext *C)
   if (image_select_transform_is_floating(C)) {
     return false;
   }
+  if (image_select_warp_is_floating(C)) {
+    return false;
+  }
   /* Re-drag an already-floating fragment, no selection needed. */
   if (g_floating_state && sima == g_floating_state->owner_sima) {
     return true;

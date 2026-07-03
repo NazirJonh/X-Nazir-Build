@@ -587,6 +587,29 @@ bool popup_block_fixed_grid_wheel_scroll(bContext *C, ARegion *region, const wmE
     return false;
   }
 
+  /* Route the wheel to whichever view is under the cursor. Over a non-grid scrollable view (e.g. the
+   * catalog tree beside the asset grid in the asset shelf popover) scroll that view by whole steps
+   * instead of the grid, and never let the grid steal the event while the cursor is over it. */
+  if (AbstractView *hover_view = region_view_find_at(region, event->xy, 0, nullptr)) {
+    if (dynamic_cast<AbstractGridView *>(hover_view) == nullptr) {
+      if (hover_view->supports_scrolling() && !hover_view->is_fully_visible()) {
+        std::optional<ViewScrollDirection> dir;
+        if (event->type == WHEELUPMOUSE) {
+          dir = ViewScrollDirection::UP;
+        }
+        else if (event->type == WHEELDOWNMOUSE) {
+          dir = ViewScrollDirection::DOWN;
+        }
+        if (dir) {
+          hover_view->scroll(*dir);
+          ED_region_tag_refresh_ui(region);
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+
   AbstractGridView *grid_view = block_view_find_fixed_viewport_grid(*block);
   if (grid_view == nullptr || grid_view->is_fully_visible()) {
     return false;
@@ -655,6 +678,59 @@ bool popup_block_fixed_grid_wheel_scroll(bContext *C, ARegion *region, const wmE
   grid_view->scroll(*direction);
   ED_region_tag_refresh_ui(region);
   return true;
+}
+
+bool popup_block_fixed_grid_drag_scroll_dy(ARegion *region, const int dy)
+{
+  if (region == nullptr) {
+    return false;
+  }
+  Block *block = static_cast<Block *>(region->runtime->uiblocks.first);
+  if (block == nullptr || (block->flag & BLOCK_POPOVER) == 0) {
+    return false;
+  }
+  AbstractGridView *grid_view = block_view_find_fixed_viewport_grid(*block);
+  if (grid_view == nullptr) {
+    return false;
+  }
+  if (grid_view->is_fully_visible()) {
+    /* A fixed-viewport grid is present but there is nothing to scroll; still report it so the caller
+     * doesn't fall back to whole-popover scrolling. */
+    return true;
+  }
+
+  /* Blender Y-up: drag up (dy > 0) makes content follow the cursor up, revealing later rows (same
+   * sign as the touch/pen drag in #ui_do_but_VIEW_ITEM). Scroll pixel-exactly through the same
+   * clamped accumulator as the wheel trackpad pan; the partially scrolled rows are drawn clipped. */
+  const float scale = block_to_window_scale(region, block);
+  const int dy_content = int(roundf(float(dy) / std::max(scale, FLT_EPSILON)));
+  const int tile_h = std::max(grid_view->get_style().tile_height, 1);
+  const int total_px = std::clamp(grid_view->scroll_value() * tile_h +
+                                      grid_view->scroll_offset_px() + dy_content,
+                                  0,
+                                  grid_view->fixed_viewport_max_scroll_px());
+  if (total_px / tile_h != grid_view->scroll_value() ||
+      total_px % tile_h != grid_view->scroll_offset_px())
+  {
+    grid_view->scroll_value_set(total_px / tile_h);
+    grid_view->scroll_offset_px_set(total_px % tile_h);
+    ED_region_tag_redraw(region);
+    ED_region_tag_refresh_ui(region);
+  }
+  return true;
+}
+
+bool popup_region_point_over_fixed_grid(ARegion *region, const int xy[2])
+{
+  if (region == nullptr) {
+    return false;
+  }
+  AbstractView *view = region_view_find_at(region, xy, 0, nullptr);
+  if (view == nullptr) {
+    return false;
+  }
+  AbstractGridView *grid_view = dynamic_cast<AbstractGridView *>(view);
+  return grid_view != nullptr && grid_view->use_fixed_viewport_layout();
 }
 
 /* Kinetic (fling) scrolling tuning. Velocities are in content pixels per second. */
@@ -739,6 +815,55 @@ bool popup_block_fixed_grid_fling_step(bContext *C, PopupBlockHandle *menu, Bloc
 }
 
 /** \} */
+
+float popup_grid_fixed_viewport_units(const bContext *C,
+                                      const Block *block,
+                                      const float non_grid_units,
+                                      const float tile_units,
+                                      const float default_units)
+{
+  if (block == nullptr || block->handle == nullptr) {
+    return default_units;
+  }
+  const Button *but = block->handle->popup_create_vars.but;
+  ARegion *butregion = block->handle->popup_create_vars.butregion;
+  if (but == nullptr || but->block == nullptr || butregion == nullptr) {
+    return default_units;
+  }
+  const float aspect = but->block->aspect;
+  if (aspect >= 1.0f) {
+    /* Not zoomed in; the full-height popover fits. */
+    return default_units;
+  }
+
+  /* Vertical space on the roomier side, measured from the button *edge* the popover stacks away
+   * from, not its center: the popover grows away from the button, so the center over-counts the
+   * available space by half the button height. At high zoom the button is drawn large (scaling with
+   * 1/aspect), making that a 1-2 unit error - exactly what overflows the tightly-packed grid. */
+  float bx = BLI_rctf_cent_x(&but->rect);
+  float by_bottom = but->rect.ymin;
+  float bx_top = bx;
+  float by_top = but->rect.ymax;
+  block_to_window_fl(butregion, but->block, &bx, &by_bottom);
+  block_to_window_fl(butregion, but->block, &bx_top, &by_top);
+  const auto win_size = WM_window_native_pixel_size(CTX_wm_window(C));
+  float avail_px = std::max(by_bottom, float(win_size[1]) - by_top);
+
+  /* Chrome the popover wraps around the content when positioned, all scaling with 1/aspect like the
+   * layout: the arrow hint (~0.5 #widget_unit) plus the block bounds padding on both sides
+   * (#block_margin = widget_unit/2 each) ≈ 1.5 widget_unit, plus a fixed screen-edge margin.
+   * Subtracting it keeps the final block inside the window so it never turns menu-scrollable, which
+   * would otherwise drag the fixed header off screen while the grid scrolls. Keep this
+   * conservative. */
+  avail_px -= 1.5f * float(UI_UNIT_Y) / aspect + float(UI_UNIT_Y) * 1.5f;
+
+  /* popover_pixels = units * UI_UNIT_Y / aspect  →  units = pixels * aspect / UI_UNIT_Y. */
+  const float budget_units = avail_px * aspect / float(UI_UNIT_Y);
+  const float tile = std::max(tile_units, 0.001f);
+  /* Whole tile rows that fit after the fixed header/gaps; never drop below a single row. */
+  const int rows = std::max(1, int((budget_units - non_grid_units) / tile));
+  return std::clamp(float(rows) * tile, tile, default_units);
+}
 
 static std::optional<int> find_filtered_item_index(const AbstractGridViewItem &item)
 {
@@ -886,6 +1011,7 @@ void AbstractGridView::scroll_active_into_view(bContext *C, bool scroll_active_t
     }
     else {
       scroll_active_into_view_on_build_ = true;
+      scroll_active_center_on_build_ = scroll_active_to_center;
     }
     return;
   }
@@ -1311,8 +1437,9 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
      * the popover) before the visible rows are selected below. */
     grid_view.fixed_viewport_clamp_scroll_value();
     if (grid_view.scroll_active_into_view_on_build_) {
-      grid_view.fixed_viewport_scroll_active_into_view(false);
+      grid_view.fixed_viewport_scroll_active_into_view(grid_view.scroll_active_center_on_build_);
       grid_view.scroll_active_into_view_on_build_ = false;
+      grid_view.scroll_active_center_on_build_ = false;
     }
 
     /* Turn the grid column into a fixed-height scroll-clip window (see

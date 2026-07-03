@@ -474,7 +474,8 @@ static std::string filter_string_get(const AssetShelf &shelf)
 void build_asset_view(ui::Layout &layout,
                       const AssetLibraryReference &library_ref,
                       const AssetShelf &shelf,
-                      const bContext &C)
+                      const bContext &C,
+                      std::optional<int> popup_grid_viewport_height_px)
 {
   list::storage_fetch(&library_ref, &C);
 
@@ -493,13 +494,29 @@ void build_asset_view(ui::Layout &layout,
   std::unique_ptr asset_view = std::make_unique<AssetView>(library_ref, shelf, active_asset);
   asset_view->set_catalog_filter(catalog_filter_from_shelf_settings(shelf.settings, *library));
   asset_view->set_tile_size(tile_width, tile_height);
+  if (popup_grid_viewport_height_px) {
+    /* Popover: bound the grid to a fixed viewport with internal row scrolling so the popover header
+     * (search / preview size / settings) stays put instead of scrolling away with the block. */
+    asset_view->set_fixed_viewport_layout(true);
+    asset_view->set_min_viewport_height(*popup_grid_viewport_height_px);
+  }
 
   ui::Block *block = layout.block();
   ui::AbstractGridView *grid_view = block_add_view(
       *block, "asset shelf asset view", std::move(asset_view));
   grid_view->set_context_menu_title("Asset Shelf");
   if (STREQ(shelf.type->idname, "VIEW3D_AST_image_texture")) {
-    grid_view->scroll_active_into_center_on_draw_ = true;
+    if (popup_grid_viewport_height_px) {
+      /* Fixed-viewport popover: centre via the row-index scroll model, only on first open (a refresh
+       * fires on every scroll step; re-centring each time would fight the user's scrolling). */
+      if (ui::block_is_first_open(block)) {
+        grid_view->scroll_active_into_view(const_cast<bContext *>(&C),
+                                           /*scroll_active_to_center=*/true);
+      }
+    }
+    else {
+      grid_view->scroll_active_into_center_on_draw_ = true;
+    }
   }
 
   ui::GridViewBuilder builder(*block);

@@ -111,7 +111,24 @@ void image_grid_viewport_store_scroll_for_layout(ImageGridViewport &viewport,
 
 static bool image_grid_browse_popover_is_open(const bContext &C)
 {
-  return ui::region_popup_has_panel(CTX_wm_region_popup(&C), "ASSETSHELF_PT_popover_panel");
+  /* Fast path: the browse popover is the current popup context (e.g. an event handled inside it). */
+  if (ui::region_popup_has_panel(CTX_wm_region_popup(&C), "ASSETSHELF_PT_popover_panel")) {
+    return true;
+  }
+  /* The catalog clobber runs from the N-panel image-grid draw, where the popup is not the context
+   * region (#CTX_wm_region_popup is null). Popup regions live in #bScreen::regionbase as
+   * #RGN_TYPE_TEMPORARY, so scan them to detect the open browse popover window-wide. */
+  const bScreen *screen = CTX_wm_screen(&C);
+  if (screen) {
+    for (const ARegion &region : screen->regionbase) {
+      if (region.regiontype == RGN_TYPE_TEMPORARY &&
+          ui::region_popup_has_panel(&region, "ASSETSHELF_PT_popover_panel"))
+      {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 static int image_grid_find_asset_filtered_index(const bContext &C,
@@ -567,7 +584,14 @@ AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
   if (!shelf) {
     return nullptr;
   }
-  image_grid_sync_shelf_from_state(*shelf, state);
+  /* While the browse popover is open it owns the library/catalog selection (the user picks catalogs
+   * in its tree, written straight to #shelf.settings). This prep runs on every N-panel image-grid
+   * redraw; syncing shelf←state here would clobber that selection back to #ImageGridUIState on the
+   * next frame. Skip it while open — the popover's #setup_popover_layout reconciles settings→state,
+   * and this prep resumes once the popover closes. */
+  if (!image_grid_browse_popover_is_open(C)) {
+    image_grid_sync_shelf_from_state(*shelf, state);
+  }
   /* The popover keeps its own preview size (persisted per shelf type in the Preferences), so it is
    * intentionally not overwritten from the N-panel image grid's #View3D preview size here. */
 

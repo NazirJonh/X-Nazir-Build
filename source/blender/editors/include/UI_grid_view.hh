@@ -123,6 +123,8 @@ class AbstractGridView : public AbstractView {
   std::shared_ptr<int> scroll_offset_px_;
   /** Request scrolling the active item into view during the next fixed-viewport build. */
   bool scroll_active_into_view_on_build_ = false;
+  /** Remember the center intent for the deferred #scroll_active_into_view_on_build_ pass. */
+  bool scroll_active_center_on_build_ = false;
 
  public:
   AbstractGridView();
@@ -289,6 +291,22 @@ class GridViewBuilder {
  * Called once from #ED_spacetypes_init(); not tied to any space type.
  */
 void grid_view_register_pre_button_handler();
+
+/**
+ * Height (in #UI_UNIT_Y) for a fixed-viewport grid inside a popover so the whole popover stays
+ * within the window even when the spawning button is zoomed (#Block::aspect < 1). Returns
+ * \a default_units when the popover is not zoomed (the full-height popover fits). The result is
+ * snapped to whole tile rows so the viewport shows complete rows with no trailing gap.
+ *
+ * \param non_grid_units: header rows and gaps consumed before/after the grid (#UI_UNIT_Y).
+ * \param tile_units: one tile row height in #UI_UNIT_Y.
+ * \param default_units: viewport height used when the popover is not zoomed.
+ */
+float popup_grid_fixed_viewport_units(const bContext *C,
+                                      const Block *block,
+                                      float non_grid_units,
+                                      float tile_units,
+                                      float default_units);
 
 /* ---------------------------------------------------------------------- */
 /** \name Predefined Grid-View Item Types

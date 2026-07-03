@@ -38,7 +38,8 @@ namespace ed::asset::shelf {
 void build_asset_view(ui::Layout &layout,
                       const AssetLibraryReference &library_ref,
                       const AssetShelf &shelf,
-                      const bContext &C);
+                      const bContext &C,
+                      std::optional<int> popup_grid_viewport_height_px = std::nullopt);
 
 void catalog_selector_panel_register(ARegionType *region_type);
 void popover_panel_register(ARegionType *region_type);

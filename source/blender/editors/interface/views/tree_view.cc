@@ -207,12 +207,23 @@ AbstractViewItem *AbstractTreeView::navigate_down(AbstractViewItem *from)
   return next_item ? next_item : from;
 }
 
-void AbstractTreeView::set_default_rows(int default_rows)
+void AbstractTreeView::set_default_rows(int default_rows, bool allow_resize)
 {
   BLI_assert_msg(default_rows >= MIN_ROWS,
                  "Default value is smaller than the minimum rows. Limit is required to prevent "
                  "resizing below specific height.");
   custom_height_ = std::make_unique<int>(default_rows * padded_item_height());
+  allow_height_resize_ = allow_resize;
+}
+
+void AbstractTreeView::set_fixed_height_px(int height_px, bool allow_resize)
+{
+  /* Clamp to the minimum rows so the view never resizes below a usable height, matching
+   * #set_default_rows(). The stored value is snapped to whole item rows on draw
+   * (#tot_visible_row_count). */
+  const int min_px = MIN_ROWS * padded_item_height();
+  custom_height_ = std::make_unique<int>(std::max(height_px, min_px));
+  allow_height_resize_ = allow_resize;
 }
 
 std::optional<uiViewState> AbstractTreeView::persistent_state() const
@@ -1032,116 +1043,121 @@ void TreeViewLayoutBuilder::build_from_tree(AbstractTreeView &tree_view)
       but_scroll->visual_height = *visible_row_count;
     }
 
-    block_layout_set_current(block, &col);
+    /* The bottom resize grip and filter row are omitted when the height is fixed externally (e.g.
+     * the asset shelf popover), which keeps the popover height stable; the scroll bar above still
+     * provides scrolling for overflow. */
+    if (tree_view.allow_height_resize_) {
+      block_layout_set_current(block, &col);
 
-    /* Bottom */
-    Layout &bottom = col.row(false);
-    block_emboss_set(block, EmbossType::None);
-    but = uiDefIconButBit(block,
-                          ButtonType::IconToggleN,
-                          1,
-                          ICON_DISCLOSURE_TRI_DOWN,
-                          0,
-                          0,
-                          UI_UNIT_X,
-                          UI_UNIT_Y * 0.5,
-                          tree_view.show_display_options_.get(),
-                          0,
-                          0,
-                          TIP_(""));
-    button_flag_disable(but, BUT_UNDO);
-    block_emboss_set(block, EmbossType::Emboss);
-    bottom.column(false);
-
-    uiDefIconButV(block,
-                  ButtonType::Grip,
-                  ICON_GRIP,
-                  0,
-                  0,
-                  UI_UNIT_X * 10,
-                  UI_UNIT_Y * 0.5f,
-                  tree_view.custom_height_.get(),
-                  0,
-                  0,
-                  "");
-
-    if (*tree_view.show_display_options_) {
-      Layout &filter_layout = col.row(true);
-      block_emboss_set(block, EmbossType::Emboss);
-      but = uiDefBut(block,
-                     ButtonType::Text,
-                     "",
-                     0,
-                     0,
-                     UI_UNIT_X * 10,
-                     UI_UNIT_Y,
-                     tree_view.search_string_.get(),
-                     0,
-                     UI_MAX_NAME_STR,
-                     "");
-      button_flag_enable(but, BUT_TEXTEDIT_UPDATE | BUT_VALUE_CLEAR);
-      button_flag_disable(but, BUT_UNDO);
-      def_but_icon(but, ICON_VIEWZOOM, UI_HAS_ICON);
-      button_placeholder_set(but, IFACE_("Search"));
-
-      but = uiDefIconButBit(
-          block,
-          ButtonType::Toggle,
-          1,
-          ICON_ARROW_LEFTRIGHT,
-          0,
-          0,
-          UI_UNIT_X,
-          UI_UNIT_Y,
-          tree_view.invert_search_filter_.get(),
-          0,
-          0,
-          TIP_("Invert search results (Show items that don't match the search string)"));
-      button_flag_disable(but, BUT_UNDO);
-
-      filter_layout.separator();
+      /* Bottom */
+      Layout &bottom = col.row(false);
+      block_emboss_set(block, EmbossType::None);
       but = uiDefIconButBit(block,
-                            ButtonType::Toggle,
+                            ButtonType::IconToggleN,
                             1,
-                            ICON_SORTALPHA,
+                            ICON_DISCLOSURE_TRI_DOWN,
                             0,
                             0,
                             UI_UNIT_X,
-                            UI_UNIT_Y,
-                            tree_view.sort_alpha_.get(),
+                            UI_UNIT_Y * 0.5,
+                            tree_view.show_display_options_.get(),
                             0,
                             0,
-                            TIP_("Sort items alphabetically"));
+                            TIP_(""));
       button_flag_disable(but, BUT_UNDO);
+      block_emboss_set(block, EmbossType::Emboss);
+      bottom.column(false);
 
-      int icon = ICON_SORT_DESC;
-      switch (*tree_view.invert_sort_type_) {
-        case TreeViewSortOrder::InvertRoot:
-          icon = ICON_DOWNARROW_HLT;
-          break;
-        case TreeViewSortOrder::InvertNested:
-          icon = ICON_SORT_ASC;
-          break;
-        default:
-          break;
+      uiDefIconButV(block,
+                    ButtonType::Grip,
+                    ICON_GRIP,
+                    0,
+                    0,
+                    UI_UNIT_X * 10,
+                    UI_UNIT_Y * 0.5f,
+                    tree_view.custom_height_.get(),
+                    0,
+                    0,
+                    "");
+
+      if (*tree_view.show_display_options_) {
+        Layout &filter_layout = col.row(true);
+        block_emboss_set(block, EmbossType::Emboss);
+        but = uiDefBut(block,
+                       ButtonType::Text,
+                       "",
+                       0,
+                       0,
+                       UI_UNIT_X * 10,
+                       UI_UNIT_Y,
+                       tree_view.search_string_.get(),
+                       0,
+                       UI_MAX_NAME_STR,
+                       "");
+        button_flag_enable(but, BUT_TEXTEDIT_UPDATE | BUT_VALUE_CLEAR);
+        button_flag_disable(but, BUT_UNDO);
+        def_but_icon(but, ICON_VIEWZOOM, UI_HAS_ICON);
+        button_placeholder_set(but, IFACE_("Search"));
+
+        but = uiDefIconButBit(
+            block,
+            ButtonType::Toggle,
+            1,
+            ICON_ARROW_LEFTRIGHT,
+            0,
+            0,
+            UI_UNIT_X,
+            UI_UNIT_Y,
+            tree_view.invert_search_filter_.get(),
+            0,
+            0,
+            TIP_("Invert search results (Show items that don't match the search string)"));
+        button_flag_disable(but, BUT_UNDO);
+
+        filter_layout.separator();
+        but = uiDefIconButBit(block,
+                              ButtonType::Toggle,
+                              1,
+                              ICON_SORTALPHA,
+                              0,
+                              0,
+                              UI_UNIT_X,
+                              UI_UNIT_Y,
+                              tree_view.sort_alpha_.get(),
+                              0,
+                              0,
+                              TIP_("Sort items alphabetically"));
+        button_flag_disable(but, BUT_UNDO);
+
+        int icon = ICON_SORT_DESC;
+        switch (*tree_view.invert_sort_type_) {
+          case TreeViewSortOrder::InvertRoot:
+            icon = ICON_DOWNARROW_HLT;
+            break;
+          case TreeViewSortOrder::InvertNested:
+            icon = ICON_SORT_ASC;
+            break;
+          default:
+            break;
+        }
+
+        but = uiDefIconBut(block,
+                           ButtonType::Toggle,
+                           icon,
+                           0,
+                           0,
+                           UI_UNIT_X,
+                           UI_UNIT_Y,
+                           nullptr,
+                           0,
+                           0,
+                           TIP_("Reverse the order of items"));
+        button_func_set(but, set_sort_order_fn, nullptr, tree_view.invert_sort_type_.get());
+        button_func_pushed_state_set(but, [&](const ui::Button & /*button*/) {
+          return *tree_view.invert_sort_type_ != TreeViewSortOrder::None;
+        });
+        button_flag_disable(but, BUT_UNDO);
       }
-
-      but = uiDefIconBut(block,
-                         ButtonType::Toggle,
-                         icon,
-                         0,
-                         0,
-                         UI_UNIT_X,
-                         UI_UNIT_Y,
-                         nullptr,
-                         0,
-                         0,
-                         TIP_("Reverse the order of items"));
-      button_func_set(but, set_sort_order_fn, nullptr, tree_view.invert_sort_type_.get());
-      button_func_pushed_state_set(but, [&](const ui::Button & /*button*/) {
-        return *tree_view.invert_sort_type_ != TreeViewSortOrder::None;
-      });
-      button_flag_disable(but, BUT_UNDO);
     }
   }
 

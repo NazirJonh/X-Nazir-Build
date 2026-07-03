@@ -1099,6 +1099,13 @@ EmbossType block_emboss_get(Block *block);
 void block_emboss_set(Block *block, EmbossType emboss);
 bool block_is_search_only(const Block *block);
 /**
+ * True on a popup/popover block's initial build, false on a refresh. On first open the region is
+ * fresh (#Block::oldblock is null); a refresh (e.g. from #ED_region_tag_refresh_ui) reuses the
+ * region so the previous block is matched into #Block::oldblock. Lets callers run one-time setup
+ * (e.g. scrolling the active item into view) without fighting later user interaction.
+ */
+bool block_is_first_open(const Block *block);
+/**
  * Use when a block must be searched to give accurate results
  * for the whole region but shouldn't be displayed.
  */
@@ -2366,6 +2373,21 @@ void region_pre_button_handler_add(RegionPreButtonHandlerFn fn);
  * Returns true if any scrolling was actually applied.
  */
 bool popup_region_scroll_apply_dy(ARegion *region, float dy);
+/**
+ * Apply a per-event vertical drag delta (screen pixels, Blender Y-up: positive = drag up, revealing
+ * later rows) to the fixed-viewport grid in \a region's popup block, if one opted into fixed-viewport
+ * layout (#AbstractGridView::set_fixed_viewport_layout). Scrolls it by whole rows plus a sub-row
+ * offset, mirroring the touch/pen drag in #ui_do_but_VIEW_ITEM. Returns true if such a grid was found
+ * (whether or not the position changed), so callers can distinguish it from the whole-popover scroll
+ * fallback (#popup_region_scroll_apply_dy).
+ */
+bool popup_block_fixed_grid_drag_scroll_dy(ARegion *region, int dy);
+/**
+ * True when \a xy (window pixels) is over the fixed-viewport grid of \a region's popup block. Lets a
+ * drag-scroll handler restrict its hijacking to the grid, leaving sibling views (e.g. a catalog
+ * tree) to handle their own interaction.
+ */
+bool popup_region_point_over_fixed_grid(ARegion *region, const int xy[2]);
 void popup_handlers_add(bContext *C,
                         ListBaseT<wmEventHandler> *handlers,
                         PopupBlockHandle *popup,

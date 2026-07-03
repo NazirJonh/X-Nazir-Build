@@ -317,70 +317,6 @@ class IDBrowserView : public AbstractGridView {
   }
 };
 
-/**
- * Grid viewport height (in #UI_UNIT_Y) for the current popover.
- *
- * The popover layout is built at normal UI scale and only scaled to the spawning button's zoom
- * (#Block::aspect) when it is positioned. In a strongly zoomed node editor (aspect < 1) the
- * fixed-height popover would blow up past the window edge, turning the whole block menu-scrollable
- * and dragging the fixed header (filters/search) out of view. Shrink the grid so the final popover
- * still fits the available vertical space; the grid keeps its own internal row scrolling.
- *
- * \a non_grid_units: header rows and gaps consumed before/after the grid (kept in sync with the
- * layout in #id_browser_popover_draw). \a tile_units: one tile row height in #UI_UNIT_Y; the
- * result is snapped to whole rows so the viewport shows complete rows with no trailing gap.
- */
-static float id_browser_grid_viewport_units(const bContext *C,
-                                               const Block *block,
-                                               const float non_grid_units,
-                                               const float tile_units)
-{
-  const float default_units = ID_BROWSER_GRID_VIEWPORT_UNITS_Y;
-  if (block == nullptr || block->handle == nullptr) {
-    return default_units;
-  }
-  const Button *but = block->handle->popup_create_vars.but;
-  ARegion *butregion = block->handle->popup_create_vars.butregion;
-  if (but == nullptr || but->block == nullptr || butregion == nullptr) {
-    return default_units;
-  }
-  const float aspect = but->block->aspect;
-  if (aspect >= 1.0f) {
-    /* Not zoomed in; the full-height popover fits. */
-    return default_units;
-  }
-
-  /* Vertical space on the roomier side, measured from the button *edge* the popover stacks away
-   * from, not its center: the popover grows away from the button, so the center over-counts the
-   * available space by half the button height. At high zoom the button is drawn large (scaling with
-   * 1/aspect), making that a 1-2 unit error - exactly what overflows the tightly-packed List grid. */
-  float bx = BLI_rctf_cent_x(&but->rect);
-  float by_bottom = but->rect.ymin;
-  float bx_top = bx;
-  float by_top = but->rect.ymax;
-  block_to_window_fl(butregion, but->block, &bx, &by_bottom);
-  block_to_window_fl(butregion, but->block, &bx_top, &by_top);
-  const auto win_size = WM_window_native_pixel_size(CTX_wm_window(C));
-  float avail_px = std::max(by_bottom, float(win_size[1]) - by_top);
-
-  /* Chrome the popover wraps around the content when positioned, all scaling with 1/aspect like the
-   * layout: the arrow hint (~0.5 #widget_unit, #block_translate in #popup_block_create) plus the
-   * block bounds padding on both sides (#block_margin = widget_unit/2 each, see
-   * #scrollmin/#scrollmax) ≈ 1.5 widget_unit, plus a fixed screen-edge margin. Subtracting it keeps
-   * the final block inside the window so it never turns menu-scrollable, which would otherwise drag
-   * the fixed header off screen while the grid scrolls. #List rows snap to ~1 unit and fill the
-   * budget tightly, so unlike the coarser ~3-unit #Grid rows they leave no slack to absorb an
-   * under-estimate - keep this conservative. */
-  avail_px -= 1.5f * float(UI_UNIT_Y) / aspect + float(UI_UNIT_Y) * 1.5f;
-
-  /* popover_pixels = units * UI_UNIT_Y / aspect  →  units = pixels * aspect / UI_UNIT_Y. */
-  const float budget_units = avail_px * aspect / float(UI_UNIT_Y);
-  const float tile = std::max(tile_units, 0.001f);
-  /* Whole tile rows that fit after the fixed header/gaps; never drop below a single row. */
-  const int rows = std::max(1, int((budget_units - non_grid_units) / tile));
-  return std::clamp(float(rows) * tile, tile, default_units);
-}
-
 static void build_id_grid(const bContext &C, Layout &layout, const float grid_viewport_units)
 {
   PointerRNA target_ptr = CTX_data_pointer_get(&C, "id_browser_ptr");
@@ -605,8 +541,8 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
 
   /* Shrink the grid when a zoomed popover would otherwise overflow the window (see
    * #id_browser_grid_viewport_units); keeps the fixed header on screen while scrolling. */
-  const float grid_units = id_browser_grid_viewport_units(
-      C, layout.block(), non_grid_units, tile_units);
+  const float grid_units = popup_grid_fixed_viewport_units(
+      C, layout.block(), non_grid_units, tile_units, ID_BROWSER_GRID_VIEWPORT_UNITS_Y);
 
   Layout &grid_area = layout.column(true);
   grid_area.ui_units_x_set(ID_BROWSER_POPOVER_UNITS_X);

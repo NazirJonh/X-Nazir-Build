@@ -22,6 +22,7 @@
 
 #include "DNA_userdef_types.h"
 
+#include "UI_grid_view.hh"
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
@@ -238,7 +239,10 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
   }
 };
 
-static void catalog_tree_draw(const bContext &C, ui::Layout &layout, AssetShelf &shelf)
+static void catalog_tree_draw(const bContext &C,
+                              ui::Layout &layout,
+                              AssetShelf &shelf,
+                              int fixed_height_px)
 {
   const asset_system::AssetLibrary *library = list::library_get_once_available(
       shelf.settings.asset_library_reference);
@@ -251,6 +255,11 @@ static void catalog_tree_draw(const bContext &C, ui::Layout &layout, AssetShelf 
       *block,
       "asset shelf catalog tree view",
       std::make_unique<AssetCatalogTreeView>(*library, shelf));
+
+  /* Bound the catalog tree to the exact pixel height of the asset grid viewport so the popover keeps
+   * a stable height with no dead space below either column, and the header stays put even with many
+   * catalogs. Grip-less: the popover height is fixed externally. */
+  tree_view->set_fixed_height_px(fixed_height_px, /*allow_resize=*/false);
 
   ui::TreeViewBuilder::build_tree_view(C, *tree_view, layout);
 }
@@ -265,6 +274,11 @@ static AssetShelfType *lookup_type_from_idname_in_context(const bContext *C)
 }
 
 constexpr int LEFT_COL_WIDTH_UNITS = 10;
+
+/* Default asset grid viewport height (in #UI_UNIT_Y) for the popover when it is not zoomed; the
+ * grid scrolls internally beyond this. Shrunk to fit the window by
+ * #ui::popup_grid_fixed_viewport_units. */
+constexpr float ASSET_SHELF_POPUP_GRID_DEFAULT_UNITS_Y = 18.0f;
 
 /**
  * Ensure the popover width fits into the window: Clamp width by the window width, minus some
@@ -311,12 +325,28 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
   PointerRNA shelf_ptr = RNA_pointer_create_discrete(&screen->id, RNA_AssetShelf, shelf);
   layout.context_ptr_set("asset_shelf", &shelf_ptr);
 
+  /* Asset grid viewport height, derived from the window so the popover fits on screen (see
+   * #ui::popup_grid_fixed_viewport_units). Snapped to whole tile rows so the grid fills it exactly
+   * and the catalog tree can be given the same pixel height — otherwise the taller column leaves
+   * dead space below the shorter one. Reused to keep both columns within the window so the sticky
+   * header holds. */
+  const int tile_h_px = std::max(1, tile_height(shelf->settings));
+  const float tile_units = float(tile_h_px) / float(UI_UNIT_Y);
+  /* Header + gap consumed above the grid: the search / preset row (~1 unit) plus the ~1-unit gap
+   * below it where the persistent scroll-up arrow is drawn. Only used to shrink the grid when a
+   * zoomed popover would otherwise overflow the window. */
+  const float non_grid_units = 2.0f;
+  const float grid_units = ui::popup_grid_fixed_viewport_units(
+      C, layout.block(), non_grid_units, tile_units, ASSET_SHELF_POPUP_GRID_DEFAULT_UNITS_Y);
+  const int grid_rows = std::max(1, int(grid_units * UI_UNIT_Y) / tile_h_px);
+  const int grid_viewport_px = grid_rows * tile_h_px;
+
   ui::Layout &row = layout.row(false);
   ui::Layout &catalogs_col = row.column(false);
   catalogs_col.ui_units_x_set(LEFT_COL_WIDTH_UNITS);
   catalogs_col.fixed_size_set(true);
   library_selector_draw(C, catalogs_col, *shelf);
-  catalog_tree_draw(*C, catalogs_col, *shelf);
+  catalog_tree_draw(*C, catalogs_col, *shelf, grid_viewport_px);
 
   const int right_col_width_units = layout_width_units - LEFT_COL_WIDTH_UNITS;
 
@@ -360,11 +390,18 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
                                "ASSETSHELF_PT_popover_display");
   }
 
+  /* Gap between the header and the grid so the persistent scroll-up arrow
+   * (#ui::AbstractGridView::draw_overlays), drawn ~0.75 #UI_UNIT_Y above the top tile row, clears the
+   * search field instead of overlapping it. #Layout::separator uses 6px*UI_SCALE_FAC steps. */
+  const float unit_gap_factor = float(UI_UNIT_Y) / (6.0f * UI_SCALE_FAC);
+  right_col.separator(unit_gap_factor);
+
   ui::Layout &asset_view_col = right_col.column(false);
   asset_view_col.ui_units_x_set(right_col_width_units);
   asset_view_col.fixed_size_set(true);
 
-  build_asset_view(asset_view_col, shelf->settings.asset_library_reference, *shelf, *C);
+  build_asset_view(
+      asset_view_col, shelf->settings.asset_library_reference, *shelf, *C, grid_viewport_px);
 }
 
 static bool popover_panel_poll(const bContext *C, PanelType * /*panel_type*/)

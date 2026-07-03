@@ -1158,6 +1158,16 @@ static int asset_view_drag_scroll_handler(bContext *C, const wmEvent *event, ARe
       /* Asset shelf / popover: driven entirely by UI handlers, use a steadier dead-zone. */
       else if (std::abs(event->xy[1] - g_asset_drag_scroll.start_y) >= ASSET_DRAG_SCROLL_THRESHOLD)
       {
+        /* In the sticky-header popover only hijack the gesture for grid scrolling when it starts over
+         * the asset grid; over the catalog tree (left column) leave the event to normal handling so
+         * tree items stay clickable and the tree uses its own scroll bar / wheel. */
+        const int start_xy[2] = {g_asset_drag_scroll.start_x, g_asset_drag_scroll.start_y};
+        if (region->regiontype == RGN_TYPE_TEMPORARY &&
+            !ui::popup_region_point_over_fixed_grid(region, start_xy))
+        {
+          g_asset_drag_scroll = {};
+          return WM_UI_HANDLER_CONTINUE;
+        }
         g_asset_drag_scroll.dragging = true;
         /* Cancel any active button (e.g. an asset item that entered WAIT_RELEASE/WAIT_DRAG on
          * press) so drag-scroll doesn't show a tooltip or trigger a click. In popovers,
@@ -1168,11 +1178,14 @@ static int asset_view_drag_scroll_handler(bContext *C, const wmEvent *event, ARe
 
     if (g_asset_drag_scroll.dragging) {
       if (region->regiontype == RGN_TYPE_TEMPORARY) {
-        /* Popover: buttons are in window pixel space, no view2d transform applied.
-         * Use the popup scroll mechanism (same as MMB panning) which moves button
-         * rects directly. Only has effect when the popup overflows the screen. */
-        ui::popup_region_scroll_apply_dy(region, float(dy));
-        /* popup_region_scroll_apply_dy already calls ED_region_tag_redraw internally. */
+        /* Popover: a sticky-header asset popover bounds the grid to a fixed viewport that scrolls
+         * internally (leaving the search/preview-size/settings header in place); drive that grid
+         * directly. Fall back to the whole-popover scroll (moving button rects, same as MMB panning,
+         * only effective when the popup overflows the screen) when no fixed-viewport grid is present. */
+        if (!ui::popup_block_fixed_grid_drag_scroll_dy(region, dy)) {
+          ui::popup_region_scroll_apply_dy(region, float(dy));
+        }
+        /* Both paths tag the region for redraw internally. */
       }
       else {
         View2D *v2d = &region->v2d;

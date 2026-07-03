@@ -5752,6 +5752,15 @@ static AbstractGridView *view_item_but_scrollable_popup_grid(Button *but)
   if (!grid_view || !grid_view->supports_scrolling()) {
     return nullptr;
   }
+  /* Only tiles of that grid opt into drag-to-scroll. A popup can host other views in the same block
+   * (e.g. the asset shelf popover's catalog tree beside the grid); their view-item buttons must keep
+   * the normal activate-on-click behavior instead of being deferred into the grid's drag-scroll. */
+  const ButtonViewItem *view_item_but = static_cast<const ButtonViewItem *>(but);
+  if (view_item_but->view_item == nullptr ||
+      &view_item_but->view_item->get_view() != static_cast<const AbstractView *>(grid_view))
+  {
+    return nullptr;
+  }
   return grid_view;
 }
 

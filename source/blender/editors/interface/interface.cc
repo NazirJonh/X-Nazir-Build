@@ -4100,6 +4100,11 @@ bool block_is_search_only(const Block *block)
   return block->flag & BLOCK_SEARCH_ONLY;
 }
 
+bool block_is_first_open(const Block *block)
+{
+  return block->oldblock == nullptr;
+}
+
 void block_set_search_only(Block *block, bool search_only)
 {
   SET_FLAG_FROM_TEST(block->flag, search_only, BLOCK_SEARCH_ONLY);

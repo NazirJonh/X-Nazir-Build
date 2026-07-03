@@ -20,6 +20,7 @@
 #include "BLI_math_base.h"
 #include "BLI_rect.h"
 #include "BLI_string.h"
+#include "BLI_sys_types.h"
 #include "BLI_utildefines.h"
 
 #include "BKE_context.hh"
@@ -75,12 +76,24 @@ struct GenericGridSessionState {
   int scroll_row = 0;
   int scroll_offset_px = 0;
   int cached_item_count = 0;
+  /* Number of live #GenericGridView instances bound to this grid_id. The registry has no owner to
+   * free its entries (grid_id keys may be minted dynamically), so a session is reclaimed once no
+   * view references it. A displayed grid always keeps a view here, so refcount stays >= 1 and the
+   * session is never swept while live. See #generic_grid_sessions_tick_and_sweep. */
+  int block_refcount = 0;
+  /* #GenericGridRuntime::rebuild_seq captured when #block_refcount last dropped to 0, used to age
+   * the entry out only after it stays unreferenced past the sweep grace window. */
+  uint64_t orphaned_at_seq = 0;
 };
 
 /* Defined together with the rest of the process-lifetime grid runtime (#GenericGridRuntime),
  * once the drag/wheel state types it is grouped with are also declared, below. */
 static GenericGridSessionState &generic_grid_session_state_ensure(StringRef grid_id);
 static Map<std::string, std::unique_ptr<GenericGridSessionState>> &generic_grid_sessions();
+/* Refcount a session by the lifetime of the #GenericGridView instances bound to it (see the
+ * #GenericGridSessionState::block_refcount docstring). Defined with the runtime, below. */
+static void generic_grid_session_view_acquire(GenericGridSessionState &session);
+static void generic_grid_session_view_release(GenericGridSessionState &session);
 
 class GenericGridView : public AbstractGridView {
   const bContext &context_;
@@ -98,6 +111,14 @@ class GenericGridView : public AbstractGridView {
         cols_hint_(max_ii(1, cols_hint)),
         session_(generic_grid_session_state_ensure(grid_id))
   {
+    generic_grid_session_view_acquire(session_);
+  }
+
+  /* Virtual via #AbstractView::~AbstractView; runs when #block_free_views drops the owning
+   * #ViewLink, which is the teardown signal the session refcount is keyed on. */
+  ~GenericGridView()
+  {
+    generic_grid_session_view_release(session_);
   }
 
   int grip_pixel_height() const
@@ -330,11 +351,15 @@ struct GenericGridWheelLatch {
  *   when #Map rehashes on inserting a *different* grid_id.
  * - #drag: the one in-flight touch/pen drag gesture (#GenericGridDragScrollState).
  * - #wheel: the last wheel hit-test decision (#GenericGridWheelLatch).
+ * - #rebuild_seq: logical clock advanced once per grid build, used to age unreferenced #sessions
+ *   out (see #generic_grid_sessions_tick_and_sweep). It only moves while grids are being built, so
+ *   an idle-but-open popup never ages its session.
  */
 struct GenericGridRuntime {
   Map<std::string, std::unique_ptr<GenericGridSessionState>> sessions;
   GenericGridDragScrollState drag;
   GenericGridWheelLatch wheel;
+  uint64_t rebuild_seq = 0;
 };
 
 static GenericGridRuntime &generic_grid_runtime()
@@ -354,6 +379,46 @@ static GenericGridSessionState &generic_grid_session_state_ensure(const StringRe
   std::unique_ptr<GenericGridSessionState> &slot = sessions.lookup_or_add_cb(
       std::string(grid_id), [] { return std::make_unique<GenericGridSessionState>(); });
   return *slot;
+}
+
+static void generic_grid_session_view_acquire(GenericGridSessionState &session)
+{
+  session.block_refcount++;
+}
+
+static void generic_grid_session_view_release(GenericGridSessionState &session)
+{
+  BLI_assert(session.block_refcount > 0);
+  session.block_refcount--;
+  if (session.block_refcount == 0) {
+    /* Not evicted immediately: a redraw frees the old view before (or after) building the new one
+     * for the same grid_id, so a momentary refcount == 0 is normal rebuild churn. The sweep waits
+     * a grace window to tell that gap apart from a grid that is truly gone. */
+    session.orphaned_at_seq = generic_grid_runtime().rebuild_seq;
+  }
+}
+
+/** Grace window (in #GenericGridRuntime::rebuild_seq ticks) before an unreferenced session is
+ * reclaimed. Must exceed the number of distinct grids built within a single redraw pass so a grid
+ * whose old view is freed before its new view is built this frame is not evicted in that gap; a
+ * handful of simultaneous scrollable grids is the realistic maximum, so this is comfortably
+ * generous while still bounding the registry for dynamically-minted grid_ids. */
+static constexpr uint64_t GRID_SESSION_SWEEP_GRACE = 8;
+
+/**
+ * Advance the registry clock and drop sessions no live #GenericGridView references any more. Called
+ * once per grid build. Safe because a displayed grid always holds a view (refcount >= 1) and is
+ * never a candidate; only entries orphaned past #GRID_SESSION_SWEEP_GRACE ticks are removed.
+ */
+static void generic_grid_sessions_tick_and_sweep()
+{
+  GenericGridRuntime &runtime = generic_grid_runtime();
+  const uint64_t seq = ++runtime.rebuild_seq;
+  runtime.sessions.remove_if([seq](auto item) {
+    const GenericGridSessionState &session = *item.value;
+    return session.block_refcount == 0 &&
+           (seq - session.orphaned_at_seq) >= GRID_SESSION_SWEEP_GRACE;
+  });
 }
 
 static GenericGridDragScrollState &generic_grid_drag_scroll_state()
@@ -601,6 +666,10 @@ void build_grid_view(const bContext &C,
                      const int cols_est,
                      const int panel_width)
 {
+  /* Advance the session-registry clock and reclaim entries no live grid still references, so the
+   * grid_id-keyed registry stays bounded even when grid_ids are minted dynamically. */
+  generic_grid_sessions_tick_and_sweep();
+
   Block *block = layout.block();
 
   const GridViewStyle &style = view.get_style();

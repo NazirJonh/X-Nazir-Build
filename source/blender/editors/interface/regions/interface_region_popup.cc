@@ -974,8 +974,12 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
      * would cancel the shrink while leaving growth unaffected (which only raises the top). */
     const bool upward_anchored_popover = (block->flag & BLOCK_POPOVER) &&
                                          (block->direction & UI_DIR_UP);
+    /* Color picker popups are exempt: their height legitimately changes when the palette sub-panel is
+     * switched or collapsed, and pinning the old size would leave the popup oversized with empty space
+     * when the new palette has fewer swatches. */
+    const bool is_color_picker = block->color_pickers.list.first != nullptr;
     if (handle->refresh && (handle->prev_block_rect.ymax - block->rect.ymax) > 1.0f &&
-        !upward_anchored_popover)
+        !upward_anchored_popover && !is_color_picker)
     {
       if (block->bounds_type != BLOCK_BOUNDS_POPUP_CENTER) {
         const float offset = handle->prev_block_rect.ymax - block->rect.ymax;

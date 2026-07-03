@@ -4930,7 +4930,9 @@ static void block_open_begin(bContext *C, Button *but, HandleButtonData *data)
   }
 
   if (func || handlefunc) {
-    data->menu = popup_block_create(C, data->region, but, func, handlefunc, arg, nullptr, false);
+    const bool can_refresh = (handlefunc == block_func_COLOR);
+    data->menu = popup_block_create(
+        C, data->region, but, func, handlefunc, arg, nullptr, can_refresh);
     if (but->block->handle) {
       data->menu->popup = but->block->handle->popup;
     }
@@ -12923,26 +12925,34 @@ static int handle_menus_recursive(bContext *C,
           C, event, submenu, level + 1, is_parent_inside || inside, is_menu, false);
     }
   }
-  else if (!but && event->val == KM_PRESS && event->type == LEFTMOUSE) {
+  else if (event->val == KM_PRESS && event->type == LEFTMOUSE) {
     for (Block &block : menu->region->runtime->uiblocks) {
+      /* A layout-panel header is normally toggled only when no button is active (the `!but` case
+       * below). The color picker popup keeps its color buttons active, so allow toggling its
+       * palette sub-panel as a special case while leaving all other menus' behavior unchanged. */
+      const bool is_color_picker = block.color_pickers.list.first != nullptr;
+      if (but && !is_color_picker) {
+        continue;
+      }
       if (block.panel) {
         int mx = event->xy[0];
         int my = event->xy[1];
         window_to_block(menu->region, &block, &mx, &my);
-        if (!IN_RANGE(float(mx), block.rect.xmin, block.rect.xmax)) {
-          break;
-        }
-        LayoutPanelHeader *header = layout_panel_header_under_mouse(*block.panel, my);
-        if (header) {
-          ED_region_tag_redraw(menu->region);
-          ED_region_tag_refresh_ui(menu->region);
-          ARegion *prev_region_popup = CTX_wm_region_popup(C);
-          /* Set the current context popup region so the handler context can access to it. */
-          CTX_wm_region_popup_set(C, menu->region);
-          panel_drag_collapse_handler_add(C, !layout_panel_toggle_open(C, header));
-          /* Restore previous popup region. */
-          CTX_wm_region_popup_set(C, prev_region_popup);
-          retval = WM_UI_HANDLER_BREAK;
+        if (IN_RANGE(float(mx), block.rect.xmin, block.rect.xmax)) {
+          LayoutPanelHeader *header = layout_panel_header_under_mouse(*block.panel, my);
+          if (header) {
+            ARegion *prev_region_popup = CTX_wm_region_popup(C);
+            /* Set the current context popup region so the handler context can access it. */
+            CTX_wm_region_popup_set(C, menu->region);
+            const bool new_state = layout_panel_toggle_open(C, header);
+            /* Restore previous popup region. */
+            CTX_wm_region_popup_set(C, prev_region_popup);
+            ED_region_tag_redraw(menu->region);
+            ED_region_tag_refresh_ui(menu->region);
+            panel_drag_collapse_handler_add(C, !new_state);
+            retval = WM_UI_HANDLER_BREAK;
+            break;
+          }
         }
       }
     }

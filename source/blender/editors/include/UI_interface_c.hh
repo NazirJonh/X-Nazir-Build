@@ -1063,6 +1063,14 @@ void popup_block_close(bContext *C, wmWindow *win, Block *block);
 
 bool popup_block_name_exists(const bScreen *screen, StringRef name);
 
+/**
+ * Get the current color (in scene-linear space) from the active color picker popup. Looks first at
+ * the popup/current region in the context, then falls back to the screen's temporary popup regions.
+ * Returns true when an initialized color picker was found. Use this to read the displayed color in a
+ * color picker popup at operator execution time.
+ */
+bool colorpicker_active_rgb_get(const bContext *C, float r_rgb[3]);
+
 /* Blocks
  *
  * Functions for creating, drawing and freeing blocks. A Block is a
@@ -2754,7 +2762,11 @@ void template_color_picker(Layout *layout,
                            bool lock,
                            bool lock_luminosity,
                            bool cubic);
-void template_palette(Layout *layout, PointerRNA *ptr, StringRefNull propname);
+void template_palette(Layout *layout,
+                      PointerRNA *ptr,
+                      StringRefNull propname,
+                      bool show_empty_message,
+                      bool show_sort_buttons);
 void template_crypto_picker(Layout *layout, PointerRNA *ptr, StringRefNull propname, int icon);
 /**
  * TODO: for now, grouping of layers is determined by dividing up the length of

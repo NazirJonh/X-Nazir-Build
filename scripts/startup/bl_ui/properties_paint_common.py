@@ -445,7 +445,7 @@ class ColorPalettePanel(BrushPanel):
 
         layout.template_ID(settings, "palette", new="palette.new")
         if settings.palette:
-            layout.template_palette(settings, "palette")
+            layout.template_palette(settings, "palette", show_empty_message=True, show_sort_buttons=True)
 
 
 class ClonePanel(BrushPanel):

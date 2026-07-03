@@ -1838,6 +1838,8 @@ void rna_collection_search_update_fn(
 /* `interface_ops.cc` */
 
 bool jump_to_target_button_poll(bContext *C);
+/** Session-only display state toggled by #UI_OT_palette_swatch_size_toggle. */
+bool palette_swatch_size_large_get();
 
 /* `interface_query.cc` */
 

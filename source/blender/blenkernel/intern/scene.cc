@@ -46,6 +46,7 @@
 #include "BLI_math_base.h"
 #include "BLI_math_rotation.h"
 #include "BLI_path_utils.hh"
+#include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
 #include "BLI_threads.h"
@@ -773,6 +774,21 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
       reader,
       &toolsett_old->gp_sculpt.guide.reference_object,
       IDWALK_CB_NOP);
+
+  /* Per-color-picker palettes. Only processed for the regular `foreach_id` (and undo relinking of
+   * newly read data); the undo-preserve special pass lets these follow the whole-ToolSettings swap,
+   * so a global undo simply reverts them along with the rest of the tool settings.
+   *
+   * These are weak (non-counted) references: #IDWALK_CB_NOP, so no user-count is added on assign or
+   * removed on delete. The palette is kept alive by its own fake user (see #palette_init_data), and
+   * this reference is nulled by the normal remap-on-delete pass, so a weak link cannot dangle. This
+   * avoids a user-count imbalance, since the per-picker palette is also assigned via a non-refcounted
+   * RNA pointer property (see #ColorPickerPalette in `rna_sculpt_paint.cc`). */
+  if (!do_undo_restore) {
+    for (ColorPickerPalette &cpp : toolsett->color_picker_palettes) {
+      BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, cpp.palette, IDWALK_CB_NOP);
+    }
+  }
 }
 
 #undef BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER
@@ -1212,6 +1228,10 @@ static void scene_blend_write(BlendWriter *writer, ID *id, const void *id_addres
     writer->write_struct(ts->curves_sculpt);
     BKE_paint_blend_write(writer, &ts->curves_sculpt->paint);
   }
+  for (ColorPickerPalette &cpp : ts->color_picker_palettes) {
+    writer->write_struct(&cpp);
+    writer->write_string(cpp.key);
+  }
   /* write grease-pencil custom ipo curve to file */
   if (ts->gp_interpolate.custom_ipo) {
     BKE_curvemapping_blend_write(writer, ts->gp_interpolate.custom_ipo);
@@ -1387,6 +1407,12 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
         reader, sce, reinterpret_cast<Paint **>(&sce->toolsettings->curves_sculpt));
 
     BKE_paint_blend_read_data(reader, sce, &sce->toolsettings->imapaint.paint);
+
+    BLO_read_struct_list(
+        reader, ColorPickerPalette, &sce->toolsettings->color_picker_palettes);
+    for (ColorPickerPalette &cpp : sce->toolsettings->color_picker_palettes) {
+      BLO_read_string(reader, &cpp.key);
+    }
 
     sce->toolsettings->particle.paintcursor = nullptr;
     sce->toolsettings->particle.scene = nullptr;
@@ -1779,6 +1805,17 @@ ToolSettings *BKE_toolsettings_copy(ToolSettings *toolsettings, const int flag)
       toolsettings->custom_bevel_profile_preset);
 
   ts->sequencer_tool_settings = seq::tool_settings_copy(toolsettings->sequencer_tool_settings);
+
+  /* Deep-copy per-color-picker palettes (the shallow `MEM_dupalloc` above only copied the
+   * #ListBase head/tail). The `palette` ID user counts are handled by the scene's `foreach_id`. */
+  BLI_listbase_clear(&ts->color_picker_palettes);
+  for (const ColorPickerPalette &cpp : toolsettings->color_picker_palettes) {
+    ColorPickerPalette *cpp_new = MEM_new<ColorPickerPalette>(__func__);
+    cpp_new->palette = cpp.palette;
+    cpp_new->key = cpp.key ? BLI_strdup(cpp.key) : nullptr;
+    BLI_addtail(&ts->color_picker_palettes, cpp_new);
+  }
+
   return ts;
 }
 
@@ -1861,6 +1898,14 @@ void BKE_toolsettings_free(ToolSettings *toolsettings)
   if (toolsettings->sequencer_tool_settings) {
     seq::tool_settings_free(toolsettings->sequencer_tool_settings);
   }
+
+  for (ColorPickerPalette &cpp : toolsettings->color_picker_palettes.items_mutable()) {
+    /* `key` is a #BLI_strdup'd string; this fork's guardedalloc frees C-style strings with
+     * #MEM_delete (there is no #MEM_freeN), matching e.g. #AssetMetaData's author/description. */
+    MEM_delete(cpp.key);
+    MEM_delete(&cpp);
+  }
+  BLI_listbase_clear(&toolsettings->color_picker_palettes);
 
   MEM_delete(toolsettings);
 }

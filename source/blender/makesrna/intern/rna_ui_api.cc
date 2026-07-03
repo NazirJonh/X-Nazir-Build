@@ -2433,6 +2433,16 @@ void RNA_api_ui_layout(StructRNA *srna)
   func = RNA_def_function(srna, "template_palette", "template_palette");
   RNA_def_function_ui_description(func, "Item. A palette used to pick colors.");
   api_ui_item_rna_common(func);
+  RNA_def_boolean(func,
+                  "show_empty_message",
+                  true,
+                  "Show Empty Message",
+                  "Show a message when the palette contains no colors");
+  RNA_def_boolean(func,
+                  "show_sort_buttons",
+                  true,
+                  "Show Sort Buttons",
+                  "Show buttons for moving and sorting colors in the palette");
 
   func = RNA_def_function(srna, "template_image_layers", "uiTemplateImageLayers");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);

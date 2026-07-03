@@ -5644,6 +5644,10 @@ void Layout::resolve()
     y_ = top - h_;
 
     Block *block = this->block();
+    /* Only one scroll-clip window per block is supported: the clip rect and the
+     * #BUT_GRID_SCROLL_CLIP button flag are block-global, so a second window would silently
+     * re-target the first window's buttons to its own rect. */
+    BLI_assert(!block->view_scroll_clip_enabled);
     block->view_scroll_clip_enabled = true;
     block->view_scroll_clip_rect.xmin = float(x_);
     block->view_scroll_clip_rect.xmax = float(x_ + w_);

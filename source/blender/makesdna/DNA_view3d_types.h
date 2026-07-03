@@ -850,6 +850,14 @@ struct View3D {
   float stereo3d_volume_alpha = 0.05f;
   float stereo3d_convergence_alpha = 0.15f;
 
+  /** Paint-slot filter mode for the image browser popover (#TEMPLATE_ID_FILTER_*). Mirrors
+   * #SpaceImage. The grid/list view mode and search now live on the window manager
+   * (#wmWindowManager::id_browser_view_mode), shared across editors. */
+  char image_filter_mode = 0;
+  /** Slot type filter used when `image_filter_mode` includes the slot bit. */
+  char image_filter_slot_type = 0;
+  char _pad_ibrowse[6] = {};
+
   /** Display settings. */
   View3DShading shading;
   View3DOverlay overlay;

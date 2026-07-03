@@ -49,6 +49,7 @@ set(SRC
   interface_handlers.cc
   interface_icons.cc
   interface_icons_event.cc
+  interface_id_filter.cc
   interface_layout.cc
   interface_ops.cc
   interface_ops_color.cc
@@ -82,6 +83,7 @@ set(SRC
   templates/interface_template_grease_pencil_layer_tree.cc
   templates/interface_template_icon.cc
   templates/interface_template_id.cc
+  templates/interface_template_id_browser.cc
   templates/interface_template_keymap.cc
   templates/interface_template_layers.cc
   templates/interface_template_light_linking.cc

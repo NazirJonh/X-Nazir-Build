@@ -103,8 +103,14 @@ enum class NodeAssetMenuOperatorType : int8_t {
  * Panel popup draw direction.
  */
 enum class PopupAttachDirection : int8_t {
+  /** Below the button, horizontally centered on it. */
   Vertical = 0,
+  /** Beside the button (to the left of it). */
   Horizontal = 1,
+  /** Below (or above) the button, left edges aligned. */
+  VerticalAlignLeft = 2,
+  /** Below (or above) the button, right edges aligned. */
+  VerticalAlignRight = 3,
 };
 
 enum class EnumTabExpand {
@@ -245,8 +251,7 @@ struct Layout : public Item, NonCopyable, NonMovable {
   /**
    * Make this layout a fixed-height "scroll window": after layout resolve its reported height is
    * clamped to \a height_px regardless of content, every descendant button is shifted vertically
-   * by
-   * \a offset_px and flagged #BUT_GRID_SCROLL_CLIP, and the owning block is told to clip those
+   * by \a offset_px and flagged #BUT_GRID_SCROLL_CLIP, and the owning block is told to clip those
    * buttons to the visible window. This lets an embedded grid view scroll its rows by sub-row
    * pixel amounts while occupying a fixed slot in the surrounding layout (brush texture image
    * grid).

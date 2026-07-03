@@ -39,7 +39,9 @@
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
+#include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
 
@@ -147,6 +149,15 @@ static void material_copy_data(Main *bmain,
 static void material_free_data(ID *id)
 {
   Material *material = id_cast<Material *>(id);
+
+  /* Invalidate image paint slot info for all images used in this material. */
+  if (material->nodetree != nullptr) {
+    for (bNode &node : material->nodetree->nodes) {
+      if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id != nullptr) {
+        BKE_image_paint_slot_info_invalidate(id_cast<Image *>(node.id));
+      }
+    }
+  }
 
   /* Free gpu material before the ntree */
   GPU_material_free(&material->gpumaterial);
@@ -1600,7 +1611,162 @@ struct FillTexPaintSlotsData {
   int slot_len;
 };
 
-static bool fill_texpaint_slots_cb(bNodeTree * /*nodetree*/, bNode *node, void *userdata)
+/**
+ * Priority of the paint slot types. Higher values are preferred if a texture
+ * is connected to multiple different slots.
+ */
+static int get_slot_type_priority(char slot_type)
+{
+  switch (slot_type) {
+    case NODE_TEX_IMAGE_SLOT_BASE_COLOR:
+      return 100;
+    case NODE_TEX_IMAGE_SLOT_NORMAL:
+      return 90;
+    case NODE_TEX_IMAGE_SLOT_BUMP:
+      return 80;
+    case NODE_TEX_IMAGE_SLOT_DISPLACEMENT:
+      return 70;
+    case NODE_TEX_IMAGE_SLOT_METALLIC:
+      return 60;
+    case NODE_TEX_IMAGE_SLOT_ROUGHNESS:
+      return 50;
+    case NODE_TEX_IMAGE_SLOT_SPECULAR:
+      return 40;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Recursively find all target slot types by following the output links.
+ * This allows "seeing through" any number of utility nodes like Mix, ColorRamp, etc.
+ * Uses a set to prevent infinite loops and follows all paths to find the best slot.
+ */
+static void detect_slot_types_recursive(const bNode *tex_node,
+                                        const bNodeTree *ntree,
+                                        const bNode *current_node,
+                                        Set<const bNode *> &visited,
+                                        Vector<char> &found_slots)
+{
+  if (!visited.add(current_node)) {
+    return;
+  }
+
+  /* Safety limit for extremely complex graphs. */
+  if (visited.size() > 512) {
+    return;
+  }
+
+  /* Walk all output sockets of the current node. */
+  for (const bNodeSocket *out_sock : current_node->output_sockets()) {
+    /* For the starting Image Texture node, we primarily care about Color/Alpha. */
+    const bool is_starting_node = (current_node == tex_node);
+    if (is_starting_node && !STREQ(out_sock->name, "Color") && !STREQ(out_sock->name, "Alpha")) {
+      continue;
+    }
+
+    for (const bNodeLink *link : out_sock->directly_linked_links()) {
+      if (!link->is_used()) {
+        continue;
+      }
+      const bNode *to_node = link->tonode;
+      const bNodeSocket *to_sock = link->tosock;
+
+      /* Target: Principled BSDF. */
+      if (to_node->type_legacy == SH_NODE_BSDF_PRINCIPLED) {
+        if (STREQ(to_sock->name, "Base Color") || STREQ(to_sock->name, "Alpha")) {
+          found_slots.append(NODE_TEX_IMAGE_SLOT_BASE_COLOR);
+        }
+        else if (STREQ(to_sock->name, "Metallic")) {
+          found_slots.append(NODE_TEX_IMAGE_SLOT_METALLIC);
+        }
+        else if (STREQ(to_sock->name, "Roughness")) {
+          found_slots.append(NODE_TEX_IMAGE_SLOT_ROUGHNESS);
+        }
+        else if (STREQ(to_sock->name, "Specular IOR Level") || STREQ(to_sock->name, "Specular")) {
+          found_slots.append(NODE_TEX_IMAGE_SLOT_SPECULAR);
+        }
+        else if (STREQ(to_sock->name, "Normal")) {
+          found_slots.append(NODE_TEX_IMAGE_SLOT_NORMAL);
+        }
+        else if (STREQ(to_sock->name, "Displacement")) {
+          found_slots.append(NODE_TEX_IMAGE_SLOT_DISPLACEMENT);
+        }
+      }
+      /* Target: Material Output Displacement. */
+      else if (to_node->type_legacy == SH_NODE_OUTPUT_MATERIAL &&
+               STREQ(to_sock->name, "Displacement"))
+      {
+        found_slots.append(NODE_TEX_IMAGE_SLOT_DISPLACEMENT);
+      }
+      /* Intermediate: Normal Map node. */
+      else if (to_node->type_legacy == SH_NODE_NORMAL_MAP) {
+        detect_slot_types_recursive(tex_node, ntree, to_node, visited, found_slots);
+      }
+      /* Intermediate: Bump node. */
+      else if (to_node->type_legacy == SH_NODE_BUMP && STREQ(to_sock->name, "Height")) {
+        /* We need a sub-search to see if this Bump node leads to a Normal slot. */
+        Vector<char> bump_outputs;
+        Set<const bNode *> bump_visited = visited;
+        detect_slot_types_recursive(tex_node, ntree, to_node, bump_visited, bump_outputs);
+        for (char type : bump_outputs) {
+          found_slots.append((type == NODE_TEX_IMAGE_SLOT_NORMAL) ? NODE_TEX_IMAGE_SLOT_BUMP :
+                                                                    type);
+        }
+      }
+      /* Intermediate: Utility nodes.
+       * We follow any node that isn't a shader or output, which includes all
+       * math, color, and converter nodes. */
+      else if (to_node->typeinfo->nclass != NODE_CLASS_SHADER &&
+               to_node->typeinfo->nclass != NODE_CLASS_OUTPUT)
+      {
+        detect_slot_types_recursive(tex_node, ntree, to_node, visited, found_slots);
+      }
+    }
+  }
+}
+
+/**
+ * Detect the paint slot type of a SH_NODE_TEX_IMAGE node by inspecting its output links.
+ * Traverses the node tree forward deeply to find if the texture is connected to a known
+ * input socket of a Principled BSDF node, using priorities if multiple connections exist.
+ *
+ * Returns NODE_TEX_IMAGE_SLOT_NONE if no known connection is found.
+ */
+static char detect_slot_type_from_links(const bNode *tex_node, const bNodeTree *ntree)
+{
+  /* Ensure topology cache is available for link traversal. */
+  ntree->ensure_topology_cache();
+
+  Set<const bNode *> visited;
+  Vector<char> found_slots;
+  detect_slot_types_recursive(tex_node, ntree, tex_node, visited, found_slots);
+
+  if (found_slots.is_empty()) {
+    return NODE_TEX_IMAGE_SLOT_NONE;
+  }
+
+  /* Pick the slot with the highest priority. */
+  char best_slot = found_slots[0];
+  int best_priority = get_slot_type_priority(best_slot);
+
+  for (int i = 1; i < found_slots.size(); i++) {
+    int priority = get_slot_type_priority(found_slots[i]);
+    if (priority > best_priority) {
+      best_priority = priority;
+      best_slot = found_slots[i];
+    }
+  }
+
+  return best_slot;
+}
+
+char BKE_material_node_detect_tex_image_slot_type(const bNode *tex_node, const bNodeTree *ntree)
+{
+  return detect_slot_type_from_links(tex_node, ntree);
+}
+
+static bool fill_texpaint_slots_cb(bNodeTree *nodetree, bNode *node, void *userdata)
 {
   FillTexPaintSlotsData *fill_data = static_cast<FillTexPaintSlotsData *>(userdata);
 
@@ -1618,7 +1784,22 @@ static bool fill_texpaint_slots_cb(bNodeTree * /*nodetree*/, bNode *node, void *
       slot->ima = id_cast<Image *>(node->id);
       NodeTexImage *storage = static_cast<NodeTexImage *>(node->storage);
       slot->interp = storage->interpolation;
+
+      /* If paint_slot_type is not explicitly set, try to detect it from node connections. */
+      char effective_slot_type = storage->paint_slot_type;
+      if (effective_slot_type == NODE_TEX_IMAGE_SLOT_NONE && nodetree != nullptr) {
+        effective_slot_type = detect_slot_type_from_links(node, nodetree);
+        if (effective_slot_type != NODE_TEX_IMAGE_SLOT_NONE) {
+          /* Persist the detected type back to the node so it's stable across refreshes. */
+          storage->paint_slot_type = effective_slot_type;
+          /* The image's runtime usage index is now stale — force a rebuild next access. */
+          BKE_image_paint_slot_info_invalidate(slot->ima);
+        }
+      }
+
+      slot->slot_type = effective_slot_type;
       slot->image_user = &storage->iuser;
+
       /* For new renderer, we need to traverse the tree back in search of a UV node. */
       bNode *uvnode = nodetree_uv_node_recursive(node);
 

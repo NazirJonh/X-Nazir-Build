@@ -2352,7 +2352,7 @@ void block_draw(const bContext *C, Block *block)
    * Intersect it with the current scissor: #GPU_scissor REPLACES (does not intersect) the active
    * box, and during a partial region redraw that active box is #ARegion::drawrct (see
    * #wmPartialViewport). Without the intersection the grid tiles could paint outside the area
-   * being repainted this pass, smearing over the (not-redrawn) grip/Browse below the grid. */
+   * being repainted this pass, smearing over the (not-redrawn) widgets below the grid. */
   rcti grid_clip_rect = {};
   bool grid_clip_has_area = false;
   if (block->view_scroll_clip_enabled) {
@@ -2416,21 +2416,18 @@ void block_draw(const bContext *C, Block *block)
     /* XXX: figure out why invalid coordinates happen when closing render window */
     /* and material preview is redrawn in main window (temp fix for bug #23848) */
     if (rect.xmin < rect.xmax && rect.ymin < rect.ymax) {
-      if (grid_clipped) {
-        if (!grid_scissor_active) {
-          widgetbase_draw_cache_flush();
-          BLF_batch_draw_flush();
-          GPU_scissor(grid_clip_rect.xmin,
-                      grid_clip_rect.ymin,
-                      BLI_rcti_size_x(&grid_clip_rect),
-                      BLI_rcti_size_y(&grid_clip_rect));
-          grid_scissor_active = true;
-        }
-        draw_button(C, region, &style, &but, &rect);
+      if (grid_clipped && !grid_scissor_active) {
+        /* Flush pending batched widget/text draws before narrowing the scissor, otherwise they
+         * would be emitted under the new (smaller) clip box. */
+        widgetbase_draw_cache_flush();
+        BLF_batch_draw_flush();
+        GPU_scissor(grid_clip_rect.xmin,
+                    grid_clip_rect.ymin,
+                    BLI_rcti_size_x(&grid_clip_rect),
+                    BLI_rcti_size_y(&grid_clip_rect));
+        grid_scissor_active = true;
       }
-      else {
-        draw_button(C, region, &style, &but, &rect);
-      }
+      draw_button(C, region, &style, &but, &rect);
     }
   }
 

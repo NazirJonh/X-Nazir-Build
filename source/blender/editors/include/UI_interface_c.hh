@@ -10,6 +10,7 @@
 
 #include <bit>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -43,6 +44,7 @@ struct IDProperty;
 struct ImBuf;
 struct Image;
 struct ImageUser;
+struct Material;
 struct MTex;
 struct Panel;
 struct PanelType;
@@ -1653,7 +1655,50 @@ std::string button_extra_icon_string_get_operator_keymap(const bContext &C,
 enum {
   TEMPLATE_ID_FILTER_ALL = 0,
   TEMPLATE_ID_FILTER_AVAILABLE = 1,
+  /** Filter images by current active material. */
+  TEMPLATE_ID_FILTER_CURRENT_MATERIAL = 2,
+  /** Filter images by slot type (requires slot_type context). */
+  TEMPLATE_ID_FILTER_SLOT_TYPE = 4,
 };
+
+/** Filter context for template ID browsing. */
+struct TemplateIDFilterContext {
+  /** Current active material to filter by (for CURRENT_MATERIAL filter). */
+  struct Material *material;
+  /** Slot type to filter by (for SLOT_TYPE filter). */
+  char slot_type;
+};
+
+/**
+ * A script-defined filter for ID-browsing templates (#template_id_browser,
+ * #template_ID_with_filter_context). Registered from Python by subclassing `bpy.types.IDFilter`
+ * and implementing a `filter_id` class-method; the templates reference it by its #idname. Mirrors
+ * the registered-type model used by #AssetShelfType and #uiListType: the type owns the RNA
+ * extension and a C bridge that calls the Python method per candidate ID.
+ */
+struct IDFilterType {
+  /** Unique identifier; the registered class's `bl_idname` (matches #BKE_ST_MAXNAME). */
+  char idname[64];
+  /**
+   * Decide whether \a id should be shown. For Python types this bridges to the class's `filter_id`
+   * method. Null when the registered class did not implement it (then everything passes).
+   */
+  bool (*filter_id)(const IDFilterType *type, const bContext *C, ID *id);
+  /** RNA integration. */
+  ExtensionRNA rna_ext;
+};
+
+/** Register (or replace) a script-defined #IDFilterType. Takes ownership of \a type. */
+void id_filter_type_register(std::unique_ptr<IDFilterType> type);
+/** Remove a previously registered #IDFilterType (frees it). */
+void id_filter_type_unregister(const IDFilterType &type);
+/** Find a registered #IDFilterType by its #IDFilterType::idname, or null (null/empty -> null). */
+IDFilterType *id_filter_type_find(StringRef idname);
+/**
+ * Run \a type's filter on \a id. Returns true when the ID passes (should be shown); also true when
+ * the type defines no `filter_id` method.
+ */
+bool id_filter_type_poll(const IDFilterType &type, const bContext &C, ID &id);
 
 /***************************** ID Utilities *******************************/
 
@@ -2437,6 +2482,40 @@ void template_id_browse(Layout *layout,
                         const char *unlinkop,
                         int filter = TEMPLATE_ID_FILTER_ALL,
                         const char *text = nullptr);
+/**
+ * Extended version with filter context for material/slot type filtering. \a filter_type optionally
+ * names a registered #IDFilterType to further filter the offered IDs from Python (may be
+ * null/empty).
+ */
+void template_id_browse_with_context(Layout *layout,
+                                     bContext *C,
+                                     PointerRNA *ptr,
+                                     StringRefNull propname,
+                                     const char *newop,
+                                     const char *openop,
+                                     const char *unlinkop,
+                                     int filter,
+                                     const char *text,
+                                     struct Material *material,
+                                     char slot_type,
+                                     const char *filter_type = nullptr);
+/**
+ * Browse/assign an ID-block via a popover panel with a grid/list view toggle and a search field.
+ * \a ptr / \a propname identify the pointer property to set; its ID type determines the listed
+ * data-blocks. For Image properties the popover also shows the paint-slot/material filters (driven
+ * by the editor's own #SpaceImage / #SpaceNode `image_filter_*` properties); \a material seeds the
+ * material filter context (may be null). \a filter_type optionally names a registered #IDFilterType
+ * to further filter the listed data-blocks from Python (may be null/empty).
+ */
+void template_id_browser(Layout *layout,
+                         const bContext *C,
+                         PointerRNA *ptr,
+                         const char *propname,
+                         struct Material *material,
+                         const char *newop,
+                         const char *openop,
+                         const char *unlinkop,
+                         const char *filter_type = nullptr);
 void template_id_preview(Layout *layout,
                          bContext *C,
                          PointerRNA *ptr,
@@ -3093,6 +3172,8 @@ ARegion *tooltip_create_from_search_item_generic(bContext *C,
                                                  const ARegion *searchbox_region,
                                                  const rcti *item_rect,
                                                  ID *id);
+/** Same content as search-box ID tooltips (incl. image preview), for custom button tooltips. */
+void tooltip_from_id(TooltipData &tip, ID *id);
 
 /* How long before a tool-tip shows. */
 #define UI_TOOLTIP_DELAY 0.5

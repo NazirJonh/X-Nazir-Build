@@ -503,7 +503,12 @@ class ClonePanel(BrushPanel):
 
             clone_text = mesh.uv_layer_clone.name if mesh.uv_layer_clone else ""
             col.label(text="Source Clone Image")
-            col.template_ID(settings, "clone_image")
+            mat = ob.active_material if ob else None
+            col.template_ID_browser(
+                settings, "clone_image",
+                new="image.new", open="image.open",
+                material=mat,
+            )
             col.label(text="Source Clone UV Map")
             col.menu("VIEW3D_MT_tools_projectpaint_clone", text=clone_text, translate=False)
 

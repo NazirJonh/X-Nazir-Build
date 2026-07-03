@@ -85,6 +85,28 @@ void block_free_views(Block *block)
   }
 }
 
+AbstractView *block_view_find_by_idname(Block &block, const StringRef idname)
+{
+  for (ViewLink &link : block.views) {
+    if (link.idname == idname) {
+      return link.view.get();
+    }
+  }
+  return nullptr;
+}
+
+AbstractGridView *block_view_find_fixed_viewport_grid(Block &block)
+{
+  for (ViewLink &link : block.views) {
+    if (auto *grid_view = dynamic_cast<AbstractGridView *>(link.view.get())) {
+      if (grid_view->use_fixed_viewport_layout()) {
+        return grid_view;
+      }
+    }
+  }
+  return nullptr;
+}
+
 void ViewLink::views_bounds_calc(const Block &block)
 {
   Map<AbstractView *, rcti> views_bounds;
@@ -108,9 +130,17 @@ void ViewLink::views_bounds_calc(const Block &block)
     AbstractViewItem &view_item = *view_item_but->view_item;
     AbstractView &view = view_item.get_view();
 
+    /* Clamp grid-scroll-clipped tiles to the visible clip window: the buffer/partially-scrolled
+     * rows are masked away when drawn, so they must not extend the view bounds either (these
+     * bounds drive the scroll arrows, wheel hover checks and edge auto-scroll zones). */
+    rctf but_bounds_rect;
+    if (!block_grid_scroll_clip_bounds_rect(&block, view_item_but, &but_bounds_rect)) {
+      continue;
+    }
+
     rcti &bounds = views_bounds.lookup(&view);
     rcti but_rcti{};
-    BLI_rcti_rctf_copy_round(&but_rcti, &view_item_but->rect);
+    BLI_rcti_rctf_copy_round(&but_rcti, &but_bounds_rect);
     BLI_rcti_do_minmax_rcti(&bounds, &but_rcti);
   }
 
@@ -325,17 +355,48 @@ bool region_view_idname_has_bounds(const ARegion *region, const StringRef idname
   return false;
 }
 
+static void region_view_scroll_at_borders_apply(ARegion *region,
+                                              AbstractView &view,
+                                              const ViewScrollDirection scroll_dir)
+{
+  if (auto *grid_view = dynamic_cast<AbstractGridView *>(&view)) {
+    if (grid_view->use_fixed_viewport_layout()) {
+      /* Fixed-viewport scroll is a row index in the grid view; the refresh rebuilds the visible
+       * rows from it. */
+      grid_view->scroll(scroll_dir);
+      ED_region_tag_refresh_ui(region);
+      return;
+    }
+  }
+  view.scroll(scroll_dir);
+  ED_region_tag_redraw(region);
+}
+
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event)
 {
   Block *block = nullptr;
-  ARegion *region = CTX_wm_region(C);
+  ARegion *region = CTX_wm_region_popup(C);
+  if (region == nullptr) {
+    region = CTX_wm_region(C);
+  }
   wmWindow *window = CTX_wm_window(C);
   wmWindowManager *wm = CTX_wm_manager(C);
-  if (!ELEM(event->type, MOUSEMOVE, TIMER)) {
+  if (!ELEM(event->type, MOUSEMOVE, TIMER) || region == nullptr) {
     return;
   }
+
   AbstractView *view = region_view_find_at(region, event->xy, UI_UNIT_Y, &block);
   if (view == nullptr) {
+    /* Fixed-viewport grid views (e.g. the image browser popover) lay out only their visible rows,
+     * so #region_view_find_at may miss them when the cursor is in the scroll-edge band. Fall back
+     * to the block's fixed-viewport grid so drag-auto-scroll still works there. */
+    block = static_cast<Block *>(region->runtime->uiblocks.first);
+    if (block) {
+      view = block_view_find_fixed_viewport_grid(*block);
+    }
+  }
+
+  if (view == nullptr || block == nullptr) {
     WM_event_timer_remove(wm, window, dropbox.timer);
     dropbox.timer = nullptr;
     return;
@@ -344,16 +405,19 @@ void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEven
   float x = event->xy[0], y = event->xy[1];
   window_to_block_fl(region, block, &x, &y);
 
-  const std::optional<rcti> bounds = view->get_bounds();
-  if (!bounds.has_value()) {
-    WM_event_timer_remove(wm, window, dropbox.timer);
-    dropbox.timer = nullptr;
-    return;
-  }
-
   const float margin = UI_UNIT_Y * 1 / 3;
   const std::optional<ViewScrollDirection> scroll_dir =
       [&]() -> std::optional<ViewScrollDirection> {
+    if (const auto *grid_view = dynamic_cast<const AbstractGridView *>(view)) {
+      if (grid_view->use_fixed_viewport_layout()) {
+        return grid_view->fixed_viewport_scroll_at_y(*block, y);
+      }
+    }
+
+    const std::optional<rcti> bounds = view->get_bounds();
+    if (!bounds.has_value()) {
+      return std::nullopt;
+    }
     if (y > bounds->ymax - margin) {
       return ViewScrollDirection::UP;
     }
@@ -371,8 +435,7 @@ void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEven
 
   if (dropbox.timer) {
     if (event->type == TIMER) {
-      view->scroll(scroll_dir.value());
-      ED_region_tag_redraw(region);
+      region_view_scroll_at_borders_apply(region, *view, *scroll_dir);
     }
   }
   else {

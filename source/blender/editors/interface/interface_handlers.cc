@@ -62,6 +62,7 @@
 #include "ED_undo.hh"
 
 #include "UI_abstract_view.hh"
+#include "UI_grid_view.hh"
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
 #include "UI_string_search.hh"
@@ -244,6 +245,13 @@ static int handle_region_semi_modal_buttons(bContext *C, const wmEvent *event, A
 #define MENU_TOWARDS_WIGGLE_ROOM 64
 
 static constexpr double menu_keep_open_duration = 0.4f;
+
+/** Low-pass time constant for the fixed-grid drag velocity estimate feeding the kinetic fling
+ * (see #do_but_VIEW_ITEM): smooths jittery per-event deltas without lagging a real swipe. */
+static constexpr float GRID_DRAG_VELOCITY_LOWPASS_TAU = 0.05f;
+/** Max idle since the last velocity sample still counted as "released while moving": a longer
+ * pause before lifting means a deliberate positioning drag, so no fling is started. */
+static constexpr double GRID_DRAG_FLING_RELEASE_MAX_IDLE = 0.1;
 
 enum ButtonActivateType {
   BUTTON_ACTIVATE_OVER,
@@ -511,6 +519,13 @@ struct HandleButtonData {
   float dragf = 0.0f;
   float dragfstart = 0.0f;
   CBData *dragcbd = nullptr;
+
+  /** Fixed-viewport grid drag: low-pass filtered scroll velocity (content pixels per second) and
+   * the last sample it was derived from, feeding the kinetic fling on release (see
+   * #popup_block_fixed_grid_fling_start). */
+  float grid_drag_velocity = 0.0f;
+  double grid_drag_last_time = 0.0;
+  int grid_drag_last_px = 0;
 
   /** Soft min/max with #UI_DRAG_MAP_SOFT_RANGE_PIXEL_MAX applied. */
   float drag_map_soft_min = 0.0f;
@@ -4804,8 +4819,9 @@ static void numedit_apply(bContext *C, Block *block, Button *but, HandleButtonDa
   }
 
   ED_region_tag_redraw(data->region);
+  /* Scrollbar/grip of a scroll-clip window: a redraw alone would re-use the stale button
+   * geometry, the grid rows need a UI refresh to be rebuilt at the new scroll offset. */
   if (ELEM(but->type, ButtonType::Scroll, ButtonType::Grip)) {
-    Block *block = but->block;
     if (block->view_scroll_clip_enabled && (but->drawflag & BUT_GRID_SCROLL_CLIP)) {
       ED_region_tag_refresh_ui(data->region);
     }
@@ -5719,6 +5735,26 @@ static void force_activate_view_item_but(bContext *C,
   }
 }
 
+/**
+ * Popover grids (e.g. the ID browser) lay out their items with
+ * #AbstractGridView::set_fixed_viewport_layout, scrolled by row index instead of the region
+ * #View2D. These support touch/pen drag-to-scroll: holding LMB on a tile and dragging past the
+ * click threshold scrolls the grid instead of activating the tile. Returns the grid to scroll,
+ * or null if this button isn't a tile of one (other popup view items keep the existing
+ * immediate-activate-on-press behavior below).
+ */
+static AbstractGridView *view_item_but_scrollable_popup_grid(Button *but)
+{
+  if (!block_is_popup_any(but->block)) {
+    return nullptr;
+  }
+  AbstractGridView *grid_view = block_view_find_fixed_viewport_grid(*but->block);
+  if (!grid_view || !grid_view->supports_scrolling()) {
+    return nullptr;
+  }
+  return grid_view;
+}
+
 static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, const wmEvent *event)
 {
   ButtonViewItem *view_item_but = static_cast<ButtonViewItem *>(but);
@@ -5734,6 +5770,24 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
           }
 
           if (block_is_popup_any(but->block)) {
+            if (view_item_but_scrollable_popup_grid(but)) {
+              /* Catch a flinging list: pressing stops the kinetic scroll (phone UX). */
+              popup_block_fixed_grid_fling_stop(C, but->block->handle);
+
+              /* Defer activation to #KM_RELEASE: a drag past the threshold scrolls the grid
+               * instead of selecting the tile (touch/pen friendly), see #BUTTON_STATE_WAIT_DRAG
+               * below. */
+              button_activate_state(C, but, BUTTON_STATE_WAIT_DRAG);
+              data->dragstartx = event->xy[0];
+              data->dragstarty = event->xy[1];
+              data->dragchange = false;
+              data->dragsel = 0;
+              data->grid_drag_velocity = 0.0f;
+              data->grid_drag_last_time = 0.0;
+              data->grid_drag_last_px = 0;
+              return WM_UI_HANDLER_CONTINUE;
+            }
+
             /* TODO(!147047): This should be handled in selection operator. */
             /* For select-on-click items, defer activation to KM_CLICK in
              * handle_view_item_event so drag-to-scroll does not trigger selection on press. */
@@ -5777,6 +5831,86 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
     }
   }
   else if (data->state == BUTTON_STATE_WAIT_DRAG) {
+    AbstractGridView *grid_view = view_item_but_scrollable_popup_grid(but);
+    if (grid_view) {
+      if (event->type == MOUSEMOVE) {
+        /* Same click-vs-drag threshold #but_drag_init uses: the OS/user-preference drag
+         * threshold, clamped so a high preference doesn't require dragging more than half a
+         * tile's height. */
+        const float scale = block_to_window_scale(data->region, but->block);
+        const int drag_threshold = min_ii(WM_event_drag_threshold(event),
+                                          int((UI_UNIT_Y / 2) * scale));
+        const int dy_total = event->xy[1] - data->dragstarty;
+
+        if (!data->dragchange && abs(dy_total) >= drag_threshold) {
+          data->dragchange = true;
+          /* #data->dragsel is repurposed here to snapshot the scroll position (in content pixels)
+           * at the moment the drag threshold was crossed; every following move recomputes the
+           * target from the total drag distance (rather than accumulating per-event deltas) so
+           * rounding never drifts. */
+          const int tile_h = max_ii(1, grid_view->get_style().tile_height);
+          data->dragsel = grid_view->scroll_value() * tile_h + grid_view->scroll_offset_px();
+          data->grid_drag_velocity = 0.0f;
+          data->grid_drag_last_time = BLI_time_now_seconds();
+          data->grid_drag_last_px = data->dragsel;
+        }
+
+        if (data->dragchange) {
+          /* Phone UX: drag up (`dy > 0` in Blender Y-up coordinates) means the content follows
+           * the cursor up and later rows appear. Scroll by sub-row pixel amounts for smooth 1:1
+           * motion: clamp the combined pixel position once, then split it back into whole rows
+           * plus a sub-row offset (the partially scrolled rows are drawn clipped, see
+           * #Layout::view_scroll_clip_set). */
+          const int tile_h = max_ii(1, grid_view->get_style().tile_height);
+          const int dy_content = int(roundf(float(dy_total) / max_ff(scale, FLT_EPSILON)));
+          const int total_px = std::clamp(
+              data->dragsel + dy_content, 0, grid_view->fixed_viewport_max_scroll_px());
+          if (total_px / tile_h != grid_view->scroll_value() ||
+              total_px % tile_h != grid_view->scroll_offset_px())
+          {
+            grid_view->scroll_value_set(total_px / tile_h);
+            grid_view->scroll_offset_px_set(total_px % tile_h);
+            ED_region_tag_redraw(data->region);
+            ED_region_tag_refresh_ui(data->region);
+          }
+
+          /* Velocity sample for the kinetic fling on release. Low-pass filtered (~50 ms time
+           * constant) to smooth jittery per-event deltas without lagging a real swipe. */
+          const double now = BLI_time_now_seconds();
+          const double time_delta = now - data->grid_drag_last_time;
+          if (time_delta > 1.0e-4) {
+            const float velocity_sample = float(double(total_px - data->grid_drag_last_px) /
+                                                time_delta);
+            const float mix_factor = 1.0f -
+                                     expf(float(-time_delta) / GRID_DRAG_VELOCITY_LOWPASS_TAU);
+            data->grid_drag_velocity += (velocity_sample - data->grid_drag_velocity) * mix_factor;
+            data->grid_drag_last_time = now;
+            data->grid_drag_last_px = total_px;
+          }
+        }
+        return WM_UI_HANDLER_BREAK;
+      }
+      if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+        if (!data->dragchange) {
+          /* Genuine tap: the drag threshold was never crossed, so perform the same
+           * immediate-select behavior #KM_PRESS would have done directly for a non-scrollable
+           * popup view item. */
+          force_activate_view_item_but(C, data->region, view_item_but, false);
+        }
+        else if (BLI_time_now_seconds() - data->grid_drag_last_time <
+                 GRID_DRAG_FLING_RELEASE_MAX_IDLE)
+        {
+          /* Swipe released while still moving: keep gliding with the release velocity. A pause
+           * before lifting (no recent velocity sample) means the user positioned the list
+           * deliberately - no fling then. */
+          popup_block_fixed_grid_fling_start(C, but->block->handle, data->grid_drag_velocity);
+        }
+        button_activate_state(C, but, BUTTON_STATE_EXIT);
+        return WM_UI_HANDLER_BREAK;
+      }
+      return WM_UI_HANDLER_BREAK;
+    }
+
     /* Let "default" button handling take care of the drag logic. */
     return do_but_EXIT(C, but, data, event);
   }
@@ -10097,10 +10231,22 @@ wmOperator *context_active_operator_get(const bContext *C)
   return nullptr;
 }
 
+/* Resolve the searchbox handling data of \a but, accounting for semi-modal search fields whose
+ * state lives in #Button.semi_modal_state (with #Button.active null outside the semi-modal scope).
+ */
+static const HandleButtonData *button_handle_data_get(const Button *but)
+{
+  return but->semi_modal_state ? but->semi_modal_state : but->active;
+}
+
 ARegion *region_searchbox_region_get(const ARegion *button_region)
 {
-  Button *but = region_active_but_get(button_region);
-  return (but != nullptr) ? but->active->searchbox : nullptr;
+  const Button *but = region_active_but_get(button_region);
+  if (but == nullptr) {
+    return nullptr;
+  }
+  const HandleButtonData *data = button_handle_data_get(but);
+  return data ? data->searchbox : nullptr;
 }
 
 void context_update_anim_flag(const bContext *C)
@@ -10213,7 +10359,12 @@ static int handle_button_over(bContext *C, const wmEvent *event, ARegion *region
     Button *but = but_find_open_event(region, event);
     if (but) {
       button_activate_init(C, region, but, BUTTON_ACTIVATE_OVER);
-      do_button(C, but->block, but, event);
+      /* Semi-modal buttons (e.g. a search field with #BUT2_FORCE_SEMI_MODAL_ACTIVE) are not
+       * activated the normal way; their handling state lives in #Button.semi_modal_state and
+       * #Button.active stays null. Skip #do_button to avoid dereferencing a null active. */
+      if (but->active) {
+        do_button(C, but->block, but, event);
+      }
     }
   }
 
@@ -10951,6 +11102,12 @@ static int handle_view_item_event(bContext *C,
                 view_item_find_mouse_over(region, event->xy));
 
         if (view_but) {
+          if (view_item_but_scrollable_popup_grid(view_but)) {
+            /* Activation (tap vs. drag-to-scroll) is handled entirely by
+             * #do_but_VIEW_ITEM's #BUTTON_STATE_WAIT_DRAG handling for these, see there. */
+            break;
+          }
+
           if (view_item_supports_drag(*view_but->view_item) ||
               view_but->view_item->is_select_on_click())
           {
@@ -11205,6 +11362,31 @@ static char menu_scroll_test(Block *block, int2 xy)
     }
   }
   return 0;
+}
+
+static void menu_scroll_apply_offset_y(ARegion *region, Block *block, float dy)
+{
+  BLI_assert(dy != 0.0f);
+
+  /* remember scroll offset for refreshes */
+  const float prev_scroll = block->handle->scrolloffset;
+  block->handle->scrolloffset = std::clamp(
+      block->handle->scrolloffset + dy, block->handle->scrollmin, block->handle->scrollmax);
+  dy = block->handle->scrolloffset - prev_scroll;
+  /* Apply popup scroll delta to layout panels too. */
+  layout_panel_popup_scroll_apply(block->panel, dy);
+
+  /* apply scroll offset */
+  for (Button &bt : block->buttons()) {
+    bt.rect.ymin += dy;
+    bt.rect.ymax += dy;
+  }
+  block_view_scroll_clip_offset_apply(block, dy);
+
+  /* set flags again */
+  popup_block_scrolltest(block);
+
+  ED_region_tag_redraw(region);
 }
 
 /** Scroll to activated button. */
@@ -11614,8 +11796,17 @@ static int handle_menu_event(bContext *C,
       mouse_motion_towards_reinit(menu, event->xy);
     }
   }
+  else if (event->type == TIMER && menu->grid_fling_timer &&
+           event->customdata == menu->grid_fling_timer)
+  {
+    /* Fixed-viewport grid kinetic scrolling (continues a released touch drag). */
+    popup_block_fixed_grid_fling_step(C, menu, block);
+  }
   else if (event->type == TIMER && event->customdata == menu->scrolltimer) {
-    if (!menu_scroll_test(block, {mx, my})) {
+    if (popup_block_fixed_grid_scrolltimer_step(C, menu, block, my)) {
+      /* Fixed-viewport grid (e.g. image browser) edge auto-scroll. */
+    }
+    else if (!menu_scroll_test(block, {mx, my})) {
       WM_event_timer_remove(CTX_wm_manager(C), win, menu->scrolltimer);
       menu->scrolltimer = nullptr;
     }
@@ -11632,11 +11823,21 @@ static int handle_menu_event(bContext *C,
       }
 
       /* add menu scroll timer, if needed */
-      if (menu_scroll_test(block, {mx, my})) {
+      if (menu_scroll_test(block, {mx, my}) ||
+          popup_block_fixed_grid_autoscroll_at_pointer(block, my))
+      {
         if (menu->scrolltimer == nullptr) {
           menu->scrolltimer = WM_event_timer_add(
               CTX_wm_manager(C), CTX_wm_window(C), TIMER, MENU_SCROLL_INTERVAL);
         }
+      }
+      else if (menu->scrolltimer) {
+        WM_event_timer_remove(CTX_wm_manager(C), win, menu->scrolltimer);
+        menu->scrolltimer = nullptr;
+      }
+
+      if (block->flag & BLOCK_POPOVER) {
+        popup_block_fixed_grid_redraw_for_scroll_overlay(region, block);
       }
     }
 
@@ -11716,6 +11917,16 @@ static int handle_menu_event(bContext *C,
           if (event->modifier) {
             /* pass */
           }
+          else if ((block->flag & BLOCK_POPOVER) &&
+                   popup_block_fixed_grid_wheel_scroll(C, region, event))
+          {
+            if (but) {
+              but->active->cancel = true;
+              button_activate_exit(C, but, but->active, false, false);
+            }
+            WM_event_add_mousemove(CTX_wm_window(C));
+            break;
+          }
           else if (block->flag & (BLOCK_CLIPTOP | BLOCK_CLIPBOTTOM)) {
             const float dy = event->xy[1] - event->prev_xy[1];
             if (dy != 0.0f) {
@@ -11738,6 +11949,16 @@ static int handle_menu_event(bContext *C,
         case WHEELDOWNMOUSE: {
           if (event->modifier) {
             /* pass */
+          }
+          else if ((block->flag & BLOCK_POPOVER) &&
+                   popup_block_fixed_grid_wheel_scroll(C, region, event))
+          {
+            if (but) {
+              but->active->cancel = true;
+              button_activate_exit(C, but, but->active, false, false);
+            }
+            WM_event_add_mousemove(CTX_wm_window(C));
+            break;
           }
           else if (block->flag & (BLOCK_CLIPTOP | BLOCK_CLIPBOTTOM)) {
             const int scroll_dir = (event->type == WHEELUPMOUSE) ? 1 : -1;

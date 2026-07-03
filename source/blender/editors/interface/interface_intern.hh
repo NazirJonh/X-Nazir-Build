@@ -704,6 +704,10 @@ struct Block {
    * amounts while the visible area stays a fixed window (e.g. the brush texture image grid).
    * Grid tile buttons are shifted by the sub-row offset in layout resolve and excluded from
    * #block_align_calc so this rect stays aligned with the visible window.
+   *
+   * Only one scroll-clip window per block is supported (asserted in #Layout::resolve): the rect
+   * and the button flag are block-global, so a second window would re-target the first window's
+   * buttons to its own rect.
    */
   bool view_scroll_clip_enabled = false;
   rctf view_scroll_clip_rect = {};
@@ -834,7 +838,7 @@ rcti rect_to_pixelrect(const ARegion *region, const Block *block, const rctf *sr
 /** Translate #Block::view_scroll_clip_rect with buttons (e.g. #block_translate). */
 void block_view_scroll_clip_translate(Block *block, float dx, float dy);
 
-/** Vertical-only helper (e.g. #offset_panel_block). */
+/** Vertical-only helper (e.g. #offset_panel_block, popup scroll offsets). */
 void block_view_scroll_clip_offset_apply(Block *block, float dy);
 
 /**
@@ -1076,6 +1080,14 @@ struct PopupBlockHandle {
   float scrollmin = 0.0f;
   float scrollmax = 0.0f;
 
+  /**
+   * Fixed-viewport grid fling: kinetic scrolling that keeps a touch drag gliding after release
+   * (see #popup_block_fixed_grid_fling_start). Velocity is in content pixels per second, positive
+   * towards later rows; the timer is owned here like #scrolltimer.
+   */
+  wmTimer *grid_fling_timer = nullptr;
+  float grid_fling_velocity = 0.0f;
+
   KeyNavLock keynav_state;
 
   /* for operator popups */
@@ -1272,6 +1284,36 @@ bool layout_panel_toggle_open(const bContext *C, LayoutPanelHeader *header);
 LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int my);
 /** Apply scroll to layout panels when the main panel is used in popups. */
 void layout_panel_popup_scroll_apply(Panel *panel, const float dy);
+
+/**
+ * Wheel-scroll the fixed-viewport grid view of a popover block (e.g. the image browser) when the
+ * cursor is over the grid rather than the fixed header. Generic: works with any #AbstractGridView
+ * that uses #AbstractGridView::use_fixed_viewport_layout.
+ * \return True if the event was handled.
+ */
+bool popup_block_fixed_grid_wheel_scroll(bContext *C, ARegion *region, const wmEvent *event);
+
+/** Fixed-viewport grid popover: edge hover auto-scroll (#PopupBlockHandle::scrolltimer). */
+bool popup_block_fixed_grid_scrolltimer_step(bContext *C,
+                                             PopupBlockHandle *menu,
+                                             Block *block,
+                                             int my);
+bool popup_block_fixed_grid_autoscroll_at_pointer(Block *block, int my);
+void popup_block_fixed_grid_redraw_for_scroll_overlay(ARegion *region, Block *block);
+
+/**
+ * Fixed-viewport grid popover: kinetic (fling) scrolling that continues a touch drag after
+ * release. Starts a ~60 Hz timer on \a menu advancing the grid's pixel scroll position by the
+ * exponentially decaying \a velocity_px_per_sec (content pixels per second, positive towards
+ * later rows). No-op below the start-velocity threshold.
+ */
+void popup_block_fixed_grid_fling_start(bContext *C,
+                                        PopupBlockHandle *menu,
+                                        float velocity_px_per_sec);
+/** Advance the fling by one timer step; false when \a menu has no active fling timer. */
+bool popup_block_fixed_grid_fling_step(bContext *C, PopupBlockHandle *menu, Block *block);
+/** Stop an active fling (the user takes over scrolling, a tile is pressed, etc.). */
+void popup_block_fixed_grid_fling_stop(bContext *C, PopupBlockHandle *menu);
 
 /**
  * Draws in resolution of 48x4 colors.
@@ -1796,6 +1838,13 @@ void interface_tag_script_reload_queries();
 /* `views/interface_view.cc` */
 
 void block_free_views(Block *block);
+AbstractView *block_view_find_by_idname(Block &block, StringRef idname);
+/**
+ * First grid view in \a block that uses a fixed-viewport layout (the popover/menu scroll model).
+ * Lets popup event handling drive grid scrolling without knowing the concrete view, so no caller
+ * needs to match a specific view idname. Returns null if there is no such view.
+ */
+AbstractGridView *block_view_find_fixed_viewport_grid(Block &block);
 void block_views_end(ARegion *region, const Block *block);
 void block_view_persistent_state_restore(const ARegion &region,
                                          const Block &block,

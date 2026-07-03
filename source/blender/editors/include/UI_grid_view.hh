@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include "BLI_function_ref.hh"
@@ -98,6 +99,30 @@ class AbstractGridView : public AbstractView {
   int cols_per_row_ = 0;
   /** When > 0, overrides width-based column guess in #GridViewLayoutBuilder. */
   int cols_per_row_hint_ = 0;
+  /** When set, empty row spacers are added so the grid block is at least this tall (pixels). */
+  std::optional<int> min_viewport_height_;
+  /**
+   * Popover/fixed-height layouts: only the visible tile rows are placed (no scroll spacer labels).
+   * The scroll position is stored as a row index in #scroll_value_ instead of the region #View2D,
+   * mirroring #AbstractTreeView. This is robust against the popup draw pipeline re-initializing the
+   * region #View2D every refresh.
+   */
+  bool fixed_viewport_layout_ = false;
+  /**
+   * Fixed-viewport scroll position: number of tile rows scrolled out of view at the top (see
+   * #uiViewState.scroll_offset). Shared with the previous view via #update_children_from_old so it
+   * survives popover rebuilds. Null until the first fixed-viewport build allocates it.
+   */
+  std::shared_ptr<int> scroll_value_;
+  /**
+   * Sub-row scroll offset in pixels (0..tile_height-1), applied on top of the #scroll_value_
+   * whole rows so drag-scrolling can track the cursor 1:1. The partially scrolled rows are cut at
+   * the viewport edges via #Layout::view_scroll_clip_set. Shared with the previous view
+   * (#update_children_from_old) like #scroll_value_; null until first used.
+   */
+  std::shared_ptr<int> scroll_offset_px_;
+  /** Request scrolling the active item into view during the next fixed-viewport build. */
+  bool scroll_active_into_view_on_build_ = false;
 
  public:
   AbstractGridView();
@@ -133,7 +158,40 @@ class AbstractGridView : public AbstractView {
   /** Fixed column count (e.g. from #template_asset_image_grid `cols`). 0 = guess from layout
    * width. */
   void set_cols_per_row_hint(int cols);
+  /** Ensure the laid-out grid uses at least this height, using the same row spacers as scrolling.
+   */
+  void set_min_viewport_height(int height_px);
+  [[nodiscard]] std::optional<int> min_viewport_height() const;
+  void set_fixed_viewport_layout(bool fixed_viewport_layout);
+  [[nodiscard]] bool use_fixed_viewport_layout() const;
+  /**
+   * Menu-style scroll zones (#UI_MENU_SCROLL_MOUSE) over the grid bounds in block space, extended
+   * into the separator gaps so the persistent scroll arrows are themselves hoverable. Used for edge
+   * auto-scroll. The current scroll row comes from #scroll_value_.
+   */
+  [[nodiscard]] std::optional<ViewScrollDirection> fixed_viewport_scroll_at_y(
+      const Block &block, float block_space_y) const;
+  void draw_overlays(const ARegion &region, const Block &block) const override;
   AbstractViewItem *find_active_or_visible_item() const override;
+  bool supports_scrolling() const override;
+  bool is_fully_visible() const override;
+  void scroll(ViewScrollDirection direction) override;
+  /**
+   * Pixel-exact fixed-viewport scroll position, decomposed into whole rows (#scroll_value) and a
+   * sub-row pixel remainder (#scroll_offset_px). Drag-scroll input accumulates
+   * `scroll_value() * tile_height + scroll_offset_px()` pixels, clamps the total to
+   * [0, #fixed_viewport_max_scroll_px()] and stores it back through the setters; both values are
+   * re-clamped against the actual row range during the next build
+   * (#fixed_viewport_clamp_scroll_value).
+   */
+  [[nodiscard]] int scroll_value() const;
+  void scroll_value_set(int value);
+  [[nodiscard]] int scroll_offset_px() const;
+  void scroll_offset_px_set(int offset_px);
+  /** Total pixel scroll range of the fixed viewport (highest first row times tile height). */
+  [[nodiscard]] int fixed_viewport_max_scroll_px() const;
+  std::optional<uiViewState> persistent_state() const override;
+  void persistent_state_apply(const uiViewState &state) override;
   AbstractViewItem *navigate_left(AbstractViewItem *from) override;
   AbstractViewItem *navigate_right(AbstractViewItem *from) override;
   AbstractViewItem *navigate_up(AbstractViewItem *from) override;
@@ -146,11 +204,29 @@ class AbstractGridView : public AbstractView {
 
   IndexRange get_visible_range(const View2D &v2d,
                                const AbstractGridViewItem *force_visible_item) const;
+  /** Item index range to build for the current fixed-viewport scroll position (#scroll_value_). */
+  IndexRange fixed_viewport_visible_range() const;
 
  protected:
   virtual void build_items() = 0;
 
  private:
+  /** Row/column geometry of the fixed viewport for the current filtered item count. */
+  struct FixedViewportGeometry {
+    int cols;
+    int content_rows;
+    int visible_rows;
+    /** Highest possible first visible row (0 when everything fits). */
+    int max_first_row;
+  };
+  FixedViewportGeometry fixed_viewport_geometry() const;
+  /** First visible row, read (and clamped) from #scroll_value_. */
+  int fixed_viewport_first_row() const;
+  /** Allocate #scroll_value_ if needed and clamp it to the valid row range. */
+  void fixed_viewport_clamp_scroll_value();
+  /** Set #scroll_value_ so the active item's row is within the fixed viewport. */
+  void fixed_viewport_scroll_active_into_view(bool scroll_active_to_center);
+
   void foreach_view_item(FunctionRef<void(AbstractViewItem &)> iter_fn) const final;
   void update_children_from_old(const AbstractView &old_view) override;
   AbstractGridViewItem *find_matching_item(const AbstractGridViewItem &item_to_match,

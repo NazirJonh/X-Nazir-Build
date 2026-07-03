@@ -11,6 +11,7 @@
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
 
+#include "DNA_node_types.h"
 #include "DNA_screen_types.h"
 
 #include "UI_interface.hh"
@@ -44,6 +45,16 @@ static const EnumPropertyItem popup_draw_direction_items[] = {
      0,
      "Horizontal",
      "Draw popup panel to the side of the button"},
+    {int(ui::PopupAttachDirection::VerticalAlignLeft),
+     "VERTICAL_ALIGN_LEFT",
+     0,
+     "Vertical Align Left",
+     "Draw popup panel above or below the button, aligned to its left edge"},
+    {int(ui::PopupAttachDirection::VerticalAlignRight),
+     "VERTICAL_ALIGN_RIGHT",
+     0,
+     "Vertical Align Right",
+     "Draw popup panel above or below the button, aligned to its right edge"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 }  // namespace blender
@@ -721,6 +732,56 @@ static void rna_ui_template_ID_session_uid(
   template_ID_session_uid(*layout, C, ptr, propname, idcode);
 }
 
+static void rna_uiTemplateID_with_filter_context(Layout *layout,
+                                                 bContext *C,
+                                                 PointerRNA *ptr,
+                                                 const char *propname,
+                                                 const char *newop,
+                                                 const char *openop,
+                                                 const char *unlinkop,
+                                                 int filter,
+                                                 const char *text,
+                                                 PointerRNA *material_ptr,
+                                                 int slot_type,
+                                                 const char *filter_type)
+{
+  Material *material = nullptr;
+  if (material_ptr && material_ptr->data) {
+    material = static_cast<Material *>(material_ptr->data);
+  }
+
+  template_id_browse_with_context(layout,
+                                  C,
+                                  ptr,
+                                  propname,
+                                  newop,
+                                  openop,
+                                  unlinkop,
+                                  filter,
+                                  text,
+                                  material,
+                                  char(slot_type),
+                                  filter_type);
+}
+
+static void rna_uiTemplateID_browser(Layout *layout,
+                                     bContext *C,
+                                     PointerRNA *ptr,
+                                     const char *propname,
+                                     const char *newop,
+                                     const char *openop,
+                                     const char *unlinkop,
+                                     PointerRNA *material_ptr,
+                                     const char *filter_type)
+{
+  Material *material = nullptr;
+  if (material_ptr && material_ptr->data) {
+    material = static_cast<Material *>(material_ptr->data);
+  }
+  ui::template_id_browser(
+      layout, C, ptr, propname, material, newop, openop, unlinkop, filter_type);
+}
+
 static void rna_uiTemplateAnyID(Layout *layout,
                                 PointerRNA *ptr,
                                 const char *propname,
@@ -1369,6 +1430,13 @@ void RNA_api_ui_layout(StructRNA *srna)
   static const EnumPropertyItem id_template_filter_items[] = {
       {ui::TEMPLATE_ID_FILTER_ALL, "ALL", 0, "All", ""},
       {ui::TEMPLATE_ID_FILTER_AVAILABLE, "AVAILABLE", 0, "Available", ""},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL, "CURRENT_MATERIAL", 0, "Current Material", ""},
+      {ui::TEMPLATE_ID_FILTER_SLOT_TYPE, "SLOT_TYPE", 0, "Slot Type", ""},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL | ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+       "CURRENT_MATERIAL_AND_SLOT_TYPE",
+       0,
+       "Current Material & Slot Type",
+       ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -1913,6 +1981,72 @@ void RNA_api_ui_layout(StructRNA *srna)
                "Optionally limit the items which can be selected");
   RNA_def_boolean(func, "live_icon", false, "", "Show preview instead of fixed icon");
   api_ui_item_common_text(func);
+
+  func = RNA_def_function(
+      srna, "template_ID_with_filter_context", "rna_uiTemplateID_with_filter_context");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "Template ID with filter context for material and slot type filtering (for texture paint)");
+  api_ui_item_rna_common(func);
+  RNA_def_string(func, "new", nullptr, 0, "", "Operator identifier to create a new ID block");
+  RNA_def_string(func,
+                 "open",
+                 nullptr,
+                 0,
+                 "",
+                 "Operator identifier to open a file for creating a new ID block");
+  RNA_def_string(func, "unlink", nullptr, 0, "", "Operator identifier to unlink the ID block");
+  RNA_def_enum(func,
+               "filter",
+               id_template_filter_items,
+               ui::TEMPLATE_ID_FILTER_ALL,
+               "",
+               "Optionally limit the items which can be selected");
+  RNA_def_string(func, "text", nullptr, 0, "", "Custom label to display in UI");
+  parm = RNA_def_pointer(
+      func, "material", "Material", "", "Material to filter images by (optional)");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_enum(func,
+               "slot_type",
+               rna_enum_node_tex_image_paint_slot_type_items,
+               NODE_TEX_IMAGE_SLOT_NONE,
+               "Slot Type",
+               "Paint slot type to filter images by");
+  RNA_def_string(func,
+                 "filter_type",
+                 nullptr,
+                 0,
+                 "Filter Type",
+                 "bl_idname of a registered IDFilter class to further filter the listed "
+                 "data-blocks");
+
+  func = RNA_def_function(srna, "template_ID_browser", "rna_uiTemplateID_browser");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_function_ui_description(
+      func,
+      "Browse and assign a data-block via a filtered popover, with standard new/open controls. "
+      "The listed data-blocks come from the pointer property's ID type; image properties also get "
+      "paint-slot/material filters");
+  api_ui_item_rna_common(func);
+  RNA_def_string(func, "new", nullptr, 0, "", "Operator identifier to create a new ID block");
+  RNA_def_string(func,
+                 "open",
+                 nullptr,
+                 0,
+                 "",
+                 "Operator identifier to open a file for creating a new ID block");
+  RNA_def_string(func, "unlink", nullptr, 0, "", "Operator identifier to unlink the ID block");
+  parm = RNA_def_pointer(
+      func, "material", "Material", "", "Material providing the filter context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_string(func,
+                 "filter_type",
+                 nullptr,
+                 0,
+                 "Filter Type",
+                 "bl_idname of a registered IDFilter class to further filter the listed "
+                 "data-blocks");
 
   func = RNA_def_function(srna, "template_ID_session_uid", "rna_ui_template_ID_session_uid");
   RNA_def_function_ui_description(func,

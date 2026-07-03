@@ -6,6 +6,7 @@
  * \ingroup bke
  */
 
+#include <algorithm>
 #include <cctype>
 #include <cfloat>
 #include <cmath>
@@ -17,9 +18,13 @@
 #include "BLI_array_utils.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_index_range.hh"
+#include "BLI_kdopbvh.hh"
+#include "BLI_math_geom_c.hh"
+#include "BLI_math_vector.hh"
 #include "BLI_math_vector_c.hh"
 #include "BLI_span.hh"
 #include "BLI_task.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_attribute.h"
 #include "BKE_attribute.hh"
@@ -27,6 +32,7 @@
 #include "BKE_bvhutils.hh"
 #include "BKE_deform.hh"
 #include "BKE_mesh.hh"
+#include "BKE_mesh_mapping.hh"
 #include "BKE_mesh_remesh_voxel.hh" /* own include */
 #include "BKE_mesh_sample.hh"
 #include "BKE_modifier.hh"
@@ -47,6 +53,580 @@
 
 namespace blender {
 
+namespace bke {
+
+/* Period-4 (4-RoSy) complex helpers. A line direction at angle `θ` in a local
+ * tangent basis is encoded as `exp(i·4θ)`, which collapses the four symmetric
+ * directions of a cross into a single value that can be averaged linearly. */
+static float2 rosy4_polar(const float r, const float angle)
+{
+  return float2(r * std::cos(angle), r * std::sin(angle));
+}
+static float2 rosy4_mul(const float2 a, const float2 b)
+{
+  return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+void mesh_curvature_guide_field(const Mesh &mesh,
+                                const float strength,
+                                MutableSpan<float3> r_dirs,
+                                MutableSpan<float> r_weights)
+{
+  const int verts_num = mesh.verts_num;
+  r_dirs.fill(float3(0.0f));
+  r_weights.fill(0.0f);
+  if (verts_num == 0 || mesh.faces_num == 0) {
+    return;
+  }
+
+  const Span<float3> positions = mesh.vert_positions();
+  const Span<float3> vert_normals = mesh.vert_normals();
+  const Span<float3> face_normals = mesh.face_normals();
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const Span<int2> edges = mesh.edges();
+
+  /* Face areas weight the normal-variation tensor so larger faces count more. */
+  Array<float> face_area(faces.size());
+  threading::parallel_for(faces.index_range(), 2048, [&](const IndexRange range) {
+    for (const int f : range) {
+      face_area[f] = mesh::face_area_calc(positions, corner_verts.slice(faces[f]));
+    }
+  });
+
+  Array<int> v2f_offsets;
+  Array<int> v2f_indices;
+  const GroupedSpan<int> vert_to_face = mesh::build_vert_to_face_map(
+      faces, corner_verts, verts_num, v2f_offsets, v2f_indices);
+
+  Array<int> v2e_offsets;
+  Array<int> v2e_indices;
+  const GroupedSpan<int> vert_to_edge = mesh::build_vert_to_edge_map(
+      edges, verts_num, v2e_offsets, v2e_indices);
+
+  Array<float3> basis_u(verts_num);
+  Array<float3> basis_v(verts_num);
+  /* Encoded line field `z = anisotropy · exp(i·4·θ_max)` in the local basis; its
+   * magnitude is the curvature anisotropy used as confidence. */
+  Array<float2> field(verts_num);
+
+  /* NOTE: For very noisy sculpt input, pre-smoothing the input normals a couple
+   * of iterations would further stabilize this estimate. The period-4 diffusion
+   * below already smooths the resulting field, so it is left out for now. */
+  threading::parallel_for(IndexRange(verts_num), 1024, [&](const IndexRange range) {
+    for (const int v : range) {
+      const float3 n = vert_normals[v];
+      float u[3], w[3];
+      ortho_basis_v3v3_v3(u, w, n);
+      const float3 uf(u);
+      const float3 wf(w);
+      basis_u[v] = uf;
+      basis_v[v] = wf;
+
+      /* Variation of face normals projected to the tangent plane gives a 2x2
+       * symmetric tensor `[[a, b], [b, c]]`. */
+      float a = 0.0f, b = 0.0f, c = 0.0f, wsum = 0.0f;
+      for (const int f : vert_to_face[v]) {
+        const float3 dn = face_normals[f] - n;
+        const float du = math::dot(dn, uf);
+        const float dv = math::dot(dn, wf);
+        const float fw = face_area[f];
+        a += fw * du * du;
+        b += fw * du * dv;
+        c += fw * dv * dv;
+        wsum += fw;
+      }
+      if (wsum > 0.0f) {
+        const float inv = 1.0f / wsum;
+        a *= inv;
+        b *= inv;
+        c *= inv;
+      }
+      /* Closed-form eigen-decomposition: the larger eigenvalue corresponds to
+       * the maximum-curvature direction at `θ = ½·atan2(2b, a-c)`, and the
+       * eigenvalue gap over their sum is the confidence. This *relative*
+       * anisotropy `(λ1-λ2)/(λ1+λ2)` is scale-invariant: gently curved regions
+       * (limbs, torso) guide just as strongly as sharp creases, instead of
+       * being drowned out by whichever crease holds the global maximum. It is
+       * ≈1 on cylinder-like surfaces and ≈0 on flat/spherical (umbilic) ones,
+       * where the direction is undefined. Truly flat regions, whose tensor is
+       * pure numeric noise, are zeroed by the threshold; remaining noise has
+       * incoherent directions and collapses in the diffusion below. */
+      const float disc = std::sqrt(0.25f * (a - c) * (a - c) + b * b);
+      const float theta = 0.5f * std::atan2(2.0f * b, a - c);
+      const float total = a + c;
+      const float anisotropy = (total > 1e-10f) ?
+                                   math::clamp(2.0f * disc / total, 0.0f, 1.0f) :
+                                   0.0f;
+      field[v] = rosy4_polar(anisotropy, 4.0f * theta);
+    }
+  });
+
+  /* Smooth the line field across the surface. Raw directions cannot be averaged
+   * (4-RoSy neighbors 90° apart would cancel), so a neighbor value is parallel-
+   * transported into the current basis (a rotation by `4·φ`) before being added.
+   * The magnitude doubles as confidence, so disagreeing neighbors damp the
+   * weight where the flow is ambiguous. */
+  const int iterations = 10;
+  const float lambda = 0.4f;
+  Array<float2> tmp(verts_num);
+  for (int iteration = 0; iteration < iterations; iteration++) {
+    threading::parallel_for(IndexRange(verts_num), 4096, [&](const IndexRange range) {
+      for (const int v : range) {
+        const float3 uv = basis_u[v];
+        const float3 vv = basis_v[v];
+        const float3 nv = vert_normals[v];
+        float2 acc(0.0f, 0.0f);
+        float wsum = 0.0f;
+        for (const int e : vert_to_edge[v]) {
+          const int2 edge = edges[e];
+          const int nb = (edge[0] == v) ? edge[1] : edge[0];
+          float3 uj = basis_u[nb];
+          uj = uj - nv * math::dot(uj, nv);
+          const float len = math::length(uj);
+          if (len < 1e-8f) {
+            continue;
+          }
+          uj /= len;
+          const float phi = std::atan2(math::dot(uj, vv), math::dot(uj, uv));
+          acc += rosy4_mul(field[nb], rosy4_polar(1.0f, 4.0f * phi));
+          wsum += 1.0f;
+        }
+        const float2 avg = (wsum > 0.0f) ? acc / wsum : field[v];
+        tmp[v] = field[v] * (1.0f - lambda) + avg * lambda;
+      }
+    });
+    std::swap(field, tmp);
+  }
+
+  /* Decode the smoothed field to object-space directions and confidence weights. */
+  threading::parallel_for(IndexRange(verts_num), 4096, [&](const IndexRange range) {
+    for (const int v : range) {
+      const float2 z = field[v];
+      const float mag = math::length(z);
+      if (mag < 1e-6f) {
+        continue;
+      }
+      const float theta = 0.25f * std::atan2(z.y, z.x);
+      float3 dir = basis_u[v] * std::cos(theta) + basis_v[v] * std::sin(theta);
+      const float3 n = vert_normals[v];
+      dir = dir - n * math::dot(dir, n);
+      const float len = math::length(dir);
+      if (len < 1e-8f) {
+        continue;
+      }
+      r_dirs[v] = dir / len;
+      /* The orientation solver blends `(1-w)·smoothed + w·guide` per iteration,
+       * so mid-confidence weights are easily overpowered by the smoothing term
+       * and the field relaxes back to a featureless uniform grid. The square
+       * root boosts coherent mid-range confidence enough to actually steer the
+       * solver, while low-confidence noise still fades out. */
+      r_weights[v] = math::clamp(std::sqrt(mag) * strength, 0.0f, 1.0f);
+    }
+  });
+}
+
+void mesh_guide_strokes_field(const Mesh &mesh,
+                              const Span<float3> stroke_points,
+                              const OffsetIndices<int> stroke_offsets,
+                              const float radius,
+                              const float strength,
+                              MutableSpan<float3> r_dirs,
+                              MutableSpan<float> r_weights)
+{
+  if (stroke_offsets.size() == 0 || radius <= 0.0f || strength <= 0.0f) {
+    return;
+  }
+  const Span<float3> positions = mesh.vert_positions();
+  const Span<float3> vert_normals = mesh.vert_normals();
+  const float radius_sq = radius * radius;
+
+  /* Per-stroke bounds expanded by `radius`; vertices outside cannot be in range,
+   * so they skip the stroke's segment scan entirely. */
+  Array<float3> stroke_min(stroke_offsets.size());
+  Array<float3> stroke_max(stroke_offsets.size());
+  for (const int s : stroke_offsets.index_range()) {
+    float3 lo(FLT_MAX);
+    float3 hi(-FLT_MAX);
+    for (const int i : stroke_offsets[s]) {
+      lo = math::min(lo, stroke_points[i]);
+      hi = math::max(hi, stroke_points[i]);
+    }
+    stroke_min[s] = lo - float3(radius);
+    stroke_max[s] = hi + float3(radius);
+  }
+
+  /* For each vertex, find the nearest stroke segment within `radius` and use its
+   * tangent as a soft orientation constraint. Strokes are few, so a direct
+   * per-vertex scan keeps this simple and race-free (each vertex is independent),
+   * and combines with any existing guidance (e.g. curvature) by keeping the
+   * stronger weight. */
+  threading::parallel_for(positions.index_range(), 1024, [&](const IndexRange range) {
+    for (const int v : range) {
+      const float3 p = positions[v];
+      float best_dist_sq = radius_sq;
+      float3 best_tangent(0.0f);
+      bool found = false;
+      for (const int s : stroke_offsets.index_range()) {
+        const IndexRange points = stroke_offsets[s];
+        if (points.size() < 2) {
+          continue;
+        }
+        if (p.x < stroke_min[s].x || p.y < stroke_min[s].y || p.z < stroke_min[s].z ||
+            p.x > stroke_max[s].x || p.y > stroke_max[s].y || p.z > stroke_max[s].z)
+        {
+          continue;
+        }
+        for (const int i : points.drop_back(1)) {
+          const float3 a = stroke_points[i];
+          const float3 b = stroke_points[i + 1];
+          const float d_sq = dist_squared_to_line_segment_v3(p, a, b);
+          if (d_sq < best_dist_sq) {
+            best_dist_sq = d_sq;
+            best_tangent = b - a;
+            found = true;
+          }
+        }
+      }
+      if (!found) {
+        continue;
+      }
+      const float3 n = vert_normals[v];
+      float3 t = best_tangent - n * math::dot(best_tangent, n);
+      if (math::length_squared(t) < 1e-12f) {
+        continue;
+      }
+      t = math::normalize(t);
+      /* Smoothstep falloff: full strength on the stroke, zero at `radius`. */
+      const float x = math::clamp(1.0f - std::sqrt(best_dist_sq) / radius, 0.0f, 1.0f);
+      const float w = strength * (x * x * (3.0f - 2.0f * x));
+      if (w > r_weights[v]) {
+        r_weights[v] = w;
+        r_dirs[v] = t;
+      }
+    }
+  });
+}
+
+void mesh_face_set_boundaries_field(const Mesh &mesh,
+                                    MutableSpan<float3> r_dirs,
+                                    MutableSpan<float> r_weights,
+                                    MutableSpan<float> r_pin_weights)
+{
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  const VArray<int> face_sets = *attributes.lookup_or_default<int>(
+      ".sculpt_face_set", bke::AttrDomain::Face, 0);
+  if (!face_sets) {
+    return;
+  }
+
+  const Span<float3> positions = mesh.vert_positions();
+  const Span<int2> edges = mesh.edges();
+  const Span<int> corner_edges = mesh.corner_edges();
+  const OffsetIndices<int> faces = mesh.faces();
+
+  Array<int> edge_face_1(edges.size(), -1);
+  Array<int> edge_face_2(edges.size(), -1);
+
+  for (const int f : faces.index_range()) {
+    for (const int corner : faces[f]) {
+      const int e = corner_edges[corner];
+      if (edge_face_1[e] == -1) {
+        edge_face_1[e] = f;
+      }
+      else {
+        edge_face_2[e] = f;
+      }
+    }
+  }
+
+  /* Collect up to two incident boundary edges per vertex. Vertices with
+   * exactly two are interior chain vertices; one means a chain end, more than
+   * two a junction between face set regions. */
+  const int verts_num = mesh.verts_num;
+  Array<int2> incident(verts_num, int2(-1, -1));
+  Array<int> incident_num(verts_num, 0);
+  for (const int e : edges.index_range()) {
+    const int f1 = edge_face_1[e];
+    const int f2 = edge_face_2[e];
+    if (f1 == -1 || f2 == -1 || face_sets[f1] == face_sets[f2]) {
+      continue;
+    }
+    for (const int v : {edges[e][0], edges[e][1]}) {
+      if (incident_num[v] < 2) {
+        incident[v][incident_num[v]] = e;
+      }
+      incident_num[v]++;
+    }
+  }
+
+  /* Per-vertex tangent along the boundary. A single edge direction zigzags on
+   * a triangulated boundary; averaging both incident segments (with the second
+   * one flipped, so both point "along" the chain) gives the direction of the
+   * underlying feature curve. The positional pin makes the output geometry
+   * pass through the boundary while still sliding along it, the same mechanism
+   * `preserve_boundary` uses for open mesh boundaries. */
+  for (const int v : IndexRange(verts_num)) {
+    if (incident_num[v] == 0) {
+      continue;
+    }
+    const int2 e0 = edges[incident[v][0]];
+    const float3 d0 = positions[(e0[0] == v) ? e0[1] : e0[0]] - positions[v];
+    float3 tangent = d0;
+    if (incident_num[v] == 2) {
+      const int2 e1 = edges[incident[v][1]];
+      const float3 d1 = positions[(e1[0] == v) ? e1[1] : e1[0]] - positions[v];
+      tangent = d0 - d1;
+      if (math::length_squared(tangent) < 1e-12f) {
+        /* Degenerate hairpin; fall back to a single segment. */
+        tangent = d0;
+      }
+    }
+    if (math::length_squared(tangent) < 1e-12f) {
+      continue;
+    }
+    r_dirs[v] = math::normalize(tangent);
+    r_weights[v] = 1.0f;
+    if (!r_pin_weights.is_empty()) {
+      r_pin_weights[v] = 1.0f;
+    }
+  }
+
+  /* Smooth the tangents along each chain so the constraint describes the
+   * feature curve rather than individual jagged edges. Junctions and chain
+   * ends stay as-is to anchor the smoothing. The sign flip aligns neighbors
+   * before averaging (the constraint is 4-RoSy, so sign itself is free). */
+  Array<float3> smoothed(verts_num);
+  for (int iteration = 0; iteration < 3; iteration++) {
+    for (const int v : IndexRange(verts_num)) {
+      smoothed[v] = r_dirs[v];
+      if (incident_num[v] != 2) {
+        continue;
+      }
+      float3 acc = r_dirs[v];
+      for (const int i : IndexRange(2)) {
+        const int2 e = edges[incident[v][i]];
+        const int nb = (e[0] == v) ? e[1] : e[0];
+        if (incident_num[nb] == 0) {
+          continue;
+        }
+        const float3 d = r_dirs[nb];
+        acc += (math::dot(d, r_dirs[v]) < 0.0f) ? -d : d;
+      }
+      if (math::length_squared(acc) > 1e-12f) {
+        smoothed[v] = math::normalize(acc);
+      }
+    }
+    for (const int v : IndexRange(verts_num)) {
+      if (incident_num[v] == 2) {
+        r_dirs[v] = smoothed[v];
+      }
+    }
+  }
+}
+
+void mesh_curvature_density_field(const Mesh &mesh,
+                                  const float adaptivity,
+                                  MutableSpan<float> r_scales)
+{
+  const int verts_num = mesh.verts_num;
+  r_scales.fill(1.0f);
+  if (verts_num == 0 || mesh.faces_num == 0 || adaptivity <= 0.0f) {
+    return;
+  }
+
+  const Span<float3> positions = mesh.vert_positions();
+  const Span<float3> vert_normals = mesh.vert_normals();
+  const Span<float3> face_normals = mesh.face_normals();
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const Span<int2> edges = mesh.edges();
+
+  Array<float> face_area(faces.size());
+  threading::parallel_for(faces.index_range(), 2048, [&](const IndexRange range) {
+    for (const int f : range) {
+      face_area[f] = mesh::face_area_calc(positions, corner_verts.slice(faces[f]));
+    }
+  });
+
+  Array<int> v2f_offsets;
+  Array<int> v2f_indices;
+  const GroupedSpan<int> vert_to_face = mesh::build_vert_to_face_map(
+      faces, corner_verts, verts_num, v2f_offsets, v2f_indices);
+
+  Array<int> v2e_offsets;
+  Array<int> v2e_indices;
+  const GroupedSpan<int> vert_to_edge = mesh::build_vert_to_edge_map(
+      edges, verts_num, v2e_offsets, v2e_indices);
+
+  /* Absolute curvature estimate: the RMS tangential deviation of the one-ring
+   * face normals is `≈ curvature · ring radius`, so dividing by the average
+   * incident edge length removes the dependence on the input tessellation
+   * density. Constant factors cancel in the median normalization below. */
+  Array<float> curvature(verts_num, 0.0f);
+  threading::parallel_for(IndexRange(verts_num), 1024, [&](const IndexRange range) {
+    for (const int v : range) {
+      const float3 n = vert_normals[v];
+      float total = 0.0f;
+      float wsum = 0.0f;
+      for (const int f : vert_to_face[v]) {
+        const float3 dn = face_normals[f] - n;
+        const float normal_dev_sq = math::length_squared(dn);
+        const float along_n = math::dot(dn, n);
+        const float fw = face_area[f];
+        total += fw * math::max(normal_dev_sq - along_n * along_n, 0.0f);
+        wsum += fw;
+      }
+      if (wsum > 0.0f) {
+        total /= wsum;
+      }
+      float ring = 0.0f;
+      for (const int e : vert_to_edge[v]) {
+        const int2 edge = edges[e];
+        ring += math::distance(positions[edge[0]], positions[edge[1]]);
+      }
+      if (!vert_to_edge[v].is_empty()) {
+        ring /= float(vert_to_edge[v].size());
+      }
+      if (ring > 1e-12f) {
+        curvature[v] = std::sqrt(total) / ring;
+      }
+    }
+  });
+
+  /* The median curvature maps to scale 1, so roughly half of the surface gets
+   * finer quads and half coarser and the total face count stays close to the
+   * target. A mean would be dominated by a few sharp creases. */
+  Vector<float> sorted;
+  sorted.reserve(verts_num);
+  for (const int v : IndexRange(verts_num)) {
+    if (curvature[v] > 0.0f) {
+      sorted.append(curvature[v]);
+    }
+  }
+  if (sorted.is_empty()) {
+    return;
+  }
+  std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+  const float median = sorted[sorted.size() / 2];
+  if (median <= 0.0f) {
+    return;
+  }
+
+  threading::parallel_for(IndexRange(verts_num), 4096, [&](const IndexRange range) {
+    for (const int v : range) {
+      /* Edge length `∝ 1/sqrt(curvature)`: adaptive but less extreme than the
+       * theoretically optimal `1/curvature`, which starves flat regions. The
+       * lower bound on the curvature keeps flat regions from blowing past the
+       * clamp before `adaptivity` is applied. */
+      const float k = math::max(curvature[v], median * 0.0625f);
+      const float scale_full = math::clamp(std::sqrt(median / k), 0.5f, 2.0f);
+      r_scales[v] = 1.0f + (scale_full - 1.0f) * adaptivity;
+    }
+  });
+
+  /* Smooth the result so quad size changes gradually; abrupt scale jumps read
+   * as distorted quads in the output. */
+  Array<float> tmp(verts_num);
+  for (int iteration = 0; iteration < 5; iteration++) {
+    threading::parallel_for(IndexRange(verts_num), 4096, [&](const IndexRange range) {
+      for (const int v : range) {
+        float acc = 0.0f;
+        int num = 0;
+        for (const int e : vert_to_edge[v]) {
+          const int2 edge = edges[e];
+          acc += r_scales[(edge[0] == v) ? edge[1] : edge[0]];
+          num++;
+        }
+        tmp[v] = (num > 0) ? 0.5f * r_scales[v] + 0.5f * (acc / float(num)) : r_scales[v];
+      }
+    });
+    r_scales.copy_from(tmp);
+  }
+}
+
+void mesh_relax_reproject(Mesh &mesh,
+                          const Mesh &source,
+                          const int iterations,
+                          const float factor,
+                          const float sharp_angle)
+{
+  if (iterations <= 0 || factor <= 0.0f || mesh.verts_num == 0 || source.faces_num == 0) {
+    return;
+  }
+  const int verts_num = mesh.verts_num;
+  MutableSpan<float3> positions = mesh.vert_positions_for_write();
+  const Span<int2> edges = mesh.edges();
+  const Span<int> corner_edges = mesh.corner_edges();
+  const OffsetIndices<int> faces = mesh.faces();
+
+  /* Vertices on open boundaries (including the symmetry seam of a bisected
+   * mesh) and non-manifold edges stay fixed; smoothing them would pull the
+   * boundary inward. Vertices on sharp edges are fixed as well: the Laplacian
+   * pulls them across the crease and the closest-point projection then cuts
+   * the corner, visibly rounding shapes like cube edges. */
+  const Span<float3> face_normals = mesh.face_normals();
+  const float cos_sharp = std::cos(sharp_angle);
+  Array<int> edge_face_count(edges.size(), 0);
+  Array<int2> edge_faces(edges.size(), int2(-1, -1));
+  for (const int f : faces.index_range()) {
+    for (const int corner : faces[f]) {
+      const int e = corner_edges[corner];
+      if (edge_face_count[e] < 2) {
+        edge_faces[e][edge_face_count[e]] = f;
+      }
+      edge_face_count[e]++;
+    }
+  }
+  Array<bool> pinned(verts_num, false);
+  for (const int e : edges.index_range()) {
+    bool pin = edge_face_count[e] != 2;
+    if (!pin) {
+      pin = math::dot(face_normals[edge_faces[e][0]], face_normals[edge_faces[e][1]]) < cos_sharp;
+    }
+    if (pin) {
+      pinned[edges[e][0]] = true;
+      pinned[edges[e][1]] = true;
+    }
+  }
+
+  Array<int> v2e_offsets;
+  Array<int> v2e_indices;
+  const GroupedSpan<int> vert_to_edge = mesh::build_vert_to_edge_map(
+      edges, verts_num, v2e_offsets, v2e_indices);
+
+  bke::BVHTreeFromMesh bvh = source.bvh_corner_tris();
+  Array<float3> next(verts_num);
+  for (int iteration = 0; iteration < iterations; iteration++) {
+    threading::parallel_for(IndexRange(verts_num), 512, [&](const IndexRange range) {
+      for (const int v : range) {
+        if (pinned[v] || vert_to_edge[v].is_empty()) {
+          next[v] = positions[v];
+          continue;
+        }
+        float3 acc(0.0f);
+        for (const int e : vert_to_edge[v]) {
+          const int2 edge = edges[e];
+          acc += positions[(edge[0] == v) ? edge[1] : edge[0]];
+        }
+        const float3 smoothed = math::interpolate(
+            positions[v], acc / float(vert_to_edge[v].size()), factor);
+        /* Keep the relaxed vertex on the original surface, otherwise repeated
+         * smoothing shrinks the model. */
+        BVHTreeNearest nearest;
+        nearest.index = -1;
+        nearest.dist_sq = FLT_MAX;
+        BLI_bvhtree_find_nearest(bvh.tree, smoothed, &nearest, bvh.nearest_callback, &bvh);
+        next[v] = (nearest.index != -1) ? float3(nearest.co) : smoothed;
+      }
+    });
+    positions.copy_from(next);
+  }
+  mesh.tag_positions_changed();
+}
+
+}  // namespace bke
+
 #ifdef WITH_QUADRIFLOW
 static Mesh *remesh_quadriflow(const Mesh *input_mesh,
                                int target_faces,
@@ -55,7 +635,11 @@ static Mesh *remesh_quadriflow(const Mesh *input_mesh,
                                bool preserve_boundary,
                                bool adaptive_scale,
                                void (*update_cb)(void *, float progress, int *cancel),
-                               void *update_cb_data)
+                               void *update_cb_data,
+                               const float *guide_dirs,
+                               const float *guide_weights,
+                               const float *guide_pin_weights,
+                               const float *guide_scales)
 {
   using namespace blender::bke;
   const Span<float3> input_positions = input_mesh->vert_positions();
@@ -81,6 +665,12 @@ static Mesh *remesh_quadriflow(const Mesh *input_mesh,
   qrd.minimum_cost_flow = false;
   qrd.aggresive_sat = false;
   qrd.rng_seed = seed;
+
+  /* Optional orientation guidance; null unless a caller supplies a guide field. */
+  qrd.guide_dirs = guide_dirs;
+  qrd.guide_weights = guide_weights;
+  qrd.guide_pin_weights = guide_pin_weights;
+  qrd.guide_scales = guide_scales;
 
   qrd.out_faces = nullptr;
 
@@ -134,7 +724,11 @@ Mesh *BKE_mesh_remesh_quadriflow(const Mesh *mesh,
                                  bool preserve_boundary,
                                  bool adaptive_scale,
                                  void (*update_cb)(void *, float progress, int *cancel),
-                                 void *update_cb_data)
+                                 void *update_cb_data,
+                                 const float *guide_dirs,
+                                 const float *guide_weights,
+                                 const float *guide_pin_weights,
+                                 const float *guide_scales)
 {
 #ifdef WITH_QUADRIFLOW
   if (target_faces <= 0) {
@@ -147,7 +741,11 @@ Mesh *BKE_mesh_remesh_quadriflow(const Mesh *mesh,
                            preserve_boundary,
                            adaptive_scale,
                            update_cb,
-                           update_cb_data);
+                           update_cb_data,
+                           guide_dirs,
+                           guide_weights,
+                           guide_pin_weights,
+                           guide_scales);
 #else
   UNUSED_VARS(mesh,
               target_faces,
@@ -156,7 +754,11 @@ Mesh *BKE_mesh_remesh_quadriflow(const Mesh *mesh,
               preserve_boundary,
               adaptive_scale,
               update_cb,
-              update_cb_data);
+              update_cb_data,
+              guide_dirs,
+              guide_weights,
+              guide_pin_weights,
+              guide_scales);
   return nullptr;
 #endif
 }

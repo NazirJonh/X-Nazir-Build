@@ -1025,6 +1025,9 @@ class VIEW3D_PT_sculpt_voxel_remesh(Panel, View3DPaintPanel):
 
         layout.operator("object.voxel_remesh", text="Remesh")
 
+        layout.separator()
+        layout.operator("object.quadriflow_remesh", text="Quad Remesh")
+
 
 class VIEW3D_PT_sculpt_options(Panel, View3DPaintPanel):
     bl_context = ".sculpt_mode"  # dot on purpose (access from topbar)

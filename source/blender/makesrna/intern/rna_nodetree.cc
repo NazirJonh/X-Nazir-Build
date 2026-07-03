@@ -10809,6 +10809,7 @@ static void rna_def_nodes(BlenderRNA *brna)
   define("GeometryNode", "GeometryNodePointsToVertices");
   define("GeometryNode", "GeometryNodePointsToVolume");
   define("GeometryNode", "GeometryNodeProximity");
+  define("GeometryNode", "GeometryNodeQuadRemesh");
   define("GeometryNode", "GeometryNodeRaycast");
   define("GeometryNode", "GeometryNodeRealizeInstances");
   define("GeometryNode", "GeometryNodeRemoveAttribute");

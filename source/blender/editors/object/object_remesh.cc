@@ -9,25 +9,36 @@
 #include <cctype>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_array.hh"
 #include "BLI_bounds.hh"
+#include "BLI_disjoint_set.hh"
+#include "BLI_kdopbvh.hh"
 #include "BLI_math_geom_c.hh"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_matrix_c.hh"
+#include "BLI_string.hh"
 #include "BLI_string_utf8.hh"
 #include "BLI_utildefines.hh"
+#include "BLI_vector.hh"
 
+#include "DNA_curves_types.h"
 #include "DNA_object_types.h"
 #include "DNA_userdef_types.h"
 
 #include "BLT_translation.hh"
 
 #include "BKE_attribute.hh"
+#include "BKE_bvhutils.hh"
 #include "BKE_context.hh"
+#include "BKE_curves.hh"
 #include "BKE_global.hh"
+#include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
@@ -44,7 +55,9 @@
 #include "BKE_unit.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 
+#include "ED_object.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
 #include "ED_space_api.hh"
@@ -669,7 +682,19 @@ struct QuadriFlowJob {
 
   bool use_preserve_sharp;
   bool use_preserve_boundary;
+  bool use_preserve_face_sets;
   bool use_mesh_curvature;
+  bool use_merge_parts;
+  float curvature_strength;
+  float adaptive_density;
+  int relax_iterations;
+
+  /* Optional guide curves (soft orientation constraints), resolved on the main
+   * thread into the target object's local space before the worker runs. */
+  float guide_radius;
+  float guide_strength;
+  Array<float3> guide_stroke_points;
+  Array<int> guide_stroke_offsets;
 
   bool preserve_attributes;
   bool smooth_normals;
@@ -842,6 +867,40 @@ static Mesh *remesh_symmetry_mirror(Object *ob, Mesh *mesh, eSymmetryAxes symmet
   return mesh_mirror;
 }
 
+/* Number of edge-connected islands among vertices used by faces. Loose
+ * vertices and wire edges are ignored: the voxel union that consumes this
+ * count only sees the face surface anyway. */
+static int remesh_face_islands_num(const Mesh &mesh)
+{
+  const Span<int2> edges = mesh.edges();
+  const Span<int> corner_verts = mesh.corner_verts();
+
+  DisjointSet<int> islands(mesh.verts_num);
+  for (const int2 &edge : edges) {
+    islands.join(edge[0], edge[1]);
+  }
+
+  Array<bool> used(mesh.verts_num, false);
+  for (const int v : corner_verts) {
+    used[v] = true;
+  }
+  /* Count distinct roots among used vertices; the root itself may be an
+   * unused wire-edge vertex of the same island. */
+  Array<bool> root_seen(mesh.verts_num, false);
+  int islands_num = 0;
+  for (const int v : IndexRange(mesh.verts_num)) {
+    if (!used[v]) {
+      continue;
+    }
+    const int root = islands.find_root(v);
+    if (!root_seen[root]) {
+      root_seen[root] = true;
+      islands_num++;
+    }
+  }
+  return islands_num;
+}
+
 static void quadriflow_start_job(void *customdata, wmJobWorkerStatus *worker_status)
 {
   QuadriFlowJob *qj = static_cast<QuadriFlowJob *>(customdata);
@@ -869,21 +928,158 @@ static void quadriflow_start_job(void *customdata, wmJobWorkerStatus *worker_sta
    * freeing the original ID */
   bisect_mesh = BKE_mesh_copy_for_eval(*mesh);
 
+  /* Merge separate parts into one watertight volume (voxel union) before quad
+   * remeshing, so intersecting pieces become a single surface instead of being
+   * remeshed independently. Only runs when the mesh actually has multiple
+   * face islands; a single-piece mesh keeps its original surface untouched.
+   * The voxel size is derived from the target quad edge length so the union
+   * keeps more detail than the final quads can express. */
+  if (qj->use_merge_parts) {
+    const int islands_num = remesh_face_islands_num(*bisect_mesh);
+    if (islands_num > 1) {
+      const float area = BKE_mesh_calc_area(bisect_mesh);
+      if (area > 0.0f) {
+        const float target_edge_len = std::sqrt(area / float(math::max(qj->target_faces, 1)));
+        const float voxel_size = math::max(0.5f * target_edge_len, 1e-5f);
+        if (Mesh *merged = BKE_mesh_remesh_voxel(bisect_mesh, voxel_size, 0.0f, 0.0f, nullptr)) {
+          BKE_id_free(nullptr, bisect_mesh);
+          bisect_mesh = merged;
+          BKE_reportf(worker_status->reports,
+                      RPT_INFO,
+                      "QuadriFlow: merged %d parts into one volume (voxel size %f)",
+                      islands_num,
+                      double(voxel_size));
+        }
+        else {
+          BKE_report(worker_status->reports,
+                     RPT_WARNING,
+                     "QuadriFlow: could not merge mesh parts (voxel remesh failed), remeshing "
+                     "the parts separately");
+        }
+      }
+    }
+  }
+
   /* Bisect the input mesh using the paint symmetry settings */
   bisect_mesh = remesh_symmetry_bisect(bisect_mesh, qj->symmetry_axes);
+
+  /* Build a per-vertex orientation guide from surface curvature and/or guide
+   * curves, then feed it to the cross-field solver. Computed on the bisected
+   * mesh so the guide indices match the solver input. The two sources combine
+   * into the same arrays; the stronger weight wins per vertex. */
+  Array<float3> guide_dirs;
+  Array<float> guide_weights;
+  Array<float> guide_pin_weights;
+  const float *guide_dirs_ptr = nullptr;
+  const float *guide_weights_ptr = nullptr;
+  const float *guide_pin_weights_ptr = nullptr;
+  const bool use_strokes = qj->guide_stroke_offsets.size() >= 2;
+  if (qj->use_mesh_curvature || use_strokes || qj->use_preserve_face_sets) {
+    const int verts_num = bisect_mesh->verts_num;
+    guide_dirs.reinitialize(verts_num);
+    guide_weights.reinitialize(verts_num);
+    guide_dirs.fill(float3(0.0f));
+    guide_weights.fill(0.0f);
+
+    if (qj->use_mesh_curvature) {
+      bke::mesh_curvature_guide_field(
+          *bisect_mesh, qj->curvature_strength, guide_dirs, guide_weights);
+    }
+    if (use_strokes) {
+      const OffsetIndices<int> offsets(qj->guide_stroke_offsets.as_span());
+      bke::mesh_guide_strokes_field(*bisect_mesh,
+                                    qj->guide_stroke_points,
+                                    offsets,
+                                    qj->guide_radius,
+                                    qj->guide_strength,
+                                    guide_dirs,
+                                    guide_weights);
+    }
+    if (qj->use_preserve_face_sets) {
+      /* Only face set boundaries pin positions; curvature and stroke guides
+       * steer orientation without restricting where the quads land. */
+      guide_pin_weights.reinitialize(verts_num);
+      guide_pin_weights.fill(0.0f);
+      bke::mesh_face_set_boundaries_field(
+          *bisect_mesh, guide_dirs, guide_weights, guide_pin_weights);
+      guide_pin_weights_ptr = guide_pin_weights.data();
+    }
+    guide_dirs_ptr = reinterpret_cast<const float *>(guide_dirs.data());
+    guide_weights_ptr = guide_weights.data();
+  }
+
+  /* Adaptive quad density from the absolute curvature: smaller quads on
+   * detailed regions, larger on flat ones. Independent from the orientation
+   * guides above. */
+  Array<float> guide_scales;
+  const float *guide_scales_ptr = nullptr;
+  if (qj->adaptive_density > 0.0f) {
+    guide_scales.reinitialize(bisect_mesh->verts_num);
+    bke::mesh_curvature_density_field(*bisect_mesh, qj->adaptive_density, guide_scales);
+    guide_scales_ptr = guide_scales.data();
+  }
+
+  /* Report the guide statistics (Info editor and console). This both verifies
+   * that the guided path actually ran in this build and gives the numbers
+   * needed to tune strength/adaptivity when the effect looks too weak. */
+  {
+    int guided_num = 0;
+    float weight_max = 0.0f;
+    for (const float w : guide_weights.as_span()) {
+      if (w > 0.01f) {
+        guided_num++;
+        weight_max = math::max(weight_max, w);
+      }
+    }
+    float scale_min = 1.0f;
+    float scale_max = 1.0f;
+    for (const float s : guide_scales.as_span()) {
+      scale_min = math::min(scale_min, s);
+      scale_max = math::max(scale_max, s);
+    }
+    BKE_reportf(worker_status->reports,
+                RPT_INFO,
+                "QuadriFlow guides: %d of %d vertices oriented (max weight %.2f), "
+                "density scale %.2f-%.2f, relax %d",
+                guided_num,
+                bisect_mesh->verts_num,
+                double(weight_max),
+                double(scale_min),
+                double(scale_max),
+                qj->relax_iterations);
+    /* Job INFO reports are not printed by default; mirror the line to stdout
+     * (visible in the system console) so the guided path is verifiable. */
+    printf("QuadriFlow guides: %d of %d vertices oriented (max weight %.2f), "
+           "density scale %.2f-%.2f, relax %d\n",
+           guided_num,
+           bisect_mesh->verts_num,
+           double(weight_max),
+           double(scale_min),
+           double(scale_max),
+           qj->relax_iterations);
+    fflush(stdout);
+  }
 
   new_mesh = BKE_mesh_remesh_quadriflow(bisect_mesh,
                                         qj->target_faces,
                                         qj->seed,
                                         qj->use_preserve_sharp,
                                         (qj->use_preserve_boundary || qj->use_mesh_symmetry),
-#ifdef USE_MESH_CURVATURE
-                                        qj->use_mesh_curvature,
-#else
-                                        false,
-#endif
+                                        /*adaptive_scale*/ false,
                                         quadriflow_update_job,
-                                        static_cast<void *>(qj));
+                                        static_cast<void *>(qj),
+                                        guide_dirs_ptr,
+                                        guide_weights_ptr,
+                                        guide_pin_weights_ptr,
+                                        guide_scales_ptr);
+
+  /* Post-process: relax the quads on the original surface for more uniform
+   * shapes, before the bisected source mesh is freed. Edges sharper than 30
+   * degrees are kept fixed so creases and hard corners are not rounded. */
+  if (new_mesh != nullptr && qj->relax_iterations > 0) {
+    bke::mesh_relax_reproject(
+        *new_mesh, *bisect_mesh, qj->relax_iterations, 0.5f, /*sharp_angle=30deg*/ 0.523599f);
+  }
 
   BKE_id_free(nullptr, bisect_mesh);
 
@@ -957,7 +1153,7 @@ static void quadriflow_end_job(void *customdata)
 
 static wmOperatorStatus quadriflow_remesh_exec(bContext *C, wmOperator *op)
 {
-  QuadriFlowJob *job = MEM_new_uninitialized<QuadriFlowJob>("QuadriFlowJob");
+  QuadriFlowJob *job = MEM_new<QuadriFlowJob>("QuadriFlowJob");
 
   job->op = op;
   job->owner = CTX_data_active_object(C);
@@ -970,10 +1166,44 @@ static wmOperatorStatus quadriflow_remesh_exec(bContext *C, wmOperator *op)
 
   job->use_preserve_sharp = RNA_boolean_get(op->ptr, "use_preserve_sharp");
   job->use_preserve_boundary = RNA_boolean_get(op->ptr, "use_preserve_boundary");
+  job->use_preserve_face_sets = RNA_boolean_get(op->ptr, "use_preserve_face_sets");
 
-#ifdef USE_MESH_CURVATURE
   job->use_mesh_curvature = RNA_boolean_get(op->ptr, "use_mesh_curvature");
-#endif
+  job->use_merge_parts = RNA_boolean_get(op->ptr, "use_merge_parts");
+  job->curvature_strength = RNA_float_get(op->ptr, "curvature_strength");
+  job->adaptive_density = RNA_float_get(op->ptr, "adaptive_density");
+  job->relax_iterations = RNA_int_get(op->ptr, "relax_iterations");
+
+  /* Resolve optional guide curves here (main thread) into the target object's
+   * local space, so the worker thread only needs the plain point data. */
+  job->guide_strength = RNA_float_get(op->ptr, "guide_strength");
+  job->guide_radius = RNA_float_get(op->ptr, "guide_radius");
+  char guide_name[MAX_ID_NAME - 2];
+  RNA_string_get(op->ptr, "guide_curves_object", guide_name);
+  if (guide_name[0] == '\0' && job->owner) {
+    /* Default to the companion object created by the guide-draw tool, so drawn
+     * guides are picked up without the user typing the name. */
+    SNPRINTF(guide_name, "%s_QuadGuides", job->owner->id.name + 2);
+  }
+  if (guide_name[0] != '\0' && job->owner) {
+    Main *bmain = CTX_data_main(C);
+    Object *guide_ob = reinterpret_cast<Object *>(
+        BKE_libblock_find_name(bmain, ID_OB, guide_name));
+    if (guide_ob && guide_ob->type == OB_CURVES) {
+      const Curves &curves_id = *id_cast<const Curves *>(guide_ob->data);
+      const bke::CurvesGeometry &curves = curves_id.geometry.wrap();
+      const Span<float3> src = curves.positions();
+      const OffsetIndices<int> by_curve = curves.points_by_curve();
+      if (!src.is_empty() && by_curve.size() > 0) {
+        const float4x4 to_target = job->owner->world_to_object() *
+                                   guide_ob->object_to_world();
+        job->guide_stroke_points.reinitialize(src.size());
+        math::transform_points(src, to_target, job->guide_stroke_points.as_mutable_span());
+        job->guide_stroke_offsets.reinitialize(by_curve.data().size());
+        job->guide_stroke_offsets.as_mutable_span().copy_from(by_curve.data());
+      }
+    }
+  }
 
   job->preserve_attributes = RNA_boolean_get(op->ptr, "preserve_attributes");
   job->smooth_normals = RNA_boolean_get(op->ptr, "smooth_normals");
@@ -1100,6 +1330,18 @@ static bool quadriflow_poll_property(const bContext *C, wmOperator *op, const Pr
     }
   }
 
+  if (STREQ(prop_id, "curvature_strength") && !RNA_boolean_get(op->ptr, "use_mesh_curvature")) {
+    return false;
+  }
+
+  if (STREQ(prop_id, "guide_strength") || STREQ(prop_id, "guide_radius")) {
+    char guide_name[MAX_ID_NAME - 2];
+    RNA_string_get(op->ptr, "guide_curves_object", guide_name);
+    if (guide_name[0] == '\0') {
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -1153,22 +1395,92 @@ void OBJECT_OT_quadriflow_remesh(wmOperatorType *ot)
 
   RNA_def_boolean(ot->srna,
                   "use_preserve_sharp",
-                  false,
+                  true,
                   "Preserve Sharp",
                   "Try to preserve sharp features on the mesh");
+
+  RNA_def_boolean(ot->srna,
+                  "use_merge_parts",
+                  true,
+                  "Merge Parts",
+                  "Union separate or intersecting parts of the mesh into a single volume before "
+                  "remeshing (uses a voxel pass; only applies when the mesh has multiple parts)");
 
   RNA_def_boolean(ot->srna,
                   "use_preserve_boundary",
                   false,
                   "Preserve Mesh Boundary",
                   "Try to preserve mesh boundary on the mesh");
-#ifdef USE_MESH_CURVATURE
+  RNA_def_boolean(ot->srna,
+                  "use_preserve_face_sets",
+                  true,
+                  "Preserve Face Sets",
+                  "Align the new mesh to the Face Set boundaries");
   RNA_def_boolean(ot->srna,
                   "use_mesh_curvature",
-                  false,
+                  true,
                   "Use Mesh Curvature",
-                  "Take the mesh curvature into account when remeshing");
-#endif
+                  "Align the new edge flow to the surface curvature of the original mesh");
+
+  prop = RNA_def_float_factor(ot->srna,
+                              "curvature_strength",
+                              0.7f,
+                              0.0f,
+                              1.0f,
+                              "Curvature Strength",
+                              "How strongly the curvature guides the edge flow",
+                              0.0f,
+                              1.0f);
+
+  prop = RNA_def_float_factor(ot->srna,
+                              "adaptive_density",
+                              0.5f,
+                              0.0f,
+                              1.0f,
+                              "Adaptive Density",
+                              "Concentrate smaller quads in curved, detailed regions and larger "
+                              "quads in flat ones (0 gives uniform quad size)",
+                              0.0f,
+                              1.0f);
+
+  RNA_def_int(ot->srna,
+              "relax_iterations",
+              2,
+              0,
+              20,
+              "Relax Iterations",
+              "Number of smoothing steps applied to the result while keeping it on the original "
+              "surface, for more uniform quad shapes",
+              0,
+              10);
+
+  RNA_def_string(ot->srna,
+                 "guide_curves_object",
+                 nullptr,
+                 MAX_ID_NAME - 2,
+                 "Guide Curves",
+                 "Name of a Curves object whose strokes guide the edge flow");
+
+  prop = RNA_def_float_factor(ot->srna,
+                              "guide_strength",
+                              0.7f,
+                              0.0f,
+                              1.0f,
+                              "Guide Strength",
+                              "How strongly the guide curves constrain the edge flow",
+                              0.0f,
+                              1.0f);
+
+  prop = RNA_def_float(ot->srna,
+                       "guide_radius",
+                       0.1f,
+                       0.0f,
+                       FLT_MAX,
+                       "Guide Radius",
+                       "Radius of influence around each guide curve segment",
+                       0.0001f,
+                       1.0f);
+
   RNA_def_boolean(ot->srna,
                   "preserve_attributes",
                   false,
@@ -1240,6 +1552,209 @@ void OBJECT_OT_quadriflow_remesh(wmOperatorType *ot)
               "come up with different quad layouts on the mesh",
               0,
               255);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Quadriflow Guide Draw Operator
+ *
+ * Draws guide curves directly on a mesh surface to steer the QuadriFlow edge
+ * flow. Each stroke is ray-cast onto the surface and appended to a companion
+ * Curves object named "<mesh>_QuadGuides", which #OBJECT_OT_quadriflow_remesh
+ * reads through its "Guide Curves" property. Stroke points are stored in world
+ * space and the guide object is kept at the identity transform, so the
+ * remesher's guide-to-target space conversion is a no-op.
+ * \{ */
+
+struct QuadGuideDrawData {
+  Object *target = nullptr;
+  /** Ray-cast acceleration structure for the evaluated target surface. */
+  bke::BVHTreeFromMesh surface_bvh;
+  /** World-space points of the in-progress stroke. */
+  Vector<float3> stroke;
+};
+
+static bool quadriflow_guide_raycast(QuadGuideDrawData &cd,
+                                     const ARegion *region,
+                                     const int mval[2],
+                                     float3 &r_local_co)
+{
+  const float mval_f[2] = {float(mval[0]), float(mval[1])};
+  float3 ray_start_world, ray_dir_world;
+  ED_view3d_win_to_ray(region, mval_f, ray_start_world, ray_dir_world);
+
+  /* The surface mesh and its BVH are in the target object's local space. */
+  const float4x4 &world_to_object = cd.target->world_to_object();
+  const float3 ray_start = math::transform_point(world_to_object, ray_start_world);
+  const float3 ray_dir = math::normalize(math::transform_direction(world_to_object, ray_dir_world));
+
+  BVHTreeRayHit hit;
+  hit.dist = FLT_MAX;
+  hit.index = -1;
+  BLI_bvhtree_ray_cast(cd.surface_bvh.tree,
+                       ray_start,
+                       ray_dir,
+                       0.0f,
+                       &hit,
+                       cd.surface_bvh.raycast_callback,
+                       &cd.surface_bvh);
+  if (hit.index == -1) {
+    return false;
+  }
+  /* The hit is in the target object's local space, matching the mesh fed to the
+   * remesher. */
+  r_local_co = float3(hit.co);
+  return true;
+}
+
+static Object *quadriflow_guide_object_ensure(bContext *C, Object *target)
+{
+  Main *bmain = CTX_data_main(C);
+  char name[MAX_ID_NAME - 2];
+  SNPRINTF(name, "%s_QuadGuides", target->id.name + 2);
+
+  Object *guide = reinterpret_cast<Object *>(BKE_libblock_find_name(bmain, ID_OB, name));
+  if (guide != nullptr && guide->type == OB_CURVES) {
+    return guide;
+  }
+
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  /* Created at the origin (identity transform) so world-space strokes map directly. */
+  guide = BKE_object_add(bmain, scene, view_layer, OB_CURVES, name);
+  DEG_relations_tag_update(bmain);
+
+  /* Adding an object makes it active; keep the mesh active so drawing continues. */
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  if (Base *target_base = BKE_view_layer_base_find(view_layer, target)) {
+    base_activate(C, target_base);
+  }
+  return guide;
+}
+
+static void quadriflow_guide_commit(bContext *C, QuadGuideDrawData *cd)
+{
+  if (cd->stroke.size() < 2) {
+    return;
+  }
+  Object *guide = quadriflow_guide_object_ensure(C, cd->target);
+  Curves &curves_id = *id_cast<Curves *>(guide->data);
+  bke::CurvesGeometry &curves = curves_id.geometry.wrap();
+
+  const int old_points_num = curves.points_num();
+  const int old_curves_num = curves.curves_num();
+  const int stroke_point_num = cd->stroke.size();
+
+  curves.resize(old_points_num + stroke_point_num, old_curves_num + 1);
+  curves.offsets_for_write()[old_curves_num + 1] = old_points_num + stroke_point_num;
+
+  /* Strokes are captured in the target's local space; store them in the guide
+   * object's local space, the convention for Curves point data. */
+  const float4x4 to_guide = guide->world_to_object() * cd->target->object_to_world();
+  math::transform_points(cd->stroke.as_span(),
+                         to_guide,
+                         curves.positions_for_write().slice(old_points_num, stroke_point_num));
+
+  curves.fill_curve_types(CURVE_TYPE_POLY);
+  curves.update_curve_types();
+  curves.tag_topology_changed();
+  curves.tag_positions_changed();
+
+  DEG_id_tag_update(&curves_id.id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_GEOM | ND_DATA, &curves_id.id);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, guide);
+}
+
+static void quadriflow_guide_draw_exit(wmOperator *op)
+{
+  if (QuadGuideDrawData *cd = static_cast<QuadGuideDrawData *>(op->customdata)) {
+    MEM_delete(cd);
+    op->customdata = nullptr;
+  }
+}
+
+static wmOperatorStatus quadriflow_guide_draw_invoke(bContext *C,
+                                                     wmOperator *op,
+                                                     const wmEvent *event)
+{
+  ARegion *region = CTX_wm_region(C);
+  Object *ob = CTX_data_active_object(C);
+
+  /* Ray-cast against the original mesh (the same surface the remesher consumes),
+   * not the evaluated copy: it stays valid for the whole modal session and keeps
+   * the guides aligned to the mesh that is actually remeshed. */
+  const Mesh *mesh = id_cast<const Mesh *>(ob->data);
+  if (mesh->faces_num == 0) {
+    BKE_report(op->reports, RPT_ERROR, "The active mesh has no faces to draw on");
+    return OPERATOR_CANCELLED;
+  }
+
+  QuadGuideDrawData *cd = MEM_new<QuadGuideDrawData>(__func__);
+  cd->target = ob;
+  cd->surface_bvh = mesh->bvh_corner_tris();
+  op->customdata = cd;
+
+  float3 co;
+  if (quadriflow_guide_raycast(*cd, region, event->mval, co)) {
+    cd->stroke.append(co);
+  }
+
+  WM_event_add_modal_handler(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus quadriflow_guide_draw_modal(bContext *C,
+                                                    wmOperator *op,
+                                                    const wmEvent *event)
+{
+  QuadGuideDrawData *cd = static_cast<QuadGuideDrawData *>(op->customdata);
+  ARegion *region = CTX_wm_region(C);
+
+  switch (event->type) {
+    case MOUSEMOVE: {
+      float3 co;
+      if (quadriflow_guide_raycast(*cd, region, event->mval, co)) {
+        cd->stroke.append(co);
+      }
+      break;
+    }
+    case LEFTMOUSE:
+      if (event->val == KM_RELEASE) {
+        quadriflow_guide_commit(C, cd);
+        quadriflow_guide_draw_exit(op);
+        return OPERATOR_FINISHED;
+      }
+      break;
+    case EVT_ESCKEY:
+    case RIGHTMOUSE:
+      quadriflow_guide_draw_exit(op);
+      return OPERATOR_CANCELLED;
+    default:
+      break;
+  }
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static bool quadriflow_guide_draw_poll(bContext *C)
+{
+  const Object *ob = CTX_data_active_object(C);
+  return ob != nullptr && ob->type == OB_MESH && CTX_wm_region_view3d(C) != nullptr;
+}
+
+void OBJECT_OT_quadriflow_guide_draw(wmOperatorType *ot)
+{
+  ot->name = "Draw Quad Guide";
+  ot->description =
+      "Draw a guide curve on the mesh surface to steer the QuadriFlow edge flow. The stroke is "
+      "stored in a companion Curves object referenced by the remesh operator";
+  ot->idname = "OBJECT_OT_quadriflow_guide_draw";
+
+  ot->invoke = quadriflow_guide_draw_invoke;
+  ot->modal = quadriflow_guide_draw_modal;
+  ot->poll = quadriflow_guide_draw_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
 /** \} */

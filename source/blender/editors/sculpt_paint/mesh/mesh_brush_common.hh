@@ -8,6 +8,7 @@
 #include "BLI_array_utils.hh"
 #include "BLI_bit_span.hh"
 #include "BLI_math_matrix_types.hh"
+#include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_offset_indices.hh"
 #include "BLI_set.hh"
@@ -299,6 +300,73 @@ void filter_region_clip_factors(const SculptSession &ss,
 void filter_region_clip_factors(const SculptSession &ss,
                                 Span<float3> positions,
                                 MutableSpan<float> factors);
+
+/**
+ * Approximates world-space isotropy for a local-space NORMAL/direction vector (built from
+ * cross-products of a surface normal, or averaged into an area normal) under the object's own
+ * non-uniform scale, using #StrokeCache.scale (the inverse-transpose-style `max_scale /
+ * object_scale_axis` compensation seeded once per stroke in #stroke_cache_init). Applied only
+ * for #StrokeCache.multi_object_stroke, so a single-object stroke with non-uniform scale keeps
+ * its previous (unpredictable, but unchanged) behavior.
+ *
+ * Do NOT use this for position differences / falloff distances — those transform by the
+ * object's scale directly (the opposite relationship), see #position_scale_normalized.
+ *
+ * This returns the corrected but *unnormalized* vector; when the result is consumed as a unit
+ * orientation vector (a basis axis, a rotation axis, a projection-plane normal) use
+ * #scale_normalized_unit instead so single-object strokes stay bit-exact.
+ */
+inline float3 scale_normalized(const StrokeCache &cache, const float3 &v)
+{
+  return cache.multi_object_stroke ? v * cache.scale : v;
+}
+
+/**
+ * Unit-length variant of #scale_normalized for a raw local NORMAL/direction that is consumed as a
+ * unit orientation vector. In a multi-object stroke it applies the non-uniform-scale correction
+ * and re-normalizes; in a single-object stroke it returns #v untouched — no extra #math::normalize
+ * is introduced, so the result stays bit-identical to the pre-multi-object behavior.
+ */
+inline float3 scale_normalized_unit(const StrokeCache &cache, const float3 &v)
+{
+  return cache.multi_object_stroke ? math::normalize(v * cache.scale) : v;
+}
+
+/**
+ * Approximates world-space isotropy for a local-space POSITION DIFFERENCE (a falloff distance,
+ * a slide direction derived from `location - position`) under the object's own non-uniform
+ * scale, using #StrokeCache.position_scale (`ob.scale[axis] / mat4_to_scale(world matrix)`,
+ * seeded once per stroke in #stroke_cache_init). Applied only for
+ * #StrokeCache.multi_object_stroke.
+ *
+ * Do NOT use this for normals/orientation vectors — see #scale_normalized instead.
+ */
+inline float3 position_scale_normalized(const StrokeCache &cache, const float3 &v)
+{
+  return cache.multi_object_stroke ? v * cache.position_scale : v;
+}
+
+/**
+ * Per-axis compensation making a local-space displacement/direction look isotropic in world
+ * space despite the object's own non-uniform #Object.scale: the largest axis is left unscaled,
+ * smaller axes are scaled up to match it. Only the axis *ratios* matter for direction
+ * correctness (a uniform post-multiply cancels out under `normalize()`). This is the same
+ * formula #StrokeCache.scale is seeded with once per stroke in #stroke_cache_init; use that
+ * cached value instead when a #StrokeCache is available (e.g. via #scale_normalized).
+ */
+float3 non_uniform_scale_compensation(const Object &ob);
+
+/**
+ * Per-axis compensation making a local-space POSITION DIFFERENCE match a true isotropic
+ * world-space distance, given that #StrokeCache.radius/#SculptSession.cursor_radius were derived
+ * by dividing a world/screen radius by the single isotropic scalar `mat4_to_scale(world matrix)`
+ * (#paint_calc_object_space_radius). This is `ob.scale[axis] / mat4_to_scale(ob)` — the opposite
+ * relationship from #non_uniform_scale_compensation, which corrects normals via the
+ * inverse-transpose rule. This is the same formula #StrokeCache.position_scale is seeded with
+ * once per stroke in #stroke_cache_init; use that cached value instead when a #StrokeCache is
+ * available (e.g. via #position_scale_normalized).
+ */
+float3 position_scale_compensation(const Object &ob);
 
 /**
  * Calculate distances based on the distance from the brush cursor and various other settings.

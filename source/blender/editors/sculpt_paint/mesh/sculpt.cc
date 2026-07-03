@@ -1910,6 +1910,15 @@ static AreaNormalCenterData calc_area_sample_multi_object_mesh(const Depsgraph &
     plane_from_point_normal_v3(tube_plane, ref_location, ref_view_normal);
   }
 
+  /* #pos_ref/#ref_location below are always in the reference object's local space (every other
+   * object's vertices are mapped into it via #ref_from_obj). Non-uniform scale on the reference
+   * object itself would otherwise skew this distance the same way it skews #calc_brush_distances.
+   */
+  const SculptSession &reference_ss = *reference_ob.runtime->sculpt_session;
+  const float3 reference_scale = (reference_ss.cache && reference_ss.cache->multi_object_stroke) ?
+                                     reference_ss.cache->position_scale :
+                                     float3(1.0f);
+
   AreaNormalCenterData anctd{};
 
   for (Object *object_ptr : objects) {
@@ -1976,10 +1985,10 @@ static AreaNormalCenterData calc_area_sample_multi_object_mesh(const Depsgraph &
         if (use_tube) {
           float3 projected;
           closest_to_plane_normalized_v3(projected, tube_plane, pos_ref);
-          distance_sq = math::distance_squared(projected, ref_location);
+          distance_sq = math::length_squared((projected - ref_location) * reference_scale);
         }
         else {
-          distance_sq = math::distance_squared(ref_location, pos_ref);
+          distance_sq = math::length_squared((pos_ref - ref_location) * reference_scale);
         }
         if (distance_sq > max_radius_sq) {
           continue;
@@ -3632,6 +3641,21 @@ static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgra
    * the brush can produce artifacts in some situations. */
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW && brush.flag & BRUSH_ORIGINAL_NORMAL) {
     radius_scale = 2.0f;
+  }
+
+  /* Node culling uses a raw local-space sphere (#node_in_sphere), but in a multi-object stroke the
+   * per-vertex falloff is measured through #StrokeCache.position_scale — a world-isotropic sphere
+   * (#calc_brush_distances_squared). Where position_scale shrinks a local axis (< 1) the falloff
+   * reaches past the raw radius; expand the node search to cover it so no falloff-affected vertex is
+   * culled. Otherwise the factor drops abruptly at the node-search boundary and accumulating brushes
+   * that do not restore between steps (e.g. Snake Hook) tear the mesh along it. Over-inclusion is
+   * harmless: the extra vertices simply receive a zero falloff factor. */
+  if (ss.cache && ss.cache->multi_object_stroke) {
+    const float3 &position_scale = ss.cache->position_scale;
+    const float min_axis = std::min({position_scale.x, position_scale.y, position_scale.z});
+    if (min_axis > 0.0f && min_axis < 1.0f) {
+      radius_scale /= min_axis;
+    }
   }
   return {pbvh_gather_generic(ob, brush, use_original, radius_scale, memory),
           std::nullopt,
@@ -6552,13 +6576,9 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
     StrokeCache *cache = ss.cache;
 
     /* Set scaling adjustment. */
-    float max_scale = 0.0f;
-    for (int j = 0; j < 3; j++) {
-      max_scale = max_ff(max_scale, fabsf(ob.scale[j]));
-    }
-    cache->scale[0] = max_scale / ob.scale[0];
-    cache->scale[1] = max_scale / ob.scale[1];
-    cache->scale[2] = max_scale / ob.scale[2];
+    cache->scale = non_uniform_scale_compensation(ob);
+    cache->position_scale = position_scale_compensation(ob);
+    cache->multi_object_stroke = objects.size() > 1;
 
     cache->plane_trim_squared = brush->plane_trim * brush->plane_trim;
 
@@ -8745,6 +8765,22 @@ void filter_region_clip_factors(const SculptSession &ss,
   }
 }
 
+float3 non_uniform_scale_compensation(const Object &ob)
+{
+  float max_scale = 0.0f;
+  for (int axis = 0; axis < 3; axis++) {
+    max_scale = max_ff(max_scale, fabsf(ob.scale[axis]));
+  }
+  return float3(max_scale / ob.scale[0], max_scale / ob.scale[1], max_scale / ob.scale[2]);
+}
+
+float3 position_scale_compensation(const Object &ob)
+{
+  float iso_scale = mat4_to_scale(ob.object_to_world().ptr());
+  iso_scale = (iso_scale == 0.0f) ? 1.0f : iso_scale;
+  return float3(ob.scale[0], ob.scale[1], ob.scale[2]) / iso_scale;
+}
+
 void calc_brush_distances_squared(const SculptSession &ss,
                                   const Span<float3> positions,
                                   const Span<int> verts,
@@ -8763,12 +8799,20 @@ void calc_brush_distances_squared(const SculptSession &ss,
     for (const int i : verts.index_range()) {
       float3 projected;
       closest_to_plane_normalized_v3(projected, test_plane, positions[verts[i]]);
-      r_distances[i] = math::distance_squared(projected, test_location);
+      float3 diff = projected - test_location;
+      if (ss.cache) {
+        diff = position_scale_normalized(*ss.cache, diff);
+      }
+      r_distances[i] = math::length_squared(diff);
     }
   }
   else {
     for (const int i : verts.index_range()) {
-      r_distances[i] = math::distance_squared(test_location, positions[verts[i]]);
+      float3 diff = positions[verts[i]] - test_location;
+      if (ss.cache) {
+        diff = position_scale_normalized(*ss.cache, diff);
+      }
+      r_distances[i] = math::length_squared(diff);
     }
   }
 }
@@ -8802,12 +8846,20 @@ void calc_brush_distances_squared(const SculptSession &ss,
     for (const int i : positions.index_range()) {
       float3 projected;
       closest_to_plane_normalized_v3(projected, test_plane, positions[i]);
-      r_distances[i] = math::distance_squared(projected, test_location);
+      float3 diff = projected - test_location;
+      if (ss.cache) {
+        diff = position_scale_normalized(*ss.cache, diff);
+      }
+      r_distances[i] = math::length_squared(diff);
     }
   }
   else {
     for (const int i : positions.index_range()) {
-      r_distances[i] = math::distance_squared(test_location, positions[i]);
+      float3 diff = positions[i] - test_location;
+      if (ss.cache) {
+        diff = position_scale_normalized(*ss.cache, diff);
+      }
+      r_distances[i] = math::length_squared(diff);
     }
   }
 }

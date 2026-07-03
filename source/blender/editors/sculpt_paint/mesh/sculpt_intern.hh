@@ -216,6 +216,23 @@ struct StrokeCache {
   /* Invariants */
   float initial_radius = 0.0f;
   float3 scale = float3(0);
+  /**
+   * Per-axis correction for local-space POSITION DIFFERENCES (falloff distance, slide
+   * direction) under non-uniform #Object.scale: `ob.scale[axis] / mat4_to_scale(world matrix)`.
+   * This is the opposite relationship from #scale (`max_scale / ob.scale[axis]`), which corrects
+   * NORMAL/direction vectors via the inverse-transpose rule. Distances/positions transform
+   * directly by the object's scale, not its inverse; using #scale here would invert the
+   * correction. #cache.radius is defined as `screen_radius / mat4_to_scale(world matrix)`
+   * (#paint_calc_object_space_radius), so this factor makes `length((p - center) *
+   * position_scale) < cache.radius` match a true isotropic world-space sphere test.
+   */
+  float3 position_scale = float3(1);
+  /**
+   * True when the stroke spans more than one object (#SculptPaintStroke::mode_objects_). Gates
+   * the non-uniform-scale compensation in #scale_normalized() so single-object strokes stay
+   * bit-exact with their pre-multi-object behavior.
+   */
+  bool multi_object_stroke = false;
   struct {
     uint8_t flag = 0;
     float3 tolerance = float3(0);

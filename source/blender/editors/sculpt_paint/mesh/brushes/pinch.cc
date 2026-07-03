@@ -192,11 +192,16 @@ void do_pinch_brush(const Depsgraph &depsgraph,
     return;
   }
 
-  /* Initialize `mat`. */
+  /* #area_no is a raw local-space normal (#calc_brush_plane does not itself compensate for
+   * non-uniform scale). Correct it before using it to build a world-orthogonal basis; this file
+   * never multiplies by #StrokeCache.scale elsewhere, so this is the only correction needed
+   * here (see #scale_normalized). */
+  const float3 area_no_corrected = scale_normalized_unit(*ss.cache, area_no);
+
   float4x4 mat = float4x4::identity();
-  mat.x_axis() = math::cross(area_no, ss.cache->grab_delta_symm);
-  mat.y_axis() = math::cross(area_no, mat.x_axis());
-  mat.z_axis() = area_no;
+  mat.x_axis() = math::cross(area_no_corrected, ss.cache->grab_delta_symm);
+  mat.y_axis() = math::cross(area_no_corrected, mat.x_axis());
+  mat.z_axis() = area_no_corrected;
   mat.location() = ss.cache->location_symm;
   normalize_m4(mat.ptr());
 

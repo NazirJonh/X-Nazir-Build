@@ -103,8 +103,11 @@ static void calc_faces(const Depsgraph &depsgraph,
   scale_translations(translations, strength);
 
   /* The vertices are pinched towards a line instead of a single point. Without this we get a
-   * 'flat' surface surrounding the pinch. */
-  project_translations(translations, cache.sculpt_normal_symm);
+   * 'flat' surface surrounding the pinch. #cache.sculpt_normal_symm is a raw local-space normal;
+   * correct it for the object's non-uniform scale here (a local copy only — #do_crease_or_blob_
+   * brush's own `offset` computation reads the same field raw, matching #StrokeCache.scale's
+   * magnitude-compensation convention there, see #scale_normalized). */
+  project_translations(translations, scale_normalized_unit(cache, cache.sculpt_normal_symm));
 
   add_offset_to_translations(translations, tls.factors, offset);
 
@@ -141,7 +144,9 @@ static void calc_grids(const Depsgraph &depsgraph,
   scale_translations(translations, tls.factors);
   scale_translations(translations, strength);
 
-  project_translations(translations, cache.sculpt_normal_symm);
+  /* #cache.sculpt_normal_symm is a raw local-space normal; correct it here (a local copy only,
+   * see #scale_normalized and the comment in #calc_faces above). */
+  project_translations(translations, scale_normalized_unit(cache, cache.sculpt_normal_symm));
 
   add_offset_to_translations(translations, tls.factors, offset);
 
@@ -177,7 +182,9 @@ static void calc_bmesh(const Depsgraph &depsgraph,
   scale_translations(translations, tls.factors);
   scale_translations(translations, strength);
 
-  project_translations(translations, cache.sculpt_normal_symm);
+  /* #cache.sculpt_normal_symm is a raw local-space normal; correct it here (a local copy only,
+   * see #scale_normalized and the comment in #calc_faces above). */
+  project_translations(translations, scale_normalized_unit(cache, cache.sculpt_normal_symm));
 
   add_offset_to_translations(translations, tls.factors, offset);
 

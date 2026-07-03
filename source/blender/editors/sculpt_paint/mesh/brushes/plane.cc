@@ -384,6 +384,12 @@ void do_plane_brush(const Depsgraph &depsgraph,
   const float displace = ss.cache->radius * offset * (flip ? -1.0f : 1.0f);
   center += normal * ss.cache->scale * displace;
 
+  /* #normal is a raw local-space normal; correct it for the object's non-uniform scale now,
+   * after the #center offset above (which intentionally uses the raw direction, matching
+   * #StrokeCache.scale's own magnitude-compensation convention there), but before it is used to
+   * build the orientation basis below (see #scale_normalized). */
+  normal = scale_normalized_unit(*ss.cache, normal);
+
   float4x4 mat = float4x4::identity();
   mat.x_axis() = math::cross(normal, ss.cache->grab_delta_symm);
   mat.y_axis() = math::cross(normal, mat.x_axis());

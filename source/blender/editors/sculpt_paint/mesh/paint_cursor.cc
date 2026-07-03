@@ -672,20 +672,46 @@ static void object_space_overlays_draw(const PaintCursorContext &pcontext)
 
 static void cursor_space_drawing_setup(const PaintCursorContext &pcontext)
 {
-  const float4x4 cursor_trans = math::translate(pcontext.vc.obact->object_to_world(),
-                                                pcontext.location);
-
-  const float3 z_axis = {0.0f, 0.0f, 1.0f};
+  const Object &ob = *pcontext.vc.obact;
 
   const float3 normal = bke::brush::supports_tilt(*pcontext.brush) ?
-                            tilt_apply_to_normal(*pcontext.vc.obact,
-                                                 float4x4(pcontext.vc.rv3d->viewinv),
-                                                 pcontext.normal,
-                                                 pcontext.tilt,
-                                                 pcontext.brush->tilt_strength_factor) :
-                            pcontext.normal;
+                           tilt_apply_to_normal(ob,
+                                                float4x4(pcontext.vc.rv3d->viewinv),
+                                                pcontext.normal,
+                                                pcontext.tilt,
+                                                pcontext.brush->tilt_strength_factor) :
+                           pcontext.normal;
 
-  const math::AxisAngle between_vecs(z_axis, normal);
+  const float3 z_axis = {0.0f, 0.0f, 1.0f};
+  float4x4 cursor_trans;
+  float3 world_normal;
+
+  /* #normal/#pcontext.radius are local to #ob. The old #cursor_trans (`object_to_world() *
+   * translate(location)`) baked the object's full matrix, including non-uniform scale, into the
+   * disc's own basis: even with a correctly world-oriented rotation, a circle drawn in that
+   * basis still comes out elliptical once the anisotropic scale is applied to its shape, not
+   * just its orientation. Only corrected in multi-object sculpts (matching
+   * #StrokeCache.multi_object_stroke elsewhere) so a single scaled object keeps its long-standing
+   * appearance. */
+  if (sculpt_mode_objects(pcontext.vc).size() > 1) {
+    const float3 world_location = math::transform_point(ob.object_to_world(), pcontext.location);
+    /* Isotropic size compensation matching how #pcontext.radius was derived (divided by this
+     * same scalar in #paint_calc_object_space_radius), applied AFTER the rotation below so it
+     * only resizes the disc uniformly instead of reintroducing anisotropy. */
+    const float iso_scale = mat4_to_scale(ob.object_to_world().ptr());
+    cursor_trans = math::translate(float4x4::identity(), world_location) *
+                  math::from_scale<float4x4>(float3(iso_scale == 0.0f ? 1.0f : iso_scale));
+    /* Normals transform via the inverse-transpose to stay perpendicular under non-uniform
+     * scale — this maps the local (possibly tilt-adjusted) normal directly into world space. */
+    world_normal = math::normalize(
+        math::transpose(math::invert(float3x3(ob.object_to_world()))) * normal);
+  }
+  else {
+    cursor_trans = math::translate(ob.object_to_world(), pcontext.location);
+    world_normal = normal;
+  }
+
+  const math::AxisAngle between_vecs(z_axis, world_normal);
   const float4x4 cursor_rot = math::from_rotation<float4x4>(between_vecs);
 
   GPU_matrix_mul(cursor_trans.ptr());

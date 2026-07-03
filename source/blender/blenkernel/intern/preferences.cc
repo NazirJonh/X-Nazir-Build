@@ -715,7 +715,8 @@ void BKE_preferences_asset_shelf_popup_view_load(const UserDef *userdef,
                                                  const char *shelf_idname,
                                                  short *r_preview_size,
                                                  short *r_display_flag,
-                                                 short *r_width_units)
+                                                 short *r_width_units,
+                                                 short *r_height_units)
 {
   const bUserAssetShelfSettings *settings = BKE_preferences_asset_shelf_settings_get(userdef,
                                                                                      shelf_idname);
@@ -731,18 +732,23 @@ void BKE_preferences_asset_shelf_popup_view_load(const UserDef *userdef,
   if (r_width_units) {
     *r_width_units = settings->popup_width_units;
   }
+  if (r_height_units) {
+    *r_height_units = settings->popup_height_units;
+  }
 }
 
 void BKE_preferences_asset_shelf_popup_view_store(UserDef *userdef,
                                                   const char *shelf_idname,
                                                   short preview_size,
                                                   short display_flag,
-                                                  short width_units)
+                                                  short width_units,
+                                                  short height_units)
 {
   bUserAssetShelfSettings *settings = asset_shelf_settings_ensure(userdef, shelf_idname);
   settings->popup_preview_size = preview_size;
   settings->popup_display_flag = display_flag;
   settings->popup_width_units = width_units;
+  settings->popup_height_units = height_units;
   settings->popup_view_flag |= USER_ASSET_SHELF_POPUP_VIEW_STORED;
 }
 

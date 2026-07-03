@@ -119,6 +119,14 @@ struct wmWindowManager {
 
   ListBaseT<wmWindow> windows = {nullptr, nullptr};
 
+  /**
+   * Per-`.blend` remembered sizes of popup asset shelves (brush/texture browse popovers), keyed
+   * by #AssetShelfType.idname. Overrides the global Preferences default. Kept here (rather than in
+   * a space) because popup shelves are global and only one is open at a time. See
+   * #AssetShelfPopupSize.
+   */
+  ListBaseT<AssetShelfPopupSize> asset_shelf_popup_sizes = {nullptr, nullptr};
+
   /** Set on file read. */
   eWM_InitFlag init_flag = {};
   char _pad0[1] = {};
@@ -148,7 +156,15 @@ struct wmWindowManager {
    * #bke::WindowManagerRuntime::id_browser_search. #eImageBrowserViewMode.
    */
   char id_browser_view_mode = 0;
-  char _pad2[6] = {};
+  /**
+   * Interactive size of the ID-browser popover (#UI_PT_id_browser), set by its corner resize grip.
+   * Width in #UI_UNIT_X units, height (grid viewport) in #UI_UNIT_Y units. 0 = use the built-in
+   * default. Stored here (per-`.blend`) like #id_browser_view_mode; only one popover is open at a
+   * time so a single shared value is correct.
+   */
+  short id_browser_popup_width_units = 0;
+  short id_browser_popup_height_units = 0;
+  char _pad2[2] = {};
 
   // #ifdef WITH_XR_OPENXR
   wmXrData xr;

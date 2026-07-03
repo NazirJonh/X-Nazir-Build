@@ -251,7 +251,12 @@ std::optional<uiViewState> AbstractTreeView::persistent_state() const
 
 void AbstractTreeView::persistent_state_apply(const uiViewState &state)
 {
-  if (state.custom_height) {
+  /* Only restore a user-resized height when the view is actually user-resizable. A view given a
+   * fixed height (#set_fixed_height_px with `allow_resize=false`, e.g. the asset shelf popover's
+   * catalog tree bound to the grid height) must keep the height set each draw; otherwise the stale
+   * persisted value from the previous frame would override it and the tree would never follow a
+   * live height change. */
+  if (state.custom_height && allow_height_resize_) {
     set_default_rows(std::max(
         MIN_ROWS, round_fl_to_int(state.custom_height * UI_SCALE_FAC) / padded_item_height()));
   }
@@ -424,7 +429,14 @@ void AbstractTreeView::update_children_from_old(const AbstractView &old_view)
 {
   const AbstractTreeView &old_tree_view = dynamic_cast<const AbstractTreeView &>(old_view);
 
-  custom_height_ = old_tree_view.custom_height_;
+  /* Carry over a user-resized height across rebuilds, but only when the view is user-resizable.
+   * A fixed-height view (#set_fixed_height_px with `allow_resize=false`, e.g. the asset shelf
+   * popover's catalog tree bound to the grid height) sets its height fresh every draw; copying the
+   * previous frame's height here would override it, so the tree would not follow a live height
+   * change (only visible after a full reopen). */
+  if (allow_height_resize_) {
+    custom_height_ = old_tree_view.custom_height_;
+  }
   scroll_value_ = old_tree_view.scroll_value_;
   search_string_ = old_tree_view.search_string_;
   show_display_options_ = old_tree_view.show_display_options_;

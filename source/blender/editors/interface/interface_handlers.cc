@@ -7092,6 +7092,12 @@ static int do_but_GRIP(
       if (event->type == LEFTMOUSE) {
         data->dragstartx = event->xy[0];
         data->dragstarty = event->xy[1];
+        if (but->grip_2d) {
+          /* Capture both axis origins up front; the 2D branch writes the pointers directly rather
+           * than going through #numedit_apply (which only handles a single value). */
+          data->origvec[0] = float(*reinterpret_cast<short *>(but->poin));
+          data->origvec[1] = but->poin2 ? float(*reinterpret_cast<short *>(but->poin2)) : 0.0f;
+        }
         button_activate_state(C, but, BUTTON_STATE_NUM_EDITING);
         retval = WM_UI_HANDLER_BREAK;
       }
@@ -7112,8 +7118,41 @@ static int do_but_GRIP(
       int dragstartx = data->dragstartx;
       int dragstarty = data->dragstarty;
       window_to_block(data->region, block, &dragstartx, &dragstarty);
-      data->value = data->origvalue + (horizontal ? mx - dragstartx : dragstarty - my);
-      numedit_apply(C, block, but, data);
+      if (but->grip_2d) {
+        /* Corner grip: drive both axes at once. Values are in UI units; the block-space pixel
+         * delta maps ~1:1 to window pixels for an unzoomed popover. Broad sanity clamps only; the
+         * consumer clamps precisely to the window at draw time. Dragging right grows #poin (X),
+         * dragging down grows #poin2 (Y). */
+        const int dx = mx - dragstartx;
+        /* Grip at the bottom edge: dragging down (my decreases) grows the height. A #grip_2d_flip_y
+         * grip sits at the top edge (popover opened upward), so dragging up grows it instead. */
+        const int dy = but->grip_2d_flip_y ? (my - dragstarty) : (dragstarty - my);
+        /* Width range from the button's hard limits when set (e.g. a narrow sidebar grip), else a
+         * broad sanity range with the precise window clamp left to the consumer's draw. */
+        const bool has_w_range = but->hardmin < but->hardmax;
+        const int w_min = has_w_range ? int(but->hardmin) : 15;
+        const int w_max = has_w_range ? int(but->hardmax) : 300;
+        const int w = std::clamp(int(data->origvec[0]) + dx / UI_UNIT_X, w_min, w_max);
+        /* Keep the primary value in sync: on release the grip goes through #apply_but_NUM, which
+         * writes #data->value back into #poin. Without this it would overwrite the dragged width
+         * with the stale pre-drag #origvalue (the vertical axis in #poin2 is unaffected, which is
+         * why only the width would snap back). */
+        data->value = w;
+        *reinterpret_cast<short *>(but->poin) = short(w);
+        if (but->poin2) {
+          const int h = std::clamp(int(data->origvec[1]) + dy / UI_UNIT_Y, 3, 300);
+          *reinterpret_cast<short *>(but->poin2) = short(h);
+        }
+        /* Let the owner react to the live change (e.g. persist the new size). The 2D branch does
+         * not go through #numedit_apply, so fire the callback explicitly. */
+        if (but->apply_func) {
+          but->apply_func(*C);
+        }
+      }
+      else {
+        data->value = data->origvalue + (horizontal ? mx - dragstartx : dragstarty - my);
+        numedit_apply(C, block, but, data);
+      }
       if (block_is_popup_any(block)) {
         ED_region_tag_refresh_ui(data->region);
       }

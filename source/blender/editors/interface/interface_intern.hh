@@ -236,6 +236,14 @@ struct Button : NonMovable {
   rctf rect = {};
 
   char *poin = nullptr;
+  /** For a 2D corner #ButtonType::Grip: the second (vertical) raw value pointer; #poin drives the
+   * horizontal axis. Both point at `short` values. Set via #button_grip_2d_set. */
+  char *poin2 = nullptr;
+  /** This #ButtonType::Grip resizes on both axes at once (#poin = X, #poin2 = Y). */
+  bool grip_2d = false;
+  /** For a 2D corner grip placed at the *top* (e.g. a popover that opened upward): dragging up
+   * grows #poin2 instead of dragging down. #poin (width) is unaffected. */
+  bool grip_2d_flip_y = false;
   float hardmin = 0, hardmax = 0, softmin = 0, softmax = 0;
 
   /** See \ref button_func_identity_compare_set(). */

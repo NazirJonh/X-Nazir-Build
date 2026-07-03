@@ -225,15 +225,16 @@ bool BKE_preferences_asset_shelf_settings_ensure_catalog_path_enabled(UserDef *u
                                                                       const char *catalog_path);
 
 /**
- * Read the popup-shelf view preferences (preview size, display flags, popup width) stored for
- * the given shelf type. Fields whose stored value is 0 ("not set") are left untouched in the
- * outputs, so callers can pre-seed them with the shelf type's defaults.
+ * Read the popup-shelf view preferences (preview size, display flags, popup width and height)
+ * stored for the given shelf type. Fields whose stored value is 0 ("not set") are left untouched
+ * in the outputs, so callers can pre-seed them with the shelf type's defaults.
  */
 void BKE_preferences_asset_shelf_popup_view_load(const UserDef *userdef,
                                                  const char *shelf_idname,
                                                  short *r_preview_size,
                                                  short *r_display_flag,
-                                                 short *r_width_units);
+                                                 short *r_width_units,
+                                                 short *r_height_units);
 
 /**
  * Persist the popup-shelf view preferences for the given shelf type. Creates the per-type
@@ -244,7 +245,8 @@ void BKE_preferences_asset_shelf_popup_view_store(UserDef *userdef,
                                                   const char *shelf_idname,
                                                   short preview_size,
                                                   short display_flag,
-                                                  short width_units);
+                                                  short width_units,
+                                                  short height_units);
 
 /** \} */
 

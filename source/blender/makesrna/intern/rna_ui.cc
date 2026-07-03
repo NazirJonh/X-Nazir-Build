@@ -1516,8 +1516,32 @@ static void rna_AssetShelf_popup_settings_update(Main * /*bmain*/,
                                                shelf->idname,
                                                shelf->settings.preview_size,
                                                short(shelf->settings.display_flag),
-                                               shelf->settings.popup_width_units);
+                                               shelf->settings.popup_width_units,
+                                               shelf->settings.popup_height_units);
   U.runtime.is_dirty = true;
+}
+
+/**
+ * Update callback for the popup-shelf *size* properties (#popup_width_units, #popup_height_units).
+ * Unlike #rna_AssetShelf_popup_settings_update (which writes the global Preferences), size changes
+ * are remembered per `.blend` file: they upsert the override stored on the #wmWindowManager, so
+ * each file keeps its own popover size. The global default is only changed explicitly via the
+ * "Set as Default" operator.
+ */
+static void rna_AssetShelf_popup_size_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
+{
+  AssetShelf *shelf = static_cast<AssetShelf *>(ptr->data);
+  if (!shelf->is_popup || shelf->idname[0] == '\0') {
+    return;
+  }
+  if (wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first)) {
+    ed::asset::shelf::popup_size_store(*wm,
+                                       shelf->idname,
+                                       shelf->settings.popup_width_units,
+                                       shelf->settings.popup_height_units,
+                                       shelf->settings.popup_catalog_width_units);
+    WM_file_tag_modified();
+  }
 }
 
 static void rna_Panel_bl_description_set(PointerRNA *ptr, const char *value)
@@ -2957,7 +2981,14 @@ static void rna_def_asset_shelf(BlenderRNA *brna)
   RNA_def_property_range(prop, 20, 120);
   RNA_def_property_ui_text(prop, "Popup Width", "Width of the popup grid area in UI units");
   RNA_def_property_update(
-      prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_AssetShelf_popup_settings_update");
+      prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_AssetShelf_popup_size_update");
+
+  prop = RNA_def_property(srna, "popup_height_units", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "settings.popup_height_units");
+  RNA_def_property_range(prop, 3, 120);
+  RNA_def_property_ui_text(prop, "Popup Height", "Height of the popup grid area in UI units");
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_AssetShelf_popup_size_update");
 
   prop = RNA_def_property(srna, "search_filter", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "settings.search_string");

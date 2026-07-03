@@ -14,8 +14,11 @@
 #include "DNA_defs.h"
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "BLO_read_write.hh"
+
+#include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
 #include "BLI_string.h"
@@ -62,6 +65,8 @@ AssetShelfSettings &AssetShelfSettings::operator=(const AssetShelfSettings &othe
   this->preview_size = other.preview_size;
   this->display_flag = other.display_flag;
   this->popup_width_units = other.popup_width_units;
+  this->popup_height_units = other.popup_height_units;
+  this->popup_catalog_width_units = other.popup_catalog_width_units;
 
   if (other.active_catalog_path) {
     this->active_catalog_path = BLI_strdup(other.active_catalog_path);
@@ -95,6 +100,47 @@ void settings_blend_read_data(BlendDataReader *reader, AssetShelfSettings &setti
   BKE_asset_catalog_path_list_blend_read_data(reader, settings.enabled_catalog_paths);
   BKE_asset_catalog_state_list_blend_read_data(reader, settings.catalog_states);
   BLO_read_string(reader, &settings.active_catalog_path);
+}
+
+void popup_size_load(const wmWindowManager &wm,
+                     const char *shelf_idname,
+                     short *r_width_units,
+                     short *r_height_units,
+                     short *r_catalog_width_units)
+{
+  const AssetShelfPopupSize *size = static_cast<const AssetShelfPopupSize *>(BLI_findstring(
+      &wm.asset_shelf_popup_sizes, shelf_idname, offsetof(AssetShelfPopupSize, idname)));
+  if (!size) {
+    return;
+  }
+  /* A stored 0 means "not set"; leave the caller's pre-seeded default untouched. */
+  if (r_width_units && size->width_units) {
+    *r_width_units = size->width_units;
+  }
+  if (r_height_units && size->height_units) {
+    *r_height_units = size->height_units;
+  }
+  if (r_catalog_width_units && size->catalog_width_units) {
+    *r_catalog_width_units = size->catalog_width_units;
+  }
+}
+
+void popup_size_store(wmWindowManager &wm,
+                      const char *shelf_idname,
+                      const short width_units,
+                      const short height_units,
+                      const short catalog_width_units)
+{
+  AssetShelfPopupSize *size = static_cast<AssetShelfPopupSize *>(BLI_findstring(
+      &wm.asset_shelf_popup_sizes, shelf_idname, offsetof(AssetShelfPopupSize, idname)));
+  if (!size) {
+    size = MEM_new<AssetShelfPopupSize>(__func__);
+    STRNCPY_UTF8(size->idname, shelf_idname);
+    BLI_addtail(&wm.asset_shelf_popup_sizes, size);
+  }
+  size->width_units = width_units;
+  size->height_units = height_units;
+  size->catalog_width_units = catalog_width_units;
 }
 
 AssetLibraryReference &settings_ensure_valid_library_ref(AssetShelfSettings &settings)

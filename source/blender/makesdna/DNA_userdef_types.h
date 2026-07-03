@@ -919,7 +919,9 @@ struct bUserAssetShelfSettings {
   short popup_preview_size = 0;
   short popup_display_flag = 0; /* #AssetShelfSettings_DisplayFlag */
   short popup_width_units = 0;
+  short popup_height_units = 0;
   short popup_view_flag = 0; /* #eUserAssetShelfPopupViewFlag */
+  char _pad[6] = {};
 };
 
 /**

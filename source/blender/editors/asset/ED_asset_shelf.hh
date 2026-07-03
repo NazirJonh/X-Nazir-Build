@@ -107,6 +107,25 @@ void ensure_asset_library_fetched(const bContext &C, const AssetShelfType &shelf
  */
 AssetShelf *popup_shelf_get_or_create(const bContext &C, AssetShelfType &shelf_type);
 
+/**
+ * Per-`.blend` popup shelf size override, stored on #wmWindowManager keyed by
+ * #AssetShelfType.idname (see #AssetShelfPopupSize). Overrides the global Preferences default.
+ *
+ * #popup_size_load leaves an output untouched when no entry exists or its stored value is 0
+ * ("not set"), so callers can pre-seed with the prefs/type defaults. #popup_size_store upserts
+ * the entry; the caller is responsible for tagging the file modified (#WM_file_tag_modified).
+ */
+void popup_size_load(const wmWindowManager &wm,
+                     const char *shelf_idname,
+                     short *r_width_units,
+                     short *r_height_units,
+                     short *r_catalog_width_units);
+void popup_size_store(wmWindowManager &wm,
+                      const char *shelf_idname,
+                      short width_units,
+                      short height_units,
+                      short catalog_width_units);
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

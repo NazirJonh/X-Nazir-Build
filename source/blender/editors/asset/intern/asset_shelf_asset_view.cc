@@ -475,7 +475,8 @@ void build_asset_view(ui::Layout &layout,
                       const AssetLibraryReference &library_ref,
                       const AssetShelf &shelf,
                       const bContext &C,
-                      std::optional<int> popup_grid_viewport_height_px)
+                      std::optional<int> popup_grid_viewport_height_px,
+                      std::optional<int> cols_hint)
 {
   list::storage_fetch(&library_ref, &C);
 
@@ -494,6 +495,11 @@ void build_asset_view(ui::Layout &layout,
   std::unique_ptr asset_view = std::make_unique<AssetView>(library_ref, shelf, active_asset);
   asset_view->set_catalog_filter(catalog_filter_from_shelf_settings(shelf.settings, *library));
   asset_view->set_tile_size(tile_width, tile_height);
+  if (cols_hint) {
+    /* Popover snaps its width to whole columns; forcing the column count here keeps the grid from
+     * computing one fewer column due to float rounding at the boundary (which would leave a gap). */
+    asset_view->set_cols_per_row_hint(*cols_hint);
+  }
   if (popup_grid_viewport_height_px) {
     /* Popover: bound the grid to a fixed viewport with internal row scrolling so the popover header
      * (search / preview size / settings) stays put instead of scrolling away with the block. */

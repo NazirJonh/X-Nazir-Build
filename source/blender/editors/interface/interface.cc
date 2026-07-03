@@ -6509,6 +6509,14 @@ void button_view_item_draw_size_set(Button *but,
   but_view_item->draw_height = draw_height.value_or(0);
 }
 
+void button_grip_2d_set(Button *but, short *height_poin, const bool flip_y)
+{
+  BLI_assert(but->type == ButtonType::Grip);
+  but->grip_2d = true;
+  but->grip_2d_flip_y = flip_y;
+  but->poin2 = reinterpret_cast<char *>(height_poin);
+}
+
 void button_focus_on_enter_event(wmWindow *win, Button *but)
 {
   wmEvent event;

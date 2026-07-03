@@ -137,6 +137,12 @@ static void window_manager_blend_write(BlendWriter *writer, ID *id, const void *
     /* Data is written, clear deprecated data again. */
     win.screen = nullptr;
   }
+
+  /* Per-`.blend` asset shelf popup size overrides. The list head is part of the wm struct written
+   * above; the entries need their own #write_struct. */
+  for (AssetShelfPopupSize &popup_size : wm->asset_shelf_popup_sizes) {
+    writer->write_struct(&popup_size);
+  }
 }
 
 static void direct_link_wm_xr_data(BlendDataReader *reader, wmXrData *xr_data)
@@ -150,6 +156,7 @@ static void window_manager_blend_read_data(BlendDataReader *reader, ID *id)
 
   id_us_ensure_real(&wm->id);
   BLO_read_struct_list(reader, wmWindow, &wm->windows);
+  BLO_read_struct_list(reader, AssetShelfPopupSize, &wm->asset_shelf_popup_sizes);
 
   for (wmWindow &win : wm->windows) {
     BLO_read_struct(reader, wmWindow, &win.parent);
@@ -587,6 +594,9 @@ void wm_close_and_free(bContext *C, wmWindowManager *wm)
 #endif
 
   wm_reports_free(wm);
+
+  /* Per-`.blend` asset shelf popup sizes are plain (no nested allocations). */
+  BLI_freelistN(&wm->asset_shelf_popup_sizes);
 
   if (C && CTX_wm_manager(C) == wm) {
     CTX_wm_manager_set(C, nullptr);

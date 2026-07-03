@@ -324,6 +324,15 @@ enum {
    * and inherited by sub-menus from their parent.
    */
   BLOCK_NO_ACCELERATOR_KEYS = 1 << 27,
+  /**
+   * Keep the popup's left edge pinned across refreshes so it only grows/shrinks to the right.
+   *
+   * For popovers that manage their own width and expose an interactive width control (e.g. the
+   * asset-shelf catalog-tree divider grip): without this, growing the content width shifts the
+   * left edge left whenever the block is right-aligned to the window edge. The creator is
+   * responsible for clamping its width so the right edge stays within the window.
+   */
+  BLOCK_POPUP_ANCHOR_LEFT = 1 << 28,
 };
 
 /** #PopupBlockHandle.menuretval */
@@ -1208,6 +1217,14 @@ void block_flag_enable(Block *block, int flag);
 void block_flag_disable(Block *block, int flag);
 void block_translate(Block *block, float x, float y);
 
+/**
+ * Horizontal budget in pixels from a #BLOCK_POPUP_ANCHOR_LEFT popover's pinned left edge to the
+ * window's right margin, for clamping content that manages its own width so its right edge stays on
+ * screen. Returns the full usable window width before the block has been positioned (its first
+ * open), so the caller falls back to a window-relative clamp until the pinned left edge is known.
+ */
+int popup_block_left_anchored_budget_px(const wmWindow *window, const Block *block);
+
 int button_return_value_get(Button *but);
 
 Button *button_active_drop_name_button(const bContext *C);
@@ -1984,6 +2001,16 @@ void button_search_preview_grid_size_set(Button *but, int rows, int cols);
 void button_view_item_draw_size_set(Button *but,
                                     const std::optional<int> draw_width = std::nullopt,
                                     const std::optional<int> draw_height = std::nullopt);
+
+/**
+ * Turn a #ButtonType::Grip button into a 2D corner grip that resizes on both axes at once. The
+ * button's own value pointer (from #uiDefIconButV) drives the horizontal axis; \a height_poin (a
+ * `short`) drives the vertical axis. Both are written directly during the drag.
+ *
+ * \param flip_y: place the grip at the top edge (e.g. a popover that opened upward) so dragging
+ * *up* grows the height. The width axis is unaffected.
+ */
+void button_grip_2d_set(Button *but, short *height_poin, bool flip_y = false);
 
 void block_func_handle_set(Block *block, BlockHandleFunc func, void *arg);
 void block_func_set(Block *block, ButtonHandleFunc func, void *arg1, void *arg2);

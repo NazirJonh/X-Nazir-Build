@@ -36,6 +36,8 @@
 #include "BLI_string.h"
 
 #include "DNA_image_types.h"
+#include "DNA_screen_types.h"
+#include "DNA_userdef_types.h"
 
 #include "ED_asset.hh"
 #include "ED_asset_image_library.hh"
@@ -1926,8 +1928,46 @@ static void ASSET_OT_images_to_assets(wmOperatorType *ot)
 
 /* -------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------- */
+/** \name Set Asset Shelf Popup Size as Default
+ * \{ */
+
+static wmOperatorStatus asset_shelf_popup_set_default_size_exec(bContext *C, wmOperator * /*op*/)
+{
+  PointerRNA shelf_ptr = CTX_data_pointer_get_type(C, "asset_shelf", RNA_AssetShelf);
+  AssetShelf *shelf = static_cast<AssetShelf *>(shelf_ptr.data);
+  if (!shelf || shelf->idname[0] == '\0') {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Copy this file's current popup size (and the other stored view options) into the Preferences,
+   * so new files and files without their own per-`.blend` override open at this size. */
+  BKE_preferences_asset_shelf_popup_view_store(&U,
+                                               shelf->idname,
+                                               shelf->settings.preview_size,
+                                               short(shelf->settings.display_flag),
+                                               shelf->settings.popup_width_units,
+                                               shelf->settings.popup_height_units);
+  U.runtime.is_dirty = true;
+  return OPERATOR_FINISHED;
+}
+
+static void ASSET_OT_shelf_popup_set_default_size(wmOperatorType *ot)
+{
+  ot->name = "Set Popup Size as Default";
+  ot->description = "Use the current popup size as the default for new files";
+  ot->idname = "ASSET_OT_shelf_popup_set_default_size";
+
+  ot->exec = asset_shelf_popup_set_default_size_exec;
+
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+/** \} */
+
 void operatortypes_asset()
 {
+  WM_operatortype_append(ASSET_OT_shelf_popup_set_default_size);
   WM_operatortype_append(ASSET_OT_mark);
   WM_operatortype_append(ASSET_OT_mark_single);
   WM_operatortype_append(ASSET_OT_clear);

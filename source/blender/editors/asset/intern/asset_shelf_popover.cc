@@ -112,7 +112,8 @@ AssetShelf *popup_shelf_get_or_create(const bContext &C, AssetShelfType &shelf_t
                                               shelf_type.idname,
                                               &new_shelf->settings.preview_size,
                                               &display_flag,
-                                              &new_shelf->settings.popup_width_units);
+                                              &new_shelf->settings.popup_width_units,
+                                              &new_shelf->settings.popup_height_units);
   new_shelf->settings.display_flag = AssetShelfSettings_DisplayFlag(display_flag);
 
   popup_shelves.append(new_shelf);
@@ -281,15 +282,36 @@ constexpr int LEFT_COL_WIDTH_UNITS = 10;
 constexpr float ASSET_SHELF_POPUP_GRID_DEFAULT_UNITS_Y = 18.0f;
 
 /**
- * Ensure the popover width fits into the window: Clamp width by the window width, minus some
- * padding.
+ * Ensure the popover width fits into the window: clamp the total width to the horizontal budget
+ * (in #UI_UNIT_X units) available to the right of the popover's pinned left edge. Once the catalog
+ * is wide enough to consume the budget, the right (grid) column gives up space instead of the
+ * popover growing off screen (the left edge stays fixed, see #ui::BLOCK_POPUP_ANCHOR_LEFT).
  */
-static int layout_width_units_clamped(const wmWindow *win, int right_col_width)
+static int layout_width_units_clamped(int left_col_width, int right_col_width, int max_total_units)
 {
   /* Ensure a reasonable minimum width for the right column. */
   const int effective_right_width = std::max(right_col_width, 20);
-  const int max_units_x = (WM_window_native_pixel_x(win) / UI_UNIT_X) - 2;
-  return std::min(LEFT_COL_WIDTH_UNITS + effective_right_width, max_units_x);
+  return std::min(left_col_width + effective_right_width, max_total_units);
+}
+
+/* Catalog tree column width bounds (in #UI_UNIT_X units) for the interactive vertical grip. */
+constexpr int CATALOG_COL_WIDTH_MIN_UNITS = 6;
+constexpr int CATALOG_COL_WIDTH_MAX_UNITS = 30;
+/* Width of the vertical grip strip between the catalog and grid columns (in #UI_UNIT_X units). */
+constexpr float CATALOG_GRIP_WIDTH_UNITS = 0.4f;
+
+/**
+ * Clamp the user's popup grid-viewport height (in #UI_UNIT_Y units) so the whole popover stays on
+ * screen. Mirrors #layout_width_units_clamped for the vertical axis: #popup_grid_fixed_viewport_units
+ * only window-fits a zoomed (aspect < 1) spawn, so the general case needs this explicit clamp.
+ * The lower bound keeps at least a few preview rows; the upper bound leaves room for the header row
+ * above the grid plus a small screen-edge margin.
+ */
+static int layout_height_units_clamped(const wmWindow *win, int grid_height_units)
+{
+  const int min_units_y = 3;
+  const int max_units_y = (WM_window_native_pixel_y(win) / UI_UNIT_Y) - 4;
+  return std::clamp(grid_height_units, min_units_y, std::max(min_units_y, max_units_y));
 }
 
 static void popover_panel_draw(const bContext *C, Panel *panel)
@@ -306,15 +328,70 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
 
   settings_ensure_valid_library_ref(shelf->settings);
 
-  const int layout_width_units = layout_width_units_clamped(win,
-                                                            shelf->settings.popup_width_units);
+  /* The popup shelf is a process-global singleton, not tied to the current file
+   * (#StaticPopupShelves), and #popup_shelf_get_or_create returns an existing instance without
+   * re-seeding. Re-apply the size from the current file's per-`.blend` override (falling back to the
+   * Preferences default) whenever the popover opens, so switching files shows each file's own
+   * remembered size. Gated on first-open, not every refresh, so a live grip resize during an open
+   * popover is not clobbered. The width/height are clamped to the window at draw time below. */
+  if (ui::block_is_first_open(panel->layout->block())) {
+    short width_units = shelf->settings.popup_width_units;
+    short height_units = shelf->settings.popup_height_units;
+    short catalog_width_units = shelf->settings.popup_catalog_width_units;
+    BKE_preferences_asset_shelf_popup_view_load(
+        &U, shelf->idname, nullptr, nullptr, &width_units, &height_units);
+    if (const wmWindowManager *wm = CTX_wm_manager(C)) {
+      popup_size_load(*wm, shelf->idname, &width_units, &height_units, &catalog_width_units);
+    }
+    /* Materialize the "0 = use default" values into the concrete defaults so the resize grips drag
+     * from the size actually shown (their origin is the stored value), instead of jumping from 0. */
+    if (height_units <= 0) {
+      height_units = short(ASSET_SHELF_POPUP_GRID_DEFAULT_UNITS_Y);
+    }
+    if (catalog_width_units <= 0) {
+      catalog_width_units = short(LEFT_COL_WIDTH_UNITS);
+    }
+    shelf->settings.popup_width_units = width_units;
+    shelf->settings.popup_height_units = height_units;
+    shelf->settings.popup_catalog_width_units = catalog_width_units;
+  }
+
+  /* Catalog tree column width, resizable via the vertical grip between the columns. */
+  const int catalog_units = std::clamp(int(shelf->settings.popup_catalog_width_units) > 0 ?
+                                           int(shelf->settings.popup_catalog_width_units) :
+                                           LEFT_COL_WIDTH_UNITS,
+                                       CATALOG_COL_WIDTH_MIN_UNITS,
+                                       CATALOG_COL_WIDTH_MAX_UNITS);
+
+  /* Pin the popover's left edge so the catalog-width grip (and the width control) only grow/shrink
+   * it to the right; the left edge stays fixed even when the block is right-aligned to the window
+   * edge. The total width is clamped to the horizontal budget from that pinned left edge, so once
+   * the catalog fills the budget the grid gives up columns rather than the popover going off screen. */
+  ui::Block *popover_block = panel->layout->block();
+  ui::block_flag_enable(popover_block, ui::BLOCK_POPUP_ANCHOR_LEFT);
+  const int width_budget_units = std::max(
+      catalog_units + 1, ui::popup_block_left_anchored_budget_px(win, popover_block) / UI_UNIT_X - 1);
+
+  const int layout_width_units = layout_width_units_clamped(
+      catalog_units, shelf->settings.popup_width_units, width_budget_units);
 
   /* Ensure the assertion doesn't fail if the window is extremely small. */
-  if (layout_width_units <= LEFT_COL_WIDTH_UNITS) {
+  if (layout_width_units <= catalog_units) {
     return;
   }
+
+  /* Snap the right column to a whole number of grid tile columns so the previews fill it exactly,
+   * with no gap between the last column and the popover edge (most visible while resizing width
+   * with the grip). #grid_cols is forwarded to the grid as a hint so a float rounding at the column
+   * boundary cannot drop it to one fewer column and reopen the gap. */
+  const int tile_w_px = std::max(1, tile_width(shelf->settings));
+  const float tile_w_units = float(tile_w_px) / float(UI_UNIT_X);
+  const int raw_right_units = layout_width_units - catalog_units;
+  const int grid_cols = std::max(1, int(float(raw_right_units) / tile_w_units));
+  const float right_col_width_units = float(grid_cols) * tile_w_units;
+
   ui::Layout &layout = *panel->layout;
-  layout.ui_units_x_set(layout_width_units);
+  layout.ui_units_x_set(float(catalog_units) + CATALOG_GRIP_WIDTH_UNITS + right_col_width_units);
 
   bScreen *screen = CTX_wm_screen(C);
   PointerRNA library_ref_ptr = RNA_pointer_create_discrete(
@@ -338,25 +415,63 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
    * below it where the persistent scroll-up arrow is drawn. Only used to shrink the grid when a
    * zoomed popover would otherwise overflow the window. */
   const float non_grid_units = 2.0f;
+  /* User-set popover height (grid-viewport units) overrides the default, clamped to the window.
+   * 0 means "not set" — use the type default. */
+  const float default_grid_units = (shelf->settings.popup_height_units > 0) ?
+                                       float(layout_height_units_clamped(
+                                           win, shelf->settings.popup_height_units)) :
+                                       ASSET_SHELF_POPUP_GRID_DEFAULT_UNITS_Y;
   const float grid_units = ui::popup_grid_fixed_viewport_units(
-      C, layout.block(), non_grid_units, tile_units, ASSET_SHELF_POPUP_GRID_DEFAULT_UNITS_Y);
+      C, layout.block(), non_grid_units, tile_units, default_grid_units);
   const int grid_viewport_px = std::max(tile_h_px, int(grid_units * UI_UNIT_Y));
 
   ui::Layout &row = layout.row(false);
   ui::Layout &catalogs_col = row.column(false);
-  catalogs_col.ui_units_x_set(LEFT_COL_WIDTH_UNITS);
+  catalogs_col.ui_units_x_set(float(catalog_units));
   catalogs_col.fixed_size_set(true);
   library_selector_draw(C, catalogs_col, *shelf);
   catalog_tree_draw(*C, catalogs_col, *shelf, grid_viewport_px);
 
-  const int right_col_width_units = layout_width_units - LEFT_COL_WIDTH_UNITS;
+  /* Vertical grip between the columns to resize the catalog tree width (useful when category names
+   * are long). X-only (no second value pointer); the hard min/max bound it inside #do_but_GRIP. */
+  {
+    ui::Layout &grip_col = row.column(false);
+    grip_col.fixed_size_set(true);
+    ui::Block *block = layout.block();
+    ui::block_layout_set_current(block, &grip_col);
+    ui::Button *catalog_grip = ui::uiDefIconButV(block,
+                                                 ui::ButtonType::Grip,
+                                                 ICON_GRIP,
+                                                 0,
+                                                 0,
+                                                 short(CATALOG_GRIP_WIDTH_UNITS * UI_UNIT_X),
+                                                 short(grid_viewport_px),
+                                                 &shelf->settings.popup_catalog_width_units,
+                                                 float(CATALOG_COL_WIDTH_MIN_UNITS),
+                                                 float(CATALOG_COL_WIDTH_MAX_UNITS),
+                                                 std::nullopt);
+    ui::button_grip_2d_set(catalog_grip, nullptr);
+    ui::button_flag_disable(catalog_grip, ui::BUT_UNDO);
+    AssetShelf *shelf_capture = shelf;
+    ui::button_func_set(catalog_grip, [shelf_capture](bContext &C) {
+      if (wmWindowManager *wm = CTX_wm_manager(&C)) {
+        popup_size_store(*wm,
+                         shelf_capture->idname,
+                         shelf_capture->settings.popup_width_units,
+                         shelf_capture->settings.popup_height_units,
+                         shelf_capture->settings.popup_catalog_width_units);
+        WM_file_tag_modified();
+      }
+    });
+    ui::block_layout_set_current(block, &layout);
+  }
 
   ui::Layout &right_col = row.column(false);
   right_col.ui_units_x_set(right_col_width_units);
   right_col.fixed_size_set(true);
 
   ui::Layout &header_row = right_col.row(false);
-  header_row.ui_units_x_set(float(right_col_width_units));
+  header_row.ui_units_x_set(right_col_width_units);
 
   /* Wrapper row expands to fill the header up to the fixed-width control buttons. */
   ui::Layout &search_row = header_row.row(false);
@@ -401,8 +516,52 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
   asset_view_col.ui_units_x_set(right_col_width_units);
   asset_view_col.fixed_size_set(true);
 
-  build_asset_view(
-      asset_view_col, shelf->settings.asset_library_reference, *shelf, *C, grid_viewport_px);
+  build_asset_view(asset_view_col,
+                   shelf->settings.asset_library_reference,
+                   *shelf,
+                   *C,
+                   grid_viewport_px,
+                   grid_cols);
+
+  /* Interactive 2D resize grip in the bottom-right corner. Placed in a full-width row beneath both
+   * columns so the strip it adds is under the catalog tree and the grid equally — never lengthening
+   * only the right column (which would leave dead space below the shorter catalog column). The grip
+   * drives #popup_width_units (X) and #popup_height_units (Y); both are clamped to the window at the
+   * next draw. */
+  {
+    ui::Layout &grip_row = layout.row(false);
+    grip_row.alignment_set(ui::LayoutAlign::Right);
+    ui::Block *block = layout.block();
+    ui::block_layout_set_current(block, &grip_row);
+    ui::Button *grip = ui::uiDefIconButV(block,
+                                         ui::ButtonType::Grip,
+                                         ICON_GRIP,
+                                         0,
+                                         0,
+                                         short(UI_UNIT_X),
+                                         short(UI_UNIT_Y * 0.7f),
+                                         &shelf->settings.popup_width_units,
+                                         0.0f,
+                                         0.0f,
+                                         std::nullopt);
+    ui::button_grip_2d_set(grip, &shelf->settings.popup_height_units);
+    ui::button_flag_disable(grip, ui::BUT_UNDO);
+    /* Persist the live size into this file's per-`.blend` override on each grip apply. #shelf is a
+     * process-global static (#StaticPopupShelves), so capturing it is safe across popover rebuilds;
+     * the window manager is re-fetched from context each call. */
+    AssetShelf *shelf_capture = shelf;
+    ui::button_func_set(grip, [shelf_capture](bContext &C) {
+      if (wmWindowManager *wm = CTX_wm_manager(&C)) {
+        popup_size_store(*wm,
+                         shelf_capture->idname,
+                         shelf_capture->settings.popup_width_units,
+                         shelf_capture->settings.popup_height_units,
+                         shelf_capture->settings.popup_catalog_width_units);
+        WM_file_tag_modified();
+      }
+    });
+    ui::block_layout_set_current(block, &layout);
+  }
 }
 
 static bool popover_panel_poll(const bContext *C, PanelType * /*panel_type*/)
@@ -435,6 +594,11 @@ static void popover_display_panel_draw(const bContext *C, Panel *panel)
   col.prop(&shelf_ptr, "preview_size", UI_ITEM_NONE, IFACE_("Preview Size"), ICON_NONE);
   col.prop(&shelf_ptr, "show_names", UI_ITEM_NONE, IFACE_("Show Names"), ICON_NONE);
   col.prop(&shelf_ptr, "popup_width_units", UI_ITEM_NONE, IFACE_("Popup Width"), ICON_NONE);
+  col.prop(&shelf_ptr, "popup_height_units", UI_ITEM_NONE, IFACE_("Popup Height"), ICON_NONE);
+
+  /* Store the current per-file size as the global default for new files (the interactive grip and
+   * the fields above only change this file's remembered size). */
+  layout.op("ASSET_OT_shelf_popup_set_default_size", IFACE_("Set as Default"), ICON_NONE);
 }
 
 static bool popover_display_panel_poll(const bContext *C, PanelType * /*panel_type*/)

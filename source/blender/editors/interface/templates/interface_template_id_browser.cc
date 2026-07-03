@@ -61,6 +61,12 @@ namespace blender::ui {
 static constexpr float ID_BROWSER_GRID_VIEWPORT_UNITS_Y = 18.0f;
 /** Popover content width (in #UI_UNIT_X). List rows and grid columns use this. */
 static constexpr float ID_BROWSER_POPOVER_UNITS_X = 15.0f;
+/**
+ * Minimum width (in #UI_UNIT_X) of a single list-mode column. The popover packs its row width into
+ * as many equal columns as fit at this minimum, so a widened popover lays items out in horizontal
+ * columns instead of one tall single column.
+ */
+static constexpr float ID_BROWSER_LIST_MIN_COL_UNITS_X = 14.0f;
 
 /* -------------------------------------------------------------------- */
 /** \name Popover registration
@@ -317,7 +323,10 @@ class IDBrowserView : public AbstractGridView {
   }
 };
 
-static void build_id_grid(const bContext &C, Layout &layout, const float grid_viewport_units)
+static void build_id_grid(const bContext &C,
+                          Layout &layout,
+                          const float grid_viewport_units,
+                          const int cols_hint = 0)
 {
   PointerRNA target_ptr = CTX_data_pointer_get(&C, "id_browser_ptr");
   const std::optional<StringRefNull> prop_name = CTX_data_string_get(&C, "id_browser_prop");
@@ -378,13 +387,25 @@ static void build_id_grid(const bContext &C, Layout &layout, const float grid_vi
       target_ptr, target_prop, bmain, &C, idlb, filter, list_mode);
 
   if (list_mode) {
-    /* One item per row; width matches the popover so selection covers the full row. */
+    /* Pack the row width into as many equal columns as fit (each at least
+     * #ID_BROWSER_LIST_MIN_COL_UNITS_X wide), so a widened popover lays items out in horizontal
+     * columns instead of one tall single column. The tile width divides the popover exactly so the
+     * columns fill it with no gap on the right, and the column count is forced as a hint so float
+     * rounding at the boundary cannot drop one. */
     const float units_x = layout.ui_units_x() > 0.0f ? layout.ui_units_x() :
                                                        ID_BROWSER_POPOVER_UNITS_X;
-    view->set_tile_size(int(units_x * UI_UNIT_X), UI_UNIT_X);
+    const int list_cols = std::max(1, int(units_x / ID_BROWSER_LIST_MIN_COL_UNITS_X));
+    const int tile_w = std::max(1, int(units_x * UI_UNIT_X) / list_cols);
+    view->set_tile_size(tile_w, UI_UNIT_X);
+    view->set_cols_per_row_hint(list_cols);
   }
   else {
     view->set_tile_size(UI_UNIT_X * 3, UI_UNIT_Y * 3);
+    if (cols_hint > 0) {
+      /* The popover snaps its width to whole columns; force the column count so float rounding at
+       * the boundary cannot drop it to one fewer column and reopen the gap on the right. */
+      view->set_cols_per_row_hint(cols_hint);
+    }
   }
 
   view->set_min_viewport_height(int(UI_UNIT_Y * grid_viewport_units));
@@ -429,6 +450,36 @@ static bool id_browser_popover_poll(const bContext * /*C*/, PanelType * /*panel_
   return true;
 }
 
+/**
+ * Add the interactive 2D resize grip. Placed at the bottom-right for a popover that opened
+ * downward, or at the top-right (with the vertical axis flipped, so dragging up grows) when it
+ * opened upward — e.g. a Shader-editor node button near the bottom of the area. Drives the
+ * width/height stored on the window manager; the values persist with the file automatically, so
+ * the callback only flags it modified.
+ */
+static void id_browser_add_resize_grip(Layout &layout, wmWindowManager &wm, const bool flip_up)
+{
+  Layout &grip_row = layout.row(false);
+  grip_row.alignment_set(LayoutAlign::Right);
+  Block *block = layout.block();
+  block_layout_set_current(block, &grip_row);
+  Button *grip = uiDefIconButV(block,
+                               ButtonType::Grip,
+                               ICON_GRIP,
+                               0,
+                               0,
+                               short(UI_UNIT_X),
+                               short(UI_UNIT_Y * 0.7f),
+                               &wm.id_browser_popup_width_units,
+                               0.0f,
+                               0.0f,
+                               std::nullopt);
+  button_grip_2d_set(grip, &wm.id_browser_popup_height_units, flip_up);
+  button_flag_disable(grip, BUT_UNDO);
+  button_func_set(grip, [](bContext & /*C*/) { WM_file_tag_modified(); });
+  block_layout_set_current(block, &layout);
+}
+
 static void id_browser_popover_draw(const bContext *C, Panel *panel)
 {
   wmWindowManager *wm = CTX_wm_manager(C);
@@ -438,6 +489,28 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   /* The popover's own UI state (view mode, search) lives on the window manager, so it works in any
    * editor. */
   PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
+
+  /* Interactive popover size, remembered on the window manager (per-`.blend`). Materialize a stored
+   * 0 ("use the default") so the corner resize grip drags from the size actually shown. */
+  if (wm->id_browser_popup_width_units <= 0) {
+    wm->id_browser_popup_width_units = short(ID_BROWSER_POPOVER_UNITS_X);
+  }
+  if (wm->id_browser_popup_height_units <= 0) {
+    wm->id_browser_popup_height_units = short(ID_BROWSER_GRID_VIEWPORT_UNITS_Y);
+  }
+  const wmWindow *win = CTX_wm_window(C);
+  const int win_max_x = win ? std::max(10, (WM_window_native_pixel_x(win) / UI_UNIT_X) - 2) : 300;
+  int popover_units_x = std::clamp(int(wm->id_browser_popup_width_units), 10, win_max_x);
+  /* Grid mode: snap the width to a whole number of tile columns (tile = 3 #UI_UNIT_X) so previews
+   * fill the row with no gap on the right. List mode is a single full-width column — no snap. The
+   * column count is forwarded to the grid so float rounding cannot drop a column. */
+  const bool view_list_mode = RNA_enum_get(&wm_ptr, "id_browser_view_mode") ==
+                              IMAGE_BROWSER_VIEW_LIST;
+  int grid_cols = 1;
+  if (!view_list_mode) {
+    grid_cols = std::max(1, popover_units_x / 3);
+    popover_units_x = grid_cols * 3;
+  }
 
   /* The built-in paint-slot filters need an Image/Node editor's space to store their state; they
    * are optional. When absent (the popover is used elsewhere) the search, view toggle and any
@@ -465,7 +538,17 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   const bool show_paint_filters = is_image && space_ptr.data != nullptr;
 
   Layout &layout = *panel->layout;
-  layout.ui_units_x_set(ID_BROWSER_POPOVER_UNITS_X);
+  layout.ui_units_x_set(float(popover_units_x));
+
+  /* Resolved open direction from the previous frame (the block is positioned, and its direction
+   * copied to the handle, after this draw runs). Unknown (0) on the very first frame, so the grip
+   * defaults to the bottom and corrects on the next refresh. When the popover opened upward, put
+   * the grip on the top (growth) edge so resizing grows it up-and-right, away from the button. */
+  const Block *block = layout.block();
+  const bool flip_up = block->handle && (block->handle->direction & UI_DIR_UP);
+  if (flip_up) {
+    id_browser_add_resize_grip(layout, *wm, true);
+  }
 
   Layout &header = layout.column(true);
   header.fixed_size_set(true);
@@ -513,7 +596,7 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
                                   "",
                                   0,
                                   0,
-                                  UI_UNIT_X * (ID_BROWSER_POPOVER_UNITS_X - 2.0f),
+                                  UI_UNIT_X * (popover_units_x - 2),
                                   UI_UNIT_Y,
                                   wm->runtime->id_browser_search,
                                   0.0f,
@@ -539,20 +622,30 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
                          IMAGE_BROWSER_VIEW_LIST;
   const float tile_units = list_mode ? float(UI_UNIT_X) / float(UI_UNIT_Y) : 3.0f;
 
-  /* Shrink the grid when a zoomed popover would otherwise overflow the window (see
-   * #id_browser_grid_viewport_units); keeps the fixed header on screen while scrolling. */
+  /* User-set popover height (grid-viewport units) remembered on the window manager, clamped to the
+   * window. Fed as the default so #popup_grid_fixed_viewport_units still shrinks it further only
+   * when a zoomed popover would overflow the window, keeping the fixed header on screen. */
+  const int win_max_y = win ? std::max(3, (WM_window_native_pixel_y(win) / UI_UNIT_Y) - 4) : 120;
+  const float default_grid_units = float(
+      std::clamp(int(wm->id_browser_popup_height_units), 3, win_max_y));
   const float grid_units = popup_grid_fixed_viewport_units(
-      C, layout.block(), non_grid_units, tile_units, ID_BROWSER_GRID_VIEWPORT_UNITS_Y);
+      C, layout.block(), non_grid_units, tile_units, default_grid_units);
 
   Layout &grid_area = layout.column(true);
-  grid_area.ui_units_x_set(ID_BROWSER_POPOVER_UNITS_X);
+  grid_area.ui_units_x_set(float(popover_units_x));
   grid_area.ui_units_y_set(grid_units);
   grid_area.fixed_size_set(true);
 
-  build_id_grid(*C, grid_area, grid_units);
+  build_id_grid(*C, grid_area, grid_units, view_list_mode ? 0 : grid_cols);
 
   /* Matching gap under the grid for the persistent scroll-down arrow. */
   layout.separator(half_unit_gap_factor);
+
+  /* Downward popover: grip on the bottom (growth) edge. The upward case is placed at the top above.
+   */
+  if (!flip_up) {
+    id_browser_add_resize_grip(layout, *wm, false);
+  }
 }
 
 void id_browser_add_popover_button(Layout &row,

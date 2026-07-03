@@ -524,6 +524,22 @@ static void popup_block_clip(wmWindow *window, Block *block)
   block_view_scroll_clip_translate(block, xofs, 0.0f);
 }
 
+int popup_block_left_anchored_budget_px(const wmWindow *window, const Block *block)
+{
+  const int win_x = WM_window_native_pixel_size(window)[0];
+  const int margin = UI_SCREEN_MARGIN;
+  /* Before the block is positioned (its first open) the pinned left edge is unknown; fall back to
+   * the full usable window width so the caller's window-relative clamp still applies. The left edge
+   * is measured in window space (#PopupBlockHandle::prev_block_rect, stored before the block is
+   * brought into region space). */
+  if (block == nullptr || block->handle == nullptr ||
+      block->handle->prev_block_rect.xmin <= 0.0f)
+  {
+    return std::max(0, win_x - 2 * margin);
+  }
+  return std::max(0, win_x - margin - int(block->handle->prev_block_rect.xmin));
+}
+
 void popup_block_scrolltest(Block *block)
 {
   block->flag &= ~(BLOCK_CLIPBOTTOM | BLOCK_CLIPTOP);
@@ -952,12 +968,31 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
     popup_block_clip(window, block);
 
     /* Avoid menu moving down and losing cursor focus by keeping it at the same height when the
-     * popup is displaced down by at least one window unit. */
-    if (handle->refresh && (handle->prev_block_rect.ymax - block->rect.ymax) > 1.0f) {
+     * popup is displaced down by at least one window unit. Skip this for an upward-anchored popover:
+     * its bottom edge is pinned to the button, so a dropping top edge is a genuine size change (e.g.
+     * an interactive resize grip shrinking it), not a displacement to correct. Pinning the top here
+     * would cancel the shrink while leaving growth unaffected (which only raises the top). */
+    const bool upward_anchored_popover = (block->flag & BLOCK_POPOVER) &&
+                                         (block->direction & UI_DIR_UP);
+    if (handle->refresh && (handle->prev_block_rect.ymax - block->rect.ymax) > 1.0f &&
+        !upward_anchored_popover)
+    {
       if (block->bounds_type != BLOCK_BOUNDS_POPUP_CENTER) {
         const float offset = handle->prev_block_rect.ymax - block->rect.ymax;
         block_translate(block, 0, offset);
         block->rect.ymin = handle->prev_block_rect.ymin;
+      }
+    }
+
+    /* Keep the left edge pinned across refreshes for popovers that manage their own width and
+     * expose a width control (e.g. the asset-shelf catalog-tree divider grip). The block then only
+     * grows/shrinks to the right, so resizing never shifts the fixed left edge - even when the
+     * block was right-aligned to the window edge. The creator clamps its width so the right edge
+     * stays on screen (see #BLOCK_POPUP_ANCHOR_LEFT). */
+    if (handle->refresh && (block->flag & BLOCK_POPUP_ANCHOR_LEFT)) {
+      const float xofs = handle->prev_block_rect.xmin - block->rect.xmin;
+      if (xofs != 0.0f) {
+        block_translate(block, xofs, 0.0f);
       }
     }
 

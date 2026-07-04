@@ -2197,48 +2197,17 @@ void calc_area_center(const Depsgraph &depsgraph,
   }
 }
 
-std::optional<float3> calc_area_normal(const Depsgraph &depsgraph,
-                                       const Brush &brush,
-                                       const Object &ob,
-                                       const IndexMask &node_mask)
+/* This object's own area normal from its own nodes only, bypassing any multi-object pooling (unlike
+ * #calc_area_normal, which averages across #StrokeCache.multi_object_sample_objects when active).
+ * Used by #calc_brush_area_texture_mat to detect when a single mesh's surface diverges too sharply
+ * from a shared multi-object brush frame to project onto it without stretching. */
+static std::optional<float3> calc_area_normal_own(const Depsgraph &depsgraph,
+                                                  const Brush &brush,
+                                                  const Object &ob,
+                                                  const IndexMask &node_mask)
 {
-  SculptSession &ss = *ob.runtime->sculpt_session;
+  const SculptSession &ss = *ob.runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
-
-  {
-    const Object *reference = nullptr;
-    Span<Object *> sample_objects;
-    float3 ref_location, ref_view_normal;
-    float position_radius, normal_radius;
-    if (multi_object_area_sample_active(ob,
-                                        brush,
-                                        pbvh,
-                                        reference,
-                                        sample_objects,
-                                        ref_location,
-                                        ref_view_normal,
-                                        position_radius,
-                                        normal_radius))
-    {
-      const AreaNormalCenterData anctd = calc_area_sample_multi_object_mesh(depsgraph,
-                                                                            brush,
-                                                                            *reference,
-                                                                            sample_objects,
-                                                                            ref_location,
-                                                                            ref_view_normal,
-                                                                            position_radius,
-                                                                            normal_radius,
-                                                                            AverageDataFlags::Normal);
-      for (const int i : {0, 1}) {
-        if (anctd.count_no[i] != 0 && !math::is_zero(anctd.area_nos[i])) {
-          const float4x4 cur_from_ref = ob.world_to_object() * reference->object_to_world();
-          const float3x3 cur_from_ref_nor = math::transpose(math::invert(float3x3(cur_from_ref)));
-          return math::normalize(cur_from_ref_nor * math::normalize(anctd.area_nos[i]));
-        }
-      }
-      return std::nullopt;
-    }
-  }
 
   AreaNormalCenterData anctd;
   threading::EnumerableThreadSpecific<SampleLocalData> all_tls;
@@ -2318,13 +2287,56 @@ std::optional<float3> calc_area_normal(const Depsgraph &depsgraph,
   }
 
   for (const int i : {0, 1}) {
-    if (anctd.count_no[i] != 0) {
-      if (!math::is_zero(anctd.area_nos[i])) {
-        return math::normalize(anctd.area_nos[i]);
-      }
+    if (anctd.count_no[i] != 0 && !math::is_zero(anctd.area_nos[i])) {
+      return math::normalize(anctd.area_nos[i]);
     }
   }
   return std::nullopt;
+}
+
+std::optional<float3> calc_area_normal(const Depsgraph &depsgraph,
+                                       const Brush &brush,
+                                       const Object &ob,
+                                       const IndexMask &node_mask)
+{
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+
+  {
+    const Object *reference = nullptr;
+    Span<Object *> sample_objects;
+    float3 ref_location, ref_view_normal;
+    float position_radius, normal_radius;
+    if (multi_object_area_sample_active(ob,
+                                        brush,
+                                        pbvh,
+                                        reference,
+                                        sample_objects,
+                                        ref_location,
+                                        ref_view_normal,
+                                        position_radius,
+                                        normal_radius))
+    {
+      const AreaNormalCenterData anctd = calc_area_sample_multi_object_mesh(depsgraph,
+                                                                            brush,
+                                                                            *reference,
+                                                                            sample_objects,
+                                                                            ref_location,
+                                                                            ref_view_normal,
+                                                                            position_radius,
+                                                                            normal_radius,
+                                                                            AverageDataFlags::Normal);
+      for (const int i : {0, 1}) {
+        if (anctd.count_no[i] != 0 && !math::is_zero(anctd.area_nos[i])) {
+          const float4x4 cur_from_ref = ob.world_to_object() * reference->object_to_world();
+          const float3x3 cur_from_ref_nor = math::transpose(math::invert(float3x3(cur_from_ref)));
+          return math::normalize(cur_from_ref_nor * math::normalize(anctd.area_nos[i]));
+        }
+      }
+      return std::nullopt;
+    }
+  }
+
+  return calc_area_normal_own(depsgraph, brush, ob, node_mask);
 }
 
 /*
@@ -3231,6 +3243,52 @@ float3 tilt_effective_normal_get(const SculptSession &ss, const Brush &brush)
   return tilt_apply_to_normal(ss.cache->sculpt_normal_symm, *ss.cache, brush.tilt_strength_factor);
 }
 
+/* Builds the world-space orthonormal brush frame (see #calc_brush_area_texture_mat) for #ob from a
+ * given world-space normal. Factored out so the same construction can be used both for the shared
+ * multi-object frame and for a single object's independent frame (sharp-curvature fallback below). */
+static float4x4 build_area_texture_world_frame(const float rotation,
+                                               const Object &ob,
+                                               const StrokeCache &cache,
+                                               const float3 &world_normal)
+{
+  const float angle = rotation + cache.special_rotation;
+  const float2 motion_dir_screen(cosf(angle), sinf(angle));
+
+  const float3 world_location = math::transform_point(ob.object_to_world(), cache.location_symm);
+  const float zfac = ED_view3d_calc_zfac(cache.vc->rv3d, world_location);
+  float3 world_motion_dir;
+  ED_view3d_win_to_delta(cache.vc->region, motion_dir_screen, zfac, world_motion_dir);
+  world_motion_dir = math::normalize(world_motion_dir);
+
+  /* Build an orthonormal basis (matches #calc_brush_local_mat's axis order). Normalize each
+   * basis axis INDIVIDUALLY — NOT `math::normalize(float4x4)`, which normalizes every column
+   * including the translation and would corrupt #world_location for objects whose brush hit is
+   * far from the world origin (offset transform origins). #calc_brush_local_mat uses
+   * #normalize_m4 for the same reason: it only normalizes the 3x3 basis and leaves the location
+   * untouched. */
+  const float3 axis_z = world_normal;
+  const float3 axis_y = math::normalize(math::cross(axis_z, world_motion_dir));
+  const float3 axis_x = math::normalize(math::cross(axis_y, axis_z));
+
+  float4x4 mat = float4x4::identity();
+  mat.x_axis() = axis_x;
+  mat.y_axis() = axis_y;
+  mat.z_axis() = axis_z;
+  mat.location() = world_location;
+
+  /* #StrokeCache.radius is `screen_radius / mat4_to_scale(world matrix)`
+   * (#paint_calc_object_space_radius); multiplying back by this object's own scale recovers the
+   * shared screen-derived world radius, consistent across every object in the stroke. */
+  const float world_radius = cache.radius * mat4_to_scale(ob.object_to_world().ptr());
+  return mat * math::from_scale<float4x4>(float3(world_radius));
+}
+
+/* Below this cosine (~30 degrees between world-space normals) a single mesh's own surface is
+ * considered too sharply curved relative to a shared multi-object brush frame to project onto it
+ * without a stretched/grazing-angle result (the original wall+floor-at-90-degrees complaint) — see
+ * #calc_brush_area_texture_mat. */
+static constexpr float area_texture_flat_cos_threshold = 0.866f;
+
 /**
  * World-space equivalent of #calc_brush_local_mat, for the Area-mapped brush/mask texture
  * (#sculpt_apply_texture) and vector-displacement texture (#calc_vertex_displacement).
@@ -3255,14 +3313,28 @@ float3 tilt_effective_normal_get(const SculptSession &ss, const Brush &brush)
  *    stores it in #StrokeCache.area_texture_frame_to_world; every secondary object reuses that
  *    exact frame.
  *
+ * 3. SHARP CURVATURE BETWEEN MESHES. A single shared plane cannot fit two meshes meeting at a sharp
+ *    angle (e.g. a wall and floor at 90 degrees) without one of them projecting at a grazing angle
+ *    and smearing. When #check_curvature is set (an Area-mapped mask/color texture is in use) and
+ *    this object's OWN surface normal (independent of the pooling above, see
+ *    #calc_area_normal_own) diverges from the shared-frame normal by more than
+ *    #area_texture_flat_cos_threshold, this object's #local_mat/#local_mat_inv are rebuilt from its
+ *    OWN normal instead — projected independently, not sharing the plane. The published
+ *    #StrokeCache.area_texture_frame_to_world used by OTHER objects is left untouched, so this is a
+ *    per-object decision, not a stroke-wide one.
+ *
  * #local_mat still maps a MODEL-SPACE (local) point to brush-frame coordinates, and #local_mat_inv
  * still maps brush-frame coordinates back to a model-space point/direction, matching
  * #calc_brush_local_mat's contract — the object's own transform is composed into both matrices so
  * callers don't need to change. #calc_brush_local_mat itself is left untouched: #cube_tip_init
  * shares it and expects a purely local-space matrix.
  */
-static void calc_brush_area_texture_mat(const float rotation,
+static void calc_brush_area_texture_mat(const Depsgraph &depsgraph,
+                                        const Brush &brush,
+                                        const float rotation,
                                         const Object &ob,
+                                        const IndexMask &node_mask,
+                                        const bool check_curvature,
                                         float4x4 &local_mat,
                                         float4x4 &local_mat_inv)
 {
@@ -3270,6 +3342,10 @@ static void calc_brush_area_texture_mat(const float rotation,
 
   /* Ensure `ob.world_to_object` is up to date. */
   ob.runtime->world_to_object = math::invert(ob.object_to_world());
+
+  /* A local-space NORMAL maps to world space via the inverse-transpose rule, unlike a
+   * position/direction which transforms directly (see #non_uniform_scale_compensation). */
+  const float3x3 to_world_normal = math::transpose(float3x3(ob.world_to_object()));
 
   /* The primary object under the cursor defines the shared world frame; it pools the area normal
    * across all meshes and is processed first, so its frame is ready when secondaries run. */
@@ -3285,53 +3361,34 @@ static void calc_brush_area_texture_mat(const float rotation,
     frame_to_world = reference_cache->area_texture_frame_to_world;
   }
   else {
-    const float angle = rotation + cache->special_rotation;
-    const float2 motion_dir_screen(cosf(angle), sinf(angle));
-
-    const float3 world_location = math::transform_point(ob.object_to_world(),
-                                                        cache->location_symm);
-    const float zfac = ED_view3d_calc_zfac(cache->vc->rv3d, world_location);
-    float3 world_motion_dir;
-    ED_view3d_win_to_delta(cache->vc->region, motion_dir_screen, zfac, world_motion_dir);
-    world_motion_dir = math::normalize(world_motion_dir);
-
-    /* A local-space NORMAL maps to world space via the inverse-transpose rule, unlike a
-     * position/direction which transforms directly (see #non_uniform_scale_compensation). */
-    const float3x3 to_world_normal = math::transpose(float3x3(ob.world_to_object()));
     const float3 world_normal = math::normalize(to_world_normal * cache->sculpt_normal);
-
-    /* Build an orthonormal basis (matches #calc_brush_local_mat's axis order). Normalize each
-     * basis axis INDIVIDUALLY — NOT `math::normalize(float4x4)`, which normalizes every column
-     * including the translation and would corrupt #world_location for objects whose brush hit is
-     * far from the world origin (offset transform origins). #calc_brush_local_mat uses
-     * #normalize_m4 for the same reason: it only normalizes the 3x3 basis and leaves the location
-     * untouched. */
-    const float3 axis_z = world_normal;
-    const float3 axis_y = math::normalize(math::cross(axis_z, world_motion_dir));
-    const float3 axis_x = math::normalize(math::cross(axis_y, axis_z));
-
-    float4x4 mat = float4x4::identity();
-    mat.x_axis() = axis_x;
-    mat.y_axis() = axis_y;
-    mat.z_axis() = axis_z;
-    mat.location() = world_location;
-
-    /* #StrokeCache.radius is `screen_radius / mat4_to_scale(world matrix)`
-     * (#paint_calc_object_space_radius); multiplying back by this object's own scale recovers the
-     * shared screen-derived world radius, consistent across every object in the stroke. */
-    const float world_radius = cache->radius * mat4_to_scale(ob.object_to_world().ptr());
-    frame_to_world = mat * math::from_scale<float4x4>(float3(world_radius));
+    frame_to_world = build_area_texture_world_frame(rotation, ob, *cache, world_normal);
 
     /* Publish the frame for secondary objects (the reference is processed first). */
     cache->area_texture_frame_to_world = frame_to_world;
     cache->area_texture_frame_valid = true;
   }
 
+  if (check_curvature) {
+    if (const std::optional<float3> own_normal = calc_area_normal_own(
+            depsgraph, brush, ob, node_mask))
+    {
+      const float3 own_normal_world = math::normalize(to_world_normal * *own_normal);
+      const float3 shared_normal_world = math::normalize(frame_to_world.z_axis());
+      if (math::dot(own_normal_world, shared_normal_world) < area_texture_flat_cos_threshold) {
+        frame_to_world = build_area_texture_world_frame(rotation, ob, *cache, own_normal_world);
+      }
+    }
+  }
+
   local_mat_inv = ob.world_to_object() * frame_to_world;
   local_mat = math::invert(frame_to_world) * ob.object_to_world();
 }
 
-static void update_brush_local_mat(const Sculpt &sd, Object &ob)
+static void update_brush_local_mat(const Depsgraph &depsgraph,
+                                   const Sculpt &sd,
+                                   Object &ob,
+                                   const IndexMask &node_mask)
 {
   StrokeCache *cache = ob.runtime->sculpt_session->cache;
 
@@ -3339,8 +3396,18 @@ static void update_brush_local_mat(const Sculpt &sd, Object &ob)
     const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
     const MTex *mask_tex = BKE_brush_mask_texture_get(brush, OB_MODE_SCULPT);
     if (cache->multi_object_stroke) {
-      calc_brush_area_texture_mat(
-          mask_tex->rot, ob, cache->brush_local_mat, cache->brush_local_mat_inv);
+      /* The extra own-normal sample (#calc_area_normal_own) that curvature detection needs has a
+       * real per-object cost, so only pay it when an Area-mapped texture is actually in use. */
+      const bool check_curvature = mask_tex->tex != nullptr &&
+                                   mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA;
+      calc_brush_area_texture_mat(depsgraph,
+                                  *brush,
+                                  mask_tex->rot,
+                                  ob,
+                                  node_mask,
+                                  check_curvature,
+                                  cache->brush_local_mat,
+                                  cache->brush_local_mat_inv);
     }
     else {
       calc_brush_local_mat(
@@ -3863,7 +3930,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
     update_sculpt_normal(depsgraph, sd, ob, cursor_sample_result);
   }
 
-  update_brush_local_mat(sd, ob);
+  update_brush_local_mat(depsgraph, sd, ob, node_mask);
 
   if (brush.deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM) {
     if (!ss.cache->cloth_sim) {

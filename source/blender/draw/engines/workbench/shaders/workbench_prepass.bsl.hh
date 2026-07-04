@@ -105,6 +105,9 @@ struct VertOut {
   [[flat]] int object_id;
   [[flat]] float roughness;
   [[flat]] float metallic;
+  /** Poly Paint: dielectric F0, see #get_world_lighting. Defaults to 0.5f (neutral, no override)
+   * for every vertex shader below; only #vert_mesh may override it per-vertex. */
+  [[flat]] float specular;
 };
 
 struct MeshIn {
@@ -112,6 +115,9 @@ struct MeshIn {
   [[attribute(1)]] float3 nor;
   [[attribute(2)]] float4 ac;
   [[attribute(3)]] float2 au;
+  [[attribute(4)]] float a_metallic;
+  [[attribute(5)]] float a_roughness;
+  [[attribute(6)]] float a_specular;
 };
 
 struct Mesh {
@@ -120,6 +126,10 @@ struct Mesh {
   /** WORKAROUND: This exact compilation constant is checked in Metal backend to enable clip
    * distances. */
   [[compilation_constant]] const bool use_clipping;
+
+  [[push_constant]] const bool use_vertex_metallic;
+  [[push_constant]] const bool use_vertex_roughness;
+  [[push_constant]] const bool use_vertex_specular;
 };
 
 [[vertex]] void vert_mesh([[resource_table]] Mesh &mesh,
@@ -153,6 +163,17 @@ struct Mesh {
 
   materials.material_data_get(
       custom_id, v_in.ac.rgb, v_out.color, v_out.alpha, v_out.roughness, v_out.metallic);
+  v_out.specular = 0.5f;
+
+  if (mesh.use_vertex_metallic) {
+    v_out.metallic = v_in.a_metallic;
+  }
+  if (mesh.use_vertex_roughness) {
+    v_out.roughness = v_in.a_roughness;
+  }
+  if (mesh.use_vertex_specular) {
+    v_out.specular = v_in.a_specular;
+  }
 }
 
 struct Curves {
@@ -220,6 +241,7 @@ struct Curves {
   float3 vert_col = curves::get_customdata_vec3(ws_pt.curve_id, curves.ac);
   materials.material_data_get(
       custom_id, vert_col, v_out.color, v_out.alpha, v_out.roughness, v_out.metallic);
+  v_out.specular = 0.5f;
 
   /* Hairs have lots of layer and can rapidly become the most prominent surface.
    * So we lower their alpha artificially. */
@@ -280,6 +302,7 @@ struct PointCloud {
 
   materials.material_data_get(
       custom_id, float3(1.0f), v_out.color, v_out.alpha, v_out.roughness, v_out.metallic);
+  v_out.specular = 0.5f;
 
   v_out.object_id = int(id.resource_id<1>() & 0xFFFFu) + 1;
 }
@@ -311,7 +334,8 @@ struct OpaqueOut {
   frag_out.object_id = uint(v_out.object_id);
   frag_out.normal = normal_encode(facing, v_out.normal);
 
-  frag_out.material = float4(v_out.color, float_pair_encode(v_out.roughness, v_out.metallic));
+  frag_out.material = float4(
+      v_out.color, float_triplet_encode(v_out.roughness, v_out.metallic, v_out.specular));
 
   if (srt.use_texture) [[static_branch]] {
     frag_out.material.rgb = color::image_color(srt.texture, v_out.uv);
@@ -354,7 +378,8 @@ struct TransparentOut {
     shaded_color = get_matcap_lighting(world, srt.matcap_tx, color, N, I);
   }
   else if (srt.lighting_mode == WORKBENCH_LIGHTING_STUDIO) [[static_branch]] {
-    shaded_color = get_world_lighting(world, color, v_out.roughness, v_out.metallic, N, I);
+    shaded_color = get_world_lighting(
+        world, color, v_out.roughness, v_out.metallic, v_out.specular, N, I);
   }
   else if (srt.lighting_mode == WORKBENCH_LIGHTING_FLAT) [[static_branch]] {
     shaded_color = color;

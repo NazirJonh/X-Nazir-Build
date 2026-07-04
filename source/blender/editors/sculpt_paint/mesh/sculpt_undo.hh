@@ -12,6 +12,7 @@
 
 #include "BLI_index_mask_fwd.hh"
 #include "BLI_span.hh"
+#include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 
 namespace blender {
@@ -38,6 +39,13 @@ enum class Type : int8_t {
   Geometry,
   FaceSet,
   Color,
+  /** Poly Paint: one or more named `CD_PROP_FLOAT` point attributes (metallic, roughness,
+   * specular, and/or a custom attribute), as selected by PaintModeSettings when the step
+   * was pushed. All attribute names for the step are stored together; each undo node holds
+   * aligned scalar buffers for every name. When Base Color is also painted in the same
+   * stroke, the active color attribute is snapshotted in the same Material step (see
+   * #push_nodes \a material_store_color) so one Undo restores floats and `"Color"`. */
+  Material,
 };
 
 struct StepData;
@@ -47,15 +55,34 @@ struct StepData;
  * threads concurrently, as long as they don't pass the same pbvh::Tree node.
  *
  * This is only possible when building an undo step, in between #push_begin and #push_end.
+ *
+ * \param material_attribute_names: Point float attribute names to snapshot. Required (and used)
+ * only when \a type is #Type::Material; all names are stored in a single Material step. The list
+ * is fixed by the first push of a step; passing a different list to a later push of the same step
+ * is a programming error and asserts, since the per-node buffers are indexed positionally
+ * against it.
+ * \param material_store_color: When \a type is #Type::Material, also snapshot the active color
+ * attribute into the same undo nodes (Material Paint Base Color alongside scalars).
+ * \param material_created_attribute_names: Subset of \a material_attribute_names that the current
+ * stroke itself created (didn't exist before it started). Fixed by the first push of a step, same
+ * as \a material_attribute_names. Undoing the step removes these attributes instead of leaving a
+ * zero-valued one behind; redoing does not recreate them (the Add Attribute operator, or another
+ * stroke, does that).
  */
 void push_node(const Depsgraph &depsgraph,
                const Object &object,
                const bke::pbvh::Node *node,
-               undo::Type type);
+               undo::Type type,
+               Span<StringRef> material_attribute_names = {},
+               bool material_store_color = false,
+               Span<StringRef> material_created_attribute_names = {});
 void push_nodes(const Depsgraph &depsgraph,
                 Object &object,
                 const IndexMask &node_mask,
-                undo::Type type);
+                undo::Type type,
+                Span<StringRef> material_attribute_names = {},
+                bool material_store_color = false,
+                Span<StringRef> material_created_attribute_names = {});
 
 /**
  * Pushes an undo step using the operator name. This is necessary for

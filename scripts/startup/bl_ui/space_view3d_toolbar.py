@@ -29,6 +29,8 @@ from bl_ui.properties_paint_common import (
     brush_settings,
     brush_settings_advanced,
     draw_color_settings,
+    draw_material_paint_channels,
+    draw_material_paint_visibility_chevron,
 )
 from bl_ui.utils import PresetPanel
 
@@ -320,6 +322,50 @@ class VIEW3D_PT_tools_brush_select(Panel, View3DPaintBrushPanel, BrushSelectPane
     bl_label = "Brush Asset"
 
 
+class VIEW3D_PT_paint_canvas_npanel(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Tool"
+    bl_label = ""
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        if ob is None or ob.mode not in {'TEXTURE_PAINT', 'SCULPT'}:
+            return False
+        if ob.mode == 'SCULPT':
+            # Material Paint channels only work with the Paint brush type; deformation brushes
+            # (Grab, Smooth, etc.) have no material-channel sampling/blending behind them.
+            brush = context.tool_settings.sculpt.brush
+            return brush is not None and brush.sculpt_brush_type == 'PAINT'
+        return True
+
+    def draw_header(self, context):
+        layout = self.layout
+        layout.label(text="Paint PBR")
+        row = layout.row(align=True)
+        row.prop(context.tool_settings.paint_mode, "canvas_source", text="")
+        draw_material_paint_visibility_chevron(context, row, context.tool_settings.paint_mode)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        paint = context.tool_settings.paint_mode
+        if self.is_popover:
+            layout.prop(paint, "canvas_source", text="Mode")
+            layout.separator()
+
+        if paint.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}:
+            settings = UnifiedPaintPanel.paint_settings(context)
+            brush = settings.brush if settings else None
+            draw_material_paint_channels(
+                context, layout, brush, paint,
+                show_custom=(paint.canvas_source == 'MATERIAL_PAINT'),
+            )
+
+
 class VIEW3D_PT_tools_brush_settings(Panel, View3DPaintBrushPanel):
     bl_context = ".paint_common"
     bl_label = "Brush Settings"
@@ -433,6 +479,20 @@ class SelectPaintSlotHelper:
     canvas_source_attr_name = "canvas_source"
     canvas_image_attr_name = "canvas_image"
 
+    # When True, MATERIAL / MATERIAL_PAINT draw channel rows instead of
+    # texture_paint_slots (sculpt Canvas / Image Editor PaintModeSettings).
+    use_material_paint_channels = False
+
+    def get_active_brush(self, context):
+        return context.tool_settings.image_paint.brush
+
+    def draw_header(self, context):
+        layout = self.layout
+        mode_settings = self.get_mode_settings(context)
+        row = layout.row(align=True)
+        row.prop(mode_settings, self.canvas_source_attr_name, text="")
+        draw_material_paint_visibility_chevron(context, row, mode_settings)
+
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
@@ -443,12 +503,38 @@ class SelectPaintSlotHelper:
 
         ob = context.active_object
 
-        layout.prop(mode_settings, self.canvas_source_attr_name, text="Mode")
-        layout.separator()
+        if self.is_popover:
+            layout.prop(mode_settings, self.canvas_source_attr_name, text="Mode")
+            layout.separator()
 
         have_image = False
+        canvas_source = getattr(mode_settings, self.canvas_source_attr_name)
 
-        match getattr(mode_settings, self.canvas_source_attr_name):
+        match canvas_source:
+            case 'MATERIAL' | 'MATERIAL_PAINT' if self.use_material_paint_channels:
+                if canvas_source == 'MATERIAL' and len(ob.material_slots) > 1:
+                    layout.template_list(
+                        "MATERIAL_UL_matslots", "layers",
+                        ob, "material_slots",
+                        ob, "active_material_index", rows=2,
+                    )
+
+                if canvas_source == 'MATERIAL':
+                    has_image_fn = getattr(ob, "principled_paint_channel_has_image", None)
+                    if has_image_fn is not None:
+                        have_image = any(
+                            has_image_fn(channel)
+                            for channel in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL', 'ALPHA', 'EMISSION')
+                        )
+
+                draw_material_paint_channels(
+                    context,
+                    layout,
+                    self.get_active_brush(context),
+                    mode_settings,
+                    show_custom=(canvas_source == 'MATERIAL_PAINT'),
+                )
+
             case 'MATERIAL':
                 if len(ob.material_slots) > 1:
                     layout.template_list(
@@ -511,7 +597,7 @@ class SelectPaintSlotHelper:
                 col.operator("geometry.color_attribute_add", icon='ADD', text="")
                 col.operator("geometry.color_attribute_remove", icon='REMOVE', text="")
 
-        if settings.missing_uvs:
+        if settings.missing_uvs and canvas_source != 'MATERIAL_PAINT':
             layout.separator()
             split = layout.split()
             split.label(text="UV Map Needed", icon='INFO')
@@ -555,59 +641,45 @@ class VIEW3D_PT_slots_projectpaint(SelectPaintSlotHelper, View3DPanel, Panel):
 
 
 class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
-    bl_label = "Canvas"
+    bl_label = ""
+    # Wide enough for draw_material_paint_channels' socket/value split rows; channel toggles
+    # wrap via grid_flow when the popover is narrower than the full toggle strip.
+    bl_ui_units_x = 16
+
+    def draw_header(self, context):
+        layout = self.layout
+        layout.label(text="Canvas")
+        layout.prop(self.get_mode_settings(context), self.canvas_source_attr_name, text="")
+    use_material_paint_channels = True
 
     @classmethod
     def poll(cls, context):
-        if not context.preferences.experimental.use_sculpt_texture_paint:
+        ob = context.active_object
+        if ob is None or ob.mode not in {'TEXTURE_PAINT', 'SCULPT'}:
             return False
-
-        from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
-        tool = ToolSelectPanelHelper.tool_active_from_context(context)
-        if tool is None:
-            return False
-
-        is_paint_tool = False
-        if tool.use_brushes:
+        if ob.mode == 'SCULPT':
+            # Material Paint channels only work with the Paint brush type; Smear, other sculpt
+            # brushes, and non-brush tools have no material-channel sampling/blending behind them.
             brush = context.tool_settings.sculpt.brush
-            if brush:
-                is_paint_tool = brush.sculpt_brush_type in {'PAINT', 'SMEAR'}
-        else:
-            # TODO: The property use_paint_canvas doesn't work anymore since its associated
-            # C++ function 'rna_WorkSpaceTool_use_paint_canvas_get' passes in a nullptr for
-            # the bContext. This property should be fixed in the future, but will require
-            # some extensive refactoring. For now, use the workaround above.
-            is_paint_tool = tool.use_paint_canvas
-
-        return is_paint_tool
+            return brush is not None and brush.sculpt_brush_type == 'PAINT'
+        return True
 
     def get_mode_settings(self, context):
         return context.tool_settings.paint_mode
+
+    def get_active_brush(self, context):
+        # This popover covers both Sculpt and Texture Paint (see #poll); each mode keeps its
+        # active brush in a different tool_settings slot.
+        ob = context.active_object
+        if ob is not None and ob.mode == 'SCULPT':
+            return context.tool_settings.sculpt.brush
+        return context.tool_settings.image_paint.brush
 
     def draw_image_interpolation(self, **_kwargs):
         pass
 
     def draw_header(self, context):
-        paint = context.tool_settings.paint_mode
-        ob = context.object
-        me = ob.data
-        mat = ob.active_material
-
-        label = iface_("Canvas")
-
-        if paint.canvas_source == 'MATERIAL':
-            if mat and mat.texture_paint_images and mat.texture_paint_slots:
-                label = mat.texture_paint_slots[mat.paint_active_slot].name
-        elif paint.canvas_source == 'COLOR_ATTRIBUTE':
-            active_color = me.color_attributes.active_color
-            label = (
-                active_color.name if active_color else
-                iface_("Color Attribute")
-            )
-        elif paint.canvas_image:
-            label = paint.canvas_image.name
-
-        self.bl_label = label
+        self.bl_label = iface_("Paint PBR")
 
 
 class VIEW3D_PT_slots_color_attributes(Panel):
@@ -2353,6 +2425,7 @@ classes = (
     VIEW3D_PT_slots_color_attributes,
     VIEW3D_PT_slots_vertex_groups,
     VIEW3D_PT_tools_brush_select,
+    VIEW3D_PT_paint_canvas_npanel,
     VIEW3D_PT_tools_brush_settings,
     VIEW3D_PT_tools_brush_color,
     VIEW3D_PT_tools_brush_swatches,

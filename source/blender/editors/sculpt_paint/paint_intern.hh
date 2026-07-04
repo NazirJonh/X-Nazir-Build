@@ -512,6 +512,9 @@ namespace ed::sculpt_paint {
 void PAINT_OT_sample_color(wmOperatorType *ot);
 }
 void PAINT_OT_brush_colors_flip(wmOperatorType *ot);
+void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot);
+void PAINT_OT_material_channel_value_invert(wmOperatorType *ot);
+void PAINT_OT_material_channel_source_clear(wmOperatorType *ot);
 void PAINT_OT_texture_paint_toggle(wmOperatorType *ot);
 void PAINT_OT_project_image(wmOperatorType *ot);
 void PAINT_OT_image_from_view(wmOperatorType *ot);

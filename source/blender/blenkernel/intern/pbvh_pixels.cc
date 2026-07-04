@@ -14,9 +14,12 @@
 #include "BLI_listbase.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector.hh"
 
 #include "BKE_image_wrappers.hh"
 #include "BKE_paint.hh"
+
+#include "BKE_paint_material_channel_perf_debug.hh"
 
 #include "PRF_profile.hh"
 
@@ -52,6 +55,53 @@ static float2 calc_barycentric_delta_x(const ImBuf *image_buffer,
   const float2 start_uv(float(x) / image_buffer->x, float(y) / image_buffer->y);
   const float2 end_uv(float(x + 1) / image_buffer->x, float(y) / image_buffer->y);
   return calc_barycentric_delta(uvs, start_uv, end_uv);
+}
+
+/**
+ * Object-space tangent (`T_m`) of a UV triangle, derived from its UV parametrization the
+ * standard way for tangent-space normal mapping. Approximate (a single flat tangent per
+ * triangle, not mikktspace-averaged): enough to re-express a Normal channel's source sample in
+ * the destination surface's own tangent space. Also returns the parametrization's handedness
+ * (`+1`/`-1`), needed to build a bitangent that matches mirrored UV islands.
+ */
+static float3 calc_uv_primitive_tangent(const uv_islands::MeshData &mesh_data,
+                                        const uv_islands::UVPrimitive &uv_primitive,
+                                        const float2 uvs[3],
+                                        float &r_bitangent_sign)
+{
+  const float3 &v0 = mesh_data.vert_positions[uv_primitive.get_uv_vertex(mesh_data, 0)->vertex];
+  const float3 &v1 = mesh_data.vert_positions[uv_primitive.get_uv_vertex(mesh_data, 1)->vertex];
+  const float3 &v2 = mesh_data.vert_positions[uv_primitive.get_uv_vertex(mesh_data, 2)->vertex];
+  const float3 edge1 = v1 - v0;
+  const float3 edge2 = v2 - v0;
+  const float2 duv1 = uvs[1] - uvs[0];
+  const float2 duv2 = uvs[2] - uvs[0];
+
+  const float denom = duv1.x * duv2.y - duv2.x * duv1.y;
+  /* UV layouts commonly mirror islands to reuse space; a mirrored triangle's bitangent must flip
+   * to match, or the Normal channel decodes those islands with the wrong handedness. */
+  r_bitangent_sign = denom < 0.0f ? -1.0f : 1.0f;
+
+  float3 tangent;
+  /* Degenerate UV triangle (zero UV area, e.g. an unwrapped-to-a-point face): the UV gradient
+   * cannot define a tangent, so fall back to an arbitrary vector orthogonal to the face normal. */
+  if (math::abs(denom) < 1e-12f) {
+    float3 normal = math::cross(edge1, edge2);
+    if (math::length_squared(normal) < 1e-12f) {
+      normal = float3(0.0f, 0.0f, 1.0f);
+    }
+    else {
+      normal = math::normalize(normal);
+    }
+    float fallback[3];
+    ortho_v3_v3(fallback, normal);
+    return float3(fallback);
+  }
+
+  const float f = 1.0f / denom;
+  tangent = (edge1 * duv2.y - edge2 * duv1.y) * f;
+  const float tangent_len = math::length(tangent);
+  return tangent_len > 1e-12f ? tangent / tangent_len : math::normalize(edge1);
 }
 
 /**
@@ -151,10 +201,18 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
   BLI_assert(pixel_node.flags.rebuild ||
              (pixel_node.uv_primitives.tri_indices.is_empty() &&
               pixel_node.uv_primitives.delta_barycentric_coords.is_empty() &&
+              pixel_node.uv_primitives.tangents.is_empty() &&
+              pixel_node.uv_primitives.triangle_positions.is_empty() &&
+              pixel_node.uv_primitives.triangle_uvs.is_empty() &&
+              pixel_node.uv_primitives.bitangent_signs.is_empty() &&
               pixel_node.tiles.is_empty()));
   /* Assuming a quad mesh, we'll have at least 2 * faces entries */
   pixel_node.uv_primitives.tri_indices.reserve(node.faces().size() * 2);
   pixel_node.uv_primitives.delta_barycentric_coords.reserve(node.faces().size() * 2);
+  pixel_node.uv_primitives.tangents.reserve(node.faces().size() * 2);
+  pixel_node.uv_primitives.triangle_positions.reserve(node.faces().size() * 6);
+  pixel_node.uv_primitives.triangle_uvs.reserve(node.faces().size() * 6);
+  pixel_node.uv_primitives.bitangent_signs.reserve(node.faces().size() * 2);
 
   for (ImageTile &tile : image.tiles) {
     image::ImageTileWrapper image_tile(&tile);
@@ -190,6 +248,19 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
           pixel_node.uv_primitives.tri_indices.append(tri);
           pixel_node.uv_primitives.delta_barycentric_coords.append(
               calc_barycentric_delta_x(image_buffer, uvs, minx, miny));
+          float bitangent_sign;
+          pixel_node.uv_primitives.tangents.append(
+              calc_uv_primitive_tangent(mesh_data, *entry.uv_primitive, uvs, bitangent_sign));
+          pixel_node.uv_primitives.triangle_positions.append(
+              mesh_data.vert_positions[entry.uv_primitive->get_uv_vertex(mesh_data, 0)->vertex]);
+          pixel_node.uv_primitives.triangle_positions.append(
+              mesh_data.vert_positions[entry.uv_primitive->get_uv_vertex(mesh_data, 1)->vertex]);
+          pixel_node.uv_primitives.triangle_positions.append(
+              mesh_data.vert_positions[entry.uv_primitive->get_uv_vertex(mesh_data, 2)->vertex]);
+          pixel_node.uv_primitives.triangle_uvs.append(uvs[0]);
+          pixel_node.uv_primitives.triangle_uvs.append(uvs[1]);
+          pixel_node.uv_primitives.triangle_uvs.append(uvs[2]);
+          pixel_node.uv_primitives.bitangent_signs.append(bitangent_sign);
 
           /* Extract the pixels. */
           extract_barycentric_pixels(tile_data,
@@ -214,6 +285,10 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
 
     BLI_assert(pixel_node.uv_primitives.delta_barycentric_coords.size() ==
                pixel_node.uv_primitives.tri_indices.size());
+    BLI_assert(pixel_node.uv_primitives.tangents.size() ==
+               pixel_node.uv_primitives.tri_indices.size());
+    BLI_assert(pixel_node.uv_primitives.bitangent_signs.size() ==
+               pixel_node.uv_primitives.tri_indices.size());
 
     pixel_node.tiles.append(tile_data);
   }
@@ -231,9 +306,13 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
 static IndexMask find_nodes_to_update(Tree &pbvh, IndexMaskMemory &memory)
 {
   MutableSpan<MeshNode> nodes = pbvh.nodes<MeshNode>();
-  if (pbvh.pixels_ == nullptr) {
-    pbvh.pixels_ = MEM_new<PixelData>(__func__);
+  if (pbvh.pixels_ == nullptr || pbvh.pixels_->nodes.size() != nodes.size()) {
+    if (pbvh.pixels_ == nullptr) {
+      pbvh.pixels_ = MEM_new<PixelData>(__func__);
+    }
     pbvh.pixels_->nodes.reinitialize(nodes.size());
+    pbvh.pixels_->flags.dirty = true;
+    pbvh.pixels_->layout_key.clear();
   }
 
   PixelData &pixel_data = *pbvh.pixels_;
@@ -298,7 +377,8 @@ static bool update_pixels(const Depsgraph &depsgraph,
                           const Object &object,
                           Tree &pbvh,
                           Image &image,
-                          ImageUser &image_user)
+                          ImageUser &image_user,
+                          const StringRef uv_map_name)
 {
   IndexMaskMemory memory;
   const IndexMask nodes_to_update = find_nodes_to_update(pbvh, memory);
@@ -306,14 +386,21 @@ static bool update_pixels(const Depsgraph &depsgraph,
     return false;
   }
 
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  blender::bke::paint_material_channel_perf::set_build_pixels_leaf_nodes_updated(
+      nodes_to_update.size());
+#endif
+
   const Mesh &mesh = *id_cast<const Mesh *>(object.data);
-  const StringRef active_uv_name = mesh.active_uv_map_name();
-  if (active_uv_name.is_empty()) {
+  if (uv_map_name.is_empty()) {
     return false;
   }
 
   const AttributeAccessor attributes = mesh.attributes();
-  const VArraySpan uv_map = *attributes.lookup<float2>(active_uv_name, AttrDomain::Corner);
+  const VArraySpan uv_map = *attributes.lookup<float2>(uv_map_name, AttrDomain::Corner);
+  if (uv_map.is_empty()) {
+    return false;
+  }
 
   uv_islands::MeshData mesh_data(mesh.faces(),
                                  mesh.corner_tris(),
@@ -335,28 +422,50 @@ static bool update_pixels(const Depsgraph &depsgraph,
                       ushort2(tile_buffer->x, tile_buffer->y));
     BKE_image_release_ibuf(&image, tile_buffer, nullptr);
   }
-  uv_masks.add(mesh_data, islands);
-  uv_masks.dilate(image.seam_margin);
 
-  islands.extract_borders();
-  islands.extend_borders(mesh_data, uv_masks);
-  update_geom_primitives(pbvh, mesh_data);
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  {
+    PAINT_CHANNEL_PERF_SCOPE(BuildPixelsUvIslands);
+#endif
+    uv_masks.add(mesh_data, islands);
+    uv_masks.dilate(image.seam_margin);
+
+    islands.extract_borders();
+    islands.extend_borders(mesh_data, uv_masks);
+    update_geom_primitives(pbvh, mesh_data);
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  }
+#endif
 
   UVPrimitiveLookup uv_primitive_lookup(mesh_data.corner_tris.size(), islands);
 
   MutableSpan<MeshNode> nodes = pbvh.nodes<MeshNode>();
   MutableSpan<PixelNode> pixel_nodes = pbvh.pixels_->nodes;
 
-  nodes_to_update.foreach_index([&](const int i) {
-    do_encode_pixels(
-        mesh_data, uv_masks, uv_primitive_lookup, image, image_user, nodes[i], pixel_nodes[i]);
-  });
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  {
+    PAINT_CHANNEL_PERF_SCOPE(BuildPixelsEncode);
+#endif
+    nodes_to_update.foreach_index([&](const int i) {
+      do_encode_pixels(
+          mesh_data, uv_masks, uv_primitive_lookup, image, image_user, nodes[i], pixel_nodes[i]);
+    });
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  }
+#endif
   if (USE_WATERTIGHT_CHECK) {
     apply_watertight_check(pbvh, image, image_user);
   }
 
   /* Add solution for non-manifold parts of the model. */
-  copy_update(pbvh, image, image_user, mesh_data);
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  {
+    PAINT_CHANNEL_PERF_SCOPE(BuildPixelsCopyUpdate);
+#endif
+    copy_update(pbvh, image, image_user, mesh_data);
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  }
+#endif
 
   /* Rebuild the undo regions. */
   nodes_to_update.foreach_index([&](const int i) { pixel_nodes[i].rebuild_undo_regions(); });
@@ -365,6 +474,8 @@ static bool update_pixels(const Depsgraph &depsgraph,
   nodes_to_update.foreach_index([&](const int i) { pixel_nodes[i].flags.rebuild = false; });
 
   pbvh.pixels_->flags.dirty = false;
+  pbvh.pixels_->layout_key = BKE_paint_pixels_layout_key_get(
+      image, image_user, uv_map_name);
 
 // #define DO_PRINT_STATISTICS
 #ifdef DO_PRINT_STATISTICS
@@ -449,17 +560,36 @@ void collect_dirty_tiles(PixelNode &node, Vector<image::TileNumber> &r_dirty_til
 
 namespace bke::pbvh {
 
-void build_pixels(const Depsgraph &depsgraph, Object &object, Image &image, ImageUser &image_user)
+bool build_pixels(const Depsgraph &depsgraph,
+                  Object &object,
+                  Image &image,
+                  ImageUser &image_user,
+                  const StringRef uv_map_name)
 {
   PRF_scope(ProfileCategory::Editor);
   Tree &pbvh = *object::pbvh_get(object);
-  pixels::update_pixels(depsgraph, object, pbvh, image, image_user);
+  const std::string layout_key = BKE_paint_pixels_layout_key_get(image, image_user, uv_map_name);
+  for (pixels::PixelData *cached : pbvh.pixels_cache_) {
+    if (cached->layout_key == layout_key) {
+      pbvh.pixels_ = cached;
+      if (!cached->flags.dirty) {
+        return true;
+      }
+      return pixels::update_pixels(depsgraph, object, pbvh, image, image_user, uv_map_name);
+    }
+  }
+
+  pbvh.pixels_ = MEM_new<pixels::PixelData>(__func__);
+  pbvh.pixels_cache_.append(pbvh.pixels_);
+  return pixels::update_pixels(depsgraph, object, pbvh, image, image_user, uv_map_name);
 }
 
 void pixels_free(Tree *pbvh)
 {
-  pixels::PixelData *pbvh_data = pbvh->pixels_;
-  MEM_delete(pbvh_data);
+  for (pixels::PixelData *cached : pbvh->pixels_cache_) {
+    MEM_delete(cached);
+  }
+  pbvh->pixels_cache_.clear();
   pbvh->pixels_ = nullptr;
 }
 

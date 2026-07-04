@@ -166,6 +166,62 @@ struct BrushCurvesSculptSettings {
   struct CurveMapping *curve_parameter_falloff = nullptr;
 };
 
+/**
+ * Tangent-space convention of a Normal channel's source image, matching the Shader Editor's
+ * Normal Map node: OpenGL stores +Y (green) pointing up, DirectX stores it flipped.
+ * Meaningless for any channel other than #PAINT_MATERIAL_CHANNEL_NORMAL.
+ */
+enum eBrushMaterialPaintNormalSpace : int8_t {
+  BRUSH_MATERIAL_PAINT_NORMAL_SPACE_OPENGL = 0,
+  BRUSH_MATERIAL_PAINT_NORMAL_SPACE_DIRECTX = 1,
+};
+
+struct BrushMaterialPaintChannel {
+  DNA_DEFINE_CXX_METHODS(BrushMaterialPaintChannel)
+
+  /**
+   * Paint value. Scalar channels use \a value[0]; Normal uses the full XYZ tangent
+   * (default flat tangent). Unused for Base Color (Base Color follows
+   * #BrushMaterialPaint.base_color).
+   */
+  float value[3] = {0.0f, 0.0f, 1.0f};
+  /** #IMB_BlendMode. */
+  short blend = 0;
+  char use = 0;
+  /** #eBrushMaterialPaintNormalSpace. Only read for the Normal channel. */
+  char normal_space = 0;
+
+  /**
+   * Source texture sampled instead of `value` / base color. Inactive when `tex` is null.
+   * Sampled through the same brush mapping machinery as #Brush.mtex, so all brush map modes
+   * work without extra coordinate handling.
+   */
+  struct MTex source_mtex;
+};
+
+struct BrushMaterialPaint {
+  DNA_DEFINE_CXX_METHODS(BrushMaterialPaint)
+
+  /** Indexed by #eMaterialPaintChannel. */
+  BrushMaterialPaintChannel channels[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
+  /** RGB written by the Base Color channel when not synced with the brush color. */
+  float base_color[3] = {1.0f, 1.0f, 1.0f};
+  char use_sync_base_color_with_brush = 1;
+  /** When the Alpha channel is enabled, write stroke values into the Alpha map. */
+  char use_alpha_map = 1;
+  /** When the Alpha channel is enabled, sample Alpha to mask other channels' writes this stroke. */
+  char use_alpha_stroke_mask = 1;
+  char _pad = 0;
+  /**
+   * Mapping (map_mode, size, angle) shared by every channel's source texture, so multi-channel
+   * patterns (e.g. a Base Color texture with a matching Normal/Roughness texture) stay aligned
+   * instead of drifting apart because one channel's mapping was tweaked independently.
+   * #MTex.tex is never set here; each channel keeps its own source texture identity in
+   * #BrushMaterialPaintChannel.source_mtex.tex, only reading mapping from here at paint time.
+   */
+  struct MTex shared_source_mapping;
+};
+
 /** Max number of propagation steps for automasking settings. */
 #define AUTOMASKING_BOUNDARY_EDGES_MAX_PROPAGATION_STEPS 20
 /**
@@ -443,6 +499,8 @@ struct Brush {
 
   struct BrushGpencilSettings *gpencil_settings = nullptr;
   struct BrushCurvesSculptSettings *curves_sculpt_settings = nullptr;
+  /** Lazily allocated by #BKE_brush_material_paint_ensure. */
+  struct BrushMaterialPaint *material_paint = nullptr;
 
   DNA_DEPRECATED int automasking_cavity_blur_steps = 0;
   DNA_DEPRECATED float automasking_cavity_factor = 1.0f;

@@ -304,6 +304,11 @@ add_blender_test(
 )
 
 add_blender_test(
+  script_pbr_channels
+  --python ${CMAKE_CURRENT_LIST_DIR}/bl_pbr_channels.py
+)
+
+add_blender_test(
   script_pyapi_bpy_utils_units
   --python ${CMAKE_CURRENT_LIST_DIR}/bl_pyapi_bpy_utils_units.py
 )

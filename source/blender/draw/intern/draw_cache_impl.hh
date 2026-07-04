@@ -209,6 +209,9 @@ Span<gpu::Batch *> DRW_mesh_batch_cache_get_surface_shaded(Object &object,
 Span<gpu::Batch *> DRW_mesh_batch_cache_get_surface_texpaint(Object &object, Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_texpaint_single(Object &object, Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_vertpaint(Object &object, Mesh &mesh);
+gpu::Batch *DRW_mesh_batch_cache_get_surface_material_props(Object &object, Mesh &mesh);
+Span<gpu::Batch *> DRW_mesh_batch_cache_get_surface_shaded_material_props(
+    Object &object, Mesh &mesh, Span<const GPUMaterial *> materials);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_sculpt(Object &object, Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_surface_weights(Mesh &mesh);
 gpu::Batch *DRW_mesh_batch_cache_get_sculpt_overlays(Mesh &mesh);

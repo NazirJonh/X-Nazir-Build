@@ -83,6 +83,8 @@ set(SRC
   mesh/paint_image_2d_curve_mask.cc
   mesh/paint_image_ops_paint.cc
   mesh/paint_image_proj.cc
+  mesh/paint_material_attribute.cc
+  mesh/paint_material_source.cc
   mesh/paint_mask.cc
   mesh/paint_vertex.cc
   mesh/paint_vertex_color_ops.cc
@@ -109,6 +111,7 @@ set(SRC
   mesh/sculpt_ops.cc
   mesh/sculpt_paint_color.cc
   mesh/sculpt_paint_image.cc
+  mesh/sculpt_paint_material.cc
   mesh/sculpt_pose.cc
   mesh/sculpt_project.cc
   mesh/sculpt_smooth.cc
@@ -127,6 +130,8 @@ set(SRC
 
   mesh/mesh_brush_common.hh
   mesh/paint_hide.hh
+  mesh/paint_material_attribute.hh
+  mesh/paint_material_source.hh
   mesh/paint_mask.hh
   mesh/sculpt_automask.hh
   mesh/sculpt_boundary.hh
@@ -142,6 +147,7 @@ set(SRC
   mesh/sculpt_hide.hh
   mesh/sculpt_intern.hh
   mesh/sculpt_islands.hh
+  mesh/sculpt_paint_material.hh
   mesh/sculpt_pose.hh
   mesh/sculpt_smooth.hh
   mesh/sculpt_undo.hh

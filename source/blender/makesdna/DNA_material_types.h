@@ -280,6 +280,18 @@ struct TexPaintSlot {
   int interp = 0;
 };
 
+/** Runtime-only resolution cache for #BKE_paint_principled_channel_image_get. Not saved to disk. */
+struct MaterialPaintChannelCache {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintChannelCache)
+
+  struct Image *image = nullptr;
+  struct ImageUser *iuser = nullptr;
+  char valid = 0;
+  char resolved = 0;
+  /** Pad to 8-byte alignment (pointers force align 8; size must be multiple of align). */
+  char _pad[6] = {};
+};
+
 struct MaterialGPencilStyle {
   DNA_DEFINE_CXX_METHODS(MaterialGPencilStyle)
 
@@ -451,6 +463,12 @@ struct Material {
    * BKE_texpaint_slot_refresh_cache before using.
    */
   struct TexPaintSlot *texpaintslot = nullptr;
+
+  /**
+   * Cached Principled-socket image resolution for material paint channels.
+   * Must be refreshed via #BKE_paint_material_channel_cache_invalidate before using after edits.
+   */
+  MaterialPaintChannelCache paint_channel_cache[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
 
   /** Runtime cache for GLSL materials. */
   ListBaseT<LinkData> gpumaterial = {nullptr, nullptr};

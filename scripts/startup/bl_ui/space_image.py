@@ -16,6 +16,9 @@ from bl_ui.properties_paint_common import (
     brush_settings,
     brush_settings_advanced,
     draw_color_settings,
+    draw_material_paint_channels,
+    draw_material_paint_visibility_chevron,
+    draw_material_paint_visibility_popover,
     ClonePanel,
     BrushSelectPanel,
     TextureMaskPanel,
@@ -1248,6 +1251,142 @@ class IMAGE_PT_paint_select(Panel, ImagePaintPanel, BrushSelectPanel):
     bl_category = "Tool"
 
 
+class IMAGE_PT_material_paint_channel_visibility(Panel):
+    bl_label = "Visible Channels"
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    def draw(self, context):
+        draw_material_paint_visibility_popover(
+            context, self.layout, context.tool_settings.paint_mode,
+        )
+
+
+class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
+    bl_context = ".paint_common_2d"
+    bl_category = "Tool"
+    bl_label = ""
+
+    @classmethod
+    def poll(cls, context):
+        sima = context.space_data
+        return sima and sima.mode == 'PAINT'
+
+    def draw_header(self, context):
+        paint = context.tool_settings.paint_mode
+        ob = context.object
+        me = ob.data if ob else None
+
+        label = iface_("Canvas")
+
+        if paint.canvas_source == 'MATERIAL':
+            label = iface_("Material")
+        elif paint.canvas_source == 'MATERIAL_PAINT':
+            label = iface_("Material Paint")
+        elif paint.canvas_source == 'COLOR_ATTRIBUTE':
+            if me:
+                active_color = me.color_attributes.active_color
+                label = (
+                    active_color.name if active_color else
+                    iface_("Color Attribute")
+                )
+            else:
+                label = iface_("Color Attribute")
+        elif paint.canvas_image:
+            label = paint.canvas_image.name
+
+        self.layout.label(text="PBR Paint")
+        row = self.layout.row(align=True)
+        row.prop(paint, "canvas_source", text="")
+        draw_material_paint_visibility_chevron(
+            context, row, paint, panel="IMAGE_PT_material_paint_channel_visibility",
+        )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        settings = context.tool_settings.image_paint
+        mode_settings = context.tool_settings.paint_mode
+        ob = context.active_object
+
+        if self.is_popover:
+            layout.prop(mode_settings, "canvas_source", text="Mode")
+            layout.separator()
+
+        have_image = False
+        canvas_source = mode_settings.canvas_source
+
+        match canvas_source:
+            case 'MATERIAL' | 'MATERIAL_PAINT':
+                if canvas_source == 'MATERIAL' and ob and len(ob.material_slots) > 1:
+                    layout.template_list(
+                        "MATERIAL_UL_matslots", "layers",
+                        ob, "material_slots",
+                        ob, "active_material_index", rows=2,
+                    )
+
+                if canvas_source == 'MATERIAL' and ob:
+                    has_image_fn = getattr(ob, "principled_paint_channel_has_image", None)
+                    if has_image_fn is not None:
+                        have_image = any(
+                            has_image_fn(channel)
+                            for channel in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL', 'ALPHA', 'EMISSION')
+                        )
+
+                draw_material_paint_channels(
+                    context,
+                    layout,
+                    getattr(settings, "brush", None),
+                    mode_settings,
+                    show_custom=(canvas_source == 'MATERIAL_PAINT'),
+                )
+
+            case 'IMAGE':
+                if ob:
+                    mesh = ob.data
+                    uv_text = mesh.uv_layers.active.name if mesh.uv_layers.active else ""
+                    layout.template_ID(mode_settings, "canvas_image", new="image.new", open="image.open")
+                    if settings.missing_uvs:
+                        layout.operator("paint.add_simple_uvs", icon='ADD', text="Add UVs")
+                    else:
+                        layout.menu("VIEW3D_MT_tools_projectpaint_uvlayer", text=uv_text, translate=False)
+                else:
+                    layout.template_ID(mode_settings, "canvas_image", new="image.new", open="image.open")
+                have_image = mode_settings.canvas_image is not None
+
+            case 'COLOR_ATTRIBUTE':
+                if ob:
+                    mesh = ob.data
+
+                    row = layout.row()
+                    col = row.column()
+                    col.template_list(
+                        "MESH_UL_color_attributes_selector",
+                        "color_attributes",
+                        mesh,
+                        "color_attributes",
+                        mesh.color_attributes,
+                        "active_color_index",
+                        rows=3,
+                    )
+
+                    col = row.column(align=True)
+                    col.operator("geometry.color_attribute_add", icon='ADD', text="")
+                    col.operator("geometry.color_attribute_remove", icon='REMOVE', text="")
+
+        if settings.missing_uvs and canvas_source != 'MATERIAL_PAINT':
+            layout.separator()
+            split = layout.split()
+            split.label(text="UV Map Needed", icon='INFO')
+            split.operator("paint.add_simple_uvs", icon='ADD', text="Add Simple UVs")
+        elif have_image:
+            layout.separator()
+            layout.operator("image.save_all_modified", text="Save All Images", icon='FILE_TICK')
+
+
 class IMAGE_PT_paint_settings(Panel, ImagePaintPanel):
     bl_context = ".paint_common_2d"
     bl_category = "Tool"
@@ -1879,6 +2018,8 @@ classes = (
     IMAGE_PT_udim_tiles,
     IMAGE_PT_view_display,
     IMAGE_PT_paint_select,
+    IMAGE_PT_material_paint_channel_visibility,
+    IMAGE_PT_paint_canvas,
     IMAGE_PT_paint_settings,
     IMAGE_PT_paint_color,
     IMAGE_PT_paint_swatches,

@@ -29,6 +29,45 @@
 
 namespace blender {
 
+/* Mirrors the descriptor table in #BKE_paint_material_channels. */
+const EnumPropertyItem rna_enum_material_paint_channel_items[] = {
+    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", "Base color channel"},
+    {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", "Metallic channel"},
+    {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", "Roughness channel"},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", "Specular channel"},
+    {PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", "Tangent-space normal map channel"},
+    {PAINT_MATERIAL_CHANNEL_CUSTOM,
+     "CUSTOM",
+     0,
+     "Custom",
+     "User-named float attribute, vertex painting only"},
+    {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", "Scalar height/displacement channel"},
+    {PAINT_MATERIAL_CHANNEL_ALPHA,
+     "ALPHA",
+     0,
+     "Alpha",
+     "Scalar alpha channel; also masks writes to other active channels while enabled"},
+    {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", "Ambient occlusion channel"},
+    {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", "Emission color channel"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Bit-flag values for #PaintModeSettings.visible_material_channels. Must not reuse
+ * #rna_enum_material_paint_channel_items: that table stores channel indices (0..9), while
+ * PROP_ENUM_FLAG requires each item to be a unique power-of-two bit. */
+static const EnumPropertyItem rna_enum_visible_material_paint_channel_items[] = {
+    {1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 const EnumPropertyItem rna_enum_particle_edit_hair_brush_items[] = {
     {PE_BRUSH_COMB, "COMB", 0, "Comb", "Comb hairs"},
     {PE_BRUSH_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth hairs"},
@@ -85,6 +124,11 @@ static const EnumPropertyItem rna_enum_canvas_source_items[] = {
     {PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE, "COLOR_ATTRIBUTE", 0, "Color Attribute", ""},
     {PAINT_CANVAS_SOURCE_MATERIAL, "MATERIAL", 0, "Material", ""},
     {PAINT_CANVAS_SOURCE_IMAGE, "IMAGE", 0, "Image", ""},
+    {PAINT_CANVAS_SOURCE_MATERIAL_PAINT,
+     "MATERIAL_PAINT",
+     0,
+     "Material Paint",
+     "Paint per-vertex material attribute channels"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -577,6 +621,15 @@ static void rna_UnifiedPaintSettings_color_update(bContext *C, PointerRNA *ptr)
   UnifiedPaintSettings *ups = static_cast<UnifiedPaintSettings *>(ptr->data);
   rna_UnifiedPaintSettings_update(C, ptr);
   BKE_brush_color_sync_legacy(ups);
+
+  /* Sync Base Color channel from active brush color when Sync with Brush is on. */
+  const Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  Paint *paint = BKE_paint_get_active(*bmain, scene, view_layer);
+  Brush *brush = BKE_paint_brush(paint);
+  BKE_brush_material_paint_base_color_sync_to_channel(paint, brush);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, brush);
 }
 
 static void rna_UnifiedPaintSettings_size_set(PointerRNA *ptr, int value)
@@ -1416,6 +1469,57 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       prop, nullptr, nullptr, nullptr, "rna_Image_no_renderresult_or_viewer_poll");
   RNA_def_property_flag(prop, PROP_EDITABLE | PROP_CONTEXT_UPDATE);
   RNA_def_property_ui_text(prop, "Texture", "Image used as painting target");
+
+  /* Custom channel attribute name and value range stay scene-level; enable/value/blend live on
+   * #Brush.material_paint. */
+  prop = RNA_def_property(srna, "channel_custom_range", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "channel_custom_range");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_ui_range(prop, -10000.0f, 10000.0f, 0.01, 3);
+  RNA_def_property_ui_text(
+      prop, "Custom Range", "Range painted values of the custom channel are clamped to");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "material_paint_custom_attr", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "material_paint_custom_attr");
+  RNA_def_property_ui_text(
+      prop, "Custom Attribute Name", "Name of custom material attribute when using custom mode");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  static const EnumPropertyItem new_channel_image_size_items[] = {
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_256, "SIZE_256", 0, "256 (256 x 256)", "256 x 256"},
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_512, "SIZE_512", 0, "512 (512 x 512)", "512 x 512"},
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_1K, "SIZE_1K", 0, "1K (1024 x 1024)", "1024 x 1024"},
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_2K, "SIZE_2K", 0, "2K (2048 x 2048)", "2048 x 2048"},
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_4K, "SIZE_4K", 0, "4K (4096 x 4096)", "4096 x 4096"},
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_8K, "SIZE_8K", 0, "8K (8192 x 8192)", "8192 x 8192"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "new_channel_image_size", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "new_channel_image_size");
+  RNA_def_property_enum_items(prop, new_channel_image_size_items);
+  RNA_def_property_enum_default(prop, PAINT_NEW_CHANNEL_IMAGE_SIZE_4K);
+  RNA_def_property_ui_text(prop,
+                           "New Channel Image Size",
+                           "Width and height used for material paint channel images that "
+                           "are auto-created when a channel is enabled");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  const int default_visible_material_channels = (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
+                                                (1 << PAINT_MATERIAL_CHANNEL_METALLIC) |
+                                                (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
+                                                (1 << PAINT_MATERIAL_CHANNEL_NORMAL);
+  prop = RNA_def_enum_flag(srna,
+                           "visible_material_channels",
+                           rna_enum_visible_material_paint_channel_items,
+                           default_visible_material_channels,
+                           "Visible Channels",
+                           "Which material paint channels are shown in the Paint PBR channel "
+                           "list and painted during strokes; hidden channels keep their settings "
+                           "but are skipped until shown again");
+  RNA_def_property_enum_sdna(prop, nullptr, "visible_material_channels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 static void rna_def_image_paint(BlenderRNA *brna)

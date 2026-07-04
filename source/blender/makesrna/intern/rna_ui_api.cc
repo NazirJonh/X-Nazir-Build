@@ -893,6 +893,19 @@ static void rna_template_cache_file(Layout *layout,
   ui::template_cache_file(layout, C, ptr, propname);
 }
 
+static void rna_template_node_socket(Layout *layout,
+                                     bContext *C,
+                                     const float *color,
+                                     const char *menu)
+{
+  if (menu && menu[0]) {
+    ui::template_node_socket_menu(layout, C, color, menu);
+  }
+  else {
+    ui::template_node_socket(layout, C, color);
+  }
+}
+
 static void rna_template_cache_file_velocity(Layout *layout, PointerRNA *ptr, const char *propname)
 {
   PointerRNA fileptr;
@@ -2148,6 +2161,14 @@ void RNA_api_ui_layout(StructRNA *srna)
   api_ui_item_rna_common(func);
   RNA_def_boolean(func, "expand", false, "", "Expand button to show more detail");
 
+  func = RNA_def_function(
+      srna, "template_material_paint_value_slider", "template_material_paint_value_slider");
+  RNA_def_function_ui_description(
+      func, "Horizontal gradient slider with a single handle for material paint scalar values");
+  api_ui_item_rna_common(func);
+  RNA_def_int(
+      func, "index", 0, 0, INT_MAX, "Index", "Array index for the float property", 0, INT_MAX);
+
   func = RNA_def_function(srna, "template_icon", "template_icon");
   RNA_def_function_ui_description(func, "Display a large icon");
   parm = RNA_def_int(func, "icon_value", 0, 0, INT_MAX, "Icon to display", "", 0, INT_MAX);
@@ -2477,11 +2498,12 @@ void RNA_api_ui_layout(StructRNA *srna)
 #  endif
 
   /* node socket icon */
-  func = RNA_def_function(srna, "template_node_socket", "template_node_socket");
+  func = RNA_def_function(srna, "template_node_socket", "rna_template_node_socket");
   RNA_def_function_ui_description(func, "Node Socket Icon");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   RNA_def_float_array(
       func, "color", 4, node_socket_color_default, 0.0f, 1.0f, "Color", "", 0.0f, 1.0f);
+  parm = RNA_def_string(func, "menu", nullptr, 0, "", "Menu to open when the socket is clicked");
 
   func = RNA_def_function(srna, "template_cache_file", "rna_template_cache_file");
   RNA_def_function_ui_description(

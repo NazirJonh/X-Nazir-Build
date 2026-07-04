@@ -65,6 +65,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
+#include "BKE_paint.hh"
 #include "BKE_pointcloud.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_scene.hh"
@@ -142,6 +143,7 @@ static void material_copy_data(Main *bmain,
   }
 
   material_dst->gpumaterial.clear_no_delete();
+  BKE_paint_material_channel_cache_invalidate(material_dst);
 
   /* TODO: Duplicate Engine Settings and set runtime to nullptr. */
 }
@@ -208,6 +210,7 @@ static void material_blend_write(BlendWriter *writer, ID *id, const void *id_add
   /* Clean up, important in undo case to reduce false detection of changed datablocks. */
   ma->texpaintslot = nullptr;
   ma->gpumaterial.clear_no_delete();
+  BKE_paint_material_channel_cache_invalidate(ma);
 
   /* Set deprecated #use_nodes for forward compatibility. */
   ma->use_nodes = true;
@@ -242,6 +245,7 @@ static void material_blend_read_data(BlendDataReader *reader, ID *id)
   BKE_previewimg_blend_read(reader, ma->preview);
 
   ma->gpumaterial.clear_no_delete();
+  BKE_paint_material_channel_cache_invalidate(ma);
 
   BLO_read_struct(reader, MaterialGPencilStyle, &ma->gp_style);
 }
@@ -1759,7 +1763,7 @@ static void fill_texpaint_slots_recursive(bNodeTree *nodetree,
 static ePaintSlotFilter material_paint_slot_filter(const Object *ob)
 {
   ePaintSlotFilter slot_filter = PAINT_SLOT_IMAGE;
-  if (ob->mode == OB_MODE_SCULPT && USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint)) {
+  if (ob->mode == OB_MODE_SCULPT) {
     slot_filter |= PAINT_SLOT_COLOR_ATTRIBUTE;
   }
   return slot_filter;
@@ -1770,6 +1774,8 @@ void BKE_texpaint_slot_refresh_cache(Scene *scene, Material *ma, const Object *o
   if (!ma) {
     return;
   }
+
+  BKE_paint_material_channel_cache_invalidate(ma);
 
   const ePaintSlotFilter slot_filter = material_paint_slot_filter(ob);
 

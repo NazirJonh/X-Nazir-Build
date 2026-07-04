@@ -12,6 +12,7 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_texture_types.h"
 #include "DNA_windowmanager_types.h"
 
 #include "BKE_paint.hh"
@@ -40,6 +41,16 @@ struct PaintCursorContext {
   Paint *paint = nullptr;
   PaintMode mode = PaintMode::Invalid;
   ViewContext vc = {};
+
+  /** Backing storage for #material_preview_mtex (see #BKE_paint_material_preview_mtex_get);
+   * owned here since it is a value the preview builds (channel texture + shared mapping), not a
+   * pointer into DNA data. */
+  MTex material_preview_mtex_storage = {};
+  /** Material paint channel source to preview in the alpha/stencil overlay instead of the
+   * brush's own #mtex, so the user can see the pattern they are about to paint. Null when the
+   * brush is not a Material Paint brush, or no enabled channel has a usable source. Points at
+   * #material_preview_mtex_storage when set. */
+  const MTex *material_preview_mtex = nullptr;
 
   /* Sculpt related data. */
   Sculpt *sd = nullptr;

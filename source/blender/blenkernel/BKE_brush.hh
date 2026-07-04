@@ -81,6 +81,33 @@ void BKE_brush_init_mesh_automasking_settings(Brush *brush);
 void BKE_brush_init_curves_sculpt_settings(Brush *brush);
 
 /**
+ * Lazily allocates #Brush.material_paint if null.
+ * Call before reading/writing per-channel material paint values.
+ */
+void BKE_brush_material_paint_ensure(Brush *brush);
+
+/**
+ * Copy the brush's paint color into the Base Color channel, when the brush has material paint
+ * settings with Sync with Brush enabled.
+ *
+ * \param paint: the active paint, used to resolve the unified color. May be null, in which case
+ * #Brush.color is read directly — the caller then only knows about the brush, not the mode.
+ *
+ * \note Both sync directions share one re-entrancy guard, so a sync triggered from either side
+ * cannot bounce back into the other. Keeping the guard here rather than in RNA is the whole point
+ * of this pair living in blenkernel: RNA reaches the Base Color from several unrelated update
+ * callbacks (brush color, unified color, the channel itself), and per-file guards would not see
+ * each other.
+ */
+void BKE_brush_material_paint_base_color_sync_to_channel(const Paint *paint, Brush *brush);
+
+/**
+ * Copy the Base Color channel into the brush's paint color, when Sync with Brush is enabled.
+ * The inverse of #BKE_brush_material_paint_base_color_sync_to_channel; shares its guard.
+ */
+void BKE_brush_material_paint_base_color_sync_to_brush(Paint *paint, Brush *brush);
+
+/**
  * Tag a linked brush as having changed settings so an indicator can be displayed to the user,
  * showing that the brush settings differ from the state of the imported brush asset. Call
  * every time a user visible change to the brush is done.

@@ -84,9 +84,10 @@ struct FragOut {
     color.rgb = workbench::get_matcap_lighting(srt.world, srt.matcap_tx, base_color, N, V);
   }
   else if (srt.lighting_mode == WORKBENCH_LIGHTING_STUDIO) [[static_branch]] {
-    float roughness = 0.0f, metallic = 0.0f;
-    workbench::float_pair_decode(mat_data.a, roughness, metallic);
-    color.rgb = workbench::get_world_lighting(srt.world, base_color, roughness, metallic, N, V);
+    float roughness = 0.0f, metallic = 0.0f, specular = 0.0f;
+    workbench::float_triplet_decode(mat_data.a, roughness, metallic, specular);
+    color.rgb = workbench::get_world_lighting(
+        srt.world, base_color, roughness, metallic, specular, N, V);
   }
   else if (srt.lighting_mode == WORKBENCH_LIGHTING_FLAT) [[static_branch]] {
     color.rgb = base_color;

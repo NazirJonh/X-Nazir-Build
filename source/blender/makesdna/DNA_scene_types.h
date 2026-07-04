@@ -1183,7 +1183,39 @@ enum ePaintCanvasSource : char {
   PAINT_CANVAS_SOURCE_IMAGE = 1,
   /** Paint on the active color attribute (vertex color) layer. */
   PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE = 2,
+  /** Paint enabled material channels into per-vertex float attributes. */
+  PAINT_CANVAS_SOURCE_MATERIAL_PAINT = 3,
 };
+
+/**
+ * A material paint channel. Used as the index into the per-channel arrays of
+ * #PaintModeSettings, so the values must stay contiguous and start at zero.
+ *
+ * All other per-channel knowledge (attribute name, Principled BSDF socket, value range) lives in
+ * the descriptor table returned by #BKE_paint_material_channels, not in switch statements.
+ */
+enum eMaterialPaintChannel : int8_t {
+  /** RGB channel, written into the mesh color attribute or the Base Color map. */
+  PAINT_MATERIAL_CHANNEL_BASE_COLOR = 0,
+  PAINT_MATERIAL_CHANNEL_METALLIC = 1,
+  PAINT_MATERIAL_CHANNEL_ROUGHNESS = 2,
+  PAINT_MATERIAL_CHANNEL_SPECULAR = 3,
+  /** Tangent-space normal map channel (Mode=`Material` image paint). */
+  PAINT_MATERIAL_CHANNEL_NORMAL = 4,
+  /** User-named float attribute, vertex painting only. */
+  PAINT_MATERIAL_CHANNEL_CUSTOM = 5,
+  /** Scalar height/displacement channel. */
+  PAINT_MATERIAL_CHANNEL_HEIGHT = 6,
+  /** Alpha channel; masks stroke write strength across all other active channels. */
+  PAINT_MATERIAL_CHANNEL_ALPHA = 7,
+  /** Ambient Occlusion scalar channel. */
+  PAINT_MATERIAL_CHANNEL_AO = 8,
+  /** Emission color channel (RGB, routes through the generic color-attribute path). */
+  PAINT_MATERIAL_CHANNEL_EMISSION = 9,
+};
+
+/** Number of #eMaterialPaintChannel values. Sizes the per-channel arrays in DNA. */
+#define PAINT_MATERIAL_CHANNEL_NUM 10
 
 struct MeshAutomaskingSettings {
   DNA_DEFINE_CXX_METHODS(MeshAutomaskingSettings)
@@ -1341,6 +1373,45 @@ struct PaintModeSettings {
   /** Selected image when canvas_source=PAINT_CANVAS_SOURCE_IMAGE. */
   Image *canvas_image = nullptr;
   ImageUser image_user;
+
+  /* Multi-channel material paint (Modes Material + Material Paint).
+   * Per-channel enable/value/blend live on #BrushMaterialPaint; only Custom's attribute
+   * name and value range stay scene-level. */
+
+  /**
+   * Value range of the Custom channel. The fixed channels take their range from the descriptor
+   * table (#BKE_paint_material_channels); only Custom is user-defined, since it can target an
+   * arbitrary float attribute.
+   */
+  float channel_custom_range[2] = {0.0f, 1.0f};
+  /** Attribute name painted by #PAINT_MATERIAL_CHANNEL_CUSTOM. */
+  char material_paint_custom_attr[64] = {};
+
+  /** Width/height (in pixels) used for newly auto-created per-channel material paint images.
+   * \see ePaintNewChannelImageSize. */
+  int new_channel_image_size = 4096;
+
+  /**
+   * Bitmask of #eMaterialPaintChannel values controlling which channels are shown in the Paint
+   * PBR channel list and participate in strokes. Independent of each channel's
+   * #BrushMaterialPaintChannel.use: hiding a channel here does not clear its value or source
+   * texture, but the channel is omitted from the UI and skipped during painting until shown
+   * again. #PAINT_MATERIAL_CHANNEL_CUSTOM is deliberately not represented in this bitmask; it
+   * keeps its own separate `show_custom` UI gate (draw-time argument, not stored state),
+   * matching how the preview-priority list (#BKE_paint_material_preview_mtex_get) already
+   * excludes Custom.
+   */
+  int visible_material_channels = 0;
+};
+
+/** #PaintModeSettings::new_channel_image_size */
+enum ePaintNewChannelImageSize : int {
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_256 = 256,
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_512 = 512,
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_1K = 1024,
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_2K = 2048,
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_4K = 4096,
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_8K = 8192,
 };
 
 /** \} */

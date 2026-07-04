@@ -131,6 +131,10 @@ static void brush_copy_data(Main * /*bmain*/,
     brush_dst->curves_sculpt_settings->curve_parameter_falloff = BKE_curvemapping_copy(
         brush_src->curves_sculpt_settings->curve_parameter_falloff);
   }
+  if (brush_src->material_paint != nullptr) {
+    brush_dst->material_paint = MEM_new<BrushMaterialPaint>(
+        __func__, dna::shallow_copy(*(brush_src->material_paint)));
+  }
   if (brush_src->mesh_automasking_settings != nullptr) {
     brush_dst->mesh_automasking_settings = MEM_new<MeshAutomaskingSettings>(
         __func__, dna::shallow_copy(*(brush_src->mesh_automasking_settings)));
@@ -177,6 +181,7 @@ static void brush_free_data(ID *id)
     BKE_curvemapping_free(brush->curves_sculpt_settings->curve_parameter_falloff);
     MEM_delete(brush->curves_sculpt_settings);
   }
+  MEM_SAFE_DELETE(brush->material_paint);
   if (brush->mesh_automasking_settings != nullptr) {
     BKE_curvemapping_free(brush->mesh_automasking_settings->cavity_curve);
     MEM_delete(brush->mesh_automasking_settings);
@@ -236,6 +241,15 @@ static void brush_foreach_id(ID *id, LibraryForeachIDData *data)
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, BKE_texture_mtex_foreach_id(data, &brush->mtex));
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data,
                                           BKE_texture_mtex_foreach_id(data, &brush->mask_mtex));
+  /* Each channel owns its own source texture; without this the user count is never updated and
+   * remapping, library overrides and unused-data purging all miss them. */
+  if (brush->material_paint) {
+    for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+      BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(
+          data,
+          BKE_texture_mtex_foreach_id(data, &brush->material_paint->channels[i].source_mtex));
+    }
+  }
 }
 
 static void brush_foreach_working_space_color(ID *id, const IDTypeForeachColorFunctionCallback &fn)
@@ -320,6 +334,9 @@ static void brush_blend_write(BlendWriter *writer, ID *id, const void *id_addres
   if (brush->curves_sculpt_settings) {
     writer->write_struct(brush->curves_sculpt_settings);
     BKE_curvemapping_blend_write(writer, brush->curves_sculpt_settings->curve_parameter_falloff);
+  }
+  if (brush->material_paint) {
+    writer->write_struct(brush->material_paint);
   }
   if (brush->mesh_automasking_settings) {
     writer->write_struct(brush->mesh_automasking_settings);
@@ -463,6 +480,8 @@ static void brush_blend_read_data(BlendDataReader *reader, ID *id)
       BKE_curvemapping_blend_read(reader, brush->curves_sculpt_settings->curve_parameter_falloff);
     }
   }
+
+  BLO_read_struct(reader, BrushMaterialPaint, &brush->material_paint);
 
   BLO_read_struct(reader, MeshAutomaskingSettings, &brush->mesh_automasking_settings);
   if (brush->mesh_automasking_settings) {
@@ -795,6 +814,95 @@ void BKE_brush_init_curves_sculpt_settings(Brush *brush)
   settings->curve_radius = 0.01f;
   settings->density_add_attempts = 100;
   settings->curve_parameter_falloff = BKE_curvemapping_add(1, 0.0f, 0.0f, 1.0f, 1.0f);
+}
+
+void BKE_brush_material_paint_ensure(Brush *brush)
+{
+  if (brush->material_paint != nullptr) {
+    return;
+  }
+  BrushMaterialPaint *settings = MEM_new<BrushMaterialPaint>(__func__);
+  /* Match former scene-level #PaintModeSettings defaults. */
+  settings->channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
+  settings->channels[PAINT_MATERIAL_CHANNEL_METALLIC].value[0] = 0.5f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].value[0] = 0.5f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_SPECULAR].value[0] = 0.5f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_NORMAL].value[0] = 0.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_NORMAL].value[1] = 0.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_NORMAL].value[2] = 1.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_CUSTOM].value[0] = 0.5f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].value[0] = 0.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 0;
+  /* Neutral = fully opaque / no masking; masking only activates once the user opts in via use. */
+  settings->channels[PAINT_MATERIAL_CHANNEL_ALPHA].value[0] = 1.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_ALPHA].use = 0;
+  /* Neutral = fully lit / no occlusion. */
+  settings->channels[PAINT_MATERIAL_CHANNEL_AO].value[0] = 1.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_EMISSION].value[0] = 0.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_EMISSION].value[1] = 0.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_EMISSION].value[2] = 0.0f;
+  copy_v3_fl(settings->base_color, 1.0f);
+  settings->use_sync_base_color_with_brush = 1;
+  settings->use_alpha_map = 1;
+  settings->use_alpha_stroke_mask = 1;
+  brush->material_paint = settings;
+}
+
+/**
+ * Shared by both sync directions so that writing one side cannot re-enter and overwrite the other.
+ * A single flag is enough because the sync is always driven from the UI thread, one property edit
+ * at a time.
+ */
+static bool brush_material_paint_base_color_sync_guard = false;
+
+/** The state both sync directions need, or null when there is nothing to sync. */
+static BrushMaterialPaint *brush_material_paint_sync_settings_get(const Brush *brush)
+{
+  if (brush == nullptr || brush->material_paint == nullptr ||
+      brush_material_paint_base_color_sync_guard)
+  {
+    return nullptr;
+  }
+  BrushMaterialPaint *settings = brush->material_paint;
+  if (!settings->use_sync_base_color_with_brush) {
+    return nullptr;
+  }
+  return settings;
+}
+
+void BKE_brush_material_paint_base_color_sync_to_channel(const Paint *paint, Brush *brush)
+{
+  BrushMaterialPaint *settings = brush_material_paint_sync_settings_get(brush);
+  if (settings == nullptr) {
+    return;
+  }
+
+  /* Without a Paint the unified color is unreachable, so fall back to the brush's own color. */
+  const float3 color = paint ? BKE_brush_color_get(paint, brush) : float3(brush->color);
+  if (equals_v3v3(settings->base_color, color)) {
+    return;
+  }
+
+  brush_material_paint_base_color_sync_guard = true;
+  copy_v3_v3(settings->base_color, color);
+  brush_material_paint_base_color_sync_guard = false;
+}
+
+void BKE_brush_material_paint_base_color_sync_to_brush(Paint *paint, Brush *brush)
+{
+  BrushMaterialPaint *settings = brush_material_paint_sync_settings_get(brush);
+  if (settings == nullptr || paint == nullptr) {
+    return;
+  }
+
+  const float3 color = float3(settings->base_color);
+  if (equals_v3v3(BKE_brush_color_get(paint, brush), color)) {
+    return;
+  }
+
+  brush_material_paint_base_color_sync_guard = true;
+  BKE_brush_color_set(paint, brush, color);
+  brush_material_paint_base_color_sync_guard = false;
 }
 
 void BKE_brush_tag_unsaved_changes(Brush *brush)

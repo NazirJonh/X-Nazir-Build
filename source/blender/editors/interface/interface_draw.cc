@@ -29,6 +29,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curveprofile.h"
+#include "BKE_paint.hh"
 #include "BKE_tracking.hh"
 
 #include "IMB_colormanagement.hh"
@@ -1505,6 +1506,128 @@ void draw_but_COLORBAND(Button *but, const uiWidgetColors *wcol, const rcti *rec
     const float pos = x1 + cbd->pos * (sizex - 1) + 1;
     draw_colorband_handle(pos_id, rect, pos, &cbd->r, display, true);
   }
+}
+
+void button_material_paint_value_track_x(const rctf &but_rect, float *r_x1, float *r_sizex)
+{
+  /* Same insets as the former widgets.cc padding + draw pixelsize inset. */
+  const float padding = BLI_rctf_size_y(&but_rect) / 6.0f;
+  const float xmin = but_rect.xmin + padding;
+  const float xmax = but_rect.xmax - padding;
+  *r_x1 = xmin + float(U.pixelsize);
+  *r_sizex = xmax - float(U.pixelsize) - *r_x1;
+}
+
+void draw_but_MATERIAL_PAINT_VALUE(Button *but, const uiWidgetColors *wcol, const rcti *rect)
+{
+  const float value_min = but->softmin;
+  const float value_max = but->softmax;
+  const float value = float(button_value_get(but));
+
+  rctf but_rect;
+  BLI_rctf_rcti_copy(&but_rect, rect);
+
+  float x1 = 0.0f;
+  float sizex = 0.0f;
+  button_material_paint_value_track_x(but_rect, &x1, &sizex);
+
+  /* Outline box is the track (x1..x1+sizex) let back out by one pixelsize on each side. Derived
+   * from the track bounds rather than re-deriving padding from but_rect, so the outline can
+   * never drift a fraction of a pixel out of sync with the gradient/handle track it encloses. */
+  const float outline_x1 = x1 - float(U.pixelsize);
+  const float outline_x2 = x1 + sizex + float(U.pixelsize);
+
+  rcti padded_rect = *rect;
+
+  const float y1 = padded_rect.ymin + U.pixelsize;
+  const float sizey = padded_rect.ymax - y1 - U.pixelsize;
+
+  if (sizex <= 0.0f || sizey <= 0.0f) {
+    return;
+  }
+
+  GPU_blend(GPU_BLEND_ALPHA);
+
+  /* Outline around the padded strip (handle room at edges). */
+  GPUVertFormat *format = immVertexFormat();
+  uint pos_id = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+  immUniformColor4ubv(wcol->outline);
+  immBegin(GPU_PRIM_TRI_STRIP, 4);
+  immVertex2f(pos_id, outline_x1, padded_rect.ymin);
+  immVertex2f(pos_id, outline_x2, padded_rect.ymin);
+  immVertex2f(pos_id, outline_x1, padded_rect.ymax);
+  immVertex2f(pos_id, outline_x2, padded_rect.ymax);
+  immEnd();
+  immUnbindProgram();
+
+  /* Gradient fill sampled across the strip. */
+  format = immVertexFormat();
+  pos_id = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  const uint col_id = GPU_vertformat_attr_add(
+      format, "color", gpu::VertAttrType::SFLOAT_32_32_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_SMOOTH_COLOR);
+
+  float v1[2], v2[2];
+  float rgb[3];
+  v1[1] = y1;
+  v2[1] = y1 + sizey;
+
+  const int samples = int(sizex) + 1;
+  immBegin(GPU_PRIM_TRI_STRIP, samples * 2);
+  for (int a = 0; a < samples; a++) {
+    const float t = (samples > 1) ? (float(a) / float(samples - 1)) : 0.0f;
+    BKE_paint_material_value_gradient_color(value_min, value_max, t, rgb);
+    v1[0] = v2[0] = x1 + float(a);
+
+    immAttr4f(col_id, rgb[0], rgb[1], rgb[2], 1.0f);
+    immVertex2fv(pos_id, v1);
+    immVertex2fv(pos_id, v2);
+  }
+  immEnd();
+  immUnbindProgram();
+
+  const float track = max_ff(sizex - 1.0f, 0.0f);
+
+  /* Reference tick on the same track as the handle, at whichever value is the neutral one for
+   * this range:
+   * - Unipolar (e.g. [0,1] factors): black mark at the minimum, value 0.
+   * - Bipolar (range straddles zero, e.g. [-1,1] height): white mark at value 0, wherever that
+   *   falls in the range (not necessarily the track center). */
+  {
+    const MaterialPaintValueGradientMode mode = BKE_paint_material_value_gradient_mode(value_min,
+                                                                                       value_max);
+    const float t_tick = (mode == MaterialPaintValueGradientMode::Bipolar) ?
+                             BKE_paint_material_t_from_value(value_min, value_max, 0.0f) :
+                             0.0f;
+    const float mid_x = floorf(x1 + t_tick * track + 1.0f);
+    const float tick = (mode == MaterialPaintValueGradientMode::Bipolar) ? 1.0f : 0.0f;
+
+    format = immVertexFormat();
+    pos_id = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+    immUniformColor4f(tick, tick, tick, 1.0f);
+    const float line_width = max_ff(1.0f, float(U.pixelsize));
+    GPU_line_width(line_width);
+    immBegin(GPU_PRIM_LINES, 2);
+    immVertex2f(pos_id, mid_x, y1);
+    immVertex2f(pos_id, mid_x, y1 + sizey);
+    immEnd();
+    immUnbindProgram();
+    /* Restore the default line width; this widget is the only caller that changes it. */
+    GPU_line_width(1.0f);
+  }
+
+  /* Single handle at current value (same track as click/drag mapping). */
+  const float t = BKE_paint_material_t_from_value(value_min, value_max, value);
+  const float handle_x = floorf(x1 + t * track + 1.0f);
+  BKE_paint_material_value_gradient_color(value_min, value_max, t, rgb);
+
+  format = immVertexFormat();
+  pos_id = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  draw_colorband_handle(pos_id, &padded_rect, handle_x, rgb, nullptr, true);
+
+  GPU_blend(GPU_BLEND_NONE);
 }
 
 void draw_but_UNITVEC(Button *but,

@@ -42,6 +42,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 
 #include "IMB_colormanagement.hh"
 
@@ -50,6 +51,7 @@
 #include "curves/sculpt_intern.hh"
 #include "mesh/paint_hide.hh"
 #include "mesh/paint_mask.hh"
+#include "mesh/paint_material_attribute.hh"
 #include "mesh/sculpt_intern.hh"
 
 namespace blender {
@@ -525,6 +527,110 @@ static wmOperatorStatus stencil_reset_transform_exec(bContext *C, wmOperator *op
   return OPERATOR_FINISHED;
 }
 
+static wmOperatorStatus material_paint_brush_ensure_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint brush");
+    return OPERATOR_CANCELLED;
+  }
+  BKE_brush_material_paint_ensure(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus material_channel_value_invert_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active material paint brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  const eMaterialPaintChannel channel_id = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
+  BrushMaterialPaintChannel &channel = brush->material_paint->channels[channel_id];
+
+  const Scene *scene = CTX_data_scene(C);
+  const PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
+  const float2 range = BKE_paint_material_channel_range(mode_settings, channel_id);
+  channel.value[0] = BKE_paint_material_value_invert(range[0], range[1], channel.value[0]);
+
+  BKE_brush_tag_unsaved_changes(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_channel_value_invert(wmOperatorType *ot)
+{
+  ot->name = "Invert Value";
+  ot->idname = "PAINT_OT_material_channel_value_invert";
+  ot->description = "Invert this channel's value within its range (min + max - value)";
+  ot->exec = material_channel_value_invert_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  ot->prop = RNA_def_enum(ot->srna,
+                          "channel",
+                          rna_enum_material_paint_channel_items,
+                          PAINT_MATERIAL_CHANNEL_METALLIC,
+                          "Channel",
+                          "Material paint channel to invert");
+}
+
+static wmOperatorStatus material_channel_source_clear_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active material paint brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  const eMaterialPaintChannel channel_id = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
+  BrushMaterialPaintChannel &channel = brush->material_paint->channels[channel_id];
+
+  /* Drop the whole Tex, not just its image: this also recovers a source left in a broken state
+   * (e.g. its image was deleted from Main), which the source_image pointer alone cannot express
+   * since it already reads as unset. */
+  if (channel.source_mtex.tex != nullptr) {
+    id_us_min(&channel.source_mtex.tex->id);
+    channel.source_mtex.tex = nullptr;
+  }
+
+  BKE_brush_tag_unsaved_changes(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_channel_source_clear(wmOperatorType *ot)
+{
+  ot->name = "Clear Source";
+  ot->idname = "PAINT_OT_material_channel_source_clear";
+  ot->description = "Remove this channel's source texture, including one left in a broken state";
+  ot->exec = material_channel_source_clear_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  ot->prop = RNA_def_enum(ot->srna,
+                          "channel",
+                          rna_enum_material_paint_channel_items,
+                          PAINT_MATERIAL_CHANNEL_METALLIC,
+                          "Channel",
+                          "Material paint channel whose source texture should be cleared");
+}
+
+void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot)
+{
+  ot->name = "Enable Material Paint Channels for Brush";
+  ot->idname = "PAINT_OT_material_paint_brush_ensure";
+  ot->description = "Initialize per-channel material paint values for the active brush";
+  ot->exec = material_paint_brush_ensure_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
 static void BRUSH_OT_stencil_reset_transform(wmOperatorType *ot)
 {
   /* identifiers */
@@ -604,6 +710,9 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_project_image);
   WM_operatortype_append(PAINT_OT_image_from_view);
   WM_operatortype_append(PAINT_OT_brush_colors_flip);
+  WM_operatortype_append(PAINT_OT_material_paint_brush_ensure);
+  WM_operatortype_append(PAINT_OT_material_channel_value_invert);
+  WM_operatortype_append(PAINT_OT_material_channel_source_clear);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 
@@ -653,6 +762,10 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_face_select_loop);
 
   WM_operatortype_append(PAINT_OT_face_vert_reveal);
+
+  /* material attributes (Poly Paint) */
+  WM_operatortype_append(PAINT_OT_material_attribute_add);
+  WM_operatortype_append(PAINT_OT_material_attribute_remove);
 
   /* partial visibility */
   WM_operatortype_append(hide::PAINT_OT_hide_show_all);

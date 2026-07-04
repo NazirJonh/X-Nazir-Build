@@ -95,6 +95,13 @@ struct BrushPainter {
   rctf mask_mapping; /* mask texture coordinate mapping */
 
   bool cache_invert;
+
+  /**
+   * When set, Mode=`Material` overrides draw color with a channel color:
+   * RGB for Base Color, or grayscale `(v, v, v)` for scalar channels.
+   */
+  bool use_material_channel_color = false;
+  float material_channel_color[3] = {};
 };
 
 struct ImagePaintRegion {
@@ -144,6 +151,14 @@ struct ImagePaintState {
   int num_tiles;
 
   BlurKernel *blurkernel;
+
+  /**
+   * Owned secondary stroke states for Mode=MATERIAL multi-map write.
+   * Primary target is this state; extras are additional Principled maps.
+   * Only the root stroke handle owns extras (extras themselves have none).
+   */
+  ImagePaintState **material_extra_states;
+  int material_extra_states_num;
 };
 
 static BrushPainter *brush_painter_2d_new(Scene *scene,
@@ -410,8 +425,13 @@ static ImBuf *brush_painter_imbuf_new(
 
   /* get brush color */
   if (brush->image_brush_type == IMAGE_PAINT_BRUSH_TYPE_DRAW) {
-    paint_brush_color_get(
-        paint, brush, painter->initial_hsv_jitter, cache->invert, distance, pressure, brush_rgb);
+    if (painter->use_material_channel_color) {
+      copy_v3_v3(brush_rgb, painter->material_channel_color);
+    }
+    else {
+      paint_brush_color_get(
+          paint, brush, painter->initial_hsv_jitter, cache->invert, distance, pressure, brush_rgb);
+    }
 
     if (cache->is_srgb) {
       IMB_colormanagement_scene_linear_to_srgb_v3(brush_rgb, brush_rgb);
@@ -503,8 +523,13 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
 
   /* get brush color */
   if (brush->image_brush_type == IMAGE_PAINT_BRUSH_TYPE_DRAW) {
-    paint_brush_color_get(
-        paint, brush, painter->initial_hsv_jitter, cache->invert, 0.0f, 1.0f, brush_rgb);
+    if (painter->use_material_channel_color) {
+      copy_v3_v3(brush_rgb, painter->material_channel_color);
+    }
+    else {
+      paint_brush_color_get(
+          paint, brush, painter->initial_hsv_jitter, cache->invert, 0.0f, 1.0f, brush_rgb);
+    }
 
     if (cache->is_srgb) {
       IMB_colormanagement_scene_linear_to_srgb_v3(brush_rgb, brush_rgb);
@@ -1507,16 +1532,15 @@ static void paint_2d_uv_to_coord(ImagePaintTile *tile, const float uv[2], float 
   coord[1] = (uv[1] - tile->uv_origin[1]) * tile->size[1];
 }
 
-void paint_2d_stroke(void *ps,
-                     const float prev_mval[2],
-                     const float mval[2],
-                     const bool eraser,
-                     float pressure,
-                     float distance,
-                     float base_size)
+static void paint_2d_stroke_single(ImagePaintState *s,
+                                   const float prev_mval[2],
+                                   const float mval[2],
+                                   const bool eraser,
+                                   float pressure,
+                                   float distance,
+                                   float base_size)
 {
   float new_uv[2], old_uv[2];
-  ImagePaintState *s = static_cast<ImagePaintState *>(ps);
   BrushPainter *painter = s->painter;
 
   s->blend = s->brush->blend;
@@ -1610,7 +1634,40 @@ void paint_2d_stroke(void *ps,
   painter->firsttouch = false;
 }
 
-void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mode)
+void paint_2d_stroke(void *ps,
+                     const float prev_mval[2],
+                     const float mval[2],
+                     const bool eraser,
+                     float pressure,
+                     float distance,
+                     float base_size)
+{
+  ImagePaintState *s = static_cast<ImagePaintState *>(ps);
+  paint_2d_stroke_single(s, prev_mval, mval, eraser, pressure, distance, base_size);
+  for (int i = 0; i < s->material_extra_states_num; i++) {
+    paint_2d_stroke_single(
+        s->material_extra_states[i], prev_mval, mval, eraser, pressure, distance, base_size);
+  }
+}
+
+/**
+ * Initialize a single 2D paint stroke state for \a image.
+ * \param material_iuser: Optional ImageUser from Material target resolve (may be null).
+ * \param material_channel_value: When >= 0 and \a material_channel_rgb is null,
+ *   override brush RGB with (v,v,v).
+ * \param material_channel_rgb: When non-null, override brush RGB with this color
+ *   (Mode=`Material` Base Color). Takes precedence over \a material_channel_value.
+ * \param init_brush_tex: When true, begin brush texture nodetree exec (once per stroke root).
+ * \return Stroke state or null on failure (caller owns success).
+ */
+static ImagePaintState *paint_2d_new_stroke_for_image(bContext *C,
+                                                     wmOperator *op,
+                                                     const BrushStrokeMode mode,
+                                                     Image *image,
+                                                     ImageUser *material_iuser,
+                                                     const float material_channel_value,
+                                                     const float *material_channel_rgb,
+                                                     const bool init_brush_tex)
 {
   Scene *scene = CTX_data_scene(C);
   SpaceImage *sima = CTX_wm_space_image(C);
@@ -1618,9 +1675,13 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
   const Paint *paint = BKE_paint_get_active_from_context(C);
   Brush *brush = BKE_paint_brush(&settings->imapaint.paint);
 
+  if (image == nullptr) {
+    return nullptr;
+  }
+
   ImagePaintState *s = MEM_new_zeroed<ImagePaintState>(__func__);
 
-  s->sima = CTX_wm_space_image(C);
+  s->sima = sima;
   s->v2d = &CTX_wm_region(C)->v2d;
   s->scene = scene;
   s->paint = paint;
@@ -1628,14 +1689,10 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
   s->brush = brush;
   s->brush_type = brush->image_brush_type;
   s->blend = brush->blend;
+  s->image = image;
 
-  s->image = s->sima->image;
   s->symmetry = settings->imapaint.paint.symmetry_flags;
 
-  if (s->image == nullptr) {
-    MEM_delete(s);
-    return nullptr;
-  }
   if (BKE_image_has_packedfile(s->image) && s->image->rr != nullptr) {
     BKE_report(op->reports, RPT_WARNING, "Packed MultiLayer files cannot be painted");
     MEM_delete(s);
@@ -1645,7 +1702,7 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
   s->num_tiles = s->image->tiles.count();
   s->tiles = MEM_new_array<ImagePaintTile>(s->num_tiles, __func__);
   for (int i = 0; i < s->num_tiles; i++) {
-    s->tiles[i].iuser = sima->iuser;
+    s->tiles[i].iuser = material_iuser ? *material_iuser : sima->iuser;
   }
 
   zero_v2(s->tiles[0].uv_origin);
@@ -1684,6 +1741,9 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
   }
 
   if (!paint_2d_canvas_set(s, paint)) {
+    /* Release acquired tile canvas before freeing the state. */
+    BKE_image_release_ibuf(s->image, s->tiles[0].canvas, nullptr);
+    s->tiles[0].canvas = nullptr;
     MEM_delete(s->tiles);
 
     MEM_delete(s);
@@ -1694,18 +1754,135 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     s->blurkernel = paint_new_blur_kernel(brush, false);
   }
 
-  paint_brush_init_tex(s->brush);
+  if (init_brush_tex) {
+    paint_brush_init_tex(s->brush);
+  }
 
   /* create painter */
   s->painter = brush_painter_2d_new(scene, paint, s->brush, mode == BrushStrokeMode::Invert);
+  if (material_channel_rgb != nullptr) {
+    s->painter->use_material_channel_color = true;
+    copy_v3_v3(s->painter->material_channel_color, material_channel_rgb);
+  }
+  else if (material_channel_value >= 0.0f) {
+    s->painter->use_material_channel_color = true;
+    s->painter->material_channel_color[0] = material_channel_value;
+    s->painter->material_channel_color[1] = material_channel_value;
+    s->painter->material_channel_color[2] = material_channel_value;
+  }
 
   return s;
 }
 
-void paint_2d_redraw(const bContext *C, void *ps, bool final)
+static void paint_2d_stroke_done_single(ImagePaintState *s, const bool exit_brush_tex)
 {
-  ImagePaintState *s = static_cast<ImagePaintState *>(ps);
+  paint_2d_canvas_free(s);
+  for (int i = 0; i < s->num_tiles; i++) {
+    brush_painter_cache_2d_free(&s->tiles[i].cache);
+  }
+  MEM_delete(s->painter);
+  MEM_delete(s->tiles);
+  if (exit_brush_tex) {
+    paint_brush_exit_tex(s->brush);
+  }
 
+  MEM_delete(s);
+}
+
+void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mode)
+{
+  Scene *scene = CTX_data_scene(C);
+  SpaceImage *sima = CTX_wm_space_image(C);
+  ToolSettings *settings = scene->toolsettings;
+  const PaintModeSettings &paint_mode = settings->paint_mode;
+  Object *ob = CTX_data_active_object(C);
+
+  /* Mesh-attribute modes are not Image Editor 2D canvases — never write sima->image. */
+  if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT ||
+      paint_mode.canvas_source == PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE)
+  {
+    return nullptr;
+  }
+
+  if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
+    if (ob == nullptr) {
+      return nullptr;
+    }
+
+    /* Auto-create and wire up an Image Texture on the Principled BSDF for each enabled
+     * channel that doesn't already resolve to one, matching the View3D Sculpt path. */
+    Main *bmain = CTX_data_main(C);
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      if (info.socket_name == nullptr) {
+        continue;
+      }
+      if (!BKE_paint_material_channel_is_enabled(paint_mode, info.channel)) {
+        continue;
+      }
+      Image *channel_image;
+      ImageUser *channel_iuser;
+      BKE_paint_principled_channel_image_ensure(
+          *bmain, *ob, info.channel, &channel_image, &channel_iuser);
+    }
+
+    const Vector<PaintMaterialImageTarget> targets = BKE_paint_material_image_targets_get(
+        *ob, paint_mode);
+    if (targets.is_empty()) {
+      return nullptr;
+    }
+
+    const Paint *paint = BKE_paint_get_active_from_context(C);
+    Brush *brush = BKE_paint_brush(&settings->imapaint.paint);
+    const bool invert = mode == BrushStrokeMode::Invert;
+
+    ImagePaintState *primary = nullptr;
+    Vector<ImagePaintState *> extras;
+    for (const PaintMaterialImageTarget &target : targets) {
+      float rgb_storage[3];
+      const float *rgb_ptr = nullptr;
+      float value = -1.0f;
+      if (target.is_color_channel) {
+        const float3 rgb = BKE_paint_material_base_color_get(paint_mode, *paint, *brush, invert);
+        copy_v3_v3(rgb_storage, rgb);
+        rgb_ptr = rgb_storage;
+      }
+      else {
+        value = target.value;
+      }
+      ImagePaintState *state = paint_2d_new_stroke_for_image(
+          C, op, mode, target.image, target.iuser, value, rgb_ptr, primary == nullptr);
+      if (state == nullptr) {
+        continue; /* Skip missing / unloadable maps. */
+      }
+      if (primary == nullptr) {
+        primary = state;
+      }
+      else {
+        extras.append(state);
+      }
+    }
+    if (primary == nullptr) {
+      return nullptr;
+    }
+    if (!extras.is_empty()) {
+      primary->material_extra_states_num = int(extras.size());
+      primary->material_extra_states = MEM_new_array<ImagePaintState *>(extras.size(), __func__);
+      for (const int i : extras.index_range()) {
+        primary->material_extra_states[i] = extras[i];
+      }
+    }
+    return primary;
+  }
+
+  Image *image = sima->image;
+  if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE && paint_mode.canvas_image != nullptr) {
+    image = paint_mode.canvas_image;
+  }
+  return paint_2d_new_stroke_for_image(C, op, mode, image, nullptr, -1.0f, nullptr, true);
+}
+
+static void paint_2d_redraw_single(const bContext *C, ImagePaintState *s, bool final)
+{
   bool had_redraw = false;
   for (int i = 0; i < s->num_tiles; i++) {
     if (s->tiles[i].need_redraw) {
@@ -1752,19 +1929,28 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
   }
 }
 
+void paint_2d_redraw(const bContext *C, void *ps, bool final)
+{
+  ImagePaintState *s = static_cast<ImagePaintState *>(ps);
+
+  paint_2d_redraw_single(C, s, final);
+  for (int i = 0; i < s->material_extra_states_num; i++) {
+    paint_2d_redraw_single(C, s->material_extra_states[i], final);
+  }
+}
+
 void paint_2d_stroke_done(void *ps)
 {
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
 
-  paint_2d_canvas_free(s);
-  for (int i = 0; i < s->num_tiles; i++) {
-    brush_painter_cache_2d_free(&s->tiles[i].cache);
+  for (int i = 0; i < s->material_extra_states_num; i++) {
+    paint_2d_stroke_done_single(s->material_extra_states[i], false);
   }
-  MEM_delete(s->painter);
-  MEM_delete(s->tiles);
-  paint_brush_exit_tex(s->brush);
+  MEM_delete(s->material_extra_states);
+  s->material_extra_states = nullptr;
+  s->material_extra_states_num = 0;
 
-  MEM_delete(s);
+  paint_2d_stroke_done_single(s, true);
 }
 
 static void paint_2d_fill_add_pixel_byte(const int x_px,

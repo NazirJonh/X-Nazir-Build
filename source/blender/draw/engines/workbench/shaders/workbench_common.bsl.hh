@@ -42,34 +42,40 @@ float2 normal_encode(bool front_face, float3 n)
   return n.xy;
 }
 
-/* Encoding into the alpha of a RGBA16F texture. (10bit mantissa) */
-#define TARGET_BITCOUNT 8u
+/* Encoding into the alpha of a RGBA16F texture. The 11 packed bits produce integer codes in
+ * [0..2047], and an FP16 value represents every integer up to 2048 exactly, so the round-trip
+ * through the material buffer stays bit-exact. Roughness keeps its full 5-bit precision; metallic
+ * and specular use 3 bits each. */
+#define TARGET_BITCOUNT 11u
+#define SPECULAR_BITS 3u /* Specular channel is less important. */
 #define METALLIC_BITS 3u /* Metallic channel is less important. */
-#define ROUGHNESS_BITS (TARGET_BITCOUNT - METALLIC_BITS)
+#define ROUGHNESS_BITS (TARGET_BITCOUNT - METALLIC_BITS - SPECULAR_BITS)
 
-/* Encode 2 float into 1 with the desired precision. */
-float float_pair_encode(float v1, float v2)
+/* Encode 3 float into 1 with the desired precision. */
+float float_triplet_encode(float v1, float v2, float v3)
 {
   // constexpr uint v1_mask = ~(0xFFFFFFFFu << ROUGHNESS_BITS);
   // constexpr uint v2_mask = ~(0xFFFFFFFFu << METALLIC_BITS);
+  // constexpr uint v3_mask = ~(0xFFFFFFFFu << SPECULAR_BITS);
   /* Same as above because some compiler are very dumb and think we use medium int. */
   constexpr int v1_mask = 0x1F;
   constexpr int v2_mask = 0x7;
+  constexpr int v3_mask = 0x7;
   int iv1 = int(v1 * float(v1_mask));
   int iv2 = int(v2 * float(v2_mask)) << int(ROUGHNESS_BITS);
-  return float(iv1 | iv2);
+  int iv3 = int(v3 * float(v3_mask)) << int(ROUGHNESS_BITS + METALLIC_BITS);
+  return float(iv1 | iv2 | iv3);
 }
 
-void float_pair_decode(float data, float &v1, float &v2)
+void float_triplet_decode(float data, float &v1, float &v2, float &v3)
 {
-  // constexpr uint v1_mask = ~(0xFFFFFFFFu << ROUGHNESS_BITS);
-  // constexpr uint v2_mask = ~(0xFFFFFFFFu << METALLIC_BITS);
-  /* Same as above because some compiler are very dumb and think we use medium int. */
   constexpr int v1_mask = 0x1F;
   constexpr int v2_mask = 0x7;
+  constexpr int v3_mask = 0x7;
   int idata = int(data);
   v1 = float(idata & v1_mask) * (1.0f / float(v1_mask));
-  v2 = float(idata >> int(ROUGHNESS_BITS)) * (1.0f / float(v2_mask));
+  v2 = float((idata >> int(ROUGHNESS_BITS)) & v2_mask) * (1.0f / float(v2_mask));
+  v3 = float(idata >> int(ROUGHNESS_BITS + METALLIC_BITS)) * (1.0f / float(v3_mask));
 }
 
 }  // namespace workbench

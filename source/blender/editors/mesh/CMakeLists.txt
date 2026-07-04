@@ -32,6 +32,7 @@ set(SRC
   editmesh_knife.cc
   editmesh_knife_project.cc
   editmesh_loopcut.cc
+  mesh_material_attribute.cc
   editmesh_path.cc
   editmesh_polybuild.cc
   editmesh_preselect_edgering.cc

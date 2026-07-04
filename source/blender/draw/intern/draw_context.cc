@@ -55,11 +55,13 @@
 
 #include "DNA_camera_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
 #include "DNA_world_types.h"
 
 #include "ED_gpencil_legacy.hh"
+#include "ED_image.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_view3d.hh"
@@ -1151,7 +1153,18 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
 
   SpaceLink *space_data = this->space_data;
   if (space_data && space_data->spacetype == SPACE_IMAGE) {
-    if (DRW_engine_external_acquire_for_image_editor(this)) {
+    const SpaceImage *sima = reinterpret_cast<const SpaceImage *>(space_data);
+    /* Mask mode and a render result have their own content to show, and the shaded mesh would
+     * replace it with an empty region. The flag stays set so the choice survives a round trip
+     * through those modes, it simply has no effect while one of them is active. */
+    const bool use_shading = (sima->flag & SI_USE_SHADING) &&
+                             !ED_space_image_show_render(sima) &&
+                             !ED_space_image_show_mask(sima);
+    if (use_shading) {
+      /* Material Preview and Rendered fall back to Workbench until the EEVEE path lands. */
+      view_data.workbench.set_used(true);
+    }
+    else if (DRW_engine_external_acquire_for_image_editor(this)) {
       view_data.external.set_used(true);
     }
     else {

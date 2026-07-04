@@ -17,6 +17,8 @@
 
 #include "DNA_constraint_types.h"
 #include "DNA_modifier_types.h"
+/* For #eMaterialPaintChannel. */
+#include "DNA_scene_types.h"
 
 #include "ED_outliner.hh"
 
@@ -66,6 +68,7 @@ static const EnumPropertyItem space_items[] = {
 #  include "BKE_modifier.hh"
 #  include "BKE_object.hh"
 #  include "BKE_object_types.hh"
+#  include "BKE_paint.hh"
 #  include "BKE_report.hh"
 #  include "BKE_vfont.hh"
 
@@ -826,6 +829,14 @@ static bool rna_Object_update_from_editmode(Object *ob, Main *bmain)
   return result;
 }
 
+static bool rna_Object_principled_paint_channel_has_image(Object *ob, int channel)
+{
+  Image *image = nullptr;
+  ImageUser *iuser = nullptr;
+  return BKE_paint_principled_channel_image_get(
+      *ob, eMaterialPaintChannel(channel), &image, &iuser);
+}
+
 }  // namespace blender
 
 #else /* RNA_RUNTIME */
@@ -1368,6 +1379,30 @@ void RNA_api_object(StructRNA *srna)
   RNA_def_function_ui_description(func,
                                   "Release memory used by caches associated with this object. "
                                   "Intended to be used by render engines only.");
+
+  static const EnumPropertyItem principled_paint_channel_items[] = {
+      {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+      {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
+      {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+      {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  func = RNA_def_function(
+      srna, "principled_paint_channel_has_image", "rna_Object_principled_paint_channel_has_image");
+  RNA_def_function_ui_description(
+      func,
+      "Return whether the active material has an Image Texture directly linked to the given "
+      "Principled BSDF input (Base Color, Metallic, Roughness, or Specular IOR Level)");
+  parm = RNA_def_enum(func,
+                      "channel",
+                      principled_paint_channel_items,
+                      PAINT_MATERIAL_CHANNEL_METALLIC,
+                      "Channel",
+                      "Principled BSDF channel to resolve");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "True when a paintable image was found");
+  RNA_def_function_return(func, parm);
 }
 
 }  // namespace blender

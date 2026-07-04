@@ -49,9 +49,10 @@ static bool get_matcap_tx(Texture &matcap_tx, StudioLight &studio_light)
   return false;
 }
 
-static float4x4 get_world_shading_rotation_matrix(float studiolight_rot_z)
+static float4x4 get_world_shading_rotation_matrix(const float4x4 &view_matrix,
+                                                  float studiolight_rot_z)
 {
-  float4x4 V = draw::View::default_get().viewmat();
+  float4x4 V = view_matrix;
   float R[4][4];
   axis_angle_to_mat4_single(R, 'Z', -studiolight_rot_z);
   mul_m4_m4m4(R, V.ptr(), R);
@@ -147,7 +148,8 @@ void SceneResources::init(const SceneState &scene_state, const DRWContext *ctx)
 
   float4x4 world_shading_rotation = float4x4::identity();
   if (shading.flag & V3D_SHADING_WORLD_ORIENTATION) {
-    world_shading_rotation = get_world_shading_rotation_matrix(shading.studiolight_rot_z);
+    world_shading_rotation = get_world_shading_rotation_matrix(scene_state.view_matrix,
+                                                               shading.studiolight_rot_z);
   }
 
   for (int i = 0; i < 4; i++) {

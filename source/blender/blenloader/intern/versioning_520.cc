@@ -23,7 +23,9 @@
 #include "DNA_windowmanager_types.h"
 #include "DNA_xr_types.h"
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
@@ -43,7 +45,9 @@
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_paint.hh"
 #include "BKE_report.hh"
+#include "BKE_screen.hh"
 
 #include "SEQ_effects.hh"
 #include "SEQ_iterator.hh"
@@ -525,6 +529,43 @@ void do_versions_after_linking_520(FileData *fd, Main *bmain)
    */
 }
 
+/**
+ * Initializes the material paint channels of files written before they existed.
+ *
+ * Those files read the new #PaintModeSettings members back as zeroes, which is not a usable state:
+ * every channel would be disabled with a paint value of 0, so Material Paint would silently do
+ * nothing and Base Color would paint black. Seed the same defaults the DNA struct declares.
+ */
+static void version_material_paint_channel_defaults(Main &bmain)
+{
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    PaintModeSettings &paint_mode = ts->paint_mode;
+
+    bool any_channel_used = false;
+    for (const char used : paint_mode.use_channel) {
+      any_channel_used |= used != 0;
+    }
+    if (any_channel_used) {
+      /* Written by a build that already had the channels. */
+      continue;
+    }
+
+    paint_mode.use_channel[PAINT_MATERIAL_CHANNEL_METALLIC] = 1;
+    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      paint_mode.channel_value[channel] = 0.5f;
+    }
+    paint_mode.channel_value[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = 0.0f;
+    copy_v3_fl(paint_mode.channel_base_color, 1.0f);
+    paint_mode.channel_custom_range[0] = 0.0f;
+    paint_mode.channel_custom_range[1] = 1.0f;
+    paint_mode.use_sync_base_color_with_brush = 1;
+  }
+}
+
 static void version_solid_color_width_height_defaults(Main &bmain)
 {
   for (Scene &scene : bmain.scenes) {
@@ -911,6 +952,28 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  /* SpaceImage gained shading settings for UV-space shaded display. Old files read them as
+   * zeroes, which is not a usable View3DShading state. */
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_IMAGE) {
+            continue;
+          }
+          SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+          BKE_screen_view3d_shading_init(&sima->shading);
+          sima->shading.type = OB_SOLID;
+          sima->flag &= ~SI_USE_SHADING;
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 46)) {
+    version_material_paint_channel_defaults(*bmain);
   }
 
   /**

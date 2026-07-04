@@ -30,6 +30,10 @@ struct Resources {
   [[compilation_constant]] bool use_curvature;
   [[compilation_constant]] bool use_shadow;
 
+  /** In UV space mode the screen position carries no 3D meaning, so the view vector cannot be
+   * derived from it. */
+  [[push_constant]] const bool is_uv_space;
+
   [[legacy_info]] ShaderCreateInfo draw_view;
   [[sampler(3)]] sampler2DDepth depth_tx;
   [[sampler(4)]] sampler2D normal_tx;
@@ -70,9 +74,17 @@ struct FragOut {
   }
 
   /* Normal and Incident vector are in view-space. Lighting is evaluated in view-space. */
-  float3 P = drw_point_screen_to_view(float3(uv, 0.5f));
-  float3 V = drw_view_incident_vector(P);
   float3 N = workbench::normal_decode(texture(srt.normal_tx, uv));
+  float3 V;
+  if (srt.is_uv_space) {
+    /* Look at every point head on. The 3D viewport camera option needs the world position in
+     * the g-buffer and lands with the deferred work, see the design spec. */
+    V = N;
+  }
+  else {
+    float3 P = drw_point_screen_to_view(float3(uv, 0.5f));
+    V = drw_view_incident_vector(P);
+  }
   float4 mat_data = texture(srt.material_tx, uv);
 
   float3 base_color = mat_data.rgb;
@@ -84,9 +96,10 @@ struct FragOut {
     color.rgb = workbench::get_matcap_lighting(srt.world, srt.matcap_tx, base_color, N, V);
   }
   else if (srt.lighting_mode == WORKBENCH_LIGHTING_STUDIO) [[static_branch]] {
-    float roughness = 0.0f, metallic = 0.0f;
-    workbench::float_pair_decode(mat_data.a, roughness, metallic);
-    color.rgb = workbench::get_world_lighting(srt.world, base_color, roughness, metallic, N, V);
+    float roughness = 0.0f, metallic = 0.0f, specular = 0.0f;
+    workbench::float_triplet_decode(mat_data.a, roughness, metallic, specular);
+    color.rgb = workbench::get_world_lighting(
+        srt.world, base_color, roughness, metallic, specular, N, V);
   }
   else if (srt.lighting_mode == WORKBENCH_LIGHTING_FLAT) [[static_branch]] {
     color.rgb = base_color;

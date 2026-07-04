@@ -22,6 +22,7 @@
 
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
+#include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_query.hh"
@@ -134,6 +135,9 @@ static SpaceLink *image_create(const ScrArea * /*area*/, const Scene * /*scene*/
 
   simage->mask_info = MaskSpaceInfo();
 
+  BKE_screen_view3d_shading_init(&simage->shading);
+  simage->shading.type = OB_SOLID;
+
   /* header */
   region = BKE_area_region_new();
 
@@ -193,6 +197,11 @@ static void image_free(SpaceLink *sl)
   SpaceImage *simage = reinterpret_cast<SpaceImage *>(sl);
 
   BKE_scopes_free(&simage->scopes);
+
+  if (simage->shading.prop) {
+    IDP_FreeProperty(simage->shading.prop);
+    simage->shading.prop = nullptr;
+  }
 }
 
 /* spacetype; init callback, add handlers */
@@ -206,11 +215,18 @@ static void image_init(wmWindowManager * /*wm*/, ScrArea *area)
 
 static SpaceLink *image_duplicate(SpaceLink *sl)
 {
-  SpaceImage *simagen = MEM_dupalloc(reinterpret_cast<SpaceImage *>(sl));
+  SpaceImage *simageo = reinterpret_cast<SpaceImage *>(sl);
+  SpaceImage *simagen = MEM_dupalloc(simageo);
 
   /* clear or remove stuff from old */
 
   BKE_scopes_new(&simagen->scopes);
+
+  /* The shallow copy shares the ID property pointer with the original, which would be freed
+   * twice. */
+  if (simagen->shading.prop) {
+    simagen->shading.prop = IDP_CopyProperty(simageo->shading.prop);
+  }
 
   return reinterpret_cast<SpaceLink *>(simagen);
 }
@@ -393,10 +409,28 @@ static void image_listener(const wmSpaceTypeListenerParams *params)
       }
       break;
     }
+    case NC_MATERIAL:
+    case NC_LAMP:
+    case NC_WORLD: {
+      /* The UV-space shaded display is lit by the scene, so it has to follow world, light and
+       * material changes the plain image display can ignore. */
+      if (sima->flag & SI_USE_SHADING) {
+        ED_area_tag_refresh(area);
+        ED_area_tag_redraw(area);
+      }
+      break;
+    }
     case NC_OBJECT: {
       switch (wmn->data) {
         case ND_TRANSFORM:
         case ND_MODIFIER: {
+          /* Moving a light or the shaded object itself changes the UV-space shaded display
+           * regardless of the UV guide settings checked below. */
+          if (sima->flag & SI_USE_SHADING) {
+            ED_area_tag_refresh(area);
+            ED_area_tag_redraw(area);
+          }
+
           const Scene *scene = WM_window_get_active_scene(win);
           ViewLayer *view_layer = WM_window_get_active_view_layer(win);
           BKE_view_layer_synced_ensure(*params->bmain, scene, view_layer);
@@ -1278,9 +1312,11 @@ static int image_space_icon_get(const ScrArea *area)
   return item.icon;
 }
 
-static void image_space_blend_read_data(BlendDataReader * /*reader*/, SpaceLink *sl)
+static void image_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
 {
   SpaceImage *sima = reinterpret_cast<SpaceImage *>(sl);
+
+  BKE_screen_view3d_shading_blend_read_data(reader, &sima->shading);
 
   sima->iuser.scene = nullptr;
   sima->scopes.waveform_1 = nullptr;
@@ -1303,7 +1339,10 @@ static void image_space_blend_read_data(BlendDataReader * /*reader*/, SpaceLink 
 
 static void image_space_blend_write(BlendWriter *writer, SpaceLink *sl)
 {
+  SpaceImage *sima = reinterpret_cast<SpaceImage *>(sl);
+
   writer->write_struct_cast<SpaceImage>(sl);
+  BKE_screen_view3d_shading_blend_write(writer, &sima->shading);
 }
 
 /**************************** spacetype *****************************/

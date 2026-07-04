@@ -568,7 +568,13 @@ void do_paint_brush(const Depsgraph &depsgraph,
                     const IndexMask &texnode_mask)
 {
   if (SCULPT_use_image_paint_brush(paint_mode_settings, ob)) {
-    SCULPT_do_paint_brush_image(depsgraph, sd, ob, texnode_mask);
+    SCULPT_do_paint_brush_image(depsgraph, paint_mode_settings, sd, ob, texnode_mask);
+    return;
+  }
+  /* Empty Material / Image canvas must not fall through to color-attribute painting. */
+  if (paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL ||
+      paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_IMAGE)
+  {
     return;
   }
   PRF_scope(ProfileCategory::Editor);

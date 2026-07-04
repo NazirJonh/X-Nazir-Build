@@ -14,6 +14,7 @@
 #include "DNA_texture_types.h"
 
 #include "BLI_math_base.h"
+#include "BLI_math_vector.h"
 #include "BLI_string_utf8_symbols.h"
 
 #include "BLT_translation.hh"
@@ -716,6 +717,18 @@ static void rna_Brush_color_update(Main *bmain, Scene *scene, PointerRNA *ptr)
   Brush *br = static_cast<Brush *>(ptr->data);
   rna_Brush_update(bmain, scene, ptr);
   BKE_brush_color_sync_legacy(br);
+
+  /* Sync Base Color channel from brush primary Color when Sync with Brush is on.
+   * Unified color edits go through #rna_UnifiedPaintSettings_color_update instead. */
+  if (scene && scene->toolsettings) {
+    PaintModeSettings &settings = scene->toolsettings->paint_mode;
+    if (settings.use_sync_base_color_with_brush &&
+        !equals_v3v3(settings.channel_base_color, br->color))
+    {
+      copy_v3_v3(settings.channel_base_color, br->color);
+      WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
+    }
+  }
 }
 
 static void rna_Brush_material_update(bContext * /*C*/, PointerRNA *ptr)
@@ -4024,6 +4037,7 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "MeshAutomaskingSettings");
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Mesh Automasking Settings", nullptr);
+
 }
 
 /**

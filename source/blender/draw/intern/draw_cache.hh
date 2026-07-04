@@ -10,6 +10,7 @@
 
 #include "BLI_math_matrix_types.hh"
 #include "BLI_span.hh"
+#include "BLI_string_ref.hh"
 
 #include "BKE_volume_grid_fwd.hh"
 
@@ -72,7 +73,34 @@ Span<gpu::Batch *> DRW_cache_mesh_surface_shaded_get(Object *ob,
 Span<gpu::Batch *> DRW_cache_mesh_surface_texpaint_get(Object *ob);
 gpu::Batch *DRW_cache_mesh_surface_texpaint_single_get(Object *ob);
 gpu::Batch *DRW_cache_mesh_surface_vertpaint_get(Object *ob);
+/**
+ * Vertex input name the Workbench prepass binds the material paint attribute \a attribute_name to,
+ * or null when the attribute is not a shader-readable material paint channel.
+ *
+ * The generated attribute name (`a` + safe name) does not match the fixed shader inputs, so both
+ * the mesh extractor and the sculpt (PBVH) path add this alias to their vertex formats. Keeping
+ * the mapping in one place is what stops the two paths from drifting apart.
+ */
+const char *DRW_material_paint_vertex_input_alias(StringRef attribute_name);
+
+/**
+ * Surface batch that additionally exposes the material paint scalar point attributes as vertex
+ * inputs, used by Workbench Poly Paint to render per-vertex material values.
+ */
+gpu::Batch *DRW_cache_mesh_surface_material_props_get(Object *ob);
+/**
+ * Per-material variant of #DRW_cache_mesh_surface_material_props_get, matching
+ * #DRW_cache_object_surface_material_get but with the material property attributes requested.
+ */
+Span<gpu::Batch *> DRW_cache_mesh_surface_shaded_material_props_get(
+    Object *ob, Span<const GPUMaterial *> materials);
 gpu::Batch *DRW_cache_mesh_surface_sculptcolors_get(Object *ob);
+/**
+ * Make the surface batches of `ob` carry the active UV map, whichever surface getter above is
+ * used to obtain them. Needed by the Image Editor's UV-space shaded display, which rasterizes
+ * from the UV attribute for every shading color type, not only for texture color.
+ */
+void DRW_cache_mesh_surface_uv_request(Object *ob);
 gpu::Batch *DRW_cache_mesh_surface_weights_get(Object *ob);
 gpu::Batch *DRW_cache_mesh_surface_mesh_analysis_get(Object *ob);
 gpu::Batch *DRW_cache_mesh_face_wireframe_get(Object *ob);

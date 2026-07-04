@@ -17,15 +17,17 @@
 
 #include "DNA_asset_types.h"
 #include "DNA_brush_types.h"
+#include "DNA_image_types.h"
 #include "DNA_key_types.h"
+#include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_meshdata_types.h"
 #include "DNA_modifier_types.h"
+#include "DNA_node_types.h"
 #include "DNA_object_enums.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
-#include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
 #include "DNA_workspace_types.h"
 
@@ -57,11 +59,14 @@
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
+#include "BKE_main_invariants.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_runtime.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
@@ -70,6 +75,7 @@
 #include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "PRF_profile.hh"
@@ -2446,13 +2452,10 @@ static void sculpt_update_object(Depsgraph *depsgraph,
      *
      * The relevant changes are stored/encoded in the paint canvas key.
      * These include the active uv map, and resolutions. */
-    if (USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint)) {
-      std::string paint_canvas_key = BKE_paint_canvas_key_get(&scene->toolsettings->paint_mode,
-                                                              ob);
-      if (!ss.last_paint_canvas_key || paint_canvas_key != ss.last_paint_canvas_key) {
-        ss.last_paint_canvas_key = paint_canvas_key;
-        BKE_pbvh_mark_rebuild_pixels(pbvh);
-      }
+    std::string paint_canvas_key = BKE_paint_canvas_key_get(&scene->toolsettings->paint_mode, ob);
+    if (!ss.last_paint_canvas_key || paint_canvas_key != ss.last_paint_canvas_key) {
+      ss.last_paint_canvas_key = paint_canvas_key;
+      BKE_pbvh_mark_rebuild_pixels(pbvh);
     }
 
     /* We could be more precise when we have access to the active tool. */
@@ -2831,5 +2834,429 @@ void BKE_paint_face_set_overlay_color_get(const int face_set, const int seed, uc
              &rgba[2]);
   rgba_float_to_uchar(r_color, rgba);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Material Painting (Poly Paint)
+ * \{ */
+
+/**
+ * The one place channel-specific knowledge lives. Rows are ordered by #eMaterialPaintChannel and
+ * indexed by it, which #BKE_paint_material_channel_info asserts.
+ *
+ * The fixed attribute names are deliberately prefixed: an unprefixed `"roughness"` is a common
+ * name for unrelated geometry-nodes attributes, and the draw engines switch shading based on the
+ * presence of these attributes.
+ */
+static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
+    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "Base Color", "Color", "Base Color", 0.0f, 1.0f, true},
+    {PAINT_MATERIAL_CHANNEL_METALLIC,
+     "Metallic",
+     "material_metallic",
+     "Metallic",
+     0.0f,
+     1.0f,
+     false},
+    {PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+     "Roughness",
+     "material_roughness",
+     "Roughness",
+     0.0f,
+     1.0f,
+     false},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR,
+     "Specular",
+     "material_specular",
+     "Specular IOR Level",
+     0.0f,
+     1.0f,
+     false},
+    /* Custom targets a user-named attribute and has no Principled socket, so it is vertex-only. */
+    {PAINT_MATERIAL_CHANNEL_CUSTOM, "Custom", nullptr, nullptr, 0.0f, 1.0f, false},
+};
+
+static_assert(ARRAY_SIZE(material_paint_channels) == PAINT_MATERIAL_CHANNEL_NUM,
+              "Every material paint channel needs a descriptor row");
+
+/* The per-channel DNA arrays spell their length as a plain literal, because makesdna only parses
+ * numeric array sizes. Catch the literal and the constant drifting apart here, rather than through
+ * a silently truncated channel. */
+static_assert(sizeof(PaintModeSettings::use_channel) == PAINT_MATERIAL_CHANNEL_NUM,
+              "PaintModeSettings::use_channel must have one entry per channel");
+static_assert(sizeof(PaintModeSettings::channel_value) ==
+                  sizeof(float) * PAINT_MATERIAL_CHANNEL_NUM,
+              "PaintModeSettings::channel_value must have one entry per channel");
+
+Span<MaterialPaintChannelInfo> BKE_paint_material_channels()
+{
+  return Span(material_paint_channels, PAINT_MATERIAL_CHANNEL_NUM);
+}
+
+const MaterialPaintChannelInfo &BKE_paint_material_channel_info(
+    const eMaterialPaintChannel channel)
+{
+  BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
+  const MaterialPaintChannelInfo &info = material_paint_channels[channel];
+  BLI_assert(info.channel == channel);
+  return info;
+}
+
+bool BKE_paint_material_channel_is_enabled(const PaintModeSettings &settings,
+                                           const eMaterialPaintChannel channel)
+{
+  BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
+  if (settings.use_channel[channel] == 0) {
+    return false;
+  }
+  /* A channel without a fixed attribute name is only usable once the user has named one. */
+  return !BKE_paint_material_channel_attribute_name(settings, channel).is_empty();
+}
+
+float2 BKE_paint_material_channel_range(const PaintModeSettings &settings,
+                                        const eMaterialPaintChannel channel)
+{
+  if (channel == PAINT_MATERIAL_CHANNEL_CUSTOM) {
+    const float2 range(settings.channel_custom_range[0], settings.channel_custom_range[1]);
+    /* Guard against an inverted range configured through the API. */
+    return range.x <= range.y ? range : float2(range.y, range.x);
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  return float2(info.value_min, info.value_max);
+}
+
+float BKE_paint_material_channel_value(const PaintModeSettings &settings,
+                                       const eMaterialPaintChannel channel)
+{
+  BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
+  if (BKE_paint_material_channel_info(channel).is_color) {
+    return 0.0f;
+  }
+  const float2 range = BKE_paint_material_channel_range(settings, channel);
+  return math::clamp(settings.channel_value[channel], range.x, range.y);
+}
+
+std::optional<eMaterialPaintChannel> BKE_paint_material_channel_from_attribute_name(
+    const StringRef attribute_name)
+{
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.attribute_name != nullptr && attribute_name == info.attribute_name) {
+      return info.channel;
+    }
+  }
+  return std::nullopt;
+}
+
+StringRef BKE_paint_material_channel_attribute_name(const PaintModeSettings &settings,
+                                                    const eMaterialPaintChannel channel)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  if (info.attribute_name != nullptr) {
+    return info.attribute_name;
+  }
+  return settings.material_paint_custom_attr;
+}
+
+float3 BKE_paint_material_base_color_get(const PaintModeSettings &settings,
+                                         const Paint &paint,
+                                         const Brush &brush,
+                                         bool invert)
+{
+  if (invert) {
+    return BKE_brush_secondary_color_get(&paint, &brush);
+  }
+  /* When Sync with Brush is on, #channel_base_color is kept equal to the brush color by the RNA
+   * update callbacks, so it stays the single source of truth here. */
+  return float3(settings.channel_base_color);
+}
+
+/**
+ * Finds Principled BSDF connected to Material Output Surface, else the first
+ * Principled in the tree. Returns nullptr when none exist.
+ */
+static bNode *paint_find_principled_bsdf(bNodeTree &ntree)
+{
+  bNode *first_principled = nullptr;
+  for (bNode &node : ntree.nodes) {
+    if (node.type_legacy != SH_NODE_BSDF_PRINCIPLED) {
+      continue;
+    }
+    if (first_principled == nullptr) {
+      first_principled = &node;
+    }
+  }
+
+  for (bNode &node : ntree.nodes) {
+    if (node.type_legacy != SH_NODE_OUTPUT_MATERIAL) {
+      continue;
+    }
+    const bNodeSocket *surface = bke::node_find_socket(node, SOCK_IN, "Surface"_ustr);
+    if (surface == nullptr) {
+      continue;
+    }
+    for (bNodeLink &link : ntree.links) {
+      if (link.tosock != surface) {
+        continue;
+      }
+      if (link.fromnode != nullptr && link.fromnode->type_legacy == SH_NODE_BSDF_PRINCIPLED) {
+        return link.fromnode;
+      }
+    }
+  }
+
+  return first_principled;
+}
+
+bool BKE_paint_principled_channel_image_get(Object &ob,
+                                            eMaterialPaintChannel channel,
+                                            Image **r_image,
+                                            ImageUser **r_iuser)
+{
+  *r_image = nullptr;
+  *r_iuser = nullptr;
+
+  const char *socket_name = BKE_paint_material_channel_info(channel).socket_name;
+  if (socket_name == nullptr) {
+    return false;
+  }
+
+  Material *ma = BKE_object_material_get(&ob, ob.actcol);
+  if (ma == nullptr || ma->nodetree == nullptr) {
+    return false;
+  }
+
+  bNodeTree &ntree = *ma->nodetree;
+  bNode *principled = paint_find_principled_bsdf(ntree);
+  if (principled == nullptr) {
+    return false;
+  }
+
+  bNodeSocket *socket = bke::node_find_socket(*principled, SOCK_IN, UString(socket_name));
+  if (socket == nullptr) {
+    return false;
+  }
+
+  for (bNodeLink &link : ntree.links) {
+    if (link.tosock != socket) {
+      continue;
+    }
+    bNode *from_node = link.fromnode;
+    if (from_node == nullptr || from_node->type_legacy != SH_NODE_TEX_IMAGE) {
+      return false;
+    }
+    if (from_node->id == nullptr || GS(from_node->id->name) != ID_IM) {
+      return false;
+    }
+    NodeTexImage *storage = static_cast<NodeTexImage *>(from_node->storage);
+    if (storage == nullptr) {
+      return false;
+    }
+    *r_image = id_cast<Image *>(from_node->id);
+    *r_iuser = &storage->iuser;
+    return true;
+  }
+
+  return false;
+}
+
+bool BKE_paint_principled_channel_image_ensure(Main &bmain,
+                                               Object &ob,
+                                               eMaterialPaintChannel channel,
+                                               Image **r_image,
+                                               ImageUser **r_iuser)
+{
+  if (BKE_paint_principled_channel_image_get(ob, channel, r_image, r_iuser)) {
+    return true;
+  }
+
+  const char *socket_name = BKE_paint_material_channel_info(channel).socket_name;
+  if (socket_name == nullptr) {
+    return false;
+  }
+
+  Material *ma = BKE_object_material_get(&ob, ob.actcol);
+  if (ma == nullptr || ma->nodetree == nullptr) {
+    return false;
+  }
+
+  bNodeTree &ntree = *ma->nodetree;
+  bNode *principled = paint_find_principled_bsdf(ntree);
+  if (principled == nullptr) {
+    return false;
+  }
+
+  bNodeSocket *socket = bke::node_find_socket(*principled, SOCK_IN, UString(socket_name));
+  if (socket == nullptr) {
+    return false;
+  }
+
+  /* Only wire up an unconnected socket. A link that isn't a resolvable Image Texture
+   * (invalid image, indirect link, etc.) reflects deliberate user node setup and must not
+   * be replaced. */
+  for (bNodeLink &link : ntree.links) {
+    if (link.tosock == socket) {
+      return false;
+    }
+  }
+
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+
+  char image_name[MAX_ID_NAME - 2];
+  SNPRINTF(image_name, "%s %s", ma->id.name + 2, socket_name);
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      &bmain, 1024, 1024, image_name, 24, false, IMA_GENTYPE_BLANK, color, false, true, false);
+  if (image == nullptr) {
+    return false;
+  }
+
+  /* Scalar channels feed non-color Principled inputs; reading them through sRGB would silently
+   * skew every painted value. Only the Base Color map stays in the default color space. */
+  if (!info.is_color) {
+    STRNCPY(image->colorspace_settings.name,
+            IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA));
+  }
+
+  bNode *tex_node = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_IMAGE);
+  tex_node->id = &image->id;
+  bke::node_position_relative(*tex_node, *principled, nullptr, *socket);
+
+  bNodeSocket *tex_out = bke::node_find_socket(*tex_node, SOCK_OUT, UString("Color"));
+  if (tex_out == nullptr) {
+    return false;
+  }
+  bke::node_add_link(ntree, *tex_node, *tex_out, *principled, *socket);
+
+  BKE_main_ensure_invariants(bmain, ntree.id);
+  DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
+  DEG_relations_tag_update(&bmain);
+
+  NodeTexImage *storage = static_cast<NodeTexImage *>(tex_node->storage);
+  *r_image = image;
+  *r_iuser = &storage->iuser;
+  return true;
+}
+
+Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
+    Object &ob, const PaintModeSettings &settings)
+{
+  Vector<PaintMaterialImageTarget> targets;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.socket_name == nullptr) {
+      /* Vertex-only channel, it has no map to paint into. */
+      continue;
+    }
+    if (!BKE_paint_material_channel_is_enabled(settings, info.channel)) {
+      continue;
+    }
+
+    Image *image = nullptr;
+    ImageUser *iuser = nullptr;
+    if (!BKE_paint_principled_channel_image_get(ob, info.channel, &image, &iuser)) {
+      continue;
+    }
+
+    PaintMaterialImageTarget target;
+    target.channel = info.channel;
+    target.image = image;
+    target.iuser = iuser;
+    target.is_color_channel = info.is_color;
+    if (info.is_color) {
+      copy_v3_v3(target.color, settings.channel_base_color);
+      target.value = 0.0f;
+    }
+    else {
+      target.value = BKE_paint_material_channel_value(settings, info.channel);
+    }
+    targets.append(target);
+  }
+  return targets;
+}
+
+MaterialPaintAttributeStatus BKE_paint_mesh_material_attribute_ensure(Mesh &mesh,
+                                                                     const StringRef attr_name,
+                                                                     bool *r_created)
+{
+  if (r_created) {
+    *r_created = false;
+  }
+  if (attr_name.is_empty()) {
+    return MaterialPaintAttributeStatus::InvalidName;
+  }
+
+  bke::MutableAttributeAccessor attrs = mesh.attributes_for_write();
+
+  if (attrs.contains(attr_name)) {
+    const std::optional<bke::AttributeMetaData> meta_data = attrs.lookup_meta_data(attr_name);
+    if (meta_data && meta_data->data_type == bke::AttrType::Float &&
+        meta_data->domain == bke::AttrDomain::Point)
+    {
+      return MaterialPaintAttributeStatus::Ok;
+    }
+    return MaterialPaintAttributeStatus::TypeMismatch;
+  }
+
+  if (!attrs.add<float>(attr_name, bke::AttrDomain::Point, bke::AttributeInitDefaultValue())) {
+    return MaterialPaintAttributeStatus::CreationFailed;
+  }
+
+  if (r_created) {
+    *r_created = true;
+  }
+  return MaterialPaintAttributeStatus::Ok;
+}
+
+MaterialPaintAttributeStatus BKE_paint_mesh_material_color_attribute_ensure(Mesh &mesh,
+                                                                           bool *r_created)
+{
+  if (r_created) {
+    *r_created = false;
+  }
+
+  const StringRef attr_name = BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_BASE_COLOR)
+                                  .attribute_name;
+  bke::MutableAttributeAccessor attrs = mesh.attributes_for_write();
+
+  if (attrs.contains(attr_name)) {
+    const std::optional<bke::AttributeMetaData> meta_data = attrs.lookup_meta_data(attr_name);
+    if (meta_data && meta_data->domain == bke::AttrDomain::Point &&
+        ELEM(meta_data->data_type, bke::AttrType::ColorFloat, bke::AttrType::ColorByte))
+    {
+      return MaterialPaintAttributeStatus::Ok;
+    }
+    return MaterialPaintAttributeStatus::TypeMismatch;
+  }
+
+  if (!attrs.add(attr_name,
+                 bke::AttrDomain::Point,
+                 bke::AttrType::ColorFloat,
+                 bke::AttributeInitDefaultValue()))
+  {
+    return MaterialPaintAttributeStatus::CreationFailed;
+  }
+
+  BKE_id_attributes_active_color_set(&mesh.id, attr_name);
+  BKE_id_attributes_default_color_set(&mesh.id, attr_name);
+
+  if (r_created) {
+    *r_created = true;
+  }
+  return MaterialPaintAttributeStatus::Ok;
+}
+
+const char *BKE_paint_material_attribute_status_message(const MaterialPaintAttributeStatus status)
+{
+  switch (status) {
+    case MaterialPaintAttributeStatus::Ok:
+      return "";
+    case MaterialPaintAttributeStatus::TypeMismatch:
+      return N_("An attribute of that name already exists with an incompatible type or domain");
+    case MaterialPaintAttributeStatus::InvalidName:
+      return N_("Material paint channel has no attribute name set");
+    case MaterialPaintAttributeStatus::CreationFailed:
+      return N_("Could not create the material paint attribute");
+  }
+  return "";
+}
+
+/** \} */
 
 }  // namespace blender

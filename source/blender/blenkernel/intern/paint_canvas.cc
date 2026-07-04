@@ -55,12 +55,19 @@ bool BKE_paint_canvas_image_get(PaintModeSettings *settings,
     case PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE:
       break;
 
+    case PAINT_CANVAS_SOURCE_MATERIAL_PAINT:
+      /* Vertex float attributes; no single canvas image. */
+      break;
+
     case PAINT_CANVAS_SOURCE_IMAGE:
       *r_image = settings->canvas_image;
       *r_image_user = &settings->image_user;
       break;
 
     case PAINT_CANVAS_SOURCE_MATERIAL: {
+      /* Legacy single-slot lookup (Object Mode project paint / sync).
+       * Sculpt Mode=`Material` multi-channel uses
+       * #BKE_paint_material_image_targets_get instead. */
       TexPaintSlot *slot = get_active_slot(ob);
       if (slot == nullptr) {
         break;
@@ -85,6 +92,8 @@ std::optional<StringRef> BKE_paint_canvas_uvmap_name_get(const PaintModeSettings
   switch (settings->canvas_source) {
     case PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE:
       return std::nullopt;
+    case PAINT_CANVAS_SOURCE_MATERIAL_PAINT:
+      return std::nullopt;
     case PAINT_CANVAS_SOURCE_IMAGE: {
       /* Use active uv map of the object. */
       if (ob->type != OB_MESH) {
@@ -98,21 +107,22 @@ std::optional<StringRef> BKE_paint_canvas_uvmap_name_get(const PaintModeSettings
       return mesh->active_uv_map_name();
     }
     case PAINT_CANVAS_SOURCE_MATERIAL: {
-      /* Use uv map of the canvas. */
-      TexPaintSlot *slot = get_active_slot(ob);
-      if (slot == nullptr) {
-        break;
-      }
-
+      /* Prefer active UV for Principled multi-channel paint; fall back to
+       * active texture-paint slot UV when present (legacy project-paint path). */
       if (ob->type != OB_MESH) {
         return std::nullopt;
       }
 
-      if (slot->uvname == nullptr) {
+      const Mesh *mesh = id_cast<Mesh *>(ob->data);
+      if (has_uv_map_attribute(*mesh, mesh->active_uv_map_name())) {
+        return mesh->active_uv_map_name();
+      }
+
+      TexPaintSlot *slot = get_active_slot(ob);
+      if (slot == nullptr || slot->uvname == nullptr) {
         return std::nullopt;
       }
 
-      const Mesh *mesh = id_cast<Mesh *>(ob->data);
       if (!has_uv_map_attribute(*mesh, slot->uvname)) {
         return std::nullopt;
       }
@@ -122,26 +132,42 @@ std::optional<StringRef> BKE_paint_canvas_uvmap_name_get(const PaintModeSettings
   return std::nullopt;
 }
 
+static void append_image_key(std::stringstream &ss, Image &image, ImageUser &image_user)
+{
+  ss << ",SEAM_MARGIN:" << image.seam_margin;
+  ImageUser tile_user = image_user;
+  for (ImageTile &image_tile : image.tiles) {
+    tile_user.tile = image_tile.tile_number;
+    ImBuf *image_buffer = BKE_image_acquire_ibuf(&image, &tile_user, nullptr);
+    if (!image_buffer) {
+      continue;
+    }
+    ss << ",TILE_" << image_tile.tile_number;
+    ss << "(" << image_buffer->x << "," << image_buffer->y << ")";
+    BKE_image_release_ibuf(&image, image_buffer, nullptr);
+  }
+}
+
 std::string BKE_paint_canvas_key_get(PaintModeSettings *settings, Object *ob)
 {
   std::stringstream ss;
   ss << "UV_MAP:" << BKE_paint_canvas_uvmap_name_get(settings, ob).value_or("");
 
+  if (settings->canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
+    /* Key all Principled channel maps so PBVH pixels rebuild when any target changes. */
+    const Vector<PaintMaterialImageTarget> targets = BKE_paint_material_image_targets_get(*ob,
+                                                                                         *settings);
+    for (const PaintMaterialImageTarget &target : targets) {
+      ss << ",CH" << int(target.channel);
+      append_image_key(ss, *target.image, *target.iuser);
+    }
+    return ss.str();
+  }
+
   Image *image;
   ImageUser *image_user;
   if (BKE_paint_canvas_image_get(settings, ob, &image, &image_user)) {
-    ss << ",SEAM_MARGIN:" << image->seam_margin;
-    ImageUser tile_user = *image_user;
-    for (ImageTile &image_tile : image->tiles) {
-      tile_user.tile = image_tile.tile_number;
-      ImBuf *image_buffer = BKE_image_acquire_ibuf(image, &tile_user, nullptr);
-      if (!image_buffer) {
-        continue;
-      }
-      ss << ",TILE_" << image_tile.tile_number;
-      ss << "(" << image_buffer->x << "," << image_buffer->y << ")";
-      BKE_image_release_ibuf(image, image_buffer, nullptr);
-    }
+    append_image_key(ss, *image, *image_user);
   }
 
   return ss.str();

@@ -766,7 +766,8 @@ enum eSpaceImage_Mode : char {
 
 /** #SpaceImage.flag */
 enum eSpaceImage_Flag : int {
-  SI_FLAG_UNUSED_0 = (1 << 0), /* cleared */
+  /** Draw the mesh shaded in UV space instead of the plain image. */
+  SI_USE_SHADING = (1 << 0),
   SI_FLAG_UNUSED_1 = (1 << 1), /* cleared */
   SI_CLIP_UV = (1 << 2),
   SI_FLAG_UNUSED_3 = (1 << 3), /* cleared */

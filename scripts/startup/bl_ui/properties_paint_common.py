@@ -1131,6 +1131,65 @@ def brush_settings(layout, context, brush, popover=False):
             layout.prop(brush.curves_sculpt_settings, "minimum_length")
 
 
+def draw_material_paint_channels(layout, paint_mode, *, show_custom, show_missing_fn=None):
+    """Draw Material / Material Paint channel enable + value rows.
+
+    Used by View3D Canvas and Image Editor Paint Canvas panels.
+
+    :arg layout: Layout to draw into.
+    :arg paint_mode: ``PaintModeSettings`` RNA data-block.
+    :arg show_custom: When True, draw the Custom channel (Material Paint mode).
+    :arg show_missing_fn: Optional ``callable(channel_id) -> bool``. When it
+        returns True for a channel id (``'BASE_COLOR'`` / ``'METALLIC'`` /
+        ``'ROUGHNESS'`` / ``'SPECULAR'``), a Missing indicator is shown on that row.
+    """
+    col = layout.column(align=True)
+
+    row = col.row(align=True)
+    row.prop(paint_mode, "use_channel_base_color", text="")
+    row.label(text="Base Color")
+    sub = row.row(align=True)
+    sub.active = paint_mode.use_channel_base_color
+    sub.prop(paint_mode, "channel_base_color", text="")
+    sub.prop(paint_mode, "use_sync_base_color_with_brush", text="Sync with Brush")
+    if show_missing_fn is not None and show_missing_fn('BASE_COLOR'):
+        row.label(text="Missing", icon='ERROR')
+
+    channels = (
+        ("use_channel_metallic", "channel_metallic_value", "Metallic", 'METALLIC'),
+        ("use_channel_roughness", "channel_roughness_value", "Roughness", 'ROUGHNESS'),
+        ("use_channel_specular", "channel_specular_value", "Specular", 'SPECULAR'),
+    )
+
+    for use_prop, value_prop, label, channel_id in channels:
+        row = col.row(align=True)
+        row.prop(paint_mode, use_prop, text="")
+        row.label(text=label)
+        sub = row.row(align=True)
+        sub.active = getattr(paint_mode, use_prop)
+        sub.prop(paint_mode, value_prop, text="", slider=True)
+        if show_missing_fn is not None and show_missing_fn(channel_id):
+            row.label(text="Missing", icon='ERROR')
+
+    if show_custom:
+        row = col.row(align=True)
+        row.prop(paint_mode, "use_channel_custom", text="")
+        row.label(text="Custom")
+        sub = row.row(align=True)
+        sub.active = paint_mode.use_channel_custom
+        sub.prop(paint_mode, "channel_custom_value", text="")
+
+        row = col.row(align=True)
+        row.active = paint_mode.use_channel_custom
+        row.prop(paint_mode, "material_paint_custom_attr", text="Name")
+
+        # Unlike the fixed channels, the custom channel targets an arbitrary float attribute, so
+        # the range its painted values are clamped to is user-defined.
+        row = col.row(align=True)
+        row.active = paint_mode.use_channel_custom
+        row.prop(paint_mode, "channel_custom_range", text="Range")
+
+
 def brush_shared_settings(layout, context, brush, popover=False):
     """ Draw simple brush settings that are shared between different paint modes. """
 

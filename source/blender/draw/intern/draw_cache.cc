@@ -28,6 +28,7 @@
 #include "BKE_mesh_wrapper.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
+#include "BKE_paint.hh"
 #include "BKE_subdiv_modifier.hh"
 
 #include "DRW_render.hh"
@@ -242,10 +243,54 @@ gpu::Batch *DRW_cache_mesh_surface_vertpaint_get(Object *ob)
                                                     DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
+const char *DRW_material_paint_vertex_input_alias(const StringRef attribute_name)
+{
+  const std::optional<eMaterialPaintChannel> channel =
+      BKE_paint_material_channel_from_attribute_name(attribute_name);
+  if (!channel) {
+    return nullptr;
+  }
+  switch (*channel) {
+    case PAINT_MATERIAL_CHANNEL_METALLIC:
+      return "a_metallic";
+    case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
+      return "a_roughness";
+    case PAINT_MATERIAL_CHANNEL_SPECULAR:
+      return "a_specular";
+    case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
+    case PAINT_MATERIAL_CHANNEL_CUSTOM:
+      /* Base Color travels through the regular color attribute path, and Custom has no
+       * shader input of its own. */
+      return nullptr;
+  }
+  return nullptr;
+}
+
+gpu::Batch *DRW_cache_mesh_surface_material_props_get(Object *ob)
+{
+  BLI_assert(ob->type == OB_MESH);
+  return DRW_mesh_batch_cache_get_surface_material_props(
+      *ob, DRW_object_get_data_for_drawing<Mesh>(*ob));
+}
+
+Span<gpu::Batch *> DRW_cache_mesh_surface_shaded_material_props_get(
+    Object *ob, const Span<const GPUMaterial *> materials)
+{
+  BLI_assert(ob->type == OB_MESH);
+  return DRW_mesh_batch_cache_get_surface_shaded_material_props(
+      *ob, DRW_object_get_data_for_drawing<Mesh>(*ob), materials);
+}
+
 gpu::Batch *DRW_cache_mesh_surface_sculptcolors_get(Object *ob)
 {
   BLI_assert(ob->type == OB_MESH);
   return DRW_mesh_batch_cache_get_surface_sculpt(*ob, DRW_object_get_data_for_drawing<Mesh>(*ob));
+}
+
+void DRW_cache_mesh_surface_uv_request(Object *ob)
+{
+  BLI_assert(ob->type == OB_MESH);
+  DRW_mesh_batch_cache_request_surface_uv(*ob, DRW_object_get_data_for_drawing<Mesh>(*ob));
 }
 
 gpu::Batch *DRW_cache_mesh_surface_weights_get(Object *ob)

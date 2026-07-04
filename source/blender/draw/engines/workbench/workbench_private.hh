@@ -156,6 +156,16 @@ struct SceneState {
   View3DShading shading = {};
   eLightingType lighting_type = eLightingType::STUDIO;
   bool xray_mode = false;
+  /** Rasterize geometry in UV space for the Image Editor instead of the 3D view. */
+  bool is_uv_space = false;
+  /**
+   * View matrix everything Workbench shades with: normals, studio light directions and the
+   * #draw::View it submits with. Normally the draw manager's default view. In UV space that
+   * default is the Image Editor's `View2D` rect transform, which is a zoom-dependent scale rather
+   * than a rotation, so lighting would swim as the user zooms and pans; an identity (head-on)
+   * view is substituted instead, making view space equal world space.
+   */
+  float4x4 view_matrix = float4x4::identity();
 
   DRWState cull_state = DRW_STATE_NO_DRAW;
   Vector<float4> clip_planes;
@@ -304,6 +314,10 @@ class MeshPass : public PassMain {
   ePipelineType pipeline_;
   eLightingType lighting_;
   bool clip_;
+  /** Whether the pass is fed by the Image Editor's UV-space raster. Cached here because
+   * #get_subpass binds the shader for every subpass and is the only place a push constant can be
+   * safely set (the parent #MeshPass itself never binds a shader). */
+  bool is_uv_space_ = false;
 
   bool is_empty_ = false;
 
@@ -316,7 +330,7 @@ class MeshPass : public PassMain {
   bool is_empty() const;
 
   void init_pass(SceneResources &resources, DRWState state, int clip_planes);
-  void init_subpasses(ePipelineType pipeline, eLightingType lighting, bool clip);
+  void init_subpasses(ePipelineType pipeline, eLightingType lighting, bool clip, bool is_uv_space);
 
   PassMain::Sub &get_subpass(eGeometryType geometry_type,
                              const MaterialTexture *texture = nullptr);
@@ -595,7 +609,13 @@ class AntiAliasingPass {
 
   void init(const SceneState &scene_state);
   void sync(const SceneState &scene_state, SceneResources &resources);
-  void setup_view(View &view, const SceneState &scene_state);
+  /**
+   * Sync `view` with this sample's temporal anti-aliasing jitter folded into the window matrix.
+   *
+   * \return the applied jitter in NDC units, so that callers rasterizing through their own
+   * projection (the Image Editor's UV-space display) can apply the same offset themselves.
+   */
+  float2 setup_view(View &view, const SceneState &scene_state);
   void draw(
       const DRWContext *draw_ctx,
       Manager &manager,

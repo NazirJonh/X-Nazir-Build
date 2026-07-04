@@ -33,6 +33,7 @@
 #include "draw_cache.hh"
 #include "draw_common.hh"
 #include "draw_sculpt.hh"
+#include "draw_uv_space_view.hh"
 #include "draw_view_data.hh"
 
 #include "workbench_private.hh"
@@ -45,11 +46,98 @@ namespace workbench {
 
 using namespace draw;
 
+/**
+ * Which material paint channels a mesh carries per-vertex, indexed by #eMaterialPaintChannel.
+ *
+ * Only the scalar channels the prepass shader can read are ever set; Base Color goes through the
+ * regular vertex color path and Custom has no shader slot.
+ */
+struct MaterialPropsUsage {
+  bool used[PAINT_MATERIAL_CHANNEL_NUM] = {};
+
+  bool any() const
+  {
+    for (const bool value : used) {
+      if (value) {
+        return true;
+      }
+    }
+    return false;
+  }
+};
+
+/**
+ * Push constant declared by #workbench_prepass.bsl.hh for \a channel, or null when the shader has
+ * no slot for it. Kept next to the draw code rather than in the channel descriptor table, since it
+ * describes this shader rather than the paint data.
+ */
+static const char *material_props_uniform_name(const eMaterialPaintChannel channel)
+{
+  switch (channel) {
+    case PAINT_MATERIAL_CHANNEL_METALLIC:
+      return "use_vertex_metallic";
+    case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
+      return "use_vertex_roughness";
+    case PAINT_MATERIAL_CHANNEL_SPECULAR:
+      return "use_vertex_specular";
+    case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
+    case PAINT_MATERIAL_CHANNEL_CUSTOM:
+      return nullptr;
+  }
+  return nullptr;
+}
+
+/**
+ * Detects the material paint attributes present on \a ob.
+ *
+ * Presence alone is not enough: the shader reads these as float point attributes, and an unrelated
+ * attribute that merely shares the name (a face-domain color, say) must not switch shading.
+ */
+static MaterialPropsUsage material_props_usage_get(const Object &ob)
+{
+  MaterialPropsUsage usage;
+  if (ob.type != OB_MESH) {
+    return usage;
+  }
+
+  const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(ob);
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (material_props_uniform_name(info.channel) == nullptr) {
+      continue;
+    }
+    const std::optional<bke::AttributeMetaData> meta_data = attributes.lookup_meta_data(
+        info.attribute_name);
+    usage.used[info.channel] = meta_data && meta_data->data_type == bke::AttrType::Float &&
+                               meta_data->domain == bke::AttrDomain::Point;
+  }
+  return usage;
+}
+
+/* The UV-space display shows the unwrap of whatever the Image Editor shows: the active object
+ * in paint or sculpt mode, and every object in multi-object edit mode. */
+static bool uv_space_object_is_shown(const ObjectRef &ob_ref)
+{
+  const Object *ob = ob_ref.object;
+  if (ob == nullptr || ob->type != OB_MESH) {
+    return false;
+  }
+  if (ob->mode & OB_MODE_EDIT) {
+    return true;
+  }
+  return ELEM(ob->mode, OB_MODE_TEXTURE_PAINT, OB_MODE_SCULPT, OB_MODE_VERTEX_PAINT);
+}
+
 class Instance : public DrawEngine {
  private:
   View view_ = {"DefaultView"};
 
   SceneState scene_state_;
+
+  /* UV-space projection matrix, valid whenever `scene_state_.is_uv_space` is true. Seeded in
+   * `init` and refreshed by #uv_to_clip_update once the sample jitter is known, so `draw_mesh`
+   * never has to reach past `Instance` for it. */
+  float4x4 uv_to_clip_ = float4x4::identity();
 
   SceneResources resources_;
 
@@ -101,12 +189,32 @@ class Instance : public DrawEngine {
                                              DEG_get_update_count(depsgraph));
 
     scene_state_.init(this->draw_ctx, scene_updated, camera_ob);
+
+    if (scene_state_.is_uv_space) {
+      /* Rebuilt with this sample's jitter in #draw, but a valid matrix is kept here as well so
+       * the member is never stale between sync and draw. */
+      this->uv_to_clip_update(float2(0.0f));
+    }
+
     shadow_ps_.init(scene_state_, resources_);
     resources_.init(scene_state_, this->draw_ctx);
 
     outline_ps_.init(scene_state_);
     dof_ps_.init(scene_state_, this->draw_ctx);
     anti_aliasing_ps_.init(scene_state_);
+  }
+
+  /**
+   * Recompute the UV-space projection for the current frame.
+   *
+   * `is_uv_space` is only ever true for the Image Editor's 2D render loop, which always supplies
+   * a region (see `drw_draw_render_loop_2d`), so `region` is safe to dereference without a null
+   * check.
+   */
+  void uv_to_clip_update(const float2 &jitter_ndc)
+  {
+    uv_to_clip_ = draw::uv_space_projection_get(
+        this->draw_ctx->region->v2d.cur, int2(0, 0), jitter_ndc);
   }
 
   void begin_sync() final
@@ -160,6 +268,10 @@ class Instance : public DrawEngine {
       return;
     }
 
+    if (scene_state_.is_uv_space && !uv_space_object_is_shown(ob_ref)) {
+      return;
+    }
+
     Object *ob = ob_ref.object;
     if (!DRW_object_is_renderable(ob)) {
       return;
@@ -171,7 +283,10 @@ class Instance : public DrawEngine {
                                    OB_VISIBLE_SELF) &&
                                   (ob->dt >= OB_SOLID || draw_ctx->is_scene_render());
 
-    if (!(ob->base_flag & BASE_FROM_DUPLI)) {
+    /* Volumes have no UV representation, so there is nothing to rasterize them into. Skipping the
+     * whole block also keeps a gas domain from clearing #is_object_data_visible, which would stop
+     * the mesh itself from drawing. */
+    if (!scene_state_.is_uv_space && !(ob->base_flag & BASE_FROM_DUPLI)) {
       ModifierData *md = BKE_modifiers_findby_type(ob, eModifierType_Fluid);
       if (md && BKE_modifier_is_enabled(scene_state_.scene, md, eModifierMode_Realtime)) {
         FluidModifierData *fmd = reinterpret_cast<FluidModifierData *>(md);
@@ -216,7 +331,9 @@ class Instance : public DrawEngine {
       }
     }
 
-    if (ob->type == OB_MESH && ob->modifiers.first != nullptr) {
+    /* Hair strands carry no UV of their own, so #vert_curves has no UV-space path and would
+     * rasterize them through the view matrices, scattering them across the unwrap. */
+    if (!scene_state_.is_uv_space && ob->type == OB_MESH && ob->modifiers.first != nullptr) {
       for (ModifierData &md : ob->modifiers) {
         if (md.type != eModifierType_ParticleSystem) {
           continue;
@@ -265,7 +382,8 @@ class Instance : public DrawEngine {
                  gpu::Batch *batch,
                  ResourceHandleRange handle,
                  const MaterialTexture *texture = nullptr,
-                 bool show_missing_texture = false)
+                 bool show_missing_texture = false,
+                 const MaterialPropsUsage &material_props = {})
   {
     resources_.material_buf.append(material);
     int material_index = resources_.material_buf.size() - 1;
@@ -275,7 +393,20 @@ class Instance : public DrawEngine {
     }
 
     this->draw_to_mesh_pass(ob_ref, material.is_transparent(), [&](MeshPass &mesh_pass) {
-      mesh_pass.get_subpass(eGeometryType::MESH, texture).draw(batch, handle, material_index);
+      PassMain::Sub &pass = mesh_pass.get_subpass(eGeometryType::MESH, texture);
+      for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+        if (const char *name = material_props_uniform_name(info.channel)) {
+          pass.push_constant(name, material_props.used[info.channel]);
+        }
+      }
+      if (scene_state_.is_uv_space) {
+        /* Only pushed in UV mode: the 3D viewport would record 64 bytes of push constant per draw
+         * that the shader never reads, since `is_uv_space` is already false from the sub-pass
+         * default set in #MeshPass::get_subpass. Passed by pointer so the matrix is read at
+         * submission time, after #Instance::draw has folded this frame's TAA jitter into it. */
+        pass.push_constant("uv_to_clip", &uv_to_clip_);
+      }
+      pass.draw(batch, handle, material_index);
     });
   }
 
@@ -283,12 +414,35 @@ class Instance : public DrawEngine {
   {
     bool has_transparent_material = false;
 
+    if (scene_state_.is_uv_space && ob_ref.object->type == OB_MESH) {
+      /* The UV-space raster reads the UV attribute whatever the color type is, but none of the
+       * surface batch getters below request UVs on their own: they only appear once the active UV
+       * map is in the batch cache's `cd_used`. Request it here so the attribute is bound instead
+       * of reading the zero default, which would collapse every triangle onto UV (0, 0). */
+      DRW_cache_mesh_surface_uv_request(ob_ref.object);
+    }
+
+    /* Poly Paint: detect per-vertex material attributes so painted metallic/roughness/specular
+     * display in Object Mode too, not only while the Sculpt Mode draw path is active. They only
+     * override the solid base color, so they are ignored for texture and vertex-color shading. */
+    MaterialPropsUsage material_props;
+    if (object_state.color_type != V3D_SHADING_TEXTURE_COLOR &&
+        object_state.color_type != V3D_SHADING_VERTEX_COLOR)
+    {
+      material_props = material_props_usage_get(*ob_ref.object);
+    }
+    const bool use_material_props = material_props.any();
+
     if (object_state.use_per_material_batches) {
       const int material_count = BKE_object_material_used_with_fallback_eval(*ob_ref.object);
 
       Span<gpu::Batch *> batches;
       if (object_state.color_type == V3D_SHADING_TEXTURE_COLOR) {
         batches = DRW_cache_mesh_surface_texpaint_get(ob_ref.object);
+      }
+      else if (use_material_props) {
+        batches = DRW_cache_mesh_surface_shaded_material_props_get(
+            ob_ref.object, this->get_dummy_gpu_materials(material_count));
       }
       else {
         batches = DRW_cache_object_surface_material_get(
@@ -310,8 +464,13 @@ class Instance : public DrawEngine {
             texture = MaterialTexture(ob_ref.object, material_slot);
           }
 
-          this->draw_mesh(
-              ob_ref, mat, batches[i], handle, &texture, object_state.show_missing_texture);
+          this->draw_mesh(ob_ref,
+                          mat,
+                          batches[i],
+                          handle,
+                          &texture,
+                          object_state.show_missing_texture,
+                          material_props);
         }
       }
     }
@@ -328,6 +487,9 @@ class Instance : public DrawEngine {
           batch = DRW_cache_mesh_surface_sculptcolors_get(ob_ref.object);
         }
       }
+      else if (use_material_props) {
+        batch = DRW_cache_mesh_surface_material_props_get(ob_ref.object);
+      }
       else {
         batch = DRW_cache_object_surface_get(ob_ref.object);
       }
@@ -336,7 +498,13 @@ class Instance : public DrawEngine {
         Material mat = this->get_material(ob_ref, object_state.color_type);
         has_transparent_material = has_transparent_material || mat.is_transparent();
 
-        this->draw_mesh(ob_ref, mat, batch, handle, &object_state.image_paint_override);
+        this->draw_mesh(ob_ref,
+                        mat,
+                        batch,
+                        handle,
+                        &object_state.image_paint_override,
+                        false,
+                        material_props);
       }
     }
 
@@ -349,10 +517,24 @@ class Instance : public DrawEngine {
   {
     SculptBatchFeature features = SCULPT_BATCH_DEFAULT;
     if (object_state.color_type == V3D_SHADING_VERTEX_COLOR) {
-      features = SCULPT_BATCH_VERTEX_COLOR;
+      features |= SCULPT_BATCH_VERTEX_COLOR;
     }
     else if (object_state.color_type == V3D_SHADING_TEXTURE_COLOR) {
-      features = SCULPT_BATCH_UV;
+      features |= SCULPT_BATCH_UV;
+    }
+
+    if (scene_state_.is_uv_space) {
+      /* The UV-space raster reads the UV attribute for every color type, not only for texture
+       * color. Without it the attribute would be unbound and every triangle would collapse onto
+       * UV (0, 0). */
+      features |= SCULPT_BATCH_UV;
+    }
+
+    /* Only request the extra vertex buffers when the mesh actually carries painted channels;
+     * every sculpt object would pay for them otherwise. */
+    const MaterialPropsUsage material_props = material_props_usage_get(*ob_ref.object);
+    if (material_props.any()) {
+      features |= SCULPT_BATCH_MATERIAL_PROPS;
     }
 
     if (object_state.use_per_material_batches) {
@@ -367,8 +549,13 @@ class Instance : public DrawEngine {
           texture = MaterialTexture(ob_ref.object, batch.material_slot);
         }
 
-        this->draw_mesh(
-            ob_ref, mat, batch.batch, handle, &texture, object_state.show_missing_texture);
+        this->draw_mesh(ob_ref,
+                        mat,
+                        batch.batch,
+                        handle,
+                        &texture,
+                        object_state.show_missing_texture,
+                        material_props);
       }
     }
     else {
@@ -378,7 +565,13 @@ class Instance : public DrawEngine {
           mat.base_color = batch.debug_color();
         }
 
-        this->draw_mesh(ob_ref, mat, batch.batch, handle, &object_state.image_paint_override);
+        this->draw_mesh(ob_ref,
+                        mat,
+                        batch.batch,
+                        handle,
+                        &object_state.image_paint_override,
+                        false,
+                        material_props);
       }
     }
   }
@@ -475,7 +668,20 @@ class Instance : public DrawEngine {
       return;
     }
 
-    anti_aliasing_ps_.setup_view(view_, scene_state_);
+    const float2 jitter_ndc = anti_aliasing_ps_.setup_view(view_, scene_state_);
+
+    /* Frustum culling compares world-space object bounds against a frustum built from matrices
+     * that no longer decide what lands on screen, since `out_position` comes from UV. Any object
+     * away from the world origin would be culled, and zooming the Image Editor would shrink the
+     * frustum further. */
+    view_.visibility_test(!scene_state_.is_uv_space);
+
+    if (scene_state_.is_uv_space) {
+      /* The regular pipeline jitters the window matrix, which the UV raster does not use, so the
+       * same offset has to be folded into the projection replacing it. Without this, sample
+       * accumulation would keep adding identical samples and never anti-alias. */
+      this->uv_to_clip_update(jitter_ndc);
+    }
 
     GPUAttachment id_attachment = GPU_ATTACHMENT_NONE;
     if (scene_state_.draw_object_id) {

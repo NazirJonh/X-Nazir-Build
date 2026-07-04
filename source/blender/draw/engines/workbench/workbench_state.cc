@@ -4,6 +4,7 @@
 
 #include "workbench_private.hh"
 
+#include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 
 #include "BKE_camera.h"
@@ -125,11 +126,41 @@ void SceneState::init(const DRWContext *context,
    * Check why Workbench Next exposes OB_MATERIAL, and Workbench exposes OB_RENDER */
   bool is_render_mode = !v3d || ELEM(v3d->shading.type, OB_RENDER, OB_MATERIAL);
 
+  const SpaceLink *space_data = context->space_data;
+  const SpaceImage *sima = (space_data && space_data->spacetype == SPACE_IMAGE) ?
+                               reinterpret_cast<const SpaceImage *>(space_data) :
+                               nullptr;
+  /* #DRWContext::enable_engines is the authoritative gate: it only routes a #SPACE_IMAGE region
+   * to Workbench when the flag is set and the editor is neither in mask mode nor showing a render
+   * result. Reaching this line at all therefore means that condition already held, so it is not
+   * repeated here where it could drift out of step with the original. */
+  is_uv_space = sima && (sima->flag & SI_USE_SHADING);
+
+  view_matrix = is_uv_space ? float4x4::identity() : View::default_get().viewmat();
+
   const View3DShading previous_shading = shading;
-  shading = is_render_mode ? scene->display.shading : v3d->shading;
+  if (is_uv_space) {
+    /* The Image Editor has no View3D at all, so without this the engine would silently fall
+     * back to the scene display settings and ignore the space's own shading entirely. */
+    shading = sima->shading;
+  }
+  else {
+    shading = is_render_mode ? scene->display.shading : v3d->shading;
+  }
 
   cull_state = shading.flag & V3D_SHADING_BACKFACE_CULLING ? DRW_STATE_CULL_BACK :
                                                              DRW_STATE_NO_DRAW;
+  if (is_uv_space) {
+    /* A mirrored UV island has the opposite winding of its 3D counterpart, so backface culling
+     * would drop it entirely. */
+    cull_state = DRW_STATE_NO_DRAW;
+
+    /* Cavity, outline, shadow volumes and depth of field are all screen space effects, and screen
+     * space no longer corresponds to view space when rasterizing in UV space. Curvature rides on
+     * the cavity bit, so it is disabled along with it. */
+    shading.flag &= ~(V3D_SHADING_SHADOW | V3D_SHADING_CAVITY | V3D_SHADING_OBJECT_OUTLINE |
+                      V3D_SHADING_DEPTH_OF_FIELD);
+  }
 
   /* FIXME: This reproduce old behavior when workbench was separated in 2 engines.
    * But this is a workaround for a missing update tagging. */

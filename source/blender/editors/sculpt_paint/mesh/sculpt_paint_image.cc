@@ -8,7 +8,6 @@
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_object_types.h"
-#include "DNA_userdef_types.h"
 
 #include "ED_paint.hh"
 
@@ -54,20 +53,65 @@ ImageData::~ImageData()
   }
   buffers.clear();
 }
-std::unique_ptr<ImageData> ImageData::init_active_image(Object &ob,
-                                                        PaintModeSettings &paint_mode_settings)
+
+std::unique_ptr<ImageData> ImageData::from_image(Image *image, ImageUser *image_user)
 {
-  std::unique_ptr<ImageData> image_data = std::make_unique<ImageData>();
-  if (!BKE_paint_canvas_image_get(
-          &paint_mode_settings, &ob, &image_data->image, &image_data->image_user))
-  {
+  if (image == nullptr || image_user == nullptr) {
     return nullptr;
   }
-
-  BLI_assert(image_data->image);
-  BLI_assert(image_data->image_user);
-
+  std::unique_ptr<ImageData> image_data = std::make_unique<ImageData>();
+  image_data->image = image;
+  image_data->image_user = image_user;
   return image_data;
+}
+
+Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
+                                                  PaintModeSettings &paint_mode_settings)
+{
+  Vector<ImagePaintTarget> targets;
+
+  switch (paint_mode_settings.canvas_source) {
+    case PAINT_CANVAS_SOURCE_MATERIAL: {
+      const Vector<PaintMaterialImageTarget> material_targets =
+          BKE_paint_material_image_targets_get(ob, paint_mode_settings);
+      for (const PaintMaterialImageTarget &material_target : material_targets) {
+        ImagePaintTarget target;
+        target.data = ImageData::from_image(material_target.image, material_target.iuser);
+        if (!target.data) {
+          continue;
+        }
+        target.is_color_channel = material_target.is_color_channel;
+        if (material_target.is_color_channel) {
+          const float3 rgb = float3(material_target.color);
+          target.color_override = float4(rgb, 1.0f);
+        }
+        else {
+          const float v = material_target.value;
+          target.color_override = float4(v, v, v, 1.0f);
+        }
+        targets.append(std::move(target));
+      }
+      break;
+    }
+    case PAINT_CANVAS_SOURCE_IMAGE: {
+      Image *image = nullptr;
+      ImageUser *image_user = nullptr;
+      if (!BKE_paint_canvas_image_get(&paint_mode_settings, &ob, &image, &image_user)) {
+        break;
+      }
+      ImagePaintTarget target;
+      target.data = ImageData::from_image(image, image_user);
+      if (target.data) {
+        targets.append(std::move(target));
+      }
+      break;
+    }
+    case PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE:
+    case PAINT_CANVAS_SOURCE_MATERIAL_PAINT:
+      break;
+  }
+
+  return targets;
 }
 
 static void fetch_image_buffers(ImageData &image_data,
@@ -338,9 +382,9 @@ static Bounds<int2> negative_bounds()
 
 static void do_paint_pixels(const Depsgraph &depsgraph,
                             Object &object,
-                            const Paint &paint,
                             const Brush &brush,
                             ImageData &image_data,
+                            const float4 &brush_color,
                             bke::pbvh::Node & /*node*/,
                             PixelNode &pixel_node)
 {
@@ -353,11 +397,6 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
 
   BitVector<> brush_test = init_uv_primitives_brush_test(
       ss, pbvh_data.vert_tris, pixel_node.uv_primitives.tri_indices, positions);
-
-  float4 brush_color = float4(ss.cache->toggle_settings.invert ?
-                                  BKE_brush_secondary_color_get(&paint, &brush) :
-                                  BKE_brush_color_get(&paint, &brush),
-                              1.0f);
 
 #ifdef DEBUG_PIXEL_NODES
   float4 debug_color;
@@ -597,18 +636,27 @@ using namespace blender::ed::sculpt_paint::paint::image;
 
 bool SCULPT_use_image_paint_brush(PaintModeSettings &settings, Object &ob)
 {
-  if (!USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint)) {
-    return false;
-  }
   if (ob.type != OB_MESH) {
     return false;
   }
-  Image *image;
-  ImageUser *image_user;
-  return BKE_paint_canvas_image_get(&settings, &ob, &image, &image_user);
+  switch (settings.canvas_source) {
+    case PAINT_CANVAS_SOURCE_MATERIAL:
+      /* Multi-channel Principled maps; empty target list is a no-op (no texpaint fallback). */
+      return !BKE_paint_material_image_targets_get(ob, settings).is_empty();
+    case PAINT_CANVAS_SOURCE_MATERIAL_PAINT:
+    case PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE:
+      return false;
+    case PAINT_CANVAS_SOURCE_IMAGE: {
+      Image *image;
+      ImageUser *image_user;
+      return BKE_paint_canvas_image_get(&settings, &ob, &image, &image_user);
+    }
+  }
+  return false;
 }
 
 void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
+                                 PaintModeSettings &paint_mode_settings,
                                  const Sculpt &sd,
                                  Object &ob,
                                  const IndexMask &node_mask)
@@ -617,34 +665,64 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
   ed::sculpt_paint::StrokeCache &cache = *ob.runtime->sculpt_session->cache;
 
-  if (!cache.image_data) {
+  if (cache.image_paint_targets.is_empty()) {
     return;
   }
 
-  ImageData &image_data = *cache.image_data;
-
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
-  PixelData &pixel_data = *pbvh.pixels_;
-  MutableSpan<PixelNode> pixel_nodes = pixel_data.nodes;
 
-  node_mask.foreach_index(
-      [&](const int i) { fetch_image_buffers(image_data, nodes[i], pixel_nodes[i]); });
-  node_mask.foreach_index(
-      [&](const int i) { do_push_undo_tile(image_data, nodes[i], pixel_nodes[i]); },
-      exec_mode::grain_size(1));
-  node_mask.foreach_index(
-      [&](const int i) {
-        do_paint_pixels(depsgraph, ob, sd.paint, *brush, image_data, nodes[i], pixel_nodes[i]);
-      },
-      exec_mode::grain_size(1));
+  const float4 brush_color_default = float4(cache.toggle_settings.invert ?
+                                                BKE_brush_secondary_color_get(&sd.paint, brush) :
+                                                BKE_brush_color_get(&sd.paint, brush),
+                                            1.0f);
 
-  fix_non_manifold_seam_bleeding(ob, image_data, nodes, pixel_nodes, node_mask);
+  for (ImagePaintTarget &target : cache.image_paint_targets) {
+    ImageData &image_data = *target.data;
+    /* Base Color must honor invert each dab; scalars keep frozen grayscale. */
+    float4 brush_color_storage;
+    const float4 *brush_color_ptr;
+    if (target.is_color_channel) {
+      const float3 rgb = BKE_paint_material_base_color_get(
+          paint_mode_settings, sd.paint, *brush, cache.toggle_settings.invert);
+      brush_color_storage = float4(rgb, 1.0f);
+      brush_color_ptr = &brush_color_storage;
+    }
+    else if (target.color_override) {
+      brush_color_ptr = &(*target.color_override);
+    }
+    else {
+      brush_color_ptr = &brush_color_default;
+    }
+    const float4 &brush_color = *brush_color_ptr;
 
-  node_mask.foreach_index([&](const int i) {
-    bke::pbvh::pixels::mark_image_dirty(
-        nodes[i], pixel_nodes[i], *image_data.image, image_data.buffers);
-  });
+    /* Rebuild UV pixel encoding for this image so differently sized / UDIM
+     * maps cannot reuse another target's ImBuf coordinates. */
+    BKE_pbvh_mark_rebuild_pixels(pbvh);
+    bke::pbvh::build_pixels(depsgraph, ob, *image_data.image, *image_data.image_user);
+
+    PixelData &pixel_data = *pbvh.pixels_;
+    MutableSpan<PixelNode> pixel_nodes = pixel_data.nodes;
+
+    node_mask.foreach_index(
+        [&](const int i) { fetch_image_buffers(image_data, nodes[i], pixel_nodes[i]); });
+    node_mask.foreach_index(
+        [&](const int i) { do_push_undo_tile(image_data, nodes[i], pixel_nodes[i]); },
+        exec_mode::grain_size(1));
+    node_mask.foreach_index(
+        [&](const int i) {
+          do_paint_pixels(
+              depsgraph, ob, *brush, image_data, brush_color, nodes[i], pixel_nodes[i]);
+        },
+        exec_mode::grain_size(1));
+
+    fix_non_manifold_seam_bleeding(ob, image_data, nodes, pixel_nodes, node_mask);
+
+    node_mask.foreach_index([&](const int i) {
+      bke::pbvh::pixels::mark_image_dirty(
+          nodes[i], pixel_nodes[i], *image_data.image, image_data.buffers);
+    });
+  }
 }
 
 }  // namespace blender

@@ -1183,7 +1183,29 @@ enum ePaintCanvasSource : char {
   PAINT_CANVAS_SOURCE_IMAGE = 1,
   /** Paint on the active color attribute (vertex color) layer. */
   PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE = 2,
+  /** Paint enabled material channels into per-vertex float attributes. */
+  PAINT_CANVAS_SOURCE_MATERIAL_PAINT = 3,
 };
+
+/**
+ * A material paint channel. Used as the index into the per-channel arrays of
+ * #PaintModeSettings, so the values must stay contiguous and start at zero.
+ *
+ * All other per-channel knowledge (attribute name, Principled BSDF socket, value range) lives in
+ * the descriptor table returned by #BKE_paint_material_channels, not in switch statements.
+ */
+enum eMaterialPaintChannel : int8_t {
+  /** RGB channel, written into the mesh color attribute or the Base Color map. */
+  PAINT_MATERIAL_CHANNEL_BASE_COLOR = 0,
+  PAINT_MATERIAL_CHANNEL_METALLIC = 1,
+  PAINT_MATERIAL_CHANNEL_ROUGHNESS = 2,
+  PAINT_MATERIAL_CHANNEL_SPECULAR = 3,
+  /** User-named float attribute, vertex painting only. */
+  PAINT_MATERIAL_CHANNEL_CUSTOM = 4,
+};
+
+/** Number of #eMaterialPaintChannel values. Sizes the per-channel arrays in DNA. */
+#define PAINT_MATERIAL_CHANNEL_NUM 5
 
 struct MeshAutomaskingSettings {
   DNA_DEFINE_CXX_METHODS(MeshAutomaskingSettings)
@@ -1341,6 +1363,27 @@ struct PaintModeSettings {
   /** Selected image when canvas_source=PAINT_CANVAS_SOURCE_IMAGE. */
   Image *canvas_image = nullptr;
   ImageUser image_user;
+
+  /* Multi-channel material paint (Modes Material + Material Paint).
+   * The per-channel arrays are indexed by #eMaterialPaintChannel. */
+
+  /** Per-channel enable flags. */
+  char use_channel[/*PAINT_MATERIAL_CHANNEL_NUM*/ 5] = {0, 1, 0, 0, 0};
+  /** Drive the Base Color channel from the brush color instead of #channel_base_color. */
+  char use_sync_base_color_with_brush = 1;
+  char _pad0[2] = {};
+  /** Per-channel scalar paint value. Unused for #PAINT_MATERIAL_CHANNEL_BASE_COLOR. */
+  float channel_value[/*PAINT_MATERIAL_CHANNEL_NUM*/ 5] = {0.0f, 0.5f, 0.5f, 0.5f, 0.5f};
+  /** RGB written by the Base Color channel when not synced with the brush. */
+  float channel_base_color[3] = {1.0f, 1.0f, 1.0f};
+  /**
+   * Value range of the Custom channel. The fixed channels take their range from the descriptor
+   * table (#BKE_paint_material_channels); only Custom is user-defined, since it can target an
+   * arbitrary float attribute.
+   */
+  float channel_custom_range[2] = {0.0f, 1.0f};
+  /** Attribute name painted by #PAINT_MATERIAL_CHANNEL_CUSTOM. */
+  char material_paint_custom_attr[64] = {};
 };
 
 /** \} */

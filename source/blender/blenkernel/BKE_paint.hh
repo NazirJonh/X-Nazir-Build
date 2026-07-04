@@ -26,6 +26,8 @@
 #include "DNA_brush_enums.h"
 #include "DNA_meshdata_types.h"
 #include "DNA_object_enums.h"
+/* For #eMaterialPaintChannel and #PAINT_MATERIAL_CHANNEL_NUM. */
+#include "DNA_scene_types.h"
 
 namespace blender {
 
@@ -648,5 +650,181 @@ std::optional<StringRef> BKE_paint_canvas_uvmap_name_get(const PaintModeSettings
                                                          Object *ob);
 CurveMapping *BKE_sculpt_default_cavity_curve();
 CurveMapping *BKE_paint_default_curve();
+
+/* -------------------------------------------------------------------- */
+/** \name Material Painting (Poly Paint)
+ *
+ * Everything that distinguishes one material paint channel from another is described by the
+ * descriptor table below. Adding a channel means adding an #eMaterialPaintChannel value, bumping
+ * #PAINT_MATERIAL_CHANNEL_NUM and adding one table row; no call site should switch on the channel.
+ * \{ */
+
+/**
+ * Static description of one material paint channel.
+ *
+ * \note The scalar range applies to the fixed channels only. #PAINT_MATERIAL_CHANNEL_CUSTOM
+ * targets an arbitrary float attribute, so its range is user-defined and stored per scene in
+ * #PaintModeSettings.channel_custom_range; use #BKE_paint_material_channel_range for a range that
+ * accounts for both.
+ */
+struct MaterialPaintChannelInfo {
+  eMaterialPaintChannel channel;
+  /** Untranslated UI name, e.g. `"Metallic"`. */
+  const char *ui_name;
+  /**
+   * Mesh attribute painted in #PAINT_CANVAS_SOURCE_MATERIAL_PAINT mode. Null for Custom, whose
+   * name comes from #PaintModeSettings.material_paint_custom_attr.
+   */
+  const char *attribute_name;
+  /** Principled BSDF input socket for #PAINT_CANVAS_SOURCE_MATERIAL mode. Null when unmapped. */
+  const char *socket_name;
+  /** Inclusive value range of the scalar channels. */
+  float value_min;
+  float value_max;
+  /** True for the RGB channel, which is written to a color attribute rather than a float one. */
+  bool is_color;
+};
+
+/**
+ * The material paint channels, ordered by #eMaterialPaintChannel and indexable by it.
+ * Base Color comes first so painting and undo process the color channel before the scalars.
+ */
+Span<MaterialPaintChannelInfo> BKE_paint_material_channels();
+
+/** The single descriptor for \a channel. */
+const MaterialPaintChannelInfo &BKE_paint_material_channel_info(eMaterialPaintChannel channel);
+
+/**
+ * Returns whether \a channel is enabled on \a settings.
+ * Custom additionally requires a non-empty attribute name.
+ */
+bool BKE_paint_material_channel_is_enabled(const PaintModeSettings &settings,
+                                           eMaterialPaintChannel channel);
+
+/**
+ * Returns the scalar paint value for \a channel from \a settings, clamped to the channel range.
+ * Base Color has no scalar value and returns 0.0f (use #BKE_paint_material_base_color_get).
+ */
+float BKE_paint_material_channel_value(const PaintModeSettings &settings,
+                                       eMaterialPaintChannel channel);
+
+/**
+ * Returns the valid value range for \a channel: the descriptor range for the fixed channels and
+ * #PaintModeSettings.channel_custom_range for Custom.
+ */
+float2 BKE_paint_material_channel_range(const PaintModeSettings &settings,
+                                        eMaterialPaintChannel channel);
+
+/**
+ * Returns the mesh attribute name for \a channel: the descriptor name for the fixed channels and
+ * #PaintModeSettings.material_paint_custom_attr for Custom. May be empty for an unconfigured
+ * Custom channel.
+ */
+StringRef BKE_paint_material_channel_attribute_name(const PaintModeSettings &settings,
+                                                    eMaterialPaintChannel channel);
+
+/**
+ * Returns the channel whose fixed attribute name is \a attribute_name, if any. Never matches
+ * Custom, whose name is not fixed. Used by the draw engines to decide whether a mesh attribute is
+ * a material paint channel without hard-coding names.
+ */
+std::optional<eMaterialPaintChannel> BKE_paint_material_channel_from_attribute_name(
+    StringRef attribute_name);
+
+/**
+ * Effective RGB for Base Color strokes: invert uses brush secondary color;
+ * otherwise #PaintModeSettings.channel_base_color.
+ */
+float3 BKE_paint_material_base_color_get(const PaintModeSettings &settings,
+                                         const Paint &paint,
+                                         const Brush &brush,
+                                         bool invert);
+
+/**
+ * Resolves the Image Texture directly linked to the Principled BSDF input for
+ * \a channel on the active material of \a ob (see design §3.7).
+ * Channels without a socket (Custom) always return false. Indirect links (Math, etc.) are not
+ * resolved.
+ * \return true when \a r_image and \a r_iuser were set.
+ */
+bool BKE_paint_principled_channel_image_get(Object &ob,
+                                            eMaterialPaintChannel channel,
+                                            Image **r_image,
+                                            ImageUser **r_iuser);
+
+/**
+ * Same as #BKE_paint_principled_channel_image_get, but when \a channel's Principled
+ * socket exists and has no incoming link, creates a generated blank Image with the color space
+ * required by the channel, adds an Image Texture node for it, and links it to the socket, then
+ * returns it.
+ * Does nothing and returns false when there is no material, no node tree, no Principled
+ * BSDF, no matching socket, or the socket is already driven by something other than a
+ * (missing/invalid) Image Texture. Channels without a socket (Custom) always return false.
+ * \return true when \a r_image and \a r_iuser were set.
+ */
+bool BKE_paint_principled_channel_image_ensure(Main &bmain,
+                                               Object &ob,
+                                               eMaterialPaintChannel channel,
+                                               Image **r_image,
+                                               ImageUser **r_iuser);
+
+/**
+ * One Principled map target for Mode=`Material` multi-channel image paint.
+ * Scalar \a value is written as RGB `(v, v, v)`.
+ * Base Color uses \a color with \a is_color_channel set.
+ */
+struct PaintMaterialImageTarget {
+  eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_METALLIC;
+  Image *image = nullptr;
+  ImageUser *iuser = nullptr;
+  float value = 0.0f;
+  float color[3] = {0.0f, 0.0f, 0.0f};
+  bool is_color_channel = false;
+};
+
+/**
+ * Collects enabled channels that successfully resolve to a Principled Image Texture on \a ob.
+ * Missing maps are skipped. Channels without a socket (Custom) are never included.
+ * Order follows #BKE_paint_material_channels.
+ */
+Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
+    Object &ob, const PaintModeSettings &settings);
+
+/** Why a material paint channel could not be prepared on a mesh. */
+enum class MaterialPaintAttributeStatus {
+  /** The attribute exists with the required type and domain, or was just created. */
+  Ok,
+  /** An attribute of that name exists with an incompatible type or domain. */
+  TypeMismatch,
+  /** The name is empty (an unconfigured Custom channel). */
+  InvalidName,
+  /** Creating the attribute failed. */
+  CreationFailed,
+};
+
+/**
+ * Ensure a float point attribute named \a attr_name exists on \a mesh.
+ * \param r_created: when non-null, set to true only if a new attribute was added by this call.
+ */
+MaterialPaintAttributeStatus BKE_paint_mesh_material_attribute_ensure(Mesh &mesh,
+                                                                     StringRef attr_name,
+                                                                     bool *r_created = nullptr);
+
+/**
+ * Ensure the material Base Color attribute `"Color"` exists on the mesh.
+ * Accepts an existing Point-domain ColorFloat or ColorByte; otherwise creates a ColorFloat named
+ * `"Color"` and sets it as the active and default color attribute.
+ * \param r_created: when non-null, set to true only if a new attribute was added by this call.
+ */
+MaterialPaintAttributeStatus BKE_paint_mesh_material_color_attribute_ensure(
+    Mesh &mesh, bool *r_created = nullptr);
+
+/**
+ * Human-readable reason for a non-#MaterialPaintAttributeStatus::Ok status, for operator reports.
+ * Returns an untranslated format-free message; \a attr_name is not embedded.
+ */
+const char *BKE_paint_material_attribute_status_message(MaterialPaintAttributeStatus status);
+
+/** \} */
 
 }  // namespace blender

@@ -131,6 +131,11 @@ void MESH_OT_primitive_cube_add_gizmo(wmOperatorType *ot);
 
 void MESH_OT_attribute_set(wmOperatorType *ot);
 
+/* *** `mesh_material_attribute.cc` *** */
+
+void MESH_OT_material_attribute_add(wmOperatorType *ot);
+void MESH_OT_material_attribute_remove(wmOperatorType *ot);
+
 /* *** `editmesh_bevel.cc` *** */
 
 void MESH_OT_bevel(wmOperatorType *ot);

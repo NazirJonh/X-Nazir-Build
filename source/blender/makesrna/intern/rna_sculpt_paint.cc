@@ -29,6 +29,20 @@
 
 namespace blender {
 
+/* Mirrors the descriptor table in #BKE_paint_material_channels. */
+const EnumPropertyItem rna_enum_material_paint_channel_items[] = {
+    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", "Base color channel"},
+    {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", "Metallic channel"},
+    {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", "Roughness channel"},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", "Specular channel"},
+    {PAINT_MATERIAL_CHANNEL_CUSTOM,
+     "CUSTOM",
+     0,
+     "Custom",
+     "User-named float attribute, vertex painting only"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 const EnumPropertyItem rna_enum_particle_edit_hair_brush_items[] = {
     {PE_BRUSH_COMB, "COMB", 0, "Comb", "Comb hairs"},
     {PE_BRUSH_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth hairs"},
@@ -85,6 +99,11 @@ static const EnumPropertyItem rna_enum_canvas_source_items[] = {
     {PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE, "COLOR_ATTRIBUTE", 0, "Color Attribute", ""},
     {PAINT_CANVAS_SOURCE_MATERIAL, "MATERIAL", 0, "Material", ""},
     {PAINT_CANVAS_SOURCE_IMAGE, "IMAGE", 0, "Image", ""},
+    {PAINT_CANVAS_SOURCE_MATERIAL_PAINT,
+     "MATERIAL_PAINT",
+     0,
+     "Material Paint",
+     "Paint per-vertex material attribute channels"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -104,6 +123,9 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 
 #ifdef RNA_RUNTIME
 #  include "MEM_guardedalloc.h"
+
+#  include "BLI_math_vector.h"
+#  include "BLI_math_vector_types.hh"
 
 #  include "BKE_brush.hh"
 #  include "BKE_collection.hh"
@@ -464,6 +486,80 @@ static void rna_PaintModeSettings_canvas_source_update(bContext *C, PointerRNA *
   }
 }
 
+/* Re-entry guard for Base Color ↔ brush Color sync (spec §3.5). */
+static bool paint_base_color_sync_guard = false;
+
+static void rna_PaintModeSettings_base_color_sync_brush_to_channel(Scene *scene,
+                                                                   Paint *paint,
+                                                                   const Brush *brush)
+{
+  if (!scene || !scene->toolsettings || !paint || !brush || paint_base_color_sync_guard) {
+    return;
+  }
+  PaintModeSettings &settings = scene->toolsettings->paint_mode;
+  if (!settings.use_sync_base_color_with_brush) {
+    return;
+  }
+
+  const float3 color = BKE_brush_color_get(paint, brush);
+  if (equals_v3v3(settings.channel_base_color, color)) {
+    return;
+  }
+
+  paint_base_color_sync_guard = true;
+  copy_v3_v3(settings.channel_base_color, color);
+  paint_base_color_sync_guard = false;
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
+}
+
+static void rna_PaintModeSettings_base_color_sync_channel_to_brush(Scene *scene,
+                                                                   Paint *paint,
+                                                                   Brush *brush)
+{
+  if (!scene || !scene->toolsettings || !paint || !brush || paint_base_color_sync_guard) {
+    return;
+  }
+  PaintModeSettings &settings = scene->toolsettings->paint_mode;
+  if (!settings.use_sync_base_color_with_brush) {
+    return;
+  }
+
+  const float3 color = float3(settings.channel_base_color);
+  if (equals_v3v3(BKE_brush_color_get(paint, brush), color)) {
+    return;
+  }
+
+  paint_base_color_sync_guard = true;
+  BKE_brush_color_set(paint, brush, color);
+  paint_base_color_sync_guard = false;
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, brush);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
+}
+
+static void rna_PaintModeSettings_channel_base_color_update(bContext *C, PointerRNA * /*ptr*/)
+{
+  const Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  Paint *paint = BKE_paint_get_active(*bmain, scene, view_layer);
+  Brush *brush = BKE_paint_brush(paint);
+  /* Sync on: channel → brush primary Color. */
+  rna_PaintModeSettings_base_color_sync_channel_to_brush(scene, paint, brush);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
+}
+
+static void rna_PaintModeSettings_sync_base_color_update(bContext *C, PointerRNA * /*ptr*/)
+{
+  const Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  Paint *paint = BKE_paint_get_active(*bmain, scene, view_layer);
+  Brush *brush = BKE_paint_brush(paint);
+  /* Sync enable 0→1: align brush → channel (brush is source). Sync off: leave values. */
+  rna_PaintModeSettings_base_color_sync_brush_to_channel(scene, paint, brush);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
+}
+
 /** \} */
 
 static bool rna_ImaPaint_detect_data(ImagePaintSettings *imapaint)
@@ -577,6 +673,14 @@ static void rna_UnifiedPaintSettings_color_update(bContext *C, PointerRNA *ptr)
   UnifiedPaintSettings *ups = static_cast<UnifiedPaintSettings *>(ptr->data);
   rna_UnifiedPaintSettings_update(C, ptr);
   BKE_brush_color_sync_legacy(ups);
+
+  /* Sync Base Color channel from active brush color when Sync with Brush is on. */
+  const Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  Paint *paint = BKE_paint_get_active(*bmain, scene, view_layer);
+  Brush *brush = BKE_paint_brush(paint);
+  rna_PaintModeSettings_base_color_sync_brush_to_channel(scene, paint, brush);
 }
 
 static void rna_UnifiedPaintSettings_size_set(PointerRNA *ptr, int value)
@@ -1416,6 +1520,93 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       prop, nullptr, nullptr, nullptr, "rna_Image_no_renderresult_or_viewer_poll");
   RNA_def_property_flag(prop, PROP_EDITABLE | PROP_CONTEXT_UPDATE);
   RNA_def_property_ui_text(prop, "Texture", "Image used as painting target");
+
+  /* The per-channel flags and values live in arrays indexed by #eMaterialPaintChannel; the
+   * properties below expose one named property per channel so the UI and scripts stay readable. */
+  prop = RNA_def_property(srna, "use_channel_base_color", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_channel[0]", 1);
+  RNA_def_property_ui_text(prop, "Use Base Color", "Paint the base color channel");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "channel_base_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "channel_base_color");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(
+      prop, "Base Color", "Color to paint for the base color channel");
+  RNA_def_property_update(prop, 0, "rna_PaintModeSettings_channel_base_color_update");
+
+  prop = RNA_def_property(srna, "use_sync_base_color_with_brush", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_sync_base_color_with_brush", 1);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_ui_text(prop,
+                           "Sync with Brush",
+                           "Keep the base color channel synchronized with the brush color");
+  RNA_def_property_update(prop, 0, "rna_PaintModeSettings_sync_base_color_update");
+
+  prop = RNA_def_property(srna, "use_channel_metallic", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_channel[1]", 1);
+  RNA_def_property_ui_text(prop, "Use Metallic", "Paint the metallic channel");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_channel_roughness", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_channel[2]", 1);
+  RNA_def_property_ui_text(prop, "Use Roughness", "Paint the roughness channel");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_channel_specular", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_channel[3]", 1);
+  RNA_def_property_ui_text(prop, "Use Specular", "Paint the specular channel");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_channel_custom", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_channel[4]", 1);
+  RNA_def_property_ui_text(prop, "Use Custom", "Paint a custom vertex float attribute");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "channel_metallic_value", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "channel_value[1]");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Metallic Value", "Value to paint for the metallic channel");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "channel_roughness_value", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "channel_value[2]");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Roughness Value", "Value to paint for the roughness channel");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "channel_specular_value", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "channel_value[3]");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Specular Value", "Value to paint for the specular channel");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* The custom channel targets an arbitrary float attribute, so its value is not a 0-1 factor and
+   * its soft range follows the user-defined range below. */
+  prop = RNA_def_property(srna, "channel_custom_value", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "channel_value[4]");
+  RNA_def_property_ui_range(prop, -10000.0f, 10000.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Custom Value", "Value to paint for the custom channel");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "channel_custom_range", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "channel_custom_range");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_ui_range(prop, -10000.0f, 10000.0f, 0.01, 3);
+  RNA_def_property_ui_text(
+      prop, "Custom Range", "Range painted values of the custom channel are clamped to");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "material_paint_custom_attr", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "material_paint_custom_attr");
+  RNA_def_property_ui_text(
+      prop, "Custom Attribute Name", "Name of custom material attribute when using custom mode");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 static void rna_def_image_paint(BlenderRNA *brna)

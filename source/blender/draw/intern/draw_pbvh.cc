@@ -36,6 +36,7 @@
 
 #include "attribute_convert.hh"
 #include "bmesh.hh"
+#include "draw_cache.hh"
 
 namespace blender {
 
@@ -311,7 +312,7 @@ static GPUVertFormat attribute_format(const OrigMeshData &orig_mesh_data,
 {
   GPUVertFormat format = init_format_for_attribute(data_type, "data");
 
-  bool is_render, is_active;
+  bool is_render = false, is_active = false;
   const char *prefix = "a";
 
   if (CD_TYPE_AS_MASK(*bke::attr_type_to_custom_data_type(data_type))) {
@@ -326,6 +327,14 @@ static GPUVertFormat attribute_format(const OrigMeshData &orig_mesh_data,
   }
 
   DRW_cdlayer_attr_aliases_add(&format, prefix, data_type, name, is_render, is_active);
+
+  /* Poly Paint: the Workbench prepass reads the scalar material attributes through fixed vertex
+   * input names. The generic alias generated above is `a` + safe-name (and a hashed form for
+   * names longer than 8 chars), which does not match, so add the explicit alias. */
+  if (const char *alias = DRW_material_paint_vertex_input_alias(name)) {
+    GPU_vertformat_alias_add(&format, alias);
+  }
+
   return format;
 }
 

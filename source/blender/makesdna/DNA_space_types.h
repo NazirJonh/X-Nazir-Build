@@ -19,6 +19,7 @@
 #include "DNA_node_types.h"      /* for bNodeInstanceKey */
 #include "DNA_outliner_types.h"  /* for TreeStoreElem */
 #include "DNA_space_enums.h"
+#include "DNA_view3d_types.h" /* for View3DShading */
 /* Hum ... Not really nice... but needed for spacebuts. */
 #include "DNA_vec_defaults.h"
 #include "DNA_view2d_types.h"
@@ -699,6 +700,9 @@ struct SpaceImage {
 
   MaskSpaceInfo mask_info;
   SpaceImageOverlay overlay;
+
+  /** Shading settings for the UV-space shaded display. Active when #SI_USE_SHADING is set. */
+  View3DShading shading;
 };
 
 /** \} */

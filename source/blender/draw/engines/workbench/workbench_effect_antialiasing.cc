@@ -195,16 +195,19 @@ void AntiAliasingPass::sync(const SceneState &scene_state, SceneResources &resou
   smaa_resolve_ps_.draw_procedural(GPU_PRIM_TRIS, 1, 3);
 }
 
-void AntiAliasingPass::setup_view(View &view, const SceneState &scene_state)
+float2 AntiAliasingPass::setup_view(View &view, const SceneState &scene_state)
 {
   const View &default_view = View::default_get();
-  const float4x4 &viewmat = default_view.viewmat();
+  /* In UV space the draw manager's default view is the Image Editor's zoom-dependent `View2D`
+   * transform, which is unusable for lighting. See #SceneState::view_matrix. */
+  const float4x4 &viewmat = scene_state.is_uv_space ? scene_state.view_matrix :
+                                                      default_view.viewmat();
   float4x4 winmat = default_view.winmat();
   float4x4 persmat = default_view.persmat();
 
   if (!enabled_) {
     view.sync(viewmat, winmat);
-    return;
+    return float2(0.0f);
   }
 
   const TaaSamples &taa_samples = get_taa_samples();
@@ -231,12 +234,15 @@ void AntiAliasingPass::setup_view(View &view, const SceneState &scene_state)
 
   setup_taa_weights(sample_offset, weights_, weights_sum_);
 
-  window_translate_m4(winmat.ptr(),
-                      persmat.ptr(),
-                      sample_offset.x / scene_state.resolution.x,
-                      sample_offset.y / scene_state.resolution.y);
+  /* For an orthographic window matrix #window_translate_m4 adds this straight to the NDC
+   * translation, so it is already the jitter expressed in NDC units. */
+  const float2 jitter_ndc = sample_offset / float2(scene_state.resolution);
+
+  window_translate_m4(winmat.ptr(), persmat.ptr(), jitter_ndc.x, jitter_ndc.y);
 
   view.sync(viewmat, winmat);
+
+  return jitter_ndc;
 }
 
 void AntiAliasingPass::draw(const DRWContext *draw_ctx,

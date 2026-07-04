@@ -982,15 +982,19 @@ class VIEW3D_HT_header(Header):
             row = layout.row()
             row.active = is_paint_tool and color_type == 'VERTEX'
 
-            if context.preferences.experimental.use_sculpt_texture_paint:
-                canvas_source = tool_settings.paint_mode.canvas_source
-                icon = 'GROUP_VCOL' if canvas_source == 'COLOR_ATTRIBUTE' else canvas_source
-                row.popover(panel="VIEW3D_PT_slots_paint_canvas", icon=icon)
-                # TODO: Update this boolean condition so that the Canvas button is only active when
-                # the appropriate color types are selected in Solid mode, I.E. 'TEXTURE'
-                row.active = is_paint_tool
-            else:
-                row.popover(panel="VIEW3D_PT_slots_color_attributes", icon='GROUP_VCOL')
+            canvas_source = tool_settings.paint_mode.canvas_source
+            # Mode identifiers MATERIAL/IMAGE coincide with icon names; others need a map.
+            match canvas_source:
+                case 'COLOR_ATTRIBUTE':
+                    icon = 'GROUP_VCOL'
+                case 'MATERIAL_PAINT':
+                    icon = 'MATERIAL_DATA'
+                case _:
+                    icon = canvas_source
+            row.popover(panel="VIEW3D_PT_slots_paint_canvas", icon=icon)
+            # TODO: Update this boolean condition so that the Canvas button is only active when
+            # the appropriate color types are selected in Solid mode, I.E. 'TEXTURE'
+            row.active = is_paint_tool
 
             layout.popover(
                 panel="VIEW3D_PT_sculpt_snapping",

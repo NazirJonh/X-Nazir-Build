@@ -499,6 +499,28 @@ const EnumPropertyItem rna_enum_shading_type_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Values reuse #eDrawType directly so they can be assigned straight to #View3DShading.type;
+ * `0` is free to mean "no shading" since #eDrawType has no zero member. */
+static const EnumPropertyItem rna_enum_space_image_shading_mode_items[] = {
+    {0, "IMAGE", ICON_IMAGE_DATA, "Image", "Display the image without shading"},
+    {OB_SOLID,
+     "SOLID",
+     ICON_SHADING_SOLID,
+     "Solid",
+     "Display the mesh in UV space with solid shading"},
+    {OB_MATERIAL,
+     "MATERIAL",
+     ICON_SHADING_TEXTURE,
+     "Material Preview",
+     "Display the mesh in UV space with material preview shading"},
+    {OB_RENDER,
+     "RENDERED",
+     ICON_SHADING_RENDERED,
+     "Rendered",
+     "Display the mesh in UV space with rendered shading"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_viewport_lighting_items[] = {
     {V3D_LIGHTING_STUDIO, "STUDIO", 0, "Studio", "Display using studio lighting"},
     {V3D_LIGHTING_MATCAP, "MATCAP", 0, "MatCap", "Display using matcap material and lighting"},
@@ -1870,6 +1892,12 @@ static std::optional<std::string> rna_View3DShading_path(const PointerRNA *ptr)
             return fmt::format("areas[{}].spaces[{}].shading", area_index, space_index);
           }
         }
+        else if (sl.spacetype == SPACE_IMAGE) {
+          const SpaceImage *sima = reinterpret_cast<const SpaceImage *>(&sl);
+          if (&sima->shading == shading) {
+            return fmt::format("areas[{}].spaces[{}].shading", area_index, space_index);
+          }
+        }
       }
     }
   }
@@ -2215,6 +2243,38 @@ static const EnumPropertyItem *rna_SpaceImageEditor_pivot_itemf(bContext * /*C*/
   else {
     return pivot_items;
   }
+}
+
+static int rna_SpaceImageEditor_shading_mode_get(PointerRNA *ptr)
+{
+  const SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+
+  if ((sima->flag & SI_USE_SHADING) == 0) {
+    return 0;
+  }
+  /* Types the mode enum cannot express (e.g. wireframe from a versioned-in file) fall back to
+   * Solid, the closest shaded equivalent. */
+  switch (sima->shading.type) {
+    case OB_MATERIAL:
+      return OB_MATERIAL;
+    case OB_RENDER:
+      return OB_RENDER;
+    default:
+      return OB_SOLID;
+  }
+}
+
+static void rna_SpaceImageEditor_shading_mode_set(PointerRNA *ptr, int value)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+
+  if (value == 0) {
+    /* Only clear the flag so the previously chosen shading type is kept for next time. */
+    sima->flag &= ~SI_USE_SHADING;
+    return;
+  }
+  sima->flag |= SI_USE_SHADING;
+  sima->shading.type = eDrawType(value);
 }
 
 static void rna_SpaceUVEditor_tile_grid_shape_set(PointerRNA *ptr, const int *values)
@@ -6495,6 +6555,22 @@ static void rna_def_space_image(BlenderRNA *brna)
 
   /* mask */
   rna_def_space_mask_info(srna, NC_SPACE | ND_SPACE_IMAGE, "rna_SpaceImageEditor_mask_set");
+
+  /* Shading. */
+  prop = RNA_def_property(srna, "shading", PROP_POINTER, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_NEVER_NULL);
+  RNA_def_property_struct_type(prop, "View3DShading");
+  RNA_def_property_ui_text(
+      prop, "Shading Settings", "Settings for shading in the UV-space shaded display");
+
+  prop = RNA_def_property(srna, "shading_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_space_image_shading_mode_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_SpaceImageEditor_shading_mode_get",
+                              "rna_SpaceImageEditor_shading_mode_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop, "Shading Mode", "Display mode of the image editor");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 }
 
 static void rna_def_space_sequencer_preview_overlay(BlenderRNA *brna)

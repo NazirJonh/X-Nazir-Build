@@ -83,6 +83,7 @@ set(SRC
   intern/draw_sculpt.cc
   intern/draw_select_buffer.cc
   intern/draw_shader.cc
+  intern/draw_uv_space_view.cc
   intern/draw_view.cc
   intern/draw_view_c.cc
   intern/draw_view_data.cc
@@ -183,6 +184,7 @@ set(SRC
   intern/draw_subdiv_defines.hh
   intern/draw_subdiv_shader_shared.hh
   intern/draw_subdivision.hh
+  intern/draw_uv_space_view.hh
   intern/draw_view.hh
   intern/draw_view_c.hh
   intern/draw_view_data.hh
@@ -888,6 +890,7 @@ if(WITH_GTESTS)
       tests/draw_curves_test.cc
       tests/draw_pass_test.cc
       tests/eevee_test.cc
+      tests/draw_uv_space_view_test.cc
 
       tests/draw_testing.hh
     )

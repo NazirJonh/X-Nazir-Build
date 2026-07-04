@@ -525,6 +525,29 @@ static wmOperatorStatus stencil_reset_transform_exec(bContext *C, wmOperator *op
   return OPERATOR_FINISHED;
 }
 
+static wmOperatorStatus material_paint_brush_ensure_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint brush");
+    return OPERATOR_CANCELLED;
+  }
+  BKE_brush_material_paint_ensure(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot)
+{
+  ot->name = "Enable Material Paint Channels for Brush";
+  ot->idname = "PAINT_OT_material_paint_brush_ensure";
+  ot->description = "Initialize per-channel material paint values for the active brush";
+  ot->exec = material_paint_brush_ensure_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
 static void BRUSH_OT_stencil_reset_transform(wmOperatorType *ot)
 {
   /* identifiers */
@@ -604,6 +627,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_project_image);
   WM_operatortype_append(PAINT_OT_image_from_view);
   WM_operatortype_append(PAINT_OT_brush_colors_flip);
+  WM_operatortype_append(PAINT_OT_material_paint_brush_ensure);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 

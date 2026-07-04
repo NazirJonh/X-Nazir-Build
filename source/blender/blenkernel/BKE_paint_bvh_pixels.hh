@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <string>
+
 #include "BLI_array.hh"
 #include "BLI_map.hh"
 #include "BLI_math_vector.hh"
@@ -343,6 +345,13 @@ struct PixelData {
     bool dirty : 1;
   } flags;
 
+  /**
+   * Layout key of the Image last encoded into #nodes (seam margin + tile sizes).
+   * Empty when unknown or when a full rebuild was requested. Matching keys can
+   * reuse this encoding across Material paint channels.
+   */
+  std::string layout_key;
+
   /* Per UVPRimitive contains the paint data. */
   Array<int3> vert_tris;
 
@@ -350,6 +359,11 @@ struct PixelData {
   CopyPixelTiles tiles_copy_pixels;
 
   Vector<PixelNode> nodes;
+
+  PixelData()
+  {
+    flags.dirty = true;
+  }
 };
 
 void mark_image_dirty(bke::pbvh::Node &node,

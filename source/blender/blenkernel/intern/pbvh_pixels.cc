@@ -18,6 +18,8 @@
 #include "BKE_image_wrappers.hh"
 #include "BKE_paint.hh"
 
+#include "BKE_paint_material_channel_perf_debug.hh"
+
 #include "PRF_profile.hh"
 
 #include "pbvh_intern.hh"
@@ -231,9 +233,13 @@ static void do_encode_pixels(const uv_islands::MeshData &mesh_data,
 static IndexMask find_nodes_to_update(Tree &pbvh, IndexMaskMemory &memory)
 {
   MutableSpan<MeshNode> nodes = pbvh.nodes<MeshNode>();
-  if (pbvh.pixels_ == nullptr) {
-    pbvh.pixels_ = MEM_new<PixelData>(__func__);
+  if (pbvh.pixels_ == nullptr || pbvh.pixels_->nodes.size() != nodes.size()) {
+    if (pbvh.pixels_ == nullptr) {
+      pbvh.pixels_ = MEM_new<PixelData>(__func__);
+    }
     pbvh.pixels_->nodes.reinitialize(nodes.size());
+    pbvh.pixels_->flags.dirty = true;
+    pbvh.pixels_->layout_key.clear();
   }
 
   PixelData &pixel_data = *pbvh.pixels_;
@@ -298,7 +304,8 @@ static bool update_pixels(const Depsgraph &depsgraph,
                           const Object &object,
                           Tree &pbvh,
                           Image &image,
-                          ImageUser &image_user)
+                          ImageUser &image_user,
+                          const StringRef uv_map_name)
 {
   IndexMaskMemory memory;
   const IndexMask nodes_to_update = find_nodes_to_update(pbvh, memory);
@@ -306,14 +313,21 @@ static bool update_pixels(const Depsgraph &depsgraph,
     return false;
   }
 
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  blender::bke::paint_material_channel_perf::set_build_pixels_leaf_nodes_updated(
+      nodes_to_update.size());
+#endif
+
   const Mesh &mesh = *id_cast<const Mesh *>(object.data);
-  const StringRef active_uv_name = mesh.active_uv_map_name();
-  if (active_uv_name.is_empty()) {
+  if (uv_map_name.is_empty()) {
     return false;
   }
 
   const AttributeAccessor attributes = mesh.attributes();
-  const VArraySpan uv_map = *attributes.lookup<float2>(active_uv_name, AttrDomain::Corner);
+  const VArraySpan uv_map = *attributes.lookup<float2>(uv_map_name, AttrDomain::Corner);
+  if (uv_map.is_empty()) {
+    return false;
+  }
 
   uv_islands::MeshData mesh_data(mesh.faces(),
                                  mesh.corner_tris(),
@@ -335,28 +349,50 @@ static bool update_pixels(const Depsgraph &depsgraph,
                       ushort2(tile_buffer->x, tile_buffer->y));
     BKE_image_release_ibuf(&image, tile_buffer, nullptr);
   }
-  uv_masks.add(mesh_data, islands);
-  uv_masks.dilate(image.seam_margin);
 
-  islands.extract_borders();
-  islands.extend_borders(mesh_data, uv_masks);
-  update_geom_primitives(pbvh, mesh_data);
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  {
+    PAINT_CHANNEL_PERF_SCOPE(BuildPixelsUvIslands);
+#endif
+    uv_masks.add(mesh_data, islands);
+    uv_masks.dilate(image.seam_margin);
+
+    islands.extract_borders();
+    islands.extend_borders(mesh_data, uv_masks);
+    update_geom_primitives(pbvh, mesh_data);
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  }
+#endif
 
   UVPrimitiveLookup uv_primitive_lookup(mesh_data.corner_tris.size(), islands);
 
   MutableSpan<MeshNode> nodes = pbvh.nodes<MeshNode>();
   MutableSpan<PixelNode> pixel_nodes = pbvh.pixels_->nodes;
 
-  nodes_to_update.foreach_index([&](const int i) {
-    do_encode_pixels(
-        mesh_data, uv_masks, uv_primitive_lookup, image, image_user, nodes[i], pixel_nodes[i]);
-  });
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  {
+    PAINT_CHANNEL_PERF_SCOPE(BuildPixelsEncode);
+#endif
+    nodes_to_update.foreach_index([&](const int i) {
+      do_encode_pixels(
+          mesh_data, uv_masks, uv_primitive_lookup, image, image_user, nodes[i], pixel_nodes[i]);
+    });
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  }
+#endif
   if (USE_WATERTIGHT_CHECK) {
     apply_watertight_check(pbvh, image, image_user);
   }
 
   /* Add solution for non-manifold parts of the model. */
-  copy_update(pbvh, image, image_user, mesh_data);
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  {
+    PAINT_CHANNEL_PERF_SCOPE(BuildPixelsCopyUpdate);
+#endif
+    copy_update(pbvh, image, image_user, mesh_data);
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+  }
+#endif
 
   /* Rebuild the undo regions. */
   nodes_to_update.foreach_index([&](const int i) { pixel_nodes[i].rebuild_undo_regions(); });
@@ -365,6 +401,8 @@ static bool update_pixels(const Depsgraph &depsgraph,
   nodes_to_update.foreach_index([&](const int i) { pixel_nodes[i].flags.rebuild = false; });
 
   pbvh.pixels_->flags.dirty = false;
+  pbvh.pixels_->layout_key = BKE_paint_pixels_layout_key_get(
+      image, image_user, uv_map_name);
 
 // #define DO_PRINT_STATISTICS
 #ifdef DO_PRINT_STATISTICS
@@ -449,17 +487,36 @@ void collect_dirty_tiles(PixelNode &node, Vector<image::TileNumber> &r_dirty_til
 
 namespace bke::pbvh {
 
-void build_pixels(const Depsgraph &depsgraph, Object &object, Image &image, ImageUser &image_user)
+bool build_pixels(const Depsgraph &depsgraph,
+                  Object &object,
+                  Image &image,
+                  ImageUser &image_user,
+                  const StringRef uv_map_name)
 {
   PRF_scope(ProfileCategory::Editor);
   Tree &pbvh = *object::pbvh_get(object);
-  pixels::update_pixels(depsgraph, object, pbvh, image, image_user);
+  const std::string layout_key = BKE_paint_pixels_layout_key_get(image, image_user, uv_map_name);
+  for (pixels::PixelData *cached : pbvh.pixels_cache_) {
+    if (cached->layout_key == layout_key) {
+      pbvh.pixels_ = cached;
+      if (!cached->flags.dirty) {
+        return true;
+      }
+      return pixels::update_pixels(depsgraph, object, pbvh, image, image_user, uv_map_name);
+    }
+  }
+
+  pbvh.pixels_ = MEM_new<pixels::PixelData>(__func__);
+  pbvh.pixels_cache_.append(pbvh.pixels_);
+  return pixels::update_pixels(depsgraph, object, pbvh, image, image_user, uv_map_name);
 }
 
 void pixels_free(Tree *pbvh)
 {
-  pixels::PixelData *pbvh_data = pbvh->pixels_;
-  MEM_delete(pbvh_data);
+  for (pixels::PixelData *cached : pbvh->pixels_cache_) {
+    MEM_delete(cached);
+  }
+  pbvh->pixels_cache_.clear();
   pbvh->pixels_ = nullptr;
 }
 

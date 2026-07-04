@@ -16,6 +16,7 @@
 
 #include "attribute_convert.hh"
 #include "draw_attributes.hh"
+#include "draw_cache.hh"
 #include "draw_subdivision.hh"
 #include "extract_mesh.hh"
 
@@ -47,6 +48,13 @@ static void init_vbo_for_attribute(const MeshRenderData &mr,
   }
   if (mr.default_color_name && name == mr.default_color_name) {
     GPU_vertformat_alias_add(&format, "c");
+  }
+
+  /* Poly Paint: the Workbench prepass reads the scalar material attributes through fixed vertex
+   * input names. The auto-generated name above is `a` + safe-name, which does not match, so add
+   * the explicit alias. Mirrors the sculpt path in `draw_pbvh.cc`. */
+  if (const char *alias = DRW_material_paint_vertex_input_alias(name)) {
+    GPU_vertformat_alias_add(&format, alias);
   }
 
   if (build_on_device) {

@@ -7,8 +7,8 @@
 
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
+#include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
-#include "DNA_userdef_types.h"
 
 #include "ED_paint.hh"
 
@@ -16,8 +16,11 @@
 #include "BLI_bounds.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_listbase.h"
+#include "BLI_math_base.hh"
 #include "BLI_math_color_blend.h"
 #include "BLI_math_geom.h"
+#include "BLI_math_vector.h"
+#include "BLI_math_vector.hh"
 #ifdef DEBUG_PIXEL_NODES
 #  include "BLI_hash.h"
 #endif
@@ -25,17 +28,23 @@
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 
+#include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_image_wrappers.hh"
+#include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
+#include "BKE_paint_material_channel_perf_debug.hh"
 
 #include "mesh_brush_common.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_intern.hh"
 
 namespace blender {
+
+namespace paint_material_channel_perf = bke::paint_material_channel_perf;
 
 namespace ed::sculpt_paint::paint::image {
 
@@ -54,20 +63,77 @@ ImageData::~ImageData()
   }
   buffers.clear();
 }
-std::unique_ptr<ImageData> ImageData::init_active_image(Object &ob,
-                                                        PaintModeSettings &paint_mode_settings)
+
+std::unique_ptr<ImageData> ImageData::from_image(Image *image, ImageUser *image_user)
 {
-  std::unique_ptr<ImageData> image_data = std::make_unique<ImageData>();
-  if (!BKE_paint_canvas_image_get(
-          &paint_mode_settings, &ob, &image_data->image, &image_data->image_user))
-  {
+  if (image == nullptr || image_user == nullptr) {
     return nullptr;
   }
-
-  BLI_assert(image_data->image);
-  BLI_assert(image_data->image_user);
-
+  std::unique_ptr<ImageData> image_data = std::make_unique<ImageData>();
+  image_data->image = image;
+  image_data->image_user = image_user;
   return image_data;
+}
+
+Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
+                                                  PaintModeSettings &paint_mode_settings,
+                                                  const Brush *brush)
+{
+  Vector<ImagePaintTarget> targets;
+
+  switch (paint_mode_settings.canvas_source) {
+    case PAINT_CANVAS_SOURCE_MATERIAL: {
+      const BrushMaterialPaint *brush_paint = brush ? brush->material_paint : nullptr;
+      const Vector<PaintMaterialImageTarget> material_targets =
+          BKE_paint_material_image_targets_get(ob, paint_mode_settings, brush_paint);
+      for (const PaintMaterialImageTarget &material_target : material_targets) {
+        ImagePaintTarget target;
+        target.data = ImageData::from_image(material_target.image, material_target.iuser);
+        if (!target.data) {
+          continue;
+        }
+        target.is_color_channel = material_target.is_color_channel;
+        target.is_normal_channel = material_target.is_normal_channel;
+        target.channel = material_target.channel;
+        target.channel_name = BKE_paint_material_channel_info(material_target.channel).ui_name;
+        if (material_target.is_color_channel) {
+          const float3 rgb = float3(material_target.color);
+          target.color_override = float4(rgb, 1.0f);
+        }
+        else if (material_target.is_normal_channel) {
+          /* Pack tangent into 0..1 so byte and float blend paths share one brush color. */
+          float packed[3];
+          BKE_pbr_normal_pack(material_target.color, false, packed);
+          target.color_override = float4(packed[0], packed[1], packed[2], 1.0f);
+        }
+        else {
+          const float v = material_target.value;
+          target.color_override = float4(v, v, v, 1.0f);
+        }
+        targets.append(std::move(target));
+      }
+      break;
+    }
+    case PAINT_CANVAS_SOURCE_IMAGE: {
+      Image *image = nullptr;
+      ImageUser *image_user = nullptr;
+      if (!BKE_paint_canvas_image_get(&paint_mode_settings, &ob, &image, &image_user)) {
+        break;
+      }
+      ImagePaintTarget target;
+      target.data = ImageData::from_image(image, image_user);
+      if (target.data) {
+        target.channel_name = image->id.name + 2;
+        targets.append(std::move(target));
+      }
+      break;
+    }
+    case PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE:
+    case PAINT_CANVAS_SOURCE_MATERIAL_PAINT:
+      break;
+  }
+
+  return targets;
 }
 
 static void fetch_image_buffers(ImageData &image_data,
@@ -286,10 +352,28 @@ static void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
 
 static void blend_colors(MutableSpan<float4> paint_pixels,
                          Span<float4> scene_linear_pixels,
-                         const Brush &brush)
+                         const Brush &brush,
+                         const IMB_BlendMode blend_mode,
+                         const bool is_float_storage)
 {
   PRF_scope(ProfileCategory::Editor);
   BLI_assert(paint_pixels.size() == scene_linear_pixels.size());
+
+  if (blend_mode == IMB_BLEND_NORMAL_MIX) {
+    for (const int i : paint_pixels.index_range()) {
+      const float t = math::clamp(paint_pixels[i][3] * brush.alpha, 0.0f, 1.0f);
+      float target_n[3] = {paint_pixels[i][0] * 2.0f - 1.0f,
+                           paint_pixels[i][1] * 2.0f - 1.0f,
+                           paint_pixels[i][2] * 2.0f - 1.0f};
+      float out[3];
+      BKE_pbr_normal_blend_mix(scene_linear_pixels[i], target_n, t, is_float_storage, out);
+      paint_pixels[i][0] = out[0];
+      paint_pixels[i][1] = out[1];
+      paint_pixels[i][2] = out[2];
+      paint_pixels[i][3] = scene_linear_pixels[i][3];
+    }
+    return;
+  }
 
   /* Mix the initial image color with the paint color. */
   for (const int i : paint_pixels.index_range()) {
@@ -298,8 +382,7 @@ static void blend_colors(MutableSpan<float4> paint_pixels,
   }
 
   /* Apply the blended color to the original image with the brush alpha. */
-  IMB_blend_color_float(
-      paint_pixels, scene_linear_pixels, paint_pixels, IMB_BlendMode(brush.blend));
+  IMB_blend_color_float(paint_pixels, scene_linear_pixels, paint_pixels, blend_mode);
 }
 
 #ifdef DEBUG_PIXEL_NODES
@@ -336,32 +419,164 @@ static Bounds<int2> negative_bounds()
   return {int2(std::numeric_limits<int>::max()), int2(std::numeric_limits<int>::lowest())};
 }
 
-static void do_paint_pixels(const Depsgraph &depsgraph,
-                            Object &object,
-                            const Paint &paint,
-                            const Brush &brush,
-                            ImageData &image_data,
-                            bke::pbvh::Node & /*node*/,
-                            PixelNode &pixel_node)
+/** Per-face material filter for Mode=Material image painting (active slot only). */
+struct MaterialPaintFilter {
+  bool use_filter = false;
+  int active_material_index = 0;
+  std::optional<int> face_material_single;
+  Span<int> face_materials;
+  Span<int> corner_tri_faces;
+
+  static MaterialPaintFilter from_object(Object &object, const bool material_canvas_mode)
+  {
+    MaterialPaintFilter filter;
+    if (!material_canvas_mode || object.totcol <= 1) {
+      return filter;
+    }
+
+    const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+    filter.use_filter = true;
+    filter.active_material_index = math::max(object.actcol - 1, 0);
+    filter.corner_tri_faces = mesh.corner_tri_faces();
+
+    const VArray<int> material_indices = *mesh.attributes().lookup_or_default<int>(
+        "material_index", bke::AttrDomain::Face, 0);
+    if (material_indices.is_single()) {
+      filter.face_material_single = material_indices.get_internal_single();
+    }
+    else {
+      filter.face_materials = material_indices.get_internal_span();
+    }
+    return filter;
+  }
+
+  bool uv_primitive_matches(const PixelNode &pixel_node, const int uv_primitive_index) const
+  {
+    if (!use_filter) {
+      return true;
+    }
+    const int tri_index = pixel_node.uv_primitives.tri_indices[uv_primitive_index];
+    const int face_i = corner_tri_faces[tri_index];
+    const int face_material_index = face_material_single ?
+                                      *face_material_single :
+                                      face_materials[face_i];
+    return face_material_index == active_material_index;
+  }
+};
+
+/**
+ * Per-tile cache of brush falloff/hardness/strength/texture factors for one pixel node.
+ * These only depend on brush, stroke cache and geometry, never on which Material channel image
+ * is being written, so they are computed once per dab and shared by every enabled channel
+ * instead of being re-evaluated per channel.
+ */
+struct RowFactorCache {
+  /* IndexMaskMemory is non-movable; heap-own it so RowFactorCache itself stays movable
+   * (needed to live in a resizable Array without disturbing pointers the IndexMask holds
+   * into it). */
+  std::unique_ptr<IndexMaskMemory> memory = std::make_unique<IndexMaskMemory>();
+  IndexMask valid_rows;
+  Array<bool> row_changed;
+  /** Indexed like #UDIMTilePixels::pixel_rows; only entries in #valid_rows are populated. */
+  Array<Array<float>> row_factors;
+  Bounds<int2> dirty_bounds = negative_bounds();
+};
+
+static Array<RowFactorCache> compute_paint_row_factors(SculptSession &ss,
+                                                        const PixelData &pbvh_data,
+                                                        const Span<float3> positions,
+                                                        const Brush &brush,
+                                                        const MaterialPaintFilter &material_filter,
+                                                        PixelNode &pixel_node)
 {
   PRF_scope(ProfileCategory::Editor);
-  SculptSession &ss = *object.runtime->sculpt_session;
   const StrokeCache &cache = *ss.cache;
-  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
-  PixelData &pbvh_data = bke::pbvh::pixels::data_get(pbvh);
-  const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
 
   BitVector<> brush_test = init_uv_primitives_brush_test(
       ss, pbvh_data.vert_tris, pixel_node.uv_primitives.tri_indices, positions);
 
-  float4 brush_color = float4(ss.cache->toggle_settings.invert ?
-                                  BKE_brush_secondary_color_get(&paint, &brush) :
-                                  BKE_brush_color_get(&paint, &brush),
-                              1.0f);
+  Array<RowFactorCache> tile_caches(pixel_node.tiles.size());
+
+  for (const int tile_i : pixel_node.tiles.index_range()) {
+    UDIMTilePixels &tile_data = pixel_node.tiles[tile_i];
+    RowFactorCache &tile_cache = tile_caches[tile_i];
+
+    tile_cache.valid_rows = IndexMask::from_predicate(
+        tile_data.pixel_rows.index_range(), *tile_cache.memory, [&](const int i) {
+          const PackedPixelRow &pixel_row = tile_data.pixel_rows[i];
+          if (!brush_test[pixel_row.uv_primitive_index]) {
+            return false;
+          }
+          return material_filter.uv_primitive_matches(pixel_node, pixel_row.uv_primitive_index);
+        });
+
+    tile_cache.row_changed = Array<bool>(tile_cache.valid_rows.min_array_size(), false);
+    tile_cache.row_factors.reinitialize(tile_cache.valid_rows.min_array_size());
+
+    threading::EnumerableThreadSpecific<PaintLocalData> all_factor_tls;
+    tile_cache.valid_rows.foreach_index(
+        [&](const int row_i) {
+          const PackedPixelRow pixel_row = tile_data.pixel_rows[row_i];
+          const int row_size = pixel_row.num_pixels;
+          Array<float> &row_factors = tile_cache.row_factors[row_i];
+          row_factors.reinitialize(row_size);
+
+          threading::parallel_for(IndexRange(row_size), 512, [&](const IndexRange range) {
+            PaintLocalData &tls = all_factor_tls.local();
+            tls.pixel_positions.resize(range.size());
+            calc_pixel_row_positions(positions,
+                                     pbvh_data.vert_tris,
+                                     pixel_node.uv_primitives.tri_indices,
+                                     pixel_node.uv_primitives.delta_barycentric_coords,
+                                     pixel_row,
+                                     range,
+                                     tls.pixel_positions);
+
+            MutableSpan<float> factors = row_factors.as_mutable_span().slice(range);
+            factors.fill(1.0f);
+
+            tls.distances.resize(range.size());
+            calc_brush_distances(
+                ss, tls.pixel_positions, eBrushFalloffShape(brush.falloff_shape), tls.distances);
+            filter_distances_with_radius(cache.radius, tls.distances, factors);
+            apply_hardness_to_distances(cache, tls.distances);
+            calc_brush_strength_factors(cache, brush, tls.distances, factors);
+            calc_brush_texture_factors(ss, brush, tls.pixel_positions, factors);
+            scale_factors(factors, cache.bstrength);
+          });
+
+          if (std::ranges::all_of(row_factors, [](const float factor) { return factor == 0.0f; }))
+          {
+            paint_material_channel_perf::add_rows_skipped(1);
+            return;
+          }
+          tile_cache.row_changed[row_i] = true;
+          paint_material_channel_perf::add_rows_painted(1);
+
+          const int2 start(pixel_row.start_image_coordinate.x,
+                           pixel_row.start_image_coordinate.y);
+          const int2 end = start + int2(pixel_row.num_pixels + 1, 0);
+          tile_cache.dirty_bounds = bounds::merge(tile_cache.dirty_bounds, Bounds<int2>(start, end));
+        },
+        exec_mode::grain_size(2));
+  }
+
+  return tile_caches;
+}
+
+/** Apply cached brush factors to one Material paint channel's image (read/blend/write only). */
+static void apply_paint_channel(ImageData &image_data,
+                                const Brush &brush,
+                                const float4 &brush_color,
+                                const IMB_BlendMode blend_mode,
+                                PixelNode &pixel_node,
+                                Span<RowFactorCache> tile_caches)
+{
+  PRF_scope(ProfileCategory::Editor);
 
 #ifdef DEBUG_PIXEL_NODES
   float4 debug_color;
-  uint hash = BLI_hash_int(POINTER_AS_UINT(&node));
+  uint hash = BLI_hash_int(POINTER_AS_UINT(&pixel_node));
 
   debug_color[0] = float(hash & 255) / 255.0f;
   debug_color[1] = float((hash >> 8) & 255) / 255.0f;
@@ -370,12 +585,14 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
 #endif
 
   bool pixels_updated = false;
-  for (UDIMTilePixels &tile_data : pixel_node.tiles) {
+  for (const int tile_i : pixel_node.tiles.index_range()) {
+    UDIMTilePixels &tile_data = pixel_node.tiles[tile_i];
+    const RowFactorCache &tile_cache = tile_caches[tile_i];
+
     ImBuf *image_buffer = image_data.buffers.lookup_default(tile_data.tile_number, nullptr);
     if (image_buffer == nullptr) {
       continue;
     }
-    IndexMaskMemory memory;
 
     MutableSpan<float4> float_buffer;
     MutableSpan<uchar4> byte_buffer;
@@ -393,48 +610,38 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
     const TileColorspaceProcessor *processors = image_data.processors.lookup_ptr(
         tile_data.tile_number);
 
-    const IndexMask valid_rows = IndexMask::from_predicate(
-        tile_data.pixel_rows.index_range(), memory, [&](const int i) {
-          return brush_test[tile_data.pixel_rows[i].uv_primitive_index];
-        });
-
-    Array<bool> row_changed(valid_rows.min_array_size(), false);
-    threading::EnumerableThreadSpecific<PaintLocalData> all_factor_tls;
-    valid_rows.foreach_index(
+    threading::EnumerableThreadSpecific<PaintLocalData> all_tls;
+    tile_cache.valid_rows.foreach_index(
         [&](const int row_i) {
+          if (!tile_cache.row_changed[row_i]) {
+            return;
+          }
           const PackedPixelRow pixel_row = tile_data.pixel_rows[row_i];
           const int row_size = pixel_row.num_pixels;
+          Span<float> row_factors = tile_cache.row_factors[row_i];
+
           threading::parallel_for(IndexRange(row_size), 512, [&](const IndexRange range) {
-            PaintLocalData &tls = all_factor_tls.local();
-            tls.factors.resize(range.size());
-            tls.factors.fill(1.0f);
-            tls.pixel_positions.resize(range.size());
-            calc_pixel_row_positions(positions,
-                                     pbvh_data.vert_tris,
-                                     pixel_node.uv_primitives.tri_indices,
-                                     pixel_node.uv_primitives.delta_barycentric_coords,
-                                     pixel_row,
-                                     range,
-                                     tls.pixel_positions);
-
-            MutableSpan<float> factors = tls.factors;
-
-            tls.distances.resize(range.size());
-            calc_brush_distances(
-                ss, tls.pixel_positions, eBrushFalloffShape(brush.falloff_shape), tls.distances);
-            filter_distances_with_radius(cache.radius, tls.distances, factors);
-            apply_hardness_to_distances(cache, tls.distances);
-            calc_brush_strength_factors(cache, brush, tls.distances, factors);
-            calc_brush_texture_factors(ss, brush, tls.pixel_positions, factors);
-            scale_factors(factors, cache.bstrength);
-
+            Span<float> factors = row_factors.slice(range);
+            /* Chunk may still be all-zero even though the row has some nonzero factor
+             * elsewhere; skip it exactly like the un-cached path used to. */
             if (std::ranges::all_of(factors, [](const float factor) { return factor == 0.0f; })) {
+              paint_material_channel_perf::add_rows_skipped(1);
               return;
             }
-            row_changed[row_i] = true;
+            paint_material_channel_perf::add_pixels_painted(range.size());
 
+            PaintLocalData &tls = all_tls.local();
             tls.paint_pixels.resize(range.size());
-            calc_brush_colors(tls.paint_pixels, factors, brush_color);
+            if (blend_mode == IMB_BLEND_NORMAL_MIX) {
+              /* Keep packed tangent RGB intact; strength lives in alpha as mix t. */
+              for (const int i : range.index_range()) {
+                tls.paint_pixels[i] = float4(
+                    brush_color[0], brush_color[1], brush_color[2], factors[i]);
+              }
+            }
+            else {
+              calc_brush_colors(tls.paint_pixels, factors, brush_color);
+            }
 
             if (!float_buffer.is_empty()) {
               tls.scene_linear_pixels = read_image_pixels(
@@ -453,7 +660,11 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
             apply_debug_color(scene_linear_pixels, pixel_row);
 #endif
 
-            blend_colors(tls.paint_pixels, tls.scene_linear_pixels, brush);
+            blend_colors(tls.paint_pixels,
+                         tls.scene_linear_pixels,
+                         brush,
+                         blend_mode,
+                         !float_buffer.is_empty());
 
             if (!float_buffer.is_empty()) {
               write_image_pixels(
@@ -467,28 +678,8 @@ static void do_paint_pixels(const Depsgraph &depsgraph,
         },
         exec_mode::grain_size(2));
 
-    const IndexMask changed_rows = IndexMask::from_bools(valid_rows, row_changed, memory);
-
-    const Bounds<int2> dirty_bounds = threading::parallel_reduce(
-        changed_rows.index_range(),
-        512,
-        negative_bounds(),
-        [&](const IndexRange range, const Bounds<int2> &init) {
-          Bounds<int2> current = init;
-          changed_rows.slice(range).foreach_index([&](const int row_i) {
-            const PackedPixelRow pixel_row = tile_data.pixel_rows[row_i];
-
-            const int2 start(pixel_row.start_image_coordinate.x,
-                             pixel_row.start_image_coordinate.y);
-            const int2 end = start + int2(pixel_row.num_pixels + 1, 0);
-
-            current = bounds::merge(current, Bounds<int2>(start, end));
-          });
-          return current;
-        },
-        merge_bounds);
-    if (!dirty_bounds.is_empty()) {
-      tile_data.mark_dirty(dirty_bounds);
+    if (!tile_cache.dirty_bounds.is_empty()) {
+      tile_data.mark_dirty(tile_cache.dirty_bounds);
     }
 
     if (tile_data.flags.dirty) {
@@ -595,20 +786,31 @@ static void fix_non_manifold_seam_bleeding(Object &ob,
 
 using namespace blender::ed::sculpt_paint::paint::image;
 
-bool SCULPT_use_image_paint_brush(PaintModeSettings &settings, Object &ob)
+bool SCULPT_use_image_paint_brush(PaintModeSettings &settings, Object &ob, const Brush *brush)
 {
-  if (!USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint)) {
-    return false;
-  }
   if (ob.type != OB_MESH) {
     return false;
   }
-  Image *image;
-  ImageUser *image_user;
-  return BKE_paint_canvas_image_get(&settings, &ob, &image, &image_user);
+  switch (settings.canvas_source) {
+    case PAINT_CANVAS_SOURCE_MATERIAL: {
+      /* Multi-channel Principled maps; empty target list is a no-op (no texpaint fallback). */
+      const BrushMaterialPaint *brush_paint = brush ? brush->material_paint : nullptr;
+      return !BKE_paint_material_image_targets_get(ob, settings, brush_paint).is_empty();
+    }
+    case PAINT_CANVAS_SOURCE_MATERIAL_PAINT:
+    case PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE:
+      return false;
+    case PAINT_CANVAS_SOURCE_IMAGE: {
+      Image *image;
+      ImageUser *image_user;
+      return BKE_paint_canvas_image_get(&settings, &ob, &image, &image_user);
+    }
+  }
+  return false;
 }
 
 void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
+                                 PaintModeSettings &paint_mode_settings,
                                  const Sculpt &sd,
                                  Object &ob,
                                  const IndexMask &node_mask)
@@ -617,34 +819,171 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
   ed::sculpt_paint::StrokeCache &cache = *ob.runtime->sculpt_session->cache;
 
-  if (!cache.image_data) {
+  if (cache.image_paint_targets.is_empty()) {
     return;
   }
 
-  ImageData &image_data = *cache.image_data;
-
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
-  PixelData &pixel_data = *pbvh.pixels_;
-  MutableSpan<PixelNode> pixel_nodes = pixel_data.nodes;
 
-  node_mask.foreach_index(
-      [&](const int i) { fetch_image_buffers(image_data, nodes[i], pixel_nodes[i]); });
-  node_mask.foreach_index(
-      [&](const int i) { do_push_undo_tile(image_data, nodes[i], pixel_nodes[i]); },
-      exec_mode::grain_size(1));
-  node_mask.foreach_index(
-      [&](const int i) {
-        do_paint_pixels(depsgraph, ob, sd.paint, *brush, image_data, nodes[i], pixel_nodes[i]);
-      },
-      exec_mode::grain_size(1));
+  const bool material_canvas_mode =
+      paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL;
+  const MaterialPaintFilter material_filter =
+      MaterialPaintFilter::from_object(ob, material_canvas_mode);
 
-  fix_non_manifold_seam_bleeding(ob, image_data, nodes, pixel_nodes, node_mask);
+  const float4 brush_color_default = float4(cache.toggle_settings.invert ?
+                                                BKE_brush_secondary_color_get(&sd.paint, brush) :
+                                                BKE_brush_color_get(&sd.paint, brush),
+                                            1.0f);
 
-  node_mask.foreach_index([&](const int i) {
-    bke::pbvh::pixels::mark_image_dirty(
-        nodes[i], pixel_nodes[i], *image_data.image, image_data.buffers);
-  });
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
+
+  /* Brush falloff/hardness/strength/texture factors are channel-independent: computed once per
+   * dab against the shared pixel-node encoding and reused by every enabled Material channel,
+   * instead of being re-evaluated per channel (Base Color, Normal, Roughness, ...). Recomputed
+   * whenever the pixel encoding itself is rebuilt below. */
+  Array<Array<RowFactorCache>> node_factor_caches(nodes.size());
+  bool factor_caches_valid = false;
+
+  int target_index = 0;
+  for (ImagePaintTarget &target : cache.image_paint_targets) {
+    ImageData &image_data = *target.data;
+    ImageUser tile_user = *image_data.image_user;
+    ImBuf *tile_buffer = BKE_image_acquire_ibuf(image_data.image, &tile_user, nullptr);
+    const int res_x = tile_buffer ? tile_buffer->x : 0;
+    const int res_y = tile_buffer ? tile_buffer->y : 0;
+    if (tile_buffer) {
+      BKE_image_release_ibuf(image_data.image, tile_buffer, nullptr);
+    }
+
+    paint_material_channel_perf::target_begin(
+        target_index, target.channel_name, res_x, res_y);
+    PAINT_CHANNEL_PERF_SCOPE(TargetTotal);
+
+    /* Base Color and scalars honor invert each dab; Normal erase blends toward flat tangent.
+     * The mode is per-channel, so it is resolved once here rather than taken from #Brush.blend. */
+    float4 brush_color_storage;
+    const float4 *brush_color_ptr;
+    BLI_assert(brush->material_paint != nullptr);
+    const IMB_BlendMode blend_mode = IMB_BlendMode(BKE_paint_material_channel_blend_mode(
+        *brush->material_paint, target.channel, cache.toggle_settings.invert));
+    if (target.is_color_channel) {
+      BLI_assert(brush->material_paint != nullptr);
+      const float3 rgb = BKE_paint_material_base_color_get(
+          *brush->material_paint, sd.paint, *brush, cache.toggle_settings.invert);
+      brush_color_storage = float4(rgb, 1.0f);
+      brush_color_ptr = &brush_color_storage;
+    }
+    else if (target.is_normal_channel) {
+      float3 tangent(0.0f, 0.0f, 1.0f);
+      if (!cache.toggle_settings.invert && target.color_override) {
+        /* color_override stores packed 0..1; unpack to tangent then re-pack after invert branch. */
+        tangent[0] = (*target.color_override)[0] * 2.0f - 1.0f;
+        tangent[1] = (*target.color_override)[1] * 2.0f - 1.0f;
+        tangent[2] = (*target.color_override)[2] * 2.0f - 1.0f;
+      }
+      float packed[3];
+      BKE_pbr_normal_pack(tangent, false, packed);
+      brush_color_storage = float4(packed[0], packed[1], packed[2], 1.0f);
+      brush_color_ptr = &brush_color_storage;
+    }
+    else if (target.color_override) {
+      if (cache.toggle_settings.invert) {
+        const float v = BKE_paint_material_channel_default_value(target.channel);
+        brush_color_storage = float4(v, v, v, 1.0f);
+        brush_color_ptr = &brush_color_storage;
+      }
+      else {
+        brush_color_ptr = &(*target.color_override);
+      }
+    }
+    else {
+      brush_color_ptr = &brush_color_default;
+    }
+    const float4 &brush_color = *brush_color_ptr;
+
+    /* Rebuild UV pixel encoding only when tile layout differs from what is
+     * already cached on the PBVH (resolution / UDIM / seam margin). Same-sized
+     * Material maps reuse the previous encoding. */
+    const StringRef uv_map_name = BKE_paint_canvas_uvmap_name_get(&paint_mode_settings, &ob)
+                                      .value_or("");
+    const std::string layout_key = BKE_paint_pixels_layout_key_get(
+        *image_data.image,
+        *image_data.image_user,
+        uv_map_name);
+    const bool need_rebuild = pbvh.pixels_ == nullptr || pbvh.pixels_->flags.dirty ||
+                              pbvh.pixels_->layout_key != layout_key;
+    if (need_rebuild) {
+      PAINT_CHANNEL_PERF_SCOPE(BuildPixelsTotal);
+      const bool rebuilt = bke::pbvh::build_pixels(
+          depsgraph, ob, *image_data.image, *image_data.image_user, uv_map_name);
+      if (!rebuilt || pbvh.pixels_ == nullptr || pbvh.pixels_->flags.dirty) {
+        continue;
+      }
+      /* The pixel-node encoding changed, so any cached factors from a previous channel this
+       * dab no longer line up with it. */
+      factor_caches_valid = false;
+    }
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+    else {
+      paint_material_channel_perf::set_build_pixels_leaf_nodes_updated(0);
+    }
+#endif
+
+    PixelData &pixel_data = *pbvh.pixels_;
+    MutableSpan<PixelNode> pixel_nodes = pixel_data.nodes;
+
+    {
+      PAINT_CHANNEL_PERF_SCOPE(FetchBuffers);
+      node_mask.foreach_index(
+          [&](const int i) { fetch_image_buffers(image_data, nodes[i], pixel_nodes[i]); });
+    }
+    {
+      PAINT_CHANNEL_PERF_SCOPE(UndoPush);
+      node_mask.foreach_index(
+          [&](const int i) { do_push_undo_tile(image_data, nodes[i], pixel_nodes[i]); },
+          exec_mode::grain_size(1));
+    }
+    if (!factor_caches_valid) {
+      PAINT_CHANNEL_PERF_SCOPE(PaintFactors);
+      node_mask.foreach_index(
+          [&](const int i) {
+            node_factor_caches[i] = compute_paint_row_factors(
+                ss, pixel_data, positions, *brush, material_filter, pixel_nodes[i]);
+          },
+          exec_mode::grain_size(1));
+      factor_caches_valid = true;
+    }
+    {
+      PAINT_CHANNEL_PERF_SCOPE(PaintPixels);
+      node_mask.foreach_index(
+          [&](const int i) {
+            apply_paint_channel(image_data,
+                                *brush,
+                                brush_color,
+                                blend_mode,
+                                pixel_nodes[i],
+                                node_factor_caches[i]);
+          },
+          exec_mode::grain_size(1));
+    }
+
+    {
+      PAINT_CHANNEL_PERF_SCOPE(SeamFix);
+      fix_non_manifold_seam_bleeding(ob, image_data, nodes, pixel_nodes, node_mask);
+    }
+
+    {
+      PAINT_CHANNEL_PERF_SCOPE(MarkDirty);
+      node_mask.foreach_index([&](const int i) {
+        bke::pbvh::pixels::mark_image_dirty(
+            nodes[i], pixel_nodes[i], *image_data.image, image_data.buffers);
+      });
+    }
+
+    target_index++;
+  }
 }
 
 }  // namespace blender

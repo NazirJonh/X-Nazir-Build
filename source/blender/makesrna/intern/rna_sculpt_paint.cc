@@ -29,6 +29,21 @@
 
 namespace blender {
 
+/* Mirrors the descriptor table in #BKE_paint_material_channels. */
+const EnumPropertyItem rna_enum_material_paint_channel_items[] = {
+    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", "Base color channel"},
+    {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", "Metallic channel"},
+    {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", "Roughness channel"},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", "Specular channel"},
+    {PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", "Tangent-space normal map channel"},
+    {PAINT_MATERIAL_CHANNEL_CUSTOM,
+     "CUSTOM",
+     0,
+     "Custom",
+     "User-named float attribute, vertex painting only"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 const EnumPropertyItem rna_enum_particle_edit_hair_brush_items[] = {
     {PE_BRUSH_COMB, "COMB", 0, "Comb", "Comb hairs"},
     {PE_BRUSH_SMOOTH, "SMOOTH", 0, "Smooth", "Smooth hairs"},
@@ -85,6 +100,11 @@ static const EnumPropertyItem rna_enum_canvas_source_items[] = {
     {PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE, "COLOR_ATTRIBUTE", 0, "Color Attribute", ""},
     {PAINT_CANVAS_SOURCE_MATERIAL, "MATERIAL", 0, "Material", ""},
     {PAINT_CANVAS_SOURCE_IMAGE, "IMAGE", 0, "Image", ""},
+    {PAINT_CANVAS_SOURCE_MATERIAL_PAINT,
+     "MATERIAL_PAINT",
+     0,
+     "Material Paint",
+     "Paint per-vertex material attribute channels"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -577,6 +597,15 @@ static void rna_UnifiedPaintSettings_color_update(bContext *C, PointerRNA *ptr)
   UnifiedPaintSettings *ups = static_cast<UnifiedPaintSettings *>(ptr->data);
   rna_UnifiedPaintSettings_update(C, ptr);
   BKE_brush_color_sync_legacy(ups);
+
+  /* Sync Base Color channel from active brush color when Sync with Brush is on. */
+  const Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  Paint *paint = BKE_paint_get_active(*bmain, scene, view_layer);
+  Brush *brush = BKE_paint_brush(paint);
+  BKE_brush_material_paint_base_color_sync_to_channel(paint, brush);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, brush);
 }
 
 static void rna_UnifiedPaintSettings_size_set(PointerRNA *ptr, int value)
@@ -1416,6 +1445,22 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       prop, nullptr, nullptr, nullptr, "rna_Image_no_renderresult_or_viewer_poll");
   RNA_def_property_flag(prop, PROP_EDITABLE | PROP_CONTEXT_UPDATE);
   RNA_def_property_ui_text(prop, "Texture", "Image used as painting target");
+
+  /* Custom channel attribute name and value range stay scene-level; enable/value/blend live on
+   * #Brush.material_paint. */
+  prop = RNA_def_property(srna, "channel_custom_range", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "channel_custom_range");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_ui_range(prop, -10000.0f, 10000.0f, 0.01, 3);
+  RNA_def_property_ui_text(
+      prop, "Custom Range", "Range painted values of the custom channel are clamped to");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "material_paint_custom_attr", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "material_paint_custom_attr");
+  RNA_def_property_ui_text(
+      prop, "Custom Attribute Name", "Name of custom material attribute when using custom mode");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 static void rna_def_image_paint(BlenderRNA *brna)

@@ -174,9 +174,30 @@ struct ImageData : NonCopyable {
 
   ~ImageData();
 
-  static std::unique_ptr<ImageData> init_active_image(Object &ob,
-                                                      PaintModeSettings &paint_mode_settings);
+  static std::unique_ptr<ImageData> from_image(Image *image, ImageUser *image_user);
 };
+
+/**
+ * One image canvas written during a sculpt paint dab.
+ * When #color_override is set (Mode=`Material` channel), that color is used
+ * instead of the brush color. Scalar channels freeze grayscale `(v,v,v)` for paint;
+ * invert re-targets to #channel default with #IMB_BLEND_MIX each dab.
+ * Base Color sets #is_color_channel so each dab can recompute RGB for invert.
+ * Normal sets #is_normal_channel and always uses #IMB_BLEND_NORMAL_MIX.
+ */
+struct ImagePaintTarget {
+  std::unique_ptr<ImageData> data;
+  std::optional<float4> color_override;
+  bool is_color_channel = false;
+  bool is_normal_channel = false;
+  eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_METALLIC;
+  const char *channel_name = nullptr;
+};
+
+/** Builds paint targets for Mode=`Image` (one canvas) or Mode=`Material` (Principled maps). */
+Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
+                                                  PaintModeSettings &paint_mode_settings,
+                                                  const Brush *brush);
 
 }  // namespace paint::image
 
@@ -444,7 +465,7 @@ struct StrokeCache {
   float4x4 stroke_local_mat = float4x4::identity();
   float multiplane_scrape_angle = 0.0f;
 
-  std::unique_ptr<paint::image::ImageData> image_data;
+  Vector<paint::image::ImagePaintTarget> image_paint_targets;
 
   StrokeCache();
   ~StrokeCache();
@@ -925,10 +946,11 @@ float object_space_radius_get(const ViewContext &vc,
  * \{ */
 
 void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
+                                 PaintModeSettings &paint_mode_settings,
                                  const Sculpt &sd,
                                  Object &ob,
                                  const IndexMask &node_mask);
-bool SCULPT_use_image_paint_brush(PaintModeSettings &settings, Object &ob);
+bool SCULPT_use_image_paint_brush(PaintModeSettings &settings, Object &ob, const Brush *brush);
 
 /** \} */
 

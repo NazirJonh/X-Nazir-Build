@@ -14,6 +14,7 @@
 #include "DNA_texture_types.h"
 
 #include "BLI_math_base.h"
+#include "BLI_math_vector.h"
 #include "BLI_string_utf8_symbols.h"
 
 #include "BLT_translation.hh"
@@ -398,8 +399,13 @@ static EnumPropertyItem rna_enum_gpencil_brush_modes_items[] = {
 #  include "BKE_layer.hh"
 #  include "BKE_material.hh"
 #  include "BKE_paint.hh"
+#  include "BKE_paint.hh"
 #  include "BKE_paint_types.hh"
 #  include "BKE_preview_image.hh"
+
+#  include "BLI_math_vector_types.hh"
+
+#  include <optional>
 
 #  include "WM_api.hh"
 
@@ -716,6 +722,11 @@ static void rna_Brush_color_update(Main *bmain, Scene *scene, PointerRNA *ptr)
   Brush *br = static_cast<Brush *>(ptr->data);
   rna_Brush_update(bmain, scene, ptr);
   BKE_brush_color_sync_legacy(br);
+
+  /* Sync Base Color channel from brush primary Color when Sync with Brush is on. There is no
+   * Paint here, so the brush color is used directly; unified color edits arrive through
+   * #rna_UnifiedPaintSettings_color_update instead, which does have one. */
+  BKE_brush_material_paint_base_color_sync_to_channel(nullptr, br);
 }
 
 static void rna_Brush_material_update(bContext * /*C*/, PointerRNA *ptr)
@@ -1141,6 +1152,90 @@ static const EnumPropertyItem *rna_BrushTextureSlot_map_mode_itemf(bContext *C,
 static std::optional<std::string> rna_BrushCurvesSculptSettings_path(const PointerRNA * /*ptr*/)
 {
   return "curves_sculpt_settings";
+}
+
+static std::optional<std::string> rna_BrushMaterialPaint_path(const PointerRNA * /*ptr*/)
+{
+  return "material_paint";
+}
+
+static void rna_BrushMaterialPaint_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  BKE_brush_tag_unsaved_changes(br);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
+}
+
+static void rna_BrushMaterialPaint_base_color_update(bContext *C, PointerRNA *ptr)
+{
+  Brush *brush = reinterpret_cast<Brush *>(ptr->owner_id);
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  BKE_brush_material_paint_base_color_sync_to_brush(paint, brush);
+  rna_BrushMaterialPaint_update(CTX_data_main(C), CTX_data_scene(C), ptr);
+}
+
+static void rna_BrushMaterialPaint_sync_base_color_update(bContext *C, PointerRNA *ptr)
+{
+  Brush *brush = reinterpret_cast<Brush *>(ptr->owner_id);
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  /* Sync enable 0→1: align brush → channel (brush is source). Sync off: leave values. */
+  BKE_brush_material_paint_base_color_sync_to_channel(paint, brush);
+  rna_BrushMaterialPaint_update(CTX_data_main(C), CTX_data_scene(C), ptr);
+}
+
+static void rna_BrushMaterialPaint_channels_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  BrushMaterialPaint *settings = static_cast<BrushMaterialPaint *>(ptr->data);
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           settings->channels,
+                           sizeof(BrushMaterialPaintChannel),
+                           ARRAY_SIZE(settings->channels),
+                           0,
+                           nullptr);
+}
+
+static int rna_BrushMaterialPaint_channels_length(PointerRNA * /*ptr*/)
+{
+  return ARRAY_SIZE((static_cast<BrushMaterialPaint *>(nullptr))->channels);
+}
+
+/**
+ * The channels are a fixed DNA array, so a channel's own index — and with it its descriptor range
+ * — can only be recovered from where `ptr` points inside #Brush.material_paint.
+ */
+static std::optional<eMaterialPaintChannel> rna_BrushMaterialPaintChannel_channel_get(
+    const PointerRNA *ptr)
+{
+  const Brush *brush = reinterpret_cast<const Brush *>(ptr->owner_id);
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    return std::nullopt;
+  }
+  const BrushMaterialPaintChannel *channels = brush->material_paint->channels;
+  const BrushMaterialPaintChannel *channel = static_cast<const BrushMaterialPaintChannel *>(
+      ptr->data);
+  const int index = int(channel - channels);
+  if (index < 0 || index >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return std::nullopt;
+  }
+  return eMaterialPaintChannel(index);
+}
+
+static void rna_BrushMaterialPaintChannel_value_range(
+    PointerRNA *ptr, float *min, float *max, float *softmin, float *softmax)
+{
+  /* Fall back to the widest fixed-channel range when the owning channel cannot be identified. */
+  float range_min = -1.0f;
+  float range_max = 1.0f;
+  if (const std::optional<eMaterialPaintChannel> channel =
+          rna_BrushMaterialPaintChannel_channel_get(ptr))
+  {
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(*channel);
+    range_min = info.value_min;
+    range_max = info.value_max;
+  }
+  *min = *softmin = range_min;
+  *max = *softmax = range_max;
 }
 
 }  // namespace blender
@@ -2266,6 +2361,92 @@ static void rna_def_curves_sculpt_options(BlenderRNA *brna)
                            "Curve Parameter Falloff",
                            "Falloff that is applied from the tip to the root of each curve");
   RNA_def_property_update(prop, 0, "rna_BrushCurvesSculptSettings_update");
+}
+
+static void rna_def_brush_material_paint(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  static const EnumPropertyItem prop_blend_items[] = {
+      {IMB_BLEND_MIX, "MIX", 0, "Mix", "Use Mix blending mode while painting"},
+      {IMB_BLEND_DARKEN, "DARKEN", 0, "Darken", "Use Darken blending mode while painting"},
+      {IMB_BLEND_MUL, "MUL", 0, "Multiply", "Use Multiply blending mode while painting"},
+      {IMB_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", "Use Lighten blending mode while painting"},
+      {IMB_BLEND_SCREEN, "SCREEN", 0, "Screen", "Use Screen blending mode while painting"},
+      {IMB_BLEND_ADD, "ADD", 0, "Add", "Use Add blending mode while painting"},
+      {IMB_BLEND_SUB, "SUB", 0, "Subtract", "Use Subtract blending mode while painting"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "BrushMaterialPaintChannel", nullptr);
+  RNA_def_struct_sdna(srna, "BrushMaterialPaintChannel");
+  RNA_def_struct_ui_text(srna, "Material Paint Channel", "Per-channel material paint settings");
+
+  prop = RNA_def_property(srna, "use", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use", 1);
+  RNA_def_property_ui_text(prop, "Use", "Paint this material channel");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "value", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "value");
+  RNA_def_property_array(prop, 3);
+  /* Per-channel: 0..1 for Metallic/Roughness/Specular/Custom, -1..1 for the Normal tangent. */
+  RNA_def_property_float_funcs(prop, nullptr, nullptr, "rna_BrushMaterialPaintChannel_value_range");
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(
+      prop, "Value", "Paint value (scalar channels use X; Normal uses XYZ tangent)");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  /* Stored per channel, but only ever read for Base Color: the blend modes are color operations,
+   * and applying them to the scalar channels would compute a photometric result for a quantity
+   * that has none. See #BKE_paint_material_channel_blend_mode. */
+  prop = RNA_def_property(srna, "blend", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "blend");
+  RNA_def_property_enum_items(prop, prop_blend_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Blend",
+      "Blending mode for this channel. Only used by the Base Color channel; the scalar channels "
+      "always blend with Mix");
+  RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_COLOR);
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  srna = RNA_def_struct(brna, "BrushMaterialPaint", nullptr);
+  RNA_def_struct_sdna(srna, "BrushMaterialPaint");
+  RNA_def_struct_path_func(srna, "rna_BrushMaterialPaint_path");
+  RNA_def_struct_ui_text(srna, "Material Paint", "Per-brush material paint channel settings");
+
+  prop = RNA_def_property(srna, "channels", PROP_COLLECTION, PROP_NONE);
+  /* Empty length name: fixed DNA array (same pattern as UserDef studiolight solid_lights). */
+  RNA_def_property_collection_sdna(prop, nullptr, "channels", "");
+  RNA_def_property_struct_type(prop, "BrushMaterialPaintChannel");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_BrushMaterialPaint_channels_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_BrushMaterialPaint_channels_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(prop, "Channels", "Per-channel enable, value, and blend settings");
+
+  prop = RNA_def_property(srna, "base_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "base_color");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Base Color", "Color to paint for the base color channel");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_base_color_update");
+
+  prop = RNA_def_property(srna, "use_sync_base_color_with_brush", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_sync_base_color_with_brush", 1);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_ui_text(prop,
+                           "Sync with Brush",
+                           "Keep the base color channel synchronized with the brush color");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_sync_base_color_update");
 }
 
 static void rna_def_brush(BlenderRNA *brna)
@@ -4020,10 +4201,16 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Curves Sculpt Settings", "");
 
+  prop = RNA_def_property(srna, "material_paint", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "BrushMaterialPaint");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Material Paint", "Per-channel material paint settings");
+
   prop = RNA_def_property(srna, "mesh_automasking_settings", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "MeshAutomaskingSettings");
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Mesh Automasking Settings", nullptr);
+
 }
 
 /**
@@ -4106,6 +4293,7 @@ void RNA_def_brush(BlenderRNA *brna)
   rna_def_weight_paint_capabilities(brna);
   rna_def_gpencil_options(brna);
   rna_def_curves_sculpt_options(brna);
+  rna_def_brush_material_paint(brna);
   rna_def_brush_texture_slot(brna);
   rna_def_operator_stroke_element(brna);
 }

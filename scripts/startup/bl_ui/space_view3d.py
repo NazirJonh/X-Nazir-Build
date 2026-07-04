@@ -15,6 +15,7 @@ from bl_ui.properties_paint_common import (
     brush_basic_grease_pencil_weight_settings,
     brush_basic_grease_pencil_vertex_settings,
     BrushAssetShelf,
+    draw_material_paint_channels,
 )
 from bl_ui.properties_grease_pencil_common import (
     AnnotationDataPanel,
@@ -982,15 +983,19 @@ class VIEW3D_HT_header(Header):
             row = layout.row()
             row.active = is_paint_tool and color_type == 'VERTEX'
 
-            if context.preferences.experimental.use_sculpt_texture_paint:
-                canvas_source = tool_settings.paint_mode.canvas_source
-                icon = 'GROUP_VCOL' if canvas_source == 'COLOR_ATTRIBUTE' else canvas_source
-                row.popover(panel="VIEW3D_PT_slots_paint_canvas", icon=icon)
-                # TODO: Update this boolean condition so that the Canvas button is only active when
-                # the appropriate color types are selected in Solid mode, I.E. 'TEXTURE'
-                row.active = is_paint_tool
-            else:
-                row.popover(panel="VIEW3D_PT_slots_color_attributes", icon='GROUP_VCOL')
+            canvas_source = tool_settings.paint_mode.canvas_source
+            # Mode identifiers MATERIAL/IMAGE coincide with icon names; others need a map.
+            match canvas_source:
+                case 'COLOR_ATTRIBUTE':
+                    icon = 'GROUP_VCOL'
+                case 'MATERIAL_PAINT':
+                    icon = 'MATERIAL_DATA'
+                case _:
+                    icon = canvas_source
+            row.popover(panel="VIEW3D_PT_slots_paint_canvas", icon=icon)
+            # TODO: Update this boolean condition so that the Canvas button is only active when
+            # the appropriate color types are selected in Solid mode, I.E. 'TEXTURE'
+            row.active = is_paint_tool
 
             layout.popover(
                 panel="VIEW3D_PT_sculpt_snapping",
@@ -8836,6 +8841,34 @@ class VIEW3D_PT_paint_texture_context_menu(Panel):
             )
 
 
+class VIEW3D_PT_paint_canvas_npanel(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Tool"
+    bl_label = "Canvas"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ob is not None and ob.mode in {'TEXTURE_PAINT', 'SCULPT'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        paint = context.tool_settings.paint_mode
+        layout.prop(paint, "canvas_source", text="Mode")
+
+        if paint.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}:
+            settings = UnifiedPaintPanel.paint_settings(context)
+            brush = settings.brush if settings else None
+            draw_material_paint_channels(
+                layout, brush, paint,
+                show_custom=(paint.canvas_source == 'MATERIAL_PAINT'),
+            )
+
+
 class VIEW3D_PT_paint_weight_context_menu(Panel):
     # Only for popover, these are dummy values.
     bl_space_type = 'VIEW_3D'
@@ -9512,6 +9545,7 @@ classes = (
     VIEW3D_PT_context_properties,
     VIEW3D_PT_paint_vertex_context_menu,
     VIEW3D_PT_paint_texture_context_menu,
+    VIEW3D_PT_paint_canvas_npanel,
     VIEW3D_PT_paint_weight_context_menu,
     VIEW3D_PT_sculpt_automasking,
     VIEW3D_PT_sculpt_context_menu,

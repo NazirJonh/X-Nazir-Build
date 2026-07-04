@@ -10,6 +10,7 @@
 #include <cstdlib>
 
 #include "BLI_math_base.h"
+#include "BLI_math_color.h"
 #include "BLI_math_color_blend.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
@@ -21,11 +22,64 @@
 
 #include "IMB_colormanagement.hh"
 
+#include "BKE_paint.hh"
+
 #include "MEM_guardedalloc.h"
 
 #include <cstring>
 
 namespace blender {
+
+/**
+ * \param src2: Brush color in packed 0..1 form (flat tangent = 0.5, 0.5, 1.0).
+ * \param t: Mix factor in [0, 1].
+ */
+static void blend_color_normal_mix_byte(uchar dst[4],
+                                        const uchar src1[4],
+                                        const uchar src2[4],
+                                        const float t)
+{
+  const float current_packed[3] = {
+      src1[0] / 255.0f, src1[1] / 255.0f, src1[2] / 255.0f};
+  const float target_n[3] = {src2[0] / 255.0f * 2.0f - 1.0f,
+                             src2[1] / 255.0f * 2.0f - 1.0f,
+                             src2[2] / 255.0f * 2.0f - 1.0f};
+  float out[3];
+  BKE_pbr_normal_blend_mix(current_packed, target_n, t, false, out);
+  dst[0] = unit_float_to_uchar_clamp(out[0]);
+  dst[1] = unit_float_to_uchar_clamp(out[1]);
+  dst[2] = unit_float_to_uchar_clamp(out[2]);
+  dst[3] = src1[3];
+}
+
+static void blend_color_normal_mix_byte_alpha(uchar dst[4],
+                                              const uchar src1[4],
+                                              const uchar src2[4])
+{
+  blend_color_normal_mix_byte(dst, src1, src2, src2[3] / 255.0f);
+}
+
+/**
+ * Float ImBuf stores tangent directly; \a src2 remains packed 0..1 from the brush color.
+ */
+static void blend_color_normal_mix_float(float dst[4],
+                                         const float src1[4],
+                                         const float src2[4],
+                                         const float t)
+{
+  const float target_n[3] = {src2[0] * 2.0f - 1.0f, src2[1] * 2.0f - 1.0f, src2[2] * 2.0f - 1.0f};
+  float out[3];
+  BKE_pbr_normal_blend_mix(src1, target_n, t, true, out);
+  copy_v3_v3(dst, out);
+  dst[3] = src1[3];
+}
+
+static void blend_color_normal_mix_float_alpha(float dst[4],
+                                               const float src1[4],
+                                               const float src2[4])
+{
+  blend_color_normal_mix_float(dst, src1, src2, src2[3]);
+}
 
 void IMB_blend_color_byte(uchar dst[4],
                           const uchar src1[4],
@@ -35,6 +89,9 @@ void IMB_blend_color_byte(uchar dst[4],
   switch (mode) {
     case IMB_BLEND_MIX:
       blend_color_mix_byte(dst, src1, src2);
+      break;
+    case IMB_BLEND_NORMAL_MIX:
+      blend_color_normal_mix_byte_alpha(dst, src1, src2);
       break;
     case IMB_BLEND_ADD:
       blend_color_add_byte(dst, src1, src2);
@@ -193,6 +250,9 @@ void IMB_blend_color_float(float dst[4],
     case IMB_BLEND_LUMINOSITY:
       blend_color_luminosity_float(dst, src1, src2);
       break;
+    case IMB_BLEND_NORMAL_MIX:
+      blend_color_normal_mix_float_alpha(dst, src1, src2);
+      break;
     default:
       dst[0] = src1[0];
       dst[1] = src1[1];
@@ -329,6 +389,11 @@ void IMB_blend_color_float(const MutableSpan<float4> dst,
     case IMB_BLEND_LUMINOSITY:
       for (const int i : dst.index_range()) {
         blend_color_luminosity_float(dst[i], src1[i], src2[i]);
+      }
+      break;
+    case IMB_BLEND_NORMAL_MIX:
+      for (const int i : dst.index_range()) {
+        blend_color_normal_mix_float_alpha(dst[i], src1[i], src2[i]);
       }
       break;
     default:
@@ -808,6 +873,10 @@ void IMB_rectblend(ImBuf *dbuf,
         func = blend_color_mix_byte;
         func_float = blend_color_mix_float;
         break;
+      case IMB_BLEND_NORMAL_MIX:
+        func = blend_color_normal_mix_byte_alpha;
+        func_float = blend_color_normal_mix_float_alpha;
+        break;
       case IMB_BLEND_ADD:
         func = blend_color_add_byte;
         func_float = blend_color_add_float;
@@ -955,6 +1024,13 @@ void IMB_rectblend(ImBuf *dbuf,
                                                  mask_src,
                                                  mask / 65535.0f);
                   }
+                  else if (mode == IMB_BLEND_NORMAL_MIX) {
+                    mask_src[3] = src[3];
+                    blend_color_normal_mix_byte(reinterpret_cast<uchar *>(dr),
+                                                reinterpret_cast<const uchar *>(outr),
+                                                mask_src,
+                                                mask / 65535.0f);
+                  }
                   else {
                     mask_src[3] = divide_round_i(src[3] * mask, 65535);
                     func(reinterpret_cast<uchar *>(dr),
@@ -991,6 +1067,13 @@ void IMB_rectblend(ImBuf *dbuf,
                                                reinterpret_cast<const uchar *>(outr),
                                                mask_src,
                                                mask / 65535.0f);
+                }
+                else if (mode == IMB_BLEND_NORMAL_MIX) {
+                  mask_src[3] = src[3];
+                  blend_color_normal_mix_byte(reinterpret_cast<uchar *>(dr),
+                                              reinterpret_cast<const uchar *>(outr),
+                                              mask_src,
+                                              mask / 65535.0f);
                 }
                 else {
                   mask_src[3] = divide_round_i(src[3] * mask, 65535);
@@ -1061,6 +1144,9 @@ void IMB_rectblend(ImBuf *dbuf,
                   if (mode == IMB_BLEND_INTERPOLATE) {
                     blend_color_interpolate_float(drf, orf, srf, mask / 65535.0f);
                   }
+                  else if (mode == IMB_BLEND_NORMAL_MIX) {
+                    blend_color_normal_mix_float(drf, orf, srf, mask / 65535.0f);
+                  }
                   else {
                     float mask_srf[4];
                     mul_v4_v4fl(mask_srf, srf, mask / 65535.0f);
@@ -1085,6 +1171,9 @@ void IMB_rectblend(ImBuf *dbuf,
               if (srf[3] && (mask > 0.0f)) {
                 if (mode == IMB_BLEND_INTERPOLATE) {
                   blend_color_interpolate_float(drf, orf, srf, mask / 65535.0f);
+                }
+                else if (mode == IMB_BLEND_NORMAL_MIX) {
+                  blend_color_normal_mix_float(drf, orf, srf, mask / 65535.0f);
                 }
                 else {
                   float mask_srf[4];

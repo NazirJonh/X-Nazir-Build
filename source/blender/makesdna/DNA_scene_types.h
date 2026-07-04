@@ -1183,7 +1183,31 @@ enum ePaintCanvasSource : char {
   PAINT_CANVAS_SOURCE_IMAGE = 1,
   /** Paint on the active color attribute (vertex color) layer. */
   PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE = 2,
+  /** Paint enabled material channels into per-vertex float attributes. */
+  PAINT_CANVAS_SOURCE_MATERIAL_PAINT = 3,
 };
+
+/**
+ * A material paint channel. Used as the index into the per-channel arrays of
+ * #PaintModeSettings, so the values must stay contiguous and start at zero.
+ *
+ * All other per-channel knowledge (attribute name, Principled BSDF socket, value range) lives in
+ * the descriptor table returned by #BKE_paint_material_channels, not in switch statements.
+ */
+enum eMaterialPaintChannel : int8_t {
+  /** RGB channel, written into the mesh color attribute or the Base Color map. */
+  PAINT_MATERIAL_CHANNEL_BASE_COLOR = 0,
+  PAINT_MATERIAL_CHANNEL_METALLIC = 1,
+  PAINT_MATERIAL_CHANNEL_ROUGHNESS = 2,
+  PAINT_MATERIAL_CHANNEL_SPECULAR = 3,
+  /** Tangent-space normal map channel (Mode=`Material` image paint). */
+  PAINT_MATERIAL_CHANNEL_NORMAL = 4,
+  /** User-named float attribute, vertex painting only. */
+  PAINT_MATERIAL_CHANNEL_CUSTOM = 5,
+};
+
+/** Number of #eMaterialPaintChannel values. Sizes the per-channel arrays in DNA. */
+#define PAINT_MATERIAL_CHANNEL_NUM 6
 
 struct MeshAutomaskingSettings {
   DNA_DEFINE_CXX_METHODS(MeshAutomaskingSettings)
@@ -1341,6 +1365,19 @@ struct PaintModeSettings {
   /** Selected image when canvas_source=PAINT_CANVAS_SOURCE_IMAGE. */
   Image *canvas_image = nullptr;
   ImageUser image_user;
+
+  /* Multi-channel material paint (Modes Material + Material Paint).
+   * Per-channel enable/value/blend live on #BrushMaterialPaint; only Custom's attribute
+   * name and value range stay scene-level. */
+
+  /**
+   * Value range of the Custom channel. The fixed channels take their range from the descriptor
+   * table (#BKE_paint_material_channels); only Custom is user-defined, since it can target an
+   * arbitrary float attribute.
+   */
+  float channel_custom_range[2] = {0.0f, 1.0f};
+  /** Attribute name painted by #PAINT_MATERIAL_CHANNEL_CUSTOM. */
+  char material_paint_custom_attr[64] = {};
 };
 
 /** \} */

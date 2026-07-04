@@ -166,6 +166,31 @@ struct BrushCurvesSculptSettings {
   struct CurveMapping *curve_parameter_falloff = nullptr;
 };
 
+struct BrushMaterialPaintChannel {
+  DNA_DEFINE_CXX_METHODS(BrushMaterialPaintChannel)
+
+  /**
+   * Paint value. Scalar channels use \a value[0]; Normal uses the full XYZ tangent
+   * (default flat tangent). Unused for Base Color (Base Color follows #BrushMaterialPaint.base_color).
+   */
+  float value[3] = {0.0f, 0.0f, 1.0f};
+  /** #IMB_BlendMode. */
+  short blend = 0;
+  char use = 0;
+  char _pad[1] = {};
+};
+
+struct BrushMaterialPaint {
+  DNA_DEFINE_CXX_METHODS(BrushMaterialPaint)
+
+  /** Indexed by #eMaterialPaintChannel. */
+  BrushMaterialPaintChannel channels[/*PAINT_MATERIAL_CHANNEL_NUM*/ 6] = {};
+  /** RGB written by the Base Color channel when not synced with the brush color. */
+  float base_color[3] = {1.0f, 1.0f, 1.0f};
+  char use_sync_base_color_with_brush = 1;
+  char _pad[3] = {};
+};
+
 /** Max number of propagation steps for automasking settings. */
 #define AUTOMASKING_BOUNDARY_EDGES_MAX_PROPAGATION_STEPS 20
 /**
@@ -443,6 +468,8 @@ struct Brush {
 
   struct BrushGpencilSettings *gpencil_settings = nullptr;
   struct BrushCurvesSculptSettings *curves_sculpt_settings = nullptr;
+  /** Lazily allocated by #BKE_brush_material_paint_ensure. */
+  struct BrushMaterialPaint *material_paint = nullptr;
 
   DNA_DEPRECATED int automasking_cavity_blur_steps = 0;
   DNA_DEPRECATED float automasking_cavity_factor = 1.0f;

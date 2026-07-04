@@ -11,6 +11,7 @@
 #include "DNA_mesh_types.h"
 #include "DNA_scene_types.h"
 #include "draw_attributes.hh"
+#include "draw_cache.hh"
 #include "draw_context_private.hh"
 #include "draw_view.hh"
 
@@ -156,6 +157,24 @@ Vector<SculptBatch> sculpt_batches_get(const Object *ob, SculptBatchFeature feat
     const StringRef uv_name = mesh->active_uv_map_name();
     if (!uv_name.is_empty()) {
       attrs.append(pbvh::GenericRequest(uv_name));
+    }
+  }
+
+  if (features & SCULPT_BATCH_MATERIAL_PROPS) {
+    const bke::AttributeAccessor mesh_attrs = mesh->attributes();
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      if (info.attribute_name == nullptr ||
+          DRW_material_paint_vertex_input_alias(info.attribute_name) == nullptr)
+      {
+        continue;
+      }
+      const std::optional<bke::AttributeMetaData> meta_data = mesh_attrs.lookup_meta_data(
+          info.attribute_name);
+      if (meta_data && meta_data->data_type == bke::AttrType::Float &&
+          meta_data->domain == bke::AttrDomain::Point)
+      {
+        attrs.append(pbvh::GenericRequest(info.attribute_name));
+      }
     }
   }
 

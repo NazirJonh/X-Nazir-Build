@@ -1131,6 +1131,103 @@ def brush_settings(layout, context, brush, popover=False):
             layout.prop(brush.curves_sculpt_settings, "minimum_length")
 
 
+def draw_material_paint_channels(layout, brush, paint_mode, *, show_custom, show_missing_fn=None):
+    """Draw Material / Material Paint channel enable + value rows.
+
+    Used by View3D Canvas and Image Editor Paint Canvas panels. Only Base Color has a blend
+    mode; the scalar channels always use Mix. The brush-level Blend setting is not what drives
+    these strokes.
+
+    :arg layout: Layout to draw into.
+    :arg brush: Active paint ``Brush``, or ``None``.
+    :arg paint_mode: ``PaintModeSettings`` RNA data-block (Custom name/range only).
+    :arg show_custom: When True, draw the Custom channel (Material Paint mode).
+    :arg show_missing_fn: Optional ``callable(channel_id) -> bool``. When it
+        returns True for a channel id (``'BASE_COLOR'`` / ``'METALLIC'`` /
+        ``'ROUGHNESS'`` / ``'SPECULAR'`` / ``'NORMAL'``), a Missing indicator is shown on that row.
+    """
+    if brush is None:
+        layout.label(text="No active brush", icon='INFO')
+        return
+
+    material_paint = brush.material_paint
+    if material_paint is None:
+        layout.operator(
+            "paint.material_paint_brush_ensure",
+            text="Enable PBR Channels for Brush",
+            icon='ADD',
+        )
+        return
+
+    col = layout.column(align=True)
+    channels = material_paint.channels
+
+    row = col.row(align=True)
+    row.prop(channels[0], "use", text="")
+    row.label(text="Base Color")
+    sub = row.row(align=True)
+    sub.active = channels[0].use
+    sub.prop(material_paint, "base_color", text="")
+    sub.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
+    if show_missing_fn is not None and show_missing_fn('BASE_COLOR'):
+        row.label(text="Missing", icon='ERROR')
+
+    # Base Color is the only blendable channel: the blend modes are defined on colors. The scalar
+    # channels below are data, not light, and always interpolate with Mix. The brush-level Blend
+    # setting does not apply to material paint at all.
+    row = col.row(align=True)
+    row.active = channels[0].use
+    row.prop(channels[0], "blend", text="Blend")
+
+    scalar_channels = (
+        (1, "Metallic", 'METALLIC'),
+        (2, "Roughness", 'ROUGHNESS'),
+        (3, "Specular", 'SPECULAR'),
+    )
+
+    for index, label, channel_id in scalar_channels:
+        channel = channels[index]
+        row = col.row(align=True)
+        row.prop(channel, "use", text="")
+        row.label(text=label)
+        sub = row.row(align=True)
+        sub.active = channel.use
+        sub.prop(channel, "value", index=0, text="", slider=True)
+        if show_missing_fn is not None and show_missing_fn(channel_id):
+            row.label(text="Missing", icon='ERROR')
+
+    # Normal: XYZ tangent vector; the blend mode is always NORMAL_MIX, since any other mode would
+    # produce non-unit tangents. Hence no blend dropdown on this row.
+    channel = channels[4]
+    row = col.row(align=True)
+    row.prop(channel, "use", text="")
+    row.label(text="Normal")
+    sub = row.row(align=True)
+    sub.active = channel.use
+    sub.prop(channel, "value", text="")
+    if show_missing_fn is not None and show_missing_fn('NORMAL'):
+        row.label(text="Missing", icon='ERROR')
+
+    if show_custom:
+        channel = channels[5]
+        row = col.row(align=True)
+        row.prop(channel, "use", text="")
+        row.label(text="Custom")
+        sub = row.row(align=True)
+        sub.active = channel.use
+        sub.prop(channel, "value", index=0, text="")
+
+        row = col.row(align=True)
+        row.active = channel.use
+        row.prop(paint_mode, "material_paint_custom_attr", text="Name")
+
+        # Unlike the fixed channels, the custom channel targets an arbitrary float attribute, so
+        # the range its painted values are clamped to is user-defined.
+        row = col.row(align=True)
+        row.active = channel.use
+        row.prop(paint_mode, "channel_custom_range", text="Range")
+
+
 def brush_shared_settings(layout, context, brush, popover=False):
     """ Draw simple brush settings that are shared between different paint modes. """
 

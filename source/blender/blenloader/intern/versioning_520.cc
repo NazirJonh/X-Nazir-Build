@@ -525,6 +525,46 @@ void do_versions_after_linking_520(FileData *fd, Main *bmain)
    */
 }
 
+/**
+ * Initializes the Custom-channel range for files that predate material paint channels.
+ * Per-channel enable/value/blend live on #Brush.material_paint and need no versioning: the brush
+ * settings are allocated on demand by #BKE_brush_material_paint_ensure, already at their defaults.
+ */
+static void version_material_paint_channel_defaults(Main &bmain)
+{
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    PaintModeSettings &paint_mode = ts->paint_mode;
+    /* A zero-length range is the zero-initialized state of an older file, never a valid setting.
+     * Only the maximum needs restoring; the minimum default is already 0. */
+    if (paint_mode.channel_custom_range[0] == 0.0f && paint_mode.channel_custom_range[1] == 0.0f) {
+      paint_mode.channel_custom_range[1] = 1.0f;
+    }
+  }
+}
+
+/**
+ * Material paint used to blend every channel with the single brush-wide #Brush.blend, while
+ * #BrushMaterialPaintChannel.blend was stored but never read. Base Color now blends with its own
+ * stored mode, so carry the brush's mode over to it; otherwise such brushes would silently fall
+ * back to Mix, which is the zero value the field was left at.
+ *
+ * The scalar channels are deliberately left alone: they no longer blend with anything but Mix (see
+ * #BKE_paint_material_channel_blend_mode), so there is nothing to preserve for them.
+ */
+static void version_material_paint_base_color_blend_from_brush(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    if (brush.material_paint == nullptr) {
+      continue;
+    }
+    brush.material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].blend = brush.blend;
+  }
+}
+
 static void version_solid_color_width_height_defaults(Main &bmain)
 {
   for (Scene &scene : bmain.scenes) {
@@ -911,6 +951,14 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 46)) {
+    version_material_paint_channel_defaults(*bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 48)) {
+    version_material_paint_base_color_blend_from_brush(*bmain);
   }
 
   /**

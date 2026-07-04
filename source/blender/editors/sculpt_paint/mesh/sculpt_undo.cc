@@ -138,6 +138,8 @@ struct Node {
   Array<float3, 0> normal;
   Array<float4, 0> col;
   Array<float, 0> mask;
+  /** Poly Paint: per-attribute scalars aligned with #StepData::material_attribute_names. */
+  Vector<Array<float, 0>> material_scalars;
 
   Array<float4, 0> loop_col;
 
@@ -212,6 +214,15 @@ struct StepData {
 
   /** Name of the object's active shape key when the undo step was created. */
   std::string active_shape_key_name;
+
+  /** Poly Paint: names of the point float attributes snapshotted for #Type::Material steps. */
+  Vector<std::string> material_attribute_names;
+
+  /**
+   * When true and #type is #Type::Material, each undo node also stores the active color attribute
+   * (Material Paint Base Color written in the same stroke as float channels).
+   */
+  bool material_store_color = false;
 
   /* TODO: Combine the three structs into a variant, since they specify data that is only valid
    * within a single mode. */
@@ -766,6 +777,44 @@ static void restore_color(Object &object,
   }
 
   color_attribute.finish();
+}
+
+static void restore_material_attribute(Object &object,
+                                       StepData &step_data,
+                                       const MutableSpan<bool> modified_verts)
+{
+  PRF_scope(ProfileCategory::Editor);
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
+
+  for (const int attr_i : step_data.material_attribute_names.index_range()) {
+    /* Deliberately does not create the attribute: if the user removed it after the stroke, undo
+     * should not resurrect it as a side effect of restoring values. */
+    bke::SpanAttributeWriter<float> scalar_attribute =
+        attributes.lookup_for_write_span<float>(step_data.material_attribute_names[attr_i]);
+    if (!scalar_attribute) {
+      continue;
+    }
+    if (scalar_attribute.domain != bke::AttrDomain::Point) {
+      scalar_attribute.finish();
+      continue;
+    }
+
+    for (std::unique_ptr<Node> &unode : step_data.nodes) {
+      BLI_assert(unode->material_scalars.size() == step_data.material_attribute_names.size());
+      MutableSpan<float> stored = unode->material_scalars[attr_i];
+      const Span<int> index = unode->vert_indices.as_span().take_front(unode->unique_verts_num);
+      for (const int i : index.index_range()) {
+        const int vert = index[i];
+        if (scalar_attribute.span[vert] != stored[i]) {
+          std::swap(scalar_attribute.span[vert], stored[i]);
+          modified_verts[vert] = true;
+        }
+      }
+    }
+
+    scalar_attribute.finish();
+  }
 }
 
 static void restore_mask_mesh(Object &object, Node &unode, const MutableSpan<bool> modified_verts)
@@ -1375,6 +1424,36 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       pbvh.tag_attribute_changed(changed_nodes, mesh.active_color_attribute);
       break;
     }
+    case Type::Material: {
+      IndexMaskMemory memory;
+      const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+
+      BKE_sculpt_update_object_for_edit(depsgraph, &object, false);
+      if (!topology_matches(step_data, object)) {
+        return;
+      }
+
+      const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+
+      const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+      Array<bool> modified_verts(mesh.verts_num, false);
+      restore_material_attribute(object, step_data, modified_verts);
+      if (step_data.material_store_color) {
+        restore_color(object, step_data, modified_verts);
+      }
+      const IndexMask changed_nodes = IndexMask::from_predicate(
+          node_mask,
+          memory,
+          [&](const int i) { return indices_contain_true(modified_verts, nodes[i].all_verts()); },
+          exec_mode::grain_size(1));
+      for (const std::string &attr_name : step_data.material_attribute_names) {
+        pbvh.tag_attribute_changed(changed_nodes, attr_name);
+      }
+      if (step_data.material_store_color) {
+        pbvh.tag_attribute_changed(changed_nodes, mesh.active_color_attribute);
+      }
+      break;
+    }
     case Type::Geometry: {
       BLI_assert(!ss.bm);
 
@@ -1539,6 +1618,63 @@ static void store_mask_grids(const SubdivCCG &subdiv_ccg, Node &unode)
   }
 }
 
+/**
+ * Records the material attribute names covered by this undo step.
+ *
+ * The names are fixed by the first push of the step and every later push must match: the per-node
+ * scalar buffers are indexed positionally against this list, and #ensure_node does not refill a
+ * node that was already stored, so a changing list would silently misalign the restore.
+ */
+static void material_step_data_ensure(StepData &step_data,
+                                      const Type type,
+                                      const Span<StringRef> attribute_names,
+                                      const bool store_color)
+{
+  if (type != Type::Material) {
+    return;
+  }
+
+  if (step_data.nodes.is_empty() && step_data.material_attribute_names.is_empty()) {
+    for (const StringRef name : attribute_names) {
+      step_data.material_attribute_names.append(name);
+    }
+    step_data.material_store_color = store_color;
+    return;
+  }
+
+#ifndef NDEBUG
+  BLI_assert(step_data.material_store_color == store_color);
+  BLI_assert(step_data.material_attribute_names.size() == attribute_names.size());
+  for (const int i : attribute_names.index_range()) {
+    BLI_assert(step_data.material_attribute_names[i] == attribute_names[i]);
+  }
+#else
+  UNUSED_VARS(attribute_names, store_color);
+#endif
+}
+
+static void store_material_attributes(const Mesh &mesh,
+                                      const Span<std::string> attribute_names,
+                                      Node &unode)
+{
+  PRF_scope(ProfileCategory::Editor);
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  const int verts_num = unode.vert_indices.size();
+  unode.material_scalars.resize(attribute_names.size());
+  for (const int attr_i : attribute_names.index_range()) {
+    Array<float, 0> &scalar = unode.material_scalars[attr_i];
+    scalar.reinitialize(verts_num);
+    const VArraySpan stored = *attributes.lookup<float>(attribute_names[attr_i],
+                                                        bke::AttrDomain::Point);
+    if (stored.is_empty()) {
+      scalar.fill(0.0f);
+    }
+    else {
+      gather_data_mesh(stored, unode.vert_indices.as_span(), scalar.as_mutable_span());
+    }
+  }
+}
+
 static void store_color(const Mesh &mesh, const bke::pbvh::MeshNode &node, Node &unode)
 {
   PRF_scope(ProfileCategory::Editor);
@@ -1651,6 +1787,16 @@ static void fill_node_data_mesh(const Depsgraph &depsgraph,
       store_color(mesh, node, unode);
       break;
     }
+    case Type::Material: {
+      /* Read the names off the step rather than from a parameter, so a node can never be filled
+       * against a different list than the one #restore_material_attribute will index with. */
+      const StepData &step_data = *get_step_data();
+      store_material_attributes(mesh, step_data.material_attribute_names, unode);
+      if (step_data.material_store_color && color::active_color_attribute(mesh)) {
+        store_color(mesh, node, unode);
+      }
+      break;
+    }
     case Type::DyntopoBegin:
     case Type::DyntopoEnd:
       /* Dyntopo should be handled elsewhere. */
@@ -1712,6 +1858,11 @@ static void fill_node_data_grids(const Object &object,
       break;
     }
     case Type::Color: {
+      BLI_assert_unreachable();
+      break;
+    }
+    case Type::Material: {
+      /* Material painting currently only supports mesh mode. */
       BLI_assert_unreachable();
       break;
     }
@@ -1818,6 +1969,7 @@ BLI_NOINLINE static void bmesh_push(const Object &object,
       case Type::Geometry:
       case Type::FaceSet:
       case Type::Color:
+      case Type::Material:
         break;
     }
   }
@@ -1842,7 +1994,9 @@ static Node *ensure_node(StepData &step_data, const bke::pbvh::Node &node, bool 
 void push_node(const Depsgraph &depsgraph,
                const Object &object,
                const bke::pbvh::Node *node,
-               const Type type)
+               const Type type,
+               const Span<StringRef> material_attribute_names,
+               const bool material_store_color)
 {
   SculptSession &ss = *object.runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
@@ -1854,6 +2008,7 @@ void push_node(const Depsgraph &depsgraph,
   StepData *step_data = get_step_data();
   BLI_assert(ELEM(step_data->type, Type::None, type));
   step_data->type = type;
+  material_step_data_ensure(*step_data, type, material_attribute_names, material_store_color);
 
   bool newly_added;
   Node *unode = ensure_node(*step_data, *node, newly_added);
@@ -1881,7 +2036,9 @@ void push_node(const Depsgraph &depsgraph,
 void push_nodes(const Depsgraph &depsgraph,
                 Object &object,
                 const IndexMask &node_mask,
-                const Type type)
+                const Type type,
+                const Span<StringRef> material_attribute_names,
+                const bool material_store_color)
 {
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *object.runtime->sculpt_session;
@@ -1898,6 +2055,7 @@ void push_nodes(const Depsgraph &depsgraph,
   StepData *step_data = get_step_data();
   BLI_assert(ELEM(step_data->type, Type::None, type));
   step_data->type = type;
+  material_step_data_ensure(*step_data, type, material_attribute_names, material_store_color);
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {

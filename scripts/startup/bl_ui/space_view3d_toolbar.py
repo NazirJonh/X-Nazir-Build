@@ -29,6 +29,7 @@ from bl_ui.properties_paint_common import (
     brush_settings,
     brush_settings_advanced,
     draw_color_settings,
+    draw_material_paint_channels,
 )
 from bl_ui.utils import PresetPanel
 
@@ -433,6 +434,10 @@ class SelectPaintSlotHelper:
     canvas_source_attr_name = "canvas_source"
     canvas_image_attr_name = "canvas_image"
 
+    # When True, MATERIAL / MATERIAL_PAINT draw channel rows instead of
+    # texture_paint_slots (sculpt Canvas / Image Editor PaintModeSettings).
+    use_material_paint_channels = False
+
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
@@ -447,8 +452,37 @@ class SelectPaintSlotHelper:
         layout.separator()
 
         have_image = False
+        canvas_source = getattr(mode_settings, self.canvas_source_attr_name)
 
-        match getattr(mode_settings, self.canvas_source_attr_name):
+        match canvas_source:
+            case 'MATERIAL' | 'MATERIAL_PAINT' if self.use_material_paint_channels:
+                if canvas_source == 'MATERIAL' and len(ob.material_slots) > 1:
+                    layout.template_list(
+                        "MATERIAL_UL_matslots", "layers",
+                        ob, "material_slots",
+                        ob, "active_material_index", rows=2,
+                    )
+
+                show_missing_fn = None
+                if canvas_source == 'MATERIAL':
+                    has_image_fn = getattr(ob, "principled_paint_channel_has_image", None)
+                    if has_image_fn is not None:
+                        def show_missing_fn(channel, *, _has_image_fn=has_image_fn):
+                            return not _has_image_fn(channel)
+
+                        have_image = any(
+                            has_image_fn(channel)
+                            for channel in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL')
+                        )
+
+                draw_material_paint_channels(
+                    layout,
+                    getattr(settings, "brush", None),
+                    mode_settings,
+                    show_custom=(canvas_source == 'MATERIAL_PAINT'),
+                    show_missing_fn=show_missing_fn,
+                )
+
             case 'MATERIAL':
                 if len(ob.material_slots) > 1:
                     layout.template_list(
@@ -511,7 +545,7 @@ class SelectPaintSlotHelper:
                 col.operator("geometry.color_attribute_add", icon='ADD', text="")
                 col.operator("geometry.color_attribute_remove", icon='REMOVE', text="")
 
-        if settings.missing_uvs:
+        if settings.missing_uvs and canvas_source != 'MATERIAL_PAINT':
             layout.separator()
             split = layout.split()
             split.label(text="UV Map Needed", icon='INFO')
@@ -556,12 +590,10 @@ class VIEW3D_PT_slots_projectpaint(SelectPaintSlotHelper, View3DPanel, Panel):
 
 class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
     bl_label = "Canvas"
+    use_material_paint_channels = True
 
     @classmethod
     def poll(cls, context):
-        if not context.preferences.experimental.use_sculpt_texture_paint:
-            return False
-
         from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
         tool = ToolSelectPanelHelper.tool_active_from_context(context)
         if tool is None:
@@ -591,13 +623,13 @@ class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
         paint = context.tool_settings.paint_mode
         ob = context.object
         me = ob.data
-        mat = ob.active_material
 
         label = iface_("Canvas")
 
         if paint.canvas_source == 'MATERIAL':
-            if mat and mat.texture_paint_images and mat.texture_paint_slots:
-                label = mat.texture_paint_slots[mat.paint_active_slot].name
+            label = iface_("Material")
+        elif paint.canvas_source == 'MATERIAL_PAINT':
+            label = iface_("Material Paint")
         elif paint.canvas_source == 'COLOR_ATTRIBUTE':
             active_color = me.color_attributes.active_color
             label = (

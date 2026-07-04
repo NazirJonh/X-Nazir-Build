@@ -399,6 +399,17 @@ struct StrokeCache {
    */
   float4x4 brush_local_mat_inv = float4x4::identity();
 
+  /**
+   * Multi-object Area-texture parity: the brush-frame-to-WORLD transform used to build every
+   * object's #brush_local_mat in a multi-object stroke (see #calc_brush_area_texture_mat). The
+   * primary object (the sampling reference under the cursor) computes it from the pooled area
+   * normal; every other object reuses this exact world frame so the Area-mapped texture reads
+   * continuously across the seam between meshes (a joined mesh has a single such frame). Unused
+   * for single-object strokes (each object keeps its own #calc_brush_local_mat frame).
+   */
+  float4x4 area_texture_frame_to_world = float4x4::identity();
+  bool area_texture_frame_valid = false;
+
   /* used to shift the plane around when doing tiled strokes */
   float3 plane_offset = float3(0);
   int tile_pass = 0;

@@ -39,6 +39,7 @@
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_texture_types.h"
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
@@ -3230,6 +3231,106 @@ float3 tilt_effective_normal_get(const SculptSession &ss, const Brush &brush)
   return tilt_apply_to_normal(ss.cache->sculpt_normal_symm, *ss.cache, brush.tilt_strength_factor);
 }
 
+/**
+ * World-space equivalent of #calc_brush_local_mat, for the Area-mapped brush/mask texture
+ * (#sculpt_apply_texture) and vector-displacement texture (#calc_vertex_displacement).
+ *
+ * Two problems with the local-space #calc_brush_local_mat make it unusable for multi-object
+ * strokes, both solved by building the frame in world space here:
+ *
+ * 1. NON-UNIFORM SCALE. #calc_brush_local_mat builds its frame directly in local space, which only
+ *    stays orthonormal in world space when the object's scale is uniform. Under non-uniform
+ *    #Object.scale, a frame built from a non-axis-aligned normal and motion direction cannot be
+ *    made isotropic again by correcting the input vectors individually (unlike the
+ *    single-corrected-axis cases elsewhere in this file, see #scale_normalized_unit) — verified by
+ *    hand: per-axis-correcting only the normal still produces a basis whose world-space extent
+ *    varies with direction. A world-space frame is orthonormal by construction.
+ *
+ * 2. SEAM CONTINUITY. For the texture to read like one joined mesh across the seam where two meshes
+ *    meet, every object must share ONE brush frame: same world origin, normal, motion direction and
+ *    radius. Each object otherwise builds the frame from its OWN pooled-but-still-per-object
+ *    #sculpt_normal / #location_symm, so the texture tilts and shifts differently on each mesh at
+ *    the seam. The primary object (the sampling reference under the cursor, processed first in
+ *    #update_step Phase 2) computes the shared world frame once from the pooled area normal and
+ *    stores it in #StrokeCache.area_texture_frame_to_world; every secondary object reuses that
+ *    exact frame.
+ *
+ * #local_mat still maps a MODEL-SPACE (local) point to brush-frame coordinates, and #local_mat_inv
+ * still maps brush-frame coordinates back to a model-space point/direction, matching
+ * #calc_brush_local_mat's contract — the object's own transform is composed into both matrices so
+ * callers don't need to change. #calc_brush_local_mat itself is left untouched: #cube_tip_init
+ * shares it and expects a purely local-space matrix.
+ */
+static void calc_brush_area_texture_mat(const float rotation,
+                                        const Object &ob,
+                                        float4x4 &local_mat,
+                                        float4x4 &local_mat_inv)
+{
+  StrokeCache *cache = ob.runtime->sculpt_session->cache;
+
+  /* Ensure `ob.world_to_object` is up to date. */
+  ob.runtime->world_to_object = math::invert(ob.object_to_world());
+
+  /* The primary object under the cursor defines the shared world frame; it pools the area normal
+   * across all meshes and is processed first, so its frame is ready when secondaries run. */
+  const Object *reference = cache->multi_object_sample_reference;
+  const StrokeCache *reference_cache =
+      (reference != nullptr && reference != &ob && reference->runtime->sculpt_session) ?
+          reference->runtime->sculpt_session->cache :
+          nullptr;
+
+  float4x4 frame_to_world;
+  if (reference_cache != nullptr && reference_cache->area_texture_frame_valid) {
+    /* Secondary object: reuse the primary object's exact world frame for seam continuity. */
+    frame_to_world = reference_cache->area_texture_frame_to_world;
+  }
+  else {
+    const float angle = rotation + cache->special_rotation;
+    const float2 motion_dir_screen(cosf(angle), sinf(angle));
+
+    const float3 world_location = math::transform_point(ob.object_to_world(),
+                                                        cache->location_symm);
+    const float zfac = ED_view3d_calc_zfac(cache->vc->rv3d, world_location);
+    float3 world_motion_dir;
+    ED_view3d_win_to_delta(cache->vc->region, motion_dir_screen, zfac, world_motion_dir);
+    world_motion_dir = math::normalize(world_motion_dir);
+
+    /* A local-space NORMAL maps to world space via the inverse-transpose rule, unlike a
+     * position/direction which transforms directly (see #non_uniform_scale_compensation). */
+    const float3x3 to_world_normal = math::transpose(float3x3(ob.world_to_object()));
+    const float3 world_normal = math::normalize(to_world_normal * cache->sculpt_normal);
+
+    /* Build an orthonormal basis (matches #calc_brush_local_mat's axis order). Normalize each
+     * basis axis INDIVIDUALLY — NOT `math::normalize(float4x4)`, which normalizes every column
+     * including the translation and would corrupt #world_location for objects whose brush hit is
+     * far from the world origin (offset transform origins). #calc_brush_local_mat uses
+     * #normalize_m4 for the same reason: it only normalizes the 3x3 basis and leaves the location
+     * untouched. */
+    const float3 axis_z = world_normal;
+    const float3 axis_y = math::normalize(math::cross(axis_z, world_motion_dir));
+    const float3 axis_x = math::normalize(math::cross(axis_y, axis_z));
+
+    float4x4 mat = float4x4::identity();
+    mat.x_axis() = axis_x;
+    mat.y_axis() = axis_y;
+    mat.z_axis() = axis_z;
+    mat.location() = world_location;
+
+    /* #StrokeCache.radius is `screen_radius / mat4_to_scale(world matrix)`
+     * (#paint_calc_object_space_radius); multiplying back by this object's own scale recovers the
+     * shared screen-derived world radius, consistent across every object in the stroke. */
+    const float world_radius = cache->radius * mat4_to_scale(ob.object_to_world().ptr());
+    frame_to_world = mat * math::from_scale<float4x4>(float3(world_radius));
+
+    /* Publish the frame for secondary objects (the reference is processed first). */
+    cache->area_texture_frame_to_world = frame_to_world;
+    cache->area_texture_frame_valid = true;
+  }
+
+  local_mat_inv = ob.world_to_object() * frame_to_world;
+  local_mat = math::invert(frame_to_world) * ob.object_to_world();
+}
+
 static void update_brush_local_mat(const Sculpt &sd, Object &ob)
 {
   StrokeCache *cache = ob.runtime->sculpt_session->cache;
@@ -3237,8 +3338,14 @@ static void update_brush_local_mat(const Sculpt &sd, Object &ob)
   if (cache->mirror_symmetry_pass == 0 && cache->radial_symmetry_pass == 0) {
     const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
     const MTex *mask_tex = BKE_brush_mask_texture_get(brush, OB_MODE_SCULPT);
-    calc_brush_local_mat(
-        mask_tex->rot, ob, cache->brush_local_mat.ptr(), cache->brush_local_mat_inv.ptr());
+    if (cache->multi_object_stroke) {
+      calc_brush_area_texture_mat(
+          mask_tex->rot, ob, cache->brush_local_mat, cache->brush_local_mat_inv);
+    }
+    else {
+      calc_brush_local_mat(
+          mask_tex->rot, ob, cache->brush_local_mat.ptr(), cache->brush_local_mat_inv.ptr());
+    }
   }
 }
 
@@ -7489,6 +7596,22 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   }
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
     face_set_overlay_check(*C, *op);
+  }
+
+  /* Warn once at stroke start when a Tiled-mapped brush texture uses an image whose extension is
+   * not Repeat. The Tiled mapping samples the texture in screen space at coordinates well outside
+   * the [0,1] tile, so an Extend/Clip image cannot tile — the brush then appears to have no
+   * textured effect at all. Procedural textures are defined everywhere, so this only affects images
+   * (#Tex.extend is only meaningful for #TEX_IMAGE). */
+  {
+    const MTex *mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
+    if (mtex->tex && mtex->brush_map_mode == MTEX_MAP_MODE_TILED &&
+        mtex->tex->type == TEX_IMAGE && mtex->tex->extend != TEX_REPEAT)
+    {
+      BKE_report(op->reports,
+                 RPT_WARNING,
+                 "Tiled brush texture: set the image Extension to Repeat so it tiles onto the mesh");
+    }
   }
 
   op->customdata = stroke;

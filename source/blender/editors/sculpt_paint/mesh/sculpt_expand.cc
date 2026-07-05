@@ -2204,7 +2204,14 @@ static std::optional<int> target_vert_update_and_get(bContext *C, Object &ob, co
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
   CursorGeometryInfo cgi;
-  if (cursor_geometry_info_update(C, &cgi, mval, false)) {
+  Object *hit_ob = nullptr;
+  /* #cursor_geometry_info_update is multi-object aware: with several sculpt-mode meshes it
+   * silently resolves and updates whichever object the cursor actually hit, which may not be
+   * #ob. Expand stays single-object (see #sculpt_expand_invoke), so the returned index is only
+   * valid to read from #ob's own #SculptSession; treat a hit on any other object the same as the
+   * cursor not being over the mesh at all, rather than returning #ob's stale/unset active vertex
+   * (previously crashed indexing with a negative index in #find_symm_verts_mesh). */
+  if (cursor_geometry_info_update(C, &cgi, mval, false, &hit_ob) && hit_ob == &ob) {
     return ss.active_vert_index();
   }
   return std::nullopt;

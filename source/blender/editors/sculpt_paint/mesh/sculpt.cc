@@ -7463,6 +7463,19 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       }
     }
 
+    /* The Draw Face Sets brush lazily allocates a new face-set id per object the first time it
+     * is unset (#do_draw_face_sets_brush), picking the next id free in THAT object's own mesh.
+     * With separate meshes that yields a different id per object for what should be one shared
+     * face set. The primary object is processed first, so copy its id into every secondary
+     * object's cache before its own brush action would otherwise independently allocate one. */
+    if (&ob != primary_ob && cache->paint_face_set == face_set_none_id && primary_ob != nullptr) {
+      const SculptSession *primary_ss = primary_ob->runtime->sculpt_session;
+      if (primary_ss && primary_ss->cache && primary_ss->cache->paint_face_set != face_set_none_id)
+      {
+        cache->paint_face_set = primary_ss->cache->paint_face_set;
+      }
+    }
+
     restore_from_undo_step_if_necessary(depsgraph, sd, ob);
 
     if (dyntopo::stroke_is_dyntopo(ob, brush)) {

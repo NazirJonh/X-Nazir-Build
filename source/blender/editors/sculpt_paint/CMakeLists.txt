@@ -96,6 +96,7 @@ set(SRC
   mesh/sculpt_detail.cc
   mesh/sculpt_dyntopo.cc
   mesh/sculpt_expand.cc
+  mesh/sculpt_expand_multi.cc
   mesh/sculpt_face_set.cc
   mesh/sculpt_filter_color.cc
   mesh/sculpt_filter_mask.cc
@@ -134,6 +135,7 @@ set(SRC
   mesh/sculpt_color.hh
   mesh/sculpt_dyntopo.hh
   mesh/sculpt_expand.hh
+  mesh/sculpt_expand_multi.hh
   mesh/sculpt_face_set.hh
   mesh/sculpt_filter.hh
   mesh/sculpt_flood_fill.hh
@@ -212,6 +214,7 @@ if(WITH_GTESTS)
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_color_test.cc
     mesh/sculpt_detail_test.cc
+    mesh/sculpt_expand_multi_test.cc
     mesh/sculpt_face_set_test.cc
     mesh/sculpt_undo_test.cc
   )

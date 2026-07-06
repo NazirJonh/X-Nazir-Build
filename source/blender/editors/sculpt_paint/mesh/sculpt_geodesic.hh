@@ -29,4 +29,23 @@ Array<float> distances_create(Span<float3> vert_positions,
                               const Set<int> &initial_verts,
                               float limit_radius);
 
+/**
+ * Same contract and per-triangle update formula as #distances_create, but propagates in true
+ * increasing-distance order via a min-heap (the standard Fast Marching Method for triangulated
+ * surfaces) instead of #distances_create's round-based BFS. Prefer this variant whenever the
+ * topology may contain long-range "shortcut" edges not backed by mesh faces (e.g. a cross-object
+ * proximity bridge) -- #distances_create's round order can then diverge badly from true distance
+ * order and re-relax large parts of the mesh many times over; this variant finalizes each vertex
+ * exactly once regardless of topology.
+ */
+Array<float> distances_create_priority_queue(Span<float3> vert_positions,
+                                             Span<int2> edges,
+                                             OffsetIndices<int> faces,
+                                             Span<int> corner_verts,
+                                             GroupedSpan<int> vert_to_edge_map,
+                                             GroupedSpan<int> edge_to_face_map,
+                                             Span<bool> hide_poly,
+                                             const Set<int> &initial_verts,
+                                             float limit_radius);
+
 }  // namespace blender::ed::sculpt_paint::geodesic

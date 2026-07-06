@@ -569,15 +569,26 @@ static void screen_space_overlays_draw(const PaintCursorContext &pcontext)
     return;
   }
 
-  /* Expand operation origin. */
+  /* Expand operation origin. Resolve it on the seed's OWN object: with cross-mesh seeding the seed
+   * can live on a non-active object, so indexing the active object's positions with that vertex
+   * would draw the origin on the wrong mesh (and could be out of range). Falls back to the active
+   * object for the single-object path, where seed == {0, initial_active_vert}. */
   if (pcontext.ss->expand_cache) {
-    const int vert = pcontext.ss->expand_cache->initial_active_vert;
+    const expand::Cache &expand_cache = *pcontext.ss->expand_cache;
+    const expand::MultiVertRef seed = expand_cache.seed;
+
+    Object *origin_object = &active_object;
+    int vert = expand_cache.initial_active_vert;
+    if (seed.object_index >= 0 && seed.object_index < expand_cache.object_states.size()) {
+      origin_object = expand_cache.object_states[seed.object_index].object;
+      vert = seed.vert;
+    }
 
     float3 position;
-    switch (bke::object::pbvh_get(active_object)->type()) {
+    switch (bke::object::pbvh_get(*origin_object)->type()) {
       case bke::pbvh::Type::Mesh: {
         const Span<float3> positions = bke::pbvh::vert_positions_eval(*pcontext.depsgraph,
-                                                                      active_object);
+                                                                      *origin_object);
         position = positions[vert];
         break;
       }
@@ -593,7 +604,7 @@ static void screen_space_overlays_draw(const PaintCursorContext &pcontext)
       }
     }
     screen_space_point_draw(
-        pcontext.pos, pcontext.region, position, active_object.object_to_world().ptr(), 2);
+        pcontext.pos, pcontext.region, position, origin_object->object_to_world().ptr(), 2);
   }
 
   if (!pcontext.is_brush_active) {

@@ -33,6 +33,7 @@
 #include "draw_cache_impl.hh"
 #include "draw_manager_text.hh"
 #include "overlay_base.hh"
+#include "overlay_symmetry_contour.hh"
 
 namespace blender::draw::overlay {
 
@@ -92,14 +93,22 @@ class Meshes : Overlay {
   View view_edit_cage_ = {"view_edit_cage"};
   View::OffsetData offset_data_;
 
+  SymmetryContourOverlay symmetry_contour_ = {SelectionType::DISABLED, "EditMeshSymmetryContour"};
+
  public:
   void begin_sync(Resources &res, const State &state) final
   {
     enabled_ = state.is_space_v3d();
 
     if (!enabled_) {
+      symmetry_contour_.begin_sync(res, state, false);
       return;
     }
+
+    symmetry_contour_.begin_sync(res,
+                                 state,
+                                 state.ctx_mode == CTX_MODE_EDIT_MESH &&
+                                     state.overlay.show_edit_mesh_symmetry_contour);
 
     offset_data_ = state.offset_data_get();
     xray_enabled_ = state.xray_enabled;
@@ -311,6 +320,19 @@ class Meshes : Overlay {
 
     Object *ob = ob_ref.object;
     Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*ob);
+    /* Read symmetry from the original object, not the evaluated copy: `use_mesh_mirror_*`
+     * only sends a redraw notifier and never tags the mesh for depsgraph re-evaluation, so the
+     * evaluated copy can go stale until something else forces a geometry recalc (see the same
+     * fix in overlay_paint.hh for the Paint mode overlays). */
+    const Object *ob_orig = DEG_get_original(ob);
+    const Mesh &mesh_orig = DRW_object_get_data_for_drawing<Mesh>(*ob_orig);
+    const int symmetry_flags = symmetry_flags_from_mesh_symmetry(mesh_orig.symmetry);
+    if (symmetry_flags != 0) {
+      /* In Edit Mode the `Mesh` used for drawing carries no populated position/face arrays;
+       * the live geometry lives in the `BMesh` instead, so the contour is extracted from it. */
+      BMesh *edit_bm = mesh.runtime->edit_mesh ? mesh.runtime->edit_mesh->bm : nullptr;
+      symmetry_contour_.object_sync(ob, symmetry_flags, state, edit_bm);
+    }
     /* WORKAROUND: GPU subdiv uses a different normal format. Remove this once GPU subdiv is
      * refactored. */
     const bool use_gpu_subdiv = BKE_subsurf_modifier_has_gpu_subdiv(&mesh);
@@ -409,7 +431,16 @@ class Meshes : Overlay {
     manager.submit(edit_mesh_skin_roots_ps_, view);
     manager.submit(edit_mesh_facedots_ps_, view);
 
+    symmetry_contour_.draw_line(framebuffer, manager, view);
     GPU_debug_group_end();
+  }
+
+  void end_sync(Resources & /*res*/, const State & /*state*/) final
+  {
+    if (!enabled_) {
+      return;
+    }
+    symmetry_contour_.end_sync();
   }
 
   void draw_color_only(Framebuffer &framebuffer, Manager &manager, View &view) final

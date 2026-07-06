@@ -778,6 +778,19 @@ void blo_do_versions_510(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
         }
       }
     }
+
+    /* Enable sculpt symmetry contour and plane display by default for existing files. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = (View3D *)&sl;
+            v3d->overlay.show_sculpt_symmetry_contour = true;
+            v3d->overlay.show_sculpt_symmetry_plane = true;
+          }
+        }
+      }
+    }
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 16)) {

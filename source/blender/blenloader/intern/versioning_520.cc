@@ -20,8 +20,12 @@
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_xr_types.h"
+
+#include "BLI_listbase_wrapper.hh"
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_string.h"
@@ -768,6 +772,22 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     FOREACH_NODETREE_END;
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 27)) {
+    /* Enable paint symmetry contours by default for older files. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            v3d->overlay.show_weight_paint_symmetry_contour = true;
+            v3d->overlay.show_vertex_paint_symmetry_contour = true;
+            v3d->overlay.show_texture_paint_symmetry_contour = true;
+          }
+        }
+      }
+    }
+  }
+
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 28)) {
     version_text_strip_space_line(*bmain);
     version_compositor_effect_initialized(*bmain);
@@ -892,6 +912,21 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
+    /* Enable edit-mesh symmetry contour and curves symmetry plane by default for older files. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            v3d->overlay.show_edit_mesh_symmetry_contour = true;
+            v3d->overlay.show_curves_symmetry_plane = true;
+          }
+        }
+      }
+    }
   }
 
   /**

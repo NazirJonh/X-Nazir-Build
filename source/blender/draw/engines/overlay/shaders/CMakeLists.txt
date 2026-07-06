@@ -145,7 +145,6 @@ set(SRC_GLSL_FRAG
   overlay_wireframe_frag.glsl
 )
 
-
 set(SRC_GLSL_COMP
 )
 

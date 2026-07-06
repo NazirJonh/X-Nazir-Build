@@ -102,7 +102,7 @@ class Instance : public DrawEngine {
     PointClouds pointclouds;
     Prepass prepass;
     Relations relations = {selection_type_};
-    Sculpts sculpts;
+    Sculpts sculpts = {selection_type_};
     Speakers speakers = {selection_type_};
     Wireframe wireframe;
   } regular{selection_type_}, infront{selection_type_};

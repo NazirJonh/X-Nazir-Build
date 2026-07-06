@@ -7,7 +7,9 @@
 #include "BLI_array.hh"
 #include "BLI_array_utils.hh"
 #include "BLI_bit_span.hh"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_matrix_types.hh"
+#include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_offset_indices.hh"
 #include "BLI_set.hh"
@@ -299,6 +301,147 @@ void filter_region_clip_factors(const SculptSession &ss,
 void filter_region_clip_factors(const SculptSession &ss,
                                 Span<float3> positions,
                                 MutableSpan<float> factors);
+
+/**
+ * True when \a ob's own #Object.scale is anisotropic (its axes differ from one another), using
+ * the same tolerance as the "Object has non-uniform scale" stroke-start warning
+ * (`sculpt_ops.cc`). Combined with #StrokeCache.multi_object_stroke to decide when the
+ * non-uniform-scale correction helpers below should engage: a multi-object stroke always
+ * engages them (every object in the group needs consistent treatment even if this particular one
+ * happens to be uniformly scaled), while a single-object stroke only engages them when this
+ * object's own scale actually is anisotropic -- a plain or uniformly-scaled single object stays
+ * bit-exact. Declared here but defined in `sculpt.cc` (like #non_uniform_scale_compensation
+ * below) since it dereferences #Object, which this header only forward-declares.
+ */
+bool object_has_non_uniform_scale(const Object &ob);
+
+/**
+ * Approximates world-space isotropy for a local-space NORMAL/direction vector (built from
+ * cross-products of a surface normal, or averaged into an area normal) under the object's own
+ * non-uniform scale, using #StrokeCache.scale (the inverse-transpose-style `max_scale /
+ * object_scale_axis` compensation seeded once per stroke in #stroke_cache_init). Gated on
+ * #StrokeCache.non_uniform_scale_active, so an object with uniform (or no) scale keeps its
+ * previous, unchanged behavior.
+ *
+ * Do NOT use this for position differences / falloff distances — those transform by the
+ * object's scale directly (the opposite relationship), see #position_scale_normalized.
+ *
+ * This returns the corrected but *unnormalized* vector; when the result is consumed as a unit
+ * orientation vector (a basis axis, a rotation axis, a projection-plane normal) use
+ * #scale_normalized_unit instead so uniformly-scaled strokes stay bit-exact.
+ */
+inline float3 scale_normalized(const StrokeCache &cache, const float3 &v)
+{
+  return cache.non_uniform_scale_active ? v * cache.scale : v;
+}
+
+/**
+ * Unit-length variant of #scale_normalized for a raw local NORMAL/direction that is consumed as a
+ * unit orientation vector. When the correction is active it applies the non-uniform-scale
+ * correction and re-normalizes; otherwise it returns #v untouched — no extra #math::normalize is
+ * introduced, so the result stays bit-identical to the pre-correction behavior.
+ */
+inline float3 scale_normalized_unit(const StrokeCache &cache, const float3 &v)
+{
+  return cache.non_uniform_scale_active ? math::normalize(v * cache.scale) : v;
+}
+
+/**
+ * Approximates world-space isotropy for a local-space POSITION DIFFERENCE (a falloff distance,
+ * a slide direction derived from `location - position`) under the object's own non-uniform
+ * scale, using #StrokeCache.position_scale (`ob.scale[axis] / mat4_to_scale(world matrix)`,
+ * seeded once per stroke in #stroke_cache_init). Gated on #StrokeCache.non_uniform_scale_active.
+ *
+ * Do NOT use this for normals/orientation vectors — see #scale_normalized instead.
+ */
+inline float3 position_scale_normalized(const StrokeCache &cache, const float3 &v)
+{
+  return cache.non_uniform_scale_active ? v * cache.position_scale : v;
+}
+
+/**
+ * Per-axis compensation making a local-space displacement/direction look isotropic in world
+ * space despite the object's own non-uniform #Object.scale: the largest axis is left unscaled,
+ * smaller axes are scaled up to match it. Only the axis *ratios* matter for direction
+ * correctness (a uniform post-multiply cancels out under `normalize()`). This is the same
+ * formula #StrokeCache.scale is seeded with once per stroke in #stroke_cache_init; use that
+ * cached value instead when a #StrokeCache is available (e.g. via #scale_normalized).
+ */
+float3 non_uniform_scale_compensation(const Object &ob);
+
+/**
+ * Per-axis compensation making a local-space POSITION DIFFERENCE match a true isotropic
+ * world-space distance, given that #StrokeCache.radius/#SculptSession.cursor_radius were derived
+ * by dividing a world/screen radius by the single isotropic scalar `mat4_to_scale(world matrix)`
+ * (#paint_calc_object_space_radius). This is `ob.scale[axis] / mat4_to_scale(ob)` — the opposite
+ * relationship from #non_uniform_scale_compensation, which corrects normals via the
+ * inverse-transpose rule. This is the same formula #StrokeCache.position_scale is seeded with
+ * once per stroke in #stroke_cache_init; use that cached value instead when a #StrokeCache is
+ * available (e.g. via #position_scale_normalized).
+ */
+float3 position_scale_compensation(const Object &ob);
+
+/**
+ * A snapshot of an object's world transform used to evaluate #BKE_kelvinlet_* (Elastic Deform,
+ * Snake Hook's kelvinlet mode, the Transform tool's Elastic mode) in world space instead of the
+ * object's own local space. #BKE_kelvinlet_* has no scale awareness of its own -- it measures
+ * real Euclidean distances/directions on whatever raw `float[3]` values it is given, so
+ * evaluating it directly on local-space coordinates gives an anisotropically distorted result
+ * whenever the object's own #Object.scale is non-uniform. Round-tripping through world space
+ * (transform in, call kelvinlet unmodified, transform the displacement back out) fixes this
+ * without touching `kelvinlet.cc`. See #kelvinlet_world_transform_init.
+ */
+struct KelvinletWorldTransform {
+  float4x4 to_world = float4x4::identity();
+  float4x4 to_local = float4x4::identity();
+  float3x3 to_world_normal = float3x3::identity();
+};
+
+/**
+ * Build a #KelvinletWorldTransform from \a ob's current world transform. Computes `to_local =
+ * invert(to_world)` fresh from #Object.object_to_world -- does NOT read or write
+ * #Object.runtime.world_to_object, so this is safe to call from a threaded PBVH node loop (unlike
+ * relying on the cached runtime field the way #calc_brush_area_texture_mat does, which explicitly
+ * refreshes it before reading and must not be mutated concurrently from multiple threads).
+ * Intended to be called ONCE per brush step, before iterating vertices/nodes -- the object's
+ * transform is assumed static for the stroke's duration (the same assumption
+ * #StrokeCache.scale/#StrokeCache.position_scale already make). Declared here but defined in
+ * `sculpt.cc` (like #object_has_non_uniform_scale above) since it dereferences #Object, which
+ * this header only forward-declares.
+ */
+KelvinletWorldTransform kelvinlet_world_transform_init(const Object &ob);
+
+/** Transform a local-space POSITION (#BKE_kelvinlet_*'s `elem_orig_co`/`brush_location`) to world space. */
+inline float3 kelvinlet_position_to_world(const KelvinletWorldTransform &transform, const float3 &p)
+{
+  return math::transform_point(transform.to_world, p);
+}
+
+/** Transform a local-space DIRECTION (#BKE_kelvinlet_grab*'s `brush_delta`) to world space. */
+inline float3 kelvinlet_direction_to_world(const KelvinletWorldTransform &transform, const float3 &v)
+{
+  return math::transform_direction(transform.to_world, v);
+}
+
+/**
+ * Transform a local-space NORMAL (#BKE_kelvinlet_scale/#BKE_kelvinlet_twist's `surface_normal`) to
+ * world space via the inverse-transpose rule -- see #non_uniform_scale_compensation for why
+ * normals need a different transform law than positions/directions.
+ */
+inline float3 kelvinlet_normal_to_world(const KelvinletWorldTransform &transform, const float3 &n)
+{
+  return math::normalize(math::transform_direction(transform.to_world_normal, n));
+}
+
+/**
+ * Transform a world-space DISPLACEMENT (a #BKE_kelvinlet_* return value) back to local space.
+ * Displacements are directions, not positions -- use the object's inverse transform's linear
+ * part, not a position round-trip.
+ */
+inline float3 kelvinlet_direction_to_local(const KelvinletWorldTransform &transform, const float3 &v)
+{
+  return math::transform_direction(transform.to_local, v);
+}
 
 /**
  * Calculate distances based on the distance from the brush cursor and various other settings.

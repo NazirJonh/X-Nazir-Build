@@ -10,6 +10,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_scene_types.h"
 #include "DNA_vec_types.h"
 
 #include "BLI_bitmap_draw_2d.h"
@@ -37,6 +38,7 @@
 
 #include "../paint_intern.hh"
 #include "sculpt_intern.hh"
+#include "sculpt_multi_object.hh"
 
 namespace blender::ed::sculpt_paint::gesture {
 
@@ -74,8 +76,8 @@ static void init_common(bContext *C, const wmOperator *op, GestureData &gesture_
   /* SculptSession */
   gesture_data.ss = object.runtime->sculpt_session;
 
-  /* Symmetry. */
-  gesture_data.symm = ePaintSymmetryFlags(mesh_symmetry_xyz_get(object));
+  /* Symmetry. The authoritative value is set once in #apply(), from the reference object
+   * (objects[0]) -- not recomputed here, see that function's comment. */
 
   /* View Normal. */
   const float3x3 view_inv(float4x4(gesture_data.vc.rv3d->viewinv));
@@ -88,6 +90,90 @@ static void init_common(bContext *C, const wmOperator *op, GestureData &gesture_
   /* View Origin. */
   gesture_data.world_space_view_origin = gesture_data.vc.rv3d->viewinv[3];
   gesture_data.true_view_origin = gesture_data.vc.rv3d->viewinv[3];
+
+  /* Single-object default. Multi-object gesture operators overwrite this with
+   * sculpt_mode_objects(vc) after init_from_*() returns; apply() then recomputes all per-object
+   * state via init_object_space() for each entry. The object-dependent values computed above are
+   * for the active object and get recomputed per object in init_object_space() — they are still
+   * set here because init_from_line()'s line_calculate_plane_points() reads true_view_normal /
+   * true_view_origin before the per-object loop begins. */
+  gesture_data.objects = {gesture_data.vc.obact};
+}
+
+static void line_plane_from_tri(float *r_plane,
+                                const Object &object,
+                                const bool flip,
+                                const float3 &p1,
+                                const float3 &p2,
+                                const float3 &p3)
+{
+  float3 normal;
+  normal_tri_v3(normal, p1, p2, p3);
+  /* A world-space plane normal maps to local space via the inverse-transpose rule (the transpose
+   * of object_to_world), not the naive world_to_object() transform used here previously -- the two
+   * only agree (up to a scalar) when the object has no non-uniform scale, so the previous formula
+   * silently tilted the local-space gesture plane on any non-uniformly scaled object. */
+  normal = math::normalize(math::transpose(float3x3(object.object_to_world())) * normal);
+  if (flip) {
+    normal *= -1.0f;
+  }
+  const float3 plane_point_object_space = math::transform_point(object.world_to_object(), p1);
+  plane_from_point_normal_v3(r_plane, plane_point_object_space, normal);
+}
+
+/* Recomputes every per-object field of `gesture_data` (SculptSession, symmetry, view normal,
+ * clip/line planes) for `object`, from the object-independent anchors captured by init_common()
+ * and init_from_box()/init_from_lasso()/init_from_line(). Called once per object by apply(). */
+static void init_object_space(GestureData &gesture_data, Object &object)
+{
+  gesture_data.ss = object.runtime->sculpt_session;
+  gesture_data.true_view_normal = math::normalize(
+      math::transform_direction(object.world_to_object(), gesture_data.world_space_view_normal));
+
+  switch (gesture_data.shape_type) {
+    case ShapeType::Box: {
+      BoundBox bb;
+      ED_view3d_clipping_calc(&bb,
+                              gesture_data.true_clip_planes,
+                              gesture_data.vc.region,
+                              &object,
+                              &gesture_data.box_rect);
+      break;
+    }
+    case ShapeType::Lasso: {
+      gesture_data.lasso.projviewobjmat = ED_view3d_ob_project_mat_get(gesture_data.vc.rv3d,
+                                                                       &object);
+      BoundBox bb;
+      ED_view3d_clipping_calc(&bb,
+                              gesture_data.true_clip_planes,
+                              gesture_data.vc.region,
+                              &object,
+                              &gesture_data.lasso.boundbox);
+      break;
+    }
+    case ShapeType::Line: {
+      const bool flip = gesture_data.line.flip ^ (!gesture_data.vc.rv3d->is_persp);
+      line_plane_from_tri(gesture_data.line.true_plane,
+                          object,
+                          flip,
+                          gesture_data.line_plane_points[0],
+                          gesture_data.line_plane_points[1],
+                          gesture_data.line_plane_points[2]);
+      line_plane_from_tri(gesture_data.line.true_side_plane[0],
+                          object,
+                          false,
+                          gesture_data.line_plane_points[1],
+                          gesture_data.line_plane_points[0],
+                          gesture_data.line_offset_plane_points[0]);
+      line_plane_from_tri(gesture_data.line.true_side_plane[1],
+                          object,
+                          false,
+                          gesture_data.line_plane_points[3],
+                          gesture_data.line_plane_points[2],
+                          gesture_data.line_offset_plane_points[1]);
+      break;
+    }
+  }
 }
 
 static void lasso_px_cb(const int x, const int x_end, const int y, void *user_data)
@@ -118,8 +204,6 @@ std::unique_ptr<GestureData> init_from_lasso(bContext *C, wmOperator *op)
 
   init_common(C, op, *gesture_data);
 
-  gesture_data->lasso.projviewobjmat = ED_view3d_ob_project_mat_get(gesture_data->vc.rv3d,
-                                                                    gesture_data->vc.obact);
   BLI_lasso_boundbox(&gesture_data->lasso.boundbox, mcoords);
   const int lasso_width = 1 + gesture_data->lasso.boundbox.xmax -
                           gesture_data->lasso.boundbox.xmin;
@@ -136,18 +220,13 @@ std::unique_ptr<GestureData> init_from_lasso(bContext *C, wmOperator *op)
                                 lasso_px_cb,
                                 gesture_data.get());
 
-  BoundBox bb;
-  ED_view3d_clipping_calc(&bb,
-                          gesture_data->true_clip_planes,
-                          gesture_data->vc.region,
-                          gesture_data->vc.obact,
-                          &gesture_data->lasso.boundbox);
-
   gesture_data->gesture_points.reinitialize(mcoords.size());
   for (const int i : mcoords.index_range()) {
     gesture_data->gesture_points[i][0] = mcoords[i][0];
     gesture_data->gesture_points[i][1] = mcoords[i][1];
   }
+
+  init_object_space(*gesture_data, *gesture_data->vc.obact);
 
   return gesture_data;
 }
@@ -159,46 +238,25 @@ std::unique_ptr<GestureData> init_from_box(bContext *C, wmOperator *op)
 
   init_common(C, op, *gesture_data);
 
-  rcti rect;
-  WM_operator_properties_border_to_rcti(op, &rect);
-
-  BoundBox bb;
-  ED_view3d_clipping_calc(
-      &bb, gesture_data->true_clip_planes, gesture_data->vc.region, gesture_data->vc.obact, &rect);
+  WM_operator_properties_border_to_rcti(op, &gesture_data->box_rect);
 
   gesture_data->gesture_points.reinitialize(4);
 
-  gesture_data->gesture_points[0][0] = rect.xmax;
-  gesture_data->gesture_points[0][1] = rect.ymax;
+  gesture_data->gesture_points[0][0] = gesture_data->box_rect.xmax;
+  gesture_data->gesture_points[0][1] = gesture_data->box_rect.ymax;
 
-  gesture_data->gesture_points[1][0] = rect.xmax;
-  gesture_data->gesture_points[1][1] = rect.ymin;
+  gesture_data->gesture_points[1][0] = gesture_data->box_rect.xmax;
+  gesture_data->gesture_points[1][1] = gesture_data->box_rect.ymin;
 
-  gesture_data->gesture_points[2][0] = rect.xmin;
-  gesture_data->gesture_points[2][1] = rect.ymin;
+  gesture_data->gesture_points[2][0] = gesture_data->box_rect.xmin;
+  gesture_data->gesture_points[2][1] = gesture_data->box_rect.ymin;
 
-  gesture_data->gesture_points[3][0] = rect.xmin;
-  gesture_data->gesture_points[3][1] = rect.ymax;
+  gesture_data->gesture_points[3][0] = gesture_data->box_rect.xmin;
+  gesture_data->gesture_points[3][1] = gesture_data->box_rect.ymax;
+
+  init_object_space(*gesture_data, *gesture_data->vc.obact);
+
   return gesture_data;
-}
-
-static void line_plane_from_tri(float *r_plane,
-                                const GestureData &gesture_data,
-                                const bool flip,
-                                const float3 &p1,
-                                const float3 &p2,
-                                const float3 &p3)
-{
-  float3 normal;
-  normal_tri_v3(normal, p1, p2, p3);
-  normal = math::normalize(
-      math::transform_direction(gesture_data.vc.obact->world_to_object(), normal));
-  if (flip) {
-    normal *= -1.0f;
-  }
-  const float3 plane_point_object_space = math::transform_point(
-      gesture_data.vc.obact->world_to_object(), p1);
-  plane_from_point_normal_v3(r_plane, plane_point_object_space, normal);
 }
 
 /* Creates 4 points in the plane defined by the line and 2 extra points with an offset relative to
@@ -249,33 +307,12 @@ std::unique_ptr<GestureData> init_from_line(bContext *C, const wmOperator *op)
 
   gesture_data->line.flip = RNA_boolean_get(op->ptr, "flip");
 
-  std::array<float3, 4> plane_points;
-  std::array<float3, 2> offset_plane_points;
-  line_calculate_plane_points(
-      *gesture_data, gesture_data->gesture_points, plane_points, offset_plane_points);
+  line_calculate_plane_points(*gesture_data,
+                              gesture_data->gesture_points,
+                              gesture_data->line_plane_points,
+                              gesture_data->line_offset_plane_points);
 
-  /* Calculate line plane and normal. */
-  const bool flip = gesture_data->line.flip ^ (!gesture_data->vc.rv3d->is_persp);
-  line_plane_from_tri(gesture_data->line.true_plane,
-                      *gesture_data,
-                      flip,
-                      plane_points[0],
-                      plane_points[1],
-                      plane_points[2]);
-
-  /* Calculate the side planes. */
-  line_plane_from_tri(gesture_data->line.true_side_plane[0],
-                      *gesture_data,
-                      false,
-                      plane_points[1],
-                      plane_points[0],
-                      offset_plane_points[0]);
-  line_plane_from_tri(gesture_data->line.true_side_plane[1],
-                      *gesture_data,
-                      false,
-                      plane_points[3],
-                      plane_points[2],
-                      offset_plane_points[1]);
+  init_object_space(*gesture_data, *gesture_data->vc.obact);
 
   return gesture_data;
 }
@@ -309,20 +346,103 @@ static void flip_plane(float out[4], const float in[4], const char symm)
   out[3] = in[3];
 }
 
+float3 mirror_world_point(const GestureData &gesture_data, const float3 &world_point)
+{
+  BLI_assert(gesture_data.use_shared_symmetry_frame);
+  return math::transform_point(
+      gesture_data.symm_space_to_world,
+      symmetry_flip(math::transform_point(gesture_data.world_to_symm_space, world_point),
+                    gesture_data.symmpass));
+}
+
+/* Unprojects `rect` into world space (ob=nullptr skips the object-transform step
+ * #ED_view3d_clipping_calc would otherwise apply), mirrors each corner through the shared
+ * symmetry frame, and rebuilds clip planes from the mirrored+localized boundbox for
+ * `current_object`. Shared by the Box and Lasso cases below: Box uses these as its precise
+ * "is affected" test, Lasso uses them only for broad-phase node culling (the precise test mirrors
+ * the query point directly, see #is_affected_lasso).
+ *
+ * \note Negates the result to match #flip_plane's convention for `gesture_data.clip_planes` (used
+ * as-is by #isect_point_planes_v3 in #is_affected, and un-negated again locally by
+ * #update_affected_nodes_by_clip_planes for #node_frustum_contain_aabb) -- #true_clip_planes /
+ * #ED_view3d_clipping_calc_from_boundbox use the opposite (non-negated) sign convention. */
+static void build_shared_frame_clip_planes(const GestureData &gesture_data,
+                                           const Object &current_object,
+                                           const rcti &rect,
+                                           float r_clip_planes[4][4])
+{
+  BoundBox bb_world;
+  float unused_planes[4][4];
+  ED_view3d_clipping_calc(&bb_world, unused_planes, gesture_data.vc.region, nullptr, &rect);
+
+  BoundBox bb_local;
+  for (int k = 0; k < 8; k++) {
+    const float3 mirrored_world = mirror_world_point(gesture_data, float3(bb_world.vec[k]));
+    const float3 mirrored_local = math::transform_point(current_object.world_to_object(),
+                                                         mirrored_world);
+    copy_v3_v3(bb_local.vec[k], mirrored_local);
+  }
+  const bool flip_sign = is_negative_m4(current_object.object_to_world().ptr());
+  ED_view3d_clipping_calc_from_boundbox(r_clip_planes, &bb_local, flip_sign);
+  negate_m4(r_clip_planes);
+}
+
 static void flip_for_symmetry_pass(GestureData &gesture_data, const ePaintSymmetryFlags symmpass)
 {
   gesture_data.symmpass = symmpass;
-  for (int j = 0; j < 4; j++) {
-    flip_plane(gesture_data.clip_planes[j], gesture_data.true_clip_planes[j], symmpass);
+
+  if (!gesture_data.use_shared_symmetry_frame) {
+    for (int j = 0; j < 4; j++) {
+      flip_plane(gesture_data.clip_planes[j], gesture_data.true_clip_planes[j], symmpass);
+    }
+
+    negate_m4(gesture_data.clip_planes);
+
+    gesture_data.view_normal = symmetry_flip(gesture_data.true_view_normal, symmpass);
+    gesture_data.view_origin = symmetry_flip(gesture_data.true_view_origin, symmpass);
+    flip_plane(gesture_data.line.plane, gesture_data.line.true_plane, symmpass);
+    flip_plane(gesture_data.line.side_plane[0], gesture_data.line.true_side_plane[0], symmpass);
+    flip_plane(gesture_data.line.side_plane[1], gesture_data.line.true_side_plane[1], symmpass);
+    return;
   }
 
-  negate_m4(gesture_data.clip_planes);
+  /* Shared World/Cursor symmetry: mirror the WORLD-SPACE anchors around the shared frame, then
+   * carry the result into the current object's own local space -- instead of mirroring each
+   * object's already-local planes around its own origin. Matches the approach used for brush
+   * strokes (#shared_symmetry_world_centers). `view_origin` is intentionally left unset here: it
+   * has no reader anywhere in the gesture code (verified), so it is not worth mirroring. */
+  Object &current_object = *gesture_data.vc.obact;
 
-  gesture_data.view_normal = symmetry_flip(gesture_data.true_view_normal, symmpass);
-  gesture_data.view_origin = symmetry_flip(gesture_data.true_view_origin, symmpass);
-  flip_plane(gesture_data.line.plane, gesture_data.line.true_plane, symmpass);
-  flip_plane(gesture_data.line.side_plane[0], gesture_data.line.true_side_plane[0], symmpass);
-  flip_plane(gesture_data.line.side_plane[1], gesture_data.line.true_side_plane[1], symmpass);
+  const float3 mirrored_world_view_normal = symmetry_flip(gesture_data.world_space_view_normal,
+                                                           symmpass);
+  gesture_data.view_normal = math::normalize(
+      math::transform_direction(current_object.world_to_object(), mirrored_world_view_normal));
+
+  switch (gesture_data.shape_type) {
+    case ShapeType::Box:
+      build_shared_frame_clip_planes(
+          gesture_data, current_object, gesture_data.box_rect, gesture_data.clip_planes);
+      break;
+    case ShapeType::Lasso:
+      /* Broad-phase node culling only -- the precise "is affected" test mirrors the query point
+       * directly in #is_affected_lasso using the same shared frame. */
+      build_shared_frame_clip_planes(
+          gesture_data, current_object, gesture_data.lasso.boundbox, gesture_data.clip_planes);
+      break;
+    case ShapeType::Line: {
+      const bool flip = gesture_data.line.flip ^ (!gesture_data.vc.rv3d->is_persp);
+      const float3 p0 = mirror_world_point(gesture_data, gesture_data.line_plane_points[0]);
+      const float3 p1 = mirror_world_point(gesture_data, gesture_data.line_plane_points[1]);
+      const float3 p2 = mirror_world_point(gesture_data, gesture_data.line_plane_points[2]);
+      const float3 p3 = mirror_world_point(gesture_data, gesture_data.line_plane_points[3]);
+      const float3 op0 = mirror_world_point(gesture_data, gesture_data.line_offset_plane_points[0]);
+      const float3 op1 = mirror_world_point(gesture_data, gesture_data.line_offset_plane_points[1]);
+      line_plane_from_tri(gesture_data.line.plane, current_object, flip, p0, p1, p2);
+      line_plane_from_tri(gesture_data.line.side_plane[0], current_object, false, p1, p0, op0);
+      line_plane_from_tri(gesture_data.line.side_plane[1], current_object, false, p3, p2, op1);
+      break;
+    }
+  }
 }
 
 static void update_affected_nodes_by_line_plane(GestureData &gesture_data)
@@ -383,11 +503,25 @@ static void update_affected_nodes(GestureData &gesture_data)
 
 static bool is_affected_lasso(const GestureData &gesture_data, const float3 &position)
 {
-  const float3 co_final = symmetry_flip(position, gesture_data.symmpass);
-
-  /* First project point to 2d space. */
-  const float2 scr_co_f = ED_view3d_project_float_v2_m4(
-      gesture_data.vc.region, co_final, gesture_data.lasso.projviewobjmat);
+  /* First project point to 2d space. `position` is local to the current object.
+   * `use_shared_symmetry_frame`: mirror through the shared World/Cursor frame in world space,
+   * then project with the view's own world-to-screen matrix (#RegionView3D::persmat) -- the
+   * per-object `projviewobjmat` already bakes in this object's matrix, which would double-apply
+   * it if fed a world-space point. Otherwise (Active Object space or single-object gesture):
+   * mirror the point around the object's own local origin, unchanged from before. */
+  float2 scr_co_f;
+  if (gesture_data.use_shared_symmetry_frame) {
+    const float3 world_pos = math::transform_point(gesture_data.vc.obact->object_to_world(),
+                                                    position);
+    const float3 mirrored_world = mirror_world_point(gesture_data, world_pos);
+    scr_co_f = ED_view3d_project_float_v2_m4(
+        gesture_data.vc.region, mirrored_world, float4x4(gesture_data.vc.rv3d->persmat));
+  }
+  else {
+    const float3 co_final = symmetry_flip(position, gesture_data.symmpass);
+    scr_co_f = ED_view3d_project_float_v2_m4(
+        gesture_data.vc.region, co_final, gesture_data.lasso.projviewobjmat);
+  }
 
   int2 screen_coords = {int(scr_co_f[0]), int(scr_co_f[1])};
 
@@ -458,12 +592,41 @@ void apply(bContext &C, GestureData &gesture_data, wmOperator &op)
 
   operation->begin(C, op, gesture_data);
 
-  for (int symmpass = 0; symmpass <= gesture_data.symm; symmpass++) {
-    if (is_symmetry_iteration_valid(symmpass, gesture_data.symm)) {
-      flip_for_symmetry_pass(gesture_data, ePaintSymmetryFlags(symmpass));
-      update_affected_nodes(gesture_data);
+  /* Symmetry AXES/radial-count source: the reference (active, objects[0]) object's own
+   * Mesh.symmetry -- secondary objects mirror using the reference's enabled axes even when their
+   * own mesh has no mirror toggled on, matching #StrokeCache::symm_reference_object for brush
+   * strokes (a multi-object gesture then matches the same geometry after Join). For a
+   * single-object gesture objects[0] is the object itself, so this is bit-exact with the old
+   * per-object computation. */
+  gesture_data.symm = ePaintSymmetryFlags(mesh_symmetry_xyz_get(*gesture_data.objects.first()));
 
-      operation->apply_for_symmetry_pass(C, gesture_data);
+  /* Shared multi-object symmetry frame for Global World Origin / Global 3D Cursor
+   * `symmetry_space` -- mirrors around world axes (optionally through the 3D cursor) instead of
+   * each object's own local origin. Gated on more than one object so single-object gestures stay
+   * bit-exact regardless of the symmetry_space setting, matching the brush-stroke
+   * `multi_object_stroke` discipline. The frame itself is constant across objects/passes; only
+   * `symmpass` (read separately per pass) varies the actual mirror. */
+  const ePaintSymmetrySpace symmetry_space = ePaintSymmetrySpace(gesture_data.paint->symmetry_space);
+  gesture_data.use_shared_symmetry_frame = gesture_data.objects.size() > 1 &&
+                                           symmetry_space != PAINT_SYMM_SPACE_ACTIVE_OBJECT;
+  if (gesture_data.use_shared_symmetry_frame) {
+    const float3 cursor_world = float3(gesture_data.vc.scene->cursor.location);
+    gesture_data.world_to_symm_space = symmetry_space_frame(
+        symmetry_space, gesture_data.objects.first()->world_to_object(), cursor_world);
+    gesture_data.symm_space_to_world = math::invert(gesture_data.world_to_symm_space);
+  }
+
+  for (Object *object : gesture_data.objects) {
+    gesture_data.vc.obact = object;
+    init_object_space(gesture_data, *object);
+
+    for (int symmpass = 0; symmpass <= gesture_data.symm; symmpass++) {
+      if (is_symmetry_iteration_valid(symmpass, gesture_data.symm)) {
+        flip_for_symmetry_pass(gesture_data, ePaintSymmetryFlags(symmpass));
+        update_affected_nodes(gesture_data);
+
+        operation->apply_for_symmetry_pass(C, gesture_data);
+      }
     }
   }
 

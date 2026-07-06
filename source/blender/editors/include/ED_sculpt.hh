@@ -10,6 +10,9 @@
 
 #include <cstddef>
 
+#include "BLI_span.hh"
+#include "BLI_vector.hh"
+
 namespace blender {
 
 struct Depsgraph;
@@ -50,15 +53,50 @@ void object_sculpt_mode_exit(bContext *C, Depsgraph &depsgraph);
 bool shape_key_check(const Object &ob, ReportList *reports);
 
 void operatortypes_sculpt();
+void operatormacros_sculpt();
 
 void keymap_sculpt(wmKeyConfig *keyconf);
 
 /* `sculpt_transform.cc` */
 
-void update_modal_transform(bContext *C, Object &ob);
-void cancel_modal_transform(bContext *C, Object &ob);
+void update_modal_transform(bContext *C, Object &ob, bool is_active);
+void cancel_modal_transform(bContext *C, Object &ob, bool is_active);
 void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char *undo_name);
+/** Like #init_transform, but adds \a ob to an already-open multi-object undo step (see
+ * #undo::push_begin_add_object) instead of opening a new one. */
+void init_transform_add_object(bContext *C, Object &ob, const float mval_fl[2]);
 void end_transform(bContext *C, Object &ob);
+/** Multi-object counterpart of #end_transform: closes the shared undo step opened across \a
+ * objects by #init_transform + #init_transform_add_object. */
+void end_transform(bContext *C, Span<Object *> objects);
+
+/**
+ * Objects the Transform tool's interactive gizmo (Move/Rotate/Scale pivot) should affect: the
+ * active object alone, or every object currently in Sculpt Mode, depending on
+ * `Sculpt::transform_all_objects`. Independent of `Sculpt::multi_object_edit_scope` (which only
+ * governs brush strokes and other tools).
+ */
+Vector<Object *> transform_target_objects(bContext *C);
+
+/**
+ * Converts \a local_rot (an object's local #SculptSession::pivot_rot) into a world-space
+ * quaternion \a r_world_rot, using ONLY \a ob's orientation -- never its own scale. See
+ * #sync_local_pivot_from_world's doc comment for why rotation needs this, unlike position.
+ */
+void local_pivot_rot_to_world(const Object &ob, const float local_rot[4], float r_world_rot[4]);
+/**
+ * Refreshes \a ob's LOCAL #SculptSession::pivot_pos/#pivot_rot from its (already-set, shared
+ * across every object in the session) #SculptSession::transform_pivot_pos_world/
+ * #transform_pivot_rot_world. Called once per object every modal step of a Transform session
+ * (see #update_modal_transform) so the per-object vertex-displacement math always sees an
+ * up-to-date local pivot.
+ *
+ * Position uses \a ob's full (possibly anisotropic) world-to-object matrix -- exact for a point.
+ * Rotation uses \a ob's orientation ONLY, with scale stripped out: conjugating a rotation by a
+ * non-uniformly-scaled matrix does not generally produce a valid rotation (it shears), so
+ * position and rotation need two different conversions here.
+ */
+void sync_local_pivot_from_world(Object &ob);
 
 /* `sculpt_undo.cc` */
 
@@ -90,6 +128,15 @@ namespace face_set {
 
 int find_next_available_id(const Mesh &object);
 int find_next_available_id(Object &object);
+
+/**
+ * The next available Face Set id that is free across every mesh in \a meshes — i.e.
+ * `max(find_next_available_id(mesh) for mesh in meshes)`. Used to assign one shared id across
+ * all objects in a multi-object sculpt-mode gesture/operator.
+ */
+int find_shared_next_available_id(Span<const Mesh *> meshes);
+int find_shared_next_available_id(Span<Object *> objects);
+
 void initialize_none_to_id(Mesh *mesh, int new_id);
 int active_update_and_get(bContext *C, Object &ob, const float mval_fl[2]);
 

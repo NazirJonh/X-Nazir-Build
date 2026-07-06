@@ -24,7 +24,9 @@
 #include "BKE_animsys.h"
 #include "BKE_customdata.hh"
 #include "BKE_data_transfer.h"
+#include "BKE_global.hh"
 #include "BKE_mesh_remap.hh"
+#include "BKE_multires.hh"
 #include "BKE_node.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_interface.hh"
@@ -1313,6 +1315,76 @@ static void rna_MultiresModifier_level_range(
 
   *min = 0;
   *max = max_ii(0, mmd->totlvl); /* intentionally _not_ -1 */
+}
+
+/**
+ * RNA property setters have no bContext, so the candidate set for group-sync is gathered by
+ * walking every object in the file (via the global Main) rather than the current view layer's
+ * selection — slightly broader than the panel's own (view-layer-scoped) grouping in
+ * `multires_group_objects`, but functionally equivalent for the normal single-scene case.
+ */
+static Vector<Object *> rna_multires_group_candidates(Main *bmain)
+{
+  Vector<Object *> candidates;
+  for (Object &ob : bmain->objects) {
+    if (ob.type == OB_MESH && (ob.mode & OB_MODE_SCULPT)) {
+      candidates.append(&ob);
+    }
+  }
+  return candidates;
+}
+
+static void rna_multires_group_set(PointerRNA *ptr, const MultiresLevelType level_type, const int value)
+{
+  Object *active_ob = id_cast<Object *>(ptr->owner_id);
+  MultiresModifierData *mmd = static_cast<MultiresModifierData *>(ptr->data);
+
+  const int old_value = multires_level_get(mmd, level_type);
+  int new_value = value;
+  CLAMP(new_value, 0, int(mmd->totlvl));
+  multires_level_set(mmd, level_type, new_value);
+
+  if (!(active_ob->mode & OB_MODE_SCULPT)) {
+    return;
+  }
+
+  const Vector<Object *> candidates = rna_multires_group_candidates(G_MAIN);
+  const Vector<Object *> changed = multires_level_group_sync(
+      candidates, active_ob, level_type, old_value, new_value, true);
+  for (Object *ob : changed) {
+    DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+    WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ob);
+  }
+}
+
+static int rna_MultiresModifier_levels_group_get(PointerRNA *ptr)
+{
+  return multires_level_get(static_cast<const MultiresModifierData *>(ptr->data),
+                            MultiresLevelType::Viewport);
+}
+static void rna_MultiresModifier_levels_group_set(PointerRNA *ptr, const int value)
+{
+  rna_multires_group_set(ptr, MultiresLevelType::Viewport, value);
+}
+
+static int rna_MultiresModifier_sculpt_levels_group_get(PointerRNA *ptr)
+{
+  return multires_level_get(static_cast<const MultiresModifierData *>(ptr->data),
+                            MultiresLevelType::Sculpt);
+}
+static void rna_MultiresModifier_sculpt_levels_group_set(PointerRNA *ptr, const int value)
+{
+  rna_multires_group_set(ptr, MultiresLevelType::Sculpt, value);
+}
+
+static int rna_MultiresModifier_render_levels_group_get(PointerRNA *ptr)
+{
+  return multires_level_get(static_cast<const MultiresModifierData *>(ptr->data),
+                            MultiresLevelType::Render);
+}
+static void rna_MultiresModifier_render_levels_group_set(PointerRNA *ptr, const int value)
+{
+  rna_multires_group_set(ptr, MultiresLevelType::Render, value);
 }
 
 static bool rna_MultiresModifier_external_get(PointerRNA *ptr)
@@ -2834,6 +2906,42 @@ static void rna_def_modifier_multires(BlenderRNA *brna)
   RNA_def_property_int_sdna(prop, nullptr, "renderlvl");
   RNA_def_property_ui_text(prop, "Render Levels", "The subdivision level visible at render time");
   RNA_def_property_int_funcs(prop, nullptr, nullptr, "rna_MultiresModifier_level_range");
+
+  prop = RNA_def_property(srna, "levels_group", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_funcs(prop,
+                             "rna_MultiresModifier_levels_group_get",
+                             "rna_MultiresModifier_levels_group_set",
+                             "rna_MultiresModifier_level_range");
+  RNA_def_property_ui_text(prop,
+                           "Levels Viewport",
+                           "Number of subdivisions to use in the viewport; also applied to every "
+                           "other selected sculpt-mode object whose value currently matches this "
+                           "one");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_levels_group", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_funcs(prop,
+                             "rna_MultiresModifier_sculpt_levels_group_get",
+                             "rna_MultiresModifier_sculpt_levels_group_set",
+                             "rna_MultiresModifier_level_range");
+  RNA_def_property_ui_text(prop,
+                           "Sculpt Levels",
+                           "Number of subdivisions to use in sculpt mode; also applied to every "
+                           "other selected sculpt-mode object whose value currently matches this "
+                           "one");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "render_levels_group", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_funcs(prop,
+                             "rna_MultiresModifier_render_levels_group_get",
+                             "rna_MultiresModifier_render_levels_group_set",
+                             "rna_MultiresModifier_level_range");
+  RNA_def_property_ui_text(prop,
+                           "Render Levels",
+                           "The subdivision level visible at render time; also applied to every "
+                           "other selected sculpt-mode object whose value currently matches this "
+                           "one");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
 
   prop = RNA_def_property(srna, "total_levels", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_int_sdna(prop, nullptr, "totlvl");

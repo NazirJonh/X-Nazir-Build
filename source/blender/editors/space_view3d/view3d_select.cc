@@ -574,12 +574,15 @@ static bool do_lasso_select_objects(const ViewContext *vc,
                                     const eSelectOp sel_op)
 {
   View3D *v3d = vc->v3d;
+  Object *old_obact = vc->obact;
+  const bool sculpt_group_active = old_obact && (old_obact->mode & OB_MODE_SCULPT);
 
   bool changed = false;
   if (SEL_OP_USE_PRE_DESELECT(sel_op)) {
     changed |= object_deselect_all_visible(*vc->bmain, vc->scene, vc->view_layer, vc->v3d);
   }
   BKE_view_layer_synced_ensure(*vc->bmain, vc->scene, vc->view_layer);
+  Base *first_sculpt_selected = nullptr;
   for (Base &base : *BKE_view_layer_object_bases_get(vc->view_layer)) {
     if (BASE_SELECTABLE(v3d, &base)) { /* Use this to avoid unnecessary lasso look-ups. */
       float region_co[2];
@@ -596,6 +599,11 @@ static bool do_lasso_select_objects(const ViewContext *vc,
         ed::object::base_select(&base,
                                 sel_op_result ? ed::object::BA_SELECT : ed::object::BA_DESELECT);
         changed = true;
+        if (sculpt_group_active && sel_op_result && !first_sculpt_selected &&
+            (base.object->mode & OB_MODE_SCULPT))
+        {
+          first_sculpt_selected = &base;
+        }
       }
     }
   }
@@ -604,6 +612,19 @@ static bool do_lasso_select_objects(const ViewContext *vc,
     DEG_id_tag_update(&vc->scene->id, ID_RECALC_SELECT);
     WM_main_add_notifier(NC_SCENE | ND_OB_SELECT, vc->scene);
   }
+
+  if (sculpt_group_active) {
+    Base *old_obact_base = BKE_view_layer_base_find(vc->view_layer, old_obact);
+    /* Same rule as do_object_box_select(): leave the active object alone if it's still
+     * selected after this gesture; otherwise activate the first newly-selected sculpting
+     * object, in the same view-layer order this loop already walks. */
+    if (!(old_obact_base && (old_obact_base->flag & BASE_SELECTED)) && first_sculpt_selected) {
+      ed::object::base_activate(vc->C, first_sculpt_selected);
+      ed::object::object_overlay_mode_transfer_animation_start(vc->C,
+                                                                first_sculpt_selected->object);
+    }
+  }
+
   return changed;
 }
 
@@ -3029,6 +3050,9 @@ static bool ed_object_select_pick(bContext *C,
   if (use_activate_selected_base && (basact != nullptr)) {
     changed_object = true;
     ed::object::base_activate(C, basact); /* adds notifier */
+    if (basact->object->mode & OB_MODE_SCULPT) {
+      ed::object::object_overlay_mode_transfer_animation_start(C, basact->object);
+    }
     if ((scene->toolsettings->object_flag & SCE_OBJECT_MODE_LOCK) == 0) {
       WM_toolsystem_update_from_context_view3d(C);
     }
@@ -4344,6 +4368,8 @@ static bool do_object_box_select(bContext *C,
                                  const eSelectOp sel_op)
 {
   View3D *v3d = vc->v3d;
+  Object *old_obact = vc->obact;
+  const bool sculpt_group_active = old_obact && (old_obact->mode & OB_MODE_SCULPT);
 
   GPUSelectBuffer buffer;
   const eV3DSelectObjectFilter select_filter = ED_view3d_select_filter_from_mode(
@@ -4394,6 +4420,7 @@ static bool do_object_box_select(bContext *C,
     }
   }
 
+  Base *first_sculpt_selected = nullptr;
   for (Base *base = static_cast<Base *>(object_bases->first); base && hits; base = base->next) {
     if (BASE_SELECTABLE(v3d, base)) {
       const bool is_select = base->flag & BASE_SELECTED;
@@ -4403,6 +4430,11 @@ static bool do_object_box_select(bContext *C,
         ed::object::base_select(base,
                                 sel_op_result ? ed::object::BA_SELECT : ed::object::BA_DESELECT);
         changed = true;
+        if (sculpt_group_active && sel_op_result && !first_sculpt_selected &&
+            (base->object->mode & OB_MODE_SCULPT))
+        {
+          first_sculpt_selected = base;
+        }
       }
     }
   }
@@ -4410,6 +4442,20 @@ static bool do_object_box_select(bContext *C,
   if (changed) {
     object_select_tag_updates(*C, *vc->scene);
   }
+
+  if (sculpt_group_active) {
+    Base *old_obact_base = BKE_view_layer_base_find(vc->view_layer, old_obact);
+    /* Leave the active object alone if it's still part of the selection after this gesture --
+     * matches the convention every other area-select domain in Blender already follows.
+     * Otherwise, activate the first newly-selected sculpting object (in the same view-layer
+     * order this loop already walks) so the multi-object sculpt session always has a valid
+     * active object to follow. */
+    if (!(old_obact_base && (old_obact_base->flag & BASE_SELECTED)) && first_sculpt_selected) {
+      ed::object::base_activate(C, first_sculpt_selected);
+      ed::object::object_overlay_mode_transfer_animation_start(C, first_sculpt_selected->object);
+    }
+  }
+
   return changed;
 }
 

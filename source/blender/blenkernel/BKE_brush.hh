@@ -93,6 +93,13 @@ void BKE_brush_init_curves_sculpt_settings(Brush *brush);
  */
 void BKE_brush_tag_unsaved_changes(Brush *brush);
 
+/**
+ * Recompute #Brush.drag_kind from #Brush.sculpt_brush_type / #Brush.stroke_method /
+ * #Brush.cloth_deform_type. Call whenever any of those three fields changes (RNA setters for all
+ * three call this; see `rna_brush.cc`) so #Brush.drag_kind never goes stale relative to them.
+ */
+void BKE_brush_drag_kind_update(Brush *brush);
+
 float2 BKE_brush_jitter_pos(const Paint &paint, const Brush &brush, const float2 &pos);
 void BKE_brush_randomize_texture_coords(Paint *paint, bool mask);
 

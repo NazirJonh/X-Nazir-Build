@@ -16,6 +16,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
@@ -23,11 +24,16 @@
 #include "BKE_kelvinlet.h"
 #include "BKE_layer.hh"
 #include "BKE_mesh.hh"
+#include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_subdiv_ccg.hh"
+
+#include "DNA_object_types.h"
+
+#include "DEG_depsgraph.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -53,9 +59,22 @@
 
 namespace blender::ed::sculpt_paint {
 
-void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char *undo_name)
+/**
+ * True when Origin Correct should drive a NON-ACTIVE object's own #Object matrix this Transform
+ * session, instead of deforming its mesh vertices. Shared by #init_transform_add_object (snapshot
+ * capture), #update_modal_transform, and #cancel_modal_transform (Tasks 7/8) so the same
+ * four-part condition can't drift out of sync between them. Does not itself check
+ * `is_active` -- callers that process both the active and secondary objects must additionally
+ * gate on `!is_active` (the active object is never origin-corrected, see the design spec §3).
+ */
+static bool origin_correct_active_for_secondary(const Sculpt &sd)
 {
-  const Scene &scene = *CTX_data_scene(C);
+  return sd.transform_all_objects && sd.transform_origin_correct &&
+         sd.transform_mode == SCULPT_TRANSFORM_MODE_ALL_VERTICES;
+}
+
+static void init_transform_common(bContext *C, Object &ob, const float mval_fl[2])
+{
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   SculptSession &ss = *ob.runtime->sculpt_session;
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
@@ -69,7 +88,6 @@ void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char 
   ss.prev_pivot_scale = ss.pivot_scale;
 
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
-  undo::push_begin_ex(scene, ob, undo_name);
 
   vert_random_access_ensure(ob);
 
@@ -83,7 +101,152 @@ void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char 
   }
 }
 
-static std::array<float4x4, 8> transform_matrices_init(const SculptSession &ss,
+void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char *undo_name)
+{
+  const Scene &scene = *CTX_data_scene(C);
+  undo::push_begin_ex(scene, ob, undo_name);
+  init_transform_common(C, ob, mval_fl);
+}
+
+void init_transform_add_object(bContext *C, Object &ob, const float mval_fl[2])
+{
+  undo::push_begin_add_object(ob);
+  const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
+  if (origin_correct_active_for_secondary(sd)) {
+    undo::set_object_transform_snapshot(ob);
+  }
+  init_transform_common(C, ob, mval_fl);
+}
+
+Vector<Object *> transform_target_objects(bContext *C)
+{
+  Object &active_ob = *CTX_data_active_object(C);
+  const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
+  if (!sd.transform_all_objects) {
+    return {&active_ob};
+  }
+
+  const Main &bmain = *CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  const View3D *v3d = CTX_wm_view3d(C);
+  const ObjectsInModeParams params{OB_MODE_SCULPT, false, nullptr, nullptr};
+  return BKE_view_layer_array_from_objects_in_mode_params(bmain, scene, view_layer, v3d, &params);
+}
+
+/**
+ * Splits \a ob's linear (3x3) world-space basis -- rotation times scale, possibly non-uniform
+ * and/or sheared (e.g. inherited from a non-uniformly-scaled, rotated parent) -- into its closest
+ * pure rotation \a r_orientation and the corresponding scale/shear part \a r_scale, via polar
+ * decomposition (#mat3_polar_decompose). \a r_orientation_inv and \a r_scale_inv are their
+ * inverses: #r_orientation is always orthonormal, so its inverse is a plain transpose; #r_scale
+ * can be singular for a degenerate object (e.g. a zero #Object.scale axis), in which case its
+ * "inverse" falls back to identity rather than propagating NaN/Inf into the mesh.
+ *
+ * A naive per-column #normalize_m3() is only a valid rotation extraction when the 3x3 basis is
+ * ALREADY orthogonal; #mat3_polar_decompose finds the closest orthogonal matrix by SVD instead,
+ * so this stays correct under shear too. It also resolves the sign ambiguity for a mirrored
+ * (negative-determinant) object the same way #interp_m4_m4m4 does, so #r_orientation is always a
+ * proper rotation (never a rotation composed with a reflection) and can be safely round-tripped
+ * through a quaternion.
+ *
+ * Shared by #local_pivot_rot_to_world, #sync_local_pivot_from_world, and
+ * #transform_matrices_init -- all three need to conjugate a rotation (or, for the latter, the
+ * full transform) by the object's orientation alone or by its full linear basis, never by a
+ * matrix that silently mixes the two. Takes the object-to-world matrix explicitly (rather than
+ * an `Object &` to read it from) so a rigid-body Origin Correct secondary can conjugate by its
+ * FIXED session-start matrix instead of its live, per-step-mutated one -- see
+ * #sync_local_pivot_from_matrix.
+ */
+static void object_orientation_and_scale(const float4x4 &object_to_world,
+                                         float r_orientation[3][3],
+                                         float r_orientation_inv[3][3],
+                                         float r_scale[3][3],
+                                         float r_scale_inv[3][3])
+{
+  float object_lin_mat[3][3];
+  copy_m3_m4(object_lin_mat, object_to_world.ptr());
+
+  mat3_polar_decompose(object_lin_mat, r_orientation, r_scale);
+  if (is_negative_m3(r_orientation)) {
+    /* Quaternions cannot represent a reflection; fold the sign flip into the scale part instead
+     * (same fix as #interp_m4_m4m4's for #77154). */
+    mul_m3_fl(r_orientation, -1.0f);
+    mul_m3_fl(r_scale, -1.0f);
+  }
+  transpose_m3_m3(r_orientation_inv, r_orientation);
+
+  if (!invert_m3_m3(r_scale_inv, r_scale)) {
+    unit_m3(r_scale_inv);
+  }
+}
+
+/**
+ * Conjugates the quaternion \a in_rot by \a mat (i.e. computes
+ * `mat * quat_to_mat3(in_rot) * mat_inv`, converting the result back to a quaternion \a r_rot).
+ * Used both to convert a LOCAL rotation into WORLD space (\a mat = orientation, \a mat_inv =
+ * orientation_inv) and the reverse (\a mat = orientation_inv, \a mat_inv = orientation) -- see
+ * #local_pivot_rot_to_world and #sync_local_pivot_from_world.
+ */
+static void conjugate_quat_m3(const float mat[3][3],
+                              const float mat_inv[3][3],
+                              const float in_rot[4],
+                              float r_rot[4])
+{
+  float in_mat[3][3];
+  quat_to_mat3(in_mat, in_rot);
+
+  float tmp[3][3], out_mat[3][3];
+  mul_m3_m3m3(tmp, in_mat, mat_inv);
+  mul_m3_m3m3(out_mat, mat, tmp);
+  mat3_to_quat(r_rot, out_mat);
+}
+
+void local_pivot_rot_to_world(const Object &ob, const float local_rot[4], float r_world_rot[4])
+{
+  float orientation[3][3], orientation_inv[3][3], scale[3][3], scale_inv[3][3];
+  object_orientation_and_scale(ob.object_to_world(), orientation, orientation_inv, scale, scale_inv);
+  conjugate_quat_m3(orientation, orientation_inv, local_rot, r_world_rot);
+}
+
+/**
+ * Core of #sync_local_pivot_from_world, parameterized by an explicit object-to-world matrix
+ * instead of reading it from an `Object &`. For the ACTIVE object (and for a normal, mesh-deform
+ * secondary), that matrix never changes during a Transform session, so calling
+ * #sync_local_pivot_from_world(ob) every modal step is self-consistent with #ss.init_pivot_pos/
+ * #init_pivot_rot (captured once, from that same unchanging matrix, in #init_transform_common).
+ *
+ * A rigid-body Origin Correct secondary is different: #update_modal_transform mutates THAT
+ * object's own matrix in place every step via #BKE_object_apply_mat4. Deriving the local pivot
+ * from the object's live (already-mutated) matrix on the NEXT step would compare it against
+ * #init_pivot_pos/#init_pivot_rot, which are still expressed in the ORIGINAL (session-start)
+ * frame -- a mismatch that compounds every step (confirmed at runtime via `[ORIGDBG]` printf
+ * tracing: the object's world rotation visibly oscillated/jittered while slowly advancing,
+ * instead of tracking the gizmo smoothly). The fix is to always conjugate by the FIXED
+ * session-start matrix (from the undo snapshot, #undo::get_object_transform_snapshot) for a
+ * rigid-body secondary, never by its live matrix -- see #update_modal_transform's rigid-body
+ * branch.
+ */
+static void sync_local_pivot_from_matrix(SculptSession &ss, const float4x4 &object_to_world)
+{
+  float world_to_object[4][4];
+  invert_m4_m4(world_to_object, object_to_world.ptr());
+  copy_v3_v3(ss.pivot_pos, ss.transform_pivot_pos_world);
+  mul_m4_v3(world_to_object, ss.pivot_pos);
+
+  float orientation[3][3], orientation_inv[3][3], scale[3][3], scale_inv[3][3];
+  object_orientation_and_scale(object_to_world, orientation, orientation_inv, scale, scale_inv);
+  conjugate_quat_m3(orientation_inv, orientation, ss.transform_pivot_rot_world, ss.pivot_rot);
+}
+
+void sync_local_pivot_from_world(Object &ob)
+{
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  sync_local_pivot_from_matrix(ss, ob.object_to_world());
+}
+
+static std::array<float4x4, 8> transform_matrices_init(const float4x4 &object_to_world,
+                                                       const SculptSession &ss,
                                                        const ePaintSymmetryFlags symm,
                                                        const TransformDisplacementMode t_mode)
 {
@@ -108,6 +271,14 @@ static std::array<float4x4, 8> transform_matrices_init(const SculptSession &ss,
       break;
   }
 
+  /* The object's orientation/scale split (used by the rotation matrix below) is invariant across
+   * all 8 symmetry areas in the loop below -- the object doesn't move mid-step -- so compute it
+   * once here instead of on every iteration. \a object_to_world is passed in explicitly (rather
+   * than read from an `Object &`) so a rigid-body Origin Correct secondary can pass its FIXED
+   * session-start matrix instead of its live, per-step-mutated one. */
+  float orientation[3][3], orientation_inv[3][3], scale_mat[3][3], scale_inv_mat[3][3];
+  object_orientation_and_scale(object_to_world, orientation, orientation_inv, scale_mat, scale_inv_mat);
+
   for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
     ePaintSymmetryAreas v_symm = ePaintSymmetryAreas(i);
 
@@ -124,11 +295,32 @@ static std::array<float4x4, 8> transform_matrices_init(const SculptSession &ss,
     d_t = flip_v3_by_symm_area(d_t, symm, v_symm, ss.init_pivot_pos);
     translate_m4(t_mat, d_t[0], d_t[1], d_t[2]);
 
-    /* Rotation matrix. */
+    /* Rotation matrix -- built via full conjugation (object orientation AND scale) instead of a
+     * naive local quaternion, so a non-uniformly-scaled object rotates rigidly around the
+     * shared world pivot instead of shearing. #sync_local_pivot_from_world's orientation-only
+     * conjugation (used to derive `d_r` just below, unchanged) is exactly right for keeping
+     * #pivot_rot itself a valid rotation, but it deliberately drops the object's own scale --
+     * reintroduce it here by converting the (symmetry-flipped) LOCAL delta back to world space,
+     * then conjugating by BOTH orientation and scale. For a uniformly-scaled or unscaled object
+     * this is bit-exact with the previous `quat_to_mat4(d_r)` (scale cancels out of the
+     * conjugation when it is a multiple of the identity). */
     sub_qt_qtqt(d_r, ss.pivot_rot, start_pivot_rot);
     normalize_qt(d_r);
     flip_quat_by_symm_area(d_r, symm, v_symm, ss.init_pivot_pos);
-    quat_to_mat4(r_mat, d_r);
+
+    float world_d_r[4];
+    conjugate_quat_m3(orientation, orientation_inv, d_r, world_d_r);
+    float world_rot_mat[3][3];
+    quat_to_mat3(world_rot_mat, world_d_r);
+
+    float ortho_scale[3][3], world_ortho_scale[3][3], conjugated[3][3], r_mat3[3][3];
+    mul_m3_m3m3(ortho_scale, orientation, scale_mat);             /* O * S. */
+    mul_m3_m3m3(world_ortho_scale, world_rot_mat, ortho_scale);   /* Rw * O * S. */
+    mul_m3_m3m3(conjugated, orientation_inv, world_ortho_scale);  /* O^-1 * Rw * O * S. */
+    mul_m3_m3m3(r_mat3, scale_inv_mat, conjugated);                /* S^-1 * O^-1 * Rw * O * S. */
+
+    unit_m4(r_mat);
+    copy_m4_m3(r_mat, r_mat3);
 
     /* Scale matrix. */
     sub_v3_v3v3(d_s, ss.pivot_scale, start_pivot_scale);
@@ -290,7 +482,7 @@ static void sculpt_transform_all_vertices(const Depsgraph &depsgraph, const Scul
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
 
   std::array<float4x4, 8> transform_mats = transform_matrices_init(
-      ss, symm, ss.filter_cache->transform_displacement_mode);
+      ob.object_to_world(), ss, symm, ss.filter_cache->transform_displacement_mode);
 
   /* Regular transform applies all symmetry passes at once as it is split by symmetry areas
    * (each vertex can only be transformed once by the transform matrix of its area). */
@@ -353,14 +545,35 @@ BLI_NOINLINE static void calc_transform_translations(const float4x4 &elastic_tra
   }
 }
 
-BLI_NOINLINE static void apply_kelvinet_to_translations(const KelvinletParams &params,
+BLI_NOINLINE static void apply_kelvinet_to_translations(const Object &object,
+                                                        const KelvinletParams &params,
                                                         const float3 &elastic_transform_pivot,
                                                         const Span<float3> positions,
                                                         const MutableSpan<float3> translations)
 {
+  if (!object_has_non_uniform_scale(object)) {
+    for (const int i : positions.index_range()) {
+      BKE_kelvinlet_grab_triscale(
+          translations[i], &params, positions[i], elastic_transform_pivot, translations[i]);
+    }
+    return;
+  }
+
+  /* Non-uniform-scale path -- see #KelvinletWorldTransform. No #StrokeCache on this path (the
+   * Transform tool's Elastic mode runs via the mesh-filter machinery, not a normal brush
+   * stroke), so the gate above is a freshly-computed check rather than
+   * `cache.non_uniform_scale_active`. `translations[i]` going in is the per-vertex linear-
+   * transform displacement from `calc_transform_translations`; it is the `brush_delta` argument
+   * to kelvinlet, transformed as a DIRECTION, and is OVERWRITTEN by the kelvinlet output (matches
+   * the pre-existing overwrite semantics of the branch above). */
+  const KelvinletWorldTransform transform = kelvinlet_world_transform_init(object);
+  const float3 world_pivot = kelvinlet_position_to_world(transform, elastic_transform_pivot);
   for (const int i : positions.index_range()) {
-    BKE_kelvinlet_grab_triscale(
-        translations[i], &params, positions[i], elastic_transform_pivot, translations[i]);
+    const float3 world_co = kelvinlet_position_to_world(transform, positions[i]);
+    const float3 world_delta = kelvinlet_direction_to_world(transform, translations[i]);
+    float3 world_disp;
+    BKE_kelvinlet_grab_triscale(world_disp, &params, world_co, world_pivot, world_delta);
+    translations[i] = kelvinlet_direction_to_local(transform, world_disp);
   }
 }
 
@@ -388,7 +601,7 @@ static void elastic_transform_node_mesh(const Sculpt &sd,
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
   calc_transform_translations(elastic_transform_mat, positions, translations);
-  apply_kelvinet_to_translations(params, elastic_transform_pivot, positions, translations);
+  apply_kelvinet_to_translations(object, params, elastic_transform_pivot, positions, translations);
 
   scale_translations(translations, factors);
 
@@ -419,7 +632,7 @@ static void elastic_transform_node_grids(const Sculpt &sd,
   tls.translations.resize(positions.size());
   const MutableSpan<float3> translations = tls.translations;
   calc_transform_translations(elastic_transform_mat, positions, translations);
-  apply_kelvinet_to_translations(params, elastic_transform_pivot, positions, translations);
+  apply_kelvinet_to_translations(object, params, elastic_transform_pivot, positions, translations);
 
   scale_translations(translations, factors);
 
@@ -448,7 +661,7 @@ static void elastic_transform_node_bmesh(const Sculpt &sd,
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
   calc_transform_translations(elastic_transform_mat, positions, translations);
-  apply_kelvinet_to_translations(params, elastic_transform_pivot, positions, translations);
+  apply_kelvinet_to_translations(object, params, elastic_transform_pivot, positions, translations);
 
   scale_translations(translations, factors);
 
@@ -468,7 +681,7 @@ static void transform_radius_elastic(const Depsgraph &depsgraph,
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
 
   std::array<float4x4, 8> transform_mats = transform_matrices_init(
-      ss, symm, ss.filter_cache->transform_displacement_mode);
+      ob.object_to_world(), ss, symm, ss.filter_cache->transform_displacement_mode);
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   const IndexMask &node_mask = ss.filter_cache->node_mask;
@@ -547,48 +760,102 @@ static void transform_radius_elastic(const Depsgraph &depsgraph,
   pbvh.flush_bounds_to_parents();
 }
 
-void update_modal_transform(bContext *C, Object &ob)
+void update_modal_transform(bContext *C, Object &ob, bool is_active)
 {
   const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   SculptSession &ss = *ob.runtime->sculpt_session;
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
 
-  vert_random_access_ensure(ob);
-  BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
+  /* Origin Correct: a non-active object moves as a rigid body -- its own matrix follows the
+   * shared pivot delta, mesh vertices are never touched -- instead of the normal mesh-deform
+   * path below. See design spec §5 for why #transform_mats[0] (the unflipped/main symmetry area)
+   * is the correct delta for the object's own origin. */
+  if (!is_active && origin_correct_active_for_secondary(sd)) {
+    /* Conjugate by the FIXED session-start matrix (the undo snapshot from
+     * #undo::set_object_transform_snapshot), NEVER by `ob`'s live matrix -- this block mutates
+     * `ob`'s own matrix every step via #BKE_object_apply_mat4 below, so reading it back for the
+     * pivot/orientation math (#sync_local_pivot_from_matrix, #transform_matrices_init) would
+     * compound a growing error each step: confirmed at runtime via `[ORIGDBG]` printf tracing
+     * (since removed) that the object's rotation visibly oscillated/jittered while only slowly
+     * advancing toward the gizmo's target, instead of tracking it smoothly. Falls back to the
+     * live matrix only if no snapshot exists (should not normally happen --
+     * #init_transform_add_object always captures one when this toggle is already on at session
+     * start; defensive only, e.g. the toggle was flipped on mid-drag). */
+    float4x4 orig_mat = ob.object_to_world();
+    undo::get_object_transform_snapshot(ob, orig_mat);
 
-  switch (sd.transform_mode) {
-    case SCULPT_TRANSFORM_MODE_ALL_VERTICES: {
-      sculpt_transform_all_vertices(*depsgraph, sd, ob);
-      break;
-    }
-    case SCULPT_TRANSFORM_MODE_RADIUS_ELASTIC: {
-      const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
-      float transform_radius;
+    sync_local_pivot_from_matrix(ss, orig_mat);
 
-      if (BKE_brush_use_locked_size(&sd.paint, &brush)) {
-        transform_radius = BKE_brush_unprojected_radius_get(&sd.paint, &brush);
+    const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
+    const std::array<float4x4, 8> transform_mats = transform_matrices_init(
+        orig_mat, ss, symm, ss.filter_cache->transform_displacement_mode);
+    const float4x4 new_world_mat = orig_mat * transform_mats[0];
+    BKE_object_apply_mat4(&ob, new_world_mat.ptr(), false, true);
+    DEG_id_tag_update(&ob.id, ID_RECALC_TRANSFORM);
+    WM_event_add_notifier(C, NC_OBJECT | ND_TRANSFORM, &ob);
+  }
+  else {
+    /* Blender's generic Transform system (Move/Rotate/Scale) drives #ss.transform_pivot_pos_world/
+     * #transform_pivot_rot_world directly (see #createTransSculpt) -- refresh this object's LOCAL
+     * pivot from that shared world value before doing any vertex math below, which reads
+     * #ss.pivot_pos/#pivot_rot. Safe to read `ob`'s live matrix here: this branch never mutates
+     * it, unlike the rigid-body branch above. */
+    sync_local_pivot_from_world(ob);
+
+    vert_random_access_ensure(ob);
+    BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
+
+    switch (sd.transform_mode) {
+      case SCULPT_TRANSFORM_MODE_ALL_VERTICES: {
+        sculpt_transform_all_vertices(*depsgraph, sd, ob);
+        break;
       }
-      else {
-        ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+      case SCULPT_TRANSFORM_MODE_RADIUS_ELASTIC: {
+        const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
+        float transform_radius;
 
-        transform_radius = paint_calc_object_space_radius(
-            vc, ss.init_pivot_pos, BKE_brush_radius_get(&sd.paint, &brush));
+        if (BKE_brush_use_locked_size(&sd.paint, &brush)) {
+          transform_radius = BKE_brush_unprojected_radius_get(&sd.paint, &brush);
+        }
+        else {
+          ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+
+          transform_radius = paint_calc_object_space_radius(
+              vc, ss.init_pivot_pos, BKE_brush_radius_get(&sd.paint, &brush));
+        }
+
+        transform_radius_elastic(*depsgraph, sd, ob, transform_radius);
+        break;
       }
-
-      transform_radius_elastic(*depsgraph, sd, ob, transform_radius);
-      break;
     }
+
+    /* Per-object overload -- bit-exact with the single-object #flush_update_step(C, ...) wrapper
+     * when `ob == CTX_data_active_object(C)`, but that wrapper always resolves to the ACTIVE
+     * object, so calling it here for a non-active `ob` would silently flush the WRONG object.
+     * For a Grids/multires object this is not just a redraw nicety: #multires_mark_as_modified
+     * (called from the per-object overload below) is what extracts the interactively-edited
+     * #SubdivCCG::positions runtime cache back into the persistent MDisps displacement -- without
+     * it for THIS object, the next depsgraph evaluation recomputes multires displacement from the
+     * unchanged MDisps data and the edit visually reverts (Mesh objects are unaffected because
+     * their position edit already lives in the persistent Mesh vertex array itself). */
+    ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+    flush_update_step(vc, ob, UpdateType::Position);
   }
 
   copy_v3_v3(ss.prev_pivot_pos, ss.pivot_pos);
   copy_v4_v4(ss.prev_pivot_rot, ss.pivot_rot);
   copy_v3_v3(ss.prev_pivot_scale, ss.pivot_scale);
-
-  flush_update_step(C, UpdateType::Position);
 }
 
-void cancel_modal_transform(bContext *C, Object &ob)
+void cancel_modal_transform(bContext *C, Object &ob, bool is_active)
 {
+  const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
+  if (!is_active && origin_correct_active_for_secondary(sd)) {
+    /* Rigid-body secondary: revert its matrix, not its mesh -- it was never touched. */
+    undo::restore_object_transform_from_undo_step(ob);
+    return;
+  }
+
   /* Canceling "Elastic" transforms (due to its #TransformDisplacementMode::Incremental nature),
    * requires restoring positions from undo. For "All Vertices" there is no benefit in using the
    * transform system to update to original positions either. */
@@ -607,6 +874,16 @@ void end_transform(bContext *C, Object &ob)
   ss.filter_cache = nullptr;
   undo::push_end(ob);
   flush_update_done(C, ob, UpdateType::Position);
+}
+
+void end_transform(bContext *C, Span<Object *> objects)
+{
+  for (Object *ob : objects) {
+    SculptSession &ss = *ob->runtime->sculpt_session;
+    MEM_delete(ss.filter_cache);
+    ss.filter_cache = nullptr;
+  }
+  undo::finish_multi_object(C, objects, UpdateType::Position);
 }
 
 enum class PivotPositionMode {
@@ -952,16 +1229,43 @@ static wmOperatorStatus set_pivot_position_exec(bContext *C, wmOperator *op)
     case PivotPositionMode::ActiveVert: {
       const float2 mval(RNA_float_get(op->ptr, "mouse_x"), RNA_float_get(op->ptr, "mouse_y"));
       CursorGeometryInfo cgi;
-      if (cursor_geometry_info_update(C, &cgi, mval, false)) {
-        ss.pivot_pos = ss.active_vert_position(*depsgraph, ob);
+      Object *hit_ob = nullptr;
+      if (cursor_geometry_info_update(C, &cgi, mval, false, &hit_ob)) {
+        /* The cursor may be over a DIFFERENT sculpt-mode object than the active one --
+         * #cursor_geometry_info_update already searches every selected object. Whichever
+         * object was hit owns the active-vertex state read below, so its position must be
+         * looked up (and converted) from THAT object, not silently reused as if it were the
+         * active object's own local-space position (see #ED_sculpt.hh's #pivot_pos doc: the
+         * shared pivot is always stored in the ACTIVE object's local space). */
+        Object &vert_ob = hit_ob ? *hit_ob : ob;
+        const SculptSession &vert_ss = *vert_ob.runtime->sculpt_session;
+        const float3 world_location = math::transform_point(
+            vert_ob.object_to_world(), vert_ss.active_vert_position(*depsgraph, vert_ob));
+        ss.pivot_pos = math::transform_point(ob.world_to_object(), world_location);
       }
       break;
     }
     case PivotPositionMode::CursorSurface: {
       const float2 mval(RNA_float_get(op->ptr, "mouse_x"), RNA_float_get(op->ptr, "mouse_y"));
+      ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+      const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
+      const Brush *brush = BKE_paint_brush(BKE_paint_get_active_from_context(C));
+      Object *hit_ob = nullptr;
       float3 stroke_location;
-      if (stroke_get_location_bvh(C, stroke_location, mval, false)) {
-        ss.pivot_pos = stroke_location;
+      if (stroke_get_location_bvh(
+              *depsgraph, vc, &sd, brush, stroke_location, mval, false, &hit_ob))
+      {
+        /* #stroke_get_location_bvh searches every sculpt-mode object and returns the surface
+         * point of WHICHEVER one is actually closest to the viewer under the cursor, in THAT
+         * object's own local space -- it does not have to be the active object. Storing it
+         * straight into `ss.pivot_pos` (the active object's local pivot) without converting
+         * first silently misinterpreted a foreign object's local coordinates as the active
+         * object's own, placing the pivot at the wrong point whenever the cursor was over a
+         * non-active mesh. Route it through world space instead. */
+        Object &hit_object = hit_ob ? *hit_ob : ob;
+        const float3 world_location = math::transform_point(hit_object.object_to_world(),
+                                                             stroke_location);
+        ss.pivot_pos = math::transform_point(ob.world_to_object(), world_location);
       }
       break;
     }

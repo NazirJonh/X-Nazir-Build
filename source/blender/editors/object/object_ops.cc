@@ -138,6 +138,7 @@ void operatortypes_object()
   WM_operatortype_append(OBJECT_OT_multires_rebuild_subdiv);
   WM_operatortype_append(OBJECT_OT_multires_external_save);
   WM_operatortype_append(OBJECT_OT_multires_external_pack);
+  WM_operatortype_append(OBJECT_OT_multires_level_sync);
   WM_operatortype_append(OBJECT_OT_skin_root_mark);
   WM_operatortype_append(OBJECT_OT_skin_loose_mark_clear);
   WM_operatortype_append(OBJECT_OT_skin_radii_equalize);

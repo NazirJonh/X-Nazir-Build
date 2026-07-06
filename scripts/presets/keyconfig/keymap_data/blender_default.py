@@ -5450,6 +5450,24 @@ def km_sculpt(params):
              {"properties": [("value", 0.0)]}),
         ])
 
+    # Multi-object sculpt group selection.
+    # An unspecified key_modifier matches regardless of which ordinary key is held (see
+    # wm_eventmatch() in wm_event_system.cc), so it cannot be used to carve out a new
+    # combination from an existing bare-modifier binding -- every other RIGHTMOUSE PRESS
+    # binding above (stencil control: none/shift/ctrl/alt/shift+alt/ctrl+alt; pivot point:
+    # shift; lasso masking: ctrl/shift+ctrl) would still fire immediately on PRESS and beat
+    # this CLICK_DRAG-based one to the event. Shift+Ctrl+Alt is the only RIGHTMOUSE modifier
+    # combination none of those claim, so it is used here (with Q as an additional
+    # key_modifier) to guarantee no collision. Bound to the macro operator (lasso-select in
+    # ADD mode, then bring the selection into this Sculpt session) rather than the plain
+    # select operator directly -- the macro's lasso step already has mode='ADD' baked in at
+    # registration time (see `operatormacros_sculpt()`), so no "properties" are passed here.
+    items.extend([
+        ("sculpt.lasso_select_and_enter",
+         {"type": 'RIGHTMOUSE', "value": 'CLICK_DRAG', "shift": True, "ctrl": True, "alt": True, "key_modifier": 'Q'},
+         None),
+    ])
+
     if params.legacy:
         items.extend(_template_items_legacy_tools_from_numbers())
 
@@ -6726,6 +6744,8 @@ def km_sculpt_expand_modal(_params):
         )),
         ("SNAP_TOGGLE", {"type": 'LEFT_CTRL', "value": 'ANY'}, None),
         ("SNAP_TOGGLE", {"type": 'RIGHT_CTRL', "value": 'ANY'}, None),
+        ("SNAP_SEED_OBJECT_ONLY_TOGGLE", {"type": 'LEFT_ALT', "value": 'ANY'}, None),
+        ("SNAP_SEED_OBJECT_ONLY_TOGGLE", {"type": 'RIGHT_ALT', "value": 'ANY'}, None),
         ("LOOP_COUNT_INCREASE", {"type": 'W', "value": 'PRESS', "any": True, "repeat": True}, None),
         ("LOOP_COUNT_DECREASE", {"type": 'Q', "value": 'PRESS', "any": True, "repeat": True}, None),
         ("BRUSH_GRADIENT_TOGGLE", {"type": 'B', "value": 'PRESS', "any": True}, None),

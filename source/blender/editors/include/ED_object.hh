@@ -491,6 +491,13 @@ Object *object_in_mode_from_index(
  */
 Map<std::string, float, 1> mode_transfer_overlay_current_state();
 
+/**
+ * Start the mode-transfer flash animation for \a ob_dst -- the same visual
+ * #OBJECT_OT_transfer_mode uses -- so other callers can reuse the same feedback for their own
+ * "this object just became relevant" moments.
+ */
+void object_overlay_mode_transfer_animation_start(bContext *C, Object *ob_dst);
+
 /* `object_modifier.cc` */
 
 enum {

@@ -1113,6 +1113,10 @@ class VIEW3D_PT_sculpt_symmetry(Panel, View3DPaintPanel):
         row.prop(sculpt, "tile_z", text="Z", toggle=True)
 
         layout.prop(sculpt, "use_symmetry_feather", text="Feather")
+
+        row = layout.row(align=True, heading="Symmetry Space")
+        row.prop(sculpt, "symmetry_space", expand=True)
+
         layout.prop(mesh, "radial_symmetry", text="Radial")
         layout.prop(sculpt, "tile_offset", text="Tile Offset")
 

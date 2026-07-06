@@ -802,6 +802,53 @@ void BKE_brush_tag_unsaved_changes(Brush *brush)
   }
 }
 
+void BKE_brush_drag_kind_update(Brush *brush)
+{
+  /* In these brushes the grab delta is calculated always from the initial stroke location,
+   * which is generally used to create grab deformations. Kept in sync (by construction, this is
+   * the single place both classifications live) with #ed::sculpt_paint's former
+   * `need_delta_from_anchored_origin` / `need_delta_for_tip_orientation`, which now just read
+   * #Brush.drag_kind instead of re-deriving it. */
+  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_SMEAR &&
+      brush->stroke_method == BRUSH_STROKE_ANCHORED)
+  {
+    brush->drag_kind = BRUSH_DRAG_KIND_ANCHORED_ORIGIN;
+    return;
+  }
+  if (ELEM(brush->sculpt_brush_type,
+           SCULPT_BRUSH_TYPE_GRAB,
+           SCULPT_BRUSH_TYPE_POSE,
+           SCULPT_BRUSH_TYPE_BOUNDARY,
+           SCULPT_BRUSH_TYPE_THUMB,
+           SCULPT_BRUSH_TYPE_ELASTIC_DEFORM))
+  {
+    brush->drag_kind = BRUSH_DRAG_KIND_ANCHORED_ORIGIN;
+    return;
+  }
+  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_CLOTH) {
+    /* The grab delta is calculated from the previous stroke location (tip-orientation) for every
+     * Cloth deform type except Grab, which is anchored-origin like the other grab-like tools. */
+    brush->drag_kind = (brush->cloth_deform_type == BRUSH_CLOTH_DEFORM_GRAB) ?
+                           BRUSH_DRAG_KIND_ANCHORED_ORIGIN :
+                           BRUSH_DRAG_KIND_TIP_ORIENTATION;
+    return;
+  }
+  /* In these brushes the grab delta is calculated from the previous stroke location, which is
+   * used to orient the brush tip and deformation towards the stroke direction. */
+  if (ELEM(brush->sculpt_brush_type,
+           SCULPT_BRUSH_TYPE_CLAY_STRIPS,
+           SCULPT_BRUSH_TYPE_PINCH,
+           SCULPT_BRUSH_TYPE_MULTIPLANE_SCRAPE,
+           SCULPT_BRUSH_TYPE_CLAY_THUMB,
+           SCULPT_BRUSH_TYPE_NUDGE,
+           SCULPT_BRUSH_TYPE_SNAKE_HOOK))
+  {
+    brush->drag_kind = BRUSH_DRAG_KIND_TIP_ORIENTATION;
+    return;
+  }
+  brush->drag_kind = BRUSH_DRAG_KIND_NONE;
+}
+
 void BKE_brush_debug_print_state(Brush *br)
 {
   /* create a fake brush and set it to the defaults */

@@ -141,7 +141,10 @@ void do_thumb_brush(const Depsgraph &depsgraph,
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
 
   const float3 &grab_delta = ss.cache->grab_delta_symm;
-  const float3 &normal = ss.cache->sculpt_normal_symm;
+  /* #cache.sculpt_normal_symm is a raw local-space normal; correct it for the object's
+   * non-uniform scale before using it to project #grab_delta onto the tangent plane (this file
+   * has no separate magnitude-compensation step to preserve, see #scale_normalized). */
+  const float3 normal = scale_normalized_unit(*ss.cache, ss.cache->sculpt_normal_symm);
   const float3 offset = math::cross(math::cross(normal, grab_delta), normal) * ss.cache->bstrength;
 
   threading::EnumerableThreadSpecific<LocalData> all_tls;

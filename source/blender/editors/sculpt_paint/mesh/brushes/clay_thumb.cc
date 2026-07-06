@@ -153,11 +153,16 @@ void do_clay_thumb_brush(const Depsgraph &depsgraph,
   float3 area_position;
   float3 sculpt_plane_normal;
   calc_brush_plane(depsgraph, brush, object, node_mask, area_position, sculpt_plane_normal);
+  /* #area_position is #calc_brush_plane's r_area_no output (a raw local-space normal, despite
+   * the name) — correct it for non-uniform scale before it is used as a direction below. This
+   * file never multiplies by #StrokeCache.scale elsewhere (see #scale_normalized). */
+  area_position = scale_normalized_unit(*ss.cache, area_position);
 
   float3 area_normal = area_position;
   /* Ignore brush settings and recalculate the area normal. */
   if (brush.sculpt_plane != SCULPT_DISP_DIR_AREA || (brush.flag & BRUSH_ORIGINAL_NORMAL)) {
-    area_normal = calc_area_normal(depsgraph, brush, object, node_mask).value_or(float3(0));
+    area_normal = scale_normalized_unit(
+        *ss.cache, calc_area_normal(depsgraph, brush, object, node_mask).value_or(float3(0)));
   }
 
   /* Delay the first daub because grab delta is not setup. */

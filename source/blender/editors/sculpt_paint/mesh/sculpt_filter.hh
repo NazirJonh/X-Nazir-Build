@@ -70,6 +70,15 @@ struct Cache {
   float4x4 viewmat;
   float4x4 viewmat_inv;
 
+  /* Maps this object's local space into the reference (active) object's local space, used by
+   * #FilterOrientation::Local. This is what makes a multi-object filter deform along ONE set of
+   * axes, as if every mesh were joined into the active object, rather than along each mesh's own
+   * axes. Identity for the active object and for single-object filters, so #World and #View --
+   * which already go through world space and are therefore consistent across objects -- are
+   * unaffected. */
+  float3x3 local_orientation_mat = float3x3::identity();
+  float3x3 local_orientation_mat_inv = float3x3::identity();
+
   /* Displacement eraser. */
   Array<float3> limit_surface_co;
 

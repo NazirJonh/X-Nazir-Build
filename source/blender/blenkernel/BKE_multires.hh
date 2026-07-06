@@ -11,10 +11,13 @@
 #include "BLI_array.hh"
 #include "BLI_enum_flags.hh"
 #include "BLI_math_matrix_types.hh"
+#include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 namespace blender {
 
 struct Depsgraph;
+struct Main;
 struct MDisps;
 struct Mesh;
 struct ModifierData;
@@ -23,6 +26,8 @@ struct Object;
 struct ReportList;
 struct Scene;
 struct SubdivCCG;
+struct View3D;
+struct ViewLayer;
 namespace bke::subdiv {
 struct Settings;
 struct ToMeshSettings;
@@ -53,6 +58,50 @@ void multires_force_external_reload(Object *object);
  * Reset the multi-res levels to match the number of mdisps.
  */
 void multiresModifier_set_levels_from_disps(MultiresModifierData *mmd, Object *ob);
+
+enum class MultiresLevelType : int8_t {
+  Viewport = 0,
+  Sculpt = 1,
+  Render = 2,
+};
+
+/** Read one of `mmd`'s three subdivision level fields, selected by `level_type`. */
+int multires_level_get(const MultiresModifierData *mmd, MultiresLevelType level_type);
+/** Write one of `mmd`'s three subdivision level fields, clamped to `[0, mmd->totlvl]`. */
+void multires_level_set(MultiresModifierData *mmd, MultiresLevelType level_type, int value);
+
+/**
+ * Apply `new_value` for `level_type` to every object in `candidates` other than `active_ob`
+ * that has a Multires modifier.
+ * When `only_matching` is true, an object is updated only if its current value equals
+ * `old_value` (objects already in sync with the old reference follow along; diverged objects
+ * are left untouched). When false, every candidate with a Multires modifier is force-set.
+ * Pure data function: does not tag the depsgraph or post notifiers, callers do that for the
+ * returned objects.
+ */
+Vector<Object *> multires_level_group_sync(Span<Object *> candidates,
+                                           const Object *active_ob,
+                                           MultiresLevelType level_type,
+                                           int old_value,
+                                           int new_value,
+                                           bool only_matching);
+
+/**
+ * Mesh objects that are part of the same multi-object sculpt session as `active_ob` would be
+ * (`OB_MODE_SCULPT` within `view_layer`) and have a Multires modifier.
+ */
+Vector<Object *> multires_group_objects(const Main *bmain,
+                                        const Scene *scene,
+                                        ViewLayer *view_layer,
+                                        const View3D *v3d);
+
+/**
+ * Objects in `candidates` (other than `active_ob`) whose current `MultiresModifierData::totlvl`
+ * equals `reference_totlvl`. Pure filter, no side effects.
+ */
+Vector<Object *> multires_totlvl_matching_group(Span<Object *> candidates,
+                                                const Object *active_ob,
+                                                int reference_totlvl);
 
 enum class MultiresFlags : uint8_t {
   UseLocalMMD = 1,

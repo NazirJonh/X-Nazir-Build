@@ -105,18 +105,17 @@ void sync_all_from_faces(Object &object)
   }
 }
 
-void tag_update_visibility(const bContext &C)
+void tag_update_visibility(const bContext &C, const Span<Object *> objects)
 {
-  ARegion *region = CTX_wm_region(&C);
-  ED_region_tag_redraw(region);
-
-  Object *ob = CTX_data_active_object(&C);
-  WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, ob);
-
-  DEG_id_tag_update(&ob->id, ID_RECALC_SHADING);
   const RegionView3D *rv3d = CTX_wm_region_view3d(&C);
-  if (!BKE_sculptsession_use_pbvh_draw(ob, rv3d)) {
-    DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  for (Object *ob : objects) {
+    DEG_id_tag_update(&ob->id, ID_RECALC_SHADING);
+    /* An object that is not drawn from the pbvh::Tree (deform modifiers, shape keys, an external
+     * render engine) takes its visibility from the evaluated mesh, which only picks the change up
+     * on re-evaluation. */
+    if (!BKE_sculptsession_use_pbvh_draw(ob, rv3d)) {
+      DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+    }
   }
 }
 
@@ -519,43 +518,56 @@ static void partialvis_all_update_bmesh(const Depsgraph &depsgraph,
 static wmOperatorStatus hide_show_all_exec(bContext *C, wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
-  Object &ob = *CTX_data_active_object(C);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
+  if (objects.is_empty()) {
+    /* Matches #push_begin_multi_object's own empty guard; the manual push_begin_ex path below
+     * dereferences #objects.first(). */
+    return OPERATOR_CANCELLED;
+  }
 
   const VisAction action = VisAction(RNA_enum_get(op->ptr, "action"));
 
-  bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(*depsgraph, ob);
-
-  /* Start undo. */
+  /* Start undo. Keep the "Hide area"/"Show area" naming (distinct from the operator's generic
+   * "Hide/Show All" name) by driving push_begin_ex/push_begin_add_object directly instead of
+   * push_begin_multi_object(). */
   switch (action) {
     case VisAction::Hide:
-      undo::push_begin_ex(scene, ob, "Hide area");
+      undo::push_begin_ex(scene, *objects.first(), "Hide area");
       break;
     case VisAction::Show:
-      undo::push_begin_ex(scene, ob, "Show area");
+      undo::push_begin_ex(scene, *objects.first(), "Show area");
       break;
   }
+  for (Object *ob : objects.as_span().drop_front(1)) {
+    undo::push_begin_add_object(*ob);
+  }
 
-  IndexMaskMemory memory;
-  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  for (Object *ob : objects) {
+    bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(*depsgraph, *ob);
 
-  switch (pbvh.type()) {
-    case bke::pbvh::Type::Mesh:
-      partialvis_all_update_mesh(*depsgraph, ob, action, node_mask);
-      break;
-    case bke::pbvh::Type::Grids:
-      partialvis_all_update_grids(*depsgraph, ob, action, node_mask);
-      break;
-    case bke::pbvh::Type::BMesh:
-      partialvis_all_update_bmesh(*depsgraph, ob, action, node_mask);
-      break;
+    IndexMaskMemory memory;
+    const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+
+    switch (pbvh.type()) {
+      case bke::pbvh::Type::Mesh:
+        partialvis_all_update_mesh(*depsgraph, *ob, action, node_mask);
+        break;
+      case bke::pbvh::Type::Grids:
+        partialvis_all_update_grids(*depsgraph, *ob, action, node_mask);
+        break;
+      case bke::pbvh::Type::BMesh:
+        partialvis_all_update_bmesh(*depsgraph, *ob, action, node_mask);
+        break;
+    }
+
+    islands::invalidate(*ob->runtime->sculpt_session);
   }
 
   /* End undo. */
-  undo::push_end(ob);
-
-  islands::invalidate(*ob.runtime->sculpt_session);
-  tag_update_visibility(*C);
+  undo::finish_multi_object(C, objects, UpdateType::Visibility);
+  tag_update_visibility(*C, objects);
 
   return OPERATOR_FINISHED;
 }
@@ -636,43 +648,56 @@ static void partialvis_masked_update_bmesh(const Depsgraph &depsgraph,
 static wmOperatorStatus hide_show_masked_exec(bContext *C, wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
-  Object &ob = *CTX_data_active_object(C);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
+  if (objects.is_empty()) {
+    /* Matches #push_begin_multi_object's own empty guard; the manual push_begin_ex path below
+     * dereferences #objects.first(). */
+    return OPERATOR_CANCELLED;
+  }
 
   const VisAction action = VisAction(RNA_enum_get(op->ptr, "action"));
 
-  bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(*depsgraph, ob);
-
-  /* Start undo. */
+  /* Start undo. Keep the "Hide area"/"Show area" naming (distinct from the operator's generic
+   * "Hide/Show Masked" name) by driving push_begin_ex/push_begin_add_object directly instead of
+   * push_begin_multi_object(). */
   switch (action) {
     case VisAction::Hide:
-      undo::push_begin_ex(scene, ob, "Hide area");
+      undo::push_begin_ex(scene, *objects.first(), "Hide area");
       break;
     case VisAction::Show:
-      undo::push_begin_ex(scene, ob, "Show area");
+      undo::push_begin_ex(scene, *objects.first(), "Show area");
       break;
   }
+  for (Object *ob : objects.as_span().drop_front(1)) {
+    undo::push_begin_add_object(*ob);
+  }
 
-  IndexMaskMemory memory;
-  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  for (Object *ob : objects) {
+    bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(*depsgraph, *ob);
 
-  switch (pbvh.type()) {
-    case bke::pbvh::Type::Mesh:
-      partialvis_masked_update_mesh(*depsgraph, ob, action, node_mask);
-      break;
-    case bke::pbvh::Type::Grids:
-      partialvis_masked_update_grids(*depsgraph, ob, action, node_mask);
-      break;
-    case bke::pbvh::Type::BMesh:
-      partialvis_masked_update_bmesh(*depsgraph, ob, action, node_mask);
-      break;
+    IndexMaskMemory memory;
+    const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+
+    switch (pbvh.type()) {
+      case bke::pbvh::Type::Mesh:
+        partialvis_masked_update_mesh(*depsgraph, *ob, action, node_mask);
+        break;
+      case bke::pbvh::Type::Grids:
+        partialvis_masked_update_grids(*depsgraph, *ob, action, node_mask);
+        break;
+      case bke::pbvh::Type::BMesh:
+        partialvis_masked_update_bmesh(*depsgraph, *ob, action, node_mask);
+        break;
+    }
+
+    islands::invalidate(*ob->runtime->sculpt_session);
   }
 
   /* End undo. */
-  undo::push_end(ob);
-
-  islands::invalidate(*ob.runtime->sculpt_session);
-  tag_update_visibility(*C);
+  undo::finish_multi_object(C, objects, UpdateType::Visibility);
+  tag_update_visibility(*C, objects);
 
   return OPERATOR_FINISHED;
 }
@@ -803,30 +828,34 @@ static void invert_visibility_bmesh(const Depsgraph &depsgraph,
 static wmOperatorStatus visibility_invert_exec(bContext *C, wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
-  Object &object = *CTX_data_active_object(C);
   Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
+  ViewContext vc = ED_view3d_viewcontext_init(C, &depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
 
-  bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(depsgraph, object);
+  undo::push_begin_multi_object(scene, op, objects);
 
-  IndexMaskMemory memory;
-  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
-  undo::push_begin(scene, object, op);
-  switch (pbvh.type()) {
-    case bke::pbvh::Type::Mesh:
-      invert_visibility_mesh(depsgraph, object, node_mask);
-      break;
-    case bke::pbvh::Type::Grids:
-      invert_visibility_grids(depsgraph, object, node_mask);
-      break;
-    case bke::pbvh::Type::BMesh:
-      invert_visibility_bmesh(depsgraph, object, node_mask);
-      break;
+  for (Object *object : objects) {
+    bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(depsgraph, *object);
+
+    IndexMaskMemory memory;
+    const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+    switch (pbvh.type()) {
+      case bke::pbvh::Type::Mesh:
+        invert_visibility_mesh(depsgraph, *object, node_mask);
+        break;
+      case bke::pbvh::Type::Grids:
+        invert_visibility_grids(depsgraph, *object, node_mask);
+        break;
+      case bke::pbvh::Type::BMesh:
+        invert_visibility_bmesh(depsgraph, *object, node_mask);
+        break;
+    }
+
+    islands::invalidate(*object->runtime->sculpt_session);
   }
 
-  undo::push_end(object);
-
-  islands::invalidate(*object.runtime->sculpt_session);
-  tag_update_visibility(*C);
+  undo::finish_multi_object(C, objects, UpdateType::Visibility);
+  tag_update_visibility(*C, objects);
 
   return OPERATOR_FINISHED;
 }
@@ -1139,42 +1168,44 @@ static void grow_shrink_visibility_bmesh(const Depsgraph &depsgraph,
 static wmOperatorStatus visibility_filter_exec(bContext *C, wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
-  Object &object = *CTX_data_active_object(C);
   Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
-
-  bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(depsgraph, object);
+  ViewContext vc = ED_view3d_viewcontext_init(C, &depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
 
   const VisAction mode = VisAction(RNA_enum_get(op->ptr, "action"));
+  const bool auto_iteration_count = RNA_boolean_get(op->ptr, "auto_iteration_count");
 
-  IndexMaskMemory memory;
-  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  undo::push_begin_multi_object(scene, op, objects);
 
-  int num_verts = vertex_count_get(object);
+  for (Object *object : objects) {
+    bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(depsgraph, *object);
 
-  int iterations = RNA_int_get(op->ptr, "iterations");
+    IndexMaskMemory memory;
+    const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
-  if (RNA_boolean_get(op->ptr, "auto_iteration_count")) {
-    /* Automatically adjust the number of iterations based on the number
-     * of vertices in the mesh. */
-    iterations = int(num_verts / VERTEX_ITERATION_THRESHOLD) + 1;
+    int iterations = RNA_int_get(op->ptr, "iterations");
+    if (auto_iteration_count) {
+      /* Automatically adjust the number of iterations based on this object's own vertex count. */
+      iterations = int(vertex_count_get(*object) / VERTEX_ITERATION_THRESHOLD) + 1;
+    }
+
+    switch (pbvh.type()) {
+      case bke::pbvh::Type::Mesh:
+        grow_shrink_visibility_mesh(depsgraph, *object, node_mask, mode, iterations);
+        break;
+      case bke::pbvh::Type::Grids:
+        grow_shrink_visibility_grid(depsgraph, *object, node_mask, mode, iterations);
+        break;
+      case bke::pbvh::Type::BMesh:
+        grow_shrink_visibility_bmesh(depsgraph, *object, node_mask, mode, iterations);
+        break;
+    }
+
+    islands::invalidate(*object->runtime->sculpt_session);
   }
 
-  undo::push_begin(scene, object, op);
-  switch (pbvh.type()) {
-    case bke::pbvh::Type::Mesh:
-      grow_shrink_visibility_mesh(depsgraph, object, node_mask, mode, iterations);
-      break;
-    case bke::pbvh::Type::Grids:
-      grow_shrink_visibility_grid(depsgraph, object, node_mask, mode, iterations);
-      break;
-    case bke::pbvh::Type::BMesh:
-      grow_shrink_visibility_bmesh(depsgraph, object, node_mask, mode, iterations);
-      break;
-  }
-  undo::push_end(object);
-
-  islands::invalidate(*object.runtime->sculpt_session);
-  tag_update_visibility(*C);
+  undo::finish_multi_object(C, objects, UpdateType::Visibility);
+  tag_update_visibility(*C, objects);
 
   return OPERATOR_FINISHED;
 }
@@ -1304,14 +1335,16 @@ static void partialvis_gesture_update_bmesh(gesture::GestureData &gesture_data)
                                 selection_test_fn);
 }
 
-static void hide_show_begin(bContext &C, wmOperator &op, gesture::GestureData & /*gesture_data*/)
+static void hide_show_begin(bContext &C, wmOperator &op, gesture::GestureData &gesture_data)
 {
   const Scene &scene = *CTX_data_scene(&C);
-  Object *ob = CTX_data_active_object(&C);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(&C);
 
-  undo::push_begin(scene, *ob, &op);
-  bke::object::pbvh_ensure(*depsgraph, *ob);
+  for (Object *ob : gesture_data.objects) {
+    bke::object::pbvh_ensure(*depsgraph, *ob);
+  }
+
+  undo::push_begin_multi_object(scene, &op, gesture_data.objects.as_span());
 }
 
 static void hide_show_apply_for_symmetry_pass(bContext &C, gesture::GestureData &gesture_data)
@@ -1332,9 +1365,11 @@ static void hide_show_apply_for_symmetry_pass(bContext &C, gesture::GestureData 
 }
 static void hide_show_end(bContext &C, gesture::GestureData &gesture_data)
 {
-  islands::invalidate(*gesture_data.vc.obact->runtime->sculpt_session);
-  tag_update_visibility(C);
-  undo::push_end(*gesture_data.vc.obact);
+  for (Object *ob : gesture_data.objects) {
+    islands::invalidate(*ob->runtime->sculpt_session);
+  }
+  undo::finish_multi_object(&C, gesture_data.objects.as_span(), UpdateType::Visibility);
+  tag_update_visibility(C, gesture_data.objects.as_span());
 }
 
 static void hide_show_init_properties(bContext & /*C*/,
@@ -1360,6 +1395,7 @@ static wmOperatorStatus hide_show_gesture_box_exec(bContext *C, wmOperator *op)
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
+  gesture_data->objects = sculpt_mode_objects(gesture_data->vc);
   hide_show_init_properties(*C, *gesture_data, *op);
   gesture::apply(*C, *gesture_data, *op);
   return OPERATOR_FINISHED;
@@ -1371,6 +1407,7 @@ static wmOperatorStatus hide_show_gesture_lasso_exec(bContext *C, wmOperator *op
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
+  gesture_data->objects = sculpt_mode_objects(gesture_data->vc);
   hide_show_init_properties(*C, *gesture_data, *op);
   gesture::apply(*C, *gesture_data, *op);
   return OPERATOR_FINISHED;
@@ -1382,6 +1419,7 @@ static wmOperatorStatus hide_show_gesture_line_exec(bContext *C, wmOperator *op)
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
+  gesture_data->objects = sculpt_mode_objects(gesture_data->vc);
   hide_show_init_properties(*C, *gesture_data, *op);
   gesture::apply(*C, *gesture_data, *op);
   return OPERATOR_FINISHED;
@@ -1393,6 +1431,7 @@ static wmOperatorStatus hide_show_gesture_polyline_exec(bContext *C, wmOperator 
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
+  gesture_data->objects = sculpt_mode_objects(gesture_data->vc);
   hide_show_init_properties(*C, *gesture_data, *op);
   gesture::apply(*C, *gesture_data, *op);
   return OPERATOR_FINISHED;

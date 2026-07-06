@@ -226,6 +226,7 @@ void OBJECT_OT_multires_unsubdivide(wmOperatorType *ot);
 void OBJECT_OT_multires_rebuild_subdiv(wmOperatorType *ot);
 void OBJECT_OT_multires_external_save(wmOperatorType *ot);
 void OBJECT_OT_multires_external_pack(wmOperatorType *ot);
+void OBJECT_OT_multires_level_sync(wmOperatorType *ot);
 void OBJECT_OT_correctivesmooth_bind(wmOperatorType *ot);
 void OBJECT_OT_meshdeform_bind(wmOperatorType *ot);
 void OBJECT_OT_explode_refresh(wmOperatorType *ot);

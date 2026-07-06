@@ -10,6 +10,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_enumerable_thread_specific.hh"
+#include "BLI_listbase.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
 
@@ -53,6 +54,7 @@
 #include "ED_object.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
+#include "ED_select_utils.hh"
 
 #include "../paint_intern.hh"
 #include "mesh_brush_common.hh"
@@ -559,44 +561,126 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
   ToolSettings &ts = *scene.toolsettings;
   ViewLayer &view_layer = *CTX_data_view_layer(C);
   BKE_view_layer_synced_ensure(bmain, &scene, &view_layer);
-  Object &ob = *BKE_view_layer_active_object_get(&view_layer);
-  const eObjectMode mode_flag = OB_MODE_SCULPT;
-  const bool is_mode_set = (ob.mode & mode_flag) != 0;
-
-  if (!is_mode_set) {
-    if (!object::mode_compat_set(C, &ob, eObjectMode(mode_flag), op->reports)) {
-      return OPERATOR_CANCELLED;
-    }
+  Object *active_ob = BKE_view_layer_active_object_get(&view_layer);
+  if (!active_ob) {
+    return OPERATOR_CANCELLED;
   }
+
+  const eObjectMode mode_flag = OB_MODE_SCULPT;
+  const bool is_mode_set = (active_ob->mode & mode_flag) != 0;
 
   if (is_mode_set) {
-    object_sculpt_mode_exit(bmain, *depsgraph, scene, ob);
+    /* Exit sculpt mode for all objects that are currently in it. */
+    for (Base &base : view_layer.object_bases) {
+      Object *ob = base.object;
+      if (ob->mode & mode_flag) {
+        object_sculpt_mode_exit(bmain, *depsgraph, scene, *ob);
+      }
+    }
   }
   else {
-    if (depsgraph) {
-      depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+    depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+    if (!depsgraph) {
+      return OPERATOR_CANCELLED;
     }
-    object_sculpt_mode_enter(bmain, *depsgraph, scene, ob, false, op->reports);
+
+    /* Multi-object Sculpt entry, structured after `object_edit.cc:editmode_toggle_exec`
+     * for consistency with the rest of the object-mode toggle family.
+     *
+     * Step 1) Process the active object first and unconditionally, regardless of
+     *         whether it is currently selected. This fixes a regression where an
+     *         active-but-not-selected mesh was skipped (`CTX_data_selected_objects`
+     *         does not imply the active is selected), but the per-object
+     *         `Object.mode` RNA notifier below still fired as if the active's mode
+     *         had changed, leaving `bpy.context.mode` and the toolbar indicator out
+     *         of sync with the real set of objects in Sculpt.
+     *
+     * Step 2) Cascade into selected secondaries of the same type as the active.
+     *         For non-active objects we deliberately do NOT call
+     *         `object::mode_compat_set`: that helper internally invokes
+     *         `WM_operator_name_call` to toggle out of the *other* mode, and the
+     *         toggle operator's exec resolves its target via `CTX_data_active_object`
+     *         -- not the object we passed. Calling it on a secondary in Paint/Edit
+     *         silently flips the active's mode instead. We require
+     *         `ob->mode == OB_MODE_OBJECT` explicitly and skip-with-report otherwise.
+     *
+     * The cascading filter `ob->type == active_ob->type` mirrors the edit-mode
+     * idiom; for Sculpt it collapses to OB_MESH today but is kept explicit so
+     * future GP- or Curves-Sculpt support only has to drop the operator-level
+     * mesh filter, not change cascade semantics. */
+    if (active_ob->type != OB_MESH) {
+      BKE_reportf(op->reports,
+                  RPT_ERROR,
+                  "Active object '%s' is not a Mesh; cannot enter Sculpt Mode",
+                  active_ob->id.name + 2);
+      return OPERATOR_CANCELLED;
+    }
+
+    if (!object::mode_compat_set(C, active_ob, eObjectMode(mode_flag), op->reports)) {
+      return OPERATOR_CANCELLED;
+    }
+    object_sculpt_mode_enter(bmain, *depsgraph, scene, *active_ob, false, op->reports);
+
+    {
+      Vector<PointerRNA> selected_objects;
+      CTX_data_selected_objects(C, &selected_objects);
+      for (const PointerRNA &ptr : selected_objects) {
+        Object *ob = reinterpret_cast<Object *>(ptr.owner_id);
+        if (ob == active_ob) {
+          continue;
+        }
+        if (ob->type != active_ob->type) {
+          continue;
+        }
+        if (ob->mode != OB_MODE_OBJECT) {
+          BKE_reportf(op->reports,
+                      RPT_WARNING,
+                      "Object '%s' is not in Object Mode; skipping Sculpt entry",
+                      ob->id.name + 2);
+          continue;
+        }
+        object_sculpt_mode_enter(bmain, *depsgraph, scene, *ob, false, op->reports);
+      }
+    }
+
     BKE_paint_brushes_validate(&bmain, &ts.sculpt->paint);
 
-    if (ob.mode & mode_flag) {
-      Mesh *mesh = id_cast<Mesh *>(ob.data);
-      /* Dyntopo adds its own undo step. */
-      if ((mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) == 0) {
-        /* Without this the memfile undo step is used,
-         * while it works it causes lag when undoing the first undo step, see #71564. */
-        wmWindowManager *wm = CTX_wm_manager(C);
-        if (wm->op_undo_depth <= 1) {
-          undo::push_enter_sculpt_mode(scene, ob, op);
-          undo::push_end(ob);
+    /* Push initial undo step for all objects that successfully entered sculpt mode. */
+    wmWindowManager *wm = CTX_wm_manager(C);
+    if (wm->op_undo_depth <= 1) {
+      Vector<Object *> sculpt_objects;
+      for (Base &base : view_layer.object_bases) {
+        Object *ob = base.object;
+        if (!(ob->mode & mode_flag)) {
+          continue;
         }
+        Mesh *mesh = id_cast<Mesh *>(ob->data);
+        if (mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) {
+          continue;
+        }
+        sculpt_objects.append(ob);
+      }
+
+      bool sculpt_undo_started = false;
+      for (const int i : sculpt_objects.index_range()) {
+        Object *ob = sculpt_objects[i];
+        if (!sculpt_undo_started) {
+          undo::push_enter_sculpt_mode(scene, *ob, op);
+          sculpt_undo_started = true;
+        }
+        else {
+          undo::push_enter_sculpt_mode_add_object(*ob);
+        }
+      }
+      if (sculpt_undo_started) {
+        undo::push_end_all_ex(false, true);
       }
     }
   }
 
   WM_event_add_notifier(C, NC_SCENE | ND_MODE, &scene);
 
-  WM_msg_publish_rna_prop(mbus, &ob.id, &ob, Object, mode);
+  WM_msg_publish_rna_prop(mbus, &active_ob->id, active_ob, Object, mode);
 
   WM_toolsystem_update_from_context_view3d(C);
 
@@ -611,6 +695,87 @@ static void SCULPT_OT_sculptmode_toggle(wmOperatorType *ot)
 
   ot->exec = sculpt_mode_toggle_exec;
   ot->poll = ED_operator_object_active_editable_mesh;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus sculpt_selection_enter_sculpt_mode_exec(bContext *C, wmOperator *op)
+{
+  Main &bmain = *CTX_data_main(C);
+  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  if (!depsgraph) {
+    return OPERATOR_CANCELLED;
+  }
+  Scene &scene = *CTX_data_scene(C);
+  Object *active_ob = CTX_data_active_object(C);
+  if (!active_ob) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Vector<Object *> newly_entered;
+  Vector<PointerRNA> selected_objects;
+  CTX_data_selected_objects(C, &selected_objects);
+  for (const PointerRNA &ptr : selected_objects) {
+    Object *ob = reinterpret_cast<Object *>(ptr.owner_id);
+    /* Unlike sculpt_mode_toggle_exec's cascade, there is no explicit `ob == active_ob` skip
+     * here: this operator's poll (sculpt_mode_poll) guarantees active_ob is already
+     * sculpting, so it is always excluded by the OB_MODE_OBJECT check below on its own. */
+    if (ob->type != active_ob->type) {
+      continue;
+    }
+    if (ob->mode != OB_MODE_OBJECT) {
+      continue;
+    }
+    object_sculpt_mode_enter(bmain, *depsgraph, scene, *ob, false, op->reports);
+    newly_entered.append(ob);
+  }
+
+  if (!newly_entered.is_empty()) {
+    wmWindowManager *wm = CTX_wm_manager(C);
+    if (wm->op_undo_depth <= 1) {
+      bool sculpt_undo_started = false;
+      for (Object *ob : newly_entered) {
+        Mesh *mesh = id_cast<Mesh *>(ob->data);
+        if (mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) {
+          continue;
+        }
+        if (!sculpt_undo_started) {
+          undo::push_enter_sculpt_mode(scene, *ob, op);
+          sculpt_undo_started = true;
+        }
+        else {
+          undo::push_enter_sculpt_mode_add_object(*ob);
+        }
+      }
+      if (sculpt_undo_started) {
+        undo::push_end_all_ex(false, true);
+      }
+    }
+
+    for (Object *ob : newly_entered) {
+      ed::object::object_overlay_mode_transfer_animation_start(C, ob);
+    }
+
+    WM_event_add_notifier(C, NC_SCENE | ND_MODE, &scene);
+    WM_toolsystem_update_from_context_view3d(C);
+  }
+
+  /* Always FINISHED, even when nothing needed to transition (e.g. the lasso only re-covered
+   * objects that were already sculpting) -- this step's own no-op must not cause the macro's
+   * earlier lasso-select step to be treated as failed/discarded. */
+  return OPERATOR_FINISHED;
+}
+
+static void SCULPT_OT_selection_enter_sculpt_mode(wmOperatorType *ot)
+{
+  ot->name = "Enter Sculpt Mode for Selection";
+  ot->idname = "SCULPT_OT_selection_enter_sculpt_mode";
+  ot->description =
+      "Bring every selected object of the active object's type into the current Sculpt Mode "
+      "session";
+
+  ot->exec = sculpt_selection_enter_sculpt_mode_exec;
+  ot->poll = sculpt_mode_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
@@ -676,6 +841,7 @@ static float final_mask_get(const float current_mask,
 static void mask_by_color_contiguous_mesh(const Depsgraph &depsgraph,
                                           Object &object,
                                           const int vert,
+                                          const float4 &active_color,
                                           const float threshold,
                                           const bool invert,
                                           const bool preserve_mask)
@@ -686,7 +852,6 @@ static void mask_by_color_contiguous_mesh(const Depsgraph &depsgraph,
   const bke::AttributeAccessor attributes = mesh.attributes();
   const VArraySpan colors = *attributes.lookup_or_default<ColorGeometry4f>(
       mesh.active_color_attribute, bke::AttrDomain::Point, {});
-  const float4 active_color = float4(colors[vert]);
 
   Array<float> new_mask(mesh.verts_num, invert ? 1.0f : 0.0f);
 
@@ -718,7 +883,7 @@ static void mask_by_color_contiguous_mesh(const Depsgraph &depsgraph,
 
 static void mask_by_color_full_mesh(const Depsgraph &depsgraph,
                                     Object &object,
-                                    const int vert,
+                                    const float4 &active_color,
                                     const float threshold,
                                     const bool invert,
                                     const bool preserve_mask)
@@ -728,7 +893,6 @@ static void mask_by_color_full_mesh(const Depsgraph &depsgraph,
   const bke::AttributeAccessor attributes = mesh.attributes();
   const VArraySpan colors = *attributes.lookup_or_default<ColorGeometry4f>(
       mesh.active_color_attribute, bke::AttrDomain::Point, {});
-  const float4 active_color = float4(colors[vert]);
 
   IndexMaskMemory memory;
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
@@ -745,12 +909,32 @@ static void mask_by_color_full_mesh(const Depsgraph &depsgraph,
       });
 }
 
+/* Contiguous mode floods only the object under the cursor; every other object receives the flood
+ * default — exactly what unreachable islands of a joined mesh get (the full-mesh `new_mask` array
+ * is initialized to this default and applied everywhere). */
+static void mask_by_color_default_mesh(const Depsgraph &depsgraph,
+                                       Object &object,
+                                       const bool invert,
+                                       const bool preserve_mask)
+{
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  IndexMaskMemory memory;
+  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  const float new_mask = invert ? 1.0f : 0.0f;
+
+  update_mask_mesh(
+      depsgraph, object, node_mask, [&](MutableSpan<float> node_masks, const Span<int> verts) {
+        for (const int i : verts.index_range()) {
+          node_masks[i] = final_mask_get(node_masks[i], new_mask, invert, preserve_mask);
+        }
+      });
+}
+
 static wmOperatorStatus mask_by_color(bContext *C, wmOperator *op, const float2 region_location)
 {
   const Scene &scene = *CTX_data_scene(C);
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
-  Object &ob = *CTX_data_active_object(C);
-  SculptSession &ss = *ob.runtime->sculpt_session;
+  Object &active_ob = *CTX_data_active_object(C);
   View3D *v3d = CTX_wm_view3d(C);
 
   {
@@ -767,40 +951,69 @@ static wmOperatorStatus mask_by_color(bContext *C, wmOperator *op, const float2 
   ed::sculpt_paint::mask_overlay_check(*C, *op);
 
   /* Color data is not available in multi-resolution or dynamic topology. */
-  if (!color_supported_check(scene, ob, op->reports)) {
+  if (!color_supported_check(scene, active_ob, op->reports)) {
     return OPERATOR_CANCELLED;
   }
 
-  BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
+  for (Object *object : objects) {
+    BKE_sculpt_update_object_for_edit(depsgraph, object, false);
+  }
 
   /* Tools that are not brushes do not have the brush gizmo to update the vertex as the mouse move,
-   * so it needs to be updated here. */
+   * so it needs to be updated here. The resolver stores the active vertex in the session of the
+   * front-most object under the cursor — read the seed from that object, not the active one. */
   CursorGeometryInfo cgi;
-  cursor_geometry_info_update(C, &cgi, region_location, false);
+  Object *hit_ob_ptr = nullptr;
+  cursor_geometry_info_update(C, &cgi, region_location, false, &hit_ob_ptr);
+  Object &hit_ob = hit_ob_ptr ? *hit_ob_ptr : active_ob;
+  SculptSession &hit_ss = *hit_ob.runtime->sculpt_session;
 
-  if (std::holds_alternative<std::monostate>(ss.active_vert())) {
+  if (std::holds_alternative<std::monostate>(hit_ss.active_vert())) {
     return OPERATOR_CANCELLED;
   }
 
-  undo::push_begin(scene, ob, op);
-  BKE_sculpt_color_layer_create_if_needed(&ob);
+  undo::push_begin_multi_object(scene, op, objects);
+  color::ensure_shared_color_attributes(active_ob, objects);
 
   const float threshold = RNA_float_get(op->ptr, "threshold");
   const bool invert = RNA_boolean_get(op->ptr, "invert");
   const bool preserve_mask = RNA_boolean_get(op->ptr, "preserve_previous_mask");
 
-  const int active_vert = std::get<int>(ss.active_vert());
-  if (RNA_boolean_get(op->ptr, "contiguous")) {
-    mask_by_color_contiguous_mesh(*depsgraph, ob, active_vert, threshold, invert, preserve_mask);
-  }
-  else {
-    mask_by_color_full_mesh(*depsgraph, ob, active_vert, threshold, invert, preserve_mask);
+  /* Seed color: the color under the cursor, from the hit object's shared channel. */
+  const int active_vert = std::get<int>(hit_ss.active_vert());
+  const Mesh &hit_mesh = *id_cast<const Mesh *>(hit_ob.data);
+  const VArraySpan hit_colors = *hit_mesh.attributes().lookup_or_default<ColorGeometry4f>(
+      hit_mesh.active_color_attribute, bke::AttrDomain::Point, {});
+  const float4 active_color = float4(hit_colors[active_vert]);
+
+  const bool contiguous = RNA_boolean_get(op->ptr, "contiguous");
+  for (Object *object : objects) {
+    if (contiguous) {
+      /* Flood fill only reaches connected geometry — other objects get the flood default, the
+       * same as unreachable islands of a joined mesh. */
+      if (object == &hit_ob) {
+        mask_by_color_contiguous_mesh(
+            *depsgraph, *object, active_vert, active_color, threshold, invert, preserve_mask);
+      }
+      else {
+        mask_by_color_default_mesh(*depsgraph, *object, invert, preserve_mask);
+      }
+    }
+    else {
+      mask_by_color_full_mesh(
+          *depsgraph, *object, active_color, threshold, invert, preserve_mask);
+    }
   }
 
-  undo::push_end(ob);
+  undo::push_end_all_ex(false, true);
 
-  flush_update_done(C, ob, UpdateType::Mask);
-  DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+  for (Object *object : objects) {
+    flush_update_done(C, *object, UpdateType::Mask);
+    DEG_id_tag_update(&object->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, object);
+  }
 
   return OPERATOR_FINISHED;
 }
@@ -1500,6 +1713,7 @@ void operatortypes_sculpt()
 {
   WM_operatortype_append(SCULPT_OT_brush_stroke);
   WM_operatortype_append(SCULPT_OT_sculptmode_toggle);
+  WM_operatortype_append(SCULPT_OT_selection_enter_sculpt_mode);
   WM_operatortype_append(SCULPT_OT_set_persistent_base);
   WM_operatortype_append(dyntopo::SCULPT_OT_dynamic_topology_toggle);
   WM_operatortype_append(SCULPT_OT_optimize);
@@ -1536,6 +1750,23 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_mask_extract);
   WM_operatortype_append(SCULPT_OT_face_set_extract);
   WM_operatortype_append(SCULPT_OT_paint_mask_slice);
+}
+
+void operatormacros_sculpt()
+{
+  wmOperatorType *ot;
+  wmOperatorTypeMacro *otmacro;
+
+  ot = WM_operatortype_append_macro(
+      "SCULPT_OT_lasso_select_and_enter",
+      "Lasso Select and Enter Sculpt Mode",
+      "Lasso-select objects and bring the selection into the current Sculpt Mode session",
+      OPTYPE_UNDO | OPTYPE_REGISTER);
+  if (ot) {
+    otmacro = WM_operatortype_macro_define(ot, "VIEW3D_OT_select_lasso");
+    RNA_enum_set(otmacro->ptr, "mode", SEL_OP_ADD);
+    WM_operatortype_macro_define(ot, "SCULPT_OT_selection_enter_sculpt_mode");
+  }
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

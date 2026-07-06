@@ -45,9 +45,25 @@ enum ePaintSymmetryFlags : int {
   PAINT_TILE_X = (1 << 4),
   PAINT_TILE_Y = (1 << 5),
   PAINT_TILE_Z = (1 << 6),
+  /* Multi-object sculpt: mirror the brush across a single symmetry plane shared by the whole
+   * stroke (the primary object's local space) instead of each object mirroring around its own
+   * origin, so a multi-object stroke matches the same geometry after #Join (joined-mesh parity). */
+  PAINT_SYMMETRY_SHARED_ORIGIN = (1 << 7),
 };
 ENUM_OPERATORS(ePaintSymmetryFlags);
 #define PAINT_SYMM_AXIS_ALL (PAINT_SYMM_X | PAINT_SYMM_Y | PAINT_SYMM_Z)
+
+/**
+ * #Paint.symmetry_space: which space the brush symmetry plane is expressed in for multi-object
+ * sculpt strokes. Stored as a #char field; default 0 keeps the historical behavior (mirror across
+ * the reference/active object's own local axes). The GLOBAL_* modes mirror across world axes with a
+ * chosen pivot, so a rotated/scaled active object no longer tilts the shared plane.
+ */
+enum ePaintSymmetrySpace {
+  PAINT_SYMM_SPACE_ACTIVE_OBJECT = 0,
+  PAINT_SYMM_SPACE_GLOBAL_WORLD = 1,
+  PAINT_SYMM_SPACE_GLOBAL_CURSOR = 2,
+};
 
 #ifdef __cplusplus
 inline ePaintSymmetryFlags operator++(ePaintSymmetryFlags &flags, int)

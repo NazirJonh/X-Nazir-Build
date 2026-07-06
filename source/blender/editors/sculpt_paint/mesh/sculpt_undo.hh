@@ -16,6 +16,7 @@
 
 namespace blender {
 
+struct bContext;
 struct Depsgraph;
 struct Mesh;
 struct Object;
@@ -23,6 +24,12 @@ struct Scene;
 struct wmOperator;
 namespace bke::pbvh {
 class Node;
+}
+namespace ed::sculpt_paint {
+/* Fully declared in `sculpt_intern.hh`; forward-declared here (no explicit enum-base, matching
+ * the real definition's implicit `int` underlying type) so this header does not have to pull in
+ * `sculpt_intern.hh`'s heavier dependencies just for #finish_multi_object's parameter type. */
+enum class UpdateType;
 }
 
 namespace ed::sculpt_paint::undo {
@@ -89,6 +96,58 @@ void restore_from_bmesh_enter_geometry(const StepData &step_data, Mesh &mesh);
 bool has_bmesh_log_entry(const Object &ob);
 
 void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object);
+
+/* -------------------------------------------------------------------- */
+/** \name Multi-object ("global") sculpt undo helpers
+ *
+ * Unify the ≥10 repeated patterns across sculpt_mask, sculpt_face_set, sculpt_filter_mask,
+ * sculpt_filter_color, sculpt_mask_init, sculpt_ops (mask_by_color), sculpt_expand (paste),
+ * paint_mask (flood_fill + gesture_begin) of:
+ *
+ *     undo::push_begin(scene, primary_ob, op);
+ *     for (Object *ob : objects) {
+ *       if (ob != primary_ob) undo::push_begin_add_object(*ob);
+ *     }
+ *     ... operator body ...
+ *     undo::push_end_all_ex(false, true);
+ *     for (Object *ob : objects) {
+ *       flush_update_done(C, *ob, UpdateType::X);
+ *       WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+ *     }
+ *
+ * Pattern from
+ * `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 4.2.
+ * \{ */
+
+/**
+ * Open an undo step covering the multi-object ("global") sculpt operation rooted at the first
+ * object in \a scene_objects (the active sculpt object, per
+ * #ed::sculpt_paint::sculpt_mode_objects(vc)[0]). Calls #push_begin for that object, then
+ * #push_begin_add_object for every remaining entry.
+ *
+ * A no-op when \a scene_objects is empty. The caller is still responsible for doing meaningful
+ * work between this and #finish_multi_object; #finish_multi_object will call #push_end_all_ex
+ * regardless of whether the operator body touched any object -- so if the operator's per-object
+ * work all bailed out before mutating anything, prefer #discard_init_step instead.
+ */
+void push_begin_multi_object(const Scene &scene,
+                             const wmOperator *op,
+                             Span<Object *> scene_objects);
+
+/**
+ * Close the multi-object undo step opened by #push_begin_multi_object, publish a per-object
+ * viewport redraw and dependency-graph tag at the requested #ed::sculpt_paint::UpdateType, and
+ * fire one `NC_OBJECT | ND_DRAW` notifier per object so every viewport redraws.
+ *
+ * Pass `bContext *C` already in the operator's `exec` scope. \a update_type must match the
+ * field that the operator actually mutated (mask / face-set / color / position / etc.); the brush
+ * helpers will route the tag to the correct update graph path.
+ */
+void finish_multi_object(bContext *C,
+                         Span<Object *> scene_objects,
+                         UpdateType update_type);
+
+/** \} */
 
 namespace compression {
 

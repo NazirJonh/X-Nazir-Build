@@ -6037,6 +6037,63 @@ class ScopedStrokeObjectOverride {
   ScopedStrokeObjectOverride &operator=(ScopedStrokeObjectOverride &&) = delete;
 };
 
+/**
+ * Snapshot of the primary object's per-stroke fields that are LAZILY allocated inside the brush
+ * action (density_seed in #do_paint_brush_action / #do_blur_brush_action, painted_face_set_id in
+ * #do_draw_face_sets_brush) and would otherwise be re-allocated per secondary, producing a
+ * divergent value between meshes for what should be one joined stroke.
+ *
+ * Captured immediately after the primary object's brush action runs and mirrored onto every
+ * secondary BEFORE its brush action via #propagate_shared_stroke_state. After this propagation
+ * the secondaries' brush actions skip their own lazy allocation.
+ *
+ * \note This is the ONLY remaining "shared per-stroke state" propagation split between primary
+ *       and secondary; all other shared fields are either pure-copy from the framework (B
+ *       fields, computed in the loop above Phase 2 every step), stroke-init only (the
+ *       `toggle_settings` capture in #stroke_cache_init), or domain-specific deferred computation
+ *       (#area_texture_frame_to_world / #area_texture_frame_valid in
+ *       #calc_brush_area_texture_mat, kept lazy because the right value depends on the
+ *       secondary's own curvature check). See
+ *       `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 3.1.
+ */
+struct SharedStrokeStateSnapshot {
+  /* `std::nullopt` => primary had not yet set a seed at capture time (kept as-is; the secondary
+   * would then lazy-allocate one, which is acceptable as every secondary needs SOME seed). */
+  std::optional<float> density_seed;
+  /* `face_set_none_id` => primary had not yet allocated a paint face-set id at capture time.
+   * The secondary will allocate one itself; this case should not normally happen during the
+   * first stroke step if the brush is engaged, but is allowed for completeness. */
+  int painted_face_set_id = face_set_none_id;
+};
+
+SharedStrokeStateSnapshot capture_shared_stroke_state(const Object &primary_ob)
+{
+  SharedStrokeStateSnapshot result;
+  const SculptSession *ss = primary_ob.runtime->sculpt_session;
+  if (ss && ss->cache) {
+    result.density_seed = ss->cache->paint_brush.density_seed;
+    result.painted_face_set_id = ss->cache->paint_face_set;
+  }
+  return result;
+}
+
+void propagate_shared_stroke_state(Object &secondary_ob, const SharedStrokeStateSnapshot &primary_state)
+{
+  SculptSession *ss = secondary_ob.runtime->sculpt_session;
+  if (!ss || !ss->cache) {
+    return;
+  }
+  StrokeCache *cache = ss->cache;
+  if (primary_state.density_seed && !cache->paint_brush.density_seed) {
+    cache->paint_brush.density_seed = *primary_state.density_seed;
+  }
+  if (primary_state.painted_face_set_id != face_set_none_id &&
+      cache->paint_face_set == face_set_none_id)
+  {
+    cache->paint_face_set = primary_state.painted_face_set_id;
+  }
+}
+
 }  // namespace detail
 
 struct SculptPaintStroke final : public PaintStroke {
@@ -7407,7 +7464,14 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
    * primary object has established #primary_world_center; empty when the option is off. */
   Vector<float3> symm_world_centers;
 
-  /* ── Phase 2: per-object brush application ── */
+  /* ── Phase 2: per-object brush application ──
+   *
+   * Captured from the primary object *after* its brush action and pushed onto every secondary
+   * *before* its brush action runs, so the secondary's brush does not independently lazy-allocate
+   * a divergent value. See #detail::SharedStrokeStateSnapshot,
+   * #detail::capture_shared_stroke_state, #detail::propagate_shared_stroke_state. */
+  std::optional<detail::SharedStrokeStateSnapshot> shared_stroke_state;
+
   for (Object *object_ptr : objects) {
     Object &ob = *object_ptr;
     SculptSession &ss = *ob.runtime->sculpt_session;
@@ -7503,29 +7567,18 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       continue;
     }
 
-    /* The Paint/Blur density seed is lazily initialized per object from a local-space brush
-     * location, which diverges between objects. The primary object is processed first, so its
-     * seed already exists here for every secondary: copy it before the secondary's own brush
-     * action gets a chance to self-initialize, keeping density noise consistent across the
-     * multi-object stroke. */
-    if (&ob != primary_ob && !cache->paint_brush.density_seed && primary_ob != nullptr) {
-      const SculptSession *primary_ss = primary_ob->runtime->sculpt_session;
-      if (primary_ss && primary_ss->cache && primary_ss->cache->paint_brush.density_seed) {
-        cache->paint_brush.density_seed = primary_ss->cache->paint_brush.density_seed;
-      }
-    }
-
-    /* The Draw Face Sets brush lazily allocates a new face-set id per object the first time it
-     * is unset (#do_draw_face_sets_brush), picking the next id free in THAT object's own mesh.
-     * With separate meshes that yields a different id per object for what should be one shared
-     * face set. The primary object is processed first, so copy its id into every secondary
-     * object's cache before its own brush action would otherwise independently allocate one. */
-    if (&ob != primary_ob && cache->paint_face_set == face_set_none_id && primary_ob != nullptr) {
-      const SculptSession *primary_ss = primary_ob->runtime->sculpt_session;
-      if (primary_ss && primary_ss->cache && primary_ss->cache->paint_face_set != face_set_none_id)
-      {
-        cache->paint_face_set = primary_ss->cache->paint_face_set;
-      }
+    /* Push shared per-stroke state from the primary object (captured at the end of its
+     * iteration) onto this secondary BEFORE the brush action runs so the brush does not
+     * independently lazy-allocate a divergent value. Never runs for the primary itself
+     * (`shared_stroke_state` is set after its brush). Unifies the two formerly standalone
+     * "copy density_seed if !local" + "copy paint_face_set if local=none" branches, which
+     * were order-dependent on the manual #std::swap above -- the new flow stores the captured
+     * state in `shared_stroke_state` and explicitly passes it here, so future code readers do
+     * not have to wonder "is primary first because of std::swap, std::optional, or implicit?".
+     * Pattern from
+     * `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 3.1. */
+    if (&ob != primary_ob && shared_stroke_state) {
+      detail::propagate_shared_stroke_state(ob, *shared_stroke_state);
     }
 
     restore_from_undo_step_if_necessary(depsgraph, sd, ob);
@@ -7557,6 +7610,14 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
     }
     else {
       flush_update_step(this->vc, ob, UpdateType::Position);
+    }
+
+    /* Capture the primary object's lazy-allocated per-stroke state once its brush has run, so
+     * any subsequent secondary iteration in this same `update_step` call can mirror it via
+     * #detail::propagate_shared_stroke_state. By construction the primary is processed first
+     * (the swap above), so this runs exactly once per `update_step`. */
+    if (&ob == primary_ob) {
+      shared_stroke_state = detail::capture_shared_stroke_state(ob);
     }
     /* `stroke_object_override` + `obact_override` restore `this->object` and `vc.obact`
      * to the primary object at the end of each iteration. */

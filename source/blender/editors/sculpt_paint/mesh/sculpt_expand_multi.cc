@@ -324,13 +324,9 @@ void propagate_uniform(const Span<GroupedSpan<int>> object_neighbors,
   }
 }
 
-void propagate_geodesic(const Span<ObjectTopology> objects,
-                        const MultiObjectBridge &bridge,
-                        const Span<MultiVertRef> seeds,
-                        MutableSpan<Array<float>> r_vert_falloff_per_object)
+GlobalGeodesicTopology build_global_geodesic_topology(const Span<ObjectTopology> objects,
+                                                       const MultiObjectBridge &bridge)
 {
-  BLI_assert(objects.size() == r_vert_falloff_per_object.size());
-
   /* Step 1: running per-object offsets into each global (concatenated) array. */
   Array<int> vert_offset(objects.size() + 1, 0);
   Array<int> edge_offset(objects.size() + 1, 0);
@@ -361,34 +357,40 @@ void propagate_geodesic(const Span<ObjectTopology> objects,
    * map built below leaves them face-less; #geodesic::distances_create already treats a face-less
    * edge as a plain Euclidean-length relaxation (`sculpt_geodesic.cc`), which is exactly the
    * intended bridge behavior. */
-  Vector<int2> global_edges;
-  global_edges.reserve(total_object_edges + bridge.edges.size());
-  for (const int i : objects.index_range()) {
-    for (const int2 &edge : objects[i].edges) {
-      global_edges.append(int2(edge[0] + vert_offset[i], edge[1] + vert_offset[i]));
+  Array<int2> global_edges(total_object_edges + bridge.edges.size());
+  {
+    MutableSpan<int2> dst = global_edges.as_mutable_span();
+    int edge_i = 0;
+    for (const int i : objects.index_range()) {
+      for (const int2 &edge : objects[i].edges) {
+        dst[edge_i++] = int2(edge[0] + vert_offset[i], edge[1] + vert_offset[i]);
+      }
     }
-  }
-  for (const BridgeEdge &edge : bridge.edges) {
-    global_edges.append(int2(edge.a.vert + vert_offset[edge.a.object_index],
-                             edge.b.vert + vert_offset[edge.b.object_index]));
+    for (const BridgeEdge &edge : bridge.edges) {
+      dst[edge_i++] = int2(edge.a.vert + vert_offset[edge.a.object_index],
+                           edge.b.vert + vert_offset[edge.b.object_index]);
+    }
   }
 
   /* Step 4: global faces + corner_verts + corner_edges. Face corner-starts are the per-object
    * corner-start shifted by that object's `corner_offset`; the OffsetIndices contract requires the
-   * final entry to equal the total corner count. */
+   * final entry to equal the total corner count. `global_corner_edges` is only needed transiently
+   * to build the edge-to-face map in step 6 below, so it is not retained past this function. */
   Array<int> global_face_offsets(total_faces + 1);
-  Vector<int> global_corner_verts;
-  Vector<int> global_corner_edges;
-  global_corner_verts.reserve(total_corners);
-  global_corner_edges.reserve(total_corners);
-  for (const int i : objects.index_range()) {
-    const OffsetIndices<int> &faces = objects[i].faces;
-    for (const int f : faces.index_range()) {
-      global_face_offsets[face_offset[i] + f] = faces[f].start() + corner_offset[i];
-    }
-    for (const int c : objects[i].corner_verts.index_range()) {
-      global_corner_verts.append(objects[i].corner_verts[c] + vert_offset[i]);
-      global_corner_edges.append(objects[i].corner_edges[c] + edge_offset[i]);
+  Array<int> global_corner_verts(total_corners);
+  Array<int> global_corner_edges(total_corners);
+  {
+    int corner_i = 0;
+    for (const int i : objects.index_range()) {
+      const OffsetIndices<int> &faces = objects[i].faces;
+      for (const int f : faces.index_range()) {
+        global_face_offsets[face_offset[i] + f] = faces[f].start() + corner_offset[i];
+      }
+      for (const int c : objects[i].corner_verts.index_range()) {
+        global_corner_verts[corner_i] = objects[i].corner_verts[c] + vert_offset[i];
+        global_corner_edges[corner_i] = objects[i].corner_edges[c] + edge_offset[i];
+        corner_i++;
+      }
     }
   }
   global_face_offsets[total_faces] = total_corners;
@@ -418,57 +420,93 @@ void propagate_geodesic(const Span<ObjectTopology> objects,
 
   /* Step 6: adjacency maps over the GLOBAL arrays. `global_edges.size()` includes the bridge
    * edges, but `global_corner_edges` only ever references object edges, so
-   * #bke::mesh::build_edge_to_face_map naturally leaves every bridge edge with an empty face list. */
-  Array<int> edge_to_face_offsets;
-  Array<int> edge_to_face_indices;
-  const GroupedSpan<int> global_edge_to_face_map = bke::mesh::build_edge_to_face_map(
-      global_faces,
-      global_corner_edges,
-      global_edges.size(),
-      edge_to_face_offsets,
-      edge_to_face_indices);
-  Array<int> vert_to_edge_offsets;
-  Array<int> vert_to_edge_indices;
-  const GroupedSpan<int> global_vert_to_edge_map = bke::mesh::build_vert_to_edge_map(
-      global_edges.as_span(), total_verts, vert_to_edge_offsets, vert_to_edge_indices);
+   * #bke::mesh::build_edge_to_face_map naturally leaves every bridge edge with an empty face list.
+   * The returned #GroupedSpan views (over `global_faces` / the not-yet-moved offsets/indices
+   * below) are discarded -- only the owning arrays are kept in the result, and the views are
+   * reconstructed from them fresh at each use site (see #GlobalGeodesicTopology's doc-comment). */
+  GlobalGeodesicTopology result;
+  bke::mesh::build_edge_to_face_map(global_faces,
+                                    global_corner_edges,
+                                    global_edges.size(),
+                                    result.edge_to_face_offsets,
+                                    result.edge_to_face_indices);
+  bke::mesh::build_vert_to_edge_map(
+      global_edges.as_span(), total_verts, result.vert_to_edge_offsets, result.vert_to_edge_indices);
 
-  /* Step 7: seeds, translated into global vertex indices. */
+  result.positions = std::move(global_positions);
+  result.edges = std::move(global_edges);
+  result.face_offset_data = std::move(global_face_offsets);
+  result.corner_verts = std::move(global_corner_verts);
+  result.hide_poly = std::move(global_hide_poly);
+  result.vert_offset = std::move(vert_offset);
+  return result;
+}
+
+void propagate_geodesic_from_topology(const GlobalGeodesicTopology &topology,
+                                      const Span<MultiVertRef> seeds,
+                                      MutableSpan<Array<float>> r_vert_falloff_per_object)
+{
+  const int object_num = topology.vert_offset.size() - 1;
+  BLI_assert(object_num == r_vert_falloff_per_object.size());
+
+  /* Reconstruct the grouped-span / offset-indices views fresh from the owning arrays -- see
+   * #GlobalGeodesicTopology's doc-comment for why these must not be cached alongside them. */
+  const OffsetIndices<int> global_faces(topology.face_offset_data);
+  const GroupedSpan<int> global_edge_to_face_map(OffsetIndices<int>(topology.edge_to_face_offsets),
+                                                 topology.edge_to_face_indices.as_span());
+  const GroupedSpan<int> global_vert_to_edge_map(OffsetIndices<int>(topology.vert_to_edge_offsets),
+                                                 topology.vert_to_edge_indices.as_span());
+
+  /* Seeds, translated into global vertex indices. */
   Set<int> global_initial_verts;
   for (const MultiVertRef &seed : seeds) {
-    global_initial_verts.add(seed.vert + vert_offset[seed.object_index]);
+    global_initial_verts.add(seed.vert + topology.vert_offset[seed.object_index]);
   }
 
-  /* Step 8: propagate over the combined topology using the priority-queue (Fast Marching Method)
-   * geodesic core, NOT #geodesic::distances_create. The proximity bridge added above is exactly
-   * the kind of long-range "shortcut" edge (geometrically close, but many hops away in the
-   * concatenated topology) that breaks #distances_create's round-based BFS ordering assumption:
-   * measured on a real repro (3 bridged objects, ~1.5M verts each), seeding from a more centrally
-   * bridged object drove ~7 redundant re-relaxations per vertex on average and a ~60x slowdown
-   * (155s vs 2.5s) versus seeding from an end object, even though the combined graph was
-   * identical both times. #distances_create_priority_queue uses the same per-triangle update
-   * formula but finalizes each vertex exactly once (true increasing-distance order), which is
-   * immune to this pathology regardless of where the bridge sits relative to the seed. For a
-   * single object with no bridge this still produces the same distance field as the single-object
-   * path (the underlying geodesic distance being approximated is unique); it is simply not
-   * guaranteed to match #distances_create's exact intermediate tie-breaking, which does not
-   * matter here since this function is only ever used for the multi-object path. */
-  const Array<float> dists = geodesic::distances_create_priority_queue(global_positions,
-                                                                       global_edges,
+  /* Propagate over the combined topology using the priority-queue (Fast Marching Method) geodesic
+   * core, NOT #geodesic::distances_create. The proximity bridge is exactly the kind of long-range
+   * "shortcut" edge (geometrically close, but many hops away in the concatenated topology) that
+   * breaks #distances_create's round-based BFS ordering assumption: measured on a real repro (3
+   * bridged objects, ~1.5M verts each), seeding from a more centrally bridged object drove ~7
+   * redundant re-relaxations per vertex on average and a ~60x slowdown (155s vs 2.5s) versus
+   * seeding from an end object, even though the combined graph was identical both times.
+   * #distances_create_priority_queue uses the same per-triangle update formula but finalizes each
+   * vertex exactly once (true increasing-distance order), which is immune to this pathology
+   * regardless of where the bridge sits relative to the seed. For a single object with no bridge
+   * this still produces the same distance field as the single-object path (the underlying
+   * geodesic distance being approximated is unique); it is simply not guaranteed to match
+   * #distances_create's exact intermediate tie-breaking, which does not matter here since this
+   * function is only ever used for the multi-object path. */
+  const Array<float> dists = geodesic::distances_create_priority_queue(topology.positions,
+                                                                       topology.edges,
                                                                        global_faces,
-                                                                       global_corner_verts,
+                                                                       topology.corner_verts,
                                                                        global_vert_to_edge_map,
                                                                        global_edge_to_face_map,
-                                                                       global_hide_poly,
+                                                                       topology.hide_poly,
                                                                        global_initial_verts,
                                                                        FLT_MAX);
 
-  /* Step 9: split the combined result back into one Array per object. */
-  for (const int i : objects.index_range()) {
-    const int count = objects[i].positions.size();
+  /* Split the combined result back into one Array per object. */
+  for (const int i : IndexRange(object_num)) {
+    const int count = topology.vert_offset[i + 1] - topology.vert_offset[i];
     r_vert_falloff_per_object[i].reinitialize(count);
     r_vert_falloff_per_object[i].as_mutable_span().copy_from(
-        dists.as_span().slice(vert_offset[i], count));
+        dists.as_span().slice(topology.vert_offset[i], count));
   }
+}
+
+void propagate_geodesic(const Span<ObjectTopology> objects,
+                        const MultiObjectBridge &bridge,
+                        const Span<MultiVertRef> seeds,
+                        MutableSpan<Array<float>> r_vert_falloff_per_object)
+{
+  BLI_assert(objects.size() == r_vert_falloff_per_object.size());
+  /* One-shot / test entry point: rebuilds the concatenated topology every call. The hot
+   * (per-mouse-move) multi-object path instead builds a #GlobalGeodesicTopology once and reuses
+   * it across calls -- see #multi_object_graph_propagate. */
+  const GlobalGeodesicTopology topology = build_global_geodesic_topology(objects, bridge);
+  propagate_geodesic_from_topology(topology, seeds, r_vert_falloff_per_object);
 }
 
 }  // namespace detail
@@ -545,37 +583,48 @@ void multi_object_graph_propagate(const Depsgraph &depsgraph,
                                   const Span<MultiVertRef> seeds,
                                   const MultiObjectBridge &bridge,
                                   const PropagationMode mode,
+                                  std::unique_ptr<detail::GlobalGeodesicTopology> &geodesic_topology_cache,
                                   MutableSpan<Array<float>> r_vert_falloff_per_object)
 {
   if (mode == PropagationMode::Geodesic) {
-    /* Geodesic: build one #detail::ObjectTopology per object (mesh topology + the caller's
-     * WORLD-space positions) and defer to #detail::propagate_geodesic, which concatenates every
-     * object into a single combined topology and calls the untouched #geodesic::distances_create
-     * core. `depsgraph` is not needed here: `world_positions` already holds the evaluated
+    /* Geodesic: `depsgraph` is not needed here -- `world_positions` already holds the evaluated
      * positions (see #world_positions_create). */
     (void)depsgraph;
 
-    /* Kept alive for the whole call: each #detail::ObjectTopology's `hide_poly` is a view onto the
-     * corresponding entry here (empty when the object has no `.hide_poly` attribute). Built via
-     * #Vector::append (placement-construct) rather than indexed assignment, since #VArraySpan only
-     * exposes a move constructor / move-assignment operator, not a copy-assignment operator. */
-    Vector<VArraySpan<bool>> hide_poly_storage;
-    hide_poly_storage.reserve(objects.size());
-    Vector<detail::ObjectTopology> topologies;
-    topologies.reserve(objects.size());
-    for (const int i : objects.index_range()) {
-      const Mesh &mesh = *id_cast<const Mesh *>(objects[i]->data);
-      const bke::AttributeAccessor attributes = mesh.attributes();
-      hide_poly_storage.append(*attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face));
-      topologies.append({world_positions[i],
-                         mesh.edges(),
-                         mesh.faces(),
-                         mesh.corner_verts(),
-                         mesh.corner_edges(),
-                         hide_poly_storage.last()});
+    /* The concatenated topology + adjacency maps only depend on the object set / mesh topology /
+     * bridge, all fixed for the whole Expand modal operation (Expand never mutates geometry).
+     * Build it once into `geodesic_topology_cache` and reuse it on every later call (e.g. one per
+     * mouse-move while moving the origin) instead of repeating the O(verts+edges+faces)
+     * concatenation + #bke::mesh::build_edge_to_face_map / #build_vert_to_edge_map work -- see
+     * `Architecture_Refactoring_Analysis.md` 5.2. */
+    if (!geodesic_topology_cache) {
+      /* Kept alive only for this build: each #detail::ObjectTopology's `hide_poly` is a view onto
+       * the corresponding entry here (empty when the object has no `.hide_poly` attribute). Built
+       * via #Vector::append (placement-construct) rather than indexed assignment, since
+       * #VArraySpan only exposes a move constructor / move-assignment operator, not a
+       * copy-assignment operator. Not needed once #build_global_geodesic_topology has copied
+       * everything it needs into the cached, owning #GlobalGeodesicTopology. */
+      Vector<VArraySpan<bool>> hide_poly_storage;
+      hide_poly_storage.reserve(objects.size());
+      Vector<detail::ObjectTopology> topologies;
+      topologies.reserve(objects.size());
+      for (const int i : objects.index_range()) {
+        const Mesh &mesh = *id_cast<const Mesh *>(objects[i]->data);
+        const bke::AttributeAccessor attributes = mesh.attributes();
+        hide_poly_storage.append(*attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face));
+        topologies.append({world_positions[i],
+                           mesh.edges(),
+                           mesh.faces(),
+                           mesh.corner_verts(),
+                           mesh.corner_edges(),
+                           hide_poly_storage.last()});
+      }
+      geodesic_topology_cache = std::make_unique<detail::GlobalGeodesicTopology>(
+          detail::build_global_geodesic_topology(topologies, bridge));
     }
 
-    detail::propagate_geodesic(topologies, bridge, seeds, r_vert_falloff_per_object);
+    detail::propagate_geodesic_from_topology(
+        *geodesic_topology_cache, seeds, r_vert_falloff_per_object);
     return;
   }
 

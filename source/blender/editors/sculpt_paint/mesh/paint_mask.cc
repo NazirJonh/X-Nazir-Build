@@ -704,7 +704,6 @@ static wmOperatorStatus mask_flood_fill_exec(bContext *C, wmOperator *op)
 {
   Main &bmain = *CTX_data_main(C);
   const Scene &scene = *CTX_data_scene(C);
-  Object &active_object = *CTX_data_active_object(C);
   Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
   ViewContext vc = ED_view3d_viewcontext_init(C, &depsgraph);
   const Vector<Object *> objects = sculpt_mode_objects(vc);
@@ -718,12 +717,7 @@ static wmOperatorStatus mask_flood_fill_exec(bContext *C, wmOperator *op)
 
   ed::sculpt_paint::mask_overlay_check(*C, *op);
 
-  undo::push_begin(scene, active_object, op);
-  for (Object *ob : objects) {
-    if (ob != &active_object) {
-      undo::push_begin_add_object(*ob);
-    }
-  }
+  undo::push_begin_multi_object(scene, op, objects);
 
   for (Object *ob : objects) {
     switch (mode) {
@@ -739,12 +733,7 @@ static wmOperatorStatus mask_flood_fill_exec(bContext *C, wmOperator *op)
     }
   }
 
-  undo::push_end_all_ex(false, true);
-
-  for (Object *ob : objects) {
-    flush_update_done(C, *ob, UpdateType::Mask);
-    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
-  }
+  undo::finish_multi_object(C, objects, UpdateType::Mask);
 
   return OPERATOR_FINISHED;
 }
@@ -799,13 +788,7 @@ static void gesture_begin(bContext &C, wmOperator &op, gesture::GestureData &ges
     BKE_sculpt_update_object_for_edit(depsgraph, ob, false);
   }
 
-  Object *active_object = gesture_data.vc.obact;
-  undo::push_begin(scene, *active_object, &op);
-  for (Object *ob : gesture_data.objects) {
-    if (ob != active_object) {
-      undo::push_begin_add_object(*ob);
-    }
-  }
+  undo::push_begin_multi_object(scene, &op, gesture_data.objects.as_span());
 }
 
 static float mask_gesture_get_new_value(const float elem, FloodFillMode mode, float value)
@@ -930,12 +913,7 @@ static void gesture_end(bContext &C, gesture::GestureData &gesture_data)
     }
   }
 
-  undo::push_end_all_ex(false, true);
-
-  for (Object *ob : gesture_data.objects) {
-    flush_update_done(&C, *ob, UpdateType::Mask);
-    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, ob);
-  }
+  undo::finish_multi_object(&C, gesture_data.objects.as_span(), UpdateType::Mask);
 }
 
 static void init_operation(bContext &C, gesture::GestureData &gesture_data, wmOperator &op)

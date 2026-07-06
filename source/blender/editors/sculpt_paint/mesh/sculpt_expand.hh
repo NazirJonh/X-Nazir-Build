@@ -206,6 +206,14 @@ struct Cache {
   /* Cross-mesh proximity bridge, built ONCE at invoke (static-geometry invariant — Expand never
    * mutates geometry). Empty in the single-object path. */
   MultiObjectBridge bridge;
+
+  /* Concatenated Geodesic-mode topology + adjacency maps, lazily built on the first Geodesic
+   * #multi_object_graph_propagate call and reused for the rest of the modal op (same
+   * static-geometry invariant as #world_positions / #bridge above) -- avoids rebuilding
+   * #bke::mesh::build_edge_to_face_map / #build_vert_to_edge_map on every mouse-move while moving
+   * the propagation origin (Architecture_Refactoring_Analysis.md 5.2). Null when Geodesic falloff
+   * has not been used yet, or in the single-object path. */
+  std::unique_ptr<detail::GlobalGeodesicTopology> geodesic_topology_cache;
 };
 
 }  // namespace ed::sculpt_paint::expand

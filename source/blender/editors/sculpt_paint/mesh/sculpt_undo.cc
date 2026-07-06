@@ -25,6 +25,7 @@
 #include "sculpt_undo.hh"
 
 #include <mutex>
+#include <shared_mutex>
 #include <zstd.h>
 
 #include "CLG_log.h"
@@ -56,6 +57,7 @@
 #include "BKE_global.hh"
 #include "BKE_key.hh"
 #include "BKE_layer.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_multires.hh"
@@ -209,8 +211,23 @@ struct StepData {
    */
   Type type = Type::None;
 
-  /** Name of the object associated with this undo data (`object.id.name`). */
+  /** Name of the object associated with this undo data (`object.id.name`). Kept for human-readable
+   * identification and as a last-ditch fallback lookup for steps recorded before
+   * #object_session_uid was populated. The primary lookup key (see #get_step_data and
+   * #find_object_for_step) is #object_session_uid. */
   std::string object_name;
+
+  /** Session-stable unique ID (`ID.session_uid`). Used as the primary lookup key for
+   * routing undo data to the right object on lookup and on undo/redo restore, because
+   * #object_name is only unique within a single #Library. Two #Object instances from
+   * different linked libraries (or one local + one linked with the same name) share the
+   * name but have distinct `session_uid` values; without this, undo data for one mesh
+   * could silently be applied to another at restore time.
+   *
+   * Left at 0 for unreachable paths (synthetic steps, unit tests with no Main). The
+   * lookup falls back to #object_name when this is 0 so old undo steps remain valid.
+   */
+  uint32_t object_session_uid = 0;
 
   /** Name of the object's active shape key when the undo step was created. */
   std::string active_shape_key_name;
@@ -561,6 +578,32 @@ static bool sculpt_step_should_push(const SculptUndoStep &us)
   return false;
 }
 
+/**
+ * Primary key is #ID.session_uid -- unique per-ID across linked libraries / same-name
+ * duplicates. Falls back to #ID.name comparison for steps recorded before
+ * #StepData.object_session_uid was populated (and when session_uid is the (unused) 0
+ * sentinel). Without this check, two #Object instances from different libraries sharing a
+ * name would silently route each other's undo data. See
+ * `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 2.1.
+ *
+ * Caller must hold at least a shared lock on #objects_data_mutex.
+ */
+static StepData *find_step_data(SculptUndoStep &us, const Object &ob)
+{
+  const uint32_t ob_session_uid = ob.id.session_uid;
+  for (std::unique_ptr<StepData> &sd : us.objects_data) {
+    if (sd->object_session_uid != 0 && sd->object_session_uid == ob_session_uid) {
+      return sd.get();
+    }
+  }
+  for (std::unique_ptr<StepData> &sd : us.objects_data) {
+    if (sd->object_session_uid == 0 && sd->object_name == ob.id.name) {
+      return sd.get();
+    }
+  }
+  return nullptr;
+}
+
 static StepData *get_step_data(const Object &ob)
 {
   SculptUndoStep *us = get_init_sculpt_step();
@@ -568,24 +611,74 @@ static StepData *get_step_data(const Object &ob)
     return nullptr;
   }
 
-  /* Undo nodes are pushed concurrently from worker threads (see #push_node / #ensure_node), so the
-   * lookup-and-create below must be serialized. The returned #StepData itself is heap-allocated via
-   * #unique_ptr, so it stays valid for the caller even if another thread appends afterwards. */
-  static Mutex objects_data_mutex;
-  std::scoped_lock lock(objects_data_mutex);
+  /* Undo nodes are pushed and looked up concurrently from worker threads (see #push_node /
+   * #ensure_node / #get_node), so access to #objects_data must be serialized. The returned
+   * #StepData itself is heap-allocated via #unique_ptr, so it stays valid for the caller even if
+   * another thread appends afterwards.
+   *
+   * By the time a multi-object stroke's per-node worker threads start, #StepData already exists
+   * for every participating object -- entries are created on the main thread by
+   * #push_begin / #push_begin_add_object before the parallel per-node work begins (see
+   * #save_step_topology_data). So the hot path from every worker thread is a pure lookup; only
+   * the (effectively single-threaded, first-touch) creation of a new #StepData mutates
+   * #objects_data. A #std::shared_mutex lets concurrent lookups run in parallel with each other,
+   * serializing only the rare append -- unlike a plain #Mutex, which serialized every lookup
+   * against every other lookup regardless of whether either one ever mutated the vector. See
+   * `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 2.2. */
+  static std::shared_mutex objects_data_mutex;
 
-  /* Compare against #ID.name directly to avoid constructing a temporary string on this hot path. */
-  for (std::unique_ptr<StepData> &sd : us->objects_data) {
-    if (sd->object_name == ob.id.name) {
-      return sd.get();
+  {
+    std::shared_lock read_lock(objects_data_mutex);
+    if (StepData *found = find_step_data(*us, ob)) {
+      return found;
     }
   }
 
-  /* If not found, create a new StepData for this object. */
+  /* Not found under a shared lock: escalate to exclusive to append. #std::shared_mutex has no
+   * atomic shared-to-exclusive upgrade, so re-check after acquiring the exclusive lock in case
+   * another thread inserted this object's #StepData in between. */
+  std::unique_lock write_lock(objects_data_mutex);
+  if (StepData *found = find_step_data(*us, ob)) {
+    return found;
+  }
+
   us->objects_data.append(std::make_unique<StepData>());
   StepData &sd = *us->objects_data.last();
   sd.object_name = ob.id.name;
+  sd.object_session_uid = ob.id.session_uid;
   return &sd;
+}
+
+/**
+ * Locate the #Object in `bmain` that owns the undo data stored in `sd`. Prefers the
+ * session-stable `session_uid` (the only safe key when same-named objects come from different
+ * linked libraries, or when a local and a linked object share a name); falls back to name
+ * lookup for #StepData entries recorded before `session_uid` was populated.
+ *
+ * \return The matching #Object, or `nullptr` if no equivalent is present in `bmain`.
+ */
+static Object *find_object_for_step(const Main &bmain, const StepData &sd)
+{
+  if (sd.object_session_uid != 0) {
+    ID *id = BKE_libblock_find_session_uid(const_cast<Main *>(&bmain),
+                                            ID_OB,
+                                            sd.object_session_uid);
+    if (id != nullptr) {
+      return id_cast<Object *>(id);
+    }
+    /* The session_uid was set at record time but the corresponding #Object is gone from the
+     * current Main (deleted, link-broken, etc.). Do NOT fall back to name lookup: a name match
+     * could be a DIFFERENT object (e.g. a new linked Library cover). Return null so the
+     * caller skips this step silently rather than corrupting a wrong mesh. */
+    return nullptr;
+  }
+  /* `Main::objects` is `ListBaseT<Object>` (a typed subclass of the simple `ListBase`). Pass as
+   * a generic `ListBase const *` to #BLI_findstring, which scans `name+2` against the `ID::name`
+   * field offset (the leading two chars `OB` of `Object::id.name` are skipped). */
+  return static_cast<Object *>(
+      BLI_findstring(static_cast<const ListBase *>(&bmain.objects),
+                     sd.object_name.c_str() + 2,
+                     offsetof(ID, name) + 2));
 }
 
 static bool use_multires_undo(const StepData &step_data, const SculptSession &ss)
@@ -1528,9 +1621,7 @@ static void restore_list(bContext *C,
 
   for (std::unique_ptr<StepData> &sd_ptr : objects_data) {
     StepData &sd = *sd_ptr;
-    /* Find object in the current main by name. */
-    Object *ob = static_cast<Object *>(
-        BLI_findstring(&bmain->objects, sd.object_name.c_str() + 2, offsetof(ID, name) + 2));
+    Object *ob = find_object_for_step(*bmain, sd);
     if (!ob) {
       continue;
     }
@@ -2383,10 +2474,7 @@ void push_end_all_ex(const bool /*use_nested_undo*/, const bool finalize_undo_st
     /* #active_color_start is captured from the first object (the active object, stored first by
      * #stroke_undo_begin). Capture the end state from the same object so the active color attribute
      * is restored consistently on undo/redo. */
-    Object *active_ob = static_cast<Object *>(BLI_findstring(
-        &bmain->objects,
-        us->objects_data.first()->object_name.c_str() + 2,
-        offsetof(ID, name) + 2));
+    Object *active_ob = find_object_for_step(*bmain, *us->objects_data.first());
     if (active_ob) {
       save_active_attribute(*active_ob, &us->active_color_end);
     }
@@ -2401,6 +2489,36 @@ void discard_init_step()
 void push_end(Object &ob)
 {
   push_end_ex(ob, false, true);
+}
+
+void push_begin_multi_object(const Scene &scene,
+                             const wmOperator *op,
+                             Span<Object *> scene_objects)
+{
+  const int n = scene_objects.size();
+  if (n == 0) {
+    return;
+  }
+  push_begin(scene, *scene_objects[0], op);
+  for (int i = 1; i < n; ++i) {
+    push_begin_add_object(*scene_objects[i]);
+  }
+}
+
+void finish_multi_object(bContext *C,
+                         Span<Object *> scene_objects,
+                         UpdateType update_type)
+{
+  /* Closing pending `push_begin_ex` (image paint, etc.) -- the multi-object undo step is owned
+   * by the sculpt undo system, but the surrounding brush operator may have started an image
+   * undo step in parallel; the image undo system already completes it itself when
+   * #push_end_all_ex runs (it consults the sculpt step data to skip objects it did not touch). */
+  push_end_all_ex(false, true);
+
+  for (Object *ob : scene_objects) {
+    flush_update_done(C, *ob, update_type);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  }
 }
 
 /* -------------------------------------------------------------------- */
@@ -2626,8 +2744,7 @@ static void step_decode(
 
     bool any_sculpt_object = false;
     for (const std::unique_ptr<StepData> &sd : us->objects_data) {
-      Object *ob = static_cast<Object *>(
-          BLI_findstring(&bmain->objects, sd->object_name.c_str() + 2, offsetof(ID, name) + 2));
+      Object *ob = find_object_for_step(*bmain, *sd);
       if (!ob) {
         continue;
       }

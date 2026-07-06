@@ -7,6 +7,8 @@
  */
 #pragma once
 
+#include <memory>
+
 #include "BLI_array.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_math_matrix_types.hh"
@@ -56,13 +58,28 @@ MultiObjectBridge build_multi_object_bridge(const Depsgraph &depsgraph,
                                             Span<Array<float3>> world_positions,
                                             float bridge_factor);
 
-void multi_object_graph_propagate(const Depsgraph &depsgraph,
-                                  Span<Object *> objects,
-                                  Span<Array<float3>> world_positions,
-                                  Span<MultiVertRef> seeds,
-                                  const MultiObjectBridge &bridge,
-                                  PropagationMode mode,
-                                  MutableSpan<Array<float>> r_vert_falloff_per_object);
+namespace detail {
+struct GlobalGeodesicTopology;
+}
+
+/**
+ * \param geodesic_topology_cache: Persists the #detail::GlobalGeodesicTopology built for the
+ * Geodesic mode across repeated calls with the same object set / topology / bridge (e.g. one call
+ * per mouse-move while moving the Expand origin, spec 5.2) -- pass the same instance (owned by
+ * the caller, typically alongside #Cache) on every call within one Expand operation so only the
+ * first call pays the concatenation + adjacency-map build cost. Ignored for Uniform /
+ * UniformDiagonals. Pass a default-constructed (null) instance to always rebuild, matching the
+ * previous behavior.
+ */
+void multi_object_graph_propagate(
+    const Depsgraph &depsgraph,
+    Span<Object *> objects,
+    Span<Array<float3>> world_positions,
+    Span<MultiVertRef> seeds,
+    const MultiObjectBridge &bridge,
+    PropagationMode mode,
+    std::unique_ptr<detail::GlobalGeodesicTopology> &geodesic_topology_cache,
+    MutableSpan<Array<float>> r_vert_falloff_per_object);
 
 namespace detail {
 
@@ -103,11 +120,53 @@ struct ObjectTopology {
 /* Geodesic (triangle-unfold) propagation over all objects, treating each `bridge` edge as a
  * face-less edge (Euclidean world length). Concatenates into one global topology and defers to
  * geodesic::distances_create, so single-object / no-bridge output is elementwise identical to it.
- * Exposed for unit testing on hand-built topology (no Blender Object required). */
+ * Exposed for unit testing on hand-built topology (no Blender Object required).
+ *
+ * Rebuilds the concatenated topology and its adjacency maps from scratch every call -- suitable
+ * for one-shot / test use. #multi_object_graph_propagate's hot (per-mouse-move) path instead
+ * builds a #GlobalGeodesicTopology once via #build_global_geodesic_topology and repropagates from
+ * it via #propagate_geodesic_from_topology, since the topology is invariant for the whole Expand
+ * operation (see `Architecture_Refactoring_Analysis.md` 5.2). */
 void propagate_geodesic(Span<ObjectTopology> objects,
                         const MultiObjectBridge &bridge,
                         Span<MultiVertRef> seeds,
                         MutableSpan<Array<float>> r_vert_falloff_per_object);
+
+/**
+ * Concatenated multi-object topology + adjacency maps for the Geodesic core, cacheable across
+ * repeated #propagate_geodesic_from_topology calls (e.g. one per mouse-move while moving the
+ * Expand origin) as long as the object set / mesh topology / bridge do not change -- true for the
+ * whole lifetime of one Expand modal operation, which never mutates geometry.
+ *
+ * \note #edge_to_face_offsets/#indices and #vert_to_edge_offsets/#indices are stored as the owning
+ * #Array pair rather than a #GroupedSpan: #Array relocates its small-size inline buffer on
+ * move/copy, which would leave a #GroupedSpan view stored alongside it dangling. Reconstruct the
+ * #GroupedSpan / #OffsetIndices views from these owning arrays at each use site instead (cheap --
+ * both are lightweight pointer+size wrappers).
+ */
+struct GlobalGeodesicTopology {
+  Array<float3> positions;
+  Array<int2> edges;
+  /** Backs an #OffsetIndices<int> view over the concatenated faces; see the note above. */
+  Array<int> face_offset_data;
+  Array<int> corner_verts;
+  /** Empty when no object hides any face. */
+  Array<bool> hide_poly;
+  Array<int> edge_to_face_offsets;
+  Array<int> edge_to_face_indices;
+  Array<int> vert_to_edge_offsets;
+  Array<int> vert_to_edge_indices;
+  /** Size `objects.size() + 1`; object `i`'s vertices occupy `[vert_offset[i], vert_offset[i+1])`
+   * in #positions, and its seeds translate to global indices via `vert + vert_offset[i]`. */
+  Array<int> vert_offset;
+};
+
+GlobalGeodesicTopology build_global_geodesic_topology(Span<ObjectTopology> objects,
+                                                      const MultiObjectBridge &bridge);
+
+void propagate_geodesic_from_topology(const GlobalGeodesicTopology &topology,
+                                      Span<MultiVertRef> seeds,
+                                      MutableSpan<Array<float>> r_vert_falloff_per_object);
 
 }  // namespace detail
 

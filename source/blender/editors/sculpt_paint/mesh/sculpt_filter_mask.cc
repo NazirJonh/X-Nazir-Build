@@ -1068,7 +1068,6 @@ static void mask_filter_object(bContext &C,
 static wmOperatorStatus sculpt_mask_filter_exec(bContext *C, wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
-  Object &active_object = *CTX_data_active_object(C);
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
   const FilterType filter_type = FilterType(RNA_enum_get(op->ptr, "filter_type"));
 
@@ -1086,12 +1085,7 @@ static wmOperatorStatus sculpt_mask_filter_exec(bContext *C, wmOperator *op)
   const bool auto_iteration_count = RNA_boolean_get(op->ptr, "auto_iteration_count");
   const int fixed_iterations = RNA_int_get(op->ptr, "iterations");
 
-  undo::push_begin(scene, active_object, op);
-  for (Object *ob : objects) {
-    if (ob != &active_object) {
-      undo::push_begin_add_object(*ob);
-    }
-  }
+  undo::push_begin_multi_object(scene, op, objects);
 
   for (Object *ob : objects) {
     mask_filter_object(*C, *ob, filter_type, auto_iteration_count, fixed_iterations);

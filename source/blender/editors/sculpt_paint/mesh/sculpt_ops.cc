@@ -894,12 +894,7 @@ static wmOperatorStatus mask_by_color(bContext *C, wmOperator *op, const float2 
     return OPERATOR_CANCELLED;
   }
 
-  undo::push_begin(scene, active_ob, op);
-  for (Object *object : objects) {
-    if (object != &active_ob) {
-      undo::push_begin_add_object(*object);
-    }
-  }
+  undo::push_begin_multi_object(scene, op, objects);
   color::ensure_shared_color_attributes(active_ob, objects);
 
   const float threshold = RNA_float_get(op->ptr, "threshold");

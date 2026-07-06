@@ -274,7 +274,6 @@ static wmOperatorStatus sculpt_mask_init_exec(bContext *C, wmOperator *op)
   ed::sculpt_paint::mask_overlay_check(*C, *op);
 
   const Scene &scene = *CTX_data_scene(C);
-  Object &active_object = *CTX_data_active_object(C);
   Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
   ViewContext vc = ED_view3d_viewcontext_init(C, &depsgraph);
   const Vector<Object *> objects = sculpt_mode_objects(vc);
@@ -283,12 +282,7 @@ static wmOperatorStatus sculpt_mask_init_exec(bContext *C, wmOperator *op)
     BKE_sculpt_update_object_for_edit(&depsgraph, ob, false);
   }
 
-  undo::push_begin(scene, active_object, op);
-  for (Object *ob : objects) {
-    if (ob != &active_object) {
-      undo::push_begin_add_object(*ob);
-    }
-  }
+  undo::push_begin_multi_object(scene, op, objects);
 
   const InitMode mode = InitMode(RNA_enum_get(op->ptr, "mode"));
   const int seed = BLI_time_now_seconds();
@@ -297,12 +291,7 @@ static wmOperatorStatus sculpt_mask_init_exec(bContext *C, wmOperator *op)
     mask_init_object(*C, *ob, mode, seed);
   }
 
-  undo::push_end_all_ex(false, true);
-
-  for (Object *ob : objects) {
-    flush_update_done(C, *ob, UpdateType::Mask);
-    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
-  }
+  undo::finish_multi_object(C, objects, UpdateType::Mask);
 
   return OPERATOR_FINISHED;
 }

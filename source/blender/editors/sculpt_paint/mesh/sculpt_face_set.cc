@@ -574,7 +574,6 @@ static bool create_face_set_object(Depsgraph &depsgraph,
 static wmOperatorStatus create_op_exec(bContext *C, wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
-  Object &active_object = *CTX_data_active_object(C);
   Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
 
   const CreateMode mode = CreateMode(RNA_enum_get(op->ptr, "mode"));
@@ -594,12 +593,7 @@ static wmOperatorStatus create_op_exec(bContext *C, wmOperator *op)
     BKE_sculpt_update_object_for_edit(&depsgraph, ob, false);
   }
 
-  undo::push_begin(scene, active_object, op);
-  for (Object *ob : objects) {
-    if (ob != &active_object) {
-      undo::push_begin_add_object(*ob);
-    }
-  }
+  undo::push_begin_multi_object(scene, op, objects);
 
   const int next_face_set = find_shared_next_available_id(objects);
 
@@ -615,12 +609,7 @@ static wmOperatorStatus create_op_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  undo::push_end_all_ex(false, true);
-
-  for (Object *ob : objects) {
-    flush_update_done(C, *ob, UpdateType::FaceSet);
-    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
-  }
+  undo::finish_multi_object(C, objects, UpdateType::FaceSet);
 
   return OPERATOR_FINISHED;
 }
@@ -853,7 +842,6 @@ static void init_face_set_object(Object &ob, const InitMode mode, const float th
 static wmOperatorStatus init_op_exec(bContext *C, wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
-  Object &active_object = *CTX_data_active_object(C);
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
 
   const InitMode mode = InitMode(RNA_enum_get(op->ptr, "mode"));
@@ -875,12 +863,7 @@ static wmOperatorStatus init_op_exec(bContext *C, wmOperator *op)
     BKE_sculpt_update_object_for_edit(depsgraph, ob, false);
   }
 
-  undo::push_begin(scene, active_object, op);
-  for (Object *ob : objects) {
-    if (ob != &active_object) {
-      undo::push_begin_add_object(*ob);
-    }
-  }
+  undo::push_begin_multi_object(scene, op, objects);
 
   bool any_object_processed = false;
   for (Object *ob : objects) {
@@ -907,12 +890,7 @@ static wmOperatorStatus init_op_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  undo::push_end_all_ex(false, true);
-
-  for (Object *ob : objects) {
-    flush_update_done(C, *ob, UpdateType::FaceSet);
-    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
-  }
+  undo::finish_multi_object(C, objects, UpdateType::FaceSet);
 
   return OPERATOR_FINISHED;
 }
@@ -1117,12 +1095,7 @@ static wmOperatorStatus change_visibility_exec(bContext *C, wmOperator *op)
     BKE_sculpt_update_object_for_edit(&depsgraph, ob, false);
   }
 
-  undo::push_begin(scene, active_object, op);
-  for (Object *ob : objects) {
-    if (ob != &active_object) {
-      undo::push_begin_add_object(*ob);
-    }
-  }
+  undo::push_begin_multi_object(scene, op, objects);
 
   for (Object *ob : objects) {
     bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(*ob);
@@ -1942,13 +1915,9 @@ static void gesture_begin(bContext &C, wmOperator &op, gesture::GestureData &ges
     BKE_sculpt_update_object_for_edit(depsgraph, ob, false);
   }
 
-  Object *active_object = gesture_data.vc.obact;
-  undo::push_begin(scene, *active_object, &op);
-  for (Object *ob : gesture_data.objects) {
-    if (ob != active_object) {
-      undo::push_begin_add_object(*ob);
-    }
-  }
+  /* The primary (cursor) object is the first entry in `gesture_data.objects` by convention
+   * (see `sculpt_mode_objects`); `push_begin_multi_object` handles it uniformly. */
+  undo::push_begin_multi_object(scene, &op, gesture_data.objects.as_span());
 }
 
 static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMask &node_mask)
@@ -2147,12 +2116,7 @@ static void gesture_apply_for_symmetry_pass(bContext & /*C*/, gesture::GestureDa
 
 static void gesture_end(bContext &C, gesture::GestureData &gesture_data)
 {
-  undo::push_end_all_ex(false, true);
-
-  for (Object *ob : gesture_data.objects) {
-    flush_update_done(&C, *ob, UpdateType::FaceSet);
-    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, ob);
-  }
+  undo::finish_multi_object(&C, gesture_data.objects.as_span(), UpdateType::FaceSet);
 }
 
 static void init_operation(gesture::GestureData &gesture_data, wmOperator & /*op*/)

@@ -596,12 +596,7 @@ static int sculpt_color_filter_init(bContext *C, wmOperator *op)
     bke::object::pbvh_ensure(*CTX_data_ensure_evaluated_depsgraph(C), *object);
   }
 
-  undo::push_begin(scene, ob, op);
-  for (Object *object : objects) {
-    if (object != &ob) {
-      undo::push_begin_add_object(*object);
-    }
-  }
+  undo::push_begin_multi_object(scene, op, objects);
   ensure_shared_color_attributes(ob, objects);
 
   /* CTX_data_ensure_evaluated_depsgraph should be used at the end to include the potential
@@ -630,8 +625,6 @@ static int sculpt_color_filter_init(bContext *C, wmOperator *op)
 
 static wmOperatorStatus sculpt_color_filter_exec(bContext *C, wmOperator *op)
 {
-  Object &ob = *CTX_data_active_object(C);
-
   if (sculpt_color_filter_init(C, op) == OPERATOR_CANCELLED) {
     return OPERATOR_CANCELLED;
   }

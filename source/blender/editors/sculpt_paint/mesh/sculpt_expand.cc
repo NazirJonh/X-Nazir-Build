@@ -1909,6 +1909,7 @@ static void face_set_boundary_falloff_multi(const Depsgraph &depsgraph,
                                seeds,
                                expand_cache.bridge,
                                PropagationMode::Geodesic,
+                               expand_cache.geodesic_topology_cache,
                                falloffs);
   for (const int i : states.index_range()) {
     expand_cache.object_states[i].vert_falloff = std::move(falloffs[i]);
@@ -2177,6 +2178,7 @@ static void calc_falloff_from_vert_and_symmetry(const Depsgraph &depsgraph,
                                    seeds,
                                    expand_cache.bridge,
                                    mode,
+                                   expand_cache.geodesic_topology_cache,
                                    falloffs);
       for (const int i : states.index_range()) {
         expand_cache.object_states[i].vert_falloff = std::move(falloffs[i]);
@@ -4128,17 +4130,26 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
     return OPERATOR_CANCELLED;
   }
 
-  /* Initialize undo. */
-  undo::push_begin(scene, ob, op);  /* `ob` = active object, first in object_states. */
+  /* Initialize undo.
+   *
+   * If multi-object is active we use the unified #push_begin_multi_object helper (it pushes the
+   * active object first, then iterates the secondaries); the expand cache's `object_states`
+   * starts with `ob = `active object` (see #state_check), so a simple Span over its pointers
+   * (after the active-first dedup) is exactly what the helper expects. For the single-object
+   * path we keep the simple `push_begin` call -- `push_begin_multi_object` is a no-op on an
+   * empty span but adds an indirection that isn't worth it on this hot path. */
   if (expand_multi_object_active(*ss.expand_cache)) {
-    /* Every secondary object must be explicitly added to the active undo step so its ID/data are
-     * memfile-tracked and its topology saved (matches every multi-object sculpt operator, e.g.
-     * sculpt_face_set.cc). */
+    Vector<Object *> all_objects;
+    all_objects.append(&ob);
     for (const ObjectState &state : ss.expand_cache->object_states) {
       if (state.object != &ob) {
-        undo::push_begin_add_object(*state.object);
+        all_objects.append(state.object);
       }
     }
+    undo::push_begin_multi_object(scene, op, all_objects.as_span());
+  }
+  else {
+    undo::push_begin(scene, ob, op);
   }
   undo_push(*depsgraph, *ss.expand_cache);
 

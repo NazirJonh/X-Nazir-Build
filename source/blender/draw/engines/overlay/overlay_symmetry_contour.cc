@@ -35,7 +35,6 @@
 #include <cfloat>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <utility>
 
 namespace blender::draw::overlay {
@@ -526,6 +525,64 @@ void build_loops_from_segments(const Span<ContourSegment> segments,
   }
 }
 
+/**
+ * Resolve object-space vertex positions for extraction: live sculpt deformation when available,
+ * otherwise the evaluated mesh (which already reflects the edit cage in edit mode). Returns an
+ * empty span for the Edit Mode BMesh path, where the live geometry lives in `edit_bm` instead.
+ */
+Span<float3> resolve_positions(const Object &ob,
+                               const Mesh &mesh,
+                               const bke::pbvh::Tree *pbvh,
+                               const SculptSession *ss,
+                               const State &state,
+                               const BMesh *edit_bm)
+{
+  const bool sculpt_mesh = pbvh != nullptr && pbvh->type() == bke::pbvh::Type::Mesh && ss;
+  if (sculpt_mesh && !DEG_is_original(&ob)) {
+    return bke::pbvh::vert_positions_eval_from_eval(ob);
+  }
+  if (sculpt_mesh && state.depsgraph) {
+    return bke::pbvh::vert_positions_eval(*state.depsgraph, ob);
+  }
+  if (edit_bm == nullptr) {
+    return mesh.vert_positions();
+  }
+  return {};
+}
+
+/**
+ * Object-space bounds used to scale the extraction tolerances. Prefers the PBVH bounds when
+ * available to avoid scanning every vertex on heavy meshes.
+ */
+Bounds<float3> compute_object_bounds(const bke::pbvh::Tree *pbvh,
+                                     BMesh *edit_bm,
+                                     const Span<float3> positions)
+{
+  float3 bb_min(FLT_MAX);
+  float3 bb_max(-FLT_MAX);
+  if (pbvh != nullptr) {
+    const Bounds<float3> bounds = bke::pbvh::bounds_get(*pbvh);
+    bb_min = bounds.min;
+    bb_max = bounds.max;
+  }
+  else if (edit_bm != nullptr) {
+    BMVert *v;
+    BMIter viter;
+    BM_ITER_MESH (v, &viter, edit_bm, BM_VERTS_OF_MESH) {
+      const float3 p(v->co);
+      bb_min = math::min(bb_min, p);
+      bb_max = math::max(bb_max, p);
+    }
+  }
+  else {
+    for (const float3 &p : positions) {
+      bb_min = math::min(bb_min, p);
+      bb_max = math::max(bb_max, p);
+    }
+  }
+  return {bb_min, bb_max};
+}
+
 }  // namespace
 
 /** \} */
@@ -564,49 +621,12 @@ void SymmetryContour::emit_loop(const ContourLoop &loop, const float4x4 &object_
   }
 }
 
-void SymmetryContour::update_contours(const Object *ob,
-                                      const int symmetry_flags,
-                                      const State &state,
-                                      BMesh *edit_bm)
+SymmetryContour::RegenDecision SymmetryContour::compute_regen_decision(
+    const Object *ob,
+    const int symmetry_flags,
+    const bke::pbvh::Tree *pbvh,
+    const bool has_dirty_nodes) const
 {
-  if (!enabled_ || ob == nullptr || ob->data == nullptr || ob->type != OB_MESH ||
-      symmetry_flags == 0)
-  {
-    return;
-  }
-
-  /* TEMP DEBUG (#SYMCONTOUR_PERF): timing instrumentation for the sculpt-mode overlay perf
-   * investigation. Grep "SYMCONTOUR_PERF" to find/remove every line tagged by this. */
-  const auto symcontour_perf_t0 = std::chrono::steady_clock::now();
-  auto symcontour_perf_ms = [](const std::chrono::steady_clock::time_point &t0,
-                               const std::chrono::steady_clock::time_point &t1) {
-    return std::chrono::duration<double, std::milli>(t1 - t0).count();
-  };
-
-  const float4x4 object_to_world = ob->object_to_world();
-
-  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*const_cast<Object *>(ob));
-  const SculptSession *ss = ob->runtime->sculpt_session;
-  /* TEMP DEBUG (#SYMCONTOUR_PERF): kept for the perf log below only. No longer needed to gate
-   * #need_regenerate now that #has_dirty_nodes is sourced from
-   * #Tree::consume_external_positions_dirty, which stays accurate mid-stroke. */
-  const bool stroke_active = ss && ss->cache;
-  /* The BMesh path is only relevant when there is no paint BVH to draw from. */
-  if (pbvh != nullptr) {
-    edit_bm = nullptr;
-  }
-
-  IndexMaskMemory dirty_memory;
-  IndexMask dirty_nodes;
-  bool has_dirty_nodes = false;
-  if (pbvh != nullptr) {
-    /* Unlike #bke::pbvh::pbvh_positions_dirty_mask (which reads the tree's own transient
-     * #bounds_dirty_ - already cleared by the brush's #flush_bounds_to_parents call by the time
-     * this overlay runs, on essentially every stroke step), this stays precise even mid-stroke. */
-    dirty_nodes = pbvh->consume_external_positions_dirty(dirty_memory);
-    has_dirty_nodes = !dirty_nodes.is_empty();
-  }
-
   /* Edit-mode meshes have no paint BVH and thus no dirty-node signal, so geometry edits would
    * otherwise be missed by the cache. Regenerate every sync there. Texture paint also lacks a BVH
    * but cannot change geometry, so it keeps using the cache. */
@@ -633,36 +653,64 @@ void SymmetryContour::update_contours(const Object *ob,
    * stays accurate through a stroke instead of being cleared by the brush's own bookkeeping) - it
    * only fires for genuine no-detail events, e.g. undo/redo, mesh filters, or transforms. */
   const bool positions_changed_without_detail = positions_changed && !has_dirty_nodes;
-  const bool need_regenerate = contours_dirty_ || enabled_ != prev_enabled_ || object_changed ||
-                               has_dirty_nodes || edit_mode_live || topology_changed ||
-                               positions_changed_without_detail;
 
-  /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-  printf(
-      "[SYMCONTOUR_PERF] obj=%s regen=%d dirty_nodes=%d(num=%d) pos_changed=%d stroke_active=%d "
-      "obj_changed=%d topo_changed=%d edit_live=%d contours_dirty=%d pbvh_nodes=%d\n",
-      ob->id.name,
-      need_regenerate,
-      has_dirty_nodes,
-      has_dirty_nodes ? int(dirty_nodes.size()) : 0,
-      positions_changed,
-      stroke_active,
-      object_changed,
-      topology_changed,
-      edit_mode_live,
-      contours_dirty_,
-      pbvh_nodes_num);
+  RegenDecision decision;
+  decision.object_changed = object_changed;
+  decision.need_regenerate = contours_dirty_ || enabled_ != prev_enabled_ || object_changed ||
+                             has_dirty_nodes || edit_mode_live || topology_changed ||
+                             positions_changed_without_detail;
+  /* The per-node cache is only valid while editing the same object and PBVH topology. It must also
+   * be dropped for #positions_changed_without_detail: the affected nodes are unknown, so every
+   * intersecting node has to be recomputed rather than re-emitted from stale cache entries. That
+   * flag should now only fire for rare one-off events (undo/redo, filters, enabling the overlay,
+   * mesh transform), since #has_dirty_nodes stays precise through an active stroke - so paying for
+   * a full rebuild here is acceptable. When a precise dirty mask *is* available (the normal case
+   * while actively sculpting), it already pinpoints exactly which nodes to recompute, so the rest
+   * of the cache stays valid instead of being thrown away and rebuilt from scratch. */
+  decision.reset_cache = object_changed || topology_changed || positions_changed_without_detail;
+  decision.pbvh_nodes_num = pbvh_nodes_num;
+  decision.positions_count = positions_count;
+  return decision;
+}
+
+void SymmetryContour::update_contours(const Object *ob,
+                                      const int symmetry_flags,
+                                      const State &state,
+                                      BMesh *edit_bm)
+{
+  if (!enabled_ || ob == nullptr || ob->data == nullptr || ob->type != OB_MESH ||
+      symmetry_flags == 0)
+  {
+    return;
+  }
+
+  const float4x4 object_to_world = ob->object_to_world();
+
+  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*const_cast<Object *>(ob));
+  const SculptSession *ss = ob->runtime->sculpt_session;
+  /* The BMesh path is only relevant when there is no paint BVH to draw from. */
+  if (pbvh != nullptr) {
+    edit_bm = nullptr;
+  }
+
+  IndexMaskMemory dirty_memory;
+  IndexMask dirty_nodes;
+  bool has_dirty_nodes = false;
+  if (pbvh != nullptr) {
+    /* Unlike #bke::pbvh::pbvh_positions_dirty_mask (which reads the tree's own transient
+     * #bounds_dirty_ - already cleared by the brush's #flush_bounds_to_parents call by the time
+     * this overlay runs, on essentially every stroke step), this stays precise even mid-stroke. */
+    dirty_nodes = pbvh->consume_external_positions_dirty(dirty_memory);
+    has_dirty_nodes = !dirty_nodes.is_empty();
+  }
+
+  const RegenDecision decision = compute_regen_decision(ob, symmetry_flags, pbvh, has_dirty_nodes);
 
   /* Fast path: re-emit the cached contour (transformed by the current matrix) unchanged. */
-  if (!need_regenerate) {
+  if (!decision.need_regenerate) {
     for (const ContourLoop &loop : cached_contours_) {
       emit_loop(loop, object_to_world);
     }
-    /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-    printf("[SYMCONTOUR_PERF] obj=%s FASTPATH total_ms=%.3f cached_loops=%td\n",
-           ob->id.name,
-           symcontour_perf_ms(symcontour_perf_t0, std::chrono::steady_clock::now()),
-           cached_contours_.size());
     return;
   }
 
@@ -670,55 +718,21 @@ void SymmetryContour::update_contours(const Object *ob,
 
   const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*ob);
 
-  /* Resolve object-space positions: live sculpt deformation when available, otherwise the
-   * evaluated mesh (which already reflects the edit cage in edit mode). */
-  const bool sculpt_mesh = pbvh != nullptr && pbvh->type() == bke::pbvh::Type::Mesh && ss;
-  Span<float3> positions;
-  if (sculpt_mesh && !DEG_is_original(ob)) {
-    positions = bke::pbvh::vert_positions_eval_from_eval(*ob);
-  }
-  else if (sculpt_mesh && state.depsgraph) {
-    positions = bke::pbvh::vert_positions_eval(*state.depsgraph, *ob);
-  }
-  else if (edit_bm == nullptr) {
-    positions = mesh.vert_positions();
-  }
+  const Span<float3> positions = resolve_positions(*ob, mesh, pbvh, ss, state, edit_bm);
   if (positions.is_empty() && edit_bm == nullptr) {
     return;
   }
 
-  /* Object size, used to scale tolerances. Use the PBVH bounds when available to avoid scanning
-   * all vertices on heavy meshes. */
-  float3 bb_min(FLT_MAX);
-  float3 bb_max(-FLT_MAX);
-  if (pbvh != nullptr) {
-    const blender::Bounds<float3> bounds = bke::pbvh::bounds_get(*pbvh);
-    bb_min = bounds.min;
-    bb_max = bounds.max;
-  }
-  else if (edit_bm != nullptr) {
-    BMVert *v;
-    BMIter viter;
-    BM_ITER_MESH (v, &viter, edit_bm, BM_VERTS_OF_MESH) {
-      const float3 p(v->co);
-      bb_min = math::min(bb_min, p);
-      bb_max = math::max(bb_max, p);
-    }
-  }
-  else {
-    for (const float3 &p : positions) {
-      bb_min = math::min(bb_min, p);
-      bb_max = math::max(bb_max, p);
-    }
-  }
-  const float diag = math::max(math::length(bb_max - bb_min), 1e-3f);
+  /* Object size, used to scale tolerances. */
+  const Bounds<float3> bounds = compute_object_bounds(pbvh, edit_bm, positions);
+  const float diag = math::max(math::length(bounds.max - bounds.min), 1e-3f);
 
   /* Per-fragment occlusion tolerance in world units (the contour is emitted in world space and
    * the shader compares view-space depths). Scaled by the object's world-space size so it stays
    * proportional to the geometry: it absorbs the small gap where a straight contour segment cuts
    * a curved face slightly below the displayed surface, without letting genuinely back-facing
    * parts leak through. */
-  const float3 world_diag = math::transform_direction(object_to_world, bb_max - bb_min);
+  const float3 world_diag = math::transform_direction(object_to_world, bounds.max - bounds.min);
   depth_bias_ = 0.0025f * math::max(math::length(world_diag), 1e-4f);
 
   /* View frustum for PBVH-node culling. */
@@ -734,22 +748,14 @@ void SymmetryContour::update_contours(const Object *ob,
    * whatever the mesh actually costs to process. */
   constexpr double recompute_time_budget_ms = 4.0;
 
-  /* The per-node cache is only valid while editing the same object and PBVH topology. It must also
-   * be dropped for #positions_changed_without_detail: the affected nodes are unknown, so every
-   * intersecting node has to be recomputed rather than re-emitted from stale cache entries. That
-   * flag should now only fire for rare one-off events (undo/redo, filters, enabling the overlay,
-   * mesh transform), since #has_dirty_nodes stays precise through an active stroke - so paying for
-   * a full rebuild here is acceptable. When a precise dirty mask *is* available (the normal case
-   * while actively sculpting), it already pinpoints exactly which nodes to recompute, so the rest
-   * of the cache stays valid instead of being thrown away and rebuilt from scratch. */
-  const bool reset_cache = object_changed || topology_changed || positions_changed_without_detail;
-  if (reset_cache) {
+  /* Drop the whole per-node cache when it can no longer be trusted (see #compute_regen_decision
+   * for when #reset_cache fires). Otherwise a precise dirty mask pinpoints exactly which nodes to
+   * recompute, so the rest of the cache stays valid instead of being rebuilt from scratch. */
+  if (decision.reset_cache) {
     for (int axis = 0; axis < 3; axis++) {
       cached_segments_by_axis_[axis].clear();
     }
   }
-  /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-  printf("[SYMCONTOUR_PERF] obj=%s reset_cache=%d\n", ob->id.name, reset_cache);
 
   BitVector<> dirty_lookup;
   if (has_dirty_nodes) {
@@ -770,20 +776,6 @@ void SymmetryContour::update_contours(const Object *ob,
     Vector<ContourSegment> segments;
     Set<uint64_t> segment_hashes;
 
-    /* TEMP DEBUG (#SYMCONTOUR_PERF): per-axis timing/counters. */
-    const auto symcontour_perf_t_axis0 = std::chrono::steady_clock::now();
-    int symcontour_perf_nodes_total = 0;
-    int symcontour_perf_pbvh_type = -1;
-    std::atomic<int> symcontour_perf_recomputed{0};
-    std::atomic<int> symcontour_perf_cache_hit{0};
-    std::atomic<int> symcontour_perf_passed_filter{0};
-    std::atomic<int64_t> symcontour_perf_process_ns{0};
-    std::atomic<int64_t> symcontour_perf_process_faces{0};
-    auto symcontour_perf_t_after_leafnodes = symcontour_perf_t_axis0;
-    auto symcontour_perf_t_after_snapshot = symcontour_perf_t_axis0;
-    auto symcontour_perf_t_after_parallel = symcontour_perf_t_axis0;
-    auto symcontour_perf_t_after_join = symcontour_perf_t_axis0;
-
     if (pbvh != nullptr) {
       Map<int, Vector<ContourSegment>> &axis_cache = cached_segments_by_axis_[axis];
 
@@ -791,11 +783,6 @@ void SymmetryContour::update_contours(const Object *ob,
       const IndexMask node_mask = bke::pbvh::all_leaf_nodes(*pbvh, memory);
       Vector<int> node_indices(node_mask.size());
       node_mask.to_indices(node_indices.as_mutable_span());
-      symcontour_perf_nodes_total = int(node_indices.size());
-      symcontour_perf_pbvh_type = int(pbvh->type());
-
-      /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-      symcontour_perf_t_after_leafnodes = std::chrono::steady_clock::now();
 
       /* Snapshot of the cached segments, indexed by node id, for lock-free lookup during the
        * parallel loop below: #axis_cache itself is only mutated afterwards - in the single-
@@ -808,9 +795,6 @@ void SymmetryContour::update_contours(const Object *ob,
           }
         });
       }
-
-      /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-      symcontour_perf_t_after_snapshot = std::chrono::steady_clock::now();
 
       const auto recompute_deadline =
           std::chrono::steady_clock::now() +
@@ -827,7 +811,7 @@ void SymmetryContour::update_contours(const Object *ob,
           local_new_cache_ts;
 
       auto node_needs_recompute = [&](const int n) {
-        if (object_changed) {
+        if (decision.object_changed) {
           return true;
         }
         if (has_dirty_nodes && dirty_lookup[n]) {
@@ -836,116 +820,83 @@ void SymmetryContour::update_contours(const Object *ob,
         return cache_snapshot[n] == nullptr;
       };
 
+      /* Shared per-node traversal for every PBVH type. Each leaf node is culled against the plane
+       * and the view frustum, then either recomputed (subject to the per-frame time budget) or
+       * re-used from the cache. Only the leaf-node type, the grain size and the extraction callback
+       * differ between Mesh, BMesh and Grids; `extra_recompute` forces recompute regardless of the
+       * dirty state (used by Grids when the CCG coordinates are dirty). */
+      auto process_nodes = [&](auto nodes,
+                               const int64_t grain_size,
+                               const bool extra_recompute,
+                               auto &&extract) {
+        threading::parallel_for(
+            node_indices.index_range(), grain_size, [&](const IndexRange range) {
+              Vector<ContourSegment> &local_segments = local_segments_ts.local();
+              for (const int n : node_indices.as_span().slice(range)) {
+                const auto &node = nodes[n];
+                if (!aabb_intersects_plane(node.bounds(), plane)) {
+                  continue;
+                }
+                if (use_frustum_cull) {
+                  const blender::Bounds<float3> world_bounds =
+                      blender::bounds::transform_bounds<float, 4>(object_to_world, node.bounds());
+                  if (isect_aabb_planes_v3(
+                          frustum_planes, frustum_plane_len, world_bounds.min, world_bounds.max) ==
+                      ISECT_AABB_PLANE_BEHIND_ANY)
+                  {
+                    continue;
+                  }
+                }
+                if (node_needs_recompute(n) || extra_recompute) {
+                  /* Never throttle a full rebuild (#reset_cache): every intersecting node is
+                   * already missing from the cache in that case, so spreading the one-off cost over
+                   * many frames only multiplies the fixed per-frame leaf-walk overhead instead of
+                   * paying it once. Throttling only matters for the incremental case, where a live
+                   * stroke could otherwise dirty an unexpectedly large number of nodes in a single
+                   * step. */
+                  if (!decision.reset_cache &&
+                      (recompute_budget_exhausted.load(std::memory_order_relaxed) ||
+                       std::chrono::steady_clock::now() >= recompute_deadline))
+                  {
+                    recompute_budget_exhausted.store(true, std::memory_order_relaxed);
+                    pending_dirty_nodes.store(true, std::memory_order_relaxed);
+                    continue;
+                  }
+                  Vector<ContourSegment> node_segments;
+                  Set<uint64_t> local_hashes;
+                  extract(node, node_segments, local_hashes);
+                  local_segments.extend(node_segments);
+                  local_new_cache_ts.local().append_as(n, std::move(node_segments));
+                }
+                else if (const Vector<ContourSegment> *cached = cache_snapshot[n]) {
+                  local_segments.extend(*cached);
+                }
+              }
+            });
+      };
+
       switch (pbvh->type()) {
         case bke::pbvh::Type::Mesh: {
-          const Span<bke::pbvh::MeshNode> nodes = pbvh->nodes<bke::pbvh::MeshNode>();
-          threading::parallel_for(node_indices.index_range(), 256, [&](const IndexRange range) {
-            Vector<ContourSegment> &local_segments = local_segments_ts.local();
-            for (const int n : node_indices.as_span().slice(range)) {
-              const bke::pbvh::MeshNode &node = nodes[n];
-              if (!aabb_intersects_plane(node.bounds(), plane)) {
-                continue;
-              }
-              if (use_frustum_cull) {
-                const blender::Bounds<float3> world_bounds =
-                    blender::bounds::transform_bounds<float, 4>(object_to_world, node.bounds());
-                if (isect_aabb_planes_v3(
-                        frustum_planes, frustum_plane_len, world_bounds.min, world_bounds.max) ==
-                    ISECT_AABB_PLANE_BEHIND_ANY)
-                {
-                  continue;
-                }
-              }
-              /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-              symcontour_perf_passed_filter.fetch_add(1, std::memory_order_relaxed);
-              if (node_needs_recompute(n)) {
-                /* Never throttle a full rebuild (#reset_cache): every intersecting node is
-                 * already missing from the cache in that case, so spreading the one-off cost
-                 * over many frames only multiplies the fixed per-frame leaf-walk overhead instead
-                 * of paying it once. Throttling only matters for the incremental case, where a
-                 * live stroke could otherwise dirty an unexpectedly large number of nodes in a
-                 * single step. */
-                if (!reset_cache &&
-                    (recompute_budget_exhausted.load(std::memory_order_relaxed) ||
-                     std::chrono::steady_clock::now() >= recompute_deadline))
-                {
-                  recompute_budget_exhausted.store(true, std::memory_order_relaxed);
-                  pending_dirty_nodes.store(true, std::memory_order_relaxed);
-                  continue;
-                }
-                Vector<ContourSegment> node_segments;
-                Set<uint64_t> local_hashes;
-                /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-                const auto symcontour_perf_t_proc0 = std::chrono::steady_clock::now();
-                process_pbvh_mesh(positions, mesh, node, plane, node_segments, local_hashes);
-                symcontour_perf_process_ns.fetch_add(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - symcontour_perf_t_proc0)
-                        .count(),
-                    std::memory_order_relaxed);
-                symcontour_perf_process_faces.fetch_add(node.faces().size(),
-                                                        std::memory_order_relaxed);
-                local_segments.extend(node_segments);
-                local_new_cache_ts.local().append_as(n, std::move(node_segments));
-                symcontour_perf_recomputed.fetch_add(1, std::memory_order_relaxed);
-              }
-              else if (const Vector<ContourSegment> *cached = cache_snapshot[n]) {
-                local_segments.extend(*cached);
-                symcontour_perf_cache_hit.fetch_add(1, std::memory_order_relaxed);
-              }
-            }
-          });
+          process_nodes(pbvh->nodes<bke::pbvh::MeshNode>(),
+                        256,
+                        false,
+                        [&](const bke::pbvh::MeshNode &node,
+                            Vector<ContourSegment> &node_segments,
+                            Set<uint64_t> &local_hashes) {
+                          process_pbvh_mesh(
+                              positions, mesh, node, plane, node_segments, local_hashes);
+                        });
           break;
         }
         case bke::pbvh::Type::BMesh: {
-          const Span<bke::pbvh::BMeshNode> nodes = pbvh->nodes<bke::pbvh::BMeshNode>();
-          threading::parallel_for(node_indices.index_range(), 256, [&](const IndexRange range) {
-            Vector<ContourSegment> &local_segments = local_segments_ts.local();
-            for (const int n : node_indices.as_span().slice(range)) {
-              const bke::pbvh::BMeshNode &node = nodes[n];
-              if (!aabb_intersects_plane(node.bounds(), plane)) {
-                continue;
-              }
-              if (use_frustum_cull) {
-                const blender::Bounds<float3> world_bounds =
-                    blender::bounds::transform_bounds<float, 4>(object_to_world, node.bounds());
-                if (isect_aabb_planes_v3(
-                        frustum_planes, frustum_plane_len, world_bounds.min, world_bounds.max) ==
-                    ISECT_AABB_PLANE_BEHIND_ANY)
-                {
-                  continue;
-                }
-              }
-              /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-              symcontour_perf_passed_filter.fetch_add(1, std::memory_order_relaxed);
-              if (node_needs_recompute(n)) {
-                /* Never throttle a full rebuild (#reset_cache): every intersecting node is
-                 * already missing from the cache in that case, so spreading the one-off cost
-                 * over many frames only multiplies the fixed per-frame leaf-walk overhead instead
-                 * of paying it once. Throttling only matters for the incremental case, where a
-                 * live stroke could otherwise dirty an unexpectedly large number of nodes in a
-                 * single step. */
-                if (!reset_cache &&
-                    (recompute_budget_exhausted.load(std::memory_order_relaxed) ||
-                     std::chrono::steady_clock::now() >= recompute_deadline))
-                {
-                  recompute_budget_exhausted.store(true, std::memory_order_relaxed);
-                  pending_dirty_nodes.store(true, std::memory_order_relaxed);
-                  continue;
-                }
-                Vector<ContourSegment> node_segments;
-                Set<uint64_t> local_hashes;
-                process_pbvh_bmesh(node, plane, node_segments, local_hashes);
-                local_segments.extend(node_segments);
-                local_new_cache_ts.local().append_as(n, std::move(node_segments));
-                symcontour_perf_recomputed.fetch_add(1, std::memory_order_relaxed);
-              }
-              else if (const Vector<ContourSegment> *cached = cache_snapshot[n]) {
-                local_segments.extend(*cached);
-                symcontour_perf_cache_hit.fetch_add(1, std::memory_order_relaxed);
-              }
-            }
-          });
+          process_nodes(pbvh->nodes<bke::pbvh::BMeshNode>(),
+                        256,
+                        false,
+                        [&](const bke::pbvh::BMeshNode &node,
+                            Vector<ContourSegment> &node_segments,
+                            Set<uint64_t> &local_hashes) {
+                          process_pbvh_bmesh(node, plane, node_segments, local_hashes);
+                        });
           break;
         }
         case bke::pbvh::Type::Grids: {
@@ -954,61 +905,18 @@ void SymmetryContour::update_contours(const Object *ob,
           }
           const SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
           const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
-          const bool coords_dirty = subdiv_ccg.dirty.coords;
-          const Span<bke::pbvh::GridsNode> nodes = pbvh->nodes<bke::pbvh::GridsNode>();
-          threading::parallel_for(node_indices.index_range(), 1, [&](const IndexRange range) {
-            Vector<ContourSegment> &local_segments = local_segments_ts.local();
-            for (const int n : node_indices.as_span().slice(range)) {
-              const bke::pbvh::GridsNode &node = nodes[n];
-              if (!aabb_intersects_plane(node.bounds(), plane)) {
-                continue;
-              }
-              if (use_frustum_cull) {
-                const blender::Bounds<float3> world_bounds =
-                    blender::bounds::transform_bounds<float, 4>(object_to_world, node.bounds());
-                if (isect_aabb_planes_v3(
-                        frustum_planes, frustum_plane_len, world_bounds.min, world_bounds.max) ==
-                    ISECT_AABB_PLANE_BEHIND_ANY)
-                {
-                  continue;
-                }
-              }
-              /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-              symcontour_perf_passed_filter.fetch_add(1, std::memory_order_relaxed);
-              if (node_needs_recompute(n) || coords_dirty) {
-                /* Never throttle a full rebuild (#reset_cache): every intersecting node is
-                 * already missing from the cache in that case, so spreading the one-off cost
-                 * over many frames only multiplies the fixed per-frame leaf-walk overhead instead
-                 * of paying it once. Throttling only matters for the incremental case, where a
-                 * live stroke could otherwise dirty an unexpectedly large number of nodes in a
-                 * single step. */
-                if (!reset_cache &&
-                    (recompute_budget_exhausted.load(std::memory_order_relaxed) ||
-                     std::chrono::steady_clock::now() >= recompute_deadline))
-                {
-                  recompute_budget_exhausted.store(true, std::memory_order_relaxed);
-                  pending_dirty_nodes.store(true, std::memory_order_relaxed);
-                  continue;
-                }
-                Vector<ContourSegment> node_segments;
-                Set<uint64_t> local_hashes;
-                process_pbvh_grids(subdiv_ccg, key, node, plane, node_segments, local_hashes);
-                local_segments.extend(node_segments);
-                local_new_cache_ts.local().append_as(n, std::move(node_segments));
-                symcontour_perf_recomputed.fetch_add(1, std::memory_order_relaxed);
-              }
-              else if (const Vector<ContourSegment> *cached = cache_snapshot[n]) {
-                local_segments.extend(*cached);
-                symcontour_perf_cache_hit.fetch_add(1, std::memory_order_relaxed);
-              }
-            }
-          });
+          process_nodes(pbvh->nodes<bke::pbvh::GridsNode>(),
+                        1,
+                        subdiv_ccg.dirty.coords,
+                        [&](const bke::pbvh::GridsNode &node,
+                            Vector<ContourSegment> &node_segments,
+                            Set<uint64_t> &local_hashes) {
+                          process_pbvh_grids(
+                              subdiv_ccg, key, node, plane, node_segments, local_hashes);
+                        });
           break;
         }
       }
-
-      /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-      symcontour_perf_t_after_parallel = std::chrono::steady_clock::now();
 
       /* Join: fold the per-thread results into the shared containers. #axis_cache is mutated
        * here only, single-threaded, after every reader of #cache_snapshot above has finished, so
@@ -1029,9 +937,6 @@ void SymmetryContour::update_contours(const Object *ob,
       if (pending_dirty_nodes.load(std::memory_order_relaxed)) {
         pending_dirty = true;
       }
-
-      /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-      symcontour_perf_t_after_join = std::chrono::steady_clock::now();
     }
 
     /* No paint BVH (edit / texture paint): extract from the full mesh. */
@@ -1043,9 +948,6 @@ void SymmetryContour::update_contours(const Object *ob,
         add_full_mesh_segments(mesh, positions, plane, segments, segment_hashes);
       }
     }
-
-    /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-    const auto symcontour_perf_t_after_walk = std::chrono::steady_clock::now();
 
     Vector<ContourLoop> axis_loops;
     build_loops_from_segments(segments, plane, axis_loops);
@@ -1062,9 +964,6 @@ void SymmetryContour::update_contours(const Object *ob,
       }
     }
 
-    /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-    const auto symcontour_perf_t_after_build = std::chrono::steady_clock::now();
-
     /* Screen-space decimation (operates in object space; persmat folds in the model matrix). */
     if (state.rv3d && state.region) {
       const float4x4 persmat = float4x4(state.rv3d->persmat) * object_to_world;
@@ -1078,47 +977,16 @@ void SymmetryContour::update_contours(const Object *ob,
       emit_loop(loop, object_to_world);
     }
 
-    /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-    printf(
-        "[SYMCONTOUR_PERF] obj=%s axis=%d pbvh_type=%d nodes=%d passed_filter=%d recomputed=%d "
-        "cache_hit=%d proc_faces=%lld proc_ms=%.3f segments=%td loops=%td leafnodes_ms=%.3f "
-        "snapshot_ms=%.3f parallel_ms=%.3f join_ms=%.3f fullmesh_ms=%.3f build_ms=%.3f "
-        "tail_ms=%.3f pending_dirty=%d\n",
-        ob->id.name,
-        axis,
-        symcontour_perf_pbvh_type,
-        symcontour_perf_nodes_total,
-        symcontour_perf_passed_filter.load(std::memory_order_relaxed),
-        symcontour_perf_recomputed.load(std::memory_order_relaxed),
-        symcontour_perf_cache_hit.load(std::memory_order_relaxed),
-        static_cast<long long>(symcontour_perf_process_faces.load(std::memory_order_relaxed)),
-        double(symcontour_perf_process_ns.load(std::memory_order_relaxed)) / 1.0e6,
-        segments.size(),
-        axis_loops.size(),
-        symcontour_perf_ms(symcontour_perf_t_axis0, symcontour_perf_t_after_leafnodes),
-        symcontour_perf_ms(symcontour_perf_t_after_leafnodes, symcontour_perf_t_after_snapshot),
-        symcontour_perf_ms(symcontour_perf_t_after_snapshot, symcontour_perf_t_after_parallel),
-        symcontour_perf_ms(symcontour_perf_t_after_parallel, symcontour_perf_t_after_join),
-        symcontour_perf_ms(symcontour_perf_t_after_join, symcontour_perf_t_after_walk),
-        symcontour_perf_ms(symcontour_perf_t_after_walk, symcontour_perf_t_after_build),
-        symcontour_perf_ms(symcontour_perf_t_after_build, std::chrono::steady_clock::now()),
-        pending_dirty);
-
     cached_contours_.extend(std::move(axis_loops));
   }
-
-  /* TEMP DEBUG (#SYMCONTOUR_PERF). */
-  printf("[SYMCONTOUR_PERF] obj=%s TOTAL total_ms=%.3f\n",
-         ob->id.name,
-         symcontour_perf_ms(symcontour_perf_t0, std::chrono::steady_clock::now()));
 
   /* Recompute next frame if the per-frame budget left dirty nodes unprocessed. */
   contours_dirty_ = pending_dirty;
   prev_enabled_ = enabled_;
   prev_object_ = ob;
   prev_symmetry_flags_ = symmetry_flags;
-  prev_pbvh_nodes_num_ = pbvh_nodes_num;
-  prev_positions_count_ = positions_count;
+  prev_pbvh_nodes_num_ = decision.pbvh_nodes_num;
+  prev_positions_count_ = decision.positions_count;
 }
 
 void SymmetryContour::end_sync(PassSimple::Sub &pass)

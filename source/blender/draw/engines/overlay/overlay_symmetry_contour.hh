@@ -143,6 +143,26 @@ class SymmetryContour {
   float depth_bias_ = 0.0f;
   bool enabled_ = false;
 
+  /**
+   * Outcome of the per-frame change detection: whether anything moved since the last build and,
+   * if so, how much of the cache survives. Carries the fresh #prev_pbvh_nodes_num_ /
+   * #prev_positions_count_ values back so #update_contours can store them after the rebuild.
+   */
+  struct RegenDecision {
+    bool need_regenerate;
+    /** Object or symmetry flags changed: every node must be recomputed from scratch. */
+    bool object_changed;
+    /** The whole per-node segment cache is stale and must be dropped before rebuilding. */
+    bool reset_cache;
+    int pbvh_nodes_num;
+    int64_t positions_count;
+  };
+  /** Decide whether (and how much of) the contour needs rebuilding this frame. */
+  RegenDecision compute_regen_decision(const Object *ob,
+                                       int symmetry_flags,
+                                       const bke::pbvh::Tree *pbvh,
+                                       bool has_dirty_nodes) const;
+
   /** Transform an object-space contour to world space and append it to the line buffer. */
   void emit_loop(const ContourLoop &loop, const float4x4 &object_to_world);
 

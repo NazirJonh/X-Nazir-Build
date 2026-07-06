@@ -28,6 +28,7 @@
 #include "gpu_shader_create_info.hh"
 
 #include "../select/select_instance.hh"
+
 #include "overlay_shader_shared.hh"
 
 #include "draw_common.hh"
@@ -507,6 +508,7 @@ class ShaderModule {
   StaticShader sculpt_curves = shader_clippable("overlay_sculpt_curves_selection");
   StaticShader sculpt_curves_cage = shader_clippable("overlay_sculpt_curves_cage");
   StaticShader sculpt_mesh = shader_clippable("overlay_sculpt_mask");
+  StaticShader sculpt_symmetry_plane = shader_clippable("overlay_sculpt_symmetry_plane");
   StaticShader uniform_color = shader_clippable("overlay_uniform_color");
   StaticShader uv_analysis_stretch_angle = {"overlay_edit_uv_stretching_angle"};
   StaticShader uv_analysis_stretch_area = {"overlay_edit_uv_stretching_area"};
@@ -539,6 +541,8 @@ class ShaderModule {
   StaticShader extra_shape = shader_selectable("overlay_extra");
   StaticShader extra_point = shader_selectable("overlay_extra_point");
   StaticShader extra_wire = shader_selectable("overlay_extra_wire");
+  /* Контур не нужен в режиме выделения, берем обычный шейдер без selectable-варианта. */
+  StaticShader extra_wire_contour = shader_clippable("overlay_extra_wire_contour");
   StaticShader extra_wire_object = shader_selectable("overlay_extra_wire_object");
   StaticShader extra_loose_points = shader_selectable("overlay_extra_loose_point");
   StaticShader extra_grid = shader_selectable("overlay_extra_grid");
@@ -719,6 +723,7 @@ struct Resources : public select::SelectMap {
     shaders->extra_shape.ensure_compile_async();
     shaders->extra_wire_object.ensure_compile_async();
     shaders->extra_wire.ensure_compile_async();
+    shaders->extra_wire_contour.ensure_compile_async();
     shaders->fluid_grid_lines_flags.ensure_compile_async();
     shaders->fluid_grid_lines_flat.ensure_compile_async();
     shaders->fluid_grid_lines_range.ensure_compile_async();
@@ -755,6 +760,10 @@ struct Resources : public select::SelectMap {
     shaders->particle_hair.ensure_compile_async();
     shaders->particle_shape.ensure_compile_async();
     shaders->pointcloud_points.ensure_compile_async();
+    shaders->sculpt_curves.ensure_compile_async();
+    shaders->sculpt_curves_cage.ensure_compile_async();
+    shaders->sculpt_mesh.ensure_compile_async();
+    shaders->sculpt_symmetry_plane.ensure_compile_async();
     shaders->uniform_color.ensure_compile_async();
     shaders->wireframe_curve.ensure_compile_async();
     shaders->wireframe_mesh.ensure_compile_async();

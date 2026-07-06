@@ -110,6 +110,7 @@ enum ThemeColorID {
   TH_FACE_SELECT, /* Stands for face selection, not face select mode. */
   TH_FACE_MODE_SELECT,
   TH_FACE_RETOPOLOGY,
+  TH_SCULPT_SYMMETRY_CONTOUR,
   TH_FACE_BACK,
   TH_FACE_FRONT,
   TH_NORMAL,

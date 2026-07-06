@@ -278,6 +278,7 @@ set(SRC
   engines/overlay/overlay_private.hh
   engines/overlay/overlay_relation.hh
   engines/overlay/overlay_sculpt.hh
+  engines/overlay/overlay_symmetry_contour.cc
   engines/overlay/overlay_speaker.hh
   engines/overlay/overlay_text.hh
   engines/overlay/overlay_wireframe.hh
@@ -726,6 +727,8 @@ set(GLSL_SRC
   engines/overlay/shaders/overlay_sculpt_curves_selection_vert.glsl
   engines/overlay/shaders/overlay_sculpt_mask_frag.glsl
   engines/overlay/shaders/overlay_sculpt_mask_vert.glsl
+  engines/overlay/shaders/overlay_sculpt_symmetry_plane.bsl.hh
+  engines/overlay/shaders/overlay_symmetry_contour.bsl.hh
   engines/overlay/shaders/overlay_uniform_color_frag.glsl
   engines/overlay/shaders/overlay_varying_color.glsl
   engines/overlay/shaders/overlay_viewer_attribute_curve_vert.glsl

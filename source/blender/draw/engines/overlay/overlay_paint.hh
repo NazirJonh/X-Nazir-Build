@@ -18,12 +18,13 @@
 #include "draw_cache_impl.hh"
 
 #include "overlay_base.hh"
+#include "overlay_symmetry_contour.hh"
 
 namespace blender::draw::overlay {
 
 /**
- * Display paint modes overlays.
- * Covers weight paint, vertex paint and texture paint.
+ * Display paint mode overlays.
+ * Covers weight paint, vertex paint and texture paint, plus the symmetry contour.
  */
 class Paints : Overlay {
 
@@ -42,17 +43,41 @@ class Paints : Overlay {
   /* Black and white mask overlayed on top of mesh to preview painting influence. */
   PassSimple paint_mask_ps_ = {"paint_mask_ps_"};
 
-  bool show_weight_ = false;
   bool show_wires_ = false;
   bool show_paint_mask_ = false;
   bool masked_transparency_support_ = false;
+  bool show_symmetry_contour_ = false;
+  /* Effective paint context mode, falling back to the object mode when the global context mode
+   * doesn't match (e.g. during certain mode transitions). */
+  int paint_ctx_mode_ = -1;
+  SymmetryContourOverlay symmetry_contour_ = {SelectionType::DISABLED, "PaintSymmetryContour"};
 
  public:
   void begin_sync(Resources &res, const State &state) final
   {
-    enabled_ =
-        state.is_space_v3d() && !res.is_selection() &&
-        ELEM(state.ctx_mode, CTX_MODE_PAINT_WEIGHT, CTX_MODE_PAINT_VERTEX, CTX_MODE_PAINT_TEXTURE);
+    paint_ctx_mode_ = state.ctx_mode;
+    const int ob_mode = state.object_active ? state.object_active->mode : 0;
+    const bool is_paint_ctx = ELEM(
+        state.ctx_mode, CTX_MODE_PAINT_WEIGHT, CTX_MODE_PAINT_VERTEX, CTX_MODE_PAINT_TEXTURE);
+    if (!is_paint_ctx &&
+        (ob_mode & (OB_MODE_WEIGHT_PAINT | OB_MODE_VERTEX_PAINT | OB_MODE_TEXTURE_PAINT)))
+    {
+      if (ob_mode & OB_MODE_WEIGHT_PAINT) {
+        paint_ctx_mode_ = CTX_MODE_PAINT_WEIGHT;
+      }
+      else if (ob_mode & OB_MODE_VERTEX_PAINT) {
+        paint_ctx_mode_ = CTX_MODE_PAINT_VERTEX;
+      }
+      else if (ob_mode & OB_MODE_TEXTURE_PAINT) {
+        paint_ctx_mode_ = CTX_MODE_PAINT_TEXTURE;
+      }
+    }
+
+    enabled_ = state.is_space_v3d() && !res.is_selection() &&
+               ELEM(paint_ctx_mode_,
+                    CTX_MODE_PAINT_WEIGHT,
+                    CTX_MODE_PAINT_VERTEX,
+                    CTX_MODE_PAINT_TEXTURE);
 
     /* Init in any case to release the data. */
     paint_region_ps_.init();
@@ -60,11 +85,20 @@ class Paints : Overlay {
     paint_mask_ps_.init();
 
     if (!enabled_) {
+      show_symmetry_contour_ = false;
+      symmetry_contour_.begin_sync(res, state, false);
       return;
     }
 
-    show_weight_ = state.ctx_mode == CTX_MODE_PAINT_WEIGHT;
     show_wires_ = state.overlay.paint_flag & V3D_OVERLAY_PAINT_WIRE;
+    show_symmetry_contour_ = !state.is_wire() && !state.is_depth_only_drawing &&
+                             ((paint_ctx_mode_ == CTX_MODE_PAINT_WEIGHT &&
+                               state.overlay.show_weight_paint_symmetry_contour) ||
+                              (paint_ctx_mode_ == CTX_MODE_PAINT_VERTEX &&
+                               state.overlay.show_vertex_paint_symmetry_contour) ||
+                              (paint_ctx_mode_ == CTX_MODE_PAINT_TEXTURE &&
+                               state.overlay.show_texture_paint_symmetry_contour));
+    symmetry_contour_.begin_sync(res, state, show_symmetry_contour_);
 
     {
       auto &pass = paint_region_ps_;
@@ -96,7 +130,7 @@ class Paints : Overlay {
       }
     }
 
-    if (state.ctx_mode == CTX_MODE_PAINT_WEIGHT) {
+    if (paint_ctx_mode_ == CTX_MODE_PAINT_WEIGHT) {
       /* Support masked transparency in Workbench.
        * EEVEE can't be supported since depth won't match. */
       const eDrawType shading_type = eDrawType(state.v3d->shading.type);
@@ -131,7 +165,7 @@ class Paints : Overlay {
           DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_EQUAL | DRW_STATE_BLEND_ALPHA);
     }
 
-    if (state.ctx_mode == CTX_MODE_PAINT_TEXTURE) {
+    if (paint_ctx_mode_ == CTX_MODE_PAINT_TEXTURE) {
       const ImagePaintSettings &paint_settings = state.scene->toolsettings->imapaint;
       show_paint_mask_ = paint_settings.stencil &&
                          (paint_settings.flag & IMAGEPAINT_PROJECT_LAYER_STENCIL);
@@ -161,40 +195,47 @@ class Paints : Overlay {
                    Resources & /*res*/,
                    const State &state) final
   {
-    if (!enabled_) {
+    if (!enabled_ || ob_ref.object->type != OB_MESH) {
+      /* Only meshes are supported. */
       return;
     }
 
-    if (ob_ref.object->type != OB_MESH) {
-      /* Only meshes are supported for now. */
-      return;
-    }
+    /* Read symmetry from the original object, not the evaluated copy: `use_mesh_mirror_*`
+     * (see rna_object.cc) only sends a redraw notifier and never tags the mesh for depsgraph
+     * re-evaluation, so the evaluated copy can go stale until something else forces a geometry
+     * recalc (Vertex/Weight Paint strokes do; Texture Paint never touches geometry, so it never
+     * refreshes and stays stuck with the symmetry flags from the last real recalc). Sculpt
+     * overlay already does the same for the same reason, see overlay_sculpt.hh. */
+    const Object *ob_orig = DEG_get_original(ob_ref.object);
+    const Mesh &mesh_orig = DRW_object_get_data_for_drawing<Mesh>(*ob_orig);
+    /* 3D paint symmetry follows the mesh symmetry flags (see paint_image_proj.cc). */
+    const int symmetry_flags = symmetry_flags_from_mesh_symmetry(mesh_orig.symmetry);
 
-    switch (state.ctx_mode) {
+    switch (paint_ctx_mode_) {
       case CTX_MODE_PAINT_WEIGHT:
         if (ob_ref.object->mode != OB_MODE_WEIGHT_PAINT) {
-          /* Not matching context mode. */
           return;
         }
         break;
       case CTX_MODE_PAINT_VERTEX:
         if (ob_ref.object->mode != OB_MODE_VERTEX_PAINT) {
-          /* Not matching context mode. */
           return;
         }
         break;
       case CTX_MODE_PAINT_TEXTURE:
         if (ob_ref.object->mode != OB_MODE_TEXTURE_PAINT) {
-          /* Not matching context mode. */
           return;
         }
         break;
       default:
-        /* Not in paint mode. */
         return;
     }
 
-    switch (state.ctx_mode) {
+    if (show_symmetry_contour_) {
+      symmetry_contour_.object_sync(ob_ref.object, symmetry_flags, state);
+    }
+
+    switch (paint_ctx_mode_) {
       case CTX_MODE_PAINT_WEIGHT: {
         gpu::Batch *geom = DRW_cache_mesh_surface_weights_get(ob_ref.object);
         if (masked_transparency_support_ && ob_ref.object->dt >= OB_SOLID) {
@@ -230,7 +271,7 @@ class Paints : Overlay {
       const bool use_vert_selection = (mesh_orig.editflag & ME_EDIT_PAINT_VERT_SEL);
       /* Texture paint mode only draws the face selection without wires or vertices as we don't
        * draw on the geometry data directly. */
-      const bool in_texture_paint_mode = state.ctx_mode == CTX_MODE_PAINT_TEXTURE;
+      const bool in_texture_paint_mode = paint_ctx_mode_ == CTX_MODE_PAINT_TEXTURE;
 
       if ((use_face_selection || show_wires_) && !in_texture_paint_mode) {
         gpu::Batch *geom = DRW_cache_mesh_paint_overlay_edges_get(ob_ref.object);
@@ -259,6 +300,22 @@ class Paints : Overlay {
     /* TODO(fclem): Draw this onto the line frame-buffer to get wide-line and anti-aliasing.
      * Just need to make sure the shaders output line data. */
     manager.submit(paint_region_ps_, view);
+  }
+
+  void draw_line(Framebuffer &framebuffer, Manager &manager, View &view) final
+  {
+    if (!enabled_) {
+      return;
+    }
+    symmetry_contour_.draw_line(framebuffer, manager, view);
+  }
+
+  void end_sync(Resources & /*res*/, const State & /*state*/) final
+  {
+    if (!enabled_) {
+      return;
+    }
+    symmetry_contour_.end_sync();
   }
 };
 

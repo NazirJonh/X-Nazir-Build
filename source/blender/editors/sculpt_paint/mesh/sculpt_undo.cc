@@ -57,7 +57,6 @@
 #include "BKE_global.hh"
 #include "BKE_key.hh"
 #include "BKE_layer.hh"
-#include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_multires.hh"
@@ -211,23 +210,20 @@ struct StepData {
    */
   Type type = Type::None;
 
-  /** Name of the object associated with this undo data (`object.id.name`). Kept for human-readable
-   * identification and as a last-ditch fallback lookup for steps recorded before
-   * #object_session_uid was populated. The primary lookup key (see #get_step_data and
-   * #find_object_for_step) is #object_session_uid. */
-  std::string object_name;
-
-  /** Session-stable unique ID (`ID.session_uid`). Used as the primary lookup key for
-   * routing undo data to the right object on lookup and on undo/redo restore, because
-   * #object_name is only unique within a single #Library. Two #Object instances from
-   * different linked libraries (or one local + one linked with the same name) share the
-   * name but have distinct `session_uid` values; without this, undo data for one mesh
-   * could silently be applied to another at restore time.
-   *
-   * Left at 0 for unreachable paths (synthetic steps, unit tests with no Main). The
-   * lookup falls back to #object_name when this is 0 so old undo steps remain valid.
-   */
-  uint32_t object_session_uid = 0;
+  /**
+   * The object this undo data belongs to. Standard Blender undo-system object reference (see
+   * `editmesh_undo.cc`'s `obedit_ref` for the same pattern): #ptr is a LIVE pointer only while
+   * this step is being built (`ustack->step_init`, from #push_begin to #push_end_all_ex), safe to
+   * compare/dereference directly during that window (see #get_step_data). Once the step is
+   * committed, the generic undo system (#register_type's `step_foreach_ID_ref`) clears #ptr to
+   * null and serializes `name` + `library_filepath_abs` instead, then re-resolves #ptr fresh from
+   * the current #Main immediately before every later `step_decode` (undo/redo) -- this is what
+   * lets undo data survive object rename and correctly distinguish same-named objects from
+   * different libraries, unlike a raw `id.name` string compare (which is only unique within a
+   * single #Library). #ptr may be null after a resolve if the object was since deleted or could
+   * not be found in the current #Main -- callers must null-check before dereferencing.
+   * See `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 2.1. */
+  UndoRefID_Object object_ref = {};
 
   /** Name of the object's active shape key when the undo step was created. */
   std::string active_shape_key_name;
@@ -579,25 +575,18 @@ static bool sculpt_step_should_push(const SculptUndoStep &us)
 }
 
 /**
- * Primary key is #ID.session_uid -- unique per-ID across linked libraries / same-name
- * duplicates. Falls back to #ID.name comparison for steps recorded before
- * #StepData.object_session_uid was populated (and when session_uid is the (unused) 0
- * sentinel). Without this check, two #Object instances from different libraries sharing a
- * name would silently route each other's undo data. See
- * `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 2.1.
+ * Compares #StepData.object_ref.ptr directly against `&ob`. Safe ONLY while the step is still
+ * being built (`ustack->step_init`): #object_ref.ptr is a live pointer from creation
+ * (#get_step_data below) until the step is committed, at which point the generic undo system
+ * clears it to null (see #StepData.object_ref's doc-comment) -- #find_step_data is never called
+ * after that point, since #get_step_data only ever operates on the in-progress init step.
  *
  * Caller must hold at least a shared lock on #objects_data_mutex.
  */
 static StepData *find_step_data(SculptUndoStep &us, const Object &ob)
 {
-  const uint32_t ob_session_uid = ob.id.session_uid;
   for (std::unique_ptr<StepData> &sd : us.objects_data) {
-    if (sd->object_session_uid != 0 && sd->object_session_uid == ob_session_uid) {
-      return sd.get();
-    }
-  }
-  for (std::unique_ptr<StepData> &sd : us.objects_data) {
-    if (sd->object_session_uid == 0 && sd->object_name == ob.id.name) {
+    if (sd->object_ref.ptr == &ob) {
       return sd.get();
     }
   }
@@ -644,41 +633,8 @@ static StepData *get_step_data(const Object &ob)
 
   us->objects_data.append(std::make_unique<StepData>());
   StepData &sd = *us->objects_data.last();
-  sd.object_name = ob.id.name;
-  sd.object_session_uid = ob.id.session_uid;
+  sd.object_ref.ptr = &const_cast<Object &>(ob);
   return &sd;
-}
-
-/**
- * Locate the #Object in `bmain` that owns the undo data stored in `sd`. Prefers the
- * session-stable `session_uid` (the only safe key when same-named objects come from different
- * linked libraries, or when a local and a linked object share a name); falls back to name
- * lookup for #StepData entries recorded before `session_uid` was populated.
- *
- * \return The matching #Object, or `nullptr` if no equivalent is present in `bmain`.
- */
-static Object *find_object_for_step(const Main &bmain, const StepData &sd)
-{
-  if (sd.object_session_uid != 0) {
-    ID *id = BKE_libblock_find_session_uid(const_cast<Main *>(&bmain),
-                                            ID_OB,
-                                            sd.object_session_uid);
-    if (id != nullptr) {
-      return id_cast<Object *>(id);
-    }
-    /* The session_uid was set at record time but the corresponding #Object is gone from the
-     * current Main (deleted, link-broken, etc.). Do NOT fall back to name lookup: a name match
-     * could be a DIFFERENT object (e.g. a new linked Library cover). Return null so the
-     * caller skips this step silently rather than corrupting a wrong mesh. */
-    return nullptr;
-  }
-  /* `Main::objects` is `ListBaseT<Object>` (a typed subclass of the simple `ListBase`). Pass as
-   * a generic `ListBase const *` to #BLI_findstring, which scans `name+2` against the `ID::name`
-   * field offset (the leading two chars `OB` of `Object::id.name` are skipped). */
-  return static_cast<Object *>(
-      BLI_findstring(static_cast<const ListBase *>(&bmain.objects),
-                     sd.object_name.c_str() + 2,
-                     offsetof(ID, name) + 2));
 }
 
 static bool use_multires_undo(const StepData &step_data, const SculptSession &ss)
@@ -1617,11 +1573,12 @@ static void restore_list(bContext *C,
                          Depsgraph *depsgraph,
                          Vector<std::unique_ptr<StepData>> &objects_data)
 {
-  Main *bmain = CTX_data_main(C);
-
   for (std::unique_ptr<StepData> &sd_ptr : objects_data) {
     StepData &sd = *sd_ptr;
-    Object *ob = find_object_for_step(*bmain, sd);
+    /* Resolved to a live pointer by the generic undo system (#register_type's
+     * `step_foreach_ID_ref`) immediately before #step_decode runs; null if the object was since
+     * deleted or could not be found in the current #Main. */
+    Object *ob = sd.object_ref.ptr;
     if (!ob) {
       continue;
     }
@@ -2467,18 +2424,22 @@ void push_end_all_ex(const bool /*use_nested_undo*/, const bool finalize_undo_st
     return;
   }
 
-  push_sculpt_undo_step_to_stack();
-
   if (!us->objects_data.is_empty()) {
-    Main *bmain = G_MAIN;
     /* #active_color_start is captured from the first object (the active object, stored first by
-     * #stroke_undo_begin). Capture the end state from the same object so the active color attribute
-     * is restored consistently on undo/redo. */
-    Object *active_ob = find_object_for_step(*bmain, *us->objects_data.first());
+     * #stroke_undo_begin). Capture the end state from the same object so the active color
+     * attribute is restored consistently on undo/redo. Must run BEFORE
+     * #push_sculpt_undo_step_to_stack below: that call finalizes the step via
+     * #BKE_undosys_step_push_with_type, which invokes the generic undo system's "store" callback
+     * (#register_type's `step_foreach_ID_ref`) and clears every #StepData.object_ref.ptr to null
+     * (see #StepData.object_ref's doc-comment) -- reading it after the push would always see
+     * nullptr. */
+    Object *active_ob = us->objects_data.first()->object_ref.ptr;
     if (active_ob) {
       save_active_attribute(*active_ob, &us->active_color_end);
     }
   }
+
+  push_sculpt_undo_step_to_stack();
 }
 
 void discard_init_step()
@@ -2744,7 +2705,9 @@ static void step_decode(
 
     bool any_sculpt_object = false;
     for (const std::unique_ptr<StepData> &sd : us->objects_data) {
-      Object *ob = find_object_for_step(*bmain, *sd);
+      /* Resolved to a live pointer by the generic undo system (#register_type's
+       * `step_foreach_ID_ref`) immediately before this #step_decode callback runs. */
+      Object *ob = sd->object_ref.ptr;
       if (!ob) {
         continue;
       }
@@ -2783,6 +2746,25 @@ static void step_free(UndoStep *us_p)
     free_step_data_resources(*sd);
   }
   us->objects_data.~Vector<std::unique_ptr<StepData>>();
+}
+
+/**
+ * Reports every #StepData.object_ref to the generic undo system, one per object involved in this
+ * multi-object step. Standard Blender undo-system hook (see `editmesh_undo.cc`'s
+ * `mesh_undosys_foreach_ID_ref` for the single-ref case, `curves_undo.cc`'s `foreach_ID_ref` for
+ * the per-element-of-a-container case this mirrors): called by the generic undo system right
+ * after #step_encode (to serialize each live #Object* to a name + library path and clear the
+ * pointer) and right before #step_decode (to re-resolve each name + library path back to a live
+ * pointer in the current #Main). See #StepData.object_ref's doc-comment.
+ */
+static void step_foreach_ID_ref(UndoStep *us_p,
+                                UndoTypeForEachIDRefFn foreach_ID_ref_fn,
+                                void *user_data)
+{
+  SculptUndoStep *us = reinterpret_cast<SculptUndoStep *>(us_p);
+  for (std::unique_ptr<StepData> &sd : us->objects_data) {
+    foreach_ID_ref_fn(user_data, reinterpret_cast<UndoRefID *>(&sd->object_ref));
+  }
 }
 
 void geometry_begin(const Scene &scene, Object &ob, const wmOperator *op)
@@ -2869,6 +2851,7 @@ void register_type(UndoType *ut)
   ut->step_encode = step_encode;
   ut->step_decode = step_decode;
   ut->step_free = step_free;
+  ut->step_foreach_ID_ref = step_foreach_ID_ref;
 
   ut->flags = UNDOTYPE_FLAG_DECODE_ACTIVE_STEP;
 

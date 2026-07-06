@@ -269,8 +269,8 @@ struct StrokeCache {
    */
   float3 position_scale = float3(1);
   /**
-   * True when the stroke spans more than one object (#SculptPaintStroke::mode_objects_). Gates
-   * the non-uniform-scale compensation in #scale_normalized() so single-object strokes stay
+   * True when the stroke spans more than one object (#MultiObjectStrokeContext::mode_objects).
+   * Gates the non-uniform-scale compensation in #scale_normalized() so single-object strokes stay
    * bit-exact with their pre-multi-object behavior.
    */
   bool multi_object_stroke = false;

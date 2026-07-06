@@ -2087,7 +2087,12 @@ static void normals_falloff_multi(const Depsgraph &depsgraph,
 
 /* Falloff types whose multi-object cross-mesh falloff is implemented so far. Types not listed
  * fall back to the single-object (active-object-only) path even in multi-object mode (no crash).
- */
+ *
+ * No `default:` case: every #FalloffType value is listed explicitly (all currently return true --
+ * multi-object falloff is implemented for all of them). A new #FalloffType value that lands here
+ * must be triaged into `true`/`false` explicitly; a `default:` would have silently routed it to
+ * the single-object fallback with no compiler diagnostic (Architecture_Refactoring_Analysis.md
+ * 5.5). */
 static bool falloff_type_supports_multi(const FalloffType falloff_type)
 {
   switch (falloff_type) {
@@ -2100,9 +2105,9 @@ static bool falloff_type_supports_multi(const FalloffType falloff_type)
     case FalloffType::BoundaryFaceSet:
     case FalloffType::Normals:
       return true;
-    default:
-      return false;
   }
+  BLI_assert_unreachable();
+  return false;
 }
 
 /**

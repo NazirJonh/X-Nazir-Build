@@ -121,6 +121,47 @@ class PositionDeformData {
   void deform(MutableSpan<float3> translations, Span<int> verts) const;
 };
 
+/**
+ * Temporarily override #ViewContext.obact for the duration of a scope; restores the previous value
+ * on destruction.
+ *
+ * Used by multi-object ("global") sculpt code paths that must call brush / sculpt helpers which
+ * internally read #vc.obact (e.g. #paint_calc_object_space_radius, the `raycast_init` BVH path in
+ * #stroke_get_location_object) and need to be redirected to a per-iteration object for one stroke
+ * step. Without an RAII guard, a `continue` / early `return` in the protected scope would leave
+ * `#vc.obact` pointing at the wrong object for the rest of the frame; the compiler and any
+ * `#BLI_assert` (which is a no-op in Release) cannot catch that.
+ *
+ * \note This is for **temporary** per-iteration overrides only. The permanent per-stroke switch of
+ *       `PaintStroke::object` + `#vc.obact` performed by `SculptPaintStroke::get_location` when
+ *       the cursor moves over a different mesh is a deliberate state change of the stroke, not
+ *       an override, and must NOT be wrapped in this guard.
+ *
+ * Pattern from `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 3.2.
+ */
+class ScopedObactOverride {
+  ViewContext &vc_;
+  Object *const saved_obact_;
+
+ public:
+  ScopedObactOverride(ViewContext &vc, Object &new_obact)
+      : vc_(vc), saved_obact_(vc.obact)
+  {
+    vc_.obact = &new_obact;
+  }
+  ~ScopedObactOverride()
+  {
+    vc_.obact = saved_obact_;
+  }
+
+  /* The dtor must undo the constructor's swap; forbid copies and moves so we never end up with a
+   * guard whose saved pointer became stale or whose swap was performed into a different lifetime. */
+  ScopedObactOverride(const ScopedObactOverride &) = delete;
+  ScopedObactOverride &operator=(const ScopedObactOverride &) = delete;
+  ScopedObactOverride(ScopedObactOverride &&) = delete;
+  ScopedObactOverride &operator=(ScopedObactOverride &&) = delete;
+};
+
 enum class UpdateType {
   Position,
   Mask,

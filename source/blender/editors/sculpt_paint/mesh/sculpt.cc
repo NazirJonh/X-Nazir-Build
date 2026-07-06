@@ -5880,12 +5880,13 @@ static bool stroke_get_location_bvh_ex(Depsgraph &depsgraph,
 
   /* #raycast_init (called inside #stroke_get_location_object) transforms the screen ray into
    * #ViewContext.obact's local space. Redirect it to each object so every object is raycast in its
-   * own space; restored after both loops. */
-  Object *const prev_obact = vc.obact;
-
+   * own space. Each iteration uses #ScopedObactOverride so the per-iter override restores the
+   * pre-call `#vc.obact` automatically -- this matches the original "save before loops, restore
+   * after" semantics while making future `continue` / early `return` safe by construction (the
+   * pre-RAII guard had to remember to restore on every exit path). */
   for (Object *object_ptr : objects) {
     Object &ob = *object_ptr;
-    vc.obact = &ob;
+    ScopedObactOverride obact_override(vc, ob);
     float3 object_out;
     if (!stroke_get_location_object(
             depsgraph, vc, paint, sd, ob, object_out, mval, force_original, false, false))
@@ -5906,7 +5907,7 @@ static bool stroke_get_location_bvh_ex(Depsgraph &depsgraph,
   if (!best_ob && check_closest) {
     for (Object *object_ptr : objects) {
       Object &ob = *object_ptr;
-      vc.obact = &ob;
+      ScopedObactOverride obact_override(vc, ob);
       float3 object_out;
       if (!stroke_get_location_object(depsgraph,
                                       vc,
@@ -5932,8 +5933,6 @@ static bool stroke_get_location_bvh_ex(Depsgraph &depsgraph,
       }
     }
   }
-
-  vc.obact = prev_obact;
 
   if (best_ob) {
     out = best_out;
@@ -5999,6 +5998,47 @@ bool stroke_get_location_bvh(bContext *C,
   return stroke_get_location_bvh(*depsgraph, vc, &sd, brush, out, mval, force_original);
 }
 
+namespace detail {
+
+/**
+ * File-local complement to #ed::sculpt_paint::ScopedObactOverride: temporarily redirect
+ * `PaintStroke::object` along with `#vc.obact` so brush / sculpt helpers that read either field
+ * (e.g. `paint_calc_object_space_radius`, `cursor_geometry_info_update`) operate on the per-stroke
+ * object without leaking the redirect past the protected scope.
+ *
+ * Used in `SculptPaintStroke::update_step` Phase 2 (multi-object sculpt), where the previous
+ * implementation had to remember to restore both pointers on **every** exit path -- normal end,
+ * two `continue` sites, and one secondary-skip -- and any new branch without an explicit restore
+ * would silently corrupt the active-object state for the rest of the frame.
+ *
+ * \note Kept file-local because the only consumer is `SculptPaintStroke` itself; promoting it to
+ *       the public header would pull `paint_intern.hh` into `sculpt_intern.hh` for a single use
+ *       site. Pattern from
+ *       `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 3.2.
+ */
+class ScopedStrokeObjectOverride {
+  PaintStroke *const stroke_;
+  Object *const saved_object_;
+
+ public:
+  ScopedStrokeObjectOverride(PaintStroke &stroke, Object &new_object)
+      : stroke_(&stroke), saved_object_(stroke.object)
+  {
+    stroke_->object = &new_object;
+  }
+  ~ScopedStrokeObjectOverride()
+  {
+    stroke_->object = saved_object_;
+  }
+
+  ScopedStrokeObjectOverride(const ScopedStrokeObjectOverride &) = delete;
+  ScopedStrokeObjectOverride &operator=(const ScopedStrokeObjectOverride &) = delete;
+  ScopedStrokeObjectOverride(ScopedStrokeObjectOverride &&) = delete;
+  ScopedStrokeObjectOverride &operator=(ScopedStrokeObjectOverride &&) = delete;
+};
+
+}  // namespace detail
+
 struct SculptPaintStroke final : public PaintStroke {
   Main *bmain_;
   Sculpt *sculpt_;
@@ -6061,6 +6101,12 @@ struct SculptPaintStroke final : public PaintStroke {
 
 bool SculptPaintStroke::get_location(float out[3], const float mouse[2], bool force_original)
 {
+  /* PERMANENT per-stroke change, not a temporary override: when the cursor moves to a different
+   * sculpt-mode object the stroke is "promoted" to it — `this->object` and `vc.obact` stay
+   * pointed at the new object for the rest of the stroke. Do NOT wrap in
+   * #ScopedObactOverride / #detail::ScopedStrokeObjectOverride here; those guards are for
+   * per-iteration overrides only (see their doc-comments and
+   * .MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md 3.2). */
   Object *hit_ob = nullptr;
   const bool hit = stroke_get_location_bvh(
       *this->depsgraph, this->vc, sculpt_, this->brush, out, mouse, force_original, &hit_ob);
@@ -6679,8 +6725,10 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
 
   /* The object-space radius helpers read #ViewContext.obact (via #paint_calc_object_space_radius).
    * Redirect it to the object being initialized so each object's closest-radius limit is computed
-   * in its own object space; restore the real active object after the loop. */
-  Object *original_obact = this->vc.obact;
+   * in its own object space. Each iteration installs a #ScopedObactOverride so the per-iter
+   * override restores the pre-loop `#vc.obact` automatically (the previous manual save / restore
+   * dance was safe today but offered no defense against a future early `return` or exception
+   * escape). */
 
   /* Joined-mesh parity: every object shares the stroke-start state of the primary (under-cursor)
    * object. Raycast the primary once here and propagate its world-space hit location and sampled
@@ -6739,7 +6787,7 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
   for (Object *object_ptr : objects) {
     Object &ob = *object_ptr;
     SculptSession &ss = *ob.runtime->sculpt_session;
-    vc->obact = &ob;
+    ScopedObactOverride obact_override(*vc, ob);
 
     if (!ss.cache) {
       ss.cache = MEM_new<StrokeCache>(__func__);
@@ -6896,8 +6944,6 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
       cache->dial = BLI_dial_init(cache->initial_mouse, pixel_input_threshold);
     }
   }
-
-  this->vc.obact = original_obact;
 }
 
 bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
@@ -7370,11 +7416,17 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
     /* stroke_cache_update and the object-space radius helpers read both this->object and
      * vc.obact (the latter via #paint_calc_object_space_radius) for the current object's
      * SculptSession and transform. Temporarily redirect both so that secondary objects
-     * compute their brush radius in their own object space rather than the active object's. */
-    Object *original_stroke_ob = this->object;
-    Object *original_obact = this->vc.obact;
-    this->object = &ob;
-    this->vc.obact = &ob;
+     * compute their brush radius in their own object space rather than the active object's.
+     *
+     * Both redirects are wrapped in RAII guards so that any future `continue` / early `return`
+     * added in this loop body restores the pre-iteration `this->object` and `vc.obact`
+     * automatically. The pre-refactor implementation had to remember to restore on **every**
+     * exit path (one normal end + two `continue` sites); reintroducing that manual bookkeeping
+     * after a refactor is easy to forget and the compiler cannot catch it
+     * (#BLI_assert is a no-op in Release). See
+     * `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 3.2. */
+    detail::ScopedStrokeObjectOverride stroke_object_override(*this, ob);
+    ScopedObactOverride obact_override(this->vc, ob);
 
     BLI_assert(ss.cache != nullptr);
     StrokeCache *cache = ss.cache;
@@ -7423,8 +7475,8 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       /* Secondary objects: check whether any geometry intersects the world-space brush sphere
        * centered at primary_ob's hit point. No pixel raycast required. */
       if (!primary_world_center_valid) {
-        this->object = original_stroke_ob;
-        this->vc.obact = original_obact;
+        /* `stroke_object_override` + `obact_override` restore `this->object` and `vc.obact`
+         * to the primary object on scope exit. */
         continue;
       }
       has_location = stroke_cache_set_location_from_world_sphere(
@@ -7446,8 +7498,8 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
     }
 
     if (!has_location) {
-      this->object = original_stroke_ob;
-      this->vc.obact = original_obact;
+      /* `stroke_object_override` + `obact_override` restore `this->object` and `vc.obact`
+       * to the primary object on scope exit. */
       continue;
     }
 
@@ -7506,9 +7558,8 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
     else {
       flush_update_step(this->vc, ob, UpdateType::Position);
     }
-
-    this->object = original_stroke_ob;
-    this->vc.obact = original_obact;
+    /* `stroke_object_override` + `obact_override` restore `this->object` and `vc.obact`
+     * to the primary object at the end of each iteration. */
   }
 }
 

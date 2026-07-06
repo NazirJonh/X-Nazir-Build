@@ -84,8 +84,11 @@ static void calc_faces(const Depsgraph &depsgraph,
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
+  /* #cache.sculpt_normal_symm is a raw local-space normal (#calc_brush_plane does not itself
+   * compensate for non-uniform scale); correct it before using it as a rotation axis. This file
+   * never multiplies by #StrokeCache.scale elsewhere (see #scale_normalized). */
   calc_translations(orig_data.positions,
-                    cache.sculpt_normal_symm,
+                    scale_normalized_unit(cache, cache.sculpt_normal_symm),
                     tls.factors,
                     cache.location_symm,
                     translations);
@@ -125,7 +128,7 @@ static void calc_grids(const Depsgraph &depsgraph,
   tls.translations.resize(grid_verts_num);
   const MutableSpan<float3> translations = tls.translations;
   calc_translations(orig_data.positions,
-                    cache.sculpt_normal_symm,
+                    scale_normalized_unit(cache, cache.sculpt_normal_symm),
                     tls.factors,
                     cache.location_symm,
                     translations);
@@ -158,8 +161,11 @@ static void calc_bmesh(const Depsgraph &depsgraph,
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
-  calc_translations(
-      orig_positions, cache.sculpt_normal_symm, tls.factors, cache.location_symm, translations);
+  calc_translations(orig_positions,
+                    scale_normalized_unit(cache, cache.sculpt_normal_symm),
+                    tls.factors,
+                    cache.location_symm,
+                    translations);
 
   clip_and_lock_translations(sd, ss, orig_positions, translations);
   apply_translations(translations, verts);

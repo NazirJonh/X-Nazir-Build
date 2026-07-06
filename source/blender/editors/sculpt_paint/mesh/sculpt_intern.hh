@@ -216,6 +216,23 @@ struct StrokeCache {
   /* Invariants */
   float initial_radius = 0.0f;
   float3 scale = float3(0);
+  /**
+   * Per-axis correction for local-space POSITION DIFFERENCES (falloff distance, slide
+   * direction) under non-uniform #Object.scale: `ob.scale[axis] / mat4_to_scale(world matrix)`.
+   * This is the opposite relationship from #scale (`max_scale / ob.scale[axis]`), which corrects
+   * NORMAL/direction vectors via the inverse-transpose rule. Distances/positions transform
+   * directly by the object's scale, not its inverse; using #scale here would invert the
+   * correction. #cache.radius is defined as `screen_radius / mat4_to_scale(world matrix)`
+   * (#paint_calc_object_space_radius), so this factor makes `length((p - center) *
+   * position_scale) < cache.radius` match a true isotropic world-space sphere test.
+   */
+  float3 position_scale = float3(1);
+  /**
+   * True when the stroke spans more than one object (#SculptPaintStroke::mode_objects_). Gates
+   * the non-uniform-scale compensation in #scale_normalized() so single-object strokes stay
+   * bit-exact with their pre-multi-object behavior.
+   */
+  bool multi_object_stroke = false;
   struct {
     uint8_t flag = 0;
     float3 tolerance = float3(0);
@@ -243,6 +260,49 @@ struct StrokeCache {
   float3 location_symm = float3(0);
   float3 last_location_symm = float3(0);
   float stroke_distance = 0.0f;
+
+  /* Multi-object ("global") sculpt: shared surface sampling for area-/plane-based brushes.
+   *
+   * When a stroke spans more than one mesh object, #calc_area_normal, #calc_area_center and
+   * #calc_area_normal_and_center pool the vertices of every object in #multi_object_sample_objects
+   * into #multi_object_sample_reference's local space and convert the resulting normal/center back
+   * into the requesting object's space. This makes Draw (area), Clay, Clay Strips, Plane, Flatten,
+   * Multiplane Scrape, etc. see one shared surface like a single joined mesh, instead of each object
+   * sampling only itself. Empty / null in single-object mode and only honored for
+   * #bke::pbvh::Type::Mesh. Refreshed every #update_step; the span is owned by the paint stroke. */
+  Span<Object *> multi_object_sample_objects;
+  const Object *multi_object_sample_reference = nullptr;
+
+  /**
+   * Maps this object's local coordinates into the shared texture-sampling space (the primary
+   * object's local space) so 3D brush textures (#MTEX_MAP_MODE_3D) read the same values across
+   * all objects of a multi-object stroke, like on a joined mesh. Identity in single-object mode
+   * and for the primary object itself.
+   */
+  float4x4 texture_sample_from_object = float4x4::identity();
+
+  /**
+   * Shared symmetry origin (multi-object sculpt, #PAINT_SYMMETRY_SHARED_ORIGIN).
+   *
+   * When mirroring the brush across a single symmetry plane shared by the whole stroke, the
+   * mirror must happen in the primary (reference) object's local space and the result be brought
+   * back into this object's space. #symm_ref_from_cur maps this object's local coordinates into
+   * the reference object's local space; #symm_cur_from_ref is its inverse. Both are identity for
+   * the primary object, in single-object mode, and when the option is disabled, which keeps the
+   * per-object symmetry path bit-exact.
+   */
+  float4x4 symm_ref_from_cur = float4x4::identity();
+  float4x4 symm_cur_from_ref = float4x4::identity();
+  /* True only for objects other than the symmetry reference in a multi-object stroke while
+   * #PAINT_SYMMETRY_SHARED_ORIGIN is on. When false (reference object, single-object stroke, option
+   * off) brush data is mirrored around this object's own origin exactly as in single-object mode. */
+  bool symm_shared_origin_active = false;
+  /* Reference object whose local space defines the single shared symmetry plane for the whole
+   * stroke (#PAINT_SYMMETRY_SHARED_ORIGIN). This is the active object — the one a #Join would merge
+   * everything into — so the plane stays fixed instead of following the cursor between meshes.
+   * The symmetry flag set and radial counts are read from its mesh. Null when the option is off or
+   * in single-object mode. */
+  const Object *symm_reference_object = nullptr;
 
   /**
    * Used for alternating between deformations in brushes that need to apply different ones to
@@ -338,6 +398,17 @@ struct StrokeCache {
    * displacement in area plane mode.
    */
   float4x4 brush_local_mat_inv = float4x4::identity();
+
+  /**
+   * Multi-object Area-texture parity: the brush-frame-to-WORLD transform used to build every
+   * object's #brush_local_mat in a multi-object stroke (see #calc_brush_area_texture_mat). The
+   * primary object (the sampling reference under the cursor) computes it from the pooled area
+   * normal; every other object reuses this exact world frame so the Area-mapped texture reads
+   * continuously across the seam between meshes (a joined mesh has a single such frame). Unused
+   * for single-object strokes (each object keeps its own #calc_brush_local_mat frame).
+   */
+  float4x4 area_texture_frame_to_world = float4x4::identity();
+  bool area_texture_frame_valid = false;
 
   /* used to shift the plane around when doing tiled strokes */
   float3 plane_offset = float3(0);
@@ -514,20 +585,6 @@ void tag_update_overlays(bContext *C);
  * TODO: This should be updated to return std::optional<float3>
  */
 bool stroke_get_location_bvh(bContext *C, float out[3], const float mval[2], bool force_original);
-bool stroke_get_location_bvh(Depsgraph &depsgraph,
-                             ViewContext &vc,
-                             const Sculpt &sd,
-                             const Brush *brush,
-                             float out[3],
-                             const float mval[2],
-                             bool force_original);
-bool stroke_get_location_bvh(Depsgraph &depsgraph,
-                             ViewContext &vc,
-                             const Paint &paint,
-                             const Brush *brush,
-                             float out[3],
-                             const float mval[2],
-                             bool force_original);
 
 struct ActiveElementInfo {
   ActiveVert vert = {};
@@ -552,10 +609,28 @@ struct CursorGeometryInfo {
  *
  * TODO: This should be updated to return `std::optional<CursorGeometryInfo>`
  */
+bool stroke_get_location_bvh(Depsgraph &depsgraph,
+                             ViewContext &vc,
+                             const Sculpt *sd,
+                             const Brush *brush,
+                             float out[3],
+                             const float mval[2],
+                             const bool force_original,
+                             Object **r_hit_ob = nullptr);
+bool stroke_get_location_bvh(Depsgraph &depsgraph,
+                             ViewContext &vc,
+                             const Paint &paint,
+                             const Brush *brush,
+                             float out[3],
+                             const float mval[2],
+                             const bool force_original,
+                             Object **r_hit_ob = nullptr);
+
 bool cursor_geometry_info_update(bContext *C,
                                  CursorGeometryInfo *out,
                                  const float2 &mval,
-                                 bool use_sampled_normal);
+                                 bool use_sampled_normal,
+                                 Object **r_hit_ob = nullptr);
 bool cursor_geometry_info_update(Depsgraph &depsgraph,
                                  const Paint &paint,
                                  const Sculpt *sd,
@@ -563,7 +638,8 @@ bool cursor_geometry_info_update(Depsgraph &depsgraph,
                                  const Base *base,
                                  CursorGeometryInfo *out,
                                  const float2 &mval,
-                                 bool use_sampled_normal);
+                                 bool use_sampled_normal,
+                                 Object **r_hit_ob = nullptr);
 
 void geometry_preview_lines_update(Depsgraph &depsgraph,
                                    Object &object,
@@ -610,6 +686,12 @@ float3 grab_delta_get(const Brush &brush, const StrokeCache &cache);
 
 /** Ensure random access; required for bke::pbvh::Type::BMesh */
 void vert_random_access_ensure(Object &object);
+
+/**
+ * Return all mesh objects currently in sculpt mode in the view layer of \a vc, active object
+ * first.
+ */
+Vector<Object *> sculpt_mode_objects(const ViewContext &vc);
 
 int vertex_count_get(const Object &object);
 

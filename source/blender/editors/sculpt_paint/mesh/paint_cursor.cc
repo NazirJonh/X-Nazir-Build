@@ -148,11 +148,16 @@ static void brush_unprojected_size_update(Paint &paint,
 
 void mesh_cursor_update_and_init(PaintCursorContext &pcontext)
 {
-  BLI_assert(pcontext.ss != nullptr);
+  /* The object under the cursor (and its #SculptSession) was already resolved in
+   * #paint_cursor_context_init, which redirects #ViewContext.obact and #PaintCursorContext.ss to
+   * the hit object. We must not raycast all sculpt objects a second time here. */
+  if (!pcontext.ss) {
+    return;
+  }
 
+  bke::PaintRuntime &paint_runtime = *pcontext.paint->runtime;
   SculptSession &ss = *pcontext.ss;
   Brush &brush = *pcontext.brush;
-  bke::PaintRuntime &paint_runtime = *pcontext.paint->runtime;
   ViewContext &vc = pcontext.vc;
   CursorGeometryInfo gi;
 
@@ -244,7 +249,9 @@ static void geometry_preview_lines_draw(const Depsgraph &depsgraph,
 
 void mesh_cursor_active_draw(PaintCursorContext &pcontext)
 {
-  BLI_assert(pcontext.ss != nullptr);
+  if (!pcontext.ss) {
+    return;
+  }
 
   SculptSession &ss = *pcontext.ss;
   Brush &brush = *pcontext.brush;
@@ -562,15 +569,26 @@ static void screen_space_overlays_draw(const PaintCursorContext &pcontext)
     return;
   }
 
-  /* Expand operation origin. */
+  /* Expand operation origin. Resolve it on the seed's OWN object: with cross-mesh seeding the seed
+   * can live on a non-active object, so indexing the active object's positions with that vertex
+   * would draw the origin on the wrong mesh (and could be out of range). Falls back to the active
+   * object for the single-object path, where seed == {0, initial_active_vert}. */
   if (pcontext.ss->expand_cache) {
-    const int vert = pcontext.ss->expand_cache->initial_active_vert;
+    const expand::Cache &expand_cache = *pcontext.ss->expand_cache;
+    const expand::MultiVertRef seed = expand_cache.seed;
+
+    Object *origin_object = &active_object;
+    int vert = expand_cache.initial_active_vert;
+    if (seed.object_index >= 0 && seed.object_index < expand_cache.object_states.size()) {
+      origin_object = expand_cache.object_states[seed.object_index].object;
+      vert = seed.vert;
+    }
 
     float3 position;
-    switch (bke::object::pbvh_get(active_object)->type()) {
+    switch (bke::object::pbvh_get(*origin_object)->type()) {
       case bke::pbvh::Type::Mesh: {
         const Span<float3> positions = bke::pbvh::vert_positions_eval(*pcontext.depsgraph,
-                                                                      active_object);
+                                                                      *origin_object);
         position = positions[vert];
         break;
       }
@@ -586,7 +604,7 @@ static void screen_space_overlays_draw(const PaintCursorContext &pcontext)
       }
     }
     screen_space_point_draw(
-        pcontext.pos, pcontext.region, position, active_object.object_to_world().ptr(), 2);
+        pcontext.pos, pcontext.region, position, origin_object->object_to_world().ptr(), 2);
   }
 
   if (!pcontext.is_brush_active) {
@@ -665,20 +683,46 @@ static void object_space_overlays_draw(const PaintCursorContext &pcontext)
 
 static void cursor_space_drawing_setup(const PaintCursorContext &pcontext)
 {
-  const float4x4 cursor_trans = math::translate(pcontext.vc.obact->object_to_world(),
-                                                pcontext.location);
-
-  const float3 z_axis = {0.0f, 0.0f, 1.0f};
+  const Object &ob = *pcontext.vc.obact;
 
   const float3 normal = bke::brush::supports_tilt(*pcontext.brush) ?
-                            tilt_apply_to_normal(*pcontext.vc.obact,
-                                                 float4x4(pcontext.vc.rv3d->viewinv),
-                                                 pcontext.normal,
-                                                 pcontext.tilt,
-                                                 pcontext.brush->tilt_strength_factor) :
-                            pcontext.normal;
+                           tilt_apply_to_normal(ob,
+                                                float4x4(pcontext.vc.rv3d->viewinv),
+                                                pcontext.normal,
+                                                pcontext.tilt,
+                                                pcontext.brush->tilt_strength_factor) :
+                           pcontext.normal;
 
-  const math::AxisAngle between_vecs(z_axis, normal);
+  const float3 z_axis = {0.0f, 0.0f, 1.0f};
+  float4x4 cursor_trans;
+  float3 world_normal;
+
+  /* #normal/#pcontext.radius are local to #ob. The old #cursor_trans (`object_to_world() *
+   * translate(location)`) baked the object's full matrix, including non-uniform scale, into the
+   * disc's own basis: even with a correctly world-oriented rotation, a circle drawn in that
+   * basis still comes out elliptical once the anisotropic scale is applied to its shape, not
+   * just its orientation. Only corrected in multi-object sculpts (matching
+   * #StrokeCache.multi_object_stroke elsewhere) so a single scaled object keeps its long-standing
+   * appearance. */
+  if (sculpt_mode_objects(pcontext.vc).size() > 1) {
+    const float3 world_location = math::transform_point(ob.object_to_world(), pcontext.location);
+    /* Isotropic size compensation matching how #pcontext.radius was derived (divided by this
+     * same scalar in #paint_calc_object_space_radius), applied AFTER the rotation below so it
+     * only resizes the disc uniformly instead of reintroducing anisotropy. */
+    const float iso_scale = mat4_to_scale(ob.object_to_world().ptr());
+    cursor_trans = math::translate(float4x4::identity(), world_location) *
+                  math::from_scale<float4x4>(float3(iso_scale == 0.0f ? 1.0f : iso_scale));
+    /* Normals transform via the inverse-transpose to stay perpendicular under non-uniform
+     * scale — this maps the local (possibly tilt-adjusted) normal directly into world space. */
+    world_normal = math::normalize(
+        math::transpose(math::invert(float3x3(ob.object_to_world()))) * normal);
+  }
+  else {
+    cursor_trans = math::translate(ob.object_to_world(), pcontext.location);
+    world_normal = normal;
+  }
+
+  const math::AxisAngle between_vecs(z_axis, world_normal);
   const float4x4 cursor_rot = math::from_rotation<float4x4>(between_vecs);
 
   GPU_matrix_mul(cursor_trans.ptr());

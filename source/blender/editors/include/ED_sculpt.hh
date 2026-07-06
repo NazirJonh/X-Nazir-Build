@@ -10,6 +10,8 @@
 
 #include <cstddef>
 
+#include "BLI_span.hh"
+
 namespace blender {
 
 struct Depsgraph;
@@ -90,6 +92,15 @@ namespace face_set {
 
 int find_next_available_id(const Mesh &object);
 int find_next_available_id(Object &object);
+
+/**
+ * The next available Face Set id that is free across every mesh in \a meshes — i.e.
+ * `max(find_next_available_id(mesh) for mesh in meshes)`. Used to assign one shared id across
+ * all objects in a multi-object sculpt-mode gesture/operator.
+ */
+int find_shared_next_available_id(Span<const Mesh *> meshes);
+int find_shared_next_available_id(Span<Object *> objects);
+
 void initialize_none_to_id(Mesh *mesh, int new_id);
 int active_update_and_get(bContext *C, Object &ob, const float mval_fl[2]);
 

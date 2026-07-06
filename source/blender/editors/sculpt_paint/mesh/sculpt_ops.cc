@@ -578,41 +578,68 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
     }
   }
   else {
-    /* Enter sculpt mode for all selected editable meshes. */
-    Vector<PointerRNA> selected_objects;
-    CTX_data_selected_objects(C, &selected_objects);
-
-    Vector<Object *> objects;
-    for (const PointerRNA &ptr : selected_objects) {
-      Object *ob = reinterpret_cast<Object *>(ptr.owner_id);
-      if (ob->type != OB_MESH) {
-        continue;
-      }
-      objects.append(ob);
-    }
-
     depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
     if (!depsgraph) {
       return OPERATOR_CANCELLED;
     }
 
-    if (objects.is_empty()) {
-      /* Fallback to active object if nothing selected. */
-      if (!object::mode_compat_set(C, active_ob, eObjectMode(mode_flag), op->reports)) {
-        return OPERATOR_CANCELLED;
-      }
-      object_sculpt_mode_enter(bmain, *depsgraph, scene, *active_ob, false, op->reports);
+    /* Multi-object Sculpt entry, structured after `object_edit.cc:editmode_toggle_exec`
+     * for consistency with the rest of the object-mode toggle family.
+     *
+     * Step 1) Process the active object first and unconditionally, regardless of
+     *         whether it is currently selected. This addresses §1.2 of
+     *         .MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md:
+     *         previously an active-but-not-selected mesh was skipped
+     *         (`CTX_data_selected_objects` does not imply the active is selected),
+     *         but the per-object `Object.mode` RNA notifier below still fired as
+     *         if the active's mode had changed, leaving `bpy.context.mode` and the
+     *         toolbar indicator out of sync with the real set of objects in Sculpt.
+     *
+     * Step 2) Cascade into selected secondaries of the same type as the active.
+     *         For non-active objects we deliberately do NOT call
+     *         `object::mode_compat_set`: that helper internally invokes
+     *         `WM_operator_name_call` to toggle out of the *other* mode, and the
+     *         toggle operator's exec resolves its target via `CTX_data_active_object`
+     *         -- not the object we passed. Calling it on a secondary in Paint/Edit
+     *         silently flips the active's mode instead (§1.1 of the analysis).
+     *         We require `ob->mode == OB_MODE_OBJECT` explicitly and skip-with-report
+     *         otherwise.
+     *
+     * The cascading filter `ob->type == active_ob->type` mirrors the edit-mode
+     * idiom; for Sculpt it collapses to OB_MESH today but is kept explicit so
+     * future GP- or Curves-Sculpt support only has to drop the operator-level
+     * mesh filter, not change cascade semantics (§1.3 of the analysis). */
+    if (active_ob->type != OB_MESH) {
+      BKE_reportf(op->reports,
+                  RPT_ERROR,
+                  "Active object '%s' is not a Mesh; cannot enter Sculpt Mode",
+                  active_ob->id.name + 2);
+      return OPERATOR_CANCELLED;
     }
-    else {
-      for (Object *ob : objects) {
-        if (ob->type != OB_MESH) {
+
+    if (!object::mode_compat_set(C, active_ob, eObjectMode(mode_flag), op->reports)) {
+      return OPERATOR_CANCELLED;
+    }
+    object_sculpt_mode_enter(bmain, *depsgraph, scene, *active_ob, false, op->reports);
+
+    {
+      Vector<PointerRNA> selected_objects;
+      CTX_data_selected_objects(C, &selected_objects);
+      for (const PointerRNA &ptr : selected_objects) {
+        Object *ob = reinterpret_cast<Object *>(ptr.owner_id);
+        if (ob == active_ob) {
           continue;
         }
-
-        if (!object::mode_compat_set(C, ob, eObjectMode(mode_flag), op->reports)) {
+        if (ob->type != active_ob->type) {
           continue;
         }
-
+        if (ob->mode != OB_MODE_OBJECT) {
+          BKE_reportf(op->reports,
+                      RPT_WARNING,
+                      "Object '%s' is not in Object Mode; skipping Sculpt entry",
+                      ob->id.name + 2);
+          continue;
+        }
         object_sculpt_mode_enter(bmain, *depsgraph, scene, *ob, false, op->reports);
       }
     }

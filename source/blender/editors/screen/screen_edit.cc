@@ -917,6 +917,12 @@ void ED_region_exit(bContext *C, ARegion *region)
     region->runtime->regiontimer = nullptr;
   }
 
+  /* Stop the unified grid view handler's fling/drag if this region owns it, so a permanent
+   * region (View3D sidebar, persistent asset shelf, ...) being hidden/closed never leaves a
+   * dangling #ARegion pointer or a running fling timer behind. Idempotent: the temporary/popup
+   * teardown path in #popup_block_remove also calls this, redundantly but harmlessly. */
+  ui::UI_grid_view_input_region_freed(region);
+
   WM_msgbus_clear_by_owner(wm->runtime->message_bus, region);
 
   CTX_wm_region_set(C, prevar);

@@ -83,9 +83,26 @@ void catalog_remove(AssetLibrary *library, const CatalogID &catalog_id)
     return;
   }
 
+  /* Capture the catalog path before pruning; used to clean up the on-disk mirror folder below. */
+  std::string removed_path;
+  if (const AssetCatalog *catalog = catalog_service.find_catalog(catalog_id)) {
+    removed_path = catalog->path.c_str();
+  }
+
   catalog_service.undo_push();
   catalog_service.tag_has_unsaved_changes(nullptr);
   catalog_service.prune_catalogs_by_id(catalog_id);
+
+  /* Symmetric to #catalog_add, which creates the mirror folder. Only removes it when empty and
+   * inside the library root, so image files moved into the catalog are never destroyed. NOTE:
+   * child-catalog folders nested inside are not recursed here (kept minimal); their own removal
+   * cleans them up if empty. */
+  if (!removed_path.empty()) {
+    if (const char *library_root = image_library_editable_root_from_asset_library(*library)) {
+      image_library_catalog_directory_remove_if_empty(library_root, removed_path);
+    }
+  }
+
   WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
 }
 

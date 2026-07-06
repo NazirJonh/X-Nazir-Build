@@ -243,28 +243,6 @@ void AssetViewItem::disable_asset_drag()
 }
 
 /**
- * Read brush target from layout context so activation does not depend on a live UI context store
- * (popover refresh can invalidate context inherited from the opening button).
- */
-static void image_texture_shelf_brush_target_from_layout(const ui::Layout &layout,
-                                                         uint32_t &brush_session_uid,
-                                                         bool &use_mask_slot)
-{
-  brush_session_uid = MAIN_ID_SESSION_UID_UNSET;
-  use_mask_slot = false;
-
-  const PointerRNA *target_ptr = layout.context_ptr_get("image_grid_target", nullptr);
-  if (!target_ptr || !target_ptr->data || !target_ptr->owner_id) {
-    return;
-  }
-  if (GS(target_ptr->owner_id->name) != ID_BR) {
-    return;
-  }
-  brush_session_uid = target_ptr->owner_id->session_uid;
-  use_mask_slot = layout.context_int_get("image_grid_is_mask_slot").value_or(0) != 0;
-}
-
-/**
  * Needs freeing with #WM_operator_properties_free() (will be done by button if passed to that) and
  * #MEM_delete().
  */
@@ -301,8 +279,8 @@ void AssetViewItem::build_grid_tile(const bContext &C, ui::Layout &layout) const
       layout.block(), reinterpret_cast<ui::Button *>(view_item_but_), "asset", &asset_ptr);
 
   ui::Button *item_but = reinterpret_cast<ui::Button *>(this->view_item_button());
-  if (STREQ(shelf_type.idname, "VIEW3D_AST_image_texture")) {
-    image_texture_shelf_brush_target_from_layout(
+  if (shelf_type.grid_tile_activate_extra_params) {
+    shelf_type.grid_tile_activate_extra_params(
         layout, image_texture_brush_session_uid_, image_texture_use_mask_slot_);
   }
   if (std::optional<wmOperatorCallParams> activate_op = create_asset_operator_params(
@@ -447,15 +425,12 @@ std::optional<bool> AssetViewItem::should_be_active() const
   if (*asset_view.active_asset_ == item_weak_ref) {
     return true;
   }
-  /* #bke::asset_edit_weak_reference_from_id() uses "Image/<id-name>" while shelf assets use the
-   * library-relative path from #AssetRepresentation::make_weak_reference(). Match by local ID
-   * name for the image-texture browse popover. */
-  if (STREQ(shelf_type.idname, "VIEW3D_AST_image_texture")) {
+  /* Shelf types whose #get_active_asset_from_context uses a different addressing scheme than
+   * #AssetRepresentation::make_weak_reference() can opt into a name-based fallback match. */
+  if (shelf_type.active_asset_name_fallback_matches) {
     if (const ID *local_id = asset_.local_id()) {
-      const char *active_identifier = asset_view.active_asset_->relative_asset_identifier;
-      if (active_identifier && STRPREFIX(active_identifier, "Image/")) {
-        return STREQ(local_id->name + 2, active_identifier + 6);
-      }
+      return shelf_type.active_asset_name_fallback_matches(
+          &shelf_type, local_id, *asset_view.active_asset_);
     }
   }
   return false;
@@ -558,7 +533,7 @@ void build_asset_view(ui::Layout &layout,
     grid_view->use_session_scroll(fmt::format("asset_shelf_grid:{}", shelf.type->idname));
   }
   grid_view->set_context_menu_title("Asset Shelf");
-  if (STREQ(shelf.type->idname, "VIEW3D_AST_image_texture")) {
+  if (shelf.type->flag & ASSET_SHELF_TYPE_FLAG_CENTER_ACTIVE_ASSET_ON_OPEN) {
     if (popup_grid_viewport_height_px) {
       /* Fixed-viewport popover: centre via the row-index scroll model, only on first open (a refresh
        * fires on every scroll step; re-centring each time would fight the user's scrolling). */

@@ -29,6 +29,8 @@
 #include "BKE_context.hh"
 #include "BKE_screen.hh"
 
+#include "UI_grid_view.hh"
+
 #include "WM_api.hh"
 #include "WM_types.hh"
 
@@ -328,10 +330,11 @@ static void popup_block_position(wmWindow *window, ARegion *butregion, Button *b
     button_update(&bt);
   }
 
-  if (block->view_scroll_clip_enabled) {
-    block_to_window_rctf(
-        butregion, but->block, &block->view_scroll_clip_rect, &block->view_scroll_clip_rect);
-    BLI_rctf_translate(&block->view_scroll_clip_rect, offset_x, offset_y);
+  for (AbstractGridView *grid_view : block_view_scroll_clipped_grids(*block)) {
+    rctf rect = grid_view->scroll_clip_rect();
+    block_to_window_rctf(butregion, but->block, &rect, &rect);
+    BLI_rctf_translate(&rect, offset_x, offset_y);
+    grid_view->scroll_clip_set(rect);
   }
 
   BLI_rctf_translate(&block->rect, offset_x, offset_y);
@@ -567,8 +570,9 @@ void popup_block_scrolltest(Block *block)
 
   for (Button &bt : block->buttons()) {
     /* Sub-row scrolled grid tiles can extend past the popup block bounds while still being inside
-     * #view_scroll_clip_rect; keep them drawable (see #block_grid_scroll_clip_contains_button). */
-    if (block_grid_scroll_clip_contains_button(block, &bt)) {
+     * their owning grid's clip rect; keep them drawable (see
+     * #block_grid_scroll_clip_contains_button). */
+    if (block_grid_scroll_clip_contains_button(&bt)) {
       continue;
     }
     /* Tag buttons that are outside boundary */
@@ -1039,7 +1043,7 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
     float ymax = -FLT_MAX;
     for (const Button &bt : block->buttons()) {
       rctf bounds_rect;
-      if (!block_grid_scroll_clip_bounds_rect(block, &bt, &bounds_rect)) {
+      if (!block_grid_scroll_clip_bounds_rect(&bt, &bounds_rect)) {
         continue;
       }
       ymin = min_ff(ymin, bounds_rect.ymin);

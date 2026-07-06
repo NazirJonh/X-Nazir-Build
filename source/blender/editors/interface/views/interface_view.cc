@@ -97,6 +97,39 @@ AbstractGridView *block_view_find_fixed_viewport_grid(Block &block)
   return nullptr;
 }
 
+Vector<AbstractGridView *> block_view_scroll_clipped_grids(Block &block)
+{
+  Vector<AbstractGridView *> result;
+  for (ViewLink &link : block.views) {
+    auto *grid_view = dynamic_cast<AbstractGridView *>(link.view.get());
+    if (grid_view && grid_view->scroll_clip_enabled()) {
+      result.append(grid_view);
+    }
+  }
+  return result;
+}
+
+AbstractGridView *block_view_find_fixed_viewport_grid_at_y(Block &block, const float block_space_y)
+{
+  AbstractGridView *fallback = nullptr;
+  for (ViewLink &link : block.views) {
+    auto *grid_view = dynamic_cast<AbstractGridView *>(link.view.get());
+    if (!grid_view || !grid_view->use_fixed_viewport_layout()) {
+      continue;
+    }
+    if (!fallback) {
+      /* Preserve today's single-grid behavior exactly when nothing below matches (e.g. the
+       * pointer is outside every grid's edge-scroll band): pick the first one, as
+       * #block_view_find_fixed_viewport_grid always did. */
+      fallback = grid_view;
+    }
+    if (grid_view->fixed_viewport_scroll_at_y(block, block_space_y).has_value()) {
+      return grid_view;
+    }
+  }
+  return fallback;
+}
+
 void ViewLink::views_bounds_calc(const Block &block)
 {
   Map<AbstractView *, rcti> views_bounds;
@@ -124,7 +157,7 @@ void ViewLink::views_bounds_calc(const Block &block)
      * rows are masked away when drawn, so they must not extend the view bounds either (these
      * bounds drive the scroll arrows, wheel hover checks and edge auto-scroll zones). */
     rctf but_bounds_rect;
-    if (!block_grid_scroll_clip_bounds_rect(&block, view_item_but, &but_bounds_rect)) {
+    if (!block_grid_scroll_clip_bounds_rect(view_item_but, &but_bounds_rect)) {
       continue;
     }
 
@@ -137,18 +170,17 @@ void ViewLink::views_bounds_calc(const Block &block)
   /* A grid with a scroll-clip window exists independently of the tiles built this frame: during
    * a fast-scroll rebuild few or zero tiles may be built, which would otherwise leave empty (or
    * shrunken) bounds for a frame and leak wheel events to the region's own #View2D pan (the
-   * cascade the wheel latches used to paper over). The clip window is the grid's viewport, so it
-   * is the stable bounds source. */
-  if (block.view_scroll_clip_enabled) {
-    rcti clip_rect{};
-    BLI_rcti_rctf_copy_round(&clip_rect, &block.view_scroll_clip_rect);
-    for (ViewLink &link : block.views) {
-      if (dynamic_cast<AbstractGridView *>(link.view.get()) == nullptr) {
-        continue;
-      }
-      rcti &bounds = views_bounds.lookup(link.view.get());
-      BLI_rcti_do_minmax_rcti(&bounds, &clip_rect);
+   * cascade the wheel latches used to paper over). The clip window is the grid's own viewport, so
+   * it is the stable bounds source — each grid unions only its own clip rect. */
+  for (ViewLink &link : block.views) {
+    auto *grid_view = dynamic_cast<AbstractGridView *>(link.view.get());
+    if (!grid_view || !grid_view->scroll_clip_enabled()) {
+      continue;
     }
+    rcti clip_rect{};
+    BLI_rcti_rctf_copy_round(&clip_rect, &grid_view->scroll_clip_rect());
+    rcti &bounds = views_bounds.lookup(link.view.get());
+    BLI_rcti_do_minmax_rcti(&bounds, &clip_rect);
   }
 
   for (const auto item : views_bounds.items()) {
@@ -380,7 +412,9 @@ void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEven
      * to the block's fixed-viewport grid so drag-auto-scroll still works there. */
     block = static_cast<Block *>(region->runtime->uiblocks.first);
     if (block) {
-      view = block_view_find_fixed_viewport_grid(*block);
+      float bx = float(event->xy[0]), by = float(event->xy[1]);
+      window_to_block_fl(region, block, &bx, &by);
+      view = block_view_find_fixed_viewport_grid_at_y(*block, by);
     }
   }
 

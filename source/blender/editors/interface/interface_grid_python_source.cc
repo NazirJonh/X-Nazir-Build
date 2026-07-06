@@ -44,12 +44,18 @@ static void pygrid_draw_context_menu(const bContext &C,
 class PyGridItem : public PreviewGridItem {
   uiGridType *grid_type_;
   std::string activate_operator_;
+  int badge_icon_ = ICON_NONE;
 
  public:
-  PyGridItem(StringRef identifier, StringRef label, const int icon, uiGridType *grid_type)
+  PyGridItem(StringRef identifier,
+            StringRef label,
+            const int icon,
+            const int badge_icon,
+            uiGridType *grid_type)
       : PreviewGridItem(identifier, label, icon),
         grid_type_(grid_type),
-        activate_operator_(grid_type->activate_operator)
+        activate_operator_(grid_type->activate_operator),
+        badge_icon_(badge_icon)
   {
   }
 
@@ -72,6 +78,46 @@ class PyGridItem : public PreviewGridItem {
   void build_context_menu(bContext &C, Layout &column) const override
   {
     pygrid_draw_context_menu(C, grid_type_, identifier_, column);
+  }
+
+  void build_grid_tile(const bContext &C, Layout &layout) const override
+  {
+    if (badge_icon_ == ICON_NONE) {
+      PreviewGridItem::build_grid_tile(C, layout);
+      return;
+    }
+
+    const GridViewStyle &style = this->get_view().get_style();
+    Layout &overlap = layout.overlap();
+    overlap.fixed_size_set(true);
+    overlap.ui_units_x_set(style.tile_width / float(UI_UNIT_X));
+    overlap.ui_units_y_set(style.tile_height / float(UI_UNIT_Y));
+
+    this->build_grid_tile_button(overlap.column(true));
+
+    /* Bottom-right badge overlay, mirroring #ImageAssetGridItem::build_grid_tile. A separator
+     * spacer pushes the icon row to the bottom of the tile. */
+    Layout &badge_col = overlap.column(true);
+    uiDefBut(badge_col.block(),
+             ButtonType::Sepr,
+             "",
+             0,
+             0,
+             0,
+             style.tile_height - int(UI_UNIT_Y),
+             nullptr,
+             0.0,
+             0.0,
+             "");
+    Layout &badge_row = badge_col.row(false);
+    badge_row.alignment_set(LayoutAlign::Right);
+    /* #uiItemL_ex draws through the plain icon path (no #BUT_ICON_PREVIEW), unlike the main
+     * preview button above: deferred-loading previews are not handled for this small badge slot.
+     * Fine for the built-in fixed enum icons this mirrors (#ICON_LINKED / #ICON_ASSET_MANAGER);
+     * a script passing a custom preview icon id here must have it already resolved. */
+    Button *badge_but = uiItemL_ex(&badge_row, "", badge_icon_, false, false);
+    button_label_alpha_factor_set(badge_but, 0.6f);
+    button_label_draw_icon_border_set(badge_but, true);
   }
 };
 
@@ -219,7 +265,7 @@ void PyCallbackGridDataSource::build_window(const bContext &C,
     if (!pygrid_get_item_desc(C, grid_type_, dataptr_, propname_, index, desc)) {
       continue;
     }
-    view.add_item<PyGridItem>(desc.identifier, desc.label, desc.icon, grid_type_);
+    view.add_item<PyGridItem>(desc.identifier, desc.label, desc.icon, desc.badge_icon, grid_type_);
   }
 }
 

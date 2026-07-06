@@ -182,6 +182,7 @@ if(WITH_GTESTS)
   set(TEST_SRC
     interface_ops_test.cc
     tests/grid_core_math_test.cc
+    tests/grid_view_settings_utils_test.cc
   )
 
   set(TEST_LIB

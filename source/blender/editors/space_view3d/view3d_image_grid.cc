@@ -1239,12 +1239,10 @@ static wmOperatorStatus image_grid_new_exec(bContext *C, wmOperator *op)
     tex = BKE_texture_add(bmain, DATA_("Texture"));
   }
 
-  bool linked_id_created = false;
   id_us_min(&tex->id);
 
   if (target_ptr.owner_id) {
     BKE_id_move_to_same_lib(*bmain, tex->id, *target_ptr.owner_id);
-    linked_id_created = ID_IS_LINKED(&tex->id);
   }
 
   PointerRNA idptr = RNA_id_pointer_create(&tex->id);
@@ -1275,10 +1273,6 @@ static wmOperatorStatus image_grid_new_exec(bContext *C, wmOperator *op)
       image_grid_prepare_browse_shelf(*C, state, "VIEW3D_AST_image_texture");
       image_grid_notify_change(*C, use_mask_slot);
     }
-  }
-
-  if (!linked_id_created) {
-    ED_undo_push_op(C, op);
   }
 
   WM_event_add_notifier(C, NC_TEXTURE | NA_ADDED, tex);
@@ -1319,7 +1313,6 @@ static wmOperatorStatus image_grid_open_exec(bContext *C, wmOperator *op)
   }
 
   image_grid_open_cancel(C, op);
-  ED_undo_push_op(C, op);
   return OPERATOR_FINISHED;
 }
 

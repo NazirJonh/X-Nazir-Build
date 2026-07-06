@@ -103,7 +103,7 @@ bool button_is_interactive_ex(const Button *but, const bool labeledit, const boo
   if (but->flag & UI_HIDDEN) {
     return false;
   }
-  if (but->flag & UI_SCROLLED && !block_grid_scroll_clip_contains_button(but->block, but)) {
+  if (but->flag & UI_SCROLLED && !block_grid_scroll_clip_contains_button(but)) {
     return false;
   }
   if ((but->type == ButtonType::Text) &&
@@ -363,10 +363,12 @@ Button *button_find_mouse_over_ex(const ARegion *region,
           }
         }
         else if (button_contains_pt(&but, mx, my)) {
-          /* Grid-scroll-clipped tiles are only hit within their visible clip window, so a
-           * partially scrolled row can't be activated through its cut-off (off-window) part. */
-          if ((but.drawflag & BUT_GRID_SCROLL_CLIP) && block.view_scroll_clip_enabled) {
-            if (!BLI_rctf_isect_pt(&block.view_scroll_clip_rect, mx, my)) {
+          /* Grid-scroll-clipped tiles are only hit within their own grid's visible clip window,
+           * so a partially scrolled row can't be activated through its cut-off (off-window) part. */
+          if ((but.drawflag & BUT_GRID_SCROLL_CLIP) && but.grid_scroll_clip_owner &&
+              but.grid_scroll_clip_owner->scroll_clip_enabled())
+          {
+            if (!BLI_rctf_isect_pt(&but.grid_scroll_clip_owner->scroll_clip_rect(), mx, my)) {
               continue;
             }
           }

@@ -22,6 +22,7 @@
 #include "BLI_path_utils.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
 #include "MEM_guardedalloc.h"
@@ -29,6 +30,7 @@
 #include "BKE_asset.hh"
 #include "BKE_asset_edit.hh"
 #include "BKE_context.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
 #include "BKE_screen.hh"
@@ -498,6 +500,46 @@ static void image_texture_shelf_setup_popover_layout(bContext &C, ui::Layout &la
   image_grid_popover_layout_context_set(layout, C, false);
 }
 
+/**
+ * Read the brush texture-slot target pushed into the layout context by
+ * #image_texture_shelf_setup_popover_layout, so grid-tile activation does not depend on a live
+ * UI context store (popover refresh can invalidate context inherited from the opening button).
+ */
+static void image_texture_shelf_grid_tile_activate_extra_params(const ui::Layout &layout,
+                                                                uint32_t &r_session_uid,
+                                                                bool &r_use_mask_slot)
+{
+  r_session_uid = MAIN_ID_SESSION_UID_UNSET;
+  r_use_mask_slot = false;
+
+  const PointerRNA *target_ptr = layout.context_ptr_get("image_grid_target", nullptr);
+  if (!target_ptr || !target_ptr->data || !target_ptr->owner_id) {
+    return;
+  }
+  if (GS(target_ptr->owner_id->name) != ID_BR) {
+    return;
+  }
+  r_session_uid = target_ptr->owner_id->session_uid;
+  r_use_mask_slot = layout.context_int_get("image_grid_is_mask_slot").value_or(0) != 0;
+}
+
+/**
+ * #bke::asset_edit_weak_reference_from_id() uses "Image/<id-name>" while shelf assets use the
+ * library-relative path from #AssetRepresentation::make_weak_reference(). Match by local ID name
+ * as a fallback for the image-texture browse popover.
+ */
+static bool image_texture_shelf_active_asset_name_fallback_matches(
+    const AssetShelfType * /*shelf_type*/,
+    const ID *local_id,
+    const AssetWeakReference &active_asset)
+{
+  const char *active_identifier = active_asset.relative_asset_identifier;
+  if (!active_identifier || !STRPREFIX(active_identifier, "Image/")) {
+    return false;
+  }
+  return STREQ(local_id->name + 2, active_identifier + 6);
+}
+
 void image_grid_shelf_sync_register()
 {
   AssetShelfType *type = ed::asset::shelf::type_find_from_idname(IMAGE_TEXTURE_SHELF_IDNAME);
@@ -508,6 +550,9 @@ void image_grid_shelf_sync_register()
   type->get_active_asset_from_context = image_texture_shelf_active_asset_type_callback;
   type->pre_popover_invoke = image_texture_shelf_pre_popover_invoke;
   type->setup_popover_layout = image_texture_shelf_setup_popover_layout;
+  type->active_asset_name_fallback_matches = image_texture_shelf_active_asset_name_fallback_matches;
+  type->grid_tile_activate_extra_params = image_texture_shelf_grid_tile_activate_extra_params;
+  type->flag |= ASSET_SHELF_TYPE_FLAG_CENTER_ACTIVE_ASSET_ON_OPEN;
 }
 
 void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState &state)

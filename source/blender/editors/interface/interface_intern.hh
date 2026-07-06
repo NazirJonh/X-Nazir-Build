@@ -192,6 +192,8 @@ enum class TextDirection : int8_t {
   Up,
 };
 
+class AbstractGridView;
+
 struct Button : NonMovable {
 
   /** Pointer back to the layout item holding this button. */
@@ -199,6 +201,11 @@ struct Button : NonMovable {
   int flag = 0;
   int drawflag = 0;
   char flag2 = 0;
+  /** Set alongside #BUT_GRID_SCROLL_CLIP by #layout_scroll_clip_apply_buttons; the grid this
+   * clip-scrolled button belongs to (never null when #BUT_GRID_SCROLL_CLIP is set). Every read
+   * site resolves the per-grid clip rect through this instead of a block-global field, so two
+   * clip-scrolled grids in the same block don't share one window. */
+  AbstractGridView *grid_scroll_clip_owner = nullptr;
 
   TextDirection text_direction = TextDirection::Default;
 
@@ -710,20 +717,6 @@ struct Block {
   rctf rect = {};
   float aspect = 0.0f;
 
-  /**
-   * Clip rect (block space) applied while drawing buttons flagged #BUT_GRID_SCROLL_CLIP. Set by
-   * #Layout::view_scroll_clip_set so an embedded grid view can scroll its rows by sub-row pixel
-   * amounts while the visible area stays a fixed window (e.g. the brush texture image grid).
-   * Grid tile buttons are shifted by the sub-row offset in layout resolve and excluded from
-   * #block_align_calc so this rect stays aligned with the visible window.
-   *
-   * Only one scroll-clip window per block is supported (asserted in #Layout::resolve): the rect
-   * and the button flag are block-global, so a second window would re-target the first window's
-   * buttons to its own rect.
-   */
-  bool view_scroll_clip_enabled = false;
-  rctf view_scroll_clip_rect = {};
-
   BlockAlertLevel alert_level = BlockAlertLevel::None;
 
   /** Unique hash used to implement popup menu memory. */
@@ -847,17 +840,19 @@ void fontscale(float *points, float aspect);
 void button_to_pixelrect(rcti *rect, const ARegion *region, const Block *block, const Button *but);
 rcti rect_to_pixelrect(const ARegion *region, const Block *block, const rctf *src_rect);
 
-/** Translate #Block::view_scroll_clip_rect with buttons (e.g. #block_translate). */
+/** Translate every clip-scrolled grid's clip rect in \a block with its buttons (e.g.
+ * #block_translate). */
 void block_view_scroll_clip_translate(Block *block, float dx, float dy);
 
 /** Vertical-only helper (e.g. #offset_panel_block, popup scroll offsets). */
 void block_view_scroll_clip_offset_apply(Block *block, float dy);
 
 /**
- * True when \a but is a grid-scroll-clipped tile that intersects the effective clip rect.
- * Such buttons must stay visible/interactive even if popup scroll tests mark them #UI_SCROLLED.
+ * True when \a but is a grid-scroll-clipped tile that intersects its owning grid's effective clip
+ * rect (#Button::grid_scroll_clip_owner). Such buttons must stay visible/interactive even if popup
+ * scroll tests mark them #UI_SCROLLED.
  */
-bool block_grid_scroll_clip_contains_button(const Block *block, const Button *but);
+bool block_grid_scroll_clip_contains_button(const Button *but);
 
 /**
  * Effective rect of \a but for bounds/scroll computations.
@@ -865,11 +860,12 @@ bool block_grid_scroll_clip_contains_button(const Block *block, const Button *bu
  * A #BUT_GRID_SCROLL_CLIP tile may overflow its fixed window (the extra buffer row and the
  * sub-row-scrolled partial rows). That overflow is masked away at draw time, so it must not
  * inflate block bounds either - otherwise it would grow the panel/popup size and feed the popup
- * auto-scroll, shifting rows around. For such buttons \a r_rect is clamped to
- * #Block::view_scroll_clip_rect; returns false when the button lies fully outside the window (it
- * should be ignored). For all other buttons \a r_rect is the button rect and the result is true.
+ * auto-scroll, shifting rows around. For such buttons \a r_rect is clamped to its owning grid's
+ * clip rect (#Button::grid_scroll_clip_owner); returns false when the button lies fully outside
+ * the window (it should be ignored). For all other buttons \a r_rect is the button rect and the
+ * result is true.
  */
-bool block_grid_scroll_clip_bounds_rect(const Block *block, const Button *but, rctf *r_rect);
+bool block_grid_scroll_clip_bounds_rect(const Button *but, rctf *r_rect);
 
 void block_to_region_fl(const ARegion *region, const Block *block, float *x, float *y);
 void block_to_window_fl(const ARegion *region, const Block *block, float *x, float *y);
@@ -1098,6 +1094,16 @@ struct PopupBlockHandle {
   float scrollmin = 0.0f;
   float scrollmax = 0.0f;
 
+  /**
+   * Fixed-viewport grid edge auto-scroll: guards against the popup's initial cursor position
+   * (set by #PanelType::offset_units_xy, which assumes the first row is at the top) being
+   * misread as a scroll request when #ASSET_SHELF_TYPE_FLAG_CENTER_ACTIVE_ASSET_ON_OPEN moves
+   * the first row away from 0 before the user has moved the mouse at all.
+   */
+  bool fixed_grid_autoscroll_baseline_set = false;
+  bool fixed_grid_autoscroll_gate_released = false;
+  int fixed_grid_autoscroll_baseline_my = 0;
+
   KeyNavLock keynav_state;
 
   /* for operator popups */
@@ -1323,12 +1329,14 @@ bool popup_block_fixed_grid_scrolltimer_step(bContext *C,
                                              PopupBlockHandle *menu,
                                              Block *block,
                                              int my);
-bool popup_block_fixed_grid_autoscroll_at_pointer(Block *block, int my);
+bool popup_block_fixed_grid_autoscroll_at_pointer(PopupBlockHandle *menu, Block *block, int my);
 
 /**
  * A region owning the unified grid handler's active fling or touch drag is being freed: stop the
  * fling (removing its timer) and drop the drag, so no later event touches the dead region. Called
- * from #popup_block_remove.
+ * from #popup_block_remove (temporary/popup regions) and, via the public #UI_grid_view_input_region_freed
+ * wrapper, from #ED_region_exit (any region). Idempotent: safe to call more than once for the
+ * same region.
  */
 void grid_view_input_region_freed(const ARegion *region);
 
@@ -1863,6 +1871,20 @@ void block_free_views(Block *block);
  * needs to match a specific view idname. Returns null if there is no such view.
  */
 AbstractGridView *block_view_find_fixed_viewport_grid(Block &block);
+/**
+ * All grid views in \a block with an active scroll-clip window
+ * (#AbstractGridView::scroll_clip_enabled()). #ViewLink is private to `interface_view.cc`, so
+ * callers elsewhere that need to update every clip-scrolled grid's rect (e.g. translating it
+ * along with the rest of the block) go through this instead of iterating #Block::views directly.
+ */
+Vector<AbstractGridView *> block_view_scroll_clipped_grids(Block &block);
+/**
+ * Like #block_view_find_fixed_viewport_grid, but when \a block hosts more than one fixed-viewport
+ * grid, picks the one whose own edge-scroll geometry actually contains \a block_space_y (via
+ * #AbstractGridView::fixed_viewport_scroll_at_y) instead of always the first. Falls back to the
+ * first grid when none matches, preserving today's single-grid behavior exactly.
+ */
+AbstractGridView *block_view_find_fixed_viewport_grid_at_y(Block &block, float block_space_y);
 void block_views_end(ARegion *region, const Block *block);
 void block_view_persistent_state_restore(const ARegion &region,
                                          const Block &block,

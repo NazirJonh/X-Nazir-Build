@@ -4812,7 +4812,9 @@ static void numedit_apply(bContext *C, Block *block, Button *but, HandleButtonDa
   /* Scrollbar/grip of a scroll-clip window: a redraw alone would re-use the stale button
    * geometry, the grid rows need a UI refresh to be rebuilt at the new scroll offset. */
   if (ELEM(but->type, ButtonType::Scroll, ButtonType::Grip)) {
-    if (block->view_scroll_clip_enabled && (but->drawflag & BUT_GRID_SCROLL_CLIP)) {
+    if (but->grid_scroll_clip_owner && but->grid_scroll_clip_owner->scroll_clip_enabled() &&
+        (but->drawflag & BUT_GRID_SCROLL_CLIP))
+    {
       ED_region_tag_refresh_ui(data->region);
     }
   }
@@ -11733,7 +11735,7 @@ static int handle_menu_event(bContext *C,
 
       /* add menu scroll timer, if needed */
       if (menu_scroll_test(block, {mx, my}) ||
-          popup_block_fixed_grid_autoscroll_at_pointer(block, my))
+          popup_block_fixed_grid_autoscroll_at_pointer(menu, block, my))
       {
         if (menu->scrolltimer == nullptr) {
           menu->scrolltimer = WM_event_timer_add(

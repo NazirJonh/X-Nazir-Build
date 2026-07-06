@@ -222,6 +222,12 @@ bool AbstractGridView::use_fixed_viewport_layout() const
   return fixed_viewport_layout_;
 }
 
+void AbstractGridView::scroll_clip_set(const rctf &rect)
+{
+  scroll_clip_enabled_ = true;
+  scroll_clip_rect_ = rect;
+}
+
 AbstractGridView::FixedViewportGeometry AbstractGridView::fixed_viewport_geometry() const
 {
   BLI_assert(style_.tile_height > 0);
@@ -435,9 +441,11 @@ void AbstractGridView::draw_overlays(const ARegion &region, const Block &block) 
   }
 
   /* The buffer/partially scrolled rows are cut to the scroll-clip window when drawn; clamp the
-   * arrow anchor bounds the same way so the arrows stay attached to the visible window edges. */
-  if (block.view_scroll_clip_enabled) {
-    const rcti clip_pixel_rect = rect_to_pixelrect(&region, &block, &block.view_scroll_clip_rect);
+   * arrow anchor bounds the same way so the arrows stay attached to the visible window edges.
+   * This is this grid's own window (not a block-global one): a block may host more than one
+   * clip-scrolled grid, each with its own. */
+  if (this->scroll_clip_enabled()) {
+    const rcti clip_pixel_rect = rect_to_pixelrect(&region, &block, &this->scroll_clip_rect());
     if (!BLI_rcti_isect(&pixel_bounds, &clip_pixel_rect, &pixel_bounds)) {
       return;
     }
@@ -1171,6 +1179,11 @@ void grid_view_input_region_freed(const ARegion *region)
   }
 }
 
+void UI_grid_view_input_region_freed(const ARegion *region)
+{
+  grid_view_input_region_freed(region);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -1178,20 +1191,50 @@ void grid_view_input_region_freed(const ARegion *region)
  *
  * Generic popup/menu event glue driving the fixed-viewport scroll of whichever grid view in the
  * block opted into it (#AbstractGridView::set_fixed_viewport_layout). Found via
- * #block_view_find_fixed_viewport_grid, so this knows nothing about the concrete view (e.g. the
- * image browser) it scrolls.
+ * #block_view_find_fixed_viewport_grid_at_y, so this knows nothing about the concrete view (e.g.
+ * the image browser) it scrolls.
  * \{ */
 
-bool popup_block_fixed_grid_autoscroll_at_pointer(Block *block, const int my)
+/**
+ * Returns false while the mouse is still sitting at (or hasn't yet been recorded away from) the
+ * position it had when this popup first opened. #PanelType::offset_units_xy places that initial
+ * position over what is assumed to be row 0; #ASSET_SHELF_TYPE_FLAG_CENTER_ACTIVE_ASSET_ON_OPEN
+ * can move the first row away from 0 before the user has touched the mouse, which otherwise makes
+ * that still, placement-driven cursor look like an edge-hover scroll request and immediately
+ * undoes the centering (see #PopupBlockHandle::fixed_grid_autoscroll_gate_released).
+ */
+static bool fixed_grid_autoscroll_user_moved(PopupBlockHandle &menu, const int my)
 {
-  if (block == nullptr) {
+  if (menu.fixed_grid_autoscroll_gate_released) {
+    return true;
+  }
+  if (!menu.fixed_grid_autoscroll_baseline_set) {
+    menu.fixed_grid_autoscroll_baseline_set = true;
+    menu.fixed_grid_autoscroll_baseline_my = my;
     return false;
   }
-  const AbstractGridView *grid_view = block_view_find_fixed_viewport_grid(*block);
+  if (my == menu.fixed_grid_autoscroll_baseline_my) {
+    return false;
+  }
+  menu.fixed_grid_autoscroll_gate_released = true;
+  return true;
+}
+
+bool popup_block_fixed_grid_autoscroll_at_pointer(PopupBlockHandle *menu,
+                                                   Block *block,
+                                                   const int my)
+{
+  if (block == nullptr || menu == nullptr) {
+    return false;
+  }
+  const AbstractGridView *grid_view = block_view_find_fixed_viewport_grid_at_y(*block, float(my));
   if (grid_view == nullptr) {
     return false;
   }
-  return grid_view->fixed_viewport_scroll_at_y(*block, float(my)).has_value();
+  if (!grid_view->fixed_viewport_scroll_at_y(*block, float(my)).has_value()) {
+    return false;
+  }
+  return fixed_grid_autoscroll_user_moved(*menu, my);
 }
 
 bool popup_block_fixed_grid_scrolltimer_step(bContext * /*C*/,
@@ -1202,7 +1245,7 @@ bool popup_block_fixed_grid_scrolltimer_step(bContext * /*C*/,
   if (block == nullptr || menu == nullptr || menu->region == nullptr) {
     return false;
   }
-  AbstractGridView *grid_view = block_view_find_fixed_viewport_grid(*block);
+  AbstractGridView *grid_view = block_view_find_fixed_viewport_grid_at_y(*block, float(my));
   if (grid_view == nullptr) {
     return false;
   }
@@ -1210,6 +1253,9 @@ bool popup_block_fixed_grid_scrolltimer_step(bContext * /*C*/,
   const std::optional<ViewScrollDirection> scroll_dir = grid_view->fixed_viewport_scroll_at_y(
       *block, float(my));
   if (!scroll_dir) {
+    return false;
+  }
+  if (!fixed_grid_autoscroll_user_moved(*menu, my)) {
     return false;
   }
 
@@ -1884,7 +1930,7 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
         grid_row->ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
       }
       layout.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
-      layout.view_scroll_clip_set(visible_height, grid_view.scroll_offset_px());
+      layout.view_scroll_clip_set(visible_height, grid_view.scroll_offset_px(), &grid_view);
     }
 
     /* Publish geometry to the session so the unified input handler hit-tests and clamps scrolling

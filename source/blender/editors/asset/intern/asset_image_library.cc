@@ -321,11 +321,20 @@ static bool image_library_index_write_atomic(const char *library_root_path,
   return true;
 }
 
+/* Bounds both pathologically deep trees and directory symlink/junction loops (stat follows
+ * symlinks, so a loop would otherwise recurse until the stack overflows). */
+static constexpr int IMAGE_LIBRARY_MAX_SCAN_DEPTH = 64;
+
 static void scan_directory_recursive(const char *dir_abs,
                                      const char *rel_dir,
                                      std::set<std::string> &catalog_paths,
-                                     Vector<ImageLibraryIndexEntry> &image_entries)
+                                     Vector<ImageLibraryIndexEntry> &image_entries,
+                                     const int depth)
 {
+  if (depth > IMAGE_LIBRARY_MAX_SCAN_DEPTH) {
+    return;
+  }
+
   direntry *entries = nullptr;
   const int entries_num = BLI_filelist_dir_contents(dir_abs, &entries);
 
@@ -348,7 +357,7 @@ static void scan_directory_recursive(const char *dir_abs,
       else {
         STRNCPY(sub_rel, entry.relname);
       }
-      scan_directory_recursive(sub_abs, sub_rel, catalog_paths, image_entries);
+      scan_directory_recursive(sub_abs, sub_rel, catalog_paths, image_entries, depth + 1);
       continue;
     }
 
@@ -482,7 +491,7 @@ int image_library_scan_and_index(const char *library_root_path,
 
   std::set<std::string> catalog_paths;
   Vector<ImageLibraryIndexEntry> image_entries;
-  scan_directory_recursive(library_root_path, "", catalog_paths, image_entries);
+  scan_directory_recursive(library_root_path, "", catalog_paths, image_entries, 0);
 
   if (image_entries.is_empty()) {
     char index_path[FILE_MAX];
@@ -553,7 +562,7 @@ bool image_library_needs_reindex(const char *library_root_path)
 
   std::set<std::string> catalog_paths;
   Vector<ImageLibraryIndexEntry> disk_entries;
-  scan_directory_recursive(library_root_path, "", catalog_paths, disk_entries);
+  scan_directory_recursive(library_root_path, "", catalog_paths, disk_entries, 0);
 
   if (disk_entries.size() != indexed_entries.size()) {
     return true;
@@ -657,6 +666,13 @@ bool image_library_foreach_image(const char *library_root,
 
 void image_library_on_startup()
 {
+  /* Startup indexing is a synchronous recursive filesystem scan; skip it entirely in background
+   * (`-b`) mode where there is no UI to serve and the cost is pure overhead. Interactive async
+   * indexing is handled separately. */
+  if (G.background) {
+    return;
+  }
+
   for (const bUserAssetLibrary &user_lib : U.asset_libraries) {
     if (user_lib.flag & (ASSET_LIBRARY_DISABLED | ASSET_LIBRARY_USE_REMOTE_URL)) {
       continue;
@@ -720,6 +736,54 @@ bool image_library_catalog_directory_ensure(const char *library_root_path,
   char abs_dir[FILE_MAX];
   join_library_root_and_relative(library_root_path, rel_dir, abs_dir);
   return BLI_dir_create_recursive(abs_dir);
+}
+
+static bool directory_is_empty(const char *dir_abs)
+{
+  direntry *entries = nullptr;
+  const int entries_num = BLI_filelist_dir_contents(dir_abs, &entries);
+  bool is_empty = true;
+  for (int i = 0; i < entries_num; i++) {
+    if (!FILENAME_IS_CURRPAR(entries[i].relname)) {
+      is_empty = false;
+      break;
+    }
+  }
+  BLI_filelist_free(entries, entries_num);
+  return is_empty;
+}
+
+bool image_library_catalog_directory_remove_if_empty(const char *library_root_path,
+                                                      const StringRef catalog_path)
+{
+  if (!image_library_is_editable_root(library_root_path)) {
+    return false;
+  }
+
+  const std::string rel_dir = relative_dir_from_catalog_path(catalog_path);
+  if (rel_dir.empty()) {
+    /* The "Root" pseudo-catalog maps to the library root itself; never remove that. */
+    return false;
+  }
+
+  char abs_dir[FILE_MAX];
+  join_library_root_and_relative(library_root_path, rel_dir, abs_dir);
+
+  /* Containment guard: never touch anything outside the library root. */
+  if (!BLI_path_contains(library_root_path, abs_dir)) {
+    return false;
+  }
+
+  if (!BLI_exists(abs_dir)) {
+    return true; /* Nothing to remove. */
+  }
+  if (!BLI_is_dir(abs_dir) || !directory_is_empty(abs_dir)) {
+    /* Non-empty: the folder still holds image files moved into this catalog, so removing it
+     * would destroy user data. Leave it in place. */
+    return false;
+  }
+
+  return BLI_delete(abs_dir, true, false) == 0;
 }
 
 bool image_library_catalog_directory_relocate(const char *library_root_path,

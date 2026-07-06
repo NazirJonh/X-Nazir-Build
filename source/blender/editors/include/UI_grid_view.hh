@@ -19,6 +19,8 @@
 #include "BLI_map.hh"
 #include "BLI_vector.hh"
 
+#include "DNA_vec_types.h"
+
 #include "UI_abstract_view.hh"
 #include "UI_resources.hh"
 
@@ -127,6 +129,11 @@ class AbstractGridView : public AbstractView {
   bool scroll_active_into_view_on_build_ = false;
   /** Remember the center intent for the deferred #scroll_active_into_view_on_build_ pass. */
   bool scroll_active_center_on_build_ = false;
+  /** Set by #Layout::resolve() when this grid opted into #Layout::view_scroll_clip_set(). Per-grid
+   * (not block-global): a block can host more than one clip-scrolled grid, each with its own
+   * window. */
+  bool scroll_clip_enabled_ = false;
+  rctf scroll_clip_rect_ = {};
 
  public:
   AbstractGridView();
@@ -168,6 +175,20 @@ class AbstractGridView : public AbstractView {
   [[nodiscard]] std::optional<int> min_viewport_height() const;
   void set_fixed_viewport_layout(bool fixed_viewport_layout);
   [[nodiscard]] bool use_fixed_viewport_layout() const;
+  /**
+   * Set by #Layout::resolve() when this grid's layout opted into #Layout::view_scroll_clip_set().
+   * Rebuilt fresh (defaults to disabled) every redraw along with the view itself, so no explicit
+   * reset is needed between frames.
+   */
+  void scroll_clip_set(const rctf &rect);
+  [[nodiscard]] bool scroll_clip_enabled() const
+  {
+    return scroll_clip_enabled_;
+  }
+  [[nodiscard]] const rctf &scroll_clip_rect() const
+  {
+    return scroll_clip_rect_;
+  }
   /**
    * Menu-style scroll zones (#UI_MENU_SCROLL_MOUSE) over the grid bounds in block space, extended
    * into the separator gaps so the persistent scroll arrows are themselves hoverable. Used for edge

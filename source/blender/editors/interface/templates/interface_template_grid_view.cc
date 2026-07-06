@@ -349,7 +349,7 @@ void build_grid_view(const bContext &C,
     grid_view_col.ui_units_x_set(float(panel_width) / float(UI_UNIT_X));
   }
   grid_view_col.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
-  grid_view_col.view_scroll_clip_set(visible_height, scroll_offset_px);
+  grid_view_col.view_scroll_clip_set(visible_height, scroll_offset_px, &view);
 
   GridViewBuilder builder(*block);
   builder.build_grid_view(C, view, grid_view_col, "", &local_v2d);

@@ -535,9 +535,9 @@ enum {
 
   /**
    * Button belongs to a clip-scrolled view region (see #Layout::view_scroll_clip_set). When drawn,
-   * #block_draw clips it to #Block::view_scroll_clip_rect and skips it entirely when fully
-   * outside, so partially-scrolled grid rows are cut cleanly instead of overflowing the visible
-   * area.
+   * #block_draw clips it to its owning grid's clip rect (#Button::grid_scroll_clip_owner) and
+   * skips it entirely when fully outside, so partially-scrolled grid rows are cut cleanly instead
+   * of overflowing the visible area.
    */
   BUT_GRID_SCROLL_CLIP = 1 << 28,
 };
@@ -1163,6 +1163,15 @@ void blocklist_free_inactive(const bContext *C, ARegion *region);
  */
 void UI_screen_free_active_but_highlight(const bContext *C, bScreen *screen);
 void UI_region_free_active_but_all(bContext *C, ARegion *region);
+
+/**
+ * A region owning the unified grid view handler's active fling or touch drag is being torn
+ * down: stop the fling (removing its timer) and drop the drag, so no later event touches the
+ * dead region. Thin public wrapper around #grid_view_input_region_freed for callers outside
+ * `editors/interface` (e.g. #ED_region_exit). Safe to call for any region; a no-op if the
+ * region owns neither the active fling nor the active drag.
+ */
+void UI_grid_view_input_region_freed(const ARegion *region);
 
 void block_region_set(Block *block, ARegion *region);
 

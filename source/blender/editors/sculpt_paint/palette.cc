@@ -236,13 +236,16 @@ static wmOperatorStatus palette_new_exec(bContext *C, wmOperator * /*op*/)
   Main *bmain = CTX_data_main(C);
   Palette *palette = BKE_palette_add(bmain, "Palette");
 
-  /* When invoked from a `template_ID` whose bound property is a palette pointer (e.g. a color
-   * picker's per-popup palette), assign the new palette there. Otherwise assign to the active
-   * paint palette, matching the tool panels' behavior. */
+  /* Only the color picker's per-popup palette (a weak, non-refcounted #ColorPickerPalette.palette
+   * reference) is assigned through the generic RNA setter. Every other #template_ID target --
+   * notably the long-standing tool-panel Paint.palette selector, whose RNA property is not
+   * PROP_ID_REFCOUNT -- must go through #BKE_paint_palette_set so old/new user counts stay correct. */
   PointerRNA owner_ptr;
   PropertyRNA *prop;
   ui::context_active_but_prop_get_templateID(C, &owner_ptr, &prop);
-  if (owner_ptr.data != nullptr && prop != nullptr) {
+  if (owner_ptr.data != nullptr && prop != nullptr &&
+      RNA_struct_is_a(owner_ptr.type, RNA_ColorPickerPalette))
+  {
     PointerRNA idptr = RNA_id_pointer_create(&palette->id);
     RNA_property_pointer_set(&owner_ptr, prop, idptr, nullptr);
     RNA_property_update(C, &owner_ptr, prop);

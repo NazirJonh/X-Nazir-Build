@@ -73,12 +73,75 @@ inline int preview_size_get(PointerRNA &settings)
   return RNA_int_get(&settings, "preview_size");
 }
 
-/** Parse comma-separated catalog paths. An empty result means "show all". */
+/**
+ * Serialize a set of catalog paths into one string. A catalog path may contain any character,
+ * including commas and surrounding spaces, so commas and backslashes are backslash-escaped
+ * (`,`->`\,`, `\`->`\\`) to make the encoding lossless and reversible with #catalogs_split.
+ */
+inline std::string catalogs_join(const Set<std::string> &paths)
+{
+  std::string joined;
+  bool first = true;
+  for (const std::string &path : paths) {
+    if (!first) {
+      joined += ',';
+    }
+    for (const char c : path) {
+      if (ELEM(c, '\\', ',')) {
+        joined += '\\';
+      }
+      joined += c;
+    }
+    first = false;
+  }
+  return joined;
+}
+
+/**
+ * Inverse of #catalogs_join: split on unescaped commas, unescaping `\,` and `\\`. Empty tokens
+ * (from a leading, trailing, or doubled comma) are skipped.
+ */
+inline Vector<std::string> catalogs_split(const std::string &str)
+{
+  Vector<std::string> tokens;
+  std::string token;
+  bool in_token = false;
+  bool escaped = false;
+  for (const char c : str) {
+    if (escaped) {
+      token += c;
+      escaped = false;
+      continue;
+    }
+    if (c == '\\') {
+      escaped = true;
+      in_token = true;
+      continue;
+    }
+    if (c == ',') {
+      if (in_token) {
+        tokens.append(std::move(token));
+        token.clear();
+        in_token = false;
+      }
+      continue;
+    }
+    token += c;
+    in_token = true;
+  }
+  if (in_token) {
+    tokens.append(std::move(token));
+  }
+  return tokens;
+}
+
+/** Parse the serialized catalog paths. An empty result means "show all". A malformed string with
+ * repeated tokens is merged (Set::add), never #Set::add_new which is UB on a duplicate key. */
 inline Set<std::string> enabled_catalogs_get(PointerRNA &settings)
 {
   Set<std::string> result;
-  for (std::string &path : split_comma_separated(RNA_string_get(&settings, "enabled_catalogs"))) {
-    result.add_new(std::move(path));
+  for (std::string &path : catalogs_split(RNA_string_get(&settings, "enabled_catalogs"))) {
+    result.add(std::move(path));
   }
   return result;
 }
@@ -95,21 +158,8 @@ inline bool is_catalog_path_enabled(PointerRNA &settings, StringRef catalog_path
 
 inline void enabled_catalogs_set(PointerRNA &settings, const Set<std::string> &paths)
 {
-  if (paths.is_empty()) {
-    RNA_string_set(&settings, "enabled_catalogs", "");
-    return;
-  }
-
-  std::string joined;
-  bool first = true;
-  for (const std::string &path : paths) {
-    if (!first) {
-      joined += ',';
-    }
-    joined += path;
-    first = false;
-  }
-  RNA_string_set(&settings, "enabled_catalogs", joined.c_str());
+  /* #catalogs_join returns "" for an empty set, which is the "show all" encoding. */
+  RNA_string_set(&settings, "enabled_catalogs", catalogs_join(paths).c_str());
 }
 
 inline void catalog_path_set_enabled(PointerRNA &settings,
@@ -118,7 +168,7 @@ inline void catalog_path_set_enabled(PointerRNA &settings,
 {
   Set<std::string> paths = enabled_catalogs_get(settings);
   if (enabled) {
-    paths.add_new(catalog_path);
+    paths.add(catalog_path);
   }
   else {
     paths.remove(catalog_path);

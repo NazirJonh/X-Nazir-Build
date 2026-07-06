@@ -310,7 +310,6 @@ static wmOperatorStatus image_grid_assign_catalog_exec(bContext *C, wmOperator *
   image_grid_operation_finish(
       *C, asset_system::current_file_library_reference(), image->id.name + 2, is_mask_slot);
 
-  ED_undo_push_op(C, op);
   return OPERATOR_FINISHED;
 }
 
@@ -567,7 +566,6 @@ static wmOperatorStatus image_grid_copy_move_exec(bContext *C, wmOperator *op, c
 
       ed::asset::list::library_refresh(C, &dest_ref);
       image_grid_operation_finish(*C, dest_ref, moved_relative, is_mask_slot);
-      ED_undo_push_op(C, op);
       return OPERATOR_FINISHED;
     }
   }
@@ -602,7 +600,6 @@ static wmOperatorStatus image_grid_copy_move_exec(bContext *C, wmOperator *op, c
   ed::asset::list::library_refresh(C, &dest_ref);
   image_grid_operation_finish(*C, dest_ref, focus_identifier, is_mask_slot);
 
-  ED_undo_push_op(C, op);
   return OPERATOR_FINISHED;
 }
 

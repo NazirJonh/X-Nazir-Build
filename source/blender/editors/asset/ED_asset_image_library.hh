@@ -108,6 +108,14 @@ bool image_library_catalog_directory_relocate(const char *library_root_path,
                                               StringRef new_catalog_path);
 
 /**
+ * Remove the on-disk folder mirroring \a catalog_path under \a library_root_path, but only when
+ * the folder is empty and inside the library root. Non-empty folders (holding moved image files)
+ * are left untouched. Symmetric to #image_library_catalog_directory_ensure.
+ */
+bool image_library_catalog_directory_remove_if_empty(const char *library_root_path,
+                                                     StringRef catalog_path);
+
+/**
  * Move an indexed image file into the folder for \a catalog_id and update the JSON index.
  */
 bool image_library_assign_image_to_catalog(const char *library_root_path,

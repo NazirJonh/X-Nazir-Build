@@ -2580,7 +2580,17 @@ static void rna_def_uigrid(BlenderRNA *brna)
   RNA_def_function_output(func, parm);
   parm = RNA_def_int(func, "icon", 0, 0, INT_MAX, "", "Preview icon", 0, INT_MAX);
   RNA_def_function_output(func, parm);
-  parm = RNA_def_int(func, "badge_icon", 0, 0, INT_MAX, "", "Optional badge icon", 0, INT_MAX);
+  parm = RNA_def_int(func,
+                     "badge_icon",
+                     0,
+                     0,
+                     INT_MAX,
+                     "",
+                     "Optional small badge icon drawn over the bottom-right corner of the "
+                     "preview. Unlike `icon`, deferred/loading previews are not supported here — "
+                     "pass an icon that is already resolved (e.g. after preview_ensure())",
+                     0,
+                     INT_MAX);
   RNA_def_function_output(func, parm);
 
   func = RNA_def_function(srna, "draw_context_menu", nullptr);

@@ -726,6 +726,12 @@ enum AssetShelfTypeFlag {
    * highlighting the asset as active.
    */
   ASSET_SHELF_TYPE_FLAG_ACTIVATE_FOR_CONTEXT_MENU = (1 << 3),
+  /**
+   * Scroll the active asset into the center of the grid the first time it is shown (e.g. a
+   * context-aware active asset set via #AssetShelfType.get_active_asset_from_context), instead of
+   * relying on the default top-of-grid scroll position.
+   */
+  ASSET_SHELF_TYPE_FLAG_CENTER_ACTIVE_ASSET_ON_OPEN = (1 << 4),
 };
 ENUM_OPERATORS(AssetShelfTypeFlag);
 
@@ -783,6 +789,29 @@ struct AssetShelfType {
    * When set, asset shelf grid build prefers this over #get_active_asset. */
   const AssetWeakReference *(*get_active_asset_from_context)(const AssetShelfType *shelf_type,
                                                              const bContext *C);
+
+  /**
+   * Optional fallback equality check for #AssetViewItem::should_be_active(), used when the
+   * active asset weak reference does not equal a grid item's own weak reference by identity.
+   * Needed by shelf types whose #get_active_asset_from_context returns a reference in a
+   * different addressing scheme than #AssetRepresentation::make_weak_reference() (e.g.
+   * "Image/<id-name>" for a brush texture localized from an asset, vs. the library-relative
+   * asset path). \a local_id is the grid item's own local ID (never null when this is called).
+   */
+  bool (*active_asset_name_fallback_matches)(const AssetShelfType *shelf_type,
+                                             const ID *local_id,
+                                             const AssetWeakReference &active_asset);
+
+  /**
+   * Called while building a grid tile, to let this shelf type read any extra
+   * #activate_operator parameters it needs from the layout context (as set up via
+   * #setup_popover_layout) — e.g. a target ID's session UID and an auxiliary flag for a
+   * texture-slot-aware activate operator. Optional; most shelf types' #activate_operator needs
+   * no parameters beyond the asset itself.
+   */
+  void (*grid_tile_activate_extra_params)(const ui::Layout &layout,
+                                          uint32_t &r_session_uid,
+                                          bool &r_use_mask_slot);
 
   /**
    * Called once before the browse popover block is created (e.g. to sync shelf state).

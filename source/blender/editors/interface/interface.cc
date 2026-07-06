@@ -48,6 +48,7 @@
 #include "BLT_translation.hh"
 
 #include "UI_abstract_view.hh"
+#include "UI_grid_view.hh"
 #include "UI_interface.hh"
 #include "UI_interface_icons.hh"
 #include "UI_interface_layout.hh"
@@ -399,10 +400,11 @@ void region_winrct_get_no_margin(const ARegion *region, rcti *r_rect)
 
 void block_view_scroll_clip_translate(Block *block, const float dx, const float dy)
 {
-  if (!block->view_scroll_clip_enabled) {
-    return;
+  for (AbstractGridView *grid_view : block_view_scroll_clipped_grids(*block)) {
+    rctf rect = grid_view->scroll_clip_rect();
+    BLI_rctf_translate(&rect, dx, dy);
+    grid_view->scroll_clip_set(rect);
   }
-  BLI_rctf_translate(&block->view_scroll_clip_rect, dx, dy);
 }
 
 void block_view_scroll_clip_offset_apply(Block *block, const float dy)
@@ -410,23 +412,28 @@ void block_view_scroll_clip_offset_apply(Block *block, const float dy)
   block_view_scroll_clip_translate(block, 0.0f, dy);
 }
 
-bool block_grid_scroll_clip_contains_button(const Block *block, const Button *but)
+bool block_grid_scroll_clip_contains_button(const Button *but)
 {
-  if (!block->view_scroll_clip_enabled || !(but->drawflag & BUT_GRID_SCROLL_CLIP)) {
+  if (!(but->drawflag & BUT_GRID_SCROLL_CLIP) || !but->grid_scroll_clip_owner ||
+      !but->grid_scroll_clip_owner->scroll_clip_enabled())
+  {
     return false;
   }
-  return BLI_rctf_isect(&block->view_scroll_clip_rect, &but->rect, nullptr);
+  return BLI_rctf_isect(&but->grid_scroll_clip_owner->scroll_clip_rect(), &but->rect, nullptr);
 }
 
-bool block_grid_scroll_clip_bounds_rect(const Block *block, const Button *but, rctf *r_rect)
+bool block_grid_scroll_clip_bounds_rect(const Button *but, rctf *r_rect)
 {
-  if (!block->view_scroll_clip_enabled || !(but->drawflag & BUT_GRID_SCROLL_CLIP)) {
+  if (!(but->drawflag & BUT_GRID_SCROLL_CLIP) || !but->grid_scroll_clip_owner ||
+      !but->grid_scroll_clip_owner->scroll_clip_enabled())
+  {
     *r_rect = but->rect;
     return true;
   }
   /* Clamp the tile to the visible window so the clipped-away buffer/partial rows don't inflate
-   * block bounds (which drive panel size, popup size and popup auto-scroll). */
-  return BLI_rctf_isect(&block->view_scroll_clip_rect, &but->rect, r_rect);
+   * block bounds (which drive panel size, popup size and popup auto-scroll). Each grid clips to
+   * its own window, so two clip-scrolled grids in one block never leak into each other's bounds. */
+  return BLI_rctf_isect(&but->grid_scroll_clip_owner->scroll_clip_rect(), &but->rect, r_rect);
 }
 
 void block_translate(Block *block, float x, float y)
@@ -534,7 +541,7 @@ void block_bounds_calc(Block *block)
 
     for (const Button &bt : block->buttons()) {
       rctf bounds_rect;
-      if (block_grid_scroll_clip_bounds_rect(block, &bt, &bounds_rect)) {
+      if (block_grid_scroll_clip_bounds_rect(&bt, &bounds_rect)) {
         BLI_rctf_union(&block->rect, &bounds_rect);
       }
     }
@@ -2349,29 +2356,34 @@ void block_draw(const bContext *C, Block *block)
   }
 
   /* Pixel-space clip rect for #BUT_GRID_SCROLL_CLIP buttons (sub-row scrolled grid views).
-   * Intersect it with the current scissor: #GPU_scissor REPLACES (does not intersect) the active
-   * box, and during a partial region redraw that active box is #ARegion::drawrct (see
-   * #wmPartialViewport). Without the intersection the grid tiles could paint outside the area
-   * being repainted this pass, smearing over the (not-redrawn) widgets below the grid. */
-  rcti grid_clip_rect = {};
-  bool grid_clip_has_area = false;
-  if (block->view_scroll_clip_enabled) {
-    grid_clip_rect = rect_to_pixelrect(region, block, &block->view_scroll_clip_rect);
-    rcti cur_scissor;
-    BLI_rcti_init(
-        &cur_scissor, scissor[0], scissor[0] + scissor[2], scissor[1], scissor[1] + scissor[3]);
-    grid_clip_has_area = BLI_rcti_isect(&grid_clip_rect, &cur_scissor, &grid_clip_rect);
-  }
+   * Intersected with the current scissor on first use per grid (cached below, keyed by owner):
+   * #GPU_scissor REPLACES (does not intersect) the active box, and during a partial region redraw
+   * that active box is #ARegion::drawrct (see #wmPartialViewport). Without the intersection the
+   * grid tiles could paint outside the area being repainted this pass, smearing over the
+   * (not-redrawn) widgets below the grid. A block may host more than one clip-scrolled grid, each
+   * with its own window, so this is resolved per #Button::grid_scroll_clip_owner instead of once
+   * for the whole block. */
+  Map<const AbstractGridView *, std::pair<rcti, bool>> grid_clip_rect_cache;
+  rcti cur_scissor;
+  BLI_rcti_init(
+      &cur_scissor, scissor[0], scissor[0] + scissor[2], scissor[1], scissor[1] + scissor[3]);
+  auto grid_clip_for = [&](const AbstractGridView *owner) -> const std::pair<rcti, bool> & {
+    return grid_clip_rect_cache.lookup_or_add_cb(owner, [&]() -> std::pair<rcti, bool> {
+      rcti pixel_rect = rect_to_pixelrect(region, block, &owner->scroll_clip_rect());
+      const bool has_area = BLI_rcti_isect(&pixel_rect, &cur_scissor, &pixel_rect);
+      return {pixel_rect, has_area};
+    });
+  };
 
   /* widgets */
-  bool grid_scissor_active = false;
+  const AbstractGridView *grid_scissor_active_owner = nullptr;
   for (Button &but : block->buttons()) {
     if (but.flag & UI_HIDDEN) {
       continue;
     }
     /* Popup #popup_block_scrolltest can mark sub-row scrolled grid tiles #UI_SCROLLED when they
-     * extend past #Block::rect even though they are still inside #view_scroll_clip_rect. */
-    if ((but.flag & UI_SCROLLED) && !block_grid_scroll_clip_contains_button(block, &but)) {
+     * extend past #Block::rect even though they are still inside their grid's clip rect. */
+    if ((but.flag & UI_SCROLLED) && !block_grid_scroll_clip_contains_button(&but)) {
       continue;
     }
 
@@ -2381,25 +2393,27 @@ void block_draw(const bContext *C, Block *block)
       continue;
     }
 
+    const bool grid_clipped = (but.drawflag & BUT_GRID_SCROLL_CLIP) &&
+                              but.grid_scroll_clip_owner &&
+                              but.grid_scroll_clip_owner->scroll_clip_enabled();
+    rcti grid_clip_rect = {};
     /* Grid-scroll-clipped buttons: skip rows fully scrolled out of the visible window, and clip
      * the partially-visible rows to it so the sub-row scroll offset cuts them cleanly. */
-    const bool grid_clipped = block->view_scroll_clip_enabled &&
-                              (but.drawflag & BUT_GRID_SCROLL_CLIP);
     if (grid_clipped) {
+      const std::pair<rcti, bool> &cached = grid_clip_for(but.grid_scroll_clip_owner);
+      grid_clip_rect = cached.first;
       /* Nothing of the clip window is inside the current (partial) scissor, or this tile row is
        * fully outside the window: skip it entirely. */
-      if (!grid_clip_has_area || rect.ymax <= grid_clip_rect.ymin ||
-          rect.ymin >= grid_clip_rect.ymax)
-      {
+      if (!cached.second || rect.ymax <= grid_clip_rect.ymin || rect.ymin >= grid_clip_rect.ymax) {
         continue;
       }
     }
 
-    if (grid_scissor_active && !grid_clipped) {
+    if (grid_scissor_active_owner && grid_scissor_active_owner != but.grid_scroll_clip_owner) {
       widgetbase_draw_cache_flush();
       BLF_batch_draw_flush();
       GPU_scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
-      grid_scissor_active = false;
+      grid_scissor_active_owner = nullptr;
     }
 
     /* Don't draw buttons that are wider than enclosing panel. #150173 */
@@ -2416,7 +2430,7 @@ void block_draw(const bContext *C, Block *block)
     /* XXX: figure out why invalid coordinates happen when closing render window */
     /* and material preview is redrawn in main window (temp fix for bug #23848) */
     if (rect.xmin < rect.xmax && rect.ymin < rect.ymax) {
-      if (grid_clipped && !grid_scissor_active) {
+      if (grid_clipped && grid_scissor_active_owner != but.grid_scroll_clip_owner) {
         /* Flush pending batched widget/text draws before narrowing the scissor, otherwise they
          * would be emitted under the new (smaller) clip box. */
         widgetbase_draw_cache_flush();
@@ -2425,13 +2439,13 @@ void block_draw(const bContext *C, Block *block)
                     grid_clip_rect.ymin,
                     BLI_rcti_size_x(&grid_clip_rect),
                     BLI_rcti_size_y(&grid_clip_rect));
-        grid_scissor_active = true;
+        grid_scissor_active_owner = but.grid_scroll_clip_owner;
       }
       draw_button(C, region, &style, &but, &rect);
     }
   }
 
-  if (grid_scissor_active) {
+  if (grid_scissor_active_owner) {
     widgetbase_draw_cache_flush();
     BLF_batch_draw_flush();
     GPU_scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
@@ -4043,8 +4057,6 @@ Block *block_begin(const bContext *C,
   block->active = true;
   block->emboss = emboss;
   block->evil_C = (void *)C; /* XXX */
-  block->view_scroll_clip_enabled = false;
-  block->view_scroll_clip_rect = {};
 
   if (scene) {
     /* store display device name, don't lookup for transformations yet

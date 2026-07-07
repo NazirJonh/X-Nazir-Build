@@ -199,7 +199,8 @@ extern const UndoType *BKE_UNDOSYS_TYPE_TEXT;
 
 /** \} */
 
-#define BKE_UNDOSYS_TYPE_IS_MEMFILE_SKIP(ty) ELEM(ty, BKE_UNDOSYS_TYPE_IMAGE)
+#define BKE_UNDOSYS_TYPE_IS_MEMFILE_SKIP(ty) \
+  ELEM(ty, BKE_UNDOSYS_TYPE_IMAGE, BKE_UNDOSYS_TYPE_SCULPT)
 
 UndoStack *BKE_undosys_stack_create();
 void BKE_undosys_stack_destroy(UndoStack *ustack);

@@ -92,6 +92,24 @@ void push_end_all_ex(bool use_nested_undo, bool finalize_undo_step = true);
 /** Discard the sculpt undo step currently being built without pushing it to the stack. */
 void discard_init_step();
 
+/**
+ * Add another object's full-geometry snapshot to the multi-object step opened by #geometry_begin,
+ * mirroring how #push_begin_add_object extends the step opened by #push_begin. A no-op if no
+ * step is currently pending (mirrors #push_begin_add_object's own guard).
+ */
+void geometry_begin_add_object(Object &ob);
+
+/**
+ * Capture \a ob's geometry snapshot into the currently open multi-object step, WITHOUT
+ * finalizing/pushing the step (unlike #geometry_end, which does both -- calling #geometry_end
+ * per object in a multi-object gesture pushes/clears the step after the FIRST object, leaving
+ * every subsequent #geometry_push call with no pending step to write into). Call
+ * #push_end_all_ex(false, true) once, after every object has been captured this way, to finalize
+ * and push the whole multi-object step (mirrors how #finish_multi_object closes the per-node
+ * multi-object undo path).
+ */
+void geometry_end_add_object(Object &ob);
+
 void restore_from_bmesh_enter_geometry(const StepData &step_data, Mesh &mesh);
 bool has_bmesh_log_entry(const Object &ob);
 

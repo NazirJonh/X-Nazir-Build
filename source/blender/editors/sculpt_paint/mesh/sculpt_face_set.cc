@@ -1064,12 +1064,9 @@ static wmOperatorStatus change_visibility_exec(bContext *C, wmOperator *op)
   Object &active_object = *CTX_data_active_object(C);
   Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
 
-  BKE_sculpt_update_object_for_edit(&depsgraph, &active_object, false);
-
-  if (bke::object::pbvh_get(active_object)->type() == bke::pbvh::Type::BMesh) {
-    /* Not supported for dyntopo. There is no active face. */
-    return OPERATOR_CANCELLED;
-  }
+  /* Dyntopo objects are skipped individually in the per-object loop below; bailing out here
+   * whenever the ACTIVE object alone is dyntopo would wrongly cancel the whole operator even
+   * when other selected sculpt-mode objects are regular meshes with face sets. */
 
   const VisibilityMode mode = VisibilityMode(RNA_enum_get(op->ptr, "mode"));
   const int active_face_set = RNA_int_get(op->ptr, "active_face_set");
@@ -1214,9 +1211,12 @@ static wmOperatorStatus change_visibility_invoke(bContext *C, wmOperator *op, co
   CursorGeometryInfo cgi;
   const float mval_fl[2] = {float(event->mval[0]), float(event->mval[1])};
   vert_random_access_ensure(ob);
-  cursor_geometry_info_update(C, &cgi, mval_fl, false);
+  Object *hit_ob = nullptr;
+  cursor_geometry_info_update(C, &cgi, mval_fl, false, &hit_ob);
 
-  const int active_face_set = active_face_set_get(ob);
+  /* Pick the active face set from whichever sculpt-mode object is under the cursor, not
+   * unconditionally from the active object. */
+  const int active_face_set = active_face_set_get(hit_ob ? *hit_ob : ob);
   RNA_int_set(op->ptr, "active_face_set", active_face_set);
 
   return change_visibility_exec(C, op);
@@ -1342,67 +1342,89 @@ enum class EditMode {
   FairTangency = 4,
 };
 
-static void edit_grow_shrink(const Depsgraph &depsgraph,
+static void edit_grow_shrink(bContext *C,
+                             const Depsgraph &depsgraph,
                              const Scene &scene,
-                             Object &object,
+                             const Span<Object *> objects,
                              const EditMode mode,
                              const int active_face_set_id,
                              const bool modify_hidden,
                              wmOperator *op)
 {
-  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
-  Mesh &mesh = *id_cast<Mesh *>(object.data);
-  const OffsetIndices faces = mesh.faces();
-  const Span<int> corner_verts = mesh.corner_verts();
-  const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
-  const bke::AttributeAccessor attributes = mesh.attributes();
+  undo::push_begin_multi_object(scene, op, objects);
 
-  BLI_assert(attributes.contains(".sculpt_face_set"));
+  for (Object *object_ptr : objects) {
+    Object &object = *object_ptr;
+    bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+    Mesh &mesh = *id_cast<Mesh *>(object.data);
+    const OffsetIndices faces = mesh.faces();
+    const Span<int> corner_verts = mesh.corner_verts();
+    const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+    const bke::AttributeAccessor attributes = mesh.attributes();
 
-  const VArraySpan<bool> hide_poly = *attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face);
-  Array<int> prev_face_sets = duplicate_face_sets(mesh);
+    BLI_assert(attributes.contains(".sculpt_face_set"));
 
-  undo::push_begin(scene, object, op);
+    const VArraySpan<bool> hide_poly = *attributes.lookup<bool>(".hide_poly",
+                                                                bke::AttrDomain::Face);
+    Array<int> prev_face_sets = duplicate_face_sets(mesh);
 
-  IndexMaskMemory memory;
-  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
-  face_sets_update(
-      depsgraph, object, node_mask, [&](const Span<int> indices, MutableSpan<int> face_sets) {
-        for (const int i : indices.index_range()) {
-          const int face = indices[i];
-          if (!modify_hidden && !hide_poly.is_empty() && hide_poly[face]) {
-            continue;
-          }
-          if (mode == EditMode::Grow) {
-            for (const int vert : corner_verts.slice(faces[face])) {
-              for (const int neighbor_face_index : vert_to_face_map[vert]) {
-                if (neighbor_face_index == face) {
-                  continue;
-                }
-                if (prev_face_sets[neighbor_face_index] == active_face_set_id) {
-                  face_sets[i] = active_face_set_id;
-                }
-              }
+    IndexMaskMemory memory;
+    const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+    face_sets_update(
+        depsgraph, object, node_mask, [&](const Span<int> indices, MutableSpan<int> face_sets) {
+          for (const int i : indices.index_range()) {
+            const int face = indices[i];
+            if (!modify_hidden && !hide_poly.is_empty() && hide_poly[face]) {
+              continue;
             }
-          }
-          else {
-            if (prev_face_sets[face] == active_face_set_id) {
-              for (const int vert_i : corner_verts.slice(faces[face])) {
-                for (const int neighbor_face_index : vert_to_face_map[vert_i]) {
+            if (mode == EditMode::Grow) {
+              for (const int vert : corner_verts.slice(faces[face])) {
+                for (const int neighbor_face_index : vert_to_face_map[vert]) {
                   if (neighbor_face_index == face) {
                     continue;
                   }
-                  if (prev_face_sets[neighbor_face_index] != active_face_set_id) {
-                    face_sets[i] = prev_face_sets[neighbor_face_index];
+                  if (prev_face_sets[neighbor_face_index] == active_face_set_id) {
+                    face_sets[i] = active_face_set_id;
+                  }
+                }
+              }
+            }
+            else {
+              if (prev_face_sets[face] == active_face_set_id) {
+                for (const int vert_i : corner_verts.slice(faces[face])) {
+                  for (const int neighbor_face_index : vert_to_face_map[vert_i]) {
+                    if (neighbor_face_index == face) {
+                      continue;
+                    }
+                    if (prev_face_sets[neighbor_face_index] != active_face_set_id) {
+                      face_sets[i] = prev_face_sets[neighbor_face_index];
+                    }
                   }
                 }
               }
             }
           }
-        }
-      });
+        });
+  }
 
-  undo::push_end(object);
+  undo::finish_multi_object(C, objects, UpdateType::FaceSet);
+}
+
+/* Whether `object` has any face belonging to `active_face_set_id` at all. None of
+ * Grow/Shrink/DeleteGeometry/FairPositions/FairTangency can ever change anything on an object
+ * that fails this check -- every one of them only grows, shrinks, deletes, or smooths an
+ * EXISTING region already carrying that ID. Used as a cheap (O(faces), no allocation beyond the
+ * attribute lookup) pre-filter so multi-object edits skip objects before paying for expensive
+ * mode-specific no-op work (a full BMesh round-trip for Delete Geometry, a full O(verts +
+ * corners) linear-solver context build for Fair). */
+static bool object_has_target_face_set(const Object &object, const int active_face_set_id)
+{
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  const VArraySpan<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
+                                                            bke::AttrDomain::Face);
+  return face_sets.is_empty() ? (active_face_set_id == face_set_none_id) :
+                                face_sets.contains(active_face_set_id);
 }
 
 static bool check_single_face_set(const Object &object, const bool check_visible_only)
@@ -1549,6 +1571,7 @@ static void edit_fairing(const Depsgraph &depsgraph,
 
 static bool edit_is_operation_valid(const Object &object,
                                     const EditMode mode,
+                                    const int active_face_set_id,
                                     const bool modify_hidden)
 {
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
@@ -1565,6 +1588,14 @@ static bool edit_is_operation_valid(const Object &object,
        * data remapping as what happens in the mesh edit mode. */
       return false;
     }
+    if (!object_has_target_face_set(object, active_face_set_id)) {
+      /* Skip objects that do not contain any face belonging to the active face set: deleting
+       * would tag zero faces, but #delete_geometry still pays for a full BMesh round-trip
+       * (#BM_mesh_bm_from_me / #BM_mesh_bm_to_me) of the WHOLE mesh to discover that. Left
+       * ungated, every additional selected sculpt-mode object multiplies that cost even though
+       * only the mesh(es) that actually contain the face set can ever be affected. */
+      return false;
+    }
     if (check_single_face_set(object, !modify_hidden)) {
       /* Cancel the operator if the mesh only contains one face set to avoid deleting the
        * entire object. */
@@ -1579,6 +1610,17 @@ static bool edit_is_operation_valid(const Object &object,
        * different way or converted to a mesh for this operation. */
       return false;
     }
+    if (!object_has_target_face_set(object, active_face_set_id)) {
+      /* Skip objects that do not contain any face belonging to the active face set: fairing
+       * would be a no-op for them, but #BKE_mesh_prefair_and_fair_verts still pays the full
+       * O(verts + corners) cost of building its linear-solver context (adjacency map
+       * construction, a full position-array copy) before it can discover there is nothing to
+       * solve. Left ungated, every additional selected sculpt-mode object multiplies that cost
+       * even though only the mesh(es) that actually contain the face set can ever be affected --
+       * this is what made Fair Positions/Tangency feel very slow with several objects in sculpt
+       * mode at once. */
+      return false;
+    }
   }
 
   if (ELEM(mode, EditMode::Grow, EditMode::Shrink)) {
@@ -1590,88 +1632,124 @@ static bool edit_is_operation_valid(const Object &object,
          * have no effect, exit early in this case. */
         return false;
       }
+      if (!object_has_target_face_set(object, active_face_set_id)) {
+        /* Growing/shrinking only ever extends an EXISTING boundary of the target face set; if
+         * this mesh has none of its faces in that set, the operation can never change anything on
+         * it. Skipping here avoids the smaller, but still real, cost of #duplicate_face_sets'
+         * full face-array copy and the #face_sets_update per-node scan for every additional
+         * selected object that could never be affected. */
+        return false;
+      }
     }
   }
 
   return true;
 }
 
-static void edit_modify_geometry(
-    bContext *C, Object &ob, const int active_face_set, const bool modify_hidden, wmOperator *op)
+static void edit_modify_geometry(bContext *C,
+                                 const Span<Object *> objects,
+                                 const int active_face_set,
+                                 const bool modify_hidden,
+                                 wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
-  Mesh *mesh = id_cast<Mesh *>(ob.data);
-  undo::geometry_begin(scene, ob, op);
-  delete_geometry(ob, active_face_set, modify_hidden);
-  undo::geometry_end(ob);
-  BKE_sculptsession_free_pbvh(ob);
-  BKE_mesh_batch_cache_dirty_tag(mesh, BKE_MESH_BATCH_DIRTY_ALL);
-  DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(C, NC_GEOM | ND_DATA, mesh);
+
+  /* Snapshot every object's original geometry BEFORE any of them are mutated below -- mirrors
+   * #sculpt_trim.cc's gesture_begin/gesture_end split for the same #undo::Type::Geometry path. */
+  undo::geometry_begin(scene, *objects.first(), op);
+  for (Object *ob : objects.drop_front(1)) {
+    undo::geometry_begin_add_object(*ob);
+  }
+
+  for (Object *ob_ptr : objects) {
+    Object &ob = *ob_ptr;
+    Mesh *mesh = id_cast<Mesh *>(ob.data);
+    delete_geometry(ob, active_face_set, modify_hidden);
+    /* Per-object snapshot only -- #undo::geometry_end would also finalize/push the whole step,
+     * leaving every object after the first with no pending step to write into. */
+    undo::geometry_end_add_object(ob);
+    BKE_sculptsession_free_pbvh(ob);
+    BKE_mesh_batch_cache_dirty_tag(mesh, BKE_MESH_BATCH_DIRTY_ALL);
+    DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_GEOM | ND_DATA, mesh);
+  }
+
+  undo::push_end_all_ex(false, true);
 }
 
-static void edit_modify_coordinates(
-    bContext *C, Object &ob, const int active_face_set, const EditMode mode, wmOperator *op)
+static void edit_modify_coordinates(bContext *C,
+                                    ViewContext &vc,
+                                    const Span<Object *> objects,
+                                    const int active_face_set,
+                                    const EditMode mode,
+                                    wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
   const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
   const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
-  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
-  IndexMaskMemory memory;
-  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
-
   const float strength = RNA_float_get(op->ptr, "strength");
 
-  undo::push_begin(scene, ob, op);
-  undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Position);
+  undo::push_begin_multi_object(scene, op, objects);
 
-  switch (mode) {
-    case EditMode::FairPositions:
-      edit_fairing(depsgraph, sd, ob, active_face_set, MESH_FAIRING_DEPTH_POSITION, strength);
-      break;
-    case EditMode::FairTangency:
-      edit_fairing(depsgraph, sd, ob, active_face_set, MESH_FAIRING_DEPTH_TANGENCY, strength);
-      break;
-    default:
-      BLI_assert_unreachable();
+  for (Object *ob_ptr : objects) {
+    Object &ob = *ob_ptr;
+    bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+    IndexMaskMemory memory;
+    const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+
+    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Position);
+
+    switch (mode) {
+      case EditMode::FairPositions:
+        edit_fairing(depsgraph, sd, ob, active_face_set, MESH_FAIRING_DEPTH_POSITION, strength);
+        break;
+      case EditMode::FairTangency:
+        edit_fairing(depsgraph, sd, ob, active_face_set, MESH_FAIRING_DEPTH_TANGENCY, strength);
+        break;
+      default:
+        BLI_assert_unreachable();
+    }
+
+    pbvh.tag_positions_changed(node_mask);
+    pbvh.update_bounds(depsgraph, ob);
+    /* Per-object overload -- bit-exact with the single-object #flush_update_step(C, ...) wrapper
+     * when `ob == vc.obact`, and correctly extends the same side effects (draw-cache freeze,
+     * eager bounds update) to every other object in a multi-object edit. */
+    flush_update_step(vc, ob, UpdateType::Position);
   }
 
-  pbvh.tag_positions_changed(node_mask);
-  pbvh.update_bounds(depsgraph, ob);
-  flush_update_step(C, UpdateType::Position);
-  flush_update_done(C, ob, UpdateType::Position);
-  undo::push_end(ob);
-}
-
-static bool edit_op_init(bContext *C, wmOperator *op)
-{
-  Object *ob = CTX_data_active_object(C);
-  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
-  const EditMode mode = EditMode(RNA_enum_get(op->ptr, "mode"));
-  const bool modify_hidden = RNA_boolean_get(op->ptr, "modify_hidden");
-
-  if (!edit_is_operation_valid(*ob, mode, modify_hidden)) {
-    return false;
-  }
-
-  BKE_sculpt_update_object_for_edit(depsgraph, ob, false);
-
-  return true;
+  undo::finish_multi_object(C, objects, UpdateType::Position);
 }
 
 static wmOperatorStatus edit_op_exec(bContext *C, wmOperator *op)
 {
-  if (!edit_op_init(C, op)) {
-    return OPERATOR_CANCELLED;
-  }
-
   const Scene &scene = *CTX_data_scene(C);
-  const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
-  Object &ob = *CTX_data_active_object(C);
+  Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
 
   const int active_face_set = RNA_int_get(op->ptr, "active_face_set");
   const EditMode mode = EditMode(RNA_enum_get(op->ptr, "mode"));
   const bool modify_hidden = RNA_boolean_get(op->ptr, "modify_hidden");
+
+  ViewContext vc = ED_view3d_viewcontext_init(C, &depsgraph);
+
+  /* Filter to the objects the requested mode can actually run on (mirrors
+   * #edit_is_operation_valid's pre-existing per-object gates: dyntopo, Grids for
+   * Delete/Fair, single-face-set for Delete, missing attribute for Grow/Shrink, missing target
+   * face set for Fair) instead of cancelling the whole operator whenever the ACTIVE object alone
+   * fails one of those checks -- or, for Fair, running its expensive linear-solver setup on every
+   * selected object regardless of whether it can ever be affected. */
+  Vector<Object *> objects;
+  for (Object *ob : sculpt_mode_objects(vc)) {
+    if (!edit_is_operation_valid(*ob, mode, active_face_set, modify_hidden)) {
+      continue;
+    }
+    BKE_sculpt_update_object_for_edit(&depsgraph, ob, false);
+    objects.append(ob);
+  }
+
+  if (objects.is_empty()) {
+    return OPERATOR_CANCELLED;
+  }
 
   if (ELEM(mode, EditMode::Grow, EditMode::Shrink)) {
     ed::sculpt_paint::face_set_overlay_check(*C, *op);
@@ -1679,15 +1757,15 @@ static wmOperatorStatus edit_op_exec(bContext *C, wmOperator *op)
 
   switch (mode) {
     case EditMode::DeleteGeometry:
-      edit_modify_geometry(C, ob, active_face_set, modify_hidden, op);
+      edit_modify_geometry(C, objects, active_face_set, modify_hidden, op);
       break;
     case EditMode::Grow:
     case EditMode::Shrink:
-      edit_grow_shrink(depsgraph, scene, ob, mode, active_face_set, modify_hidden, op);
+      edit_grow_shrink(C, depsgraph, scene, objects, mode, active_face_set, modify_hidden, op);
       break;
     case EditMode::FairPositions:
     case EditMode::FairTangency:
-      edit_modify_coordinates(C, ob, active_face_set, mode, op);
+      edit_modify_coordinates(C, vc, objects, active_face_set, mode, op);
       break;
   }
 

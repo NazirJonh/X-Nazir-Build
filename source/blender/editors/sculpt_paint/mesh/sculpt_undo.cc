@@ -2790,6 +2790,20 @@ void geometry_begin_ex(const Scene & /*scene*/, Object &ob, const char *name)
   geometry_push(ob);
 }
 
+void geometry_begin_add_object(Object &ob)
+{
+  UndoStack *ustack = ED_undo_stack_get();
+
+  ED_undosys_stack_memfile_id_changed_tag(ustack, &ob.id);
+  ED_undosys_stack_memfile_id_changed_tag(ustack, ob.data);
+
+  SculptUndoStep *us = get_init_sculpt_step();
+  if (!us) {
+    return;
+  }
+  geometry_push(ob);
+}
+
 static size_t calculate_node_geometry_allocated_size(const NodeGeometry &node_geometry)
 {
   BLI_assert(node_geometry.is_initialized);
@@ -2822,7 +2836,7 @@ static size_t estimate_geometry_step_size(const StepData &step_data)
   return step_size;
 }
 
-void geometry_end(Object &ob)
+void geometry_end_add_object(Object &ob)
 {
   geometry_push(ob);
 
@@ -2830,6 +2844,11 @@ void geometry_end(Object &ob)
   if (step_data) {
     step_data->undo_size = estimate_geometry_step_size(*step_data);
   }
+}
+
+void geometry_end(Object &ob)
+{
+  geometry_end_add_object(ob);
 
   /* We could remove this and enforce all callers run in an operator using 'OPTYPE_UNDO'. */
   wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);

@@ -107,7 +107,11 @@ static void line_plane_from_tri(float *r_plane,
 {
   float3 normal;
   normal_tri_v3(normal, p1, p2, p3);
-  normal = math::normalize(math::transform_direction(object.world_to_object(), normal));
+  /* A world-space plane normal maps to local space via the inverse-transpose rule (the transpose
+   * of object_to_world), not the naive world_to_object() transform used here previously -- the two
+   * only agree (up to a scalar) when the object has no non-uniform scale, so the previous formula
+   * silently tilted the local-space gesture plane on any non-uniformly scaled object. */
+  normal = math::normalize(math::transpose(float3x3(object.object_to_world())) * normal);
   if (flip) {
     normal *= -1.0f;
   }

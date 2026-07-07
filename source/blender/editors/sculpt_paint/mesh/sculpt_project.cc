@@ -11,6 +11,7 @@
 #include "BKE_context.hh"
 #include "BKE_layer.hh"
 #include "BKE_mesh.hh"
+#include "BKE_multires.hh"
 #include "BKE_object_types.hh"
 #include "BKE_subdiv_ccg.hh"
 
@@ -33,8 +34,12 @@ static void gesture_begin(bContext &C, wmOperator &op, gesture::GestureData &ges
 {
   const Scene &scene = *CTX_data_scene(&C);
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(&C);
-  BKE_sculpt_update_object_for_edit(depsgraph, gesture_data.vc.obact, false);
-  undo::push_begin(scene, *gesture_data.vc.obact, &op);
+
+  for (Object *ob : gesture_data.objects) {
+    BKE_sculpt_update_object_for_edit(depsgraph, ob, false);
+  }
+
+  undo::push_begin_multi_object(scene, &op, gesture_data.objects.as_span());
 }
 
 struct LocalData {
@@ -212,9 +217,15 @@ static void gesture_apply_for_symmetry_pass(bContext &C, gesture::GestureData &g
 
 static void gesture_end(bContext &C, gesture::GestureData &gesture_data)
 {
-  flush_update_step(&C, UpdateType::Position);
-  flush_update_done(&C, *gesture_data.vc.obact, UpdateType::Position);
-  undo::push_end(*gesture_data.vc.obact);
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(&C);
+
+  for (Object *ob : gesture_data.objects) {
+    if (bke::object::pbvh_get(*ob)->type() == bke::pbvh::Type::Grids) {
+      multires_mark_as_modified(depsgraph, ob, MULTIRES_COORDS_MODIFIED);
+    }
+  }
+
+  undo::finish_multi_object(&C, gesture_data.objects.as_span(), UpdateType::Position);
 }
 
 static void init_operation(gesture::GestureData &gesture_data, wmOperator & /*op*/)
@@ -247,6 +258,7 @@ static wmOperatorStatus gesture_line_exec(bContext *C, wmOperator *op)
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
+  gesture_data->objects = sculpt_mode_objects(gesture_data->vc);
   init_operation(*gesture_data, *op);
   gesture::apply(*C, *gesture_data, *op);
   return OPERATOR_FINISHED;

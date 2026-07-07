@@ -488,7 +488,7 @@ Map<std::string, float, 1> mode_transfer_overlay_current_state()
   return factors;
 }
 
-static void object_overlay_mode_transfer_animation_start(bContext *C, Object *ob_dst)
+void object_overlay_mode_transfer_animation_start(bContext *C, Object *ob_dst)
 {
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
   Object *ob_dst_eval = DEG_get_evaluated(depsgraph, ob_dst);
@@ -504,6 +504,23 @@ static bool object_transfer_mode_to_base(bContext *C,
 {
   const Main *bmain = CTX_data_main(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
+
+  if (mode_dst == OB_MODE_SCULPT) {
+    BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+    Base *base_dst = BKE_view_layer_base_find(view_layer, ob_dst);
+    if (base_dst && (base_dst->flag & BASE_SELECTED) && (ob_dst->mode & OB_MODE_SCULPT)) {
+      /* The target is already part of the current multi-object sculpt group (selected AND
+       * sculpting) -- no mode transition is needed. Only retarget the active object; every
+       * other group member's selection and mode stay untouched, so multi-object tools keep
+       * seeing the whole group. */
+      base_activate(C, base_dst);
+      ED_undo_push(C, "Change Active");
+      if (RNA_boolean_get(op->ptr, "use_flash_on_transfer")) {
+        object_overlay_mode_transfer_animation_start(C, ob_dst);
+      }
+      return true;
+    }
+  }
 
   /* Undo is handled manually here, such that the entry in the user-visible undo history is named
    * from the expected mode toggle operator name, and not the 'Transfer Mode' operator itself.

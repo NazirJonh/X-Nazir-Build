@@ -18,6 +18,7 @@
 #include "rna_internal.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "BKE_paint.hh"
@@ -122,6 +123,7 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 
 #  include "ED_gpencil_legacy.hh"
 #  include "ED_image.hh"
+#  include "ED_object.hh"
 #  include "ED_paint.hh"
 #  include "ED_particle.hh"
 
@@ -303,6 +305,29 @@ static void rna_Sculpt_update(bContext *C, PointerRNA * /*ptr*/)
   if (ob) {
     DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
     WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ob);
+  }
+}
+
+static void rna_Sculpt_multi_object_edit_scope_update(bContext *C, PointerRNA *ptr)
+{
+  const Sculpt *sd = static_cast<const Sculpt *>(ptr->data);
+  const Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+
+  if (sd->multi_object_edit_scope == SCULPT_MULTI_OBJECT_EDIT_ACTIVE) {
+    if (Object *obact = BKE_view_layer_active_object_get(view_layer)) {
+      ed::object::object_overlay_mode_transfer_animation_start(C, obact);
+    }
+    return;
+  }
+
+  const ObjectsInModeParams params{OB_MODE_SCULPT, false, nullptr, nullptr};
+  const Vector<Object *> objects = BKE_view_layer_array_from_objects_in_mode_params(
+      *bmain, scene, view_layer, CTX_wm_view3d(C), &params);
+  for (Object *ob : objects) {
+    ed::object::object_overlay_mode_transfer_animation_start(C, ob);
   }
 }
 
@@ -1314,7 +1339,9 @@ static void rna_def_sculpt(BlenderRNA *brna)
       "Multi-Object Edit Scope",
       "Whether brush strokes and tools act on the active object only, or on every object "
       "currently in Sculpt Mode");
-  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Sculpt_multi_object_edit_scope_update");
 
   prop = RNA_def_property(srna, "gravity_object", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_EDITABLE);

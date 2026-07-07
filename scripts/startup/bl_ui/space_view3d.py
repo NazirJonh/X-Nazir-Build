@@ -3705,6 +3705,9 @@ class VIEW3D_MT_sculpt(Menu):
         props = layout.operator("sculpt.face_set_change_visibility", text="Hide Active Face Set")
         props.mode = 'HIDE_ACTIVE'
 
+        props = layout.operator("sculpt.face_set_change_visibility", text="Hide Active Object")
+        props.mode = 'HIDE_ACTIVE_OBJECT'
+
         props = layout.operator("paint.hide_show_all", text="Show All")
         props.action = 'SHOW'
 

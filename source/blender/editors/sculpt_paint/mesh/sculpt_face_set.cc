@@ -25,6 +25,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_task.hh"
+#include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
@@ -966,6 +967,9 @@ enum class VisibilityMode {
   Toggle = 0,
   ShowActive = 1,
   HideActive = 2,
+  /* Multi-object only: hides the whole object under the cursor, ignoring its face sets. Falls
+   * back to #HideActive when only one object is in sculpt mode. */
+  HideActiveObject = 3,
 };
 
 static void face_hide_update(const Depsgraph &depsgraph,
@@ -1058,6 +1062,27 @@ static void show_all(Depsgraph &depsgraph, Object &object, const IndexMask &node
   }
 }
 
+/* Whether the object has any face set other than the default one. Used to decide whether
+ * #VisibilityMode::HideActive should auto-upgrade to #VisibilityMode::HideActiveObject in
+ * multi-object sculpt mode. */
+static bool object_has_custom_face_sets(Object &object)
+{
+  if (bke::object::pbvh_get(object)->type() == bke::pbvh::Type::BMesh) {
+    /* Dyntopo has no active face for this operator; never auto-upgrade for it. */
+    return true;
+  }
+  const Mesh *mesh = BKE_object_get_original_mesh(&object);
+  const bke::AttributeAccessor attributes = mesh->attributes();
+  const VArraySpan<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
+                                                            bke::AttrDomain::Face);
+  if (face_sets.is_empty()) {
+    return false;
+  }
+  const int default_face_set = mesh->face_sets_color_default;
+  return std::any_of(
+      face_sets.begin(), face_sets.end(), [&](const int fs) { return fs != default_face_set; });
+}
+
 static wmOperatorStatus change_visibility_exec(bContext *C, wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
@@ -1073,6 +1098,42 @@ static wmOperatorStatus change_visibility_exec(bContext *C, wmOperator *op)
 
   ViewContext vc = ED_view3d_viewcontext_init(C, &depsgraph);
   const Vector<Object *> objects = sculpt_mode_objects(vc);
+
+  /* Resolve the object that was under the cursor at invoke time (falls back to the active
+   * object, e.g. when the operator is executed without going through invoke). Used by
+   * #VisibilityMode::HideActiveObject to scope the hide to that one object. */
+  char active_object_name[MAX_ID_NAME - 2];
+  RNA_string_get(op->ptr, "active_object_name", active_object_name);
+  Object *hit_object = nullptr;
+  for (Object *ob : objects) {
+    if (STREQ(ob->id.name + 2, active_object_name)) {
+      hit_object = ob;
+      break;
+    }
+  }
+  if (!hit_object) {
+    hit_object = &active_object;
+  }
+
+  /* Multi-object only: hiding a mesh whose faces are all the default face set (the common case
+   * for meshes that were never given custom face sets) via the ordinary per-face-set HideActive
+   * comparison would hide every other selected object sharing that same default id. Auto-upgrade
+   * to hiding just the hovered object in that case. #HideActiveObject itself only makes sense
+   * with more than one object selected; fall back to the ordinary per-face-set behavior otherwise. */
+  VisibilityMode effective_mode = mode;
+  if (mode == VisibilityMode::HideActiveObject && objects.size() <= 1) {
+    effective_mode = VisibilityMode::HideActive;
+  }
+  else if (mode == VisibilityMode::HideActive && objects.size() > 1 &&
+           !object_has_custom_face_sets(*hit_object))
+  {
+    effective_mode = VisibilityMode::HideActiveObject;
+  }
+  if (effective_mode != mode) {
+    /* Reflect the auto-upgrade in the operator's own "mode" property, so the redo/adjust-last-
+     * operation panel shows what actually happened instead of the keymap's literal HIDE_ACTIVE. */
+    RNA_enum_set(op->ptr, "mode", int(effective_mode));
+  }
 
   /* For Toggle, decide the branch (show everything vs. isolate the active face set) once, from
    * the object under the cursor, and apply the same decision to every object — otherwise a
@@ -1111,7 +1172,7 @@ static wmOperatorStatus change_visibility_exec(bContext *C, wmOperator *op)
     const VArraySpan<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
                                                               bke::AttrDomain::Face);
 
-    switch (mode) {
+    switch (effective_mode) {
       case VisibilityMode::Toggle: {
         if (toggle_show_all || face_sets.is_empty()) {
           show_all(depsgraph, *ob, node_mask);
@@ -1159,6 +1220,16 @@ static wmOperatorStatus change_visibility_exec(bContext *C, wmOperator *op)
                   }
                 }
               });
+        }
+        break;
+      case VisibilityMode::HideActiveObject:
+        if (ob == hit_object) {
+          face_hide_update(depsgraph,
+                           *ob,
+                           node_mask,
+                           [&](const Span<int> /*faces*/, MutableSpan<bool> hide) {
+                             hide.fill(true);
+                           });
         }
         break;
     }
@@ -1216,8 +1287,10 @@ static wmOperatorStatus change_visibility_invoke(bContext *C, wmOperator *op, co
 
   /* Pick the active face set from whichever sculpt-mode object is under the cursor, not
    * unconditionally from the active object. */
-  const int active_face_set = active_face_set_get(hit_ob ? *hit_ob : ob);
+  Object &target_ob = hit_ob ? *hit_ob : ob;
+  const int active_face_set = active_face_set_get(target_ob);
   RNA_int_set(op->ptr, "active_face_set", active_face_set);
+  RNA_string_set(op->ptr, "active_object_name", target_ob.id.name + 2);
 
   return change_visibility_exec(C, op);
 }
@@ -1250,6 +1323,11 @@ void SCULPT_OT_face_set_change_visibility(wmOperatorType *ot)
        0,
        "Hide Active Face Set",
        "Hide the active face set"},
+      {int(VisibilityMode::HideActiveObject),
+       "HIDE_ACTIVE_OBJECT",
+       0,
+       "Hide Active Object",
+       "Hide the whole object under the cursor, ignoring its face sets"},
       {0, nullptr, 0, nullptr, nullptr},
   };
   RNA_def_enum(ot->srna, "mode", modes, int(VisibilityMode::Toggle), "Mode", "");
@@ -1257,6 +1335,10 @@ void SCULPT_OT_face_set_change_visibility(wmOperatorType *ot)
   PropertyRNA *prop = RNA_def_int(
       ot->srna, "active_face_set", 0, 0, INT_MAX, "Active Face Set", "", 0, INT_MAX);
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_string(
+      ot->srna, "active_object_name", nullptr, MAX_ID_NAME - 2, "Active Object", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
 static wmOperatorStatus randomize_colors_exec(bContext *C, wmOperator * /*op*/)

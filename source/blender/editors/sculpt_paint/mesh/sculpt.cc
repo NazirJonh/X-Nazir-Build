@@ -9241,6 +9241,15 @@ float3 position_scale_compensation(const Object &ob)
   return float3(ob.scale[0], ob.scale[1], ob.scale[2]) / iso_scale;
 }
 
+KelvinletWorldTransform kelvinlet_world_transform_init(const Object &ob)
+{
+  KelvinletWorldTransform result;
+  result.to_world = ob.object_to_world();
+  result.to_local = math::invert(result.to_world);
+  result.to_world_normal = math::transpose(float3x3(result.to_local));
+  return result;
+}
+
 void calc_brush_distances_squared(const SculptSession &ss,
                                   const Span<float3> positions,
                                   const Span<int> verts,

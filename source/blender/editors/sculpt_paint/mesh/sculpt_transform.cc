@@ -383,14 +383,35 @@ BLI_NOINLINE static void calc_transform_translations(const float4x4 &elastic_tra
   }
 }
 
-BLI_NOINLINE static void apply_kelvinet_to_translations(const KelvinletParams &params,
+BLI_NOINLINE static void apply_kelvinet_to_translations(const Object &object,
+                                                        const KelvinletParams &params,
                                                         const float3 &elastic_transform_pivot,
                                                         const Span<float3> positions,
                                                         const MutableSpan<float3> translations)
 {
+  if (!object_has_non_uniform_scale(object)) {
+    for (const int i : positions.index_range()) {
+      BKE_kelvinlet_grab_triscale(
+          translations[i], &params, positions[i], elastic_transform_pivot, translations[i]);
+    }
+    return;
+  }
+
+  /* Non-uniform-scale path -- see #KelvinletWorldTransform. No #StrokeCache on this path (the
+   * Transform tool's Elastic mode runs via the mesh-filter machinery, not a normal brush
+   * stroke), so the gate above is a freshly-computed check rather than
+   * `cache.non_uniform_scale_active`. `translations[i]` going in is the per-vertex linear-
+   * transform displacement from `calc_transform_translations`; it is the `brush_delta` argument
+   * to kelvinlet, transformed as a DIRECTION, and is OVERWRITTEN by the kelvinlet output (matches
+   * the pre-existing overwrite semantics of the branch above). */
+  const KelvinletWorldTransform transform = kelvinlet_world_transform_init(object);
+  const float3 world_pivot = kelvinlet_position_to_world(transform, elastic_transform_pivot);
   for (const int i : positions.index_range()) {
-    BKE_kelvinlet_grab_triscale(
-        translations[i], &params, positions[i], elastic_transform_pivot, translations[i]);
+    const float3 world_co = kelvinlet_position_to_world(transform, positions[i]);
+    const float3 world_delta = kelvinlet_direction_to_world(transform, translations[i]);
+    float3 world_disp;
+    BKE_kelvinlet_grab_triscale(world_disp, &params, world_co, world_pivot, world_delta);
+    translations[i] = kelvinlet_direction_to_local(transform, world_disp);
   }
 }
 
@@ -418,7 +439,7 @@ static void elastic_transform_node_mesh(const Sculpt &sd,
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
   calc_transform_translations(elastic_transform_mat, positions, translations);
-  apply_kelvinet_to_translations(params, elastic_transform_pivot, positions, translations);
+  apply_kelvinet_to_translations(object, params, elastic_transform_pivot, positions, translations);
 
   scale_translations(translations, factors);
 
@@ -449,7 +470,7 @@ static void elastic_transform_node_grids(const Sculpt &sd,
   tls.translations.resize(positions.size());
   const MutableSpan<float3> translations = tls.translations;
   calc_transform_translations(elastic_transform_mat, positions, translations);
-  apply_kelvinet_to_translations(params, elastic_transform_pivot, positions, translations);
+  apply_kelvinet_to_translations(object, params, elastic_transform_pivot, positions, translations);
 
   scale_translations(translations, factors);
 
@@ -478,7 +499,7 @@ static void elastic_transform_node_bmesh(const Sculpt &sd,
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
   calc_transform_translations(elastic_transform_mat, positions, translations);
-  apply_kelvinet_to_translations(params, elastic_transform_pivot, positions, translations);
+  apply_kelvinet_to_translations(object, params, elastic_transform_pivot, positions, translations);
 
   scale_translations(translations, factors);
 

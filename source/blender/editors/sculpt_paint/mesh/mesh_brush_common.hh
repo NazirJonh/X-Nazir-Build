@@ -7,6 +7,7 @@
 #include "BLI_array.hh"
 #include "BLI_array_utils.hh"
 #include "BLI_bit_span.hh"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
@@ -379,6 +380,68 @@ float3 non_uniform_scale_compensation(const Object &ob);
  * available (e.g. via #position_scale_normalized).
  */
 float3 position_scale_compensation(const Object &ob);
+
+/**
+ * A snapshot of an object's world transform used to evaluate #BKE_kelvinlet_* (Elastic Deform,
+ * Snake Hook's kelvinlet mode, the Transform tool's Elastic mode) in world space instead of the
+ * object's own local space. #BKE_kelvinlet_* has no scale awareness of its own -- it measures
+ * real Euclidean distances/directions on whatever raw `float[3]` values it is given, so
+ * evaluating it directly on local-space coordinates gives an anisotropically distorted result
+ * whenever the object's own #Object.scale is non-uniform. Round-tripping through world space
+ * (transform in, call kelvinlet unmodified, transform the displacement back out) fixes this
+ * without touching `kelvinlet.cc`. See #kelvinlet_world_transform_init.
+ */
+struct KelvinletWorldTransform {
+  float4x4 to_world = float4x4::identity();
+  float4x4 to_local = float4x4::identity();
+  float3x3 to_world_normal = float3x3::identity();
+};
+
+/**
+ * Build a #KelvinletWorldTransform from \a ob's current world transform. Computes `to_local =
+ * invert(to_world)` fresh from #Object.object_to_world -- does NOT read or write
+ * #Object.runtime.world_to_object, so this is safe to call from a threaded PBVH node loop (unlike
+ * relying on the cached runtime field the way #calc_brush_area_texture_mat does, which explicitly
+ * refreshes it before reading and must not be mutated concurrently from multiple threads).
+ * Intended to be called ONCE per brush step, before iterating vertices/nodes -- the object's
+ * transform is assumed static for the stroke's duration (the same assumption
+ * #StrokeCache.scale/#StrokeCache.position_scale already make). Declared here but defined in
+ * `sculpt.cc` (like #object_has_non_uniform_scale above) since it dereferences #Object, which
+ * this header only forward-declares.
+ */
+KelvinletWorldTransform kelvinlet_world_transform_init(const Object &ob);
+
+/** Transform a local-space POSITION (#BKE_kelvinlet_*'s `elem_orig_co`/`brush_location`) to world space. */
+inline float3 kelvinlet_position_to_world(const KelvinletWorldTransform &transform, const float3 &p)
+{
+  return math::transform_point(transform.to_world, p);
+}
+
+/** Transform a local-space DIRECTION (#BKE_kelvinlet_grab*'s `brush_delta`) to world space. */
+inline float3 kelvinlet_direction_to_world(const KelvinletWorldTransform &transform, const float3 &v)
+{
+  return math::transform_direction(transform.to_world, v);
+}
+
+/**
+ * Transform a local-space NORMAL (#BKE_kelvinlet_scale/#BKE_kelvinlet_twist's `surface_normal`) to
+ * world space via the inverse-transpose rule -- see #non_uniform_scale_compensation for why
+ * normals need a different transform law than positions/directions.
+ */
+inline float3 kelvinlet_normal_to_world(const KelvinletWorldTransform &transform, const float3 &n)
+{
+  return math::normalize(math::transform_direction(transform.to_world_normal, n));
+}
+
+/**
+ * Transform a world-space DISPLACEMENT (a #BKE_kelvinlet_* return value) back to local space.
+ * Displacements are directions, not positions -- use the object's inverse transform's linear
+ * part, not a position round-trip.
+ */
+inline float3 kelvinlet_direction_to_local(const KelvinletWorldTransform &transform, const float3 &v)
+{
+  return math::transform_direction(transform.to_local, v);
+}
 
 /**
  * Calculate distances based on the distance from the brush cursor and various other settings.

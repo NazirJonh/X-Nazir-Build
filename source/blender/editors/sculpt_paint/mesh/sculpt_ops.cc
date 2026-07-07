@@ -54,6 +54,7 @@
 #include "ED_object.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
+#include "ED_select_utils.hh"
 
 #include "../paint_intern.hh"
 #include "mesh_brush_common.hh"
@@ -696,6 +697,87 @@ static void SCULPT_OT_sculptmode_toggle(wmOperatorType *ot)
 
   ot->exec = sculpt_mode_toggle_exec;
   ot->poll = ED_operator_object_active_editable_mesh;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus sculpt_selection_enter_sculpt_mode_exec(bContext *C, wmOperator *op)
+{
+  Main &bmain = *CTX_data_main(C);
+  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  if (!depsgraph) {
+    return OPERATOR_CANCELLED;
+  }
+  Scene &scene = *CTX_data_scene(C);
+  Object *active_ob = CTX_data_active_object(C);
+  if (!active_ob) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Vector<Object *> newly_entered;
+  Vector<PointerRNA> selected_objects;
+  CTX_data_selected_objects(C, &selected_objects);
+  for (const PointerRNA &ptr : selected_objects) {
+    Object *ob = reinterpret_cast<Object *>(ptr.owner_id);
+    /* Unlike sculpt_mode_toggle_exec's cascade, there is no explicit `ob == active_ob` skip
+     * here: this operator's poll (sculpt_mode_poll) guarantees active_ob is already
+     * sculpting, so it is always excluded by the OB_MODE_OBJECT check below on its own. */
+    if (ob->type != active_ob->type) {
+      continue;
+    }
+    if (ob->mode != OB_MODE_OBJECT) {
+      continue;
+    }
+    object_sculpt_mode_enter(bmain, *depsgraph, scene, *ob, false, op->reports);
+    newly_entered.append(ob);
+  }
+
+  if (!newly_entered.is_empty()) {
+    wmWindowManager *wm = CTX_wm_manager(C);
+    if (wm->op_undo_depth <= 1) {
+      bool sculpt_undo_started = false;
+      for (Object *ob : newly_entered) {
+        Mesh *mesh = id_cast<Mesh *>(ob->data);
+        if (mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) {
+          continue;
+        }
+        if (!sculpt_undo_started) {
+          undo::push_enter_sculpt_mode(scene, *ob, op);
+          sculpt_undo_started = true;
+        }
+        else {
+          undo::push_enter_sculpt_mode_add_object(*ob);
+        }
+      }
+      if (sculpt_undo_started) {
+        undo::push_end_all_ex(false, true);
+      }
+    }
+
+    for (Object *ob : newly_entered) {
+      ed::object::object_overlay_mode_transfer_animation_start(C, ob);
+    }
+
+    WM_event_add_notifier(C, NC_SCENE | ND_MODE, &scene);
+    WM_toolsystem_update_from_context_view3d(C);
+  }
+
+  /* Always FINISHED, even when nothing needed to transition (e.g. the lasso only re-covered
+   * objects that were already sculpting) -- this step's own no-op must not cause the macro's
+   * earlier lasso-select step to be treated as failed/discarded. */
+  return OPERATOR_FINISHED;
+}
+
+static void SCULPT_OT_selection_enter_sculpt_mode(wmOperatorType *ot)
+{
+  ot->name = "Enter Sculpt Mode for Selection";
+  ot->idname = "SCULPT_OT_selection_enter_sculpt_mode";
+  ot->description =
+      "Bring every selected object of the active object's type into the current Sculpt Mode "
+      "session";
+
+  ot->exec = sculpt_selection_enter_sculpt_mode_exec;
+  ot->poll = sculpt_mode_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
@@ -1633,6 +1715,7 @@ void operatortypes_sculpt()
 {
   WM_operatortype_append(SCULPT_OT_brush_stroke);
   WM_operatortype_append(SCULPT_OT_sculptmode_toggle);
+  WM_operatortype_append(SCULPT_OT_selection_enter_sculpt_mode);
   WM_operatortype_append(SCULPT_OT_set_persistent_base);
   WM_operatortype_append(dyntopo::SCULPT_OT_dynamic_topology_toggle);
   WM_operatortype_append(SCULPT_OT_optimize);
@@ -1669,6 +1752,23 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_mask_extract);
   WM_operatortype_append(SCULPT_OT_face_set_extract);
   WM_operatortype_append(SCULPT_OT_paint_mask_slice);
+}
+
+void operatormacros_sculpt()
+{
+  wmOperatorType *ot;
+  wmOperatorTypeMacro *otmacro;
+
+  ot = WM_operatortype_append_macro(
+      "SCULPT_OT_lasso_select_and_enter",
+      "Lasso Select and Enter Sculpt Mode",
+      "Lasso-select objects and bring the selection into the current Sculpt Mode session",
+      OPTYPE_UNDO | OPTYPE_REGISTER);
+  if (ot) {
+    otmacro = WM_operatortype_macro_define(ot, "VIEW3D_OT_select_lasso");
+    RNA_enum_set(otmacro->ptr, "mode", SEL_OP_ADD);
+    WM_operatortype_macro_define(ot, "SCULPT_OT_selection_enter_sculpt_mode");
+  }
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

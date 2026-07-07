@@ -512,12 +512,19 @@ static bool object_transfer_mode_to_base(bContext *C,
       /* The target is already part of the current multi-object sculpt group (selected AND
        * sculpting) -- no mode transition is needed. Only retarget the active object; every
        * other group member's selection and mode stay untouched, so multi-object tools keep
-       * seeing the whole group. */
+       * seeing the whole group.
+       *
+       * Wrapped in an undo group like the mode-transfer path below: #ED_undo_push commits
+       * whatever is currently in the undo stack's `step_init` slot, and this branch (unlike
+       * the mode-transfer path) does not itself call #mode_set_ex first to guarantee that slot
+       * is in a pushable state. */
+      ED_undo_group_begin(C);
       base_activate(C, base_dst);
       ED_undo_push(C, "Change Active");
       if (RNA_boolean_get(op->ptr, "use_flash_on_transfer")) {
         object_overlay_mode_transfer_animation_start(C, ob_dst);
       }
+      ED_undo_group_end(C);
       return true;
     }
   }

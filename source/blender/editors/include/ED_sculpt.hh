@@ -52,6 +52,7 @@ void object_sculpt_mode_exit(bContext *C, Depsgraph &depsgraph);
 bool shape_key_check(const Object &ob, ReportList *reports);
 
 void operatortypes_sculpt();
+void operatormacros_sculpt();
 
 void keymap_sculpt(wmKeyConfig *keyconf);
 

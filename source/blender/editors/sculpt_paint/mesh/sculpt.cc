@@ -1916,7 +1916,8 @@ static AreaNormalCenterData calc_area_sample_multi_object_mesh(const Depsgraph &
    * object itself would otherwise skew this distance the same way it skews #calc_brush_distances.
    */
   const SculptSession &reference_ss = *reference_ob.runtime->sculpt_session;
-  const float3 reference_scale = (reference_ss.cache && reference_ss.cache->multi_object_stroke) ?
+  const float3 reference_scale = (reference_ss.cache &&
+                                  reference_ss.cache->non_uniform_scale_active) ?
                                      reference_ss.cache->position_scale :
                                      float3(1.0f);
 
@@ -3395,7 +3396,7 @@ static void update_brush_local_mat(const Depsgraph &depsgraph,
   if (cache->mirror_symmetry_pass == 0 && cache->radial_symmetry_pass == 0) {
     const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
     const MTex *mask_tex = BKE_brush_mask_texture_get(brush, OB_MODE_SCULPT);
-    if (cache->multi_object_stroke) {
+    if (cache->non_uniform_scale_active) {
       /* The extra own-normal sample (#calc_area_normal_own) that curvature detection needs has a
        * real per-object cost, so only pay it when an Area-mapped texture is actually in use. */
       const bool check_curvature = mask_tex->tex != nullptr &&
@@ -3817,14 +3818,14 @@ static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgra
     radius_scale = 2.0f;
   }
 
-  /* Node culling uses a raw local-space sphere (#node_in_sphere), but in a multi-object stroke the
-   * per-vertex falloff is measured through #StrokeCache.position_scale — a world-isotropic sphere
-   * (#calc_brush_distances_squared). Where position_scale shrinks a local axis (< 1) the falloff
-   * reaches past the raw radius; expand the node search to cover it so no falloff-affected vertex is
-   * culled. Otherwise the factor drops abruptly at the node-search boundary and accumulating brushes
-   * that do not restore between steps (e.g. Snake Hook) tear the mesh along it. Over-inclusion is
-   * harmless: the extra vertices simply receive a zero falloff factor. */
-  if (ss.cache && ss.cache->multi_object_stroke) {
+  /* Node culling uses a raw local-space sphere (#node_in_sphere), but whenever the non-uniform-scale
+   * correction is active the per-vertex falloff is measured through #StrokeCache.position_scale — a
+   * world-isotropic sphere (#calc_brush_distances_squared). Where position_scale shrinks a local axis
+   * (< 1) the falloff reaches past the raw radius; expand the node search to cover it so no
+   * falloff-affected vertex is culled. Otherwise the factor drops abruptly at the node-search boundary
+   * and accumulating brushes that do not restore between steps (e.g. Snake Hook) tear the mesh along
+   * it. Over-inclusion is harmless: the extra vertices simply receive a zero falloff factor. */
+  if (ss.cache && ss.cache->non_uniform_scale_active) {
     const float3 &position_scale = ss.cache->position_scale;
     const float min_axis = std::min({position_scale.x, position_scale.y, position_scale.z});
     if (min_axis > 0.0f && min_axis < 1.0f) {
@@ -7020,6 +7021,8 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
     cache->scale = non_uniform_scale_compensation(ob);
     cache->position_scale = position_scale_compensation(ob);
     cache->multi_object_stroke = objects.size() > 1;
+    cache->non_uniform_scale_active = cache->multi_object_stroke ||
+                                      object_has_non_uniform_scale(ob);
 
     cache->plane_trim_squared = brush->plane_trim * brush->plane_trim;
 
@@ -8538,12 +8541,12 @@ void cube_tip_init(const Sculpt & /*sd*/, const Object &ob, const Brush &brush, 
 
   zero_m4(mat);
 
-  if (cache.multi_object_stroke) {
+  if (cache.non_uniform_scale_active) {
     /* #calc_brush_local_mat's cross-product basis is orthonormal only in LOCAL space; under
-     * non-uniform #Object.scale it stops being isotropic in world space, so the square tip
-     * comes out stretched/skewed on a secondary object whose scale differs from the primary's
-     * (same root problem #calc_brush_area_texture_mat solves for Area-mapped textures, see its
-     * comment above). Build the same kind of world-space orthonormal frame here instead.
+     * non-uniform #Object.scale it stops being isotropic in world space, so the square tip comes
+     * out stretched/skewed (same root problem #calc_brush_area_texture_mat solves for Area-mapped
+     * textures, see its comment above). Build the same kind of world-space orthonormal frame here
+     * instead.
      * Also ensure `ob.world_to_object` is up to date (normally refreshed inside
      * #calc_brush_local_mat, which this branch does not call). */
     ob.runtime->world_to_object = math::invert(ob.object_to_world());
@@ -9214,6 +9217,12 @@ void filter_region_clip_factors(const SculptSession &ss,
       factors[i] = 0.0f;
     }
   }
+}
+
+bool object_has_non_uniform_scale(const Object &ob)
+{
+  constexpr float eps = 1e-4f;
+  return !(fabsf(ob.scale[0] - ob.scale[1]) < eps && fabsf(ob.scale[1] - ob.scale[2]) < eps);
 }
 
 float3 non_uniform_scale_compensation(const Object &ob)

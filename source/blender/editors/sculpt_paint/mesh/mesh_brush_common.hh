@@ -302,48 +302,60 @@ void filter_region_clip_factors(const SculptSession &ss,
                                 MutableSpan<float> factors);
 
 /**
+ * True when \a ob's own #Object.scale is anisotropic (its axes differ from one another), using
+ * the same tolerance as the "Object has non-uniform scale" stroke-start warning
+ * (`sculpt_ops.cc`). Combined with #StrokeCache.multi_object_stroke to decide when the
+ * non-uniform-scale correction helpers below should engage: a multi-object stroke always
+ * engages them (every object in the group needs consistent treatment even if this particular one
+ * happens to be uniformly scaled), while a single-object stroke only engages them when this
+ * object's own scale actually is anisotropic -- a plain or uniformly-scaled single object stays
+ * bit-exact. Declared here but defined in `sculpt.cc` (like #non_uniform_scale_compensation
+ * below) since it dereferences #Object, which this header only forward-declares.
+ */
+bool object_has_non_uniform_scale(const Object &ob);
+
+/**
  * Approximates world-space isotropy for a local-space NORMAL/direction vector (built from
  * cross-products of a surface normal, or averaged into an area normal) under the object's own
  * non-uniform scale, using #StrokeCache.scale (the inverse-transpose-style `max_scale /
- * object_scale_axis` compensation seeded once per stroke in #stroke_cache_init). Applied only
- * for #StrokeCache.multi_object_stroke, so a single-object stroke with non-uniform scale keeps
- * its previous (unpredictable, but unchanged) behavior.
+ * object_scale_axis` compensation seeded once per stroke in #stroke_cache_init). Gated on
+ * #StrokeCache.non_uniform_scale_active, so an object with uniform (or no) scale keeps its
+ * previous, unchanged behavior.
  *
  * Do NOT use this for position differences / falloff distances — those transform by the
  * object's scale directly (the opposite relationship), see #position_scale_normalized.
  *
  * This returns the corrected but *unnormalized* vector; when the result is consumed as a unit
  * orientation vector (a basis axis, a rotation axis, a projection-plane normal) use
- * #scale_normalized_unit instead so single-object strokes stay bit-exact.
+ * #scale_normalized_unit instead so uniformly-scaled strokes stay bit-exact.
  */
 inline float3 scale_normalized(const StrokeCache &cache, const float3 &v)
 {
-  return cache.multi_object_stroke ? v * cache.scale : v;
+  return cache.non_uniform_scale_active ? v * cache.scale : v;
 }
 
 /**
  * Unit-length variant of #scale_normalized for a raw local NORMAL/direction that is consumed as a
- * unit orientation vector. In a multi-object stroke it applies the non-uniform-scale correction
- * and re-normalizes; in a single-object stroke it returns #v untouched — no extra #math::normalize
- * is introduced, so the result stays bit-identical to the pre-multi-object behavior.
+ * unit orientation vector. When the correction is active it applies the non-uniform-scale
+ * correction and re-normalizes; otherwise it returns #v untouched — no extra #math::normalize is
+ * introduced, so the result stays bit-identical to the pre-correction behavior.
  */
 inline float3 scale_normalized_unit(const StrokeCache &cache, const float3 &v)
 {
-  return cache.multi_object_stroke ? math::normalize(v * cache.scale) : v;
+  return cache.non_uniform_scale_active ? math::normalize(v * cache.scale) : v;
 }
 
 /**
  * Approximates world-space isotropy for a local-space POSITION DIFFERENCE (a falloff distance,
  * a slide direction derived from `location - position`) under the object's own non-uniform
  * scale, using #StrokeCache.position_scale (`ob.scale[axis] / mat4_to_scale(world matrix)`,
- * seeded once per stroke in #stroke_cache_init). Applied only for
- * #StrokeCache.multi_object_stroke.
+ * seeded once per stroke in #stroke_cache_init). Gated on #StrokeCache.non_uniform_scale_active.
  *
  * Do NOT use this for normals/orientation vectors — see #scale_normalized instead.
  */
 inline float3 position_scale_normalized(const StrokeCache &cache, const float3 &v)
 {
-  return cache.multi_object_stroke ? v * cache.position_scale : v;
+  return cache.non_uniform_scale_active ? v * cache.position_scale : v;
 }
 
 /**

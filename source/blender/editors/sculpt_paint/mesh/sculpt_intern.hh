@@ -270,10 +270,19 @@ struct StrokeCache {
   float3 position_scale = float3(1);
   /**
    * True when the stroke spans more than one object (#MultiObjectStrokeContext::mode_objects).
-   * Gates the non-uniform-scale compensation in #scale_normalized() so single-object strokes stay
-   * bit-exact with their pre-multi-object behavior.
+   * Used by multi-object-only mechanisms unrelated to scale (pooled area sampling, shared
+   * symmetry/texture frames); for the non-uniform-scale compensation gate see
+   * #non_uniform_scale_active instead.
    */
   bool multi_object_stroke = false;
+  /**
+   * True when the non-uniform-scale compensation in #scale_normalized()/#position_scale_normalized()
+   * should engage: either #multi_object_stroke, or a single object whose own #Object.scale is
+   * anisotropic (#object_has_non_uniform_scale). A uniformly-scaled (or unscaled) single-object
+   * stroke stays bit-exact with its pre-correction behavior. Seeded once per object in
+   * #stroke_cache_init.
+   */
+  bool non_uniform_scale_active = false;
   struct {
     uint8_t flag = 0;
     float3 tolerance = float3(0);

@@ -29,6 +29,7 @@
 
 #include "WM_api.hh"
 
+#include "mesh_brush_common.hh"
 #include "sculpt_boundary.hh"
 #include "sculpt_cloth.hh"
 #include "sculpt_expand.hh"
@@ -701,10 +702,12 @@ static void cursor_space_drawing_setup(const PaintCursorContext &pcontext)
    * translate(location)`) baked the object's full matrix, including non-uniform scale, into the
    * disc's own basis: even with a correctly world-oriented rotation, a circle drawn in that
    * basis still comes out elliptical once the anisotropic scale is applied to its shape, not
-   * just its orientation. Only corrected in multi-object sculpts (matching
-   * #StrokeCache.multi_object_stroke elsewhere) so a single scaled object keeps its long-standing
-   * appearance. */
-  if (sculpt_mode_objects(pcontext.vc).size() > 1) {
+   * just its orientation. Corrected whenever the stroke would engage the non-uniform-scale
+   * compensation elsewhere (multi-object, or a single object with its own anisotropic scale --
+   * matching #StrokeCache.non_uniform_scale_active, which isn't available yet at hover time since
+   * no #StrokeCache exists until a stroke starts) so a uniformly-scaled object keeps its
+   * long-standing appearance. */
+  if (sculpt_mode_objects(pcontext.vc).size() > 1 || object_has_non_uniform_scale(ob)) {
     const float3 world_location = math::transform_point(ob.object_to_world(), pcontext.location);
     /* Isotropic size compensation matching how #pcontext.radius was derived (divided by this
      * same scalar in #paint_calc_object_space_radius), applied AFTER the rotation below so it

@@ -8534,11 +8534,33 @@ void ensure_cache(Object &object)
 void cube_tip_init(const Sculpt & /*sd*/, const Object &ob, const Brush &brush, float mat[4][4])
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
+  StrokeCache &cache = *ss.cache;
+
+  zero_m4(mat);
+
+  if (cache.multi_object_stroke) {
+    /* #calc_brush_local_mat's cross-product basis is orthonormal only in LOCAL space; under
+     * non-uniform #Object.scale it stops being isotropic in world space, so the square tip
+     * comes out stretched/skewed on a secondary object whose scale differs from the primary's
+     * (same root problem #calc_brush_area_texture_mat solves for Area-mapped textures, see its
+     * comment above). Build the same kind of world-space orthonormal frame here instead.
+     * Also ensure `ob.world_to_object` is up to date (normally refreshed inside
+     * #calc_brush_local_mat, which this branch does not call). */
+    ob.runtime->world_to_object = math::invert(ob.object_to_world());
+
+    const float3x3 to_world_normal = math::transpose(float3x3(ob.world_to_object()));
+    const float3 world_normal = math::normalize(to_world_normal * cache.sculpt_normal);
+    float4x4 frame_to_world = build_area_texture_world_frame(0.0f, ob, cache, world_normal);
+    frame_to_world.y_axis() *= brush.tip_scale_x;
+    const float4x4 local_mat = math::invert(frame_to_world) * ob.object_to_world();
+    copy_m4_m4(mat, local_mat.ptr());
+    return;
+  }
+
   float scale[4][4];
   float tmat[4][4];
   float unused[4][4];
 
-  zero_m4(mat);
   calc_brush_local_mat(0.0, ob, unused, mat);
 
   /* NOTE: we ignore the radius scaling done inside of calc_brush_local_mat to

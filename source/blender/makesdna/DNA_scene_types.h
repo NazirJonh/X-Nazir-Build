@@ -1474,6 +1474,12 @@ enum eSculptTransformMode : int {
   SCULPT_TRANSFORM_MODE_RADIUS_ELASTIC = 1,
 };
 
+/** #Sculpt::multi_object_edit_scope */
+enum eSculptMultiObjectEditScope : int {
+  SCULPT_MULTI_OBJECT_EDIT_ALL = 0,
+  SCULPT_MULTI_OBJECT_EDIT_ACTIVE = 1,
+};
+
 /** Sculpt. */
 struct Sculpt {
   DNA_DEFINE_CXX_METHODS(Sculpt)
@@ -1484,6 +1490,11 @@ struct Sculpt {
 
   /** Transform tool. */
   eSculptTransformMode transform_mode = SCULPT_TRANSFORM_MODE_ALL_VERTICES;
+
+  /** Whether brush strokes and tools act on the active object only, or on every object
+   * currently in Sculpt Mode. */
+  eSculptMultiObjectEditScope multi_object_edit_scope = SCULPT_MULTI_OBJECT_EDIT_ALL;
+  char _pad0[4] = {};
 
   /** Deprecated. \see MeshAutomaskingSettings */
   DNA_DEPRECATED int automasking_flags = 0;

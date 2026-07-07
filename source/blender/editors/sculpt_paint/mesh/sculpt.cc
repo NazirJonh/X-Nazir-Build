@@ -5812,6 +5812,17 @@ static bool stroke_get_location_object(Depsgraph &depsgraph,
  */
 Vector<Object *> sculpt_mode_objects(const ViewContext &vc)
 {
+  const Sculpt *sd = vc.scene->toolsettings->sculpt;
+  if (sd && sd->multi_object_edit_scope == SCULPT_MULTI_OBJECT_EDIT_ACTIVE && vc.obact) {
+    /* Narrow every multi-object caller (brush strokes, cursor/hit resolution, and every
+     * exec/gesture tool) down to the active object only -- this is the single choke point
+     * all of them already go through, so no other file needs to change. Return before the
+     * view-layer scan below: this function sits on hot paths (cursor hit-testing runs every
+     * mouse-move), and #BKE_view_layer_array_from_objects_in_mode_params is an O(view-layer
+     * size) walk that Active-only scope has no use for. */
+    return {vc.obact};
+  }
+
   const ObjectsInModeParams params{OB_MODE_SCULPT, false, nullptr, nullptr};
   return BKE_view_layer_array_from_objects_in_mode_params(
       *vc.bmain, vc.scene, vc.view_layer, vc.v3d, &params);

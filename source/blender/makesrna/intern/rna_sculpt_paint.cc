@@ -1203,6 +1203,20 @@ static void rna_def_sculpt(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem sculpt_multi_object_edit_scope_items[] = {
+      {SCULPT_MULTI_OBJECT_EDIT_ACTIVE,
+       "ACTIVE",
+       0,
+       "Active Object",
+       "Brush strokes and tools only affect the active object"},
+      {SCULPT_MULTI_OBJECT_EDIT_ALL,
+       "ALL",
+       0,
+       "All Objects",
+       "Brush strokes and tools affect every object currently in Sculpt Mode"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   StructRNA *srna;
   PropertyRNA *prop;
 
@@ -1291,6 +1305,15 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, sculpt_transform_mode_items);
   RNA_def_property_ui_text(
       prop, "Transform Mode", "How the transformation is going to be applied to the target");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "multi_object_edit_scope", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, sculpt_multi_object_edit_scope_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Multi-Object Edit Scope",
+      "Whether brush strokes and tools act on the active object only, or on every object "
+      "currently in Sculpt Mode");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "gravity_object", PROP_POINTER, PROP_NONE);

@@ -876,6 +876,9 @@ class VIEW3D_HT_header(Header):
                     icon='CURVE_PATH',
                     depress=(domain == 'CURVE'),
                 ).domain = 'CURVE'
+            elif object_mode == 'SCULPT':
+                row = layout.row(align=True)
+                row.prop(tool_settings.sculpt, "multi_object_edit_scope", expand=True)
 
         # Grease Pencil
         if obj and obj.type == 'GREASEPENCIL':

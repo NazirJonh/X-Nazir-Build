@@ -315,6 +315,7 @@ class _defs_transform:
         if context.mode != 'SCULPT':
             return
         layout.prop(context.tool_settings.sculpt, "transform_mode")
+        layout.prop(context.tool_settings.sculpt, "transform_all_objects", text="Affect All Objects")
 
     @ToolDef.from_fn
     def translate():

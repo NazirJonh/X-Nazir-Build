@@ -1494,7 +1494,12 @@ struct Sculpt {
   /** Whether brush strokes and tools act on the active object only, or on every object
    * currently in Sculpt Mode. */
   eSculptMultiObjectEditScope multi_object_edit_scope = SCULPT_MULTI_OBJECT_EDIT_ALL;
-  char _pad0[4] = {};
+
+  /** When enabled, the Transform tool's gizmo moves/rotates/scales every object currently in
+   * Sculpt Mode around one shared world-space pivot, instead of only the active object.
+   * Independent of #multi_object_edit_scope, which only governs brush strokes and other tools. */
+  int8_t transform_all_objects = 0;
+  char _pad0[3] = {};
 
   /** Deprecated. \see MeshAutomaskingSettings */
   DNA_DEPRECATED int automasking_flags = 0;

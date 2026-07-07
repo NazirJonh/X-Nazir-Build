@@ -11,6 +11,7 @@
 #include <cstddef>
 
 #include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 namespace blender {
 
@@ -61,7 +62,21 @@ void keymap_sculpt(wmKeyConfig *keyconf);
 void update_modal_transform(bContext *C, Object &ob);
 void cancel_modal_transform(bContext *C, Object &ob);
 void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char *undo_name);
+/** Like #init_transform, but adds \a ob to an already-open multi-object undo step (see
+ * #undo::push_begin_add_object) instead of opening a new one. */
+void init_transform_add_object(bContext *C, Object &ob, const float mval_fl[2]);
 void end_transform(bContext *C, Object &ob);
+/** Multi-object counterpart of #end_transform: closes the shared undo step opened across \a
+ * objects by #init_transform + #init_transform_add_object. */
+void end_transform(bContext *C, Span<Object *> objects);
+
+/**
+ * Objects the Transform tool's interactive gizmo (Move/Rotate/Scale pivot) should affect: the
+ * active object alone, or every object currently in Sculpt Mode, depending on
+ * `Sculpt::transform_all_objects`. Independent of `Sculpt::multi_object_edit_scope` (which only
+ * governs brush strokes and other tools).
+ */
+Vector<Object *> transform_target_objects(bContext *C);
 
 /* `sculpt_undo.cc` */
 

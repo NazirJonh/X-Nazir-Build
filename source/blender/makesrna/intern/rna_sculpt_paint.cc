@@ -1343,6 +1343,14 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_update(
       prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Sculpt_multi_object_edit_scope_update");
 
+  prop = RNA_def_property(srna, "transform_all_objects", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_ui_text(
+      prop,
+      "Affect All Objects",
+      "Move, rotate, and scale every object currently in Sculpt Mode together, around one "
+      "shared pivot, instead of only the active object");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
   prop = RNA_def_property(srna, "gravity_object", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(

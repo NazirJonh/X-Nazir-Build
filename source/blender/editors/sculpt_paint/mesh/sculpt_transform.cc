@@ -16,6 +16,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
@@ -28,6 +29,8 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_subdiv_ccg.hh"
+
+#include "DNA_object_types.h"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -53,9 +56,8 @@
 
 namespace blender::ed::sculpt_paint {
 
-void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char *undo_name)
+static void init_transform_common(bContext *C, Object &ob, const float mval_fl[2])
 {
-  const Scene &scene = *CTX_data_scene(C);
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   SculptSession &ss = *ob.runtime->sculpt_session;
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
@@ -69,7 +71,6 @@ void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char 
   ss.prev_pivot_scale = ss.pivot_scale;
 
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
-  undo::push_begin_ex(scene, ob, undo_name);
 
   vert_random_access_ensure(ob);
 
@@ -81,6 +82,35 @@ void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char 
   else {
     ss.filter_cache->transform_displacement_mode = TransformDisplacementMode::Original;
   }
+}
+
+void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char *undo_name)
+{
+  const Scene &scene = *CTX_data_scene(C);
+  undo::push_begin_ex(scene, ob, undo_name);
+  init_transform_common(C, ob, mval_fl);
+}
+
+void init_transform_add_object(bContext *C, Object &ob, const float mval_fl[2])
+{
+  undo::push_begin_add_object(ob);
+  init_transform_common(C, ob, mval_fl);
+}
+
+Vector<Object *> transform_target_objects(bContext *C)
+{
+  Object &active_ob = *CTX_data_active_object(C);
+  const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
+  if (!sd.transform_all_objects) {
+    return {&active_ob};
+  }
+
+  const Main &bmain = *CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  const View3D *v3d = CTX_wm_view3d(C);
+  const ObjectsInModeParams params{OB_MODE_SCULPT, false, nullptr, nullptr};
+  return BKE_view_layer_array_from_objects_in_mode_params(bmain, scene, view_layer, v3d, &params);
 }
 
 static std::array<float4x4, 8> transform_matrices_init(const SculptSession &ss,
@@ -607,6 +637,16 @@ void end_transform(bContext *C, Object &ob)
   ss.filter_cache = nullptr;
   undo::push_end(ob);
   flush_update_done(C, ob, UpdateType::Position);
+}
+
+void end_transform(bContext *C, Span<Object *> objects)
+{
+  for (Object *ob : objects) {
+    SculptSession &ss = *ob->runtime->sculpt_session;
+    MEM_delete(ss.filter_cache);
+    ss.filter_cache = nullptr;
+  }
+  undo::finish_multi_object(C, objects, UpdateType::Position);
 }
 
 enum class PivotPositionMode {

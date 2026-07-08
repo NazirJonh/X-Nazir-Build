@@ -785,7 +785,10 @@ static Vector<Object *> trimmable_objects(const ViewContext &vc, ReportList &rep
 {
   Vector<Object *> result;
   for (Object *object : sculpt_mode_objects(vc)) {
-    const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(*object);
+    /* The PBVH is only guaranteed to already exist for the active object (built lazily on cursor
+     * hover, see #paint_cursor.cc). A secondary object that was never hovered/stroked before this
+     * gesture would otherwise still have a null PBVH here. */
+    const bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(*vc.depsgraph, *object);
     if (pbvh.type() == bke::pbvh::Type::BMesh) {
       BKE_reportf(&reports,
                   RPT_WARNING,

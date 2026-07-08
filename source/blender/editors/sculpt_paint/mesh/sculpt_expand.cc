@@ -33,6 +33,7 @@
 #include "BKE_mesh_mapping.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_multires.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_report.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -182,13 +183,15 @@ static int object_index_get(const Cache &expand_cache, const Object &object)
 }
 
 /**
- * Returns true when every object in `states` is backed by a mesh #bke::pbvh::Tree. Multi-object
- * Expand is restricted to mesh-backed objects (grids/BMesh are not supported across objects).
+ * Returns true when every object in `states` is backed by a Mesh or Grids (Multires)
+ * #bke::pbvh::Tree. Multi-object Expand is restricted to these -- BMesh (Dyntopo) objects are not
+ * supported across objects (or wired into the propagation graph at all).
  */
-static bool all_mesh_backed(Span<ObjectState> states)
+static bool all_topology_supported(Span<ObjectState> states)
 {
   for (const ObjectState &state : states) {
-    if (bke::object::pbvh_get(*state.object)->type() != bke::pbvh::Type::Mesh) {
+    const bke::pbvh::Type type = bke::object::pbvh_get(*state.object)->type();
+    if (type != bke::pbvh::Type::Mesh && type != bke::pbvh::Type::Grids) {
       return false;
     }
   }
@@ -197,11 +200,31 @@ static bool all_mesh_backed(Span<ObjectState> states)
 
 /**
  * Returns true when Expand should operate across all objects in `expand_cache.object_states`
- * instead of only the active object: more than one object in the mode and all of them Mesh-backed.
+ * instead of only the active object: more than one object in the mode and all of them Mesh- or
+ * Grids-backed.
  */
 static bool expand_multi_object_active(const Cache &expand_cache)
 {
-  return expand_cache.object_states.size() > 1 && all_mesh_backed(expand_cache.object_states);
+  return expand_cache.object_states.size() > 1 &&
+        all_topology_supported(expand_cache.object_states);
+}
+
+/**
+ * Returns true when at least one object in `states` is Grids-backed. Used to decide, once per
+ * group, whether Geodesic falloff should route through the multi-object Sphere path instead of
+ * true triangle-unfold geodesic -- mirrors the existing single-object Geodesic->Spherical fallback
+ * policy (`geodesic_falloff_create`'s `has_topology_info` check), just decided for the whole group
+ * at once so a Mesh/Multires seam never has some objects on exact geodesic and others on
+ * Euclidean-sphere distances.
+ */
+static bool any_grids_backed(Span<ObjectState> states)
+{
+  for (const ObjectState &state : states) {
+    if (bke::object::pbvh_get(*state.object)->type() == bke::pbvh::Type::Grids) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /* Functions for getting the state of mesh elements (vertices and base mesh faces). When the main
@@ -612,6 +635,22 @@ static IndexMask boundary_from_enabled(Object &object,
 {
   SculptSession &ss = *object.runtime->sculpt_session;
 
+  /* Diagnostic (debug-only): a size mismatch here means `enabled_verts` was built for a different
+   * object/vertex-count convention than `object` actually has (e.g. base-mesh count instead of
+   * raw CCG count for a Grids object) -- the exact defect under investigation for the
+   * multi-object Grids null-read crash. */
+  BLI_assert(enabled_verts.size() == vertex_count_get(object));
+
+  /* Defensive (real check, not assert-only): `object_states_init` populates every group member's
+   * `boundary_info_cache` once at invoke, but this function is only ever exercised for a
+   * secondary Grids object once, at Confirm time (via #reposition_pivot), never during the live
+   * per-mouse-move drag -- unlike #enabled_state_to_bitmap, which runs on every drag step and has
+   * therefore already proven `ss`/`subdiv_ccg` valid for this object by the time this runs. Making
+   * this call idempotently self-healing here (cheap: `ensure_boundary_info` no-ops if the cache
+   * already exists) removes any chance of dereferencing a null cache, whatever the reason it could
+   * be unset, instead of crashing. */
+  boundary::ensure_boundary_info(object);
+
   const IndexMask enabled_mask = IndexMask::from_bits(enabled_verts, memory);
 
   switch (bke::object::pbvh_get(object)->type()) {
@@ -654,6 +693,8 @@ static IndexMask boundary_from_enabled(Object &object,
         SubdivCCGNeighbors neighbors;
         BKE_subdiv_ccg_neighbor_coords_get(subdiv_ccg, coord, false, neighbors);
         for (const SubdivCCGCoord neighbor : neighbors.coords) {
+          /* Diagnostic (debug-only): see the matching assert at this function's entry. */
+          BLI_assert(neighbor.to_index(key) < enabled_verts.size());
           if (!enabled_verts[neighbor.to_index(key)]) {
             return true;
           }
@@ -705,6 +746,20 @@ static void check_topology_islands(Object &ob, FalloffType falloff_type)
                                     FalloffType::TopologyNormals,
                                     FalloffType::BoundaryTopology,
                                     FalloffType::Normals);
+
+  if (falloff_type == FalloffType::Geodesic && any_grids_backed(expand_cache.object_states)) {
+    /* Mirrors #calc_falloff_from_vert_and_symmetry's Geodesic->Sphere group fallback: when the
+     * group has a Grids object, Geodesic is actually computed as a plain Euclidean distance
+     * across the whole group (#spherical_falloff_multi), exactly like the user-chosen Sphere
+     * falloff -- which never sets check_islands (it is absent from the ELEM list above, and the
+     * SCULPT_EXPAND_MODAL_FALLOFF_SPHERICAL toggle explicitly clears it). Leaving check_islands
+     * true here would still gate the actual Mask/FaceSet WRITE by cross-object island/bridge
+     * connectivity even though the distance computation no longer respects topology at all -- the
+     * proximity bridge (#build_multi_object_bridge) is only a best-effort stitch, so a secondary
+     * object not close enough to bridge-connect would have its write silently suppressed while
+     * the falloff-based preview (which never checked islands) kept showing it as reachable. */
+    expand_cache.check_islands = false;
+  }
 
   if (expand_cache.check_islands) {
     islands::ensure_cache(ob);
@@ -1199,18 +1254,31 @@ static MultiVertRef nearest_multi_vert(const Depsgraph &depsgraph,
   for (const int i : states.index_range()) {
     Object &object = *states[i].object;
     const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
-    const Mesh &mesh = *id_cast<const Mesh *>(object.data);
-    const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
-    const bke::AttributeAccessor attributes = mesh.attributes();
-    const VArraySpan hide_vert = *attributes.lookup<bool>(".hide_vert", bke::AttrDomain::Point);
     const float3 local_target = math::transform_point(object.world_to_object(), world_target);
     /* Search radius MUST be a conservative LOCAL radius covering the world sphere, not the raw
      * world distance — otherwise a scaled-down object under-searches and drops valid
      * candidates. */
     const float local_radius = world_radius_to_local_search_radius(object.world_to_object(),
                                                                    max_world_distance);
-    const std::optional<int> nearest = nearest_vert_calc_mesh(
-        pbvh, positions, hide_vert, local_target, local_radius, false);
+
+    std::optional<int> nearest;
+    if (pbvh.type() == bke::pbvh::Type::Grids) {
+      const SculptSession &ss = *object.runtime->sculpt_session;
+      const std::optional<SubdivCCGCoord> nearest_coord = nearest_vert_calc_grids(
+          pbvh, *ss.subdiv_ccg, local_target, local_radius, false);
+      if (nearest_coord) {
+        const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss.subdiv_ccg);
+        nearest = nearest_coord->to_index(key);
+      }
+    }
+    else {
+      const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+      const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
+      const bke::AttributeAccessor attributes = mesh.attributes();
+      const VArraySpan hide_vert = *attributes.lookup<bool>(".hide_vert", bke::AttrDomain::Point);
+      nearest = nearest_vert_calc_mesh(
+          pbvh, positions, hide_vert, local_target, local_radius, false);
+    }
     if (!nearest) {
       continue;
     }
@@ -1663,16 +1731,41 @@ static void vert_to_face_falloff(Object &object, Mesh *mesh, Cache &expand_cache
   }
 }
 
-/* Multi-object #vert_to_face_falloff: mirrors #vert_to_face_falloff_mesh, per object (Mesh-only --
- * multi is Mesh-only, matching #expand_multi_object_active's gate). Needed so the FaceSets target
- * has a `face_falloff` to read from on every object, not only the active one. */
+/* Multi-object #vert_to_face_falloff: mirrors #vert_to_face_falloff_mesh/#vert_to_face_falloff_grids,
+ * per object. Needed so the FaceSets target has a `face_falloff` to read from on every object, not
+ * only the active one. Per-object pbvh-type branch added so a Grids object's `state.vert_falloff`
+ * (raw CCG-indexed, per #world_positions_create/Task 5) is read through the matching grid-loop
+ * convention instead of through `mesh.corner_verts()`'s base-mesh vertex indices -- the two index
+ * spaces are unrelated sizes, so reading the Mesh convention for a Grids object silently pulled
+ * wrong (but in-bounds, since raw CCG count exceeds base-mesh count) falloff values into
+ * `face_falloff`, rather than crashing. BMesh is unreachable here (multi-object gate excludes it). */
 static void vert_to_face_falloff_multi(Cache &expand_cache)
 {
   for (ObjectState &state : expand_cache.object_states) {
-    Mesh &mesh = *id_cast<Mesh *>(state.object->data);
+    Object &object = *state.object;
+    Mesh &mesh = *id_cast<Mesh *>(object.data);
     const OffsetIndices faces = mesh.faces();
-    const Span<int> corner_verts = mesh.corner_verts();
     state.face_falloff.reinitialize(mesh.faces_num);
+
+    if (bke::object::pbvh_get(object)->type() == bke::pbvh::Type::Grids) {
+      const SculptSession &ss = *object.runtime->sculpt_session;
+      const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss.subdiv_ccg);
+      threading::parallel_for(faces.index_range(), 1024, [&](const IndexRange range) {
+        for (const int face : range) {
+          float accum = 0.0f;
+          for (const int corner : faces[face]) {
+            const int grid_loop_index = corner * key.grid_area;
+            for (int g = 0; g < key.grid_area; g++) {
+              accum += state.vert_falloff[grid_loop_index + g];
+            }
+          }
+          state.face_falloff[face] = accum / (faces[face].size() * key.grid_area);
+        }
+      });
+      continue;
+    }
+
+    const Span<int> corner_verts = mesh.corner_verts();
     threading::parallel_for(faces.index_range(), 1024, [&](const IndexRange range) {
       for (const int face : range) {
         const Span<int> face_verts = corner_verts.slice(faces[face]);
@@ -1950,10 +2043,15 @@ static void face_set_boundary_falloff_multi(const Depsgraph &depsgraph,
     vert_has_unique_face_set[i] = std::move(has_unique_face_set);
   }
 
+  Array<Array<int>> canonical_maps(states.size());
+  for (const int i : states.index_range()) {
+    canonical_maps[i] = states[i].grids_canonical_map;
+  }
   Array<Array<float>> falloffs(states.size());
   multi_object_graph_propagate(depsgraph,
                                objects,
                                expand_cache.world_positions,
+                               canonical_maps,
                                seeds,
                                expand_cache.bridge,
                                PropagationMode::Geodesic,
@@ -2170,7 +2268,9 @@ static void calc_falloff_from_vert_and_symmetry(const Depsgraph &depsgraph,
 {
   if (expand_multi_object_active(expand_cache) && falloff_type_supports_multi(falloff_type)) {
     expand_cache.falloff_type = falloff_type;
-    if (falloff_type == FalloffType::Sphere) {
+    if (falloff_type == FalloffType::Sphere ||
+        (falloff_type == FalloffType::Geodesic && any_grids_backed(expand_cache.object_states)))
+    {
       spherical_falloff_multi(depsgraph, expand_cache);
     }
     else if (falloff_type == FalloffType::ActiveFaceSet ||
@@ -2224,10 +2324,15 @@ static void calc_falloff_from_vert_and_symmetry(const Depsgraph &depsgraph,
                                        (falloff_type == FalloffType::TopologyNormals ?
                                             PropagationMode::UniformDiagonals :
                                             PropagationMode::Uniform);
+      Array<Array<int>> canonical_maps(states.size());
+      for (const int i : states.index_range()) {
+        canonical_maps[i] = states[i].grids_canonical_map;
+      }
       Array<Array<float>> falloffs(states.size());
       multi_object_graph_propagate(depsgraph,
                                    objects,
                                    expand_cache.world_positions,
+                                   canonical_maps,
                                    seeds,
                                    expand_cache.bridge,
                                    mode,
@@ -2315,8 +2420,18 @@ static void snap_init_from_enabled(const Depsgraph &depsgraph,
     expand_cache.snap = false;
     expand_cache.invert = false;
 
-    /* Phase 1: add every face-set id present on every object. */
+    /* Phase 1: add every face-set id present on every object. Grids objects are skipped here (and
+     * in Phase 2 below) to match the single-object path a few lines down, which returns early
+     * ("no snap support") for any non-Mesh pbvh -- Snap face-set init has never been implemented
+     * for Multires. Contributing a Grids object's ids in Phase 1 without Phase 2 being able to
+     * correctly evaluate "any disabled vertex" for it (its `corner_verts()` are base-mesh indices,
+     * but `enabled_verts` from #enabled_state_to_bitmap is raw-CCG-indexed for Grids -- reading one
+     * through the other is in-bounds but semantically wrong, not a crash) would leave some ids
+     * that should have been removed incorrectly stuck in the snap set. */
     for (const ObjectState &state : expand_cache.object_states) {
+      if (bke::object::pbvh_get(*state.object)->type() != bke::pbvh::Type::Mesh) {
+        continue;
+      }
       const Mesh &mesh = *id_cast<const Mesh *>(state.object->data);
       const OffsetIndices<int> faces = mesh.faces();
       for (const int i : faces.index_range()) {
@@ -2325,6 +2440,9 @@ static void snap_init_from_enabled(const Depsgraph &depsgraph,
     }
     /* Phase 2: remove any id that has a disabled vertex on any object. */
     for (const ObjectState &state : expand_cache.object_states) {
+      if (bke::object::pbvh_get(*state.object)->type() != bke::pbvh::Type::Mesh) {
+        continue;
+      }
       const Mesh &mesh = *id_cast<const Mesh *>(state.object->data);
       const OffsetIndices<int> faces = mesh.faces();
       const Span<int> corner_verts = mesh.corner_verts();
@@ -2490,7 +2608,13 @@ static void restore_original_state(bContext *C, Object &ob, Cache &expand_cache)
           restore_face_set_data(object, expand_cache);
           break;
         case TargetType::Colors:
-          restore_color_data(object, expand_cache);
+          /* Colors is Mesh-only (see #original_state_store_for_object's matching guard) --
+           * #restore_color_data unconditionally does `pbvh.nodes<bke::pbvh::MeshNode>()`, which
+           * throws `std::bad_variant_access` (not a plain null-deref, but just as fatal) for a
+           * Grids object's pbvh. Skip it here the same way the apply path already does. */
+          if (bke::object::pbvh_get(object)->type() == bke::pbvh::Type::Mesh) {
+            restore_color_data(object, expand_cache);
+          }
           break;
       }
     }
@@ -2611,12 +2735,13 @@ static void calc_new_mask_mesh(const SculptSession &ss,
 }
 
 static bool update_mask_grids(const SculptSession &ss,
+                              const Cache &expand_cache,
+                              const ObjectState &state,
+                              const int object_index,
                               const BitSpan enabled_verts,
                               bke::pbvh::GridsNode &node,
                               SubdivCCG &subdiv_ccg)
 {
-  const Cache &expand_cache = *ss.expand_cache;
-  const ObjectState &state = active_object_state(expand_cache);
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
   const Span<float3> positions = subdiv_ccg.positions;
   MutableSpan<float> masks = subdiv_ccg.masks;
@@ -2626,9 +2751,12 @@ static bool update_mask_grids(const SculptSession &ss,
     for (const int vert : bke::ccg::grid_range(key, grid)) {
       const float initial_mask = masks[vert];
 
-      /* Grids are never multi-object (#expand_multi_object_active is Mesh-only), so this always
-       * runs on the active object (index 0). */
-      if (expand_cache.check_islands && !is_vert_in_active_component(ss, expand_cache, vert, 0)) {
+      /* `object_index` is passed in explicitly (not hardcoded to 0) so this also works for a
+       * SECONDARY Grids object in a multi-object Expand group -- see the multi-object apply loop's
+       * Grids case, which passes each object's own index. */
+      if (expand_cache.check_islands &&
+          !is_vert_in_active_component(ss, expand_cache, vert, object_index))
+      {
         continue;
       }
 
@@ -2860,7 +2988,15 @@ static void original_state_store_for_object(Cache &expand_cache, ObjectState &st
     state.original_mask = mask::duplicate_mask(ob);
   }
 
-  if (expand_cache.target == TargetType::Colors) {
+  if (expand_cache.target == TargetType::Colors &&
+      bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Mesh)
+  {
+    /* Colors is Mesh-only even in single-object Expand (no per-pbvh-type branch exists for it
+     * anywhere in this file) -- vertex-color painting on a Multires object isn't supported by this
+     * codebase today. Guarding here keeps the multi-object path no worse than single-object
+     * (skips a Grids object instead of indexing its much larger flattened CCG vertex range through
+     * arrays sized to the BASE mesh's vertex count). Fixing Colors-on-Multires itself is a
+     * separate, pre-existing gap, out of scope here. */
     const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
     const OffsetIndices<int> faces = mesh.faces();
     const Span<int> corner_verts = mesh.corner_verts();
@@ -2949,15 +3085,71 @@ static void update_for_vert(bContext *C, Object &ob, const MultiVertRef vertex)
           const IndexMask &object_node_mask = object_state.node_mask;
           const BitVector<> enabled_verts = enabled_state_to_bitmap(
               depsgraph, object, expand_cache);
-          const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
-          mask::update_mask_mesh(
-              depsgraph,
-              object,
-              object_node_mask,
-              [&](const MutableSpan<float> mask, const Span<int> verts) {
-                calc_new_mask_mesh(
-                    object_ss, expand_cache, object_state, positions, enabled_verts, verts, mask, i);
-              });
+          const bke::pbvh::Tree &object_pbvh_type_check = *bke::object::pbvh_get(object);
+          switch (object_pbvh_type_check.type()) {
+            case bke::pbvh::Type::Mesh: {
+              const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
+              mask::update_mask_mesh(
+                  depsgraph,
+                  object,
+                  object_node_mask,
+                  [&](const MutableSpan<float> mask, const Span<int> verts) {
+                    calc_new_mask_mesh(object_ss,
+                                       expand_cache,
+                                       object_state,
+                                       positions,
+                                       enabled_verts,
+                                       verts,
+                                       mask,
+                                       i);
+                  });
+              break;
+            }
+            case bke::pbvh::Type::Grids: {
+              SubdivCCG &object_subdiv_ccg = *object_ss.subdiv_ccg;
+              bke::pbvh::Tree &object_pbvh = *bke::object::pbvh_get(object);
+              Array<bool> node_changed(object_node_mask.min_array_size(), false);
+              MutableSpan<bke::pbvh::GridsNode> nodes = object_pbvh.nodes<bke::pbvh::GridsNode>();
+              object_node_mask.foreach_index(
+                  [&](const int node_i) {
+                    node_changed[node_i] = update_mask_grids(object_ss,
+                                                             expand_cache,
+                                                             object_state,
+                                                             i,
+                                                             enabled_verts,
+                                                             nodes[node_i],
+                                                             object_subdiv_ccg);
+                  },
+                  exec_mode::grain_size(1));
+              IndexMaskMemory memory;
+              object_pbvh.tag_masks_changed(IndexMask::from_bools(node_changed, memory));
+              BKE_subdiv_ccg_average_grids(object_subdiv_ccg);
+              /* `update_mask_grids` writes ONLY to the evaluated `subdiv_ccg.masks` span. That change
+               * is flushed back to the persistent base-cage `GridPaintMask` layer only when the
+               * object's `subdiv_ccg->dirty.coords` is set (there is no separate mask flag -- see the
+               * `MultiresModifiedFlags` enum, which only has COORDS/HIDDEN; the reshape write-back
+               * path `multires_reshape_assign_final_coords_from_ccg` copies masks as a side effect of
+               * the coords reshape). `flush_update_step(C, ...)` below marks dirty.coords for the
+               * ACTIVE object only, so without this per-object mark a SECONDARY Grids object's mask
+               * survives in evaluated data while dragging (preview is correct, the viewport reads
+               * eval) but is discarded on the depsgraph re-eval triggered by Confirm's
+               * `flush_update_done` -- appearing as an empty/reverted mask on the secondary object,
+               * with the undo step (snapshot taken from eval at invoke) showing the same wrong state.
+               * This is the identical call the Mesh mask tools make (`paint_mask.cc`: every Grids
+               * mask op) and that `flush_update_step` makes for the active object. `multires_mark_as_
+               * modified` takes a non-const `Depsgraph *`, so resolve it directly from the context
+               * here instead of the function's const `depsgraph` binding. */
+              multires_mark_as_modified(
+                  CTX_data_depsgraph_pointer(C), &object, MULTIRES_COORDS_MODIFIED);
+              break;
+            }
+            case bke::pbvh::Type::BMesh: {
+              /* Unreachable: the multi-object gate (#all_topology_supported) never admits a BMesh
+               * object into a multi-object group. */
+              BLI_assert_unreachable();
+              break;
+            }
+          }
           break;
         }
         case TargetType::FaceSets: {
@@ -2966,6 +3158,14 @@ static void update_for_vert(bContext *C, Object &ob, const MultiVertRef vertex)
           break;
         }
         case TargetType::Colors: {
+          if (bke::object::pbvh_get(object)->type() != bke::pbvh::Type::Mesh) {
+            /* Colors is Mesh-only (see #original_state_store_for_object's matching guard) -- skip
+             * this object rather than reading its color data through arrays sized to the wrong
+             * (base-mesh) vertex count. Reported once per object per apply call is too noisy for a
+             * modal drag operator; the invoke-time report (Step 3) covers the user-facing warning
+             * instead. */
+            break;
+          }
           Mesh &mesh = *id_cast<Mesh *>(object.data);
           const Span<float3> vert_positions = bke::pbvh::vert_positions_eval(depsgraph, object);
           const OffsetIndices<int> faces = mesh.faces();
@@ -3053,7 +3253,8 @@ static void update_for_vert(bContext *C, Object &ob, const MultiVertRef vertex)
           MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
           node_mask.foreach_index(
               [&](const int i) {
-                node_changed[i] = update_mask_grids(ss, enabled_verts, nodes[i], *ss.subdiv_ccg);
+                node_changed[i] = update_mask_grids(
+                    ss, expand_cache, state, 0, enabled_verts, nodes[i], *ss.subdiv_ccg);
               },
               exec_mode::grain_size(1));
 
@@ -4030,6 +4231,9 @@ static void object_states_init(bContext *C, Cache &expand_cache)
     boundary::ensure_boundary_info(*object);
     ObjectState state;
     state.object = object;
+    if (bke::object::pbvh_get(*object)->type() == bke::pbvh::Type::Grids) {
+      state.grids_canonical_map = grids_canonical_map_create(*object);
+    }
     expand_cache.object_states.append(std::move(state));
   }
 }
@@ -4119,6 +4323,17 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
   cache_initial_config_set(C, op, *ss.expand_cache);
   object_states_init(C, *ss.expand_cache);
 
+  if (ss.expand_cache->target == TargetType::Colors && ss.expand_cache->object_states.size() > 1) {
+    for (const ObjectState &state : ss.expand_cache->object_states) {
+      if (bke::object::pbvh_get(*state.object)->type() != bke::pbvh::Type::Mesh) {
+        BKE_reportf(op->reports,
+                   RPT_WARNING,
+                   "Expand Color target does not support Multires: skipping \"%s\"",
+                   state.object->id.name + 2);
+      }
+    }
+  }
+
   if (expand_multi_object_active(*ss.expand_cache)) {
     /* World-space positions are only needed for cross-object falloff (Task 2.4+); building them
      * once here keeps them valid for the whole modal op (static-geometry invariant). */
@@ -4129,6 +4344,15 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
     ss.expand_cache->world_positions = world_positions_create(*depsgraph, objects);
     ss.expand_cache->bridge = build_multi_object_bridge(
         *depsgraph, objects, ss.expand_cache->world_positions, SCULPT_EXPAND_BRIDGE_FACTOR);
+    /* TEMPORARY diagnostic (not a permanent feature) -- reports how many proximity-bridge edges
+     * were found across the group, so a failure to stitch two touching/overlapping objects shows
+     * up immediately (bridge.edges.size() == 0) without needing a debugger attached. Remove once
+     * the cross-object mask-write inconsistency bug is root-caused. */
+    BKE_reportf(op->reports,
+               RPT_INFO,
+               "Expand: multi-object bridge has %d edge(s) across %d objects",
+               int(ss.expand_cache->bridge.edges.size()),
+               int(objects.size()));
   }
 
   /* Update object. */
@@ -4145,8 +4369,18 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
 
   if (ss.expand_cache->target == TargetType::Mask) {
     Scene &scene = *CTX_data_scene(C);
-    MultiresModifierData *mmd = BKE_sculpt_multires_active(&scene, &ob);
-    BKE_sculpt_mask_layers_ensure(depsgraph, CTX_data_main(C), &ob, mmd);
+    Vector<Object *> mask_layer_objects;
+    for (const ObjectState &state : ss.expand_cache->object_states) {
+      mask_layer_objects.append(state.object);
+    }
+    /* Ensure the grid paint mask layer exists on EVERY object in the group, not just the active
+     * one -- the multi-object Mask apply path (#update_mask_grids) indexes SubdivCCG::masks
+     * unconditionally, which is left empty for a Multires object that has never had a mask layer
+     * created. Same class of bug already fixed for the Mask gesture tools (see
+     * #ensure_mask_layers's use in paint_mask.cc's init_operation); Expand's invoke only ever
+     * ensured the layer for the active object, which was harmless while multi-object Expand was
+     * Mesh-only and became a null-read crash once Grids objects were admitted into the group. */
+    ensure_mask_layers(depsgraph, CTX_data_main(C), &scene, mask_layer_objects);
 
     if (RNA_boolean_get(op->ptr, "use_auto_mask")) {
       if (any_nonzero_mask(ob)) {

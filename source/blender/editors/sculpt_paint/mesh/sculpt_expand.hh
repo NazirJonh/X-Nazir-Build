@@ -75,6 +75,14 @@ struct ObjectState {
   Array<float> original_mask;
   Array<int> original_face_sets;
   Array<float4> original_colors;
+
+  /* Multi-object Grids only: maps this object's RAW flat CCG vertex index to its canonical
+   * representative (see #grids_canonical_map_create) -- built once at invoke, alongside
+   * #Cache::world_positions/#Cache::bridge (same static-geometry invariant). Empty for Mesh/BMesh
+   * objects. Consumed by #multi_object_graph_propagate to translate seeds/bridge endpoints/results
+   * between this object's raw index space (every OTHER consumer of `vert_falloff`) and the
+   * duplicate-free canonical index space #detail::propagate_uniform's graph is built over. */
+  Array<int> grids_canonical_map;
 };
 
 struct Cache;

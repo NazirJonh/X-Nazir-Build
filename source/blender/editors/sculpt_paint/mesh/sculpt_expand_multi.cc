@@ -24,6 +24,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph_query.hh"
 
@@ -37,8 +38,19 @@ Array<Array<float3>> world_positions_create(const Depsgraph &depsgraph, Span<Obj
   Array<Array<float3>> result(objects.size());
   for (const int i : objects.index_range()) {
     Object &object = *objects[i];
-    const Span<float3> local = bke::pbvh::vert_positions_eval(depsgraph, object);
     const float4x4 to_world = object.object_to_world();
+
+    Span<float3> local;
+    if (bke::object::pbvh_get(object)->type() == bke::pbvh::Type::Grids) {
+      /* Never call vert_positions_eval on a Grids object -- it asserts Type::Mesh (pbvh.cc:997).
+       * Grids positions live in the flattened CCG array instead. */
+      const SculptSession &ss = *object.runtime->sculpt_session;
+      local = ss.subdiv_ccg->positions;
+    }
+    else {
+      local = bke::pbvh::vert_positions_eval(depsgraph, object);
+    }
+
     Array<float3> world(local.size());
     threading::parallel_for(local.index_range(), 2048, [&](const IndexRange range) {
       for (const int v : range) {
@@ -69,6 +81,114 @@ float world_radius_to_local_search_radius(const float4x4 &world_to_object, float
  * \{ */
 
 namespace detail {
+
+Array<int> canonicalize_duplicates(
+    const int vert_count,
+    const FunctionRef<void(int vert, Vector<int> &r_duplicates)> duplicates_of)
+{
+  /* Plain union-find with path halving, no union-by-rank -- `vert_count` is one object's vertex
+   * count (at most a few million for a dense Multires object), well within where the simpler
+   * scheme is fast enough and easier to read than a ranked version. */
+  Array<int> parent(vert_count);
+  for (const int v : IndexRange(vert_count)) {
+    parent[v] = v;
+  }
+
+  auto find = [&](int v) {
+    while (parent[v] != v) {
+      parent[v] = parent[parent[v]];
+      v = parent[v];
+    }
+    return v;
+  };
+
+  Vector<int> duplicates;
+  for (const int v : IndexRange(vert_count)) {
+    duplicates.clear();
+    duplicates_of(v, duplicates);
+    for (const int d : duplicates) {
+      const int root_v = find(v);
+      const int root_d = find(d);
+      if (root_v != root_d) {
+        /* Smaller index becomes the parent, so the eventual representative is deterministically
+         * the smallest index in the class regardless of visit order. */
+        if (root_v < root_d) {
+          parent[root_d] = root_v;
+        }
+        else {
+          parent[root_v] = root_d;
+        }
+      }
+    }
+  }
+
+  Array<int> canonical(vert_count);
+  for (const int v : IndexRange(vert_count)) {
+    canonical[v] = find(v);
+  }
+  return canonical;
+}
+
+GroupedSpan<int> build_canonical_neighbors(
+    const int raw_vert_count,
+    const Span<int> canonical_of_raw,
+    const FunctionRef<void(int raw_vert, Vector<int> &r_real_neighbors)> real_neighbors_of,
+    Array<int> &r_offsets,
+    Array<int> &r_data)
+{
+  BLI_assert(canonical_of_raw.size() == raw_vert_count);
+
+  /* Compact the raw representative values (which are sparse: e.g. {0,1,4,4,4,5} after
+   * canonicalization) into a dense 0..N-1 canonical-id space, matching #propagate_uniform's
+   * "one array slot per graph vertex" convention. */
+  Map<int, int> compact_id;
+  for (const int raw : IndexRange(raw_vert_count)) {
+    const int rep = canonical_of_raw[raw];
+    compact_id.lookup_or_add_cb(rep, [&]() { return int(compact_id.size()); });
+  }
+  const int canonical_count = compact_id.size();
+
+  Vector<Set<int>> neighbor_sets(canonical_count);
+  Vector<int> real;
+  for (const int raw : IndexRange(raw_vert_count)) {
+    const int from_id = compact_id.lookup(canonical_of_raw[raw]);
+    real.clear();
+    real_neighbors_of(raw, real);
+    for (const int raw_neighbor : real) {
+      const int to_id = compact_id.lookup(canonical_of_raw[raw_neighbor]);
+      if (to_id == from_id) {
+        /* A real neighbor that canonicalizes to the same vertex as the source (e.g. it was
+         * itself a duplicate reported as "real" by a misbehaving caller) -- never a self-edge. */
+        continue;
+      }
+      neighbor_sets[from_id].add(to_id);
+      neighbor_sets[to_id].add(from_id);
+    }
+  }
+
+  r_offsets.reinitialize(canonical_count + 1);
+  int total = 0;
+  for (const int i : IndexRange(canonical_count)) {
+    r_offsets[i] = total;
+    total += neighbor_sets[i].size();
+  }
+  r_offsets[canonical_count] = total;
+
+  r_data.reinitialize(total);
+  int cursor = 0;
+  for (const int i : IndexRange(canonical_count)) {
+    for (const int n : neighbor_sets[i]) {
+      r_data[cursor++] = n;
+    }
+  }
+
+  return {OffsetIndices<int>(r_offsets.as_span()), r_data.as_span()};
+}
+
+std::array<std::pair<int, int>, 4> interior_diagonal_offsets()
+{
+  return {{{-1, -1}, {-1, 1}, {1, -1}, {1, 1}}};
+}
 
 MultiObjectBridge build_bridge_impl(
     const Span<Span<float3>> object_world_positions,
@@ -206,6 +326,49 @@ MultiObjectBridge build_multi_object_bridge(const Depsgraph &depsgraph,
    * nothing" (`threshold <= 0`). */
   Array<float> mean_world_edge_length(objects.size());
   for (const int i : objects.index_range()) {
+    const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(*objects[i]);
+    if (pbvh.type() == bke::pbvh::Type::Grids) {
+      /* Reuse the same canonical edge adjacency the propagation core builds from, so this mean is
+       * computed over the exact same (duplicate-free) edge set the BFS graph uses -- no separate
+       * dedup logic needed here. */
+      const Array<int> canonical_map = grids_canonical_map_create(*objects[i]);
+      Array<int> edge_offsets;
+      Array<int> edge_data;
+      const GroupedSpan<int> edges = grids_edge_neighbors_create(
+          *objects[i], canonical_map, edge_offsets, edge_data);
+
+      /* `edges` is indexed by CANONICAL id, but `world_positions[i]` is indexed by RAW flat CCG
+       * index -- map each canonical id back to one representative raw index (any raw vertex
+       * canonicalizing to it works, they are all coincident in world space by construction). */
+      Array<int> raw_of_canonical(edges.size(), -1);
+      {
+        Map<int, int> compact_id;
+        for (const int raw : canonical_map.index_range()) {
+          const int rep = canonical_map[raw];
+          const int id = compact_id.lookup_or_add_cb(rep, [&]() { return int(compact_id.size()); });
+          if (raw_of_canonical[id] == -1) {
+            raw_of_canonical[id] = raw;
+          }
+        }
+      }
+
+      double length_sum = 0.0;
+      int64_t edge_count = 0;
+      for (const int v : edges.index_range()) {
+        for (const int n : edges[v]) {
+          if (n <= v) {
+            /* Each undirected edge appears at both endpoints; count it once. */
+            continue;
+          }
+          length_sum += double(math::distance(world_positions[i][raw_of_canonical[v]],
+                                              world_positions[i][raw_of_canonical[n]]));
+          edge_count++;
+        }
+      }
+      mean_world_edge_length[i] = edge_count > 0 ? float(length_sum / double(edge_count)) : 0.0f;
+      continue;
+    }
+
     const Mesh &mesh = *id_cast<const Mesh *>(objects[i]->data);
     const Span<int2> edges = mesh.edges();
     if (edges.is_empty()) {
@@ -240,6 +403,18 @@ MultiObjectBridge build_multi_object_bridge(const Depsgraph &depsgraph,
     const float local_radius = world_radius_to_local_search_radius(world_to_object,
                                                                    max_world_dist);
     const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+
+    if (pbvh.type() == bke::pbvh::Type::Grids) {
+      const SculptSession &ss = *object.runtime->sculpt_session;
+      const std::optional<SubdivCCGCoord> nearest = nearest_vert_calc_grids(
+          pbvh, *ss.subdiv_ccg, local_p, local_radius, false);
+      if (!nearest) {
+        return -1;
+      }
+      const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss.subdiv_ccg);
+      return nearest->to_index(key);
+    }
+
     const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
     const Mesh &mesh = *id_cast<const Mesh *>(object.data);
     const bke::AttributeAccessor attributes = mesh.attributes();
@@ -251,6 +426,105 @@ MultiObjectBridge build_multi_object_bridge(const Depsgraph &depsgraph,
 
   return detail::build_bridge_impl(
       world_pos_spans, mean_world_edge_length, bridge_factor, nearest_fn);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Grids (Multires) Adapter
+ * \{ */
+
+Array<int> grids_canonical_map_create(const Object &object)
+{
+  BLI_assert(bke::object::pbvh_get(object)->type() == bke::pbvh::Type::Grids);
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  const int vert_count = BKE_sculpt_get_grid_num_verts(object);
+
+  return detail::canonicalize_duplicates(
+      vert_count, [&](const int vert, Vector<int> &r_duplicates) {
+        const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, vert);
+        SubdivCCGNeighbors neighbors;
+        BKE_subdiv_ccg_neighbor_coords_get(subdiv_ccg, coord, true, neighbors);
+        for (const SubdivCCGCoord &dup : neighbors.duplicates()) {
+          r_duplicates.append(dup.to_index(key));
+        }
+      });
+}
+
+GroupedSpan<int> grids_edge_neighbors_create(const Object &object,
+                                             const Span<int> canonical_map,
+                                             Array<int> &r_offsets,
+                                             Array<int> &r_data)
+{
+  BLI_assert(bke::object::pbvh_get(object)->type() == bke::pbvh::Type::Grids);
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  const int vert_count = BKE_sculpt_get_grid_num_verts(object);
+
+  return detail::build_canonical_neighbors(
+      vert_count,
+      canonical_map,
+      [&](const int vert, Vector<int> &r_real_neighbors) {
+        const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, vert);
+        SubdivCCGNeighbors neighbors;
+        BKE_subdiv_ccg_neighbor_coords_get(subdiv_ccg, coord, true, neighbors);
+        for (const SubdivCCGCoord &real : neighbors.unique()) {
+          r_real_neighbors.append(real.to_index(key));
+        }
+      },
+      r_offsets,
+      r_data);
+}
+
+GroupedSpan<int> grids_diagonal_neighbors_create(const Object &object,
+                                                 const Span<int> canonical_map,
+                                                 Array<int> &r_offsets,
+                                                 Array<int> &r_data)
+{
+  BLI_assert(bke::object::pbvh_get(object)->type() == bke::pbvh::Type::Grids);
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  const int vert_count = BKE_sculpt_get_grid_num_verts(object);
+  const std::array<std::pair<int, int>, 4> diag_offsets = detail::interior_diagonal_offsets();
+
+  return detail::build_canonical_neighbors(
+      vert_count,
+      canonical_map,
+      [&](const int vert, Vector<int> &r_real_neighbors) {
+        const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, vert);
+
+        /* Edge (real) neighbors are always same-quad neighbors too. */
+        SubdivCCGNeighbors neighbors;
+        BKE_subdiv_ccg_neighbor_coords_get(subdiv_ccg, coord, true, neighbors);
+        for (const SubdivCCGCoord &real : neighbors.unique()) {
+          r_real_neighbors.append(real.to_index(key));
+        }
+
+        /* Diagonal same-quad neighbors: interior coordinates only (documented scope narrowing --
+         * see #grids_diagonal_neighbors_create's declaration comment). A coordinate is interior
+         * here iff both its diagonal-offset x and y stay within [0, grid_size) of the SAME grid
+         * for every one of the 4 offsets -- boundary/corner coordinates fail this for at least one
+         * offset and simply get no diagonal edges added, keeping only the edge neighbors already
+         * appended above. */
+        for (const auto &[dx, dy] : diag_offsets) {
+          const int x = int(coord.x) + dx;
+          const int y = int(coord.y) + dy;
+          if (x < 0 || x >= key.grid_size || y < 0 || y >= key.grid_size) {
+            continue;
+          }
+          SubdivCCGCoord diag{};
+          diag.grid_index = coord.grid_index;
+          diag.x = short(x);
+          diag.y = short(y);
+          r_real_neighbors.append(diag.to_index(key));
+        }
+      },
+      r_offsets,
+      r_data);
 }
 
 /** \} */
@@ -580,6 +854,7 @@ static GroupedSpan<int> build_face_diagonal_neighbors(const Mesh &mesh,
 void multi_object_graph_propagate(const Depsgraph &depsgraph,
                                   const Span<Object *> objects,
                                   const Span<Array<float3>> world_positions,
+                                  const Span<Array<int>> grids_canonical_maps,
                                   const Span<MultiVertRef> seeds,
                                   const MultiObjectBridge &bridge,
                                   const PropagationMode mode,
@@ -637,18 +912,80 @@ void multi_object_graph_propagate(const Depsgraph &depsgraph,
    * from shared-face-corners (diagonals included) for UniformDiagonals -- then defer to the same
    * #detail::propagate_uniform BFS core for both; the two modes differ only in this neighbor
    * build step. The backing offsets/data live in `all_offsets`/`all_data` for the remainder of
-   * this call, since #GroupedSpan only stores a view onto them. */
+   * this call, since #GroupedSpan only stores a view onto them. For a Grids object the graph is
+   * built over CANONICAL (duplicate-seam-merged) vertex ids instead of raw mesh vertices -- see
+   * #grids_canonical_map_create. */
   Vector<Array<int>> all_offsets(objects.size());
   Vector<Array<int>> all_data(objects.size());
   Array<GroupedSpan<int>> object_neighbors(objects.size());
   for (const int i : objects.index_range()) {
+    const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(*objects[i]);
+    if (pbvh.type() == bke::pbvh::Type::Grids) {
+      object_neighbors[i] = (mode == PropagationMode::UniformDiagonals) ?
+                                grids_diagonal_neighbors_create(
+                                    *objects[i], grids_canonical_maps[i], all_offsets[i], all_data[i]) :
+                                grids_edge_neighbors_create(
+                                    *objects[i], grids_canonical_maps[i], all_offsets[i], all_data[i]);
+      continue;
+    }
     const Mesh &mesh = *id_cast<const Mesh *>(objects[i]->data);
     object_neighbors[i] = (mode == PropagationMode::UniformDiagonals) ?
                               build_face_diagonal_neighbors(mesh, all_offsets[i], all_data[i]) :
                               build_vert_to_vert_map(mesh, all_offsets[i], all_data[i]);
   }
 
-  detail::propagate_uniform(object_neighbors, bridge, seeds, r_vert_falloff_per_object);
+  /* Translate seeds and bridge endpoints from raw to canonical indices for every Grids object
+   * before they touch the canonical-indexed graph built above. Mesh objects pass through
+   * unchanged (empty canonical map). */
+  auto to_canonical = [&](const MultiVertRef &v) -> MultiVertRef {
+    const Array<int> &map = grids_canonical_maps[v.object_index];
+    if (map.is_empty()) {
+      return v;
+    }
+    /* The canonical id space #object_neighbors was built over is a DENSE compaction (see
+     * #detail::build_canonical_neighbors); recompute the same compaction here so seed/bridge
+     * translation lands on the same ids the graph itself uses. Cheap relative to the graph build
+     * already performed above (one more pass over this one object's raw vertex count). */
+    Map<int, int> compact_id;
+    for (const int raw : map.index_range()) {
+      compact_id.lookup_or_add_cb(map[raw], [&]() { return int(compact_id.size()); });
+    }
+    return {v.object_index, compact_id.lookup(map[v.vert])};
+  };
+
+  Vector<MultiVertRef> canonical_seeds;
+  for (const MultiVertRef &s : seeds) {
+    canonical_seeds.append(to_canonical(s));
+  }
+
+  MultiObjectBridge canonical_bridge;
+  for (const BridgeEdge &edge : bridge.edges) {
+    canonical_bridge.edges.append(
+        {to_canonical(edge.a), to_canonical(edge.b), edge.world_distance});
+  }
+
+  detail::propagate_uniform(
+      object_neighbors, canonical_bridge, canonical_seeds, r_vert_falloff_per_object);
+
+  /* Broadcast each canonical vertex's falloff back out to every raw index in its equivalence
+   * class, so `r_vert_falloff_per_object[i]` ends up raw-index-sized like every Mesh object's,
+   * matching what #ObjectState::vert_falloff's other consumers (enabled_state_to_bitmap,
+   * gradient_value_get, update_mask_grids, ...) expect. */
+  for (const int i : objects.index_range()) {
+    const Array<int> &map = grids_canonical_maps[i];
+    if (map.is_empty()) {
+      continue;
+    }
+    Map<int, int> compact_id;
+    for (const int raw : map.index_range()) {
+      compact_id.lookup_or_add_cb(map[raw], [&]() { return int(compact_id.size()); });
+    }
+    Array<float> raw_falloff(map.size());
+    for (const int raw : map.index_range()) {
+      raw_falloff[raw] = r_vert_falloff_per_object[i][compact_id.lookup(map[raw])];
+    }
+    r_vert_falloff_per_object[i] = std::move(raw_falloff);
+  }
 }
 
 /** \} */

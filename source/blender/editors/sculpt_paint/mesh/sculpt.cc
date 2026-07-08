@@ -6339,6 +6339,26 @@ bool SculptPaintStroke::get_location(float out[3], const float mouse[2], bool fo
       *this->depsgraph, this->vc, sculpt_, this->brush, out, mouse, force_original, &hit_ob);
 
   if (hit && hit_ob && hit_ob != this->object) {
+    /* WORKAROUND: this raycast queries every sculpt-mode object, unfiltered by brush support (see
+     * #paintable_mode_objects, which #test_start uses to drop Multires/Dyntopo objects from
+     * #MultiObjectStrokeContext.mode_objects for color-attribute brushes -- Paint/Smear/Blur --
+     * since #color::do_paint_brush/etc. only support Mesh-typed PBVH). Without this check,
+     * hovering the cursor over such an object mid-stroke would still promote `this->object` onto
+     * it; that object was never given a #StrokeCache (it is not in #mode_objects), so #done()
+     * unconditionally dereferencing `this->object`'s cache at stroke end crashed on a null
+     * #SculptSession::cache read (see `.MyTaskAndDoc/Log_A.md`). Refuse the promotion here and
+     * report this event as a miss, exactly as if the cursor were off any mesh, so `this->object`
+     * stays on the last object that IS being painted.
+     *
+     * NOT yet confirmed by the user whether "silently ignore this event" is the right feel during
+     * an active stroke (vs. e.g. some other feedback) -- revisit together with the policy note in
+     * #paintable_mode_objects if it turns out to be surprising in practice. */
+    if (this->brush && brush_type_is_paint(this->brush->sculpt_brush_type) &&
+        !color_supported_check(*this->scene, *hit_ob, nullptr))
+    {
+      return false;
+    }
+
     /* Switch active object of the stroke. */
     this->object = hit_ob;
     this->vc.obact = hit_ob;
@@ -6950,6 +6970,47 @@ bool color_supported_check(const Scene &scene, Object &object, ReportList *repor
   return true;
 }
 
+/* WORKAROUND (multi-object sculpt): filter #mode_objects down to the ones a color-attribute brush
+ * (Paint/Smear/Blur) can operate on, warning about and skipping the rest instead of letting them
+ * crash the stroke.
+ *
+ * Why this exists: #sculpt_brush_stroke_invoke only runs #color_supported_check against the
+ * single ACTIVE object. In multi-object sculpt mode `mode_objects` (this file's
+ * #sculpt_mode_objects) can also contain OTHER objects that are in sculpt mode but not active --
+ * e.g. after #OBJECT_OT_transfer_mode switches the active object to a mesh without Multires while
+ * a Multires object stays in the same mode group. The per-object stroke loop
+ * (#SculptPaintStroke::update_step) does not re-check color support per object, so it went on to
+ * call #color::do_paint_brush on the Multires object too. That function unconditionally does
+ * `pbvh.nodes<bke::pbvh::MeshNode>()`; a Multires object's PBVH is `Grids`-typed, so
+ * `std::get<Vector<MeshNode>>` threw `std::bad_variant_access` and crashed Blender (see
+ * `.MyTaskAndDoc/Log_A.md`).
+ *
+ * Policy choice: skip the incompatible object and keep painting the rest of the group, rather
+ * than cancelling the whole stroke. This mirrors the "skip incompatible objects" policy already
+ * chosen for Trim (`trimmable_objects` in `sculpt_trim.cc`) instead of introducing a second,
+ * inconsistent policy. NOT yet confirmed by the user for brush painting specifically -- revisit
+ * this decision (skip-and-warn vs. cancel-the-whole-stroke) if it turns out to be surprising in
+ * practice. */
+static Vector<Object *> paintable_mode_objects(const Scene &scene,
+                                               const Span<Object *> mode_objects,
+                                               ReportList *reports)
+{
+  Vector<Object *> result;
+  result.reserve(mode_objects.size());
+  for (Object *object : mode_objects) {
+    if (!color_supported_check(scene, *object, nullptr)) {
+      BKE_reportf(reports,
+                 RPT_WARNING,
+                 "Painting: skipping \"%s\" (not supported in multiresolution or dynamic "
+                 "topology mode)",
+                 object->id.name + 2);
+      continue;
+    }
+    result.append(object);
+  }
+  return result;
+}
+
 /* TODO: `init` is a bad name */
 void SculptPaintStroke::stroke_cache_init(const float mval[2])
 {
@@ -6982,9 +7043,16 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
   if (mval) {
     Object *hit_ob = nullptr;
     float hit_co[3];
+    /* Same Multires/Dyntopo exclusion as #get_location -- see the comment there and
+     * #paintable_mode_objects. Without it, a color-brush stroke started with the cursor over an
+     * incompatible object would adopt it as the shared "primary" reference (world hit
+     * location/normal propagated to every other object in the stroke) even though that object
+     * itself is excluded from #mode_objects and never gets painted. */
     if (stroke_get_location_bvh(
             *this->depsgraph, *vc, sculpt_, brush, hit_co, mval, false, &hit_ob) &&
-        hit_ob)
+        hit_ob &&
+        (!brush || !brush_type_is_paint(brush->sculpt_brush_type) ||
+         color_supported_check(*this->scene, *hit_ob, nullptr)))
     {
       primary_ob = hit_ob;
       primary_hit = true;
@@ -7208,6 +7276,17 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     /* Capture the sculpt-mode object set once for the whole stroke (see
      * #MultiObjectStrokeContext.mode_objects). */
     this->multi_.mode_objects = sculpt_mode_objects(this->vc);
+
+    /* Color-attribute brushes (Paint/Smear/Blur) only support Mesh-typed PBVH -- drop any
+     * Multires/Dyntopo object from this stroke's object set. See #paintable_mode_objects for why
+     * this exists (fixes a crash) and why "skip and warn" was chosen over cancelling the stroke. */
+    if (brush && brush_type_is_paint(brush->sculpt_brush_type)) {
+      this->multi_.mode_objects = paintable_mode_objects(
+          *this->scene, this->multi_.mode_objects, op->reports);
+      if (this->multi_.mode_objects.is_empty()) {
+        return false;
+      }
+    }
 
     stroke_cache_init(mval);
     if (brush && brush_type_is_paint(brush->sculpt_brush_type)) {

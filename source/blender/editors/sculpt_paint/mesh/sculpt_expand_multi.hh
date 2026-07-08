@@ -7,7 +7,9 @@
  */
 #pragma once
 
+#include <array>
 #include <memory>
+#include <utility>
 
 #include "BLI_array.hh"
 #include "BLI_function_ref.hh"
@@ -58,6 +60,40 @@ MultiObjectBridge build_multi_object_bridge(const Depsgraph &depsgraph,
                                             Span<Array<float3>> world_positions,
                                             float bridge_factor);
 
+/**
+ * Union-find canonicalization of `object`'s CCG "duplicate" seam vertices (see
+ * #detail::canonicalize_duplicates) -- a Grids object stores one flat vertex slot per grid, so a
+ * point on a shared boundary between two grids of the same Multires cage is stored TWICE, at two
+ * different flat indices, and #BKE_subdiv_ccg_neighbor_coords_get reports each as the other's
+ * "duplicate". `result.size() == BKE_sculpt_get_grid_num_verts(object)`; `result[raw]` is the
+ * smallest flat index among every raw index that is the same physical point as `raw`. Must be
+ * called on a Grids-backed `object` (`bke::object::pbvh_get(object)->type() == Type::Grids`).
+ */
+Array<int> grids_canonical_map_create(const Object &object);
+
+/**
+ * Real (non-duplicate) CCG edge adjacency for `object`, over CANONICAL vertex ids (see
+ * #grids_canonical_map_create) -- ready to feed #detail::propagate_uniform directly.
+ * `r_offsets`/`r_data` back the returned view and must outlive it.
+ */
+GroupedSpan<int> grids_edge_neighbors_create(const Object &object,
+                                             Span<int> canonical_map,
+                                             Array<int> &r_offsets,
+                                             Array<int> &r_data);
+
+/**
+ * Same-quad ("diagonal") adjacency for `object`, over CANONICAL vertex ids, for the
+ * `PropagationMode::UniformDiagonals` arm. Includes both edge- and diagonal-adjacent same-quad
+ * partners for INTERIOR grid coordinates (exact); a coordinate on a grid boundary or corner keeps
+ * only its edge (#grids_edge_neighbors_create) neighbors here -- boundary/corner grid vertices
+ * intentionally do not gain extra diagonal edges this round. `r_offsets`/`r_data` back the
+ * returned view and must outlive it.
+ */
+GroupedSpan<int> grids_diagonal_neighbors_create(const Object &object,
+                                                 Span<int> canonical_map,
+                                                 Array<int> &r_offsets,
+                                                 Array<int> &r_data);
+
 namespace detail {
 struct GlobalGeodesicTopology;
 }
@@ -70,11 +106,17 @@ struct GlobalGeodesicTopology;
  * first call pays the concatenation + adjacency-map build cost. Ignored for Uniform /
  * UniformDiagonals. Pass a default-constructed (null) instance to always rebuild, matching the
  * previous behavior.
+ * \param grids_canonical_maps: index-aligned with `objects`; for a Grids object,
+ * `grids_canonical_maps[i]` maps its raw flat CCG index to a canonical representative (see
+ * #grids_canonical_map_create) -- an empty inner array means "this object is not Grids, use raw
+ * indices directly, no remap". Ignored for `PropagationMode::Geodesic` (Grids objects never reach
+ * the Geodesic arm -- routed through Sphere instead).
  */
 void multi_object_graph_propagate(
     const Depsgraph &depsgraph,
     Span<Object *> objects,
     Span<Array<float3>> world_positions,
+    Span<Array<int>> grids_canonical_maps,
     Span<MultiVertRef> seeds,
     const MultiObjectBridge &bridge,
     PropagationMode mode,
@@ -167,6 +209,52 @@ GlobalGeodesicTopology build_global_geodesic_topology(Span<ObjectTopology> objec
 void propagate_geodesic_from_topology(const GlobalGeodesicTopology &topology,
                                       Span<MultiVertRef> seeds,
                                       MutableSpan<Array<float>> r_vert_falloff_per_object);
+
+/**
+ * Union-find over `vert_count` flat vertex indices, merging every pair `(v, d)` where `d` is
+ * reported as a duplicate of `v` by `duplicates_of`. Returns, for every vertex, the SMALLEST index
+ * in its merged equivalence class (deterministic representative). A vertex reported as its own
+ * duplicate, or never reported at all, canonicalizes to itself.
+ *
+ * Exposed for unit testing on a hand-built `duplicates_of` functor -- no #SubdivCCG required. The
+ * production caller (#grids_canonical_map_create) wraps
+ * #BKE_subdiv_ccg_neighbor_coords_get(..., include_duplicates=true, ...)'s `.duplicates()`.
+ */
+Array<int> canonicalize_duplicates(int vert_count,
+                                   FunctionRef<void(int vert, Vector<int> &r_duplicates)>
+                                       duplicates_of);
+
+/**
+ * Builds a symmetric adjacency list over CANONICAL vertex ids (a dense 0-based compaction of the
+ * distinct values in `canonical_of_raw`, NOT the raw representative value itself -- callers get a
+ * graph ready to feed straight into #propagate_uniform, matching its "one array entry per graph
+ * vertex" convention). For every raw vertex, `real_neighbors_of` supplies its REAL (non-duplicate)
+ * neighbors as raw indices; each is remapped through `canonical_of_raw` and every raw vertex
+ * sharing a canonical id contributes its neighbors to that one merged row (deduplicated). A vertex
+ * is never its own neighbor even if some raw neighbor remaps to the same canonical id as the
+ * source (e.g. a duplicate reported as a "real" neighbor by mistake upstream -- defensively
+ * excluded here, not assumed impossible).
+ *
+ * Exposed for unit testing on hand-built functors -- no #SubdivCCG required. `r_offsets`/`r_data`
+ * back the returned #GroupedSpan and must outlive it (same convention as
+ * #build_vert_to_vert_map).
+ */
+GroupedSpan<int> build_canonical_neighbors(
+    int raw_vert_count,
+    Span<int> canonical_of_raw,
+    FunctionRef<void(int raw_vert, Vector<int> &r_real_neighbors)> real_neighbors_of,
+    Array<int> &r_offsets,
+    Array<int> &r_data);
+
+/**
+ * The 4 diagonal `(dx, dy)` offsets from an interior CCG grid coordinate (`dx` along `x`, `dy`
+ * along `y`) to its 4 diagonal same-quad neighbors. Only valid for a coordinate whose `x±1`/`y±1`
+ * all stay within `[0, grid_size)` of the SAME grid -- the production caller
+ * (#grids_diagonal_neighbors_create, non-`detail`) checks that bound before applying these.
+ * Factored out as a named function (not inlined at each call site) so it has exactly one
+ * definition shared by production code and its unit test.
+ */
+std::array<std::pair<int, int>, 4> interior_diagonal_offsets();
 
 }  // namespace detail
 

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "testing/testing.h"
 
+#include <algorithm>
 #include <cfloat>
 
 #include "BLI_math_matrix.hh"
@@ -16,6 +17,189 @@
 #include "sculpt_geodesic.hh"
 
 namespace blender::ed::sculpt_paint::expand::tests {
+
+TEST(sculpt_expand_multi, canonicalize_duplicates_no_duplicates_is_identity)
+{
+  /* 5 verts, none report any duplicate -- every vertex is its own canonical representative. */
+  const Array<int> canonical = detail::canonicalize_duplicates(
+      5, [](const int /*vert*/, Vector<int> & /*r_duplicates*/) {});
+  for (const int v : IndexRange(5)) {
+    EXPECT_EQ(canonical[v], v);
+  }
+}
+
+TEST(sculpt_expand_multi, canonicalize_duplicates_pair_merges_to_smaller_index)
+{
+  /* Vertex 1 and vertex 3 are duplicates of each other (e.g. the same CCG seam point stored twice).
+   * Both must canonicalize to the SAME representative, and it must be deterministic (smaller
+   * index wins) so repeated calls agree. */
+  const Array<int> canonical = detail::canonicalize_duplicates(
+      4, [](const int vert, Vector<int> &r_duplicates) {
+        if (vert == 1) {
+          r_duplicates.append(3);
+        }
+        else if (vert == 3) {
+          r_duplicates.append(1);
+        }
+      });
+  EXPECT_EQ(canonical[0], 0);
+  EXPECT_EQ(canonical[1], 1);
+  EXPECT_EQ(canonical[2], 2);
+  EXPECT_EQ(canonical[3], 1);
+}
+
+TEST(sculpt_expand_multi, canonicalize_duplicates_chain_all_merge)
+{
+  /* A pole where 4 grids meet: all 4 flat indices {0,1,2,3} are duplicates of EVERY other one
+   * (mirrors #BKE_subdiv_ccg_neighbor_coords_get's corner-center case, which reports every other
+   * grid's copy of the same corner point). All 4 must canonicalize to vertex 0. */
+  const Array<int> canonical = detail::canonicalize_duplicates(
+      4, [](const int vert, Vector<int> &r_duplicates) {
+        for (const int other : IndexRange(4)) {
+          if (other != vert) {
+            r_duplicates.append(other);
+          }
+        }
+      });
+  for (const int v : IndexRange(4)) {
+    EXPECT_EQ(canonical[v], 0);
+  }
+}
+
+TEST(sculpt_expand_multi, canonicalize_duplicates_two_disjoint_pairs)
+{
+  /* Two unrelated seam pairs (0,2) and (1,3) must NOT merge into each other. */
+  const Array<int> canonical = detail::canonicalize_duplicates(
+      4, [](const int vert, Vector<int> &r_duplicates) {
+        if (vert == 0) {
+          r_duplicates.append(2);
+        }
+        else if (vert == 2) {
+          r_duplicates.append(0);
+        }
+        else if (vert == 1) {
+          r_duplicates.append(3);
+        }
+        else if (vert == 3) {
+          r_duplicates.append(1);
+        }
+      });
+  EXPECT_EQ(canonical[0], 0);
+  EXPECT_EQ(canonical[2], 0);
+  EXPECT_EQ(canonical[1], 1);
+  EXPECT_EQ(canonical[3], 1);
+}
+
+TEST(sculpt_expand_multi, build_canonical_neighbors_merges_seam_and_dedupes)
+{
+  /* 6 raw vertices: a 2x3 "two grids glued at a seam" layout --
+   *   grid A: 0 - 1      grid B: 3 - 4
+   *           |   |              |   |
+   *           2 - (seam)          (seam) - 5
+   * Raw vertex 1 (grid A's right edge) and raw vertex 3 (grid B's left edge) are the SAME physical
+   * point (a duplicate pair), likewise 2 and 4 are NOT duplicates here (only one seam edge, at the
+   * top). Real (non-duplicate) neighbors: 0-1, 0-2, 1-2 within A; 3-4, 3-5, 4-5 within B. */
+  auto real_neighbors_of = [](const int vert, Vector<int> &r) {
+    switch (vert) {
+      case 0: r = {1, 2}; break;
+      case 1: r = {0, 2}; break;
+      case 2: r = {0, 1}; break;
+      case 3: r = {4, 5}; break;
+      case 4: r = {3, 5}; break;
+      case 5: r = {3, 4}; break;
+    }
+  };
+  auto duplicates_of = [](const int vert, Vector<int> &r) {
+    if (vert == 1) {
+      r.append(3);
+    }
+    else if (vert == 3) {
+      r.append(1);
+    }
+  };
+
+  const Array<int> canonical = detail::canonicalize_duplicates(6, duplicates_of);
+  ASSERT_EQ(canonical[1], canonical[3]);
+
+  Array<int> offsets;
+  Array<int> data;
+  const GroupedSpan<int> graph = detail::build_canonical_neighbors(
+      6, canonical, real_neighbors_of, offsets, data);
+
+  /* Canonical vertex count is 5 (6 raw minus the 1 merged pair). Canonical rep for the merged pair
+   * is min(1,3) = 1; canonical indices for {0,2,4,5} are themselves (never merged), but the
+   * returned graph is indexed by a COMPACTED 0..4 canonical-id space, not the raw representative
+   * value -- #build_canonical_neighbors compacts internally so callers get a dense 0-based graph
+   * matching #propagate_uniform's indexing convention. */
+  ASSERT_EQ(graph.size(), 5);
+
+  /* The merged seam vertex's neighbors are the UNION of raw-1's and raw-3's real neighbors, minus
+   * itself, deduped: raw 1's real neighbors {0,2} + raw 3's real neighbors {4,5} = {0,2,4,5}. */
+  Vector<int> offsets_v(offsets.begin(), offsets.end());
+  Vector<int> data_v(data.begin(), data.end());
+  const OffsetIndices<int> offset_indices(offsets_v.as_span());
+
+  /* Find which compacted id the merged seam vertex landed on by checking which row has 4
+   * neighbors (every other canonical vertex has exactly 2). */
+  int seam_id = -1;
+  for (const int i : IndexRange(5)) {
+    if (graph[i].size() == 4) {
+      seam_id = i;
+    }
+  }
+  ASSERT_NE(seam_id, -1);
+  Vector<int> seam_neighbors(graph[seam_id].begin(), graph[seam_id].end());
+  std::sort(seam_neighbors.begin(), seam_neighbors.end());
+  /* 4 distinct neighbor ROWS (0, 2, 4, 5's canonical ids) -- exact id values depend on compaction
+   * order, so just check the count and that every non-seam row has exactly 2 neighbors summing to
+   * a consistent, symmetric graph (each of the 4 outer verts sees the seam vertex once). */
+  EXPECT_EQ(seam_neighbors.size(), 4);
+  int rows_containing_seam = 0;
+  for (const int i : IndexRange(5)) {
+    if (i == seam_id) {
+      continue;
+    }
+    EXPECT_EQ(graph[i].size(), 2);
+    for (const int n : graph[i]) {
+      if (n == seam_id) {
+        rows_containing_seam++;
+      }
+    }
+  }
+  EXPECT_EQ(rows_containing_seam, 4);
+}
+
+TEST(sculpt_expand_multi, interior_diagonal_offsets_are_the_four_corners)
+{
+  const std::array<std::pair<int, int>, 4> offsets = detail::interior_diagonal_offsets();
+  Vector<std::pair<int, int>> sorted(offsets.begin(), offsets.end());
+  std::sort(sorted.begin(), sorted.end());
+  const Vector<std::pair<int, int>> expected = {{-1, -1}, {-1, 1}, {1, -1}, {1, 1}};
+  ASSERT_EQ(sorted.size(), expected.size());
+  for (const int i : IndexRange(4)) {
+    EXPECT_EQ(sorted[i], expected[i]);
+  }
+}
+
+TEST(sculpt_expand_multi, interior_diagonal_offsets_reach_3x3_corners_from_center)
+{
+  /* Applying the 4 offsets to the 3x3 grid's center coordinate (x=1, y=1, row-major index
+   * `y*3+x`) must reach exactly the 4 corner indices {0, 2, 6, 8} -- the same grid #build_3x3_grid_
+   * neighbors's diagonal partners would be, confirming the offset convention (dx = column/x,
+   * dy = row/y) matches that test's row-major layout (`index = y*3 + x`). */
+  const std::array<std::pair<int, int>, 4> offsets = detail::interior_diagonal_offsets();
+  Set<int> reached;
+  for (const auto &[dx, dy] : offsets) {
+    const int x = 1 + dx;
+    const int y = 1 + dy;
+    reached.add(y * 3 + x);
+  }
+  EXPECT_TRUE(reached.contains(0));
+  EXPECT_TRUE(reached.contains(2));
+  EXPECT_TRUE(reached.contains(6));
+  EXPECT_TRUE(reached.contains(8));
+  EXPECT_EQ(reached.size(), 4);
+}
 
 TEST(sculpt_expand_multi, world_transform_identity)
 {

@@ -7,23 +7,29 @@
  */
 
 #include <cstddef>
+#include <fmt/format.h>
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_span.hh"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
 
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_view3d_types.h"
 
 #include "BKE_context.hh"
 #include "BKE_customdata.hh"
+#include "BKE_layer.hh"
 #include "BKE_mesh.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
 #include "BKE_paint.hh"
+#include "BKE_screen.hh"
 #include "BKE_subdiv.hh"
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_subdiv_deform.hh"
@@ -284,6 +290,105 @@ static void deform_matrices(ModifierData *md,
   }
 }
 
+static Vector<Object *> multi_object_multires_group(const bContext *C)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  View3D *v3d = CTX_wm_view3d(C);
+  return multires_group_objects(bmain, scene, view_layer, v3d);
+}
+
+/**
+ * True when the active object is in Sculpt Mode and part of a multi-object sculpt session with
+ * 2+ Multires objects. When true and `r_group` is non-null, it receives that object set (active
+ * object included).
+ */
+static bool multi_object_multires_active(const bContext *C, Vector<Object *> *r_group)
+{
+  Object *active_ob = CTX_data_active_object(C);
+  if (!active_ob || !(active_ob->mode & OB_MODE_SCULPT)) {
+    return false;
+  }
+  Vector<Object *> group = multi_object_multires_group(C);
+  if (group.size() < 2) {
+    return false;
+  }
+  if (r_group) {
+    *r_group = std::move(group);
+  }
+  return true;
+}
+
+static void multires_group_levels_draw(const bContext *C,
+                                       ui::Layout &layout,
+                                       PointerRNA *ptr,
+                                       Span<Object *> group_objects)
+{
+  struct LevelField {
+    const char *prop_name;
+    const char *label;
+    MultiresLevelType level_type;
+  };
+  static const LevelField fields[3] = {
+      {"levels_group", "Levels Viewport", MultiresLevelType::Viewport},
+      {"sculpt_levels_group", "Sculpt", MultiresLevelType::Sculpt},
+      {"render_levels_group", "Render", MultiresLevelType::Render},
+  };
+
+  Object *active_ob = CTX_data_active_object(C);
+  MultiresModifierData *active_mmd = static_cast<MultiresModifierData *>(ptr->data);
+  const char *modifier_name = reinterpret_cast<ModifierData *>(active_mmd)->name;
+
+  layout.label(IFACE_("Select Object Subdivision"), ICON_NONE);
+
+  ui::Layout &col = layout.column(true);
+  for (const LevelField &field : fields) {
+    ui::Layout &row = col.row(true);
+    row.prop(ptr, field.prop_name, UI_ITEM_NONE, IFACE_(field.label), ICON_NONE);
+    PointerRNA op_ptr = row.op("OBJECT_OT_multires_level_sync",
+                               "",
+                               ICON_UV_SYNC_SELECT,
+                               wm::OpCallContext::ExecDefault,
+                               UI_ITEM_NONE);
+    RNA_enum_set(&op_ptr, "level_type", int(field.level_type));
+    RNA_string_set(&op_ptr, "modifier", modifier_name);
+  }
+
+  Vector<std::string> mismatches;
+  for (Object *ob : group_objects) {
+    if (ob == active_ob) {
+      continue;
+    }
+    ModifierData *md = BKE_modifiers_findby_type(ob, eModifierType_Multires);
+    MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(md);
+
+    std::string diff_str;
+    for (const LevelField &field : fields) {
+      const int active_value = multires_level_get(active_mmd, field.level_type);
+      const int other_value = multires_level_get(mmd, field.level_type);
+      if (active_value == other_value) {
+        continue;
+      }
+      if (!diff_str.empty()) {
+        diff_str += ", ";
+      }
+      diff_str += fmt::format("{} {}", field.label, other_value);
+    }
+    if (!diff_str.empty()) {
+      mismatches.append(fmt::format("{}: {}", ob->id.name + 2, diff_str));
+    }
+  }
+
+  if (!mismatches.is_empty()) {
+    ui::Layout &box = layout.box();
+    box.label(IFACE_("Different subdivision:"), ICON_ERROR);
+    for (const std::string &line : mismatches) {
+      box.label(line, ICON_NONE);
+    }
+  }
+}
+
 static void panel_draw(const bContext *C, Panel *panel)
 {
   ui::Layout &layout = *panel->layout;
@@ -292,16 +397,28 @@ static void panel_draw(const bContext *C, Panel *panel)
 
   layout.use_property_split_set(true);
 
-  ui::Layout &col = layout.column(true);
-  col.prop(ptr, "levels", UI_ITEM_NONE, IFACE_("Levels Viewport"), ICON_NONE);
-  col.prop(ptr, "sculpt_levels", UI_ITEM_NONE, IFACE_("Sculpt"), ICON_NONE);
-  col.prop(ptr, "render_levels", UI_ITEM_NONE, IFACE_("Render"), ICON_NONE);
-
   const bool is_sculpt_mode = CTX_data_active_object(C)->mode & OB_MODE_SCULPT;
   ui::Block *block = layout.block();
-  block_lock_set(block, !is_sculpt_mode, N_("Sculpt Base Mesh"));
-  col.prop(ptr, "use_sculpt_base_mesh", UI_ITEM_NONE, IFACE_("Sculpt Base Mesh"), ICON_NONE);
-  block_lock_clear(block);
+
+  Vector<Object *> group_objects;
+  if (multi_object_multires_active(C, &group_objects)) {
+    multires_group_levels_draw(C, layout, ptr, group_objects);
+
+    ui::Layout &col = layout.column(true);
+    block_lock_set(block, !is_sculpt_mode, N_("Sculpt Base Mesh"));
+    col.prop(ptr, "use_sculpt_base_mesh", UI_ITEM_NONE, IFACE_("Sculpt Base Mesh"), ICON_NONE);
+    block_lock_clear(block);
+  }
+  else {
+    ui::Layout &col = layout.column(true);
+    col.prop(ptr, "levels", UI_ITEM_NONE, IFACE_("Levels Viewport"), ICON_NONE);
+    col.prop(ptr, "sculpt_levels", UI_ITEM_NONE, IFACE_("Sculpt"), ICON_NONE);
+    col.prop(ptr, "render_levels", UI_ITEM_NONE, IFACE_("Render"), ICON_NONE);
+
+    block_lock_set(block, !is_sculpt_mode, N_("Sculpt Base Mesh"));
+    col.prop(ptr, "use_sculpt_base_mesh", UI_ITEM_NONE, IFACE_("Sculpt Base Mesh"), ICON_NONE);
+    block_lock_clear(block);
+  }
 
   layout.prop(ptr, "show_only_control_edges", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 
@@ -430,9 +547,30 @@ static void advanced_panel_draw(const bContext * /*C*/, Panel *panel)
   layout.prop(ptr, "use_custom_normals", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 }
 
+static void active_object_panel_draw(const bContext * /*C*/, Panel *panel)
+{
+  ui::Layout &layout = *panel->layout;
+  PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
+
+  layout.use_property_split_set(true);
+
+  ui::Layout &col = layout.column(true);
+  col.prop(ptr, "levels", UI_ITEM_NONE, IFACE_("Levels Viewport"), ICON_NONE);
+  col.prop(ptr, "sculpt_levels", UI_ITEM_NONE, IFACE_("Sculpt"), ICON_NONE);
+  col.prop(ptr, "render_levels", UI_ITEM_NONE, IFACE_("Render"), ICON_NONE);
+}
+
+static bool active_object_panel_poll(const bContext *C, PanelType * /*pt*/)
+{
+  return multi_object_multires_active(C, nullptr);
+}
+
 static void panel_register(ARegionType *region_type)
 {
   PanelType *panel_type = modifier_panel_register(region_type, eModifierType_Multires, panel_draw);
+  PanelType *active_object_panel_type = modifier_subpanel_register(
+      region_type, "active_object", "Active Object", nullptr, active_object_panel_draw, panel_type);
+  active_object_panel_type->poll = active_object_panel_poll;
   modifier_subpanel_register(
       region_type, "subdivide", "Subdivision", nullptr, subdivisions_panel_draw, panel_type);
   modifier_subpanel_register(region_type, "shape", "Shape", nullptr, shape_panel_draw, panel_type);

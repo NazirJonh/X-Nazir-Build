@@ -923,10 +923,14 @@ static void init_operation(bContext &C, gesture::GestureData &gesture_data, wmOp
 
   MaskOperation *mask_operation = reinterpret_cast<MaskOperation *>(gesture_data.operation);
 
-  Object *object = gesture_data.vc.obact;
-  MultiresModifierData *mmd = BKE_sculpt_multires_active(gesture_data.vc.scene, object);
-  BKE_sculpt_mask_layers_ensure(
-      CTX_data_depsgraph_pointer(&C), CTX_data_main(&C), gesture_data.vc.obact, mmd);
+  /* Ensure the grid paint mask layer exists on EVERY object in the gesture, not just the active
+   * one -- `gesture_apply_for_symmetry_pass`'s Grids case indexes `SubdivCCG::masks`
+   * unconditionally, which is left empty for a multires object that has never had a mask layer
+   * created (see #ensure_mask_layers). */
+  ensure_mask_layers(CTX_data_depsgraph_pointer(&C),
+                      CTX_data_main(&C),
+                      gesture_data.vc.scene,
+                      gesture_data.objects);
 
   mask_operation->op.begin = gesture_begin;
   mask_operation->op.apply_for_symmetry_pass = gesture_apply_for_symmetry_pass;

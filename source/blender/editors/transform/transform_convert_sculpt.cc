@@ -91,28 +91,24 @@ static void createTransSculpt(bContext *C, TransInfo *t)
   copy_v3_v3(world_pivot_pos, active_ss.pivot_pos);
   mul_m4_v3(active_ob.object_to_world().ptr(), world_pivot_pos);
 
+  float world_pivot_rot[4];
+  sculpt_paint::local_pivot_rot_to_world(active_ob, active_ss.pivot_rot, world_pivot_rot);
+
   BLI_assert(!(t->options & CTX_PAINT_CURVE));
   for (const int i : objects.index_range()) {
     Object &ob = *objects[i];
     SculptSession &ss = *ob.runtime->sculpt_session;
     const bool is_active = (i == 0);
 
-    if (!is_active) {
-      /* Secondary objects derive a fresh local pivot position + identity rotation from the
-       * active object's shared world pivot every session (rather than reusing whatever stale
-       * value their own #SculptSession happens to hold) -- interactively driving each
-       * container's own quat/scale channel then composes correctly through THAT object's own
-       * (possibly non-uniformly scaled) matrix, without any hand-written cross-object math. This
-       * is the same mechanism vanilla multi-object Edit Mesh/Pose transforms already rely on. */
-      float world_to_object[4][4];
-      invert_m4_m4(world_to_object, ob.object_to_world().ptr());
-      float local_pivot_pos[3];
-      copy_v3_v3(local_pivot_pos, world_pivot_pos);
-      mul_m4_v3(world_to_object, local_pivot_pos);
-      copy_v3_v3(ss.pivot_pos, local_pivot_pos);
-
-      unit_qt(ss.pivot_rot);
-    }
+    /* Every object in the session shares ONE world-space pivot position + rotation -- seed it
+     * here, then refresh this object's LOCAL #pivot_pos/#pivot_rot from it (a no-op round-trip
+     * for the active object, since the shared value was derived from its own pivot a few lines
+     * up; for secondary objects this replaces whatever stale local value their own
+     * #SculptSession happened to hold). See #sync_local_pivot_from_world's doc comment for why
+     * #td below operates in world space at all. */
+    copy_v3_v3(ss.transform_pivot_pos_world, world_pivot_pos);
+    copy_qt_qt(ss.transform_pivot_rot_world, world_pivot_rot);
+    sculpt_paint::sync_local_pivot_from_world(ob);
 
     TransDataContainer *tc = &t->data_container[i];
     tc->data_len = 1;
@@ -121,11 +117,21 @@ static void createTransSculpt(bContext *C, TransInfo *t)
     TransDataExtension *td_ext = tc->data_ext = MEM_new_zeroed<TransDataExtension>(__func__);
 
     td->flag = TD_SELECTED;
-    copy_v3_v3(td->center, ss.pivot_pos);
-    mul_m4_v3(ob.object_to_world().ptr(), td->center);
 
-    td->loc = ss.pivot_pos;
-    copy_v3_v3(td->iloc, ss.pivot_pos);
+    /* #td->loc/#td->center and #td_ext->quat point at the SHARED world-space pivot fields above
+     * (identity #td->mtx/#td->smtx below), NOT this object's own local space. Blender's generic
+     * rotation math (#ElementRotation_ex) only produces a valid (non-sheared) rotation when its
+     * conjugation matrix is a pure rotation; for an object with non-uniform #Object.scale, using
+     * this object's own local-to-world matrix for that (as a prior version of this code did)
+     * does not qualify -- it shears the interactively-dragged rotation instead of just turning
+     * it. Working directly in world space sidesteps the conjugation: every object shares the
+     * identical pivot values and the whole group moves as one rigid unit. Each object's own
+     * LOCAL #pivot_pos/#pivot_rot -- consumed by #sculpt_transform_all_vertices for the actual
+     * per-vertex displacement -- is re-derived from the shared world value every modal step in
+     * #update_modal_transform, via #sync_local_pivot_from_world. */
+    copy_v3_v3(td->center, world_pivot_pos);
+    td->loc = ss.transform_pivot_pos_world;
+    copy_v3_v3(td->iloc, world_pivot_pos);
 
     float obmat_inv[3][3];
     copy_m3_m4(obmat_inv, ob.object_to_world().ptr());
@@ -134,20 +140,11 @@ static void createTransSculpt(bContext *C, TransInfo *t)
     td_ext->rot = nullptr;
     td_ext->rotAxis = nullptr;
     td_ext->rotAngle = nullptr;
-    td_ext->quat = ss.pivot_rot;
+    td_ext->quat = ss.transform_pivot_rot_world;
     copy_m4_m4(td_ext->obmat, ob.object_to_world().ptr());
     copy_m3_m3(td_ext->l_smtx, obmat_inv);
 
-    /* #r_mtx/r_smtx convert a world-space rotation delta into the pivot's rotation channel (see
-     * their use in `transform_mode.cc`'s `fmat = r_smtx * mat * r_mtx` -> `mat3_to_quat`). They
-     * must be pure orientation (no scale), matching how `td->axismtx` below is normalized:
-     * composing a rotation with the object's raw (possibly non-uniform) scale here would skew
-     * the extracted quaternion into a shear instead of a rotation. */
-    copy_m3_m4(td_ext->r_mtx, ob.object_to_world().ptr());
-    normalize_m3(td_ext->r_mtx);
-    transpose_m3_m3(td_ext->r_smtx, td_ext->r_mtx);
-
-    copy_qt_qt(td_ext->iquat, ss.pivot_rot);
+    copy_qt_qt(td_ext->iquat, world_pivot_rot);
     td_ext->rotOrder = ROT_MODE_QUAT;
 
     ss.pivot_scale[0] = 1.0f;
@@ -157,8 +154,8 @@ static void createTransSculpt(bContext *C, TransInfo *t)
     copy_v3_v3(ss.init_pivot_scale, ss.pivot_scale);
     copy_v3_v3(td_ext->iscale, ss.init_pivot_scale);
 
-    copy_m3_m3(td->smtx, obmat_inv);
-    copy_m3_m4(td->mtx, ob.object_to_world().ptr());
+    unit_m3(td->smtx);
+    unit_m3(td->mtx);
     copy_m3_m4(td->axismtx, ob.object_to_world().ptr());
     normalize_m3(td->axismtx);
 

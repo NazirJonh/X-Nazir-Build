@@ -1344,6 +1344,8 @@ static void rna_def_sculpt(BlenderRNA *brna)
       prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Sculpt_multi_object_edit_scope_update");
 
   prop = RNA_def_property(srna, "transform_all_objects", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "transform_all_objects", false);
+  RNA_def_property_boolean_default(prop, false);
   RNA_def_property_ui_text(
       prop,
       "Affect All Objects",

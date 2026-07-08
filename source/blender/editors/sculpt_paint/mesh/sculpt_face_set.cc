@@ -1706,22 +1706,25 @@ static bool edit_is_operation_valid(const Object &object,
   }
 
   if (ELEM(mode, EditMode::Grow, EditMode::Shrink)) {
-    if (pbvh.type() == bke::pbvh::Type::Mesh) {
-      const Mesh &mesh = *id_cast<Mesh *>(object.data);
-      const bke::AttributeAccessor attributes = mesh.attributes();
-      if (!attributes.contains(".sculpt_face_set")) {
-        /* If a mesh does not have the face set attribute, growing or shrinking the face set will
-         * have no effect, exit early in this case. */
-        return false;
-      }
-      if (!object_has_target_face_set(object, active_face_set_id)) {
-        /* Growing/shrinking only ever extends an EXISTING boundary of the target face set; if
-         * this mesh has none of its faces in that set, the operation can never change anything on
-         * it. Skipping here avoids the smaller, but still real, cost of #duplicate_face_sets'
-         * full face-array copy and the #face_sets_update per-node scan for every additional
-         * selected object that could never be affected. */
-        return false;
-      }
+    /* `.sculpt_face_set` is a face-domain attribute of the base mesh -- it exists (or doesn't)
+     * independently of whether this object's PBVH is currently Mesh or Grids, so these checks
+     * must not be gated to `Type::Mesh` only (BMesh was already excluded above). Leaving Grids
+     * ungated here let a multires object with no face set attribute reach #edit_grow_shrink,
+     * which asserts that the attribute exists. */
+    const Mesh &mesh = *id_cast<Mesh *>(object.data);
+    const bke::AttributeAccessor attributes = mesh.attributes();
+    if (!attributes.contains(".sculpt_face_set")) {
+      /* If a mesh does not have the face set attribute, growing or shrinking the face set will
+       * have no effect, exit early in this case. */
+      return false;
+    }
+    if (!object_has_target_face_set(object, active_face_set_id)) {
+      /* Growing/shrinking only ever extends an EXISTING boundary of the target face set; if
+       * this mesh has none of its faces in that set, the operation can never change anything on
+       * it. Skipping here avoids the smaller, but still real, cost of #duplicate_face_sets'
+       * full face-array copy and the #face_sets_update per-node scan for every additional
+       * selected object that could never be affected. */
+      return false;
     }
   }
 
@@ -2091,7 +2094,6 @@ static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMa
   SculptSession &ss = *gesture_data.ss;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
 
-  const Span<float3> positions_eval = bke::pbvh::vert_positions_eval(depsgraph, object);
   const OffsetIndices<int> faces = mesh.faces();
   const Span<int> corner_verts = mesh.corner_verts();
   bke::SpanAttributeWriter<int> face_sets = face_set::ensure_face_sets_mesh(mesh);
@@ -2099,6 +2101,7 @@ static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMa
   struct TLS {
     Vector<int> face_indices;
     Vector<float3> positions;
+    Vector<float3> normals;
     Vector<float> factors;
   };
 
@@ -2106,6 +2109,9 @@ static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMa
 
   threading::EnumerableThreadSpecific<TLS> all_tls;
   if (pbvh.type() == bke::pbvh::Type::Mesh) {
+    /* #bke::pbvh::vert_positions_eval() only supports the Mesh PBVH type (see its assert), so it
+     * must not be called for a Grids object -- fetch it here, scoped to this branch only. */
+    const Span<float3> positions_eval = bke::pbvh::vert_positions_eval(depsgraph, object);
     MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
     node_mask.foreach_index(
         [&](const int i) {
@@ -2147,6 +2153,9 @@ static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMa
         exec_mode::grain_size(1));
   }
   else if (pbvh.type() == bke::pbvh::Type::Grids) {
+    /* Test each grid vertex directly against the gesture (same pattern as the Mask gesture's and
+     * the Draw Face Sets brush's Grids paths), instead of computing a face center/normal from
+     * #bke::pbvh::vert_positions_eval() -- that helper only supports the Mesh PBVH type. */
     MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
     node_mask.foreach_index(
         [&](const int i) {
@@ -2158,11 +2167,14 @@ static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMa
           const Span<int> grids = nodes[i].grids();
           const MutableSpan positions = gather_grids_positions(
               *ss.subdiv_ccg, grids, tls.positions);
+          tls.normals.resize(positions.size());
+          const MutableSpan<float3> normals = tls.normals;
+          gather_grids_normals(*ss.subdiv_ccg, grids, normals);
 
           tls.factors.resize(positions.size());
           const MutableSpan<float> factors_grid = tls.factors;
           ed::sculpt_paint::fill_factor_from_hide_and_mask(*ss.subdiv_ccg, grids, factors_grid);
-          ed::sculpt_paint::filter_region_clip_factors(ss, positions_eval, factors_grid);
+          ed::sculpt_paint::filter_region_clip_factors(ss, positions, factors_grid);
 
           tls.face_indices.resize(positions.size());
           Vector<int> face_indices_grid = tls.face_indices;
@@ -2175,10 +2187,7 @@ static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMa
 
             const int face = face_indices_grid[idx];
 
-            const Span<int> face_verts = corner_verts.slice(faces[face]);
-            const float3 face_center = bke::mesh::face_center_calc(positions_eval, face_verts);
-            const float3 face_normal = bke::mesh::face_normal_calc(positions_eval, face_verts);
-            if (!gesture::is_affected(gesture_data, face_center, face_normal)) {
+            if (!gesture::is_affected(gesture_data, positions[idx], normals[idx])) {
               continue;
             }
             face_sets.span[face] = new_face_set;

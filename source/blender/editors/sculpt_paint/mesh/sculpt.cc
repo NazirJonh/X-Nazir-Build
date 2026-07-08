@@ -5829,6 +5829,14 @@ Vector<Object *> sculpt_mode_objects(const ViewContext &vc)
       *vc.bmain, vc.scene, vc.view_layer, vc.v3d, &params);
 }
 
+void ensure_mask_layers(Depsgraph *depsgraph, Main *bmain, const Scene *scene, Span<Object *> objects)
+{
+  for (Object *object : objects) {
+    MultiresModifierData *mmd = BKE_sculpt_multires_active(scene, object);
+    BKE_sculpt_mask_layers_ensure(depsgraph, bmain, object, mmd);
+  }
+}
+
 /**
  * \param check_closest: if true and the ray test fails a point closest to the ray will be found.
  * \param limit_closest_radius: if true then the closest point will be tested against the active
@@ -7904,8 +7912,12 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   }
 
   if (brush_type_is_mask(brush.sculpt_brush_type)) {
-    MultiresModifierData *mmd = BKE_sculpt_multires_active(&scene, &ob);
-    BKE_sculpt_mask_layers_ensure(CTX_data_depsgraph_pointer(C), CTX_data_main(C), &ob, mmd);
+    /* Ensure the grid paint mask layer on EVERY object in the mode, not just the active one --
+     * see #ensure_mask_layers (same pattern as #brush_stroke_init's
+     * #color::ensure_shared_color_attributes call, above). */
+    ViewContext vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
+    ensure_mask_layers(
+        CTX_data_depsgraph_pointer(C), CTX_data_main(C), &scene, sculpt_mode_objects(vc));
 
     mask_overlay_check(*C, *op);
   }

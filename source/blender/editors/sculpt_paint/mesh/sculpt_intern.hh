@@ -743,6 +743,13 @@ void vert_random_access_ensure(Object &object);
  */
 Vector<Object *> sculpt_mode_objects(const ViewContext &vc);
 
+/**
+ * Ensure the grid paint-mask layer exists on every object in \a objects, not just one -- brush
+ * strokes and gesture tools that touch masks index #SubdivCCG::masks unconditionally for a Grids
+ * PBVH, which is left empty for a multires object that has never had a mask layer created.
+ */
+void ensure_mask_layers(Depsgraph *depsgraph, Main *bmain, const Scene *scene, Span<Object *> objects);
+
 int vertex_count_get(const Object &object);
 
 bool vertex_is_occluded(const Depsgraph &depsgraph,

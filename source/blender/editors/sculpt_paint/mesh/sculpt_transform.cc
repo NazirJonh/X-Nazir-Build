@@ -113,7 +113,94 @@ Vector<Object *> transform_target_objects(bContext *C)
   return BKE_view_layer_array_from_objects_in_mode_params(bmain, scene, view_layer, v3d, &params);
 }
 
-static std::array<float4x4, 8> transform_matrices_init(const SculptSession &ss,
+/**
+ * Splits \a ob's linear (3x3) world-space basis -- rotation times scale, possibly non-uniform
+ * and/or sheared (e.g. inherited from a non-uniformly-scaled, rotated parent) -- into its closest
+ * pure rotation \a r_orientation and the corresponding scale/shear part \a r_scale, via polar
+ * decomposition (#mat3_polar_decompose). \a r_orientation_inv and \a r_scale_inv are their
+ * inverses: #r_orientation is always orthonormal, so its inverse is a plain transpose; #r_scale
+ * can be singular for a degenerate object (e.g. a zero #Object.scale axis), in which case its
+ * "inverse" falls back to identity rather than propagating NaN/Inf into the mesh.
+ *
+ * A naive per-column #normalize_m3() is only a valid rotation extraction when the 3x3 basis is
+ * ALREADY orthogonal; #mat3_polar_decompose finds the closest orthogonal matrix by SVD instead,
+ * so this stays correct under shear too. It also resolves the sign ambiguity for a mirrored
+ * (negative-determinant) object the same way #interp_m4_m4m4 does, so #r_orientation is always a
+ * proper rotation (never a rotation composed with a reflection) and can be safely round-tripped
+ * through a quaternion.
+ *
+ * Shared by #local_pivot_rot_to_world, #sync_local_pivot_from_world, and
+ * #transform_matrices_init -- all three need to conjugate a rotation (or, for the latter, the
+ * full transform) by \a ob's orientation alone or by its full linear basis, never by a matrix
+ * that silently mixes the two.
+ */
+static void object_orientation_and_scale(const Object &ob,
+                                         float r_orientation[3][3],
+                                         float r_orientation_inv[3][3],
+                                         float r_scale[3][3],
+                                         float r_scale_inv[3][3])
+{
+  float object_lin_mat[3][3];
+  copy_m3_m4(object_lin_mat, ob.object_to_world().ptr());
+
+  mat3_polar_decompose(object_lin_mat, r_orientation, r_scale);
+  if (is_negative_m3(r_orientation)) {
+    /* Quaternions cannot represent a reflection; fold the sign flip into the scale part instead
+     * (same fix as #interp_m4_m4m4's for #77154). */
+    mul_m3_fl(r_orientation, -1.0f);
+    mul_m3_fl(r_scale, -1.0f);
+  }
+  transpose_m3_m3(r_orientation_inv, r_orientation);
+
+  if (!invert_m3_m3(r_scale_inv, r_scale)) {
+    unit_m3(r_scale_inv);
+  }
+}
+
+/**
+ * Conjugates the quaternion \a in_rot by \a mat (i.e. computes
+ * `mat * quat_to_mat3(in_rot) * mat_inv`, converting the result back to a quaternion \a r_rot).
+ * Used both to convert a LOCAL rotation into WORLD space (\a mat = orientation, \a mat_inv =
+ * orientation_inv) and the reverse (\a mat = orientation_inv, \a mat_inv = orientation) -- see
+ * #local_pivot_rot_to_world and #sync_local_pivot_from_world.
+ */
+static void conjugate_quat_m3(const float mat[3][3],
+                              const float mat_inv[3][3],
+                              const float in_rot[4],
+                              float r_rot[4])
+{
+  float in_mat[3][3];
+  quat_to_mat3(in_mat, in_rot);
+
+  float tmp[3][3], out_mat[3][3];
+  mul_m3_m3m3(tmp, in_mat, mat_inv);
+  mul_m3_m3m3(out_mat, mat, tmp);
+  mat3_to_quat(r_rot, out_mat);
+}
+
+void local_pivot_rot_to_world(const Object &ob, const float local_rot[4], float r_world_rot[4])
+{
+  float orientation[3][3], orientation_inv[3][3], scale[3][3], scale_inv[3][3];
+  object_orientation_and_scale(ob, orientation, orientation_inv, scale, scale_inv);
+  conjugate_quat_m3(orientation, orientation_inv, local_rot, r_world_rot);
+}
+
+void sync_local_pivot_from_world(Object &ob)
+{
+  SculptSession &ss = *ob.runtime->sculpt_session;
+
+  float world_to_object[4][4];
+  invert_m4_m4(world_to_object, ob.object_to_world().ptr());
+  copy_v3_v3(ss.pivot_pos, ss.transform_pivot_pos_world);
+  mul_m4_v3(world_to_object, ss.pivot_pos);
+
+  float orientation[3][3], orientation_inv[3][3], scale[3][3], scale_inv[3][3];
+  object_orientation_and_scale(ob, orientation, orientation_inv, scale, scale_inv);
+  conjugate_quat_m3(orientation_inv, orientation, ss.transform_pivot_rot_world, ss.pivot_rot);
+}
+
+static std::array<float4x4, 8> transform_matrices_init(const Object &ob,
+                                                       const SculptSession &ss,
                                                        const ePaintSymmetryFlags symm,
                                                        const TransformDisplacementMode t_mode)
 {
@@ -138,6 +225,12 @@ static std::array<float4x4, 8> transform_matrices_init(const SculptSession &ss,
       break;
   }
 
+  /* #ob's orientation/scale split (used by the rotation matrix below) is invariant across all 8
+   * symmetry areas in the loop below -- the object doesn't move mid-step -- so compute it once
+   * here instead of on every iteration. */
+  float orientation[3][3], orientation_inv[3][3], scale_mat[3][3], scale_inv_mat[3][3];
+  object_orientation_and_scale(ob, orientation, orientation_inv, scale_mat, scale_inv_mat);
+
   for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
     ePaintSymmetryAreas v_symm = ePaintSymmetryAreas(i);
 
@@ -154,11 +247,32 @@ static std::array<float4x4, 8> transform_matrices_init(const SculptSession &ss,
     d_t = flip_v3_by_symm_area(d_t, symm, v_symm, ss.init_pivot_pos);
     translate_m4(t_mat, d_t[0], d_t[1], d_t[2]);
 
-    /* Rotation matrix. */
+    /* Rotation matrix -- built via full conjugation (object orientation AND scale) instead of a
+     * naive local quaternion, so a non-uniformly-scaled object rotates rigidly around the
+     * shared world pivot instead of shearing. #sync_local_pivot_from_world's orientation-only
+     * conjugation (used to derive `d_r` just below, unchanged) is exactly right for keeping
+     * #pivot_rot itself a valid rotation, but it deliberately drops the object's own scale --
+     * reintroduce it here by converting the (symmetry-flipped) LOCAL delta back to world space,
+     * then conjugating by BOTH orientation and scale. For a uniformly-scaled or unscaled object
+     * this is bit-exact with the previous `quat_to_mat4(d_r)` (scale cancels out of the
+     * conjugation when it is a multiple of the identity). */
     sub_qt_qtqt(d_r, ss.pivot_rot, start_pivot_rot);
     normalize_qt(d_r);
     flip_quat_by_symm_area(d_r, symm, v_symm, ss.init_pivot_pos);
-    quat_to_mat4(r_mat, d_r);
+
+    float world_d_r[4];
+    conjugate_quat_m3(orientation, orientation_inv, d_r, world_d_r);
+    float world_rot_mat[3][3];
+    quat_to_mat3(world_rot_mat, world_d_r);
+
+    float ortho_scale[3][3], world_ortho_scale[3][3], conjugated[3][3], r_mat3[3][3];
+    mul_m3_m3m3(ortho_scale, orientation, scale_mat);             /* O * S. */
+    mul_m3_m3m3(world_ortho_scale, world_rot_mat, ortho_scale);   /* Rw * O * S. */
+    mul_m3_m3m3(conjugated, orientation_inv, world_ortho_scale);  /* O^-1 * Rw * O * S. */
+    mul_m3_m3m3(r_mat3, scale_inv_mat, conjugated);                /* S^-1 * O^-1 * Rw * O * S. */
+
+    unit_m4(r_mat);
+    copy_m4_m3(r_mat, r_mat3);
 
     /* Scale matrix. */
     sub_v3_v3v3(d_s, ss.pivot_scale, start_pivot_scale);
@@ -320,7 +434,7 @@ static void sculpt_transform_all_vertices(const Depsgraph &depsgraph, const Scul
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
 
   std::array<float4x4, 8> transform_mats = transform_matrices_init(
-      ss, symm, ss.filter_cache->transform_displacement_mode);
+      ob, ss, symm, ss.filter_cache->transform_displacement_mode);
 
   /* Regular transform applies all symmetry passes at once as it is split by symmetry areas
    * (each vertex can only be transformed once by the transform matrix of its area). */
@@ -519,7 +633,7 @@ static void transform_radius_elastic(const Depsgraph &depsgraph,
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
 
   std::array<float4x4, 8> transform_mats = transform_matrices_init(
-      ss, symm, ss.filter_cache->transform_displacement_mode);
+      ob, ss, symm, ss.filter_cache->transform_displacement_mode);
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   const IndexMask &node_mask = ss.filter_cache->node_mask;
@@ -604,6 +718,12 @@ void update_modal_transform(bContext *C, Object &ob)
   SculptSession &ss = *ob.runtime->sculpt_session;
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
 
+  /* Blender's generic Transform system (Move/Rotate/Scale) drives #ss.transform_pivot_pos_world/
+   * #transform_pivot_rot_world directly (see #createTransSculpt) -- refresh this object's LOCAL
+   * pivot from that shared world value before doing any vertex math below, which reads
+   * #ss.pivot_pos/#pivot_rot. */
+  sync_local_pivot_from_world(ob);
+
   vert_random_access_ensure(ob);
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
 
@@ -635,7 +755,17 @@ void update_modal_transform(bContext *C, Object &ob)
   copy_v4_v4(ss.prev_pivot_rot, ss.pivot_rot);
   copy_v3_v3(ss.prev_pivot_scale, ss.pivot_scale);
 
-  flush_update_step(C, UpdateType::Position);
+  /* Per-object overload -- bit-exact with the single-object #flush_update_step(C, ...) wrapper
+   * when `ob == CTX_data_active_object(C)`, but that wrapper always resolves to the ACTIVE
+   * object, so calling it here for a non-active `ob` would silently flush the WRONG object.
+   * For a Grids/multires object this is not just a redraw nicety: #multires_mark_as_modified
+   * (called from the per-object overload below) is what extracts the interactively-edited
+   * #SubdivCCG::positions runtime cache back into the persistent MDisps displacement -- without
+   * it for THIS object, the next depsgraph evaluation recomputes multires displacement from the
+   * unchanged MDisps data and the edit visually reverts (Mesh objects are unaffected because
+   * their position edit already lives in the persistent Mesh vertex array itself). */
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  flush_update_step(vc, ob, UpdateType::Position);
 }
 
 void cancel_modal_transform(bContext *C, Object &ob)

@@ -78,6 +78,26 @@ void end_transform(bContext *C, Span<Object *> objects);
  */
 Vector<Object *> transform_target_objects(bContext *C);
 
+/**
+ * Converts \a local_rot (an object's local #SculptSession::pivot_rot) into a world-space
+ * quaternion \a r_world_rot, using ONLY \a ob's orientation -- never its own scale. See
+ * #sync_local_pivot_from_world's doc comment for why rotation needs this, unlike position.
+ */
+void local_pivot_rot_to_world(const Object &ob, const float local_rot[4], float r_world_rot[4]);
+/**
+ * Refreshes \a ob's LOCAL #SculptSession::pivot_pos/#pivot_rot from its (already-set, shared
+ * across every object in the session) #SculptSession::transform_pivot_pos_world/
+ * #transform_pivot_rot_world. Called once per object every modal step of a Transform session
+ * (see #update_modal_transform) so the per-object vertex-displacement math always sees an
+ * up-to-date local pivot.
+ *
+ * Position uses \a ob's full (possibly anisotropic) world-to-object matrix -- exact for a point.
+ * Rotation uses \a ob's orientation ONLY, with scale stripped out: conjugating a rotation by a
+ * non-uniformly-scaled matrix does not generally produce a valid rotation (it shears), so
+ * position and rotation need two different conversions here.
+ */
+void sync_local_pivot_from_world(Object &ob);
+
 /* `sculpt_undo.cc` */
 
 namespace undo {

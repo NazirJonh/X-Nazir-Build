@@ -98,15 +98,45 @@ bool paintcurve_has_multi_curves(const PaintCurve *pc);
 bool paintcurve_uses_3d_geometry(const PaintCurve *pc);
 void paintcurve_foreach_bezier_segment(
     const PaintCurve *pc, FunctionRef<void(int point_index_a, int point_index_b)> fn);
+/** Core of #paintcurve_foreach_bezier_segment: operates directly on `geom` so it can be reused
+ * without a #PaintCurve (e.g. for a standalone control curve). */
+void paintcurve_foreach_bezier_segment_from_geometry(
+    const bke::CurvesGeometry &geom, FunctionRef<void(int point_index_a, int point_index_b)> fn);
 void paintcurve_geometry_init_bezier(bke::CurvesGeometry &geom, int point_num);
 /** Cycle the handle type of a control point: Free → Auto → Vector → Align (matches Curves Pen). */
 void paintcurve_cycle_point_handle_type(PaintCurve *pc, int point_index);
 /** Index of the spline that owns point `point_index`, or -1 if out of range. */
 int paintcurve_curve_of_point(const PaintCurve *pc, int point_index);
+/** Core of #paintcurve_curve_of_point: operates directly on `geom` so it can be reused without a
+ * #PaintCurve (e.g. for a standalone control curve). */
+int paintcurve_curve_of_point_from_geometry(const bke::CurvesGeometry &geom, int point_index);
 /** Clamp/validate the active spline index against current topology. */
 int paintcurve_active_curve_get(const PaintCurve *pc);
 /** Append `point_num` bezier points as a NEW spline; returns new spline index (or -1). */
 int paintcurve_geometry_add_spline(bke::CurvesGeometry &geom, int point_num);
+/**
+ * Core of #paintcurve_point_add: append a control point at `co`, either extending the spline at
+ * `active_curve`/`add_index` or starting a new spline when `create_new_spline` is true.
+ * `active_curve` and `add_index` are updated in place to reflect the point that was added,
+ * mirroring #PaintCurve.active_curve/add_index.
+ */
+void paintcurve_geometry_add_point(bke::CurvesGeometry &geom,
+                                   const float3 &co,
+                                   bool create_new_spline,
+                                   int &active_curve,
+                                   int &add_index);
+/**
+ * Core of #paintcurve_insert_point_at_segment: subdivide the bezier segment
+ * `segment_index` -> `segment_index_next` of `geom` at `edge_t` (matches
+ * #subdivide_curves.cc semantics), selecting the newly inserted point. `active_curve` is used to
+ * shift subsequent spline offsets after the resize. Returns the index of the inserted point, or
+ * -1 when the segment's handle attributes are missing.
+ */
+int paintcurve_geometry_insert_point_at_segment(bke::CurvesGeometry &geom,
+                                                int segment_index,
+                                                int segment_index_next,
+                                                int active_curve,
+                                                float edge_t);
 /** Remove selected points (mask over all points), dropping any spline left empty. */
 void paintcurve_geometry_remove_points(bke::CurvesGeometry &geom,
                                        const IndexMask &points_to_remove);
@@ -142,6 +172,12 @@ bke::CurvesGeometry paintcurve_geometry_build_from_selected_points(
 int paintcurve_find_point_index(Span<PaintCurvePoint> screen_points,
                                 const float pos[2],
                                 float threshold);
+/** Bit values written to `paintcurve_find_in_screen_points()`'s `r_selflag`: left handle,
+ * pivot/control point, right handle respectively. */
+#define SEL_F1 (1 << 0)
+#define SEL_F2 (1 << 1)
+#define SEL_F3 (1 << 2)
+
 /**
  * Closest control point / handle under \a pos within manhattan \a threshold pixels.
  * When \a ignore_pivot is true, a click on the pivot redirects to the nearer handle.
@@ -152,6 +188,22 @@ int paintcurve_find_in_screen_points(Span<PaintCurvePoint> screen_points,
                                      bool ignore_pivot,
                                      float threshold,
                                      char *r_selflag);
+
+/**
+ * Reshape the Bezier segment `point_i1` -> `point_i2` so it passes through `mval` at parameter
+ * `segment_t` (clamped to [0.1, 0.9]), solving for the two adjacent handles. `depth_world` is the
+ * world-space point used as the win-to-3d unprojection plane (matches #paintcurve_apply_handle_move_3d's
+ * `pivot_world`). Operates directly on `geom` -- takes no #PaintCurve, unlike most of this file's
+ * other apply-move functions, since it never needed one.
+ */
+void paintcurve_apply_segment_move_3d(bke::CurvesGeometry &geom,
+                                      int point_i1,
+                                      int point_i2,
+                                      float segment_t,
+                                      const ViewContext *vc,
+                                      const float world_to_ob[4][4],
+                                      const float mval[2],
+                                      const float depth_world[3]);
 
 /** \} */
 
@@ -229,6 +281,14 @@ struct PaintCurveRadiusHandleScreen {
   float2 perp;
 };
 
+/**
+ * Core of #paintcurve_build_screen_points: operates directly on `geom`/`use_3d_space` so it can
+ * be reused without a #PaintCurve (e.g. for a standalone control curve).
+ */
+void paintcurve_build_screen_points_from_geometry(const bke::CurvesGeometry &geom,
+                                                  const bool use_3d_space,
+                                                  const ViewContext *vc,
+                                                  Vector<PaintCurvePoint> &r_screen_points);
 void paintcurve_build_screen_points(const PaintCurve *pc,
                                     const ViewContext *vc,
                                     Vector<PaintCurvePoint> &r_screen_points);
@@ -246,6 +306,17 @@ void paintcurve_build_screen_segment_polyline(const PaintCurve *pc,
                                               Vector<float2> &r_polyline);
 
 /**
+ * Core of #paintcurve_build_screen_segment_polyline for a standalone control curve (e.g. a Curve
+ * Patch): always 3D (there is no legacy screen-space variant outside a #PaintCurve), so no
+ * `screen_points_fallback` is needed. `vc->obact` supplies the object-to-world transform.
+ */
+void paintcurve_build_screen_segment_polyline_from_geometry(const bke::CurvesGeometry &geom,
+                                                             const ViewContext *vc,
+                                                             int point_index_a,
+                                                             int point_index_b,
+                                                             Vector<float2> &r_polyline);
+
+/**
  * Screen hit on a tessellated segment, returning the Bezier parameter in [0, 1] for
  * #bke::curves::bezier::insert. Tessellation steps are uniform in Bezier parameter space,
  * not arc-length (unlike #ED_paint_curve_polyline_param_at_closest_point).
@@ -258,6 +329,14 @@ bool paintcurve_bezier_param_at_screen_pos_on_segment(const ViewContext *vc,
                                                       Span<PaintCurvePoint> screen_points,
                                                       float &r_bezier_t,
                                                       float *r_min_dist = nullptr);
+
+/** Core of #paintcurve_bezier_param_at_screen_pos_on_segment for a standalone control curve. */
+bool paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(const ViewContext *vc,
+                                                                    const bke::CurvesGeometry &geom,
+                                                                    const float pos[2],
+                                                                    int point_index_a,
+                                                                    int point_index_b,
+                                                                    float &r_bezier_t);
 
 /**
  * Project every bezier spline of `geom` (in object local space) into screen-space polylines,
@@ -308,6 +387,11 @@ void paintcurve_radius_handle_screen_get(const PaintCurve *pc,
                                          const PaintCurvePoint *screen_points,
                                          int point_index,
                                          PaintCurveRadiusHandleScreen *r_handle);
+/** Core of #paintcurve_radius_handle_screen_get for a standalone control curve. */
+void paintcurve_radius_handle_screen_get_from_geometry(const bke::CurvesGeometry &geom,
+                                                        const PaintCurvePoint *screen_points,
+                                                        int point_index,
+                                                        PaintCurveRadiusHandleScreen *r_handle);
 int paintcurve_find_radius_handle_at_pos(const PaintCurve *pc,
                                          const PaintCurvePoint *screen_points,
                                          const float pos[2],

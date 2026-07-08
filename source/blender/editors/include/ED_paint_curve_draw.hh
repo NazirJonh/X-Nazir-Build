@@ -23,6 +23,9 @@ struct SpaceLink;
 struct View3D;
 struct ViewContext;
 struct ViewLayer;
+namespace bke {
+class CurvesGeometry;
+}
 }  // namespace blender
 
 struct bContext;
@@ -144,6 +147,28 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
                                          bool compute_segment_hover,
                                          bool show_insert_preview,
                                          PaintCurveScreenHandles &r_out);
+
+/**
+ * Core of #ED_paint_curve_screen_handles_build: operates directly on `geometry` so it can be
+ * reused without a #PaintCurve (e.g. for a Curve Patch's standalone control curve).
+ */
+void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
+                                                        const blender::bke::CurvesGeometry &geometry,
+                                                        const Sculpt *sculpt,
+                                                        bool show_radius_handles,
+                                                        float2 mval_region,
+                                                        bool compute_segment_hover,
+                                                        bool show_insert_preview,
+                                                        PaintCurveScreenHandles &r_out);
+
+/**
+ * Barrier accessor into `Object::runtime->sculpt_session->curve_patch_cache->control_curve` for
+ * the draw module: `draw/`'s CMake include path does not reach `editors/sculpt_paint/`, so it
+ * cannot see the full `CurvePatchCache` definition (`paint_curve_patch_cache.hh`) -- only the
+ * `bke::CurvesGeometry` it owns is returned. Returns nullptr when `ob` is null or has no live
+ * Curve Patch.
+ */
+const blender::bke::CurvesGeometry *ED_paint_curve_patch_active_control_curve(const Object *ob);
 
 void ED_paint_curve_screen_silhouettes_build(const ViewContext &vc,
                                              float2 mval_region,

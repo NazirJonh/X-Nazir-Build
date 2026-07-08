@@ -55,6 +55,7 @@ namespace filter {
 struct Cache;
 }
 struct StrokeCache;
+struct CurvePatchCache;
 }  // namespace ed::sculpt_paint
 struct GHash;
 struct GridPaintMask;
@@ -423,6 +424,7 @@ struct SculptSession : NonCopyable, NonMovable {
   ed::sculpt_paint::StrokeCache *cache = nullptr;
   ed::sculpt_paint::filter::Cache *filter_cache = nullptr;
   ed::sculpt_paint::expand::Cache *expand_cache = nullptr;
+  ed::sculpt_paint::CurvePatchCache *curve_patch_cache = nullptr;
 
   /* Cursor data and active vertex for tools */
   std::optional<int> active_face_index;

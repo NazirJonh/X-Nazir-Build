@@ -98,10 +98,10 @@ static void paintcurve_theme_handle_color_draw(const int8_t handle_type,
   ui::theme::get_color_type_4fv(color, SPACE_VIEW3D, r_col);
 }
 
-static bool should_show_radius_handle_draw(const Sculpt *sculpt,
-                                           const PaintCurve *pc,
-                                           const Span<PaintCurvePoint> points,
-                                           const int point_index)
+static bool should_show_radius_handle_draw_from_geometry(const Sculpt *sculpt,
+                                                          const bke::CurvesGeometry &geom,
+                                                          const Span<PaintCurvePoint> points,
+                                                          const int point_index)
 {
   if (!sculpt || !sculpt->paint_curve_show_radius_handles) {
     return false;
@@ -114,11 +114,10 @@ static bool should_show_radius_handle_draw(const Sculpt *sculpt,
   }
 
   if (display_mode == SCULPT_PAINT_CURVE_RADIUS_SELECT) {
-    const int curve_index = paintcurve_curve_of_point(pc, point_index);
+    const int curve_index = paintcurve_curve_of_point_from_geometry(geom, point_index);
     if (curve_index < 0) {
       return false;
     }
-    const bke::CurvesGeometry &geom = pc->geometry.wrap();
     const OffsetIndices<int> points_by_curve = geom.points_by_curve();
     const IndexRange curve_pts = points_by_curve[curve_index];
     for (const int i : curve_pts) {
@@ -131,17 +130,25 @@ static bool should_show_radius_handle_draw(const Sculpt *sculpt,
   }
 
   if (display_mode == SCULPT_PAINT_CURVE_RADIUS_TIPS) {
-    const int curve_index = paintcurve_curve_of_point(pc, point_index);
+    const int curve_index = paintcurve_curve_of_point_from_geometry(geom, point_index);
     if (curve_index < 0) {
       return false;
     }
-    const bke::CurvesGeometry &geom = pc->geometry.wrap();
     const OffsetIndices<int> points_by_curve = geom.points_by_curve();
     const IndexRange curve_pts = points_by_curve[curve_index];
     return (point_index == curve_pts.first() || point_index == curve_pts.last());
   }
 
   return false;
+}
+
+static bool should_show_radius_handle_draw(const Sculpt *sculpt,
+                                           const PaintCurve *pc,
+                                           const Span<PaintCurvePoint> points,
+                                           const int point_index)
+{
+  return should_show_radius_handle_draw_from_geometry(
+      sculpt, pc->geometry.wrap(), points, point_index);
 }
 
 static float paintcurve_polyline_distance_sq(const Span<float2> polyline, const float2 mval)
@@ -259,7 +266,7 @@ bool ED_paint_curve_overlay_is_relevant(const Brush *brush,
   if (brush == nullptr) {
     return false;
   }
-  if (brush->stroke_method == BRUSH_STROKE_CURVE) {
+  if (ELEM(brush->stroke_method, BRUSH_STROKE_CURVE, BRUSH_STROKE_CURVE_PATCH)) {
     return true;
   }
   return ED_paint_curve_is_curves_edit_tool(active_tool_idname);
@@ -333,26 +340,26 @@ Paint *ED_paint_curve_resolve_active_paint(Depsgraph *depsgraph,
 /** \name Screen handles provider
  * \{ */
 
-void ED_paint_curve_screen_handles_build(const ViewContext &vc,
-                                         const Brush &brush,
-                                         const Sculpt *sculpt,
-                                         const float2 mval_region,
-                                         const bool compute_segment_hover,
-                                         const bool show_insert_preview,
-                                         PaintCurveScreenHandles &r_out)
+void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
+                                                        const bke::CurvesGeometry &geometry,
+                                                        const Sculpt *sculpt,
+                                                        const bool show_radius_handles,
+                                                        const float2 mval_region,
+                                                        const bool compute_segment_hover,
+                                                        const bool show_insert_preview,
+                                                        PaintCurveScreenHandles &r_out)
 {
   r_out.points.clear();
   r_out.radius_handles.clear();
   r_out.segments.clear();
   r_out.insert_preview = {};
 
-  PaintCurve *pc = brush.paint_curve;
-  if (pc == nullptr || !paintcurve_geometry_is_valid(pc->geometry.wrap())) {
+  if (!paintcurve_geometry_is_valid(geometry)) {
     return;
   }
 
   Vector<PaintCurvePoint> screen_points;
-  paintcurve_build_screen_points(pc, &vc, screen_points);
+  paintcurve_build_screen_points_from_geometry(geometry, true, &vc, screen_points);
   if (screen_points.is_empty()) {
     return;
   }
@@ -395,13 +402,14 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
     r_out.points.append(hd);
   }
 
-  if (pc->show_radius_handles) {
+  if (show_radius_handles) {
     for (const int i : screen_points.index_range()) {
-      if (!should_show_radius_handle_draw(sculpt, pc, screen_points, i)) {
+      if (!should_show_radius_handle_draw_from_geometry(sculpt, geometry, screen_points, i)) {
         continue;
       }
       PaintCurveRadiusHandleScreen handle_screen;
-      paintcurve_radius_handle_screen_get(pc, screen_points.data(), i, &handle_screen);
+      paintcurve_radius_handle_screen_get_from_geometry(
+          geometry, screen_points.data(), i, &handle_screen);
       PaintCurveRadiusHandleDrawData rd;
       rd.point = handle_screen.point;
       rd.end = handle_screen.end;
@@ -411,10 +419,10 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
     }
   }
 
-  paintcurve_foreach_bezier_segment(pc, [&](const int point_a, const int point_b) {
+  paintcurve_foreach_bezier_segment_from_geometry(geometry, [&](const int point_a, const int point_b) {
     PaintCurveSegmentDrawData seg;
-    paintcurve_build_screen_segment_polyline(
-        pc, &vc, point_a, point_b, screen_points.as_span(), seg.polyline);
+    paintcurve_build_screen_segment_polyline_from_geometry(
+        geometry, &vc, point_a, point_b, seg.polyline);
     if (seg.polyline.size() < 2) {
       return;
     }
@@ -450,13 +458,8 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
     float bezier_t = 0.0f;
     PaintCurveInsertPreviewDrawData preview;
     if (hover_point_a >= 0 && hover_point_b >= 0 &&
-        paintcurve_bezier_param_at_screen_pos_on_segment(&vc,
-                                                         pc,
-                                                         mval,
-                                                         hover_point_a,
-                                                         hover_point_b,
-                                                         screen_points,
-                                                         bezier_t) &&
+        paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(
+            &vc, geometry, mval, hover_point_a, hover_point_b, bezier_t) &&
         paintcurve_polyline_point_and_tangent_at_bezier_param(
             hover_seg.polyline, bezier_t, preview.point, preview.tangent))
     {
@@ -474,6 +477,32 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
       }
     }
   }
+}
+
+void ED_paint_curve_screen_handles_build(const ViewContext &vc,
+                                         const Brush &brush,
+                                         const Sculpt *sculpt,
+                                         const float2 mval_region,
+                                         const bool compute_segment_hover,
+                                         const bool show_insert_preview,
+                                         PaintCurveScreenHandles &r_out)
+{
+  PaintCurve *pc = brush.paint_curve;
+  if (pc == nullptr) {
+    r_out.points.clear();
+    r_out.radius_handles.clear();
+    r_out.segments.clear();
+    r_out.insert_preview = {};
+    return;
+  }
+  ED_paint_curve_screen_handles_build_from_geometry(vc,
+                                                    pc->geometry.wrap(),
+                                                    sculpt,
+                                                    pc->show_radius_handles != 0,
+                                                    mval_region,
+                                                    compute_segment_hover,
+                                                    show_insert_preview,
+                                                    r_out);
 }
 
 /** \} */

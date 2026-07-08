@@ -137,6 +137,7 @@ enum {
   SCULPT_EXPAND_MODAL_FALLOFF_TOPOLOGY_DIAGONALS,
   SCULPT_EXPAND_MODAL_FALLOFF_SPHERICAL,
   SCULPT_EXPAND_MODAL_SNAP_TOGGLE,
+  SCULPT_EXPAND_MODAL_SNAP_SEED_OBJECT_ONLY_TOGGLE,
   SCULPT_EXPAND_MODAL_LOOP_COUNT_INCREASE,
   SCULPT_EXPAND_MODAL_LOOP_COUNT_DECREASE,
   SCULPT_EXPAND_MODAL_BRUSH_GRADIENT_TOGGLE,
@@ -216,6 +217,18 @@ static bool is_vert_in_active_component(const SculptSession &ss,
                                         const int vert,
                                         const int object_index)
 {
+  if (expand_cache.snap_seed_object_only && object_index != expand_cache.seed.object_index) {
+    /* Alt: restrict Expand's result to the object Expand started on. This is the single choke
+     * point every enable-decision (vertex OR face domain, any target -- Mask/Colors/Face Sets,
+     * snap or plain falloff) already goes through via #is_vert_in_active_component/
+     * #is_face_in_active_component, so gating here covers all of them uniformly instead of
+     * duplicating the check per call site (previously this only existed inside the Face-Sets
+     * Snap branches of `face_state_get`/`enabled_state_to_bitmap`, so plain falloff-based Mask
+     * Expand ignored Alt entirely). Single-object sessions are unaffected: `object_index` and
+     * `expand_cache.seed.object_index` are both always 0 there, so this never fires. */
+    return false;
+  }
+
   /* Match BOTH the object and the island id: `active_connected_islands` now keys each symmetry
    * pass by the object it was resolved on, so a vertex is "active" only if some pass landed on its
    * own object AND its own island. Single object: every entry's `object_index` is 0, matching every
@@ -358,12 +371,24 @@ static bool face_state_get(const Object &object,
     return true;
   }
 
+  if (expand_multi_object_active(expand_cache) && expand_cache.snap_seed_object_only &&
+      object_index_get(expand_cache, object) == expand_cache.seed.object_index)
+  {
+    /* Alt: once restricted to the object Expand started on, treat that WHOLE mesh as enabled
+     * immediately -- same reasoning as #enabled_state_to_bitmap's mirrored branch (matches
+     * Ctrl/Snap's whole-face-set capture instead of requiring the falloff to reach every face). */
+    return !expand_cache.invert;
+  }
+
   bool enabled = false;
   /* Reads `object`'s own state (single object ⇒ `object` is the active object ⇒ identical to
    * today's `active_object_state`). */
   const ObjectState &state = object_state_get(expand_cache, object);
 
   if (expand_cache.snap_enabled_face_sets) {
+    /* Alt (`snap_seed_object_only`) is handled once, upstream, in
+     * #is_face_in_active_component/#is_vert_in_active_component -- a face on a non-seed object
+     * never reaches this point when it's active, so no separate check is needed here. */
     const int face_set = state.original_face_sets[face];
     enabled = expand_cache.snap_enabled_face_sets->contains(face_set);
   }
@@ -455,6 +480,23 @@ static BitVector<> enabled_state_to_bitmap(const Depsgraph &depsgraph,
    * objects are filtered by their OWN keyed islands. Single object ⇒ `object_index` is always 0 ⇒
    * identical to the original single-object filter. */
   const int object_index = object_index_get(expand_cache, object);
+
+  if (expand_multi_object_active(expand_cache) && expand_cache.snap_seed_object_only &&
+      object_index == expand_cache.seed.object_index)
+  {
+    /* Alt: once restricted to the object Expand started on, treat that WHOLE mesh as enabled
+     * immediately -- matching how Ctrl/Snap captures a whole face set as soon as any of it is
+     * reached, instead of requiring the falloff to physically grow across every vertex of a
+     * (possibly huge) mesh. Mirrors the `all_enabled` early-return above, just scoped to this one
+     * object instead of every object. Gated on multi-object being active: in a single-object
+     * session `object_index`/`seed.object_index` are both always 0, so this would otherwise turn
+     * Alt into an unrelated "select all" shortcut there. */
+    if (!expand_cache.invert) {
+      enabled_verts.fill(true);
+    }
+    return enabled_verts;
+  }
+
   switch (bke::object::pbvh_get(object)->type()) {
     case bke::pbvh::Type::Mesh: {
       const Mesh &mesh = *id_cast<const Mesh *>(object.data);
@@ -474,6 +516,9 @@ static BitVector<> enabled_state_to_bitmap(const Depsgraph &depsgraph,
                 continue;
               }
               if (expand_cache.snap) {
+                /* Alt (`snap_seed_object_only`) is handled once, upstream, in
+                 * #is_vert_in_active_component -- the `continue` above already skips a
+                 * non-seed-object vertex when it's active. */
                 enabled_verts[vert].set(face_set::vert_has_any_face_set(
                     vert_to_face_map, face_sets, vert, *expand_cache.snap_enabled_face_sets));
                 continue;
@@ -505,6 +550,9 @@ static BitVector<> enabled_state_to_bitmap(const Depsgraph &depsgraph,
             return;
           }
           if (expand_cache.snap) {
+            /* Alt (`snap_seed_object_only`) is handled once, upstream, in
+             * #is_vert_in_active_component -- the `return` above already skips a non-seed-object
+             * vertex when it's active. */
             const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, vert);
             if (face_set::coord_has_any_face_set(faces,
                                                  corner_verts,
@@ -3586,6 +3634,10 @@ static void sculpt_expand_status(bContext *C, wmOperator *op, Cache *expand_cach
   status.opmodal(IFACE_("Cancel"), op->type, SCULPT_EXPAND_MODAL_CANCEL);
   status.opmodal(IFACE_("Invert"), op->type, SCULPT_EXPAND_MODAL_INVERT, expand_cache->invert);
   status.opmodal(IFACE_("Snap"), op->type, SCULPT_EXPAND_MODAL_SNAP_TOGGLE, expand_cache->snap);
+  status.opmodal(IFACE_("Snap to Origin Object"),
+                 op->type,
+                 SCULPT_EXPAND_MODAL_SNAP_SEED_OBJECT_ONLY_TOGGLE,
+                 expand_cache->snap_seed_object_only);
   status.opmodal(IFACE_("Move"), op->type, SCULPT_EXPAND_MODAL_MOVE_TOGGLE, expand_cache->move);
   status.opmodal(
       IFACE_("Preserve"), op->type, SCULPT_EXPAND_MODAL_PRESERVE_TOGGLE, expand_cache->preserve);
@@ -3704,6 +3756,10 @@ static wmOperatorStatus sculpt_expand_modal(bContext *C, wmOperator *op, const w
           expand_cache.snap_enabled_face_sets = std::make_unique<Set<int>>();
           snap_init_from_enabled(*depsgraph, ob, expand_cache);
         }
+        break;
+      }
+      case SCULPT_EXPAND_MODAL_SNAP_SEED_OBJECT_ONLY_TOGGLE: {
+        expand_cache.snap_seed_object_only = !expand_cache.snap_seed_object_only;
         break;
       }
       case SCULPT_EXPAND_MODAL_MOVE_TOGGLE: {
@@ -4285,6 +4341,11 @@ void modal_keymap(wmKeyConfig *keyconf)
        ""},
       {SCULPT_EXPAND_MODAL_FALLOFF_SPHERICAL, "FALLOFF_SPHERICAL", 0, "Spherical Falloff", ""},
       {SCULPT_EXPAND_MODAL_SNAP_TOGGLE, "SNAP_TOGGLE", 0, "Snap expand to Face Sets", ""},
+      {SCULPT_EXPAND_MODAL_SNAP_SEED_OBJECT_ONLY_TOGGLE,
+       "SNAP_SEED_OBJECT_ONLY_TOGGLE",
+       0,
+       "Restrict Snap to the Object Expand Started On",
+       ""},
       {SCULPT_EXPAND_MODAL_LOOP_COUNT_INCREASE,
        "LOOP_COUNT_INCREASE",
        0,

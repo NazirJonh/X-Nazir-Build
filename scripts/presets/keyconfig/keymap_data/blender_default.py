@@ -6744,6 +6744,8 @@ def km_sculpt_expand_modal(_params):
         )),
         ("SNAP_TOGGLE", {"type": 'LEFT_CTRL', "value": 'ANY'}, None),
         ("SNAP_TOGGLE", {"type": 'RIGHT_CTRL', "value": 'ANY'}, None),
+        ("SNAP_SEED_OBJECT_ONLY_TOGGLE", {"type": 'LEFT_ALT', "value": 'ANY'}, None),
+        ("SNAP_SEED_OBJECT_ONLY_TOGGLE", {"type": 'RIGHT_ALT', "value": 'ANY'}, None),
         ("LOOP_COUNT_INCREASE", {"type": 'W', "value": 'PRESS', "any": True, "repeat": True}, None),
         ("LOOP_COUNT_DECREASE", {"type": 'Q', "value": 'PRESS', "any": True, "repeat": True}, None),
         ("BRUSH_GRADIENT_TOGGLE", {"type": 'B', "value": 'PRESS', "any": True}, None),

@@ -6628,7 +6628,10 @@ void flush_update_done(ViewContext &vc,
     }
   }
 
-  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  /* The PBVH is only guaranteed to already exist for objects the stroke actually touched (built
+   * lazily on cursor hover, see #paint_cursor.cc). A secondary object in a multi-object stroke
+   * that was never hovered/hit would otherwise still have a null PBVH here. */
+  bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(*vc.depsgraph, ob);
 
   if (update_type == UpdateType::Position) {
     bke::pbvh::store_bounds_orig(pbvh);

@@ -172,6 +172,12 @@ struct Cache {
    * `ObjectState::original_face_sets`. */
   bool snap;
 
+  /* When set to true together with `snap`, restricts the snapped result to the object that holds
+   * `seed` (where the operator started), instead of every object sharing a matching face set ID.
+   * Face set IDs are per-object and not globally unique, so without this a fresh object's single
+   * default face set (ID 1, covering the whole mesh) matches the same ID on every other object. */
+  bool snap_seed_object_only;
+
   /* When set to true, Expand will use the current face set ID to modify an existing face set
    * instead of creating a new one. */
   bool modify_active_face_set;

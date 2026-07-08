@@ -3936,7 +3936,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
   if (brush.deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM) {
     if (!ss.cache->cloth_sim) {
       ss.cache->cloth_sim = cloth::brush_simulation_create(
-          depsgraph, ob, 1.0f, 0.0f, 0.0f, false, true);
+          depsgraph, ob, 1.0f, 0.0f, 0.0f, false, true, /*use_world_space=*/false);
     }
     cloth::brush_store_simulation_state(depsgraph, ob, *ss.cache->cloth_sim);
     cloth::ensure_nodes_constraints(sd,
@@ -6394,6 +6394,12 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   if (!ss.cache) {
     ss.cache = MEM_new<StrokeCache>(__func__);
     ss.cache->toggle_settings = create_toggle_settings(*op, *CTX_data_main(C), sd.paint);
+    /* Set eagerly so #StrokeCache.brush is never null while #StrokeCache exists -- code reachable
+     * before the first stroke step (e.g. paint-cursor drawing, #stroke_is_first_brush_step_of_symmetry_pass
+     * only starts returning true once #stroke_cache_init's first step runs) otherwise reads a null
+     * brush pointer. #stroke_cache_init (the per-step init) re-assigns the same value redundantly
+     * once the stroke actually starts. */
+    ss.cache->brush = brush;
   }
 
   brush_init_tex(sd, ss);

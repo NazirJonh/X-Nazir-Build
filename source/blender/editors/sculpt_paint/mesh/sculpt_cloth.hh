@@ -89,6 +89,18 @@ struct SimulationData {
   float damping;
   float softbody_strength;
 
+  /**
+   * When true, #pos and its siblings (#prev_pos, #last_iteration_pos, #init_pos,
+   * #deformation_pos, #softbody_pos) are stored in isotropically-normalized world space
+   * (`world_pos / mat4_to_scale(ob)`) instead of the object's local space, so the simulation's
+   * internal Euclidean distance/direction math (spring rest-lengths, Verlet integration) is
+   * physically meaningful even when #Object.scale is non-uniform. Set once in
+   * #brush_simulation_create and never changed afterwards (the object's transform is assumed
+   * static for the stroke's duration, same assumption #StrokeCache.scale/#StrokeCache.non_uniform_scale_active
+   * already make). See `ClothWorldTransform` in `sculpt_cloth.cc`.
+   */
+  bool use_world_space = false;
+
   Array<float3> acceleration;
   Array<float3> pos;
   Array<float3> init_pos;
@@ -114,7 +126,8 @@ std::unique_ptr<SimulationData> brush_simulation_create(const Depsgraph &depsgra
                                                         float cloth_damping,
                                                         float cloth_softbody_strength,
                                                         bool use_collisions,
-                                                        bool needs_deform_coords);
+                                                        bool needs_deform_coords,
+                                                        bool use_world_space);
 
 void sim_activate_nodes(Object &object, SimulationData &cloth_sim, const IndexMask &node_mask);
 

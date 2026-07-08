@@ -701,7 +701,7 @@ static float paint_stroke_overlapped_curve(const Brush &br, const float x, const
   return sum;
 }
 
-static float paint_stroke_integrate_overlap(const Brush &br, const float factor)
+float paint_stroke_integrate_overlap(const Brush &br, const float factor)
 {
   const float spacing = br.spacing * factor;
 

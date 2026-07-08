@@ -569,6 +569,14 @@ class StrokePanel(BrushPanel):
         col.prop(brush, "stroke_method")
         col.separator()
 
+        if mode == 'SCULPT' and brush.stroke_method == 'CURVE_PATCH':
+            tex_slot = brush.texture_slot
+            col.prop(tex_slot, "use_curve_patch_swap_axis", text="Swap Axis")
+            col.row().prop(tex_slot, "curve_patch_length_mode", text="Curve Patch Length", expand=True)
+            if tex_slot.curve_patch_length_mode == 'REPEAT':
+                col.prop(tex_slot, "curve_patch_length_repeat", text="Repeats")
+            col.separator()
+
         if brush.stroke_method == 'ANCHORED':
             col.prop(brush, "use_edge_to_edge", text="Edge to Edge")
 

@@ -32,6 +32,8 @@
 
 #include "ED_view3d.hh"
 
+#include "editors/sculpt_paint/mesh/brushes/brushes.hh"
+
 namespace blender {
 
 namespace ed::sculpt_paint {
@@ -831,6 +833,45 @@ void cache_calc_brushdata_symm(ed::sculpt_paint::StrokeCache &cache,
                                char axis,
                                float angle);
 
+/** Calculates the nodes that a brush will influence. */
+brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
+                                                 Object &ob,
+                                                 const Brush &brush,
+                                                 IndexMaskMemory &memory);
+
+/** Applies one brush action (a single symmetry/tile pass), reading brush placement and strength
+ * off `ob.runtime->sculpt_session->cache`. */
+void do_brush_action(const Depsgraph &depsgraph,
+                     const Scene &scene,
+                     Sculpt &sd,
+                     Object &ob,
+                     const Brush &brush,
+                     PaintModeSettings &paint_mode_settings);
+
+/** Applies `action` once per valid symmetry/tile/radial pass for the current stroke step.
+ * \param forced_bstrength: If set, used as `cache.bstrength` instead of the value computed from
+ * the live brush/paint settings. Used by callers (e.g. Curve Patch re-stamp) that need the
+ * strength frozen to a value captured earlier, rather than reactive to live brush-panel edits. */
+void do_symmetrical_brush_actions(
+    const Depsgraph &depsgraph,
+    const Scene &scene,
+    Sculpt &sd,
+    Object &ob,
+    void (*action)(const Depsgraph &depsgraph,
+                   const Scene &scene,
+                   Sculpt &sd,
+                   Object &ob,
+                   const Brush &brush,
+                   PaintModeSettings &paint_mode_settings),
+    PaintModeSettings &paint_mode_settings,
+    std::optional<float> forced_bstrength = std::nullopt);
+
+/** Restores the mesh to its last-undo-step state for brush types that compute their deformation
+ * as an offset from original coordinates (Grab/Elastic Deform/Thumb/Rotate), and for the
+ * anchored/drag-dot stroke methods. Must be called once per stroke step, after the per-dab
+ * `StrokeCache` fields are updated and before `do_symmetrical_brush_actions()`. */
+void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph, const Sculpt &sd, Object &ob);
+
 struct OrigPositionData {
   Span<float3> positions;
   Span<float3> normals;
@@ -939,6 +980,11 @@ bool SCULPT_use_image_paint_brush(PaintModeSettings &settings, Object &ob);
 namespace ed::sculpt_paint {
 
 void SCULPT_OT_brush_stroke(wmOperatorType *ot);
+/** Defined in `paint_curve_patch_edit.cc`. A single persistent modal operator that owns every
+ * event for a Curve Patch live-edit session (point/handle/segment/radius drag, insert, delete,
+ * texture-axis toggle, commit/cancel) -- see that file's header comment for why this is not
+ * split into a `wmKeyMap` of small operators. */
+void SCULPT_OT_curve_patch_edit(wmOperatorType *ot);
 
 }
 

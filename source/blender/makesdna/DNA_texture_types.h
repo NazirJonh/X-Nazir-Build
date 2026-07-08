@@ -287,6 +287,7 @@ enum eMTex_BrushMapMode : char {
   MTEX_MAP_MODE_AREA = 3,
   MTEX_MAP_MODE_RANDOM = 4,
   MTEX_MAP_MODE_STENCIL = 5,
+  MTEX_MAP_MODE_CURVE_PATCH = 6,
 };
 
 /** #MTex::brush_angle_mode. */
@@ -295,6 +296,13 @@ enum eMTex_BrushAngleMode : char {
   MTEX_ANGLE_RAKE = 2,
 };
 ENUM_OPERATORS(eMTex_BrushAngleMode)
+
+/** #MTex::curve_patch_length_mode — how the texture is mapped along the curve's length. */
+enum eMTex_CurvePatchLengthMode : char {
+  MTEX_CURVE_PATCH_LENGTH_DEFAULT = 0,
+  MTEX_CURVE_PATCH_LENGTH_REPEAT = 1,
+  MTEX_CURVE_PATCH_LENGTH_STRETCH = 2,
+};
 
 /** \} */
 
@@ -307,7 +315,21 @@ struct MTex {
 
   short texco = TEXCO_UV, mapto = MAP_COL;
   eMTex_BlendType blendtype = MTEX_BLEND;
-  char _pad2[2] = {};
+  /** For #MTEX_MAP_MODE_CURVE_PATCH: swap which texture axis (U/V) runs along the control
+   * curve's arc-length (false = V runs along the curve, the default; true = U).
+   * `char`, not `bool`: makesdna has no builtin size for `bool`, only for fixed-width integer
+   * types (see #eSDNA_Type / `build_type_table()` in `makesdna.cc`) — every other persisted
+   * single-bit flag in DNA (e.g. `CacheFile::is_sequence`) uses `char` for this reason. Placed in
+   * what used to be one byte of `_pad2` so the struct's total size and every later member's
+   * offset are unchanged. */
+  char use_curve_patch_swap_axis = false;
+  /** For #MTEX_MAP_MODE_CURVE_PATCH: how one texture tile is mapped along the control curve's
+   * arc-length. See #eMTex_CurvePatchLengthMode. */
+  char curve_patch_length_mode = 0;
+  /** For #MTEX_MAP_MODE_CURVE_PATCH REPEAT mode: number of texture repeats along the curve
+   * length (RNA-clamped 1..64). */
+  char curve_patch_length_repeat = 1;
+  char _pad2[7] = {};
   struct Object *object = nullptr;
   struct Tex *tex = nullptr;
   char uvname[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";

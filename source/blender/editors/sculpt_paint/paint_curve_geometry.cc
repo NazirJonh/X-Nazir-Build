@@ -93,12 +93,8 @@ bool paintcurve_uses_3d_geometry(const PaintCurve *pc)
   return paintcurve_geometry_is_valid(pc->geometry.wrap());
 }
 
-int paintcurve_curve_of_point(const PaintCurve *pc, const int point_index)
+int paintcurve_curve_of_point_from_geometry(const bke::CurvesGeometry &geom, const int point_index)
 {
-  if (pc == nullptr) {
-    return -1;
-  }
-  const bke::CurvesGeometry &geom = pc->geometry.wrap();
   if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
       point_index >= geom.points_num())
   {
@@ -111,6 +107,14 @@ int paintcurve_curve_of_point(const PaintCurve *pc, const int point_index)
     }
   }
   return -1;
+}
+
+int paintcurve_curve_of_point(const PaintCurve *pc, const int point_index)
+{
+  if (pc == nullptr) {
+    return -1;
+  }
+  return paintcurve_curve_of_point_from_geometry(pc->geometry.wrap(), point_index);
 }
 
 int paintcurve_active_curve_get(const PaintCurve *pc)
@@ -496,14 +500,9 @@ bool paintcurve_geometry_any_point_selected(const bke::CurvesGeometry &geom)
   return false;
 }
 
-void paintcurve_foreach_bezier_segment(
-    const PaintCurve *pc, const FunctionRef<void(int point_index_a, int point_index_b)> fn)
+void paintcurve_foreach_bezier_segment_from_geometry(
+    const bke::CurvesGeometry &geom, const FunctionRef<void(int point_index_a, int point_index_b)> fn)
 {
-  if (pc == nullptr) {
-    return;
-  }
-
-  const bke::CurvesGeometry &geom = pc->geometry.wrap();
   if (!paintcurve_geometry_runtime_is_initialized(geom) || geom.points_num() < 2) {
     return;
   }
@@ -521,6 +520,15 @@ void paintcurve_foreach_bezier_segment(
       fn(points[local_a], points[local_b]);
     }
   }
+}
+
+void paintcurve_foreach_bezier_segment(
+    const PaintCurve *pc, const FunctionRef<void(int point_index_a, int point_index_b)> fn)
+{
+  if (pc == nullptr) {
+    return;
+  }
+  paintcurve_foreach_bezier_segment_from_geometry(pc->geometry.wrap(), fn);
 }
 
 /** \} */

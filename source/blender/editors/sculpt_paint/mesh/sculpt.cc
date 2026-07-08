@@ -86,6 +86,7 @@
 #include "ED_sculpt.hh"
 #include "ED_view3d.hh"
 
+#include "../paint_curve_patch_cache.hh"
 #include "../paint_intern.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_boundary.hh"
@@ -3256,10 +3257,10 @@ static bool brush_type_needs_all_pbvh_nodes(const Brush &brush)
 }
 
 /** Calculates the nodes that a brush will influence. */
-static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
-                                                        Object &ob,
-                                                        const Brush &brush,
-                                                        IndexMaskMemory &memory)
+brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
+                                                 Object &ob,
+                                                 const Brush &brush,
+                                                 IndexMaskMemory &memory)
 {
   PRF_scope(ProfileCategory::Editor);
   const SculptSession &ss = *ob.runtime->sculpt_session;
@@ -3404,12 +3405,12 @@ static const char *sculpt_brush_type_name(const Brush &brush)
   return "Sculpting";
 }
 
-static void do_brush_action(const Depsgraph &depsgraph,
-                            const Scene & /*scene*/,
-                            Sculpt &sd,
-                            Object &ob,
-                            const Brush &brush,
-                            PaintModeSettings &paint_mode_settings)
+void do_brush_action(const Depsgraph &depsgraph,
+                     const Scene & /*scene*/,
+                     Sculpt &sd,
+                     Object &ob,
+                     const Brush &brush,
+                     PaintModeSettings &paint_mode_settings)
 {
   PRF_scope(ProfileCategory::Editor);
   PRF_scope_set_dynamic_name("%s", sculpt_brush_type_name(brush));
@@ -3843,12 +3844,13 @@ static void sculpt_fix_noise_tear(const Sculpt &sd, Object &ob)
   }
 }
 
-static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
-                                         const Scene &scene,
-                                         Sculpt &sd,
-                                         Object &ob,
-                                         const BrushActionFunc action,
-                                         PaintModeSettings &paint_mode_settings)
+void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
+                                  const Scene &scene,
+                                  Sculpt &sd,
+                                  Object &ob,
+                                  const BrushActionFunc action,
+                                  PaintModeSettings &paint_mode_settings,
+                                  std::optional<float> forced_bstrength)
 {
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   const Mesh &mesh = *id_cast<Mesh *>(ob.data);
@@ -3858,7 +3860,8 @@ static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
 
   float feather = calc_symmetry_feather(sd, symm, mesh, *ss.cache);
 
-  cache.bstrength = brush_strength(sd, cache, feather, paint_mode_settings);
+  cache.bstrength = forced_bstrength.value_or(
+      brush_strength(sd, cache, feather, paint_mode_settings));
 
   /* `symm` is a bit combination of XYZ -
    * 1 is mirror X; 2 is Y; 3 is XY; 4 is Z; 5 is XZ; 6 is YZ; 7 is XYZ */
@@ -5182,9 +5185,9 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   ED_paint_brush_type_update_sticky_shading_color(C, &ob);
 }
 
-static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
-                                                const Sculpt &sd,
-                                                Object &ob)
+void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
+                                         const Sculpt &sd,
+                                         Object &ob)
 {
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *ob.runtime->sculpt_session;
@@ -5214,8 +5217,15 @@ static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
     return;
   }
 
-  /* Restore the mesh before continuing with anchored stroke. */
-  if (ELEM(brush->stroke_method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT)) {
+  /* Restore the mesh before continuing with anchored stroke. Curve Patch's own anchor-drag phase
+   * (before `ss.curve_patch_cache` exists) needs the same treatment: it must behave as a single,
+   * continuously-recomputed dab like #BRUSH_STROKE_ANCHORED, not an accumulating multi-dab
+   * stroke. Once the patch cache exists, the re-stamp in `curve_patch_restore_and_restamp()`
+   * drives its own dabs along the whole curve and must NOT be restored per-dab here, so this only
+   * applies while the patch has not started yet. */
+  if (ELEM(brush->stroke_method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT) ||
+      (brush->stroke_method == BRUSH_STROKE_CURVE_PATCH && !ss.curve_patch_cache))
+  {
 
     undo::restore_from_undo_step(depsgraph, sd, ob);
 
@@ -5763,8 +5773,10 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
 
   cache->accum = true;
 
-  /* Make copies of the mesh vertex locations and normals for some brushes. */
-  if (brush->stroke_method == BRUSH_STROKE_ANCHORED) {
+  /* Make copies of the mesh vertex locations and normals for some brushes. Curve Patch's
+   * anchor-drag phase needs the same "read original coordinates" behavior as Anchored, since it
+   * is likewise recomputed from scratch every step (see `restore_from_undo_step_if_necessary()`). */
+  if (ELEM(brush->stroke_method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_CURVE_PATCH)) {
     cache->accum = false;
   }
 
@@ -6041,6 +6053,26 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     mask_brush_toggle_off(&sd.paint, ss.cache);
     /* Refresh the brush pointer in case we switched brush in the toggle function. */
     brush = BKE_paint_brush(&sd.paint);
+  }
+
+  if (!is_cancel && stroke_started && brush->stroke_method == BRUSH_STROKE_CURVE_PATCH) {
+    if (ss.bm) {
+      /* Dynamic Topology is explicitly out of scope for Stage 1 (see design doc): live re-stamp
+       * relies on stable vertex indices for `CurvePatchCache::orig_positions`, which dyntopo's
+       * BMesh remeshing can invalidate mid-edit. Fall through to the normal teardown below instead
+       * of starting the modal editor — the anchor stroke's own dab still applied normally, it
+       * just isn't editable afterward. */
+      BKE_report(CTX_wm_reports(this->evil_C),
+                 RPT_WARNING,
+                 "Curve Patch is not supported with Dynamic Topology");
+    }
+    else {
+      /* Hand off to the Curve Patch modal editor: keep `ss.cache` alive (re-stamp needs it, see
+       * Stage 03) and keep the undo transaction opened by `stroke_undo_begin()` open (the
+       * editor's own commit/cancel closes or discards it — see `curve_patch_start_from_anchor()`). */
+      curve_patch_start_from_anchor(*this->depsgraph, ob, sd, *brush, this->vc);
+      return;
+    }
   }
 
   MEM_delete(ss.cache);

@@ -143,7 +143,8 @@ class PaintCurveCursor : Overlay {
     const float2 mval_region = state.cursor_mval_valid ?
                                    float2(state.cursor_mval - origin) :
                                    float2(-1.0e6f);
-    const bool is_curve_stroke = brush->stroke_method == BRUSH_STROKE_CURVE;
+    const bool is_curve_stroke = ELEM(
+        brush->stroke_method, BRUSH_STROKE_CURVE, BRUSH_STROKE_CURVE_PATCH);
     const bool compute_hover = state.cursor_mval_valid && (is_curves_edit || is_curve_stroke) &&
                                state.is_space_v3d() &&
                                !ed::sculpt_paint::ED_paint_curve_slide_is_active();
@@ -152,8 +153,24 @@ class PaintCurveCursor : Overlay {
                                      !ed::sculpt_paint::ED_paint_curve_slide_is_active() &&
                                      (is_curves_edit || is_curve_stroke);
 
-    ed::sculpt_paint::ED_paint_curve_screen_handles_build(
-        vc, *brush, sculpt, mval_region, compute_hover, show_insert_preview, handles_);
+    if (brush->stroke_method == BRUSH_STROKE_CURVE_PATCH) {
+      if (const bke::CurvesGeometry *control_curve =
+              ed::sculpt_paint::ED_paint_curve_patch_active_control_curve(vc.obact))
+      {
+        ed::sculpt_paint::ED_paint_curve_screen_handles_build_from_geometry(vc,
+                                                                            *control_curve,
+                                                                            sculpt,
+                                                                            true,
+                                                                            mval_region,
+                                                                            compute_hover,
+                                                                            show_insert_preview,
+                                                                            handles_);
+      }
+    }
+    else {
+      ed::sculpt_paint::ED_paint_curve_screen_handles_build(
+          vc, *brush, sculpt, mval_region, compute_hover, show_insert_preview, handles_);
+    }
 
     if (is_curves_edit && state.is_space_v3d()) {
       const uint64_t key = ed::sculpt_paint::ED_paint_curve_silhouette_cache_key_hash(vc);

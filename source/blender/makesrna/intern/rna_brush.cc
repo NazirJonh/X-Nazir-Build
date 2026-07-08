@@ -63,6 +63,12 @@ static const EnumPropertyItem sculpt_stroke_method_items[] = {
      0,
      "Curve",
      "Define the stroke curve with a Bézier curve (dabs are separated according to spacing)"},
+    {BRUSH_STROKE_CURVE_PATCH,
+     "CURVE_PATCH",
+     0,
+     "Curve Patch",
+     "Anchor-drag a stroke, then edit an explicit control curve with live preview before "
+     "committing to the mesh"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -73,6 +79,18 @@ static const EnumPropertyItem rna_enum_brush_texture_slot_map_all_mode_items[] =
     {MTEX_MAP_MODE_3D, "3D", 0, "3D", ""},
     {MTEX_MAP_MODE_RANDOM, "RANDOM", 0, "Random", ""},
     {MTEX_MAP_MODE_STENCIL, "STENCIL", 0, "Stencil", ""},
+    {MTEX_MAP_MODE_CURVE_PATCH, "CURVE_PATCH", 0, "Curve Patch",
+     "Project the texture onto the surface following an explicit, user-edited control curve"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_brush_curve_patch_length_mode_items[] = {
+    {MTEX_CURVE_PATCH_LENGTH_DEFAULT, "DEFAULT", 0, "Default",
+     "Fit one texture tile on short curves and tile by brush radius on longer ones"},
+    {MTEX_CURVE_PATCH_LENGTH_REPEAT, "REPEAT", 0, "Repeat",
+     "Repeat the texture a fixed number of times along the curve length"},
+    {MTEX_CURVE_PATCH_LENGTH_STRETCH, "STRETCH", 0, "Stretch",
+     "Stretch a single texture tile across the whole curve length"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1200,6 +1218,30 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Rake", "");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "use_curve_patch_swap_axis", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_curve_patch_swap_axis", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Swap Axis",
+      "Run the texture's U axis along the control curve's length instead of V");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "curve_patch_length_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "curve_patch_length_mode");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_length_mode_items);
+  RNA_def_property_ui_text(
+      prop, "Length Mode", "How the texture is mapped along the control curve's length");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "curve_patch_length_repeat", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "curve_patch_length_repeat");
+  RNA_def_property_range(prop, 1, 64);
+  RNA_def_property_ui_range(prop, 1, 64, 1, -1);
+  RNA_def_property_ui_text(
+      prop, "Repeats", "Number of times the texture repeats along the curve length");
 
   prop = RNA_def_property(srna, "use_random", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "brush_angle_mode", MTEX_ANGLE_RANDOM);

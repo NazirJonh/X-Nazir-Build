@@ -318,6 +318,13 @@ float2 paint_stroke_jitter_pos(Paint *paint,
  */
 bool paint_space_stroke_enabled(const Brush &br, PaintMode mode);
 /**
+ * Computes the overlap-compensation factor used to scale brush strength so that closely spaced
+ * dabs don't over-apply relative to widely spaced ones. Callers store the result in
+ * `Paint::runtime->overlap_factor`, which `brush_strength()` reads for every dab. `factor` scales
+ * `Brush::spacing` before the integration (e.g. `1.0f` for a normal stroke).
+ */
+float paint_stroke_integrate_overlap(const Brush &br, const float factor);
+/**
  * Return true if the brush size can change during paint (normally used for pressure).
  */
 bool paint_supports_dynamic_size(const Brush &br, PaintMode mode);

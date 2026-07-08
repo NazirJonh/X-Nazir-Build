@@ -300,10 +300,6 @@ bool paint_curve_poll(bContext *C)
   return false;
 }
 
-#define SEL_F1 (1 << 0)
-#define SEL_F2 (1 << 1)
-#define SEL_F3 (1 << 2)
-
 /* Find the closest control-point handle in `screen_points` to `pos`.
  * When `ignore_pivot` is true, a click on the pivot (vec[1]) redirects to the nearer handle.
  * Returns the point index, or -1 if none is within `threshold`. Sets `*r_selflag` (SEL_F1/F2/F3). */
@@ -567,6 +563,107 @@ static bool paintcurve_wants_surface_snap(bContext *C, const wmEvent *event)
   return use_snap != ctrl;
 }
 
+void paintcurve_geometry_add_point(bke::CurvesGeometry &geom,
+                                   const float3 &co,
+                                   const bool create_new_spline,
+                                   int &active_curve,
+                                   int &add_index)
+{
+  int global_insert_idx;
+  int add_index_in_spline;
+
+  if (create_new_spline) {
+    active_curve = paintcurve_geometry_add_spline(geom, 1);
+    global_insert_idx = geom.points_num() - 1;
+    add_index_in_spline = 0;
+  }
+  else {
+    const OffsetIndices<int> pbc = geom.points_by_curve();
+    const IndexRange spline_range = pbc[active_curve];
+    add_index_in_spline = std::clamp(add_index, 0, int(spline_range.size()));
+    global_insert_idx = spline_range.start() + add_index_in_spline;
+
+    const int old_total = geom.points_num();
+    geom.resize(old_total + 1, geom.curves_num());
+
+    /* Shift offsets for all splines that come after the active one, and the sentinel.
+     * `resize` with the same curve count skips the sentinel update, so we must do it here. */
+    MutableSpan<int> offsets = geom.offsets_for_write();
+    for (int ci = active_curve + 1; ci <= geom.curves_num(); ci++) {
+      offsets[ci]++;
+    }
+
+    /* Shift point attributes to make room at global_insert_idx. */
+    MutableSpan<float3> positions = geom.positions_for_write();
+    MutableSpan<float3> handles_left = geom.handle_positions_left_for_write();
+    MutableSpan<float3> handles_right = geom.handle_positions_right_for_write();
+    MutableSpan<int8_t> types_left = geom.handle_types_left_for_write();
+    MutableSpan<int8_t> types_right = geom.handle_types_right_for_write();
+    MutableSpan<float> radii = geom.radius_for_write();
+    for (int i = old_total; i > global_insert_idx; i--) {
+      positions[i] = positions[i - 1];
+      handles_left[i] = handles_left[i - 1];
+      handles_right[i] = handles_right[i - 1];
+      types_left[i] = types_left[i - 1];
+      types_right[i] = types_right[i - 1];
+      radii[i] = radii[i - 1];
+    }
+  }
+
+  /* Set new point data. */
+  geom.positions_for_write()[global_insert_idx] = co;
+  geom.handle_positions_left_for_write()[global_insert_idx] = co;
+  geom.handle_positions_right_for_write()[global_insert_idx] = co;
+  MutableSpan<int8_t> types_left = geom.handle_types_left_for_write();
+  MutableSpan<int8_t> types_right = geom.handle_types_right_for_write();
+  types_left[global_insert_idx] = BEZIER_HANDLE_ALIGN;
+  types_right[global_insert_idx] = BEZIER_HANDLE_ALIGN;
+  geom.radius_for_write()[global_insert_idx] = 1.0f;
+
+  /* Preserve junction handle types when extending an existing spline. */
+  if (!create_new_spline) {
+    if (add_index_in_spline > 0) {
+      const int prev_idx = global_insert_idx - 1;
+      types_right[prev_idx] = paintcurve_aligned_or_free_handle_type(types_right[prev_idx]);
+      types_left[global_insert_idx] = BEZIER_HANDLE_ALIGN;
+    }
+    else if (add_index_in_spline == 0) {
+      const OffsetIndices<int> pbc = geom.points_by_curve();
+      if (pbc[active_curve].size() > 1) {
+        const int next_idx = global_insert_idx + 1;
+        types_left[next_idx] = paintcurve_aligned_or_free_handle_type(types_left[next_idx]);
+        types_right[global_insert_idx] = BEZIER_HANDLE_ALIGN;
+      }
+    }
+  }
+
+  /* Clear all selection, then mark the new point's active handle. */
+  paintcurve_geom_set_all_selection(geom, 0);
+  {
+    const OffsetIndices<int> pbc = geom.points_by_curve();
+    const int spline_size = pbc[active_curve].size();
+    uint8_t new_sel;
+    if (add_index_in_spline != 0) {
+      /* Appending — select right handle for next placement. */
+      geom.handle_types_right_for_write()[global_insert_idx] = BEZIER_HANDLE_ALIGN;
+      new_sel = 0x04; /* bit 2 = right handle */
+    }
+    else {
+      /* Prepending — select left handle for next placement. */
+      geom.handle_types_left_for_write()[global_insert_idx] = BEZIER_HANDLE_ALIGN;
+      new_sel = 0x01; /* bit 0 = left handle */
+    }
+    paintcurve_geom_set_selection(geom, global_insert_idx, new_sel);
+
+    /* Advance add_index within the active spline for the next click. */
+    add_index = (add_index_in_spline || spline_size == 1) ? (add_index_in_spline + 1) : 0;
+  }
+
+  geom.calculate_bezier_auto_handles();
+  geom.calculate_bezier_aligned_handles();
+  geom.tag_positions_changed();
+}
+
 static void paintcurve_point_add(bContext *C,
                                  wmOperator *op,
                                  const int loc[2],
@@ -622,106 +719,15 @@ static void paintcurve_point_add(bContext *C,
 
   /* A sentinel value (>= curves_num) means create a new spline on this click. */
   const bool create_new_spline = (pc->active_curve >= curves_num);
-  int active_curve;
-  int global_insert_idx;
-  int add_index_in_spline;
 
   /* Respect the selected endpoint when extending (Curve Edit and Stroke Method: Curve). */
   paintcurve_update_add_index_from_selection(pc, geom);
 
-  if (create_new_spline) {
-    active_curve = paintcurve_geometry_add_spline(geom, 1);
-    pc->active_curve = active_curve;
-    global_insert_idx = geom.points_num() - 1;
-    add_index_in_spline = 0;
-  }
-  else {
-    active_curve = pc->active_curve;
-    const OffsetIndices<int> pbc = geom.points_by_curve();
-    const IndexRange spline_range = pbc[active_curve];
-    add_index_in_spline = std::clamp(pc->add_index, 0, int(spline_range.size()));
-    global_insert_idx = spline_range.start() + add_index_in_spline;
-
-    const int old_total = geom.points_num();
-    geom.resize(old_total + 1, geom.curves_num());
-
-    /* Shift offsets for all splines that come after the active one, and the sentinel.
-     * `resize` with the same curve count skips the sentinel update, so we must do it here. */
-    MutableSpan<int> offsets = geom.offsets_for_write();
-    for (int ci = active_curve + 1; ci <= geom.curves_num(); ci++) {
-      offsets[ci]++;
-    }
-
-    /* Shift point attributes to make room at global_insert_idx. */
-    MutableSpan<float3> positions = geom.positions_for_write();
-    MutableSpan<float3> handles_left = geom.handle_positions_left_for_write();
-    MutableSpan<float3> handles_right = geom.handle_positions_right_for_write();
-    MutableSpan<int8_t> types_left = geom.handle_types_left_for_write();
-    MutableSpan<int8_t> types_right = geom.handle_types_right_for_write();
-    MutableSpan<float> radii = geom.radius_for_write();
-    for (int i = old_total; i > global_insert_idx; i--) {
-      positions[i] = positions[i - 1];
-      handles_left[i] = handles_left[i - 1];
-      handles_right[i] = handles_right[i - 1];
-      types_left[i] = types_left[i - 1];
-      types_right[i] = types_right[i - 1];
-      radii[i] = radii[i - 1];
-    }
-  }
-
-  /* Set new point data. */
-  const float3 co(obj_co);
-  geom.positions_for_write()[global_insert_idx] = co;
-  geom.handle_positions_left_for_write()[global_insert_idx] = co;
-  geom.handle_positions_right_for_write()[global_insert_idx] = co;
-  MutableSpan<int8_t> types_left = geom.handle_types_left_for_write();
-  MutableSpan<int8_t> types_right = geom.handle_types_right_for_write();
-  types_left[global_insert_idx] = BEZIER_HANDLE_ALIGN;
-  types_right[global_insert_idx] = BEZIER_HANDLE_ALIGN;
-  geom.radius_for_write()[global_insert_idx] = 1.0f;
-
-  /* Preserve junction handle types when extending an existing spline. */
-  if (!create_new_spline) {
-    if (add_index_in_spline > 0) {
-      const int prev_idx = global_insert_idx - 1;
-      types_right[prev_idx] = paintcurve_aligned_or_free_handle_type(types_right[prev_idx]);
-      types_left[global_insert_idx] = BEZIER_HANDLE_ALIGN;
-    }
-    else if (add_index_in_spline == 0) {
-      const OffsetIndices<int> pbc = geom.points_by_curve();
-      if (pbc[active_curve].size() > 1) {
-        const int next_idx = global_insert_idx + 1;
-        types_left[next_idx] = paintcurve_aligned_or_free_handle_type(types_left[next_idx]);
-        types_right[global_insert_idx] = BEZIER_HANDLE_ALIGN;
-      }
-    }
-  }
-
-  /* Clear all selection, then mark the new point's active handle. */
-  paintcurve_geom_set_all_selection(geom, 0);
-  {
-    const OffsetIndices<int> pbc = geom.points_by_curve();
-    const int spline_size = pbc[active_curve].size();
-    uint8_t new_sel;
-    if (add_index_in_spline != 0) {
-      /* Appending — select right handle for next placement. */
-      geom.handle_types_right_for_write()[global_insert_idx] = BEZIER_HANDLE_ALIGN;
-      new_sel = 0x04; /* bit 2 = right handle */
-    }
-    else {
-      /* Prepending — select left handle for next placement. */
-      geom.handle_types_left_for_write()[global_insert_idx] = BEZIER_HANDLE_ALIGN;
-      new_sel = 0x01; /* bit 0 = left handle */
-    }
-    paintcurve_geom_set_selection(geom, global_insert_idx, new_sel);
-
-    /* Advance add_index within the active spline for the next click. */
-    pc->add_index = (add_index_in_spline || spline_size == 1) ? (add_index_in_spline + 1) : 0;
-  }
-
-  geom.calculate_bezier_auto_handles();
-  geom.calculate_bezier_aligned_handles();
-  geom.tag_positions_changed();
+  int active_curve = pc->active_curve;
+  int add_index = pc->add_index;
+  paintcurve_geometry_add_point(geom, float3(obj_co), create_new_spline, active_curve, add_index);
+  pc->active_curve = active_curve;
+  pc->add_index = add_index;
 
   if (pc->use_3d_space) {
     paintcurve_sync_to_source_if_3d(C, pc);
@@ -1499,15 +1505,14 @@ static void paintcurve_remove_handle_movement_constraints(int8_t &type_left,
   }
 }
 
-static void paintcurve_apply_segment_move_3d(bke::CurvesGeometry &geom,
-                                             PaintCurve * /*pc*/,
-                                             const int point_i1,
-                                             const int point_i2,
-                                             const float segment_t,
-                                             const ViewContext *vc,
-                                             const float world_to_ob[4][4],
-                                             const float mval[2],
-                                             const float depth_world[3])
+void paintcurve_apply_segment_move_3d(bke::CurvesGeometry &geom,
+                                      const int point_i1,
+                                      const int point_i2,
+                                      const float segment_t,
+                                      const ViewContext *vc,
+                                      const float world_to_ob[4][4],
+                                      const float mval[2],
+                                      const float depth_world[3])
 {
   MutableSpan<float3> positions = geom.positions_for_write();
   MutableSpan<int8_t> types_left = geom.handle_types_left_for_write();
@@ -1607,24 +1612,12 @@ static void paintcurve_apply_segment_move_2d(bke::CurvesGeometry &geom,
   geom.calculate_bezier_aligned_handles();
 }
 
-static bool paintcurve_insert_point_at_segment(
-    bContext *C, wmOperator *op, PaintCurve *pc, const int segment_index, const float edge_t)
+int paintcurve_geometry_insert_point_at_segment(bke::CurvesGeometry &geom,
+                                                const int segment_index,
+                                                const int segment_index_next,
+                                                const int active_curve,
+                                                const float edge_t)
 {
-  bke::CurvesGeometry &geom = pc->geometry.wrap();
-  if (!paintcurve_geometry_is_valid(geom)) {
-    return false;
-  }
-
-  int segment_index_next = -1;
-  paintcurve_foreach_bezier_segment(pc, [&](const int point_a, const int point_b) {
-    if (point_a == segment_index) {
-      segment_index_next = point_b;
-    }
-  });
-  if (segment_index < 0 || segment_index_next < 0) {
-    return false;
-  }
-
   const int point_i2 = segment_index_next;
   const int old_tot = geom.points_num();
   const int insert_index = segment_index + 1;
@@ -1637,7 +1630,7 @@ static bool paintcurve_insert_point_at_segment(
   const std::optional<Span<float3>> handles_right_opt = geom.handle_positions_right();
   const std::optional<Span<float3>> handles_left_opt = geom.handle_positions_left();
   if (!handles_right_opt.has_value() || !handles_left_opt.has_value()) {
-    return false;
+    return -1;
   }
   const bke::curves::bezier::Insertion inserted = bke::curves::bezier::insert(
       geom.positions()[segment_index],
@@ -1647,13 +1640,6 @@ static bool paintcurve_insert_point_at_segment(
       edge_t);
   const float radius_a = geom.radius_for_write()[segment_index];
   const float radius_b = geom.radius_for_write()[point_i2];
-
-  const int active_curve = paintcurve_curve_of_point(pc, segment_index);
-  if (active_curve < 0) {
-    return false;
-  }
-
-  ED_paintcurve_undo_push_begin(C, op->type->name);
 
   geom.resize(old_tot + 1, geom.curves_num());
 
@@ -1709,6 +1695,48 @@ static bool paintcurve_insert_point_at_segment(
 
   paintcurve_geom_set_all_selection(geom, 0);
   paintcurve_geom_set_selection(geom, insert_index, 0x02);
+
+  return insert_index;
+}
+
+static bool paintcurve_insert_point_at_segment(
+    bContext *C, wmOperator *op, PaintCurve *pc, const int segment_index, const float edge_t)
+{
+  bke::CurvesGeometry &geom = pc->geometry.wrap();
+  if (!paintcurve_geometry_is_valid(geom)) {
+    return false;
+  }
+
+  int segment_index_next = -1;
+  paintcurve_foreach_bezier_segment(pc, [&](const int point_a, const int point_b) {
+    if (point_a == segment_index) {
+      segment_index_next = point_b;
+    }
+  });
+  if (segment_index < 0 || segment_index_next < 0) {
+    return false;
+  }
+
+  /* Mirror the core's own handles-presence guard here so a failure never triggers an undo push,
+   * matching this function's original early-out ordering (before #ED_paintcurve_undo_push_begin). */
+  if (!geom.handle_positions_right().has_value() || !geom.handle_positions_left().has_value()) {
+    return false;
+  }
+
+  const int active_curve = paintcurve_curve_of_point(pc, segment_index);
+  if (active_curve < 0) {
+    return false;
+  }
+
+  ED_paintcurve_undo_push_begin(C, op->type->name);
+
+  const int insert_index = paintcurve_geometry_insert_point_at_segment(
+      geom, segment_index, segment_index_next, active_curve, edge_t);
+  /* The handles-presence guard above already mirrors the core's own -- `insert_index` should never
+   * be the core's `-1` failure sentinel here; assert rather than silently corrupt `add_index` if
+   * the two guards are ever changed independently of each other. */
+  BLI_assert(insert_index >= 0);
+
   pc->active_curve = active_curve;
   {
     const OffsetIndices<int> pbc = geom.points_by_curve();
@@ -2431,7 +2459,6 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
             mul_v3_m4v3(depth_world, psd->ob_to_world, depth_point);
           }
           paintcurve_apply_segment_move_3d(geom,
-                                             pc,
                                              psd->segment_index,
                                              psd->segment_index_next,
                                              psd->segment_t,

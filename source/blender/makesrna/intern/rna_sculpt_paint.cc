@@ -1353,6 +1353,17 @@ static void rna_def_sculpt(BlenderRNA *brna)
       "shared pivot, instead of only the active object");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
+  prop = RNA_def_property(srna, "transform_origin_correct", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "transform_origin_correct", false);
+  RNA_def_property_boolean_default(prop, false);
+  RNA_def_property_ui_text(
+      prop,
+      "Correct Origin",
+      "Move non-active objects' own origin together with their mesh, like an Object Mode "
+      "transform, instead of leaving it in place. Only applies with \"Affect All Objects\" "
+      "enabled and Transform Mode set to \"All Vertices\"");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
   prop = RNA_def_property(srna, "gravity_object", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(

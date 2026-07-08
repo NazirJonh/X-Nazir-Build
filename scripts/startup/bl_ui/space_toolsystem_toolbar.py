@@ -314,8 +314,13 @@ class _defs_transform:
     def draw_transform_sculpt_tool_settings(context, layout):
         if context.mode != 'SCULPT':
             return
-        layout.prop(context.tool_settings.sculpt, "transform_mode")
-        layout.prop(context.tool_settings.sculpt, "transform_all_objects", text="Affect All Objects")
+        sculpt = context.tool_settings.sculpt
+        layout.prop(sculpt, "transform_mode")
+        if len(context.objects_in_mode) > 1:
+            layout.prop(sculpt, "transform_all_objects", text="Affect All Objects")
+            row = layout.row()
+            row.enabled = sculpt.transform_all_objects
+            row.prop(sculpt, "transform_origin_correct", text="Correct Origin")
 
     @ToolDef.from_fn
     def translate():

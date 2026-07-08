@@ -36,6 +36,7 @@
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_memory_counter.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_task.h"
@@ -263,6 +264,14 @@ struct StepData {
 
   float3 pivot_pos;
   float4 pivot_rot;
+
+  /** Origin Correct: snapshot of a rigid-body secondary object's #Object::object_to_world() at
+   * session start, used for both mid-session cancel (#restore_object_transform_from_undo_step,
+   * read-only) and the Ctrl+Z stack-level undo/redo swap (#restore_list_object). Unused (\a
+   * has_object_transform stays false) for the active object and for any secondary object that
+   * was not being origin-corrected when the session started. */
+  float4x4 object_transform = float4x4::identity();
+  bool has_object_transform = false;
 
   /* Geometry modification operations. */
   /* Original geometry is stored before the modification and is restored from when undoing. */
@@ -1270,6 +1279,19 @@ static void restore_list_object(bContext *C,
   ss.pivot_pos = step_data.pivot_pos;
   ss.pivot_rot = step_data.pivot_rot;
 
+  /* Origin Correct: swap the rigid-body secondary's object matrix with the snapshot, same pattern
+   * as the position swap below (#restore_position_mesh's #swap_indexed_data) -- applying the
+   * stored matrix and storing the object's pre-restore matrix back means the NEXT call (the
+   * opposite undo/redo direction) swaps back correctly. Runs unconditionally on
+   * #has_object_transform, independent of #step_data.type/#nodes, since a pure rigid-body
+   * secondary never has mesh undo nodes pushed for it at all. */
+  if (step_data.has_object_transform) {
+    const float4x4 to_restore = step_data.object_transform;
+    step_data.object_transform = object.object_to_world();
+    BKE_object_apply_mat4(&object, to_restore.ptr(), false, true);
+    DEG_id_tag_update(&object.id, ID_RECALC_TRANSFORM);
+  }
+
   if (bmesh_restore(C, *depsgraph, step_data, object)) {
     return;
   }
@@ -2271,6 +2293,36 @@ void push_begin_add_object(Object &ob)
     return;
   }
   save_step_topology_data(ob, us);
+}
+
+void set_object_transform_snapshot(Object &ob)
+{
+  StepData *step_data = get_step_data(ob);
+  if (!step_data) {
+    return;
+  }
+  step_data->object_transform = ob.object_to_world();
+  step_data->has_object_transform = true;
+}
+
+void restore_object_transform_from_undo_step(Object &ob)
+{
+  StepData *step_data = get_step_data(ob);
+  if (!step_data || !step_data->has_object_transform) {
+    return;
+  }
+  BKE_object_apply_mat4(&ob, step_data->object_transform.ptr(), false, true);
+  DEG_id_tag_update(&ob.id, ID_RECALC_TRANSFORM);
+}
+
+bool get_object_transform_snapshot(const Object &ob, float4x4 &r_transform)
+{
+  StepData *step_data = get_step_data(ob);
+  if (!step_data || !step_data->has_object_transform) {
+    return false;
+  }
+  r_transform = step_data->object_transform;
+  return true;
 }
 
 void push_begin(const Scene &scene, Object &ob, const wmOperator *op)

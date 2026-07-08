@@ -59,8 +59,8 @@ void keymap_sculpt(wmKeyConfig *keyconf);
 
 /* `sculpt_transform.cc` */
 
-void update_modal_transform(bContext *C, Object &ob);
-void cancel_modal_transform(bContext *C, Object &ob);
+void update_modal_transform(bContext *C, Object &ob, bool is_active);
+void cancel_modal_transform(bContext *C, Object &ob, bool is_active);
 void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char *undo_name);
 /** Like #init_transform, but adds \a ob to an already-open multi-object undo step (see
  * #undo::push_begin_add_object) instead of opening a new one. */

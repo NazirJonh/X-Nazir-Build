@@ -181,11 +181,12 @@ static void recalcData_sculpt(TransInfo *t)
 
   const Vector<Object *> objects = sculpt_transform_objects(t->context, active_ob);
   for (Object *ob : objects) {
+    const bool is_active = (ob == &active_ob);
     if (t->state == TRANS_CANCEL) {
-      sculpt_paint::cancel_modal_transform(t->context, *ob);
+      sculpt_paint::cancel_modal_transform(t->context, *ob, is_active);
     }
     else {
-      sculpt_paint::update_modal_transform(t->context, *ob);
+      sculpt_paint::update_modal_transform(t->context, *ob, is_active);
     }
   }
 }

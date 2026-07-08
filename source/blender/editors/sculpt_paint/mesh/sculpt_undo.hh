@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include "BLI_index_mask_fwd.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
@@ -114,6 +115,34 @@ void restore_from_bmesh_enter_geometry(const StepData &step_data, Mesh &mesh);
 bool has_bmesh_log_entry(const Object &ob);
 
 void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object);
+
+/**
+ * Snapshot \a ob's current #Object::object_to_world() into the currently-open sculpt undo step
+ * (the one opened by #push_begin_ex/#push_begin_add_object), so a later Ctrl+Z can restore it.
+ * Used by Origin Correct: a rigid-body secondary object's own matrix, not its mesh, is what needs
+ * undo coverage. A no-op if no step is currently pending (mirrors #push_begin_add_object's own
+ * guard).
+ */
+void set_object_transform_snapshot(Object &ob);
+
+/**
+ * Re-apply \a ob's object-transform snapshot captured by #set_object_transform_snapshot, WITHOUT
+ * consuming/swapping it (unlike the Ctrl+Z stack-level restore in `restore_list_object`) -- safe to
+ * call repeatedly mid-session. Used by #cancel_modal_transform to revert a rigid-body secondary to
+ * its pre-session matrix. A no-op if no snapshot was captured for \a ob.
+ */
+void restore_object_transform_from_undo_step(Object &ob);
+
+/**
+ * Read (without consuming or mutating) the object-transform snapshot captured by
+ * #set_object_transform_snapshot for \a ob, if one exists in the currently-open undo step.
+ * Unlike #restore_object_transform_from_undo_step, this never touches \a ob itself -- used by a
+ * rigid-body Origin Correct secondary's per-step math, which needs the FIXED session-start matrix
+ * as a value to compute with, not applied to the object (that happens separately via
+ * #BKE_object_apply_mat4). Returns false (leaving \a r_transform untouched) if no snapshot was
+ * captured for \a ob.
+ */
+bool get_object_transform_snapshot(const Object &ob, float4x4 &r_transform);
 
 /* -------------------------------------------------------------------- */
 /** \name Multi-object ("global") sculpt undo helpers

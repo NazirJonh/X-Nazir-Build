@@ -1499,7 +1499,13 @@ struct Sculpt {
    * Sculpt Mode around one shared world-space pivot, instead of only the active object.
    * Independent of #multi_object_edit_scope, which only governs brush strokes and other tools. */
   int8_t transform_all_objects = 0;
-  char _pad0[3] = {};
+  /** When enabled (and #transform_all_objects is also on), non-active objects in a Transform
+   * session move as rigid bodies -- their own #Object matrix follows the shared pivot delta
+   * instead of their mesh vertices being deformed -- keeping their origin attached to whatever
+   * point on the group it started coincident with. Only takes effect in
+   * #SCULPT_TRANSFORM_MODE_ALL_VERTICES; a no-op in #SCULPT_TRANSFORM_MODE_RADIUS_ELASTIC. */
+  int8_t transform_origin_correct = 0;
+  char _pad0[2] = {};
 
   /** Deprecated. \see MeshAutomaskingSettings */
   DNA_DEPRECATED int automasking_flags = 0;

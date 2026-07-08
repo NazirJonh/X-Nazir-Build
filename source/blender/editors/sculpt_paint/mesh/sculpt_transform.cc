@@ -1143,16 +1143,43 @@ static wmOperatorStatus set_pivot_position_exec(bContext *C, wmOperator *op)
     case PivotPositionMode::ActiveVert: {
       const float2 mval(RNA_float_get(op->ptr, "mouse_x"), RNA_float_get(op->ptr, "mouse_y"));
       CursorGeometryInfo cgi;
-      if (cursor_geometry_info_update(C, &cgi, mval, false)) {
-        ss.pivot_pos = ss.active_vert_position(*depsgraph, ob);
+      Object *hit_ob = nullptr;
+      if (cursor_geometry_info_update(C, &cgi, mval, false, &hit_ob)) {
+        /* The cursor may be over a DIFFERENT sculpt-mode object than the active one --
+         * #cursor_geometry_info_update already searches every selected object. Whichever
+         * object was hit owns the active-vertex state read below, so its position must be
+         * looked up (and converted) from THAT object, not silently reused as if it were the
+         * active object's own local-space position (see #ED_sculpt.hh's #pivot_pos doc: the
+         * shared pivot is always stored in the ACTIVE object's local space). */
+        Object &vert_ob = hit_ob ? *hit_ob : ob;
+        const SculptSession &vert_ss = *vert_ob.runtime->sculpt_session;
+        const float3 world_location = math::transform_point(
+            vert_ob.object_to_world(), vert_ss.active_vert_position(*depsgraph, vert_ob));
+        ss.pivot_pos = math::transform_point(ob.world_to_object(), world_location);
       }
       break;
     }
     case PivotPositionMode::CursorSurface: {
       const float2 mval(RNA_float_get(op->ptr, "mouse_x"), RNA_float_get(op->ptr, "mouse_y"));
+      ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+      const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
+      const Brush *brush = BKE_paint_brush(BKE_paint_get_active_from_context(C));
+      Object *hit_ob = nullptr;
       float3 stroke_location;
-      if (stroke_get_location_bvh(C, stroke_location, mval, false)) {
-        ss.pivot_pos = stroke_location;
+      if (stroke_get_location_bvh(
+              *depsgraph, vc, &sd, brush, stroke_location, mval, false, &hit_ob))
+      {
+        /* #stroke_get_location_bvh searches every sculpt-mode object and returns the surface
+         * point of WHICHEVER one is actually closest to the viewer under the cursor, in THAT
+         * object's own local space -- it does not have to be the active object. Storing it
+         * straight into `ss.pivot_pos` (the active object's local pivot) without converting
+         * first silently misinterpreted a foreign object's local coordinates as the active
+         * object's own, placing the pivot at the wrong point whenever the cursor was over a
+         * non-active mesh. Route it through world space instead. */
+        Object &hit_object = hit_ob ? *hit_ob : ob;
+        const float3 world_location = math::transform_point(hit_object.object_to_world(),
+                                                             stroke_location);
+        ss.pivot_pos = math::transform_point(ob.world_to_object(), world_location);
       }
       break;
     }

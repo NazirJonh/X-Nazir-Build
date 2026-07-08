@@ -508,10 +508,18 @@ static bool object_transfer_mode_to_base(bContext *C,
   if (mode_dst == OB_MODE_SCULPT) {
     BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
     Base *base_dst = BKE_view_layer_base_find(view_layer, ob_dst);
-    if (base_dst && (base_dst->flag & BASE_SELECTED) && (ob_dst->mode & OB_MODE_SCULPT)) {
-      /* The target is already part of the current multi-object sculpt group (selected AND
-       * sculpting) -- no mode transition is needed. Only retarget the active object; every
-       * other group member's selection and mode stay untouched, so multi-object tools keep
+    if (base_dst && (ob_dst->mode & OB_MODE_SCULPT)) {
+      /* The target is already part of the current multi-object sculpt group (its own #Object.mode
+       * is already Sculpt) -- no mode transition is needed, regardless of whether it currently
+       * happens to be SELECTED in the Outliner: a group member's selection can be toggled off
+       * independently of its mode (e.g. Ctrl-click to deselect a row) while it stays fully
+       * sculpting. Requiring #BASE_SELECTED here used to fall through to the legacy path below
+       * for that exact case -- #mode_set_ex(OB_MODE_OBJECT) there calls
+       * #SCULPT_OT_sculptmode_toggle's exec, which on exit walks EVERY object in the view layer
+       * currently in Sculpt Mode and exits all of them (see `sculpt_mode_toggle_exec`), not just
+       * the source object -- collapsing the entire multi-object group down to whichever single
+       * object ends up selected afterwards. Only retarget (and select) the active object here;
+       * every other group member's selection and mode stay untouched, so multi-object tools keep
        * seeing the whole group.
        *
        * Wrapped in an undo group like the mode-transfer path below: #ED_undo_push commits
@@ -519,6 +527,7 @@ static bool object_transfer_mode_to_base(bContext *C,
        * the mode-transfer path) does not itself call #mode_set_ex first to guarantee that slot
        * is in a pushable state. */
       ED_undo_group_begin(C);
+      base_select(base_dst, BA_SELECT);
       base_activate(C, base_dst);
       ED_undo_push(C, "Change Active");
       if (RNA_boolean_get(op->ptr, "use_flash_on_transfer")) {

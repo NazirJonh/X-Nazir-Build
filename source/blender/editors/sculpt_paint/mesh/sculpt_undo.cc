@@ -642,10 +642,22 @@ static bool use_multires_undo(const StepData &step_data, const SculptSession &ss
   return step_data.grids.grids_num != 0 && ss.subdiv_ccg != nullptr;
 }
 
-static bool topology_matches(const StepData &step_data, const Object &object)
+static bool topology_matches(const StepData &step_data,
+                             const Object &object,
+                             const bke::pbvh::Tree &pbvh)
 {
   const SculptSession &ss = *object.runtime->sculpt_session;
-  if (use_multires_undo(step_data, ss)) {
+  const bool multires_undo_step = use_multires_undo(step_data, ss);
+  /* #BKE_sculpt_update_object_for_edit (called just before this) may have refreshed
+   * #SculptSession::subdiv_ccg (e.g. a multires modifier's grids becoming available or
+   * unavailable), which can change what #use_multires_undo() returns compared to when
+   * #pbvh's type was last determined. Re-check here, right before the caller dispatches to
+   * #pbvh.nodes<GridsNode>() or #pbvh.nodes<MeshNode>(), to avoid requesting the wrong node
+   * type and crashing. See #131478. */
+  if (multires_undo_step != (pbvh.type() == bke::pbvh::Type::Grids)) {
+    return false;
+  }
+  if (multires_undo_step) {
     const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
     return subdiv_ccg.grids_num == step_data.grids.grids_num &&
            subdiv_ccg.grid_size == step_data.grids.grid_size;
@@ -1295,7 +1307,7 @@ static void restore_list_object(bContext *C,
       const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
       BKE_sculpt_update_object_for_edit(depsgraph, &object, false);
-      if (!topology_matches(step_data, object)) {
+      if (!topology_matches(step_data, object, pbvh)) {
         return;
       }
 
@@ -1356,7 +1368,7 @@ static void restore_list_object(bContext *C,
       const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
       BKE_sculpt_update_object_for_edit(depsgraph, &object, false);
-      if (!topology_matches(step_data, object)) {
+      if (!topology_matches(step_data, object, pbvh)) {
         return;
       }
 
@@ -1403,7 +1415,7 @@ static void restore_list_object(bContext *C,
       const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
       BKE_sculpt_update_object_for_edit(depsgraph, &object, false);
-      if (!topology_matches(step_data, object)) {
+      if (!topology_matches(step_data, object, pbvh)) {
         return;
       }
 
@@ -1447,7 +1459,7 @@ static void restore_list_object(bContext *C,
       const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
       BKE_sculpt_update_object_for_edit(depsgraph, &object, false);
-      if (!topology_matches(step_data, object)) {
+      if (!topology_matches(step_data, object, pbvh)) {
         return;
       }
 
@@ -1489,7 +1501,7 @@ static void restore_list_object(bContext *C,
       const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
       BKE_sculpt_update_object_for_edit(depsgraph, &object, false);
-      if (!topology_matches(step_data, object)) {
+      if (!topology_matches(step_data, object, pbvh)) {
         return;
       }
 
@@ -1529,7 +1541,7 @@ static void restore_list_object(bContext *C,
       const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
       BKE_sculpt_update_object_for_edit(depsgraph, &object, false);
-      if (!topology_matches(step_data, object)) {
+      if (!topology_matches(step_data, object, pbvh)) {
         return;
       }
 

@@ -95,6 +95,7 @@
 #include "sculpt_hide.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_islands.hh"
+#include "sculpt_multi_object.hh"
 #include "sculpt_pose.hh"
 #include "sculpt_undo.hh"
 
@@ -4883,15 +4884,7 @@ static float brush_dynamic_size_get(const Brush &brush,
   }
 }
 
-/* In these brushes the grab delta is calculated always from the initial stroke location, which is
- * generally used to create grab deformations.
- *
- * The classification itself lives in #Brush.drag_kind (declarative, single source of truth kept
- * in sync by #BKE_brush_drag_kind_update from #Brush.sculpt_brush_type / #stroke_method /
- * #cloth_deform_type) instead of the two parallel `ELEM` lists this function and
- * #need_delta_for_tip_orientation used to duplicate -- see
- * `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 3.5. */
-static bool need_delta_from_anchored_origin(const Brush &brush)
+bool need_delta_from_anchored_origin(const Brush &brush)
 {
   return brush.drag_kind == BRUSH_DRAG_KIND_ANCHORED_ORIGIN;
 }
@@ -6035,261 +6028,7 @@ class ScopedStrokeObjectOverride {
   ScopedStrokeObjectOverride &operator=(ScopedStrokeObjectOverride &&) = delete;
 };
 
-/**
- * Snapshot of the primary object's per-stroke fields that are LAZILY allocated inside the brush
- * action (density_seed in #do_paint_brush_action / #do_blur_brush_action, painted_face_set_id in
- * #do_draw_face_sets_brush) and would otherwise be re-allocated per secondary, producing a
- * divergent value between meshes for what should be one joined stroke.
- *
- * Captured immediately after the primary object's brush action runs and mirrored onto every
- * secondary BEFORE its brush action via #propagate_shared_stroke_state. After this propagation
- * the secondaries' brush actions skip their own lazy allocation.
- *
- * \note This is the only remaining "shared per-stroke state" propagation split between primary
- *       and secondary (needs the primary processed first, see #update_step's swap). The other
- *       per-object-cache shared fields are pure-copy from the framework every step, order
- *       independent -- see #propagate_shared_sampling_and_symmetry_state. Two fields are
- *       deliberately NOT unified here: `toggle_settings` (stroke-init only, captured once in
- *       #stroke_cache_init) and #area_texture_frame_to_world / #area_texture_frame_valid (in
- *       #calc_brush_area_texture_mat, kept lazy because the right value depends on the
- *       secondary's own curvature check). See
- *       `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 3.1.
- */
-struct SharedStrokeStateSnapshot {
-  /* `std::nullopt` => primary had not yet set a seed at capture time (kept as-is; the secondary
-   * would then lazy-allocate one, which is acceptable as every secondary needs SOME seed). */
-  std::optional<float> density_seed;
-  /* `face_set_none_id` => primary had not yet allocated a paint face-set id at capture time.
-   * The secondary will allocate one itself; this case should not normally happen during the
-   * first stroke step if the brush is engaged, but is allowed for completeness. */
-  int painted_face_set_id = face_set_none_id;
-};
-
-SharedStrokeStateSnapshot capture_shared_stroke_state(const Object &primary_ob)
-{
-  SharedStrokeStateSnapshot result;
-  const SculptSession *ss = primary_ob.runtime->sculpt_session;
-  if (ss && ss->cache) {
-    result.density_seed = ss->cache->paint_brush.density_seed;
-    result.painted_face_set_id = ss->cache->paint_face_set;
-  }
-  return result;
-}
-
-void propagate_shared_stroke_state(Object &secondary_ob, const SharedStrokeStateSnapshot &primary_state)
-{
-  SculptSession *ss = secondary_ob.runtime->sculpt_session;
-  if (!ss || !ss->cache) {
-    return;
-  }
-  StrokeCache *cache = ss->cache;
-  if (primary_state.density_seed && !cache->paint_brush.density_seed) {
-    cache->paint_brush.density_seed = *primary_state.density_seed;
-  }
-  if (primary_state.painted_face_set_id != face_set_none_id &&
-      cache->paint_face_set == face_set_none_id)
-  {
-    cache->paint_face_set = primary_state.painted_face_set_id;
-  }
-}
-
-/**
- * Publishes the shared multi-object surface-sampling context and the shared-symmetry
- * reference-space transforms onto every object's #StrokeCache for this stroke step (Container B
- * of the shared-per-stroke state; see #SharedStrokeStateSnapshot's doc-comment for how this
- * relates to Container C). Unlike Container C, every field written here is a pure function of
- * `mode_objects`/`sample_objects`/`primary_ob`/`symm_reference_ob` -- none of it is read back from
- * a lazily-populated cache, so the write order across `mode_objects` does not matter (this is
- * called once per #update_step, before the primary-first loop below it that Container C's ordering
- * invariant applies to).
- *
- * Pure extraction of the previous inline loop -- no behavior change. See
- * `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 3.1.
- */
-void propagate_shared_sampling_and_symmetry_state(const Span<Object *> mode_objects,
-                                                  const Span<Object *> sample_objects,
-                                                  Object *primary_ob,
-                                                  Object *symm_reference_ob,
-                                                  const bool shared_symmetry_active)
-{
-  for (Object *object_ptr : mode_objects) {
-    SculptSession *ss_iter = object_ptr->runtime->sculpt_session;
-    if (!ss_iter || !ss_iter->cache) {
-      continue;
-    }
-
-    /* Shared multi-object surface-sampling context, so the area/plane sampling helpers
-     * (#calc_area_normal, #calc_area_center, #calc_area_normal_and_center) can pool vertices
-     * across all meshes in the reference object's space (joined-mesh parity). Disabled (empty
-     * span) for single-object strokes. */
-    ss_iter->cache->multi_object_sample_objects = sample_objects;
-    ss_iter->cache->multi_object_sample_reference = sample_objects.is_empty() ? nullptr :
-                                                                                primary_ob;
-
-    /* 3D brush textures must be sampled in one shared space (the primary object's local space) to
-     * match a joined mesh. Identity keeps the single-object path bit-exact. */
-    if (sample_objects.is_empty() || object_ptr == primary_ob) {
-      ss_iter->cache->texture_sample_from_object = float4x4::identity();
-    }
-    else {
-      ss_iter->cache->texture_sample_from_object = primary_ob->world_to_object() *
-                                                   object_ptr->object_to_world();
-    }
-
-    /* The reference (active) object defines the shared symmetry plane (position, orientation) and
-     * supplies the symmetry AXES for every mesh in a multi-object stroke, so all meshes mirror
-     * consistently across the same world-space plane even when they have different, possibly
-     * unapplied, transforms and even when a non-active mesh has no #Mesh.symmetry of its own (the
-     * header X/Y/Z toggles only set it on the active mesh). Null for single-object strokes, where
-     * symmetry collapses to this object's own local plane, staying bit-exact. */
-    ss_iter->cache->symm_reference_object = !sample_objects.is_empty() ? symm_reference_ob :
-                                                                         nullptr;
-    /* Reference-space transforms for the shared symmetry plane (see #StrokeCache). Identity for
-     * the reference (active) object itself and for single-object strokes. */
-    if (!shared_symmetry_active || object_ptr == symm_reference_ob) {
-      ss_iter->cache->symm_ref_from_cur = float4x4::identity();
-      ss_iter->cache->symm_cur_from_ref = float4x4::identity();
-      ss_iter->cache->symm_shared_origin_active = false;
-    }
-    else {
-      ss_iter->cache->symm_ref_from_cur = symm_reference_ob->world_to_object() *
-                                          object_ptr->object_to_world();
-      ss_iter->cache->symm_cur_from_ref = object_ptr->world_to_object() *
-                                          symm_reference_ob->object_to_world();
-      ss_iter->cache->symm_shared_origin_active = true;
-    }
-  }
-}
-
 }  // namespace detail
-
-/**
- * Multi-object ("global") sculpt stroke state that has exactly one value per STROKE, not one per
- * object -- "Container A" of the shared-per-stroke state model
- * (Architecture_Refactoring_Analysis.md 3.1). Bundled into its own type (previously loose fields
- * directly on #SculptPaintStroke) so this state has one discoverable home, and the points in the
- * multi-object stroke lifecycle that touch it -- resolving the primary object, propagating shared
- * state to every object's cache, and deciding whether/where a secondary object is touched this
- * step -- are named methods instead of inline blocks in #SculptPaintStroke::update_step. Pure
- * reorganization: every field keeps its previous semantics and set-once-per-step call site
- * unchanged, just renamed/regrouped -- no behavior change (see this file's revision history for
- * the anisotropic-scale / rake-mirroring / shared-symmetry rounds this code has been through;
- * this refactor deliberately does not touch any of that math).
- *
- * \note #propagate_shared_state only covers Container B
- *       (#detail::propagate_shared_sampling_and_symmetry_state, order-independent across
- *       #mode_objects). Container C (#detail::SharedStrokeStateSnapshot) is NOT covered here: it
- *       is captured from the primary's #StrokeCache only after the primary's brush action has run
- *       (the value is lazily brush-allocated), so it cannot be resolved up front alongside
- *       Containers A/B -- it stays a separate step inside #update_step's Phase 2 loop, gated on
- *       the primary having been swapped to the front of the per-step object list (unrelated to
- *       this struct).
- */
-struct MultiObjectStrokeContext {
-  /* Objects in sculpt mode for the duration of this stroke. The membership is stable while a
-   * stroke is modal, so it is captured once in #SculptPaintStroke::test_start instead of
-   * re-querying the view layer (which allocates a vector and iterates every object base) on every
-   * event. */
-  Vector<Object *> mode_objects;
-
-  /* -- Recomputed every #update_step, by #resolve_primary / #propagate_shared_state below -- */
-
-  /* The object under the cursor for tracking brushes, or the pinned #anchored_primary_object for
-   * anchored-origin drag brushes. See #resolve_primary. */
-  Object *primary_object = nullptr;
-  /* The object a #Join would merge everything into -- #mode_objects[0], i.e. the ACTIVE object,
-   * NOT #primary_object (the object under the cursor) -- fixed reference frame for the shared
-   * symmetry plane so it does not follow the cursor between meshes. Null for single-object
-   * strokes. */
-  Object *symm_reference_object = nullptr;
-  /* True only for multi-object strokes with a resolved #symm_reference_object. */
-  bool shared_symmetry_active = false;
-
-  /* Shared world-space brush state, recomputed every #update_step from the primary object in
-   * #brush_delta_update.
-   *
-   * Anchored-origin brushes (Grab, Pose, Boundary, Thumb, Elastic Deform, Cloth-grab) lock a single
-   * world-space anchor at stroke start and accumulate a single world-space delta. The primary
-   * (under-cursor) object computes these in #brush_delta_update; secondary objects then derive their
-   * own local grab state from them, so the whole mode deforms like one joined mesh instead of each
-   * object recomputing an inconsistent per-object delta. */
-  bool world_grab_state_valid = false;
-  float3 world_grab_anchor = float3(0.0f);
-  float3 world_grab_delta = float3(0.0f);
-  /* World-space rake rotation of the primary object for the current step; mirrored onto secondary
-   * objects in #brush_delta_update. Unset when the brush has no rake or none was computed yet. */
-  std::optional<math::Quaternion> world_rake_rotation;
-
-  /* Reference object for anchored-origin drag brushes (Grab, Pose, Boundary, Thumb, Elastic Deform,
-   * Cloth-grab). These brushes accumulate the grab delta on a single object across the whole stroke,
-   * so the primary must stay fixed even when the paint-stroke framework switches
-   * #SculptPaintStroke::object to a different mesh under the cursor mid-drag. Captured on the first
-   * #update_step; nullptr means not yet captured or the brush is not anchored-origin. */
-  Object *anchored_primary_object = nullptr;
-
-  /**
-   * #update_step Phase 1: resolve and record the primary object for this step. `cursor_object` is
-   * #SculptPaintStroke::object (the object the paint-stroke framework has locked onto for tracking
-   * brushes). Returns the resolved primary object (also stored in #primary_object).
-   */
-  Object *resolve_primary(Object *cursor_object, const Brush &brush)
-  {
-    Object *primary_ob;
-    if (need_delta_from_anchored_origin(brush)) {
-      if (this->anchored_primary_object == nullptr) {
-        this->anchored_primary_object = cursor_object;
-      }
-      primary_ob = this->anchored_primary_object;
-    }
-    else {
-      primary_ob = cursor_object;
-    }
-    this->primary_object = primary_ob;
-    return primary_ob;
-  }
-
-  /**
-   * #update_step Phase 1/2 boundary: resolve #symm_reference_object / #shared_symmetry_active for
-   * this step and publish Container B (shared multi-object surface-sampling context + shared
-   * symmetry reference-space transforms) onto every object's #StrokeCache. Must be called after
-   * #resolve_primary.
-   */
-  void propagate_shared_state()
-  {
-    const Span<Object *> sample_objects = (this->mode_objects.size() > 1) ?
-                                              this->mode_objects.as_span() :
-                                              Span<Object *>();
-    this->symm_reference_object = this->mode_objects.is_empty() ? nullptr : this->mode_objects[0];
-    this->shared_symmetry_active = !sample_objects.is_empty() &&
-                                   this->symm_reference_object != nullptr;
-
-    detail::propagate_shared_sampling_and_symmetry_state(this->mode_objects,
-                                                         sample_objects,
-                                                         this->primary_object,
-                                                         this->symm_reference_object,
-                                                         this->shared_symmetry_active);
-  }
-
-  /**
-   * #update_step Phase 2, secondary-object branch: resolve whether/where `ob` (a non-primary
-   * object) is touched this step from the shared world-space brush center(s), setting up its
-   * #StrokeCache location. Returns true if `ob` has a valid location this step (should proceed to
-   * #do_symmetrical_brush_actions).
-   *
-   * Caller must first check `primary_world_center_valid` (whether the primary has established a
-   * center yet this step) before calling this -- kept as a separate check at the call site rather
-   * than a parameter here so the `continue` (with its RAII-guard-restore semantics) stays visible
-   * in #update_step's loop. `primary_world_center` is the primary's world-space brush center for
-   * this step. `symm_world_centers` is the set of mirrored daub centers to also test against when
-   * #shared_symmetry_active (empty otherwise).
-   */
-  bool process_secondary(Object &ob,
-                         StrokeCache &cache,
-                         Paint &paint,
-                         const Brush &brush,
-                         const float3 &primary_world_center,
-                         Span<float3> symm_world_centers) const;
-};
 
 struct SculptPaintStroke final : public PaintStroke {
   Main *bmain_;
@@ -7307,16 +7046,11 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
   return false;
 }
 
-/**
- * Test whether any PBVH node of \a ob intersects the brush sphere centered at \a world_center
- * (given in world space), projecting the center into the object's local space first. Does not
- * modify the cache.
- */
-static bool object_geometry_intersects_world_sphere(Object &ob,
-                                                    const StrokeCache &cache,
-                                                    Paint &paint,
-                                                    const Brush &brush,
-                                                    const float3 &world_center)
+bool object_geometry_intersects_world_sphere(Object &ob,
+                                             const StrokeCache &cache,
+                                             Paint &paint,
+                                             const Brush &brush,
+                                             const float3 &world_center)
 {
   bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
   if (!pbvh) {
@@ -7350,16 +7084,11 @@ static bool object_geometry_intersects_world_sphere(Object &ob,
   return !nodes_in_range.is_empty();
 }
 
-/**
- * Set a secondary sculpt object's brush location and radius from the world-space brush center,
- * projecting it into the object's local space. Unconditional: the caller decides whether the
- * object should be processed at all (see #object_geometry_intersects_world_sphere).
- */
-static void stroke_cache_apply_world_center(Object &ob,
-                                            StrokeCache &cache,
-                                            Paint &paint,
-                                            const Brush &brush,
-                                            const float3 &world_center)
+void stroke_cache_apply_world_center(Object &ob,
+                                     StrokeCache &cache,
+                                     Paint &paint,
+                                     const Brush &brush,
+                                     const float3 &world_center)
 {
   const float3 obj_center = math::transform_point(ob.world_to_object(), world_center);
   const float obj_radius = object_space_radius_get(*cache.vc, paint, brush, obj_center);
@@ -7400,53 +7129,17 @@ static void stroke_cache_apply_world_center(Object &ob,
   }
 }
 
-/**
- * Sets the brush location for a secondary sculpt object by projecting the world-space brush
- * center into the object's local space and testing whether any PBVH nodes intersect the brush
- * sphere. Used in multi-object sculpt mode for objects that are NOT directly under the cursor.
- *
- * Unlike the primary object, which keeps the framework-provided RNA "location", this function
- * accepts any object whose geometry overlaps the brush sphere in 3D world space.
- *
- * \return true if any PBVH node of \a ob intersects the brush sphere and the cache was updated.
- */
-static bool stroke_cache_set_location_from_world_sphere(Object &ob,
-                                                        StrokeCache &cache,
-                                                        Paint &paint,
-                                                        const Brush &brush,
-                                                        const float3 &world_center)
+bool stroke_cache_set_location_from_world_sphere(Object &ob,
+                                                 StrokeCache &cache,
+                                                 Paint &paint,
+                                                 const Brush &brush,
+                                                 const float3 &world_center)
 {
   if (!object_geometry_intersects_world_sphere(ob, cache, paint, brush, world_center)) {
     return false;
   }
   stroke_cache_apply_world_center(ob, cache, paint, brush, world_center);
   return true;
-}
-
-bool MultiObjectStrokeContext::process_secondary(Object &ob,
-                                                 StrokeCache &cache,
-                                                 Paint &paint,
-                                                 const Brush &brush,
-                                                 const float3 &primary_world_center,
-                                                 const Span<float3> symm_world_centers) const
-{
-  bool has_location = stroke_cache_set_location_from_world_sphere(
-      ob, cache, paint, brush, primary_world_center);
-
-  /* Shared symmetry: also process this object if its geometry lies under a mirrored daub, even
-   * though the main daub misses it. The cache is still set up from the main center -- the mirror
-   * passes derive their per-object #location_symm from it -- so the main pass is simply a no-op
-   * here while the mirror pass that overlaps this object does the work. */
-  if (!has_location && this->shared_symmetry_active) {
-    for (const float3 &center : symm_world_centers) {
-      if (object_geometry_intersects_world_sphere(ob, cache, paint, brush, center)) {
-        stroke_cache_apply_world_center(ob, cache, paint, brush, primary_world_center);
-        has_location = true;
-        break;
-      }
-    }
-  }
-  return has_location;
 }
 
 /**
@@ -7695,9 +7388,9 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
    *
    * Captured from the primary object *after* its brush action and pushed onto every secondary
    * *before* its brush action runs, so the secondary's brush does not independently lazy-allocate
-   * a divergent value. See #detail::SharedStrokeStateSnapshot,
-   * #detail::capture_shared_stroke_state, #detail::propagate_shared_stroke_state. */
-  std::optional<detail::SharedStrokeStateSnapshot> shared_stroke_state;
+   * a divergent value. See #SharedStrokeStateSnapshot,
+   * #capture_shared_stroke_state, #propagate_shared_stroke_state. */
+  std::optional<SharedStrokeStateSnapshot> shared_stroke_state;
 
   for (Object *object_ptr : objects) {
     Object &ob = *object_ptr;
@@ -7791,7 +7484,7 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
      * Pattern from
      * `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 3.1. */
     if (&ob != primary_ob && shared_stroke_state) {
-      detail::propagate_shared_stroke_state(ob, *shared_stroke_state);
+      propagate_shared_stroke_state(ob, *shared_stroke_state);
     }
 
     restore_from_undo_step_if_necessary(depsgraph, sd, ob);
@@ -7827,10 +7520,10 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
 
     /* Capture the primary object's lazy-allocated per-stroke state once its brush has run, so
      * any subsequent secondary iteration in this same `update_step` call can mirror it via
-     * #detail::propagate_shared_stroke_state. By construction the primary is processed first
+     * #propagate_shared_stroke_state. By construction the primary is processed first
      * (the swap above), so this runs exactly once per `update_step`. */
     if (&ob == primary_ob) {
-      shared_stroke_state = detail::capture_shared_stroke_state(ob);
+      shared_stroke_state = capture_shared_stroke_state(ob);
     }
     /* `stroke_object_override` + `obact_override` restore `this->object` and `vc.obact`
      * to the primary object at the end of each iteration. */

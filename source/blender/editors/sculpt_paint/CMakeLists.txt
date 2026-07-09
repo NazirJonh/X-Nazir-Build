@@ -107,6 +107,7 @@ set(SRC
   mesh/sculpt_hide.cc
   mesh/sculpt_mask_extract.cc
   mesh/sculpt_mask_init.cc
+  mesh/sculpt_multi_object.cc
   mesh/sculpt_ops.cc
   mesh/sculpt_paint_color.cc
   mesh/sculpt_paint_image.cc
@@ -144,6 +145,7 @@ set(SRC
   mesh/sculpt_hide.hh
   mesh/sculpt_intern.hh
   mesh/sculpt_islands.hh
+  mesh/sculpt_multi_object.hh
   mesh/sculpt_pose.hh
   mesh/sculpt_smooth.hh
   mesh/sculpt_undo.hh

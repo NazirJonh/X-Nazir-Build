@@ -1059,6 +1059,54 @@ float object_space_radius_get(const ViewContext &vc,
                               const Brush &brush,
                               const float3 &location,
                               float scale_factor = 1.0);
+
+/* In these brushes the grab delta is calculated always from the initial stroke location, which is
+ * generally used to create grab deformations.
+ *
+ * The classification itself lives in #Brush.drag_kind (declarative, single source of truth kept
+ * in sync by #BKE_brush_drag_kind_update from #Brush.sculpt_brush_type / #stroke_method /
+ * #cloth_deform_type) instead of the two parallel `ELEM` lists this function and
+ * #need_delta_for_tip_orientation used to duplicate -- see
+ * `.MyTaskAndDoc/.../Refactoring_2/Architecture_Refactoring_Analysis.md` 3.5. */
+bool need_delta_from_anchored_origin(const Brush &brush);
+
+/**
+ * Test whether any PBVH node of \a ob intersects the brush sphere centered at \a world_center
+ * (given in world space), projecting the center into the object's local space first. Does not
+ * modify the cache.
+ */
+bool object_geometry_intersects_world_sphere(Object &ob,
+                                             const StrokeCache &cache,
+                                             Paint &paint,
+                                             const Brush &brush,
+                                             const float3 &world_center);
+
+/**
+ * Set a secondary sculpt object's brush location and radius from the world-space brush center,
+ * projecting it into the object's local space. Unconditional: the caller decides whether the
+ * object should be processed at all (see #object_geometry_intersects_world_sphere).
+ */
+void stroke_cache_apply_world_center(Object &ob,
+                                     StrokeCache &cache,
+                                     Paint &paint,
+                                     const Brush &brush,
+                                     const float3 &world_center);
+
+/**
+ * Sets the brush location for a secondary sculpt object by projecting the world-space brush
+ * center into the object's local space and testing whether any PBVH nodes intersect the brush
+ * sphere. Used in multi-object sculpt mode for objects that are NOT directly under the cursor.
+ *
+ * Unlike the primary object, which keeps the framework-provided RNA "location", this function
+ * accepts any object whose geometry overlaps the brush sphere in 3D world space.
+ *
+ * \return true if any PBVH node of \a ob intersects the brush sphere and the cache was updated.
+ */
+bool stroke_cache_set_location_from_world_sphere(Object &ob,
+                                                 StrokeCache &cache,
+                                                 Paint &paint,
+                                                 const Brush &brush,
+                                                 const float3 &world_center);
 }  // namespace ed::sculpt_paint
 
 /** \} */

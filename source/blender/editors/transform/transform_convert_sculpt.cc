@@ -133,16 +133,13 @@ static void createTransSculpt(bContext *C, TransInfo *t)
     td->loc = ss.transform_pivot_pos_world;
     copy_v3_v3(td->iloc, world_pivot_pos);
 
-    float obmat_inv[3][3];
-    copy_m3_m4(obmat_inv, ob.object_to_world().ptr());
-    invert_m3(obmat_inv);
-
     td_ext->rot = nullptr;
     td_ext->rotAxis = nullptr;
     td_ext->rotAngle = nullptr;
     td_ext->quat = ss.transform_pivot_rot_world;
     copy_m4_m4(td_ext->obmat, ob.object_to_world().ptr());
-    copy_m3_m3(td_ext->l_smtx, obmat_inv);
+    /* #td_ext->l_smtx is left zero-initialized: it is only consumed under the pose-bone flag
+     * #TD_PBONE_LOCAL_MTX_C, which this sculpt #td never sets, so it is dead on this path. */
 
     copy_qt_qt(td_ext->iquat, world_pivot_rot);
     td_ext->rotOrder = ROT_MODE_QUAT;

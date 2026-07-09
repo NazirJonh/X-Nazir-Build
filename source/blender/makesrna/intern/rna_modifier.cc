@@ -1326,11 +1326,9 @@ static void rna_MultiresModifier_level_range(
 static Vector<Object *> rna_multires_group_candidates(Main *bmain)
 {
   Vector<Object *> candidates;
-  for (Object *ob = (Object *)bmain->objects.first; ob != nullptr;
-       ob = (Object *)(((Link *)ob)->next))
-  {
-    if (ob->type == OB_MESH && (ob->mode & OB_MODE_SCULPT)) {
-      candidates.append(ob);
+  for (Object &ob : bmain->objects) {
+    if (ob.type == OB_MESH && (ob.mode & OB_MODE_SCULPT)) {
+      candidates.append(&ob);
     }
   }
   return candidates;

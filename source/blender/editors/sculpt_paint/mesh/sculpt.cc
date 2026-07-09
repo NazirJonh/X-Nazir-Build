@@ -9322,23 +9322,37 @@ void filter_region_clip_factors(const SculptSession &ss,
 bool object_has_non_uniform_scale(const Object &ob)
 {
   constexpr float eps = 1e-4f;
-  return !(fabsf(ob.scale[0] - ob.scale[1]) < eps && fabsf(ob.scale[1] - ob.scale[2]) < eps);
+  /* Test the world-space per-axis scale (column lengths of `object_to_world`) rather than the raw
+   * local `ob.scale`, so an object with uniform local scale under a non-uniformly-scaled parent (or
+   * with shear in its world matrix) is still detected. For an unparented object this equals
+   * `fabsf(ob.scale)`, so a uniformly scaled object stays uniform and the whole correction machinery
+   * gates off (bit-exact with the pre-existing behavior). */
+  float3 size;
+  mat4_to_size(size, ob.object_to_world().ptr());
+  return !(fabsf(size[0] - size[1]) < eps && fabsf(size[1] - size[2]) < eps);
 }
 
 float3 non_uniform_scale_compensation(const Object &ob)
 {
+  /* Derive the per-axis scale from `object_to_world`, matching #object_has_non_uniform_scale and
+   * #position_scale_compensation so all three share one source and parent/shear is handled the same
+   * way. Equals `fabsf(ob.scale)` for an unparented object (positive scale: bit-exact). */
+  float3 size;
+  mat4_to_size(size, ob.object_to_world().ptr());
   float max_scale = 0.0f;
   for (int axis = 0; axis < 3; axis++) {
-    max_scale = max_ff(max_scale, fabsf(ob.scale[axis]));
+    max_scale = max_ff(max_scale, size[axis]);
   }
-  return float3(max_scale / ob.scale[0], max_scale / ob.scale[1], max_scale / ob.scale[2]);
+  return float3(max_scale / size[0], max_scale / size[1], max_scale / size[2]);
 }
 
 float3 position_scale_compensation(const Object &ob)
 {
+  float3 size;
+  mat4_to_size(size, ob.object_to_world().ptr());
   float iso_scale = mat4_to_scale(ob.object_to_world().ptr());
   iso_scale = (iso_scale == 0.0f) ? 1.0f : iso_scale;
-  return float3(ob.scale[0], ob.scale[1], ob.scale[2]) / iso_scale;
+  return size / iso_scale;
 }
 
 KelvinletWorldTransform kelvinlet_world_transform_init(const Object &ob)

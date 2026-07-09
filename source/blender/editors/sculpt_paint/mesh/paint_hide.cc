@@ -522,6 +522,11 @@ static wmOperatorStatus hide_show_all_exec(bContext *C, wmOperator *op)
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
   ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
   const Vector<Object *> objects = sculpt_mode_objects(vc);
+  if (objects.is_empty()) {
+    /* Matches #push_begin_multi_object's own empty guard; the manual push_begin_ex path below
+     * dereferences #objects.first(). */
+    return OPERATOR_CANCELLED;
+  }
 
   const VisAction action = VisAction(RNA_enum_get(op->ptr, "action"));
 
@@ -646,6 +651,11 @@ static wmOperatorStatus hide_show_masked_exec(bContext *C, wmOperator *op)
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
   ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
   const Vector<Object *> objects = sculpt_mode_objects(vc);
+  if (objects.is_empty()) {
+    /* Matches #push_begin_multi_object's own empty guard; the manual push_begin_ex path below
+     * dereferences #objects.first(). */
+    return OPERATOR_CANCELLED;
+  }
 
   const VisAction action = VisAction(RNA_enum_get(op->ptr, "action"));
 
@@ -1156,42 +1166,43 @@ static void grow_shrink_visibility_bmesh(const Depsgraph &depsgraph,
 static wmOperatorStatus visibility_filter_exec(bContext *C, wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
-  Object &object = *CTX_data_active_object(C);
   Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
-
-  bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(depsgraph, object);
+  ViewContext vc = ED_view3d_viewcontext_init(C, &depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
 
   const VisAction mode = VisAction(RNA_enum_get(op->ptr, "action"));
+  const bool auto_iteration_count = RNA_boolean_get(op->ptr, "auto_iteration_count");
 
-  IndexMaskMemory memory;
-  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  undo::push_begin_multi_object(scene, op, objects);
 
-  int num_verts = vertex_count_get(object);
+  for (Object *object : objects) {
+    bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(depsgraph, *object);
 
-  int iterations = RNA_int_get(op->ptr, "iterations");
+    IndexMaskMemory memory;
+    const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
-  if (RNA_boolean_get(op->ptr, "auto_iteration_count")) {
-    /* Automatically adjust the number of iterations based on the number
-     * of vertices in the mesh. */
-    iterations = int(num_verts / VERTEX_ITERATION_THRESHOLD) + 1;
+    int iterations = RNA_int_get(op->ptr, "iterations");
+    if (auto_iteration_count) {
+      /* Automatically adjust the number of iterations based on this object's own vertex count. */
+      iterations = int(vertex_count_get(*object) / VERTEX_ITERATION_THRESHOLD) + 1;
+    }
+
+    switch (pbvh.type()) {
+      case bke::pbvh::Type::Mesh:
+        grow_shrink_visibility_mesh(depsgraph, *object, node_mask, mode, iterations);
+        break;
+      case bke::pbvh::Type::Grids:
+        grow_shrink_visibility_grid(depsgraph, *object, node_mask, mode, iterations);
+        break;
+      case bke::pbvh::Type::BMesh:
+        grow_shrink_visibility_bmesh(depsgraph, *object, node_mask, mode, iterations);
+        break;
+    }
+
+    islands::invalidate(*object->runtime->sculpt_session);
   }
 
-  undo::push_begin(scene, object, op);
-  switch (pbvh.type()) {
-    case bke::pbvh::Type::Mesh:
-      grow_shrink_visibility_mesh(depsgraph, object, node_mask, mode, iterations);
-      break;
-    case bke::pbvh::Type::Grids:
-      grow_shrink_visibility_grid(depsgraph, object, node_mask, mode, iterations);
-      break;
-    case bke::pbvh::Type::BMesh:
-      grow_shrink_visibility_bmesh(depsgraph, object, node_mask, mode, iterations);
-      break;
-  }
-  undo::push_end(object);
-
-  islands::invalidate(*object.runtime->sculpt_session);
-  tag_update_visibility(*C);
+  undo::finish_multi_object(C, objects, UpdateType::Visibility);
 
   return OPERATOR_FINISHED;
 }

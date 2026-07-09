@@ -635,10 +635,8 @@ static IndexMask boundary_from_enabled(Object &object,
 {
   SculptSession &ss = *object.runtime->sculpt_session;
 
-  /* Diagnostic (debug-only): a size mismatch here means `enabled_verts` was built for a different
-   * object/vertex-count convention than `object` actually has (e.g. base-mesh count instead of
-   * raw CCG count for a Grids object) -- the exact defect under investigation for the
-   * multi-object Grids null-read crash. */
+  /* `enabled_verts` must be indexed by this object's own vertex-count convention (raw CCG count for
+   * a Grids object, not the base-mesh count); a mismatch would index the wrong buffer. */
   BLI_assert(enabled_verts.size() == vertex_count_get(object));
 
   /* Defensive (real check, not assert-only): `object_states_init` populates every group member's
@@ -693,8 +691,6 @@ static IndexMask boundary_from_enabled(Object &object,
         SubdivCCGNeighbors neighbors;
         BKE_subdiv_ccg_neighbor_coords_get(subdiv_ccg, coord, false, neighbors);
         for (const SubdivCCGCoord neighbor : neighbors.coords) {
-          /* Diagnostic (debug-only): see the matching assert at this function's entry. */
-          BLI_assert(neighbor.to_index(key) < enabled_verts.size());
           if (!enabled_verts[neighbor.to_index(key)]) {
             return true;
           }
@@ -2554,7 +2550,7 @@ static void restore_color_data(Object &ob, Cache &expand_cache)
   color_attribute.finish();
 }
 
-static void write_mask_data(Object &object, const Span<float> mask)
+static void write_mask_data(Depsgraph *depsgraph, Object &object, const Span<float> mask)
 {
   SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
@@ -2585,6 +2581,13 @@ static void write_mask_data(Object &object, const Span<float> mask)
       SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
       subdiv_ccg.masks.as_mutable_span().copy_from(mask);
       bke::pbvh::update_mask_grids(subdiv_ccg, node_mask, pbvh);
+      /* Writing #SubdivCCG::masks alone does not survive the next depsgraph re-evaluation: the
+       * change is flushed back to the persistent base-cage only when the object is marked with
+       * #MULTIRES_COORDS_MODIFIED (see the matching apply-path comment in #update_for_vert). Both
+       * the Cancel/Esc restore path and the invoke-time auto-mask reach this branch for a Grids
+       * object, so without the mark a secondary Multires object's restored mask is silently
+       * discarded on the depsgraph re-eval triggered by the following #flush_update. */
+      multires_mark_as_modified(depsgraph, &object, MULTIRES_COORDS_MODIFIED);
       break;
     }
   }
@@ -2602,7 +2605,7 @@ static void restore_original_state(bContext *C, Object &ob, Cache &expand_cache)
       Object &object = *state.object;
       switch (expand_cache.target) {
         case TargetType::Mask:
-          write_mask_data(object, state.original_mask);
+          write_mask_data(CTX_data_depsgraph_pointer(C), object, state.original_mask);
           break;
         case TargetType::FaceSets:
           restore_face_set_data(object, expand_cache);
@@ -2651,7 +2654,7 @@ static void restore_original_state(bContext *C, Object &ob, Cache &expand_cache)
 
   switch (expand_cache.target) {
     case TargetType::Mask:
-      write_mask_data(ob, active_object_state(expand_cache).original_mask);
+      write_mask_data(CTX_data_depsgraph_pointer(C), ob, active_object_state(expand_cache).original_mask);
       flush_update_step(C, UpdateType::Mask);
       flush_update_done(C, ob, UpdateType::Mask);
       tag_update_overlays(C);
@@ -4344,15 +4347,6 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
     ss.expand_cache->world_positions = world_positions_create(*depsgraph, objects);
     ss.expand_cache->bridge = build_multi_object_bridge(
         *depsgraph, objects, ss.expand_cache->world_positions, SCULPT_EXPAND_BRIDGE_FACTOR);
-    /* TEMPORARY diagnostic (not a permanent feature) -- reports how many proximity-bridge edges
-     * were found across the group, so a failure to stitch two touching/overlapping objects shows
-     * up immediately (bridge.edges.size() == 0) without needing a debugger attached. Remove once
-     * the cross-object mask-write inconsistency bug is root-caused. */
-    BKE_reportf(op->reports,
-               RPT_INFO,
-               "Expand: multi-object bridge has %d edge(s) across %d objects",
-               int(ss.expand_cache->bridge.edges.size()),
-               int(objects.size()));
   }
 
   /* Update object. */
@@ -4384,7 +4378,8 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
 
     if (RNA_boolean_get(op->ptr, "use_auto_mask")) {
       if (any_nonzero_mask(ob)) {
-        write_mask_data(ob, Array<float>(vertex_count_get(ob), 1.0f));
+        write_mask_data(
+            CTX_data_depsgraph_pointer(C), ob, Array<float>(vertex_count_get(ob), 1.0f));
       }
     }
   }

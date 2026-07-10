@@ -86,10 +86,18 @@ void curves_vertex_paint_ensure_color_attribute(Object *ob)
 
 ColorGeometry4f CurvesVertexPaintOperationBase::get_point_color(const int point_index)
 {
-  if (!vertex_colors_writer_) {
+  if (vertex_colors_writer_) {
+    return vertex_colors_writer_->span[point_index];
+  }
+  /* Writer is not active (e.g. called from on_stroke_begin before the first extended step).
+   * Fall back to reading the attribute directly from the geometry. */
+  if (!curves) {
     return ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f);
   }
-  return vertex_colors_writer_->span[point_index];
+  const VArray<ColorGeometry4f> colors =
+      *curves->attributes().lookup_or_default<ColorGeometry4f>(
+          ATTR_VERTEX_COLOR, bke::AttrDomain::Point, ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f));
+  return colors[point_index];
 }
 
 void CurvesVertexPaintOperationBase::set_point_color(const int point_index,
@@ -148,19 +156,37 @@ void CurvesVertexPaintOperationBase::apply_operation_to_point(const CurvesBrushP
 
 void CurvesVertexPaintOperationBase::init_paint_mode(const bContext & /*C*/)
 {
-  vertex_colors_writer_.reset();
-
-  if (!curves) {
-    return;
+  /* Ensure the vertex_color attribute exists so it can be opened per-step in on_stroke_extended.
+   * We do NOT keep a writer open here because SpanAttributeWriter must not be alive across
+   * depsgraph evaluations (which happen between stroke steps). */
+  if (object) {
+    curves_vertex_paint_ensure_color_attribute(object);
   }
-
-  bke::MutableAttributeAccessor attributes = curves->wrap().attributes_for_write();
-  vertex_colors_writer_ = attributes.lookup_or_add_for_write_span<ColorGeometry4f>(
-      ATTR_VERTEX_COLOR, bke::AttrDomain::Point);
 }
 
 void CurvesVertexPaintOperationBase::finalize_paint_mode(const bContext & /*C*/)
 {
+  /* The writer is opened and closed within each on_stroke_extended call, so nothing to do here. */
+  vertex_colors_writer_.reset();
+}
+
+void CurvesVertexPaintOperationBase::on_stroke_extended(
+    const bContext &C, const StrokeExtension &stroke_extension)
+{
+  if (!curves) {
+    CurvesPaintOperationBase::on_stroke_extended(C, stroke_extension);
+    return;
+  }
+
+  /* Open the attribute writer for this stroke step. */
+  bke::MutableAttributeAccessor attributes = curves->attributes_for_write();
+  vertex_colors_writer_ = attributes.lookup_or_add_for_write_span<ColorGeometry4f>(
+      ATTR_VERTEX_COLOR, bke::AttrDomain::Point);
+
+  /* Run the shared brush logic (sample points, apply_brush, tag depsgraph, send notifier). */
+  CurvesPaintOperationBase::on_stroke_extended(C, stroke_extension);
+
+  /* Commit the changes so the depsgraph evaluation sees the new colors immediately. */
   if (vertex_colors_writer_) {
     vertex_colors_writer_->finish();
     vertex_colors_writer_.reset();

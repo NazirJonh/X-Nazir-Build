@@ -35,7 +35,7 @@ static const GPUVertFormat *curves_vertex_paint_point_format()
 {
   static const GPUVertFormat format = []() {
     GPUVertFormat format{};
-    GPU_vertformat_attr_add(&format, "color", gpu::VertAttrType::SFLOAT_32_32_32_32);
+    GPU_vertformat_attr_add(&format, "vert_color", gpu::VertAttrType::SFLOAT_32_32_32_32);
     GPU_vertformat_attr_add(&format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
     GPU_vertformat_attr_add(&format, "tangent", gpu::VertAttrType::SFLOAT_32_32_32);
     return format;

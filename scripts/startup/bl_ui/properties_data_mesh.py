@@ -263,13 +263,20 @@ class DATA_PT_vertex_groups(MeshButtonsPanel, Panel):
 
 
 class MESH_UL_sculpt_layers(UIList):
-    def draw_item(self, _context, layout, _data, item, _icon, _active_data, _active_propname, _index):
+    def draw_item(self, context, layout, _data, item, _icon, _active_data, _active_propname, _index):
         layer = item
+        obj = context.object
+        # Visibility and influence keep the combined surface in sync incrementally, which can't
+        # happen in Edit Mode; keep the name editable but lock the value controls there.
+        values_editable = obj is None or obj.mode != 'EDIT'
         row = layout.row(align=True)
-        row.prop(layer, "enabled", text="", icon='HIDE_OFF' if layer.enabled else 'HIDE_ON', emboss=False)
+        vis = row.row(align=True)
+        vis.enabled = values_editable
+        vis.prop(layer, "enabled", text="", icon='HIDE_OFF' if layer.enabled else 'HIDE_ON', emboss=False)
         row.prop(layer, "name", text="", emboss=False)
         sub = layout.row()
         sub.scale_x = 0.5
+        sub.enabled = values_editable
         sub.prop(layer, "influence", text="", slider=True)
 
 
@@ -366,6 +373,10 @@ class DATA_PT_sculpt_layers(MeshButtonsPanel, Panel):
         if active:
             sub = layout.column()
             sub.use_property_split = True
+            # In Edit Mode the live mesh positions can't be updated, so changing a vertex-domain
+            # layer's influence would desync the combined surface (see rna_SculptLayer_influence_set).
+            # Disable the control there instead of silently ignoring edits.
+            sub.enabled = ob.mode != 'EDIT'
             if ob.mode == 'SCULPT':
                 # Drag handle runs the modal operator for smooth interactive updates; the slider
                 # itself stays for precise keyboard entry. Split manually so the label stays

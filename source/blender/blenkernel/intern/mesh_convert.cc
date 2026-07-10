@@ -42,6 +42,7 @@
 #include "BKE_mesh_wrapper.hh"
 #include "BKE_modifier.hh"
 #include "BKE_object_types.hh"
+#include "BKE_sculpt_layers.hh"
 /* these 2 are only used by conversion functions */
 #include "BKE_curve.hh"
 /* -- */
@@ -1174,6 +1175,16 @@ void BKE_mesh_nomain_to_mesh(Mesh *mesh_src, Mesh *mesh_dst, Object *ob, bool pr
         mesh_dst->key = nullptr;
       }
     }
+  }
+
+  /* Sculpt layers store per-element displacement bound to the current topology; a geometry
+   * replacement that changes the vertex count (remesh, voxel remesh, applying a topology-changing
+   * modifier) leaves them unmappable. Free them instead of silently applying stale deltas to the
+   * first vertices of the new topology (mirrors the shape-key handling above). */
+  if (verts_num_changed && !BLI_listbase_is_empty(&mesh_dst->sculpt_layers)) {
+    CLOG_WARN(&LOG, "Sculpt layer data lost when replacing mesh '%s' in Main", mesh_src->id.name);
+    blender::bke::sculpt_layers::free_list(&mesh_dst->sculpt_layers);
+    mesh_dst->sculpt_layers_active_index = 0;
   }
 
   /* Caches can have a large memory impact and aren't necessarily used, so don't indiscriminately

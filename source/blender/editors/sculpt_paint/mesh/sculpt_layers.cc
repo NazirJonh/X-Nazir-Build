@@ -34,6 +34,8 @@
 #include <cstdio>
 #include <type_traits>
 
+#include "CLG_log.h"
+
 #include "MEM_guardedalloc.h"
 
 #include "DNA_mesh_types.h"
@@ -79,6 +81,8 @@
 #include "sculpt_intern.hh"
 #include "sculpt_undo.hh"
 
+static CLG_LogRef LOG = {"ed.sculpt_layers"};
+
 namespace blender::ed::sculpt_paint::layers {
 
 /* Master switch for the [DEBUG-perf] stroke instrumentation. Set to 0 to compile out the
@@ -111,10 +115,10 @@ static Mesh &mesh_of(Object &object)
   return *id_cast<Mesh *>(object.data);
 }
 
-static float effective(const SculptLayer &layer)
-{
-  return (layer.flag & SCULPT_LAYER_ENABLED) ? layer.influence : 0.0f;
-}
+/* The single authority for a layer's effective influence (see #BKE_sculpt_layers.hh). Pulled into
+ * this namespace so unqualified `effective(layer)` calls resolve to it — do not re-define a local
+ * copy, so a future change to the blend/mute semantics stays a one-line edit. */
+using bke::sculpt_layers::effective;
 
 static SculptSession *session_of(Object &object)
 {
@@ -186,7 +190,8 @@ static void validate_grid_layers(Object &object)
     layer.totelem = 0;
     layer.level = short(totlvl);
     if (!warned) {
-      printf("[sculpt-layers] grid layer data reset: stored level/topology no longer matches.\n");
+      CLOG_WARN(&LOG,
+                "Grid sculpt layer data reset: stored level/topology no longer matches the mesh.");
       warned = true;
     }
   }
@@ -321,9 +326,9 @@ static void debug_validate_mesh_invariant(Object &object, const char *where)
         "first_bad=%lld\n",
         where,
         double(max_dev),
-        (long long)over,
-        (long long)positions.size(),
-        (long long)first_bad);
+        static_cast<long long>(over),
+        static_cast<long long>(positions.size()),
+        static_cast<long long>(first_bad));
     int layer_index = 0;
     for (const SculptLayer &layer : mesh.sculpt_layers) {
       printf("  layer[%d] uid=%d domain=%d enabled=%d influence=%.4f totelem=%d\n",
@@ -450,13 +455,13 @@ bool flush_interactive_update(Main &bmain, Mesh &mesh)
   SLP_PERF("[DEBUG-perf] flush_interactive_update: search=%lldus all_leaf_nodes=%lldus "
            "tag_positions_changed=%lldus update_bounds_mesh=%lldus bounds_block=%lldus "
            "total=%lldus leaf_nodes=%lld verts=%d\n",
-           (long long)us(t_search0, t_search1),
-           (long long)us(t_leaf0, t_leaf1),
-           (long long)us(t_leaf1, t_tag1),
-           (long long)us(t_tag1, t_bounds_update1),
-           (long long)us(t_bounds_update1, t_bounds_block1),
-           (long long)us(t_start, t_end),
-           (long long)node_mask.size(),
+           static_cast<long long>(us(t_search0, t_search1)),
+           static_cast<long long>(us(t_leaf0, t_leaf1)),
+           static_cast<long long>(us(t_leaf1, t_tag1)),
+           static_cast<long long>(us(t_tag1, t_bounds_update1)),
+           static_cast<long long>(us(t_bounds_update1, t_bounds_block1)),
+           static_cast<long long>(us(t_start, t_end)),
+           static_cast<long long>(node_mask.size()),
            mesh.verts_num);
   return true;
 }
@@ -576,7 +581,8 @@ static void base_view_ensure(Object &object)
   const auto t1 = std::chrono::high_resolution_clock::now();
   SLP_PERF("[DEBUG-perf] base_view_ensure: %zu elems in %lld us\n",
            size_t(ss->layers.base_view.size()),
-           (long long)std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+           static_cast<long long>(
+               std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()));
 }
 
 Span<float3> stroke_base_view(const Object &object)
@@ -644,6 +650,38 @@ Span<float3> base_view_adjust_compact_grids(const Object &object,
   return r_storage;
 }
 
+void base_view_compose_mesh(const Object &object,
+                            const Span<int> verts,
+                            const MutableSpan<float3> positions)
+{
+  const Span<float3> base_view = stroke_base_view(object);
+  if (base_view.is_empty()) {
+    return;
+  }
+  for (const int i : verts.index_range()) {
+    positions[i] += base_view[verts[i]];
+  }
+}
+
+void base_view_compose_grids(const Object &object,
+                             const SubdivCCG &subdiv_ccg,
+                             const Span<int> grids,
+                             const MutableSpan<float3> positions)
+{
+  const Span<float3> base_view = stroke_base_view(object);
+  if (base_view.is_empty()) {
+    return;
+  }
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  for (const int i : grids.index_range()) {
+    const IndexRange node_range = bke::ccg::grid_range(key, i);
+    const IndexRange grid_range = bke::ccg::grid_range(key, grids[i]);
+    for (const int offset : IndexRange(key.grid_area)) {
+      positions[node_range[offset]] += base_view[grid_range[offset]];
+    }
+  }
+}
+
 /* -------------------------------------------------------------------------------------------------
  * Stroke recording (active layer)
  */
@@ -675,6 +713,16 @@ void stroke_record_begin(const Depsgraph & /*depsgraph*/, Object &object)
      * (falloff, area normal, smoothing / plane targets) can be evaluated against the un-layered
      * base; see the Base view section above. */
     base_view_ensure(object);
+    return;
+  }
+
+  /* Recording into a layer assumes the sculpted positions are the layer's own storage space (the
+   * un-deformed base for the vertex domain, the CCG for grids). When a shape key or a deforming
+   * modifier is active the live positions are in evaluated (deformed) space, so a recorded delta
+   * would be wrong and, worse, the shape-key undo path would double-apply it (see
+   * #restore_position_mesh). Skip recording and let the stroke behave as an ordinary sculpt
+   * stroke; the layer set is unchanged, so undo restores positions the normal way. */
+  if (ss->shapekey_active || ss->deform_modifiers_active) {
     return;
   }
 
@@ -1817,14 +1865,8 @@ static wmOperatorStatus layer_solo_base_exec(bContext *C, wmOperator *op)
   }
   Mesh &mesh = *ctx.mesh;
 
-  /* Solo is active when any layer carries the marker. */
-  bool solo_active = false;
-  for (const SculptLayer &layer : mesh.sculpt_layers) {
-    if (layer.flag & SCULPT_LAYER_SOLO_HIDDEN) {
-      solo_active = true;
-      break;
-    }
-  }
+  /* Solo is active when any layer carries the marker (single authority in BKE). */
+  const bool solo_active = bke::sculpt_layers::solo_active(mesh);
 
   /* Layers the toggle changes: the enabled ones when activating, the marked ones when ending. */
   Vector<SculptLayer *> affected;

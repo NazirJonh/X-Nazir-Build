@@ -1031,6 +1031,9 @@ struct LocalDataMesh {
   Vector<int> neighbor_data;
   Vector<float3> average_positions;
 
+  /* Base-view-adjusted copy of the deform source, so deforming a base under visible sculpt layers
+   * moves the base rather than the composed surface (see #layers::stroke_base_view). */
+  Vector<float3> orig_base;
   Vector<float3> new_positions;
   Vector<float3> translations;
 };
@@ -1054,6 +1057,9 @@ struct LocalDataGrids {
   Vector<int> neighbor_data;
   Vector<float3> average_positions;
 
+  /* Base-view-adjusted copy of the deform source, so deforming a base under visible sculpt layers
+   * moves the base rather than the composed surface (see #layers::stroke_base_view). */
+  Vector<float3> orig_base;
   Vector<float3> new_positions;
   Vector<float3> translations;
 };
@@ -1146,10 +1152,18 @@ static void calc_bend_mesh(const Depsgraph &depsgraph,
 
   tls.new_positions.resize(verts.size());
   const MutableSpan<float3> new_positions = tls.new_positions;
-  calc_bend_position(orig_data.positions, pivot_positions, pivot_axes, factors, new_positions);
+  /* Deform the base surface, not the composed one, for the geometry target so the layer residual
+   * is carried on top instead of baked into the base (see #layers::stroke_base_view). The cloth
+   * target keeps the composed positions unchanged. */
+  const Span<float3> bend_source =
+      eBrushDeformTarget(deform_target) == BRUSH_DEFORM_TARGET_GEOMETRY ?
+          layers::base_view_adjust_compact_mesh(object, verts, orig_data.positions, tls.orig_base) :
+          orig_data.positions;
+  calc_bend_position(bend_source, pivot_positions, pivot_axes, factors, new_positions);
 
   switch (eBrushDeformTarget(deform_target)) {
     case BRUSH_DEFORM_TARGET_GEOMETRY: {
+      layers::base_view_compose_mesh(object, verts, new_positions);
       tls.translations.resize(verts.size());
       const MutableSpan<float3> translations = tls.translations;
       translations_from_new_positions(new_positions, verts, position_data.eval, translations);
@@ -1209,10 +1223,18 @@ static void calc_bend_grids(const Depsgraph &depsgraph,
 
   tls.new_positions.resize(grid_verts_num);
   const MutableSpan<float3> new_positions = tls.new_positions;
-  calc_bend_position(orig_data.positions, pivot_positions, pivot_axes, factors, new_positions);
+  /* Deform the base surface, not the composed one, for the geometry target (see the mesh path and
+   * #layers::stroke_base_view). The cloth target keeps the composed positions unchanged. */
+  const Span<float3> bend_source =
+      eBrushDeformTarget(deform_target) == BRUSH_DEFORM_TARGET_GEOMETRY ?
+          layers::base_view_adjust_compact_grids(
+              object, subdiv_ccg, grids, orig_data.positions, tls.orig_base) :
+          orig_data.positions;
+  calc_bend_position(bend_source, pivot_positions, pivot_axes, factors, new_positions);
 
   switch (eBrushDeformTarget(deform_target)) {
     case BRUSH_DEFORM_TARGET_GEOMETRY: {
+      layers::base_view_compose_grids(object, subdiv_ccg, grids, new_positions);
       tls.translations.resize(grid_verts_num);
       const MutableSpan<float3> translations = tls.translations;
       const Span<float3> positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
@@ -2286,11 +2308,18 @@ static void calc_twist_mesh(const Depsgraph &depsgraph,
 
   tls.new_positions.resize(verts.size());
   const MutableSpan<float3> new_positions = tls.new_positions;
-  calc_twist_position(
-      orig_data.positions, twist_pivot_position, twist_axis, factors, new_positions);
+  /* Rotate the base surface, not the composed one, for the geometry target so the layer residual
+   * is carried on top instead of baked into the base (see #calc_bend_mesh and
+   * #layers::stroke_base_view). The cloth target keeps the composed positions unchanged. */
+  const Span<float3> twist_source =
+      eBrushDeformTarget(deform_target) == BRUSH_DEFORM_TARGET_GEOMETRY ?
+          layers::base_view_adjust_compact_mesh(object, verts, orig_data.positions, tls.orig_base) :
+          orig_data.positions;
+  calc_twist_position(twist_source, twist_pivot_position, twist_axis, factors, new_positions);
 
   switch (eBrushDeformTarget(deform_target)) {
     case BRUSH_DEFORM_TARGET_GEOMETRY: {
+      layers::base_view_compose_mesh(object, verts, new_positions);
       tls.translations.resize(verts.size());
       const MutableSpan<float3> translations = tls.translations;
       translations_from_new_positions(new_positions, verts, position_data.eval, translations);
@@ -2345,11 +2374,18 @@ static void calc_twist_grids(const Depsgraph &depsgraph,
 
   tls.new_positions.resize(grid_verts_num);
   const MutableSpan<float3> new_positions = tls.new_positions;
-  calc_twist_position(
-      orig_data.positions, twist_pivot_position, twist_axis, factors, new_positions);
+  /* Rotate the base surface, not the composed one, for the geometry target (see #calc_bend_grids
+   * and #layers::stroke_base_view). The cloth target keeps the composed positions unchanged. */
+  const Span<float3> twist_source =
+      eBrushDeformTarget(deform_target) == BRUSH_DEFORM_TARGET_GEOMETRY ?
+          layers::base_view_adjust_compact_grids(
+              object, subdiv_ccg, grids, orig_data.positions, tls.orig_base) :
+          orig_data.positions;
+  calc_twist_position(twist_source, twist_pivot_position, twist_axis, factors, new_positions);
 
   switch (eBrushDeformTarget(deform_target)) {
     case BRUSH_DEFORM_TARGET_GEOMETRY: {
+      layers::base_view_compose_grids(object, subdiv_ccg, grids, new_positions);
       tls.translations.resize(grid_verts_num);
       const MutableSpan<float3> translations = tls.translations;
       const Span<float3> positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
@@ -2544,19 +2580,25 @@ BLI_NOINLINE static void calc_average_position(const Span<float3> vert_positions
                                                const GroupedSpan<int> neighbors,
                                                const Span<int> propagation_steps,
                                                const MutableSpan<float> factors,
-                                               const MutableSpan<float3> average_positions)
+                                               const MutableSpan<float3> average_positions,
+                                               const Span<float3> base_view = {})
 {
   BLI_assert(vert_positions.size() == vert_propagation_steps.size());
   BLI_assert(factors.size() == neighbors.size());
   BLI_assert(factors.size() == propagation_steps.size());
   BLI_assert(factors.size() == average_positions.size());
 
+  /* When #base_view is given (visible sculpt layers, geometry target), average the base positions
+   * instead of the composed ones so the smoothing only affects the base and the layer residual is
+   * preserved (see #layers::stroke_base_view). Indexed like #vert_positions. */
+  const bool use_base_view = !base_view.is_empty();
   for (const int i : neighbors.index_range()) {
     average_positions[i] = float3(0.0f);
     int valid_neighbors = 0;
     for (const int neighbor : neighbors[i]) {
       if (propagation_steps[i] == vert_propagation_steps[neighbor]) {
-        average_positions[i] += vert_positions[neighbor];
+        average_positions[i] += use_base_view ? vert_positions[neighbor] - base_view[neighbor] :
+                                                vert_positions[neighbor];
         valid_neighbors++;
       }
     }
@@ -2638,16 +2680,31 @@ static void calc_smooth_mesh(const Sculpt &sd,
 
   const Span<float3> positions = gather_data_mesh(position_data.eval, verts, tls.positions);
   const MutableSpan<float3> average_positions = tls.average_positions;
+  /* Smooth the base surface, not the composed one, for the geometry target so the layer residual
+   * is preserved instead of being averaged into the base (see #layers::stroke_base_view). An empty
+   * base view (no layers, or the cloth target) keeps the original composed behavior. */
+  const Span<float3> base_view =
+      eBrushDeformTarget(deform_target) == BRUSH_DEFORM_TARGET_GEOMETRY ?
+          layers::stroke_base_view(object) :
+          Span<float3>();
   calc_average_position(position_data.eval,
                         vert_propagation_steps,
                         neighbors,
                         propagation_steps,
                         factors,
-                        average_positions);
+                        average_positions,
+                        base_view);
 
   tls.new_positions.resize(verts.size());
   const MutableSpan<float3> new_positions = tls.new_positions;
-  calc_smooth_position(positions, average_positions, factors, new_positions);
+  const Span<float3> smooth_source =
+      base_view.is_empty() ?
+          positions :
+          layers::base_view_adjust_compact_mesh(object, verts, positions, tls.orig_base);
+  calc_smooth_position(smooth_source, average_positions, factors, new_positions);
+  if (!base_view.is_empty()) {
+    layers::base_view_compose_mesh(object, verts, new_positions);
+  }
 
   switch (eBrushDeformTarget(deform_target)) {
     case BRUSH_DEFORM_TARGET_GEOMETRY: {
@@ -2702,18 +2759,32 @@ static void calc_smooth_grids(const Sculpt &sd,
 
   tls.average_positions.resize(grid_verts_num);
   const MutableSpan<float3> average_positions = tls.average_positions;
+  /* Smooth the base surface, not the composed one, for the geometry target (see #calc_smooth_mesh
+   * and #layers::stroke_base_view). An empty base view keeps the composed behavior. */
+  const Span<float3> base_view =
+      eBrushDeformTarget(deform_target) == BRUSH_DEFORM_TARGET_GEOMETRY ?
+          layers::stroke_base_view(object) :
+          Span<float3>();
   calc_average_position(subdiv_ccg.positions,
                         vert_propagation_steps,
                         neighbors,
                         propagation_steps,
                         factors,
-                        average_positions);
+                        average_positions,
+                        base_view);
 
   const Span<float3> positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
 
   tls.new_positions.resize(grid_verts_num);
   const MutableSpan<float3> new_positions = tls.new_positions;
-  calc_smooth_position(positions, average_positions, factors, new_positions);
+  const Span<float3> smooth_source =
+      base_view.is_empty() ?
+          positions :
+          layers::base_view_adjust_compact_grids(object, subdiv_ccg, grids, positions, tls.orig_base);
+  calc_smooth_position(smooth_source, average_positions, factors, new_positions);
+  if (!base_view.is_empty()) {
+    layers::base_view_compose_grids(object, subdiv_ccg, grids, new_positions);
+  }
 
   switch (eBrushDeformTarget(deform_target)) {
     case BRUSH_DEFORM_TARGET_GEOMETRY: {

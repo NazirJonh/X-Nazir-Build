@@ -222,6 +222,26 @@ void BKE_multires_sculpt_layer_apply_to_mdisps(Mesh &mesh, const SculptLayer &la
 bool BKE_multires_mesh_has_grid_sculpt_layers(const Mesh &mesh);
 
 /**
+ * An enabled grid-domain sculpt layer selected for composition with (or subtraction from) the base
+ * multires displacement: a pointer into its tangent coefficients (MDisps layout at the top level)
+ * and its influence.
+ */
+struct MultiresGridSculptLayer {
+  const float3 *data;
+  float influence;
+};
+
+/**
+ * Collect the enabled grid-domain sculpt layers whose data matches the MDisps layout at
+ * \a grid_area (the `grid_size^2` of the multires top level). Both the displacement evaluator
+ * (which composes them onto the base) and the base flush (which subtracts them back) use this
+ * single collector so they always operate on an identical layer set; any asymmetry would leak the
+ * difference into the base #CD_MDISPS.
+ */
+Vector<MultiresGridSculptLayer> BKE_multires_grid_sculpt_layers_collect(const Mesh &mesh,
+                                                                        int grid_area);
+
+/**
  * Compute the object-space contribution of \a layer (at influence 1.0) for every element of the
  * given CCG at its current level: the layer's tangent coefficients subsampled to the CCG level
  * and transformed by the base-mesh limit-surface tangent matrices. Used by the interactive

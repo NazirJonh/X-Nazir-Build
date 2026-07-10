@@ -1788,7 +1788,9 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
   const IndexMask mask = IndexMask::from_union(empty_mask, dirty_mask, memory);
 
   /* Aggregate timing of the node-buffer extraction loop (one line per redraw call, not per node). */
+#if PBVH_DRAW_DEBUG_PERF
   const auto pdp_start = std::chrono::high_resolution_clock::now();
+#endif
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
@@ -1868,10 +1870,10 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
     }
   }
 
+#if PBVH_DRAW_DEBUG_PERF
   const auto pdp_end = std::chrono::high_resolution_clock::now();
   const long long pdp_us =
       std::chrono::duration_cast<std::chrono::microseconds>(pdp_end - pdp_start).count();
-#if PBVH_DRAW_DEBUG_PERF
   const char *pdp_attr_name = "Generic";
   if (const CustomRequest *pdp_rq = std::get_if<CustomRequest>(&attr)) {
     switch (*pdp_rq) {

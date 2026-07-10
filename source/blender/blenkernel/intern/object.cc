@@ -1729,12 +1729,13 @@ static void object_update_from_subsurf_ccg(Object *object)
   const bool flushed = multiresModifier_reshapeFromCCG(
       tot_level, mesh_orig, subdiv_ccg, MultiresReshapeFromCCGMode::Base);
   if (!flushed) {
-#if SCULPT_LAYERS_DEBUG_LOG
-    printf("[sculpt-layers][flush] WARNING: skipped depsgraph multires base flush; source could "
-           "not be converted to base without baking layers\n");
-#endif
-    subdiv_ccg->dirty.coords = false;
-    subdiv_ccg->dirty.hidden = false;
+    /* The composed CCG could not be separated back into an un-layered base (a sculpt layer has
+     * stale level/topology metadata). Keep the dirty flags set so the pending base edits are
+     * retained for a later flush instead of being silently discarded, and report the failure
+     * instead of losing the stroke without a trace. */
+    CLOG_ERROR(&LOG,
+               "Multires base flush skipped: sculpt layer data is inconsistent with the mesh; "
+               "base sculpt edits are kept pending.");
     return;
   }
   /* NOTE: we need to reshape into an original mesh from main database,

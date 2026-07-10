@@ -17,6 +17,7 @@
 #include "DNA_scene_types.h"
 
 #include "BLI_listbase_iterator.hh"
+#include "BLI_set.hh"
 #include "BLI_sys_types.h"
 
 #include "BKE_main.hh"
@@ -28,23 +29,31 @@
 
 #include "versioning_common.hh"
 
-// #include "CLG_log.h"
+#include "CLG_log.h"
 
 namespace blender {
 
-// static CLG_LogRef LOG = {"blend.doversion"};
+static CLG_LogRef LOG = {"blend.doversion"};
 
 void do_versions_after_linking_530(FileData * /*fd*/, Main *bmain)
 {
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 503, 3)) {
     /* Re-encode multires displacement grids into the well-conditioned tangent space (see
-     * #BKE_multires_construct_tangent_matrix). */
+     * #BKE_multires_construct_tangent_matrix). The conversion rewrites the mesh's shared
+     * #CD_MDISPS in place, so each mesh must be converted exactly once: a mesh used by several
+     * objects (linked duplicates) or an object carrying two Multires modifiers would otherwise be
+     * decoded a second time with the legacy frames and permanently corrupt the displacement. */
+    Set<const void *> converted_meshes;
     for (Object &ob : bmain->objects) {
       for (ModifierData &md : ob.modifiers) {
-        if (md.type == eModifierType_Multires) {
-          MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(&md);
-          multires_do_versions_tangent_space_conversion(&ob, mmd);
+        if (md.type != eModifierType_Multires) {
+          continue;
         }
+        if (ob.data == nullptr || !converted_meshes.add(ob.data)) {
+          continue;
+        }
+        MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(&md);
+        multires_do_versions_tangent_space_conversion(&ob, mmd);
       }
     }
   }
@@ -75,9 +84,9 @@ void blo_do_versions_530(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
         layer.totelem = 0;
         layer.level = 0;
         if (!warned) {
-          printf(
-              "[sculpt-layers] Grid sculpt layer data from an older file version was cleared: "
-              "the storage format changed to tangent space.\n");
+          CLOG_WARN(&LOG,
+                    "Grid sculpt layer data from an older file version was cleared: the storage "
+                    "format changed to tangent space.");
           warned = true;
         }
       }

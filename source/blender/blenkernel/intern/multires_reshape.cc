@@ -7,7 +7,9 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstring>
 
 #include "DNA_mesh_types.h"
 #include "DNA_meshdata_types.h"
@@ -25,6 +27,7 @@
 #include "BKE_multires.hh"
 #include "BKE_object.hh"
 #include "BKE_sculpt_layers.hh"
+#include "BKE_subdiv.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph_query.hh"
@@ -55,35 +58,29 @@ namespace blender {
 #  define SLF_PERF(...) ((void)0)
 #endif
 
-struct SculptGridLayer {
-  const float3 *data;
-  float influence;
-};
-
-/* Collect the enabled grid-domain sculpt layers whose data matches the MDisps layout at the
- * given per-grid element count. */
-static Vector<SculptGridLayer> sculpt_grid_layers_get(const Mesh &mesh, const int grid_area)
+Vector<MultiresGridSculptLayer> BKE_multires_grid_sculpt_layers_collect(const Mesh &mesh,
+                                                                        const int grid_area)
 {
-  Vector<SculptGridLayer> layers;
+  Vector<MultiresGridSculptLayer> layers;
   const int64_t expected_totelem = int64_t(mesh.corners_num) * grid_area;
   for (const SculptLayer &layer : mesh.sculpt_layers) {
     if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {
       continue;
     }
-    if (!(layer.flag & SCULPT_LAYER_ENABLED) || layer.influence == 0.0f) {
+    /* #bke::sculpt_layers::effective is the single authority for a layer's contribution weight
+     * (visibility gate + influence); routing through it keeps the grid path in sync with the mesh
+     * path if the blend/mute semantics ever change. */
+    const float eff = bke::sculpt_layers::effective(layer);
+    if (eff == 0.0f) {
       continue;
     }
     if (int64_t(layer.totelem) != expected_totelem) {
-      /* An enabled layer with data that cannot be subtracted is the classic source of a base
-       * leak: the evaluator skipped it too, but any asymmetry shows up here. */
-      SLF_PERF("[sculpt-layers][flush] layer '%s' SKIPPED: totelem=%d expected=%lld level=%d\n",
-               layer.name,
-               layer.totelem,
-               (long long)expected_totelem,
-               int(layer.level));
+      /* A layer whose data does not match the top-level MDisps layout (e.g. after a base topology
+       * change) is skipped. Both the evaluator and the flush call this same collector, so they can
+       * never select a different set — the classic source of a base leak is structurally removed. */
       continue;
     }
-    layers.append({static_cast<const float3 *>(layer.data), layer.influence});
+    layers.append({static_cast<const float3 *>(layer.data), eff});
   }
   return layers;
 }
@@ -106,13 +103,17 @@ static bool sculpt_grid_layers_applicable(const MDisps *mdisps,
 static void mdisps_add_sculpt_layers(MDisps *mdisps,
                                      const int grids_num,
                                      const int grid_area,
-                                     const Span<SculptGridLayer> layers,
-                                     const float sign)
+                                     const Span<MultiresGridSculptLayer> layers,
+                                     const float sign,
+                                     const Span<bool> grid_enabled = {})
 {
   threading::parallel_for(IndexRange(grids_num), 8, [&](const IndexRange range) {
     for (const int grid_index : range) {
+      if (!grid_enabled.is_empty() && !grid_enabled[grid_index]) {
+        continue;
+      }
       float3 *disps = reinterpret_cast<float3 *>(mdisps[grid_index].disps);
-      for (const SculptGridLayer &layer : layers) {
+      for (const MultiresGridSculptLayer &layer : layers) {
         const float3 *layer_data = layer.data + int64_t(grid_index) * grid_area;
         const float factor = sign * layer.influence;
         for (int i = 0; i < grid_area; i++) {
@@ -138,6 +139,7 @@ static void restore_ccg_positions_from_sculpt_layers(SubdivCCG &subdiv_ccg,
 
 static bool subtract_sculpt_layers_from_ccg_positions(Mesh &mesh,
                                                       SubdivCCG &subdiv_ccg,
+                                                      const int top_level,
                                                       Array<float3> &r_contribution)
 {
   r_contribution = {};
@@ -149,21 +151,33 @@ static bool subtract_sculpt_layers_from_ccg_positions(Mesh &mesh,
   Array<float3> total(subdiv_ccg.positions.size(), float3(0.0f));
   Array<float3> contribution(subdiv_ccg.positions.size());
   bool any_enabled_layer = false;
+  /* Select the exact same layer set the displacement evaluator composed onto the CCG (it validates
+   * against the top-level MDisps layout, see #BKE_multires_grid_sculpt_layers_collect). A layer at
+   * a mismatching size the evaluator skipped must be skipped here too: subtracting a contribution
+   * the CCG never contained would permanently dent the base by that layer's displacement. */
+  const int top_grid_size = bke::subdiv::grid_size_from_level(top_level);
+  const int64_t expected_totelem = int64_t(mesh.corners_num) * top_grid_size * top_grid_size;
 
   for (const SculptLayer &layer : mesh.sculpt_layers) {
-    if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || !(layer.flag & SCULPT_LAYER_ENABLED) ||
-        layer.influence == 0.0f || layer.data == nullptr)
-    {
+    if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {
+      continue;
+    }
+    /* Same effective-influence authority and top-level predicate as the evaluator's collector, so
+     * the flush subtracts exactly the set (and weights) that were composed onto the CCG. */
+    const float eff = bke::sculpt_layers::effective(layer);
+    if (eff == 0.0f) {
+      continue;
+    }
+    if (int64_t(layer.totelem) != expected_totelem) {
       continue;
     }
     if (!BKE_multires_sculpt_layer_object_contribution(mesh, subdiv_ccg, layer, contribution)) {
       return false;
     }
     any_enabled_layer = true;
-    const float influence = layer.influence;
     threading::parallel_for(total.index_range(), 8192, [&](const IndexRange range) {
       for (const int64_t i : range) {
-        total[i] += contribution[i] * influence;
+        total[i] += contribution[i] * eff;
       }
     });
   }
@@ -208,7 +222,7 @@ void BKE_multires_sculpt_layer_apply_to_mdisps(Mesh &mesh, const SculptLayer &la
   if (!sculpt_grid_layers_applicable(mdisps, mesh.corners_num, grid_area)) {
     return;
   }
-  const SculptGridLayer scaled = {static_cast<const float3 *>(layer.data), factor};
+  const MultiresGridSculptLayer scaled = {static_cast<const float3 *>(layer.data), factor};
   mdisps_add_sculpt_layers(mdisps, mesh.corners_num, grid_area, Span(&scaled, 1), 1.0f);
 }
 
@@ -311,7 +325,7 @@ bool multiresModifier_reshapeFromCCG(const int tot_level,
   Array<float3> source_layer_contribution;
   if (mode == MultiresReshapeFromCCGMode::Base &&
       !subtract_sculpt_layers_from_ccg_positions(
-          *coarse_mesh, *subdiv_ccg, source_layer_contribution))
+          *coarse_mesh, *subdiv_ccg, tot_level, source_layer_contribution))
   {
     SLF_PERF("[sculpt-layers][flush] WARNING: reshapeFromCCG base mode skipped; could not "
              "compute sculpt layer contribution without baking layers\n");
@@ -334,9 +348,9 @@ bool multiresModifier_reshapeFromCCG(const int tot_level,
    * - Base mode: CCG positions were converted to base-view before context creation; do not compose
    *   layers into MDisps, otherwise layer detail would be written into #CD_MDISPS. */
   const int grid_area = reshape_context.top.grid_size * reshape_context.top.grid_size;
-  Vector<SculptGridLayer> layers;
+  Vector<MultiresGridSculptLayer> layers;
   if (mode == MultiresReshapeFromCCGMode::Composed) {
-    layers = sculpt_grid_layers_get(*coarse_mesh, grid_area);
+    layers = BKE_multires_grid_sculpt_layers_collect(*coarse_mesh, grid_area);
   }
   if (!layers.is_empty() &&
       !sculpt_grid_layers_applicable(
@@ -421,7 +435,7 @@ bool multiresModifier_reshapeFromCCG(const int tot_level,
         changed_grids,
         reshape_context.num_grids,
         double(max_delta));
-    for (const SculptGridLayer &layer : layers) {
+    for (const MultiresGridSculptLayer &layer : layers) {
       SLF_PERF("%.3f ", double(layer.influence));
     }
     SLF_PERF("]\n");
@@ -433,6 +447,21 @@ bool multiresModifier_reshapeFromCCG(const int tot_level,
   return true;
 }
 
+/* FNV-1a hash of the coarse control-mesh vertex positions, used to detect when the base-mesh limit
+ * surface (and thus the cached tangent frames) changed. Cheap: the coarse mesh is small. */
+static uint64_t coarse_mesh_positions_hash(const Mesh &mesh)
+{
+  uint64_t hash = 14695981039346656037ull;
+  for (const float3 &p : mesh.vert_positions()) {
+    for (int i = 0; i < 3; i++) {
+      uint32_t bits;
+      std::memcpy(&bits, &p[i], sizeof(bits));
+      hash = (hash ^ uint64_t(bits)) * 1099511628211ull;
+    }
+  }
+  return hash;
+}
+
 bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
                                                        Mesh *coarse_mesh,
                                                        SubdivCCG *subdiv_ccg,
@@ -440,6 +469,9 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
                                                        SculptLayer &layer,
                                                        Vector<float3> &r_undo_delta)
 {
+#if SCULPT_LAYERS_DEBUG_FLUSH
+  const auto t_start = std::chrono::high_resolution_clock::now();
+#endif
   MultiresReshapeContext reshape_context;
   if (!multires_reshape_context_create_from_ccg(
           &reshape_context, subdiv_ccg, coarse_mesh, tot_level))
@@ -467,39 +499,95 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
 
   /* All enabled layers, including the recording one (its influence is normalized to 1.0 for the
    * duration of the recording), form the pre-stroke composed surface `T_old`. */
-  const Vector<SculptGridLayer> layers = sculpt_grid_layers_get(*coarse_mesh, grid_area);
+  const Vector<MultiresGridSculptLayer> layers = BKE_multires_grid_sculpt_layers_collect(
+      *coarse_mesh, grid_area);
 
-  /* Save the base displacement: the reshape below overwrites MDisps with the composed result and
-   * the base must be restored afterwards (MDisps only ever stores the base surface). */
-  Array<float3> saved_base(total_elems);
-  threading::parallel_for(IndexRange(num_grids), 32, [&](const IndexRange range) {
-    for (const int grid_index : range) {
+  /* Only the grids the stroke touched changed on the CCG; reshaping every other grid would just
+   * reproduce its unchanged base and get discarded by the restore below. Restrict the expensive
+   * per-grid work (compose, CCG assign, tangent encode, save/restore) to the touched grids. This is
+   * safe because untouched grids are never read (only #touched_grids feed the delta) and are left
+   * unmodified. Recording always reshapes at the top level, so the detail-smoothing pass has no
+   * detail band to add and is a no-op — no neighbor/halo grids are needed. */
+  Array<bool> grid_enabled(num_grids, false);
+  for (const int grid_index : touched_grids) {
+    if (grid_index >= 0 && grid_index < num_grids) {
+      grid_enabled[grid_index] = true;
+    }
+  }
+
+  /* Save the base displacement of the touched grids: the reshape below overwrites their MDisps with
+   * the composed result and the base must be restored afterwards (MDisps only ever stores the base
+   * surface). */
+  Array<float3> saved_base(int64_t(touched_grids.size()) * grid_area);
+  threading::parallel_for(touched_grids.index_range(), 32, [&](const IndexRange range) {
+    for (const int64_t t : range) {
+      const int grid_index = touched_grids[t];
       const float3 *disps = reinterpret_cast<const float3 *>(
           reshape_context.mdisps[grid_index].disps);
-      std::copy_n(disps, grid_area, saved_base.data() + int64_t(grid_index) * grid_area);
+      std::copy_n(disps, grid_area, saved_base.data() + t * grid_area);
     }
   });
 
   if (!layers.is_empty()) {
-    mdisps_add_sculpt_layers(reshape_context.mdisps, num_grids, grid_area, layers, 1.0f);
+    mdisps_add_sculpt_layers(reshape_context.mdisps, num_grids, grid_area, layers, 1.0f, grid_enabled);
   }
+#if SCULPT_LAYERS_DEBUG_FLUSH
+  const auto t_saved = std::chrono::high_resolution_clock::now();
+#endif
 
   /* Standard reshape: after this MDisps holds `T_new`, the tangent displacement of the sculpted
    * surface at the top level, and the original grids hold `T_old`. */
-  multires_reshape_store_original_grids(&reshape_context);
+  multires_reshape_store_original_grids(&reshape_context, grid_enabled);
   multires_reshape_ensure_grids(coarse_mesh, reshape_context.top.level);
-  if (!multires_reshape_assign_final_coords_from_ccg(&reshape_context, subdiv_ccg)) {
-    threading::parallel_for(IndexRange(num_grids), 32, [&](const IndexRange range) {
-      for (const int grid_index : range) {
+  if (!multires_reshape_assign_final_coords_from_ccg(&reshape_context, subdiv_ccg, grid_enabled)) {
+    threading::parallel_for(touched_grids.index_range(), 32, [&](const IndexRange range) {
+      for (const int64_t t : range) {
+        const int grid_index = touched_grids[t];
         float3 *disps = reinterpret_cast<float3 *>(reshape_context.mdisps[grid_index].disps);
-        std::copy_n(saved_base.data() + int64_t(grid_index) * grid_area, grid_area, disps);
+        std::copy_n(saved_base.data() + t * grid_area, grid_area, disps);
       }
     });
     multires_reshape_context_free(&reshape_context);
     return false;
   }
+#if SCULPT_LAYERS_DEBUG_FLUSH
+  const auto t_assign = std::chrono::high_resolution_clock::now();
+#endif
   multires_reshape_smooth_object_grids_with_details(&reshape_context);
-  multires_reshape_object_grids_to_tangent_displacement(&reshape_context);
+#if SCULPT_LAYERS_DEBUG_FLUSH
+  const auto t_smooth = std::chrono::high_resolution_clock::now();
+#endif
+  /* Reuse cached base-mesh limit frames across strokes: the encode is dominated by evaluating the
+   * base-mesh limit surface, which is stable while the coarse control mesh is unchanged. A change
+   * of the coarse mesh (control-cage edit) drops the cache via the hash; a CCG rebuild drops it by
+   * freeing the array. */
+  {
+    const uint64_t coarse_hash = coarse_mesh_positions_hash(*coarse_mesh);
+    if (subdiv_ccg->multires_layer_frames_coarse_hash != coarse_hash ||
+        subdiv_ccg->multires_layer_frames.size() != num_grids)
+    {
+      subdiv_ccg->multires_layer_frames.reinitialize(num_grids);
+      subdiv_ccg->multires_layer_frames_coarse_hash = coarse_hash;
+      subdiv_ccg->multires_layer_frames_bytes = 0;
+    }
+    /* Bound the cache memory; once the budget is spent stop adding new grids (already-cached grids
+     * are still reused). */
+    constexpr int64_t cache_cap_bytes = int64_t(512) * 1024 * 1024;
+    const bool allow_populate = subdiv_ccg->multires_layer_frames_bytes < cache_cap_bytes;
+    multires_reshape_object_grids_to_tangent_displacement_for_grids(
+        &reshape_context, touched_grids, subdiv_ccg->multires_layer_frames, allow_populate);
+    if (allow_populate) {
+      int64_t bytes = 0;
+      for (const SubdivCCGMultiresLayerFrames &gf : subdiv_ccg->multires_layer_frames) {
+        bytes += gf.positions.size() * int64_t(sizeof(float3)) +
+                 gf.inv_tangent_matrices.size() * int64_t(sizeof(float3x3));
+      }
+      subdiv_ccg->multires_layer_frames_bytes = bytes;
+    }
+  }
+#if SCULPT_LAYERS_DEBUG_FLUSH
+  const auto t_reshape = std::chrono::high_resolution_clock::now();
+#endif
 
   /* Accumulate the stroke delta `T_new - T_old` into the layer for the touched grids only, and
    * collect the explicit per-element undo delta. */
@@ -521,9 +609,15 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
     }
   });
 
-  /* Restore the base into MDisps (I1: layers are never baked into the base). */
-  threading::parallel_for(IndexRange(num_grids), 32, [&](const IndexRange range) {
-    for (const int grid_index : range) {
+#if SCULPT_LAYERS_DEBUG_FLUSH
+  const auto t_delta = std::chrono::high_resolution_clock::now();
+#endif
+
+  /* Restore the base into MDisps for the touched grids (I1: layers are never baked into the base).
+   * Untouched grids were never modified above, so they already hold the base. */
+  threading::parallel_for(touched_grids.index_range(), 32, [&](const IndexRange range) {
+    for (const int64_t t : range) {
+      const int grid_index = touched_grids[t];
       float3 *disps = reinterpret_cast<float3 *>(reshape_context.mdisps[grid_index].disps);
       std::copy_n(saved_base.data() + int64_t(grid_index) * grid_area, grid_area, disps);
     }
@@ -531,19 +625,32 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
 
 #if SCULPT_LAYERS_DEBUG_FLUSH
   {
+    const auto t_restore = std::chrono::high_resolution_clock::now();
+    const auto us = [](const auto a, const auto b) {
+      return static_cast<long long>(
+          std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
+    };
     float max_delta = 0.0f;
     for (const float3 &d : r_undo_delta) {
       max_delta = std::max(max_delta, math::length(d));
     }
     SLF_PERF(
         "[sculpt-layers][flush] reshape_into_layer: reshape_level=%d top_level=%d touched=%d/%d "
-        "layers_composed=%d max_layer_delta=%.6f\n",
+        "layers_composed=%d max_layer_delta=%.6f | save+compose=%lldus store+assign=%lldus "
+        "smooth=%lldus encode=%lldus delta=%lldus restore=%lldus TOTAL=%lldus\n",
         reshape_context.reshape.level,
         reshape_context.top.level,
         int(touched_grids.size()),
         num_grids,
         int(layers.size()),
-        double(max_delta));
+        double(max_delta),
+        us(t_start, t_saved),
+        us(t_saved, t_assign),
+        us(t_assign, t_smooth),
+        us(t_smooth, t_reshape),
+        us(t_reshape, t_delta),
+        us(t_delta, t_restore),
+        us(t_start, t_restore));
   }
 #endif
 

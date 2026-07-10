@@ -14,6 +14,7 @@
 #include "BLI_bit_group_vector.hh"
 #include "BLI_bit_span_ops.hh"
 #include "BLI_index_mask_fwd.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_offset_indices.hh"
 #include "BLI_ordered_edge.hh"
 #include "BLI_set.hh"
@@ -121,6 +122,16 @@ struct SubdivCCGAdjacentVertex {
 };
 
 /** Representation of subdivision surface which uses CCG grids. */
+/**
+ * Cached base-mesh limit frames for one multires grid (one entry per top-level grid element):
+ * the limit-surface position and the inverse tangent matrix used to encode object-space
+ * displacement back to tangent space. See #SubdivCCG::multires_layer_frames.
+ */
+struct SubdivCCGMultiresLayerFrames {
+  Array<float3> positions;
+  Array<float3x3> inv_tangent_matrices;
+};
+
 struct SubdivCCG : NonCopyable {
   /**
    * This is a subdivision surface this CCG was created for.
@@ -197,6 +208,24 @@ struct SubdivCCG : NonCopyable {
     /** Corresponds to MULTIRES_HIDDEN_MODIFIED. */
     bool hidden = false;
   } dirty;
+
+  /**
+   * Per-grid cache of the base-mesh limit frames (limit position and inverse tangent matrix at
+   * every top-level element of the grid). Sculpt-layer recording re-encodes the sculpted surface
+   * to tangent space at every stroke end, which is dominated by evaluating the base-mesh limit
+   * surface per element; those frames depend only on the coarse control mesh, which does not
+   * change while sculpting detail, so they are cached and reused across strokes.
+   *
+   * Lazily populated per grid (an empty entry means "not cached yet"). Sized to #grids_num, or
+   * empty when unused. Freed automatically with the CCG (a rebuild drops it); it is also cleared
+   * when #multires_layer_frames_coarse_hash no longer matches the coarse mesh (see the reshape
+   * recording path), which catches control-cage edits that do not rebuild the CCG.
+   */
+  Array<SubdivCCGMultiresLayerFrames> multires_layer_frames;
+  /** FNV hash of the coarse control mesh vertex positions the frame cache was built against. */
+  uint64_t multires_layer_frames_coarse_hash = 0;
+  /** Approximate bytes held by #multires_layer_frames, used to bound the cache memory. */
+  int64_t multires_layer_frames_bytes = 0;
 
   ~SubdivCCG();
 };

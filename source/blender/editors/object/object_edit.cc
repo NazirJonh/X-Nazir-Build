@@ -1019,31 +1019,6 @@ static wmOperatorStatus editmode_toggle_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  /* Sculpt layers cannot survive an Edit Mode topology change, so warn before entering and offer
-   * to bake them into the base first instead of silently orphaning the layer data. Checked
-   * regardless of the current mode (Object Mode included); the "Bake All Layers" choice itself
-   * takes care of entering Sculpt Mode first if the object is not already in it (see
-   * #layer_bake_and_editmode_enter_exec). */
-  if (!is_mode_set && !G.background && obact->type == OB_MESH &&
-      !RNA_boolean_get(op->ptr, "sculpt_layers_bake_confirmed"))
-  {
-    /* "Don't Show This Again This Session" checkbox in the popup below: a session-only (not
-     * saved to the .blend file) WindowManager property registered from Python, see
-     * SCULPT_PT_layer_editmode_confirm.draw() in properties_data_mesh.py. */
-    wmWindowManager *wm = CTX_wm_manager(C);
-    PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
-    if (!RNA_boolean_get(&wm_ptr, "sculpt_layers_hide_editmode_warning")) {
-      const Mesh *mesh = id_cast<const Mesh *>(obact->data);
-      if (!BLI_listbase_is_empty(&mesh->sculpt_layers)) {
-        /* A popover (not a plain popup menu): #SCULPT_PT_layer_editmode_confirm's "Don't Show
-         * This Again" checkbox must stay interactive without closing the popup on click, which
-         * only a #BLOCK_KEEP_OPEN popover supports (see that panel's draw() for details). */
-        ui::popover_panel_invoke(C, "SCULPT_PT_layer_editmode_confirm", true, op->reports);
-        return OPERATOR_INTERFACE;
-      }
-    }
-  }
-
   if (!is_mode_set) {
     if (!mode_compat_set(C, obact, eObjectMode(mode_flag), op->reports)) {
       return OPERATOR_CANCELLED;
@@ -1108,6 +1083,46 @@ static bool editmode_toggle_poll(bContext *C)
   return OB_TYPE_SUPPORT_EDITMODE(ob->type);
 }
 
+static wmOperatorStatus editmode_toggle_invoke(bContext *C,
+                                               wmOperator *op,
+                                               const wmEvent * /*event*/)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  const Object *obact = BKE_view_layer_active_object_get(view_layer);
+  const bool is_mode_set = obact && (obact->mode & OB_MODE_EDIT) != 0;
+
+  /* Sculpt layers cannot survive an Edit Mode topology change, so warn before entering and offer
+   * to bake them into the base first instead of silently orphaning the layer data. This lives in
+   * #invoke (interactive entry) only: #exec is used by scripts and #ed::object::mode_set, and must
+   * switch the mode outright rather than hand off to a popup that a non-interactive caller cannot
+   * answer. The "Bake All Layers" choice itself takes care of entering Sculpt Mode first if the
+   * object is not already in it (see #layer_bake_and_editmode_enter_exec). */
+  if (!is_mode_set && obact && obact->type == OB_MESH &&
+      !RNA_boolean_get(op->ptr, "sculpt_layers_bake_confirmed"))
+  {
+    /* "Don't Show This Again This Session" checkbox in the popup below: a session-only (not saved
+     * to the .blend file) WindowManager property registered from Python, see
+     * SCULPT_PT_layer_editmode_confirm.draw() in properties_data_mesh.py. */
+    wmWindowManager *wm = CTX_wm_manager(C);
+    PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
+    if (!RNA_boolean_get(&wm_ptr, "sculpt_layers_hide_editmode_warning")) {
+      const Mesh *mesh = id_cast<const Mesh *>(obact->data);
+      if (mesh && !BLI_listbase_is_empty(&mesh->sculpt_layers)) {
+        /* A popover (not a plain popup menu): #SCULPT_PT_layer_editmode_confirm's "Don't Show This
+         * Again" checkbox must stay interactive without closing the popup on click, which only a
+         * #BLOCK_KEEP_OPEN popover supports (see that panel's draw() for details). */
+        ui::popover_panel_invoke(C, "SCULPT_PT_layer_editmode_confirm", true, op->reports);
+        return OPERATOR_INTERFACE;
+      }
+    }
+  }
+
+  return editmode_toggle_exec(C, op);
+}
+
 void OBJECT_OT_editmode_toggle(wmOperatorType *ot)
 {
 
@@ -1118,6 +1133,7 @@ void OBJECT_OT_editmode_toggle(wmOperatorType *ot)
 
   /* API callbacks. */
   ot->exec = editmode_toggle_exec;
+  ot->invoke = editmode_toggle_invoke;
   ot->poll = editmode_toggle_poll;
 
   /* flags */

@@ -13,6 +13,8 @@
 #include <cstddef>
 #include <cstdio>
 
+#include "CLG_log.h"
+
 #include "MEM_guardedalloc.h"
 
 #include "DNA_mesh_types.h"
@@ -26,6 +28,8 @@
 #include "BKE_multires_grid_resample.hh"
 
 #include "BLO_read_write.hh"
+
+static CLG_LogRef LOG = {"bke.sculpt_layers"};
 
 namespace blender::bke::sculpt_layers {
 
@@ -145,24 +149,27 @@ bool solo_active(const Mesh &mesh)
 MutableSpan<float3> data_ensure(SculptLayer &layer, const int totelem)
 {
   if (layer.data != nullptr && layer.totelem == totelem) {
-    /* Fast path: data already allocated and correctly sized. No work, no logging — the printf
-     * that used to run here was a synchronous syscall (~0.5-1.5ms under --debug >> file) on every
-     * stroke end, dwarfing the actual work. Logging only happens on the (rare) realloc path. */
+    /* Fast path: data already allocated and correctly sized. Kept allocation-free and
+     * logging-free — the timing probe below only runs on the (rare) realloc path and only when
+     * #SCULPT_LAYERS_DEBUG_LOG is enabled. */
     return {static_cast<float3 *>(layer.data), layer.totelem};
   }
+#if SCULPT_LAYERS_DEBUG_LOG
   const auto func_start = std::chrono::high_resolution_clock::now();
   printf("[DEBUG-perf] data_ensure: realloc needed, old_totelem=%d, new_totelem=%d\n",
          layer.totelem, totelem);
+#endif
   if (layer.data) {
     MEM_delete_void(layer.data);
   }
-  const auto alloc_start = std::chrono::high_resolution_clock::now();
   layer.data = MEM_new_array_zeroed<float[3]>(size_t(totelem), __func__);
-  const auto alloc_end = std::chrono::high_resolution_clock::now();
   layer.totelem = totelem;
-  printf("[DEBUG-perf] data_ensure: alloc=%lld us, total=%lld us\n",
-         std::chrono::duration_cast<std::chrono::microseconds>(alloc_end - alloc_start).count(),
-         std::chrono::duration_cast<std::chrono::microseconds>(alloc_end - func_start).count());
+#if SCULPT_LAYERS_DEBUG_LOG
+  printf("[DEBUG-perf] data_ensure: total=%lld us\n",
+         std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::high_resolution_clock::now() - func_start)
+             .count());
+#endif
   return {static_cast<float3 *>(layer.data), layer.totelem};
 }
 
@@ -193,10 +200,14 @@ void apply_delta_mesh(const SculptLayer &layer, const float factor, MutableSpan<
     return;
   }
   const Span<float3> deltas(static_cast<const float3 *>(layer.data), layer.totelem);
-  const int64_t count = std::min(positions.size(), deltas.size());
+  if (deltas.size() != positions.size()) {
+    /* Stale layer whose element count no longer matches the mesh topology (e.g. a remesh that
+     * bypassed the free hook). Skip it rather than corrupting a mismatched vertex range. */
+    return;
+  }
   /* Bandwidth-bound vertex pass; parallelize since the influence slider runs this on the whole mesh
    * per tick. #parallel_for stays serial below the grain size, so small meshes pay no overhead. */
-  threading::parallel_for(IndexRange(count), 8192, [&](const IndexRange range) {
+  threading::parallel_for(positions.index_range(), 8192, [&](const IndexRange range) {
     for (const int64_t i : range) {
       positions[i] += deltas[i] * factor;
     }
@@ -223,8 +234,12 @@ void combine_layers_mesh(const Span<float3> base,
       continue;
     }
     const Span<float3> data(static_cast<const float3 *>(layer.data), layer.totelem);
-    const int64_t count = std::min({base.size(), r_positions.size(), data.size()});
-    threading::parallel_for(IndexRange(count), 8192, [&](const IndexRange range) {
+    if (data.size() != r_positions.size()) {
+      /* Stale layer whose element count no longer matches the mesh topology. Skip it rather than
+       * composing deltas over a mismatched vertex range. */
+      continue;
+    }
+    threading::parallel_for(r_positions.index_range(), 8192, [&](const IndexRange range) {
       for (const int64_t i : range) {
         r_positions[i] += data[i] * eff;
       }
@@ -251,7 +266,7 @@ void resample_grid_layers(Mesh &mesh, const int grids_num, const int new_level)
       layer.totelem = 0;
       layer.level = 0;
       if (!warned) {
-        printf("[sculpt-layers] grid layer data cleared: all subdivision levels removed.\n");
+        CLOG_WARN(&LOG, "Grid sculpt layer data cleared: all subdivision levels were removed.");
         warned = true;
       }
       continue;
@@ -267,7 +282,8 @@ void resample_grid_layers(Mesh &mesh, const int grids_num, const int new_level)
       layer.totelem = 0;
       layer.level = short(new_level);
       if (!warned) {
-        printf("[sculpt-layers] grid layer data reset: stored level no longer matches.\n");
+        CLOG_WARN(&LOG,
+                  "Grid sculpt layer data reset: stored level no longer matches the mesh topology.");
         warned = true;
       }
       continue;
@@ -300,8 +316,12 @@ void derive_base_mesh(const Span<float3> positions,
       continue;
     }
     const Span<float3> data(static_cast<const float3 *>(layer.data), layer.totelem);
-    const int64_t count = std::min({positions.size(), r_base.size(), data.size()});
-    threading::parallel_for(IndexRange(count), 8192, [&](const IndexRange range) {
+    if (data.size() != r_base.size()) {
+      /* Stale layer whose element count no longer matches the mesh topology. Skip it rather than
+       * deriving the base over a mismatched vertex range. */
+      continue;
+    }
+    threading::parallel_for(r_base.index_range(), 8192, [&](const IndexRange range) {
       for (const int64_t i : range) {
         r_base[i] -= data[i] * eff;
       }

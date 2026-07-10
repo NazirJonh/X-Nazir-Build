@@ -324,15 +324,19 @@ static void rna_SculptLayer_apply_mesh_delta(Mesh *mesh, SculptLayer &layer, con
     return;
   }
   MutableSpan<float3> positions = mesh->vert_positions_for_write();
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
   const std::chrono::high_resolution_clock::time_point apply_start =
       std::chrono::high_resolution_clock::now();
+#endif
   bke::sculpt_layers::apply_delta_mesh(layer, delta, positions);
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
   const int64_t apply_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                std::chrono::high_resolution_clock::now() - apply_start)
                                .count();
   SLP_RNA_PERF("[DEBUG-perf] rna_sculpt_layers: apply_delta_mesh verts=%d took %lld us\n",
                mesh->verts_num,
-               (long long)apply_us);
+               static_cast<long long>(apply_us));
+#endif
   mesh->tag_positions_changed();
 }
 
@@ -353,10 +357,26 @@ static void rna_SculptLayer_flush_pending_base(Mesh *mesh, const SculptLayer &la
   ed::sculpt_paint::layers::flush_pending_multires_base_for_mesh(*G_MAIN, *mesh);
 }
 
+/* A vertex-domain layer keeps the combined mesh positions in sync incrementally, so its influence
+ * and visibility may only change while those positions can be updated. In Edit Mode the live
+ * positions live in the edit mesh and cannot be touched here, so changing the stored value would
+ * break `positions == base + sum(layers * influence)` with no way to reconcile it. Grid-domain
+ * layers are recomposed from stored data at evaluation and are therefore always safe to change. */
+static bool rna_SculptLayer_value_change_allowed(const Mesh *mesh, const SculptLayer &layer)
+{
+  if (layer.domain != SCULPT_LAYER_DOMAIN_VERT) {
+    return true;
+  }
+  return mesh->runtime->edit_mesh == nullptr && mesh->verts_num != 0;
+}
+
 static void rna_SculptLayer_influence_set(PointerRNA *ptr, float value)
 {
   Mesh *mesh = rna_mesh(ptr);
   SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
+  if (!rna_SculptLayer_value_change_allowed(mesh, *layer)) {
+    return;
+  }
   value = (value < -10.0f) ? -10.0f : (value > 10.0f ? 10.0f : value);
   rna_SculptLayer_flush_pending_base(mesh, *layer);
   const float old_effective = bke::sculpt_layers::effective(*layer);
@@ -375,6 +395,9 @@ static void rna_SculptLayer_enabled_set(PointerRNA *ptr, bool value)
   SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
   const bool was_enabled = (layer->flag & SCULPT_LAYER_ENABLED) != 0;
   if (was_enabled == value) {
+    return;
+  }
+  if (!rna_SculptLayer_value_change_allowed(mesh, *layer)) {
     return;
   }
   rna_SculptLayer_flush_pending_base(mesh, *layer);
@@ -408,28 +431,36 @@ static void rna_Mesh_update_sculpt_layers(Main *bmain, Scene *scene, PointerRNA 
    * (see #rna_SculptLayer_apply_mesh_delta). For a vertex-domain PBVH this lets us refresh the
    * viewport with a lightweight PBVH invalidation instead of a full geometry re-evaluation, which
    * keeps the influence slider interactive on dense meshes. */
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
   const std::chrono::high_resolution_clock::time_point flush_start =
       std::chrono::high_resolution_clock::now();
+#endif
   const bool flushed = ed::sculpt_paint::layers::flush_interactive_update(*bmain, *rna_mesh(ptr));
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
   const int64_t flush_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                std::chrono::high_resolution_clock::now() - flush_start)
                                .count();
   SLP_RNA_PERF("[DEBUG-perf] rna_sculpt_layers: flush_interactive_update fast_path=%d took %lld us\n",
                int(flushed),
-               (long long)flush_us);
+               static_cast<long long>(flush_us));
+#endif
   if (flushed) {
     return;
   }
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
   const std::chrono::high_resolution_clock::time_point fallback_start =
       std::chrono::high_resolution_clock::now();
+#endif
   DEG_id_tag_update(id, ID_RECALC_GEOMETRY);
   WM_main_add_notifier(NC_GEOM | ND_DATA, id);
   WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, nullptr);
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
   const int64_t fallback_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                   std::chrono::high_resolution_clock::now() - fallback_start)
                                   .count();
   SLP_RNA_PERF("[DEBUG-perf] rna_sculpt_layers: fallback ID_RECALC_GEOMETRY+notifiers took %lld us\n",
-               (long long)fallback_us);
+               static_cast<long long>(fallback_us));
+#endif
 }
 
 /** \} */

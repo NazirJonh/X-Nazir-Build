@@ -827,7 +827,8 @@ void multires_reshape_ensure_grids(Mesh *mesh, const int level)
 /** \name Displacement, space conversion
  * \{ */
 
-void multires_reshape_store_original_grids(MultiresReshapeContext *reshape_context)
+void multires_reshape_store_original_grids(MultiresReshapeContext *reshape_context,
+                                           const Span<bool> grid_enabled)
 {
   const MDisps *mdisps = reshape_context->mdisps;
   const GridPaintMask *grid_paint_masks = reshape_context->grid_paint_masks;
@@ -840,19 +841,23 @@ void multires_reshape_store_original_grids(MultiresReshapeContext *reshape_conte
 
   const int num_grids = reshape_context->num_grids;
   for (int grid_index = 0; grid_index < num_grids; grid_index++) {
+    /* When a per-grid mask is given (a restricted, touched-grid reshape), only the enabled grids
+     * are read back. The array copy above aliased every grid's #disps pointer to the live data, so
+     * for the disabled grids drop that pointer to nullptr: this skips the expensive per-grid copy
+     * and stops the free path from double-freeing the live grid (#MEM_SAFE_DELETE ignores null). */
+    const bool enabled = grid_enabled.is_empty() || grid_enabled[grid_index];
     MDisps *orig_grid = &orig_mdisps[grid_index];
     /* Ignore possibly invalid/non-allocated original grids. They will be replaced with 0 original
      * data when accessed during reshape process.
      * Reshape process will ensure all grids are on top level, but that happens on separate set of
      * grids which eventually replaces original one. */
-    if (orig_grid->disps != nullptr) {
-      orig_grid->disps = MEM_dupalloc(orig_grid->disps);
-    }
+    orig_grid->disps = (enabled && orig_grid->disps != nullptr) ? MEM_dupalloc(orig_grid->disps) :
+                                                                  nullptr;
     if (orig_grid_paint_masks != nullptr) {
       GridPaintMask *orig_paint_mask_grid = &orig_grid_paint_masks[grid_index];
-      if (orig_paint_mask_grid->data != nullptr) {
-        orig_paint_mask_grid->data = MEM_dupalloc(orig_paint_mask_grid->data);
-      }
+      orig_paint_mask_grid->data = (enabled && orig_paint_mask_grid->data != nullptr) ?
+                                       MEM_dupalloc(orig_paint_mask_grid->data) :
+                                       nullptr;
     }
   }
 
@@ -869,6 +874,11 @@ struct ForeachGridCoordinateTaskData {
 
   int grid_size;
   float grid_size_1_inv;
+
+  /* When non-null, a per-grid enable mask (indexed by grid index): grids whose entry is false are
+   * skipped entirely. Used to restrict a reshape to the grids a sculpt stroke actually touched.
+   * Null means every grid is processed (the default for full-mesh reshapes). */
+  const bool *grid_enabled;
 
   ForeachGridCoordinateCallback callback;
   void *callback_userdata_v;
@@ -889,6 +899,9 @@ static void foreach_grid_face_coordinate_task(void *__restrict userdata_v,
   const int num_corners = faces[face_index].size();
   int grid_index = reshape_context->face_start_grid_index[face_index];
   for (int corner = 0; corner < num_corners; ++corner, ++grid_index) {
+    if (data->grid_enabled != nullptr && !data->grid_enabled[grid_index]) {
+      continue;
+    }
     for (int y = 0; y < grid_size; ++y) {
       const float v = float(y) * grid_size_1_inv;
       for (int x = 0; x < grid_size; ++x) {
@@ -909,12 +922,14 @@ static void foreach_grid_face_coordinate_task(void *__restrict userdata_v,
 static void foreach_grid_coordinate(const MultiresReshapeContext *reshape_context,
                                     const int level,
                                     ForeachGridCoordinateCallback callback,
-                                    void *userdata_v)
+                                    void *userdata_v,
+                                    const Span<bool> grid_enabled = {})
 {
   ForeachGridCoordinateTaskData data;
   data.reshape_context = reshape_context;
   data.grid_size = bke::subdiv::grid_size_from_level(level);
   data.grid_size_1_inv = 1.0f / (float(data.grid_size) - 1.0f);
+  data.grid_enabled = grid_enabled.is_empty() ? nullptr : grid_enabled.data();
   data.callback = callback;
   data.callback_userdata_v = userdata_v;
 
@@ -960,7 +975,7 @@ static void object_grid_element_to_tangent_displacement(
 }
 
 void multires_reshape_object_grids_to_tangent_displacement(
-    const MultiresReshapeContext *reshape_context)
+    const MultiresReshapeContext *reshape_context, const Span<bool> grid_enabled)
 {
 #if MULTIRES_TANGENT_DEBUG
   multires_reshape_tangent_debug_begin(reshape_context, "encode");
@@ -968,10 +983,74 @@ void multires_reshape_object_grids_to_tangent_displacement(
   foreach_grid_coordinate(reshape_context,
                           reshape_context->top.level,
                           object_grid_element_to_tangent_displacement,
-                          nullptr);
+                          nullptr,
+                          grid_enabled);
 #if MULTIRES_TANGENT_DEBUG
   multires_reshape_tangent_debug_end();
 #endif
+}
+
+void multires_reshape_object_grids_to_tangent_displacement_for_grids(
+    const MultiresReshapeContext *reshape_context,
+    const Span<int> grid_indices,
+    const MutableSpan<SubdivCCGMultiresLayerFrames> frame_cache,
+    const bool allow_populate)
+{
+  /* Use the same top-level grid size the rest of the reshape uses for #grid_area, so the element
+   * iteration matches the stored MDisps layout exactly. */
+  const int grid_size = reshape_context->top.grid_size;
+  const float grid_size_1_inv = 1.0f / (float(grid_size) - 1.0f);
+  const int64_t grid_area = int64_t(grid_size) * grid_size;
+  const bool use_cache = !frame_cache.is_empty();
+  /* Encode only the listed grids. The tangent encode of a grid element depends on the base-mesh
+   * limit surface at that element alone (no cross-grid dependency), so restricting the set is
+   * exact. Used by sculpt-layer recording to encode just the grids a stroke touched. When a frame
+   * cache is provided, reuse (or lazily populate) the per-element limit position and inverse
+   * tangent matrix so repeated strokes skip the expensive limit-surface evaluation. */
+  threading::parallel_for(grid_indices.index_range(), 1, [&](const IndexRange range) {
+    for (const int64_t i : range) {
+      const int grid_index = grid_indices[i];
+      SubdivCCGMultiresLayerFrames *frames = use_cache ? &frame_cache[grid_index] : nullptr;
+      const bool cached = frames != nullptr && !frames->positions.is_empty();
+      const bool populate = frames != nullptr && !cached && allow_populate;
+      if (populate) {
+        frames->positions.reinitialize(grid_area);
+        frames->inv_tangent_matrices.reinitialize(grid_area);
+      }
+      for (int y = 0; y < grid_size; ++y) {
+        const float v = float(y) * grid_size_1_inv;
+        for (int x = 0; x < grid_size; ++x) {
+          const int64_t elem = int64_t(y) * grid_size + x;
+          GridCoord grid_coord;
+          grid_coord.grid_index = grid_index;
+          grid_coord.u = float(x) * grid_size_1_inv;
+          grid_coord.v = v;
+
+          float3 P;
+          float3x3 inv_tangent_matrix;
+          if (cached) {
+            P = frames->positions[elem];
+            inv_tangent_matrix = frames->inv_tangent_matrices[elem];
+          }
+          else {
+            float3x3 tangent_matrix;
+            multires_reshape_evaluate_base_mesh_limit_at_grid(
+                reshape_context, &grid_coord, P, tangent_matrix);
+            inv_tangent_matrix = math::invert(tangent_matrix);
+            if (populate) {
+              frames->positions[elem] = P;
+              frames->inv_tangent_matrices[elem] = inv_tangent_matrix;
+            }
+          }
+
+          ReshapeGridElement grid_element = multires_reshape_grid_element_for_grid_coord(
+              reshape_context, &grid_coord);
+          const float3 D = *grid_element.displacement - P;
+          *grid_element.displacement = math::transform_direction(inv_tangent_matrix, D);
+        }
+      }
+    }
+  });
 }
 
 /** \} */

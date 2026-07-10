@@ -1091,6 +1091,20 @@ Span<float3> base_view_adjust_compact_grids(const Object &object,
                                             Span<float3> positions,
                                             Vector<float3> &r_storage);
 /**
+ * Inverse of #base_view_adjust_compact_mesh: add the base-view offset back into \a positions
+ * in place, lifting brush results computed in base space up to the live (composed) space. No-op
+ * when the base view is inactive. Used by brushes (Pose, Boundary) that build absolute new
+ * positions from the base so the layer residual is carried instead of baked into the base.
+ */
+void base_view_compose_mesh(const Object &object,
+                            Span<int> verts,
+                            MutableSpan<float3> positions);
+/** Grid (CCG node layout) counterpart of #base_view_compose_mesh. */
+void base_view_compose_grids(const Object &object,
+                             const SubdivCCG &subdiv_ccg,
+                             Span<int> grids,
+                             MutableSpan<float3> positions);
+/**
  * Undo the per-dab layer accumulation of an in-progress stroke that is being cancelled. Must run
  * before the sculpt undo restores the pre-stroke positions, because the offset is recomputed as
  * `current_position - pre_stroke_position` from the still-available per-node undo data.

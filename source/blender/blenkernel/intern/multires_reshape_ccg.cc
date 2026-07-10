@@ -16,7 +16,8 @@
 namespace blender {
 
 bool multires_reshape_assign_final_coords_from_ccg(const MultiresReshapeContext *reshape_context,
-                                                   SubdivCCG *subdiv_ccg)
+                                                   SubdivCCG *subdiv_ccg,
+                                                   const Span<bool> grid_enabled)
 {
   const CCGKey reshape_level_key = BKE_subdiv_ccg_key(*subdiv_ccg, reshape_context->reshape.level);
 
@@ -28,6 +29,9 @@ bool multires_reshape_assign_final_coords_from_ccg(const MultiresReshapeContext 
 
   int num_grids = subdiv_ccg->grids_num;
   for (int grid_index = 0; grid_index < num_grids; ++grid_index) {
+    if (!grid_enabled.is_empty() && !grid_enabled[grid_index]) {
+      continue;
+    }
     for (int y = 0; y < reshape_grid_size; ++y) {
       const float v = float(y) * reshape_grid_size_1_inv;
       for (int x = 0; x < reshape_grid_size; ++x) {

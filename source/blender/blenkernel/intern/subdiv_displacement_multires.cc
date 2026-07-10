@@ -36,13 +36,6 @@ struct PolyCornerIndex {
   int corner;
 };
 
-/* An enabled grid-domain sculpt layer whose tangent displacement is composed with the base
- * MDisps displacement at evaluation time (data layout matches MDisps at the top level). */
-struct MultiresLayerData {
-  const float3 *data;
-  float influence;
-};
-
 struct MultiresDisplacementData {
   Subdiv *subdiv = nullptr;
   int grid_size = 0;
@@ -62,7 +55,7 @@ struct MultiresDisplacementData {
   Span<int> face_ptex_offset = {};
   /* Enabled grid-domain sculpt layers, composed with the base displacement on read. Empty for
    * meshes without sculpt layers, in which case evaluation is identical to the base-only path. */
-  Vector<MultiresLayerData> layers = {};
+  Vector<MultiresGridSculptLayer> layers = {};
   /* Sanity check, is used in debug builds.
    * Controls that initialize() was called prior to eval_displacement(). */
   bool is_initialized = false;
@@ -160,7 +153,7 @@ BLI_INLINE void add_sculpt_layer_displacement(const MultiresDisplacementData &da
   const int x = roundf(grid_u * (grid_size - 1));
   const int y = roundf(grid_v * (grid_size - 1));
   const int elem = grid_index * grid_size * grid_size + y * grid_size + x;
-  for (const MultiresLayerData &layer : data.layers) {
+  for (const MultiresGridSculptLayer &layer : data.layers) {
     r_tangent_D += layer.data[elem] * layer.influence;
   }
 }
@@ -460,31 +453,12 @@ static void displacement_init_data(Displacement &displacement,
   data.faces = mesh.faces();
   data.mdisps = static_cast<const MDisps *>(CustomData_get_layer(&mesh.corner_data, CD_MDISPS));
   data.face_ptex_offset = face_ptex_offset_get(&subdiv);
-  /* Collect the enabled grid-domain sculpt layers whose data matches the MDisps layout at the
-   * top level. Layers at a mismatching size (e.g. after a base topology change) are skipped and
-   * handled by the sculpt-session validation. */
-  data.layers.clear();
-  const int64_t expected_totelem = int64_t(mesh.corners_num) * data.grid_size * data.grid_size;
-  for (const SculptLayer &layer : mesh.sculpt_layers) {
-    if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {
-      continue;
-    }
-    if (!(layer.flag & SCULPT_LAYER_ENABLED) || layer.influence == 0.0f) {
-      continue;
-    }
-    if (int64_t(layer.totelem) != expected_totelem) {
-#if SCULPT_LAYERS_DEBUG_LOG
-      /* Asymmetry with the reshape-side layer set would leak into the base. */
-      printf("[sculpt-layers][eval] layer '%s' SKIPPED: totelem=%d expected=%lld level=%d\n",
-             layer.name,
-             layer.totelem,
-             (long long)expected_totelem,
-             int(layer.level));
-#endif
-      continue;
-    }
-    data.layers.append({static_cast<const float3 *>(layer.data), layer.influence});
-  }
+  /* Collect the enabled grid-domain sculpt layers whose data matches the MDisps layout at the top
+   * level. The base flush (#multiresModifier_reshapeFromCCG) subtracts this exact same set via the
+   * shared #BKE_multires_grid_sculpt_layers_collect, so composition and subtraction can never drift
+   * — the classic source of a base leak is removed structurally. */
+  data.layers = BKE_multires_grid_sculpt_layers_collect(
+      mesh, data.grid_size * data.grid_size);
 #if SCULPT_LAYERS_DEBUG_LOG
   /* [DEBUG-flush] Snapshot of the layer set the CCG is (re)built with; compare against the set a
    * later flush subtracts (see SCULPT_LAYERS_DEBUG_FLUSH in `multires_reshape.cc`). Tied to the
@@ -492,7 +466,7 @@ static void displacement_init_data(Displacement &displacement,
   printf("[sculpt-layers][eval] CCG displacement attach: layers=%d grid_size=%d influences=[",
          int(data.layers.size()),
          data.grid_size);
-  for (const MultiresLayerData &layer : data.layers) {
+  for (const MultiresGridSculptLayer &layer : data.layers) {
     printf("%.3f ", double(layer.influence));
   }
   printf("]\n");

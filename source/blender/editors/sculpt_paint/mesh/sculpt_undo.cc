@@ -1202,7 +1202,7 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object)
     return;
   }
   const bool undo = step_data.needs_undo();
-  const float influence = (layer->flag & SCULPT_LAYER_ENABLED) ? layer->influence : 0.0f;
+  const float influence = bke::sculpt_layers::effective(*layer);
   MutableSpan<float3> positions = mesh.vert_positions_for_write();
 
   const auto apply_range = [&](const int start, const int count) {
@@ -1751,6 +1751,15 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
 
       /* Keep the active sculpt layer in sync with the restored positions. */
       restore_active_sculpt_layer(step_data, object);
+
+      /* A base-editing stroke (not recorded into a layer) folds itself into the runtime layer base
+       * at stroke end; undoing it restores the positions but leaves that cached base advanced by
+       * the now-undone stroke. Invalidate it so the next stroke re-derives the base from the
+       * restored positions instead of a phantom surface. Recorded-layer strokes (uid != 0) keep the
+       * base unchanged and are already reconciled by #restore_active_sculpt_layer above. */
+      if (step_data.sculpt_layer_uid == 0) {
+        layers::invalidate_runtime(object);
+      }
       break;
     }
     case Type::HideVert: {

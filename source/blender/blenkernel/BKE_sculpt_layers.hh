@@ -34,7 +34,7 @@
  * down each file's local switch. Set to 0 to compile every probe out as a no-op.
  */
 #ifndef SCULPT_LAYERS_DEBUG_LOG
-#  define SCULPT_LAYERS_DEBUG_LOG 0
+#  define SCULPT_LAYERS_DEBUG_LOG 1
 #endif
 
 struct BlendWriter;
@@ -99,20 +99,29 @@ void data_clear(SculptLayer &layer);
  */
 
 /**
- * Apply `positions[i] += layer.data[i] * factor` over the overlapping range. Used to keep the
- * combined result in sync when influence changes (factor = new - old), when toggling visibility
- * (factor = +/- influence) and when removing a layer (factor = -influence).
+ * Apply `positions[i] += layer.data[i] * factor`. Used to keep the combined result in sync when
+ * influence changes (factor = new - old), when toggling visibility (factor = +/- influence) and
+ * when removing a layer (factor = -influence). A layer whose element count does not match
+ * \a positions (stale after a topology change) is skipped rather than partially applied.
  */
 void apply_delta_mesh(const SculptLayer &layer, float factor, MutableSpan<float3> positions);
 
-/** Effective influence: the layer's influence when enabled, 0 when disabled. */
+/**
+ * Effective influence: the layer's influence when enabled, 0 when disabled. This is the single
+ * authority for "how much a layer contributes"; every consumer (mesh combine/derive, the RNA
+ * setters, the interactive drag, the multires grid collector and flush, and the undo restore)
+ * routes its weight through this function, so a future change to the blend/visibility/mute
+ * semantics is a one-line edit here rather than a scattered rewrite. The per-context composition
+ * math (object-space vertex add, tangent-space grid add, the GPU drag shader) stays specialized by
+ * necessity, but the *weight* they multiply by always comes from here.
+ */
 float effective(const SculptLayer &layer);
 
 /**
  * Recompute combined vertex positions from an un-layered base:
  * `r_positions[i] = base[i] + sum_over_enabled_vert_layers(data[i] * effective(layer))`.
- * Only #SCULPT_LAYER_DOMAIN_VERT layers contribute. Sizes may differ; the overlapping range is
- * used. \a r_positions and \a base may not alias.
+ * Only #SCULPT_LAYER_DOMAIN_VERT layers contribute. A layer whose element count does not match
+ * \a base (stale after a topology change) is skipped. \a r_positions and \a base may not alias.
  */
 void combine_layers_mesh(Span<float3> base,
                          const ListBaseT<SculptLayer> &layers,

@@ -8,6 +8,8 @@
 
 #include <cstdio>
 
+#include "CLG_log.h"
+
 #include "MEM_guardedalloc.h"
 
 /* for reading old multires */
@@ -45,6 +47,8 @@
 
 #include <cmath>
 #include <cstring>
+
+static CLG_LogRef LOG = {"bke.multires"};
 
 namespace blender {
 
@@ -347,10 +351,13 @@ void multires_flush_sculpt_updates(Object *object)
                                                        subdiv_ccg,
                                                        MultiresReshapeFromCCGMode::Base);
   if (!flushed) {
-#if SCULPT_LAYERS_DEBUG_LOG
-    printf("[sculpt-layers][flush] WARNING: skipped multires base flush; source could not be "
-           "converted to base without baking layers\n");
-#endif
+    /* The composed CCG could not be separated back into an un-layered base (a sculpt layer has
+     * stale level/topology metadata). Keep the dirty flags set so the pending base edits are
+     * retained for a later flush instead of being silently discarded, and report the failure. */
+    CLOG_ERROR(&LOG,
+               "Multires base flush skipped: sculpt layer data is inconsistent with the mesh; "
+               "base sculpt edits are kept pending.");
+    return;
   }
 
   subdiv_ccg->dirty.coords = false;

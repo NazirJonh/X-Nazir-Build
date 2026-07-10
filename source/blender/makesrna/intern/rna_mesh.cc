@@ -16,6 +16,8 @@
 #include "BKE_mesh_types.hh"
 #include "BKE_sculpt_layers.hh"
 
+#include "CLG_log.h"
+
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
 #include "RNA_types.hh"
@@ -25,6 +27,8 @@
 #include "WM_types.hh"
 
 namespace blender {
+
+static CLG_LogRef LOG = {"rna.mesh"};
 
 const EnumPropertyItem rna_enum_mesh_delimit_mode_items[] = {
     {BMO_DELIM_NORMAL, "NORMAL", 0, "Normal", "Delimit by face directions"},
@@ -375,6 +379,9 @@ static void rna_SculptLayer_influence_set(PointerRNA *ptr, float value)
   Mesh *mesh = rna_mesh(ptr);
   SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
   if (!rna_SculptLayer_value_change_allowed(mesh, *layer)) {
+    /* Silently ignored in Edit Mode (vertex-domain live positions cannot be reconciled); report so
+     * scripts and out-of-context edits can tell the change had no effect. */
+    CLOG_WARN(&LOG, "Sculpt layer influence change ignored: mesh is in Edit Mode");
     return;
   }
   value = (value < -10.0f) ? -10.0f : (value > 10.0f ? 10.0f : value);
@@ -398,6 +405,9 @@ static void rna_SculptLayer_enabled_set(PointerRNA *ptr, bool value)
     return;
   }
   if (!rna_SculptLayer_value_change_allowed(mesh, *layer)) {
+    /* Silently ignored in Edit Mode (vertex-domain live positions cannot be reconciled); report so
+     * scripts and out-of-context edits can tell the change had no effect. */
+    CLOG_WARN(&LOG, "Sculpt layer visibility change ignored: mesh is in Edit Mode");
     return;
   }
   rna_SculptLayer_flush_pending_base(mesh, *layer);

@@ -353,15 +353,21 @@ void multires_flush_sculpt_updates(Object *object)
   if (!flushed) {
     /* The composed CCG could not be separated back into an un-layered base (a sculpt layer has
      * stale level/topology metadata). Keep the dirty flags set so the pending base edits are
-     * retained for a later flush instead of being silently discarded, and report the failure. */
-    CLOG_ERROR(&LOG,
-               "Multires base flush skipped: sculpt layer data is inconsistent with the mesh; "
-               "base sculpt edits are kept pending.");
+     * retained for a later flush instead of being silently discarded, and report the failure.
+     * The flag is latched: report once per failure streak, otherwise every depsgraph re-evaluation
+     * would re-attempt the flush and spam the log with the same error. */
+    if (!subdiv_ccg->dirty.flush_failed_reported) {
+      subdiv_ccg->dirty.flush_failed_reported = true;
+      CLOG_ERROR(&LOG,
+                 "Multires base flush skipped: sculpt layer data is inconsistent with the mesh; "
+                 "base sculpt edits are kept pending.");
+    }
     return;
   }
 
   subdiv_ccg->dirty.coords = false;
   subdiv_ccg->dirty.hidden = false;
+  subdiv_ccg->dirty.flush_failed_reported = false;
 }
 
 void multires_force_sculpt_rebuild(Object *object)

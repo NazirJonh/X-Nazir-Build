@@ -447,16 +447,37 @@ bool multiresModifier_reshapeFromCCG(const int tot_level,
   return true;
 }
 
-/* FNV-1a hash of the coarse control-mesh vertex positions, used to detect when the base-mesh limit
- * surface (and thus the cached tangent frames) changed. Cheap: the coarse mesh is small. */
+/* FNV-1a hash of the coarse control mesh, used to detect when the base-mesh limit surface (and
+ * thus the cached tangent frames) changed. Covers vertex positions AND the topology that the limit
+ * surface depends on: edge/face/corner counts plus the corner-vertex/corner-edge connectivity.
+ * Topology-only edits that leave vertex positions unchanged (edge flips, connectivity changes with
+ * equal vertex counts) would otherwise keep the position-only hash and return stale tangent frames.
+ * Cheap: the coarse control mesh is small relative to the subdivided grid mesh. */
 static uint64_t coarse_mesh_positions_hash(const Mesh &mesh)
 {
+  auto fold = [](uint64_t hash, uint64_t bits) {
+    return (hash ^ bits) * 1099511628211ull;
+  };
   uint64_t hash = 14695981039346656037ull;
+  /* Topology sizes: a change in any of these is a structural change. */
+  hash = fold(hash, uint64_t(mesh.verts_num));
+  hash = fold(hash, uint64_t(mesh.edges_num));
+  hash = fold(hash, uint64_t(mesh.faces_num));
+  hash = fold(hash, uint64_t(mesh.corners_num));
+  /* Corner connectivity: which vertex/edge each corner references. This catches connectivity-only
+   * edits (edge flips, face winding changes) that preserve vertex positions and counts. */
+  for (const int vert : mesh.corner_verts()) {
+    hash = fold(hash, uint64_t(vert));
+  }
+  for (const int edge : mesh.corner_edges()) {
+    hash = fold(hash, uint64_t(edge));
+  }
+  /* Vertex positions: the primary driver of the limit surface shape. */
   for (const float3 &p : mesh.vert_positions()) {
     for (int i = 0; i < 3; i++) {
       uint32_t bits;
       std::memcpy(&bits, &p[i], sizeof(bits));
-      hash = (hash ^ uint64_t(bits)) * 1099511628211ull;
+      hash = fold(hash, uint64_t(bits));
     }
   }
   return hash;
@@ -502,49 +523,46 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
   const Vector<MultiresGridSculptLayer> layers = BKE_multires_grid_sculpt_layers_collect(
       *coarse_mesh, grid_area);
 
-  /* Only the grids the stroke touched changed on the CCG; reshaping every other grid would just
-   * reproduce its unchanged base and get discarded by the restore below. Restrict the expensive
-   * per-grid work (compose, CCG assign, tangent encode, save/restore) to the touched grids. This is
-   * safe because untouched grids are never read (only #touched_grids feed the delta) and are left
-   * unmodified. Recording always reshapes at the top level, so the detail-smoothing pass has no
-   * detail band to add and is a no-op — no neighbor/halo grids are needed. */
-  Array<bool> grid_enabled(num_grids, false);
-  for (const int grid_index : touched_grids) {
-    if (grid_index >= 0 && grid_index < num_grids) {
-      grid_enabled[grid_index] = true;
-    }
-  }
+  /* The store / assign / detail-smoothing steps must run over ALL grids: smoothing (Catmull-Clark
+   * detail transport from the reshape level up to the top level) reads neighbouring original grids
+   * and refines a subdivision over the whole mesh, so a grid left in a different state (null
+   * original, or tangent-space displacement while its neighbours hold object-space coordinates)
+   * corrupts the result even for touched grids next to it. Recording can run at sculptlvl < totlvl,
+   * in which case the smoothing pass is NOT a no-op, so this constraint is load-bearing. The
+   * per-grid restriction to touched grids is limited to the tangent encode (and its limit-frame
+   * cache) below, which is the part that dominates the per-stroke cost. */
 
-  /* Save the base displacement of the touched grids: the reshape below overwrites their MDisps with
-   * the composed result and the base must be restored afterwards (MDisps only ever stores the base
-   * surface). */
-  Array<float3> saved_base(int64_t(touched_grids.size()) * grid_area);
-  threading::parallel_for(touched_grids.index_range(), 32, [&](const IndexRange range) {
-    for (const int64_t t : range) {
-      const int grid_index = touched_grids[t];
+  /* Save the base displacement of EVERY grid: the reshape below overwrites MDisps of all grids
+   * (object-space assign + detail smoothing) and the base must be restored afterwards for every
+   * grid (MDisps only ever stores the base surface). The stroke delta is only accumulated for the
+   * touched grids below. */
+  Array<float3> saved_base(int64_t(num_grids) * grid_area);
+  threading::parallel_for(IndexRange(num_grids), 32, [&](const IndexRange range) {
+    for (const int grid_index : range) {
       const float3 *disps = reinterpret_cast<const float3 *>(
           reshape_context.mdisps[grid_index].disps);
-      std::copy_n(disps, grid_area, saved_base.data() + t * grid_area);
+      std::copy_n(disps, grid_area, saved_base.data() + int64_t(grid_index) * grid_area);
     }
   });
 
   if (!layers.is_empty()) {
-    mdisps_add_sculpt_layers(reshape_context.mdisps, num_grids, grid_area, layers, 1.0f, grid_enabled);
+    mdisps_add_sculpt_layers(reshape_context.mdisps, num_grids, grid_area, layers, 1.0f);
   }
 #if SCULPT_LAYERS_DEBUG_FLUSH
   const auto t_saved = std::chrono::high_resolution_clock::now();
 #endif
 
   /* Standard reshape: after this MDisps holds `T_new`, the tangent displacement of the sculpted
-   * surface at the top level, and the original grids hold `T_old`. */
-  multires_reshape_store_original_grids(&reshape_context, grid_enabled);
+   * surface at the top level, and the original grids hold `T_old`. Store and assign run over all
+   * grids (see the note above) so the detail-smoothing step refines a subdivision in a single,
+   * consistent coordinate space. */
+  multires_reshape_store_original_grids(&reshape_context, {});
   multires_reshape_ensure_grids(coarse_mesh, reshape_context.top.level);
-  if (!multires_reshape_assign_final_coords_from_ccg(&reshape_context, subdiv_ccg, grid_enabled)) {
-    threading::parallel_for(touched_grids.index_range(), 32, [&](const IndexRange range) {
-      for (const int64_t t : range) {
-        const int grid_index = touched_grids[t];
+  if (!multires_reshape_assign_final_coords_from_ccg(&reshape_context, subdiv_ccg, {})) {
+    threading::parallel_for(IndexRange(num_grids), 32, [&](const IndexRange range) {
+      for (const int grid_index : range) {
         float3 *disps = reinterpret_cast<float3 *>(reshape_context.mdisps[grid_index].disps);
-        std::copy_n(saved_base.data() + t * grid_area, grid_area, disps);
+        std::copy_n(saved_base.data() + int64_t(grid_index) * grid_area, grid_area, disps);
       }
     });
     multires_reshape_context_free(&reshape_context);
@@ -613,11 +631,11 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
   const auto t_delta = std::chrono::high_resolution_clock::now();
 #endif
 
-  /* Restore the base into MDisps for the touched grids (I1: layers are never baked into the base).
-   * Untouched grids were never modified above, so they already hold the base. */
-  threading::parallel_for(touched_grids.index_range(), 32, [&](const IndexRange range) {
-    for (const int64_t t : range) {
-      const int grid_index = touched_grids[t];
+  /* Restore the base into MDisps for ALL grids (I1: layers are never baked into the base). The
+   * assign + detail-smoothing above overwrote every grid's MDisps with the composed/top-level
+   * result, so every grid must be restored to its pre-stroke base — not only the touched ones. */
+  threading::parallel_for(IndexRange(num_grids), 32, [&](const IndexRange range) {
+    for (const int grid_index : range) {
       float3 *disps = reinterpret_cast<float3 *>(reshape_context.mdisps[grid_index].disps);
       std::copy_n(saved_base.data() + int64_t(grid_index) * grid_area, grid_area, disps);
     }

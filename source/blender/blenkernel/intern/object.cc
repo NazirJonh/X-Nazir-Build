@@ -1732,10 +1732,15 @@ static void object_update_from_subsurf_ccg(Object *object)
     /* The composed CCG could not be separated back into an un-layered base (a sculpt layer has
      * stale level/topology metadata). Keep the dirty flags set so the pending base edits are
      * retained for a later flush instead of being silently discarded, and report the failure
-     * instead of losing the stroke without a trace. */
-    CLOG_ERROR(&LOG,
-               "Multires base flush skipped: sculpt layer data is inconsistent with the mesh; "
-               "base sculpt edits are kept pending.");
+     * instead of losing the stroke without a trace. The flag is latched: report once per failure
+     * streak, otherwise every depsgraph re-evaluation would re-attempt the flush and spam the log
+     * with the same error. */
+    if (!subdiv_ccg->dirty.flush_failed_reported) {
+      subdiv_ccg->dirty.flush_failed_reported = true;
+      CLOG_ERROR(&LOG,
+                 "Multires base flush skipped: sculpt layer data is inconsistent with the mesh; "
+                 "base sculpt edits are kept pending.");
+    }
     return;
   }
   /* NOTE: we need to reshape into an original mesh from main database,
@@ -1777,6 +1782,7 @@ static void object_update_from_subsurf_ccg(Object *object)
   /* Everything is now up-to-date. */
   subdiv_ccg->dirty.coords = false;
   subdiv_ccg->dirty.hidden = false;
+  subdiv_ccg->dirty.flush_failed_reported = false;
 }
 
 void BKE_object_eval_assign_data(Object *object_eval, ID *data_eval, bool is_owned)

@@ -2819,6 +2819,13 @@ static void calc_smooth_bmesh(const Sculpt &sd,
   SculptSession &ss = *object.runtime->sculpt_session;
   const StrokeCache &cache = *ss.cache;
 
+  /* Sculpt layers operate on a mesh/grids PBVH; in BMesh (Edit Mode) mode there are no sculpt
+   * layers, so #stroke_base_view must be empty. This path therefore composes the surface directly,
+   * without the base-view adjust/compose the mesh/grids smooth paths do. Assert the invariant so a
+   * future change that populated base_view for BMesh would fail loudly instead of silently baking a
+   * layer offset here. */
+  BLI_assert(layers::stroke_base_view(object).is_empty());
+
   const Set<BMVert *, 0> verts = BKE_pbvh_bmesh_node_unique_verts(&node);
   Array<float3> orig_positions(verts.size());
   Array<float3> orig_normals(verts.size());

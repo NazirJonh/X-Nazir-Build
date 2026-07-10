@@ -2068,7 +2068,9 @@ void DrawCacheImpl::ensure_influence_drag(const Object &object, const IndexMask 
   GPU_shader_bind(influence_drag_shader_);
   GPU_shader_uniform_1f(influence_drag_shader_, "scale", scale);
 
+#if PBVH_DRAW_DEBUG_PERF
   const auto t0 = std::chrono::high_resolution_clock::now();
+#endif
   int dispatch_count = 0;
   /* GPU binding/dispatch is not thread-safe, so this loop must stay serial. */
   node_mask.foreach_index([&](const int i) {
@@ -2085,10 +2087,14 @@ void DrawCacheImpl::ensure_influence_drag(const Object &object, const IndexMask 
   GPU_memory_barrier(GPU_BARRIER_VERTEX_ATTRIB_ARRAY | GPU_BARRIER_SHADER_STORAGE);
   GPU_shader_unbind();
 
+#if PBVH_DRAW_DEBUG_PERF
   const long long us = std::chrono::duration_cast<std::chrono::microseconds>(
                            std::chrono::high_resolution_clock::now() - t0)
                            .count();
   PDP_PERF("[DEBUG-perf] influence_drag_compute: %d dispatches in %lld us\n", dispatch_count, us);
+#else
+  UNUSED_VARS(dispatch_count);
+#endif
 }
 
 Span<gpu::Batch *> DrawCacheImpl::ensure_tris_batches(const Object &object,

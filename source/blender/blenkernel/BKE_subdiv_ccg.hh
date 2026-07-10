@@ -207,6 +207,9 @@ struct SubdivCCG : NonCopyable {
     bool coords = false;
     /** Corresponds to MULTIRES_HIDDEN_MODIFIED. */
     bool hidden = false;
+    /** Latched while a base flush keeps failing, so the failure is reported once per streak instead
+     *  of on every depsgraph re-evaluation. Cleared again on the first successful flush. */
+    bool flush_failed_reported = false;
   } dirty;
 
   /**

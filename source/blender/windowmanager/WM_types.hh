@@ -103,7 +103,6 @@
 #include "DNA_listBase.h"
 #include "DNA_uuid_types.h"
 #include "DNA_vec_types.h"
-#include "DNA_windowmanager_enums.h"
 #include "DNA_xr_types.h"
 
 #include "BKE_wm_runtime.hh"  // IWYU pragma: export

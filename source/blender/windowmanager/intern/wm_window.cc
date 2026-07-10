@@ -1804,7 +1804,7 @@ static void wm_start_ghost_event_drag(wmWindowManager *wm,
                                       const GHOST_TEventDragnDropData *ddd,
                                       bool log_drop)
 {
-  /* Currently not all platfoms retrieves drag and drop data on drag enter. */
+  /* Currently not all platforms retrieve drag-and-drop data on drag enter. */
   if (!ddd->data) {
     return;
   }
@@ -1818,13 +1818,25 @@ static void wm_start_ghost_event_drag(wmWindowManager *wm,
   }
   else if (ddd->dataType == GHOST_kDragnDropTypeFilenames) {
     const GHOST_TStringArray *stra = static_cast<const GHOST_TStringArray *>(ddd->data);
+    if (stra->count == 0) {
+      return;
+    }
+    /* Only log on the actual drop, not on every drag-enter/update event. */
+    if (log_drop) {
+      CLOG_INFO(WM_LOG_EVENTS, "Drop %d files:", stra->count);
+      for (int i = 0; i < stra->count; i++) {
+        CLOG_INFO(WM_LOG_EVENTS, "%s", reinterpret_cast<const char *>(stra->strings[i]));
+      }
+    }
     /* Build a list of paths for the drag data. */
     blender::Vector<const char *> paths;
     for (int i = 0; i < stra->count; i++) {
       paths.append(reinterpret_cast<const char *>(stra->strings[i]));
     }
+    /* Try to get icon type from extension of the first path. */
+    const int icon = ED_file_extension_icon(reinterpret_cast<const char *>(stra->strings[0]));
     wmDragPath *path_data = WM_drag_create_path_data(paths.as_span());
-    WM_event_start_drag(C, ICON_NONE, WM_DRAG_PATH, path_data, WM_DRAG_FREE_DATA);
+    WM_event_start_drag(C, icon, WM_DRAG_PATH, path_data, WM_DRAG_NOP);
   }
 }
 
@@ -2091,27 +2103,7 @@ static bool ghost_event_proc(const GHOST_IEvent *ghost_event, GHOST_TUserDataPtr
       const GHOST_TEventDragnDropData *ddd = static_cast<const GHOST_TEventDragnDropData *>(data);
 
       wmEvent event = wm_update_cursor_position_from_drag_and_drop(wm, win, ddd, event_time_ms);
-
-      /* Activate region. */
-      event.type = MOUSEMOVE;
-      event.val = KM_NOTHING;
-      copy_v2_v2_int(event.prev_xy, event.xy);
-
-      copy_v2_v2_int(event.xy, &ddd->x);
-      wm_cursor_position_from_ghost_screen_coords(win, &event.xy[0], &event.xy[1]);
-
-      /* The values from #wm_window_update_eventstate may not match (under WAYLAND they don't)
-       * Write this into the event state. */
-      copy_v2_v2_int(win->runtime->eventstate->xy, event.xy);
-
-      event.flag = eWM_EventFlag(0);
-
-      /* No context change! `C->wm->runtime->windrawable` is drawable, or for area queues. */
-      wm->runtime->winactive = win;
-      win->active = 1;
       wm_window_csd_title_redraw_tag(wm, win);
-
-      WM_event_add(win, &event);
 
       /* Make blender drop event with custom data pointing to wm drags. */
       event.type = EVT_DROP;

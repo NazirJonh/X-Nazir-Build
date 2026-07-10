@@ -22,8 +22,6 @@
 #include "UI_interface.hh"
 #include "UI_view2d.hh"
 
-#include "../interface/interface_drop_image.hh"
-
 #include "ED_anim_api.hh"
 #include "ED_armature.hh"
 #include "ED_asset.hh"
@@ -183,8 +181,6 @@ void ED_spacemacros_init()
       type->dropboxes();
     }
   }
-
-  DROP_IMAGE_register_dropboxes(); /* Регистрируем глобально для всех редакторов */
 }
 
 void ED_spacetypes_keymap(wmKeyConfig *keyconf)

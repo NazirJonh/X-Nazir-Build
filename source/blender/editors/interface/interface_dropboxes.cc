@@ -7,6 +7,7 @@
  */
 
 #include <fmt/format.h>
+#include <memory>
 
 #include "AS_asset_representation.hh"
 #include "AS_remote_library.hh"
@@ -156,6 +157,25 @@ static std::string drop_material_tooltip(bContext *C,
                      dragged_material_name,
                      target_slot,
                      ob->id.name + 2);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Button Drop Target Lookup
+ * \{ */
+
+std::unique_ptr<DropTargetInterface> region_but_find_drop_target_at(bContext *C,
+                                                                    const ARegion *region,
+                                                                    const wmEvent *event)
+{
+  /* Dispatch to per-widget drop-target providers. Extend as more button types gain drop support. */
+  if (std::unique_ptr<DropTargetInterface> target = brush_texture_slot_drop_target_get(
+          C, region, event))
+  {
+    return target;
+  }
+  return nullptr;
 }
 
 /** \} */

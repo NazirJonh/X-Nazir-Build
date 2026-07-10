@@ -473,35 +473,58 @@ void DRWContext::acquire_data()
       float4x4 viewmat;
       BLI_rctf_transform_calc_m4_pivot_min(&v2d->cur, &region_space, viewmat.ptr());
 
-      if (this->space_data && this->space_data->spacetype == SPACE_IMAGE) {
-        SpaceImage *sima = reinterpret_cast<SpaceImage *>(this->space_data);
-        if (sima->rotation != 0.0f) {
-          float rotmat[4][4], t1[4][4], r[4][4], t2[4][4], tmp[4][4];
-          float pivot[3] = {sima->rotation_pivot[0], sima->rotation_pivot[1], 0.0f};
+      /* Rotate the overlay-engine view so grid / mask / UDIM-border / stencil overlays stay locked
+       * to the canvas-rotated image. `v2d->rotation` is synced from the Image Editor space (0
+       * elsewhere and in the UV editor), and `view2d_view_rotation_matrix` is the same
+       * aspect-correct Rot(-rotation) used by `view2d_view_ortho` and the POST_VIEW callback, so
+       * all overlay paths share one rotation. persmat = winmat * viewmat maps view space to NDC,
+       * so post-multiplying viewmat by the rotation applies it in view space, exactly like the
+       * ortho path. */
+      if (v2d->rotation != 0.0f) {
+        float rotmat[4][4];
+        ui::view2d_view_rotation_matrix(v2d, rotmat);
+        float viewmat_copy[4][4];
+        copy_m4_m4(viewmat_copy, (float (*)[4])viewmat.ptr());
 
-          /* Create transform: Translate(Pivot) * Rotate(Angle) * Translate(-Pivot) */
+        /* TEMPORARY diagnostic logging for off-center pivot rotation investigation.
+         * Dump viewmat (cur→region_space[0,1]) BEFORE and AFTER post-multiplying by rotmat, plus
+         * where the image corner (0,0) and (1,1) land. Compare against [IMGROT-ORTHO] /
+         * [IMGROT-POSTVIEW]. Remove once P1 is resolved. */
+        const float (*vm)[4] = (const float (*)[4])viewmat.ptr();
+        std::printf("[IMGROT-OVL] rotation=%.5f pivot=(%.5f, %.5f)\n",
+                    v2d->rotation,
+                    v2d->rotation_pivot[0],
+                    v2d->rotation_pivot[1]);
+        std::printf("[IMGROT-OVL] viewmat_before rows:\n");
+        std::printf("[IMGROT-OVL]   [%.5f %.5f %.5f %.5f]\n",
+                    vm[0][0],
+                    vm[1][0],
+                    vm[2][0],
+                    vm[3][0]);
+        std::printf("[IMGROT-OVL]   [%.5f %.5f %.5f %.5f]\n",
+                    vm[0][1],
+                    vm[1][1],
+                    vm[2][1],
+                    vm[3][1]);
+        std::printf("[IMGROT-OVL]   [%.5f %.5f %.5f %.5f]\n",
+                    vm[0][2],
+                    vm[1][2],
+                    vm[2][2],
+                    vm[3][2]);
 
-          /* 1. Translate to origin */
-          unit_m4(t1);
-          translate_m4(t1, -pivot[0], -pivot[1], 0.0f);
+        mul_m4_m4m4((float (*)[4])viewmat.ptr(), viewmat_copy, rotmat);
 
-          /* 2. Rotate */
-          unit_m4(r);
-          rotate_m4(r, 'Z', sima->rotation);
-
-          /* 3. Translate back */
-          unit_m4(t2);
-          translate_m4(t2, pivot[0], pivot[1], 0.0f);
-
-          /* Combine: T2 * R * T1 */
-          mul_m4_m4m4(tmp, r, t1);
-          mul_m4_m4m4(rotmat, t2, tmp);
-
-          /* Apply to viewmat: ViewMat = ViewMat * RotMat */
-          float viewmat_copy[4][4];
-          copy_m4_m4(viewmat_copy, (float (*)[4])viewmat.ptr());
-          mul_m4_m4m4((float (*)[4])viewmat.ptr(), viewmat_copy, rotmat);
-        }
+        /* Where do image corners (0,0) and (1,1) land after the rotated viewmat? */
+        const float (*vm2)[4] = (const float (*)[4])viewmat.ptr();
+        float c00[3] = {0.0f, 0.0f, 1.0f};
+        float c11[3] = {1.0f, 1.0f, 1.0f};
+        mul_m4_v3(vm2, c00);
+        mul_m4_v3(vm2, c11);
+        std::printf("[IMGROT-OVL] corner(0,0)->(%.5f, %.5f)  corner(1,1)->(%.5f, %.5f)\n",
+                    c00[0],
+                    c00[1],
+                    c11[0],
+                    c11[1]);
       }
 
       float4x4 winmat = float4x4::identity();
@@ -1514,6 +1537,45 @@ static void drw_callbacks_post_scene_2D(DRWContext &draw_ctx, View2D &v2d)
 
     wmOrtho2(v2d.cur.xmin, v2d.cur.xmax, v2d.cur.ymin, v2d.cur.ymax);
 
+    /* Rotate the view-space callback matrix so Python POST_VIEW overlays (and view-space
+     * annotations) rotate together with the canvas. Non-zero only for the Image Editor. Guarded by
+     * push/pop so a callback cannot leak the model-view change. */
+    const bool apply_canvas_rotation = (v2d.rotation != 0.0f);
+    if (apply_canvas_rotation) {
+      GPU_matrix_push();
+      float rotmat[4][4];
+      ui::view2d_view_rotation_matrix(&v2d, rotmat);
+
+      /* TEMPORARY diagnostic logging for off-center pivot rotation investigation.
+       * Dump the active model-view matrix BEFORE applying rotmat (the POST_VIEW callback path also
+       * assumes identity here). Compare with [IMGROT-ORTHO] from view2d_view_ortho. Remove once P1
+       * is resolved. */
+      float mv_before[4][4];
+      GPU_matrix_model_view_get(mv_before);
+      std::printf("[IMGROT-POSTVIEW] rotation=%.5f pivot=(%.5f, %.5f)\n",
+                  v2d.rotation,
+                  v2d.rotation_pivot[0],
+                  v2d.rotation_pivot[1]);
+      std::printf("[IMGROT-POSTVIEW] mv_before rows:\n");
+      std::printf("[IMGROT-POSTVIEW]   [%.5f %.5f %.5f %.5f]\n",
+                  mv_before[0][0],
+                  mv_before[1][0],
+                  mv_before[2][0],
+                  mv_before[3][0]);
+      std::printf("[IMGROT-POSTVIEW]   [%.5f %.5f %.5f %.5f]\n",
+                  mv_before[0][1],
+                  mv_before[1][1],
+                  mv_before[2][1],
+                  mv_before[3][1]);
+      std::printf("[IMGROT-POSTVIEW]   [%.5f %.5f %.5f %.5f]\n",
+                  mv_before[0][2],
+                  mv_before[1][2],
+                  mv_before[2][2],
+                  mv_before[3][2]);
+
+      GPU_matrix_mul(rotmat);
+    }
+
     if (do_annotations) {
       ED_annotation_draw_view2d(draw_ctx.evil_C, true);
     }
@@ -1521,6 +1583,10 @@ static void drw_callbacks_post_scene_2D(DRWContext &draw_ctx, View2D &v2d)
     GPU_depth_test(GPU_DEPTH_NONE);
 
     ED_region_draw_cb_draw(draw_ctx.evil_C, draw_ctx.region, REGION_DRAW_POST_VIEW);
+
+    if (apply_canvas_rotation) {
+      GPU_matrix_pop();
+    }
 
     GPU_matrix_pop_projection();
     /* Callback can be nasty and do whatever they want with the state.

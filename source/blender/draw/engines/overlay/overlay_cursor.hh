@@ -69,9 +69,10 @@ class Cursor : Overlay {
     }
     else {
       const SpaceImage *sima = reinterpret_cast<const SpaceImage *>(state.space_data);
-      /* Use rotation-compensated projection for 2D cursor in Image Editor. */
+      /* Rotation-compensated UV->screen projection for the 2D cursor in the Image Editor. */
       float cursor_screen[2];
-      ED_image_view_to_region_rotated(sima, state.region, sima->cursor, cursor_screen);
+      ED_image_point_pos__reverse(
+          const_cast<SpaceImage *>(sima), state.region, sima->cursor, cursor_screen);
       pixel_coord[0] = cursor_screen[0];
       pixel_coord[1] = cursor_screen[1];
     }

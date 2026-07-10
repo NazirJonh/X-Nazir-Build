@@ -17,6 +17,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_vector.h"
 #include "BLI_string_utf8.h"
 #include "BLI_threads.h"
 
@@ -687,6 +688,17 @@ static void image_main_region_set_view2d(SpaceImage *sima, ARegion *region)
   region->v2d.cur.xmax /= w;
   region->v2d.cur.ymin /= h;
   region->v2d.cur.ymax /= h;
+
+  /* Sync canvas rotation into the View2D so the ortho matrix and the POST_VIEW callback matrix pick
+   * it up (mirrors how `cur` above derives from zoom/pan). Gated by supported modes so a stored
+   * rotation never leaks into the UV editor. */
+  if (ED_space_image_rotation_supported(sima)) {
+    region->v2d.rotation = sima->rotation;
+    copy_v2_v2(region->v2d.rotation_pivot, sima->rotation_pivot);
+  }
+  else {
+    region->v2d.rotation = 0.0f;
+  }
 }
 
 /* add handlers, stuff you only do once or on area/region changes */

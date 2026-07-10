@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstdio>
 
 #include <DRW_render.hh>
 
@@ -240,10 +241,11 @@ class Instance : public DrawEngine {
         space_->get_aspect_ratio());
 
     /* Bake the canvas rotation into the screen-space to sampler-space transform. The non-rotated
-     * transform above is a pure scale + translation, so the scale/translation factors can be
-     * recovered directly from the matrix and rebuilt with rotation applied. This mirrors the
-     * rotation-compensated coordinate conversion used by the interactive tools so that the
-     * displayed image stays aligned with them. */
+     * transform above is a pure scale + translation (`m_base`), so its scale/translation factors can
+     * be recovered directly. The rotation must happen in screen space about the screen position of
+     * the pivot (square in pixels), exactly like the interactive tools and overlays, so that the
+     * displayed image stays aligned with them regardless of zoom/pan. We therefore rotate the screen
+     * input first and then apply the base map: `m_rot = m_base * R_screen`. */
     const float rotation = space_->get_canvas_rotation();
     if (rotation != 0.0f) {
       float3x3 &m = state.ss_to_texture;
@@ -254,25 +256,49 @@ class Instance : public DrawEngine {
 
       const float cos_r = cosf(rotation);
       const float sin_r = sinf(rotation);
-      /* Aspect factors convert between the normalized screen space and square pixels so the
-       * rotation is applied uniformly regardless of the region proportions. */
+      /* Aspect factors make the screen-space rotation square in pixels regardless of the region
+       * proportions. */
       const float aspect_x = float(region->winx) / float(region->winy);
       const float aspect_y = float(region->winy) / float(region->winx);
 
+      /* Screen-space (normalized screen UV) position where the image-space pivot is displayed.
+       * This is the inverse of the base map applied to the pivot, and unlike a plain `scale * pivot`
+       * it correctly tracks zoom and pan. */
       const float2 pivot = space_->get_canvas_rotation_pivot();
-      const float pivot_ss_x = scale_x * pivot.x;
-      const float pivot_ss_y = scale_y * pivot.y;
+      const float pivot_sx = (pivot.x - translate_x) / scale_x;
+      const float pivot_sy = (pivot.y - translate_y) / scale_y;
 
-      const float pivot_ss_rot_x = cos_r * pivot_ss_x - (aspect_y * sin_r) * pivot_ss_y;
-      const float pivot_ss_rot_y = (aspect_x * sin_r) * pivot_ss_x + cos_r * pivot_ss_y;
+      /* Translation of the aspect-corrected screen-space rotation about the pivot. */
+      const float rot_tx = pivot_sx * (1.0f - cos_r) + (aspect_y * sin_r) * pivot_sy;
+      const float rot_ty = pivot_sy * (1.0f - cos_r) - (aspect_x * sin_r) * pivot_sx;
 
+      /* m_base * R_screen: the base map is diagonal, so its scale multiplies each row of R_screen. */
       m = float3x3::identity();
-      m[0][0] = cos_r * scale_x;
-      m[0][1] = (aspect_x * sin_r) * scale_x;
-      m[1][0] = -(aspect_y * sin_r) * scale_y;
-      m[1][1] = cos_r * scale_y;
-      m[2][0] = translate_x + pivot_ss_x - pivot_ss_rot_x;
-      m[2][1] = translate_y + pivot_ss_y - pivot_ss_rot_y;
+      m[0][0] = scale_x * cos_r;
+      m[1][0] = scale_x * (-(aspect_y * sin_r));
+      m[0][1] = scale_y * (aspect_x * sin_r);
+      m[1][1] = scale_y * cos_r;
+      m[2][0] = scale_x * rot_tx + translate_x;
+      m[2][1] = scale_y * rot_ty + translate_y;
+
+      /* TEMPORARY diagnostic logging for off-center pivot rotation investigation.
+       * Compare pivot_sx/sy (normalized screen UV from M_base^-1) against the view2d
+       * pixel pivot normalized by winx/winy — they must match for image and overlays to agree.
+       * Remove once P1 is resolved. */
+      std::printf("[IMGROT-DRW] rotation=%.5f pivot=(%.5f, %.5f)\n", rotation, pivot.x, pivot.y);
+      std::printf("[IMGROT-DRW] winx=%d winy=%d aspect_x=%.5f aspect_y=%.5f\n",
+                  region->winx,
+                  region->winy,
+                  aspect_x,
+                  aspect_y);
+      std::printf("[IMGROT-DRW] scale_x=%.5f scale_y=%.5f translate=(%.5f, %.5f)\n",
+                  scale_x,
+                  scale_y,
+                  translate_x,
+                  translate_y);
+      std::printf("[IMGROT-DRW] pivot_sx=%.5f pivot_sy=%.5f  (normalized screen UV)\n",
+                  pivot_sx,
+                  pivot_sy);
     }
 
     const Scene *scene = DRW_context_get()->scene;

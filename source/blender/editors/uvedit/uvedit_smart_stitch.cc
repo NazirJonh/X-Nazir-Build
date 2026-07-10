@@ -35,7 +35,6 @@
 
 #include "DEG_depsgraph.hh"
 
-#include "ED_image.hh"
 #include "ED_mesh.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
@@ -2654,11 +2653,9 @@ static StitchState *stitch_select(bContext *C,
   /* add uv under mouse to processed uv's */
   float co[2];
   ARegion *region = CTX_wm_region(C);
-  SpaceImage *sima = CTX_wm_space_image(C);
   UvNearestHit hit = uv_nearest_hit_init_max(&region->v2d);
 
-  /* Use rotation-compensated coordinates for correct stitch selection when canvas is rotated. */
-  ED_image_mouse_pos_rotated(sima, region, event->mval, co);
+  ui::view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &co[0], &co[1]);
 
   if (ssc->mode == STITCH_VERT) {
     if (uv_find_nearest_vert_multi(scene, {ssc->objects, ssc->objects_len}, co, 0.0f, &hit)) {

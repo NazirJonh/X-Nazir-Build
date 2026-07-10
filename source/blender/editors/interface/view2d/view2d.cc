@@ -10,6 +10,7 @@
 #include <cfloat>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "MEM_guardedalloc.h"
@@ -1113,6 +1114,54 @@ void view2d_view_ortho(const View2D *v2d)
 
   /* set matrix on all appropriate axes */
   wmOrtho2(curmasked.xmin, curmasked.xmax, curmasked.ymin, curmasked.ymax);
+
+  /* Apply the canvas rotation (only ever non-zero for the Image Editor). The projection maps view
+   * space to the axis-aligned screen; this rotates it about the pivot to match the displayed image.
+   * Model-view is identity by convention after this call, so multiplying leaves it equal to the
+   * rotation. */
+  if (v2d->rotation != 0.0f) {
+    float rotmat[4][4];
+    view2d_view_rotation_matrix(v2d, rotmat);
+
+    /* TEMPORARY diagnostic logging for off-center pivot rotation investigation.
+     * Dump the active model-view matrix BEFORE applying rotmat to verify the identity-by-convention
+     * assumption; if it is not identity, `GPU_matrix_mul` composes `old * rotmat` and the rotation
+     * goes wrong. Remove once P1 is resolved. */
+    float mv_before[4][4];
+    GPU_matrix_model_view_get(mv_before);
+    std::printf("[IMGROT-ORTHO] rotation=%.5f pivot=(%.5f, %.5f)\n",
+                v2d->rotation,
+                v2d->rotation_pivot[0],
+                v2d->rotation_pivot[1]);
+    std::printf("[IMGROT-ORTHO] cur=(%.5f..%.5f, %.5f..%.5f)\n",
+                v2d->cur.xmin,
+                v2d->cur.xmax,
+                v2d->cur.ymin,
+                v2d->cur.ymax);
+    std::printf("[IMGROT-ORTHO] mv_before rows:\n");
+    std::printf("[IMGROT-ORTHO]   [%.5f %.5f %.5f %.5f]\n",
+                mv_before[0][0],
+                mv_before[1][0],
+                mv_before[2][0],
+                mv_before[3][0]);
+    std::printf("[IMGROT-ORTHO]   [%.5f %.5f %.5f %.5f]\n",
+                mv_before[0][1],
+                mv_before[1][1],
+                mv_before[2][1],
+                mv_before[3][1]);
+    std::printf("[IMGROT-ORTHO]   [%.5f %.5f %.5f %.5f]\n",
+                mv_before[0][2],
+                mv_before[1][2],
+                mv_before[2][2],
+                mv_before[3][2]);
+    std::printf("[IMGROT-ORTHO]   [%.5f %.5f %.5f %.5f]\n",
+                mv_before[0][3],
+                mv_before[1][3],
+                mv_before[2][3],
+                mv_before[3][3]);
+
+    GPU_matrix_mul(rotmat);
+  }
 }
 
 void view2d_view_orthoSpecial(ARegion *region, View2D *v2d, const bool xaxis)
@@ -1724,6 +1773,80 @@ void view2d_view_to_region_fl(
   /* convert proportional distances to screen coordinates */
   *r_region_x = v2d->mask.xmin + (x * BLI_rcti_size_x(&v2d->mask));
   *r_region_y = v2d->mask.ymin + (y * BLI_rcti_size_y(&v2d->mask));
+}
+
+void view2d_rotation_pivot_region(const View2D *v2d, float r_pivot_px[2])
+{
+  view2d_view_to_region_fl(
+      v2d, v2d->rotation_pivot[0], v2d->rotation_pivot[1], &r_pivot_px[0], &r_pivot_px[1]);
+}
+
+void view2d_rotate_region_point(const View2D *v2d, float xy[2], const bool inverse)
+{
+  if (v2d->rotation == 0.0f) {
+    return;
+  }
+  float pivot_px[2];
+  view2d_rotation_pivot_region(v2d, pivot_px);
+  const float angle = inverse ? -v2d->rotation : v2d->rotation;
+  const float c = cosf(angle);
+  const float s = sinf(angle);
+  const float dx = xy[0] - pivot_px[0];
+  const float dy = xy[1] - pivot_px[1];
+  xy[0] = pivot_px[0] + dx * c - dy * s;
+  xy[1] = pivot_px[1] + dx * s + dy * c;
+}
+
+void view2d_view_rotation_matrix(const View2D *v2d, float r_mat[4][4])
+{
+  unit_m4(r_mat);
+  if (v2d->rotation == 0.0f) {
+    return;
+  }
+  /* view->pixel scale per axis, so the screen-space rotation stays square (aspect-correct). */
+  const float sx = float(BLI_rcti_size_x(&v2d->mask) + 1) / BLI_rctf_size_x(&v2d->cur);
+  const float sy = float(BLI_rcti_size_y(&v2d->mask) + 1) / BLI_rctf_size_y(&v2d->cur);
+  const float px = v2d->rotation_pivot[0];
+  const float py = v2d->rotation_pivot[1];
+  const float c = cosf(v2d->rotation);
+  const float s = -sinf(v2d->rotation); /* display maps view->screen as Rot(-rotation) */
+  /* M = T(pivot) * S^-1 * R(-rotation) * S * T(-pivot) applied to view coordinates.
+   * The display maps view/UV space to screen as Rot(-rotation) about the pivot, hence the negated
+   * `s`; the generic formula below in terms of (c, s) then evaluates Rot(-rotation).
+   * The S / S^-1 pair converts the per-axis view scale to square pixels so the rotation is not
+   * sheared on non-square regions. Blender matrices are column-major (`r_mat[col][row]`), so the
+   * translation lives in `r_mat[3][*]`. */
+  const float a = sy / sx; /* couples y into x' */
+  const float b = sx / sy; /* couples x into y' */
+  r_mat[0][0] = c;
+  r_mat[1][0] = -a * s;
+  r_mat[0][1] = b * s;
+  r_mat[1][1] = c;
+  r_mat[3][0] = px - (c * px - a * s * py);
+  r_mat[3][1] = py - (b * s * px + c * py);
+
+  /* TEMPORARY diagnostic logging for off-center pivot rotation investigation.
+   * The image engine reports its pivot in normalized screen UV (pivot_sx/sy in image_instance.hh);
+   * convert the view2d pivot the same way (pixel / winx,winy) so the two are directly comparable.
+   * `pivot_px` is the axis-aligned pixel position of the pivot. Remove once P1 is resolved. */
+  float pivot_px[2];
+  view2d_view_to_region_fl(v2d, px, py, &pivot_px[0], &pivot_px[1]);
+  const float mask_w = float(BLI_rcti_size_x(&v2d->mask) + 1);
+  const float mask_h = float(BLI_rcti_size_y(&v2d->mask) + 1);
+  std::printf("[IMGROT-V2D] rotation=%.5f pivot=(%.5f, %.5f)\n", v2d->rotation, px, py);
+  std::printf("[IMGROT-V2D] mask=%dx%d cur=(%.5f..%.5f, %.5f..%.5f)\n",
+              BLI_rcti_size_x(&v2d->mask) + 1,
+              BLI_rcti_size_y(&v2d->mask) + 1,
+              v2d->cur.xmin,
+              v2d->cur.xmax,
+              v2d->cur.ymin,
+              v2d->cur.ymax);
+  std::printf("[IMGROT-V2D] sx=%.5f sy=%.5f a=%.5f b=%.5f\n", sx, sy, a, b);
+  std::printf("[IMGROT-V2D] pivot_px=(%.5f, %.5f)  pivot_norm=(%.5f, %.5f)  (px/winx, py/winy)\n",
+              pivot_px[0],
+              pivot_px[1],
+              pivot_px[0] / mask_w,
+              pivot_px[1] / mask_h);
 }
 
 bool view2d_view_to_region_segment_clip(const View2D *v2d,

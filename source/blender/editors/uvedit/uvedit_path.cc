@@ -32,7 +32,6 @@
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
 
-#include "ED_image.hh"
 #include "ED_object.hh"
 #include "ED_screen.hh"
 #include "ED_uvedit.hh"
@@ -585,10 +584,8 @@ static wmOperatorStatus uv_shortest_path_pick_invoke(bContext *C,
   float co[2];
 
   const ARegion *region = CTX_wm_region(C);
-  SpaceImage *sima = CTX_wm_space_image(C);
 
-  /* Use rotation-compensated coordinates for correct path selection when canvas is rotated. */
-  ED_image_mouse_pos_rotated(sima, region, event->mval, co);
+  ui::view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &co[0], &co[1]);
 
   BMElem *ele_src = nullptr, *ele_dst = nullptr;
 

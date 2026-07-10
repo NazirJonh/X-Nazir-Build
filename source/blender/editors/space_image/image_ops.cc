@@ -3699,7 +3699,7 @@ bool ED_space_image_color_sample(
     return false;
   }
   float uv[2];
-  ui::view2d_region_to_view(&region->v2d, mval[0], mval[1], &uv[0], &uv[1]);
+  ED_image_mouse_pos(sima, region, mval, uv);
   int tile = BKE_image_get_tile_from_pos(sima->image, uv, uv, nullptr);
 
   void *lock;

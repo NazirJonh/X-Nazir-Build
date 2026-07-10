@@ -501,7 +501,7 @@ void ED_mask_mouse_pos(ScrArea *area, ARegion *region, const int mval[2], float 
       }
       case SPACE_IMAGE: {
         SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-        ED_image_mouse_pos_rotated(sima, region, mval, r_co);
+        ED_image_mouse_pos(sima, region, mval, r_co);
         BKE_mask_coord_from_image(sima->image, &sima->iuser, r_co, r_co);
         break;
       }
@@ -535,7 +535,7 @@ void ED_mask_point_pos(ScrArea *area, ARegion *region, float x, float y, float *
         break;
       case SPACE_IMAGE: {
         SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-        ED_image_point_pos_rotated(sima, region, x, y, &co[0], &co[1]);
+        ED_image_point_pos(sima, region, x, y, &co[0], &co[1]);
         BKE_mask_coord_from_image(sima->image, &sima->iuser, co, co);
         break;
       }
@@ -578,7 +578,7 @@ void ED_mask_point_pos__reverse(
         co[0] = x;
         co[1] = y;
         BKE_mask_coord_to_image(sima->image, &sima->iuser, co, co);
-        ED_image_point_pos__reverse_rotated(sima, region, co, co);
+        ED_image_point_pos__reverse(sima, region, co, co);
         break;
       }
       default:

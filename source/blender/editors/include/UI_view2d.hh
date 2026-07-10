@@ -373,6 +373,15 @@ void view2d_view_to_region_rcti(const View2D *v2d, const rctf *rect_src, rcti *r
 bool view2d_view_to_region_rcti_clip(const View2D *v2d, const rctf *rect_src, rcti *rect_dst)
     ATTR_NONNULL();
 
+/** Pivot of #View2D.rotation converted to region (pixel) space via the axis-aligned mapping. */
+void view2d_rotation_pivot_region(const View2D *v2d, float r_pivot_px[2]) ATTR_NONNULL();
+/** Rotate a region-space point about the rotation pivot. No-op when rotation is 0.
+ * `inverse` selects the screen->view direction. */
+void view2d_rotate_region_point(const View2D *v2d, float xy[2], bool inverse) ATTR_NONNULL();
+/** Aspect-correct model-view matrix that applies #View2D.rotation in screen space.
+ * Identity when rotation is 0. Multiply into the GPU matrix after the ortho projection. */
+void view2d_view_rotation_matrix(const View2D *v2d, float r_mat[4][4]) ATTR_NONNULL();
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

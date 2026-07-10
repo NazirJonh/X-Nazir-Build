@@ -27,6 +27,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 
+#include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_view3d.hh"
 
@@ -751,8 +752,7 @@ static wmOperatorStatus paintcurve_cursor_invoke(bContext *C,
         return OPERATOR_CANCELLED;
       }
 
-      ui::view2d_region_to_view(
-          &region->v2d, event->mval[0], event->mval[1], &location[0], &location[1]);
+      ED_image_mouse_pos(sima, region, event->mval, location);
       copy_v2_v2(sima->cursor, location);
       WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
       break;

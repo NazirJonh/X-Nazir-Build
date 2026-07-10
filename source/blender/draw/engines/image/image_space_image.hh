@@ -114,6 +114,20 @@ class SpaceImageAccessor : public AbstractSpaceAccessor {
      * Furthermore, take the negatives since we want the offset of the image, not the space. */
     return -float2(sima->xof, sima->yof) * sima->zoom;
   }
+
+  float get_canvas_rotation() const override
+  {
+    /* Rotation is only supported in some modes, and is a no-op otherwise. */
+    if (sima->rotation != 0.0f && ED_space_image_rotation_supported(sima)) {
+      return sima->rotation;
+    }
+    return 0.0f;
+  }
+
+  float2 get_canvas_rotation_pivot() const override
+  {
+    return float2(sima->rotation_pivot);
+  }
 };
 
 }  // namespace blender::image_engine

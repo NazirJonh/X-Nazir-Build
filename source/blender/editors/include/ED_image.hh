@@ -112,6 +112,19 @@ void ED_image_point_pos__reverse(SpaceImage *sima,
                                  const ARegion *region,
                                  const float co[2],
                                  float r_co[2]);
+
+/* Const versions of coordinate conversion functions for use in rotation wrappers. */
+void ED_image_mouse_pos_const(const SpaceImage *sima,
+                              const ARegion *region,
+                              const int mval[2],
+                              float co[2]);
+void ED_image_point_pos_const(
+    const SpaceImage *sima, const ARegion *region, float x, float y, float *r_x, float *r_y);
+void ED_image_point_pos__reverse_const(const SpaceImage *sima,
+                                       const ARegion *region,
+                                       const float co[2],
+                                       float r_co[2]);
+
 /**
  * This is more a user-level functionality, for going to `next/prev` used slot,
  * Stepping onto the last unused slot too.
@@ -244,5 +257,23 @@ ListBaseT<ImageFrameRange> ED_image_filesel_detect_sequences(StringRefNull blend
 
 bool ED_image_tools_paint_poll(bContext *C);
 void ED_paint_cursor_start(Paint *paint, bool (*poll)(bContext *C));
+
+/* Canvas rotation support */
+void ED_image_mouse_pos_rotated(const SpaceImage *sima,
+                                const ARegion *region,
+                                const int mval[2],
+                                float r_co[2]);
+void ED_image_view_to_region_rotated(const SpaceImage *sima,
+                                     const ARegion *region,
+                                     const float co[2],
+                                     float r_co[2]);
+void ED_image_point_pos_rotated(
+    SpaceImage *sima, const ARegion *region, float x, float y, float *r_x, float *r_y);
+void ED_image_point_pos__reverse_rotated(SpaceImage *sima,
+                                         const ARegion *region,
+                                         const float co[2],
+                                         float r_co[2]);
+void ED_space_image_rotation_cache_update(SpaceImage *sima);
+bool ED_space_image_rotation_supported(const SpaceImage *sima);
 
 }  // namespace blender

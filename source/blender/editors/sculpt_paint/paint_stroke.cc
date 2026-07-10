@@ -393,6 +393,9 @@ bool PaintStroke::update(bContext *C,
   }
 
   if (do_random_mask) {
+    if (ELEM(brush.mask_mtex.brush_map_mode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_RANDOM)) {
+      paint_runtime.brush_rotation_sec += brush.mask_mtex.rot;
+    }
     if (brush.mask_mtex.brush_angle_mode & MTEX_ANGLE_RANDOM) {
       paint_runtime.brush_rotation_sec += -brush.mask_mtex.random_angle / 2.0f +
                                           brush.mask_mtex.random_angle * rng_->get_float();

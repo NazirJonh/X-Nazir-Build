@@ -23,6 +23,8 @@
 #include "DNA_windowmanager_types.h"
 #include "DNA_xr_types.h"
 
+#include <cmath>
+
 #include "BLI_listbase_iterator.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
@@ -466,6 +468,21 @@ static void versioning_replace_legacy_compositor_switch_node(bNodeTree *node_tre
 
 void do_versions_after_linking_520(FileData *fd, Main *bmain)
 {
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 4)) {
+    /* Initialize cached sin/cos values for SpaceImage rotation. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &space : area.spacedata) {
+          if (space.spacetype == SPACE_IMAGE) {
+            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&space);
+            sima->rotation_sin = std::sin(sima->rotation);
+            sima->rotation_cos = std::cos(sima->rotation);
+          }
+        }
+      }
+    }
+  }
+
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 2)) {
     for (Scene &scene : bmain->scenes) {
       bNodeTree *node_tree = version_get_scene_compositor_node_tree(bmain, &scene);

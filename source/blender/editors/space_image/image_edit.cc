@@ -10,8 +10,10 @@
 #include "DNA_mask_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_space_enums.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_rect.h"
 
 #include "BKE_colortools.hh"
@@ -573,6 +575,210 @@ bool ED_space_image_maskedit_mask_visible_splines_poll(bContext *C)
   const SpaceImage *space_image = CTX_wm_space_image(C);
   return space_image->mask_info.draw_flag & MASK_DRAWFLAG_SPLINE;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Const Versions of Coordinate Conversion Functions
+ *
+ * These functions accept const SpaceImage* for use in rotation wrappers
+ * and other contexts where the space data should not be modified.
+ * \{ */
+
+void ED_image_mouse_pos_const(const SpaceImage *sima,
+                              const ARegion *region,
+                              const int mval[2],
+                              float co[2])
+{
+  int sx, sy, width, height;
+  float zoomx, zoomy;
+
+  ED_space_image_get_zoom(const_cast<SpaceImage *>(sima), region, &zoomx, &zoomy);
+  ED_space_image_get_size(const_cast<SpaceImage *>(sima), &width, &height);
+
+  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+
+  co[0] = ((mval[0] - sx) / zoomx) / width;
+  co[1] = ((mval[1] - sy) / zoomy) / height;
+}
+
+void ED_image_point_pos_const(
+    const SpaceImage *sima, const ARegion *region, float x, float y, float *r_x, float *r_y)
+{
+  int sx, sy, width, height;
+  float zoomx, zoomy;
+
+  ED_space_image_get_zoom(const_cast<SpaceImage *>(sima), region, &zoomx, &zoomy);
+  ED_space_image_get_size(const_cast<SpaceImage *>(sima), &width, &height);
+
+  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+
+  *r_x = ((x - sx) / zoomx) / width;
+  *r_y = ((y - sy) / zoomy) / height;
+}
+
+void ED_image_point_pos__reverse_const(const SpaceImage *sima,
+                                       const ARegion *region,
+                                       const float co[2],
+                                       float r_co[2])
+{
+  float zoomx, zoomy;
+  int width, height;
+  int sx, sy;
+
+  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+  ED_space_image_get_size(const_cast<SpaceImage *>(sima), &width, &height);
+  ED_space_image_get_zoom(const_cast<SpaceImage *>(sima), region, &zoomx, &zoomy);
+
+  r_co[0] = (co[0] * width * zoomx) + float(sx);
+  r_co[1] = (co[1] * height * zoomy) + float(sy);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Canvas Rotation Support
+ * \{ */
+
+#include "BLI_math_base.h"
+#include "BLI_math_matrix.h"
+
+/**
+ * Check if canvas rotation is supported in the current mode.
+ * Rotation is supported in View, Paint, and Mask modes.
+ * Rotation is NOT supported in UV Editor mode.
+ */
+bool ED_space_image_rotation_supported(const SpaceImage *sima)
+{
+  if (sima == nullptr) {
+    return false;
+  }
+  return ELEM(sima->mode, SI_MODE_VIEW, SI_MODE_PAINT, SI_MODE_MASK);
+}
+
+/**
+ * Update cached sin/cos values for canvas rotation.
+ * Must be called whenever sima->rotation is changed.
+ */
+void ED_space_image_rotation_cache_update(SpaceImage *sima)
+{
+  sima->rotation_sin = sinf(sima->rotation);
+  sima->rotation_cos = cosf(sima->rotation);
+}
+
+/**
+ * Convert UV/image coordinates to screen coordinates with rotation compensation.
+ */
+void ED_image_view_to_region_rotated(const SpaceImage *sima,
+                                     const ARegion *region,
+                                     const float co[2],
+                                     float r_co[2])
+{
+  ED_image_point_pos__reverse(const_cast<SpaceImage *>(sima), region, co, r_co);
+
+  if (sima->rotation == 0.0f) {
+    return;
+  }
+
+  float pivot_uv[2] = {sima->rotation_pivot[0], sima->rotation_pivot[1]};
+  float pivot_screen[2];
+  ED_image_point_pos__reverse(const_cast<SpaceImage *>(sima), region, pivot_uv, pivot_screen);
+
+  const float cos_r = sima->rotation_cos;
+  const float sin_r = sima->rotation_sin;
+  const float dx = r_co[0] - pivot_screen[0];
+  const float dy = r_co[1] - pivot_screen[1];
+
+  r_co[0] = pivot_screen[0] + dx * cos_r - dy * sin_r;
+  r_co[1] = pivot_screen[1] + dx * sin_r + dy * cos_r;
+}
+
+/**
+ * Mouse position in image space, compensated for canvas rotation.
+ */
+void ED_image_mouse_pos_rotated(const SpaceImage *sima,
+                                const ARegion *region,
+                                const int mval[2],
+                                float r_co[2])
+{
+  if (sima->rotation != 0.0f) {
+    float pivot_uv[2] = {sima->rotation_pivot[0], sima->rotation_pivot[1]};
+    float pivot_screen[2];
+    ED_image_point_pos__reverse(const_cast<SpaceImage *>(sima), region, pivot_uv, pivot_screen);
+
+    float unrotated_screen[2] = {float(mval[0]), float(mval[1])};
+    const float cos_r = sima->rotation_cos;
+    const float sin_r = -sima->rotation_sin;
+
+    const float dx = unrotated_screen[0] - pivot_screen[0];
+    const float dy = unrotated_screen[1] - pivot_screen[1];
+
+    unrotated_screen[0] = pivot_screen[0] + dx * cos_r - dy * sin_r;
+    unrotated_screen[1] = pivot_screen[1] + dx * sin_r + dy * cos_r;
+
+    ED_image_point_pos(const_cast<SpaceImage *>(sima), region, unrotated_screen[0], unrotated_screen[1], &r_co[0], &r_co[1]);
+    return;
+  }
+
+  ED_image_mouse_pos(const_cast<SpaceImage *>(sima), region, mval, r_co);
+}
+
+/**
+ * Point position in image space with rotation compensation.
+ */
+void ED_image_point_pos_rotated(
+    SpaceImage *sima, const ARegion *region, float x, float y, float *r_x, float *r_y)
+{
+  if (sima->rotation != 0.0f) {
+    float pivot_uv[2] = {sima->rotation_pivot[0], sima->rotation_pivot[1]};
+    float pivot_screen[2];
+    ED_image_point_pos__reverse(sima, region, pivot_uv, pivot_screen);
+
+    float unrotated_screen[2] = {x, y};
+    const float cos_r = sima->rotation_cos;
+    const float sin_r = -sima->rotation_sin;
+    const float dx = unrotated_screen[0] - pivot_screen[0];
+    const float dy = unrotated_screen[1] - pivot_screen[1];
+
+    unrotated_screen[0] = pivot_screen[0] + dx * cos_r - dy * sin_r;
+    unrotated_screen[1] = pivot_screen[1] + dx * sin_r + dy * cos_r;
+
+    ED_image_point_pos(sima, region, unrotated_screen[0], unrotated_screen[1], r_x, r_y);
+    return;
+  }
+
+  ED_image_point_pos(sima, region, x, y, r_x, r_y);
+}
+
+/**
+ * Convert UV/image coordinates to screen coordinates with rotation compensation.
+ */
+void ED_image_point_pos__reverse_rotated(SpaceImage *sima,
+                                         const ARegion *region,
+                                         const float co[2],
+                                         float r_co[2])
+{
+  ED_image_point_pos__reverse(sima, region, co, r_co);
+
+  if (sima->rotation == 0.0f) {
+    return;
+  }
+
+  float pivot_uv[2] = {sima->rotation_pivot[0], sima->rotation_pivot[1]};
+  float pivot_screen[2];
+  ED_image_point_pos__reverse(sima, region, pivot_uv, pivot_screen);
+
+  const float cos_r = sima->rotation_cos;
+  const float neg_sin_r = -sima->rotation_sin;
+  const float dx = r_co[0] - pivot_screen[0];
+  const float dy = r_co[1] - pivot_screen[1];
+
+  float rotated_x = pivot_screen[0] + dx * cos_r - dy * neg_sin_r;
+  float rotated_y = pivot_screen[1] + dx * neg_sin_r + dy * cos_r;
+
+  r_co[0] = rotated_x;
+  r_co[1] = rotated_y;
+}
+
+/** \} */
 
 bool ED_space_image_cursor_poll(bContext *C)
 {

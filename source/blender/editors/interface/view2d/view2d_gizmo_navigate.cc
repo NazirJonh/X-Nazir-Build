@@ -46,8 +46,9 @@ namespace {
 enum {
   GZ_INDEX_MOVE = 0,
   GZ_INDEX_ZOOM = 1,
+  GZ_INDEX_ROTATE = 2,
 
-  GZ_INDEX_TOTAL = 2,
+  GZ_INDEX_TOTAL = 3,
 };
 
 struct NavigateGizmoInfo {
@@ -76,6 +77,11 @@ static NavigateGizmoInfo g_navigate_params_for_space_image[GZ_INDEX_TOTAL] = {
         "IMAGE_OT_view_zoom",
         "GIZMO_GT_button_2d",
         ICON_VIEW_ZOOM,
+    },
+    {
+        "IMAGE_OT_view_rotate_interactive",
+        "GIZMO_GT_button_2d",
+        ICON_GESTURE_ROTATE,
     },
 };
 
@@ -164,7 +170,8 @@ static void WIDGETGROUP_navigate_setup(const bContext * /*C*/, wmGizmoGroup *gzg
     const NavigateGizmoInfo *info = &navigate_params[i];
     navgroup->gz_array[i] = WM_gizmo_new(info->gizmo, gzgroup, nullptr);
     wmGizmo *gz = navgroup->gz_array[i];
-    gz->flag |= WM_GIZMO_MOVE_CURSOR | WM_GIZMO_DRAW_MODAL;
+    gz->flag |= WM_GIZMO_MOVE_CURSOR;
+    /* Don't set WM_GIZMO_DRAW_MODAL - gizmos should only draw on hover. */
 
     gz->color[3] = 0.0f;
     gz->color_hi[3] = 0.0f;
@@ -195,6 +202,13 @@ static void WIDGETGROUP_navigate_setup(const bContext * /*C*/, wmGizmoGroup *gzg
       wmGizmoOpElem *gzop = WM_gizmo_operator_get(gz, 0);
       RNA_boolean_set(&gzop->ptr, "use_cursor_init", false);
     }
+  }
+
+  /* Set use_center_pivot=true for rotate operator when called from gizmo. */
+  if (navigate_params == g_navigate_params_for_space_image) {
+    wmGizmo *gz = navgroup->gz_array[GZ_INDEX_ROTATE];
+    wmGizmoOpElem *gzop = WM_gizmo_operator_get(gz, 0);
+    RNA_boolean_set(&gzop->ptr, "use_center_pivot", true);
   }
 
   gzgroup->customdata = navgroup;
@@ -240,6 +254,15 @@ static void WIDGETGROUP_navigate_draw_prepare(const bContext *C, wmGizmoGroup *g
   gz->matrix_basis[3][0] = roundf(co[0]);
   gz->matrix_basis[3][1] = roundf(co[1] - (icon_offset_mini * icon_mini_slot++));
   WM_gizmo_set_flag(gz, WM_GIZMO_HIDDEN, false);
+
+  const NavigateGizmoInfo *navigate_params = navigate_params_from_space_type(
+      gzgroup->type->gzmap_params.spaceid);
+  if (navigate_params == g_navigate_params_for_space_image) {
+    gz = navgroup->gz_array[GZ_INDEX_ROTATE];
+    gz->matrix_basis[3][0] = roundf(co[0]);
+    gz->matrix_basis[3][1] = roundf(co[1] - (icon_offset_mini * icon_mini_slot++));
+    WM_gizmo_set_flag(gz, WM_GIZMO_HIDDEN, false);
+  }
 }
 
 void VIEW2D_GGT_navigate_impl(wmGizmoGroupType *gzgt, const char *idname)

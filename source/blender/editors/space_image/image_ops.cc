@@ -1326,6 +1326,8 @@ void IMAGE_OT_view_zoom_border(wmOperatorType *ot)
   WM_operator_properties_gesture_box_zoom(ot);
 }
 
+/** \} */
+
 /* load/replace/save callbacks */
 static void image_filesel(bContext *C, wmOperator *op, const char *path)
 {

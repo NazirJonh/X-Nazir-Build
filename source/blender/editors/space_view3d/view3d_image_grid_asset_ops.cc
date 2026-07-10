@@ -10,6 +10,7 @@
 
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
+#include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 
 #include "AS_asset_library.hh"
@@ -39,6 +40,7 @@
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_mark_clear.hh"
+#include "ED_fileselect.hh"
 #include "ED_undo.hh"
 #include "ED_view3d.hh"
 
@@ -324,6 +326,134 @@ static wmOperatorStatus image_grid_assign_catalog_invoke(bContext *C,
   return WM_operator_props_dialog_popup(C, op, 400, IFACE_("Assign to Catalog"), IFACE_("Assign"));
 }
 
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Drop Import (batch)
+ * \{ */
+
+enum class ImageGridDropImportMode {
+  Temporary = 0,
+  Library = 1,
+};
+
+static const EnumPropertyItem image_grid_drop_import_mode_items[] = {
+    {int(ImageGridDropImportMode::Temporary),
+     "TEMPORARY",
+     0,
+     "Use as Temporary Textures",
+     "Load the dropped images into the current file without marking them as assets"},
+    {int(ImageGridDropImportMode::Library),
+     "LIBRARY",
+     0,
+     "Add to Library / Catalog",
+     "Load the dropped images, mark them as assets and assign them to a catalog"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static wmOperatorStatus image_grid_drop_import_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  const ImageGridDropImportMode mode = ImageGridDropImportMode(RNA_enum_get(op->ptr, "mode"));
+  const bool library_mode = (mode == ImageGridDropImportMode::Library);
+
+  /* Resolve the target catalog once (Library mode only). */
+  asset_system::AssetLibrary *library = nullptr;
+  asset_system::AssetCatalogPath catalog_path;
+  if (library_mode) {
+    char catalog_path_c[MAX_NAME];
+    RNA_string_get(op->ptr, "catalog_path", catalog_path_c);
+    if (catalog_path_c[0] == '\0') {
+      BKE_report(op->reports, RPT_ERROR, "Catalog path is required");
+      return OPERATOR_CANCELLED;
+    }
+    library = AS_asset_library_load(bmain, asset_system::current_file_library_reference());
+    if (!library) {
+      BKE_report(op->reports, RPT_ERROR, "Current file asset library is not available");
+      return OPERATOR_CANCELLED;
+    }
+    catalog_path = asset_system::AssetCatalogPath::from_user_input(catalog_path_c);
+  }
+
+  char dir[FILE_MAX];
+  RNA_string_get(op->ptr, "directory", dir);
+
+  int loaded_num = 0;
+  RNA_BEGIN (op->ptr, itemptr, "files") {
+    char name[FILE_MAX];
+    RNA_string_get(&itemptr, "name", name);
+
+    char filepath[FILE_MAX];
+    BLI_path_join(filepath, sizeof(filepath), dir, name);
+
+    /* Only image files are relevant; other dragged file types are ignored. */
+    if ((ED_path_extension_type(filepath) & FILE_TYPE_IMAGE) == 0) {
+      continue;
+    }
+
+    Image *image = BKE_image_load_exists(bmain, filepath, nullptr);
+    if (!image) {
+      BKE_reportf(op->reports, RPT_WARNING, "Could not load image \"%s\"", filepath);
+      continue;
+    }
+    loaded_num++;
+
+    /* Library mode: mark as asset (unless linked) and assign the chosen catalog. */
+    if (library_mode && !ID_IS_LINKED(&image->id)) {
+      if (!image->id.asset_data) {
+        if (!ed::asset::image_mark_as_asset(image)) {
+          continue;
+        }
+        ed::asset::generate_preview(C, &image->id);
+      }
+      const asset_system::AssetCatalog &catalog = ed::asset::library_ensure_catalogs_in_path(
+          *library, catalog_path);
+      BKE_asset_metadata_catalog_id_set(
+          image->id.asset_data, catalog.catalog_id, catalog.simple_name.c_str());
+    }
+  }
+  RNA_END;
+
+  if (loaded_num == 0) {
+    BKE_report(op->reports, RPT_WARNING, "No image files were dropped");
+    return OPERATOR_CANCELLED;
+  }
+
+  WM_event_add_notifier(C, NC_ASSET | NA_ADDED, nullptr);
+  WM_event_add_notifier(C, NC_ID | NA_EDITED, nullptr);
+
+  /* Refresh the grid; do not focus/scroll to any item (the user picks a texture manually). */
+  const bool is_mask_slot = image_grid_is_mask_slot_from_op(C, op);
+  image_grid_operation_finish(
+      *C, asset_system::current_file_library_reference(), StringRefNull(""), is_mask_slot);
+
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus image_grid_drop_import_invoke(bContext *C,
+                                                      wmOperator *op,
+                                                      const wmEvent *event)
+{
+  /* Stage 1: no mode chosen -> show the "Temporary / Library" menu. WM_menu_invoke preserves the
+   * already-set directory/files properties by passing op->ptr->data to the menu items. */
+  if (!RNA_struct_property_is_set(op->ptr, "mode")) {
+    return WM_menu_invoke(C, op, event);
+  }
+  /* Stage 2: Library mode needs a target catalog. */
+  const ImageGridDropImportMode mode = ImageGridDropImportMode(RNA_enum_get(op->ptr, "mode"));
+  if (mode == ImageGridDropImportMode::Library &&
+      !RNA_struct_property_is_set(op->ptr, "catalog_path"))
+  {
+    const AssetLibraryReference local_ref = asset_system::current_file_library_reference();
+    RNA_enum_set(
+        op->ptr, "asset_library_reference", ed::asset::library_reference_to_enum_value(&local_ref));
+    return WM_operator_props_dialog_popup(C, op, 400, IFACE_("Add to Catalog"), IFACE_("Add"));
+  }
+  return op->type->exec(C, op);
+}
+
+/** \} */
+
 }  // namespace blender::ed::view3d
 
 namespace blender {
@@ -368,6 +498,55 @@ void VIEW3D_OT_image_grid_assign_catalog(wmOperatorType *ot)
 
   prop = RNA_def_string(
       ot->srna, "asset_identifier", nullptr, FILE_MAX_LIBEXTRA, "Asset Identifier", "");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Drop Import (batch)
+ * \{ */
+
+void VIEW3D_OT_image_grid_drop_import(wmOperatorType *ot)
+{
+  ot->name = "Import Dropped Images into Grid";
+  ot->description =
+      "Import images dropped onto the texture grid as temporary textures or as catalog assets";
+  ot->idname = "VIEW3D_OT_image_grid_drop_import";
+
+  ot->exec = ed::view3d::image_grid_drop_import_exec;
+  ot->invoke = ed::view3d::image_grid_drop_import_invoke;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  PropertyRNA *prop;
+  prop = RNA_def_string_dir_path(
+      ot->srna, "directory", nullptr, FILE_MAX, "Directory", "Directory of the dropped image files");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_collection_runtime(ot->srna, "files", RNA_OperatorFileListElement, "Files", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_enum(ot->srna,
+                      "mode",
+                      ed::view3d::image_grid_drop_import_mode_items,
+                      int(ed::view3d::ImageGridDropImportMode::Temporary),
+                      "Mode",
+                      "What to do with the dropped images");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+  ot->prop = prop;
+
+  prop = RNA_def_string(
+      ot->srna, "catalog_path", nullptr, MAX_NAME, "Catalog", "Catalog path in the current file");
+  RNA_def_property_string_search_func_runtime(
+      prop, ed::view3d::image_grid_visit_catalogs_for_search, PROP_STRING_SEARCH_SUGGESTION);
+
+  prop = RNA_def_property(ot->srna, "asset_library_reference", PROP_ENUM, PROP_NONE);
+  RNA_def_enum_funcs(prop, ed::view3d::rna_image_grid_catalog_library_itemf);
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
+
+  prop = RNA_def_boolean(
+      ot->srna, "use_mask_slot", false, "Mask Texture Slot", "Update the mask texture grid state");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
 }
 

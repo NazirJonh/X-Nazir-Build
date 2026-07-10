@@ -256,6 +256,7 @@ void VIEW3D_OT_image_grid_open(wmOperatorType *ot);
 void VIEW3D_OT_image_grid_assign_catalog(wmOperatorType *ot);
 void VIEW3D_OT_image_grid_copy_to_library(wmOperatorType *ot);
 void VIEW3D_OT_image_grid_move_to_library(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_drop_import(wmOperatorType *ot);
 void VIEW3D_OT_image_grid_browse_assets(wmOperatorType *ot);
 void VIEW3D_OT_image_shelf_activate_asset(wmOperatorType *ot);
 void VIEW3D_OT_image_grid_refresh_library(wmOperatorType *ot);

@@ -36,6 +36,10 @@
 #include "BLI_vector.hh"
 #include "BLT_translation.hh"
 
+#include "IMB_imbuf_types.hh"
+
+#include <fmt/format.h>
+
 #include "ED_asset.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
@@ -44,6 +48,7 @@
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
+#include "BLI_path_utils.hh"
 #include "BLI_rect.h"
 #include "UI_grid_view.hh"
 #include "UI_interface.hh"
@@ -523,6 +528,148 @@ class ImageAssetGridItem : public PreviewGridItem {
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Grid Drop Target
+ * \{ */
+
+/** Number of image files carried by \a drag; 0 for non-path drags. */
+static int image_grid_drag_image_file_count(const wmDrag &drag)
+{
+  if (drag.type != WM_DRAG_PATH) {
+    return 0;
+  }
+  int num = 0;
+  for (const std::string &path : WM_drag_get_paths(&drag)) {
+    if (BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+      num++;
+    }
+  }
+  return num;
+}
+
+/**
+ * View-level drop target for the brush texture image grid. Dropping a single image assigns it to
+ * the slot the grid is bound to (same as dropping on the slot button). Dropping several image files
+ * opens the batch-import menu (see #VIEW3D_OT_image_grid_drop_import), wired in a later step.
+ */
+class ImageGridDropTarget : public ui::DropTargetInterface {
+  /** The brush texture slot the grid is bound to (primary or mask). */
+  PointerRNA target_ptr_;
+
+ public:
+  explicit ImageGridDropTarget(const PointerRNA &target_ptr) : target_ptr_(target_ptr) {}
+
+  bool can_drop(const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
+  {
+    /* Local image data-block or image asset (imported on drop). */
+    if (WM_drag_is_ID_type(&drag, ID_IM)) {
+      return true;
+    }
+    /* One or more image files from the file browser or the OS. */
+    if (drag.type == WM_DRAG_PATH) {
+      return image_grid_drag_image_file_count(drag) > 0;
+    }
+    return false;
+  }
+
+  std::string drop_tooltip(const ui::DragInfo &drag_info) const override
+  {
+    const wmDrag &drag = drag_info.drag_data;
+    const int image_num = image_grid_drag_image_file_count(drag);
+    if (image_num > 1) {
+      return fmt::format(fmt::runtime(TIP_("Import {} images into the grid")), image_num);
+    }
+    const std::string image_name = WM_drag_get_item_name(const_cast<wmDrag *>(&drag));
+    return fmt::format(fmt::runtime(TIP_("Assign {} to the brush texture slot")), image_name);
+  }
+
+  bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override
+  {
+    /* Batch of image files -> import menu (temporary vs library + catalog). */
+    if (image_grid_drag_image_file_count(drag_info.drag_data) > 1) {
+      return this->drop_multiple_images(C, drag_info);
+    }
+    return this->drop_single_image(C, drag_info);
+  }
+
+ private:
+  /** Assign one dropped image to the bound slot, reusing the slot-button drop operator. */
+  bool drop_single_image(bContext *C, const ui::DragInfo &drag_info) const
+  {
+    const wmDrag &drag = drag_info.drag_data;
+
+    PointerRNA props = WM_operator_properties_create("BRUSH_OT_texture_slot_assign_image");
+    /* Resolve a local image, importing the asset first if the drag came from the asset browser. */
+    if (const ID *image_id = WM_drag_get_local_ID_or_import_from_asset(C, &drag, ID_IM)) {
+      RNA_int_set(&props, "session_uid", int(image_id->session_uid));
+    }
+    else if (drag.type == WM_DRAG_PATH) {
+      if (const char *path = WM_drag_get_single_path(&drag)) {
+        RNA_string_set(&props, "filepath", path);
+      }
+    }
+    RNA_boolean_set(&props, "use_mask_slot", ed::view3d::image_grid_slot_is_mask(target_ptr_));
+    RNA_boolean_set(&props, "replace_existing", true);
+
+    /* Invoke (not exec): a packed image on an occupied slot opens a popup that returns
+     * #OPERATOR_INTERFACE - still a successful drop. */
+    const wmOperatorStatus status = WM_operator_name_call(C,
+                                                          "BRUSH_OT_texture_slot_assign_image",
+                                                          wm::OpCallContext::InvokeDefault,
+                                                          &props,
+                                                          &drag_info.event);
+    WM_operator_properties_free(&props);
+    return (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
+  }
+
+  /**
+   * Marshal the dropped image files into #VIEW3D_OT_image_grid_drop_import and invoke it. The
+   * operator's own #invoke shows the temporary/library menu (and, for library, a catalog dialog).
+   */
+  bool drop_multiple_images(bContext *C, const ui::DragInfo &drag_info) const
+  {
+    const wmDrag &drag = drag_info.drag_data;
+
+    PointerRNA props = WM_operator_properties_create("VIEW3D_OT_image_grid_drop_import");
+
+    const char *first_image = nullptr;
+    for (const std::string &path : WM_drag_get_paths(&drag)) {
+      if (BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+        first_image = path.c_str();
+        break;
+      }
+    }
+    if (first_image) {
+      char dir[FILE_MAX];
+      BLI_path_split_dir_part(first_image, dir, sizeof(dir));
+      RNA_string_set(&props, "directory", dir);
+
+      for (const std::string &path : WM_drag_get_paths(&drag)) {
+        if (!BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+          continue;
+        }
+        char name[FILE_MAX];
+        BLI_path_split_file_part(path.c_str(), name, sizeof(name));
+        PointerRNA itemptr{};
+        RNA_collection_add(&props, "files", &itemptr);
+        RNA_string_set(&itemptr, "name", name);
+      }
+    }
+    RNA_boolean_set(&props, "use_mask_slot", ed::view3d::image_grid_slot_is_mask(target_ptr_));
+
+    /* Invoke so the operator can present the mode menu / catalog dialog. */
+    const wmOperatorStatus status = WM_operator_name_call(C,
+                                                          "VIEW3D_OT_image_grid_drop_import",
+                                                          wm::OpCallContext::InvokeDefault,
+                                                          &props,
+                                                          &drag_info.event);
+    WM_operator_properties_free(&props);
+    return (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
+  }
+};
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Grid View
  * \{ */
 
@@ -599,6 +746,11 @@ class ImageAssetGridView : public AbstractGridView {
     if (ed::asset::list::is_loaded(&library_ref_) && session_) {
       session_->cached_item_count = filtered_count;
     }
+  }
+
+  std::unique_ptr<DropTargetInterface> create_drop_target() override
+  {
+    return std::make_unique<ImageGridDropTarget>(target_ptr_);
   }
 };
 

@@ -285,6 +285,7 @@ void view3d_operatortypes()
   WM_operatortype_append(VIEW3D_OT_image_grid_assign_catalog);
   WM_operatortype_append(VIEW3D_OT_image_grid_copy_to_library);
   WM_operatortype_append(VIEW3D_OT_image_grid_move_to_library);
+  WM_operatortype_append(VIEW3D_OT_image_grid_drop_import);
   WM_operatortype_append(VIEW3D_OT_image_grid_browse_assets);
   WM_operatortype_append(VIEW3D_OT_image_shelf_activate_asset);
   WM_operatortype_append(VIEW3D_OT_image_grid_refresh_library);

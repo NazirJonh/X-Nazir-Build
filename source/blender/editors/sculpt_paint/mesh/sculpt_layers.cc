@@ -741,13 +741,15 @@ void stroke_record_begin(const Depsgraph & /*depsgraph*/, Object &object)
     return;
   }
 
-  /* Recording into a layer assumes the sculpted positions are the layer's own storage space (the
-   * un-deformed base for the vertex domain, the CCG for grids). When a shape key or a deforming
-   * modifier is active the live positions are in evaluated (deformed) space, so a recorded delta
-   * would be wrong and, worse, the shape-key undo path would double-apply it (see
-   * #restore_position_mesh). Skip recording and let the stroke behave as an ordinary sculpt
-   * stroke; the layer set is unchanged, so undo restores positions the normal way. */
-  if (ss->shapekey_active || ss->deform_modifiers_active) {
+  /* Note: an active shape key sets #deform_modifiers_active too (see #sculpt_modifiers_active), so a
+   * plain "deform active -> skip" would also disable the shape-key case we do support. Recording is
+   * routed into the layer as an object-space offset composed on top of every deform at evaluation
+   * (see #PositionDeformData::deform, which captures the object-space displacement before the
+   * crazyspace correction). That works whenever the shape key is what drives the deform. Only a real
+   * deforming modifier *without* a shape key is left unsupported for now: there the composed surface
+   * is not re-derived from base + layers at evaluation, so the recorded delta would have nowhere to
+   * be reproduced. */
+  if (ss->deform_modifiers_active && !ss->shapekey_active) {
     return;
   }
 
@@ -785,7 +787,7 @@ void stroke_record_begin(const Depsgraph & /*depsgraph*/, Object &object)
   SLP_PERF("[DEBUG-perf] stroke_record_begin: grids=%d, rec_active=true, RECORDING\n", grids);
 }
 
-void stroke_record_end(const Depsgraph & /*depsgraph*/, Object &object)
+void stroke_record_end(const Depsgraph &depsgraph, Object &object)
 {
   SculptSession *ss = session_of(object);
   if (!ss) {
@@ -868,16 +870,33 @@ void stroke_record_end(const Depsgraph & /*depsgraph*/, Object &object)
        * undo deltas for the touched vertices (work proportional to the brushed area). Must run
        * before #undo::push_end. */
       MutableSpan<float3> data = bke::sculpt_layers::data_ensure(*layer, element_count(object));
-      const Span<float3> positions = mesh.vert_positions();
+      /* Under a shape key the basis positions (#mesh.vert_positions) are untouched by the stroke —
+       * the brush edited the evaluated/display positions. Diff the live post-stroke evaluated
+       * positions against the pre-stroke ones recorded by undo to recover the per-vertex layer delta
+       * (which equals the per-dab accumulation done by #PositionDeformData::record_layer_offsets).
+       * #ss->deform_cos cannot be used here: it is a stable pre-stroke snapshot, not updated mid
+       * stroke (see #BKE_sculpt_update_object). */
+      const Span<float3> positions = ss->shapekey_active ?
+                                         bke::pbvh::vert_positions_eval(depsgraph, object) :
+                                         mesh.vert_positions();
 
       struct NodeInfo {
         Span<int> vert_indices;
         Span<float3> orig_positions;
       };
       Vector<NodeInfo> active_nodes;
-      undo::foreach_recorded_position_mesh([&](const Span<int> verts, const Span<float3> orig) {
+      const auto collect = [&](const Span<int> verts, const Span<float3> orig) {
         active_nodes.append({verts, orig});
-      });
+      };
+      /* Under a shape key #foreach_recorded_position_mesh would hand back the base-space
+       * #orig_position (the active key block); the stroke lives in evaluated space, so gather the
+       * pre-stroke evaluated positions instead to match #positions (#deform_cos) above. */
+      if (ss->shapekey_active) {
+        undo::foreach_recorded_eval_position_mesh(collect);
+      }
+      else {
+        undo::foreach_recorded_position_mesh(collect);
+      }
 
       Array<int> node_offsets(active_nodes.size() + 1);
       {

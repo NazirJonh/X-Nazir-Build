@@ -8172,6 +8172,18 @@ void PositionDeformData::deform(MutableSpan<float3> translations, const Span<int
     apply_translations(translations, verts, *eval_mut_);
   }
 
+  /* Recording a vertex sculpt layer while a shape key (or a deforming modifier) is active: #eval_mut_
+   * holds the separate display buffer that was just moved above, and the layer is composed as an
+   * object-space offset on top of every deform at evaluation. Capture that object-space displacement
+   * here — BEFORE #apply_crazyspace_to_translations rewrites #translations into the pre-deform base
+   * space — and route it into the layer only, leaving the key blocks and base positions (#orig_)
+   * untouched. Without a deform (#eval_mut_ unset) the base positions ARE the display, so recording
+   * still bakes into them in the plain branch below. */
+  if (!layer_record_data_.is_empty() && eval_mut_) {
+    this->record_layer_offsets(verts, translations);
+    return;
+  }
+
   if (deform_imats_) {
     /* Apply the reverse procedural deformation, since subsequent translation happens to the state
      * from "before" deforming modifiers. */

@@ -1205,17 +1205,28 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object)
   const float influence = bke::sculpt_layers::effective(*layer);
   MutableSpan<float3> positions = mesh.vert_positions_for_write();
 
+  /* Under a shape key the combined surface is recomposed from the base plus layers at evaluation
+   * (the layer overlay is applied on top of the shape-keyed positions), and #mesh.vert_positions
+   * holds the untouched basis. Only revert the layer data here; leave the basis alone and let the
+   * re-evaluation reflect the change, mirroring how the stroke itself never touched the basis. */
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const bool skip_positions = ss.shapekey_active != nullptr;
+
   const auto apply_range = [&](const int start, const int count) {
     for (const int64_t i : IndexRange(start, count)) {
       const int v = verts[i];
       if (v >= 0 && v < live.size()) {
         if (undo) {
           live[v] -= stored[i];
-          positions[v] -= stored[i] * influence;
+          if (!skip_positions) {
+            positions[v] -= stored[i] * influence;
+          }
         }
         else {
           live[v] += stored[i];
-          positions[v] += stored[i] * influence;
+          if (!skip_positions) {
+            positions[v] += stored[i] * influence;
+          }
         }
       }
     }
@@ -1488,6 +1499,34 @@ bool foreach_recorded_position_mesh(
                                   unode->orig_position.as_span().take_front(unique_num) :
                                   unode->position.as_span().take_front(unique_num);
     fn(unode->vert_indices.as_span().take_front(unique_num), orig);
+  }
+
+  return true;
+}
+
+bool foreach_recorded_eval_position_mesh(
+    FunctionRef<void(Span<int> verts, Span<float3> eval_positions)> fn)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data || step_data->type != Type::Position) {
+    return false;
+  }
+
+  /* Must run before #push_end, while the per-node undo data is still in the map. */
+  for (const std::unique_ptr<Node> &unode : step_data->undo_nodes_by_pbvh_node.values()) {
+    if (unode->vert_indices.is_empty()) {
+      continue;
+    }
+    const int unique_num = unode->unique_verts_num;
+    if (unique_num <= 0) {
+      continue;
+    }
+    /* Always the evaluated/display positions (#Node.position), unlike #foreach_recorded_position_mesh
+     * which prefers #orig_position (base space) when a deform is active. Under a shape key the layer
+     * stroke is captured in the evaluated space, so the recorder diffs these against the post-stroke
+     * #deform_cos to recover the object-space per-vertex layer delta. */
+    fn(unode->vert_indices.as_span().take_front(unique_num),
+       unode->position.as_span().take_front(unique_num));
   }
 
   return true;

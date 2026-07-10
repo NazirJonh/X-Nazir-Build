@@ -192,6 +192,15 @@ bool foreach_recorded_position_mesh(
     FunctionRef<void(Span<int> verts, Span<float3> orig_positions)> fn);
 
 /**
+ * Like #foreach_recorded_position_mesh but always yields the evaluated/display positions
+ * (#Node.position) rather than preferring #orig_position (base space) when a deform is active. Used
+ * by the shape-key sculpt-layer recorder, which diffs the pre-stroke evaluated positions against the
+ * post-stroke #deform_cos to recover the object-space per-vertex layer delta.
+ */
+bool foreach_recorded_eval_position_mesh(
+    FunctionRef<void(Span<int> verts, Span<float3> eval_positions)> fn);
+
+/**
  * Sculpt layers (multires/grid domain): iterate the grid indices recorded into the in-progress
  * Position undo step, per touched node. Returns false when there is no suitable in-progress grids
  * Position step. Must be called before #push_end.

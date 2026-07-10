@@ -63,6 +63,100 @@ namespace blender::draw {
 
 /* CurvesBatchCache structure is now defined in draw_cache_impl_curves_private.hh */
 
+/* -------------------------------------------------------------------- */
+/** \name Shared Curves Paint Overlay Buffers
+ *
+ * Weight and vertex paint overlays share the same point/line geometry; only the per-point
+ * attribute (weight vs color) differs. These helpers build the common parts.
+ * \{ */
+
+void curves_paint_compute_tangents(const bke::CurvesGeometry &curves,
+                                   MutableSpan<float3> r_tangents)
+{
+  const Span<float3> positions = curves.positions();
+  const OffsetIndices<int> points_by_curve = curves.points_by_curve();
+
+  for (const int curve_i : curves.curves_range()) {
+    const IndexRange points = points_by_curve[curve_i];
+
+    for (const int point_i : points) {
+      float3 tangent = float3(0.0f);
+
+      if (points.size() > 1) {
+        if (point_i == points.first()) {
+          tangent = math::normalize(positions[point_i + 1] - positions[point_i]);
+        }
+        else if (point_i == points.last()) {
+          tangent = math::normalize(positions[point_i] - positions[point_i - 1]);
+        }
+        else {
+          const float3 prev_dir = math::normalize(positions[point_i] - positions[point_i - 1]);
+          const float3 next_dir = math::normalize(positions[point_i + 1] - positions[point_i]);
+          tangent = math::normalize(prev_dir + next_dir);
+        }
+      }
+      else {
+        /* Single point curve: default tangent. */
+        tangent = float3(1.0f, 0.0f, 0.0f);
+      }
+
+      r_tangents[point_i] = tangent;
+    }
+  }
+}
+
+void curves_paint_build_point_and_line_batches(const bke::CurvesGeometry &curves,
+                                               gpu::VertBuf *vbo,
+                                               gpu::IndexBuf **r_points_ibo,
+                                               gpu::IndexBuf **r_lines_ibo,
+                                               gpu::Batch **r_points_batch,
+                                               gpu::Batch **r_lines_batch)
+{
+  const int points_num = curves.points_num();
+  const OffsetIndices<int> points_by_curve = curves.points_by_curve();
+
+  /* Index buffer for the points. */
+  GPUIndexBufBuilder points_builder;
+  GPU_indexbuf_init(&points_builder, GPU_PRIM_POINTS, points_num, points_num);
+  for (int i = 0; i < points_num; i++) {
+    GPU_indexbuf_add_point_vert(&points_builder, i);
+  }
+  *r_points_ibo = GPU_indexbuf_build(&points_builder);
+
+  /* Index buffer for the line segments (only for curves with more than one point). */
+  int total_line_segments = 0;
+  for (const int curve_i : curves.curves_range()) {
+    const IndexRange points = points_by_curve[curve_i];
+    if (points.size() > 1) {
+      total_line_segments += points.size() - 1;
+    }
+  }
+
+  if (total_line_segments > 0) {
+    GPUIndexBufBuilder lines_builder;
+    GPU_indexbuf_init(&lines_builder, GPU_PRIM_LINES, total_line_segments * 2, points_num);
+    for (const int curve_i : curves.curves_range()) {
+      const IndexRange points = points_by_curve[curve_i];
+      for (const int i : IndexRange(points.size() - 1)) {
+        GPU_indexbuf_add_line_verts(&lines_builder, points[i], points[i + 1]);
+      }
+    }
+    *r_lines_ibo = GPU_indexbuf_build(&lines_builder);
+  }
+
+  if (*r_points_ibo) {
+    *r_points_batch = GPU_batch_create(GPU_PRIM_POINTS, vbo, *r_points_ibo);
+  }
+  if (*r_lines_ibo) {
+    *r_lines_batch = GPU_batch_create(GPU_PRIM_LINES, vbo, *r_lines_ibo);
+  }
+
+  /* Allow creation of buffer texture. */
+  GPU_vertbuf_use(vbo);
+}
+
+/** \} */
+
 static bool batch_cache_is_dirty(const Curves &curves)
 {
   const CurvesBatchCache *cache = curves.batch_cache;
@@ -949,7 +1043,7 @@ void DRW_curves_batch_cache_validate(Curves *curves)
 
 void DRW_curves_batch_cache_free(Curves *curves)
 {
-  /* Clean up regular curves cache (weight paint resources are cleaned automatically) */
+  /* Frees all batches including the weight/vertex paint resources (see #clear_edit_data). */
   clear_batch_cache(*curves);
   CurvesBatchCache *batch_cache = curves->batch_cache;
   MEM_delete(batch_cache);

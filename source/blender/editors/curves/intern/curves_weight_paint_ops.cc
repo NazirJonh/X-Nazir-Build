@@ -58,38 +58,6 @@
 
 namespace blender::ed::sculpt_paint {
 
-static Object *curves_weight_paint_original_object_get(bContext *C)
-{
-  Object *object = CTX_data_active_object(C);
-  if (object == nullptr) {
-    return nullptr;
-  }
-  if (ID *original_id = DEG_get_original_id(&object->id)) {
-    return reinterpret_cast<Object *>(original_id);
-  }
-  return object;
-}
-
-/* -------------------------------------------------------------------- */
-/** \name Paint Mode Data Wrapper
- * \{ */
-
-class PaintModeDataWrapper : public PaintModeData {
- private:
-  std::unique_ptr<CurvesWeightPaintStrokeOperation> operation_;
-
- public:
-  PaintModeDataWrapper(std::unique_ptr<CurvesWeightPaintStrokeOperation> operation)
-      : operation_(std::move(operation))
-  {
-  }
-
-  CurvesWeightPaintStrokeOperation *operation()
-  {
-    return operation_.get();
-  }
-};
-
 /* -------------------------------------------------------------------- */
 /** \name Weight Paint Mode Toggle
  * \{ */
@@ -99,28 +67,28 @@ static void curves_weight_paint_mode_enter(bContext *C)
   Scene *scene = CTX_data_scene(C);
   wmMsgBus *mbus = CTX_wm_message_bus(C);
   Object *ob = CTX_data_active_object(C);
-  
+
   /* Ensure weight paint data exists */
   BKE_paint_ensure(scene->toolsettings, (Paint **)&scene->toolsettings->curves_weight_paint);
   CurvesWeightPaint *curves_weight_paint = scene->toolsettings->curves_weight_paint;
-  
+
   /* Set object mode */
   ob->mode = OB_MODE_WEIGHT_CURVES;
-  
+
   /* Set paint mode */
   Paint *paint = BKE_paint_get_active_from_paintmode(scene, PaintMode::WeightCurves);
-  
+
   /* Ensure brushes exist */
   BKE_paint_brushes_ensure(CTX_data_main(C), paint);
-  
+
   /* Start paint cursor */
-  ED_paint_cursor_start(&curves_weight_paint->paint, 
+  ED_paint_cursor_start(&curves_weight_paint->paint,
                         curves_weight_paint_poll);
   paint_init_pivot(ob, scene, paint);
-  
+
   /* Ensure deform verts exist for curves */
   bke::curves::ensure_deform_verts(ob);
-  
+
   /* Ensure at least one vertex group exists. */
   const ListBaseT<bDeformGroup> *defbase = BKE_object_defgroup_list(ob);
   if (BLI_listbase_is_empty(defbase)) {
@@ -132,8 +100,7 @@ static void curves_weight_paint_mode_enter(bContext *C)
       /* Initialize all points with weight 1.0 for the new vertex group */
       const int total_points = bke::curves::get_curves_vertex_count(ob);
       for (int i = 0; i < total_points; i++) {
-        /* Use WEIGHT_REPLACE mode (value = 1) */
-        bke::curves::set_vertex_group_weight(ob, i, defgroup_index, 1.0f, 1);
+        bke::curves::set_vertex_group_weight(ob, i, defgroup_index, 1.0f, WEIGHT_REPLACE);
       }
 
       DEG_relations_tag_update(CTX_data_main(C));
@@ -146,7 +113,7 @@ static void curves_weight_paint_mode_enter(bContext *C)
       BKE_object_defgroup_active_index_set(ob, 1);
     }
   }
-  
+
   /* Update dependency graph and notify */
   DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
   WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
@@ -158,10 +125,10 @@ static void curves_weight_paint_mode_exit(bContext *C)
 {
   Object *ob = CTX_data_active_object(C);
   wmMsgBus *mbus = CTX_wm_message_bus(C);
-  
+
   /* Set object mode back to object */
   ob->mode = OB_MODE_OBJECT;
-  
+
   /* Update dependency graph and notify */
   DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
   WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
@@ -178,29 +145,29 @@ static wmOperatorStatus curves_weight_paint_toggle_exec(bContext *C, wmOperator 
 {
   Object *ob = CTX_data_active_object(C);
   wmMsgBus *mbus = CTX_wm_message_bus(C);
-  
+
   const bool is_mode_set = ob->mode == OB_MODE_WEIGHT_CURVES;
-  
+
   if (!is_mode_set) {
     if (!blender::ed::object::mode_compat_set(C, ob, OB_MODE_WEIGHT_CURVES, op->reports)) {
       return OPERATOR_CANCELLED;
     }
   }
-  
+
   if (is_mode_set) {
     curves_weight_paint_mode_exit(C);
   }
   else {
     curves_weight_paint_mode_enter(C);
   }
-  
+
   WM_toolsystem_update_from_context_view3d(C);
-  
+
   /* Update dependency graph and notify */
   DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
   WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
   WM_event_add_notifier(C, NC_SCENE | ND_MODE, nullptr);
-  
+
   return OPERATOR_FINISHED;
 }
 
@@ -225,7 +192,7 @@ void CURVES_OT_weight_paint_toggle(wmOperatorType *ot)
 static wmOperatorStatus curves_vertex_group_add_exec(bContext *C, wmOperator *op)
 {
   Object *ob = CTX_data_active_object(C);
-  
+
   if (!ob || ob->type != OB_CURVES) {
     return OPERATOR_CANCELLED;
   }
@@ -252,8 +219,7 @@ static wmOperatorStatus curves_vertex_group_add_exec(bContext *C, wmOperator *op
   /* Initialize all points with weight 1.0 for the new vertex group */
   const int total_points = bke::curves::get_curves_vertex_count(ob);
   for (int i = 0; i < total_points; i++) {
-    /* Use WEIGHT_REPLACE mode (value = 1) */
-    bke::curves::set_vertex_group_weight(ob, i, defgroup_index, 1.0f, 1);
+    bke::curves::set_vertex_group_weight(ob, i, defgroup_index, 1.0f, WEIGHT_REPLACE);
   }
 
   /* Update dependency graph. Vertex groups are stored on the object, so notify object geometry
@@ -289,7 +255,7 @@ void CURVES_OT_vertex_group_add(wmOperatorType *ot)
 static wmOperatorStatus curves_vertex_group_remove_exec(bContext *C, wmOperator *op)
 {
   Object *ob = CTX_data_active_object(C);
-  
+
   if (!ob || ob->type != OB_CURVES) {
     return OPERATOR_CANCELLED;
   }
@@ -306,12 +272,12 @@ static wmOperatorStatus curves_vertex_group_remove_exec(bContext *C, wmOperator 
   if (curves == nullptr) {
     return OPERATOR_CANCELLED;
   }
-  
+
   /* Remove weights from all points for this group */
   if (bke::curves::has_deform_verts(ob)) {
     const int defgroup_index = BKE_object_defgroup_active_index_get(ob) - 1;
     const int total_points = bke::curves::get_curves_vertex_count(ob);
-    
+
     for (int i = 0; i < total_points; i++) {
       bke::curves::remove_vertex_from_group(ob, i, defgroup_index);
     }
@@ -351,8 +317,8 @@ void CURVES_OT_vertex_group_remove(wmOperatorType *ot)
 
 static wmOperatorStatus curves_vertex_group_assign_exec(bContext *C, wmOperator *op)
 {
-  Object *ob = curves_weight_paint_original_object_get(C);
-  
+  Object *ob = curves_paint_original_object_get(C);
+
   if (!ob || ob->type != OB_CURVES) {
     return OPERATOR_CANCELLED;
   }
@@ -374,10 +340,10 @@ static wmOperatorStatus curves_vertex_group_assign_exec(bContext *C, wmOperator 
   if (curves == nullptr) {
     return OPERATOR_CANCELLED;
   }
-  
+
   /* Ensure we have deform verts */
   bke::curves::ensure_deform_verts(ob);
-  
+
   /* Get weight value */
   const float weight = RNA_float_get(op->ptr, "weight");
 
@@ -390,8 +356,7 @@ static wmOperatorStatus curves_vertex_group_assign_exec(bContext *C, wmOperator 
 
   /* Assign weight to selected points only (point domain and selected curves). */
   selected_points.foreach_index([&](const int i) {
-    /* Use WEIGHT_REPLACE mode (value = 1) */
-    bke::curves::set_vertex_group_weight(ob, i, defgroup_index, weight, 1);
+    bke::curves::set_vertex_group_weight(ob, i, defgroup_index, weight, WEIGHT_REPLACE);
   });
 
   /* Update dependency graph */
@@ -414,7 +379,7 @@ void CURVES_OT_vertex_group_assign(wmOperatorType *ot)
   ot->poll = curves_weight_paint_mode_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-  
+
   RNA_def_float(ot->srna, "weight", 1.0f, 0.0f, 1.0f, "Weight", "Weight to assign", 0.0f, 1.0f);
 }
 
@@ -426,8 +391,8 @@ void CURVES_OT_vertex_group_assign(wmOperatorType *ot)
 
 static wmOperatorStatus curves_vertex_group_remove_from_exec(bContext *C, wmOperator *op)
 {
-  Object *ob = curves_weight_paint_original_object_get(C);
-  
+  Object *ob = curves_paint_original_object_get(C);
+
   if (!ob || ob->type != OB_CURVES) {
     return OPERATOR_CANCELLED;
   }
@@ -449,11 +414,11 @@ static wmOperatorStatus curves_vertex_group_remove_from_exec(bContext *C, wmOper
   if (curves == nullptr) {
     return OPERATOR_CANCELLED;
   }
-  
+
   if (!bke::curves::has_deform_verts(ob)) {
     return OPERATOR_CANCELLED;
   }
-  
+
   LinearAllocator<> memory;
   const IndexMask selected_points = ed::curves::retrieve_selected_points(*curves, memory);
   if (selected_points.is_empty()) {
@@ -654,7 +619,7 @@ void CURVES_OT_weight_toggle_direction(wmOperatorType *ot)
 
 static wmOperatorStatus curves_weight_invert_exec(bContext *C, wmOperator *op)
 {
-  Object *ob = curves_weight_paint_original_object_get(C);
+  Object *ob = curves_paint_original_object_get(C);
   if (!ob || ob->type != OB_CURVES || ob->data == nullptr) {
     return OPERATOR_CANCELLED;
   }
@@ -715,7 +680,7 @@ void CURVES_OT_weight_invert(wmOperatorType *ot)
 
 static wmOperatorStatus curves_vertex_group_smooth_exec(bContext *C, wmOperator *op)
 {
-  Object *ob = curves_weight_paint_original_object_get(C);
+  Object *ob = curves_paint_original_object_get(C);
   if (!ob || ob->type != OB_CURVES || ob->data == nullptr) {
     return OPERATOR_CANCELLED;
   }
@@ -842,7 +807,7 @@ void CURVES_OT_vertex_group_smooth(wmOperatorType *ot)
 
 static wmOperatorStatus curves_vertex_group_normalize_exec(bContext *C, wmOperator *op)
 {
-  Object *ob = curves_weight_paint_original_object_get(C);
+  Object *ob = curves_paint_original_object_get(C);
   if (!ob || ob->type != OB_CURVES || ob->data == nullptr) {
     return OPERATOR_CANCELLED;
   }
@@ -918,7 +883,7 @@ void CURVES_OT_vertex_group_normalize(wmOperatorType *ot)
 
 static wmOperatorStatus curves_vertex_group_normalize_all_exec(bContext *C, wmOperator *op)
 {
-  Object *ob = curves_weight_paint_original_object_get(C);
+  Object *ob = curves_paint_original_object_get(C);
   if (!ob || ob->type != OB_CURVES || ob->data == nullptr) {
     return OPERATOR_CANCELLED;
   }
@@ -1008,7 +973,7 @@ void CURVES_OT_vertex_group_normalize_all(wmOperatorType *ot)
 /** \name Brush Stroke Operators
  * \{ */
 
-static std::unique_ptr<CurvesWeightPaintStrokeOperation> start_stroke_operation(
+static std::unique_ptr<CurvesPaintStrokeOperation> start_stroke_operation(
     const BrushStrokeMode brush_mode, const BrushSwitchMode brush_switch_mode, const bContext &C)
 {
   const Object *object = CTX_data_active_object(&C);
@@ -1036,71 +1001,9 @@ static std::unique_ptr<CurvesWeightPaintStrokeOperation> start_stroke_operation(
     case WPAINT_BRUSH_TYPE_SMEAR:
       return new_weight_paint_smear_operation();
   }
-  
+
   return nullptr;
 }
-
-struct CurvesWeightPaintBrushStroke final : public PaintStroke {
-  CurvesWeightPaintBrushStroke(bContext *C, wmOperator *op, const int event_type)
-      : PaintStroke(C, op, event_type)
-  {
-  }
-
-  bool get_location(float out[3], const float mouse[2], bool /*force_original*/) override
-  {
-    out[0] = mouse[0];
-    out[1] = mouse[1];
-    out[2] = 0.0f;
-    return true;
-  }
-
-  bool test_start(wmOperator * /*op*/, const float /*mouse*/[2]) override
-  {
-    return true;
-  }
-
-  void update_step(wmOperator *op, PointerRNA *stroke_element) override
-  {
-    StrokeExtension stroke_extension;
-    RNA_float_get_array(stroke_element, "mouse", stroke_extension.mouse_position);
-    stroke_extension.pressure = RNA_float_get(stroke_element, "pressure");
-    stroke_extension.reports = op->reports;
-
-    if (!operation_) {
-      stroke_extension.is_first = true;
-      operation_ = start_stroke_operation(
-          BrushStrokeMode(RNA_enum_get(op->ptr, "mode")),
-          BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")),
-          *this->evil_C);
-      if (!operation_) {
-        return;
-      }
-      operation_->on_stroke_begin(*this->evil_C, stroke_extension);
-    }
-    else {
-      stroke_extension.is_first = false;
-    }
-
-    operation_->on_stroke_extended(*this->evil_C, stroke_extension);
-  }
-
-  void redraw(bool /*final*/) override {}
-
-  bool test_cancel() override
-  {
-    return false;
-  }
-
-  void done(bool /*is_cancel*/, bool /*stroke_started*/) override
-  {
-    if (operation_) {
-      operation_->on_stroke_done(*this->evil_C);
-    }
-  }
-
- private:
-  std::unique_ptr<CurvesWeightPaintStrokeOperation> operation_;
-};
 
 static bool curves_weight_paint_brush_stroke_poll(bContext *C)
 {
@@ -1117,7 +1020,7 @@ static wmOperatorStatus curves_weight_paint_brush_stroke_invoke(bContext *C,
                                                                  wmOperator *op,
                                                                  const wmEvent *event)
 {
-  const Object *object = curves_weight_paint_original_object_get(C);
+  const Object *object = curves_paint_original_object_get(C);
   if (!object || object->type != OB_CURVES) {
     return OPERATOR_CANCELLED;
   }
@@ -1143,46 +1046,7 @@ static wmOperatorStatus curves_weight_paint_brush_stroke_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  CurvesWeightPaintBrushStroke *stroke = MEM_new<CurvesWeightPaintBrushStroke>(
-      __func__, C, op, event->type);
-  op->customdata = stroke;
-
-  const wmOperatorStatus retval = op->type->modal(C, op, event);
-  OPERATOR_RETVAL_CHECK(retval);
-
-  if (retval == OPERATOR_FINISHED) {
-    MEM_delete(stroke);
-    op->customdata = nullptr;
-    return OPERATOR_FINISHED;
-  }
-
-  WM_event_add_modal_handler(C, op);
-  return OPERATOR_RUNNING_MODAL;
-}
-
-static wmOperatorStatus curves_weight_paint_brush_stroke_modal(bContext *C,
-                                                               wmOperator *op,
-                                                               const wmEvent *event)
-{
-  CurvesWeightPaintBrushStroke *stroke = static_cast<CurvesWeightPaintBrushStroke *>(
-      op->customdata);
-  const wmOperatorStatus retval = stroke->modal(C, op, event);
-  if (ELEM(retval, OPERATOR_FINISHED, OPERATOR_CANCELLED)) {
-    MEM_delete(stroke);
-    op->customdata = nullptr;
-  }
-  return retval;
-}
-
-static void curves_weight_paint_brush_stroke_cancel(bContext *C, wmOperator *op)
-{
-  if (op->customdata != nullptr) {
-    CurvesWeightPaintBrushStroke *stroke = static_cast<CurvesWeightPaintBrushStroke *>(
-        op->customdata);
-    stroke->cancel(C);
-    MEM_delete(stroke);
-    op->customdata = nullptr;
-  }
+  return curves_paint_brush_stroke_invoke(C, op, event, start_stroke_operation);
 }
 
 static void CURVES_OT_weight_paint_brush_stroke(wmOperatorType *ot)
@@ -1193,8 +1057,8 @@ static void CURVES_OT_weight_paint_brush_stroke(wmOperatorType *ot)
 
   ot->poll = curves_weight_paint_brush_stroke_poll;
   ot->invoke = curves_weight_paint_brush_stroke_invoke;
-  ot->modal = curves_weight_paint_brush_stroke_modal;
-  ot->cancel = curves_weight_paint_brush_stroke_cancel;
+  ot->modal = curves_paint_brush_stroke_modal;
+  ot->cancel = curves_paint_brush_stroke_cancel;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 

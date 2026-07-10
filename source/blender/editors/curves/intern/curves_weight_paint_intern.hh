@@ -7,7 +7,6 @@
 #include <memory>
 
 #include "BLI_vector.hh"
-#include "BLI_set.hh"
 #include "BKE_attribute.hh"
 #include "BKE_curves.hh"
 #include "BKE_deform.hh"
@@ -29,12 +28,6 @@ namespace blender::ed::sculpt_paint {
 
 using bke::CurvesGeometry;
 
-/* For backward compatibility, alias BrushPoint to CurvesBrushPoint. */
-using BrushPoint = CurvesBrushPoint;
-
-/* For backward compatibility, alias the stroke operation interface. */
-using CurvesWeightPaintStrokeOperation = CurvesPaintStrokeOperation;
-
 /**
  * Base class for curves weight paint operations with common weight-specific utilities.
  * Inherits common paint functionality from CurvesPaintOperationBase.
@@ -49,9 +42,6 @@ class CurvesWeightPaintOperationBase : public CurvesPaintOperationBase {
   int active_vertex_group = -1;
   bDeformGroup *object_defgroup = nullptr;
 
-  /* ----- Locked vertex groups (object level) ----- */
-  Set<std::string> object_locked_defgroups;
-
  public:
   void on_stroke_begin(const bContext &C, const StrokeExtension &start_extension) override;
   void on_stroke_done(const bContext &C) override;
@@ -63,11 +53,6 @@ class CurvesWeightPaintOperationBase : public CurvesPaintOperationBase {
    * Creates a default group if none exists.
    */
   void ensure_active_vertex_group_in_object();
-
-  /**
-   * Get list of locked vertex groups from the object.
-   */
-  void get_locked_vertex_groups();
 
   /**
    * Apply weight to a specific point with given influence.
@@ -116,31 +101,17 @@ class CurvesWeightPaintOperationBase : public CurvesPaintOperationBase {
  */
 
 /** Create a Draw weight paint operation. */
-std::unique_ptr<CurvesWeightPaintStrokeOperation> new_weight_paint_draw_operation(
+std::unique_ptr<CurvesPaintStrokeOperation> new_weight_paint_draw_operation(
     const BrushStrokeMode &stroke_mode);
 
 /** Create a Blur weight paint operation. */
-std::unique_ptr<CurvesWeightPaintStrokeOperation> new_weight_paint_blur_operation();
+std::unique_ptr<CurvesPaintStrokeOperation> new_weight_paint_blur_operation();
 
 /** Create an Average weight paint operation. */
-std::unique_ptr<CurvesWeightPaintStrokeOperation> new_weight_paint_average_operation();
+std::unique_ptr<CurvesPaintStrokeOperation> new_weight_paint_average_operation();
 
 /** Create a Smear weight paint operation. */
-std::unique_ptr<CurvesWeightPaintStrokeOperation> new_weight_paint_smear_operation();
-
-/**
- * Common context for curves weight paint operations.
- * Provides quick access to frequently needed data from bContext.
- */
-class CurvesWeightPaintCommonContext {
- public:
-  const Depsgraph *depsgraph = nullptr;
-  Scene *scene = nullptr;
-  Object *object = nullptr;
-  CurvesGeometry *curves = nullptr;
-
-  CurvesWeightPaintCommonContext(const bContext &C);
-};
+std::unique_ptr<CurvesPaintStrokeOperation> new_weight_paint_smear_operation();
 
 /**
  * Poll functions for weight paint mode operators.
@@ -155,14 +126,10 @@ bool curves_weight_paint_poll_view3d(bContext *C);
 /** Check if object is in curves weight paint mode. */
 bool curves_weight_paint_mode_poll(bContext *C);
 
+}  // namespace blender::ed::sculpt_paint
+
 /**
  * Operator registration function.
  * Called from ED_operatortypes_curves() to register all weight paint operators.
  */
 void ED_operatortypes_curves_weight_paint();
-
-}  // namespace blender::ed::sculpt_paint
-
-extern "C" {
-void ED_operatortypes_curves_weight_paint();
-}

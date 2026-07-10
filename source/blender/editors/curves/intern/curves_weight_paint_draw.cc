@@ -78,7 +78,7 @@ class BlurWeightPaintOperation : public CurvesWeightPaintOperationBase {
     Array<float> new_weights(points_in_brush.size());
 
     for (const int i : points_in_brush.index_range()) {
-      const BrushPoint &point = points_in_brush[i];
+      const CurvesBrushPoint &point = points_in_brush[i];
       const int point_index = point.point_index;
       const float old_weight = get_vertex_weight(point_index);
       new_weights[i] = old_weight;
@@ -136,7 +136,7 @@ class AverageWeightPaintOperation : public CurvesWeightPaintOperationBase {
     /* Compute the influence-weighted average of all points under the brush. */
     float weight_sum = 0.0f;
     float influence_sum = 0.0f;
-    for (const BrushPoint &point : points_in_brush) {
+    for (const CurvesBrushPoint &point : points_in_brush) {
       const float weight = get_vertex_weight(point.point_index);
       if (weight < 0.0f) {
         continue;
@@ -152,7 +152,7 @@ class AverageWeightPaintOperation : public CurvesWeightPaintOperationBase {
 
     /* Blend each point towards the average. The brush strength is already folded into the
      * point influence during sampling. */
-    for (const BrushPoint &point : points_in_brush) {
+    for (const CurvesBrushPoint &point : points_in_brush) {
       const float old_weight = get_vertex_weight(point.point_index);
       if (old_weight < 0.0f) {
         continue;
@@ -225,7 +225,7 @@ class SmearWeightPaintOperation : public CurvesWeightPaintOperationBase {
     }
 
     /* Cache the resulting weights for the next stroke sample. */
-    for (const BrushPoint &point : points_in_brush) {
+    for (const CurvesBrushPoint &point : points_in_brush) {
       previous_weights_[point.point_index] = math::max(0.0f, get_vertex_weight(point.point_index));
     }
     has_previous_sample_ = true;
@@ -242,7 +242,7 @@ class SmearWeightPaintOperation : public CurvesWeightPaintOperationBase {
     }
     const float smear_factor = math::min(1.0f, brush_movement / brush_radius);
 
-    for (const BrushPoint &point : points_in_brush) {
+    for (const CurvesBrushPoint &point : points_in_brush) {
       const float old_weight = get_vertex_weight(point.point_index);
       if (old_weight < 0.0f) {
         continue;
@@ -266,23 +266,23 @@ class SmearWeightPaintOperation : public CurvesWeightPaintOperationBase {
 /** \name Factory Functions
  * \{ */
 
-std::unique_ptr<CurvesWeightPaintStrokeOperation> new_weight_paint_draw_operation(
+std::unique_ptr<CurvesPaintStrokeOperation> new_weight_paint_draw_operation(
     const BrushStrokeMode &stroke_mode)
 {
   return std::make_unique<DrawWeightPaintOperation>(stroke_mode);
 }
 
-std::unique_ptr<CurvesWeightPaintStrokeOperation> new_weight_paint_blur_operation()
+std::unique_ptr<CurvesPaintStrokeOperation> new_weight_paint_blur_operation()
 {
   return std::make_unique<BlurWeightPaintOperation>();
 }
 
-std::unique_ptr<CurvesWeightPaintStrokeOperation> new_weight_paint_average_operation()
+std::unique_ptr<CurvesPaintStrokeOperation> new_weight_paint_average_operation()
 {
   return std::make_unique<AverageWeightPaintOperation>();
 }
 
-std::unique_ptr<CurvesWeightPaintStrokeOperation> new_weight_paint_smear_operation()
+std::unique_ptr<CurvesPaintStrokeOperation> new_weight_paint_smear_operation()
 {
   return std::make_unique<SmearWeightPaintOperation>();
 }

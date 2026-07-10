@@ -93,42 +93,11 @@ static void curves_weight_batch_populate(Object *object,
   }
   /* If no vertex groups or no active group, weights remain 0.0f (blue color). */
 
-  /* Calculate tangents for each point */
+  /* Calculate tangents for each point. */
   Array<float3> tangents(points_num);
-  const OffsetIndices<int> points_by_curve = curves_geometry.points_by_curve();
+  curves_paint_compute_tangents(curves_geometry, tangents);
 
-  for (const int curve_i : curves_geometry.curves_range()) {
-    const IndexRange points = points_by_curve[curve_i];
-
-    for (const int point_i : points) {
-      float3 tangent = float3(0.0f);
-
-      if (points.size() > 1) {
-        if (point_i == points.first()) {
-          /* First point: use direction to next point */
-          tangent = math::normalize(positions[point_i + 1] - positions[point_i]);
-        }
-        else if (point_i == points.last()) {
-          /* Last point: use direction from previous point */
-          tangent = math::normalize(positions[point_i] - positions[point_i - 1]);
-        }
-        else {
-          /* Middle point: use average of directions */
-          const float3 prev_dir = math::normalize(positions[point_i] - positions[point_i - 1]);
-          const float3 next_dir = math::normalize(positions[point_i + 1] - positions[point_i]);
-          tangent = math::normalize(prev_dir + next_dir);
-        }
-      }
-      else {
-        /* Single point curve: default tangent */
-        tangent = float3(1.0f, 0.0f, 0.0f);
-      }
-
-      tangents[point_i] = tangent;
-    }
-  }
-
-  /* Fill vertex buffer data */
+  /* Fill vertex buffer data. */
   struct WeightPointVert {
     float weight;
     float3 pos;
@@ -143,91 +112,44 @@ static void curves_weight_batch_populate(Object *object,
     verts[i].tangent = tangents[i];
   }
 
-  /* Create index buffers for points */
-  GPUIndexBufBuilder points_builder;
-  GPU_indexbuf_init(&points_builder, GPU_PRIM_POINTS, points_num, points_num);
+  curves_paint_build_point_and_line_batches(curves_geometry,
+                                            cache.weight_points_pos,
+                                            &cache.weight_points_indices,
+                                            &cache.weight_lines_indices,
+                                            &cache.weight_points,
+                                            &cache.weight_lines);
+}
 
-  for (int i = 0; i < points_num; i++) {
-    GPU_indexbuf_add_point_vert(&points_builder, i);
+static gpu::Batch *curves_weight_batch_get(Object *object, const bool lines)
+{
+  if (!object || object->type != OB_CURVES) {
+    return nullptr;
   }
 
-  cache.weight_points_indices = GPU_indexbuf_build(&points_builder);
+  const Curves *curves = id_cast<const Curves *>(object->data);
+  CurvesBatchCache &cache = get_batch_cache(*const_cast<Curves *>(curves));
 
-  /* Create index buffers for lines */
-  int total_line_segments = 0;
-  for (const int curve_i : curves_geometry.curves_range()) {
-    const IndexRange points = points_by_curve[curve_i];
-    if (points.size() > 1) {
-      total_line_segments += points.size() - 1;
-    }
+  /* Populate only when neither batch exists yet. A single populate builds both the points and
+   * lines batches, so guarding on both avoids re-running it (and leaking the previously created
+   * GPU buffers) when the requested batch stays null for single-point curves. */
+  gpu::Batch **batch = lines ? &cache.weight_lines : &cache.weight_points;
+  gpu::Batch **other_batch = lines ? &cache.weight_points : &cache.weight_lines;
+
+  if (*batch == nullptr && *other_batch == nullptr) {
+    curves_weight_batch_populate(object, curves, cache);
   }
 
-  if (total_line_segments > 0) {
-    GPUIndexBufBuilder lines_builder;
-    GPU_indexbuf_init(&lines_builder, GPU_PRIM_LINES, total_line_segments * 2, points_num);
-
-    for (const int curve_i : curves_geometry.curves_range()) {
-      const IndexRange points = points_by_curve[curve_i];
-
-      for (const int i : IndexRange(points.size() - 1)) {
-        GPU_indexbuf_add_line_verts(&lines_builder, points[i], points[i + 1]);
-      }
-    }
-
-    cache.weight_lines_indices = GPU_indexbuf_build(&lines_builder);
-  }
-
-  /* Create batches */
-  if (cache.weight_points_indices) {
-    cache.weight_points = GPU_batch_create(
-        GPU_PRIM_POINTS, cache.weight_points_pos, cache.weight_points_indices);
-  }
-
-  if (cache.weight_lines_indices) {
-    cache.weight_lines = GPU_batch_create(
-        GPU_PRIM_LINES, cache.weight_points_pos, cache.weight_lines_indices);
-  }
-
-  /* Allow creation of buffer texture */
-  GPU_vertbuf_use(cache.weight_points_pos);
+  return *batch;
 }
 
 gpu::Batch *DRW_cache_curves_weight_points_get(Object *object)
 {
-  if (!object || object->type != OB_CURVES) {
-    return nullptr;
-  }
-
-  const Curves *curves = id_cast<const Curves *>(object->data);
-
-  /* Get the batch cache - this will ensure it's valid */
-  CurvesBatchCache &cache = get_batch_cache(*const_cast<Curves *>(curves));
-
-  /* Check if weight paint batches need to be created */
-  if (cache.weight_points == nullptr) {
-    curves_weight_batch_populate(object, curves, cache);
-  }
-
-  return cache.weight_points;
+  return curves_weight_batch_get(object, false);
 }
 
 gpu::Batch *DRW_cache_curves_weight_lines_get(Object *object)
 {
-  if (!object || object->type != OB_CURVES) {
-    return nullptr;
-  }
-
-  const Curves *curves = id_cast<const Curves *>(object->data);
-
-  /* Get the batch cache - this will ensure it's valid */
-  CurvesBatchCache &cache = get_batch_cache(*const_cast<Curves *>(curves));
-
-  /* Check if weight paint batches need to be created */
-  if (cache.weight_lines == nullptr) {
-    curves_weight_batch_populate(object, curves, cache);
-  }
-
-  return cache.weight_lines;
+  return curves_weight_batch_get(object, true);
 }
 
 }  // namespace blender::draw

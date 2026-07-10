@@ -2019,7 +2019,7 @@ class _defs_vertex_paint:
         return dict(
             idname="builtin_brush.draw",
             label="Draw",
-            icon="brush.paint_vertex.draw",
+            icon="brush.draw",
             options={'USE_BRUSHES'},
             brush_type='DRAW',
         )

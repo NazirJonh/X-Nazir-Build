@@ -1046,7 +1046,7 @@ class VIEW3D_HT_header(Header):
                     tool_settings.particle_edit, "select_mode", text="", expand=True
                 )
             elif (
-                object_mode in {"EDIT", "SCULPT_CURVES", "WEIGHT_CURVES"}
+                object_mode in {"EDIT", "SCULPT_CURVES", "WEIGHT_CURVES", "VERTEX_CURVES"}
                 and obj.type == "CURVES"
             ):
                 curves = obj.data
@@ -1398,6 +1398,7 @@ class VIEW3D_MT_editor_menus(Menu):
             "SCULPT",
             "SCULPT_CURVES",
             "WEIGHT_CURVES",
+            "VERTEX_CURVES",
             "PAINT_GREASE_PENCIL",
             "SCULPT_GREASE_PENCIL",
             "WEIGHT_GREASE_PENCIL",
@@ -1472,6 +1473,7 @@ class VIEW3D_MT_editor_menus(Menu):
                 "PAINT_TEXTURE",
                 "SCULPT_CURVES",
                 "WEIGHT_CURVES",
+                "VERTEX_CURVES",
                 "SCULPT_GREASE_PENCIL",
                 "VERTEX_GREASE_PENCIL",
             }:
@@ -1486,6 +1488,9 @@ class VIEW3D_MT_editor_menus(Menu):
                 layout.template_node_operator_asset_root_items()
             elif mode_string == "WEIGHT_CURVES":
                 layout.menu("VIEW3D_MT_weight_curves")
+                layout.template_node_operator_asset_root_items()
+            elif mode_string == "VERTEX_CURVES":
+                layout.menu("VIEW3D_MT_vertex_curves")
                 layout.template_node_operator_asset_root_items()
             elif mode_string == "VERTEX_GREASE_PENCIL":
                 layout.menu("VIEW3D_MT_select_edit_grease_pencil")
@@ -4544,6 +4549,16 @@ class VIEW3D_MT_weight_curves(Menu):
         layout.separator()
 
         layout.menu("VIEW3D_MT_curves_vertex_group", text="Vertex Groups")
+
+
+class VIEW3D_MT_vertex_curves(Menu):
+    bl_label = "Paint"
+
+    def draw(self, _context):
+        layout = self.layout
+
+        layout.operator("curves.vertex_color_set", text="Set Vertex Colors")
+        layout.operator("curves.vertex_paint_sample", text="Sample Vertex Color")
 
 
 class VIEW3D_MT_mask(Menu):
@@ -10653,6 +10668,7 @@ classes = (
     VIEW3D_MT_sculpt_face_sets_edit_pie,
     VIEW3D_MT_sculpt_curves,
     VIEW3D_MT_weight_curves,
+    VIEW3D_MT_vertex_curves,
     VIEW3D_PT_active_tool,
     VIEW3D_PT_active_tool_duplicate,
     VIEW3D_PT_view3d_properties,

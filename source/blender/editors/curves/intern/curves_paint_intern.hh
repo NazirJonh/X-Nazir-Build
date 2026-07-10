@@ -16,11 +16,15 @@
 #include "DNA_scene_types.h"
 #include "DNA_object_types.h"
 
+#include "WM_types.hh"
+
 #include "../../sculpt_paint/curves/sculpt_intern.hh"
 
 struct bContext;
 struct Depsgraph;
 struct Brush;
+struct wmOperator;
+struct wmEvent;
 
 namespace blender::ed::sculpt_paint {
 
@@ -189,5 +193,36 @@ class CurvesPaintOperationBase : public CurvesPaintStrokeOperation {
    */
   virtual void finalize_paint_mode(const bContext & /*C*/) {}
 };
+
+/* -------------------------------------------------------------------- */
+/** \name Shared Paint Operator Helpers
+ * \{ */
+
+/**
+ * Resolve the original (non-evaluated) active object from context.
+ * Returns nullptr when there is no active object.
+ */
+Object *curves_paint_original_object_get(const bContext *C);
+
+/**
+ * Creates the paint operation for the active brush of a specific curves paint mode.
+ * Returns nullptr when no operation could be created (e.g. no brush).
+ */
+using CurvesPaintStartStrokeFn = std::unique_ptr<CurvesPaintStrokeOperation> (*)(
+    BrushStrokeMode brush_mode, BrushSwitchMode brush_switch_mode, const bContext &C);
+
+/**
+ * Shared PaintStroke operator callbacks for the curves paint modes. The stroke object is created
+ * lazily through \a start_fn, which is the only part that differs between paint modes; modal and
+ * cancel are mode independent.
+ */
+wmOperatorStatus curves_paint_brush_stroke_invoke(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent *event,
+                                                  CurvesPaintStartStrokeFn start_fn);
+wmOperatorStatus curves_paint_brush_stroke_modal(bContext *C, wmOperator *op, const wmEvent *event);
+void curves_paint_brush_stroke_cancel(bContext *C, wmOperator *op);
+
+/** \} */
 
 }  // namespace blender::ed::sculpt_paint

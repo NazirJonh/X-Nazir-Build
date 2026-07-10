@@ -32,8 +32,6 @@
 
 namespace blender::ed::sculpt_paint {
 
-static constexpr const char *vertex_color_attr_name = "vertex_color";
-
 /* -------------------------------------------------------------------- */
 /** \name Poll Functions
  * \{ */
@@ -63,14 +61,14 @@ void curves_vertex_paint_ensure_color_attribute(Object *ob)
   bke::MutableAttributeAccessor attributes = curves.attributes_for_write();
 
   /* Keep the existing colors when the attribute is already present. */
-  if (attributes.contains(vertex_color_attr_name)) {
+  if (attributes.contains(curves_vertex_color_attr_name)) {
     return;
   }
 
   /* Create the attribute initialized to opaque white, matching mesh vertex paint, so that the
    * curves are visible in vertex paint mode before anything is painted. */
   bke::SpanAttributeWriter<ColorGeometry4f> writer =
-      attributes.lookup_or_add_for_write_only_span<ColorGeometry4f>(vertex_color_attr_name,
+      attributes.lookup_or_add_for_write_only_span<ColorGeometry4f>(curves_vertex_color_attr_name,
                                                                     bke::AttrDomain::Point);
   if (writer) {
     writer.span.fill(ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f));
@@ -96,7 +94,7 @@ ColorGeometry4f CurvesVertexPaintOperationBase::get_point_color(const int point_
   }
   const VArray<ColorGeometry4f> colors =
       *curves->attributes().lookup_or_default<ColorGeometry4f>(
-          ATTR_VERTEX_COLOR, bke::AttrDomain::Point, ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f));
+          curves_vertex_color_attr_name, bke::AttrDomain::Point, ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f));
   return colors[point_index];
 }
 
@@ -181,7 +179,7 @@ void CurvesVertexPaintOperationBase::on_stroke_extended(
   /* Open the attribute writer for this stroke step. */
   bke::MutableAttributeAccessor attributes = curves->attributes_for_write();
   vertex_colors_writer_ = attributes.lookup_or_add_for_write_span<ColorGeometry4f>(
-      ATTR_VERTEX_COLOR, bke::AttrDomain::Point);
+      curves_vertex_color_attr_name, bke::AttrDomain::Point);
 
   /* Run the shared brush logic (sample points, apply_brush, tag depsgraph, send notifier). */
   CurvesPaintOperationBase::on_stroke_extended(C, stroke_extension);

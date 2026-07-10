@@ -764,6 +764,22 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
         do_undo_restore,
         scene_foreach_paint(data, paint, do_undo_restore, reader, paint_old));
   }
+  if (toolsett_old->curves_vertex_paint) {
+    paint = toolsett->curves_vertex_paint ? &toolsett->curves_vertex_paint->paint : nullptr;
+    paint_old = &toolsett_old->curves_vertex_paint->paint;
+    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_FUNCTION_CALL(
+        data,
+        do_undo_restore,
+        scene_foreach_paint(data, paint, do_undo_restore, reader, paint_old));
+  }
+  if (toolsett_old->curves_weight_paint) {
+    paint = toolsett->curves_weight_paint ? &toolsett->curves_weight_paint->paint : nullptr;
+    paint_old = &toolsett_old->curves_weight_paint->paint;
+    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_FUNCTION_CALL(
+        data,
+        do_undo_restore,
+        scene_foreach_paint(data, paint, do_undo_restore, reader, paint_old));
+  }
 
   BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(
       data,
@@ -1212,6 +1228,14 @@ static void scene_blend_write(BlendWriter *writer, ID *id, const void *id_addres
     writer->write_struct(ts->curves_sculpt);
     BKE_paint_blend_write(writer, &ts->curves_sculpt->paint);
   }
+  if (ts->curves_vertex_paint) {
+    writer->write_struct(ts->curves_vertex_paint);
+    BKE_paint_blend_write(writer, &ts->curves_vertex_paint->paint);
+  }
+  if (ts->curves_weight_paint) {
+    writer->write_struct(ts->curves_weight_paint);
+    BKE_paint_blend_write(writer, &ts->curves_weight_paint->paint);
+  }
   /* write grease-pencil custom ipo curve to file */
   if (ts->gp_interpolate.custom_ipo) {
     BKE_curvemapping_blend_write(writer, ts->gp_interpolate.custom_ipo);
@@ -1385,6 +1409,10 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
         reader, sce, reinterpret_cast<Paint **>(&sce->toolsettings->gp_weightpaint));
     direct_link_paint_helper(
         reader, sce, reinterpret_cast<Paint **>(&sce->toolsettings->curves_sculpt));
+    direct_link_paint_helper(
+        reader, sce, reinterpret_cast<Paint **>(&sce->toolsettings->curves_vertex_paint));
+    direct_link_paint_helper(
+        reader, sce, reinterpret_cast<Paint **>(&sce->toolsettings->curves_weight_paint));
 
     BKE_paint_blend_read_data(reader, sce, &sce->toolsettings->imapaint.paint);
 
@@ -1755,6 +1783,16 @@ ToolSettings *BKE_toolsettings_copy(ToolSettings *toolsettings, const int flag)
     ts->curves_sculpt = MEM_dupalloc(toolsettings->curves_sculpt);
     BKE_paint_copy(&toolsettings->curves_sculpt->paint, &ts->curves_sculpt->paint, flag);
   }
+  if (toolsettings->curves_vertex_paint) {
+    ts->curves_vertex_paint = MEM_dupalloc(toolsettings->curves_vertex_paint);
+    BKE_paint_copy(
+        &toolsettings->curves_vertex_paint->paint, &ts->curves_vertex_paint->paint, flag);
+  }
+  if (toolsettings->curves_weight_paint) {
+    ts->curves_weight_paint = MEM_dupalloc(toolsettings->curves_weight_paint);
+    BKE_paint_copy(
+        &toolsettings->curves_weight_paint->paint, &ts->curves_weight_paint->paint, flag);
+  }
 
   /* Color jitter curves in unified paint settings. */
   ts->unified_paint_settings.curve_rand_hue = BKE_curvemapping_copy(
@@ -1828,6 +1866,14 @@ void BKE_toolsettings_free(ToolSettings *toolsettings)
   if (toolsettings->curves_sculpt) {
     BKE_paint_free(&toolsettings->curves_sculpt->paint);
     MEM_delete(toolsettings->curves_sculpt);
+  }
+  if (toolsettings->curves_vertex_paint) {
+    BKE_paint_free(&toolsettings->curves_vertex_paint->paint);
+    MEM_delete(toolsettings->curves_vertex_paint);
+  }
+  if (toolsettings->curves_weight_paint) {
+    BKE_paint_free(&toolsettings->curves_weight_paint->paint);
+    MEM_delete(toolsettings->curves_weight_paint);
   }
   BKE_paint_free(&toolsettings->imapaint.paint);
 

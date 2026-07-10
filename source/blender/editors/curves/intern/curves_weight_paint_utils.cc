@@ -71,25 +71,6 @@ bool curves_weight_paint_mode_poll(bContext *C)
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name CurvesWeightPaintCommonContext
- * \{ */
-
-CurvesWeightPaintCommonContext::CurvesWeightPaintCommonContext(const bContext &C)
-{
-  scene = CTX_data_scene(&C);
-  object = CTX_data_active_object(&C);
-
-  if (object && object->type == OB_CURVES) {
-    Curves *curves_id = id_cast<Curves *>(object->data);
-    curves = &curves_id->geometry.wrap();
-  }
-
-  depsgraph = CTX_data_depsgraph_pointer(&C);
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
 /** \name CurvesWeightPaintOperationBase - Weight Paint Specific
  * \{ */
 
@@ -156,18 +137,6 @@ void CurvesWeightPaintOperationBase::ensure_active_vertex_group_in_object()
   active_vertex_group = object_defgroup_nr;
 }
 
-void CurvesWeightPaintOperationBase::get_locked_vertex_groups()
-{
-  object_locked_defgroups.clear();
-
-  const ListBaseT<bDeformGroup> &defgroups = *BKE_object_defgroup_list(object);
-  for (const bDeformGroup &dg : defgroups) {
-    if ((dg.flag & DG_LOCK_WEIGHT) != 0) {
-      object_locked_defgroups.add(std::string(dg.name));
-    }
-  }
-}
-
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -181,12 +150,14 @@ float CurvesWeightPaintOperationBase::get_vertex_weight(int point_index)
 
 void CurvesWeightPaintOperationBase::set_vertex_weight(int point_index, float weight)
 {
-  /* Use WEIGHT_REPLACE mode (value = 1) */
-  bke::curves::set_vertex_group_weight(object, point_index, active_vertex_group, weight, 1);
+  bke::curves::set_vertex_group_weight(
+      object, point_index, active_vertex_group, weight, WEIGHT_REPLACE);
 
   if (auto_normalize) {
+    /* Lock the active group so the weight just painted is preserved while the remaining
+     * (unlocked) groups are scaled to keep the per-point sum normalized. */
     bke::curves::normalize_point_weights(
-        object, point_index, false /* lock_active */, auto_normalize);
+        object, point_index, true /* lock_active */, auto_normalize);
   }
 }
 
@@ -242,7 +213,6 @@ void CurvesWeightPaintOperationBase::on_stroke_begin(const bContext &C,
 
   /* Ensure vertex group infrastructure is set up. */
   ensure_active_vertex_group_in_object();
-  get_locked_vertex_groups();
 
   /* Ensure deform verts exist in the curves geometry. */
   bke::curves::ensure_deform_verts(object);

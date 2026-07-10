@@ -61,34 +61,7 @@ static void curves_vertex_paint_batch_populate(const Curves *curves, CurvesBatch
       vertex_color_attr_name, bke::AttrDomain::Point, ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f));
 
   Array<float3> tangents(points_num);
-  const OffsetIndices<int> points_by_curve = curves_geometry.points_by_curve();
-
-  for (const int curve_i : curves_geometry.curves_range()) {
-    const IndexRange points = points_by_curve[curve_i];
-
-    for (const int point_i : points) {
-      float3 tangent = float3(0.0f);
-
-      if (points.size() > 1) {
-        if (point_i == points.first()) {
-          tangent = math::normalize(positions[point_i + 1] - positions[point_i]);
-        }
-        else if (point_i == points.last()) {
-          tangent = math::normalize(positions[point_i] - positions[point_i - 1]);
-        }
-        else {
-          const float3 prev_dir = math::normalize(positions[point_i] - positions[point_i - 1]);
-          const float3 next_dir = math::normalize(positions[point_i + 1] - positions[point_i]);
-          tangent = math::normalize(prev_dir + next_dir);
-        }
-      }
-      else {
-        tangent = float3(1.0f, 0.0f, 0.0f);
-      }
-
-      tangents[point_i] = tangent;
-    }
-  }
+  curves_paint_compute_tangents(curves_geometry, tangents);
 
   struct VertexPaintPointVert {
     ColorGeometry4f color;
@@ -96,7 +69,8 @@ static void curves_vertex_paint_batch_populate(const Curves *curves, CurvesBatch
     float3 tangent;
   };
 
-  MutableSpan<VertexPaintPointVert> verts = cache.vertex_paint_points_pos->data<VertexPaintPointVert>();
+  MutableSpan<VertexPaintPointVert> verts =
+      cache.vertex_paint_points_pos->data<VertexPaintPointVert>();
 
   for (const int i : positions.index_range()) {
     verts[i].pos = positions[i];
@@ -104,49 +78,12 @@ static void curves_vertex_paint_batch_populate(const Curves *curves, CurvesBatch
     verts[i].tangent = tangents[i];
   }
 
-  GPUIndexBufBuilder points_builder;
-  GPU_indexbuf_init(&points_builder, GPU_PRIM_POINTS, points_num, points_num);
-
-  for (int i = 0; i < points_num; i++) {
-    GPU_indexbuf_add_point_vert(&points_builder, i);
-  }
-
-  cache.vertex_paint_points_indices = GPU_indexbuf_build(&points_builder);
-
-  int total_line_segments = 0;
-  for (const int curve_i : curves_geometry.curves_range()) {
-    const IndexRange points = points_by_curve[curve_i];
-    if (points.size() > 1) {
-      total_line_segments += points.size() - 1;
-    }
-  }
-
-  if (total_line_segments > 0) {
-    GPUIndexBufBuilder lines_builder;
-    GPU_indexbuf_init(&lines_builder, GPU_PRIM_LINES, total_line_segments * 2, points_num);
-
-    for (const int curve_i : curves_geometry.curves_range()) {
-      const IndexRange points = points_by_curve[curve_i];
-
-      for (const int i : IndexRange(points.size() - 1)) {
-        GPU_indexbuf_add_line_verts(&lines_builder, points[i], points[i + 1]);
-      }
-    }
-
-    cache.vertex_paint_lines_indices = GPU_indexbuf_build(&lines_builder);
-  }
-
-  if (cache.vertex_paint_points_indices) {
-    cache.vertex_paint_points = GPU_batch_create(
-        GPU_PRIM_POINTS, cache.vertex_paint_points_pos, cache.vertex_paint_points_indices);
-  }
-
-  if (cache.vertex_paint_lines_indices) {
-    cache.vertex_paint_lines = GPU_batch_create(
-        GPU_PRIM_LINES, cache.vertex_paint_points_pos, cache.vertex_paint_lines_indices);
-  }
-
-  GPU_vertbuf_use(cache.vertex_paint_points_pos);
+  curves_paint_build_point_and_line_batches(curves_geometry,
+                                            cache.vertex_paint_points_pos,
+                                            &cache.vertex_paint_points_indices,
+                                            &cache.vertex_paint_lines_indices,
+                                            &cache.vertex_paint_points,
+                                            &cache.vertex_paint_lines);
 }
 
 static gpu::Batch *curves_vertex_paint_batch_get(Object *object, const bool lines)

@@ -22,6 +22,9 @@ namespace blender::ed::sculpt_paint {
 using ColorGeometry4f = blender::ColorGeometry4f;
 using ColorPaint4f = blender::ColorPaint4f;
 
+/** Name of the point-domain color attribute painted by curves vertex paint. */
+constexpr const char *curves_vertex_color_attr_name = "vertex_color";
+
 /**
  * Base class for curves vertex paint operations with color-specific utilities.
  * Inherits common paint functionality from CurvesPaintOperationBase.
@@ -29,13 +32,9 @@ using ColorPaint4f = blender::ColorPaint4f;
  */
 class CurvesVertexPaintOperationBase : public CurvesPaintOperationBase {
  protected:
-  static constexpr const char *ATTR_VERTEX_COLOR = "vertex_color";
-
   /* ----- Vertex paint specific settings ----- */
   ColorPaint4f brush_color{0.0f, 0.0f, 0.0f, 0.0f};
   IMB_BlendMode blend_mode{IMB_BLEND_MIX};
-  bool paint_stroke_points{true};
-  bool paint_fill{false};
   std::optional<bke::SpanAttributeWriter<ColorGeometry4f>> vertex_colors_writer_;
 
  public:
@@ -113,12 +112,6 @@ std::unique_ptr<CurvesPaintStrokeOperation> new_vertex_paint_smear_operation();
 
 /** Create a Replace vertex paint operation. */
 std::unique_ptr<CurvesPaintStrokeOperation> new_vertex_paint_replace_operation();
-
-/**
- * Mode enter/exit functions for vertex paint mode.
- */
-void curves_vertex_paint_mode_enter(struct bContext *C);
-void curves_vertex_paint_mode_exit(struct bContext *C);
 
 bool curves_vertex_paint_poll(bContext *C);
 bool curves_vertex_paint_mode_poll(bContext *C);

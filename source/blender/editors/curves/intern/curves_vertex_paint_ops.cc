@@ -487,7 +487,7 @@ static wmOperatorStatus curves_vertex_paint_sample_invoke(bContext *C,
   }
 
   const VArray<ColorGeometry4f> colors = *curves.attributes().lookup_or_default<ColorGeometry4f>(
-      "vertex_color", bke::AttrDomain::Point, ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f));
+      curves_vertex_color_attr_name, bke::AttrDomain::Point, ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f));
   const ColorPaint4f sampled = color::unpremultiply_alpha(colors[closest->index]);
 
   Paint *paint = BKE_paint_get_active_from_context(C);
@@ -525,14 +525,8 @@ void CURVES_OT_vertex_paint_sample(wmOperatorType *ot)
 
 static wmOperatorStatus curves_vertex_color_set_exec(bContext *C, wmOperator * /*op*/)
 {
-  Object *ob = CTX_data_active_object(C);
-  if (ob == nullptr) {
-    return OPERATOR_CANCELLED;
-  }
-  if (ID *original_id = DEG_get_original_id(&ob->id)) {
-    ob = reinterpret_cast<Object *>(original_id);
-  }
-  if (ob->type != OB_CURVES || ob->data == nullptr) {
+  Object *ob = curves_paint_original_object_get(C);
+  if (ob == nullptr || ob->type != OB_CURVES || ob->data == nullptr) {
     return OPERATOR_CANCELLED;
   }
 
@@ -556,7 +550,7 @@ static wmOperatorStatus curves_vertex_color_set_exec(bContext *C, wmOperator * /
 
   bke::MutableAttributeAccessor attributes = curves.attributes_for_write();
   bke::SpanAttributeWriter<ColorGeometry4f> writer =
-      attributes.lookup_or_add_for_write_span<ColorGeometry4f>("vertex_color",
+      attributes.lookup_or_add_for_write_span<ColorGeometry4f>(curves_vertex_color_attr_name,
                                                                bke::AttrDomain::Point);
   if (!writer) {
     return OPERATOR_CANCELLED;
@@ -629,68 +623,6 @@ static std::unique_ptr<CurvesPaintStrokeOperation> start_stroke_operation_vertex
   return nullptr;
 }
 
-struct CurvesVertexPaintBrushStroke final : public PaintStroke {
-  CurvesVertexPaintBrushStroke(bContext *C, wmOperator *op, const int event_type)
-      : PaintStroke(C, op, event_type)
-  {
-  }
-
-  bool get_location(float out[3], const float mouse[2], bool /*force_original*/) override
-  {
-    out[0] = mouse[0];
-    out[1] = mouse[1];
-    out[2] = 0.0f;
-    return true;
-  }
-
-  bool test_start(wmOperator * /*op*/, const float /*mouse*/[2]) override
-  {
-    return true;
-  }
-
-  void update_step(wmOperator *op, PointerRNA *stroke_element) override
-  {
-    StrokeExtension stroke_extension;
-    RNA_float_get_array(stroke_element, "mouse", stroke_extension.mouse_position);
-    stroke_extension.pressure = RNA_float_get(stroke_element, "pressure");
-    stroke_extension.reports = op->reports;
-
-    if (!operation_) {
-      stroke_extension.is_first = true;
-      operation_ = start_stroke_operation_vertex_paint(
-          BrushStrokeMode(RNA_enum_get(op->ptr, "mode")),
-          BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")),
-          *this->evil_C);
-      if (!operation_) {
-        return;
-      }
-      operation_->on_stroke_begin(*this->evil_C, stroke_extension);
-    }
-    else {
-      stroke_extension.is_first = false;
-    }
-
-    operation_->on_stroke_extended(*this->evil_C, stroke_extension);
-  }
-
-  void redraw(bool /*final*/) override {}
-
-  bool test_cancel() override
-  {
-    return false;
-  }
-
-  void done(bool /*is_cancel*/, bool /*stroke_started*/) override
-  {
-    if (operation_) {
-      operation_->on_stroke_done(*this->evil_C);
-    }
-  }
-
- private:
-  std::unique_ptr<CurvesPaintStrokeOperation> operation_;
-};
-
 static bool curves_vertex_paint_brush_stroke_poll(bContext *C)
 {
   const bool mode_ok = (CTX_data_active_object(C) &&
@@ -716,54 +648,7 @@ static wmOperatorStatus curves_vertex_paint_brush_stroke_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  CurvesVertexPaintBrushStroke *stroke = MEM_new<CurvesVertexPaintBrushStroke>(
-      __func__, C, op, event->type);
-  op->customdata = stroke;
-
-  const wmOperatorStatus retval = op->type->modal(C, op, event);
-  OPERATOR_RETVAL_CHECK(retval);
-
-  if (retval == OPERATOR_FINISHED) {
-    MEM_delete(stroke);
-    op->customdata = nullptr;
-    return OPERATOR_FINISHED;
-  }
-
-  WM_event_add_modal_handler(C, op);
-  return OPERATOR_RUNNING_MODAL;
-}
-
-static wmOperatorStatus curves_vertex_paint_brush_stroke_modal(bContext *C,
-                                                               wmOperator *op,
-                                                               const wmEvent *event)
-{
-  CurvesVertexPaintBrushStroke *stroke = static_cast<CurvesVertexPaintBrushStroke *>(
-      op->customdata);
-
-  if (!stroke) {
-    return OPERATOR_CANCELLED;
-  }
-
-  const wmOperatorStatus retval = stroke->modal(C, op, event);
-  OPERATOR_RETVAL_CHECK(retval);
-
-  if (retval != OPERATOR_RUNNING_MODAL) {
-    MEM_delete(stroke);
-    op->customdata = nullptr;
-  }
-
-  return retval;
-}
-
-static void curves_vertex_paint_brush_stroke_cancel(bContext *C, wmOperator *op)
-{
-  if (op->customdata != nullptr) {
-    CurvesVertexPaintBrushStroke *stroke = static_cast<CurvesVertexPaintBrushStroke *>(
-        op->customdata);
-    stroke->cancel(C);
-    MEM_delete(stroke);
-    op->customdata = nullptr;
-  }
+  return curves_paint_brush_stroke_invoke(C, op, event, start_stroke_operation_vertex_paint);
 }
 
 static void CURVES_OT_vertex_paint_brush_stroke(wmOperatorType *ot)
@@ -774,8 +659,8 @@ static void CURVES_OT_vertex_paint_brush_stroke(wmOperatorType *ot)
 
   ot->poll = curves_vertex_paint_brush_stroke_poll;
   ot->invoke = curves_vertex_paint_brush_stroke_invoke;
-  ot->modal = curves_vertex_paint_brush_stroke_modal;
-  ot->cancel = curves_vertex_paint_brush_stroke_cancel;
+  ot->modal = curves_paint_brush_stroke_modal;
+  ot->cancel = curves_paint_brush_stroke_cancel;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 

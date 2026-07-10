@@ -152,6 +152,7 @@ set(SRC
   engines/overlay/overlay_mode_transfer.cc
   engines/overlay/overlay_shader.cc
   engines/overlay/overlay_shape.cc
+  engines/overlay/overlay_curves_paint_base.cc
   engines/overlay/overlay_curves_weight.cc
   engines/overlay/overlay_curves_vertex.cc
 
@@ -255,6 +256,7 @@ set(SRC
   engines/overlay/overlay_camera.hh
   engines/overlay/overlay_cursor.hh
   engines/overlay/overlay_curve.hh
+  engines/overlay/overlay_curves_paint_base.hh
   engines/overlay/overlay_curves_weight.hh
   engines/overlay/overlay_curves_vertex.hh
   engines/overlay/overlay_empty.hh

@@ -33,8 +33,14 @@
 
 #include "ED_view3d.hh"
 
+#include "RNA_access.hh"
+
 #include "WM_api.hh"
 #include "WM_types.hh"
+
+#include "MEM_guardedalloc.h"
+
+#include "../sculpt_paint/paint_intern.hh"
 
 namespace blender::ed::sculpt_paint {
 
@@ -45,19 +51,7 @@ namespace blender::ed::sculpt_paint {
 void CurvesPaintOperationBase::get_brush_settings(const bContext &C,
                                                    const StrokeExtension &stroke_extension)
 {
-  Object *object_from_context = CTX_data_active_object(&C);
-  if (object_from_context != nullptr) {
-    ID *original_id = DEG_get_original_id(&object_from_context->id);
-    if (original_id != nullptr && original_id != &object_from_context->id) {
-      object = reinterpret_cast<Object *>(original_id);
-    }
-    else {
-      object = object_from_context;
-    }
-  }
-  else {
-    object = nullptr;
-  }
+  object = curves_paint_original_object_get(&C);
 
   if (!object || object->type != OB_CURVES || object->data == nullptr) {
     curves_id = nullptr;
@@ -224,16 +218,19 @@ void CurvesPaintOperationBase::sample_curves_3d_brush(const bContext &C,
   const float4x4 object_to_world = (eval_object != nullptr) ? eval_object->object_to_world() :
                                                                object->object_to_world();
 
+  const int points_num = curves->points_num();
+
   bke::crazyspace::GeometryDeformation deformation;
   Span<float3> positions = curves->positions();
   if (depsgraph != nullptr && object != nullptr) {
     deformation = bke::crazyspace::get_evaluated_curves_deformation(*depsgraph, *object);
-    if (!deformation.positions.is_empty()) {
+    /* Only use the evaluated positions when they map 1:1 onto the original points. Generative
+     * modifiers or geometry nodes can change the point count, in which case indexing the deformed
+     * span by original point indices would read out of bounds. */
+    if (deformation.positions.size() == points_num) {
       positions = deformation.positions;
     }
   }
-
-  const int points_num = curves->points_num();
   const float brush_radius_sq = brush_radius * brush_radius;
 
   /* Collect points within brush radius. */
@@ -343,6 +340,145 @@ void CurvesPaintOperationBase::on_stroke_done(const bContext &C)
   curves_id = nullptr;
   curves = nullptr;
   brush = nullptr;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Shared Paint Operator Helpers
+ * \{ */
+
+Object *curves_paint_original_object_get(const bContext *C)
+{
+  Object *object = CTX_data_active_object(C);
+  if (object == nullptr) {
+    return nullptr;
+  }
+  if (ID *original_id = DEG_get_original_id(&object->id)) {
+    return reinterpret_cast<Object *>(original_id);
+  }
+  return object;
+}
+
+/**
+ * PaintStroke subclass shared by all curves paint modes. The stroke operation is created lazily
+ * through the mode-specific #CurvesPaintStartStrokeFn; everything else is identical between modes.
+ */
+namespace {
+struct CurvesPaintBrushStroke final : public PaintStroke {
+  CurvesPaintBrushStroke(bContext *C,
+                         wmOperator *op,
+                         const int event_type,
+                         CurvesPaintStartStrokeFn start_fn)
+      : PaintStroke(C, op, event_type), start_fn_(start_fn)
+  {
+  }
+
+  bool get_location(float out[3], const float mouse[2], bool /*force_original*/) override
+  {
+    out[0] = mouse[0];
+    out[1] = mouse[1];
+    out[2] = 0.0f;
+    return true;
+  }
+
+  bool test_start(wmOperator * /*op*/, const float /*mouse*/[2]) override
+  {
+    return true;
+  }
+
+  void update_step(wmOperator *op, PointerRNA *stroke_element) override
+  {
+    StrokeExtension stroke_extension;
+    RNA_float_get_array(stroke_element, "mouse", stroke_extension.mouse_position);
+    stroke_extension.pressure = RNA_float_get(stroke_element, "pressure");
+    stroke_extension.reports = op->reports;
+
+    if (!operation_) {
+      stroke_extension.is_first = true;
+      operation_ = start_fn_(BrushStrokeMode(RNA_enum_get(op->ptr, "mode")),
+                             BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")),
+                             *this->evil_C);
+      if (!operation_) {
+        return;
+      }
+      operation_->on_stroke_begin(*this->evil_C, stroke_extension);
+    }
+    else {
+      stroke_extension.is_first = false;
+    }
+
+    operation_->on_stroke_extended(*this->evil_C, stroke_extension);
+  }
+
+  void redraw(bool /*final*/) override {}
+
+  bool test_cancel() override
+  {
+    return false;
+  }
+
+  void done(bool /*is_cancel*/, bool /*stroke_started*/) override
+  {
+    if (operation_) {
+      operation_->on_stroke_done(*this->evil_C);
+    }
+  }
+
+ private:
+  CurvesPaintStartStrokeFn start_fn_;
+  std::unique_ptr<CurvesPaintStrokeOperation> operation_;
+};
+}  // namespace
+
+wmOperatorStatus curves_paint_brush_stroke_invoke(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent *event,
+                                                  CurvesPaintStartStrokeFn start_fn)
+{
+  CurvesPaintBrushStroke *stroke = MEM_new<CurvesPaintBrushStroke>(
+      __func__, C, op, event->type, start_fn);
+  op->customdata = stroke;
+
+  const wmOperatorStatus retval = op->type->modal(C, op, event);
+  OPERATOR_RETVAL_CHECK(retval);
+
+  if (retval == OPERATOR_FINISHED) {
+    MEM_delete(stroke);
+    op->customdata = nullptr;
+    return OPERATOR_FINISHED;
+  }
+
+  WM_event_add_modal_handler(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+wmOperatorStatus curves_paint_brush_stroke_modal(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  CurvesPaintBrushStroke *stroke = static_cast<CurvesPaintBrushStroke *>(op->customdata);
+  if (!stroke) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const wmOperatorStatus retval = stroke->modal(C, op, event);
+  OPERATOR_RETVAL_CHECK(retval);
+
+  if (retval != OPERATOR_RUNNING_MODAL) {
+    MEM_delete(stroke);
+    op->customdata = nullptr;
+  }
+
+  return retval;
+}
+
+void curves_paint_brush_stroke_cancel(bContext *C, wmOperator *op)
+{
+  if (op->customdata != nullptr) {
+    CurvesPaintBrushStroke *stroke = static_cast<CurvesPaintBrushStroke *>(op->customdata);
+    stroke->cancel(C);
+    MEM_delete(stroke);
+    op->customdata = nullptr;
+  }
 }
 
 /** \} */

@@ -989,7 +989,9 @@ static void but_update_old_active_from_new(Button *oldbut, Button *but)
 
   /* flags from the buttons we want to refresh, may want to add more here... */
   const int flag_copy = BUT_REDALERT | BUT_DISABLED | UI_HAS_ICON | UI_SELECT_DRAW;
-  const int drawflag_copy = BUT_HAS_QUICK_TOOLTIP | BUT_NO_TOOLTIP;
+  /* #BUT_GRID_SCROLL_CLIP is synced (together with #grid_scroll_clip_owner below) so the carried
+   * over tile matches this frame's grid clip state instead of the freed previous one. */
+  const int drawflag_copy = BUT_HAS_QUICK_TOOLTIP | BUT_NO_TOOLTIP | BUT_GRID_SCROLL_CLIP;
 
   /* still stuff needs to be copied */
   oldbut->rect = but->rect;
@@ -1022,6 +1024,11 @@ static void but_update_old_active_from_new(Button *oldbut, Button *but)
 
   oldbut->flag = (oldbut->flag & ~flag_copy) | (but->flag & flag_copy);
   oldbut->drawflag = (oldbut->drawflag & ~drawflag_copy) | (but->drawflag & drawflag_copy);
+
+  /* The grid a clip-scrolled tile belongs to is rebuilt every redraw. Re-point the carried-over
+   * active tile at the live grid view; otherwise #grid_scroll_clip_owner keeps referencing the
+   * just-freed previous view, a use-after-free on the next hit-test/draw that reads its clip rect. */
+  oldbut->grid_scroll_clip_owner = but->grid_scroll_clip_owner;
 
   but_extra_icons_update_from_old_but(but, oldbut);
   std::swap(but->extra_op_icons, oldbut->extra_op_icons);

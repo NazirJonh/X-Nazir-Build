@@ -204,7 +204,9 @@ struct Button : NonMovable {
   /** Set alongside #BUT_GRID_SCROLL_CLIP by #layout_scroll_clip_apply_buttons; the grid this
    * clip-scrolled button belongs to (never null when #BUT_GRID_SCROLL_CLIP is set). Every read
    * site resolves the per-grid clip rect through this instead of a block-global field, so two
-   * clip-scrolled grids in the same block don't share one window. */
+   * clip-scrolled grids in the same block don't share one window. The grid view is rebuilt every
+   * redraw; an active tile carried over to the new block re-points this at the live view in
+   * #but_update_old_active_from_new so it never dangles at the freed old view. */
   AbstractGridView *grid_scroll_clip_owner = nullptr;
 
   TextDirection text_direction = TextDirection::Default;

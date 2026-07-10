@@ -2746,6 +2746,63 @@ static void UI_OT_view_drop(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name UI Button Drop Operator
+ * \{ */
+
+static bool button_drop_poll(bContext *C)
+{
+  const wmWindow *win = CTX_wm_window(C);
+  if (!(win && win->runtime->eventstate)) {
+    return false;
+  }
+  const ARegion *region = CTX_wm_region(C);
+  if (region == nullptr) {
+    return false;
+  }
+  return region_but_find_drop_target_at(C, region, win->runtime->eventstate) != nullptr;
+}
+
+static wmOperatorStatus button_drop_invoke(bContext *C, wmOperator * /*op*/, const wmEvent *event)
+{
+  if (event->custom != EVT_DATA_DRAGDROP) {
+    return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
+
+  ARegion *region = CTX_wm_region(C);
+  std::unique_ptr<DropTargetInterface> drop_target = region_but_find_drop_target_at(
+      C, region, event);
+  if (!drop_target) {
+    return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
+
+  if (!drop_target_apply_drop(*C,
+                              *region,
+                              *event,
+                              *drop_target,
+                              *static_cast<const ListBaseT<wmDrag> *>(event->customdata)))
+  {
+    return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
+
+  ED_region_tag_redraw(region);
+  return OPERATOR_FINISHED;
+}
+
+static void UI_OT_button_drop(wmOperatorType *ot)
+{
+  ot->name = "Button Drop";
+  ot->idname = "UI_OT_button_drop";
+  ot->description = "Drag and drop onto a button";
+
+  ot->invoke = button_drop_invoke;
+  ot->poll = button_drop_poll;
+
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name UI View Scroll Operator
  * \{ */
 
@@ -3261,6 +3318,7 @@ void operatortypes_ui()
 
   WM_operatortype_append(UI_OT_view_start_filter);
   WM_operatortype_append(UI_OT_view_drop);
+  WM_operatortype_append(UI_OT_button_drop);
   WM_operatortype_append(UI_OT_view_scroll);
   WM_operatortype_append(UI_OT_view_item_rename);
   WM_operatortype_append(UI_OT_view_item_select);

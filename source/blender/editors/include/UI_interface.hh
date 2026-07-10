@@ -218,6 +218,15 @@ std::string drop_target_tooltip(const ARegion &region,
 std::unique_ptr<DropTargetInterface> region_views_find_drop_target_at(const ARegion *region,
                                                                       const int xy[2]);
 
+/**
+ * Find a drop target for the button under the cursor, if any. Dispatches to per-widget drop-target
+ * providers (currently brush texture slots). Returns null if the button under the cursor does not
+ * support dropping the dragged data.
+ */
+std::unique_ptr<DropTargetInterface> region_but_find_drop_target_at(bContext *C,
+                                                                    const ARegion *region,
+                                                                    const wmEvent *event);
+
 enum eUIListFilterResult {
   /** Never show this item, even when filter results are inverted (#UILST_FLT_EXCLUDE). */
   UI_LIST_ITEM_NEVER_SHOW,

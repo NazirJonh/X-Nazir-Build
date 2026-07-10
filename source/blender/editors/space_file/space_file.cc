@@ -16,6 +16,10 @@
 #include "BLI_path_utils.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
+#include "BLI_uuid.h"
+
+#include "DNA_space_types.h"
+#include "DNA_uuid_types.h"
 
 #include "BKE_appdir.hh"
 #include "BKE_asset.hh"
@@ -915,7 +919,8 @@ static bool filepath_drop_poll(bContext *C, wmDrag *drag, const wmEvent * /*even
 {
   if (drag->type == WM_DRAG_PATH) {
     SpaceFile *sfile = CTX_wm_space_file(C);
-    if (sfile) {
+    /* In asset-browser mode dropped image files are handled by the image-asset dropbox below. */
+    if (sfile && !ED_fileselect_is_asset_browser(sfile)) {
       return true;
     }
   }
@@ -927,6 +932,61 @@ static void filepath_drop_copy(bContext * /*C*/, wmDrag *drag, wmDropBox *drop)
   RNA_string_set(drop->ptr, "filepath", WM_drag_get_single_path(drag));
 }
 
+static bool asset_image_drop_poll(bContext *C, wmDrag *drag, const wmEvent * /*event*/)
+{
+  if (drag->type != WM_DRAG_PATH) {
+    return false;
+  }
+  const SpaceFile *sfile = CTX_wm_space_file(C);
+  if (!sfile || !ED_fileselect_is_asset_browser(sfile) ||
+      !ED_fileselect_is_local_asset_library(sfile))
+  {
+    return false;
+  }
+  return WM_drag_has_path_file_type(drag, FILE_TYPE_IMAGE);
+}
+
+static void asset_image_drop_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
+{
+  /* Store only the image paths as `directory` + `files`. Assumes the dropped image files share a
+   * directory, which holds for a file-browser multi-selection and a single Explorer drop. */
+  const char *first_image = nullptr;
+  for (const std::string &path : WM_drag_get_paths(drag)) {
+    if (ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) {
+      first_image = path.c_str();
+      break;
+    }
+  }
+  if (first_image == nullptr) {
+    return;
+  }
+
+  char dir[FILE_MAX];
+  BLI_path_split_dir_part(first_image, dir, sizeof(dir));
+  RNA_string_set(drop->ptr, "directory", dir);
+
+  RNA_collection_clear(drop->ptr, "files");
+  for (const std::string &path : WM_drag_get_paths(drag)) {
+    if ((ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) == 0) {
+      continue;
+    }
+    char name[FILE_MAX];
+    BLI_path_split_file_part(path.c_str(), name, sizeof(name));
+    PointerRNA itemptr{};
+    RNA_collection_add(drop->ptr, "files", &itemptr);
+    RNA_string_set(&itemptr, "name", name);
+  }
+
+  /* When a specific catalog is active in the tree, assign the new assets to it. */
+  if (const FileAssetSelectParams *params = ED_fileselect_get_asset_params(CTX_wm_space_file(C))) {
+    if (params->asset_catalog_visibility == FILE_SHOW_ASSETS_FROM_CATALOG) {
+      char catalog_id_str[UUID_STRING_SIZE];
+      BLI_uuid_format(catalog_id_str, params->catalog_id);
+      RNA_string_set(drop->ptr, "catalog_id", catalog_id_str);
+    }
+  }
+}
+
 /* region dropbox definition */
 static void file_dropboxes()
 {
@@ -934,6 +994,12 @@ static void file_dropboxes()
 
   WM_dropbox_add(
       lb, "FILE_OT_filepath_drop", filepath_drop_poll, filepath_drop_copy, nullptr, nullptr);
+  WM_dropbox_add(lb,
+                 "ASSET_OT_image_import_mark",
+                 asset_image_drop_poll,
+                 asset_image_drop_copy,
+                 nullptr,
+                 nullptr);
 }
 
 static int file_space_subtype_get(ScrArea *area)

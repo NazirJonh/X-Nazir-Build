@@ -1392,6 +1392,12 @@ struct wmDrag {
 
   /** If no small icon but imbuf should be drawn around cursor. */
   const ImBuf *imb;
+  /**
+   * When true, #imb is owned by this drag and freed in #WM_drag_free. Used for previews generated
+   * on the fly (e.g. external image files dragged from the OS), as opposed to borrowed image
+   * buffers that belong to an existing data-block.
+   */
+  bool imb_is_owned;
   float imbuf_scale;
   /** If #imb is not set, draw this as a big preview instead of the small #icon. */
   int preview_icon_id; /* BIFIconID */

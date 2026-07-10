@@ -7,6 +7,7 @@
  */
 
 #include <fmt/format.h>
+#include <memory>
 
 #include "AS_asset_representation.hh"
 #include "AS_remote_library.hh"
@@ -27,6 +28,8 @@
 #include "WM_api.hh"
 
 #include "UI_interface.hh"
+
+#include "interface_drop_image.hh"
 
 namespace blender::ui {
 
@@ -159,6 +162,25 @@ static std::string drop_material_tooltip(bContext *C,
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Button Drop Target Lookup
+ * \{ */
+
+std::unique_ptr<DropTargetInterface> region_but_find_drop_target_at(bContext *C,
+                                                                    const ARegion *region,
+                                                                    const wmEvent *event)
+{
+  /* Dispatch to per-widget drop-target providers. Extend as more button types gain drop support. */
+  if (std::unique_ptr<DropTargetInterface> target = brush_texture_slot_drop_target_get(
+          C, region, event))
+  {
+    return target;
+  }
+  return nullptr;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Add User Interface Drop Boxes
  * \{ */
 
@@ -182,6 +204,9 @@ void dropboxes_ui()
                  drop_material_copy,
                  WM_drag_free_imported_drag_ID,
                  drop_material_tooltip);
+
+  /* Register texture/image drop functionality for template_id_preview */
+  DROP_IMAGE_register_dropboxes();
 }
 
 /** \} */

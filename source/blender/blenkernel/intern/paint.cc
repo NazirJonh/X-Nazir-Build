@@ -64,6 +64,7 @@
 #include "BKE_multires.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
@@ -2437,6 +2438,10 @@ static void sculpt_update_object(Depsgraph *depsgraph,
     ss.deform_cos = Span(static_cast<const float3 *>(ss.shapekey_active->data),
                          mesh_orig->verts_num);
     if (!ss.deform_cos.is_empty()) {
+      /* Compose vertex-domain sculpt layers on top of the active shape key's positions so the
+       * sculpt display shows the layer riding on the morphed form, matching the mesh-eval
+       * composition object mode uses. No-op when the mesh carries no vertex-domain layers. */
+      bke::sculpt_layers::apply_vert_layers(mesh_orig->sculpt_layers, ss.deform_cos);
       BKE_pbvh_vert_coords_apply(pbvh, ss.deform_cos);
     }
   }

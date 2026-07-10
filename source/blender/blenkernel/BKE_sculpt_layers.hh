@@ -135,6 +135,26 @@ void derive_base_mesh(Span<float3> positions,
                       const ListBaseT<SculptLayer> &layers,
                       MutableSpan<float3> r_base);
 
+/**
+ * Compose the enabled vertex-domain layers as a final object-space offset on top of the given
+ * positions: `positions[i] += sum_over_enabled_vert_layers(data[i] * effective(layer))`.
+ *
+ * Unlike #combine_layers_mesh (which rebuilds combined positions from a separate base), this adds
+ * onto whatever the positions already hold. Used both by the mesh-eval composition step and by the
+ * sculpt-mode display path (composing onto the active shape key's deformed positions). A layer whose
+ * element count does not match \a positions is skipped.
+ */
+void apply_vert_layers(const ListBaseT<SculptLayer> &layers, MutableSpan<float3> positions);
+
+/**
+ * Convenience wrapper of #apply_vert_layers over `mesh.sculpt_layers` and the mesh's own positions.
+ * This is the mesh-eval composition step: shape keys are applied by the virtual ShapeKey modifier,
+ * which overwrites the positions from the key blocks and would otherwise discard the layer
+ * contribution, so the layer is re-added here to keep it visible on top of the morphed form. Mirrors
+ * the grid-domain composition done at subdivision-surface evaluation time.
+ */
+void apply_vert_layers_eval(Mesh &mesh);
+
 /* -------------------------------------------------------------------------------------------------
  * Grid (multires) domain maintenance.
  */

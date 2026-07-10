@@ -247,6 +247,21 @@ void combine_layers_mesh(const Span<float3> base,
   }
 }
 
+void apply_vert_layers(const ListBaseT<SculptLayer> &layers, MutableSpan<float3> positions)
+{
+  for (const SculptLayer &layer : layers) {
+    if (layer.domain != SCULPT_LAYER_DOMAIN_VERT) {
+      continue;
+    }
+    apply_delta_mesh(layer, effective(layer), positions);
+  }
+}
+
+void apply_vert_layers_eval(Mesh &mesh)
+{
+  apply_vert_layers(mesh.sculpt_layers, mesh.vert_positions_for_write());
+}
+
 void resample_grid_layers(Mesh &mesh, const int grids_num, const int new_level)
 {
   bool warned = false;

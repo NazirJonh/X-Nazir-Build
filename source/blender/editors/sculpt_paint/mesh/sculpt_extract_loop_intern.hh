@@ -47,6 +47,11 @@ struct ExtractLoopSharedData {
   BMEdge *seed_edge = nullptr;
   ExtractionMode mode = ExtractionMode::Loop;
   LoopOrientation loop_orientation = LoopOrientation::Horizontal;
+
+  /* Cache of the mesh's boundary edges (edges used by exactly one face), rebuilt
+   * whenever #base.bm is (re)built. Enables boundary-first seed picking without a
+   * per-hover scan of the whole mesh. */
+  Vector<BMEdge *> boundary_edges;
 };
 
 inline float3 vert_position(const ExtractLoopSharedData &shared, BMVert *v)
@@ -71,6 +76,16 @@ struct ExtractLoopModalData {
 
 /* _pick.cc */
 BMEdge *find_seed_edge_screen_space(ExtractLoopSharedData &shared, const float mval[2]);
+/* Rebuild #ExtractLoopSharedData.boundary_edges from #base.bm. Call after the
+ * modal BMesh is (re)built. */
+void rebuild_boundary_edge_cache(ExtractLoopSharedData &shared);
+/* Boundary-first seed pick: nearest visible boundary edge in screen space within
+ * a pixel threshold, independent of a surface hit under the cursor. Returns
+ * nullptr when no boundary edge qualifies, so the caller falls back to
+ * #find_seed_edge_screen_space. Needs #C for a session-safe occlusion raycast. */
+BMEdge *find_boundary_seed_edge_screen_space(bContext *C,
+                                             ExtractLoopSharedData &shared,
+                                             const float mval[2]);
 
 /* _walker.cc */
 void run_walker(ExtractLoopSharedData &shared,

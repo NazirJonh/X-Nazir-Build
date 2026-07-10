@@ -4710,6 +4710,7 @@ std::optional<ActiveElementInfo> active_element_info_get(ViewContext &vc, const 
 
   ActiveElementInfo info;
   info.vert = srd.active_vertex;
+  info.location = ray_start + ray_normal * srd.depth;
   switch (pbvh->type()) {
     case bke::pbvh::Type::Mesh:
       info.active_face_idx = srd.active_face_grid_index;

@@ -281,10 +281,15 @@ class BrushTextureSlotDropTarget : public ui::DropTargetInterface {
     RNA_boolean_set(&props, "use_mask_slot", use_mask_slot_);
     RNA_boolean_set(&props, "replace_existing", true);
 
-    const wmOperatorStatus status = WM_operator_name_call(
-        C, "BRUSH_OT_texture_slot_assign_image", wm::OpCallContext::ExecDefault, &props, &drag_info.event);
+    /* Invoke (not exec): a packed dropped image on an occupied slot opens a popup menu, which
+     * returns #OPERATOR_INTERFACE - still a successful, accepted drop. */
+    const wmOperatorStatus status = WM_operator_name_call(C,
+                                                          "BRUSH_OT_texture_slot_assign_image",
+                                                          wm::OpCallContext::InvokeDefault,
+                                                          &props,
+                                                          &drag_info.event);
     WM_operator_properties_free(&props);
-    return status == OPERATOR_FINISHED;
+    return (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
   }
 };
 

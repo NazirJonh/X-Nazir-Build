@@ -54,6 +54,7 @@ static bool loop_hover_setup_bmesh(bContext *C, ExtractLoopSharedData &shared, O
   shared.preview_points.clear();
   shared.seed_edge = nullptr;
   shared.is_cyclic = false;
+  rebuild_boundary_edge_cache(shared);
   return true;
 }
 
@@ -99,6 +100,7 @@ void extract_loop_hover_free()
   state.shared.base.preview_faces.clear();
   state.shared.preview_points.clear();
   state.shared.loop_edges.clear();
+  state.shared.boundary_edges.clear();
   state.shared.seed_edge = nullptr;
   state.shared.base.obact = nullptr;
   state.shared.base.session_mesh = nullptr;
@@ -147,6 +149,19 @@ void extract_loop_hover_update(bContext *C,
   state.shared.loop_edges.clear();
   state.shared.seed_edge = nullptr;
   state.shared.is_cyclic = false;
+
+  /* Boundary-first: in Loop mode the mesh border is highlighted even when the
+   * cursor is off the surface (near the silhouette or past an open edge), where
+   * the raycast below would miss and leave the preview empty. Only Loop mode walks
+   * a boundary contour (#BMW_EDGEBOUNDARY); Ring/Face Strip keep the old behavior. */
+  if (mode == ExtractionMode::Loop) {
+    state.shared.seed_edge = find_boundary_seed_edge_screen_space(C, state.shared, mval);
+    if (state.shared.seed_edge) {
+      bool dummy = false;
+      run_walker(state.shared, true /* hover always follows boundary */, &dummy);
+      return;
+    }
+  }
 
   CursorGeometryInfo cgi;
   if (!cursor_geometry_info_update(C, &cgi, mval, false)) {

@@ -101,6 +101,20 @@ static void update_preview(bContext &C, ExtractLoopModalData &data, const float 
   data.has_boundary_seed = false;
   data.initial_hit = false;
 
+  /* Boundary-first: mirror the hover behavior so the border is picked even with no
+   * face under the cursor. Loop mode only — see #extract_loop_hover_update. */
+  if (data.shared.mode == ExtractionMode::Loop) {
+    data.shared.seed_edge = find_boundary_seed_edge_screen_space(&C, data.shared, mval);
+    if (data.shared.seed_edge) {
+      data.initial_hit = true;
+      run_walker(data.shared, data.use_boundary_walker, &data.has_boundary_seed);
+      for (BMEdge *e : data.shared.loop_edges) {
+        data.loop_edges_set.add(e);
+      }
+      return;
+    }
+  }
+
   CursorGeometryInfo cgi;
   if (!cursor_geometry_info_update(&C, &cgi, mval, false)) {
     return;
@@ -400,6 +414,8 @@ static wmOperatorStatus gesture_invoke(bContext *C, wmOperator *op, const wmEven
     Mesh *mesh = id_cast<Mesh *>(data->shared.base.obact->data);
     data->shared.base.preview_positions = mesh->vert_positions();
   }
+
+  rebuild_boundary_edge_cache(data->shared);
 
   op->customdata = data;
 

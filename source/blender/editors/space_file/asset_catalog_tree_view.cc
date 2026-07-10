@@ -7,6 +7,7 @@
  */
 
 #include "DNA_space_types.h"
+#include "DNA_uuid_types.h"
 
 #include "AS_asset_catalog.hh"
 #include "AS_asset_catalog_tree.hh"
@@ -15,7 +16,9 @@
 #include "BKE_asset.hh"
 
 #include "BLI_listbase.hh"
+#include "BLI_path_utils.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_uuid.hh"
 
 #include "BLT_translation.hh"
 
@@ -400,6 +403,17 @@ bool AssetCatalogDropTarget::can_drop(const wmDrag &drag, const char **r_disable
   if (drag.type == WM_DRAG_ASSET_LIST && has_droppable_asset(drag, r_disabled_hint)) {
     return true;
   }
+
+  if (drag.type == WM_DRAG_PATH) {
+    const asset_system::AssetLibrary &library = get_asset_library();
+    if (!can_modify_catalogs(library, r_disabled_hint)) {
+      return false;
+    }
+    if (!WM_drag_has_path_file_type(&drag, FILE_TYPE_IMAGE)) {
+      return false;
+    }
+    return true;
+  }
   return false;
 }
 
@@ -407,6 +421,17 @@ std::string AssetCatalogDropTarget::drop_tooltip(const ui::DragInfo &drag_info) 
 {
   if (drag_info.drag_data.type == WM_DRAG_ASSET_CATALOG) {
     return this->drop_tooltip_asset_catalog(drag_info.drag_data);
+  }
+  if (drag_info.drag_data.type == WM_DRAG_PATH) {
+    int image_num = 0;
+    for (const std::string &path : WM_drag_get_paths(&drag_info.drag_data)) {
+      if (ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) {
+        image_num++;
+      }
+    }
+    std::string tip = (image_num > 1) ? TIP_("Mark images as assets in catalog") :
+                                        TIP_("Mark image as asset in catalog");
+    return tip + ": " + catalog_item_.get_name();
   }
   return this->drop_tooltip_asset_list(drag_info.drag_data);
 }
@@ -450,6 +475,43 @@ bool AssetCatalogDropTarget::on_drop(bContext *C, const ui::DragInfo &drag_info)
     return drop_asset_catalog_into_catalog(drag_info.drag_data,
                                            this->get_view<AssetCatalogTreeView>(),
                                            catalog_item_.get_catalog_id());
+  }
+  if (drag_info.drag_data.type == WM_DRAG_PATH) {
+    const wmDrag &drag = drag_info.drag_data;
+    PointerRNA props = WM_operator_properties_create("ASSET_OT_image_import_mark");
+
+    const char *first_image = nullptr;
+    for (const std::string &path : WM_drag_get_paths(&drag)) {
+      if (ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) {
+        first_image = path.c_str();
+        break;
+      }
+    }
+    if (first_image != nullptr) {
+      char dir[FILE_MAX];
+      BLI_path_split_dir_part(first_image, dir, sizeof(dir));
+      RNA_string_set(&props, "directory", dir);
+
+      for (const std::string &path : WM_drag_get_paths(&drag)) {
+        if ((ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) == 0) {
+          continue;
+        }
+        char name[FILE_MAX];
+        BLI_path_split_file_part(path.c_str(), name, sizeof(name));
+        PointerRNA itemptr{};
+        RNA_collection_add(&props, "files", &itemptr);
+        RNA_string_set(&itemptr, "name", name);
+      }
+
+      char catalog_id_str[UUID_STRING_SIZE];
+      BLI_uuid_format(catalog_id_str, catalog_item_.get_catalog_id());
+      RNA_string_set(&props, "catalog_id", catalog_id_str);
+    }
+
+    const wmOperatorStatus status = WM_operator_name_call(
+        C, "ASSET_OT_image_import_mark", wm::OpCallContext::ExecDefault, &props, nullptr);
+    WM_operator_properties_free(&props);
+    return (status & OPERATOR_FINISHED) != 0;
   }
   return drop_assets_into_catalog(C,
                                   this->get_view<AssetCatalogTreeView>(),

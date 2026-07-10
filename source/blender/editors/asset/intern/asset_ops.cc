@@ -11,16 +11,19 @@
 
 #include <fmt/format.h>
 
+#include "AS_asset_catalog.hh"
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 #include "AS_remote_library.hh"
 
+#include "BKE_asset.hh"
 #include "BKE_asset_edit.hh"
 #include "BKE_blendfile.hh"
 #include "BKE_bpath.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_icons.hh"
+#include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_preferences.h"
@@ -33,8 +36,10 @@
 #include "BLI_rect.hh"
 #include "BLI_set.hh"
 #include "BLI_string.hh"
+#include "BLI_uuid.hh"
 
 #include "ED_asset.hh"
+#include "ED_asset_library.hh"
 #include "ED_screen.hh"
 /* XXX needs access to the file list, should all be done via the asset system in future. */
 #include "ED_asset_menu_utils.hh"
@@ -55,7 +60,9 @@
 #include "RNA_types.hh"
 #include "WM_api.hh"
 
+#include "DNA_image_types.h"
 #include "DNA_space_types.h"
+#include "DNA_uuid_types.h"
 
 #include "GPU_immediate.hh"
 
@@ -104,10 +111,10 @@ static const char *asset_operation_unsupported_type_msg(const bool is_single)
 {
   const char *msg_single = N_(
       "Data-block does not support asset operations - must be a "
-      "Brush, Collection, Node Group, Object, Pose Action, Scene, or World");
+      "Brush, Collection, Image, Node Group, Object, Pose Action, Scene, or World");
   const char *msg_multiple = N_(
       "No data-block selected that supports asset operations - select at least one "
-      "Brush, Collection, Node Group, Object, Pose Action, Scene, or World");
+      "Brush, Collection, Image, Node Group, Object, Pose Action, Scene, or World");
   return is_single ? msg_single : msg_multiple;
 }
 
@@ -208,6 +215,125 @@ static bool asset_mark_poll(bContext *C, const Span<PointerRNA> ids)
   }
 
   return true;
+}
+
+static wmOperatorStatus asset_image_import_mark_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+
+  /* Resolve the optional target catalog from its UUID string property. */
+  bUUID catalog_id;
+  bool has_catalog = false;
+  {
+    char catalog_id_str[UUID_STRING_SIZE];
+    RNA_string_get(op->ptr, "catalog_id", catalog_id_str);
+    has_catalog = (catalog_id_str[0] != '\0') &&
+                  BLI_uuid_parse_string(&catalog_id, catalog_id_str);
+  }
+
+  /* The catalog's simple name is a cached display string stored alongside the UUID. */
+  std::string catalog_simple_name;
+  if (has_catalog) {
+    if (SpaceFile *sfile = CTX_wm_space_file(C)) {
+      if (asset_system::AssetLibrary *library = ED_fileselect_active_asset_library_get(sfile)) {
+        if (const asset_system::AssetCatalog *catalog =
+                library->catalog_service().find_catalog(catalog_id))
+        {
+          catalog_simple_name = catalog->simple_name;
+        }
+      }
+    }
+  }
+
+  char dir[FILE_MAX];
+  RNA_string_get(op->ptr, "directory", dir);
+
+  int marked_num = 0;
+  bool changed = false;
+  RNA_BEGIN (op->ptr, itemptr, "files") {
+    char name[FILE_MAX];
+    RNA_string_get(&itemptr, "name", name);
+
+    char filepath[FILE_MAX];
+    BLI_path_join(filepath, sizeof(filepath), dir, name);
+
+    /* Only image files are relevant; other file types in the drag are ignored. */
+    if ((ED_path_extension_type(filepath) & FILE_TYPE_IMAGE) == 0) {
+      continue;
+    }
+
+    Image *image = BKE_image_load_exists(bmain, filepath, nullptr);
+    if (image == nullptr) {
+      BKE_reportf(op->reports, RPT_WARNING, "Could not load image \"%s\"", filepath);
+      continue;
+    }
+
+    if (image->id.asset_data == nullptr) {
+      if (mark_id(&image->id)) {
+        generate_preview(C, &image->id);
+        marked_num++;
+        changed = true;
+      }
+    }
+
+    /* Assign (or re-assign) the catalog, also for images that were already assets. */
+    if (has_catalog && image->id.asset_data != nullptr) {
+      BKE_asset_metadata_catalog_id_set(
+          image->id.asset_data, catalog_id, catalog_simple_name.c_str());
+      changed = true;
+    }
+  }
+  RNA_END;
+
+  if (!changed) {
+    BKE_report(op->reports, RPT_WARNING, "No images to mark as assets were dropped");
+    return OPERATOR_CANCELLED;
+  }
+
+  if (marked_num == 1) {
+    BKE_report(op->reports, RPT_INFO, "1 image is now an asset");
+  }
+  else if (marked_num > 1) {
+    BKE_reportf(op->reports, RPT_INFO, "%d images are now assets", marked_num);
+  }
+
+  /* Rebuild the Current File asset library so the new assets appear immediately. */
+  if (SpaceFile *sfile = CTX_wm_space_file(C)) {
+    if (const FileAssetSelectParams *params = ED_fileselect_get_asset_params(sfile)) {
+      refresh_asset_library(C, params->asset_library_ref);
+    }
+  }
+  WM_main_add_notifier(NC_ID | NA_EDITED, nullptr);
+  WM_main_add_notifier(NC_ASSET | ND_ASSET_LIST | NA_ADDED, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+static void ASSET_OT_image_import_mark(wmOperatorType *ot)
+{
+  ot->name = "Import Images as Assets";
+  ot->description =
+      "Load dropped image files and mark them as assets, optionally assigning them to a catalog";
+  ot->idname = "ASSET_OT_image_import_mark";
+
+  ot->exec = asset_image_import_mark_exec;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+
+  PropertyRNA *prop;
+  prop = RNA_def_string_dir_path(
+      ot->srna, "directory", nullptr, FILE_MAX, "Directory", "Directory of the image files");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_collection_runtime(ot->srna, "files", RNA_OperatorFileListElement, "Files", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_string(ot->srna,
+                        "catalog_id",
+                        nullptr,
+                        UUID_STRING_SIZE,
+                        "Catalog UUID",
+                        "UUID of the catalog to assign the new assets to");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
 static void ASSET_OT_mark(wmOperatorType *ot)
@@ -1847,6 +1973,8 @@ void operatortypes_asset()
 
   WM_operatortype_append(ASSET_OT_assets_download);
   WM_operatortype_append(ASSET_OT_asset_download);
+
+  WM_operatortype_append(ASSET_OT_image_import_mark);
 }
 
 }  // namespace blender::ed::asset

@@ -508,7 +508,7 @@ bool sync_multires_for_rna(Main &bmain, Scene * /*scene*/, Mesh &mesh, SculptLay
  * user keeps seeing base + layers.
  */
 
-static void base_view_ensure(Object &object)
+static void base_view_ensure(Object &object, const SculptLayer *exclude = nullptr)
 {
   SculptSession *ss = session_of(object);
   ss->layers.base_view = {};
@@ -526,6 +526,11 @@ static void base_view_ensure(Object &object)
   const short domain = domain_for(object);
   bool any_enabled = false;
   for (const SculptLayer &layer : mesh.sculpt_layers) {
+    /* The recording target is intentionally kept in the composed surface (the brush is evaluated
+     * against base + active layer), so it does not count towards the base view. */
+    if (&layer == exclude) {
+      continue;
+    }
     if (layer.domain == domain && (layer.flag & SCULPT_LAYER_ENABLED) &&
         layer.influence != 0.0f && layer.data != nullptr)
     {
@@ -547,10 +552,25 @@ static void base_view_ensure(Object &object)
       return;
     }
     const Span<float3> base = ss->layers.mesh_base;
+    /* `positions - base` is the sum of all enabled layer contributions (the maintained mesh
+     * invariant). When recording, subtract the active layer's own contribution so the base view
+     * holds only the OTHER layers; the brush is then evaluated against base + active layer and the
+     * other layers are composed back after the brush (see #base_view_compose_mesh). */
+    const float3 *exclude_data = nullptr;
+    float exclude_influence = 0.0f;
+    if (exclude && exclude->domain == SCULPT_LAYER_DOMAIN_VERT && exclude->data != nullptr &&
+        int64_t(exclude->totelem) == positions.size())
+    {
+      exclude_data = static_cast<const float3 *>(exclude->data);
+      exclude_influence = (exclude->flag & SCULPT_LAYER_ENABLED) ? exclude->influence : 0.0f;
+    }
     Array<float3> view(positions.size());
     threading::parallel_for(positions.index_range(), 8192, [&](const IndexRange range) {
       for (const int64_t i : range) {
         view[i] = positions[i] - base[i];
+        if (exclude_data) {
+          view[i] -= exclude_data[i] * exclude_influence;
+        }
       }
     });
     ss->layers.base_view = std::move(view);
@@ -560,6 +580,11 @@ static void base_view_ensure(Object &object)
     Array<float3> total(subdiv_ccg.positions.size(), float3(0.0f));
     Array<float3> contrib(subdiv_ccg.positions.size());
     for (const SculptLayer &layer : mesh.sculpt_layers) {
+      /* Keep the recording target composed (the brush is evaluated against base + active layer);
+       * only the other layers form the base view that is removed from the brush inputs. */
+      if (&layer == exclude) {
+        continue;
+      }
       if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || !(layer.flag & SCULPT_LAYER_ENABLED) ||
           layer.influence == 0.0f || layer.data == nullptr)
       {
@@ -744,6 +769,14 @@ void stroke_record_begin(const Depsgraph & /*depsgraph*/, Object &object)
      * the data buffer exists so deform can accumulate per dab. */
     bke::sculpt_layers::data_ensure(*layer, element_count(object));
   }
+
+  /* Evaluate the brush against base + active layer only. Populate the base view with the OTHER
+   * enabled layers so shape/normal-dependent brushes (draw along normal, smooth, flatten, ...) do
+   * not bake their form into the recorded layer; without this a stroke on layer B over layer A's
+   * detail imprints A's shape into B, revealed when A is later hidden. Symmetric to the base-edit
+   * base view, but excluding the recording target so the layer being authored stays WYSIWYG. */
+  base_view_ensure(object, layer);
+
   ss->layers.recording = true;
 
   if (!grids) {

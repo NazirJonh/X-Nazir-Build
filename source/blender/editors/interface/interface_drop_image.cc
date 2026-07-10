@@ -181,8 +181,9 @@ static bool DROP_IMAGE_set_preview_for_drag(wmDrag *drag, int max_size)
     return false;
   }
 
-  /* Set preview for drag operation */
-  WM_event_drag_image(drag, preview_imb, 1.0f);
+  /* Set preview for drag operation. The buffer was created just for this drag, so hand ownership
+   * to the drag which frees it in #WM_drag_free. */
+  WM_event_drag_image(drag, preview_imb, 1.0f, true);
 
   return true;
 }
@@ -370,10 +371,14 @@ void DROP_IMAGE_register_dropboxes()
                  WM_drag_free_imported_drag_ID,
                  brush_texture_drop_tooltip);
 
-  wmDropBox *drop = static_cast<wmDropBox *>(lb->last);
-  if (drop) {
-    drop->on_drag_start = DROP_IMAGE_drag_start_callback;
-  }
+  /* Attach the drag preview through a *global* prefetch handler rather than the drop-box'
+   * #on_drag_start. The latter only runs for drop-boxes in a visible area/region, but the "User
+   * Interface" map lives in #SPACE_EMPTY and is never tagged visible, so it would never fire.
+   * A global handler triggers unconditionally when a path drag starts - including files dragged in
+   * from the OS - so the texture preview shows as soon as the cursor enters the window. */
+  WM_drag_global_prefetch_handler_add(WM_DRAG_PATH, [](bContext &C, wmDrag &drag) {
+    DROP_IMAGE_drag_start_callback(&C, &drag);
+  });
 }
 
 }

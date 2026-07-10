@@ -406,9 +406,10 @@ static std::unique_ptr<bContextStore> wm_drop_ui_context_create(const bContext *
   return std::make_unique<bContextStore>(*but_context);
 }
 
-void WM_event_drag_image(wmDrag *drag, const ImBuf *imb, float scale)
+void WM_event_drag_image(wmDrag *drag, const ImBuf *imb, float scale, bool free_imb)
 {
   drag->imb = imb;
+  drag->imb_is_owned = free_imb;
   drag->imbuf_scale = scale;
 }
 
@@ -480,6 +481,11 @@ void WM_drag_free(wmDrag *drag)
   }
   if (drag->flags & WM_DRAG_FREE_DATA) {
     WM_drag_data_free(drag->type, drag->poin);
+  }
+  if (drag->imb_is_owned && drag->imb) {
+    /* Preview image buffer generated for this drag (e.g. an external image file). */
+    IMB_freeImBuf(const_cast<ImBuf *>(drag->imb));
+    drag->imb = nullptr;
   }
   drag->drop_state.ui_context.reset();
   drag->ids.free_no_destruct();

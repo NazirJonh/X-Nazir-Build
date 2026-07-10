@@ -1691,7 +1691,14 @@ wmDrag *WM_drag_data_create(
  * Invoke dragging using the given \a drag data.
  */
 void WM_event_start_prepared_drag(bContext *C, wmDrag *drag);
-void WM_event_drag_image(wmDrag *drag, const ImBuf *imb, float scale);
+/**
+ * Set an image buffer to draw around the cursor during the drag.
+ *
+ * \param free_imb: When true, \a drag takes ownership of \a imb and frees it in #WM_drag_free.
+ * Pass true for buffers generated specifically for this drag (e.g. previews of external image
+ * files); leave false for buffers borrowed from an existing data-block.
+ */
+void WM_event_drag_image(wmDrag *drag, const ImBuf *imb, float scale, bool free_imb = false);
 /**
  * Overrides the `drag.poin` event to include all selected files in the space file where the event
  * started.

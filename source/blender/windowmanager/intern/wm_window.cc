@@ -1760,6 +1760,74 @@ static void ghost_event_proc_timestamp_warning(const GHOST_IEvent *ghost_event)
 }
 #endif /* !NDEBUG */
 
+static wmEvent wm_update_cursor_position_from_drag_and_drop(wmWindowManager *wm,
+                                                            wmWindow *win,
+                                                            const GHOST_TEventDragnDropData *ddd,
+                                                            const uint64_t event_time_ms)
+{
+  /* Ensure the event state matches modifiers (window only receives drag and drop events). */
+  wm_window_update_eventstate_modifiers(wm, win, event_time_ms);
+  /* When entering window, update mouse position (without sending an event). */
+  if (win->active == 0) {
+    wm_window_update_eventstate(win);
+  }
+
+  wmEvent event;
+  wm_event_init_from_window(win, &event); /* Copy last state, like mouse coords. */
+
+  /* Activate region. */
+  event.type = MOUSEMOVE;
+  event.val = KM_NOTHING;
+  copy_v2_v2_int(event.prev_xy, event.xy);
+
+  copy_v2_v2_int(event.xy, &ddd->x);
+  wm_cursor_position_from_ghost_screen_coords(win, &event.xy[0], &event.xy[1]);
+
+  /* The values from #wm_window_update_eventstate may not match (under WAYLAND they don't)
+   * Write this into the event state. */
+  copy_v2_v2_int(win->runtime->eventstate->xy, event.xy);
+
+  event.flag = eWM_EventFlag(0);
+
+  /* No context change! `C->wm->runtime->windrawable` is drawable, or for area queues. */
+  wm->runtime->winactive = win;
+  win->active = 1;
+
+  WM_event_add(win, &event);
+
+  return event;
+}
+
+static void wm_start_ghost_event_drag(wmWindowManager *wm,
+                                      wmWindow *win,
+                                      bContext *C,
+                                      const GHOST_TEventDragnDropData *ddd,
+                                      bool log_drop)
+{
+  /* Currently not all platfoms retrieves drag and drop data on drag enter. */
+  if (!ddd->data) {
+    return;
+  }
+
+  WM_drag_free_list(&wm->runtime->drags);
+  wm_drags_exit(wm, win);
+
+  if (ddd->dataType == GHOST_kDragnDropTypeString) {
+    std::string *str = MEM_new<std::string>(__func__, static_cast<const char *>(ddd->data));
+    WM_event_start_drag(C, ICON_NONE, WM_DRAG_STRING, str, WM_DRAG_FREE_DATA);
+  }
+  else if (ddd->dataType == GHOST_kDragnDropTypeFilenames) {
+    const GHOST_TStringArray *stra = static_cast<const GHOST_TStringArray *>(ddd->data);
+    /* Build a list of paths for the drag data. */
+    blender::Vector<const char *> paths;
+    for (int i = 0; i < stra->count; i++) {
+      paths.append(reinterpret_cast<const char *>(stra->strings[i]));
+    }
+    wmDragPath *path_data = WM_drag_create_path_data(paths.as_span());
+    WM_event_start_drag(C, ICON_NONE, WM_DRAG_PATH, path_data, WM_DRAG_FREE_DATA);
+  }
+}
+
 /**
  * Called by ghost, here we handle events for windows themselves or send to event system.
  *
@@ -1995,16 +2063,34 @@ static bool ghost_event_proc(const GHOST_IEvent *ghost_event, GHOST_TUserDataPtr
       }
       break;
     }
+    case GHOST_kEventDraggingEntered: {
+      const GHOST_TEventDragnDropData *ddd = static_cast<const GHOST_TEventDragnDropData *>(data);
+      wm_update_cursor_position_from_drag_and_drop(wm, win, ddd, event_time_ms);
+      wm_start_ghost_event_drag(wm, win, C, ddd, false);
+      break;
+    }
+    case GHOST_kEventDraggingUpdated: {
+      const GHOST_TEventDragnDropData *ddd = static_cast<const GHOST_TEventDragnDropData *>(data);
+      wm_update_cursor_position_from_drag_and_drop(wm, win, ddd, event_time_ms);
+      break;
+    }
+    case GHOST_kEventDraggingExited: {
+      WM_drag_free_list(&wm->runtime->drags);
+      wm_drags_exit(wm, win);
+      const GHOST_TEventDragnDropData *ddd = static_cast<const GHOST_TEventDragnDropData *>(data);
+      wm_update_cursor_position_from_drag_and_drop(wm, win, ddd, event_time_ms);
+
+      wm_window_update_eventstate_modifiers_clear(wm, win, event_time_ms);
+      /* Buttons are hovered while drag-and-drop, send a #GHOST_kEventWindowDeactivate event so
+       * they can be deactivated on drag exit. */
+      wm_event_add_ghostevent(wm, win, GHOST_kEventWindowDeactivate, win, event_time_ms);
+      win->active = 0;
+      break;
+    }
     case GHOST_kEventDraggingDropDone: {
       const GHOST_TEventDragnDropData *ddd = static_cast<const GHOST_TEventDragnDropData *>(data);
 
-      /* Ensure the event state matches modifiers (window was inactive). */
-      wm_window_update_eventstate_modifiers(wm, win, event_time_ms);
-      /* Entering window, update mouse position (without sending an event). */
-      wm_window_update_eventstate(win);
-
-      wmEvent event;
-      wm_event_init_from_window(win, &event); /* Copy last state, like mouse coords. */
+      wmEvent event = wm_update_cursor_position_from_drag_and_drop(wm, win, ddd, event_time_ms);
 
       /* Activate region. */
       event.type = MOUSEMOVE;
@@ -2036,31 +2122,8 @@ static bool ghost_event_proc(const GHOST_IEvent *ghost_event, GHOST_TUserDataPtr
 
       WM_event_add(win, &event);
 
-      // printf("Drop detected\n");
-
       /* Add drag data to wm for paths. */
-
-      if (ddd->dataType == GHOST_kDragnDropTypeFilenames) {
-        const GHOST_TStringArray *stra = static_cast<const GHOST_TStringArray *>(ddd->data);
-
-        if (stra->count) {
-          CLOG_INFO(WM_LOG_EVENTS, "Drop %d files:", stra->count);
-          for (const char *path : Span(reinterpret_cast<char **>(stra->strings), stra->count)) {
-            CLOG_INFO(WM_LOG_EVENTS, "%s", path);
-          }
-          /* Try to get icon type from extension of the first path. */
-          int icon = ED_file_extension_icon(reinterpret_cast<char *>(stra->strings[0]));
-          wmDragPath *path_data = WM_drag_create_path_data(
-              Span(reinterpret_cast<char **>(stra->strings), stra->count));
-          WM_event_start_drag(C, icon, WM_DRAG_PATH, path_data, WM_DRAG_NOP);
-          /* Void pointer should point to string, it makes a copy. */
-        }
-      }
-      else if (ddd->dataType == GHOST_kDragnDropTypeString) {
-        /* Drop an arbitrary string. */
-        std::string *str = MEM_new<std::string>(__func__, static_cast<const char *>(ddd->data));
-        WM_event_start_drag(C, ICON_NONE, WM_DRAG_STRING, str, WM_DRAG_FREE_DATA);
-      }
+      wm_start_ghost_event_drag(wm, win, C, ddd, true);
 
       break;
     }

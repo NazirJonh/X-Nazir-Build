@@ -519,6 +519,10 @@ void PAINT_OT_add_texture_paint_slot(wmOperatorType *ot);
 void PAINT_OT_image_paint(wmOperatorType *ot);
 void PAINT_OT_add_simple_uvs(wmOperatorType *ot);
 
+/* paint_texture_ops.cc */
+void TEXTURE_OT_assign_image(wmOperatorType *ot);
+void TEXTURE_OT_new_with_image(wmOperatorType *ot);
+
 /* paint_image_2d_curve_mask.cc */
 
 /**

@@ -67,15 +67,19 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
 
-  /* Get the image to assign */
+  /* Get the image to assign. `image_existed` tracks whether the image already existed in the file
+   * (an existing datablock, or matched by filepath) rather than being freshly loaded by this
+   * operator. It decides whether a local image may be moved into a linked texture's library or must
+   * be copied into it - see the assignment below. */
   Image *image = nullptr;
-  
+  bool image_existed = false;
+
   /* Try to get image by filepath */
   char filepath[FILE_MAX];
   RNA_string_get(op->ptr, "filepath", filepath);
-  
+
   if (filepath[0] != '\0') {
-    image = BKE_image_load_exists(bmain, filepath);
+    image = BKE_image_load_exists(bmain, filepath, &image_existed);
     if (!image) {
       BKE_reportf(op->reports, RPT_ERROR, "Cannot load image: %s", filepath);
       return OPERATOR_CANCELLED;
@@ -89,6 +93,8 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
       BKE_report(op->reports, RPT_ERROR, "No image specified for assignment");
       return OPERATOR_CANCELLED;
     }
+    /* A drag of an existing image datablock always references pre-existing data. */
+    image_existed = true;
   }
 
   /* Find active brush */
@@ -137,21 +143,35 @@ static wmOperatorStatus paint_assign_image_exec(bContext *C, wmOperator *op)
     RNA_property_update(C, &brush_ptr, slot_prop);
   }
 
-  /* Assign the image to the (new or existing) texture. Keep the image in the same library as the
-   * texture: when the brush is a linked asset (edited via the asset system) the texture ends up
-   * linked too, and linked data must never reference a local image. #BKE_id_move_to_same_lib only
-   * moves local IDs, so this is a no-op for a fully local brush. */
-  if (tex->ima != image) {
+  /* Resolve the image that will actually be stored in the texture slot.
+   *
+   * A linked (asset) texture must never reference a local image: besides being an illegal
+   * linked -> local reference, moving a *pre-existing* local image into the texture's (never-undo)
+   * library would leave its session_uid present both locally (referenced by earlier undo steps) and
+   * linked, and crash on the next undo (#BKE_main_idmap_insert_id hits a duplicate session_uid).
+   *
+   * So, only when the texture is linked and the image is local:
+   *   - a freshly loaded image (absent from every earlier undo step) is simply moved into the
+   *     library, exactly like the newly created texture above;
+   *   - a pre-existing local image is copied into the library instead, leaving the original local
+   *     image (and its session_uid) untouched.
+   * For a fully local texture nothing is moved and the image is assigned as-is. */
+  Image *slot_image = image;
+  if (ID_IS_LINKED(&tex->id) && !ID_IS_LINKED(&image->id)) {
+    if (image_existed) {
+      slot_image = id_cast<Image *>(BKE_id_copy(bmain, &image->id));
+      /* #BKE_id_copy leaves one user; the slot assignment below adds one, so compensate. */
+      id_us_min(&slot_image->id);
+    }
+    BKE_id_move_to_same_lib(*bmain, slot_image->id, tex->id);
+  }
+
+  if (tex->ima != slot_image) {
     if (tex->ima) {
       id_us_min(&tex->ima->id);
     }
-    tex->ima = image;
-    id_us_plus(&image->id);
-    /* Only a local image can be pulled into the texture's (possibly linked) library; a linked
-     * image referenced by a local texture is already valid. */
-    if (!ID_IS_LINKED(&image->id)) {
-      BKE_id_move_to_same_lib(*bmain, image->id, tex->id);
-    }
+    tex->ima = slot_image;
+    id_us_plus(&slot_image->id);
   }
   tex->type = TEX_IMAGE;
   DEG_id_tag_update(&tex->id, ID_RECALC_SHADING);

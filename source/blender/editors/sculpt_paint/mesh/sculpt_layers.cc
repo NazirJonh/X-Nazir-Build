@@ -517,9 +517,12 @@ static void base_view_ensure(Object &object, const SculptLayer *exclude = nullpt
   if (!pbvh || pbvh->type() == bke::pbvh::Type::BMesh) {
     return;
   }
-  /* Deform-modifier / shape-key sessions mix position spaces (the runtime base is kept in the
-   * original space while brushes work on evaluated positions); keep the plain behavior there. */
-  if (ss->deform_modifiers_active || ss->shapekey_active) {
+  /* A deforming modifier *without* a shape key is unsupported for recording (the composed surface
+   * is not re-derived from base + layers at evaluation, see #stroke_record_begin), so there is no
+   * base view to build. The shape-key case IS supported and is handled below with a space-independent
+   * derivation: the plain `positions - mesh_base` path cannot be used there because #mesh_base is
+   * kept in basis space while the brushes work on the evaluated positions. */
+  if (ss->deform_modifiers_active && !ss->shapekey_active) {
     return;
   }
   Mesh &mesh = mesh_of(object);
@@ -544,36 +547,65 @@ static void base_view_ensure(Object &object, const SculptLayer *exclude = nullpt
 
   const auto t0 = std::chrono::high_resolution_clock::now();
   if (pbvh->type() == bke::pbvh::Type::Mesh) {
-    if (!ss->layers.state_valid) {
-      session_state_ensure(object);
-    }
-    const Span<float3> positions = mesh.vert_positions();
-    if (ss->layers.mesh_base.size() != positions.size()) {
-      return;
-    }
-    const Span<float3> base = ss->layers.mesh_base;
-    /* `positions - base` is the sum of all enabled layer contributions (the maintained mesh
-     * invariant). When recording, subtract the active layer's own contribution so the base view
-     * holds only the OTHER layers; the brush is then evaluated against base + active layer and the
-     * other layers are composed back after the brush (see #base_view_compose_mesh). */
-    const float3 *exclude_data = nullptr;
-    float exclude_influence = 0.0f;
-    if (exclude && exclude->domain == SCULPT_LAYER_DOMAIN_VERT && exclude->data != nullptr &&
-        int64_t(exclude->totelem) == positions.size())
-    {
-      exclude_data = static_cast<const float3 *>(exclude->data);
-      exclude_influence = (exclude->flag & SCULPT_LAYER_ENABLED) ? exclude->influence : 0.0f;
-    }
-    Array<float3> view(positions.size());
-    threading::parallel_for(positions.index_range(), 8192, [&](const IndexRange range) {
-      for (const int64_t i : range) {
-        view[i] = positions[i] - base[i];
-        if (exclude_data) {
-          view[i] -= exclude_data[i] * exclude_influence;
+    if (ss->shapekey_active) {
+      /* Under a shape key the runtime #mesh_base is kept in basis space, so the `positions - base`
+       * derivation below would mix spaces. The vertex layers are composed as a linear object-space
+       * offset on top of the deformed positions (see #apply_vert_layers_eval), so their contribution
+       * in evaluated space equals `data * influence`. Build the base view by summing the OTHER
+       * enabled layers directly — space-independent, needing neither #mesh_base nor crazyspace. The
+       * active recording layer is simply skipped (#exclude) so the brush stays evaluated against
+       * base + active layer. */
+      const int64_t totelem = mesh.verts_num;
+      Array<float3> view(totelem, float3(0.0f));
+      for (const SculptLayer &layer : mesh.sculpt_layers) {
+        if (&layer == exclude || layer.domain != SCULPT_LAYER_DOMAIN_VERT ||
+            !(layer.flag & SCULPT_LAYER_ENABLED) || layer.influence == 0.0f ||
+            layer.data == nullptr || int64_t(layer.totelem) != totelem)
+        {
+          continue;
         }
+        const Span<float3> data(static_cast<const float3 *>(layer.data), layer.totelem);
+        const float influence = layer.influence;
+        threading::parallel_for(IndexRange(totelem), 8192, [&](const IndexRange range) {
+          for (const int64_t i : range) {
+            view[i] += data[i] * influence;
+          }
+        });
       }
-    });
-    ss->layers.base_view = std::move(view);
+      ss->layers.base_view = std::move(view);
+    }
+    else {
+      if (!ss->layers.state_valid) {
+        session_state_ensure(object);
+      }
+      const Span<float3> positions = mesh.vert_positions();
+      if (ss->layers.mesh_base.size() != positions.size()) {
+        return;
+      }
+      const Span<float3> base = ss->layers.mesh_base;
+      /* `positions - base` is the sum of all enabled layer contributions (the maintained mesh
+       * invariant). When recording, subtract the active layer's own contribution so the base view
+       * holds only the OTHER layers; the brush is then evaluated against base + active layer and the
+       * other layers are composed back after the brush (see #base_view_compose_mesh). */
+      const float3 *exclude_data = nullptr;
+      float exclude_influence = 0.0f;
+      if (exclude && exclude->domain == SCULPT_LAYER_DOMAIN_VERT && exclude->data != nullptr &&
+          int64_t(exclude->totelem) == positions.size())
+      {
+        exclude_data = static_cast<const float3 *>(exclude->data);
+        exclude_influence = (exclude->flag & SCULPT_LAYER_ENABLED) ? exclude->influence : 0.0f;
+      }
+      Array<float3> view(positions.size());
+      threading::parallel_for(positions.index_range(), 8192, [&](const IndexRange range) {
+        for (const int64_t i : range) {
+          view[i] = positions[i] - base[i];
+          if (exclude_data) {
+            view[i] -= exclude_data[i] * exclude_influence;
+          }
+        }
+      });
+      ss->layers.base_view = std::move(view);
+    }
   }
   else if (ss->subdiv_ccg) {
     SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;

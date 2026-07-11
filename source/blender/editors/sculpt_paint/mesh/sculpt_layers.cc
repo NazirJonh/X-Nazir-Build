@@ -961,13 +961,24 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
     }
   }
 
-  /* For a plain mesh the live positions already equal base + layers, and for multires the layer
-   * capture above leaves the live CCG untouched — skip the DEG re-eval in both cases to avoid a
-   * per-stroke PBVH rebuild. Shape-key / deform-modifier mesh sessions keep the re-eval because
-   * their live positions are not a direct copy of the evaluated surface. */
-  const bool complex_mesh = pbvh && pbvh->type() == bke::pbvh::Type::Mesh &&
-                            (ss->deform_modifiers_active || ss->shapekey_active);
-  if (complex_mesh) {
+  /* Skip the DEG re-eval that would free and rebuild the whole PBVH from scratch every stroke — on
+   * dense meshes that rebuild is the dominant per-stroke freeze (hundreds of ms on multi-million
+   * vertex meshes), and the stroke topology never changes so the rebuilt tree is identical.
+   *
+   * It is safe to skip whenever the live display already reflects the finished stroke:
+   * - Plain mesh: the live positions already equal base + layers (the brush wrote them directly).
+   * - Multires: the layer capture above leaves the live CCG untouched.
+   * - Shape key: the brush updated the PBVH's own coordinates per dab (see #PositionDeformData) and
+   *   the stroke was fully recorded into the layer as an object-space offset, so the persistent data
+   *   (basis key + key blocks + layer data) reproduces the same surface on the next natural
+   *   evaluation. File-modified marking is covered by the undo push that follows this call.
+   *
+   * Only a real deforming modifier *without* a shape key keeps the re-eval: that path does not
+   * re-derive the composed surface from base + layers at evaluation, so the live positions are not
+   * reproducible and must be committed through a full re-evaluation. */
+  const bool needs_reeval = pbvh && pbvh->type() == bke::pbvh::Type::Mesh &&
+                            ss->deform_modifiers_active && !ss->shapekey_active;
+  if (needs_reeval) {
     DEG_id_tag_update(&mesh.id, 0);
   }
 }

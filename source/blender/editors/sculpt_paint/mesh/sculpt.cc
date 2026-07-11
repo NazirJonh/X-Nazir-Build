@@ -5341,7 +5341,10 @@ void flush_update_step(ViewContext &vc, Object &object, const UpdateType update_
   ED_region_tag_redraw(vc.region);
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
-  if (update_type == UpdateType::Position && !ss.shapekey_active) {
+  /* Refresh the PBVH position buffers and mesh bounds for the mesh path. Skipped for a shape-key
+   * session that draws through the evaluated mesh (the full re-evaluation above already refreshes
+   * it), but required when a shape-key-only session draws directly from the PBVH. */
+  if (update_type == UpdateType::Position && (!ss.shapekey_active || use_pbvh_draw)) {
     if (pbvh.type() == bke::pbvh::Type::Mesh) {
       tag_mesh_positions_changed(object, use_pbvh_draw);
     }

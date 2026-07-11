@@ -408,6 +408,10 @@ struct SculptSession : NonCopyable, NonMovable {
 
   /* Object is deformed with some modifiers. */
   bool deform_modifiers_active = false;
+  /* The active shape key is the only deformer (no other enabled modifier changes the drawn
+   * surface), so the sculpt PBVH can be drawn directly instead of re-evaluating the mesh every
+   * redraw. Only meaningful for #Type::Mesh sessions with #shapekey_active set. */
+  bool shapekey_pbvh_draw = false;
   /* Coords of deformed mesh but without stroke displacement. */
   Array<float3, 0> deform_cos;
   /* Crazy-space deformation matrices. */

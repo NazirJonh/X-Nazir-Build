@@ -450,7 +450,7 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
     ui::block_layout_set_current(block, &grip_col);
     ui::Button *catalog_grip = ui::uiDefIconButV(block,
                                                  ui::ButtonType::Grip,
-                                                 ICON_GRIP,
+                                                 ICON_GRIP_V,
                                                  0,
                                                  0,
                                                  short(CATALOG_GRIP_WIDTH_UNITS * UI_UNIT_X),

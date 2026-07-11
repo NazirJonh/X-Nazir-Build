@@ -944,9 +944,10 @@ void Instance::draw_v3d(Manager &manager, View &view)
     /* Overlay (+Line) pass. */
     draw(regular, resources.overlay_fb);
 
-    /* Restore original depth before rendering Axes and other overlay elements.
-     * This is needed for Retopology + Face Sets mode where prepass writes depth with offset,
-     * which would break depth testing for Axes. */
+    /* WORKAROUND: In Retopology + Face Sets mode the prepass writes depth with an offset, which
+     * would break depth testing for the Axes and other overlay elements drawn next. Restore the
+     * depth captured before the prepass (see #Resources::acquire). A cleaner fix would render the
+     * face sets into a dedicated depth target instead of copying the full depth buffer. */
     if (state.retopology_face_sets_enabled && !state.is_depth_only_drawing) {
       GPU_texture_copy(resources.depth_target_tx, resources.depth_backup_tx);
     }

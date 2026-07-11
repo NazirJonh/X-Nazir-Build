@@ -175,8 +175,6 @@ class Meshes : Overlay {
                          face_culling,
                      state.clipping_plane_count);
       pass.shader_set(res.shaders->mesh_edit_face_sets.get());
-      pass.bind_texture("color_render_tx", &res.color_render_tx);
-
       pass.push_constant("retopology_offset", retopology_offset);
       pass.push_constant("retopology_enabled", show_retopology_);
       pass.push_constant("face_sets_opacity", face_sets_opacity);
@@ -360,9 +358,6 @@ class Meshes : Overlay {
     }
     if (show_face_sets_) {
       gpu::Batch *geom = DRW_mesh_batch_cache_get_edit_triangles(mesh);
-
-      edit_mesh_face_sets_ps_.push_constant("face_set_seed", mesh.face_sets_color_seed);
-      edit_mesh_face_sets_ps_.push_constant("face_set_default", mesh.face_sets_color_default);
       edit_mesh_face_sets_ps_.draw(geom, res_handle);
     }
     if (draw_as_solid && !state.is_render_depth_available) {
@@ -438,7 +433,8 @@ class Meshes : Overlay {
     manager.submit(edit_mesh_weight_ps_, view);
 
     if (!xray_enabled_) {
-      /* Render face selection with depth testing when X-Ray is disabled.*/
+      /* Still use depth-testing for selected faces when X-Ray flag is enabled but transparency is
+       * off (X-Ray Opacity == 1.0 or in Preview/Render mode) (See #135325). */
       manager.submit(edit_mesh_faces_ps_, view);
       manager.submit(edit_mesh_cages_ps_, view);
     }
@@ -465,7 +461,7 @@ class Meshes : Overlay {
 
     if (xray_enabled_) {
       /* Still use depth-testing for selected faces when X-Ray flag is enabled but transparency is
-       * off (X-Ray Opacity == 1.0 or in Preview/Render mode) (See #135325).*/
+       * off (X-Ray Opacity == 1.0 or in Preview/Render mode) (See #135325). */
       GPU_framebuffer_bind(framebuffer);
       manager.submit(edit_mesh_faces_ps_, view);
       manager.submit(edit_mesh_cages_ps_, view);

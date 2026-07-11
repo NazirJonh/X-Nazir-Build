@@ -4396,7 +4396,7 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
-  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 12)) {
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 17)) {
     /* Add default face sets overlay opacity for files missing the field. */
     if (!DNA_struct_member_exists(fd->filesdna, "View3DOverlay", "float", "face_sets_opacity")) {
       for (bScreen &screen : bmain->screens) {

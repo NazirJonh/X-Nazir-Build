@@ -806,9 +806,9 @@ struct Resources : public select::SelectMap {
       this->depth_target_tx.wrap(this->depth_tx);
       this->depth_target_in_front_tx.wrap(this->depth_in_front_tx);
 
-      /* Backup original depth for Retopology + Face Sets mode.
-       * Prepass will modify depth_target_tx (which points to depth_tx),
-       * so we need a copy of original depth to restore later for Axes. */
+      /* WORKAROUND: Back up the original depth for Retopology + Face Sets mode. The prepass
+       * modifies depth_target_tx (which wraps depth_tx), so a copy is needed to restore the
+       * original depth later when drawing the Axes (see #Instance::draw_v3d). */
       if (state.retopology_face_sets_enabled) {
         this->depth_backup_tx.acquire(render_size,
                                       gpu::TextureFormat::SFLOAT_32_DEPTH_UINT_8);

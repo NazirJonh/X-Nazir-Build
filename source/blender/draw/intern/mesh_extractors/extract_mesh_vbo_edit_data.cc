@@ -16,8 +16,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_customdata.hh"
-
-#include "UI_resources.hh"
+#include "BKE_paint.hh"
 
 namespace blender::draw {
 
@@ -125,7 +124,6 @@ static void extract_edit_data_mesh(const MeshRenderData &mr, MutableSpan<EditLoo
   const OffsetIndices faces = mr.faces;
   const Span<int> corner_verts = mr.corner_verts;
   const Span<int> corner_edges = mr.corner_edges;
-
   threading::parallel_for(faces.index_range(), 2048, [&](const IndexRange range) {
     for (const int face : range) {
       EditLoopData face_value = {};
@@ -193,14 +191,12 @@ static void extract_edit_data_bm(const MeshRenderData &mr, MutableSpan<EditLoopD
       EditLoopData face_value = {};
       mesh_render_data_face_flag(mr, &face, uv_offsets_none, face_value);
       const BMLoop *loop = BM_FACE_FIRST_LOOP(&face);
-
       for ([[maybe_unused]] const int i : IndexRange(face.len)) {
         const int index = BM_elem_index_get(loop);
         EditLoopData &value = corners_data[index];
         value = face_value;
         mesh_render_data_edge_flag(mr, loop->e, value);
         mesh_render_data_vert_flag(mr, loop->v, value);
-
         loop = loop->next;
       }
     }
@@ -339,7 +335,6 @@ static void extract_edit_subdiv_data_bm(const MeshRenderData &mr,
   MutableSpan loose_vert_data = vbo_data.take_back(mr.loose_verts.size());
 
   BMesh &bm = *mr.bm;
-
   threading::parallel_for(IndexRange(subdiv_cache.num_subdiv_quads), 2048, [&](IndexRange range) {
     for (const int subdiv_quad : range) {
       const int coarse_face = subdiv_loop_face_index[subdiv_quad * 4];
@@ -406,17 +401,34 @@ gpu::VertBufPtr extract_edit_data_subdiv(const MeshRenderData &mr,
 }
 
 /* ---------------------------------------------------------------------- */
-/** \name Face Set ID extraction (separate VBO to avoid bloating EditLoopData)
+/** \name Face Set color extraction (separate VBO to avoid bloating EditLoopData)
  * \{ */
 
 static const GPUVertFormat &get_edit_face_set_format()
 {
   static const GPUVertFormat format = []() {
     GPUVertFormat format{};
-    GPU_vertformat_attr_add(&format, "face_set_id", gpu::VertAttrType::SINT_32);
+    GPU_vertformat_attr_add(&format, "face_set_color_in", gpu::VertAttrType::UNORM_8_8_8_8);
     return format;
   }();
   return format;
+}
+
+/* The overlay color is computed here on the CPU (single source of truth with sculpt mode, see
+ * #BKE_paint_face_set_overlay_color_get) instead of being duplicated in the shader. The default
+ * face set is left transparent; the alpha channel doubles as a flag (0 = default, 255 = explicit
+ * face set) so the shader can special-case the default without needing the seed or default id. */
+static uchar4 face_set_color_get(const int face_set_id,
+                                 const int face_set_default,
+                                 const int face_set_seed)
+{
+  if (face_set_id == face_set_default) {
+    return uchar4(0);
+  }
+  uchar4 color(0);
+  BKE_paint_face_set_overlay_color_get(face_set_id, face_set_seed, color);
+  color[3] = 255;
+  return color;
 }
 
 gpu::VertBufPtr extract_edit_face_set(const MeshRenderData &mr)
@@ -425,29 +437,31 @@ gpu::VertBufPtr extract_edit_face_set(const MeshRenderData &mr)
       GPU_vertbuf_create_with_format(get_edit_face_set_format()));
   const int size = mr.corners_num + mr.loose_indices_num;
   GPU_vertbuf_data_alloc(*vbo, size);
-  MutableSpan<int> data = vbo->data<int>();
+  MutableSpan<uchar4> data = vbo->data<uchar4>();
 
+  const uchar4 default_color(0);
   const int face_set_default = mr.mesh->face_sets_color_default;
+  const int face_set_seed = mr.mesh->face_sets_color_seed;
 
   if (mr.extract_type == MeshExtractType::Mesh) {
     const bke::AttributeAccessor attributes = mr.mesh->attributes();
     const VArraySpan<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
                                                               bke::AttrDomain::Face);
     if (face_sets.is_empty()) {
-      data.fill(face_set_default);
+      data.fill(default_color);
     }
     else {
       const OffsetIndices faces = mr.faces;
       threading::parallel_for(faces.index_range(), 2048, [&](const IndexRange range) {
         for (const int face : range) {
-          const int face_set_id = face_sets[face];
+          const uchar4 color = face_set_color_get(face_sets[face], face_set_default, face_set_seed);
           for (const int corner : faces[face]) {
-            data[corner] = face_set_id;
+            data[corner] = color;
           }
         }
       });
       /* Loose elements default. */
-      data.slice(mr.corners_num, mr.loose_indices_num).fill(face_set_default);
+      data.slice(mr.corners_num, mr.loose_indices_num).fill(default_color);
     }
   }
   else {
@@ -455,22 +469,23 @@ gpu::VertBufPtr extract_edit_face_set(const MeshRenderData &mr)
     const int face_set_offset = CustomData_get_offset_named(
         &bm.pdata, CD_PROP_INT32, ".sculpt_face_set");
     if (face_set_offset == -1) {
-      data.fill(face_set_default);
+      data.fill(default_color);
     }
     else {
       threading::parallel_for(IndexRange(bm.totface), 2048, [&](const IndexRange range) {
         for (const int face_index : range) {
           const BMFace &face = *BM_face_at_index(&const_cast<BMesh &>(bm), face_index);
           const int face_set_id = BM_ELEM_CD_GET_INT(&face, face_set_offset);
+          const uchar4 color = face_set_color_get(face_set_id, face_set_default, face_set_seed);
           const BMLoop *loop = BM_FACE_FIRST_LOOP(&face);
           for ([[maybe_unused]] const int i : IndexRange(face.len)) {
             const int index = BM_elem_index_get(loop);
-            data[index] = face_set_id;
+            data[index] = color;
             loop = loop->next;
           }
         }
       });
-      data.slice(mr.corners_num, mr.loose_indices_num).fill(face_set_default);
+      data.slice(mr.corners_num, mr.loose_indices_num).fill(default_color);
     }
   }
 
@@ -484,9 +499,11 @@ gpu::VertBufPtr extract_edit_face_set_subdiv(const MeshRenderData &mr,
       GPU_vertbuf_create_with_format(get_edit_face_set_format()));
   const int size = subdiv_full_vbo_size(mr, subdiv_cache);
   GPU_vertbuf_data_alloc(*vbo, size);
-  MutableSpan<int> data = vbo->data<int>();
+  MutableSpan<uchar4> data = vbo->data<uchar4>();
 
+  const uchar4 default_color(0);
   const int face_set_default = mr.mesh->face_sets_color_default;
+  const int face_set_seed = mr.mesh->face_sets_color_seed;
   const Span<int> subdiv_loop_face_index(subdiv_cache.subdiv_loop_face_index,
                                          subdiv_cache.num_subdiv_loops);
 
@@ -494,19 +511,19 @@ gpu::VertBufPtr extract_edit_face_set_subdiv(const MeshRenderData &mr,
   const VArraySpan<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
                                                             bke::AttrDomain::Face);
   if (face_sets.is_empty()) {
-    data.fill(face_set_default);
+    data.fill(default_color);
   }
   else {
     threading::parallel_for(
         IndexRange(subdiv_cache.num_subdiv_loops), 4096, [&](const IndexRange range) {
           for (const int i : range) {
             const int face_index = subdiv_loop_face_index[i];
-            data[i] = face_sets[face_index];
+            data[i] = face_set_color_get(face_sets[face_index], face_set_default, face_set_seed);
           }
         });
     /* Loose portion defaults. */
     data.slice(subdiv_cache.num_subdiv_loops, size - subdiv_cache.num_subdiv_loops)
-        .fill(face_set_default);
+        .fill(default_color);
   }
 
   return vbo;

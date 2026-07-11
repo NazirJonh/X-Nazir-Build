@@ -260,8 +260,12 @@ void SceneState::init(const DRWContext *context,
                               PAINT_DEBUG_SHOW_BVH_NODES) != 0 :
                              false;
 
-  /* Initialize the vertex paint channel mask from the overlay settings. */
-  if (context && context->v3d) {
+  /* Apply the vertex paint channel display only when the active object is in vertex paint mode.
+   * Outside that mode the mask stays neutral (all channels, no grayscale) so that regular
+   * color-attribute display in the workbench engine is left unchanged. */
+  const bool is_vertex_paint_mode = context &&
+                                    (context->object_mode & OB_MODE_VERTEX_PAINT) != 0;
+  if (is_vertex_paint_mode && context->v3d) {
     const int channel_flag = context->v3d->overlay.vertex_paint_channel_flag;
     vertex_paint_channel_mask = float4((channel_flag & V3D_OVERLAY_VPAINT_SHOW_R) ? 1.0f : 0.0f,
                                        (channel_flag & V3D_OVERLAY_VPAINT_SHOW_G) ? 1.0f : 0.0f,
@@ -270,9 +274,8 @@ void SceneState::init(const DRWContext *context,
     vertex_paint_grayscale = (channel_flag & V3D_OVERLAY_VPAINT_GRAYSCALE) != 0;
   }
   else {
-    /* Default: all channels enabled when the context is not available. */
     vertex_paint_channel_mask = float4(1.0f);
-    vertex_paint_grayscale = true;
+    vertex_paint_grayscale = false;
   }
 };
 

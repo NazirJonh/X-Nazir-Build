@@ -821,7 +821,7 @@ struct View3D {
   View3DShading shading;
   View3DOverlay overlay;
 
-  char _pad_viewer[4] = {};
+  char _pad5[4] = {};
 
   /** Path to the viewer node that is currently previewed. This is retrieved from the workspace. */
   ViewerPath viewer_path;

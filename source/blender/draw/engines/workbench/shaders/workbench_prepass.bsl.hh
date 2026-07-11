@@ -158,7 +158,6 @@ struct Mesh {
 
   materials.material_data_get(custom_id,
                               v_in.ac.rgb,
-                              v_in.ac.a,
                               v_out.color,
                               v_out.alpha,
                               v_out.roughness,
@@ -237,7 +236,6 @@ struct Curves {
   float3 vert_col = curves::get_customdata_vec3(ws_pt.curve_id, curves.ac);
   materials.material_data_get(custom_id,
                               vert_col,
-                              1.0f, /* Curves use default alpha. */
                               v_out.color,
                               v_out.alpha,
                               v_out.roughness,
@@ -309,7 +307,6 @@ struct PointCloud {
 
   materials.material_data_get(custom_id,
                               float3(1.0f),
-                              1.0f, /* Point clouds use default alpha. */
                               v_out.color,
                               v_out.alpha,
                               v_out.roughness,

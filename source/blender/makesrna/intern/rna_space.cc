@@ -997,15 +997,14 @@ static void rna_view3d_overlay_vertex_paint_channel_set(PointerRNA *ptr,
     }
   }
 
-#ifdef VPAINT_DEBUG
-  printf("[DEBUG] RNA SET: channel_flag=0x%x -> 0x%x (value=%d, mask=0x%x)\n", old_flag, new_flag, value, channel_flag);
-#endif
   overlay->vertex_paint_channel_flag = new_flag;
 }
 
 static void rna_Space_show_vertex_paint_channel_update(bContext *C, PointerRNA * /*ptr*/)
 {
-  /* Tag the 3D View window region for redraw. */
+  /* Tag the 3D viewport window region for redraw so the workbench engine re-reads the channel
+   * display flags on its next sync. This is a display-only setting, so no data re-evaluation is
+   * needed. */
   ScrArea *area = CTX_wm_area(C);
   if (area && area->spacetype == SPACE_VIEW3D) {
     ARegion *region = BKE_area_find_region_type(area, RGN_TYPE_WINDOW);
@@ -1013,16 +1012,6 @@ static void rna_Space_show_vertex_paint_channel_update(bContext *C, PointerRNA *
       ED_region_tag_redraw(region);
     }
   }
-
-  /* Tag the active object for geometry update to force a full sync cycle.
-   * This ensures the draw engine's object_sync() is called, which updates push constants. */
-  Object *ob = CTX_data_active_object(C);
-  if (ob != nullptr) {
-    DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
-  }
-
-  /* Force immediate redraw. */
-  WM_redraw_windows(C);
 }
 
 static bool rna_Space_show_vertex_paint_r_get(PointerRNA *ptr)
@@ -1410,7 +1399,6 @@ static void rna_SpaceView3D_retopology_update(Main * /*bmain*/, Scene *scene, Po
 
 static void rna_SpaceView3D_show_overlay_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
-  printf("[DEBUG] rna_SpaceView3D_show_overlay_update: start, ptr->data=%p\n", ptr->data);
   /* If Retopology is enabled, toggling overlays can change the visibility of active object. */
   const View3D *v3d = static_cast<View3D *>(ptr->data);
   if (v3d->overlay.edit_flag & V3D_OVERLAY_EDIT_RETOPOLOGY) {

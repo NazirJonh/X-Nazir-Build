@@ -2,9 +2,6 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* Enable debug printf messages for vertex paint channel feature */
-// #define VPAINT_DEBUG
-
 #include "BKE_context.hh"
 
 #include "DNA_camera_types.h"
@@ -314,7 +311,8 @@ class MeshPass : public PassMain {
   eLightingType lighting_;
   bool clip_;
   float4 vertex_paint_channel_mask_ = float4(1.0f);
-  int vertex_paint_grayscale_ = 1;  /* Use int instead of bool for push_constant */
+  /* Uses int rather than bool since push constants do not support bool. */
+  int vertex_paint_grayscale_ = 1;
 
   bool is_empty_ = false;
 

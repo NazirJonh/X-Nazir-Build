@@ -2,7 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-#include <cstdio>
+#include <string>
 
 #include "workbench_private.hh"
 
@@ -58,9 +58,6 @@ void MeshPass::set_vertex_paint_channel_mask(const float4 &mask)
 void MeshPass::set_vertex_paint_grayscale(bool grayscale)
 {
   vertex_paint_grayscale_ = grayscale ? 1 : 0;
-#ifdef VPAINT_DEBUG
-  printf("[DEBUG] set_vertex_paint_grayscale: %d\n", vertex_paint_grayscale_);
-#endif
 }
 
 PassMain::Sub &MeshPass::get_subpass(eGeometryType geometry_type, eShaderType shader_type)
@@ -76,17 +73,9 @@ PassMain::Sub &MeshPass::get_subpass(eGeometryType geometry_type, eShaderType sh
     sub_pass = &sub(pass_name.c_str());
     sub_pass->shader_set(
         ShaderCache::get().prepass_get(geometry_type, pipeline_, lighting_, shader_type, clip_));
-#ifdef VPAINT_DEBUG
-    printf("[DEBUG] get_subpass: CREATED new subpass %s\n", pass_name.c_str());
-#endif
   }
-#ifdef VPAINT_DEBUG
-  printf("[DEBUG] get_subpass: push_constant mask=(%.1f,%.1f,%.1f,%.1f), grayscale=%d (ptr)\n",
-         vertex_paint_channel_mask_.x, vertex_paint_channel_mask_.y,
-         vertex_paint_channel_mask_.z, vertex_paint_channel_mask_.w,
-         vertex_paint_grayscale_);
-#endif
-  /* Use pointer version to deference at submit time, allowing dynamic updates. */
+  /* Use the pointer version so the values are dereferenced at submit time, allowing dynamic
+   * updates when the overlay channel flags change. */
   sub_pass->push_constant("vertex_paint_channel_mask", &vertex_paint_channel_mask_);
   sub_pass->push_constant("vertex_paint_grayscale", &vertex_paint_grayscale_);
 

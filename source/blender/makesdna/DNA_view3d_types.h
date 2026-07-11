@@ -656,8 +656,8 @@ struct View3DOverlay {
   /** Weight paint mode settings. */
   eView3DOverlay_WPaintFlag wpaint_flag = {};
 
-  /** Vertex paint channel display flags (R=bit0, G=bit1, B=bit2, A=bit3, Grayscale=bit4). */
-  int vertex_paint_channel_flag = 7;  // 0x07 = R+G+B enabled by default, Alpha and Grayscale disabled
+  /** Vertex paint channel display flags (#eV3DOverlay_VertexPaintChannel). */
+  int vertex_paint_channel_flag = V3D_OVERLAY_VPAINT_SHOW_RGB_MASK;
 
   /** Alpha for texture, weight, vertex paint overlay. */
   float texture_paint_mode_opacity = 1.0f;

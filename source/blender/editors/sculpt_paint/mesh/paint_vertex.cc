@@ -621,9 +621,17 @@ static ColorPaint4f vpaint_get_current_col(VPaint &vp, bool secondary)
   return ColorPaint4f(brush_color.x, brush_color.y, brush_color.z, 1.0f);
 }
 
-/* wpaint has 'wpaint_blend' */
+/* Forward declaration: defined below, but referenced by #vpaint_blend_with_channels. */
+template<typename Color, typename Traits>
+static Color vpaint_blend(const VPaint &vp,
+                          Color color_curr,
+                          Color color_orig,
+                          Color color_paint,
+                          const typename Traits::ValueType alpha,
+                          const typename Traits::BlendType brush_alpha_value);
 
-/* wpaint has 'wpaint_blend' */
+/* Variant of #vpaint_blend that writes only to the channels enabled in the brush's
+ * #Brush.vertex_paint_channel_flag, keeping the current value of the disabled channels. */
 template<typename Color, typename Traits>
 static Color vpaint_blend_with_channels(const VPaint &vp,
                                         Color color_curr,
@@ -633,14 +641,12 @@ static Color vpaint_blend_with_channels(const VPaint &vp,
                                         const typename Traits::BlendType brush_alpha_value,
                                         const int channel_flag)
 {
-  const Brush &brush = *BKE_paint_brush_for_read(&vp.paint);
-
   /* For channel-specific painting, we need to preserve inactive channels from current color.
    * This ensures that when painting only Red, for example, the Green and Blue channels
    * remain unchanged. */
   Color color_paint_for_blend = color_paint;
 
-  /* Replace inactive channels with current color values */
+  /* Replace inactive channels with current color values. */
   if (!(channel_flag & BRUSH_VPAINT_CHANNEL_R)) {
     color_paint_for_blend.r = color_curr.r;
   }
@@ -654,7 +660,7 @@ static Color vpaint_blend_with_channels(const VPaint &vp,
     color_paint_for_blend.a = color_curr.a;
   }
 
-  /* Perform blending */
+  /* Perform blending. */
   Color color_blended = vpaint_blend<Color, Traits>(vp,
                                                      color_curr,
                                                      color_orig,
@@ -662,7 +668,7 @@ static Color vpaint_blend_with_channels(const VPaint &vp,
                                                      alpha,
                                                      brush_alpha_value);
 
-  /* Preserve original values for disabled channels (applies to both modes) */
+  /* Preserve original values for disabled channels (applies to both modes). */
   Color result;
   result.r = (channel_flag & BRUSH_VPAINT_CHANNEL_R) ? color_blended.r : color_curr.r;
   result.g = (channel_flag & BRUSH_VPAINT_CHANNEL_G) ? color_blended.g : color_curr.g;
@@ -791,6 +797,7 @@ static Color vpaint_blend_stroke(const VPaint &vp,
   }
   return result;
 }
+
 static void paint_and_tex_color_alpha_intern(const VPaint &vp,
                                              const ViewContext *vc,
                                              const float3 &co,

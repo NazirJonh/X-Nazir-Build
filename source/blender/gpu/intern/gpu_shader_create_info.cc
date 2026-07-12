@@ -8,7 +8,6 @@
  * Descriptor type used to define shader structure, resources and interfaces.
  */
 
-#include "BLI_hash.hh"
 #include "BLI_map.hh"
 #include "BLI_set.hh"
 #include "BLI_string_ref.hh"

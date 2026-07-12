@@ -76,6 +76,8 @@
 
 #include "interface_intern.hh"
 
+#include "templates/interface_brush_texture_preview.hh"
+
 namespace blender::ui {
 static CLG_LogRef LOG = {"ui"};
 
@@ -6684,6 +6686,9 @@ void update_text_styles()
 
 void exit()
 {
+  /* Free brush stroke preview GPU resources while the GPU context is still valid. */
+  ed::interface::BrushStrokePreview::free_all();
+
   resources_free();
   button_clipboard_free();
 }

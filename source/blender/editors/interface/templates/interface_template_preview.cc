@@ -280,8 +280,6 @@ void template_preview(Layout *layout,
 void template_brush_stroke_preview(Layout *layout,
                                    bContext *C,
                                    PointerRNA *brush_ptr,
-                                   float angle,
-                                   float spacing,
                                    const char *preview_id,
                                    bool show_grip)
 {
@@ -322,9 +320,8 @@ void template_brush_stroke_preview(Layout *layout,
   Block *block = layout->block();
   Layout *col = &layout->column(false);
 
-  /* The preview button reads the current brush parameters at draw time. Both `angle` and
-   * `spacing` are captured by value: the panel is rebuilt (and this template re-evaluated) on
-   * every brush property change, so the captured snapshot always reflects the latest values. */
+  /* The preview button reads the current brush parameters (angle, spacing) from the brush at draw
+   * time, so it always reflects the latest values without needing to capture a snapshot here. */
   void *brush_data = brush_ptr->data;
   uiDefBut(block,
            ButtonType::Extra,
@@ -337,8 +334,8 @@ void template_brush_stroke_preview(Layout *layout,
            0.0,
            0.0,
            "Brush Stroke Preview");
-  button_func_drawextra_set(block, [brush_data, angle, spacing](const bContext *C, rcti *rect) {
-    ED_brush_stroke_preview_draw(C, brush_data, angle, spacing, rect);
+  button_func_drawextra_set(block, [brush_data](const bContext *C, rcti *rect) {
+    ED_brush_stroke_preview_draw(C, brush_data, rect);
   });
 
   if (show_grip) {

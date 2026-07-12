@@ -2527,8 +2527,6 @@ void template_preview(Layout *layout,
 void template_brush_stroke_preview(Layout *layout,
                                    bContext *C,
                                    PointerRNA *brush_ptr,
-                                   float angle,
-                                   float spacing,
                                    const char *preview_id,
                                    bool show_grip);
 void template_color_ramp(Layout *layout, PointerRNA *ptr, StringRefNull propname, bool expand);

@@ -1290,7 +1290,7 @@ def brush_shared_settings(layout, context, brush, popover=False):
     if direction:
         layout.row().prop(brush, "direction", expand=True)
 
-    # Add jitter control for all paint modes that support it
+    # Jitter is available in all paint modes; in Sculpt only when the brush supports it.
     if (mode == 'SCULPT' and brush.sculpt_capabilities.has_jitter) or mode != 'SCULPT':
         layout.separator()
         row = layout.row(align=True)

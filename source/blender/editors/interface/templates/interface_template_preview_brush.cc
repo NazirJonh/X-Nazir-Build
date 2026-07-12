@@ -29,37 +29,19 @@
 
 #include "ED_screen.hh"
 
-#include "brush/brush_texture_preview.h"
-#include "brush/brush_texture_preview_api.h"
-
+#include "interface_brush_texture_preview.hh"
 #include "interface_template_preview_brush.hh"
 
 using namespace blender;
 
-/* Per-stroke transformation derived from the brush settings. */
-struct BrushTransform {
-  float scale_x;
-  float scale_y;
-  float rotation;
-  float pattern_spacing;
-  bool use_random;
-  float random_angle;
-};
+namespace blender::ed::interface {
 
-/* A single brush stamp along the previewed stroke. */
-struct PatternElement {
-  float x, y;
-  float rotation;
-};
-
-/* Generate a sinusoidal stroke of stamps. The result is deterministic (fixed RNG seed) so the
- * preview does not flicker between redraws. */
-static blender::Vector<PatternElement> generate_brush_pattern(const blender::Brush *brush,
-                                                              const BrushTransform *transform,
-                                                              float center_x,
-                                                              float center_y,
-                                                              float preview_size,
-                                                              float base_angle)
+Vector<StrokeStamp> compute_stroke_stamps(const Brush *brush,
+                                          const StrokeTransform &transform,
+                                          float center_x,
+                                          float center_y,
+                                          float preview_size,
+                                          float base_angle)
 {
   const float preview_width = preview_size * 2.0f;
   const float preview_height = preview_size;
@@ -67,7 +49,7 @@ static blender::Vector<PatternElement> generate_brush_pattern(const blender::Bru
   footprint_size = max_ff(footprint_size, 16.0f);
 
   /* Map spacing percentage to a stamp count: smaller spacing -> more stamps. */
-  float spacing_clamped = max_ff(transform->pattern_spacing, 1.0f);
+  float spacing_clamped = max_ff(transform.pattern_spacing, 1.0f);
   spacing_clamped = min_ff(spacing_clamped, 500.0f);
   const float spacing_normalized = (spacing_clamped - 1.0f) / (500.0f - 1.0f);
   int max_elements = int(30.0f - (30.0f - 3.0f) * spacing_normalized);
@@ -95,7 +77,7 @@ static blender::Vector<PatternElement> generate_brush_pattern(const blender::Bru
                                                 brush->jitter) :
                                            0.0f;
 
-  blender::Vector<PatternElement> elements;
+  Vector<StrokeStamp> elements;
   elements.reserve(max_elements);
 
   for (int i = 0; i < max_elements; i++) {
@@ -121,20 +103,21 @@ static blender::Vector<PatternElement> generate_brush_pattern(const blender::Bru
     }
 
     float element_angle = base_angle;
-    if (transform->use_random && transform->random_angle > 0.0f) {
+    if (transform.use_random && transform.random_angle > 0.0f) {
       const float random_factor = BLI_rng_get_float(rng);
-      element_angle += -transform->random_angle / 2.0f + transform->random_angle * random_factor;
+      element_angle += -transform.random_angle / 2.0f + transform.random_angle * random_factor;
     }
 
-    elements.append(PatternElement{x, y, element_angle});
+    elements.append(StrokeStamp{x, y, element_angle});
   }
 
   BLI_rng_free(rng);
   return elements;
 }
 
-void ED_brush_stroke_preview_draw(
-    const blender::bContext *C, void *brush_data, float angle, float spacing, blender::rcti *rect)
+}  // namespace blender::ed::interface
+
+void ED_brush_stroke_preview_draw(const blender::bContext *C, void *brush_data, blender::rcti *rect)
 {
   if (!brush_data || !rect) {
     return;
@@ -142,7 +125,11 @@ void ED_brush_stroke_preview_draw(
 
   blender::Brush *brush = static_cast<blender::Brush *>(brush_data);
 
-  BrushTransform transform = {};
+  /* Visualize the brush's own stroke parameters: texture angle and stroke spacing. */
+  const float angle = brush->mtex.rot;
+  const float spacing = float(brush->spacing);
+
+  blender::ed::interface::StrokeTransform transform = {};
   transform.scale_x = 1.0f;
   transform.scale_y = 1.0f;
   transform.rotation = angle;
@@ -197,21 +184,18 @@ void ED_brush_stroke_preview_draw(
   const blender::ARegion *region = CTX_wm_region(C);
   if (region && brush->mtex.tex) {
     const blender::int2 preview_px(rect->xmax - rect->xmin, rect->ymax - rect->ymin);
-    const blender::Brush *brush_const = static_cast<const blender::Brush *>(brush_data);
-    blender::ed::interface::BrushTexturePreview *texture_preview =
-        blender::ed::interface::BKE_brush_texture_preview_ensure(
-            region, brush_const, preview_px, angle, spacing);
-    if (texture_preview &&
-        blender::ed::interface::BKE_brush_texture_preview_render(texture_preview) &&
-        blender::ed::interface::BKE_brush_texture_preview_draw_ui(texture_preview, rect, 1.0f))
-    {
+    using blender::ed::interface::BrushStrokePreview;
+    BrushStrokePreview *preview = BrushStrokePreview::ensure(
+        region, brush, preview_px, angle, spacing);
+    if (preview && preview->render() && preview->draw(rect, 1.0f)) {
       return;
     }
   }
 
   /* Fallback: draw colored stamps along the previewed stroke. */
-  const blender::Vector<PatternElement> pattern = generate_brush_pattern(
-      brush, &transform, center_x, center_y, preview_size, angle);
+  const blender::Vector<blender::ed::interface::StrokeStamp> pattern =
+      blender::ed::interface::compute_stroke_stamps(
+          brush, transform, center_x, center_y, preview_size, angle);
   const int pattern_count = pattern.size();
 
   const float base_element_size = (preview_size * transform.scale_x) * 0.3f;

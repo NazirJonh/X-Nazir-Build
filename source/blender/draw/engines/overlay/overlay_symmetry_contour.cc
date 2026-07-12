@@ -19,6 +19,7 @@
 
 #include "BLI_bit_vector.hh"
 #include "BLI_bounds.hh"
+#include "BLI_disjoint_set.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_geom.h"
@@ -36,6 +37,10 @@
 #include <chrono>
 #include <cmath>
 #include <utility>
+
+#if SCULPT_OVERLAY_PERF_LOGGING
+#  include <cstdio>
+#endif
 
 namespace blender::draw::overlay {
 
@@ -137,9 +142,13 @@ bool intersect_triangle_plane(const float3 &v0,
                               float3 &r_end)
 {
   const float3 vertices[3] = {v0, v1, v2};
-  const float distances[3] = {math::dot(v0 - plane.point, plane.normal),
-                              math::dot(v1 - plane.point, plane.normal),
-                              math::dot(v2 - plane.point, plane.normal)};
+  /* The symmetry planes are always axis-aligned (see #build_plane_params), so the signed distance
+   * to the plane is just the offset along that axis - the full dot product would compute the same
+   * value with two extra zero-weighted terms. This runs once per triangle of every straddling node,
+   * so it is the hottest arithmetic in the whole extraction. */
+  const int a = plane.axis;
+  const float distances[3] = {
+      v0[a] - plane.point[a], v1[a] - plane.point[a], v2[a] - plane.point[a]};
 
   constexpr float epsilon = 1e-6f;
   const int positive_count = int(distances[0] > epsilon) + int(distances[1] > epsilon) +
@@ -414,8 +423,10 @@ void smooth_loop(ContourLoop &loop, const PlaneParams &plane)
   if (loop.points.size() < 3) {
     return;
   }
+  /* Ping-pong between two buffers instead of allocating a fresh copy per iteration. Endpoints are
+   * never written, so both buffers keep the original (correct) first/last points throughout. */
+  Vector<float3> scratch = loop.points;
   for (int iter = 0; iter < plane.smooth_iters; iter++) {
-    Vector<float3> new_points = loop.points;
     for (int i = 1; i < loop.points.size() - 1; i++) {
       const float3 target = (loop.points[i - 1] + loop.points[i + 1]) * 0.5f;
       float3 delta = (target - loop.points[i]) * plane.smooth_factor;
@@ -423,9 +434,9 @@ void smooth_loop(ContourLoop &loop, const PlaneParams &plane)
       if (delta_len > plane.smooth_max_disp && delta_len > 0.0f) {
         delta *= plane.smooth_max_disp / delta_len;
       }
-      new_points[i] = loop.points[i] + delta;
+      scratch[i] = loop.points[i] + delta;
     }
-    loop.points = std::move(new_points);
+    std::swap(loop.points, scratch);
   }
 }
 
@@ -445,83 +456,125 @@ void build_loops_from_segments(const Span<ContourSegment> segments,
     adjacency.lookup_or_add_default(QuantizedPointKeyHash{}(segments[i].key_b)).append(i);
   }
 
+  /* Partition the segments into connected components (any two segments sharing a welded endpoint
+   * are joined). Each component is an independent contour graph - no adjacency bucket ever mixes
+   * two components - so the chaining below can run on all components in parallel. */
+  DisjointSet<int> components(segments.size());
+  for (const Vector<int> &bucket : adjacency.values()) {
+    for (const int i : bucket.index_range()) {
+      if (i > 0) {
+        components.join(bucket[0], bucket[i]);
+      }
+    }
+  }
+
+  /* Group segment indices by component, keeping each group in ascending index order so junction
+   * resolution stays deterministic and matches the single-threaded result (only the order of the
+   * emitted loops in #r_loops may differ, which does not affect the drawn contour). */
+  Map<int, int> root_to_slot;
+  Vector<Vector<int>> component_segments;
+  for (const int i : segments.index_range()) {
+    const int slot = root_to_slot.lookup_or_add_cb(components.find_root(i), [&]() {
+      component_segments.append({});
+      return int(component_segments.size()) - 1;
+    });
+    component_segments[slot].append(i);
+  }
+
+  /* Shared across threads, but every component only ever touches its own (disjoint) segment
+   * indices, and blender::Vector<bool> stores one byte per element, so the writes never overlap. */
   Vector<bool> used(segments.size(), false);
 
-  for (const int start_idx : segments.index_range()) {
-    if (used[start_idx]) {
-      continue;
-    }
-    const ContourSegment &seg = segments[start_idx];
-    used[start_idx] = true;
+  threading::EnumerableThreadSpecific<Vector<ContourLoop>> loops_ts;
 
-    ContourLoop loop;
-    loop.points.append(seg.a);
-    loop.points.append(seg.b);
-
-    const uint64_t start_hash = QuantizedPointKeyHash{}(seg.key_a);
-    QuantizedPointKey current_key = seg.key_b;
-    uint64_t current_hash = QuantizedPointKeyHash{}(current_key);
-
-    while (true) {
-      Vector<int> *next_list = adjacency.lookup_ptr(current_hash);
-      if (next_list == nullptr) {
-        break;
-      }
-      /* At a plain degree-2 vertex there is only one unused candidate to continue with. At a
-       * junction - more than 2 segments quantized to the same point, from a genuine
-       * self-intersection of the contour curve or two crossings merged by #PlaneParams.quant_step
-       * - more than one unused candidate can remain. #segments arrives in a different order every
-       * call (the per-node results are folded from thread-local buffers in whatever order the
-       * task scheduler happens to visit them), so picking the first unused candidate in that
-       * order made the resulting loop count depend on that arbitrary order instead of the
-       * geometry. Continue with whichever candidate keeps the traversal straightest instead: that
-       * matches the visually correct pairing at a crossing and does not depend on input order. */
-      int next_idx = -1;
-      const float3 &curr_point = loop.points.last();
-      const float3 incoming_dir = math::normalize(curr_point - loop.points[loop.points.size() - 2]);
-      float best_dot = -2.0f;
-      for (const int cand : *next_list) {
-        if (used[cand]) {
+  threading::parallel_for(component_segments.index_range(), 1, [&](const IndexRange range) {
+    Vector<ContourLoop> &local_loops = loops_ts.local();
+    for (const int comp : range) {
+      for (const int start_idx : component_segments[comp]) {
+        if (used[start_idx]) {
           continue;
         }
-        const ContourSegment &cand_seg = segments[cand];
-        const float3 &cand_point = (cand_seg.key_a == current_key) ? cand_seg.b : cand_seg.a;
-        const float3 outgoing_dir = math::normalize(cand_point - curr_point);
-        const float dot = math::dot(incoming_dir, outgoing_dir);
-        if (dot > best_dot) {
-          best_dot = dot;
-          next_idx = cand;
+        const ContourSegment &seg = segments[start_idx];
+        used[start_idx] = true;
+
+        ContourLoop loop;
+        loop.points.append(seg.a);
+        loop.points.append(seg.b);
+
+        const uint64_t start_hash = QuantizedPointKeyHash{}(seg.key_a);
+        QuantizedPointKey current_key = seg.key_b;
+        uint64_t current_hash = QuantizedPointKeyHash{}(current_key);
+
+        while (true) {
+          Vector<int> *next_list = adjacency.lookup_ptr(current_hash);
+          if (next_list == nullptr) {
+            break;
+          }
+          /* At a plain degree-2 vertex there is only one unused candidate to continue with. At a
+           * junction - more than 2 segments quantized to the same point, from a genuine
+           * self-intersection of the contour curve or two crossings merged by
+           * #PlaneParams.quant_step - more than one unused candidate can remain. #segments arrives
+           * in a different order every call (the per-node results are folded from thread-local
+           * buffers in whatever order the task scheduler happens to visit them), so picking the
+           * first unused candidate in that order made the resulting loop count depend on that
+           * arbitrary order instead of the geometry. Continue with whichever candidate keeps the
+           * traversal straightest instead: that matches the visually correct pairing at a crossing
+           * and does not depend on input order. */
+          int next_idx = -1;
+          const float3 &curr_point = loop.points.last();
+          const float3 incoming_dir = math::normalize(curr_point -
+                                                      loop.points[loop.points.size() - 2]);
+          float best_dot = -2.0f;
+          for (const int cand : *next_list) {
+            if (used[cand]) {
+              continue;
+            }
+            const ContourSegment &cand_seg = segments[cand];
+            const float3 &cand_point = (cand_seg.key_a == current_key) ? cand_seg.b : cand_seg.a;
+            const float3 outgoing_dir = math::normalize(cand_point - curr_point);
+            const float dot = math::dot(incoming_dir, outgoing_dir);
+            if (dot > best_dot) {
+              best_dot = dot;
+              next_idx = cand;
+            }
+          }
+          if (next_idx == -1) {
+            break;
+          }
+          used[next_idx] = true;
+          const ContourSegment &next_seg = segments[next_idx];
+          if (next_seg.key_a == current_key) {
+            loop.points.append(next_seg.b);
+            current_key = next_seg.key_b;
+          }
+          else {
+            loop.points.append(next_seg.a);
+            current_key = next_seg.key_a;
+          }
+          current_hash = QuantizedPointKeyHash{}(current_key);
         }
-      }
-      if (next_idx == -1) {
-        break;
-      }
-      used[next_idx] = true;
-      const ContourSegment &next_seg = segments[next_idx];
-      if (next_seg.key_a == current_key) {
-        loop.points.append(next_seg.b);
-        current_key = next_seg.key_b;
-      }
-      else {
-        loop.points.append(next_seg.a);
-        current_key = next_seg.key_a;
-      }
-      current_hash = QuantizedPointKeyHash{}(current_key);
-    }
 
-    loop.length = 0.0f;
-    for (int i = 1; i < loop.points.size(); i++) {
-      loop.length += math::distance(loop.points[i - 1], loop.points[i]);
-    }
-    if (current_hash == start_hash && loop.points.size() > 2) {
-      loop.is_closed = true;
-    }
-    if (loop.length < plane.min_loop_len) {
-      continue;
-    }
+        loop.length = 0.0f;
+        for (int i = 1; i < loop.points.size(); i++) {
+          loop.length += math::distance(loop.points[i - 1], loop.points[i]);
+        }
+        if (current_hash == start_hash && loop.points.size() > 2) {
+          loop.is_closed = true;
+        }
+        if (loop.length < plane.min_loop_len) {
+          continue;
+        }
 
-    smooth_loop(loop, plane);
-    r_loops.append(std::move(loop));
+        smooth_loop(loop, plane);
+        local_loops.append(std::move(loop));
+      }
+    }
+  });
+
+  for (Vector<ContourLoop> &local : loops_ts) {
+    for (ContourLoop &loop : local) {
+      r_loops.append(std::move(loop));
+    }
   }
 }
 
@@ -594,13 +647,20 @@ Bounds<float3> compute_object_bounds(const bke::pbvh::Tree *pbvh,
 void SymmetryContour::begin_sync(Resources &res, const State &state)
 {
   contour_shader_ = res.shaders->extra_wire_contour.get();
-  contour_lines_.clear();
+  /* #contour_lines_ is intentionally not cleared here: it is retained across frames so an unchanged
+   * frame (camera-only navigation) can reuse it without re-emitting or re-uploading. #update_contours
+   * clears it when a rebuild is required; #end_sync clears it when the frame produced nothing. */
 
   line_thickness_ = math::max(state.overlay.sculpt_symmetry_contour_thickness, 1.0f);
 
   const float4 theme_col = res.theme.colors.sculpt_symmetry_contour;
   line_color_ = float3(theme_col);
   line_alpha_ = theme_col.w;
+
+  /* The line color is baked per-vertex during #emit_loop, so a theme change forces a re-emit. */
+  color_changed_ = float4(line_color_, line_alpha_) != emitted_color_;
+  frame_object_count_ = 0;
+  buffer_unchanged_this_frame_ = true;
 }
 
 void SymmetryContour::emit_loop(const ContourLoop &loop, const float4x4 &object_to_world)
@@ -684,6 +744,8 @@ void SymmetryContour::update_contours(const Object *ob,
     return;
   }
 
+  frame_object_count_++;
+
   const float4x4 object_to_world = ob->object_to_world();
 
   bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*const_cast<Object *>(ob));
@@ -706,11 +768,39 @@ void SymmetryContour::update_contours(const Object *ob,
 
   const RegenDecision decision = compute_regen_decision(ob, symmetry_flags, pbvh, has_dirty_nodes);
 
+  /* Reuse path: the retained #contour_lines_ already holds this object's world-space geometry, so
+   * neither the CPU re-emit nor (via #buffer_unchanged_this_frame_) the GPU re-upload is needed.
+   * Restricted to a lone synced object whose transform, cached contour and color are all unchanged -
+   * the common case while orbiting the camera over a static sculpt. */
+  const bool can_reuse = lines_valid_ && !decision.need_regenerate && !color_changed_ &&
+                         frame_object_count_ == 1 && emitted_object_count_ == 1 &&
+                         ob == emitted_object_ && object_to_world == emitted_object_to_world_;
+  if (can_reuse) {
+    return;
+  }
+
+  /* This frame will (re)build the buffer, so it is no longer identical to the retained one. */
+  buffer_unchanged_this_frame_ = false;
+  /* Clear once, on the first contributing object; later objects accumulate into the same buffer. */
+  if (frame_object_count_ == 1) {
+    contour_lines_.clear();
+  }
+  lines_valid_ = false;
+
+  auto note_emitted = [&]() {
+    emitted_object_ = ob;
+    emitted_object_to_world_ = object_to_world;
+    emitted_color_ = float4(line_color_, line_alpha_);
+    emitted_object_count_ = frame_object_count_;
+    lines_valid_ = true;
+  };
+
   /* Fast path: re-emit the cached contour (transformed by the current matrix) unchanged. */
   if (!decision.need_regenerate) {
     for (const ContourLoop &loop : cached_contours_) {
       emit_loop(loop, object_to_world);
     }
+    note_emitted();
     return;
   }
 
@@ -745,8 +835,18 @@ void SymmetryContour::update_contours(const Object *ob,
    * needlessly spreading their one-off full-mesh fill across dozens of stuttering frames (every
    * one of which still pays the fixed cost of walking every leaf node), while a cap sized for
    * light meshes would blow the frame budget on heavier ones. A time budget scales itself to
-   * whatever the mesh actually costs to process. */
-  constexpr double recompute_time_budget_ms = 4.0;
+   * whatever the mesh actually costs to process.
+   *
+   * The initial full build (and any #reset_cache rebuild) of a heavy mesh is pure triangle/plane
+   * extraction that can run into the second range - far too long for a single frame. It is spread
+   * across frames the same way, using a larger budget so the contour fills in over a handful of
+   * interactive frames instead of freezing on one. Since #search_nodes already visits only the thin
+   * slab of nodes near the plane, the per-frame fixed cost of resuming is small. A live incremental
+   * stroke keeps the smaller budget so a single dab never hitches. */
+  if (decision.reset_cache) {
+    filling_ = true;
+  }
+  const double recompute_time_budget_ms = filling_ ? 20.0 : 4.0;
 
   /* Drop the whole per-node cache when it can no longer be trusted (see #compute_regen_decision
    * for when #reset_cache fires). Otherwise a precise dirty mask pinpoints exactly which nodes to
@@ -765,6 +865,12 @@ void SymmetryContour::update_contours(const Object *ob,
 
   bool pending_dirty = false;
 
+#if SCULPT_OVERLAY_PERF_LOGGING
+  double perf_extract_ms = 0.0;
+  double perf_loops_ms = 0.0;
+  double perf_emit_ms = 0.0;
+#endif
+
   for (int axis = 0; axis < 3; axis++) {
     const int axis_flag = (axis == 0) ? PAINT_SYMM_X : (axis == 1) ? PAINT_SYMM_Y : PAINT_SYMM_Z;
     if ((symmetry_flags & axis_flag) == 0) {
@@ -776,11 +882,36 @@ void SymmetryContour::update_contours(const Object *ob,
     Vector<ContourSegment> segments;
     Set<uint64_t> segment_hashes;
 
+#if SCULPT_OVERLAY_PERF_LOGGING
+    const auto perf_t0 = std::chrono::steady_clock::now();
+#endif
+
     if (pbvh != nullptr) {
       Map<int, Vector<ContourSegment>> &axis_cache = cached_segments_by_axis_[axis];
 
-      IndexMaskMemory memory;
-      const IndexMask node_mask = bke::pbvh::all_leaf_nodes(*pbvh, memory);
+      /* Gather only the leaf nodes whose bounds straddle this symmetry plane (and, when a view is
+       * available, fall within the frustum). #search_nodes descends the PBVH and prunes whole
+       * subtrees whose bounds fail the test, so on heavy meshes - where the plane touches only a
+       * thin slab of nodes - this visits far fewer nodes than walking every leaf. The same test is
+       * therefore no longer repeated inside the parallel loop below. */
+      IndexMaskMemory node_memory;
+      const IndexMask node_mask = bke::pbvh::search_nodes(
+          *pbvh, node_memory, [&](const bke::pbvh::Node &node) {
+            if (!aabb_intersects_plane(node.bounds(), plane)) {
+              return false;
+            }
+            if (use_frustum_cull) {
+              const blender::Bounds<float3> world_bounds =
+                  blender::bounds::transform_bounds<float, 4>(object_to_world, node.bounds());
+              if (isect_aabb_planes_v3(
+                      frustum_planes, frustum_plane_len, world_bounds.min, world_bounds.max) ==
+                  ISECT_AABB_PLANE_BEHIND_ANY)
+              {
+                return false;
+              }
+            }
+            return true;
+          });
       Vector<int> node_indices(node_mask.size());
       node_mask.to_indices(node_indices.as_mutable_span());
 
@@ -820,11 +951,12 @@ void SymmetryContour::update_contours(const Object *ob,
         return cache_snapshot[n] == nullptr;
       };
 
-      /* Shared per-node traversal for every PBVH type. Each leaf node is culled against the plane
-       * and the view frustum, then either recomputed (subject to the per-frame time budget) or
-       * re-used from the cache. Only the leaf-node type, the grain size and the extraction callback
-       * differ between Mesh, BMesh and Grids; `extra_recompute` forces recompute regardless of the
-       * dirty state (used by Grids when the CCG coordinates are dirty). */
+      /* Shared per-node traversal for every PBVH type. The plane/frustum culling was already done
+       * by #search_nodes above, so every node here is a candidate: it is either recomputed (subject
+       * to the per-frame time budget) or re-used from the cache. Only the leaf-node type, the grain
+       * size and the extraction callback differ between Mesh, BMesh and Grids; `extra_recompute`
+       * forces recompute regardless of the dirty state (used by Grids when the CCG coordinates are
+       * dirty). */
       auto process_nodes = [&](auto nodes,
                                const int64_t grain_size,
                                const bool extra_recompute,
@@ -834,29 +966,14 @@ void SymmetryContour::update_contours(const Object *ob,
               Vector<ContourSegment> &local_segments = local_segments_ts.local();
               for (const int n : node_indices.as_span().slice(range)) {
                 const auto &node = nodes[n];
-                if (!aabb_intersects_plane(node.bounds(), plane)) {
-                  continue;
-                }
-                if (use_frustum_cull) {
-                  const blender::Bounds<float3> world_bounds =
-                      blender::bounds::transform_bounds<float, 4>(object_to_world, node.bounds());
-                  if (isect_aabb_planes_v3(
-                          frustum_planes, frustum_plane_len, world_bounds.min, world_bounds.max) ==
-                      ISECT_AABB_PLANE_BEHIND_ANY)
-                  {
-                    continue;
-                  }
-                }
                 if (node_needs_recompute(n) || extra_recompute) {
-                  /* Never throttle a full rebuild (#reset_cache): every intersecting node is
-                   * already missing from the cache in that case, so spreading the one-off cost over
-                   * many frames only multiplies the fixed per-frame leaf-walk overhead instead of
-                   * paying it once. Throttling only matters for the incremental case, where a live
-                   * stroke could otherwise dirty an unexpectedly large number of nodes in a single
-                   * step. */
-                  if (!decision.reset_cache &&
-                      (recompute_budget_exhausted.load(std::memory_order_relaxed) ||
-                       std::chrono::steady_clock::now() >= recompute_deadline))
+                  /* Once this frame's recompute budget is spent, leave the remaining nodes for the
+                   * next frame (marking the contour dirty). This throttles both a live incremental
+                   * stroke and the initial full build, which for a heavy mesh is otherwise a
+                   * second-long freeze; #filling_ raised the budget so that fill still completes in
+                   * a handful of interactive frames rather than dozens. */
+                  if (recompute_budget_exhausted.load(std::memory_order_relaxed) ||
+                      std::chrono::steady_clock::now() >= recompute_deadline)
                   {
                     recompute_budget_exhausted.store(true, std::memory_order_relaxed);
                     pending_dirty_nodes.store(true, std::memory_order_relaxed);
@@ -949,6 +1066,11 @@ void SymmetryContour::update_contours(const Object *ob,
       }
     }
 
+#if SCULPT_OVERLAY_PERF_LOGGING
+    const auto perf_t1 = std::chrono::steady_clock::now();
+    perf_extract_ms += std::chrono::duration<double, std::milli>(perf_t1 - perf_t0).count();
+#endif
+
     Vector<ContourLoop> axis_loops;
     build_loops_from_segments(segments, plane, axis_loops);
 
@@ -964,6 +1086,11 @@ void SymmetryContour::update_contours(const Object *ob,
       }
     }
 
+#if SCULPT_OVERLAY_PERF_LOGGING
+    const auto perf_t2 = std::chrono::steady_clock::now();
+    perf_loops_ms += std::chrono::duration<double, std::milli>(perf_t2 - perf_t1).count();
+#endif
+
     /* Screen-space decimation (operates in object space; persmat folds in the model matrix). */
     if (state.rv3d && state.region) {
       const float4x4 persmat = float4x4(state.rv3d->persmat) * object_to_world;
@@ -978,27 +1105,56 @@ void SymmetryContour::update_contours(const Object *ob,
     }
 
     cached_contours_.extend(std::move(axis_loops));
+
+#if SCULPT_OVERLAY_PERF_LOGGING
+    const auto perf_t3 = std::chrono::steady_clock::now();
+    perf_emit_ms += std::chrono::duration<double, std::milli>(perf_t3 - perf_t2).count();
+#endif
   }
 
   /* Recompute next frame if the per-frame budget left dirty nodes unprocessed. */
   contours_dirty_ = pending_dirty;
+  /* The progressive fill is finished once a frame completes without leaving dirty work behind, so
+   * subsequent incremental strokes fall back to the smaller per-frame budget. */
+  if (!pending_dirty) {
+    filling_ = false;
+  }
   prev_enabled_ = enabled_;
   prev_object_ = ob;
   prev_symmetry_flags_ = symmetry_flags;
   prev_pbvh_nodes_num_ = decision.pbvh_nodes_num;
   prev_positions_count_ = decision.positions_count;
+
+  note_emitted();
+
+#if SCULPT_OVERLAY_PERF_LOGGING
+  printf("[SCULPT_OVERLAY_PERF] rebuild extract_ms=%.3f loops_ms=%.3f emit_ms=%.3f\n",
+         perf_extract_ms,
+         perf_loops_ms,
+         perf_emit_ms);
+#endif
 }
 
 void SymmetryContour::end_sync(PassSimple::Sub &pass)
 {
   if (!enabled_ || contour_shader_ == nullptr) {
     contour_lines_.clear();
+    lines_valid_ = false;
     return;
+  }
+  /* No object contributed this frame (e.g. symmetry disabled on the mesh, or the object left sculpt
+   * mode) - the retained buffer is now stale, so drop it rather than redraw it. */
+  if (frame_object_count_ == 0) {
+    contour_lines_.clear();
+    lines_valid_ = false;
   }
   pass.shader_set(contour_shader_);
   pass.push_constant("contour_width", line_thickness_);
   pass.push_constant("depth_bias", depth_bias_);
-  contour_lines_.end_sync(pass);
+  /* Skip the GPU re-upload when every synced object reused its buffer (nothing was re-emitted); the
+   * retained buffer on the GPU is still exactly what would be uploaded. */
+  const bool skip_upload = buffer_unchanged_this_frame_ && lines_valid_ && frame_object_count_ > 0;
+  contour_lines_.end_sync(pass, !skip_upload);
 }
 
 /** \} */

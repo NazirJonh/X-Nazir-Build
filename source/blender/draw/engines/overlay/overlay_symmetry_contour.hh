@@ -26,6 +26,12 @@
 #include "BLI_set.hh"
 #include "BLI_vector.hh"
 
+/* TEMP DEBUG (#SCULPT_OVERLAY_PERF): shared toggle for the sculpt-overlay perf instrumentation used
+ * by both overlay_sculpt.hh (per-frame begin_sync/object_sync totals) and overlay_symmetry_contour.cc
+ * (per-rebuild extract/loops/emit sub-timings). Set to 1 to enable; 0 compiles it all out. Grep
+ * "SCULPT_OVERLAY_PERF" to find/remove every line tagged by this. */
+#define SCULPT_OVERLAY_PERF_LOGGING 1
+
 struct Object;
 struct Mesh;
 struct BMesh;
@@ -118,6 +124,29 @@ class SymmetryContour {
   /** Per-axis, per-PBVH-node segment cache enabling incremental updates while sculpting. */
   Map<int, Vector<ContourSegment>> cached_segments_by_axis_[3];
   bool contours_dirty_ = true;
+  /**
+   * A full rebuild is in progress and is being spread across frames (see the recompute time budget
+   * in #update_contours). Set when a #RegenDecision.reset_cache build starts and cleared once a
+   * frame finishes with no dirty work left, so the initial fill of a heavy mesh can use a larger
+   * per-frame budget than a live incremental stroke without freezing on a single frame.
+   */
+  bool filling_ = false;
+
+  /**
+   * Navigation fast path. While the object, its transform, the cached object-space contour and the
+   * line color all stay put (e.g. orbiting the camera), the world-space #contour_lines_ buffer is
+   * identical frame to frame, so it is retained on the GPU - neither re-emitted on the CPU nor
+   * re-uploaded. Engaged only for a single synced object; any frame that syncs a different object
+   * count falls back to a full re-emit. See #update_contours / #end_sync.
+   */
+  bool lines_valid_ = false;
+  bool buffer_unchanged_this_frame_ = false;
+  bool color_changed_ = false;
+  int frame_object_count_ = 0;
+  int emitted_object_count_ = 0;
+  const Object *emitted_object_ = nullptr;
+  float4x4 emitted_object_to_world_ = float4x4::identity();
+  float4 emitted_color_ = float4(0.0f);
 
   const Object *prev_object_ = nullptr;
   int prev_symmetry_flags_ = 0;

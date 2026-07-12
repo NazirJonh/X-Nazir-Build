@@ -1130,13 +1130,21 @@ struct VertexPrimitiveBuf {
     data_buf.append({float4(position, 0.0f), color});
   }
 
-  void end_sync(PassSimple::Sub &pass, GPUPrimType primitive)
+  /**
+   * `upload` may be set to false to skip the GPU re-upload when the caller knows #data_buf still
+   * holds exactly what was uploaded on a previous frame (the draw command is still recorded, so the
+   * retained buffer is drawn as-is). Used by the symmetry contour to reuse a static contour while
+   * only the camera moves.
+   */
+  void end_sync(PassSimple::Sub &pass, GPUPrimType primitive, bool upload = true)
   {
     if (data_buf.is_empty()) {
       return;
     }
     select_buf.select_bind(pass);
-    data_buf.push_update();
+    if (upload) {
+      data_buf.push_update();
+    }
     pass.bind_ssbo("data_buf", &data_buf);
     pass.push_constant("colorid", color_id);
     pass.draw_procedural(primitive, 1, data_buf.size());
@@ -1206,9 +1214,9 @@ struct LinePrimitiveBuf : public VertexPrimitiveBuf {
     append(start, end, float4(), select_id);
   }
 
-  void end_sync(PassSimple::Sub &pass)
+  void end_sync(PassSimple::Sub &pass, bool upload = true)
   {
-    VertexPrimitiveBuf::end_sync(pass, GPU_PRIM_LINES);
+    VertexPrimitiveBuf::end_sync(pass, GPU_PRIM_LINES, upload);
   }
 };
 

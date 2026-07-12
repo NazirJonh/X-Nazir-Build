@@ -1012,6 +1012,16 @@ static void rna_Space_show_vertex_paint_channel_update(bContext *C, PointerRNA *
       ED_region_tag_redraw(region);
     }
   }
+
+  /* Tag the active object for geometry update to force a full sync cycle.
+   * This ensures the draw engine's object_sync() is called, which updates push constants. */
+  Object *ob = CTX_data_active_object(C);
+  if (ob != nullptr) {
+    DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  }
+
+  /* Force immediate redraw. */
+  WM_redraw_windows(C);
 }
 
 static bool rna_Space_show_vertex_paint_r_get(PointerRNA *ptr)

@@ -125,7 +125,12 @@ float multires_level_fade(uint level)
   if (level == 0u) {
     return 1.0f;
   }
-  float wire_level = compute_multires_wire_level();
+  /* Reveal up to `level_reveal_extra` more levels of subdivision than the raw
+   * screen-size estimate would. Each unit is one extra level of detail visible at
+   * the same camera distance (set to 1.0 in Sculpt Mode via the per-object UBO,
+   * 0.0 in Object Mode). Applied here so both the per-level fade threshold and the
+   * hierarchy dimmer stay consistent with the shifted reveal schedule. */
+  float wire_level = compute_multires_wire_level() + multires_wire_buf.level_reveal_extra;
   float extra = multires_level_extra_threshold(level);
   float hide = float(level) + 0.5f + extra + LEVEL_REVEAL_OFFSET;
   float fade = smoothstep(hide, hide + 0.5f, wire_level);
@@ -345,8 +350,17 @@ void main()
 #  endif
 
 #  if !defined(CURVES)
-  /* Cull flat edges below threshold. */
-  if (!no_attr && !is_edge_sharpness_visible(wd)) {
+  /* Cull flat edges below threshold.
+   *
+   * When the adaptive Multires wireframe is active, edge visibility is driven
+   * entirely by `multires_level_fade` in the block above. This mirrors the
+   * Sculpt-Mode PBVH path, where `wd` is filled with 0.0 (see
+   * `fill_edge_fac_grids` in draw_pbvh.cc) precisely to neutralise this cull.
+   * Without skipping it here, every smooth subdivision edge (level >= 1) would
+   * be culled regardless of camera distance — since neighbouring subdivided
+   * faces are nearly coplanar and `wd` stays near its maximum — so the level
+   * wireframe would never appear in Object Mode. */
+  if (!use_multires_wireframe && !no_attr && !is_edge_sharpness_visible(wd)) {
     edge_start = float2(-1.0f);
   }
 #  endif

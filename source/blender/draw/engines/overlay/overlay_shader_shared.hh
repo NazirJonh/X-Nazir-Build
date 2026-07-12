@@ -157,7 +157,12 @@ struct [[host_shared]] OVERLAY_MultiresWireData {
    * Non-zero in Sculpt Mode when total_level > grid_depth. The shader normalises raw VBO
    * levels by subtracting this so that level 0 always means "coarsest visible edge". */
   float wire_level_min;
-  float _pad0;
+  /* Extra amount added to the computed `wire_level` in the vertex shader. Each unit shifts
+   * the whole reveal schedule down by one subdivision level (equivalent to the camera being
+   * 2x closer for visibility purposes), so the wireframe exposes one deeper level of detail
+   * at the same camera distance. Used to reveal more detail in Sculpt Mode (PBVH path) than
+   * in Object Mode. 0.0 in Object Mode. */
+  float level_reveal_extra;
 };
 
 #ifdef GPU_SHADER

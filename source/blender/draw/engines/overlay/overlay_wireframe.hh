@@ -321,6 +321,12 @@ class Wireframe : Overlay {
             (*object_ubo).object_diameter = object_diameter;
             (*object_ubo).wire_level_max = float(effective_max_level); /* std140: stored as float */
             (*object_ubo).wire_level_min = float(effective_min_level);
+            /* Reveal one extra subdivision level of detail in Sculpt Mode (PBVH path)
+             * compared to Object Mode. The shader adds this to the computed wire_level,
+             * making each deeper level appear at the same camera distance it otherwise
+             * would only reach by zooming in 2x. 0.0 in Object Mode keeps its behaviour
+             * unchanged. */
+            (*object_ubo).level_reveal_extra = is_pbvh ? 1.0f : 0.0f;
             object_ubo->push_update();
           }
 

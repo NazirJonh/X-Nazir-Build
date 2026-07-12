@@ -800,17 +800,6 @@ void multiresModifier_ensure_external_read(Mesh *mesh, const MultiresModifierDat
   multires_ensure_external_read(mesh, mmd->totlvl);
 }
 
-/* Number of binary subdivisions that produce a ptex grid of `resolution` samples per side
- * (`resolution == (1 << grid_depth) + 1`). Mirrors the loop in #fill_subdivision_levels_grids. */
-static int multires_grid_depth_from_resolution(const int resolution)
-{
-  int grid_depth = 0;
-  while ((1 << grid_depth) < (resolution - 1)) {
-    grid_depth++;
-  }
-  return grid_depth;
-}
-
 /* Subdivision level of the grid line at coordinate `coord` inside a ptex grid whose finest
  * resolution has `grid_depth` binary subdivisions (a line is at level 0 on the grid boundary and
  * at `grid_depth` on the odd coordinates that only appear at the finest level). This is the
@@ -834,7 +823,7 @@ static uint8_t multires_coord_level(const int coord, const int grid_depth)
 static int multires_tag_edges_regular(MutableSpan<uint8_t> levels, int edge, const int resolution)
 {
   /* For a quad the ptex resolution equals the mesh resolution, so the level offset is zero. */
-  const int grid_depth = multires_grid_depth_from_resolution(resolution);
+  const int grid_depth = BKE_multires_grid_depth_from_grid_size(resolution);
   const int inner = resolution - 2;
   /* Bottom inner row of horizontal edges (grid row y == 1). */
   const uint8_t row1_level = multires_coord_level(1, grid_depth);
@@ -872,10 +861,10 @@ static int multires_tag_edges_special(MutableSpan<uint8_t> levels,
                                        const int resolution,
                                        const int corners_num)
 {
-  const int total_grid_depth = multires_grid_depth_from_resolution(resolution);
+  const int total_grid_depth = BKE_multires_grid_depth_from_grid_size(resolution);
   const int ptex_resolution = (resolution >> 1) + 1;
   const int ptex_inner_resolution = ptex_resolution - 2;
-  const int grid_depth = multires_grid_depth_from_resolution(ptex_resolution);
+  const int grid_depth = BKE_multires_grid_depth_from_grid_size(ptex_resolution);
   const int level_offset = total_grid_depth - grid_depth;
   /* Inner ptex edges, per ptex grid. */
   for (int corner = 0; corner < corners_num; corner++) {

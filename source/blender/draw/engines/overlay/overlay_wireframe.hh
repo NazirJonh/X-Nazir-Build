@@ -13,6 +13,7 @@
 #include <memory>
 
 #include "BKE_modifier.hh"
+#include "BKE_multires.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -255,10 +256,7 @@ class Wireframe : Overlay {
               if (ss && ss->subdiv_ccg) {
                 effective_max_level = ss->subdiv_ccg->level;
                 const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss->subdiv_ccg);
-                int grid_depth = 0;
-                while ((1 << grid_depth) < (key.grid_size - 1)) {
-                  grid_depth++;
-                }
+                const int grid_depth = BKE_multires_grid_depth_from_grid_size(key.grid_size);
                 effective_min_level = std::max(0, effective_max_level - grid_depth);
               }
             }

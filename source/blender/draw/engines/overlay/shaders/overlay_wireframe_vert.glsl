@@ -81,11 +81,10 @@ float compute_multires_wire_level()
    * Hide levels where cell_size_px < MIN_CELL_SIZE_PX:
    *   wire_level = log2(object_screen_px / MIN_CELL_SIZE_PX)
    * Higher value = fewer deep subdivisions visible, less visual noise.
-   * At 50 px combined with the `level + 0.5` cull offset, the effective
-   * hide threshold is ~70 px cells. With this setting a level appears only
-   * when its individual edges span more than ~70 px on screen, giving a
-   * clean look at any zoom: at close range only 4-5 levels are visible at
-   * once instead of the entire subdivision pyramid. */
+   * A subdivision level appears only once its individual edges span more than
+   * roughly `MIN_CELL_SIZE_PX` pixels on screen, giving a clean look at any zoom:
+   * at close range only a few levels are visible at once instead of the entire
+   * subdivision pyramid. */
   const float MIN_CELL_SIZE_PX = 100.0f;
 
   float wire_level = log2(max(object_screen_px / MIN_CELL_SIZE_PX, 0.0001f));

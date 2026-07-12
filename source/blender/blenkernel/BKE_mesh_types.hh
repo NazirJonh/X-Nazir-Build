@@ -283,15 +283,15 @@ struct MeshRuntime {
   /**
    * When true, `subsurf_optimal_display_edges` should be used by the IBO extractor to filter
    * out subdivision edges from the wireframe (Optimal Display is ON).
-   * When false, `subsurf_optimal_display_edges` still contains coarse-edge data for BFS but
-   * the IBO should not filter — all edges are visible (Optimal Display is OFF).
+   * When false, `subsurf_optimal_display_edges` is empty and the IBO does not filter — all edges
+   * are visible (Optimal Display is OFF).
    */
   bool subsurf_use_optimal_display_filter = false;
 
   /**
    * Per-edge subdivision level for Multires adaptive wireframe display.
    * Index `i` contains the subdivision level at which edge `i` first appears.
-   * Level 0 = base mesh edge (present in `subsurf_optimal_display_edges`).
+   * Level 0 = base mesh (coarse) edge, which never fades.
    * Empty when no Multires modifier is present on the object.
    */
   blender::Array<uint8_t> subsurf_edge_subdivision_level;

@@ -22,6 +22,7 @@
 #include "BKE_attribute_math.hh"
 #include "BKE_customdata.hh"
 #include "BKE_mesh.hh"
+#include "BKE_multires.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -985,10 +986,7 @@ BLI_NOINLINE static void fill_subdivision_levels_grids(const Object &object,
   ensure_vbos_allocated_grids(object, subdivision_level_format(), use_flat_layout, node_mask, vbos);
 
   const int total_level = subdiv_ccg.level;
-  int grid_depth = 0;
-  while ((1 << grid_depth) < (key.grid_size - 1)) {
-    grid_depth++;
-  }
+  const int grid_depth = BKE_multires_grid_depth_from_grid_size(key.grid_size);
   const int level_offset = std::max(0, total_level - grid_depth);
 
   /* Memoize coordinate-to-level mapping to avoid O(grid_depth) loops per coordinate. */

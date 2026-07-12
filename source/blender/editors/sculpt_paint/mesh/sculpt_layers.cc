@@ -215,6 +215,15 @@ void session_state_ensure(Object &object)
     validate_grid_layers(object);
     return;
   }
+  if (ss->deform_modifiers_active || ss->shapekey_active) {
+    /* Deform modifier / shape key: like the grids path, keep no runtime mesh base. The composed
+     * surface is re-derived from `base + sum(enabled layers)` by the depsgraph at evaluation
+     * (see #apply_vert_layers_eval), and #mesh.vert_positions holds the untouched basis — deriving
+     * a base by subtracting the layers from it would mix spaces (basis vs. evaluated) and must not
+     * feed the canonical recompute (see #recompute_mesh_canonical). */
+    ss->layers.mesh_base = {};
+    return;
+  }
   /* Mesh (vertex) domain: capture the un-layered base from the live combined positions. */
   Mesh &mesh = mesh_of(object);
   const Span<float3> positions = mesh.vert_positions();
@@ -240,6 +249,19 @@ static void recompute_mesh_canonical(Object &object)
     return;
   }
   Mesh &mesh = mesh_of(object);
+
+  if (ss->deform_modifiers_active || ss->shapekey_active) {
+    /* Under a shape key / deform modifier the composed surface is re-derived from `base + layers`
+     * at evaluation (see #apply_vert_layers_eval); #mesh.vert_positions holds the untouched basis
+     * and must NOT be overwritten here. Writing `mesh_base + layers` into the basis corrupts it and
+     * the change leaks into the surface as an inverted layer (disabling a layer subtracts it from
+     * the whole shape) — mirrors #restore_active_sculpt_layer's #skip_positions. A plain geometry
+     * re-evaluation reflects the metadata change without touching the basis. */
+    mesh.tag_positions_changed();
+    DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+    return;
+  }
+
   MutableSpan<float3> positions = mesh.vert_positions_for_write();
   if (!ss->layers.state_valid || ss->layers.mesh_base.size() != positions.size()) {
     /* Base missing or stale (topology change): re-capture before recomputing. The capture derives
@@ -253,11 +275,6 @@ static void recompute_mesh_canonical(Object &object)
   }
   bke::sculpt_layers::combine_layers_mesh(ss->layers.mesh_base, mesh.sculpt_layers, positions);
   mesh.tag_positions_changed();
-
-  if (ss->deform_modifiers_active || ss->shapekey_active) {
-    DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
-    return;
-  }
 
   bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
   if (!pbvh || pbvh->type() != bke::pbvh::Type::Mesh) {
@@ -517,12 +534,15 @@ static void base_view_ensure(Object &object, const SculptLayer *exclude = nullpt
   if (!pbvh || pbvh->type() == bke::pbvh::Type::BMesh) {
     return;
   }
-  /* A deforming modifier *without* a shape key is unsupported for recording (the composed surface
-   * is not re-derived from base + layers at evaluation, see #stroke_record_begin), so there is no
-   * base view to build. The shape-key case IS supported and is handled below with a space-independent
-   * derivation: the plain `positions - mesh_base` path cannot be used there because #mesh_base is
-   * kept in basis space while the brushes work on the evaluated positions. */
-  if (ss->deform_modifiers_active && !ss->shapekey_active) {
+  /* Deform-modifier / shape-key sessions mix position spaces (the runtime base is kept in the
+   * original space while brushes work on evaluated positions); keep the plain behavior there.
+   *
+   * NOTE: the shape-key case is intentionally NOT handled here. Reusing the base view under a shape
+   * key subtracts the underlying layers from the falloff-distance inputs while #cache.location stays
+   * on the composed surface, so a large underlying layer pushes the sample positions outside the
+   * brush radius and the stroke has no effect. Fixing the leak under shape keys needs a
+   * DC-offset-invariant distance (see the layer-on-layer leak notes) rather than this early return. */
+  if (ss->deform_modifiers_active || ss->shapekey_active) {
     return;
   }
   Mesh &mesh = mesh_of(object);
@@ -547,65 +567,36 @@ static void base_view_ensure(Object &object, const SculptLayer *exclude = nullpt
 
   const auto t0 = std::chrono::high_resolution_clock::now();
   if (pbvh->type() == bke::pbvh::Type::Mesh) {
-    if (ss->shapekey_active) {
-      /* Under a shape key the runtime #mesh_base is kept in basis space, so the `positions - base`
-       * derivation below would mix spaces. The vertex layers are composed as a linear object-space
-       * offset on top of the deformed positions (see #apply_vert_layers_eval), so their contribution
-       * in evaluated space equals `data * influence`. Build the base view by summing the OTHER
-       * enabled layers directly — space-independent, needing neither #mesh_base nor crazyspace. The
-       * active recording layer is simply skipped (#exclude) so the brush stays evaluated against
-       * base + active layer. */
-      const int64_t totelem = mesh.verts_num;
-      Array<float3> view(totelem, float3(0.0f));
-      for (const SculptLayer &layer : mesh.sculpt_layers) {
-        if (&layer == exclude || layer.domain != SCULPT_LAYER_DOMAIN_VERT ||
-            !(layer.flag & SCULPT_LAYER_ENABLED) || layer.influence == 0.0f ||
-            layer.data == nullptr || int64_t(layer.totelem) != totelem)
-        {
-          continue;
-        }
-        const Span<float3> data(static_cast<const float3 *>(layer.data), layer.totelem);
-        const float influence = layer.influence;
-        threading::parallel_for(IndexRange(totelem), 8192, [&](const IndexRange range) {
-          for (const int64_t i : range) {
-            view[i] += data[i] * influence;
-          }
-        });
-      }
-      ss->layers.base_view = std::move(view);
+    if (!ss->layers.state_valid) {
+      session_state_ensure(object);
     }
-    else {
-      if (!ss->layers.state_valid) {
-        session_state_ensure(object);
-      }
-      const Span<float3> positions = mesh.vert_positions();
-      if (ss->layers.mesh_base.size() != positions.size()) {
-        return;
-      }
-      const Span<float3> base = ss->layers.mesh_base;
-      /* `positions - base` is the sum of all enabled layer contributions (the maintained mesh
-       * invariant). When recording, subtract the active layer's own contribution so the base view
-       * holds only the OTHER layers; the brush is then evaluated against base + active layer and the
-       * other layers are composed back after the brush (see #base_view_compose_mesh). */
-      const float3 *exclude_data = nullptr;
-      float exclude_influence = 0.0f;
-      if (exclude && exclude->domain == SCULPT_LAYER_DOMAIN_VERT && exclude->data != nullptr &&
-          int64_t(exclude->totelem) == positions.size())
-      {
-        exclude_data = static_cast<const float3 *>(exclude->data);
-        exclude_influence = (exclude->flag & SCULPT_LAYER_ENABLED) ? exclude->influence : 0.0f;
-      }
-      Array<float3> view(positions.size());
-      threading::parallel_for(positions.index_range(), 8192, [&](const IndexRange range) {
-        for (const int64_t i : range) {
-          view[i] = positions[i] - base[i];
-          if (exclude_data) {
-            view[i] -= exclude_data[i] * exclude_influence;
-          }
-        }
-      });
-      ss->layers.base_view = std::move(view);
+    const Span<float3> positions = mesh.vert_positions();
+    if (ss->layers.mesh_base.size() != positions.size()) {
+      return;
     }
+    const Span<float3> base = ss->layers.mesh_base;
+    /* `positions - base` is the sum of all enabled layer contributions (the maintained mesh
+     * invariant). When recording, subtract the active layer's own contribution so the base view
+     * holds only the OTHER layers; the brush is then evaluated against base + active layer and the
+     * other layers are composed back after the brush (see #base_view_compose_mesh). */
+    const float3 *exclude_data = nullptr;
+    float exclude_influence = 0.0f;
+    if (exclude && exclude->domain == SCULPT_LAYER_DOMAIN_VERT && exclude->data != nullptr &&
+        int64_t(exclude->totelem) == positions.size())
+    {
+      exclude_data = static_cast<const float3 *>(exclude->data);
+      exclude_influence = (exclude->flag & SCULPT_LAYER_ENABLED) ? exclude->influence : 0.0f;
+    }
+    Array<float3> view(positions.size());
+    threading::parallel_for(positions.index_range(), 8192, [&](const IndexRange range) {
+      for (const int64_t i : range) {
+        view[i] = positions[i] - base[i];
+        if (exclude_data) {
+          view[i] -= exclude_data[i] * exclude_influence;
+        }
+      }
+    });
+    ss->layers.base_view = std::move(view);
   }
   else if (ss->subdiv_ccg) {
     SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
@@ -1015,7 +1006,7 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
   }
 }
 
-void stroke_record_cancel(const Depsgraph & /*depsgraph*/, Object &object)
+void stroke_record_cancel(const Depsgraph &depsgraph, Object &object)
 {
   SculptSession *ss = session_of(object);
   if (!ss) {
@@ -1037,7 +1028,7 @@ void stroke_record_cancel(const Depsgraph & /*depsgraph*/, Object &object)
    * run for a cancelled stroke) and the regular undo restore brings the CCG positions back. */
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
   if (pbvh && pbvh->type() == bke::pbvh::Type::Mesh) {
-    cancel_recorded_offsets(object);
+    cancel_recorded_offsets(depsgraph, object);
   }
   ss->layers.recording = false;
 }
@@ -1061,7 +1052,7 @@ MutableSpan<float3> active_record_data(Object &object)
   return bke::sculpt_layers::data_get(*layer);
 }
 
-void cancel_recorded_offsets(Object &object)
+void cancel_recorded_offsets(const Depsgraph &depsgraph, Object &object)
 {
   SculptSession *ss = session_of(object);
   if (!ss || !ss->layers.recording) {
@@ -1076,20 +1067,33 @@ void cancel_recorded_offsets(Object &object)
     return;
   }
   /* The stroke was accumulated into the layer per dab (#PositionDeformData::deform). Undo that by
-   * subtracting the net offset, recomputed from the live (still post-stroke) positions and the
-   * pre-stroke positions kept in the in-progress per-node undo data. This must run before the undo
-   * system restores the positions and before #push_end clears that per-node data. */
+   * subtracting the net offset, recomputed from the still post-stroke positions and the pre-stroke
+   * positions kept in the in-progress per-node undo data. This must run before the undo system
+   * restores the positions and before #push_end clears that per-node data.
+   *
+   * Under a shape key the basis (#mesh.vert_positions) is untouched by the stroke — the brush edited
+   * the evaluated/display positions — so diff those against the pre-stroke evaluated positions
+   * instead, mirroring the REC-on capture in #stroke_record_end. Using the basis here would compute
+   * a zero offset and leave the cancelled stroke baked into the layer. */
   Mesh &mesh = mesh_of(object);
   MutableSpan<float3> data = bke::sculpt_layers::data_get(*layer);
-  const Span<float3> positions = mesh.vert_positions();
-  undo::foreach_recorded_position_mesh([&](const Span<int> verts, const Span<float3> orig) {
+  const Span<float3> positions = ss->shapekey_active ?
+                                     bke::pbvh::vert_positions_eval(depsgraph, object) :
+                                     mesh.vert_positions();
+  const auto revert = [&](const Span<int> verts, const Span<float3> orig) {
     for (const int64_t j : verts.index_range()) {
       const int v = verts[j];
       if (v >= 0 && v < data.size() && v < positions.size()) {
         data[v] -= positions[v] - orig[j];
       }
     }
-  });
+  };
+  if (ss->shapekey_active) {
+    undo::foreach_recorded_eval_position_mesh(revert);
+  }
+  else {
+    undo::foreach_recorded_position_mesh(revert);
+  }
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -1577,6 +1581,12 @@ struct InfluenceDragData {
   int ticks_since_normal_refresh;
   /* True when the active object uses a grids PBVH (multires); drives the per-tick and finish paths. */
   bool grids;
+  /* True for a vertex-domain mesh under a shape key or deforming modifier: the live positions are
+   * not a direct copy of the composed surface (the basis is untouched and the layers are re-composed
+   * on top at evaluation), so the per-tick fast paths that write the mesh positions would deform the
+   * base. Such a drag only changes the influence and relies on an honest depsgraph re-evaluation,
+   * exactly like the grids path. */
+  bool deg_reeval;
   /* Multires only: the layer's object-space contribution per CCG element at influence 1.0,
    * computed once on invoke (tangent coefficients subsampled to the current level and transformed
    * by the limit-surface tangent frames). Per tick the live CCG positions are updated
@@ -1652,10 +1662,11 @@ static void influence_drag_finish(bContext *C, wmOperator *op, const bool cancel
   Mesh &mesh = *data->mesh;
   SculptLayer &layer = *data->layer;
 
-  if (data->grids) {
-    /* Grid (multires) path: restore or commit the final influence, then re-evaluate honestly —
-     * the depsgraph rebuilds the CCG from `MDisps + sum(enabled layers)` with the new influence.
-     * MDisps are never written (the base does not contain layer contributions). */
+  if (data->grids || data->deg_reeval) {
+    /* Grid (multires) path, or a shape-key / deform-modifier mesh session: restore or commit the
+     * final influence, then re-evaluate honestly — the depsgraph rebuilds the composed surface from
+     * `base + sum(enabled layers)` with the new influence. The base (MDisps / basis) is never
+     * written (it does not contain layer contributions). */
     layer.influence = cancel ? data->start_influence : layer.influence;
     undo::push_end(object);
     DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
@@ -1758,10 +1769,18 @@ static wmOperatorStatus layer_influence_drag_invoke(bContext *C,
   data->accounted_eff = effective(*layer);
   data->ticks_since_normal_refresh = 0;
   data->grids = grids;
+  const SculptSession *drag_ss = object.runtime->sculpt_session;
+  /* A shape key / deforming modifier keeps the composed surface out of the mesh positions, so the
+   * per-tick fast paths (GPU compute / CPU write) would deform the base. Route those sessions
+   * through an honest re-evaluation instead, like the grids path (see #InfluenceDragData). */
+  data->deg_reeval = !grids && drag_ss &&
+                     (drag_ss->shapekey_active || drag_ss->deform_modifiers_active);
   /* Use the GPU compute path when a draw cache exists (object has been drawn). Otherwise fall back
-   * to the CPU per-tick update. Grid (multires) layers are always on the CPU path — the GPU
-   * influence compute targets only the vertex-domain mesh buffers. */
-  data->gpu_active = grids ? false : bke::object::pbvh_get(object)->begin_influence_drag(layer->uid);
+   * to the CPU per-tick update. Grid (multires) layers and the re-eval path are always off the GPU
+   * fast path — the GPU influence compute targets only the direct vertex-domain mesh buffers. */
+  data->gpu_active = (grids || data->deg_reeval) ?
+                         false :
+                         bke::object::pbvh_get(object)->begin_influence_drag(layer->uid);
   if (grids) {
     /* The drag changes the layer's influence; consume pending base edits first, while the live
      * CCG still matches the stored layers (see #flush_pending_multires_base). */
@@ -1846,6 +1865,18 @@ static wmOperatorStatus layer_influence_drag_modal(bContext *C, wmOperator *op, 
         }
         ED_region_tag_redraw(CTX_wm_region(C));
         WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &object.id);
+        break;
+      }
+      if (data->deg_reeval) {
+        /* Shape key / deform modifier: the composed surface is not a direct copy of the mesh
+         * positions (the basis is untouched and the layers are re-composed on top at evaluation), so
+         * a direct write would deform the base. Change only the influence and let the depsgraph
+         * rebuild the surface from `base + sum(enabled layers)` with the new value. */
+        layer.influence = value;
+        DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+        ED_region_tag_redraw(CTX_wm_region(C));
+        WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &object.id);
+        WM_event_add_notifier(C, NC_GEOM | ND_DATA, &mesh.id);
         break;
       }
       bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);

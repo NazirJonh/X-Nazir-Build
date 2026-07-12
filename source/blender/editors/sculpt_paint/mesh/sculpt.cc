@@ -6420,7 +6420,7 @@ static void sculpt_brush_stroke_cancel(bContext *C, wmOperator *op)
   /* Sculpt layers: a recorded mesh stroke is accumulated into the active layer per dab, so the
    * layer must be reverted here, while the live positions still hold this stroke's result and the
    * per-node undo data is still available (both are consumed by #restore_from_undo_step next). */
-  layers::cancel_recorded_offsets(ob);
+  layers::cancel_recorded_offsets(depsgraph, ob);
   undo::restore_from_undo_step(depsgraph, sd, ob);
   stroke->cancel(C);
 }

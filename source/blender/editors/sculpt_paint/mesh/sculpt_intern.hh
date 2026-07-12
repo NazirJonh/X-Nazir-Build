@@ -1107,9 +1107,11 @@ void base_view_compose_grids(const Object &object,
 /**
  * Undo the per-dab layer accumulation of an in-progress stroke that is being cancelled. Must run
  * before the sculpt undo restores the pre-stroke positions, because the offset is recomputed as
- * `current_position - pre_stroke_position` from the still-available per-node undo data.
+ * `current_position - pre_stroke_position` from the still-available per-node undo data. Under a
+ * shape key the stroke lives in the evaluated positions (the basis is untouched), so the depsgraph
+ * is needed to diff against them.
  */
-void cancel_recorded_offsets(Object &object);
+void cancel_recorded_offsets(const Depsgraph &depsgraph, Object &object);
 
 /**
  * Bring the live positions in sync after a layer change (influence, visibility, data edit, list

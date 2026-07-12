@@ -327,6 +327,15 @@ static void rna_SculptLayer_apply_mesh_delta(Mesh *mesh, SculptLayer &layer, con
   {
     return;
   }
+  if (mesh->key != nullptr) {
+    /* With shape keys the vertex layers are NOT baked into #mesh.vert_positions (which holds the
+     * untouched basis); they are re-composed as an object-space overlay at evaluation
+     * (#apply_vert_layers_eval). Writing the incremental delta into the basis here would corrupt it
+     * and leak into the surface as an inverted layer. The update callback re-evaluates the geometry
+     * honestly under a shape key (#flush_interactive_update returns false there), so the influence /
+     * visibility change is reflected without touching the basis. */
+    return;
+  }
   MutableSpan<float3> positions = mesh->vert_positions_for_write();
 #if SCULPT_LAYERS_RNA_DEBUG_PERF
   const std::chrono::high_resolution_clock::time_point apply_start =

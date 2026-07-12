@@ -2441,13 +2441,13 @@ static void sculpt_update_object(Depsgraph *depsgraph,
       /* The crazy-space build reproduces only the shape-keyed/deformed base surface; it evaluates
        * the modifier stack and does not include the vertex sculpt layers. Compose them back on top
        * as an object-space overlay so the sculpt display matches the evaluated mesh (and object
-       * mode). Without this, whenever this path fills #deform_cos the layers are dropped — most
-       * visibly the layer disappears after toggling its visibility. The mutually exclusive
-       * shape-key branch below applies the same overlay for the case where crazy space leaves
-       * #deform_cos empty, so the layers are composed exactly once. */
-      if (ss.shapekey_active != nullptr) {
-        bke::sculpt_layers::apply_vert_layers(mesh_orig->sculpt_layers, ss.deform_cos);
-      }
+       * mode). This applies to ANY deformer that fills #deform_cos here — a real deforming modifier
+       * (Armature/Lattice/Curve) as well as a shape key. Gating it on a shape key dropped the layers
+       * for objects deformed by a modifier without a shape key (most visibly the layer disappears
+       * after toggling its visibility). #apply_vert_layers is a no-op when the mesh carries no
+       * vertex-domain layers. The mutually exclusive shape-key branch below only runs when crazy
+       * space leaves #deform_cos empty, so the layers are still composed exactly once. */
+      bke::sculpt_layers::apply_vert_layers(mesh_orig->sculpt_layers, ss.deform_cos);
       BKE_pbvh_vert_coords_apply(pbvh, ss.deform_cos);
 
       for (float3x3 &matrix : ss.deform_imats) {

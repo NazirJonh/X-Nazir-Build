@@ -69,11 +69,22 @@ class Wireframe : Overlay {
    * UBO across all multires objects in the scene caused later-processed
    * objects to overwrite earlier ones, so every draw command (which is
    * deferred) ended up reading the last object's parameters instead of its
-   * own. The pool is rebuilt every frame in `begin_sync`. `unique_ptr` keeps
-   * the underlying `UniformBuffer` address stable even when the Vector
-   * reallocates, so previously bound UBO pointers stay valid. */
+   * own.
+   *
+   * The pool is *persistent* and reused across frames: `begin_sync` only resets
+   * the in-use counter, and `object_sync` hands out (and grows on demand) an
+   * existing `UniformBuffer` rather than allocating a new one. Destroying the
+   * buffers every frame was unsafe — `bind_ubo` stores a `gpu::UniformBuf **`
+   * into the (deferred) draw command that is only dereferenced at submit time,
+   * so freeing the `UniformBuffer` in the next `begin_sync` left the pass with a
+   * dangling pointer and crashed in the descriptor-set update. Keeping the
+   * objects alive matches the standard draw-manager pattern (persistent buffers,
+   * updated in place). `unique_ptr` keeps each `UniformBuffer` address stable
+   * even when the Vector reallocates, so bound UBO pointers stay valid. */
   using MultiresWireUBO = draw::UniformBuffer<OVERLAY_MultiresWireData>;
   Vector<std::unique_ptr<MultiresWireUBO>> multires_wire_ubo_pool_;
+  /* Number of pool entries handed out in the current frame. Reset in `begin_sync`. */
+  int multires_wire_ubo_used_ = 0;
 
  public:
   void begin_sync(Resources &res, const State &state) final
@@ -83,10 +94,10 @@ class Wireframe : Overlay {
       return;
     }
 
-    /* Reset per-frame state. Releasing the pool here ensures that previously
-     * recorded `bind_ubo` pointers from the prior frame are not reused — the
-     * pass commands are also rebuilt every frame, so the lifetime matches. */
-    multires_wire_ubo_pool_.clear();
+    /* Reset the per-frame hand-out counter. The pool itself is kept alive (see
+     * the field comment): entries are reused across frames so the `bind_ubo`
+     * pointers recorded into deferred draw commands never dangle. */
+    multires_wire_ubo_used_ = 0;
 
     show_wire_ = state.is_wireframe_mode || state.show_wireframes();
 
@@ -296,12 +307,17 @@ class Wireframe : Overlay {
               object_diameter = 1.0f;
             }
 
-            /* Allocate a fresh UBO from the per-frame pool for this object. The
-             * heap-allocated `UniformBuffer` keeps a stable address even if the
-             * pool Vector reallocates, so the pointer captured by `bind_ubo`
-             * below remains valid until the next `begin_sync`. */
-            multires_wire_ubo_pool_.append(std::make_unique<MultiresWireUBO>());
-            object_ubo = multires_wire_ubo_pool_.last().get();
+            /* Hand out a UBO from the persistent pool for this object, growing
+             * the pool only when the current frame needs more entries than any
+             * previous frame. The `UniformBuffer` outlives the frame, so the
+             * pointer captured by `bind_ubo` below stays valid through the
+             * deferred submit (and every following frame). The heap-allocated
+             * `UniformBuffer` also keeps a stable address across Vector
+             * reallocation. */
+            if (multires_wire_ubo_used_ == multires_wire_ubo_pool_.size()) {
+              multires_wire_ubo_pool_.append(std::make_unique<MultiresWireUBO>());
+            }
+            object_ubo = multires_wire_ubo_pool_[multires_wire_ubo_used_++].get();
             (*object_ubo).object_diameter = object_diameter;
             (*object_ubo).wire_level_max = float(effective_max_level); /* std140: stored as float */
             (*object_ubo).wire_level_min = float(effective_min_level);

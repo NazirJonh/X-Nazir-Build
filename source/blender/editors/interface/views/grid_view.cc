@@ -636,6 +636,10 @@ static constexpr float GRID_FLING_START_VELOCITY = 200.0f;
 static constexpr float GRID_FLING_STOP_VELOCITY = 60.0f;
 /** Exponential decay rate: the velocity roughly halves every 0.14 seconds. */
 static constexpr float GRID_FLING_DECAY = 5.0f;
+/** Fraction of the release velocity actually fed into the coast; halves the total glide distance
+ * (still v0/#GRID_FLING_DECAY, just with a smaller v0) without changing the decay rate or the
+ * swipe-vs-drag threshold below. */
+static constexpr float GRID_FLING_STRENGTH = 0.3;
 /** Low-pass time constant for the drag velocity estimate feeding the fling: smooths jittery
  * per-event deltas without lagging a real swipe. */
 static constexpr float GRID_DRAG_VELOCITY_LOWPASS_TAU = 0.05f;
@@ -748,7 +752,7 @@ static void grid_fling_start(bContext *C,
     return;
   }
   GridFlingState &fling = grid_input_runtime().fling;
-  fling.velocity = velocity;
+  fling.velocity = velocity * GRID_FLING_STRENGTH;
   fling.region = region;
   fling.grid_id = grid_id;
   fling.wm = CTX_wm_manager(C);

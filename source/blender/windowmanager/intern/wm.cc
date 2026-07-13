@@ -53,6 +53,7 @@
 #  include "wm_xr.hh"
 #endif
 
+#include "BKE_asset.hh"
 #include "BKE_undo_system.hh"
 #include "ED_screen.hh"
 
@@ -122,6 +123,7 @@ static void window_manager_blend_write(BlendWriter *writer, ID *id, const void *
 
   writer->write_id_struct(id_address, wm);
   BKE_id_blend_write(writer, &wm->id);
+  BKE_asset_catalog_path_list_blend_write(writer, wm->id_browser_enabled_catalog_paths);
   write_wm_xr_data(writer, &wm->xr);
 
   for (wmWindow &win : wm->windows) {
@@ -157,6 +159,7 @@ static void window_manager_blend_read_data(BlendDataReader *reader, ID *id)
   id_us_ensure_real(&wm->id);
   BLO_read_struct_list(reader, wmWindow, &wm->windows);
   BLO_read_struct_list(reader, AssetShelfPopupSize, &wm->asset_shelf_popup_sizes);
+  BKE_asset_catalog_path_list_blend_read_data(reader, wm->id_browser_enabled_catalog_paths);
 
   for (wmWindow &win : wm->windows) {
     BLO_read_struct(reader, wmWindow, &win.parent);
@@ -556,6 +559,13 @@ void wm_add_default(Main *bmain, bContext *C)
   wm->runtime->winactive = win;
   wm->file_saved = 1;
   wm_window_make_drawable(wm, win);
+
+  /* #BKE_libblock_alloc calloc's the struct (ID_WM has no #IDTypeInfo::init_data), so the C++
+   * default member initializer on #AssetLibraryReference::type never runs. Left at 0 that is not
+   * a valid #eAssetLibraryType (#ASSET_LIBRARY_LOCAL == 1), which the ID browser's asset-library
+   * source would otherwise silently treat as an unhandled type. */
+  wm->id_browser_asset_library_ref.type = ASSET_LIBRARY_LOCAL;
+  wm->id_browser_asset_library_ref.custom_library_index = -1;
 }
 
 static void wm_xr_data_free(wmWindowManager *wm)
@@ -597,6 +607,7 @@ void wm_close_and_free(bContext *C, wmWindowManager *wm)
 
   /* Per-`.blend` asset shelf popup sizes are plain (no nested allocations). */
   BLI_freelistN(&wm->asset_shelf_popup_sizes);
+  BKE_asset_catalog_path_list_free(wm->id_browser_enabled_catalog_paths);
 
   if (C && CTX_wm_manager(C) == wm) {
     CTX_wm_manager_set(C, nullptr);

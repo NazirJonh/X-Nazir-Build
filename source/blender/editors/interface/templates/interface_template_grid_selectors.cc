@@ -125,7 +125,16 @@ class GridCatalogSelectorTree : public AbstractTreeView {
                   1 :
                   0)
     {
-      disable_activatable();
+      /* Clicking anywhere in the row toggles the catalog, not just the checkbox — precise checkbox
+       * hits are hard with a stylus. The checkbox (#build_row) keeps its own click handling; it and
+       * the row's full-width #AbstractTreeViewItem::add_treerow_button are separate buttons, and
+       * per-pixel hit-testing resolves to whichever is topmost, so a checkbox click is never also
+       * counted as a row click. */
+      set_on_activate_fn([this](bContext &C, BasicTreeViewItem & /*item*/) {
+        GridCatalogSelectorTree &tree = dynamic_cast<GridCatalogSelectorTree &>(get_tree_view());
+        catalog_path_enabled_ = !catalog_path_enabled_;
+        tree.update_enabled_catalogs_from_items(C);
+      });
     }
 
     bool is_catalog_path_enabled() const

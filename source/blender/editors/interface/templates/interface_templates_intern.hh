@@ -10,7 +10,12 @@
 
 #pragma once
 
+#include <string>
+
 #include "MEM_guardedalloc.h"
+
+#include "BLI_function_ref.hh"
+#include "BLI_set.hh"
 
 #include "RNA_access.hh"
 #include "RNA_types.hh"
@@ -22,8 +27,14 @@ struct Main;
 
 namespace blender {
 
+struct AssetLibraryReference;
 struct bContext;
 struct Material;
+struct wmWindowManager;
+
+namespace asset_system {
+class AssetRepresentation;
+}  // namespace asset_system
 
 namespace ui {
 
@@ -118,6 +129,37 @@ void id_browser_add_popover_button(Layout &row,
                                       const char *propname,
                                       Material *material,
                                       const char *filter_type);
+
+/**
+ * `interface_template_id_browser_asset.cc`
+ * Asset-library item source for the ID browser popover.
+ */
+
+/** Grid session key shared by the ID browser's grid build (#use_session_scroll) and its scroll
+ * reset (#blender::ui::grid_view_session_reset_scroll), so the two cannot drift apart. */
+constexpr StringRef id_browser_grid_session_key = "id_browser_grid";
+
+/** Enabled catalog paths of the ID browser, as a set (the DNA list is the source of truth). */
+Set<std::string> id_browser_catalog_paths_get(const wmWindowManager &wm);
+/** Replace the ID browser's enabled catalog list with \a paths. */
+void id_browser_catalog_paths_set(wmWindowManager &wm, const Set<std::string> &paths);
+/** UI name of the browsed asset library ("Current File", "All Libraries", custom name, ...). */
+const char *id_browser_library_ui_name(const AssetLibraryReference &lib_ref);
+/**
+ * Iterate assets of \a lib_ref whose ID type is \a idcode and which pass the catalog filter.
+ * An empty \a enabled_catalog_paths means "all catalogs". Iteration stops early when \a fn
+ * returns false.
+ */
+void id_browser_foreach_asset(const bContext &C,
+                              const AssetLibraryReference &lib_ref,
+                              short idcode,
+                              const Set<std::string> &enabled_catalog_paths,
+                              FunctionRef<bool(asset_system::AssetRepresentation &)> fn);
+/**
+ * Register the `UI_PT_id_browser_catalog_selector` popover panel (catalog checkbox tree).
+ * Idempotent; safe to call every time #id_browser_popover_register runs.
+ */
+void id_browser_catalog_selector_register();
 
 }  // namespace ui
 }  // namespace blender

@@ -24,6 +24,8 @@
 
 #include "rna_internal.hh"
 
+#include "UI_grid_view.hh"
+#include "UI_interface.hh"
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
@@ -1342,6 +1344,16 @@ static void rna_WindowManager_extensions_statusbar_update(Main * /*bmain*/,
   for (wmWindow &win : wm->windows) {
     WM_window_status_area_tag_redraw(&win);
   }
+}
+
+static void rna_WindowManager_id_browser_source_update(Main * /*bmain*/,
+                                                        Scene * /*scene*/,
+                                                        PointerRNA * /*ptr*/)
+{
+  /* The two sources have different item counts, so a scroll offset kept from the other one would
+   * point at nothing. The literal must match #id_browser_grid_session_key
+   * (interface_templates_intern.hh), a module-private header not visible from makesrna. */
+  ui::grid_view_session_reset_scroll("id_browser_grid");
 }
 
 /* -------------------------------------------------------------------- */
@@ -3070,6 +3082,27 @@ static void rna_def_windowmanager(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, id_browser_view_mode_items);
   RNA_def_property_ui_text(
       prop, "ID Browser View", "How data-blocks are listed in the image browser popover");
+
+  static const EnumPropertyItem id_browser_source_items[] = {
+      {ID_BROWSER_SOURCE_BLEND_DATA,
+       "BLEND_DATA",
+       ICON_FILE_BLEND,
+       "Blend Data",
+       "Show data-blocks from the current file"},
+      {ID_BROWSER_SOURCE_ASSET_LIBRARY,
+       "ASSET_LIBRARY",
+       ICON_ASSET_MANAGER,
+       "Asset Library",
+       "Show assets from an asset library"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "id_browser_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "id_browser_source");
+  RNA_def_property_enum_items(prop, id_browser_source_items);
+  RNA_def_property_ui_text(prop, "ID Browser Source", "Where the ID browser takes its items from");
+  RNA_def_property_update(
+      prop, NC_ASSET | ND_ASSET_LIST, "rna_WindowManager_id_browser_source_update");
 
   RNA_api_wm(srna);
   RNA_api_asset_library_loading_status(srna);

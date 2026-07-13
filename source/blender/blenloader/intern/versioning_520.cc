@@ -997,6 +997,17 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
    * This is a pre-release feature, so files written before that change simply reset the image
    * grid's persisted library/catalog/row state to defaults instead of being migrated. */
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 46)) {
+    /* `id_browser_asset_library_ref` was added zeroed; `type == 0` is not a valid
+     * #eAssetLibraryType (#ASSET_LIBRARY_LOCAL is 1). Materialize the intended default. */
+    for (wmWindowManager &wm : bmain->wm) {
+      if (wm.id_browser_asset_library_ref.type == 0) {
+        wm.id_browser_asset_library_ref.type = ASSET_LIBRARY_LOCAL;
+        wm.id_browser_asset_library_ref.custom_library_index = -1;
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

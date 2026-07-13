@@ -1827,6 +1827,10 @@ void UI_OT_eyedropper_driver(wmOperatorType *ot);
 
 void UI_OT_eyedropper_grease_pencil_color(wmOperatorType *ot);
 
+/* `templates/interface_template_id_browser_asset.cc` */
+
+void UI_OT_id_browser_set_library(wmOperatorType *ot);
+
 /* interface_ops_color.cc */
 
 MenuType *UI_MT_color_space_select();

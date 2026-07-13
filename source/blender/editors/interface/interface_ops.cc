@@ -3333,6 +3333,8 @@ void operatortypes_ui()
   WM_operatortype_append(UI_OT_override_idtemplate_clear);
   override_idtemplate_menu();
 
+  WM_operatortype_append(UI_OT_id_browser_set_library);
+
   /* external */
   WM_operatortype_append(UI_OT_eyedropper_color);
   WM_operatortype_append(UI_OT_eyedropper_colorramp);

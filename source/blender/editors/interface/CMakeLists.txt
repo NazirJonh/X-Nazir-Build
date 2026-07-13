@@ -86,6 +86,7 @@ set(SRC
   templates/interface_template_icon.cc
   templates/interface_template_id.cc
   templates/interface_template_id_browser.cc
+  templates/interface_template_id_browser_asset.cc
   templates/interface_template_keymap.cc
   templates/interface_template_layers.cc
   templates/interface_template_light_linking.cc

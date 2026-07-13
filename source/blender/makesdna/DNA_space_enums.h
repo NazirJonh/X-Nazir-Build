@@ -770,6 +770,14 @@ enum eImageBrowserViewMode : char {
   IMAGE_BROWSER_VIEW_LIST = 1,
 };
 
+/** #wmWindowManager.id_browser_source. */
+enum eIDBrowserSource : char {
+  /** Data-blocks of the current file (`which_libbase()`), with the paint-slot filters. */
+  ID_BROWSER_SOURCE_BLEND_DATA = 0,
+  /** Assets from an asset library, filtered by catalog. */
+  ID_BROWSER_SOURCE_ASSET_LIBRARY = 1,
+};
+
 /** #SpaceImage.flag */
 enum eSpaceImage_Flag : int {
   SI_FLAG_UNUSED_0 = (1 << 0), /* cleared */

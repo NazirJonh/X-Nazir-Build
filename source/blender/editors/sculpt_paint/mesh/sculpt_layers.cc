@@ -168,6 +168,19 @@ bool in_use(const Object &object)
   return false;
 }
 
+bool destructive_edit_check(const Mesh &mesh, ReportList *reports)
+{
+  if (BLI_listbase_is_empty(&mesh.sculpt_layers)) {
+    return true;
+  }
+  if (reports) {
+    BKE_report(reports,
+               RPT_INFO,
+               "Sculpt layers are not baked; bake them before performing a destructive mesh edit");
+  }
+  return false;
+}
+
 short domain_for(const Object &object)
 {
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);

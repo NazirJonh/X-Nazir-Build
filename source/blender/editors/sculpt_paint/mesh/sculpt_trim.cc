@@ -737,8 +737,13 @@ static bool can_exec(const bContext &C, ReportList &reports)
     return false;
   }
 
-  if (id_cast<const Mesh *>(object.data)->faces_num == 0) {
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  if (mesh.faces_num == 0) {
     /* No geometry to trim or to detect a valid position for the trimming shape. */
+    return false;
+  }
+
+  if (!layers::destructive_edit_check(mesh, &reports)) {
     return false;
   }
 

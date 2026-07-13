@@ -447,6 +447,10 @@ static wmOperatorStatus paint_mask_slice_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  if (!layers::destructive_edit_check(*mesh, op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
+
   bool create_new_object = RNA_boolean_get(op->ptr, "new_object");
   bool fill_holes = RNA_boolean_get(op->ptr, "fill_holes");
   float mask_threshold = RNA_float_get(op->ptr, "mask_threshold");

@@ -159,6 +159,16 @@ void invalidate_runtime(Object &object);
  */
 bool flush_pending_multires_base_for_mesh(Main &bmain, Mesh &mesh);
 
+/**
+ * Reports an info message and returns false when \a mesh still carries sculpt layers that have
+ * not been baked into the base geometry. A topology-destroying edit (Trim, Mask Slice, Remesh,
+ * ...) cannot preserve their per-element data, so callers must cancel the operator when this
+ * returns false.
+ *
+ * \a reports may be null to skip the message.
+ */
+bool destructive_edit_check(const Mesh &mesh, ReportList *reports);
+
 }  // namespace layers
 
 }  // namespace ed::sculpt_paint

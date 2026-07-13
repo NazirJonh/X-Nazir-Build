@@ -41,6 +41,7 @@ struct BlendWriter;
 struct BlendDataReader;
 
 namespace blender {
+struct KeyBlock;
 struct Mesh;
 struct SculptLayer;
 }  // namespace blender
@@ -175,6 +176,38 @@ void apply_vert_layers_eval(Mesh &mesh);
  */
 void strip_vert_layers_from_positions(Mesh &mesh);
 void bake_vert_layers_into_positions(Mesh &mesh);
+
+/**
+ * Bake Sculpt Layers on a mesh with *relative* shape keys: append a key block holding the combined
+ * vertex-layer contribution, `basis + sum_over_enabled_vert_layers(data[i] * effective(layer))`, at
+ * value 1 and relative to the reference key. Returns the new block, or null when the mesh has no
+ * relative shape keys or no vertex-layer data to bake.
+ *
+ * The layers cannot simply be dropped there: with shape keys the positions and the key blocks hold
+ * the un-layered basis and the layers are composed on top at evaluation, so removing them would
+ * delete the sculpted form. A block relative to the basis contributes exactly its delta to the
+ * basis, `(basis + sum) - basis = sum`, independent of every other key's weight — so the surface is
+ * unchanged at value 1, and the user keeps the baked result as one shape key they can mute or dial
+ * back to 0.
+ */
+KeyBlock *bake_vert_layers_into_new_shape_key(Mesh &mesh);
+
+/**
+ * Fold a vertex layer's contribution into the shape keys: `positions[i] += layer.data[i] * factor`
+ * on #Mesh::vert_positions *and on every key block*. The vertex-domain counterpart of
+ * #BKE_multires_sculpt_layer_apply_to_mdisps.
+ *
+ * Only used for *absolute* shape keys, where #bake_vert_layers_into_new_shape_key does not apply (a
+ * new block there is another keyframe in time, not a dial-able offset). Shifting every block (and
+ * the basis positions that mirror the reference block) by the same per-vertex offset shifts the
+ * interpolated result by exactly that offset, so the surface stays put. The bake passes
+ * `effective(layer)` and its undo `-effective(layer)`.
+ *
+ * A no-op on a mesh without shape keys — there the layers are already baked into the positions, so
+ * a bake only has to drop the layer list. Key blocks whose element count does not match the mesh
+ * (stale) are skipped.
+ */
+void apply_vert_layer_to_shape_keys(Mesh &mesh, const SculptLayer &layer, float factor);
 
 /* -------------------------------------------------------------------------------------------------
  * Grid (multires) domain maintenance.

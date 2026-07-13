@@ -17,6 +17,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_key_types.h"
 #include "DNA_mesh_types.h"
 
 #include "BLI_array.hh"
@@ -25,6 +26,9 @@
 #include "BLI_string_utils.hh"
 #include "BLI_task.hh"
 
+#include "BLT_translation.hh"
+
+#include "BKE_key.hh"
 #include "BKE_multires_grid_resample.hh"
 
 #include "BLO_read_write.hh"
@@ -297,6 +301,70 @@ void strip_vert_layers_from_positions(Mesh &mesh)
 void bake_vert_layers_into_positions(Mesh &mesh)
 {
   shift_vert_layers_in_positions(mesh, 1.0f);
+}
+
+KeyBlock *bake_vert_layers_into_new_shape_key(Mesh &mesh)
+{
+  Key *key = mesh.key;
+  if (key == nullptr || key->type != KEY_RELATIVE) {
+    return nullptr;
+  }
+  bool any = false;
+  for (const SculptLayer &layer : mesh.sculpt_layers) {
+    if (layer.domain == SCULPT_LAYER_DOMAIN_VERT && layer.data != nullptr &&
+        layer.totelem == mesh.verts_num)
+    {
+      any = true;
+      break;
+    }
+  }
+  if (!any) {
+    return nullptr;
+  }
+
+  KeyBlock *kb = BKE_keyblock_add_ctime(key, DATA_("Sculpt Layers"), false);
+  /* The positions are the un-layered basis while shape keys are present, so this seeds the block
+   * with the basis and the layer sum below turns it into `basis + sum`. */
+  BKE_keyblock_convert_from_mesh(&mesh, key, kb);
+  if (kb->data == nullptr || kb->totelem != mesh.verts_num) {
+    return kb;
+  }
+  apply_vert_layers(mesh.sculpt_layers,
+                    MutableSpan(static_cast<float3 *>(kb->data), kb->totelem));
+
+  /* Relative to the reference key, so the block's delta is the layer sum alone, and at full value
+   * so the surface is unchanged by the bake. */
+  kb->relative = short(std::max(BLI_findindex(&key->block, key->refkey), 0));
+  kb->curval = 1.0f;
+  return kb;
+}
+
+void apply_vert_layer_to_shape_keys(Mesh &mesh, const SculptLayer &layer, const float factor)
+{
+  if (mesh.key == nullptr || layer.domain != SCULPT_LAYER_DOMAIN_VERT || layer.data == nullptr ||
+      factor == 0.0f)
+  {
+    return;
+  }
+  const Span<float3> deltas(static_cast<const float3 *>(layer.data), layer.totelem);
+  if (deltas.size() != mesh.verts_num) {
+    /* Stale layer whose element count no longer matches the topology. */
+    return;
+  }
+  apply_delta_mesh(layer, factor, mesh.vert_positions_for_write());
+  mesh.tag_positions_changed();
+
+  for (KeyBlock &kb : mesh.key->block) {
+    if (kb.data == nullptr || kb.totelem != mesh.verts_num) {
+      continue;
+    }
+    MutableSpan<float3> data(static_cast<float3 *>(kb.data), kb.totelem);
+    threading::parallel_for(data.index_range(), 8192, [&](const IndexRange range) {
+      for (const int64_t i : range) {
+        data[i] += deltas[i] * factor;
+      }
+    });
+  }
 }
 
 void resample_grid_layers(Mesh &mesh, const int grids_num, const int new_level)

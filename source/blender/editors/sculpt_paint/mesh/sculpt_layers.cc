@@ -40,6 +40,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_key_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
@@ -1581,24 +1582,49 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   /* Baking keeps the combined result and drops all layers: their effect becomes part of the base
-   * geometry. For multires this folds each enabled layer's tangent displacement into the base
-   * MDisps (an exact linear operation in tangent space); for the mesh domain the live positions
-   * already contain the contributions, so only the runtime base has to be re-derived. */
+   * geometry. Which carrier that is depends on the session:
+   * - Multires: fold each enabled layer's tangent displacement into the base MDisps (an exact
+   *   linear operation in tangent space).
+   * - Mesh without shape keys: the live positions already contain the contributions, so only the
+   *   runtime base has to be re-derived.
+   * - Mesh with shape keys: the positions and the key blocks hold the un-layered basis and the
+   *   layers are composed on top at evaluation, so dropping the layer list alone would delete the
+   *   sculpted form. The combined layer contribution becomes one new shape key at value 1 (see
+   *   #bke::sculpt_layers::bake_vert_layers_into_new_shape_key), which keeps the surface as it is
+   *   while leaving the baked result mutable / dial-able like any other key. Absolute keys have no
+   *   such dial, so there the contribution is folded into every block instead. */
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  const KeyBlock *bake_key = ctx.grids ?
+                                 nullptr :
+                                 bke::sculpt_layers::bake_vert_layers_into_new_shape_key(*ctx.mesh);
   Vector<undo::SculptLayerUndoPayload> baked;
   while (SculptLayer *layer = static_cast<SculptLayer *>(ctx.mesh->sculpt_layers.first)) {
     if (ctx.grids && layer->domain == SCULPT_LAYER_DOMAIN_GRID && layer->data) {
       BKE_multires_sculpt_layer_apply_to_mdisps(
           *ctx.mesh, *layer, bke::sculpt_layers::effective(*layer));
     }
+    else if (!bake_key) {
+      /* Absolute shape keys only; a no-op without shape keys, where the live positions already
+       * carry the layer. */
+      bke::sculpt_layers::apply_vert_layer_to_shape_keys(
+          *ctx.mesh, *layer, bke::sculpt_layers::effective(*layer));
+    }
     baked.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *layer));
     bke::sculpt_layers::remove(*ctx.mesh, *layer);
   }
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(baked), {}, true);
+  if (bake_key) {
+    undo::push_sculpt_layer_bake_shape_key(*ctx.object, bake_key->uid);
+  }
   /* The combined surface is unchanged; the runtime mesh base now equals the live positions. */
   invalidate_runtime(*ctx.object);
   session_state_ensure(*ctx.object);
   undo::push_end(*ctx.object);
+  if (!ctx.grids && ctx.mesh->key != nullptr) {
+    /* The key data changed and the session's #deform_cos is a snapshot of the pre-bake surface:
+     * re-evaluate so the display is rebuilt from the new keys. */
+    DEG_id_tag_update(&ctx.mesh->id, ID_RECALC_GEOMETRY);
+  }
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }

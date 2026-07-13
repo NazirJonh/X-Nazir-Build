@@ -177,6 +177,14 @@ void push_sculpt_layer_list_change(Object &object,
                                    bool is_bake);
 
 /**
+ * Bake on a mesh with relative shape keys: record the key block the bake created (identified by
+ * #KeyBlock::uid, see #bke::sculpt_layers::bake_vert_layers_into_new_shape_key) so undo detaches it
+ * from the mesh (the step then owns it) and redo links it back. Call between #push_begin and
+ * #push_end, after #push_sculpt_layer_list_change.
+ */
+void push_sculpt_layer_bake_shape_key(Object &object, int key_uid);
+
+/**
  * Sculpt layer operators: record a layer reorder (move up/down) into the current
  * #Type::SculptLayer undo step.
  */

@@ -325,6 +325,12 @@ struct StepData {
     /** Bake: each removed payload's contribution is also added to / subtracted from MDisps. */
     bool is_bake = false;
 
+    /** Bake on a mesh with relative shape keys: uid of the key block the bake created (0 when the
+     * bake used another carrier). #bake_key holds that block while it is detached from the mesh
+     * (between undo and redo); the step owns and frees it then. */
+    int bake_key_uid = 0;
+    KeyBlock *bake_key = nullptr;
+
     /** Layer reorder (0 when the step is not a move). */
     int move_uid = 0;
     int move_from = -1;
@@ -1413,6 +1419,15 @@ void push_sculpt_layer_list_change(Object & /*object*/,
   step_data->sculpt_layer_op.is_bake = is_bake;
 }
 
+void push_sculpt_layer_bake_shape_key(Object & /*object*/, const int key_uid)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  step_data->sculpt_layer_op.bake_key_uid = key_uid;
+}
+
 void push_sculpt_layer_move(Object & /*object*/,
                             const SculptLayer &layer,
                             const int index_from,
@@ -1645,10 +1660,19 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       for (SculptLayerUndoPayload &payload : op.removed) {
         sculpt_layer_payload_insert(mesh, payload);
         if (op.is_bake) {
-          /* Undo of a bake: remove this layer's baked contribution from the base again. */
+          /* Undo of a bake: remove this layer's baked contribution from the base again. Which base
+           * the bake folded it into depends on the session: MDisps for grids, every key block for
+           * absolute shape keys, and for relative shape keys a whole new key block, which is
+           * detached below instead (#bake_key_uid). Without shape keys this is a no-op: the live
+           * positions carry the layer and the recompute below restores them. */
           if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, payload.uid)) {
-            BKE_multires_sculpt_layer_apply_to_mdisps(
-                mesh, *layer, -bke::sculpt_layers::effective(*layer));
+            const float eff = bke::sculpt_layers::effective(*layer);
+            if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+              BKE_multires_sculpt_layer_apply_to_mdisps(mesh, *layer, -eff);
+            }
+            else if (op.bake_key_uid == 0) {
+              bke::sculpt_layers::apply_vert_layer_to_shape_keys(mesh, *layer, -eff);
+            }
           }
         }
       }
@@ -1662,15 +1686,50 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       }
       for (SculptLayerUndoPayload &payload : op.removed) {
         if (op.is_bake) {
-          /* Redo of a bake: fold the contribution back into the base before extracting. */
+          /* Redo of a bake: fold the contribution back into the base before extracting (see the
+           * undo branch above for which base that is). */
           if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, payload.uid)) {
-            BKE_multires_sculpt_layer_apply_to_mdisps(
-                mesh, *layer, bke::sculpt_layers::effective(*layer));
+            const float eff = bke::sculpt_layers::effective(*layer);
+            if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+              BKE_multires_sculpt_layer_apply_to_mdisps(mesh, *layer, eff);
+            }
+            else if (op.bake_key_uid == 0) {
+              bke::sculpt_layers::apply_vert_layer_to_shape_keys(mesh, *layer, eff);
+            }
           }
         }
         sculpt_layer_payload_extract(mesh, payload);
       }
     }
+    if (op.bake_key_uid != 0 && mesh.key != nullptr) {
+      /* Relative shape keys: the bake put the combined layer contribution into a new key block.
+       * Undo unlinks it from the mesh (the step keeps it alive until it is freed or redone), redo
+       * links it back at the end of the list, where the bake appended it. Nothing else refers to
+       * it — it was created relative to the reference key and no other block is relative to it — so
+       * the plain unlink / relink is exact. */
+      Key &key = *mesh.key;
+      if (is_undo && op.bake_key == nullptr) {
+        for (KeyBlock &kb : key.block) {
+          if (kb.uid != op.bake_key_uid) {
+            continue;
+          }
+          const int index = BLI_findindex(&key.block, &kb);
+          BLI_remlink(&key.block, &kb);
+          key.totkey--;
+          op.bake_key = &kb;
+          if (object.shapenr > index) {
+            object.shapenr = std::max(1, object.shapenr - 1);
+          }
+          break;
+        }
+      }
+      else if (!is_undo && op.bake_key != nullptr) {
+        BLI_addtail(&key.block, op.bake_key);
+        key.totkey++;
+        op.bake_key = nullptr;
+      }
+    }
+
     if (op.is_bake && !op.removed.is_empty()) {
       /* A bake toggles between "contribution in the base" and "contribution in the layers" while
        * the combined surface stays identical. Re-derive the runtime mesh base against the
@@ -2025,6 +2084,15 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
 
 static void free_step_data(StepData &step_data)
 {
+  if (KeyBlock *kb = step_data.sculpt_layer_op.bake_key) {
+    /* The step still owns the key block a bake created and an undo detached from the mesh (the redo
+     * that would link it back can no longer happen once the step is freed). */
+    if (kb->data) {
+      MEM_delete_void(kb->data);
+    }
+    MEM_delete(kb);
+    step_data.sculpt_layer_op.bake_key = nullptr;
+  }
   geometry_free_data(&step_data.geometry_original);
   geometry_free_data(&step_data.geometry_modified);
   geometry_free_data(&step_data.bmesh.geometry_enter);

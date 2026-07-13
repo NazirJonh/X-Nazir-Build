@@ -113,8 +113,17 @@ void surface_smooth_displace_step(Span<float3> laplacian_disp,
                                   float beta,
                                   MutableSpan<float3> translations);
 
+/**
+ * \param base_view: the sculpt-layer base view (#layers::stroke_base_view), or an empty span when
+ * there is none. When given, the relaxation target is computed on the un-layered base
+ * (`position - base_view`) so the layer detail is not flattened into the base; the resulting
+ * translations still apply to the live (composed) positions. The raw offset is correct here (no
+ * #layers::stroke_base_view_dc): only differences between positions are used, which a constant
+ * shift leaves unchanged.
+ */
 void calc_relaxed_translations_faces(Span<float3> vert_positions,
                                      Span<float3> vert_normals,
+                                     Span<float3> base_view,
                                      OffsetIndices<int> faces,
                                      Span<int> corner_verts,
                                      GroupedSpan<int> vert_to_face_map,
@@ -126,7 +135,9 @@ void calc_relaxed_translations_faces(Span<float3> vert_positions,
                                      Span<int> verts,
                                      Span<float> factors,
                                      MutableSpan<float3> translations);
+/** Grid counterpart of #calc_relaxed_translations_faces. */
 void calc_relaxed_translations_grids(const SubdivCCG &subdiv_ccg,
+                                     Span<float3> base_view,
                                      OffsetIndices<int> faces,
                                      Span<int> corner_verts,
                                      Span<int> face_sets,

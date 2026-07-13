@@ -255,12 +255,7 @@ static void calc_faces(const Depsgraph &depsgraph,
 
   auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
 
-  if (base_view_positions.is_empty()) {
-    calc_brush_texture_factors(ss, brush, position_data.eval, verts, factors);
-  }
-  else {
-    calc_brush_texture_factors(ss, brush, base_view_positions, factors);
-  }
+  calc_brush_texture_factors(ss, brush, position_data.eval, verts, factors);
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
@@ -322,7 +317,7 @@ static void calc_grids(const Depsgraph &depsgraph,
 
   auto_mask::calc_grids_factors(depsgraph, object, cache.automasking.get(), node, grids, factors);
 
-  calc_brush_texture_factors(ss, brush, calc_positions, factors);
+  calc_brush_texture_factors(ss, brush, positions, factors);
 
   tls.translations.resize(positions.size());
   const MutableSpan<float3> translations = tls.translations;

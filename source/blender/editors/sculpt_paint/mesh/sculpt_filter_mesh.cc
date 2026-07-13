@@ -1022,6 +1022,7 @@ static void calc_relax_filter(const Depsgraph &depsgraph,
             const MutableSpan<float3> translations = tls.translations;
             smooth::calc_relaxed_translations_faces(position_data.eval,
                                                     vert_normals,
+                                                    {},
                                                     faces,
                                                     corner_verts,
                                                     vert_to_face_map,
@@ -1075,6 +1076,7 @@ static void calc_relax_filter(const Depsgraph &depsgraph,
             tls.translations.resize(positions.size());
             const MutableSpan<float3> translations = tls.translations;
             smooth::calc_relaxed_translations_grids(subdiv_ccg,
+                                                    {},
                                                     faces,
                                                     corner_verts,
                                                     face_sets,
@@ -1186,6 +1188,7 @@ static void calc_relax_face_sets_filter(const Depsgraph &depsgraph,
             const MutableSpan<float3> translations = tls.translations;
             smooth::calc_relaxed_translations_faces(position_data.eval,
                                                     vert_normals,
+                                                    {},
                                                     faces,
                                                     corner_verts,
                                                     vert_to_face_map,
@@ -1249,6 +1252,7 @@ static void calc_relax_face_sets_filter(const Depsgraph &depsgraph,
             tls.translations.resize(positions.size());
             const MutableSpan<float3> translations = tls.translations;
             smooth::calc_relaxed_translations_grids(subdiv_ccg,
+                                                    {},
                                                     faces,
                                                     corner_verts,
                                                     face_sets,

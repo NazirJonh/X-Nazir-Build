@@ -6368,6 +6368,18 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
       return OPERATOR_CANCELLED;
     }
   }
+  /* The cloth simulation solves its constraints and its simulation-area falloff on the composed
+   * surface, which it cannot separate from the layer contribution: it would flatten the layers into
+   * the base instead of riding on top of them (see #layers::stroke_base_view). */
+  if ((brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLOTH ||
+       brush.deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM) &&
+      layers::in_use(ob))
+  {
+    BKE_report(op->reports, RPT_ERROR, "Cloth simulation is not supported with sculpt layers");
+    stroke->cancel(C);
+    MEM_delete(stroke);
+    return OPERATOR_CANCELLED;
+  }
 
   if (brush_type_is_mask(brush.sculpt_brush_type)) {
     MultiresModifierData *mmd = BKE_sculpt_multires_active(&scene, &ob);
@@ -7190,8 +7202,9 @@ void calc_factors_common_mesh_indexed(const Depsgraph &depsgraph,
 
   const Span<int> verts = node.verts();
 
-  /* Base view: falloff distances, region clipping and texture coordinates are evaluated against
-   * the un-layered base so the factors are not modulated by the layer pattern. */
+  /* Base view: falloff distances and region clipping are evaluated against the un-layered base so
+   * the factors are not modulated by the layer pattern. Texture coordinates are not: they stay on
+   * the composed surface the user aims at (see #sculpt_apply_texture). */
   Vector<float3> base_view_storage;
   const Span<float3> base_view_positions = layers::base_view_gather_mesh(
       object, verts, vert_positions, base_view_storage);
@@ -7221,12 +7234,7 @@ void calc_factors_common_mesh_indexed(const Depsgraph &depsgraph,
 
   auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
 
-  if (base_view_positions.is_empty()) {
-    calc_brush_texture_factors(ss, brush, vert_positions, verts, factors);
-  }
-  else {
-    calc_brush_texture_factors(ss, brush, base_view_positions, factors);
-  }
+  calc_brush_texture_factors(ss, brush, vert_positions, verts, factors);
 }
 
 void calc_factors_common_mesh(const Depsgraph &depsgraph,
@@ -7267,7 +7275,7 @@ void calc_factors_common_mesh(const Depsgraph &depsgraph,
 
   auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
 
-  calc_brush_texture_factors(ss, brush, calc_positions, factors);
+  calc_brush_texture_factors(ss, brush, positions, factors);
 }
 
 void calc_factors_common_grids(const Depsgraph &depsgraph,
@@ -7306,7 +7314,7 @@ void calc_factors_common_grids(const Depsgraph &depsgraph,
 
   auto_mask::calc_grids_factors(depsgraph, object, cache.automasking.get(), node, grids, factors);
 
-  calc_brush_texture_factors(ss, brush, calc_positions, factors);
+  calc_brush_texture_factors(ss, brush, positions, factors);
 }
 
 void calc_factors_common_bmesh(const Depsgraph &depsgraph,
@@ -7381,7 +7389,7 @@ void calc_factors_common_from_orig_data_mesh(const Depsgraph &depsgraph,
 
   auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
 
-  calc_brush_texture_factors(ss, brush, calc_positions, factors);
+  calc_brush_texture_factors(ss, brush, positions, factors);
 }
 
 void calc_factors_common_from_orig_data_grids(const Depsgraph &depsgraph,
@@ -7421,7 +7429,7 @@ void calc_factors_common_from_orig_data_grids(const Depsgraph &depsgraph,
 
   auto_mask::calc_grids_factors(depsgraph, object, cache.automasking.get(), node, grids, factors);
 
-  calc_brush_texture_factors(ss, brush, calc_positions, factors);
+  calc_brush_texture_factors(ss, brush, positions, factors);
 }
 
 void calc_factors_common_from_orig_data_bmesh(const Depsgraph &depsgraph,

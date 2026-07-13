@@ -179,10 +179,11 @@ static void calc_faces(const Depsgraph &depsgraph,
   const Span<int> verts = node.verts();
   const MutableSpan positions = gather_data_mesh(position_data.eval, verts, tls.positions);
 
-  /* Base view: compute the surface-shape-dependent inputs (region clip, falloff distances, brush
-   * texture, pinch/rake/grab offsets) against the un-layered base so a base edit with visible
-   * layers does not bake the layer pattern in (see #layers::stroke_base_view). Returns `positions`
-   * unchanged when the base view is inactive; the translations still apply to the live positions. */
+  /* Base view: compute the surface-shape-dependent inputs (region clip, falloff distances,
+   * pinch/rake/grab offsets) against the un-layered base so a base edit with visible layers does
+   * not bake the layer pattern in (see #layers::stroke_base_view). The brush texture is sampled on
+   * the composed surface instead (see #sculpt_apply_texture). Returns `positions` unchanged when
+   * the base view is inactive; the translations still apply to the live positions. */
   const Span<float3> calc_positions = layers::base_view_adjust_compact_mesh(
       object, verts, positions, tls.base_view_storage);
 
@@ -207,7 +208,7 @@ static void calc_faces(const Depsgraph &depsgraph,
     calc_brush_strength_factors(cache, brush, distances, factors);
 
     auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
-    calc_brush_texture_factors(ss, brush, calc_positions, factors);
+    calc_brush_texture_factors(ss, brush, positions, factors);
     scale_factors(factors, cache.bstrength);
   }
 
@@ -278,7 +279,7 @@ static void calc_grids(const Depsgraph &depsgraph,
 
     auto_mask::calc_grids_factors(
         depsgraph, object, cache.automasking.get(), node, grids, factors);
-    calc_brush_texture_factors(ss, brush, calc_positions, factors);
+    calc_brush_texture_factors(ss, brush, positions, factors);
     scale_factors(factors, cache.bstrength);
   }
 

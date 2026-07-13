@@ -149,6 +149,24 @@ bool is_supported(const Object &object)
   return pbvh && pbvh->type() != bke::pbvh::Type::BMesh;
 }
 
+bool in_use(const Object &object)
+{
+  if (!is_supported(object)) {
+    return false;
+  }
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (ss && ss->layers.rec_active) {
+    return true;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  for (const SculptLayer &layer : mesh.sculpt_layers) {
+    if (layer.flag & SCULPT_LAYER_ENABLED) {
+      return true;
+    }
+  }
+  return false;
+}
+
 short domain_for(const Object &object)
 {
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
@@ -533,6 +551,12 @@ bool sync_multires_for_rna(Main &bmain, Scene * /*scene*/, Mesh &mesh, SculptLay
  * #base_view_dc_update): the brush reference point stays on the composed surface, so removing the
  * raw offset would push the sampled positions out of the brush radius by the layer height. Only the
  * pattern must be stripped from the brush inputs, not the height under the cursor.
+ *
+ * Brush texture coordinates are deliberately NOT part of this: they are sampled on the composed
+ * surface (see #sculpt_apply_texture). The texture only modulates the amplitude, so it is not a
+ * channel through which a lower layer's shape gets copied into the recorded one, while the user
+ * sees and aims at the composed surface — a stencil or tiled stamp evaluated on the base view would
+ * land next to the cursor, off by the screen parallax of the layer height.
  */
 
 /* Sample the base view at the current brush contact point. Every consumer subtracts this constant

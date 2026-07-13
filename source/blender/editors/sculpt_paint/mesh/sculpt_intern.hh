@@ -794,7 +794,14 @@ const float *brush_frontface_normal_from_falloff_shape(const SculptSession &ss,
                                                        char falloff_shape);
 void cube_tip_init(const Sculpt &sd, const Object &ob, const Brush &brush, float mat[4][4]);
 
-/** Sample the brush's texture value. */
+/**
+ * Sample the brush's texture value.
+ *
+ * \param brush_point: must be the composed (evaluated) position of the element, never the
+ * sculpt-layer base view. The texture is anchored to the surface the user sees and aims at: the
+ * screen-projected mapping modes must land the stamp where the cursor is, and the 3D mapping mode
+ * must keep the pattern stuck to the visible geometry.
+ */
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const float brush_point[3],
@@ -1036,6 +1043,13 @@ namespace ed::sculpt_paint::layers {
 
 /** True when sculpt layers are available for this object (regular mesh or multires, not dyntopo). */
 bool is_supported(const Object &object);
+/**
+ * True when the layer system actually shapes this object's surface right now: recording is armed,
+ * or at least one layer is enabled (so the composed surface differs from the base). Brushes that
+ * cannot work with a composed surface — the cloth simulation, whose constraints and simulation-area
+ * falloff are solved on it — are rejected in this state (see #sculpt_brush_stroke_invoke).
+ */
+bool in_use(const Object &object);
 /** Element domain (#SCULPT_LAYER_DOMAIN_VERT / #SCULPT_LAYER_DOMAIN_GRID) for the sculpt target. */
 short domain_for(const Object &object);
 /** Number of layer elements for the object (mesh vertices, or total multires grid points). */

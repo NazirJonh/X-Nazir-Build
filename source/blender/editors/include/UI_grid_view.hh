@@ -103,7 +103,8 @@ class AbstractGridView : public AbstractView {
   int cols_per_row_ = 0;
   /** When > 0, overrides width-based column guess in #GridViewLayoutBuilder. */
   int cols_per_row_hint_ = 0;
-  /** When set, empty row spacers are added so the grid block is at least this tall (pixels). */
+  /** Pixel height of the fixed viewport the grid is laid out into (see #fixed_viewport_layout_).
+   * Always set for fixed-viewport layouts. */
   std::optional<int> min_viewport_height_;
   /**
    * Popover/fixed-height layouts: only the visible tile rows are placed (no scroll spacer labels).
@@ -169,10 +170,13 @@ class AbstractGridView : public AbstractView {
   /** Fixed column count (e.g. from #template_asset_image_grid `cols`). 0 = guess from layout
    * width. */
   void set_cols_per_row_hint(int cols);
-  /** Ensure the laid-out grid uses at least this height, using the same row spacers as scrolling.
+  /**
+   * Pixel height of the viewport the grid is laid out into. The laid-out grid is pinned to exactly
+   * this height regardless of how many tile rows the content fills, so the host (e.g. the asset
+   * shelf popover's resize grip) fully owns the height; content taller than this scrolls inside it.
+   * Only meaningful together with #set_fixed_viewport_layout().
    */
   void set_min_viewport_height(int height_px);
-  [[nodiscard]] std::optional<int> min_viewport_height() const;
   void set_fixed_viewport_layout(bool fixed_viewport_layout);
   [[nodiscard]] bool use_fixed_viewport_layout() const;
   /**

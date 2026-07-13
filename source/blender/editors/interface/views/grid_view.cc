@@ -207,11 +207,6 @@ void AbstractGridView::set_min_viewport_height(const int height_px)
   min_viewport_height_ = height_px;
 }
 
-std::optional<int> AbstractGridView::min_viewport_height() const
-{
-  return min_viewport_height_;
-}
-
 void AbstractGridView::set_fixed_viewport_layout(const bool fixed_viewport_layout)
 {
   fixed_viewport_layout_ = fixed_viewport_layout;
@@ -1652,9 +1647,6 @@ class BuildOnlyVisibleButtonsHelper {
   bool is_item_visible(int item_idx) const;
   void fill_layout_before_visible(Block &block) const;
   void fill_layout_after_visible(Block &block) const;
-  void fill_min_viewport_height(Block &block,
-                                const AbstractGridView &grid_view,
-                                int cols_per_row) const;
 
  private:
   IndexRange get_visible_range(const View2D &v2d,
@@ -1791,30 +1783,6 @@ void BuildOnlyVisibleButtonsHelper::fill_layout_after_visible(Block &block) cons
   }
 }
 
-void BuildOnlyVisibleButtonsHelper::fill_min_viewport_height(Block &block,
-                                                             const AbstractGridView &grid_view,
-                                                             const int cols_per_row) const
-{
-  const std::optional<int> min_height_opt = grid_view.min_viewport_height();
-  if (!min_height_opt) {
-    return;
-  }
-
-  const int item_count = grid_view.get_item_count_filtered();
-  const int content_rows = (item_count > 0 && cols_per_row > 0) ?
-                               ((item_count - 1) / cols_per_row + 1) :
-                               0;
-  const int content_height = content_rows * style_.tile_height;
-  const int min_height = *min_height_opt;
-
-  if (content_height >= min_height) {
-    return;
-  }
-
-  const int pad_rows = (min_height - content_height + style_.tile_height - 1) / style_.tile_height;
-  this->add_spacer_button(block, pad_rows);
-}
-
 void BuildOnlyVisibleButtonsHelper::add_spacer_button(Block &block, const int row_count) const
 {
   /* UI code only supports button dimensions of `signed short` size, the layout height we want to
@@ -1914,26 +1882,27 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
       grid_view.scroll_active_center_on_build_ = false;
     }
 
-    /* Turn the grid column into a fixed-height scroll-clip window (see
-     * #Layout::view_scroll_clip_set): the buffer/partially scrolled rows built below overflow the
-     * window and are cut at its edges instead of growing the popup. #ui_units_y_set fixes the
-     * estimated height to the window too, so siblings below the grid are laid out unaffected by
-     * the overflow. Skipped while everything fits: no scrolling, no overflow to clip.
+    /* Pin the grid row and tile column to the pixel-exact viewport height the host asked for (e.g.
+     * the popover's resize grip), whether or not the content overflows it. Sizing must not depend
+     * on the content: padding the layout out with whole tile rows instead would quantize the height
+     * to the tile size, so a grid that happens to fit would follow the preview size rather than the
+     * requested height. The sibling scrollbar and the clipped grid share this window, and siblings
+     * below the grid are laid out unaffected by the buffer-row overflow.
      *
-     * The clip window is the raw pixel viewport height, not a whole-row multiple: when it is
-     * taller than the fully visible rows, the extra pixels show a partial bottom row cut at the
-     * window edge (matching the reference image grid), so no dead space is left below the grid when
-     * the tile size changes without the popover resizing. */
+     * On overflow the column additionally becomes a scroll-clip window (see
+     * #Layout::view_scroll_clip_set): the buffer/partially scrolled rows built below overflow the
+     * window and are cut at its edges instead of growing the popup. The clip window is the raw
+     * pixel viewport height, not a whole-row multiple: when it is taller than the fully visible
+     * rows, the extra pixels show a partial bottom row cut at the window edge (matching the
+     * reference image grid), so no dead space is left below the grid when the tile size changes
+     * without the popover resizing. */
+    const int visible_height = grid_view.fixed_viewport_geometry().viewport_height;
+    grid_host.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
+    if (grid_row != nullptr) {
+      grid_row->ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
+    }
+    layout.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
     if (!grid_view.is_fully_visible()) {
-      const int visible_height = grid_view.fixed_viewport_geometry().viewport_height;
-      /* Size the grid row and tile column to the fixed viewport height so the sibling scrollbar and
-       * the clipped grid share the window and siblings below are unaffected by the buffer-row
-       * overflow. */
-      grid_host.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
-      if (grid_row != nullptr) {
-        grid_row->ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
-      }
-      layout.ui_units_y_set(float(visible_height) / float(UI_UNIT_Y));
       layout.view_scroll_clip_set(visible_height, grid_view.scroll_offset_px(), &grid_view);
     }
 
@@ -2029,7 +1998,6 @@ void GridViewLayoutBuilder::build_from_view(const bContext &C,
   if (!embedded_v2d) {
     build_visible_helper.fill_layout_after_visible(block_);
   }
-  build_visible_helper.fill_min_viewport_height(block_, grid_view, cols_per_row);
 }
 
 Layout &GridViewLayoutBuilder::current_layout() const

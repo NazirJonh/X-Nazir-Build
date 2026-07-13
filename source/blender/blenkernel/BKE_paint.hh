@@ -492,10 +492,13 @@ struct SculptSession : NonCopyable, NonMovable {
     /* Whether #mesh_base has been initialized for this session. */
     bool state_valid = false;
     /* Per-element object-space contribution of the enabled layers ("base view" offset,
-     * `combined[i] - base[i]`), valid only for the duration of a non-REC stroke. Brushes subtract
-     * it from the live positions when computing surface-shape-dependent inputs (falloff, area
-     * normal, smoothing targets, plane fits) so base edits do not absorb the layer residual.
-     * Empty when the mode is inactive (REC on, no enabled layers, deform/shape-key sessions). */
+     * `combined[i] - base[i]`), valid only for the duration of one stroke. Brushes subtract it from
+     * the live positions when computing surface-shape-dependent inputs (falloff, area normal,
+     * smoothing targets, plane fits), so neither a base edit nor a stroke recorded into another
+     * layer absorbs the residual of the layers below. While recording, the layer being authored is
+     * excluded (it stays WYSIWYG). Under a shape key the offset is summed straight from the layer
+     * data, which is exactly how it is composed there. Empty when no layer contributes (no enabled
+     * layers, and deform-modifier sessions without a shape key, which cannot record). */
     Array<float3> base_view;
     /* The base view offset sampled at the current brush contact point, refreshed once per brush
      * action (per symmetry / tile pass). Every consumer of #base_view removes it, i.e. the brush

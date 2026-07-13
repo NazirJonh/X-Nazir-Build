@@ -155,6 +155,27 @@ void apply_vert_layers(const ListBaseT<SculptLayer> &layers, MutableSpan<float3>
  */
 void apply_vert_layers_eval(Mesh &mesh);
 
+/**
+ * Shape-key transition: move the vertex-layer contribution out of / back into #Mesh::vert_positions.
+ *
+ * Which carrier holds the layers depends on whether the mesh has shape keys, and the two are
+ * mutually exclusive:
+ * - No shape key: the layers are baked into #Mesh::vert_positions (the brush writes them there) and
+ *   evaluation does not add them again.
+ * - Shape key: #Mesh::vert_positions and the key blocks hold the un-layered basis, and the layers
+ *   are composed on top at evaluation (see #apply_vert_layers_eval, gated on the shape-key deform).
+ *
+ * A mesh that gains its first key would otherwise copy the layer-baked positions into the Basis
+ * block and then have the layers composed a second time at evaluation (the layer offset shows up
+ * doubled); a mesh that loses its last key would keep a basis with no layers in it and the
+ * composition step gone (the layers disappear from the surface). #strip_vert_layers_from_positions
+ * is therefore called when a mesh gains a #Key (#BKE_key_add) and
+ * #bake_vert_layers_into_positions when it loses it (#BKE_object_shapekey_free). Both are a no-op
+ * on a mesh without vertex-domain layer data.
+ */
+void strip_vert_layers_from_positions(Mesh &mesh);
+void bake_vert_layers_into_positions(Mesh &mesh);
+
 /* -------------------------------------------------------------------------------------------------
  * Grid (multires) domain maintenance.
  */

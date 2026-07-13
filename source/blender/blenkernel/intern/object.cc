@@ -4734,6 +4734,15 @@ bool BKE_object_shapekey_free(Main *bmain, Object *ob)
 
   BKE_id_free_us(bmain, key);
 
+  if (ob->type == OB_MESH) {
+    /* The mesh no longer has shape keys, so evaluation stops composing the vertex sculpt layers on
+     * top of the (now gone) shape-key deform. Bake them back into the positions, the carrier a
+     * key-less mesh uses — the counterpart of the strip done when the mesh gained the key (see
+     * #bke::sculpt_layers::bake_vert_layers_into_positions). Without this the layers would silently
+     * drop out of the surface even though their data is still stored. */
+    bke::sculpt_layers::bake_vert_layers_into_positions(*id_cast<Mesh *>(ob->data));
+  }
+
   return true;
 }
 

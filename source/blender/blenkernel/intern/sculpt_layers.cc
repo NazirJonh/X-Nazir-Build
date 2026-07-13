@@ -262,6 +262,43 @@ void apply_vert_layers_eval(Mesh &mesh)
   apply_vert_layers(mesh.sculpt_layers, mesh.vert_positions_for_write());
 }
 
+/* Shared body of the two shape-key transition helpers: `positions[i] += sign * sum(...)`. Bails out
+ * before touching the positions when the mesh carries no vertex-layer data, so the copy-on-write of
+ * #Mesh::vert_positions_for_write is not paid on the (common) mesh without layers. */
+static void shift_vert_layers_in_positions(Mesh &mesh, const float sign)
+{
+  bool any = false;
+  for (const SculptLayer &layer : mesh.sculpt_layers) {
+    if (layer.domain == SCULPT_LAYER_DOMAIN_VERT && layer.data != nullptr &&
+        effective(layer) != 0.0f)
+    {
+      any = true;
+      break;
+    }
+  }
+  if (!any) {
+    return;
+  }
+  MutableSpan<float3> positions = mesh.vert_positions_for_write();
+  for (const SculptLayer &layer : mesh.sculpt_layers) {
+    if (layer.domain != SCULPT_LAYER_DOMAIN_VERT) {
+      continue;
+    }
+    apply_delta_mesh(layer, sign * effective(layer), positions);
+  }
+  mesh.tag_positions_changed();
+}
+
+void strip_vert_layers_from_positions(Mesh &mesh)
+{
+  shift_vert_layers_in_positions(mesh, -1.0f);
+}
+
+void bake_vert_layers_into_positions(Mesh &mesh)
+{
+  shift_vert_layers_in_positions(mesh, 1.0f);
+}
+
 void resample_grid_layers(Mesh &mesh, const int grids_num, const int new_level)
 {
   bool warned = false;

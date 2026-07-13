@@ -289,6 +289,8 @@ class MESH_MT_sculpt_layer_context_menu(Menu):
         layout.separator()
         layout.operator("sculpt.layer_clear")
         layout.operator("sculpt.layer_invert")
+        layout.separator()
+        layout.operator("sculpt.layer_mask_isolate", text="Isolate by Mask")
 
 
 class SCULPT_PT_layer_editmode_confirm(Panel):

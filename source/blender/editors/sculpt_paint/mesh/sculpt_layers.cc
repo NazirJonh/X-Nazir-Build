@@ -58,6 +58,7 @@
 
 #include "BLT_translation.hh"
 
+#include "BKE_attribute.hh"
 #include "BKE_context.hh"
 #include "BKE_main.hh"
 #include "BKE_mesh.hh"
@@ -1760,6 +1761,148 @@ void SCULPT_OT_layer_invert(wmOperatorType *ot)
   ot->exec = layer_invert_exec;
   ot->poll = layers_poll;
   ot->flag = OPTYPE_REGISTER;
+}
+
+/* Resolves the paint mask into an array indexed exactly like `layer.data`. Vertex layers read
+ * the `.sculpt_mask` mesh attribute directly (same index space as the layer). Grid layers read
+ * the live `SubdivCCG::masks`, which sits at the CCG's *current* sculpt level and must be
+ * upsampled to the layer's own top level (see the multires-domain comment at the top of this
+ * file) before it lines up with `layer.data`. Returns false when no usable mask exists, so
+ * callers can refuse rather than silently zero an entire layer on an empty mask. */
+static bool gather_layer_mask(Object &object, const SculptLayer &layer, Array<float> &r_mask)
+{
+  if (layer.domain == SCULPT_LAYER_DOMAIN_VERT) {
+    const Mesh &mesh = mesh_of(object);
+    if (layer.totelem != mesh.verts_num) {
+      return false;
+    }
+    const bke::AttributeAccessor attributes = mesh.attributes();
+    const VArray<float> mask = *attributes.lookup<float>(".sculpt_mask", bke::AttrDomain::Point);
+    if (!mask) {
+      return false;
+    }
+    r_mask.reinitialize(layer.totelem);
+    mask.materialize(r_mask.as_mutable_span());
+  }
+  else {
+    SculptSession *ss = session_of(object);
+    if (!ss || !ss->subdiv_ccg || ss->subdiv_ccg->masks.is_empty()) {
+      return false;
+    }
+    SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
+    const int cur_level = subdiv_ccg.level;
+    const int grids_num = subdiv_ccg.grids_num;
+    if (int64_t(bke::grid_totelem(grids_num, cur_level)) != subdiv_ccg.masks.size()) {
+      return false;
+    }
+
+    if (cur_level == layer.level) {
+      r_mask.reinitialize(subdiv_ccg.masks.size());
+      r_mask.as_mutable_span().copy_from(subdiv_ccg.masks);
+    }
+    else if (cur_level < layer.level) {
+      /* Pack the scalar mask into the x channel of a float3 field and reuse the existing
+       * per-grid bilinear upsampler (already used elsewhere in this file to compose grid layers
+       * onto the CCG): interpolation is per-component independent, so this is exact for a
+       * scalar field. */
+      Array<float3> packed(subdiv_ccg.masks.size());
+      for (const int64_t i : packed.index_range()) {
+        packed[i] = float3(subdiv_ccg.masks[i], 0.0f, 0.0f);
+      }
+      const Array<float3> upsampled = bke::grid_upsample(
+          packed, cur_level, layer.level, grids_num);
+      r_mask.reinitialize(upsampled.size());
+      for (const int64_t i : r_mask.index_range()) {
+        r_mask[i] = upsampled[i].x;
+      }
+    }
+    else {
+      /* cur_level > layer.level should not happen: layer.level tracks the multires modifier's
+       * top level, which the current sculpt level cannot exceed. Guard defensively rather than
+       * indexing out of bounds. */
+      return false;
+    }
+
+    if (r_mask.size() != layer.totelem) {
+      return false;
+    }
+  }
+
+  float max_value = 0.0f;
+  for (const float value : r_mask) {
+    max_value = std::max(max_value, value);
+  }
+  /* Nothing painted: every value is zero, so isolating would zero the whole layer. Treat this
+   * the same as "no mask" rather than silently wiping the layer on an accidental click. */
+  return max_value > 0.0f;
+}
+
+static wmOperatorStatus layer_mask_isolate_exec(bContext *C, wmOperator *op)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
+  if (!layer || !layer->data) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Array<float> mask;
+  if (!gather_layer_mask(*ctx.object, *layer, mask)) {
+    BKE_report(op->reports, RPT_ERROR, "No mask painted");
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool invert = RNA_boolean_get(op->ptr, "invert");
+  const bool clear_mask = RNA_boolean_get(op->ptr, "clear_mask");
+
+  session_state_ensure(*ctx.object);
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_sculpt_layer_data(*ctx.object, *layer);
+  MutableSpan<float3> data = bke::sculpt_layers::data_get(*layer);
+  for (const int64_t i : data.index_range()) {
+    const float factor = invert ? 1.0f - mask[i] : mask[i];
+    data[i] *= factor;
+  }
+  commit_layers_change(*ctx.depsgraph, *ctx.object);
+  undo::push_end(*ctx.object);
+
+  if (clear_mask) {
+    /* Reuse the existing flood-fill operator instead of re-deriving the per-domain mask-clear
+     * logic (grid dirty flags, node mask-changed tagging, multires-modified marking are already
+     * handled there). Runs as its own undo step, same as other layer operators that delegate to
+     * a sibling operator (see #layer_bake_and_editmode_enter_exec calling SCULPT_OT_layer_bake).
+     */
+    PointerRNA props = WM_operator_properties_create("PAINT_OT_mask_flood_fill");
+    RNA_enum_set_identifier(C, &props, "mode", "VALUE");
+    RNA_float_set(&props, "value", 0.0f);
+    WM_operator_name_call(
+        C, "PAINT_OT_mask_flood_fill", wm::OpCallContext::ExecDefault, &props, nullptr);
+    WM_operator_properties_free(&props);
+  }
+
+  layers_ui_notify(C, *ctx.object);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_mask_isolate(wmOperatorType *ot)
+{
+  ot->name = "Isolate Layer by Mask";
+  ot->idname = "SCULPT_OT_layer_mask_isolate";
+  ot->description =
+      "Keep only the masked part of the active sculpt layer's displacement, zeroing the rest";
+  ot->exec = layer_mask_isolate_exec;
+  ot->poll = layers_poll;
+  ot->flag = OPTYPE_REGISTER;
+
+  RNA_def_boolean(
+      ot->srna, "invert", false, "Invert", "Keep the unmasked part instead of the masked part");
+  RNA_def_boolean(ot->srna,
+                   "clear_mask",
+                   false,
+                   "Clear Mask",
+                   "Clear the mask after isolating the layer");
 }
 
 static wmOperatorStatus layer_set_influence_exec(bContext *C, wmOperator *op)

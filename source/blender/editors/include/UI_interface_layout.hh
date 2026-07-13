@@ -281,6 +281,13 @@ struct Layout : public Item, NonCopyable, NonMovable {
 
   [[nodiscard]] int width() const;
 
+  /**
+   * Padding #Layout::box() adds around its content on each side, in pixels. Callers that measure
+   * an exact pixel width before wrapping content in #box() (e.g. for fixed-size grid columns)
+   * need this to shrink that width so the box's total footprint (content + padding) still fits.
+   */
+  [[nodiscard]] int box_padding_px() const;
+
   /** Sub-layout items. */
 
   Layout &absolute(bool align = false);

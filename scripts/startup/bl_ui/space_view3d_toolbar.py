@@ -789,7 +789,7 @@ class VIEW3D_PT_tools_brush_texture(Panel, View3DPaintPanel):
     bl_parent_id = "VIEW3D_PT_tools_brush_settings"
     bl_label = "Texture"
     bl_options = {'DEFAULT_CLOSED'}
-    bl_ui_units_x = 12
+    bl_ui_units_x = 13
 
     @classmethod
     def poll(cls, context):

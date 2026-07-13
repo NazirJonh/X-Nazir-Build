@@ -6406,6 +6406,14 @@ LayoutRoot *Layout::root() const
 {
   return root_;
 };
+int Layout::box_padding_px() const
+{
+  /* Match #LayoutItemBx::estimate_impl(): header layouts get no box padding. */
+  if (this->root()->type == LayoutType::Header) {
+    return 0;
+  }
+  return this->root()->style->boxspace;
+};
 const bContextStore *Layout::context() const
 {
   return context_;

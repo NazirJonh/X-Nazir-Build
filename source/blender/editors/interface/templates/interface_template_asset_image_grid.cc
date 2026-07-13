@@ -1012,9 +1012,16 @@ static void build_image_grid(Layout &layout,
     }
   }
 
+  /* Wrap the tile grid, scrollbar and resize grip in a themed box so the grid reads as a
+   * distinct region (header row and browse/new/open buttons stay outside). #Layout::box() adds
+   * #box_padding_px() of padding on every side beyond its content's width, so the width fed to
+   * the pixel-exact column math below is shrunk by that amount up front — otherwise the box's
+   * drawn outline would overflow the panel by that padding. */
+  Layout &grid_box = layout.box();
+
   const int preview_size = ed::view3d::image_grid_preview_size_get(*v3d);
   const int tile_w = ui::preview_tile_size_x(preview_size);
-  const int panel_width = max_ii(layout.width(), 0);
+  const int panel_width = max_ii(layout.width() - 2 * grid_box.box_padding_px(), 0);
 
   /* Visible row count for this viewport; needed both to reserve the scrollbar gutter below and for
    * the focus scroll further down. */
@@ -1094,7 +1101,7 @@ static void build_image_grid(Layout &layout,
 
   View3DGridStateAccess state_access(session, *v3d, grid_id, is_mask_slot, is_popover);
   build_grid_view(C,
-                  layout,
+                  grid_box,
                   *grid_view,
                   state_access,
                   session.cached_item_count,

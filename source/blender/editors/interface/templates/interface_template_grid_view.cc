@@ -296,9 +296,18 @@ void build_grid_view(const bContext &C,
   const int total_rows = grid_total_rows(item_count, cols_est, effective_rows);
   /* Pixel-exact scroll range: the whole content minus the raw pixel viewport, so the last scroll
    * position pulls a partial bottom row fully into view instead of quantizing to whole rows. The
-   * sub-row remainder on the last page emerges naturally from this clamp. */
-  const int max_scroll = grid_max_scroll_px(item_count, cols_est, tile_h, visible_height);
-  state.scroll_px_set(grid_clamp_scroll_px(state.scroll_px(), max_scroll));
+   * sub-row remainder on the last page emerges naturally from this clamp.
+   *
+   * Skipped when #item_count is 0: that means #build_items() has never run for this session yet
+   * (freshly created #GridStateAccess, e.g. a popover's first-ever build), so #item_count is not
+   * "empty content" but "unknown". Clamping against a false 0 here would wipe out a same-frame
+   * scroll request (e.g. #image_grid_request_scroll_to_asset) before #build_items() below gets a
+   * chance to read it. The post-build clamp further down re-clamps against the real count once
+   * #build_items() has run, so real overflow still gets bounded correctly. */
+  if (item_count > 0) {
+    const int max_scroll = grid_max_scroll_px(item_count, cols_est, tile_h, visible_height);
+    state.scroll_px_set(grid_clamp_scroll_px(state.scroll_px(), max_scroll));
+  }
   const int scroll_offset_px = state.scroll_px() % tile_h;
 
   /* --- Layout construction --- */

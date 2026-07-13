@@ -52,6 +52,7 @@
 #include "ED_space_api.hh"
 #include "ED_transform.hh"
 #include "ED_undo.hh"
+#include "ED_view3d.hh"
 
 #include "GPU_matrix.hh"
 
@@ -1468,6 +1469,15 @@ static void space_view3d_listener(const wmSpaceTypeListenerParams *params)
 
   /* context changes */
   switch (wmn->category) {
+    case NC_WINDOW:
+      /* #rna_AssetShelf_register() fires this notifier whenever any asset shelf Python class
+       * (re)registers, replacing its #AssetShelfType with a fresh one that lacks the image-grid
+       * popover hooks (#image_grid_shelf_sync_register() re-applies them). Without this, a user
+       * who never draws the N-Panel image-grid template (the only other place that re-applies
+       * them) and instead opens the browse popover via hotkey gets an unregistered shelf type: no
+       * active-asset highlighting or #ASSET_SHELF_TYPE_FLAG_CENTER_ACTIVE_ASSET_ON_OPEN. */
+      ed::view3d::image_grid_shelf_sync_register();
+      break;
     case NC_SCENE:
       switch (wmn->data) {
         case ND_WORLD: {

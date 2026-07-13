@@ -1700,12 +1700,13 @@ int handle_image_grid_focus_active_event(bContext *C, const wmEvent *event, AReg
 bool image_grid_slot_is_mask(const PointerRNA &texture_slot_ptr);
 
 /**
- * Switch the grid bound to \a target_ptr (the brush texture slot the drop landed on) to the
- * current-file library and scroll-focus \a image. Called after a drop assigns a freshly loaded,
- * non-asset image to the slot, so the grid shows where it landed instead of staying on whatever
- * library/catalog it was filtered to before the drop.
+ * Assign \a image to the brush texture slot identified by \a target_ptr (the same slot the grid
+ * is bound to), then switch the grid to the current-file library and scroll-focus the image.
+ * Mirrors #VIEW3D_OT_image_grid_open / #VIEW3D_OT_image_grid_new (localize a linked brush rather
+ * than moving/copying the image into its library), so a dropped image never ends up linked.
+ * Returns false when \a target_ptr does not resolve to a brush.
  */
-void image_grid_focus_dropped_image(bContext &C, const PointerRNA &target_ptr, const Image &image);
+bool image_grid_assign_dropped_image(bContext &C, const PointerRNA &target_ptr, Image &image);
 
 /**
  * Build an `image_grid_target` #PointerRNA for the active paint brush texture slot.

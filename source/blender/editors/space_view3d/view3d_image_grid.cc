@@ -503,6 +503,71 @@ static bool image_grid_assign_image_to_brush(bContext &C,
   return true;
 }
 
+/** Switch the grid to the current-file library (if it was showing another one) and scroll-focus
+ * \a image, so an image just opened/assigned is visible regardless of the previous filter. */
+static void image_grid_after_image_opened(bContext &C,
+                                          View3D &v3d,
+                                          Image &image,
+                                          const bool is_mask_slot)
+{
+  ImageGridUIState &state = image_grid_state_get(v3d, is_mask_slot);
+  const AssetLibraryReference local_ref = asset_system::current_file_library_reference();
+
+  const AssetLibraryReference old_lib_ref = state.filter.lib_ref;
+  if (state.filter.lib_ref.type != ASSET_LIBRARY_LOCAL) {
+    image_grid_catalog_swap_library(state, old_lib_ref, local_ref);
+    state.filter.lib_ref = local_ref;
+    image_grid_catalog_commit_active(state);
+  }
+
+  image_grid_reset_scroll(v3d, is_mask_slot);
+  image_grid_request_scroll_to_asset(state, image.id.name + 2);
+  image_grid_pending_clear(state);
+
+  image_grid_state_persist_to_view3d(v3d, state, is_mask_slot);
+  ed::asset::list::storage_fetch(&local_ref, &C);
+  image_grid_prepare_browse_shelf(C, state, "VIEW3D_AST_image_texture");
+  image_grid_notify_change(C, is_mask_slot);
+}
+
+/**
+ * Core of assigning \a image to the brush texture slot identified by \a target_ptr: localize a
+ * linked brush, wrap the image in a #Tex, assign it to the slot, then switch the grid to the
+ * current-file library and scroll-focus the image. Shared by the Open/New-image operators (via
+ * #image_grid_assign_target_image) and by dropping an image onto the grid
+ * (#image_grid_assign_dropped_image).
+ */
+static bool image_grid_assign_image_to_slot(bContext &C,
+                                            const PointerRNA &target_ptr,
+                                            Brush &brush,
+                                            Image &image)
+{
+  const bool use_mask_slot = image_grid_slot_is_mask(target_ptr);
+  Brush *target_brush = brush_ensure_local_for_texture(C, brush);
+  if (!image_grid_assign_image_to_brush(C, *target_brush, image, use_mask_slot)) {
+    return false;
+  }
+  View3D *v3d = CTX_wm_view3d(&C);
+  if (v3d) {
+    image_grid_after_image_opened(C, *v3d, image, use_mask_slot);
+  }
+  return true;
+}
+
+bool image_grid_assign_dropped_image(bContext &C, const PointerRNA &target_ptr, Image &image)
+{
+  if (!target_ptr.owner_id || GS(target_ptr.owner_id->name) != ID_BR) {
+    return false;
+  }
+  Main *bmain = CTX_data_main(&C);
+  Brush *brush = id_cast<Brush *>(
+      BKE_libblock_find_session_uid(bmain, ID_BR, target_ptr.owner_id->session_uid));
+  if (!brush) {
+    return false;
+  }
+  return image_grid_assign_image_to_slot(C, target_ptr, *brush, image);
+}
+
 /** \} */
 
 }  // namespace blender::ed::view3d
@@ -1121,31 +1186,6 @@ static bool image_grid_brush_target_resolve(bContext *C,
   return true;
 }
 
-static void image_grid_after_image_opened(bContext &C,
-                                          View3D &v3d,
-                                          Image &image,
-                                          const bool is_mask_slot)
-{
-  ImageGridUIState &state = image_grid_state_get(v3d, is_mask_slot);
-  const AssetLibraryReference local_ref = asset_system::current_file_library_reference();
-
-  const AssetLibraryReference old_lib_ref = state.filter.lib_ref;
-  if (state.filter.lib_ref.type != ASSET_LIBRARY_LOCAL) {
-    image_grid_catalog_swap_library(state, old_lib_ref, local_ref);
-    state.filter.lib_ref = local_ref;
-    image_grid_catalog_commit_active(state);
-  }
-
-  image_grid_reset_scroll(v3d, is_mask_slot);
-  image_grid_request_scroll_to_asset(state, image.id.name + 2);
-  image_grid_pending_clear(state);
-
-  image_grid_state_persist_to_view3d(v3d, state, is_mask_slot);
-  ed::asset::list::storage_fetch(&local_ref, &C);
-  image_grid_prepare_browse_shelf(C, state, "VIEW3D_AST_image_texture");
-  image_grid_notify_change(C, is_mask_slot);
-}
-
 static bool image_grid_assign_target_image(bContext &C, Image &image, wmOperator *op)
 {
   PointerRNA target_ptr;
@@ -1153,16 +1193,7 @@ static bool image_grid_assign_target_image(bContext &C, Image &image, wmOperator
   if (!image_grid_brush_target_resolve(&C, op, &target_ptr, &brush)) {
     return false;
   }
-  const bool use_mask_slot = image_grid_slot_is_mask(target_ptr);
-  Brush *target_brush = brush_ensure_local_for_texture(C, *brush);
-  if (!image_grid_assign_image_to_brush(C, *target_brush, image, use_mask_slot)) {
-    return false;
-  }
-  View3D *v3d = CTX_wm_view3d(&C);
-  if (v3d) {
-    image_grid_after_image_opened(C, *v3d, image, use_mask_slot);
-  }
-  return true;
+  return image_grid_assign_image_to_slot(C, target_ptr, *brush, image);
 }
 
 static void image_grid_open_cancel(bContext * /*C*/, wmOperator *op)

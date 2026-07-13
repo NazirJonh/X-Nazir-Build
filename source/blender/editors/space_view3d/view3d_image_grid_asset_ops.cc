@@ -100,15 +100,6 @@ static void image_grid_operation_finish(bContext &C,
   image_grid_notify_change(C, is_mask_slot);
 }
 
-void image_grid_focus_dropped_image(bContext &C, const PointerRNA &target_ptr, const Image &image)
-{
-  const bool is_mask_slot = image_grid_slot_is_mask(target_ptr);
-  image_grid_operation_finish(C,
-                              asset_system::current_file_library_reference(),
-                              StringRefNull(image.id.name + 2),
-                              is_mask_slot);
-}
-
 static Image *image_grid_image_from_session_uid(Main *bmain, wmOperator *op)
 {
   if (!RNA_struct_property_is_set(op->ptr, "image_session_uid")) {

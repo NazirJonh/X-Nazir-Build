@@ -592,53 +592,35 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
   }
 
  private:
-  /** Assign one dropped image to the bound slot, reusing the slot-button drop operator. */
+  /**
+   * Assign one dropped image to the bound slot via the same brush-localizing path as
+   * #VIEW3D_OT_image_grid_open and the grid's own tile click
+   * (#ed::view3d::image_grid_assign_dropped_image), not #BRUSH_OT_texture_slot_assign_image: that
+   * operator moves (or, for a pre-existing image, copies) the image into a linked brush's library
+   * to keep the reference in the same undo domain - which for the common case of an asset-shelf
+   * (linked) active brush left the dropped image showing as linked, and for a pre-existing image
+   * additionally duplicated it. Localizing the brush instead keeps the dropped image itself local
+   * and untouched.
+   */
   bool drop_single_image(bContext *C, const ui::DragInfo &drag_info) const
   {
     const wmDrag &drag = drag_info.drag_data;
 
-    PointerRNA props = WM_operator_properties_create("BRUSH_OT_texture_slot_assign_image");
     /* Resolve a local image, importing the asset first if the drag came from the asset browser. */
-    const Image *image = nullptr;
-    const char *dropped_path = nullptr;
-    if (const ID *image_id = WM_drag_get_local_ID_or_import_from_asset(C, &drag, ID_IM)) {
-      RNA_int_set(&props, "session_uid", int(image_id->session_uid));
-      image = id_cast<const Image *>(image_id);
+    Image *image = nullptr;
+    if (ID *image_id = WM_drag_get_local_ID_or_import_from_asset(C, &drag, ID_IM)) {
+      image = id_cast<Image *>(image_id);
     }
     else if (drag.type == WM_DRAG_PATH) {
       if (const char *path = WM_drag_get_single_path(&drag)) {
-        RNA_string_set(&props, "filepath", path);
-        dropped_path = path;
+        image = BKE_image_load_exists(CTX_data_main(C), path);
       }
     }
-    RNA_boolean_set(&props, "use_mask_slot", ed::view3d::image_grid_slot_is_mask(target_ptr_));
-    RNA_boolean_set(&props, "replace_existing", true);
-
-    /* Invoke (not exec): a packed image on an occupied slot opens a popup that returns
-     * #OPERATOR_INTERFACE - still a successful drop. */
-    const wmOperatorStatus status = WM_operator_name_call(C,
-                                                          "BRUSH_OT_texture_slot_assign_image",
-                                                          wm::OpCallContext::InvokeDefault,
-                                                          &props,
-                                                          &drag_info.event);
-    WM_operator_properties_free(&props);
-    const bool success = (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
-
-    /* File drops resolve the image only now, after the operator's own lookup - reusing the same
-     * by-path lookup here (rather than pre-empting it) keeps the move-vs-copy decision for a
-     * linked texture's local image (#paint_assign_image_exec) based on whether the image existed
-     * *before this drop*, not because this call loaded it first. */
-    if (success && !image && dropped_path) {
-      image = BKE_image_load_exists(CTX_data_main(C), dropped_path);
+    if (!image) {
+      return false;
     }
 
-    if (success && image) {
-      /* The dropped image always ends up local to the current file (a temporary texture, or a
-       * freshly imported asset) - switch the grid there and scroll it into view, regardless of
-       * which library/catalog the grid was filtered to before the drop. */
-      ed::view3d::image_grid_focus_dropped_image(*C, target_ptr_, *image);
-    }
-    return success;
+    return ed::view3d::image_grid_assign_dropped_image(*C, target_ptr_, *image);
   }
 
   /**

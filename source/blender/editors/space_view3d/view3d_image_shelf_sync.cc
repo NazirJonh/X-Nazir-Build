@@ -573,23 +573,6 @@ void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState 
   ed::asset::shelf::settings_set_all_catalog_active(shelf.settings);
 }
 
-void image_grid_sync_state_from_shelf(ImageGridUIState &state, const AssetShelf &shelf)
-{
-  const AssetLibraryReference new_lib_ref = shelf.settings.asset_library_reference;
-  const AssetLibraryReference old_lib_ref = state.filter.lib_ref;
-  image_grid_catalog_swap_library(state, old_lib_ref, new_lib_ref);
-  state.filter.enabled_catalog_paths.clear();
-  if (!ed::asset::shelf::settings_is_all_catalog_active(shelf.settings)) {
-    if (shelf.settings.active_catalog_path && shelf.settings.active_catalog_path[0] != '\0') {
-      state.filter.enabled_catalog_paths.add(shelf.settings.active_catalog_path);
-    }
-  }
-  image_grid_catalog_commit_active(state);
-  /* Library or catalog changed — focus position is no longer valid. The caller resets the slot's
-   * scroll sessions (it has the View3D and slot in scope). */
-  image_grid_focus_clear(state.viewport);
-}
-
 AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
                                             ImageGridUIState &state,
                                             const char *shelf_idname)
@@ -606,9 +589,9 @@ AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
   }
   /* While the browse popover is open it owns the library/catalog selection (the user picks catalogs
    * in its tree, written straight to #shelf.settings). This prep runs on every N-panel image-grid
-   * redraw; syncing shelf←state here would clobber that selection back to #ImageGridUIState on the
-   * next frame. Skip it while open — the popover's #setup_popover_layout reconciles settings→state,
-   * and this prep resumes once the popover closes. */
+   * redraw; syncing shelf←state here would clobber that selection back on the next frame. Skip it
+   * while open, and resume once the popover closes: the shelf then falls back to the grid's own
+   * library/catalog, so browsing catalogs without activating an asset leaves the grid untouched. */
   if (!image_grid_browse_popover_is_open(C)) {
     image_grid_sync_shelf_from_state(*shelf, state);
   }
@@ -660,33 +643,18 @@ void image_grid_popover_layout_context_set(ui::Layout &layout,
     return;
   }
 
+  /* Only push the brush-slot target the shelf's activate operator needs. The "Browse Image" button
+   * inherits it from its own layout context store (#add_browse_image_button); the keymap path
+   * (#WM_OT_call_asset_shelf_popover) has no button, so this hook is its only source.
+   *
+   * Deliberately does *not* reconcile the shelf's library/catalog back into #ImageGridUIState:
+   * picking a catalog in the popover must not move the image grid off the user's current catalog
+   * (and scroll away from the assigned texture). The grid follows the shelf only once an asset is
+   * actually activated — #VIEW3D_OT_image_shelf_activate_asset schedules it via
+   * #image_grid_pending_schedule_from_asset, applied by #image_grid_pending_apply_if_ready after
+   * the popover closes. */
   layout.context_ptr_set("image_grid_target", &target_ptr);
   layout.context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
-
-  View3D *v3d = CTX_wm_view3d(&C);
-  if (!v3d) {
-    return;
-  }
-  ImageGridUIState &state = image_grid_state_get(*v3d, is_mask_slot);
-
-  /* Popover refresh (e.g. after #NC_ASSET) must not call #image_grid_prepare_browse_shelf, which
-   * overwrites shelf library/catalog from #ImageGridUIState and resets the user's selection.
-   * When the user changed library or catalog in the popover, sync those settings back to state. */
-  image_grid_shelf_sync_register();
-  AssetShelfType *shelf_type = ed::asset::shelf::type_find_from_idname(IMAGE_TEXTURE_SHELF_IDNAME);
-  if (!shelf_type) {
-    return;
-  }
-  AssetShelf *shelf = ed::asset::shelf::popup_shelf_get_or_create(C, *shelf_type);
-  if (!shelf) {
-    return;
-  }
-  if (!image_grid_filter_matches_shelf(state, *shelf)) {
-    image_grid_sync_state_from_shelf(state, *shelf);
-    image_grid_reset_scroll(*v3d, is_mask_slot);
-    image_grid_state_persist_to_view3d(*v3d, state, is_mask_slot);
-    image_grid_notify_change(C, is_mask_slot);
-  }
 }
 
 /** \} */

@@ -1588,9 +1588,6 @@ void image_grid_reset_scroll(const View3D &v3d, bool is_mask_slot);
 /** Copy grid library/catalog filter into popup asset shelf before opening browse UI. */
 void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState &state);
 
-/** Copy popup shelf library/catalog back into grid state; resets scroll row. */
-void image_grid_sync_state_from_shelf(ImageGridUIState &state, const AssetShelf &shelf);
-
 /** Prepare popup shelf for image browse; returns null if shelf type missing or poll fails. */
 AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
                                             ImageGridUIState &state,

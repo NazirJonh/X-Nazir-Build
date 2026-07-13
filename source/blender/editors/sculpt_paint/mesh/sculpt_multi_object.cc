@@ -16,6 +16,29 @@
 
 namespace blender::ed::sculpt_paint {
 
+float4x4 symmetry_space_frame(const ePaintSymmetrySpace symmetry_space,
+                              const float4x4 &reference_world_to_object,
+                              const float3 &cursor_world)
+{
+  float4x4 result;
+  switch (symmetry_space) {
+    case PAINT_SYMM_SPACE_ACTIVE_OBJECT:
+      /* Mirror in the reference object's own local axes (historical behavior). */
+      result = reference_world_to_object;
+      break;
+    case PAINT_SYMM_SPACE_GLOBAL_WORLD:
+      result = float4x4::identity();
+      break;
+    case PAINT_SYMM_SPACE_GLOBAL_CURSOR:
+      result = math::from_location<float4x4>(-cursor_world);
+      break;
+    default:
+      result = float4x4::identity();
+      break;
+  }
+  return result;
+}
+
 /**
  * Publishes the shared multi-object surface-sampling context and the shared-symmetry
  * reference-space transforms onto every object's #StrokeCache for this stroke step (Container B
@@ -33,8 +56,22 @@ static void propagate_shared_sampling_and_symmetry_state(const Span<Object *> mo
                                                          const Span<Object *> sample_objects,
                                                          Object *primary_ob,
                                                          Object *symm_reference_ob,
-                                                         const bool shared_symmetry_active)
+                                                         const bool shared_symmetry_active,
+                                                         const ePaintSymmetrySpace symmetry_space,
+                                                         const float3 &cursor_world)
 {
+  /* Symmetry frame for the whole stroke. In ACTIVE_OBJECT mode we keep the historical per-object
+   * expressions verbatim (see below) and never touch S, so the default path stays byte-identical. */
+  const bool global_symmetry = shared_symmetry_active &&
+                               symmetry_space != PAINT_SYMM_SPACE_ACTIVE_OBJECT;
+  float4x4 S = float4x4::identity();
+  float4x4 S_inv = float4x4::identity();
+  if (global_symmetry) {
+    S = symmetry_space_frame(
+        symmetry_space, symm_reference_ob->world_to_object(), cursor_world);
+    S_inv = math::invert(S);
+  }
+
   for (Object *object_ptr : mode_objects) {
     SculptSession *ss_iter = object_ptr->runtime->sculpt_session;
     if (!ss_iter || !ss_iter->cache) {
@@ -67,14 +104,29 @@ static void propagate_shared_sampling_and_symmetry_state(const Span<Object *> mo
      * symmetry collapses to this object's own local plane, staying bit-exact. */
     ss_iter->cache->symm_reference_object = !sample_objects.is_empty() ? symm_reference_ob :
                                                                          nullptr;
-    /* Reference-space transforms for the shared symmetry plane (see #StrokeCache). Identity for
-     * the reference (active) object itself and for single-object strokes. */
-    if (!shared_symmetry_active || object_ptr == symm_reference_ob) {
+    /* Reference-space transforms for the shared symmetry plane (see #StrokeCache). */
+    if (!shared_symmetry_active) {
+      /* Single-object stroke: untouched, bit-exact. */
+      ss_iter->cache->symm_ref_from_cur = float4x4::identity();
+      ss_iter->cache->symm_cur_from_ref = float4x4::identity();
+      ss_iter->cache->symm_shared_origin_active = false;
+    }
+    else if (global_symmetry) {
+      /* World-axis symmetry: EVERY object (including the reference) is carried into the shared world
+       * frame S, mirrored there, and carried back. */
+      ss_iter->cache->symm_ref_from_cur = S * object_ptr->object_to_world();
+      ss_iter->cache->symm_cur_from_ref = object_ptr->world_to_object() * S_inv;
+      ss_iter->cache->symm_shared_origin_active = true;
+    }
+    else if (object_ptr == symm_reference_ob) {
+      /* ACTIVE_OBJECT mode, reference object: identity -> traditional per-object mirror, bit-exact. */
       ss_iter->cache->symm_ref_from_cur = float4x4::identity();
       ss_iter->cache->symm_cur_from_ref = float4x4::identity();
       ss_iter->cache->symm_shared_origin_active = false;
     }
     else {
+      /* ACTIVE_OBJECT mode, secondary object: verbatim historical expressions (do NOT use S/invert,
+       * so this stays byte-identical to the pre-feature code). */
       ss_iter->cache->symm_ref_from_cur = symm_reference_ob->world_to_object() *
                                           object_ptr->object_to_world();
       ss_iter->cache->symm_cur_from_ref = object_ptr->world_to_object() *
@@ -129,7 +181,8 @@ Object *MultiObjectStrokeContext::resolve_primary(Object *cursor_object, const B
   return primary_ob;
 }
 
-void MultiObjectStrokeContext::propagate_shared_state()
+void MultiObjectStrokeContext::propagate_shared_state(const ePaintSymmetrySpace symmetry_space,
+                                                      const float3 &cursor_world)
 {
   const Span<Object *> sample_objects = (this->mode_objects.size() > 1) ?
                                             this->mode_objects.as_span() :
@@ -142,7 +195,9 @@ void MultiObjectStrokeContext::propagate_shared_state()
                                                sample_objects,
                                                this->primary_object,
                                                this->symm_reference_object,
-                                               this->shared_symmetry_active);
+                                               this->shared_symmetry_active,
+                                               symmetry_space,
+                                               cursor_world);
 }
 
 bool MultiObjectStrokeContext::process_secondary(Object &ob,
@@ -168,6 +223,7 @@ bool MultiObjectStrokeContext::process_secondary(Object &ob,
       }
     }
   }
+
   return has_location;
 }
 

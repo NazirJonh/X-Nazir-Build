@@ -9,14 +9,28 @@
 
 #include <optional>
 
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_quaternion_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "DNA_scene_enums.h"
+
 #include "sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint {
+
+/**
+ * Build the symmetry-frame matrix S (world -> symmetry space) for a multi-object stroke. The brush
+ * symmetry plane is the set of `symmetry_flip` axis planes expressed in this space:
+ * - #PAINT_SYMM_SPACE_ACTIVE_OBJECT: reference object's local space (world_to_object). Historical.
+ * - #PAINT_SYMM_SPACE_GLOBAL_WORLD: identity (world axes through the scene origin).
+ * - #PAINT_SYMM_SPACE_GLOBAL_CURSOR: world axes, translated to the 3D cursor.
+ */
+float4x4 symmetry_space_frame(ePaintSymmetrySpace symmetry_space,
+                              const float4x4 &reference_world_to_object,
+                              const float3 &cursor_world);
 
 /**
  * Snapshot of the primary object's per-stroke fields that are LAZILY allocated inside the brush
@@ -129,7 +143,7 @@ struct MultiObjectStrokeContext {
    * symmetry reference-space transforms) onto every object's #StrokeCache. Must be called after
    * #resolve_primary.
    */
-  void propagate_shared_state();
+  void propagate_shared_state(ePaintSymmetrySpace symmetry_space, const float3 &cursor_world);
 
   /**
    * #update_step Phase 2, secondary-object branch: resolve whether/where `ob` (a non-primary

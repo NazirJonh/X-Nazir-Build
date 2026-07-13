@@ -4507,6 +4507,7 @@ static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
     cache.radial_symmetry_pass = 0;
 
     cache_calc_brushdata_symm(cache, symm, 0, 0);
+
     do_tiled(depsgraph, scene, sd, ob, brush, paint_mode_settings, action);
 
     do_radial_symmetry(
@@ -7150,11 +7151,30 @@ bool stroke_cache_set_location_from_world_sphere(Object &ob,
  * entry is \a world_center itself (the un-mirrored center).
  */
 static Vector<float3> shared_symmetry_world_centers(const Object &reference_ob,
-                                                    const float3 &world_center)
+                                                    const float3 &world_center,
+                                                    const ePaintSymmetrySpace symmetry_space,
+                                                    const float3 &cursor_world)
 {
   const Mesh &mesh = *id_cast<const Mesh *>(reference_ob.data);
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(reference_ob);
-  const float3 center_ref = math::transform_point(reference_ob.world_to_object(), world_center);
+
+  /* World <-> symmetry-space frame, matching #propagate_shared_sampling_and_symmetry_state: the
+   * mirrored daub centers used to decide whether a secondary object is touched must live in the
+   * SAME space as the deformation's own mirror plane, or global modes would test against the wrong
+   * positions and silently skip secondary objects. ACTIVE_OBJECT keeps the verbatim reference
+   * expressions (do NOT route through #symmetry_space_frame/invert) so it stays bit-exact. */
+  float4x4 to_symm_space = float4x4::identity();
+  float4x4 from_symm_space = float4x4::identity();
+  if (symmetry_space == PAINT_SYMM_SPACE_ACTIVE_OBJECT) {
+    to_symm_space = reference_ob.world_to_object();
+    from_symm_space = reference_ob.object_to_world();
+  }
+  else {
+    to_symm_space = symmetry_space_frame(
+        symmetry_space, reference_ob.world_to_object(), cursor_world);
+    from_symm_space = math::invert(to_symm_space);
+  }
+  const float3 center_ref = math::transform_point(to_symm_space, world_center);
 
   Vector<float3> centers;
   for (int i = 0; i <= symm; i++) {
@@ -7162,7 +7182,7 @@ static Vector<float3> shared_symmetry_world_centers(const Object &reference_ob,
       continue;
     }
     const float3 mirrored = symmetry_flip(center_ref, ePaintSymmetryFlags(i));
-    centers.append(math::transform_point(reference_ob.object_to_world(), mirrored));
+    centers.append(math::transform_point(from_symm_space, mirrored));
 
     /* Radial copies around each axis, matching #do_radial_symmetry (flip, then rotate). */
     for (int axis = 0; axis < 3; axis++) {
@@ -7173,10 +7193,11 @@ static Vector<float3> shared_symmetry_world_centers(const Object &reference_ob,
         axis_angle_to_mat3_single(mat, 'X' + axis, angle);
         float3 rotated = mirrored;
         mul_m3_v3(mat, rotated);
-        centers.append(math::transform_point(reference_ob.object_to_world(), rotated));
+        centers.append(math::transform_point(from_symm_space, rotated));
       }
     }
   }
+
   return centers;
 }
 
@@ -7349,7 +7370,8 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
    * reference-space transforms onto every object's cache. Disabled (identity/empty) for
    * single-object strokes, keeping that path bit-exact. See
    * #MultiObjectStrokeContext::propagate_shared_state. */
-  this->multi_.propagate_shared_state();
+  this->multi_.propagate_shared_state(ePaintSymmetrySpace(sd.paint.symmetry_space),
+                                      float3(scene.cursor.location));
   Object *const symm_reference_ob = this->multi_.symm_reference_object;
   const bool shared_symmetry_active = this->multi_.shared_symmetry_active;
 
@@ -7452,7 +7474,10 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       /* Precompute the mirrored daub centers now that the shared center is known, for the
        * secondary-object gate below. */
       if (shared_symmetry_active) {
-        symm_world_centers = shared_symmetry_world_centers(*symm_reference_ob, primary_world_center);
+        symm_world_centers = shared_symmetry_world_centers(*symm_reference_ob,
+                                                            primary_world_center,
+                                                            ePaintSymmetrySpace(sd.paint.symmetry_space),
+                                                            float3(scene.cursor.location));
       }
     }
     else {

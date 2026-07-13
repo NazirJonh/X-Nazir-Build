@@ -1236,6 +1236,9 @@ struct Paint {
 
   /** Flags used for symmetry. */
   ePaintSymmetryFlags symmetry_flags = PAINT_SYMMETRY_FEATHER;
+  /** #ePaintSymmetrySpace: space for the multi-object brush symmetry plane. */
+  char symmetry_space = 0;
+  char _pad_symm[7] = {};
   /**
    * Collapsed state of a given pressure curve
    */

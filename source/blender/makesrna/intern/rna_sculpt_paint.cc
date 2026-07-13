@@ -721,6 +721,26 @@ static void rna_def_paint(BlenderRNA *brna)
   StructRNA *srna;
   PropertyRNA *prop;
 
+  static const EnumPropertyItem symmetry_space_items[] = {
+      {PAINT_SYMM_SPACE_ACTIVE_OBJECT,
+       "ACTIVE_OBJECT",
+       0,
+       "Active Object",
+       "Mirror across the active object's own local axes (default; matches the same meshes after "
+       "joining them)"},
+      {PAINT_SYMM_SPACE_GLOBAL_WORLD,
+       "GLOBAL_WORLD",
+       0,
+       "Global, World Origin",
+       "Mirror across world axes through the scene world origin"},
+      {PAINT_SYMM_SPACE_GLOBAL_CURSOR,
+       "GLOBAL_CURSOR",
+       0,
+       "Global, 3D Cursor",
+       "Mirror across world axes through the 3D cursor"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   srna = RNA_def_struct(brna, "Paint", nullptr);
   RNA_def_struct_ui_text(srna, "Paint", "");
 
@@ -798,14 +818,23 @@ static void rna_def_paint(BlenderRNA *brna)
                            "Reduce the strength of the brush where it overlaps symmetrical daubs");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
+  prop = RNA_def_property(srna, "symmetry_space", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "symmetry_space");
+  RNA_def_property_enum_items(prop, symmetry_space_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Symmetry Space",
+      "Space of the brush symmetry plane in multi-object sculpt: the active object's local axes, "
+      "or world axes pivoted at the world origin or 3D cursor");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* Deprecated: superseded by #symmetry_space (PAINT_SYMM_SPACE_ACTIVE_OBJECT is now always-on for
+   * multi-object strokes). Kept as a no-op so existing Python scripts do not break; the underlying
+   * #PAINT_SYMMETRY_SHARED_ORIGIN bit is no longer read. */
   prop = RNA_def_property(srna, "use_symmetry_shared_origin", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "symmetry_flags", PAINT_SYMMETRY_SHARED_ORIGIN);
   RNA_def_property_ui_text(
-      prop,
-      "Shared Symmetry Origin",
-      "In multi-object sculpt, mirror the brush across a single symmetry plane taken from the "
-      "active object instead of each object mirroring around its own origin, so the result matches "
-      "the same meshes after joining them");
+      prop, "Shared Symmetry Origin", "Deprecated, use symmetry_space instead");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "cavity_curve", PROP_POINTER, PROP_NONE);

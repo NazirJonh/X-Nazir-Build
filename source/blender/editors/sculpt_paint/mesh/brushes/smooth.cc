@@ -149,7 +149,10 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
           if (!base_view.is_empty()) {
             /* Base-aware target `avg(base) + O[v]`: smooth the un-layered base and let the layer
              * detail ride on top instead of being flattened into it. Averaging the offset with
-             * the same operator (same neighbor lists) keeps boundary handling exact. */
+             * the same operator (same neighbor lists) keeps boundary handling exact.
+             *
+             * The raw offset is correct here (no #layers::stroke_base_view_dc): only the difference
+             * `O[v] - avg(O)` is used, which a constant shift leaves unchanged. */
             tls.base_view_avg.resize(verts.size());
             smooth::neighbor_data_average_mesh_check_loose(
                 base_view, verts, neighbors, tls.base_view_avg.as_mutable_span());

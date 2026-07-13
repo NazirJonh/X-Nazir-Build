@@ -32,6 +32,8 @@
 #include <chrono>
 #include <climits>
 #include <cstdio>
+#include <limits>
+#include <optional>
 #include <type_traits>
 
 #include "CLG_log.h"
@@ -136,6 +138,8 @@ void invalidate_runtime(Object &object)
   ss->layers.state_valid = false;
   ss->layers.mesh_base = {};
   ss->layers.base_view = {};
+  ss->layers.base_view_dc = float3(0.0f);
+  ss->layers.base_view_node_bounds = {};
 }
 
 bool is_supported(const Object &object)
@@ -523,26 +527,213 @@ bool sync_multires_for_rna(Main &bmain, Scene * /*scene*/, Mesh &mesh, SculptLay
  * stroke; brushes subtract it from the live positions for their *computations* while still
  * writing to the live (composed) positions, so the base receives a pattern-free delta and the
  * user keeps seeing base + layers.
+ *
+ * The offset is always taken *relative to the brush contact point* (`O[i] - O_dc`, see
+ * #base_view_dc_update): the brush reference point stays on the composed surface, so removing the
+ * raw offset would push the sampled positions out of the brush radius by the layer height. Only the
+ * pattern must be stripped from the brush inputs, not the height under the cursor.
  */
 
-static void base_view_ensure(Object &object, const SculptLayer *exclude = nullptr)
+/* Sample the base view at the current brush contact point. Every consumer subtracts this constant
+ * from the per-element offset, which anchors the sampled surface under the cursor again (see
+ * #SculptSession::layers::base_view_dc). Refreshed once per brush action, since #location_symm
+ * changes with the symmetry and tile pass. */
+void base_view_dc_update(const Depsgraph &depsgraph, Object &object)
+{
+  SculptSession *ss = session_of(object);
+  if (!ss) {
+    return;
+  }
+  ss->layers.base_view_dc = float3(0.0f);
+
+  const Span<float3> base_view = ss->layers.base_view;
+  if (base_view.is_empty() || !ss->cache) {
+    return;
+  }
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
+  if (!pbvh) {
+    return;
+  }
+  /* The search runs on the composed positions, the same space #location_symm lives in, so the
+   * contact point is genuinely on the sampled surface and the nearest element is found within a
+   * fraction of the radius. */
+  const float3 &location = ss->cache->location_symm;
+  const float radius = ss->cache->radius;
+  if (pbvh->type() == bke::pbvh::Type::Mesh) {
+    const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
+    const std::optional<int> vert = nearest_vert_calc_mesh(
+        *pbvh, positions, {}, location, radius, false);
+    if (vert && *vert >= 0 && int64_t(*vert) < base_view.size()) {
+      ss->layers.base_view_dc = base_view[*vert];
+    }
+  }
+  else if (pbvh->type() == bke::pbvh::Type::Grids && ss->subdiv_ccg) {
+    const SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
+    const std::optional<SubdivCCGCoord> coord = nearest_vert_calc_grids(
+        *pbvh, subdiv_ccg, location, radius, false);
+    if (coord) {
+      const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+      const int index = coord->to_index(key);
+      if (index >= 0 && int64_t(index) < base_view.size()) {
+        ss->layers.base_view_dc = base_view[index];
+      }
+    }
+  }
+}
+
+/** Create invalid bounds for use with #math::min_max (see the same helper in `pbvh.cc`). */
+static Bounds<float3> negative_bounds()
+{
+  return {float3(std::numeric_limits<float>::max()), float3(std::numeric_limits<float>::lowest())};
+}
+
+/* Bounds of each leaf node's own elements in base-view space, `position[i] - base_view[i]` (the DC
+ * is added at test time, see #base_view_extend_node_mask). Computed once per stroke, right after the
+ * base view itself; non-leaf entries stay empty and never intersect anything. */
+static void base_view_node_bounds_ensure(const Depsgraph &depsgraph, Object &object)
+{
+  SculptSession *ss = session_of(object);
+  ss->layers.base_view_node_bounds = {};
+
+  const Span<float3> base_view = ss->layers.base_view;
+  if (base_view.is_empty()) {
+    return;
+  }
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
+  if (!pbvh) {
+    return;
+  }
+
+  Array<Bounds<float3>> node_bounds(pbvh->nodes_num(), negative_bounds());
+
+  IndexMaskMemory memory;
+  const IndexMask leaves = bke::pbvh::all_leaf_nodes(*pbvh, memory);
+  const Vector<int> leaf_indices = leaves.to_indices<int>();
+
+  if (pbvh->type() == bke::pbvh::Type::Mesh) {
+    /* The evaluated positions, not #Mesh::vert_positions: with a shape key (or a deform modifier)
+     * the mesh holds the untouched basis, while the brush — and therefore the mask this bounds test
+     * feeds — works on the deformed surface. Without a deform the two are the same array. */
+    const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
+    if (positions.size() != base_view.size()) {
+      return;
+    }
+    const Span<bke::pbvh::MeshNode> nodes = pbvh->nodes<bke::pbvh::MeshNode>();
+    threading::parallel_for(leaf_indices.index_range(), 8, [&](const IndexRange range) {
+      for (const int index : range) {
+        const int node_index = leaf_indices[index];
+        Bounds<float3> bounds = negative_bounds();
+        for (const int vert : nodes[node_index].verts()) {
+          math::min_max(positions[vert] - base_view[vert], bounds.min, bounds.max);
+        }
+        node_bounds[node_index] = bounds;
+      }
+    });
+  }
+  else if (pbvh->type() == bke::pbvh::Type::Grids && ss->subdiv_ccg) {
+    const SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
+    const Span<float3> positions = subdiv_ccg.positions;
+    if (positions.size() != base_view.size()) {
+      return;
+    }
+    const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+    const Span<bke::pbvh::GridsNode> nodes = pbvh->nodes<bke::pbvh::GridsNode>();
+    threading::parallel_for(leaf_indices.index_range(), 8, [&](const IndexRange range) {
+      for (const int index : range) {
+        const int node_index = leaf_indices[index];
+        Bounds<float3> bounds = negative_bounds();
+        for (const int grid : nodes[node_index].grids()) {
+          for (const int i : bke::ccg::grid_range(key, grid)) {
+            math::min_max(positions[i] - base_view[i], bounds.min, bounds.max);
+          }
+        }
+        node_bounds[node_index] = bounds;
+      }
+    });
+  }
+  else {
+    return;
+  }
+
+  ss->layers.base_view_node_bounds = std::move(node_bounds);
+}
+
+IndexMask base_view_extend_node_mask(const Object &object,
+                                     const IndexMask &node_mask,
+                                     const float radius,
+                                     IndexMaskMemory &memory)
+{
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (!ss || !ss->cache) {
+    return node_mask;
+  }
+  const Span<Bounds<float3>> node_bounds = ss->layers.base_view_node_bounds;
+  if (node_bounds.is_empty()) {
+    return node_mask;
+  }
+
+  /* The brush measures its falloff on the base view, `position[i] - (base_view[i] - dc)`, so an
+   * element is reached when its base-view position lies within the radius of the cursor — that is,
+   * when `position[i] - base_view[i]` lies within the radius of `location - dc`. Gather every node
+   * whose base-view bounds satisfy that, on top of the nodes the composed-space search already
+   * found. The result is a superset, so the elements the gather adds simply receive their (possibly
+   * zero) factor like any other; what matters is that no element with a NON-zero factor is left in
+   * an ungathered node, which is what carved the stroke along node borders. */
+  const float3 center = ss->cache->location_symm - ss->layers.base_view_dc;
+  const float radius_sq = radius * radius;
+  const IndexMask reached = IndexMask::from_predicate(
+      IndexMask(node_bounds.index_range()), memory, [&](const int64_t i) {
+        const Bounds<float3> &bounds = node_bounds[i];
+        if (bounds.min.x > bounds.max.x) {
+          /* Empty: a non-leaf node. */
+          return false;
+        }
+        const float3 nearest = math::clamp(center, bounds.min, bounds.max);
+        return math::distance_squared(nearest, center) < radius_sq;
+      });
+  return IndexMask::from_union(node_mask, reached, memory);
+}
+
+/* The base view of a shape-key session, summed straight from the layer data:
+ * `sum_over_enabled_vert_layers(data[i] * effective(layer))`, minus \a exclude's own contribution.
+ *
+ * There is no runtime mesh base to subtract from here (#session_state_ensure keeps none) and
+ * #Mesh::vert_positions holds the untouched basis, so the `positions - base` derivation of the plain
+ * path does not apply. It also is not needed: the vertex layers are composed as a plain object-space
+ * offset on top of whatever the deform produced (#bke::sculpt_layers::apply_vert_layers on
+ * #SculptSession::deform_cos, #apply_vert_layers_eval on the evaluated mesh), so their sum *is* the
+ * layer contribution, expressed in the evaluated space the brushes read and write. */
+static Array<float3> base_view_from_layer_data(const Mesh &mesh,
+                                               const int64_t verts_num,
+                                               const SculptLayer *exclude)
+{
+  Array<float3> view(verts_num, float3(0.0f));
+  bke::sculpt_layers::apply_vert_layers(mesh.sculpt_layers, view);
+  if (exclude && exclude->domain == SCULPT_LAYER_DOMAIN_VERT) {
+    /* The recording target stays in the composed surface (the brush is evaluated against
+     * base + active layer), so remove it again from the sum. */
+    bke::sculpt_layers::apply_delta_mesh(*exclude, -effective(*exclude), view);
+  }
+  return view;
+}
+
+static void base_view_ensure(const Depsgraph &depsgraph,
+                             Object &object,
+                             const SculptLayer *exclude = nullptr)
 {
   SculptSession *ss = session_of(object);
   ss->layers.base_view = {};
+  ss->layers.base_view_dc = float3(0.0f);
+  ss->layers.base_view_node_bounds = {};
 
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
   if (!pbvh || pbvh->type() == bke::pbvh::Type::BMesh) {
     return;
   }
-  /* Deform-modifier / shape-key sessions mix position spaces (the runtime base is kept in the
-   * original space while brushes work on evaluated positions); keep the plain behavior there.
-   *
-   * NOTE: the shape-key case is intentionally NOT handled here. Reusing the base view under a shape
-   * key subtracts the underlying layers from the falloff-distance inputs while #cache.location stays
-   * on the composed surface, so a large underlying layer pushes the sample positions outside the
-   * brush radius and the stroke has no effect. Fixing the leak under shape keys needs a
-   * DC-offset-invariant distance (see the layer-on-layer leak notes) rather than this early return. */
-  if (ss->deform_modifiers_active || ss->shapekey_active) {
+  /* A deforming modifier without a shape key does not support layer recording at all (see
+   * #stroke_record_begin), so leave that session with the plain behavior. A shape key is handled:
+   * its base view comes from the layer data directly (see #base_view_from_layer_data). */
+  if (ss->deform_modifiers_active && !ss->shapekey_active) {
     return;
   }
   Mesh &mesh = mesh_of(object);
@@ -566,7 +757,10 @@ static void base_view_ensure(Object &object, const SculptLayer *exclude = nullpt
   }
 
   const auto t0 = std::chrono::high_resolution_clock::now();
-  if (pbvh->type() == bke::pbvh::Type::Mesh) {
+  if (pbvh->type() == bke::pbvh::Type::Mesh && ss->shapekey_active) {
+    ss->layers.base_view = base_view_from_layer_data(mesh, mesh.verts_num, exclude);
+  }
+  else if (pbvh->type() == bke::pbvh::Type::Mesh) {
     if (!ss->layers.state_valid) {
       session_state_ensure(object);
     }
@@ -626,6 +820,7 @@ static void base_view_ensure(Object &object, const SculptLayer *exclude = nullpt
     }
     ss->layers.base_view = std::move(total);
   }
+  base_view_node_bounds_ensure(depsgraph, object);
   const auto t1 = std::chrono::high_resolution_clock::now();
   SLP_PERF("[DEBUG-perf] base_view_ensure: %zu elems in %lld us\n",
            size_t(ss->layers.base_view.size()),
@@ -642,6 +837,15 @@ Span<float3> stroke_base_view(const Object &object)
   return ss->layers.base_view;
 }
 
+float3 stroke_base_view_dc(const Object &object)
+{
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (!ss) {
+    return float3(0.0f);
+  }
+  return ss->layers.base_view_dc;
+}
+
 Span<float3> base_view_adjust_compact_mesh(const Object &object,
                                            const Span<int> verts,
                                            const Span<float3> positions,
@@ -651,9 +855,10 @@ Span<float3> base_view_adjust_compact_mesh(const Object &object,
   if (base_view.is_empty()) {
     return positions;
   }
+  const float3 dc = stroke_base_view_dc(object);
   r_storage.resize(verts.size());
   for (const int i : verts.index_range()) {
-    r_storage[i] = positions[i] - base_view[verts[i]];
+    r_storage[i] = positions[i] - (base_view[verts[i]] - dc);
   }
   return r_storage;
 }
@@ -667,10 +872,11 @@ Span<float3> base_view_gather_mesh(const Object &object,
   if (base_view.is_empty()) {
     return {};
   }
+  const float3 dc = stroke_base_view_dc(object);
   r_storage.resize(verts.size());
   for (const int i : verts.index_range()) {
     const int vert = verts[i];
-    r_storage[i] = vert_positions[vert] - base_view[vert];
+    r_storage[i] = vert_positions[vert] - (base_view[vert] - dc);
   }
   return r_storage;
 }
@@ -685,6 +891,7 @@ Span<float3> base_view_adjust_compact_grids(const Object &object,
   if (base_view.is_empty()) {
     return positions;
   }
+  const float3 dc = stroke_base_view_dc(object);
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
   r_storage.resize(positions.size());
   for (const int i : grids.index_range()) {
@@ -692,7 +899,7 @@ Span<float3> base_view_adjust_compact_grids(const Object &object,
     const IndexRange grid_range = bke::ccg::grid_range(key, grids[i]);
     for (const int offset : IndexRange(key.grid_area)) {
       r_storage[node_range[offset]] = positions[node_range[offset]] -
-                                      base_view[grid_range[offset]];
+                                      (base_view[grid_range[offset]] - dc);
     }
   }
   return r_storage;
@@ -706,8 +913,9 @@ void base_view_compose_mesh(const Object &object,
   if (base_view.is_empty()) {
     return;
   }
+  const float3 dc = stroke_base_view_dc(object);
   for (const int i : verts.index_range()) {
-    positions[i] += base_view[verts[i]];
+    positions[i] += base_view[verts[i]] - dc;
   }
 }
 
@@ -720,12 +928,13 @@ void base_view_compose_grids(const Object &object,
   if (base_view.is_empty()) {
     return;
   }
+  const float3 dc = stroke_base_view_dc(object);
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
   for (const int i : grids.index_range()) {
     const IndexRange node_range = bke::ccg::grid_range(key, i);
     const IndexRange grid_range = bke::ccg::grid_range(key, grids[i]);
     for (const int offset : IndexRange(key.grid_area)) {
-      positions[node_range[offset]] += base_view[grid_range[offset]];
+      positions[node_range[offset]] += base_view[grid_range[offset]] - dc;
     }
   }
 }
@@ -734,7 +943,7 @@ void base_view_compose_grids(const Object &object,
  * Stroke recording (active layer)
  */
 
-void stroke_record_begin(const Depsgraph & /*depsgraph*/, Object &object)
+void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
 {
   SculptSession *ss = session_of(object);
   if (!ss) {
@@ -760,7 +969,7 @@ void stroke_record_begin(const Depsgraph & /*depsgraph*/, Object &object)
      * while layers are hidden): the stroke edits the base. Compute the base view so brush inputs
      * (falloff, area normal, smoothing / plane targets) can be evaluated against the un-layered
      * base; see the Base view section above. */
-    base_view_ensure(object);
+    base_view_ensure(depsgraph, object);
     return;
   }
 
@@ -800,7 +1009,7 @@ void stroke_record_begin(const Depsgraph & /*depsgraph*/, Object &object)
    * not bake their form into the recorded layer; without this a stroke on layer B over layer A's
    * detail imprints A's shape into B, revealed when A is later hidden. Symmetric to the base-edit
    * base view, but excluding the recording target so the layer being authored stays WYSIWYG. */
-  base_view_ensure(object, layer);
+  base_view_ensure(depsgraph, object, layer);
 
   ss->layers.recording = true;
 
@@ -822,6 +1031,8 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
   /* The base view is only valid for the duration of one stroke (the stroke changes the base, and
    * for multires the tangent frames with it). */
   ss->layers.base_view = {};
+  ss->layers.base_view_dc = float3(0.0f);
+  ss->layers.base_view_node_bounds = {};
 
   if (!ss->layers.recording) {
     /* REC off: the stroke edits the base. Mesh folds the stroke into the runtime base using the
@@ -1014,6 +1225,8 @@ void stroke_record_cancel(const Depsgraph &depsgraph, Object &object)
   }
   const bool was_recording = ss->layers.recording;
   ss->layers.base_view = {};
+  ss->layers.base_view_dc = float3(0.0f);
+  ss->layers.base_view_node_bounds = {};
 
   if (!was_recording) {
     /* REC off: the regular sculpt undo restores positions; the base was not updated yet. */

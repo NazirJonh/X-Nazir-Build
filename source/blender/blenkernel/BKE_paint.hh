@@ -12,6 +12,7 @@
 
 #include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
+#include "BLI_bounds_types.hh"
 #include "BLI_enum_flags.hh"
 #include "BLI_map.hh"
 #include "BLI_math_matrix_types.hh"
@@ -496,6 +497,32 @@ struct SculptSession : NonCopyable, NonMovable {
      * normal, smoothing targets, plane fits) so base edits do not absorb the layer residual.
      * Empty when the mode is inactive (REC on, no enabled layers, deform/shape-key sessions). */
     Array<float3> base_view;
+    /* The base view offset sampled at the current brush contact point, refreshed once per brush
+     * action (per symmetry / tile pass). Every consumer of #base_view removes it, i.e. the brush
+     * inputs use `base_view[i] - base_view_dc` rather than the raw offset.
+     *
+     * The raw offset cannot be used directly: the brush reference point (#StrokeCache::location_symm
+     * and the radius around it) lives on the *composed* surface, so subtracting the full offset from
+     * the sampled positions moves them away from the cursor by the layer height. Once that height
+     * approaches the brush radius every falloff factor is zeroed (the stroke does nothing) and the
+     * area-plane sampling finds no vertex at all, falling back to a plane through the composed
+     * location, which yanks the still-active vertices by the layer height and tears the mesh.
+     * Removing the offset *at the contact point* keeps the sampled surface anchored under the cursor
+     * while still stripping the layer pattern from the brush inputs, which is what the base view is
+     * for. All consumers are either differential (smoothing, plane fits) or use a matching
+     * adjust / compose pair, so a constant shift is exactly invariant for them. */
+    float3 base_view_dc = float3(0.0f);
+    /* Bounds of the base-view positions (`position[i] - base_view[i]`, without the DC) of each PBVH
+     * leaf node's own elements, computed once per stroke. Empty when the base view is inactive.
+     *
+     * The brush measures its falloff on the base view, but the nodes it processes are selected from
+     * the node bounds on the *composed* surface. Those two footprints differ by the layer height, so
+     * an element can earn a non-zero factor while its node was never gathered — and since a node is
+     * processed as a whole, the stroke boundary then follows node borders (square tiles). These
+     * bounds let the gather add exactly the nodes the base-space footprint reaches (see
+     * #layers::base_view_extend_node_mask), which restores the invariant "every element with a
+     * non-zero factor belongs to a gathered node" without touching the falloff itself. */
+    Array<Bounds<float3>> base_view_node_bounds;
   } layers;
 
   /* Contains information used by tools and brushes that require different logic based on boundary

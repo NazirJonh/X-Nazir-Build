@@ -2581,7 +2581,8 @@ BLI_NOINLINE static void calc_average_position(const Span<float3> vert_positions
                                                const Span<int> propagation_steps,
                                                const MutableSpan<float> factors,
                                                const MutableSpan<float3> average_positions,
-                                               const Span<float3> base_view = {})
+                                               const Span<float3> base_view = {},
+                                               const float3 base_view_dc = float3(0.0f))
 {
   BLI_assert(vert_positions.size() == vert_propagation_steps.size());
   BLI_assert(factors.size() == neighbors.size());
@@ -2590,15 +2591,19 @@ BLI_NOINLINE static void calc_average_position(const Span<float3> vert_positions
 
   /* When #base_view is given (visible sculpt layers, geometry target), average the base positions
    * instead of the composed ones so the smoothing only affects the base and the layer residual is
-   * preserved (see #layers::stroke_base_view). Indexed like #vert_positions. */
+   * preserved (see #layers::stroke_base_view). Indexed like #vert_positions. The offset is taken
+   * relative to the contact point (#layers::stroke_base_view_dc), matching the smooth source that
+   * #base_view_adjust_compact_mesh produces for the same node. */
   const bool use_base_view = !base_view.is_empty();
   for (const int i : neighbors.index_range()) {
     average_positions[i] = float3(0.0f);
     int valid_neighbors = 0;
     for (const int neighbor : neighbors[i]) {
       if (propagation_steps[i] == vert_propagation_steps[neighbor]) {
-        average_positions[i] += use_base_view ? vert_positions[neighbor] - base_view[neighbor] :
-                                                vert_positions[neighbor];
+        average_positions[i] += use_base_view ?
+                                    vert_positions[neighbor] -
+                                        (base_view[neighbor] - base_view_dc) :
+                                    vert_positions[neighbor];
         valid_neighbors++;
       }
     }
@@ -2693,7 +2698,8 @@ static void calc_smooth_mesh(const Sculpt &sd,
                         propagation_steps,
                         factors,
                         average_positions,
-                        base_view);
+                        base_view,
+                        layers::stroke_base_view_dc(object));
 
   tls.new_positions.resize(verts.size());
   const MutableSpan<float3> new_positions = tls.new_positions;
@@ -2771,7 +2777,8 @@ static void calc_smooth_grids(const Sculpt &sd,
                         propagation_steps,
                         factors,
                         average_positions,
-                        base_view);
+                        base_view,
+                        layers::stroke_base_view_dc(object));
 
   const Span<float3> positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
 

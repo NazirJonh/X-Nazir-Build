@@ -1714,11 +1714,12 @@ static void calc_area_normal_and_center_node_grids(const Object &object,
   /* Base view: see the mesh variant above. The gathered copy is adjusted in place. */
   const Span<float3> base_view = layers::stroke_base_view(object);
   if (!base_view.is_empty()) {
+    const float3 dc = layers::stroke_base_view_dc(object);
     for (const int i : grids.index_range()) {
       const IndexRange node_range = bke::ccg::grid_range(key, i);
       const IndexRange grid_range = bke::ccg::grid_range(key, grids[i]);
       for (const int offset : IndexRange(key.grid_area)) {
-        tls.positions[node_range[offset]] -= base_view[grid_range[offset]];
+        tls.positions[node_range[offset]] -= base_view[grid_range[offset]] - dc;
       }
     }
   }
@@ -3311,13 +3312,9 @@ static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgra
     /* These brushes need to update all nodes as they are not constrained by the brush radius */
     return {all_leaf_nodes(pbvh, memory), std::nullopt, std::nullopt};
   }
-  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PLANE) {
-    return brushes::plane::calc_node_mask(depsgraph, ob, brush, memory);
-  }
-  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLAY_STRIPS) {
-    return brushes::clay_strips::calc_node_mask(depsgraph, ob, brush, memory);
-  }
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLOTH) {
+    /* The cloth brush gathers its nodes from the simulation area, not from the brush radius, so the
+     * sculpt-layer extension below (which is radius based) does not apply. */
     return {cloth::brush_affected_nodes_gather(ob, brush, memory), std::nullopt, std::nullopt};
   }
 
@@ -3332,9 +3329,29 @@ static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgra
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW && brush.flag & BRUSH_ORIGINAL_NORMAL) {
     radius_scale = 2.0f;
   }
-  return {pbvh_gather_generic(ob, brush, use_original, radius_scale, memory),
-          std::nullopt,
-          std::nullopt};
+
+  brushes::CursorSampleResult result;
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PLANE) {
+    result = brushes::plane::calc_node_mask(depsgraph, ob, brush, memory);
+  }
+  else if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLAY_STRIPS) {
+    result = brushes::clay_strips::calc_node_mask(depsgraph, ob, brush, memory);
+    /* A cube tip reaches past the radius at the corners. */
+    radius_scale = std::max(radius_scale, float(M_SQRT2));
+  }
+  else {
+    result = {pbvh_gather_generic(ob, brush, use_original, radius_scale, memory),
+              std::nullopt,
+              std::nullopt};
+  }
+
+  /* Sculpt layers: the gather above works on the composed surface, but with visible layers the brush
+   * measures its falloff on the base view. Add the nodes that footprint reaches, so that no element
+   * with a non-zero factor sits in an ungathered node (which would decide "moves or not" per node
+   * and carve the stroke along node borders). No-op without layers. */
+  result.node_mask = layers::base_view_extend_node_mask(
+      ob, result.node_mask, ss.cache->radius * radius_scale, memory);
+  return result;
 }
 
 static void push_undo_nodes(const Depsgraph &depsgraph,
@@ -3468,6 +3485,12 @@ static void do_brush_action(const Depsgraph &depsgraph,
       return;
     }
   }
+
+  /* Anchor the sculpt-layer base view to this action's contact point. Must run before the node
+   * gather, which uses the anchored base-view footprint to extend the node mask (see
+   * #layers::base_view_extend_node_mask), and before any brush input reads the base view. No-op
+   * without layers. */
+  layers::base_view_dc_update(depsgraph, ob);
 
   const brushes::CursorSampleResult cursor_sample_result = calc_brush_node_mask(
       depsgraph, ob, brush, memory);

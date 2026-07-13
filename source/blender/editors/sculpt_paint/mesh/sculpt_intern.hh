@@ -1058,18 +1058,56 @@ MutableSpan<float3> active_record_data(Object &object);
 
 /**
  * Per-element object-space contribution of the enabled sculpt layers ("base view" offset
- * `O = combined - base`) for the current non-REC stroke, or an empty span when the mode is
- * inactive. Indexed like the PBVH positions (mesh vertex index / CCG element index) and constant
- * for the stroke's duration. Brushes subtract it from the live positions when computing
+ * `O = combined - base`) for the current stroke, or an empty span when the mode is inactive.
+ * Indexed like the PBVH positions (mesh vertex index / CCG element index) and constant for the
+ * stroke's duration. Brushes subtract it from the live positions when computing
  * surface-shape-dependent inputs (falloff distances, area normal/center, smoothing targets, plane
- * fits) so base edits do not absorb the layer residual; the resulting translations are still
+ * fits) so the edit does not absorb the layer residual; the resulting translations are still
  * applied to the live (composed) positions.
+ *
+ * The offset must always be taken relative to #stroke_base_view_dc — never raw. The brush reference
+ * point (#StrokeCache::location_symm and the radius around it) stays on the composed surface, so
+ * removing the raw offset shifts the sampled positions away from the cursor by the layer height:
+ * once that height reaches the brush radius every falloff factor is zeroed and the area-plane
+ * sampling degenerates. The helpers below already do this; a raw consumer must subtract the DC
+ * itself (or be strictly differential, like the smooth brush's neighbor averaging, where a constant
+ * offset cancels).
  */
 Span<float3> stroke_base_view(const Object &object);
 
 /**
+ * The base-view offset sampled at the current brush contact point (see #stroke_base_view). Zero
+ * when the base view is inactive. Refreshed once per brush action, so it follows the symmetry and
+ * tile passes.
+ */
+float3 stroke_base_view_dc(const Object &object);
+
+/**
+ * Refresh #stroke_base_view_dc for the current brush action. Called once per symmetry / tile pass,
+ * before any brush computation reads the base view.
+ */
+void base_view_dc_update(const Depsgraph &depsgraph, Object &object);
+
+/**
+ * Add the nodes the brush reaches in base-view space to \a node_mask, and return the union.
+ *
+ * The brush measures its falloff on the base view, but the gather selects nodes from their bounds on
+ * the composed surface. The two footprints differ by the layer height, so without this an element
+ * can earn a non-zero factor while its node was never gathered; a node is processed as a whole, so
+ * the stroke boundary then follows node borders (square tiles). The returned mask is a superset —
+ * the added nodes' elements simply get their (usually zero) factor like any other. Returns \a
+ * node_mask unchanged when the base view is inactive. \a radius must cover the brush footprint (pass
+ * the same scaled radius the gather used).
+ */
+IndexMask base_view_extend_node_mask(const Object &object,
+                                     const IndexMask &node_mask,
+                                     float radius,
+                                     IndexMaskMemory &memory);
+
+/**
  * Base-view adjustment helpers for brush computations. Each returns the input span unchanged
- * when the base view is inactive; otherwise the adjusted copy lives in \a r_storage.
+ * when the base view is inactive; otherwise the adjusted copy (with the DC offset removed) lives in
+ * \a r_storage.
  */
 /** Compact node positions (one per element of \a verts) minus the base-view offset. */
 Span<float3> base_view_adjust_compact_mesh(const Object &object,

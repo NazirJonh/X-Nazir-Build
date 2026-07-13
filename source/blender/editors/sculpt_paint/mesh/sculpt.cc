@@ -5237,6 +5237,14 @@ static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
 
+  /* Sculpt layers: restoring the positions to their pre-stroke state must also rewind the active
+   * layer, which a recorded mesh stroke accumulates per dab (#PositionDeformData::deform). Without
+   * this the layer keeps the sum of every dab while the positions only hold the last one, breaking
+   * the `positions == base + layers` invariant — the surplus then surfaces as corrupted positions
+   * when the layer is disabled, and leaks into the base once it is re-derived from the positions.
+   * Must run while the live positions still hold the previous dab's result (both it and the
+   * per-node undo data are consumed by #restore_from_undo_step below). */
+
   /* Brushes that use original coordinates and need a "restore" step. This has to happen separately
    * rather than in the brush deformation calculation because that is called once for each symmetry
    * pass, potentially within the same BVH node.
@@ -5251,6 +5259,7 @@ static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
            SCULPT_BRUSH_TYPE_THUMB,
            SCULPT_BRUSH_TYPE_ROTATE))
   {
+    layers::cancel_recorded_offsets(depsgraph, ob);
     undo::restore_from_undo_step(depsgraph, sd, ob);
     return;
   }
@@ -5264,6 +5273,7 @@ static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
   /* Restore the mesh before continuing with anchored stroke. */
   if (ELEM(brush->stroke_method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT)) {
 
+    layers::cancel_recorded_offsets(depsgraph, ob);
     undo::restore_from_undo_step(depsgraph, sd, ob);
 
     if (ss.cache) {

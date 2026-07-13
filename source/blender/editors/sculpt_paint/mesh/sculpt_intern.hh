@@ -1079,6 +1079,10 @@ MutableSpan<float3> active_record_data(Object &object);
  * fits) so the edit does not absorb the layer residual; the resulting translations are still
  * applied to the live (composed) positions.
  *
+ * Only strokes that edit THE BASE build one. A stroke recorded into a layer works on the composed
+ * surface — what is drawn is what was seen — so this span is empty while recording and every helper
+ * below degenerates to the plain, layer-less path (see #stroke_record_begin for the trade-off).
+ *
  * The offset must always be taken relative to #stroke_base_view_dc — never raw. The brush reference
  * point (#StrokeCache::location_symm and the radius around it) stays on the composed surface, so
  * removing the raw offset shifts the sampled positions away from the cursor by the layer height:

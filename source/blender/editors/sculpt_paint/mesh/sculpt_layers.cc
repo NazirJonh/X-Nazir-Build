@@ -536,7 +536,7 @@ bool sync_multires_for_rna(Main &bmain, Scene * /*scene*/, Mesh &mesh, SculptLay
 }
 
 /* -------------------------------------------------------------------------------------------------
- * Base view (non-REC strokes)
+ * Base view (base edits only — never while recording into a layer, see #stroke_record_begin)
  *
  * When the base is sculpted with layers visible, any brush input computed from the composed
  * surface embeds the layer pattern: smoothing/plane targets absorb it directly, and even
@@ -720,7 +720,7 @@ IndexMask base_view_extend_node_mask(const Object &object,
 }
 
 /* The base view of a shape-key session, summed straight from the layer data:
- * `sum_over_enabled_vert_layers(data[i] * effective(layer))`, minus \a exclude's own contribution.
+ * `sum_over_enabled_vert_layers(data[i] * effective(layer))`.
  *
  * There is no runtime mesh base to subtract from here (#session_state_ensure keeps none) and
  * #Mesh::vert_positions holds the untouched basis, so the `positions - base` derivation of the plain
@@ -728,23 +728,16 @@ IndexMask base_view_extend_node_mask(const Object &object,
  * offset on top of whatever the deform produced (#bke::sculpt_layers::apply_vert_layers on
  * #SculptSession::deform_cos, #apply_vert_layers_eval on the evaluated mesh), so their sum *is* the
  * layer contribution, expressed in the evaluated space the brushes read and write. */
-static Array<float3> base_view_from_layer_data(const Mesh &mesh,
-                                               const int64_t verts_num,
-                                               const SculptLayer *exclude)
+static Array<float3> base_view_from_layer_data(const Mesh &mesh, const int64_t verts_num)
 {
   Array<float3> view(verts_num, float3(0.0f));
   bke::sculpt_layers::apply_vert_layers(mesh.sculpt_layers, view);
-  if (exclude && exclude->domain == SCULPT_LAYER_DOMAIN_VERT) {
-    /* The recording target stays in the composed surface (the brush is evaluated against
-     * base + active layer), so remove it again from the sum. */
-    bke::sculpt_layers::apply_delta_mesh(*exclude, -effective(*exclude), view);
-  }
   return view;
 }
 
-static void base_view_ensure(const Depsgraph &depsgraph,
-                             Object &object,
-                             const SculptLayer *exclude = nullptr)
+/* Only base edits build a base view; a recorded stroke works on the composed surface (see
+ * #stroke_record_begin), so there is no layer to exclude from the sum. */
+static void base_view_ensure(const Depsgraph &depsgraph, Object &object)
 {
   SculptSession *ss = session_of(object);
   ss->layers.base_view = {};
@@ -765,11 +758,6 @@ static void base_view_ensure(const Depsgraph &depsgraph,
   const short domain = domain_for(object);
   bool any_enabled = false;
   for (const SculptLayer &layer : mesh.sculpt_layers) {
-    /* The recording target is intentionally kept in the composed surface (the brush is evaluated
-     * against base + active layer), so it does not count towards the base view. */
-    if (&layer == exclude) {
-      continue;
-    }
     if (layer.domain == domain && (layer.flag & SCULPT_LAYER_ENABLED) &&
         layer.influence != 0.0f && layer.data != nullptr)
     {
@@ -783,7 +771,7 @@ static void base_view_ensure(const Depsgraph &depsgraph,
 
   const auto t0 = std::chrono::high_resolution_clock::now();
   if (pbvh->type() == bke::pbvh::Type::Mesh && ss->shapekey_active) {
-    ss->layers.base_view = base_view_from_layer_data(mesh, mesh.verts_num, exclude);
+    ss->layers.base_view = base_view_from_layer_data(mesh, mesh.verts_num);
   }
   else if (pbvh->type() == bke::pbvh::Type::Mesh) {
     if (!ss->layers.state_valid) {
@@ -795,24 +783,11 @@ static void base_view_ensure(const Depsgraph &depsgraph,
     }
     const Span<float3> base = ss->layers.mesh_base;
     /* `positions - base` is the sum of all enabled layer contributions (the maintained mesh
-     * invariant). When recording, subtract the active layer's own contribution so the base view
-     * holds only the OTHER layers; the brush is then evaluated against base + active layer and the
-     * other layers are composed back after the brush (see #base_view_compose_mesh). */
-    const float3 *exclude_data = nullptr;
-    float exclude_influence = 0.0f;
-    if (exclude && exclude->domain == SCULPT_LAYER_DOMAIN_VERT && exclude->data != nullptr &&
-        int64_t(exclude->totelem) == positions.size())
-    {
-      exclude_data = static_cast<const float3 *>(exclude->data);
-      exclude_influence = (exclude->flag & SCULPT_LAYER_ENABLED) ? exclude->influence : 0.0f;
-    }
+     * invariant). */
     Array<float3> view(positions.size());
     threading::parallel_for(positions.index_range(), 8192, [&](const IndexRange range) {
       for (const int64_t i : range) {
         view[i] = positions[i] - base[i];
-        if (exclude_data) {
-          view[i] -= exclude_data[i] * exclude_influence;
-        }
       }
     });
     ss->layers.base_view = std::move(view);
@@ -822,11 +797,6 @@ static void base_view_ensure(const Depsgraph &depsgraph,
     Array<float3> total(subdiv_ccg.positions.size(), float3(0.0f));
     Array<float3> contrib(subdiv_ccg.positions.size());
     for (const SculptLayer &layer : mesh.sculpt_layers) {
-      /* Keep the recording target composed (the brush is evaluated against base + active layer);
-       * only the other layers form the base view that is removed from the brush inputs. */
-      if (&layer == exclude) {
-        continue;
-      }
       if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || !(layer.flag & SCULPT_LAYER_ENABLED) ||
           layer.influence == 0.0f || layer.data == nullptr)
       {
@@ -1029,12 +999,26 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
     bke::sculpt_layers::data_ensure(*layer, element_count(object));
   }
 
-  /* Evaluate the brush against base + active layer only. Populate the base view with the OTHER
-   * enabled layers so shape/normal-dependent brushes (draw along normal, smooth, flatten, ...) do
-   * not bake their form into the recorded layer; without this a stroke on layer B over layer A's
-   * detail imprints A's shape into B, revealed when A is later hidden. Symmetric to the base-edit
-   * base view, but excluding the recording target so the layer being authored stays WYSIWYG. */
-  base_view_ensure(depsgraph, object, layer);
+  /* No base view while recording: a stroke that writes into a layer is evaluated against the
+   * composed surface, exactly like a stroke without layers.
+   *
+   * This used to populate the base view with the OTHER enabled layers, so the recorded layer would
+   * not absorb their shape. That independence has a price the user pays on every stroke: the brush
+   * footprint is then measured on a surface the user cannot see, and once a lower layer carries a
+   * large form (not just fine detail) the affected region no longer matches the cursor at all — a
+   * circle under the cursor lands as a big distorted patch, because the vertices within the radius
+   * in base space are spread far apart on the composed surface.
+   *
+   * The un-layered base is required only for strokes that write INTO THE BASE: there a composed
+   * falloff distance carries the layer pattern into the basis and accumulates across strokes (see
+   * the Base view section above). A stroke recorded into a layer above writes nothing to the base,
+   * so nothing can be baked in; the only effect of the base view there was the independence above.
+   * We choose WYSIWYG: what is drawn is what was seen. The consequence is the usual layer-stack
+   * one — smoothing over a lower layer records a delta that cancels its detail, and hiding that
+   * layer later reveals the ghost of what was smoothed away. */
+  ss->layers.base_view = {};
+  ss->layers.base_view_dc = float3(0.0f);
+  ss->layers.base_view_node_bounds = {};
 
   ss->layers.recording = true;
 

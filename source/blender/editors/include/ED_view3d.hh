@@ -1700,6 +1700,14 @@ int handle_image_grid_focus_active_event(bContext *C, const wmEvent *event, AReg
 bool image_grid_slot_is_mask(const PointerRNA &texture_slot_ptr);
 
 /**
+ * Switch the grid bound to \a target_ptr (the brush texture slot the drop landed on) to the
+ * current-file library and scroll-focus \a image. Called after a drop assigns a freshly loaded,
+ * non-asset image to the slot, so the grid shows where it landed instead of staying on whatever
+ * library/catalog it was filtered to before the drop.
+ */
+void image_grid_focus_dropped_image(bContext &C, const PointerRNA &target_ptr, const Image &image);
+
+/**
  * Build an `image_grid_target` #PointerRNA for the active paint brush texture slot.
  * Used when the browse popover is opened without an N-panel button context (e.g. hotkey).
  */

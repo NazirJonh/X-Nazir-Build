@@ -599,12 +599,16 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
 
     PointerRNA props = WM_operator_properties_create("BRUSH_OT_texture_slot_assign_image");
     /* Resolve a local image, importing the asset first if the drag came from the asset browser. */
+    const Image *image = nullptr;
+    const char *dropped_path = nullptr;
     if (const ID *image_id = WM_drag_get_local_ID_or_import_from_asset(C, &drag, ID_IM)) {
       RNA_int_set(&props, "session_uid", int(image_id->session_uid));
+      image = id_cast<const Image *>(image_id);
     }
     else if (drag.type == WM_DRAG_PATH) {
       if (const char *path = WM_drag_get_single_path(&drag)) {
         RNA_string_set(&props, "filepath", path);
+        dropped_path = path;
       }
     }
     RNA_boolean_set(&props, "use_mask_slot", ed::view3d::image_grid_slot_is_mask(target_ptr_));
@@ -618,7 +622,23 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
                                                           &props,
                                                           &drag_info.event);
     WM_operator_properties_free(&props);
-    return (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
+    const bool success = (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
+
+    /* File drops resolve the image only now, after the operator's own lookup - reusing the same
+     * by-path lookup here (rather than pre-empting it) keeps the move-vs-copy decision for a
+     * linked texture's local image (#paint_assign_image_exec) based on whether the image existed
+     * *before this drop*, not because this call loaded it first. */
+    if (success && !image && dropped_path) {
+      image = BKE_image_load_exists(CTX_data_main(C), dropped_path);
+    }
+
+    if (success && image) {
+      /* The dropped image always ends up local to the current file (a temporary texture, or a
+       * freshly imported asset) - switch the grid there and scroll it into view, regardless of
+       * which library/catalog the grid was filtered to before the drop. */
+      ed::view3d::image_grid_focus_dropped_image(*C, target_ptr_, *image);
+    }
+    return success;
   }
 
   /**

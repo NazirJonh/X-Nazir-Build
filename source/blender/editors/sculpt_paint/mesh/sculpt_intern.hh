@@ -705,6 +705,25 @@ float raycast_init(ViewContext *vc,
                    float3 &ray_end,
                    float3 &ray_normal,
                    bool original);
+
+/**
+ * Ray-cast \a ob's current (deformed) surface along \a view_axis through \a location -- both in
+ * \a ob's LOCAL space -- and return the signed distance from \a location to the front-most
+ * FRONT-FACING hit, measured along \a view_axis (positive when the surface is in front of
+ * \a location). Only the span reaching \a max_distance to either side of \a location is searched.
+ *
+ * `std::nullopt` when the ray misses that span, or when the first hit is a back face -- which means
+ * the ray started inside the mesh, i.e. its front surface is farther than \a max_distance in front
+ * of \a location and therefore out of reach.
+ *
+ * \a view_axis must be normalized and point towards the viewer (like #StrokeCache.view_normal_symm).
+ */
+std::optional<float> raycast_front_facing_surface_offset(const Depsgraph &depsgraph,
+                                                         Object &ob,
+                                                         const float3 &location,
+                                                         const float3 &view_axis,
+                                                         float max_distance);
+
 /* Symmetry */
 ePaintSymmetryFlags mesh_symmetry_xyz_get(const Object &object);
 
@@ -1070,15 +1089,29 @@ float object_space_radius_get(const ViewContext &vc,
 bool need_delta_from_anchored_origin(const Brush &brush);
 
 /**
- * Test whether any PBVH node of \a ob intersects the brush sphere centered at \a world_center
- * (given in world space), projecting the center into the object's local space first. Does not
- * modify the cache.
+ * Test whether any PBVH node of \a ob intersects the brush volume centered at \a world_center (given
+ * in world space), projecting it into the object's local space first. Does not modify the cache.
+ *
+ * The volume matches #Brush.falloff_shape, so that this gate and the brush's own node gathering
+ * (#pbvh_gather_generic) agree on what "inside the brush" means: a sphere for
+ * #PAINT_FALLOFF_SHAPE_SPHERE, a cylinder along the view axis for #PAINT_FALLOFF_SHAPE_TUBE
+ * (Projected), where depth is ignored.
+ *
+ * \param world_view_direction: the axis of that cylinder, in world space. Ignored for Sphere
+ * falloff. It is per-daub rather than per-stroke because mirroring a daub reflects its view axis
+ * along with its center -- see #MirroredDaub.
+ * \param radius_multiplier: scales the brush radius used for the test. Values above 1 are used for
+ * MIRRORED daub centers when the mirror surface snap is active, so an object whose surface the snap
+ * could still reach is not rejected here first. Defaults to 1.0, which keeps every existing call
+ * byte-identical.
  */
 bool object_geometry_intersects_world_sphere(Object &ob,
                                              const StrokeCache &cache,
                                              Paint &paint,
                                              const Brush &brush,
-                                             const float3 &world_center);
+                                             const float3 &world_center,
+                                             const float3 &world_view_direction,
+                                             float radius_multiplier = 1.0f);
 
 /**
  * Set a secondary sculpt object's brush location and radius from the world-space brush center,
@@ -1094,18 +1127,21 @@ void stroke_cache_apply_world_center(Object &ob,
 /**
  * Sets the brush location for a secondary sculpt object by projecting the world-space brush
  * center into the object's local space and testing whether any PBVH nodes intersect the brush
- * sphere. Used in multi-object sculpt mode for objects that are NOT directly under the cursor.
+ * volume. Used in multi-object sculpt mode for objects that are NOT directly under the cursor.
  *
  * Unlike the primary object, which keeps the framework-provided RNA "location", this function
- * accepts any object whose geometry overlaps the brush sphere in 3D world space.
+ * accepts any object whose geometry overlaps the brush volume in 3D world space.
  *
- * \return true if any PBVH node of \a ob intersects the brush sphere and the cache was updated.
+ * \param world_view_direction: see #object_geometry_intersects_world_sphere; only used by Projected
+ * falloff.
+ * \return true if any PBVH node of \a ob intersects the brush volume and the cache was updated.
  */
 bool stroke_cache_set_location_from_world_sphere(Object &ob,
                                                  StrokeCache &cache,
                                                  Paint &paint,
                                                  const Brush &brush,
-                                                 const float3 &world_center);
+                                                 const float3 &world_center,
+                                                 const float3 &world_view_direction);
 }  // namespace ed::sculpt_paint
 
 /** \} */

@@ -188,6 +188,15 @@ bool BKE_paint_use_unified_size(const Paint *paint);
 bool BKE_paint_use_unified_strength(const Paint *paint);
 bool BKE_paint_use_unified_color(const Paint *paint);
 
+/**
+ * Multi-object mirror-surface-snap search distance, in brush radii.
+ *
+ * Files written before #Paint.mirror_snap_distance existed store 0 in what used to be padding.
+ * Mapping 0 back to the DNA default here keeps old files working without a file-subversion bump,
+ * and gives RNA and the sculpt code one single source of truth.
+ */
+float BKE_paint_mirror_snap_distance_get(const Paint &paint);
+
 /* Paint brush retrieval and assignment. */
 
 Brush *BKE_paint_brush(Paint *paint);

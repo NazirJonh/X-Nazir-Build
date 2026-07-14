@@ -420,8 +420,14 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
   /* #PAINT_SYMM_SPACE_GLOBAL_WORLD / #PAINT_SYMM_SPACE_GLOBAL_CURSOR mirror the multi-object
    * stroke around world axes rather than the object's own local origin (see
    * #symmetry_space_frame). Reuse the exact same mirrored-center computation the stroke itself
-   * uses (#shared_symmetry_world_centers) so this preview always matches where the brush will
-   * land. Tiling is left in the object's local space (unrelated to symmetry space).
+   * uses (#shared_symmetry_world_daubs) so this preview matches where the brush will land.
+   * Tiling is left in the object's local space (unrelated to symmetry space).
+   *
+   * NOTE: with "Snap Mirror to Surface" enabled the stroke additionally pulls each mirrored center
+   * onto the secondary object's surface (#mirror_snap_location_to_surface), which this preview does
+   * not reproduce — the dot can therefore float slightly off the surface the daub actually lands on.
+   * Reproducing it here would need the depsgraph and each object's PBVH at hover time; the dot is
+   * only a position hint, so it is left as-is.
    *
    * The same routine is also needed whenever the hovered mesh is not the symmetry reference: a
    * multi-object stroke mirrors every mesh across the REFERENCE (active) object's plane and takes
@@ -435,13 +441,21 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
   if (symmetry_space != PAINT_SYMM_SPACE_ACTIVE_OBJECT || &symm_reference_ob != &ob) {
     const float3 true_location_world = math::transform_point(ob.object_to_world(),
                                                               float3(true_location));
-    const Vector<float3> symm_world_centers = shared_symmetry_world_centers(
-        symm_reference_ob, true_location_world, symmetry_space, cursor_world);
-    for (const float3 &world_point : symm_world_centers) {
-      screen_space_point_draw(gpuattr, region, world_point, float4x4::identity().ptr(), 3);
+    /* This preview only needs the mirrored POSITIONS; the per-daub view axis matters solely to the
+     * Projected-falloff node gate during a stroke. Any unit direction does, so pass an arbitrary
+     * one rather than plumbing the view here.
+     * WORKAROUND: `symm_daubs[i].view_direction` below is therefore meaningless for this
+     * preview-only call — only `.center` may be read from it. */
+    const Vector<MirroredDaub> symm_daubs = shared_symmetry_world_daubs(symm_reference_ob,
+                                                                        true_location_world,
+                                                                        float3(0.0f, 0.0f, 1.0f),
+                                                                        symmetry_space,
+                                                                        cursor_world);
+    for (const MirroredDaub &daub : symm_daubs) {
+      screen_space_point_draw(gpuattr, region, daub.center, float4x4::identity().ptr(), 3);
       if (bke::paint::supports_symmetry_tiling(paint_mode)) {
         BLI_assert(sd && paint_mode == PaintMode::Sculpt);
-        const float3 local_point = math::transform_point(ob.world_to_object(), world_point);
+        const float3 local_point = math::transform_point(ob.world_to_object(), daub.center);
         tiling_preview_draw(gpuattr, region, local_point, *sd, ob, radius);
       }
     }

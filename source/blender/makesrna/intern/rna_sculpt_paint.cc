@@ -688,6 +688,21 @@ static std::optional<std::string> rna_UnifiedPaintSettings_path(const PointerRNA
   return std::nullopt;
 }
 
+static float rna_Paint_mirror_snap_distance_get(PointerRNA *ptr)
+{
+  const Paint *paint = static_cast<const Paint *>(ptr->data);
+  return BKE_paint_mirror_snap_distance_get(*paint);
+}
+
+static void rna_Paint_mirror_snap_distance_set(PointerRNA *ptr, const float value)
+{
+  Paint *paint = static_cast<Paint *>(ptr->data);
+  /* Clamp here, not just via #RNA_def_property_range: a custom setter bypasses that, so a Python
+   * assignment could otherwise store a value the UI cannot express -- and a value <= 0 would be
+   * read back as the default by #BKE_paint_mirror_snap_distance_get. */
+  paint->mirror_snap_distance = clamp_f(value, 1.0f, 10.0f);
+}
+
 }  // namespace blender
 
 #else
@@ -826,6 +841,32 @@ static void rna_def_paint(BlenderRNA *brna)
       "Symmetry Space",
       "Space of the brush symmetry plane in multi-object sculpt: the active object's local axes, "
       "or world axes pivoted at the world origin or 3D cursor");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_mirror_surface_snap", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "symmetry_flags", PAINT_SYMMETRY_MIRROR_SNAP_OFF);
+  RNA_def_property_ui_text(prop,
+                           "Snap Mirror to Surface",
+                           "In multi-object sculpt, pull a mirrored brush daub onto the nearest "
+                           "surface of the mirrored object, so Sphere falloff still reaches it "
+                           "when that object is not an exact mirror of the sculpted one");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "mirror_snap_distance", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "mirror_snap_distance");
+  RNA_def_property_float_funcs(
+      prop, "rna_Paint_mirror_snap_distance_get", "rna_Paint_mirror_snap_distance_set", nullptr);
+  RNA_def_property_range(prop, 1.0f, 10.0f);
+  RNA_def_property_ui_range(prop, 1.0f, 4.0f, 0.1f, 2);
+  /* Without this, "Reset to Default Value" would write 0 and get clamped to the 1.0 hard minimum,
+   * silently disagreeing with the DNA default that #BKE_paint_mirror_snap_distance_get returns. */
+  RNA_def_property_float_default(prop, 2.0f);
+  RNA_def_property_ui_text(prop,
+                           "Snap Distance",
+                           "How far a mirrored brush daub may travel along the surface normal to "
+                           "reach the mirrored object, in brush radii. Beyond this the object is "
+                           "left untouched rather than partially dented");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   /* Deprecated: superseded by #symmetry_space (PAINT_SYMM_SPACE_ACTIVE_OBJECT is now always-on for

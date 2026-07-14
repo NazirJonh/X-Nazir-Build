@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 
 #include "MEM_guardedalloc.h"
 
@@ -3243,10 +3244,23 @@ static void update_sculpt_normal(const Depsgraph &depsgraph,
       cache.sculpt_normal = *cursor_sample_result.plane_normal;
     }
     else {
-      cache.sculpt_normal = calc_sculpt_normal(depsgraph, sd, ob, cursor_sample_result.node_mask);
-      if (brush.falloff_shape == PAINT_FALLOFF_SHAPE_TUBE) {
-        project_plane_v3_v3v3(cache.sculpt_normal, cache.sculpt_normal, cache.view_normal_symm);
-        normalize_v3(cache.sculpt_normal);
+      const float3 normal = calc_sculpt_normal(depsgraph, sd, ob, cursor_sample_result.node_mask);
+      /* This can now run with an EMPTY node mask: a multi-object secondary that only a mirrored daub
+       * reaches has no geometry under the main daub, yet still needs the main pass to establish the
+       * fields the mirror passes reuse (see #do_brush_action). On a Mesh PBVH that is fine --
+       * #calc_area_normal pools across every mesh in the stroke and ignores the node mask -- but on
+       * Grids/BMesh it falls back to this object's own geometry and hands back zero. That zero must
+       * not clobber the normal seeded from the primary in #propagate_shared_stroke_state, or the
+       * mirror pass would displace every vertex by nothing. Single-object strokes never take this
+       * branch (#multi_object_stroke is false), so they stay bit-exact. */
+      const bool would_clobber_seed = cache.multi_object_stroke && math::is_zero(normal) &&
+                                      !math::is_zero(cache.sculpt_normal);
+      if (!would_clobber_seed) {
+        cache.sculpt_normal = normal;
+        if (brush.falloff_shape == PAINT_FALLOFF_SHAPE_TUBE) {
+          project_plane_v3_v3v3(cache.sculpt_normal, cache.sculpt_normal, cache.view_normal_symm);
+          normalize_v3(cache.sculpt_normal);
+        }
       }
     }
     copy_v3_v3(cache.sculpt_normal_symm, cache.sculpt_normal);
@@ -4150,6 +4164,33 @@ static void do_brush_action(const Depsgraph &depsgraph,
 
   /* Only act if some verts are inside the brush area. */
   if (node_mask.is_empty()) {
+    /* In a multi-object stroke a secondary mesh can be reached by a MIRRORED daub only -- that is
+     * the whole point of shared symmetry (a mirrored limb kept as a separate mesh). Its MAIN pass
+     * then gathers no nodes, but #StrokeCache.sculpt_normal, #texture_plane_normal and
+     * #brush_local_mat are all established by the main pass ALONE; the mirror passes only reuse what
+     * it produced (see #symm_pass_mirror_direction and #sculpt_point_to_first_symm_pass). Returning
+     * straight away leaves the mirror passes with a zero normal (displacing every vertex by nothing)
+     * and a stale brush frame (texture projecting from the wrong plane). Run that setup anyway, then
+     * return: there is genuinely nothing on this mesh for the MAIN pass to deform, so everything
+     * below -- automasking, the undo push, the brush itself -- has nothing to act on.
+     *
+     * Both setup functions tolerate an empty node mask here: #calc_area_normal pools across every
+     * mesh in the stroke and ignores the mask, and #calc_brush_area_texture_mat reuses the primary's
+     * published world frame, its curvature check simply not firing.
+     *
+     * SECONDARY objects only. The primary is the object under the cursor, so an empty main-pass mask
+     * means the brush genuinely has nothing to bite into there -- and letting it through would have
+     * it PUBLISH #StrokeCache.area_texture_frame_to_world (the `else` branch of
+     * #calc_brush_area_texture_mat) from a pass with no geometry, which every secondary then
+     * consumes for its texture projection. */
+    if (ss.cache->multi_object_stroke && &ob != ss.cache->multi_object_sample_reference &&
+        ss.cache->mirror_symmetry_pass == 0 && ss.cache->radial_symmetry_pass == 0)
+    {
+      if (sculpt_brush_needs_normal(ss, brush)) {
+        update_sculpt_normal(depsgraph, sd, ob, cursor_sample_result);
+      }
+      update_brush_local_mat(depsgraph, sd, ob, node_mask);
+    }
     return;
   }
 
@@ -4687,6 +4728,7 @@ static void do_radial_symmetry(const Depsgraph &depsgraph,
     const float angle = 2.0f * M_PI * i / symm_mesh.radial_symmetry[axis - 'X'];
     ss.cache->radial_symmetry_pass = i;
     cache_calc_brushdata_symm(*ss.cache, symm, axis, angle);
+    mirror_snap_location_to_surface(depsgraph, sd.paint, brush, ob, *ss.cache);
     do_tiled(depsgraph, scene, sd, ob, brush, paint_mode_settings, action);
   }
 }
@@ -4756,6 +4798,7 @@ static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
     cache.radial_symmetry_pass = 0;
 
     cache_calc_brushdata_symm(cache, symm, 0, 0);
+    mirror_snap_location_to_surface(depsgraph, sd.paint, brush, ob, cache);
 
     do_tiled(depsgraph, scene, sd, ob, brush, paint_mode_settings, action);
 
@@ -5738,6 +5781,70 @@ std::optional<ActiveElementInfo> active_element_info_get(ViewContext &vc, const 
       break;
   }
   return info;
+}
+
+std::optional<float> raycast_front_facing_surface_offset(const Depsgraph &depsgraph,
+                                                         Object &ob,
+                                                         const float3 &location,
+                                                         const float3 &view_axis,
+                                                         const float max_distance)
+{
+  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+  if (!pbvh) {
+    return std::nullopt;
+  }
+  const SculptSession &ss = *ob.runtime->sculpt_session;
+
+  /* Start the walk \a max_distance IN FRONT of the location and run it towards the scene, so the
+   * first hit is the front-most surface of the searched span. Starting in front rather than at the
+   * location itself is what lets the surface be found on either side of it -- a mirrored daub
+   * routinely lands inside the mesh, not just above it. */
+  const float3 ray_start = location + view_axis * max_distance;
+  const float3 ray_normal = -view_axis;
+
+  RaycastData srd{};
+  srd.object = &ob;
+  srd.ray_start = ray_start;
+  srd.ray_normal = ray_normal;
+  srd.hit = false;
+  /* Doubles as the search length: the node ray-cast only accepts hits closer than this, and writes
+   * the accepted hit's distance back into it. */
+  srd.depth = 2.0f * max_distance;
+  srd.is_mid_stroke = false;
+  srd.use_original = false;
+  if (pbvh->type() == bke::pbvh::Type::Mesh) {
+    const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+    srd.vert_positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
+    srd.faces = mesh.faces();
+    srd.corner_verts = mesh.corner_verts();
+    srd.corner_tris = mesh.corner_tris();
+    const bke::AttributeAccessor attributes = mesh.attributes();
+    srd.hide_poly = *attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face);
+  }
+  else if (pbvh->type() == bke::pbvh::Type::Grids) {
+    srd.subdiv_ccg = ss.subdiv_ccg;
+  }
+  vert_random_access_ensure(ob);
+
+  isect_ray_tri_watertight_v3_precalc(&srd.isect_precalc, ray_normal);
+  bke::pbvh::raycast(
+      *pbvh,
+      [&](bke::pbvh::Node &node, float *tmin) { sculpt_raycast_cb(node, srd, tmin); },
+      ray_start,
+      ray_normal,
+      srd.use_original);
+
+  if (!srd.hit) {
+    return std::nullopt;
+  }
+  /* A back face as the FIRST hit means the ray started inside the mesh, so its front surface lies
+   * farther than \a max_distance in front of \a location -- out of reach. Reporting the back face
+   * would place the caller's daub behind the object, where a brush still pushing along the
+   * front-facing normal drives the back surface through the front one. */
+  if (math::dot(srd.face_normal, view_axis) <= 0.0f) {
+    return std::nullopt;
+  }
+  return max_distance - srd.depth;
 }
 
 /* Defined below; used here to resolve the front-most sculpt-mode object under the cursor. */
@@ -7302,7 +7409,9 @@ bool object_geometry_intersects_world_sphere(Object &ob,
                                              const StrokeCache &cache,
                                              Paint &paint,
                                              const Brush &brush,
-                                             const float3 &world_center)
+                                             const float3 &world_center,
+                                             const float3 &world_view_direction,
+                                             const float radius_multiplier)
 {
   bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
   if (!pbvh) {
@@ -7314,24 +7423,51 @@ bool object_geometry_intersects_world_sphere(Object &ob,
 
   /* Compute the brush radius in this object's local space at the projected center.
    * object_space_radius_get already accounts for the object's scale and camera distance. */
-  const float obj_radius = object_space_radius_get(*cache.vc, paint, brush, obj_center);
+  const float obj_radius = object_space_radius_get(*cache.vc, paint, brush, obj_center) *
+                           radius_multiplier;
   const float obj_radius_sq = obj_radius * obj_radius;
 
-  /* Quick PBVH sphere test: does any PBVH node of this object intersect the brush sphere?
-   * If not, there is no geometry to deform and we skip this object entirely.
+  /* Does any PBVH node of this object intersect the brush volume? If not, there is no geometry to
+   * deform and we skip this object entirely.
    *
    * The test must use the same "original geometry" choice as the actual node gathering in
    * #do_brush_action (see #brush_type_needs_original / #StrokeCache.accum). Anchored-origin brushes
    * such as Grab gather nodes against their start-of-stroke bounds (#bke::pbvh::Node.bounds_orig);
    * if this gate instead tested the deformed bounds, a secondary mesh being dragged would drift out
-   * of the sphere and get skipped mid-stroke even though the brush still affects it, so its
+   * of the volume and get skipped mid-stroke even though the brush still affects it, so its
    * deformation would cut off as the grab is pulled further. */
   const bool use_original = brush_type_needs_original(brush.sculpt_brush_type) ? true : !cache.accum;
+
   IndexMaskMemory memory;
-  const IndexMask nodes_in_range = bke::pbvh::search_nodes(
-      *pbvh, memory, [&](const bke::pbvh::Node &node) {
-        return node_in_sphere(node, obj_center, obj_radius_sq, use_original);
-      });
+  IndexMask nodes_in_range;
+  if (eBrushFalloffShape(brush.falloff_shape) == PAINT_FALLOFF_SHAPE_TUBE) {
+    /* Projected falloff measures distance to the view RAY and ignores depth entirely, so the brush
+     * volume is a cylinder, not a sphere. Testing a sphere here would reject exactly the
+     * far-in-depth meshes this mode exists to reach, even though #pbvh_gather_generic would have
+     * gathered their nodes and the per-vertex falloff would have deformed them. Mirroring a daub
+     * reflects its view axis too, which is why \a world_view_direction travels per-daub (see
+     * #MirroredDaub).
+     *
+     * Deliberately NOT #node_in_cylinder: that helper still carries an upstream `|| true`
+     * workaround, so reusing it would accept every node of every object on every step. The honest
+     * ray-to-AABB distance below is what the per-vertex falloff actually measures. */
+    const float3 obj_axis = math::normalize(
+        math::transform_direction(ob.world_to_object(), world_view_direction));
+    const DistRayAABB_Precalc ray_precalc = dist_squared_ray_to_aabb_v3_precalc(obj_center,
+                                                                                obj_axis);
+    nodes_in_range = bke::pbvh::search_nodes(*pbvh, memory, [&](const bke::pbvh::Node &node) {
+      const Bounds<float3> &bounds = use_original ? node.bounds_orig() : node.bounds();
+      float dummy_co[3], dummy_depth;
+      const float dist_sq = dist_squared_ray_to_aabb_v3(
+          &ray_precalc, bounds.min, bounds.max, dummy_co, &dummy_depth);
+      return dist_sq < obj_radius_sq;
+    });
+  }
+  else {
+    nodes_in_range = bke::pbvh::search_nodes(*pbvh, memory, [&](const bke::pbvh::Node &node) {
+      return node_in_sphere(node, obj_center, obj_radius_sq, use_original);
+    });
+  }
 
   return !nodes_in_range.is_empty();
 }
@@ -7385,9 +7521,12 @@ bool stroke_cache_set_location_from_world_sphere(Object &ob,
                                                  StrokeCache &cache,
                                                  Paint &paint,
                                                  const Brush &brush,
-                                                 const float3 &world_center)
+                                                 const float3 &world_center,
+                                                 const float3 &world_view_direction)
 {
-  if (!object_geometry_intersects_world_sphere(ob, cache, paint, brush, world_center)) {
+  if (!object_geometry_intersects_world_sphere(
+          ob, cache, paint, brush, world_center, world_view_direction))
+  {
     return false;
   }
   stroke_cache_apply_world_center(ob, cache, paint, brush, world_center);
@@ -7592,13 +7731,16 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
    * anchor; for tracking brushes it is the current cursor hit. */
   float3 primary_world_center(0.0f);
   bool primary_world_center_valid = false;
+  /* Axis of the primary object's brush volume, in world space. Only Projected falloff uses it, where
+   * the brush is a cylinder along the view rather than a sphere. */
+  float3 primary_world_view_direction(0.0f, 0.0f, 1.0f);
 
-  /* World-space centers of every symmetry pass, taken across the reference (active) object's
+  /* Every symmetry pass's daub (center + view axis), taken across the reference (active) object's
    * planes. A secondary object is processed if its geometry lies under the main daub OR under any
    * mirrored/radial daub, so shared symmetry reaches objects that only exist on the mirror side
    * (e.g. two symmetric limbs kept as separate meshes), matching a joined mesh. Filled once the
    * primary object has established #primary_world_center; empty when the option is off. */
-  Vector<float3> symm_world_centers;
+  Vector<MirroredDaub> symm_daubs;
 
   /* ── Phase 2: per-object brush application ──
    *
@@ -7664,13 +7806,20 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       }
       primary_world_center_valid = true;
 
-      /* Precompute the mirrored daub centers now that the shared center is known, for the
-       * secondary-object gate below. */
+      /* #StrokeCache.view_normal is the view axis in this object's LOCAL space, and is carried
+       * between object spaces as a plain direction throughout this module (see
+       * #multi_object_area_sample_active), so use the same rule to lift it into world space. */
+      primary_world_view_direction = math::normalize(
+          math::transform_direction(primary_ob->object_to_world(), cache->view_normal));
+
+      /* Precompute the mirrored daubs now that the shared center is known, for the secondary-object
+       * gate below. */
       if (shared_symmetry_active) {
-        symm_world_centers = shared_symmetry_world_centers(*symm_reference_ob,
-                                                            primary_world_center,
-                                                            ePaintSymmetrySpace(sd.paint.symmetry_space),
-                                                            float3(scene.cursor.location));
+        symm_daubs = shared_symmetry_world_daubs(*symm_reference_ob,
+                                                 primary_world_center,
+                                                 primary_world_view_direction,
+                                                 ePaintSymmetrySpace(sd.paint.symmetry_space),
+                                                 float3(scene.cursor.location));
       }
     }
     else {
@@ -7681,8 +7830,13 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
          * to the primary object on scope exit. */
         continue;
       }
-      has_location = this->multi_.process_secondary(
-          ob, *cache, *this->paint, brush, primary_world_center, symm_world_centers);
+      has_location = this->multi_.process_secondary(ob,
+                                                    *cache,
+                                                    *this->paint,
+                                                    brush,
+                                                    primary_world_center,
+                                                    primary_world_view_direction,
+                                                    symm_daubs);
     }
 
     if (!has_location) {
@@ -7698,7 +7852,12 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
      * "copy density_seed if !local" + "copy paint_face_set if local=none" branches, which
      * were order-dependent on the manual #std::swap above -- the new flow stores the captured
      * state in `shared_stroke_state` and explicitly passes it here, so future code readers do
-     * not have to wonder "is primary first because of std::swap, std::optional, or implicit?". */
+     * not have to wonder "is primary first because of std::swap, std::optional, or implicit?".
+     *
+     * This also seeds #StrokeCache.sculpt_normal from the primary: when this mesh's own main
+     * symmetry pass produces nothing (the main daub misses it, or covers only masked geometry), the
+     * mirror pass would otherwise mirror the zero-initialized vector and displace every vertex by
+     * nothing. See #SharedStrokeStateSnapshot::sculpt_normal_world. */
     if (&ob != primary_ob && shared_stroke_state) {
       propagate_shared_stroke_state(ob, *shared_stroke_state);
     }

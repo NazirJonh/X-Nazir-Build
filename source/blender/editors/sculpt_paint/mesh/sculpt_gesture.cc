@@ -409,7 +409,7 @@ static void flip_for_symmetry_pass(GestureData &gesture_data, const ePaintSymmet
   /* Shared World/Cursor symmetry: mirror the WORLD-SPACE anchors around the shared frame, then
    * carry the result into the current object's own local space -- instead of mirroring each
    * object's already-local planes around its own origin. Matches the approach used for brush
-   * strokes (#shared_symmetry_world_centers). `view_origin` is intentionally left unset here: it
+   * strokes (#shared_symmetry_world_daubs). `view_origin` is intentionally left unset here: it
    * has no reader anywhere in the gesture code (verified), so it is not worth mirroring. */
   Object &current_object = *gesture_data.vc.obact;
 

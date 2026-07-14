@@ -33,17 +33,65 @@ float4x4 symmetry_space_frame(ePaintSymmetrySpace symmetry_space,
                               const float3 &cursor_world);
 
 /**
- * World-space centers of every symmetry pass (mirror reflections and radial copies) of
- * \a world_center, taken across \a reference_ob's symmetry planes, expressed in \a symmetry_space.
- * Used so a multi-object shared-symmetry stroke also processes objects whose geometry only lies
- * under a mirrored daub -- a joined mesh would deform that geometry, so the separate object must
- * not be skipped -- and so paint-cursor overlays can preview the same mirrored positions the
- * stroke itself will use. The first entry is \a world_center itself (the un-mirrored center).
+ * One symmetry pass's brush daub, in world space.
+ *
+ * #view_direction is only meaningful for #PAINT_FALLOFF_SHAPE_TUBE (Projected), where the brush is
+ * a cylinder along the view axis rather than a sphere. Mirroring a daub reflects that axis just as
+ * it reflects the center, so the axis has to travel with the center rather than be recomputed from
+ * the un-mirrored view.
  */
-Vector<float3> shared_symmetry_world_centers(const Object &reference_ob,
-                                             const float3 &world_center,
-                                             ePaintSymmetrySpace symmetry_space,
-                                             const float3 &cursor_world);
+struct MirroredDaub {
+  float3 center;
+  float3 view_direction;
+};
+
+/**
+ * Every symmetry pass (mirror reflections and radial copies) of the daub at \a world_center facing
+ * \a world_view_direction, taken across \a reference_ob's symmetry planes, expressed in
+ * \a symmetry_space. Used so a multi-object shared-symmetry stroke also processes objects whose
+ * geometry only lies under a mirrored daub -- a joined mesh would deform that geometry, so the
+ * separate object must not be skipped -- and so paint-cursor overlays can preview the same mirrored
+ * positions the stroke itself will use. The first entry is the un-mirrored daub itself.
+ */
+Vector<MirroredDaub> shared_symmetry_world_daubs(const Object &reference_ob,
+                                                 const float3 &world_center,
+                                                 const float3 &world_view_direction,
+                                                 ePaintSymmetrySpace symmetry_space,
+                                                 const float3 &cursor_world);
+
+/**
+ * Multi-object mirror surface snap: pull the mirrored (or radially rotated) brush daub center onto
+ * the surface of a secondary object.
+ *
+ * #StrokeCache.location_symm is the geometric reflection of the primary object's hit point. When
+ * the secondary mesh is not an exact mirror twin of the primary, that reflection floats off its
+ * surface; with #PAINT_FALLOFF_SHAPE_SPHERE the brush measures a true 3D distance, so no vertex
+ * falls inside the radius and the mirror pass silently does nothing. Ray-casting the surface along
+ * the MIRRORED VIEW AXIS (#StrokeCache.view_normal_symm) corrects the depth while leaving the daub's
+ * position across the view exactly where the mirror put it -- the mirrored daub lands where a
+ * mirrored cursor would have hit this mesh, which is how the primary object gets its own center.
+ * The snap axis is therefore fixed for the pass and independent of the geometry the brush is
+ * deforming, which is what keeps the mirrored stroke a continuous line.
+ *
+ * No-op unless the stroke is multi-object, \a ob is not the primary object, the current pass is a
+ * mirror or radial pass, the brush falloff is Sphere, and the feature is enabled on \a paint. Must
+ * be called after #cache_calc_brushdata_symm and BEFORE #do_tiled, which takes the (possibly
+ * snapped) #StrokeCache.location_symm as the origin it offsets each tile from.
+ */
+void mirror_snap_location_to_surface(const Depsgraph &depsgraph,
+                                     const Paint &paint,
+                                     const Brush &brush,
+                                     Object &ob,
+                                     StrokeCache &cache);
+
+/**
+ * Multiplier applied to the brush radius when testing whether a secondary object lies under a
+ * MIRRORED daub (see #MultiObjectStrokeContext::process_secondary). It matches the distance
+ * #mirror_snap_location_to_surface is allowed to travel, so an object whose surface the snap could
+ * still reach is not rejected by the object gate first. Returns 1.0 when the snap is inactive,
+ * keeping the gate byte-identical in that case.
+ */
+float mirror_snap_search_multiplier(const Paint &paint, const Brush &brush);
 
 /**
  * Snapshot of the primary object's per-stroke fields that are LAZILY allocated inside the brush
@@ -72,6 +120,23 @@ struct SharedStrokeStateSnapshot {
    * The secondary will allocate one itself; this case should not normally happen during the
    * first stroke step if the brush is engaged, but is allowed for completeness. */
   int painted_face_set_id = face_set_none_id;
+  /**
+   * The primary object's #StrokeCache.sculpt_normal for this step, in WORLD space.
+   *
+   * #update_sculpt_normal only computes #StrokeCache.sculpt_normal on the MAIN symmetry pass, and
+   * that pass can produce nothing for a secondary object: the main daub may miss it entirely (the
+   * whole point of shared symmetry, e.g. a mirrored limb kept as a separate mesh) or cover only
+   * masked/hidden geometry. Its mirror pass then mirrors the zero-initialized vector, and the brush
+   * runs over the right nodes with the right strength while displacing every vertex by nothing.
+   * Seeding the primary's normal is also what a joined mesh does: one area normal, taken under the
+   * main daub, mirrored onto the other side. When the secondary's own main pass DOES produce a
+   * normal it overwrites this seed -- and for a Mesh PBVH the two are the same vector anyway, since
+   * #calc_area_normal pools across every mesh in the stroke.
+   *
+   * `std::nullopt` => the primary had no normal at capture time (its own brush action bailed, or
+   * the brush does not use one); the secondary is then left untouched.
+   */
+  std::optional<float3> sculpt_normal_world;
 };
 
 SharedStrokeStateSnapshot capture_shared_stroke_state(const Object &primary_ob);
@@ -167,15 +232,17 @@ struct MultiObjectStrokeContext {
    * center yet this step) before calling this -- kept as a separate check at the call site rather
    * than a parameter here so the `continue` (with its RAII-guard-restore semantics) stays visible
    * in #update_step's loop. `primary_world_center` is the primary's world-space brush center for
-   * this step. `symm_world_centers` is the set of mirrored daub centers to also test against when
-   * #shared_symmetry_active (empty otherwise).
+   * this step, and `primary_world_view_direction` its brush volume's axis (only used by Projected
+   * falloff). `symm_daubs` is the set of mirrored daubs to also test against when
+   * #shared_symmetry_active (empty otherwise); its first entry is the un-mirrored daub.
    */
   bool process_secondary(Object &ob,
                          StrokeCache &cache,
                          Paint &paint,
                          const Brush &brush,
                          const float3 &primary_world_center,
-                         Span<float3> symm_world_centers) const;
+                         const float3 &primary_world_view_direction,
+                         Span<MirroredDaub> symm_daubs) const;
 };
 
 }  // namespace blender::ed::sculpt_paint

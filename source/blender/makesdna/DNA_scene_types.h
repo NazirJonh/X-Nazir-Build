@@ -1240,7 +1240,14 @@ struct Paint {
   ePaintSymmetryFlags symmetry_flags = PAINT_SYMMETRY_FEATHER;
   /** #ePaintSymmetrySpace: space for the multi-object brush symmetry plane. */
   char symmetry_space = 0;
-  char _pad_symm[7] = {};
+  char _pad_symm[3] = {};
+  /**
+   * Multi-object sculpt: how far a mirrored brush daub may travel to reach the secondary object's
+   * surface, in brush radii. Carved out of the former #_pad_symm bytes, so #Paint keeps its size;
+   * files written before this field existed read 0 here, which
+   * #BKE_paint_mirror_snap_distance_get maps back to the default.
+   */
+  float mirror_snap_distance = 2.0f;
   /**
    * Collapsed state of a given pressure curve
    */

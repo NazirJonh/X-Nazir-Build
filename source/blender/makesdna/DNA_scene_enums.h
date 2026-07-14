@@ -49,6 +49,10 @@ enum ePaintSymmetryFlags : int {
    * stroke (the primary object's local space) instead of each object mirroring around its own
    * origin, so a multi-object stroke matches the same geometry after #Join (joined-mesh parity). */
   PAINT_SYMMETRY_SHARED_ORIGIN = (1 << 7),
+  /* Multi-object sculpt: DISABLE snapping a mirrored brush daub onto the secondary object's
+   * surface. Stored inverted (unset = enabled) so files written before this flag existed get the
+   * feature ON without a file-subversion bump. */
+  PAINT_SYMMETRY_MIRROR_SNAP_OFF = (1 << 8),
 };
 ENUM_OPERATORS(ePaintSymmetryFlags);
 #define PAINT_SYMM_AXIS_ALL (PAINT_SYMM_X | PAINT_SYMM_Y | PAINT_SYMM_Z)

@@ -636,6 +636,11 @@ bool BKE_paint_use_unified_color(const Paint *paint)
   return paint->unified_paint_settings.flag & UNIFIED_PAINT_COLOR;
 }
 
+float BKE_paint_mirror_snap_distance_get(const Paint &paint)
+{
+  return paint.mirror_snap_distance > 0.0f ? paint.mirror_snap_distance : 2.0f;
+}
+
 /**
  * After changing #Paint.brush_asset_reference, call this to activate the matching brush, importing
  * it if necessary. Has no effect if #Paint.brush is set already.

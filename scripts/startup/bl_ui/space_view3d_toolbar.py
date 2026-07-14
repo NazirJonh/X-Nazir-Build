@@ -1117,6 +1117,11 @@ class VIEW3D_PT_sculpt_symmetry(Panel, View3DPaintPanel):
         row = layout.row(align=True, heading="Symmetry Space")
         row.prop(sculpt, "symmetry_space", expand=True)
 
+        layout.prop(sculpt, "use_mirror_surface_snap")
+        sub = layout.column()
+        sub.active = sculpt.use_mirror_surface_snap
+        sub.prop(sculpt, "mirror_snap_distance")
+
         layout.prop(mesh, "radial_symmetry", text="Radial")
         layout.prop(sculpt, "tile_offset", text="Tile Offset")
 

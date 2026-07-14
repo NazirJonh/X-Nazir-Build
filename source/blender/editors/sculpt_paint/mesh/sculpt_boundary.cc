@@ -565,6 +565,7 @@ static void edit_data_init_grids(const SubdivCCG &subdiv_ccg,
   float accum_distance = 0.0f;
 
   Vector<SubdivCCGCoord> next_iteration;
+  SubdivCCGNeighbors neighbors;
 
   while (true) {
     /* Stop adding steps to edit info. This happens when a steps is further away from the boundary
@@ -577,7 +578,6 @@ static void edit_data_init_grids(const SubdivCCG &subdiv_ccg,
     for (const SubdivCCGCoord from_v : current_iteration) {
       const int from_v_i = from_v.to_index(key);
 
-      SubdivCCGNeighbors neighbors;
       BKE_subdiv_ccg_neighbor_coords_get(subdiv_ccg, from_v, true, neighbors);
 
       for (const SubdivCCGCoord neighbor : neighbors.duplicates()) {
@@ -678,6 +678,7 @@ static void edit_data_init_bmesh(BMesh *bm,
   float accum_distance = 0.0f;
 
   Vector<BMVert *> next_iteration;
+  BMeshNeighborVerts neighbors;
 
   while (true) {
     /* Stop adding steps to edit info. This happens when a steps is further away from the boundary
@@ -690,7 +691,6 @@ static void edit_data_init_bmesh(BMesh *bm,
     for (BMVert *from_v : current_iteration) {
       const int from_v_i = BM_elem_index_get(from_v);
 
-      BMeshNeighborVerts neighbors;
       for (BMVert *neighbor : vert_neighbors_get_bmesh(*from_v, neighbors)) {
         const int neighbor_idx = BM_elem_index_get(neighbor);
         if (BM_elem_flag_test(neighbor, BM_ELEM_HIDDEN) ||

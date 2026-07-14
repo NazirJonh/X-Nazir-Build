@@ -183,13 +183,16 @@ void FillDataBMesh::execute(Object &object, FunctionRef<bool(BMVert *from_v, BMV
   BMeshNeighborVerts neighbors;
   while (!this->queue.is_empty()) {
     for (BMVert *from_v : this->queue) {
+      /* The fake neighbor has to be appended after the topological ones: #vert_neighbors_get_bmesh
+       * clears the vector it fills. */
+      vert_neighbors_get_bmesh(*from_v, neighbors);
       if (!this->fake_neighbors.is_empty() &&
           this->fake_neighbors[BM_elem_index_get(from_v)] != FAKE_NEIGHBOR_NONE)
       {
         neighbors.append(BM_vert_at_index(bm, this->fake_neighbors[BM_elem_index_get(from_v)]));
       }
 
-      for (BMVert *neighbor : vert_neighbors_get_bmesh(*from_v, neighbors)) {
+      for (BMVert *neighbor : neighbors) {
         const int neighbor_idx = BM_elem_index_get(neighbor);
         if (this->visited_verts[neighbor_idx]) {
           continue;

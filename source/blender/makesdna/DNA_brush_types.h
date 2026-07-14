@@ -211,7 +211,9 @@ struct Brush {
    * How the stroke behaves when used via the modal operators.
    */
   eBrushStrokeType stroke_method = BRUSH_STROKE_SPACE;
-  char _pad[7] = {};
+  /** Shape used to clip the brush texture when stamping. */
+  eBrushTextureClipShape texture_clip_shape = BRUSH_TEXTURE_CLIP_SPHERE;
+  char _pad[6] = {};
   /** Number of samples used to smooth the stroke. */
   int input_samples = 1;
 

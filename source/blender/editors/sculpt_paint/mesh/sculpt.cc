@@ -960,8 +960,10 @@ static int sculpt_brush_needs_normal(const SculptSession &ss, const Brush &brush
                SCULPT_BRUSH_TYPE_THUMB) ||
           (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_SCENE_PROJECT &&
            brush.project_ray_direction_type == BRUSH_PROJECT_RAY_DIRECTION_PLANE_NORMAL) ||
-          (mask_tex->tex && mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA)) ||
-         brush_uses_topology_rake(ss, brush) || BKE_brush_has_cube_tip(&brush, PaintMode::Sculpt);
+          (mask_tex->tex && mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA) ||
+          brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE ||
+          brush_uses_topology_rake(ss, brush) ||
+          BKE_brush_has_cube_tip(&brush, PaintMode::Sculpt));
 }
 
 static bool brush_needs_rake_rotation(const Brush &brush)
@@ -2808,6 +2810,98 @@ static float brush_strength(const Sculpt &sd,
   return 0.0f;
 }
 
+/**
+ * \note Expects a point already brought back into the first symmetry pass's space, since
+ * #StrokeCache.brush_local_mat is only built for that pass — see #sculpt_point_to_first_symm_pass.
+ */
+static float3 sculpt_point_to_brush_local(const StrokeCache &cache, const float3 &object_space_point)
+{
+  float3 local_point = object_space_point;
+  mul_m4_v3(cache.brush_local_mat.ptr(), local_point);
+  return local_point;
+}
+
+/**
+ * Bring a point from the current symmetry pass back into the space of the first pass, which is the
+ * only space #StrokeCache.brush_local_mat is valid in (#update_brush_local_mat only runs for that
+ * pass). Both the texture projection and the rectangle bounds/falloff rely on this.
+ *
+ * This is the exact inverse of the mirroring #cache_calc_brushdata_symm applies to
+ * #StrokeCache.location_symm (see also #symm_pass_mirror_point): in shared multi-object symmetry
+ * the mirror happens in the REFERENCE object's space, so undoing it in this object's local space
+ * alone would land the brush frame in the wrong place on mirrored passes.
+ */
+static float3 sculpt_point_to_first_symm_pass(const StrokeCache &cache,
+                                              const float3 &object_space_point)
+{
+  if (cache.symm_shared_origin_active) {
+    /* Inverse of `cur_from_ref * rotate * flip * ref_from_cur`. */
+    float3 point = math::transform_point(cache.symm_ref_from_cur, object_space_point);
+    if (cache.radial_symmetry_pass) {
+      mul_m4_v3(cache.symm_rot_mat_inv.ptr(), point);
+    }
+    point = symmetry_flip(point, cache.mirror_symmetry_pass);
+    return math::transform_point(cache.symm_cur_from_ref, point);
+  }
+
+  float3 point = object_space_point;
+  if (cache.radial_symmetry_pass) {
+    mul_m4_v3(cache.symm_rot_mat_inv.ptr(), point);
+  }
+  return symmetry_flip(point, cache.mirror_symmetry_pass);
+}
+
+static bool sculpt_point_inside_texture_rectangle_clip(const StrokeCache &cache,
+                                                       const float3 &symm_point)
+{
+  const float3 local_point = sculpt_point_to_brush_local(cache, symm_point);
+  return std::max(std::abs(local_point.x), std::abs(local_point.y)) <= 1.0f;
+}
+
+/**
+ * Chebyshev distance in the brush-local XY plane, scaled back to object-space units so it can be
+ * compared against #StrokeCache.radius like any other brush distance.
+ */
+static float sculpt_texture_rectangle_distance(const StrokeCache &cache,
+                                               const float3 &object_space_point)
+{
+  const float3 symm_point = sculpt_point_to_first_symm_pass(cache, object_space_point);
+  const float3 local_pos = sculpt_point_to_brush_local(cache, symm_point);
+  const float distance = std::max(std::abs(local_pos.x), std::abs(local_pos.y));
+  return distance * cache.radius;
+}
+
+/**
+ * Whether brush influence is bounded by the rectangle stamp rather than the brush sphere.
+ *
+ * Only valid once #update_brush_local_mat has run for this step, so this must never be used by the
+ * area-normal/area-center sampling that feeds #StrokeCache.texture_plane_normal — that would make
+ * the brush-local matrix depend on itself (see #calc_brush_distances_squared).
+ */
+static bool brush_uses_rectangle_falloff(const SculptSession &ss)
+{
+  return ss.cache && ss.cache->brush &&
+         ss.cache->brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
+}
+
+/**
+ * Screen-based mapping modes (Tiled, View, Random) must keep screen projection even when
+ * rectangle clip is enabled. Brush-local projection is only used for Area mapping, or for
+ * rectangle clip with modes that do not define their own screen-space coordinates.
+ */
+static bool sculpt_texture_uses_brush_local_projection(const MTex &mtex, const Brush &brush)
+{
+  if (mtex.brush_map_mode == MTEX_MAP_MODE_AREA) {
+    return true;
+  }
+  if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+      !ELEM(mtex.brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_RANDOM))
+  {
+    return true;
+  }
+  return false;
+}
+
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const float brush_point[3],
@@ -2840,16 +2934,25 @@ void sculpt_apply_texture(const SculptSession &ss,
      * across the symmetry axis and rotate it back to the original
      * position in order to project it. This insures that the
      * brush texture will be oriented correctly. */
-    if (cache.radial_symmetry_pass) {
-      mul_m4_v3(cache.symm_rot_mat_inv.ptr(), point);
+    float3 symm_point = sculpt_point_to_first_symm_pass(cache, float3(point));
+
+    const bool use_brush_local_projection = sculpt_texture_uses_brush_local_projection(
+        *mtex, brush);
+
+    if (use_brush_local_projection && brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+        !sculpt_point_inside_texture_rectangle_clip(cache, symm_point))
+    {
+      *r_value = 0.0f;
+      zero_v4(r_rgba);
+      return;
     }
-    float3 symm_point = symmetry_flip(point, cache.mirror_symmetry_pass);
 
     /* Still no symmetry supported for other paint modes.
      * Sculpt does it DIY. */
-    if (mtex->brush_map_mode == MTEX_MAP_MODE_AREA) {
-      /* Similar to fixed mode, but projects from brush angle
-       * rather than view direction. */
+    if (use_brush_local_projection) {
+      /* Similar to fixed mode, but projects from the brush plane rather than the view direction.
+       * Rectangle clipping uses the same surface-aligned projection for sampling as for its
+       * brush-local bounds test. */
 
       mul_m4_v3(cache.brush_local_mat.ptr(), symm_point);
 
@@ -2874,8 +2977,18 @@ void sculpt_apply_texture(const SculptSession &ss,
       const float2 point_2d = ED_view3d_project_float_v2_m4(
           cache.vc->region, symm_point, cache.projection_mat);
       const float point_3d[3] = {point_2d[0], point_2d[1], 0.0f};
-      *r_value = BKE_brush_sample_tex_3d(
-          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool);
+      /* #BKE_brush_sample_tex_3d skips the clip for the screen-mapped modes (Tiled, Random) that
+       * have no brush-relative coordinates to test against; there the rectangular boundary comes
+       * from the brush falloff instead. */
+      const bool apply_texture_clip = brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
+      *r_value = BKE_brush_sample_tex_3d(cache.paint,
+                                         &brush,
+                                         mtex,
+                                         point_3d,
+                                         r_rgba,
+                                         0,
+                                         ss.tex_pool,
+                                         apply_texture_clip);
     }
   }
 }
@@ -2975,7 +3088,10 @@ static IndexMask pbvh_gather_generic(Object &ob,
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
 
   const float3 center = ss.cache->location_symm;
-  const float radius_sq = math::square(ss.cache->radius * radius_scale);
+  float radius_sq = math::square(ss.cache->radius * radius_scale);
+  if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) {
+    radius_sq *= 2.0f;
+  }
   const bool ignore_ineffective = brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK;
   switch (brush.falloff_shape) {
     case PAINT_FALLOFF_SHAPE_SPHERE: {
@@ -3137,6 +3253,33 @@ static void update_sculpt_normal(const Depsgraph &depsgraph,
   }
   else {
     cache.sculpt_normal_symm = symm_pass_mirror_direction(cache, cache.sculpt_normal);
+    if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) {
+      cache.texture_plane_normal_symm = tilt_apply_to_normal(
+          symm_pass_mirror_direction(cache, cache.texture_plane_normal),
+          cache,
+          brush.tilt_strength_factor);
+    }
+  }
+
+  /* Rectangle clip must use the actual surface normal under the brush, regardless of
+   * #Brush.sculpt_plane. For planar brushes (Plane, Clay Strips) `cursor_sample_result` already
+   * contains a geometry-derived normal. For other brushes (Draw, Mask, …) it doesn't, so we
+   * explicitly compute the area normal here – exactly what MTEX_MAP_MODE_AREA does. */
+  if (cache.mirror_symmetry_pass == 0 && cache.radial_symmetry_pass == 0 &&
+      brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE)
+  {
+    if (cursor_sample_result.plane_normal) {
+      cache.texture_plane_normal = *cursor_sample_result.plane_normal;
+    }
+    else {
+      /* Fall back to an area-normal sample so the rectangle is always aligned to the mesh
+       * surface rather than to the sculpt_plane setting or the camera. */
+      const std::optional<float3> area_normal = calc_area_normal(
+          depsgraph, brush, ob, cursor_sample_result.node_mask);
+      cache.texture_plane_normal = area_normal.value_or(cache.sculpt_normal);
+    }
+    cache.texture_plane_normal_symm = tilt_apply_to_normal(
+        cache.texture_plane_normal, cache, brush.tilt_strength_factor);
   }
 }
 
@@ -3160,6 +3303,7 @@ static void calc_local_from_screen(const ViewContext &vc,
 
 static void calc_brush_local_mat(const float rotation,
                                  const Object &ob,
+                                 const float3 &plane_normal,
                                  float local_mat[4][4],
                                  float local_mat_inv[4][4])
 {
@@ -3201,12 +3345,12 @@ static void calc_brush_local_mat(const float rotation,
    * The Y-axis of the brush-local frame has to lie in the intersection of the tangent plane
    * and the motion plane. */
 
-  cross_v3_v3v3(v, cache->sculpt_normal, motion_normal_local);
+  cross_v3_v3v3(v, plane_normal, motion_normal_local);
   normalize_v3_v3(mat[1], v);
 
   /* Get other axes. */
-  cross_v3_v3v3(mat[0], mat[1], cache->sculpt_normal);
-  copy_v3_v3(mat[2], cache->sculpt_normal);
+  cross_v3_v3v3(mat[0], mat[1], plane_normal);
+  copy_v3_v3(mat[2], plane_normal);
 
   /* Set location. */
   copy_v3_v3(mat[3], cache->location_symm);
@@ -3304,8 +3448,10 @@ static float4x4 build_area_texture_world_frame(const float rotation,
 static constexpr float area_texture_flat_cos_threshold = 0.866f;
 
 /**
- * World-space equivalent of #calc_brush_local_mat, for the Area-mapped brush/mask texture
- * (#sculpt_apply_texture) and vector-displacement texture (#calc_vertex_displacement).
+ * World-space equivalent of #calc_brush_local_mat, for the surface-projected brush/mask texture
+ * (#sculpt_apply_texture, i.e. Area mapping or rectangle texture clip) and vector-displacement
+ * texture (#calc_vertex_displacement). \a plane_normal is the local-space normal the frame's Z axis
+ * is built from, matching #calc_brush_local_mat.
  *
  * Two problems with the local-space #calc_brush_local_mat make it unusable for multi-object
  * strokes, both solved by building the frame in world space here:
@@ -3321,7 +3467,7 @@ static constexpr float area_texture_flat_cos_threshold = 0.866f;
  * 2. SEAM CONTINUITY. For the texture to read like one joined mesh across the seam where two meshes
  *    meet, every object must share ONE brush frame: same world origin, normal, motion direction and
  *    radius. Each object otherwise builds the frame from its OWN pooled-but-still-per-object
- *    #sculpt_normal / #location_symm, so the texture tilts and shifts differently on each mesh at
+ *    plane normal / #location_symm, so the texture tilts and shifts differently on each mesh at
  *    the seam. The primary object (the sampling reference under the cursor, processed first in
  *    #update_step Phase 2) computes the shared world frame once from the pooled area normal and
  *    stores it in #StrokeCache.area_texture_frame_to_world; every secondary object reuses that
@@ -3329,8 +3475,9 @@ static constexpr float area_texture_flat_cos_threshold = 0.866f;
  *
  * 3. SHARP CURVATURE BETWEEN MESHES. A single shared plane cannot fit two meshes meeting at a sharp
  *    angle (e.g. a wall and floor at 90 degrees) without one of them projecting at a grazing angle
- *    and smearing. When #check_curvature is set (an Area-mapped mask/color texture is in use) and
- *    this object's OWN surface normal (independent of the pooling above, see
+ *    and smearing. When #check_curvature is set (a surface-projected texture is in use: Area mapping
+ *    or rectangle texture clip) and this object's OWN surface normal (independent of the pooling
+ *    above, see
  *    #calc_area_normal_own) diverges from the shared-frame normal by more than
  *    #area_texture_flat_cos_threshold, this object's #local_mat/#local_mat_inv are rebuilt from its
  *    OWN normal instead — projected independently, not sharing the plane. The published
@@ -3340,13 +3487,14 @@ static constexpr float area_texture_flat_cos_threshold = 0.866f;
  * #local_mat still maps a MODEL-SPACE (local) point to brush-frame coordinates, and #local_mat_inv
  * still maps brush-frame coordinates back to a model-space point/direction, matching
  * #calc_brush_local_mat's contract — the object's own transform is composed into both matrices so
- * callers don't need to change. #calc_brush_local_mat itself is left untouched: #cube_tip_init
- * shares it and expects a purely local-space matrix.
+ * callers don't need to change. #calc_brush_local_mat is still used for the uniform-scale case:
+ * #cube_tip_init shares it and expects a purely local-space matrix.
  */
 static void calc_brush_area_texture_mat(const Depsgraph &depsgraph,
                                         const Brush &brush,
                                         const float rotation,
                                         const Object &ob,
+                                        const float3 &plane_normal,
                                         const IndexMask &node_mask,
                                         const bool check_curvature,
                                         float4x4 &local_mat,
@@ -3375,7 +3523,7 @@ static void calc_brush_area_texture_mat(const Depsgraph &depsgraph,
     frame_to_world = reference_cache->area_texture_frame_to_world;
   }
   else {
-    const float3 world_normal = math::normalize(to_world_normal * cache->sculpt_normal);
+    const float3 world_normal = math::normalize(to_world_normal * plane_normal);
     frame_to_world = build_area_texture_world_frame(rotation, ob, *cache, world_normal);
 
     /* Publish the frame for secondary objects (the reference is processed first). */
@@ -3410,23 +3558,35 @@ static void update_brush_local_mat(const Depsgraph &depsgraph,
   if (cache->mirror_symmetry_pass == 0 && cache->radial_symmetry_pass == 0) {
     const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
     const MTex *mask_tex = BKE_brush_mask_texture_get(brush, OB_MODE_SCULPT);
+
+    /* Rectangle clip stamps along the surface plane, which is independent of the
+     * #Brush.sculpt_plane driven #sculpt_normal_symm used for displacement. */
+    const bool use_rectangle_clip = brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
+    const float3 &plane_normal = use_rectangle_clip ? cache->texture_plane_normal_symm :
+                                                      cache->sculpt_normal_symm;
+
     if (cache->non_uniform_scale_active) {
       /* The extra own-normal sample (#calc_area_normal_own) that curvature detection needs has a
-       * real per-object cost, so only pay it when an Area-mapped texture is actually in use. */
-      const bool check_curvature = mask_tex->tex != nullptr &&
-                                   mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA;
+       * real per-object cost, so only pay it when a surface-projected texture is actually in use. */
+      const bool check_curvature = use_rectangle_clip ||
+                                   (mask_tex->tex != nullptr &&
+                                    mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA);
       calc_brush_area_texture_mat(depsgraph,
                                   *brush,
                                   mask_tex->rot,
                                   ob,
+                                  plane_normal,
                                   node_mask,
                                   check_curvature,
                                   cache->brush_local_mat,
                                   cache->brush_local_mat_inv);
     }
     else {
-      calc_brush_local_mat(
-          mask_tex->rot, ob, cache->brush_local_mat.ptr(), cache->brush_local_mat_inv.ptr());
+      calc_brush_local_mat(mask_tex->rot,
+                           ob,
+                           plane_normal,
+                           cache->brush_local_mat.ptr(),
+                           cache->brush_local_mat_inv.ptr());
     }
   }
 }
@@ -8421,7 +8581,7 @@ void cube_tip_init(const Sculpt & /*sd*/, const Object &ob, const Brush &brush, 
   float tmat[4][4];
   float unused[4][4];
 
-  calc_brush_local_mat(0.0, ob, unused, mat);
+  calc_brush_local_mat(0.0, ob, cache.sculpt_normal, unused, mat);
 
   /* NOTE: we ignore the radius scaling done inside of calc_brush_local_mat to
    * duplicate prior behavior.
@@ -9150,7 +9310,13 @@ void calc_brush_distances_squared(const SculptSession &ss,
 {
   BLI_assert(verts.size() == r_distances.size());
 
+  /* NOTE: The rectangle stamp shape is deliberately NOT handled here. This function also feeds the
+   * area-normal/area-center sampling that #StrokeCache.texture_plane_normal (and therefore
+   * #StrokeCache.brush_local_mat) is derived from, and the rectangle distance is measured in that
+   * very matrix — using it here would make the matrix depend on itself and leave it one dab stale.
+   * The stamp shape is applied in #calc_brush_distances, which only brushes use. */
   const float3 &test_location = ss.cache ? ss.cache->location_symm : ss.cursor_location;
+
   if (falloff_shape == PAINT_FALLOFF_SHAPE_TUBE && (ss.cache || ss.filter_cache)) {
     /* The tube falloff shape requires the cached view normal. */
     const float3 &view_normal = ss.cache ? ss.cache->view_normal_symm :
@@ -9185,6 +9351,15 @@ void calc_brush_distances(const SculptSession &ss,
                           const MutableSpan<float> r_distances)
 {
   PRF_scope(ProfileCategory::Editor);
+
+  if (brush_uses_rectangle_falloff(ss)) {
+    BLI_assert(verts.size() == r_distances.size());
+    for (const int i : verts.index_range()) {
+      r_distances[i] = sculpt_texture_rectangle_distance(*ss.cache, positions[verts[i]]);
+    }
+    return;
+  }
+
   calc_brush_distances_squared(ss, positions, verts, falloff_shape, r_distances);
   for (float &value : r_distances) {
     value = std::sqrt(value);
@@ -9198,7 +9373,10 @@ void calc_brush_distances_squared(const SculptSession &ss,
 {
   BLI_assert(positions.size() == r_distances.size());
 
+  /* NOTE: The rectangle stamp shape is applied in #calc_brush_distances, not here — see the note in
+   * the indexed overload above. */
   const float3 &test_location = ss.cache ? ss.cache->location_symm : ss.cursor_location;
+
   if (falloff_shape == PAINT_FALLOFF_SHAPE_TUBE && (ss.cache || ss.filter_cache)) {
     /* The tube falloff shape requires the cached view normal. */
     const float3 &view_normal = ss.cache ? ss.cache->view_normal_symm :
@@ -9232,6 +9410,15 @@ void calc_brush_distances(const SculptSession &ss,
                           const MutableSpan<float> r_distances)
 {
   PRF_scope(ProfileCategory::Editor);
+
+  if (brush_uses_rectangle_falloff(ss)) {
+    BLI_assert(positions.size() == r_distances.size());
+    for (const int i : positions.index_range()) {
+      r_distances[i] = sculpt_texture_rectangle_distance(*ss.cache, positions[i]);
+    }
+    return;
+  }
+
   calc_brush_distances_squared(ss, positions, falloff_shape, r_distances);
   for (float &value : r_distances) {
     value = std::sqrt(value);

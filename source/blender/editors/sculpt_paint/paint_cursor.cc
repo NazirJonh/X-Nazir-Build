@@ -85,6 +85,8 @@ struct TexSnapshot {
   int old_size;
   float old_zoom;
   bool old_col;
+  /* The clip shape is baked into the snapshot's pixels, so it has to invalidate it when changed. */
+  eBrushTextureClipShape old_texture_clip_shape;
   /* Pointers to detect when brush or texture changes. */
   const Brush *brush_ptr;
   const Tex *texture_ptr;
@@ -95,6 +97,7 @@ struct CursorSnapshot {
   int size;
   int zoom;
   int curve_preset;
+  eBrushTextureClipShape texture_clip_shape;
 };
 
 static TexSnapshot primary_snap = {nullptr};
@@ -139,7 +142,7 @@ static int same_tex_snap(
   return ((mtex->brush_map_mode != MTEX_MAP_MODE_TILED ||
            (vc->region->winx == snap->winx && vc->region->winy == snap->winy)) &&
           (mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL || snap->old_zoom == zoom) &&
-          snap->old_col == col);
+          snap->old_texture_clip_shape == brush->texture_clip_shape && snap->old_col == col);
 }
 
 static void make_tex_snap(
@@ -148,6 +151,7 @@ static void make_tex_snap(
   snap->old_zoom = zoom;
   snap->winx = vc->region->winx;
   snap->winy = vc->region->winy;
+  snap->old_texture_clip_shape = brush->texture_clip_shape;
   snap->brush_ptr = brush;
   snap->texture_ptr = mtex->tex;
 }
@@ -219,7 +223,22 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
 
     len = sqrtf(x * x + y * y);
 
-    if (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL) || len <= 1.0f) {
+    bool inside_bounds;
+    if (br->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+        !ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL))
+    {
+      /* Tiled is excluded because its coordinates are absolute screen space rather than
+       * brush-relative, so the rectangle bounds don't apply (same as in #BKE_brush_sample_tex_3d). */
+      inside_bounds = std::max(std::fabs(x), std::fabs(y)) <= 1.0f;
+    }
+    else if (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL)) {
+      inside_bounds = true;
+    }
+    else {
+      inside_bounds = len <= 1.0f;
+    }
+
+    if (inside_bounds) {
       /* It is probably worth optimizing for those cases where the texture is not rotated by
        * skipping the calls to atan2, sqrtf, sin, and cos. */
       if (mtex->tex && (rotation > 0.001f || rotation < -0.001f)) {
@@ -424,7 +443,9 @@ static void load_tex_cursor_task_cb(void *__restrict userdata,
     const int index = j * size + i;
     const float x = ((float(i) / size) - 0.5f) * 2.0f;
     const float y = ((float(j) / size) - 0.5f) * 2.0f;
-    const float len = sqrtf(x * x + y * y);
+    const float len = (br->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) ?
+                          std::max(std::abs(x), std::abs(y)) :
+                          sqrtf(x * x + y * y);
 
     if (len <= 1.0f) {
 
@@ -449,7 +470,8 @@ static int load_tex_cursor(Paint *paint, Brush *br, float zoom)
   int size;
   const bool refresh = !cursor_snap.overlay_texture ||
                        (overlay_flags & PAINT_OVERLAY_INVALID_CURVE) || cursor_snap.zoom != zoom ||
-                       cursor_snap.curve_preset != br->curve_distance_falloff_preset;
+                       cursor_snap.curve_preset != br->curve_distance_falloff_preset ||
+                       cursor_snap.texture_clip_shape != br->texture_clip_shape;
 
   init = (cursor_snap.overlay_texture != nullptr);
 
@@ -515,6 +537,7 @@ static int load_tex_cursor(Paint *paint, Brush *br, float zoom)
   }
 
   cursor_snap.curve_preset = br->curve_distance_falloff_preset;
+  cursor_snap.texture_clip_shape = br->texture_clip_shape;
   BKE_paint_reset_overlay_invalid(PAINT_OVERLAY_INVALID_CURVE);
 
   return 1;
@@ -1258,13 +1281,18 @@ static void paint_cursor_draw_3D_view_brush_cursor(PaintCursorContext &pcontext)
   }
   else {
     const Brush &brush = *pcontext.brush;
-    /* 2D falloff is better represented with the default 2D cursor,
-     * there is no need to draw anything else. */
+    /* 2D falloff (tube) is better represented with the default 2D cursor,
+     * there is no need to draw anything else.
+     * Rectangle clip shape uses the 3D surface-aligned cursor path so that
+     * the rectangular outline is drawn in the brush-local XY plane (matching
+     * the brush_local_mat used for texture sampling and bounds testing). */
     if (brush.falloff_shape == PAINT_FALLOFF_SHAPE_TUBE) {
       paint_draw_legacy_3D_view_brush_cursor(pcontext);
       return;
     }
-    if (pcontext.alpha_overlay_drawn) {
+    if (pcontext.alpha_overlay_drawn &&
+        brush.texture_clip_shape != BRUSH_TEXTURE_CLIP_RECTANGLE)
+    {
       paint_draw_legacy_3D_view_brush_cursor(pcontext);
       return;
     }
@@ -1447,12 +1475,12 @@ void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext)
  * which avoids rebuilding the rotation matrix here for every overlay layer and keeps the texture
  * aligned with the brush cursor when tilt is active.
  */
-static float brush_rotation_to_cursor_space(const ViewContext &vc,
-                                            const float3 &location,
-                                            const float3 &normal,
-                                            const float3 &cursor_x,
-                                            const float3 &cursor_y,
-                                            float brush_rotation_screen)
+float brush_rotation_to_cursor_space(const ViewContext &vc,
+                                     const float3 &location,
+                                     const float3 &normal,
+                                     const float3 &cursor_x,
+                                     const float3 &cursor_y,
+                                     float brush_rotation_screen)
 {
   if (math::length_squared(normal) < 1e-6f) {
     return brush_rotation_screen;

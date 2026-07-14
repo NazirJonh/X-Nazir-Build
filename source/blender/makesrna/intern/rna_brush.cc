@@ -2480,6 +2480,20 @@ static void rna_def_brush(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem texture_clip_shape_items[] = {
+      {BRUSH_TEXTURE_CLIP_SPHERE,
+       "SPHERE",
+       0,
+       "Sphere",
+       "Clip the brush texture using a circular boundary"},
+      {BRUSH_TEXTURE_CLIP_RECTANGLE,
+       "RECTANGLE",
+       0,
+       "Rectangle",
+       "Clip the brush texture using a rectangular boundary"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   static const EnumPropertyItem falloff_shape_unit_items[] = {
       {0, "SPHERE", 0, "Sphere", "Apply brush influence in a Sphere, outwards from the center"},
       {PAINT_FALLOFF_SHAPE_TUBE,
@@ -2908,6 +2922,12 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, brush_jitter_unit_items);
   RNA_def_property_ui_text(
       prop, "Jitter Unit", "Jitter in screen space or relative to brush size");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "texture_clip_shape", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "texture_clip_shape");
+  RNA_def_property_enum_items(prop, texture_clip_shape_items);
+  RNA_def_property_ui_text(prop, "Texture Clip", "Shape used to clip the brush texture when stamping");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "falloff_shape", PROP_ENUM, PROP_NONE); /* as an enum */

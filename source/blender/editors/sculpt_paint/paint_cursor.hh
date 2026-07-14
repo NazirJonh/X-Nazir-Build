@@ -97,6 +97,14 @@ struct PaintCursorContext {
   int pixel_radius = 0;
 };
 
+/** Convert a screen-space brush rotation to the cursor-space tangent basis used by 3D overlays. */
+float brush_rotation_to_cursor_space(const ViewContext &vc,
+                                     const float3 &location,
+                                     const float3 &normal,
+                                     const float3 &cursor_x,
+                                     const float3 &cursor_y,
+                                     float brush_rotation_screen);
+
 void grease_pencil_cursor_draw(PaintCursorContext &pcontext);
 
 void mesh_cursor_update_and_init(PaintCursorContext &pcontext);

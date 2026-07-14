@@ -602,6 +602,12 @@ enum eBrushFalloffShape : char {
   PAINT_FALLOFF_SHAPE_TUBE = 1,
 };
 
+/** #Brush.texture_clip_shape */
+enum eBrushTextureClipShape : char {
+  BRUSH_TEXTURE_CLIP_SPHERE = 0,
+  BRUSH_TEXTURE_CLIP_RECTANGLE = 1,
+};
+
 enum eBrushCurvesSculptFlag : uint32_t {
   BRUSH_CURVES_SCULPT_FLAG_SCALE_UNIFORM = (1 << 0),
   BRUSH_CURVES_SCULPT_FLAG_GROW_SHRINK_INVERT = (1 << 1),

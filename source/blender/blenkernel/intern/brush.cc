@@ -5,7 +5,9 @@
 /** \file
  * \ingroup bke
  */
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <optional>
 
 #include "MEM_guardedalloc.h"
@@ -641,6 +643,7 @@ static void brush_defaults(Brush *brush)
   FROM_DEFAULT(mtex);
   FROM_DEFAULT(mask_mtex);
   FROM_DEFAULT(falloff_shape);
+  FROM_DEFAULT(texture_clip_shape);
   FROM_DEFAULT(tip_scale_x);
   FROM_DEFAULT(tip_roundness);
 
@@ -1030,7 +1033,8 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
                               const float3 &point,
                               float4 &rgba,
                               const int thread,
-                              ImagePool *pool)
+                              ImagePool *pool,
+                              const bool apply_texture_clip)
 {
   const bke::PaintRuntime *paint_runtime = paint->runtime;
   float intensity = 1.0;
@@ -1117,6 +1121,23 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
 
       x = flen * cosf(angle);
       y = flen * sinf(angle);
+    }
+
+    /* Clip before the aspect correction, so the rectangular boundary matches the one tested by the
+     * paint cursor and by the sculpt brush-local bounds check.
+     *
+     * Tiled and Random sample the texture in absolute screen coordinates (for Random,
+     * #bke::PaintRuntime.tex_mouse holds a random offset rather than the brush position, see
+     * #BKE_brush_randomize_texture_coords), so `x`/`y` are not brush-relative there and the
+     * rectangle bounds must not be tested against them — the rectangular boundary comes from the
+     * brush falloff instead. */
+    if (apply_texture_clip && br->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+        !ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_RANDOM))
+    {
+      if (std::max(std::fabs(x), std::fabs(y)) > 1.0f) {
+        zero_v4(rgba);
+        return 0.0f;
+      }
     }
 
     x *= paint_runtime->tex_aspect_correction[0];
@@ -1232,6 +1253,17 @@ float BKE_brush_sample_masktex(
 
       x = flen * cosf(angle);
       y = flen * sinf(angle);
+    }
+
+    /* See the note in #BKE_brush_sample_tex_3d: screen-mapped modes have no brush-relative
+     * coordinates to test the rectangle bounds against. */
+    if (br->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+        !ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_RANDOM))
+    {
+      if (std::max(std::fabs(x), std::fabs(y)) > 1.0f) {
+        zero_v4(dummy_rgba);
+        return 0.0f;
+      }
     }
 
     x *= paint_runtime->mask_tex_aspect_correction[0];

@@ -153,7 +153,8 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
                               const float3 &point,
                               float4 &rgba,
                               int thread,
-                              ImagePool *pool);
+                              ImagePool *pool,
+                              bool apply_texture_clip = true);
 float BKE_brush_sample_masktex(
     const Paint *paint, Brush *br, const float2 &point, int thread, ImagePool *pool);
 

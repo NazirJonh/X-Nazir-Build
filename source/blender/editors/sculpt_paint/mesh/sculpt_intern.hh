@@ -434,6 +434,12 @@ struct StrokeCache {
    */
   float3 sculpt_normal = float3(0);
   float3 sculpt_normal_symm = float3(0);
+  /**
+   * Surface-aligned stamp plane normal for rectangle texture clip (area-averaged, with tilt).
+   * Independent of #Brush.sculpt_plane which controls displacement, not mask projection.
+   */
+  float3 texture_plane_normal = float3(0);
+  float3 texture_plane_normal_symm = float3(0);
 
   /**
    * Used for area texture mode, local_mat gets calculated by

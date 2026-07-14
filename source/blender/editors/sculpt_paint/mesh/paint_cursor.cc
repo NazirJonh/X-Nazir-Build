@@ -790,6 +790,34 @@ static void main_inactive_cursor_draw(const PaintCursorContext &pcontext)
       80);
 }
 
+/**
+ * Square counterpart of #imm_draw_circle_wire_3d, drawn in the brush-local XY plane.
+ * \param half_size: distance from the center to each edge, i.e. the brush radius.
+ */
+static void imm_draw_square_wire_3d(const uint gpuattr, const float half_size)
+{
+  immBegin(GPU_PRIM_LINE_LOOP, 4);
+  immVertex3f(gpuattr, -half_size, -half_size, 0.0f);
+  immVertex3f(gpuattr, half_size, -half_size, 0.0f);
+  immVertex3f(gpuattr, half_size, half_size, 0.0f);
+  immVertex3f(gpuattr, -half_size, half_size, 0.0f);
+  immEnd();
+}
+
+/** Rectangle texture clip counterpart of #main_inactive_cursor_draw. */
+static void main_inactive_rectangle_cursor_draw(const PaintCursorContext &pcontext)
+{
+  immUniformColor3fvAlpha(pcontext.outline_col, pcontext.outline_alpha);
+  GPU_line_width(2.0f);
+  imm_draw_square_wire_3d(pcontext.pos, pcontext.radius);
+
+  GPU_line_width(1.0f);
+  immUniformColor3fvAlpha(pcontext.outline_col, pcontext.outline_alpha * 0.5f);
+  imm_draw_square_wire_3d(
+      pcontext.pos,
+      pcontext.radius * clamp_f(BKE_brush_alpha_get(pcontext.paint, pcontext.brush), 0.0f, 1.0f));
+}
+
 static void layer_brush_height_preview_draw(const uint gpuattr,
                                             const Brush &brush,
                                             const float rds,
@@ -811,8 +839,38 @@ static void layer_brush_height_preview_draw(const uint gpuattr,
 static void cursor_space_overlays_draw(PaintCursorContext &pcontext)
 {
   const Brush &brush = *pcontext.brush;
-  /* Main inactive cursor. */
-  main_inactive_cursor_draw(pcontext);
+
+  /* Main inactive cursor. For the rectangle clip shape in Sculpt mode, draw a square outline
+   * aligned to the brush-local XY plane instead of a circle. The GPU matrix is already set up
+   * by cursor_space_drawing_setup so that the surface normal is the Z axis; coordinates here are
+   * in brush units where ±radius maps to the brush boundary. */
+  if (pcontext.mode == PaintMode::Sculpt &&
+      brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE)
+  {
+    /* Area overlays are drawn in the surface-aligned 3D path and need the screen-to-cursor
+     * rotation conversion. View/Tiled overlays are drawn in screen space; their texture rotation
+     * is already represented by the 2D overlay path and must not rotate this 3D outline. */
+    if (brush.mtex.brush_map_mode == MTEX_MAP_MODE_AREA) {
+      const bke::PaintRuntime &paint_runtime = *pcontext.paint->runtime;
+      const float total_rotation = brush_rotation_to_cursor_space(
+          pcontext.vc,
+          pcontext.location,
+          pcontext.cursor_space_normal,
+          pcontext.cursor_space_x,
+          pcontext.cursor_space_y,
+          paint_runtime.brush_rotation + brush.mtex.rot);
+      GPU_matrix_push();
+      GPU_matrix_rotate_axis(RAD2DEGF(total_rotation), 'Z');
+      main_inactive_rectangle_cursor_draw(pcontext);
+      GPU_matrix_pop();
+    }
+    else {
+      main_inactive_rectangle_cursor_draw(pcontext);
+    }
+  }
+  else {
+    main_inactive_cursor_draw(pcontext);
+  }
 
   paint_cursor_draw_texture_overlays(pcontext);
 

@@ -412,6 +412,7 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
                                      const float true_location[3],
                                      const Sculpt *sd,
                                      const Object &ob,
+                                     const Object &symm_reference_ob,
                                      const float radius,
                                      const ePaintSymmetrySpace symmetry_space,
                                      const float3 &cursor_world)
@@ -420,13 +421,22 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
    * stroke around world axes rather than the object's own local origin (see
    * #symmetry_space_frame). Reuse the exact same mirrored-center computation the stroke itself
    * uses (#shared_symmetry_world_centers) so this preview always matches where the brush will
-   * land; the default #PAINT_SYMM_SPACE_ACTIVE_OBJECT path below is untouched and stays
-   * bit-exact. Tiling is left in the object's local space (unrelated to symmetry space). */
-  if (symmetry_space != PAINT_SYMM_SPACE_ACTIVE_OBJECT) {
+   * land. Tiling is left in the object's local space (unrelated to symmetry space).
+   *
+   * The same routine is also needed whenever the hovered mesh is not the symmetry reference: a
+   * multi-object stroke mirrors every mesh across the REFERENCE (active) object's plane and takes
+   * the symmetry axes from ITS mesh (see #do_symmetrical_brush_actions and
+   * #MultiObjectStrokeContext::symm_reference_object). Mirroring in the hovered object's own space
+   * would both use the wrong plane and, because the header X/Y/Z toggles only write #Mesh.symmetry
+   * on the active mesh, usually find no symmetry at all — so no mirrored points would be drawn.
+   *
+   * The single-object case (`&symm_reference_ob == &ob` with the default symmetry space) keeps the
+   * historical local-space path below and stays bit-exact. */
+  if (symmetry_space != PAINT_SYMM_SPACE_ACTIVE_OBJECT || &symm_reference_ob != &ob) {
     const float3 true_location_world = math::transform_point(ob.object_to_world(),
                                                               float3(true_location));
     const Vector<float3> symm_world_centers = shared_symmetry_world_centers(
-        ob, true_location_world, symmetry_space, cursor_world);
+        symm_reference_ob, true_location_world, symmetry_space, cursor_world);
     for (const float3 &world_point : symm_world_centers) {
       screen_space_point_draw(gpuattr, region, world_point, float4x4::identity().ptr(), 3);
       if (bke::paint::supports_symmetry_tiling(paint_mode)) {
@@ -586,6 +596,19 @@ static void screen_space_overlays_draw(const PaintCursorContext &pcontext)
 
   const float3 active_vertex_co = get_active_vertex_position(pcontext);
 
+  /* A multi-object stroke mirrors every mesh across the reference (active) object's plane, using
+   * that mesh's symmetry axes -- #sculpt_mode_objects returns the active object first, which is
+   * what #MultiObjectStrokeContext::symm_reference_object resolves to. #ViewContext.obact has been
+   * redirected to the object under the cursor by #paint_cursor_context_init, so it cannot serve as
+   * the reference here. Single-object strokes keep mirroring around the object itself. */
+  const Object *symm_reference_ob = &active_object;
+  if (pcontext.mode == PaintMode::Sculpt) {
+    const Vector<Object *> mode_objects = sculpt_mode_objects(pcontext.vc);
+    if (mode_objects.size() > 1) {
+      symm_reference_ob = mode_objects[0];
+    }
+  }
+
   /* Cursor location symmetry points. */
   if (math::distance(active_vertex_co, pcontext.location) < pcontext.radius) {
     immUniformColor3fvAlpha(pcontext.outline_col, pcontext.outline_alpha);
@@ -595,6 +618,7 @@ static void screen_space_overlays_draw(const PaintCursorContext &pcontext)
                              active_vertex_co,
                              pcontext.sd,
                              active_object,
+                             *symm_reference_ob,
                              pcontext.radius,
                              ePaintSymmetrySpace(pcontext.paint->symmetry_space),
                              float3(pcontext.scene->cursor.location));

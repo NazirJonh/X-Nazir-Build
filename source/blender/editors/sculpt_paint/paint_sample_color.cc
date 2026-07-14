@@ -333,8 +333,22 @@ static float3 paint_sample_color(bContext *C,
       sampled_color = sample_texture_paint_color(*depsgraph, *scene, vc, ob, mval);
     }
     else if (ELEM(mode, PaintMode::Sculpt, PaintMode::Vertex)) {
-      BKE_sculpt_update_object_for_edit(depsgraph, ob, false);
-      sampled_color = sample_mesh_attribute_color(vc, *ob, mval);
+      Object *sample_ob = ob;
+      if (mode == PaintMode::Sculpt) {
+        /* Multi-object sculpt: sample from the front-most sculpt-mode object under the cursor,
+         * not the active object. A single object resolves to that same object (bit-exact). */
+        Object *hit_ob = nullptr;
+        cursor_geometry_info_update(C, float2(mval), false, &hit_ob);
+        if (hit_ob) {
+          sample_ob = hit_ob;
+        }
+      }
+      BKE_sculpt_update_object_for_edit(depsgraph, sample_ob, false);
+      /* active_element_info_get() raycasts vc.obact — redirect it to the sampled object. */
+      Object *orig_obact = vc.obact;
+      vc.obact = sample_ob;
+      sampled_color = sample_mesh_attribute_color(vc, *sample_ob, mval);
+      vc.obact = orig_obact;
     }
   }
   else if (sima != nullptr) {

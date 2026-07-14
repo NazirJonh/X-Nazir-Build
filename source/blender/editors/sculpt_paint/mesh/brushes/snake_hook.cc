@@ -142,7 +142,8 @@ BLI_NOINLINE static void calc_rake_rotation_influence(const StrokeCache &cache,
   }
 }
 
-BLI_NOINLINE static void calc_kelvinet_translation(const StrokeCache &cache,
+BLI_NOINLINE static void calc_kelvinet_translation(const Object &object,
+                                                   const StrokeCache &cache,
                                                    const Span<float3> positions,
                                                    const Span<float> factors,
                                                    const MutableSpan<float3> translations)
@@ -150,10 +151,28 @@ BLI_NOINLINE static void calc_kelvinet_translation(const StrokeCache &cache,
   PRF_scope(ProfileCategory::Editor);
   KelvinletParams params;
   BKE_kelvinlet_init_params(&params, cache.radius, cache.bstrength, 1.0f, 0.4f);
+
+  if (!cache.non_uniform_scale_active) {
+    for (const int i : positions.index_range()) {
+      float3 disp;
+      BKE_kelvinlet_grab_triscale(disp, &params, positions[i], cache.location_symm, translations[i]);
+      translations[i] = disp * factors[i];
+    }
+    return;
+  }
+
+  /* Non-uniform-scale path -- see #KelvinletWorldTransform. `translations[i]` going in is the
+   * accumulated grab/pinch/rake delta for this vertex; it is the `brush_delta` argument to
+   * kelvinlet, transformed as a DIRECTION. The kelvinlet output OVERWRITES `translations[i]`
+   * (matches the pre-existing overwrite semantics of the branch above, not an accumulation). */
+  const KelvinletWorldTransform transform = kelvinlet_world_transform_init(object);
+  const float3 world_location = kelvinlet_position_to_world(transform, cache.location_symm);
   for (const int i : positions.index_range()) {
-    float3 disp;
-    BKE_kelvinlet_grab_triscale(disp, &params, positions[i], cache.location_symm, translations[i]);
-    translations[i] = disp * factors[i];
+    const float3 world_co = kelvinlet_position_to_world(transform, positions[i]);
+    const float3 world_delta = kelvinlet_direction_to_world(transform, translations[i]);
+    float3 world_disp;
+    BKE_kelvinlet_grab_triscale(world_disp, &params, world_co, world_location, world_delta);
+    translations[i] = kelvinlet_direction_to_local(transform, world_disp) * factors[i];
   }
 }
 
@@ -215,7 +234,7 @@ static void calc_faces(const Depsgraph &depsgraph,
     scale_factors(factors, cache.bstrength * 20.0f);
     auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
 
-    calc_kelvinet_translation(cache, positions, factors, translations);
+    calc_kelvinet_translation(object, cache, positions, factors, translations);
   }
 
   clip_and_lock_translations(sd, ss, position_data.eval, verts, translations);
@@ -280,7 +299,7 @@ static void calc_grids(const Depsgraph &depsgraph,
     auto_mask::calc_grids_factors(
         depsgraph, object, cache.automasking.get(), node, grids, factors);
 
-    calc_kelvinet_translation(cache, positions, factors, translations);
+    calc_kelvinet_translation(object, cache, positions, factors, translations);
   }
 
   clip_and_lock_translations(sd, ss, positions, translations);
@@ -342,7 +361,7 @@ static void calc_bmesh(const Depsgraph &depsgraph,
     scale_factors(factors, cache.bstrength * 20.0f);
     auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
 
-    calc_kelvinet_translation(cache, positions, factors, translations);
+    calc_kelvinet_translation(object, cache, positions, factors, translations);
   }
 
   clip_and_lock_translations(sd, ss, positions, translations);

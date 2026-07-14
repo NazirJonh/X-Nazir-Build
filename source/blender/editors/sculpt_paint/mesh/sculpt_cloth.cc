@@ -283,6 +283,72 @@ BLI_NOINLINE static void calc_brush_simulation_falloff(const Brush &brush,
 #define CLOTH_DEFORMATION_TARGET_STRENGTH 0.01f
 #define CLOTH_DEFORMATION_GRAB_STRENGTH 0.1f
 
+/**
+ * A snapshot of an object's world transform, plus the isotropic scale factor used to keep the
+ * Cloth simulation's tuned physical constants (mass, damping, #CLOTH_SIMULATION_TIME_STEP) working
+ * in the same ballpark of magnitude regardless of #Object.scale. Converts local-space positions/
+ * directions/normals to and from "sim space" (`world_pos / mat4_to_scale(ob)`), the space
+ * #SimulationData::pos and its siblings live in for the duration of a stroke when
+ * #SimulationData::use_world_space is true. For a **uniformly**-scaled object (scale `s` on every
+ * axis), `mat4_to_scale(ob) == s` and #Object.object_to_world() scales every local distance by
+ * exactly `s`, so sim space reduces algebraically to local space -- the simulation's dynamics are
+ * unchanged from today for that case (not bit-identical due to the extra multiply/divide, but
+ * physically identical), so the tuned constants keep working exactly as before. For a
+ * **non-uniformly**-scaled object, sim space is the anisotropy-corrected position, isotropically
+ * rescaled back down to roughly the same magnitude local coordinates already were in.
+ */
+struct ClothWorldTransform {
+  float4x4 to_world = float4x4::identity();
+  float4x4 to_local = float4x4::identity();
+  float3x3 to_world_normal = float3x3::identity();
+  float iso_scale = 1.0f;
+};
+
+static ClothWorldTransform cloth_world_transform_init(const Object &ob)
+{
+  ClothWorldTransform result;
+  result.to_world = ob.object_to_world();
+  result.to_local = math::invert(result.to_world);
+  result.to_world_normal = math::transpose(float3x3(result.to_local));
+  result.iso_scale = mat4_to_scale(ob.object_to_world().ptr());
+  return result;
+}
+
+/** Transform a local-space POSITION to sim space (world, isotropically normalized). */
+static float3 cloth_position_to_sim(const ClothWorldTransform &transform, const float3 &local_pos)
+{
+  return math::transform_point(transform.to_world, local_pos) / transform.iso_scale;
+}
+
+/** Transform a sim-space POSITION back to local space. */
+static float3 cloth_position_from_sim(const ClothWorldTransform &transform, const float3 &sim_pos)
+{
+  return math::transform_point(transform.to_local, sim_pos * transform.iso_scale);
+}
+
+/**
+ * Transform a local-space DIRECTION/DISPLACEMENT (grab delta, drag direction, gravity, a
+ * pinch-toward-point direction) to sim space. No renormalization -- directions are allowed to
+ * change magnitude under an anisotropic transform, only normals need the inverse-transpose +
+ * renormalize treatment (#cloth_normal_to_sim).
+ */
+static float3 cloth_direction_to_sim(const ClothWorldTransform &transform, const float3 &local_dir)
+{
+  return math::transform_direction(transform.to_world, local_dir) / transform.iso_scale;
+}
+
+/**
+ * Transform a local-space NORMAL (sculpt normal, vertex normal for Inflate) to sim space via the
+ * inverse-transpose rule -- see #non_uniform_scale_compensation in `mesh_brush_common.hh` for why
+ * normals need a different transform law than positions/directions. Must be applied to a vector
+ * BEFORE any per-vertex magnitude scaling (e.g. by a brush factor) is applied to it -- the
+ * `normalize()` here would otherwise silently erase that scaling.
+ */
+static float3 cloth_normal_to_sim(const ClothWorldTransform &transform, const float3 &local_normal)
+{
+  return math::normalize(math::transform_direction(transform.to_world_normal, local_normal));
+}
+
 static void cloth_brush_add_length_constraint(SimulationData &cloth_sim,
                                               const int node_index,
                                               const int v1,
@@ -412,6 +478,16 @@ static void add_constraints_for_verts(const Object &object,
                                              cloth_sim_radius * cloth_sim_radius :
                                              FLT_MAX;
 
+  /* #pin_simulation_boundary reads #StrokeCache.location_symm directly (not the
+   * #cloth_sim_initial_location parameter above, a deliberate pre-existing distinction) and
+   * compares it against #init_positions, which is in sim space when #SimulationData.use_world_space
+   * is true -- convert once, outside the loop below, only when actually needed. */
+  const bool need_pin_sim_location = pin_simulation_boundary && cloth_sim.use_world_space;
+  const float3 pin_sim_location = need_pin_sim_location ?
+                                      cloth_position_to_sim(cloth_world_transform_init(object),
+                                                            ss.cache->location_symm) :
+                                      float3(0.0f);
+
   for (const int i : verts.index_range()) {
     const int vert = verts[i];
     const float len_squared = math::distance_squared(init_positions[vert],
@@ -478,8 +554,10 @@ static void add_constraints_for_verts(const Object &object,
     }
 
     if (pin_simulation_boundary) {
+      const float3 &pin_location = cloth_sim.use_world_space ? pin_sim_location :
+                                                                ss.cache->location_symm;
       const float sim_falloff = cloth_brush_simulation_falloff_get(
-          *brush, ss.cache->initial_radius, ss.cache->location_symm, init_positions[vert]);
+          *brush, ss.cache->initial_radius, pin_location, init_positions[vert]);
       /* Vertex is inside the area of the simulation without any falloff applied. */
       if (sim_falloff < 1.0f) {
         /* Create constraints with more strength the closer the vertex is to the simulation
@@ -501,6 +579,15 @@ void ensure_nodes_constraints(const Sculpt &sd,
   SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
+
+  /* #add_constraints_for_verts compares #cloth_sim_initial_location against #init_positions,
+   * which is in sim space when #SimulationData.use_world_space is true -- convert once here so
+   * every call below passes an already-correctly-spaced location, keeping
+   * #add_constraints_for_verts itself unaware of the space its inputs are in. */
+  const float3 sim_initial_location = cloth_sim.use_world_space ?
+                                          cloth_position_to_sim(cloth_world_transform_init(object),
+                                                                initial_location) :
+                                          initial_location;
 
   /* TODO: Multi-threaded needs to be disabled for this task until implementing the optimization of
    * storing the constraints per node. */
@@ -532,12 +619,24 @@ void ensure_nodes_constraints(const Sculpt &sd,
 
       Span<float3> init_positions;
       VArraySpan<float3> persistent_position;
+      Vector<float3> sim_persistent_position;
       if (brush != nullptr && brush->flag & BRUSH_PERSISTENT) {
         persistent_position = *attributes.lookup<float3>(".sculpt_persistent_co",
                                                          bke::AttrDomain::Point);
       }
       if (persistent_position.is_empty()) {
         init_positions = cloth_sim.init_pos;
+      }
+      else if (cloth_sim.use_world_space) {
+        /* The persistent base position is a raw local-space mesh attribute, independent of
+         * #SimulationData -- convert it to sim space too, so it is comparable to
+         * #sim_initial_location and to the sim-space #cloth_sim.pos it seeds constraints for. */
+        const ClothWorldTransform transform = cloth_world_transform_init(object);
+        sim_persistent_position.resize(persistent_position.size());
+        for (const int i : persistent_position.index_range()) {
+          sim_persistent_position[i] = cloth_position_to_sim(transform, persistent_position[i]);
+        }
+        init_positions = sim_persistent_position;
       }
       else {
         init_positions = persistent_position;
@@ -553,7 +652,7 @@ void ensure_nodes_constraints(const Sculpt &sd,
                                                                neighbor_data);
         add_constraints_for_verts(object,
                                   brush,
-                                  initial_location,
+                                  sim_initial_location,
                                   radius,
                                   init_positions,
                                   cloth_sim.node_state_index.lookup(&nodes[i]),
@@ -577,6 +676,7 @@ void ensure_nodes_constraints(const Sculpt &sd,
 
       Span<float3> init_positions;
       Span<float3> persistent_position;
+      Vector<float3> sim_persistent_position;
       const std::optional<PersistentMultiresData> persistent_multires_data =
           ss.persistent_multires_data();
       if (brush != nullptr && brush->flag & BRUSH_PERSISTENT && persistent_multires_data) {
@@ -584,6 +684,14 @@ void ensure_nodes_constraints(const Sculpt &sd,
       }
       if (persistent_position.is_empty()) {
         init_positions = cloth_sim.init_pos;
+      }
+      else if (cloth_sim.use_world_space) {
+        const ClothWorldTransform transform = cloth_world_transform_init(object);
+        sim_persistent_position.resize(persistent_position.size());
+        for (const int i : persistent_position.index_range()) {
+          sim_persistent_position[i] = cloth_position_to_sim(transform, persistent_position[i]);
+        }
+        init_positions = sim_persistent_position;
       }
       else {
         init_positions = persistent_position;
@@ -595,7 +703,7 @@ void ensure_nodes_constraints(const Sculpt &sd,
             subdiv_ccg, verts, neighbor_offsets, neighbor_data);
         add_constraints_for_verts(object,
                                   brush,
-                                  initial_location,
+                                  sim_initial_location,
                                   radius,
                                   init_positions,
                                   cloth_sim.node_state_index.lookup(&nodes[i]),
@@ -622,7 +730,7 @@ void ensure_nodes_constraints(const Sculpt &sd,
             bm, verts, neighbor_offsets, neighbor_data);
         add_constraints_for_verts(object,
                                   brush,
-                                  initial_location,
+                                  sim_initial_location,
                                   radius,
                                   cloth_sim.init_pos,
                                   cloth_sim.node_state_index.lookup(&nodes[i]),
@@ -782,6 +890,9 @@ static void calc_forces_mesh(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   SimulationData &cloth_sim = *ss.cache->cloth_sim;
   const StrokeCache &cache = *ss.cache;
+  const ClothWorldTransform transform = cloth_sim.use_world_space ?
+                                            cloth_world_transform_init(ob) :
+                                            ClothWorldTransform{};
 
   const Span<int> verts = node.verts();
   const MutableSpan positions = gather_data_mesh(positions_eval, verts, tls.positions);
@@ -796,6 +907,9 @@ static void calc_forces_mesh(const Depsgraph &depsgraph,
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
   filter_region_clip_factors(ss, current_positions, factors);
 
+  /* #positions here is the CURRENT LOCAL mesh position, not sim-space #cloth_sim data -- a
+   * boolean/scalar falloff test against a local #sim_location, both self-consistently local, no
+   * conversion needed here (see spec Section 3.3). */
   calc_brush_simulation_falloff(brush, cache.radius, sim_location, positions, factors);
 
   tls.translations.resize(verts.size());
@@ -804,6 +918,11 @@ static void calc_forces_mesh(const Depsgraph &depsgraph,
   /* Apply gravity in the entire simulation area before brush distances are taken into account. */
   if (!math::is_zero(gravity)) {
     translations_from_offset_and_factors(gravity, factors, forces);
+    if (cloth_sim.use_world_space) {
+      for (float3 &force : forces) {
+        force = cloth_direction_to_sim(transform, force);
+      }
+    }
     apply_forces(cloth_sim, forces, verts);
   }
 
@@ -832,43 +951,76 @@ static void calc_forces_mesh(const Depsgraph &depsgraph,
   scale_factors(factors, cache.bstrength);
 
   switch (brush.cloth_deform_type) {
-    case BRUSH_CLOTH_DEFORM_DRAG:
+    case BRUSH_CLOTH_DEFORM_DRAG: {
       translations_from_offset_and_factors(
           math::normalize(cache.location_symm - cache.last_location_symm), factors, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_direction_to_sim(transform, force);
+        }
+      }
       apply_forces(cloth_sim, forces, verts);
       break;
-    case BRUSH_CLOTH_DEFORM_PUSH:
+    }
+    case BRUSH_CLOTH_DEFORM_PUSH: {
+      /* #offset is already sim-space when gated -- see #cloth_brush_apply_brush_forces, which
+       * converts it via the NORMAL law before any magnitude scaling. Do not convert again here. */
       translations_from_offset_and_factors(-offset, factors, forces);
       apply_forces(cloth_sim, forces, verts);
       break;
-    case BRUSH_CLOTH_DEFORM_GRAB:
-      apply_grab_brush(
-          cloth_sim, verts, factors, falloff_plane.has_value(), cache.grab_delta_symm);
+    }
+    case BRUSH_CLOTH_DEFORM_GRAB: {
+      const float3 &sim_grab_delta = cloth_sim.use_world_space ?
+                                         cloth_direction_to_sim(transform, cache.grab_delta_symm) :
+                                         cache.grab_delta_symm;
+      apply_grab_brush(cloth_sim, verts, factors, falloff_plane.has_value(), sim_grab_delta);
       break;
-    case BRUSH_CLOTH_DEFORM_SNAKE_HOOK:
-      apply_snake_hook_brush(cloth_sim, verts, factors, cache.grab_delta_symm);
+    }
+    case BRUSH_CLOTH_DEFORM_SNAKE_HOOK: {
+      const float3 &sim_grab_delta = cloth_sim.use_world_space ?
+                                         cloth_direction_to_sim(transform, cache.grab_delta_symm) :
+                                         cache.grab_delta_symm;
+      apply_snake_hook_brush(cloth_sim, verts, factors, sim_grab_delta);
       break;
-    case BRUSH_CLOTH_DEFORM_PINCH_POINT:
+    }
+    case BRUSH_CLOTH_DEFORM_PINCH_POINT: {
       if (falloff_plane) {
         calc_plane_pinch_forces(positions, falloff_plane->plane, falloff_plane->normal, forces);
       }
       else {
         calc_pinch_forces(positions, cache.location_symm, forces);
       }
-      scale_translations(forces, factors);
-      apply_forces(cloth_sim, forces, verts);
-      break;
-    case BRUSH_CLOTH_DEFORM_PINCH_PERPENDICULAR: {
-      calc_perpendicular_pinch_forces(positions, imat, cache.location_symm, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_direction_to_sim(transform, force);
+        }
+      }
       scale_translations(forces, factors);
       apply_forces(cloth_sim, forces, verts);
       break;
     }
-    case BRUSH_CLOTH_DEFORM_INFLATE:
-      gather_data_mesh(vert_normals, verts, forces);
+    case BRUSH_CLOTH_DEFORM_PINCH_PERPENDICULAR: {
+      calc_perpendicular_pinch_forces(positions, imat, cache.location_symm, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_direction_to_sim(transform, force);
+        }
+      }
       scale_translations(forces, factors);
       apply_forces(cloth_sim, forces, verts);
       break;
+    }
+    case BRUSH_CLOTH_DEFORM_INFLATE: {
+      gather_data_mesh(vert_normals, verts, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_normal_to_sim(transform, force);
+        }
+      }
+      scale_translations(forces, factors);
+      apply_forces(cloth_sim, forces, verts);
+      break;
+    }
     case BRUSH_CLOTH_DEFORM_EXPAND:
       expand_length_constraints(cloth_sim, verts, factors);
       break;
@@ -889,6 +1041,9 @@ static void calc_forces_grids(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   SimulationData &cloth_sim = *ss.cache->cloth_sim;
   const StrokeCache &cache = *ss.cache;
+  const ClothWorldTransform transform = cloth_sim.use_world_space ?
+                                            cloth_world_transform_init(ob) :
+                                            ClothWorldTransform{};
   const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
 
@@ -915,6 +1070,11 @@ static void calc_forces_grids(const Depsgraph &depsgraph,
   /* Apply gravity in the entire simulation area before brush distances are taken into account. */
   if (!math::is_zero(gravity)) {
     translations_from_offset_and_factors(gravity, factors, forces);
+    if (cloth_sim.use_world_space) {
+      for (float3 &force : forces) {
+        force = cloth_direction_to_sim(transform, force);
+      }
+    }
     apply_forces(cloth_sim, forces, verts);
   }
 
@@ -943,43 +1103,74 @@ static void calc_forces_grids(const Depsgraph &depsgraph,
   scale_factors(factors, cache.bstrength);
 
   switch (brush.cloth_deform_type) {
-    case BRUSH_CLOTH_DEFORM_DRAG:
+    case BRUSH_CLOTH_DEFORM_DRAG: {
       translations_from_offset_and_factors(
           math::normalize(cache.location_symm - cache.last_location_symm), factors, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_direction_to_sim(transform, force);
+        }
+      }
       apply_forces(cloth_sim, forces, verts);
       break;
-    case BRUSH_CLOTH_DEFORM_PUSH:
+    }
+    case BRUSH_CLOTH_DEFORM_PUSH: {
       translations_from_offset_and_factors(-offset, factors, forces);
       apply_forces(cloth_sim, forces, verts);
       break;
-    case BRUSH_CLOTH_DEFORM_GRAB:
-      apply_grab_brush(
-          cloth_sim, verts, factors, falloff_plane.has_value(), cache.grab_delta_symm);
+    }
+    case BRUSH_CLOTH_DEFORM_GRAB: {
+      const float3 &sim_grab_delta = cloth_sim.use_world_space ?
+                                         cloth_direction_to_sim(transform, cache.grab_delta_symm) :
+                                         cache.grab_delta_symm;
+      apply_grab_brush(cloth_sim, verts, factors, falloff_plane.has_value(), sim_grab_delta);
       break;
-    case BRUSH_CLOTH_DEFORM_SNAKE_HOOK:
-      apply_snake_hook_brush(cloth_sim, verts, factors, cache.grab_delta_symm);
+    }
+    case BRUSH_CLOTH_DEFORM_SNAKE_HOOK: {
+      const float3 &sim_grab_delta = cloth_sim.use_world_space ?
+                                         cloth_direction_to_sim(transform, cache.grab_delta_symm) :
+                                         cache.grab_delta_symm;
+      apply_snake_hook_brush(cloth_sim, verts, factors, sim_grab_delta);
       break;
-    case BRUSH_CLOTH_DEFORM_PINCH_POINT:
+    }
+    case BRUSH_CLOTH_DEFORM_PINCH_POINT: {
       if (falloff_plane) {
         calc_plane_pinch_forces(positions, falloff_plane->plane, falloff_plane->normal, forces);
       }
       else {
         calc_pinch_forces(positions, cache.location_symm, forces);
       }
-      scale_translations(forces, factors);
-      apply_forces(cloth_sim, forces, verts);
-      break;
-    case BRUSH_CLOTH_DEFORM_PINCH_PERPENDICULAR: {
-      calc_perpendicular_pinch_forces(positions, imat, cache.location_symm, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_direction_to_sim(transform, force);
+        }
+      }
       scale_translations(forces, factors);
       apply_forces(cloth_sim, forces, verts);
       break;
     }
-    case BRUSH_CLOTH_DEFORM_INFLATE:
-      gather_grids_normals(subdiv_ccg, grids, forces);
+    case BRUSH_CLOTH_DEFORM_PINCH_PERPENDICULAR: {
+      calc_perpendicular_pinch_forces(positions, imat, cache.location_symm, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_direction_to_sim(transform, force);
+        }
+      }
       scale_translations(forces, factors);
       apply_forces(cloth_sim, forces, verts);
       break;
+    }
+    case BRUSH_CLOTH_DEFORM_INFLATE: {
+      gather_grids_normals(subdiv_ccg, grids, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_normal_to_sim(transform, force);
+        }
+      }
+      scale_translations(forces, factors);
+      apply_forces(cloth_sim, forces, verts);
+      break;
+    }
     case BRUSH_CLOTH_DEFORM_EXPAND:
       expand_length_constraints(cloth_sim, verts, factors);
       break;
@@ -1000,6 +1191,9 @@ static void calc_forces_bmesh(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   SimulationData &cloth_sim = *ss.cache->cloth_sim;
   const StrokeCache &cache = *ss.cache;
+  const ClothWorldTransform transform = cloth_sim.use_world_space ?
+                                            cloth_world_transform_init(ob) :
+                                            ClothWorldTransform{};
 
   const Set<BMVert *, 0> &bm_verts = BKE_pbvh_bmesh_node_unique_verts(&node);
   const Span<int> verts = calc_vert_indices_bmesh(bm_verts, tls.vert_indices);
@@ -1024,6 +1218,11 @@ static void calc_forces_bmesh(const Depsgraph &depsgraph,
   /* Apply gravity in the entire simulation area before brush distances are taken into account. */
   if (!math::is_zero(gravity)) {
     translations_from_offset_and_factors(gravity, factors, forces);
+    if (cloth_sim.use_world_space) {
+      for (float3 &force : forces) {
+        force = cloth_direction_to_sim(transform, force);
+      }
+    }
     apply_forces(cloth_sim, forces, verts);
   }
 
@@ -1052,43 +1251,74 @@ static void calc_forces_bmesh(const Depsgraph &depsgraph,
   scale_factors(factors, cache.bstrength);
 
   switch (brush.cloth_deform_type) {
-    case BRUSH_CLOTH_DEFORM_DRAG:
+    case BRUSH_CLOTH_DEFORM_DRAG: {
       translations_from_offset_and_factors(
           math::normalize(cache.location_symm - cache.last_location_symm), factors, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_direction_to_sim(transform, force);
+        }
+      }
       apply_forces(cloth_sim, forces, verts);
       break;
-    case BRUSH_CLOTH_DEFORM_PUSH:
+    }
+    case BRUSH_CLOTH_DEFORM_PUSH: {
       translations_from_offset_and_factors(-offset, factors, forces);
       apply_forces(cloth_sim, forces, verts);
       break;
-    case BRUSH_CLOTH_DEFORM_GRAB:
-      apply_grab_brush(
-          cloth_sim, verts, factors, falloff_plane.has_value(), cache.grab_delta_symm);
+    }
+    case BRUSH_CLOTH_DEFORM_GRAB: {
+      const float3 &sim_grab_delta = cloth_sim.use_world_space ?
+                                         cloth_direction_to_sim(transform, cache.grab_delta_symm) :
+                                         cache.grab_delta_symm;
+      apply_grab_brush(cloth_sim, verts, factors, falloff_plane.has_value(), sim_grab_delta);
       break;
-    case BRUSH_CLOTH_DEFORM_SNAKE_HOOK:
-      apply_snake_hook_brush(cloth_sim, verts, factors, cache.grab_delta_symm);
+    }
+    case BRUSH_CLOTH_DEFORM_SNAKE_HOOK: {
+      const float3 &sim_grab_delta = cloth_sim.use_world_space ?
+                                         cloth_direction_to_sim(transform, cache.grab_delta_symm) :
+                                         cache.grab_delta_symm;
+      apply_snake_hook_brush(cloth_sim, verts, factors, sim_grab_delta);
       break;
-    case BRUSH_CLOTH_DEFORM_PINCH_POINT:
+    }
+    case BRUSH_CLOTH_DEFORM_PINCH_POINT: {
       if (falloff_plane) {
         calc_plane_pinch_forces(positions, falloff_plane->plane, falloff_plane->normal, forces);
       }
       else {
         calc_pinch_forces(positions, cache.location_symm, forces);
       }
-      scale_translations(forces, factors);
-      apply_forces(cloth_sim, forces, verts);
-      break;
-    case BRUSH_CLOTH_DEFORM_PINCH_PERPENDICULAR: {
-      calc_perpendicular_pinch_forces(positions, imat, cache.location_symm, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_direction_to_sim(transform, force);
+        }
+      }
       scale_translations(forces, factors);
       apply_forces(cloth_sim, forces, verts);
       break;
     }
-    case BRUSH_CLOTH_DEFORM_INFLATE:
-      gather_bmesh_normals(bm_verts, forces);
+    case BRUSH_CLOTH_DEFORM_PINCH_PERPENDICULAR: {
+      calc_perpendicular_pinch_forces(positions, imat, cache.location_symm, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_direction_to_sim(transform, force);
+        }
+      }
       scale_translations(forces, factors);
       apply_forces(cloth_sim, forces, verts);
       break;
+    }
+    case BRUSH_CLOTH_DEFORM_INFLATE: {
+      gather_bmesh_normals(bm_verts, forces);
+      if (cloth_sim.use_world_space) {
+        for (float3 &force : forces) {
+          force = cloth_normal_to_sim(transform, force);
+        }
+      }
+      scale_translations(forces, factors);
+      apply_forces(cloth_sim, forces, verts);
+      break;
+    }
     case BRUSH_CLOTH_DEFORM_EXPAND:
       expand_length_constraints(cloth_sim, verts, factors);
       break;
@@ -1169,13 +1399,25 @@ static void cloth_brush_solve_collision(const Object &object,
 {
   const int raycast_flag = BVH_RAYCAST_DEFAULT & ~BVH_RAYCAST_WATERTIGHT;
 
+  /* #cloth_sim.pos is already in sim space (world, isotropically normalized) when
+   * #SimulationData.use_world_space is true -- #object.object_to_world()'s rotation is already
+   * baked into that value, so getting a TRUE world position back only needs undoing the isotropic
+   * division, not a full matrix transform. When false, #cloth_sim.pos is local, exactly as before
+   * this plan -- the original full local<->world round-trip is preserved verbatim. */
+  const float iso_scale = cloth_sim.use_world_space ?
+                              mat4_to_scale(object.object_to_world().ptr()) :
+                              1.0f;
   const float4x4 &object_to_world = object.object_to_world();
   const float4x4 &world_to_object = object.world_to_object();
 
   for (const ColliderCache &collider_cache : cloth_sim.collider_list) {
-    const float3 pos_world_space = math::transform_point(object_to_world, cloth_sim.pos[i]);
-    const float3 prev_pos_world_space = math::transform_point(object_to_world,
-                                                              cloth_sim.last_iteration_pos[i]);
+    const float3 pos_world_space = cloth_sim.use_world_space ?
+                                       cloth_sim.pos[i] * iso_scale :
+                                       math::transform_point(object_to_world, cloth_sim.pos[i]);
+    const float3 prev_pos_world_space =
+        cloth_sim.use_world_space ?
+            cloth_sim.last_iteration_pos[i] * iso_scale :
+            math::transform_point(object_to_world, cloth_sim.last_iteration_pos[i]);
 
     BVHTreeRayHit hit{};
     hit.index = -1;
@@ -1210,8 +1452,10 @@ static void cloth_brush_solve_collision(const Object &object,
     constexpr float friction_factor = 0.35f;
     const float3 movement_disp = (pos_on_friction_plane - float3(hit.co)) * friction_factor;
 
-    cloth_sim.pos[i] = math::transform_point(world_to_object,
-                                             float3(hit.co) + movement_disp + collision_disp);
+    const float3 result_world = float3(hit.co) + movement_disp + collision_disp;
+    cloth_sim.pos[i] = cloth_sim.use_world_space ? result_world / iso_scale :
+                                                   math::transform_point(world_to_object,
+                                                                         result_world);
   }
 }
 
@@ -1245,7 +1489,13 @@ BLI_NOINLINE static void solve_verts_simulation(const Object &object,
   if (ss.cache) {
     const MutableSpan positions = gather_data_mesh(
         cloth_sim.init_pos.as_span(), verts, tls.positions);
-    calc_brush_simulation_falloff(*brush, ss.cache->radius, sim_location, positions, factors);
+    /* #positions here is #cloth_sim.init_pos (sim space when #use_world_space), #sim_location is
+     * always local -- convert once to match, same reasoning as #calc_constraint_factors. */
+    const float3 sim_space_location = cloth_sim.use_world_space ?
+                                          cloth_position_to_sim(cloth_world_transform_init(object),
+                                                                sim_location) :
+                                          sim_location;
+    calc_brush_simulation_falloff(*brush, ss.cache->radius, sim_space_location, positions, factors);
   }
   scale_translations(pos_diff, factors);
 
@@ -1270,6 +1520,7 @@ static void calc_constraint_factors(const Depsgraph &depsgraph,
                                     const Brush *brush,
                                     const float3 &sim_location,
                                     const Span<float3> init_positions,
+                                    const bool use_world_space,
                                     const MutableSpan<float> cloth_factors)
 {
   const SculptSession &ss = *object.runtime->sculpt_session;
@@ -1278,6 +1529,14 @@ static void calc_constraint_factors(const Depsgraph &depsgraph,
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
   const auto_mask::Cache *automasking = auto_mask::active_cache_get(ss);
+
+  /* #init_positions is #cloth_sim.init_pos, in sim space when #use_world_space is true --
+   * #sim_location (the caller's `cloth_brush_simulation_location_get` result) is always local, so
+   * convert it once here to match. */
+  const float3 sim_space_location = use_world_space ?
+                                        cloth_position_to_sim(cloth_world_transform_init(object),
+                                                              sim_location) :
+                                        sim_location;
 
   struct LocalData {
     Vector<float> factors;
@@ -1301,7 +1560,7 @@ static void calc_constraint_factors(const Depsgraph &depsgraph,
             if (ss.cache) {
               const MutableSpan positions = gather_data_mesh(init_positions, verts, tls.positions);
               calc_brush_simulation_falloff(
-                  *brush, ss.cache->radius, sim_location, positions, factors);
+                  *brush, ss.cache->radius, sim_space_location, positions, factors);
             }
             scatter_data_mesh(factors.as_span(), verts, cloth_factors);
           },
@@ -1326,7 +1585,7 @@ static void calc_constraint_factors(const Depsgraph &depsgraph,
               const Span<float3> positions = gather_data_grids(
                   subdiv_ccg, init_positions, grids, tls.positions);
               calc_brush_simulation_falloff(
-                  *brush, ss.cache->radius, sim_location, positions, factors);
+                  *brush, ss.cache->radius, sim_space_location, positions, factors);
             }
             scatter_data_grids(subdiv_ccg, factors.as_span(), grids, cloth_factors);
           },
@@ -1349,7 +1608,7 @@ static void calc_constraint_factors(const Depsgraph &depsgraph,
               const MutableSpan positions = gather_data_bmesh(
                   init_positions, verts, tls.positions);
               calc_brush_simulation_falloff(
-                  *brush, ss.cache->radius, sim_location, positions, factors);
+                  *brush, ss.cache->radius, sim_space_location, positions, factors);
             }
             scatter_data_bmesh(factors.as_span(), verts, cloth_factors);
           },
@@ -1371,7 +1630,8 @@ static void cloth_brush_satisfy_constraints(const Depsgraph &depsgraph,
 
   /* Precalculate factors into an array since we need random access to specific vertex values. */
   Array<float> factors(vertex_count_get(object));
-  calc_constraint_factors(depsgraph, object, brush, sim_location, cloth_sim.init_pos, factors);
+  calc_constraint_factors(
+      depsgraph, object, brush, sim_location, cloth_sim.init_pos, cloth_sim.use_world_space, factors);
 
   for (int constraint_it = 0; constraint_it < CLOTH_SIMULATION_ITERATIONS; constraint_it++) {
     for (const LengthConstraint &constraint : cloth_sim.length_constraints) {
@@ -1441,6 +1701,13 @@ void do_simulation_step(const Depsgraph &depsgraph,
   SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
+  /* Computed once per step (single object, static for the stroke's duration) and used by all 3
+   * pbvh-type branches below to convert #cloth_sim.pos back to local space at the final
+   * write-back point, the only place sim-space data is mixed with the actual mesh's local-space
+   * positions. */
+  const ClothWorldTransform transform = cloth_sim.use_world_space ?
+                                            cloth_world_transform_init(object) :
+                                            ClothWorldTransform{};
 
   /* Update the constraints. */
   cloth_brush_satisfy_constraints(depsgraph, object, brush, cloth_sim);
@@ -1477,7 +1744,10 @@ void do_simulation_step(const Depsgraph &depsgraph,
             tls.translations.resize(verts.size());
             const MutableSpan<float3> translations = tls.translations;
             for (const int i : verts.index_range()) {
-              translations[i] = cloth_sim.pos[verts[i]] - position_data.eval[verts[i]];
+              const float3 local_pos = cloth_sim.use_world_space ?
+                                           cloth_position_from_sim(transform, cloth_sim.pos[verts[i]]) :
+                                           cloth_sim.pos[verts[i]];
+              translations[i] = local_pos - position_data.eval[verts[i]];
             }
 
             clip_and_lock_translations(sd, ss, position_data.eval, verts, translations);
@@ -1519,7 +1789,14 @@ void do_simulation_step(const Depsgraph &depsgraph,
 
             for (const int grid : grids) {
               const IndexRange grid_range = bke::ccg::grid_range(key, grid);
-              positions.slice(grid_range).copy_from(cloth_positions.slice(grid_range));
+              if (cloth_sim.use_world_space) {
+                for (const int vert : grid_range) {
+                  positions[vert] = cloth_position_from_sim(transform, cloth_positions[vert]);
+                }
+              }
+              else {
+                positions.slice(grid_range).copy_from(cloth_positions.slice(grid_range));
+              }
             }
 
             cloth_sim.node_state[cloth_sim.node_state_index.lookup(&nodes[i])] =
@@ -1553,7 +1830,11 @@ void do_simulation_step(const Depsgraph &depsgraph,
                 object, brush, sim_location, vert_indices, factors, tls, cloth_sim);
 
             for (BMVert *vert : verts) {
-              copy_v3_v3(vert->co, cloth_sim.pos[BM_elem_index_get(vert)]);
+              const float3 local_pos = cloth_sim.use_world_space ?
+                                           cloth_position_from_sim(
+                                               transform, cloth_sim.pos[BM_elem_index_get(vert)]) :
+                                           float3(cloth_sim.pos[BM_elem_index_get(vert)]);
+              copy_v3_v3(vert->co, local_pos);
             }
 
             cloth_sim.node_state[cloth_sim.node_state_index.lookup(&nodes[i])] =
@@ -1589,7 +1870,20 @@ static void cloth_brush_apply_brush_forces(const Depsgraph &depsgraph,
 
   /* Calculate push offset. */
   if (brush.cloth_deform_type == BRUSH_CLOTH_DEFORM_PUSH) {
-    offset = cache.sculpt_normal_symm * cache.radius * cache.scale * 2.0f;
+    if (cache.cloth_sim->use_world_space) {
+      /* #cache.sculpt_normal_symm is a NORMAL -- needs the inverse-transpose rule
+       * (#cloth_normal_to_sim), not the old per-axis `cache.scale` approximation (which is a
+       * cheaper orientation-only correction used elsewhere in this codebase for point-of-use
+       * fixes, see `mesh_brush_common.hh`'s #non_uniform_scale_compensation). Using both at once
+       * would double-correct -- this branch replaces `cache.scale` entirely rather than adding to
+       * it. #cache.radius is already isotropic (`screen_radius / mat4_to_scale(ob)`), so it is
+       * already directly usable as a sim-space magnitude with no further conversion. */
+      const ClothWorldTransform transform = cloth_world_transform_init(ob);
+      offset = cloth_normal_to_sim(transform, cache.sculpt_normal_symm) * cache.radius * 2.0f;
+    }
+    else {
+      offset = cache.sculpt_normal_symm * cache.radius * cache.scale * 2.0f;
+    }
   }
 
   float4x4 mat = float4x4::identity();
@@ -1733,7 +2027,8 @@ static void cloth_sim_initialize_default_node_state(Object &object, SimulationDa
 
 static void copy_positions_to_array(const Depsgraph &depsgraph,
                                     const Object &object,
-                                    MutableSpan<float3> positions)
+                                    MutableSpan<float3> positions,
+                                    const bool use_world_space)
 {
   const SculptSession &ss = *object.runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
@@ -1749,6 +2044,13 @@ static void copy_positions_to_array(const Depsgraph &depsgraph,
     case bke::pbvh::Type::BMesh:
       BM_mesh_vert_coords_get(ss.bm, positions);
       break;
+  }
+
+  if (use_world_space) {
+    const ClothWorldTransform transform = cloth_world_transform_init(object);
+    for (float3 &position : positions) {
+      position = cloth_position_to_sim(transform, position);
+    }
   }
 }
 
@@ -1779,11 +2081,14 @@ std::unique_ptr<SimulationData> brush_simulation_create(const Depsgraph &depsgra
                                                         const float cloth_damping,
                                                         const float cloth_softbody_strength,
                                                         const bool use_collisions,
-                                                        const bool needs_deform_coords)
+                                                        const bool needs_deform_coords,
+                                                        const bool use_world_space)
 {
   PRF_scope(ProfileCategory::Editor);
   const int totverts = vertex_count_get(ob);
   std::unique_ptr<SimulationData> cloth_sim = std::make_unique<SimulationData>();
+
+  cloth_sim->use_world_space = use_world_space;
 
   cloth_sim->length_constraints.reserve(CLOTH_LENGTH_CONSTRAINTS_BLOCK);
 
@@ -1792,11 +2097,13 @@ std::unique_ptr<SimulationData> brush_simulation_create(const Depsgraph &depsgra
   cloth_sim->length_constraint_tweak = Array<float>(totverts, 0.0f);
 
   cloth_sim->init_pos.reinitialize(totverts);
-  copy_positions_to_array(depsgraph, ob, cloth_sim->init_pos);
+  copy_positions_to_array(depsgraph, ob, cloth_sim->init_pos, use_world_space);
 
   cloth_sim->last_iteration_pos = cloth_sim->init_pos;
   cloth_sim->prev_pos = cloth_sim->init_pos;
 
+  /* #init_no is never read anywhere else in the sculpt-paint codebase (confirmed by search) --
+   * left in local space deliberately, converting it would be unexercised code. */
   cloth_sim->init_no.reinitialize(totverts);
   copy_normals_to_array(depsgraph, ob, cloth_sim->init_no);
 
@@ -1827,7 +2134,7 @@ void brush_store_simulation_state(const Depsgraph &depsgraph,
                                   SimulationData &cloth_sim)
 {
   PRF_scope(ProfileCategory::Editor);
-  copy_positions_to_array(depsgraph, object, cloth_sim.pos);
+  copy_positions_to_array(depsgraph, object, cloth_sim.pos, cloth_sim.use_world_space);
 }
 
 void sim_activate_nodes(Object &object, SimulationData &cloth_sim, const IndexMask &node_mask)
@@ -1892,7 +2199,8 @@ void do_cloth_brush(const Depsgraph &depsgraph,
                                                   brush->cloth_damping,
                                                   brush->cloth_constraint_softbody_strength,
                                                   (brush->flag2 & BRUSH_CLOTH_USE_COLLISION),
-                                                  is_cloth_deform_brush(*brush));
+                                                  is_cloth_deform_brush(*brush),
+                                                  ss.cache->non_uniform_scale_active);
   }
 
   if (stroke_is_first_brush_step_of_symmetry_pass(*ss.cache)) {
@@ -2497,7 +2805,8 @@ static wmOperatorStatus sculpt_cloth_filter_invoke(bContext *C,
       cloth_damping,
       0.0f,
       use_collisions,
-      cloth_filter_is_deformation_filter(filter_type));
+      cloth_filter_is_deformation_filter(filter_type),
+      /*use_world_space=*/false);
 
   ss.filter_cache->cloth_sim_pinch_point = ss.active_vert_position(*depsgraph, ob);
 

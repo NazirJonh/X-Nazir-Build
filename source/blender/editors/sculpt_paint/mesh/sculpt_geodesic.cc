@@ -7,6 +7,10 @@
  */
 
 #include <cstdlib>
+#include <functional>
+#include <queue>
+#include <utility>
+#include <vector>
 
 #include "BLI_bit_vector.hh"
 #include "BLI_linklist_stack.h"
@@ -186,6 +190,115 @@ Array<float> distances_create(const Span<float3> vert_positions,
 
   BLI_LINKSTACK_FREE(queue);
   BLI_LINKSTACK_FREE(queue_next);
+
+  return dists;
+}
+
+Array<float> distances_create_priority_queue(const Span<float3> vert_positions,
+                                             const Span<int2> edges,
+                                             const OffsetIndices<int> faces,
+                                             const Span<int> corner_verts,
+                                             const GroupedSpan<int> vert_to_edge_map,
+                                             const GroupedSpan<int> edge_to_face_map,
+                                             const Span<bool> hide_poly,
+                                             const Set<int> &initial_verts,
+                                             const float limit_radius)
+{
+  const float limit_radius_sq = limit_radius * limit_radius;
+
+  Array<float> dists(vert_positions.size());
+  BitVector<> visited(vert_positions.size());
+
+  for (const int i : vert_positions.index_range()) {
+    dists[i] = initial_verts.contains(i) ? 0.0f : FLT_MAX;
+  }
+
+  /* Same "skip vertices further than the requested radius" optimization as #distances_create. */
+  BitVector<> affected_vert(vert_positions.size());
+  if (limit_radius == FLT_MAX) {
+    affected_vert.fill(true);
+  }
+  else {
+    for (const int v : initial_verts) {
+      const float3 &v_co = vert_positions[v];
+      for (const int i : vert_positions.index_range()) {
+        if (len_squared_v3v3(v_co, vert_positions[i]) <= limit_radius_sq) {
+          affected_vert[i].set();
+        }
+      }
+    }
+  }
+
+  /* Min-heap keyed by tentative distance: unlike #distances_create's round-based BFS (which
+   * processes edges in hop-order and can re-relax the same vertex many times as shorter paths
+   * arrive in later rounds -- cheap on an ordinary single mesh, but pathological once long-range
+   * "shortcut" edges are present, e.g. a cross-object proximity bridge), this always expands the
+   * globally closest not-yet-settled vertex next. Once popped, #sculpt_geodesic_mesh_test_dist_add
+   * can never find a shorter path for it later (every unsettled candidate has a tentative distance
+   * >= the one just popped, and both the straight-edge and triangle-unfold updates only ever
+   * produce a result >= the distance they are propagated from), so each vertex is finalized
+   * exactly once -- this is the standard Fast Marching Method for triangulated surfaces (Kimmel &
+   * Sethian), applied to the same per-triangle update #distances_create already uses. A vertex may
+   * be pushed more than once as its tentative distance improves before settling; stale entries
+   * (`dist > dists[vert]`, or already-visited) are skipped cheaply on pop rather than removed from
+   * the heap, since `std::priority_queue` has no decrease-key. */
+  using HeapEntry = std::pair<float, int>;
+  std::priority_queue<HeapEntry, std::vector<HeapEntry>, std::greater<HeapEntry>> heap;
+  for (const int v : initial_verts) {
+    heap.push({0.0f, v});
+  }
+
+  while (!heap.empty()) {
+    const auto [d, v0] = heap.top();
+    heap.pop();
+    if (visited[v0] || d > dists[v0]) {
+      /* Stale entry: `v0` already settled, or a better distance was found after this entry was
+       * pushed. */
+      continue;
+    }
+    visited[v0].set();
+
+    for (const int e : vert_to_edge_map[v0]) {
+      const int v1 = (edges[e][0] == v0) ? edges[e][1] : edges[e][0];
+      if (visited[v1]) {
+        continue;
+      }
+      if (!affected_vert[v0] && !affected_vert[v1]) {
+        continue;
+      }
+
+      /* Straight edge relax: the only relax path available for a face-less edge (e.g. a bridge
+       * stitch), and the fallback for `v1` on its very first touch. Guarantees `dists[v1]` is
+       * finite afterwards (any finite candidate beats `v1`'s initial FLT_MAX), which the triangle
+       * relax below relies on. */
+      if (sculpt_geodesic_mesh_test_dist_add(
+              vert_positions, v1, v0, SCULPT_GEODESIC_VERTEX_NONE, dists, initial_verts))
+      {
+        if (affected_vert[v0] || affected_vert[v1]) {
+          heap.push({dists[v1], v1});
+        }
+      }
+
+      /* Triangle relax: for every face sharing this edge, try to improve the third corner using
+       * `v0`/`v1` as the two known corners (mirrors #distances_create's triangle test exactly). */
+      for (const int face : edge_to_face_map[e]) {
+        if (!hide_poly.is_empty() && hide_poly[face]) {
+          continue;
+        }
+        for (const int v2 : corner_verts.slice(faces[face])) {
+          if (ELEM(v2, v0, v1) || visited[v2]) {
+            continue;
+          }
+          if (sculpt_geodesic_mesh_test_dist_add(vert_positions, v2, v0, v1, dists, initial_verts))
+          {
+            if (affected_vert[v0] || affected_vert[v1] || affected_vert[v2]) {
+              heap.push({dists[v2], v2});
+            }
+          }
+        }
+      }
+    }
+  }
 
   return dists;
 }

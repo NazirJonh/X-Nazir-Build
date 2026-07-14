@@ -32,6 +32,7 @@
 #include "BKE_anim_visualization.h"
 #include "BKE_animsys.h"
 #include "BKE_attribute.hh"
+#include "BKE_brush.hh"
 #include "BKE_colortools.hh"
 #include "BKE_curves.hh"
 #include "BKE_idprop.hh"
@@ -911,6 +912,16 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
+    /* #Brush.drag_kind is new; back-fill it from the fields it classifies (sculpt_brush_type /
+     * stroke_method / cloth_deform_type) so multi-object sculpt strokes with brushes saved by
+     * older files get the same world-space drag mirroring as brushes created after this version
+     * (see Architecture_Refactoring_Analysis.md 3.5). */
+    for (Brush &brush : bmain->brushes) {
+      BKE_brush_drag_kind_update(&brush);
+    }
   }
 
   /**

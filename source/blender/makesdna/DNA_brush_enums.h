@@ -190,6 +190,25 @@ enum eBrushClothDeformType : int {
   BRUSH_CLOTH_DEFORM_SNAKE_HOOK = 7,
 };
 
+/**
+ * #Brush.drag_kind: which world-space drag-delta behavior a sculpt brush type needs during a
+ * multi-object ("global") sculpt stroke, so secondary objects can mirror the primary object's
+ * drag instead of independently recomputing an inconsistent per-object delta. Derived from
+ * #Brush.sculpt_brush_type (and, for Smear/Cloth, also #Brush.stroke_method /
+ * #Brush.cloth_deform_type) by #BKE_brush_drag_kind_update -- kept as one declarative field
+ * instead of two parallel `ELEM` lists in `sculpt.cc`.
+ */
+enum eBrushDragKind : short {
+  /** Brush does not need any world-space drag mirroring (e.g. Draw, Smooth, most brushes). */
+  BRUSH_DRAG_KIND_NONE = 0,
+  /** Grab, Pose, Boundary, Thumb, Elastic Deform, Cloth-grab, anchored-stroke Smear: the search
+   * center and delta are both fixed to a single world-space anchor for the whole stroke. */
+  BRUSH_DRAG_KIND_ANCHORED_ORIGIN = 1,
+  /** Snake Hook, Clay Strips, Pinch, Nudge, Multiplane Scrape, Clay Thumb, Cloth-non-grab: only
+   * the delta is mirrored; the search center keeps tracking the cursor. */
+  BRUSH_DRAG_KIND_TIP_ORIENTATION = 2,
+};
+
 enum eBrushSmoothDeformType : int {
   BRUSH_SMOOTH_DEFORM_LAPLACIAN = 0,
   BRUSH_SMOOTH_DEFORM_SURFACE = 1,

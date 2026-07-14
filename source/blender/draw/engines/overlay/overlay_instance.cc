@@ -1038,9 +1038,12 @@ bool Instance::object_is_sculpt_mode(const ObjectRef &ob_ref)
   }
 
   if (state.object_mode == OB_MODE_SCULPT) {
-    const Object *active_object = state.object_active;
-    const bool is_active_object = ob_ref.object == active_object;
-    return is_active_object;
+    /* Multi-object ("global") sculpt mode: every mesh object that carries a live sculpt session in
+     * sculpt mode draws its Face Set / Mask overlay, not only the active object. Mirrors the
+     * per-object check in #BKE_sculptsession_use_pbvh_draw; #Sculpts::mesh_sync re-validates the
+     * session and pbvh before drawing. */
+    const SculptSession *ss = ob_ref.object->runtime->sculpt_session;
+    return ss != nullptr && ss->mode_type == OB_MODE_SCULPT;
   }
 
   return false;

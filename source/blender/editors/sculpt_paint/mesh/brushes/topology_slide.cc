@@ -45,6 +45,12 @@ BLI_NOINLINE static void calc_translation_directions(const Brush &brush,
                                                      const MutableSpan<float3> r_translations)
 {
   PRF_scope(ProfileCategory::Editor);
+
+  /* These are local-space slide directions applied as a local translation. No non-uniform-scale
+   * correction is needed (or wanted): a raw local difference `location - position` already maps
+   * through #Object.object_to_world onto the correct world-space slide direction. Multiplying by
+   * #StrokeCache.position_scale (which is right for a *distance*, e.g. #calc_brush_distances_squared)
+   * would bend the direction toward the larger-scale axes, so it is intentionally not applied. */
   switch (brush.slide_deform_type) {
     case BRUSH_SLIDE_DEFORM_DRAG:
       r_translations.fill(math::normalize(cache.location_symm - cache.last_location_symm));

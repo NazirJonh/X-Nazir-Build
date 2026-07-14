@@ -8,11 +8,14 @@
 #include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_space_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 
 #include "BKE_context.hh"
 #include "BKE_customdata.hh"
+#include "BKE_layer.hh"
 #include "BKE_main.hh"
+#include "BKE_modifier.hh"
 #include "BKE_multires.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
@@ -43,8 +46,31 @@ static bool multires_poll(bContext *C)
   return edit_modifier_poll_generic(C, RNA_MultiresModifier, (1 << OB_MESH), true, false);
 }
 
+/**
+ * Other objects in `active_ob`'s multi-object sculpt session (if any) whose Multires modifier
+ * currently has the same `totlvl` as `reference_totlvl` — the set of objects a Subdivide/
+ * Unsubdivide/Delete Higher action on `active_ob` should also apply to, so that objects already
+ * in sync keep moving together while diverged objects are left untouched. Returns an empty
+ * vector when `active_ob` is not in Sculpt Mode or is not part of a multi-object session.
+ */
+static Vector<Object *> multires_level_action_followers(bContext *C,
+                                                        Object *active_ob,
+                                                        const int reference_totlvl)
+{
+  if (!(active_ob->mode & OB_MODE_SCULPT)) {
+    return {};
+  }
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  View3D *v3d = CTX_wm_view3d(C);
+  const Vector<Object *> group = multires_group_objects(bmain, scene, view_layer, v3d);
+  return multires_totlvl_matching_group(group, active_ob, reference_totlvl);
+}
+
 static wmOperatorStatus multires_higher_levels_delete_exec(bContext *C, wmOperator *op)
 {
+  Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
   Object *ob = context_active_object(C);
   MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(
@@ -54,11 +80,25 @@ static wmOperatorStatus multires_higher_levels_delete_exec(bContext *C, wmOperat
     return OPERATOR_CANCELLED;
   }
 
+  const int old_totlvl = mmd->totlvl;
+  const Vector<Object *> followers = multires_level_action_followers(C, ob, old_totlvl);
+
   multiresModifier_del_levels(mmd, scene, ob, 1);
 
-  iter_other(CTX_data_main(C), ob, true, multires_update_totlevels, &mmd->totlvl);
+  iter_other(bmain, ob, true, multires_update_totlevels, &mmd->totlvl);
 
   WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+
+  for (Object *follower_ob : followers) {
+    MultiresModifierData *follower_mmd = reinterpret_cast<MultiresModifierData *>(
+        BKE_modifiers_findby_type(follower_ob, eModifierType_Multires));
+
+    multiresModifier_del_levels(follower_mmd, scene, follower_ob, 1);
+
+    iter_other(bmain, follower_ob, true, multires_update_totlevels, &follower_mmd->totlvl);
+
+    WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, follower_ob);
+  }
 
   return OPERATOR_FINISHED;
 }
@@ -115,6 +155,7 @@ static EnumPropertyItem prop_multires_subdivide_mode_type[] = {
 
 static wmOperatorStatus multires_subdivide_exec(bContext *C, wmOperator *op)
 {
+  Main *bmain = CTX_data_main(C);
   Object *object = context_active_object(C);
   MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(
       edit_modifier_property_get(op, object, eModifierType_Multires));
@@ -125,17 +166,35 @@ static wmOperatorStatus multires_subdivide_exec(bContext *C, wmOperator *op)
 
   const MultiresSubdivideModeType subdivide_mode = MultiresSubdivideModeType(
       RNA_enum_get(op->ptr, "mode"));
+  const int old_totlvl = mmd->totlvl;
+  const Vector<Object *> followers = multires_level_action_followers(C, object, old_totlvl);
+
   multiresModifier_subdivide(object, mmd, subdivide_mode);
 
-  iter_other(CTX_data_main(C), object, true, multires_update_totlevels, &mmd->totlvl);
+  iter_other(bmain, object, true, multires_update_totlevels, &mmd->totlvl);
 
   DEG_id_tag_update(&object->id, ID_RECALC_GEOMETRY);
   WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, object);
 
   if (object->mode & OB_MODE_SCULPT) {
     /* ensure that grid paint mask layer is created */
+    BKE_sculpt_mask_layers_ensure(CTX_data_ensure_evaluated_depsgraph(C), bmain, object, mmd);
+  }
+
+  for (Object *follower_ob : followers) {
+    MultiresModifierData *follower_mmd = reinterpret_cast<MultiresModifierData *>(
+        BKE_modifiers_findby_type(follower_ob, eModifierType_Multires));
+
+    multiresModifier_subdivide(follower_ob, follower_mmd, subdivide_mode);
+
+    iter_other(bmain, follower_ob, true, multires_update_totlevels, &follower_mmd->totlvl);
+
+    DEG_id_tag_update(&follower_ob->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, follower_ob);
+
+    /* `follower_ob` is guaranteed to be in Sculpt Mode (see multires_level_action_followers). */
     BKE_sculpt_mask_layers_ensure(
-        CTX_data_ensure_evaluated_depsgraph(C), CTX_data_main(C), object, mmd);
+        CTX_data_ensure_evaluated_depsgraph(C), bmain, follower_ob, follower_mmd);
   }
 
   return OPERATOR_FINISHED;
@@ -457,6 +516,9 @@ static wmOperatorStatus multires_unsubdivide_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  const int old_totlvl = mmd->totlvl;
+  const Vector<Object *> followers = multires_level_action_followers(C, object, old_totlvl);
+
   MultiresUnsubdivideInfo info = {};
   int new_levels = multiresModifier_rebuild_subdiv(depsgraph, object, mmd, 1, true, info);
   if (new_levels == 0) {
@@ -467,6 +529,30 @@ static wmOperatorStatus multires_unsubdivide_exec(bContext *C, wmOperator *op)
 
   DEG_id_tag_update(&object->id, ID_RECALC_GEOMETRY);
   WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, object);
+
+  int skipped_follower_num = 0;
+  for (Object *follower_ob : followers) {
+    MultiresModifierData *follower_mmd = reinterpret_cast<MultiresModifierData *>(
+        BKE_modifiers_findby_type(follower_ob, eModifierType_Multires));
+
+    MultiresUnsubdivideInfo follower_info = {};
+    const int follower_new_levels = multiresModifier_rebuild_subdiv(
+        depsgraph, follower_ob, follower_mmd, 1, true, follower_info);
+    if (follower_new_levels == 0) {
+      skipped_follower_num++;
+      continue;
+    }
+    multiresModifier_unsubdivide_report_if_needed(follower_info, op->reports);
+
+    DEG_id_tag_update(&follower_ob->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, follower_ob);
+  }
+  if (skipped_follower_num > 0) {
+    BKE_reportf(op->reports,
+               RPT_WARNING,
+               "%d other object(s) had no valid subdivisions to rebuild and were skipped",
+               skipped_follower_num);
+  }
 
   return OPERATOR_FINISHED;
 }
@@ -553,6 +639,89 @@ void OBJECT_OT_multires_rebuild_subdiv(wmOperatorType *ot)
   /* flags */
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
   edit_modifier_properties(ot);
+}
+
+/** \} */
+
+/* ------------------------------------------------------------------- */
+/** \name Multires Level Sync Operator
+ * \{ */
+
+static const EnumPropertyItem prop_multires_level_sync_type_items[] = {
+    {int(MultiresLevelType::Viewport),
+     "VIEWPORT",
+     0,
+     "Viewport",
+     "Sync the viewport subdivision level"},
+    {int(MultiresLevelType::Sculpt), "SCULPT", 0, "Sculpt", "Sync the sculpt subdivision level"},
+    {int(MultiresLevelType::Render), "RENDER", 0, "Render", "Sync the render subdivision level"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static wmOperatorStatus multires_level_sync_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  View3D *v3d = CTX_wm_view3d(C);
+  Object *ob = context_active_object(C);
+  MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(
+      edit_modifier_property_get(op, ob, eModifierType_Multires));
+
+  if (!mmd) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const MultiresLevelType level_type = MultiresLevelType(RNA_enum_get(op->ptr, "level_type"));
+  const int reference_value = multires_level_get(mmd, level_type);
+
+  const Vector<Object *> candidates = multires_group_objects(bmain, scene, view_layer, v3d);
+  const Vector<Object *> changed = multires_level_group_sync(
+      candidates, ob, level_type, reference_value, reference_value, false);
+
+  for (Object *changed_ob : changed) {
+    DEG_id_tag_update(&changed_ob->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, changed_ob);
+  }
+
+  if (changed.is_empty()) {
+    BKE_report(op->reports, RPT_INFO, "All selected objects already match");
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus multires_level_sync_invoke(bContext *C,
+                                                   wmOperator *op,
+                                                   const wmEvent * /*event*/)
+{
+  if (edit_modifier_invoke_properties(C, op)) {
+    return multires_level_sync_exec(C, op);
+  }
+  return OPERATOR_CANCELLED;
+}
+
+void OBJECT_OT_multires_level_sync(wmOperatorType *ot)
+{
+  ot->name = "Sync Subdivision Level";
+  ot->description =
+      "Apply this subdivision level to every selected sculpt-mode object with a Multires "
+      "modifier";
+  ot->idname = "OBJECT_OT_multires_level_sync";
+
+  ot->poll = multires_poll;
+  ot->invoke = multires_level_sync_invoke;
+  ot->exec = multires_level_sync_exec;
+
+  /* flags */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+  edit_modifier_properties(ot);
+  RNA_def_enum(ot->srna,
+              "level_type",
+              prop_multires_level_sync_type_items,
+              int(MultiresLevelType::Viewport),
+              "Level Type",
+              "Which subdivision level field to sync");
 }
 
 /** \} */

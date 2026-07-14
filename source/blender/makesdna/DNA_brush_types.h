@@ -318,7 +318,9 @@ struct Brush {
   /** Active curves sculpt brush type. */
   eBrushCurvesSculptType curves_sculpt_brush_type = CURVES_SCULPT_BRUSH_TYPE_COMB;
 
-  char _pad1[2] = {};
+  /** #eBrushDragKind. Kept in sync with #sculpt_brush_type / #stroke_method / #cloth_deform_type
+   * by #BKE_brush_drag_kind_update. */
+  eBrushDragKind drag_kind = BRUSH_DRAG_KIND_NONE;
 
   float autosmooth_factor = 0.0f;
 

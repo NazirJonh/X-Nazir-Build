@@ -415,7 +415,7 @@ static void sculpt_color_presmooth_init(const Mesh &mesh, Object &object)
   }
 }
 
-static void sculpt_color_filter_apply(bContext *C, wmOperator *op, Object &ob)
+static void sculpt_color_filter_apply_object(bContext *C, wmOperator *op, Object &ob)
 {
   const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
   const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
@@ -429,6 +429,12 @@ static void sculpt_color_filter_apply(bContext *C, wmOperator *op, Object &ob)
   const float3 fill_color = fill_color_resolve(C, op, use_secondary_color);
 
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  bke::GSpanAttributeWriter color_attribute = active_color_attribute_for_write(mesh);
+  if (!color_attribute) {
+    /* Objects that could not be synchronized to the shared channel have no valid active color
+     * attribute; skip them entirely (mirrors the brush path's early return). */
+    return;
+  }
   if (filter_strength < 0.0 && ss.filter_cache->pre_smoothed_color.is_empty()) {
     sculpt_color_presmooth_init(mesh, ob);
   }
@@ -443,7 +449,6 @@ static void sculpt_color_filter_apply(bContext *C, wmOperator *op, Object &ob)
   const OffsetIndices<int> faces = mesh.faces();
   const Span<int> corner_verts = mesh.corner_verts();
   const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
-  bke::GSpanAttributeWriter color_attribute = active_color_attribute_for_write(mesh);
   const MeshAttributeData attribute_data(mesh);
 
   threading::EnumerableThreadSpecific<LocalData> all_tls;
@@ -466,23 +471,44 @@ static void sculpt_color_filter_apply(bContext *C, wmOperator *op, Object &ob)
       exec_mode::grain_size(1));
   pbvh.tag_attribute_changed(node_mask, mesh.active_color_attribute);
   color_attribute.finish();
-  flush_update_step(C, UpdateType::Color);
 }
 
-static void sculpt_color_filter_end(bContext *C, wmOperator *op, Object &ob)
+static void sculpt_color_filter_apply(bContext *C, wmOperator *op)
 {
-  SculptSession &ss = *ob.runtime->sculpt_session;
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
+  for (Object *ob : objects) {
+    /* Objects that could not be synchronized to the shared channel have no valid active color
+     * attribute; their per-object body is a cheap no-op (empty attribute writer). */
+    sculpt_color_filter_apply_object(C, op, *ob);
+    flush_update_step(vc, *ob, UpdateType::Color);
+  }
+}
 
+static void sculpt_color_filter_end(bContext *C, wmOperator *op)
+{
   if (FilterType(RNA_enum_get(op->ptr, "type")) == FilterType::Fill &&
       !RNA_struct_property_is_set(op->ptr, "fill_color"))
   {
     fill_color_store_current(C, op);
   }
 
-  undo::push_end(ob);
-  MEM_delete(ss.filter_cache);
-  ss.filter_cache = nullptr;
-  flush_update_done(C, ob, UpdateType::Color);
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
+
+  undo::push_end_all_ex(false, true);
+
+  for (Object *ob : objects) {
+    SculptSession &ss = *ob->runtime->sculpt_session;
+    if (ss.filter_cache) {
+      MEM_delete(ss.filter_cache);
+      ss.filter_cache = nullptr;
+    }
+    flush_update_done(C, *ob, UpdateType::Color);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  }
 }
 
 static wmOperatorStatus sculpt_color_filter_modal(bContext *C,
@@ -498,10 +524,10 @@ static wmOperatorStatus sculpt_color_filter_modal(bContext *C,
         !ss.filter_cache->has_dragged)
     {
       RNA_float_set(op->ptr, "strength", ss.filter_cache->start_filter_strength);
-      sculpt_color_filter_apply(C, op, ob);
+      sculpt_color_filter_apply(C, op);
     }
 
-    sculpt_color_filter_end(C, op, ob);
+    sculpt_color_filter_end(C, op);
     return OPERATOR_FINISHED;
   }
 
@@ -526,7 +552,7 @@ static wmOperatorStatus sculpt_color_filter_modal(bContext *C,
 
   RNA_float_set(op->ptr, "strength", filter_strength);
 
-  sculpt_color_filter_apply(C, op, ob);
+  sculpt_color_filter_apply(C, op);
 
   return OPERATOR_RUNNING_MODAL;
 }
@@ -561,29 +587,36 @@ static int sculpt_color_filter_init(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  /* Ensure that we have a PBVH to be able to push changes on only visible nodes. */
-  bke::object::pbvh_ensure(*CTX_data_ensure_evaluated_depsgraph(C), ob);
+  ViewContext vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
 
-  undo::push_begin(scene, ob, op);
-  BKE_sculpt_color_layer_create_if_needed(&ob);
+  /* Ensure that we have a PBVH to be able to push changes on only visible nodes. */
+  for (Object *object : objects) {
+    bke::object::pbvh_ensure(*CTX_data_ensure_evaluated_depsgraph(C), *object);
+  }
+
+  undo::push_begin_multi_object(scene, op, objects);
+  ensure_shared_color_attributes(ob, objects);
 
   /* CTX_data_ensure_evaluated_depsgraph should be used at the end to include the potential
    * creation of color layer data. */
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
-  BKE_sculpt_update_object_for_edit(depsgraph, &ob, true);
+  for (Object *object : objects) {
+    BKE_sculpt_update_object_for_edit(depsgraph, object, true);
 
-  filter::cache_init(C,
-                     ob,
-                     sd,
-                     undo::Type::Color,
-                     mval_fl,
-                     RNA_float_get(op->ptr, "area_normal_radius"),
-                     RNA_float_get(op->ptr, "strength"));
-  const SculptSession &ss = *ob.runtime->sculpt_session;
-  filter::Cache *filter_cache = ss.filter_cache;
-  filter_cache->active_face_set = face_set_none_id;
-  if (auto_mask::is_enabled(sd.paint, ob, nullptr)) {
-    auto_mask::filter_cache_ensure(*depsgraph, sd.paint, ob);
+    filter::cache_init(C,
+                       *object,
+                       sd,
+                       undo::Type::Color,
+                       mval_fl,
+                       RNA_float_get(op->ptr, "area_normal_radius"),
+                       RNA_float_get(op->ptr, "strength"));
+    const SculptSession &ss = *object->runtime->sculpt_session;
+    filter::Cache *filter_cache = ss.filter_cache;
+    filter_cache->active_face_set = face_set_none_id;
+    if (auto_mask::is_enabled(sd.paint, *object, nullptr)) {
+      auto_mask::filter_cache_ensure(*depsgraph, sd.paint, *object);
+    }
   }
 
   return OPERATOR_PASS_THROUGH;
@@ -591,14 +624,12 @@ static int sculpt_color_filter_init(bContext *C, wmOperator *op)
 
 static wmOperatorStatus sculpt_color_filter_exec(bContext *C, wmOperator *op)
 {
-  Object &ob = *CTX_data_active_object(C);
-
   if (sculpt_color_filter_init(C, op) == OPERATOR_CANCELLED) {
     return OPERATOR_CANCELLED;
   }
 
-  sculpt_color_filter_apply(C, op, ob);
-  sculpt_color_filter_end(C, op, ob);
+  sculpt_color_filter_apply(C, op);
+  sculpt_color_filter_end(C, op);
 
   return OPERATOR_FINISHED;
 }
@@ -625,8 +656,8 @@ static wmOperatorStatus sculpt_color_filter_invoke(bContext *C,
   }
 
   if (RNA_boolean_get(op->ptr, "use_immediate")) {
-    sculpt_color_filter_apply(C, op, ob);
-    sculpt_color_filter_end(C, op, ob);
+    sculpt_color_filter_apply(C, op);
+    sculpt_color_filter_end(C, op);
     return OPERATOR_FINISHED;
   }
 

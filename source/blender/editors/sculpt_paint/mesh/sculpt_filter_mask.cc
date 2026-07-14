@@ -735,23 +735,16 @@ static bool decrease_contrast_mask_bmesh(const Depsgraph &depsgraph,
   return true;
 }
 
-static wmOperatorStatus sculpt_mask_filter_exec(bContext *C, wmOperator *op)
+static void mask_filter_object(bContext &C,
+                               Object &ob,
+                               const FilterType filter_type,
+                               const bool auto_iteration_count,
+                               const int fixed_iterations)
 {
-  const Scene &scene = *CTX_data_scene(C);
-  Object &ob = *CTX_data_active_object(C);
-  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
-  const FilterType filter_type = FilterType(RNA_enum_get(op->ptr, "filter_type"));
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(&C);
 
-  const View3D *v3d = CTX_wm_view3d(C);
-  const Base *base = CTX_data_active_base(C);
-  if (!BKE_base_is_visible(v3d, base)) {
-    return OPERATOR_CANCELLED;
-  }
-
-  MultiresModifierData *mmd = BKE_sculpt_multires_active(&scene, &ob);
-  BKE_sculpt_mask_layers_ensure(CTX_data_depsgraph_pointer(C), CTX_data_main(C), &ob, mmd);
-
-  ed::sculpt_paint::mask_overlay_check(*C, *op);
+  MultiresModifierData *mmd = BKE_sculpt_multires_active(CTX_data_scene(&C), &ob);
+  BKE_sculpt_mask_layers_ensure(depsgraph, CTX_data_main(&C), &ob, mmd);
 
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
 
@@ -760,17 +753,13 @@ static wmOperatorStatus sculpt_mask_filter_exec(bContext *C, wmOperator *op)
 
   IndexMaskMemory memory;
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
-  undo::push_begin(scene, ob, op);
-
-  int iterations = RNA_int_get(op->ptr, "iterations");
 
   /* Auto iteration count calculates the number of iteration based on the vertices of the mesh to
    * avoid adding an unnecessary amount of undo steps when using the operator from a shortcut.
    * One iteration per 50000 vertices in the mesh should be fine in most cases.
    * Maybe we want this to be configurable. */
-  if (RNA_boolean_get(op->ptr, "auto_iteration_count")) {
-    iterations = int(vertex_count_get(ob) / 50000.0f) + 1;
-  }
+  const int iterations = auto_iteration_count ? int(vertex_count_get(ob) / 50000.0f) + 1 :
+                                                fixed_iterations;
 
   threading::EnumerableThreadSpecific<FilterLocalData> all_tls;
   switch (pbvh.type()) {
@@ -1074,12 +1063,41 @@ static wmOperatorStatus sculpt_mask_filter_exec(bContext *C, wmOperator *op)
     }
   }
 
-  undo::push_end(ob);
+}
 
-  flush_update_step(C, UpdateType::Mask);
-  flush_update_done(C, ob, UpdateType::Mask);
+static wmOperatorStatus sculpt_mask_filter_exec(bContext *C, wmOperator *op)
+{
+  const Scene &scene = *CTX_data_scene(C);
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  const FilterType filter_type = FilterType(RNA_enum_get(op->ptr, "filter_type"));
 
-  tag_update_overlays(C);
+  const View3D *v3d = CTX_wm_view3d(C);
+  const Base *base = CTX_data_active_base(C);
+  if (!BKE_base_is_visible(v3d, base)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  ed::sculpt_paint::mask_overlay_check(*C, *op);
+
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
+
+  const bool auto_iteration_count = RNA_boolean_get(op->ptr, "auto_iteration_count");
+  const int fixed_iterations = RNA_int_get(op->ptr, "iterations");
+
+  undo::push_begin_multi_object(scene, op, objects);
+
+  for (Object *ob : objects) {
+    mask_filter_object(*C, *ob, filter_type, auto_iteration_count, fixed_iterations);
+  }
+
+  undo::push_end_all_ex(false, true);
+
+  for (Object *ob : objects) {
+    flush_update_step(vc, *ob, UpdateType::Mask);
+    flush_update_done(C, *ob, UpdateType::Mask);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  }
 
   return OPERATOR_FINISHED;
 }

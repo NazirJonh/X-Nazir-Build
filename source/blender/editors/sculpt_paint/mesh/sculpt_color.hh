@@ -19,6 +19,7 @@ namespace blender {
 
 struct Depsgraph;
 struct Mesh;
+struct Object;
 namespace bke {
 enum class AttrDomain : int8_t;
 struct GAttributeReader;
@@ -63,6 +64,24 @@ float4 color_vert_get(OffsetIndices<int> faces,
 
 bke::GAttributeReader active_color_attribute(const Mesh &mesh);
 bke::GSpanAttributeWriter active_color_attribute_for_write(Mesh &mesh);
+
+/**
+ * Align every mesh in \a other_meshes to one shared color channel. The reference channel is the
+ * active color attribute of \a active_mesh (name, domain, type). Per mesh: an existing attribute
+ * with the reference name that is a valid color attribute is made active as-is (no data
+ * conversion); a missing attribute is created with the reference name/domain/type and made
+ * active; a name collision with a non-color attribute silently skips that mesh (painting will
+ * skip it too). Does nothing when \a active_mesh has no valid active color attribute.
+ */
+void ensure_shared_color_attributes(Mesh &active_mesh, Span<Mesh *> other_meshes);
+
+/**
+ * Object-level wrapper: first ensures the active object itself has a valid active color
+ * attribute (creating the default "Color" Point/ColorFloat channel via
+ * #BKE_sculpt_color_layer_create_if_needed when it has none), then aligns every mesh object in
+ * \a objects to that channel. Non-mesh objects are skipped.
+ */
+void ensure_shared_color_attributes(Object &active_object, Span<Object *> objects);
 
 void do_paint_brush(const Depsgraph &depsgraph,
                     PaintModeSettings &paint_mode_settings,

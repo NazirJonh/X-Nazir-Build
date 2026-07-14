@@ -36,7 +36,8 @@ struct LocalData {
   Vector<float3> translations;
 };
 
-BLI_NOINLINE static void calc_translations(const Brush &brush,
+BLI_NOINLINE static void calc_translations(const Object &object,
+                                           const Brush &brush,
                                            const StrokeCache &cache,
                                            const KelvinletParams &kelvinet_params,
                                            const float3 &location,
@@ -45,41 +46,106 @@ BLI_NOINLINE static void calc_translations(const Brush &brush,
                                            const MutableSpan<float3> translations)
 {
   PRF_scope(ProfileCategory::Editor);
+
+  if (!cache.non_uniform_scale_active) {
+    switch (eBrushElasticDeformType(brush.elastic_deform_type)) {
+      case BRUSH_ELASTIC_DEFORM_GRAB: {
+        for (const int i : positions.index_range()) {
+          BKE_kelvinlet_grab(translations[i], &kelvinet_params, positions[i], location, offset);
+        }
+        scale_translations(translations, cache.bstrength * 20.0f);
+        break;
+      }
+      case BRUSH_ELASTIC_DEFORM_GRAB_BISCALE: {
+        for (const int i : positions.index_range()) {
+          BKE_kelvinlet_grab_biscale(
+              translations[i], &kelvinet_params, positions[i], location, offset);
+        }
+        scale_translations(translations, cache.bstrength * 20.0f);
+        break;
+      }
+      case BRUSH_ELASTIC_DEFORM_GRAB_TRISCALE: {
+        for (const int i : positions.index_range()) {
+          BKE_kelvinlet_grab_triscale(
+              translations[i], &kelvinet_params, positions[i], location, offset);
+        }
+        scale_translations(translations, cache.bstrength * 20.0f);
+        break;
+      }
+      case BRUSH_ELASTIC_DEFORM_SCALE: {
+        for (const int i : positions.index_range()) {
+          BKE_kelvinlet_scale(
+              translations[i], &kelvinet_params, positions[i], location, cache.sculpt_normal_symm);
+        }
+        break;
+      }
+      case BRUSH_ELASTIC_DEFORM_TWIST: {
+        for (const int i : positions.index_range()) {
+          BKE_kelvinlet_twist(
+              translations[i], &kelvinet_params, positions[i], location, cache.sculpt_normal_symm);
+        }
+        break;
+      }
+    }
+    return;
+  }
+
+  /* Non-uniform-scale path: evaluate the kelvinlet in world space, where its internal
+   * distance/direction math is physically meaningful, then bring the displacement back to local
+   * space. See #KelvinletWorldTransform. */
+  const KelvinletWorldTransform transform = kelvinlet_world_transform_init(object);
+  const float3 world_location = kelvinlet_position_to_world(transform, location);
+  const float3 world_offset = kelvinlet_direction_to_world(transform, offset);
+  const float3 world_normal = kelvinlet_normal_to_world(transform, cache.sculpt_normal_symm);
+
   switch (eBrushElasticDeformType(brush.elastic_deform_type)) {
     case BRUSH_ELASTIC_DEFORM_GRAB: {
       for (const int i : positions.index_range()) {
-        BKE_kelvinlet_grab(translations[i], &kelvinet_params, positions[i], location, offset);
+        const float3 world_co = kelvinlet_position_to_world(transform, positions[i]);
+        float3 world_disp;
+        BKE_kelvinlet_grab(world_disp, &kelvinet_params, world_co, world_location, world_offset);
+        translations[i] = kelvinlet_direction_to_local(transform, world_disp);
       }
       scale_translations(translations, cache.bstrength * 20.0f);
       break;
     }
     case BRUSH_ELASTIC_DEFORM_GRAB_BISCALE: {
       for (const int i : positions.index_range()) {
+        const float3 world_co = kelvinlet_position_to_world(transform, positions[i]);
+        float3 world_disp;
         BKE_kelvinlet_grab_biscale(
-            translations[i], &kelvinet_params, positions[i], location, offset);
+            world_disp, &kelvinet_params, world_co, world_location, world_offset);
+        translations[i] = kelvinlet_direction_to_local(transform, world_disp);
       }
       scale_translations(translations, cache.bstrength * 20.0f);
       break;
     }
     case BRUSH_ELASTIC_DEFORM_GRAB_TRISCALE: {
       for (const int i : positions.index_range()) {
+        const float3 world_co = kelvinlet_position_to_world(transform, positions[i]);
+        float3 world_disp;
         BKE_kelvinlet_grab_triscale(
-            translations[i], &kelvinet_params, positions[i], location, offset);
+            world_disp, &kelvinet_params, world_co, world_location, world_offset);
+        translations[i] = kelvinlet_direction_to_local(transform, world_disp);
       }
       scale_translations(translations, cache.bstrength * 20.0f);
       break;
     }
     case BRUSH_ELASTIC_DEFORM_SCALE: {
       for (const int i : positions.index_range()) {
-        BKE_kelvinlet_scale(
-            translations[i], &kelvinet_params, positions[i], location, cache.sculpt_normal_symm);
+        const float3 world_co = kelvinlet_position_to_world(transform, positions[i]);
+        float3 world_disp;
+        BKE_kelvinlet_scale(world_disp, &kelvinet_params, world_co, world_location, world_normal);
+        translations[i] = kelvinlet_direction_to_local(transform, world_disp);
       }
       break;
     }
     case BRUSH_ELASTIC_DEFORM_TWIST: {
       for (const int i : positions.index_range()) {
-        BKE_kelvinlet_twist(
-            translations[i], &kelvinet_params, positions[i], location, cache.sculpt_normal_symm);
+        const float3 world_co = kelvinlet_position_to_world(transform, positions[i]);
+        float3 world_disp;
+        BKE_kelvinlet_twist(world_disp, &kelvinet_params, world_co, world_location, world_normal);
+        translations[i] = kelvinlet_direction_to_local(transform, world_disp);
       }
       break;
     }
@@ -112,7 +178,8 @@ static void calc_faces(const Depsgraph &depsgraph,
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
-  calc_translations(brush,
+  calc_translations(object,
+                    brush,
                     cache,
                     kelvinet_params,
                     cache.location_symm,
@@ -153,7 +220,8 @@ static void calc_grids(const Depsgraph &depsgraph,
 
   tls.translations.resize(grid_verts_num);
   const MutableSpan<float3> translations = tls.translations;
-  calc_translations(brush,
+  calc_translations(object,
+                    brush,
                     cache,
                     kelvinet_params,
                     cache.location_symm,
@@ -195,7 +263,7 @@ static void calc_bmesh(const Depsgraph &depsgraph,
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
   calc_translations(
-      brush, cache, kelvinet_params, cache.location_symm, offset, orig_positions, translations);
+      object, brush, cache, kelvinet_params, cache.location_symm, offset, orig_positions, translations);
 
   scale_translations(translations, factors);
 

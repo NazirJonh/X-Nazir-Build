@@ -117,7 +117,8 @@ BLI_NOINLINE static void calc_translations(const Span<float3> positions,
   }
 }
 
-BLI_NOINLINE static void accumulate_samples(const Span<float3> positions,
+BLI_NOINLINE static void accumulate_samples(const StrokeCache &cache,
+                                            const Span<float3> positions,
                                             const Span<float3> local_positions,
                                             const Span<float3> normals,
                                             const Span<float> factors,
@@ -129,7 +130,11 @@ BLI_NOINLINE static void accumulate_samples(const Span<float3> positions,
       continue;
     }
     const bool plane_index = local_positions[i].x <= 0.0f;
-    sample.area_nos[plane_index] += normals[i] * factors[i];
+    /* #normals are raw local-space vertex normals; correct them for the object's non-uniform
+     * scale (see #scale_normalized) — the same correction #do_multiplane_scrape_brush applies to
+     * its #area_normal — since they drive the Dynamic mode's sampled plane angle. Kept unnormalized
+     * here on purpose: the samples are accumulated and normalized once afterwards. */
+    sample.area_nos[plane_index] += scale_normalized(cache, normals[i]) * factors[i];
     sample.area_cos[plane_index] += positions[i];
     sample.area_count[plane_index]++;
   }
@@ -181,7 +186,7 @@ static void sample_node_surface_mesh(const Depsgraph &depsgraph,
 
   const MutableSpan normals = gather_data_mesh(vert_normals, verts, tls.normals);
 
-  accumulate_samples(positions, local_positions, normals, factors, sample);
+  accumulate_samples(cache, positions, local_positions, normals, factors, sample);
 }
 
 static void sample_node_surface_grids(const Depsgraph &depsgraph,
@@ -229,7 +234,7 @@ static void sample_node_surface_grids(const Depsgraph &depsgraph,
   MutableSpan<float3> normals = tls.normals;
   gather_grids_normals(subdiv_ccg, grids, normals);
 
-  accumulate_samples(positions, local_positions, normals, factors, sample);
+  accumulate_samples(cache, positions, local_positions, normals, factors, sample);
 }
 
 static void sample_node_surface_bmesh(const Depsgraph &depsgraph,
@@ -278,7 +283,7 @@ static void sample_node_surface_bmesh(const Depsgraph &depsgraph,
   MutableSpan<float3> normals = tls.normals;
   gather_bmesh_normals(verts, normals);
 
-  accumulate_samples(positions, local_positions, normals, factors, sample);
+  accumulate_samples(cache, positions, local_positions, normals, factors, sample);
 }
 
 /**
@@ -587,6 +592,12 @@ void do_multiplane_scrape_brush(const Depsgraph &depsgraph,
   }
 
   area_position += area_normal * ss.cache->scale * displace;
+
+  /* #area_normal is a raw local-space normal; correct it for the object's non-uniform scale now,
+   * after the #area_position offset above (which intentionally uses the raw direction, matching
+   * #StrokeCache.scale's own magnitude-compensation convention there), but before it is used to
+   * build the orientation basis below (see #scale_normalized). */
+  area_normal = scale_normalized_unit(*ss.cache, area_normal);
 
   /* Init brush local space matrix. */
   float4x4 mat = float4x4::identity();

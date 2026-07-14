@@ -207,9 +207,12 @@ void do_nudge_brush(const Depsgraph &depsgraph,
   PRF_scope(ProfileCategory::Editor);
   const SculptSession &ss = *object.runtime->sculpt_session;
 
-  const float3 offset = math::cross(
-      math::cross(ss.cache->sculpt_normal_symm, ss.cache->grab_delta_symm),
-      ss.cache->sculpt_normal_symm);
+  /* #cache.sculpt_normal_symm is a raw local-space normal; correct it for the object's
+   * non-uniform scale before using it to project #grab_delta_symm onto the tangent plane (this
+   * file has no separate magnitude-compensation step to preserve, unlike #do_draw_brush above,
+   * see #scale_normalized). */
+  const float3 normal = scale_normalized_unit(*ss.cache, ss.cache->sculpt_normal_symm);
+  const float3 offset = math::cross(math::cross(normal, ss.cache->grab_delta_symm), normal);
 
   offset_positions(depsgraph, sd, object, offset * ss.cache->bstrength, node_mask);
 }

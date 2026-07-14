@@ -876,6 +876,10 @@ class VIEW3D_HT_header(Header):
                     icon='CURVE_PATH',
                     depress=(domain == 'CURVE'),
                 ).domain = 'CURVE'
+            elif object_mode == 'SCULPT':
+                if len(context.objects_in_mode) > 1:
+                    row = layout.row(align=True)
+                    row.prop(tool_settings.sculpt, "multi_object_edit_scope", expand=True)
 
         # Grease Pencil
         if obj and obj.type == 'GREASEPENCIL':
@@ -3703,8 +3707,21 @@ class VIEW3D_MT_sculpt(Menu):
         props = layout.operator("sculpt.face_set_change_visibility", text="Toggle Visibility")
         props.mode = 'TOGGLE'
 
+        props = layout.operator(
+            "sculpt.face_set_change_visibility", text="Toggle Visibility (All Objects)")
+        props.mode = 'TOGGLE'
+        props.use_all_objects = True
+
         props = layout.operator("sculpt.face_set_change_visibility", text="Hide Active Face Set")
         props.mode = 'HIDE_ACTIVE'
+
+        props = layout.operator(
+            "sculpt.face_set_change_visibility", text="Hide Active Face Set (All Objects)")
+        props.mode = 'HIDE_ACTIVE'
+        props.use_all_objects = True
+
+        props = layout.operator("sculpt.face_set_change_visibility", text="Hide Active Object")
+        props.mode = 'HIDE_ACTIVE_OBJECT'
 
         props = layout.operator("paint.hide_show_all", text="Show All")
         props.action = 'SHOW'

@@ -109,34 +109,17 @@ static void init_mask_grids(
   BKE_subdiv_ccg_average_grids(subdiv_ccg);
 }
 
-static wmOperatorStatus sculpt_mask_init_exec(bContext *C, wmOperator *op)
+static void mask_init_object(bContext &C, Object &ob, const InitMode mode, const int seed)
 {
-  const View3D *v3d = CTX_wm_view3d(C);
-  const Base *base = CTX_data_active_base(C);
-  if (!BKE_base_is_visible(v3d, base)) {
-    return OPERATOR_CANCELLED;
-  }
-
-  ed::sculpt_paint::mask_overlay_check(*C, *op);
-
-  const Scene &scene = *CTX_data_scene(C);
-  Object &ob = *CTX_data_active_object(C);
   SculptSession &ss = *ob.runtime->sculpt_session;
-  Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
-
-  BKE_sculpt_update_object_for_edit(&depsgraph, &ob, false);
+  Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(&C);
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   IndexMaskMemory memory;
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
   if (node_mask.is_empty()) {
-    return OPERATOR_CANCELLED;
+    return;
   }
-
-  undo::push_begin(scene, ob, op);
-
-  const InitMode mode = InitMode(RNA_enum_get(op->ptr, "mode"));
-  const int seed = BLI_time_now_seconds();
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
@@ -177,8 +160,8 @@ static wmOperatorStatus sculpt_mask_init_exec(bContext *C, wmOperator *op)
       break;
     }
     case bke::pbvh::Type::Grids: {
-      Main &bmain = *CTX_data_main(C);
-      Scene &scene = *CTX_data_scene(C);
+      Main &bmain = *CTX_data_main(&C);
+      Scene &scene = *CTX_data_scene(&C);
       const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
       const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
       switch (mode) {
@@ -278,9 +261,38 @@ static wmOperatorStatus sculpt_mask_init_exec(bContext *C, wmOperator *op)
     }
   }
 
-  undo::push_end(ob);
+}
 
-  tag_update_overlays(C);
+static wmOperatorStatus sculpt_mask_init_exec(bContext *C, wmOperator *op)
+{
+  const View3D *v3d = CTX_wm_view3d(C);
+  const Base *base = CTX_data_active_base(C);
+  if (!BKE_base_is_visible(v3d, base)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  ed::sculpt_paint::mask_overlay_check(*C, *op);
+
+  const Scene &scene = *CTX_data_scene(C);
+  Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
+  ViewContext vc = ED_view3d_viewcontext_init(C, &depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
+
+  for (Object *ob : objects) {
+    BKE_sculpt_update_object_for_edit(&depsgraph, ob, false);
+  }
+
+  undo::push_begin_multi_object(scene, op, objects);
+
+  const InitMode mode = InitMode(RNA_enum_get(op->ptr, "mode"));
+  const int seed = BLI_time_now_seconds();
+
+  for (Object *ob : objects) {
+    mask_init_object(*C, *ob, mode, seed);
+  }
+
+  undo::finish_multi_object(C, objects, UpdateType::Mask);
+
   return OPERATOR_FINISHED;
 }
 

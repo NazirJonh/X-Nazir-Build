@@ -704,32 +704,36 @@ static wmOperatorStatus mask_flood_fill_exec(bContext *C, wmOperator *op)
 {
   Main &bmain = *CTX_data_main(C);
   const Scene &scene = *CTX_data_scene(C);
-  Object &object = *CTX_data_active_object(C);
   Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
+  ViewContext vc = ED_view3d_viewcontext_init(C, &depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
 
   const FloodFillMode mode = FloodFillMode(RNA_enum_get(op->ptr, "mode"));
   const float value = RNA_float_get(op->ptr, "value");
 
-  BKE_sculpt_update_object_for_edit(&depsgraph, &object, false);
+  for (Object *ob : objects) {
+    BKE_sculpt_update_object_for_edit(&depsgraph, ob, false);
+  }
 
   ed::sculpt_paint::mask_overlay_check(*C, *op);
 
-  undo::push_begin(scene, object, op);
-  switch (mode) {
-    case FloodFillMode::Value:
-      fill_mask(bmain, scene, depsgraph, object, value);
-      break;
-    case FloodFillMode::InverseValue:
-      fill_mask(bmain, scene, depsgraph, object, 1.0f - value);
-      break;
-    case FloodFillMode::InverseMeshValue:
-      invert_mask(bmain, scene, depsgraph, object);
-      break;
+  undo::push_begin_multi_object(scene, op, objects);
+
+  for (Object *ob : objects) {
+    switch (mode) {
+      case FloodFillMode::Value:
+        fill_mask(bmain, scene, depsgraph, *ob, value);
+        break;
+      case FloodFillMode::InverseValue:
+        fill_mask(bmain, scene, depsgraph, *ob, 1.0f - value);
+        break;
+      case FloodFillMode::InverseMeshValue:
+        invert_mask(bmain, scene, depsgraph, *ob);
+        break;
+    }
   }
 
-  undo::push_end(object);
-
-  tag_update_overlays(C);
+  undo::finish_multi_object(C, objects, UpdateType::Mask);
 
   return OPERATOR_FINISHED;
 }
@@ -779,8 +783,12 @@ static void gesture_begin(bContext &C, wmOperator &op, gesture::GestureData &ges
 {
   const Scene &scene = *CTX_data_scene(&C);
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(&C);
-  BKE_sculpt_update_object_for_edit(depsgraph, gesture_data.vc.obact, false);
-  undo::push_begin(scene, *gesture_data.vc.obact, &op);
+
+  for (Object *ob : gesture_data.objects) {
+    BKE_sculpt_update_object_for_edit(depsgraph, ob, false);
+  }
+
+  undo::push_begin_multi_object(scene, &op, gesture_data.objects.as_span());
 }
 
 static float mask_gesture_get_new_value(const float elem, FloodFillMode mode, float value)
@@ -898,11 +906,14 @@ static void gesture_apply_for_symmetry_pass(bContext & /*C*/, gesture::GestureDa
 static void gesture_end(bContext &C, gesture::GestureData &gesture_data)
 {
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(&C);
-  Object &object = *gesture_data.vc.obact;
-  if (bke::object::pbvh_get(object)->type() == bke::pbvh::Type::Grids) {
-    multires_mark_as_modified(depsgraph, &object, MULTIRES_COORDS_MODIFIED);
+
+  for (Object *ob : gesture_data.objects) {
+    if (bke::object::pbvh_get(*ob)->type() == bke::pbvh::Type::Grids) {
+      multires_mark_as_modified(depsgraph, ob, MULTIRES_COORDS_MODIFIED);
+    }
   }
-  undo::push_end(object);
+
+  undo::finish_multi_object(&C, gesture_data.objects.as_span(), UpdateType::Mask);
 }
 
 static void init_operation(bContext &C, gesture::GestureData &gesture_data, wmOperator &op)
@@ -912,10 +923,14 @@ static void init_operation(bContext &C, gesture::GestureData &gesture_data, wmOp
 
   MaskOperation *mask_operation = reinterpret_cast<MaskOperation *>(gesture_data.operation);
 
-  Object *object = gesture_data.vc.obact;
-  MultiresModifierData *mmd = BKE_sculpt_multires_active(gesture_data.vc.scene, object);
-  BKE_sculpt_mask_layers_ensure(
-      CTX_data_depsgraph_pointer(&C), CTX_data_main(&C), gesture_data.vc.obact, mmd);
+  /* Ensure the grid paint mask layer exists on EVERY object in the gesture, not just the active
+   * one -- `gesture_apply_for_symmetry_pass`'s Grids case indexes `SubdivCCG::masks`
+   * unconditionally, which is left empty for a multires object that has never had a mask layer
+   * created (see #ensure_mask_layers). */
+  ensure_mask_layers(CTX_data_depsgraph_pointer(&C),
+                      CTX_data_main(&C),
+                      gesture_data.vc.scene,
+                      gesture_data.objects);
 
   mask_operation->op.begin = gesture_begin;
   mask_operation->op.apply_for_symmetry_pass = gesture_apply_for_symmetry_pass;
@@ -946,6 +961,7 @@ static wmOperatorStatus gesture_box_exec(bContext *C, wmOperator *op)
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
+  gesture_data->objects = sculpt_mode_objects(gesture_data->vc);
   init_operation(*C, *gesture_data, *op);
   ed::sculpt_paint::mask_overlay_check(*C, *op);
   gesture::apply(*C, *gesture_data, *op);
@@ -958,6 +974,7 @@ static wmOperatorStatus gesture_lasso_exec(bContext *C, wmOperator *op)
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
+  gesture_data->objects = sculpt_mode_objects(gesture_data->vc);
   init_operation(*C, *gesture_data, *op);
   ed::sculpt_paint::mask_overlay_check(*C, *op);
   gesture::apply(*C, *gesture_data, *op);
@@ -970,6 +987,7 @@ static wmOperatorStatus gesture_line_exec(bContext *C, wmOperator *op)
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
+  gesture_data->objects = sculpt_mode_objects(gesture_data->vc);
   init_operation(*C, *gesture_data, *op);
   ed::sculpt_paint::mask_overlay_check(*C, *op);
   gesture::apply(*C, *gesture_data, *op);
@@ -982,6 +1000,7 @@ static wmOperatorStatus gesture_polyline_exec(bContext *C, wmOperator *op)
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
+  gesture_data->objects = sculpt_mode_objects(gesture_data->vc);
   init_operation(*C, *gesture_data, *op);
   ed::sculpt_paint::mask_overlay_check(*C, *op);
   gesture::apply(*C, *gesture_data, *op);

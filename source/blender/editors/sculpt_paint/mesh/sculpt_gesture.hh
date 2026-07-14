@@ -13,6 +13,7 @@
 #include "BLI_index_mask.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_scene_enums.h"
 #include "DNA_vec_types.h"
@@ -21,6 +22,7 @@
 
 namespace blender {
 
+struct Object;
 struct SculptSession;
 struct wmOperatorType;
 namespace bke::pbvh {
@@ -77,6 +79,12 @@ struct GestureData {
   SculptSession *ss;
   ViewContext vc;
 
+  /* Objects this gesture applies to. Defaults to `{vc.obact}` (set by init_common()); operators
+   * that support multi-object gestures overwrite it with sculpt_mode_objects(vc) right after
+   * init_from_*() returns. apply() loops over this list, recomputing all per-object state (see
+   * init_object_space()) for each entry. */
+  Vector<Object *> objects;
+
   /* Enabled and currently active symmetry. */
   ePaintSymmetryFlags symm;
   ePaintSymmetryFlags symmpass;
@@ -120,8 +128,35 @@ struct GestureData {
   IndexMaskMemory node_mask_memory;
   IndexMask node_mask;
 
+  /* World-space anchors saved by init_from_box()/init_from_line(), used by init_object_space()
+   * to recompute the per-object true_clip_planes / line.true_plane / line.true_side_plane for
+   * each object in `objects`. Lasso reuses the already-stored `lasso.boundbox` and does not need
+   * a dedicated anchor. */
+  rcti box_rect;
+  std::array<float3, 4> line_plane_points;
+  std::array<float3, 2> line_offset_plane_points;
+
+  /* Shared multi-object symmetry frame for `Paint.symmetry_space` == Global World Origin / Global
+   * 3D Cursor (see #symmetry_space_frame in sculpt_multi_object.hh). True only when there is more
+   * than one object AND symmetry_space != Active Object -- single-object gestures and Active
+   * Object space keep the historical per-object local mirror (around each object's own origin),
+   * bit-exact. Recomputed once per #apply() call from the reference object (`objects[0]`); unlike
+   * `symmpass`, the frame itself does not vary between symmetry passes or objects. Consumed by
+   * #flip_for_symmetry_pass, #is_affected_lasso, and #mirror_world_point (also used by
+   * gesture operations that mirror their own generated geometry, e.g. Trim). */
+  bool use_shared_symmetry_frame = false;
+  float4x4 world_to_symm_space = float4x4::identity();
+  float4x4 symm_space_to_world = float4x4::identity();
+
   ~GestureData();
 };
+
+/* Mirrors a WORLD-space point through the current symmetry pass (`GestureData::symmpass`) using
+ * the shared symmetry frame (`world_to_symm_space` / `symm_space_to_world`). Only meaningful when
+ * `use_shared_symmetry_frame` is true -- callers must check that themselves and fall back to
+ * their own local-space mirror otherwise (see #flip_for_symmetry_pass for the canonical example).
+ */
+float3 mirror_world_point(const GestureData &gesture_data, const float3 &world_point);
 
 /* Common abstraction structure for gesture operations. */
 struct Operation {

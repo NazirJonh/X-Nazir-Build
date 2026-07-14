@@ -22,12 +22,14 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
 #include "BLI_task.h"
+#include "BLI_utildefines.h"
 
 #include "BKE_ccg.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_mesh.h"
 #include "BKE_mesh_runtime.hh"
 #include "BKE_mesh_types.hh"
+#include "BKE_layer.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
 #include "BKE_paint.hh"
@@ -400,6 +402,102 @@ void multiresModifier_set_levels_from_disps(MultiresModifierData *mmd, Object *o
     mmd->sculptlvl = std::min(mmd->sculptlvl, mmd->totlvl);
     mmd->renderlvl = std::min(mmd->renderlvl, mmd->totlvl);
   }
+}
+
+int multires_level_get(const MultiresModifierData *mmd, const MultiresLevelType level_type)
+{
+  switch (level_type) {
+    case MultiresLevelType::Viewport:
+      return mmd->lvl;
+    case MultiresLevelType::Sculpt:
+      return mmd->sculptlvl;
+    case MultiresLevelType::Render:
+      return mmd->renderlvl;
+  }
+  BLI_assert_unreachable();
+  return 0;
+}
+
+void multires_level_set(MultiresModifierData *mmd, const MultiresLevelType level_type, const int value)
+{
+  int clamped = value;
+  CLAMP(clamped, 0, int(mmd->totlvl));
+  switch (level_type) {
+    case MultiresLevelType::Viewport:
+      mmd->lvl = char(clamped);
+      return;
+    case MultiresLevelType::Sculpt:
+      mmd->sculptlvl = char(clamped);
+      return;
+    case MultiresLevelType::Render:
+      mmd->renderlvl = char(clamped);
+      return;
+  }
+  BLI_assert_unreachable();
+}
+
+Vector<Object *> multires_level_group_sync(const Span<Object *> candidates,
+                                           const Object *active_ob,
+                                           const MultiresLevelType level_type,
+                                           const int old_value,
+                                           const int new_value,
+                                           const bool only_matching)
+{
+  Vector<Object *> changed;
+  for (Object *ob : candidates) {
+    if (ob == active_ob) {
+      continue;
+    }
+    ModifierData *md = BKE_modifiers_findby_type(ob, eModifierType_Multires);
+    if (!md) {
+      continue;
+    }
+    MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(md);
+    if (only_matching && multires_level_get(mmd, level_type) != old_value) {
+      continue;
+    }
+    multires_level_set(mmd, level_type, new_value);
+    changed.append(ob);
+  }
+  return changed;
+}
+
+Vector<Object *> multires_group_objects(const Main *bmain,
+                                        const Scene *scene,
+                                        ViewLayer *view_layer,
+                                        const View3D *v3d)
+{
+  const ObjectsInModeParams params{OB_MODE_SCULPT, false, nullptr, nullptr};
+  const Vector<Object *> objects = BKE_view_layer_array_from_objects_in_mode_params(
+      *bmain, scene, view_layer, v3d, &params);
+  Vector<Object *> result;
+  for (Object *ob : objects) {
+    if (BKE_modifiers_findby_type(ob, eModifierType_Multires)) {
+      result.append(ob);
+    }
+  }
+  return result;
+}
+
+Vector<Object *> multires_totlvl_matching_group(const Span<Object *> candidates,
+                                                const Object *active_ob,
+                                                const int reference_totlvl)
+{
+  Vector<Object *> matching;
+  for (Object *ob : candidates) {
+    if (ob == active_ob) {
+      continue;
+    }
+    ModifierData *md = BKE_modifiers_findby_type(ob, eModifierType_Multires);
+    if (!md) {
+      continue;
+    }
+    if (reinterpret_cast<MultiresModifierData *>(md)->totlvl != reference_totlvl) {
+      continue;
+    }
+    matching.append(ob);
+  }
+  return matching;
 }
 
 static void multires_set_tot_mdisps(Mesh *mesh, const int lvl)

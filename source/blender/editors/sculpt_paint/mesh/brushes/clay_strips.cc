@@ -512,6 +512,13 @@ CursorSampleResult calc_node_mask(const Depsgraph &depsgraph,
   plane_normal = tilt_apply_to_normal(plane_normal, *ss.cache, brush.tilt_strength_factor);
   plane_center += plane_normal * ss.cache->scale * displace;
 
+  /* #plane_normal is a raw local-space normal; correct it for the object's non-uniform scale
+   * now, after the #plane_center offset above (which intentionally uses the raw direction,
+   * matching #StrokeCache.scale's own magnitude-compensation convention there), but before it
+   * is used to build any orientation basis below, or returned for #do_clay_strips_brush's own
+   * (otherwise uncompensated) offset (see #scale_normalized). */
+  plane_normal = scale_normalized_unit(*ss.cache, plane_normal);
+
   if (math::is_zero(ss.cache->grab_delta_symm) || math::is_zero(plane_normal)) {
     /* The brush local matrix is degenerate: return an empty index mask. */
     return {IndexMask(), plane_center, plane_normal};

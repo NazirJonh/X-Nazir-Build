@@ -18,6 +18,7 @@
 #include "rna_internal.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "BKE_paint.hh"
@@ -122,6 +123,7 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 
 #  include "ED_gpencil_legacy.hh"
 #  include "ED_image.hh"
+#  include "ED_object.hh"
 #  include "ED_paint.hh"
 #  include "ED_particle.hh"
 
@@ -303,6 +305,29 @@ static void rna_Sculpt_update(bContext *C, PointerRNA * /*ptr*/)
   if (ob) {
     DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
     WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ob);
+  }
+}
+
+static void rna_Sculpt_multi_object_edit_scope_update(bContext *C, PointerRNA *ptr)
+{
+  const Sculpt *sd = static_cast<const Sculpt *>(ptr->data);
+  const Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+
+  if (sd->multi_object_edit_scope == SCULPT_MULTI_OBJECT_EDIT_ACTIVE) {
+    if (Object *obact = BKE_view_layer_active_object_get(view_layer)) {
+      ed::object::object_overlay_mode_transfer_animation_start(C, obact);
+    }
+    return;
+  }
+
+  const ObjectsInModeParams params{OB_MODE_SCULPT, false, nullptr, nullptr};
+  const Vector<Object *> objects = BKE_view_layer_array_from_objects_in_mode_params(
+      *bmain, scene, view_layer, CTX_wm_view3d(C), &params);
+  for (Object *ob : objects) {
+    ed::object::object_overlay_mode_transfer_animation_start(C, ob);
   }
 }
 
@@ -696,6 +721,26 @@ static void rna_def_paint(BlenderRNA *brna)
   StructRNA *srna;
   PropertyRNA *prop;
 
+  static const EnumPropertyItem symmetry_space_items[] = {
+      {PAINT_SYMM_SPACE_ACTIVE_OBJECT,
+       "ACTIVE_OBJECT",
+       0,
+       "Object",
+       "Mirror across the active object's own local axes (default; matches the same meshes after "
+       "joining them)"},
+      {PAINT_SYMM_SPACE_GLOBAL_WORLD,
+       "GLOBAL_WORLD",
+       0,
+       "World",
+       "Mirror across world axes through the scene world origin"},
+      {PAINT_SYMM_SPACE_GLOBAL_CURSOR,
+       "GLOBAL_CURSOR",
+       0,
+       "Cursor",
+       "Mirror across world axes through the 3D cursor"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   srna = RNA_def_struct(brna, "Paint", nullptr);
   RNA_def_struct_ui_text(srna, "Paint", "");
 
@@ -771,6 +816,25 @@ static void rna_def_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Symmetry Feathering",
                            "Reduce the strength of the brush where it overlaps symmetrical daubs");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "symmetry_space", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "symmetry_space");
+  RNA_def_property_enum_items(prop, symmetry_space_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Symmetry Space",
+      "Space of the brush symmetry plane in multi-object sculpt: the active object's local axes, "
+      "or world axes pivoted at the world origin or 3D cursor");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* Deprecated: superseded by #symmetry_space (PAINT_SYMM_SPACE_ACTIVE_OBJECT is now always-on for
+   * multi-object strokes). Kept as a no-op so existing Python scripts do not break; the underlying
+   * #PAINT_SYMMETRY_SHARED_ORIGIN bit is no longer read. */
+  prop = RNA_def_property(srna, "use_symmetry_shared_origin", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "symmetry_flags", PAINT_SYMMETRY_SHARED_ORIGIN);
+  RNA_def_property_ui_text(
+      prop, "Shared Symmetry Origin", "Deprecated, use symmetry_space instead");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "cavity_curve", PROP_POINTER, PROP_NONE);
@@ -1193,6 +1257,20 @@ static void rna_def_sculpt(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem sculpt_multi_object_edit_scope_items[] = {
+      {SCULPT_MULTI_OBJECT_EDIT_ACTIVE,
+       "ACTIVE",
+       0,
+       "Active Object",
+       "Brush strokes and tools only affect the active object"},
+      {SCULPT_MULTI_OBJECT_EDIT_ALL,
+       "ALL",
+       0,
+       "All Objects",
+       "Brush strokes and tools affect every object currently in Sculpt Mode"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   StructRNA *srna;
   PropertyRNA *prop;
 
@@ -1281,6 +1359,38 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, sculpt_transform_mode_items);
   RNA_def_property_ui_text(
       prop, "Transform Mode", "How the transformation is going to be applied to the target");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "multi_object_edit_scope", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, sculpt_multi_object_edit_scope_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Multi-Object Edit Scope",
+      "Whether brush strokes and tools act on the active object only, or on every object "
+      "currently in Sculpt Mode");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Sculpt_multi_object_edit_scope_update");
+
+  prop = RNA_def_property(srna, "transform_all_objects", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "transform_all_objects", false);
+  RNA_def_property_boolean_default(prop, false);
+  RNA_def_property_ui_text(
+      prop,
+      "Affect All Objects",
+      "Move, rotate, and scale every object currently in Sculpt Mode together, around one "
+      "shared pivot, instead of only the active object");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "transform_origin_correct", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "transform_origin_correct", false);
+  RNA_def_property_boolean_default(prop, false);
+  RNA_def_property_ui_text(
+      prop,
+      "Correct Origin",
+      "Move non-active objects' own origin together with their mesh, like an Object Mode "
+      "transform, instead of leaving it in place. Only applies with \"Affect All Objects\" "
+      "enabled and Transform Mode set to \"All Vertices\"");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "gravity_object", PROP_POINTER, PROP_NONE);

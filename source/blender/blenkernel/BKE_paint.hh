@@ -487,6 +487,18 @@ struct SculptSession : NonCopyable, NonMovable {
   float4 prev_pivot_rot = float4(0.0f, 0.0f, 0.0f, 1.0f);
   float3 prev_pivot_scale = {};
 
+  /* World-space pivot position/rotation actively driven by the Transform tool's modal session
+   * (see `sculpt_transform.cc`'s #createTransSculpt/#update_modal_transform). Kept separate from
+   * #pivot_pos/#pivot_rot -- which stay LOCAL-space everywhere else in the codebase -- because
+   * Blender's generic rotation math only produces a valid (non-sheared) result when the
+   * TransData conjugation matrix is a pure rotation; for an object with non-uniform #Object.scale
+   * that requires working in world space, not the object's own (anisotropic) local space. Every
+   * object in a multi-object Transform session gets an identical copy of these two fields (there
+   * is one shared world pivot for the whole group), converted back into that object's own
+   * #pivot_pos/#pivot_rot every modal step. */
+  float3 transform_pivot_pos_world = {};
+  float4 transform_pivot_rot_world = float4(0.0f, 0.0f, 0.0f, 1.0f);
+
   eObjectMode mode_type;
 
   /**

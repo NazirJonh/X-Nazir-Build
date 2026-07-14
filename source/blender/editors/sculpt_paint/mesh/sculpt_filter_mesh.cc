@@ -18,6 +18,7 @@
 #include "BLI_index_range.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_matrix.h"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
@@ -70,7 +71,7 @@ float3x3 to_orientation_space(const filter::Cache &filter_cache)
 {
   switch (filter_cache.orientation) {
     case FilterOrientation::Local:
-      return float3x3::identity();
+      return filter_cache.local_orientation_mat;
     case FilterOrientation::World:
       return float3x3(filter_cache.obmat);
     case FilterOrientation::View:
@@ -84,7 +85,7 @@ float3x3 to_object_space(const filter::Cache &filter_cache)
 {
   switch (filter_cache.orientation) {
     case FilterOrientation::Local:
-      return float3x3::identity();
+      return filter_cache.local_orientation_mat_inv;
     case FilterOrientation::World:
       return float3x3(filter_cache.obmat_inv);
     case FilterOrientation::View:
@@ -102,16 +103,10 @@ void zero_disabled_axis_components(const filter::Cache &filter_cache,
     return;
   }
 
-  if (filter_cache.orientation == FilterOrientation::Local) {
-    for (const int i : vectors.index_range()) {
-      for (int axis = 0; axis < 3; axis++) {
-        if (!filter_cache.enabled_axis[axis]) {
-          vectors[i][axis] = 0.0f;
-        }
-      }
-    }
-  }
-
+  /* #FilterOrientation::Local used to be special-cased here with a direct component zeroing, which
+   * fell through into the generic path below and zeroed a second time -- harmless only because its
+   * matrices were the identity. They are no longer identity for secondary objects (see
+   * #Cache::local_orientation_mat), and the generic path handles the identity case identically. */
   const float3x3 local_to_orientation = to_orientation_space(filter_cache);
   const float3x3 orientation_to_object = to_object_space(filter_cache);
   for (const int i : vectors.index_range()) {
@@ -2224,10 +2219,12 @@ static void sculpt_mesh_update_status_bar(bContext *C, wmOperator * /*op*/)
   status.item(IFACE_("Cancel"), ICON_EVENT_ESC, ICON_MOUSE_RMB);
 }
 
-static void sculpt_mesh_filter_apply(bContext *C, wmOperator *op, bool is_replay = false)
+static void sculpt_mesh_filter_apply_object(bContext *C,
+                                            wmOperator *op,
+                                            Object &ob,
+                                            const bool is_replay)
 {
   const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
-  Object &ob = *CTX_data_active_object(C);
   SculptSession &ss = *ob.runtime->sculpt_session;
   const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   const MeshFilterType filter_type = MeshFilterType(RNA_enum_get(op->ptr, "type"));
@@ -2287,8 +2284,20 @@ static void sculpt_mesh_filter_apply(bContext *C, wmOperator *op, bool is_replay
   pbvh.update_bounds(depsgraph, ob);
 
   ss.filter_cache->iteration_count++;
+}
 
-  flush_update_step(C, UpdateType::Position);
+static void sculpt_mesh_filter_apply(bContext *C, wmOperator *op, bool is_replay = false)
+{
+  ViewContext vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
+  for (Object *ob : sculpt_mode_objects(vc)) {
+    /* Objects skipped at init (e.g. a non-Multires mesh under Erase Displacement) have no filter
+     * cache; the rest of the group is still filtered. */
+    if (!ob->runtime->sculpt_session->filter_cache) {
+      continue;
+    }
+    sculpt_mesh_filter_apply_object(C, op, *ob, is_replay);
+    flush_update_step(vc, *ob, UpdateType::Position);
+  }
 }
 
 static void sculpt_mesh_update_strength(wmOperator *op,
@@ -2335,12 +2344,16 @@ static void sculpt_mesh_filter_apply_with_history(bContext *C, wmOperator *op)
 
 static void sculpt_mesh_filter_end(bContext *C)
 {
-  Object &ob = *CTX_data_active_object(C);
-  SculptSession &ss = *ob.runtime->sculpt_session;
-
-  MEM_delete(ss.filter_cache);
-  ss.filter_cache = nullptr;
-  flush_update_done(C, ob, UpdateType::Position);
+  ViewContext vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
+  for (Object *ob : sculpt_mode_objects(vc)) {
+    SculptSession &ss = *ob->runtime->sculpt_session;
+    if (!ss.filter_cache) {
+      continue;
+    }
+    MEM_delete(ss.filter_cache);
+    ss.filter_cache = nullptr;
+    flush_update_done(C, *ob, UpdateType::Position);
+  }
 }
 
 static wmOperatorStatus sculpt_mesh_filter_confirm(SculptSession &ss,
@@ -2356,20 +2369,27 @@ static wmOperatorStatus sculpt_mesh_filter_confirm(SculptSession &ss,
   return OPERATOR_FINISHED;
 }
 
-static void sculpt_mesh_filter_cancel(bContext *C, wmOperator * /*op*/)
+static void sculpt_mesh_filter_cancel_object(const Depsgraph &depsgraph, Object &ob)
 {
-  const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
-  Object &ob = *CTX_data_active_object(C);
   SculptSession *ss = ob.runtime->sculpt_session;
   bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
 
-  if (!ss || !pbvh) {
+  if (!ss || !ss->filter_cache || !pbvh) {
     return;
   }
 
   undo::restore_position_from_undo_step(depsgraph, ob);
   bke::pbvh::update_normals(depsgraph, ob, *pbvh);
   pbvh->update_bounds(depsgraph, ob);
+}
+
+static void sculpt_mesh_filter_cancel(bContext *C, wmOperator * /*op*/)
+{
+  const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
+  ViewContext vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
+  for (Object *ob : sculpt_mode_objects(vc)) {
+    sculpt_mesh_filter_cancel_object(depsgraph, *ob);
+  }
 }
 
 static wmOperatorStatus sculpt_mesh_filter_modal(bContext *C, wmOperator *op, const wmEvent *event)
@@ -2387,13 +2407,13 @@ static wmOperatorStatus sculpt_mesh_filter_modal(bContext *C, wmOperator *op, co
     switch (event->val) {
       case FILTER_MESH_MODAL_CANCEL:
         sculpt_mesh_filter_cancel(C, op);
-        undo::push_end_ex(ob, true);
+        undo::push_end_all_ex(false, true);
         ret = OPERATOR_CANCELLED;
         break;
 
       case FILTER_MESH_MODAL_CONFIRM:
         ret = sculpt_mesh_filter_confirm(ss, op, filter_type);
-        undo::push_end_ex(ob, false);
+        undo::push_end_all_ex(false, true);
         break;
     }
 
@@ -2429,8 +2449,17 @@ static wmOperatorStatus sculpt_mesh_filter_modal(bContext *C, wmOperator *op, co
     RNA_float_set_array(&itemptr, "mouse_event", mouse);
     RNA_float_set(&itemptr, "pressure", WM_event_tablet_data(event, nullptr, nullptr));
   }
-  else {
-    undo::restore_position_from_undo_step(*depsgraph, ob);
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
+
+  if (!sculpt_mesh_filter_is_continuous(filter_type)) {
+    /* Non-continuous filters re-apply from the pre-filter positions on every step, so every
+     * participating object has to be rewound, not just the active one. */
+    for (Object *object : objects) {
+      if (object->runtime->sculpt_session->filter_cache) {
+        undo::restore_position_from_undo_step(*depsgraph, *object);
+      }
+    }
   }
 
   float2 prev_mval(float(event->prev_press_xy[0]), float(event->prev_press_xy[1]));
@@ -2438,7 +2467,11 @@ static wmOperatorStatus sculpt_mesh_filter_modal(bContext *C, wmOperator *op, co
 
   sculpt_mesh_update_strength(op, ss, prev_mval, mval);
 
-  BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
+  for (Object *object : objects) {
+    if (object->runtime->sculpt_session->filter_cache) {
+      BKE_sculpt_update_object_for_edit(depsgraph, object, false);
+    }
+  }
 
   sculpt_mesh_filter_apply(C, op);
 
@@ -2483,6 +2516,50 @@ static void sculpt_filter_specific_init(const Depsgraph &depsgraph,
   }
 }
 
+/**
+ * Make a multi-object filter behave as if every mesh were joined into the reference (active)
+ * object. Only three pieces of #filter::Cache are shared this way; everything else in it is
+ * legitimately per-object (node mask, view normal, the Sharpen/Surface Smooth pre-computations).
+ *
+ * A single-object filter returns early, so its cache keeps exactly the values #cache_init produced
+ * -- no matrix round-trip that could perturb them.
+ */
+static void filter_propagate_shared_state(Object &reference, const Span<Object *> objects)
+{
+  if (objects.size() == 1) {
+    return;
+  }
+
+  const filter::Cache &reference_cache = *reference.runtime->sculpt_session->filter_cache;
+
+  /* #Cache::initial_normal is in the object's own local space; carry the reference's through world
+   * space (normals transform by the inverse transpose) so brush-normal auto-masking uses one
+   * surface direction for the whole group instead of a per-object area normal sampled from a
+   * cursor hit that may not even lie on that object. */
+  const float3x3 reference_to_world = math::transpose(
+      math::invert(float3x3(reference.object_to_world())));
+  const float3 world_initial_normal = math::normalize(reference_to_world *
+                                                      reference_cache.initial_normal);
+
+  for (Object *object : objects) {
+    filter::Cache &cache = *object->runtime->sculpt_session->filter_cache;
+    if (object == &reference) {
+      continue;
+    }
+
+    /* Random must not be re-seeded per mesh, or each one gets unrelated noise. */
+    cache.random_seed = reference_cache.random_seed;
+
+    cache.initial_normal = math::normalize(math::transpose(float3x3(object->object_to_world())) *
+                                           world_initial_normal);
+
+    /* Deform along the reference object's local axes rather than this object's own. */
+    cache.local_orientation_mat = float3x3(reference.world_to_object() *
+                                           object->object_to_world());
+    cache.local_orientation_mat_inv = math::invert(cache.local_orientation_mat);
+  }
+}
+
 /* Returns OPERATOR_PASS_THROUGH on success. */
 static wmOperatorStatus sculpt_mesh_filter_start(bContext *C, wmOperator *op)
 {
@@ -2504,25 +2581,38 @@ static wmOperatorStatus sculpt_mesh_filter_start(bContext *C, wmOperator *op)
   const bool use_automasking = auto_mask::is_enabled(sd.paint, ob, nullptr);
   const bool needs_topology_info = sculpt_mesh_filter_needs_pmap(filter_type) || use_automasking;
 
-  BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
-
-  if (!shape_key_check(ob, op->reports)) {
-    return OPERATOR_CANCELLED;
-  }
-
-  SculptSession &ss = *ob.runtime->sculpt_session;
-
-  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
-  if (filter_type == MeshFilterType::EraseDisplacement && pbvh.type() != bke::pbvh::Type::Grids) {
-    return OPERATOR_CANCELLED;
-  }
-
   const eMeshFilterDeformAxis deform_axis = eMeshFilterDeformAxis(
       RNA_enum_get(op->ptr, "deform_axis"));
 
   if (deform_axis == 0) {
     /* All axis are disabled, so the filter is not going to produce any deformation. */
     return OPERATOR_CANCELLED;
+  }
+
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+
+  /* Erase Displacement only means anything on Multires geometry. The active object still gates the
+   * whole operator (unchanged behavior), but a plain mesh among the secondaries is skipped rather
+   * than cancelling the filter for the whole group. The active object is therefore always present
+   * in #objects, which the modal handler relies on for its shared filter state. */
+  Vector<Object *> objects;
+  for (Object *object : sculpt_mode_objects(vc)) {
+    BKE_sculpt_update_object_for_edit(depsgraph, object, false);
+
+    if (!shape_key_check(*object, op->reports)) {
+      return OPERATOR_CANCELLED;
+    }
+
+    const bke::pbvh::Tree &object_pbvh = bke::object::pbvh_ensure(*depsgraph, *object);
+    if (filter_type == MeshFilterType::EraseDisplacement &&
+        object_pbvh.type() != bke::pbvh::Type::Grids)
+    {
+      if (object == &ob) {
+        return OPERATOR_CANCELLED;
+      }
+      continue;
+    }
+    objects.append(object);
   }
 
   float2 mval_fl{float(mval[0]), float(mval[1])};
@@ -2532,34 +2622,39 @@ static wmOperatorStatus sculpt_mesh_filter_start(bContext *C, wmOperator *op)
     cursor_geometry_info_update(C, mval_fl, false);
   }
 
-  vert_random_access_ensure(ob);
-  if (needs_topology_info) {
-    boundary::ensure_boundary_info(ob);
+  undo::push_begin_multi_object(scene, op, objects);
+
+  for (Object *object : objects) {
+    vert_random_access_ensure(*object);
+    if (needs_topology_info) {
+      boundary::ensure_boundary_info(*object);
+    }
+
+    cache_init(C,
+               *object,
+               sd,
+               undo::Type::Position,
+               mval_fl,
+               RNA_float_get(op->ptr, "area_normal_radius"),
+               RNA_float_get(op->ptr, "strength"));
+
+    filter::Cache &filter_cache = *object->runtime->sculpt_session->filter_cache;
+    filter_cache.active_face_set = face_set_none_id;
+    if (auto_mask::is_enabled(sd.paint, *object, nullptr)) {
+      auto_mask::filter_cache_ensure(*depsgraph, sd.paint, *object);
+    }
+
+    sculpt_filter_specific_init(*depsgraph, filter_type, op, *object);
+
+    filter_cache.enabled_axis[0] = deform_axis & MESH_FILTER_DEFORM_X;
+    filter_cache.enabled_axis[1] = deform_axis & MESH_FILTER_DEFORM_Y;
+    filter_cache.enabled_axis[2] = deform_axis & MESH_FILTER_DEFORM_Z;
+    filter_cache.orientation = FilterOrientation(RNA_enum_get(op->ptr, "orientation"));
   }
 
-  undo::push_begin(scene, ob, op);
-
-  cache_init(C,
-             ob,
-             sd,
-             undo::Type::Position,
-             mval_fl,
-             RNA_float_get(op->ptr, "area_normal_radius"),
-             RNA_float_get(op->ptr, "strength"));
-
-  filter::Cache *filter_cache = ss.filter_cache;
-  filter_cache->active_face_set = face_set_none_id;
-  if (auto_mask::is_enabled(sd.paint, ob, nullptr)) {
-    auto_mask::filter_cache_ensure(*depsgraph, sd.paint, ob);
-  }
-
-  sculpt_filter_specific_init(*depsgraph, filter_type, op, ob);
-
-  ss.filter_cache->enabled_axis[0] = deform_axis & MESH_FILTER_DEFORM_X;
-  ss.filter_cache->enabled_axis[1] = deform_axis & MESH_FILTER_DEFORM_Y;
-  ss.filter_cache->enabled_axis[2] = deform_axis & MESH_FILTER_DEFORM_Z;
-
-  ss.filter_cache->orientation = FilterOrientation(RNA_enum_get(op->ptr, "orientation"));
+  /* #sculpt_mode_objects returns the active object first, and it is never skipped above. */
+  BLI_assert(objects.first() == &ob);
+  filter_propagate_shared_state(ob, objects);
 
   return OPERATOR_PASS_THROUGH;
 }
@@ -2591,7 +2686,7 @@ static wmOperatorStatus sculpt_mesh_filter_exec(bContext *C, wmOperator *op)
     }
 
     sculpt_mesh_filter_end(C);
-    undo::push_end(*CTX_data_active_object(C));
+    undo::push_end_all_ex(false, true);
 
     return OPERATOR_FINISHED;
   }

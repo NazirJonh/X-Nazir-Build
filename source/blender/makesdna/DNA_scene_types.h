@@ -1238,6 +1238,9 @@ struct Paint {
 
   /** Flags used for symmetry. */
   ePaintSymmetryFlags symmetry_flags = PAINT_SYMMETRY_FEATHER;
+  /** #ePaintSymmetrySpace: space for the multi-object brush symmetry plane. */
+  char symmetry_space = 0;
+  char _pad_symm[7] = {};
   /**
    * Collapsed state of a given pressure curve
    */
@@ -1476,6 +1479,12 @@ enum eSculptTransformMode : int {
   SCULPT_TRANSFORM_MODE_RADIUS_ELASTIC = 1,
 };
 
+/** #Sculpt::multi_object_edit_scope */
+enum eSculptMultiObjectEditScope : int {
+  SCULPT_MULTI_OBJECT_EDIT_ALL = 0,
+  SCULPT_MULTI_OBJECT_EDIT_ACTIVE = 1,
+};
+
 /** Sculpt. */
 struct Sculpt {
   DNA_DEFINE_CXX_METHODS(Sculpt)
@@ -1486,6 +1495,22 @@ struct Sculpt {
 
   /** Transform tool. */
   eSculptTransformMode transform_mode = SCULPT_TRANSFORM_MODE_ALL_VERTICES;
+
+  /** Whether brush strokes and tools act on the active object only, or on every object
+   * currently in Sculpt Mode. */
+  eSculptMultiObjectEditScope multi_object_edit_scope = SCULPT_MULTI_OBJECT_EDIT_ALL;
+
+  /** When enabled, the Transform tool's gizmo moves/rotates/scales every object currently in
+   * Sculpt Mode around one shared world-space pivot, instead of only the active object.
+   * Independent of #multi_object_edit_scope, which only governs brush strokes and other tools. */
+  int8_t transform_all_objects = 0;
+  /** When enabled (and #transform_all_objects is also on), non-active objects in a Transform
+   * session move as rigid bodies -- their own #Object matrix follows the shared pivot delta
+   * instead of their mesh vertices being deformed -- keeping their origin attached to whatever
+   * point on the group it started coincident with. Only takes effect in
+   * #SCULPT_TRANSFORM_MODE_ALL_VERTICES; a no-op in #SCULPT_TRANSFORM_MODE_RADIUS_ELASTIC. */
+  int8_t transform_origin_correct = 0;
+  char _pad0[2] = {};
 
   /** Deprecated. \see MeshAutomaskingSettings */
   DNA_DEPRECATED int automasking_flags = 0;

@@ -711,6 +711,18 @@ static void rna_Brush_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *pt
   // WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 }
 
+/**
+ * Shared `update` callback for #Brush.sculpt_brush_type and #Brush.cloth_deform_type: both feed
+ * #Brush.drag_kind's classification (see #BKE_brush_drag_kind_update), so a write to either must
+ * keep it in sync.
+ */
+static void rna_Brush_drag_kind_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  Brush *br = static_cast<Brush *>(ptr->data);
+  BKE_brush_drag_kind_update(br);
+  rna_Brush_update(bmain, scene, ptr);
+}
+
 static void rna_Brush_color_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   Brush *br = static_cast<Brush *>(ptr->data);
@@ -754,6 +766,9 @@ static void rna_Brush_size_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 
 static void rna_Brush_stroke_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
+  /* #Brush.stroke_method feeds #Brush.drag_kind's classification for Smear (anchored-stroke
+   * grab-like behavior); see #BKE_brush_drag_kind_update. */
+  BKE_brush_drag_kind_update(static_cast<Brush *>(ptr->data));
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
   rna_Brush_update(bmain, scene, ptr);
 }
@@ -2651,7 +2666,7 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, rna_enum_brush_sculpt_brush_type_items);
   RNA_def_property_ui_text(prop, "Brush Type", "");
   RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_BRUSH);
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
+  RNA_def_property_update(prop, 0, "rna_Brush_drag_kind_update");
 
   prop = RNA_def_property(srna, "vertex_brush_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "vertex_brush_type");
@@ -2786,7 +2801,7 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, brush_cloth_deform_type_items);
   RNA_def_property_ui_text(prop, "Deformation", "Deformation type that is used in the brush");
   RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_BRUSH);
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
+  RNA_def_property_update(prop, 0, "rna_Brush_drag_kind_update");
 
   prop = RNA_def_property(srna, "cloth_force_falloff_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, brush_cloth_force_falloff_type_items);

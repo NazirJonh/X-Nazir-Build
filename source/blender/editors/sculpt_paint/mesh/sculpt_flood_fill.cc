@@ -20,13 +20,18 @@
 /** \name Sculpt Flood Fill API
  *
  * Iterate over connected vertices, starting from one or more initial vertices.
+ *
+ * The traversal is level-synchronized: the whole current front is visited before the next one is
+ * swapped in. This keeps the visit order of a plain FIFO queue, and with it the `from_v` that
+ * discovers each `to_v`, while holding the front in a #Vector instead of allocating per visited
+ * vertex.
  * \{ */
 
 namespace blender::ed::sculpt_paint::flood_fill {
 
 void FillDataMesh::add_initial(const int vertex)
 {
-  this->queue_current.append(vertex);
+  this->queue.append(vertex);
 }
 
 void FillDataMesh::add_initial(const Span<int> verts)
@@ -38,7 +43,7 @@ void FillDataMesh::add_initial(const Span<int> verts)
 
 void FillDataGrids::add_initial(const SubdivCCGCoord vertex)
 {
-  this->queue_current.append(vertex);
+  this->queue.append(vertex);
 }
 
 void FillDataGrids::add_initial(const CCGKey &key, const Span<int> verts)
@@ -50,7 +55,7 @@ void FillDataGrids::add_initial(const CCGKey &key, const Span<int> verts)
 
 void FillDataBMesh::add_initial(BMVert *vertex)
 {
-  this->queue_current.append(vertex);
+  this->queue.append(vertex);
 }
 
 void FillDataBMesh::add_initial(BMesh &bm, const Span<int> verts)
@@ -62,19 +67,19 @@ void FillDataBMesh::add_initial(BMesh &bm, const Span<int> verts)
 
 void FillDataMesh::add_and_skip_initial(const int vertex)
 {
-  this->queue_current.append(vertex);
+  this->queue.append(vertex);
   this->visited_verts[vertex].set();
 }
 
 void FillDataGrids::add_and_skip_initial(const SubdivCCGCoord vertex, const int index)
 {
-  this->queue_current.append(vertex);
+  this->queue.append(vertex);
   this->visited_verts[index].set();
 }
 
 void FillDataBMesh::add_and_skip_initial(BMVert *vertex, const int index)
 {
-  this->queue_current.append(vertex);
+  this->queue.append(vertex);
   this->visited_verts[index].set();
 }
 
@@ -90,15 +95,10 @@ void FillDataMesh::execute(Object &object,
   const VArray hide_vert = *attributes.lookup_or_default<bool>(
       ".hide_vert", bke::AttrDomain::Point, false);
 
-  this->queue_next.clear();
-
-  /* Level-synchronized breadth-first traversal: the whole current front is processed before
-   * swapping in the next one. Compared to a per-element std::queue this avoids the node
-   * allocations while preserving the exact FIFO visit order (and therefore the `from_v` that
-   * discovers each `to_v`). */
+  Vector<int> queue_next;
   Vector<int> neighbors;
-  while (!this->queue_current.is_empty()) {
-    for (const int from_v : this->queue_current) {
+  while (!this->queue.is_empty()) {
+    for (const int from_v : this->queue) {
       vert_neighbors_get_mesh(faces, corner_verts, vert_to_face_map, hide_poly, from_v, neighbors);
       if (!this->fake_neighbors.is_empty() && this->fake_neighbors[from_v] != FAKE_NEIGHBOR_NONE) {
         neighbors.append(this->fake_neighbors[from_v]);
@@ -115,13 +115,13 @@ void FillDataMesh::execute(Object &object,
 
         this->visited_verts[neighbor].set();
         if (func(from_v, neighbor)) {
-          this->queue_next.append(neighbor);
+          queue_next.append(neighbor);
         }
       }
     }
 
-    this->queue_current.clear();
-    std::swap(this->queue_current, this->queue_next);
+    this->queue.clear();
+    std::swap(this->queue, queue_next);
   }
 }
 
@@ -132,13 +132,9 @@ void FillDataGrids::execute(
 {
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
 
-  this->queue_next.clear();
-
-  /* Level-synchronized breadth-first traversal: the whole current front is processed before
-   * swapping in the next one. Avoids per-element std::queue node allocations while preserving
-   * the exact FIFO visit order (and therefore the `from_v` that discovers each `to_v`). */
-  while (!this->queue_current.is_empty()) {
-    for (const SubdivCCGCoord from_v : this->queue_current) {
+  Vector<SubdivCCGCoord> queue_next;
+  while (!this->queue.is_empty()) {
+    for (const SubdivCCGCoord from_v : this->queue) {
       SubdivCCGNeighbors neighbors;
       BKE_subdiv_ccg_neighbor_coords_get(subdiv_ccg, from_v, true, neighbors);
       if (!this->fake_neighbors.is_empty() &&
@@ -169,13 +165,13 @@ void FillDataGrids::execute(
         this->visited_verts[index].set();
         const bool is_duplicate = i >= num_unique;
         if (func(from_v, neighbor, is_duplicate)) {
-          this->queue_next.append(neighbor);
+          queue_next.append(neighbor);
         }
       }
     }
 
-    this->queue_current.clear();
-    std::swap(this->queue_current, this->queue_next);
+    this->queue.clear();
+    std::swap(this->queue, queue_next);
   }
 }
 
@@ -183,14 +179,10 @@ void FillDataBMesh::execute(Object &object, FunctionRef<bool(BMVert *from_v, BMV
 {
   BMesh *bm = object.runtime->sculpt_session->bm;
 
-  this->queue_next.clear();
-
-  /* Level-synchronized breadth-first traversal: the whole current front is processed before
-   * swapping in the next one. Avoids per-element std::queue node allocations while preserving
-   * the exact FIFO visit order (and therefore the `from_v` that discovers each `to_v`). */
+  Vector<BMVert *> queue_next;
   BMeshNeighborVerts neighbors;
-  while (!this->queue_current.is_empty()) {
-    for (BMVert *from_v : this->queue_current) {
+  while (!this->queue.is_empty()) {
+    for (BMVert *from_v : this->queue) {
       if (!this->fake_neighbors.is_empty() &&
           this->fake_neighbors[BM_elem_index_get(from_v)] != FAKE_NEIGHBOR_NONE)
       {
@@ -209,13 +201,13 @@ void FillDataBMesh::execute(Object &object, FunctionRef<bool(BMVert *from_v, BMV
 
         this->visited_verts[neighbor_idx].set();
         if (func(from_v, neighbor)) {
-          this->queue_next.append(neighbor);
+          queue_next.append(neighbor);
         }
       }
     }
 
-    this->queue_current.clear();
-    std::swap(this->queue_current, this->queue_next);
+    this->queue.clear();
+    std::swap(this->queue, queue_next);
   }
 }
 

@@ -24,46 +24,72 @@
 
 namespace blender::ed::sculpt_paint::geodesic {
 
-/* Atomic min update: sets dists[v0] = min(dists[v0], dist0). Returns true if updated. */
-static bool atomic_dist_min(MutableSpan<float> dists, const int v0, const float dist0)
+/**
+ * Distances are shared between the threads relaxing a level of the front, so every access goes
+ * through #std::atomic_ref. It is preferred over `atomic_cas_float` from `atomic_ops.h` because it
+ * also covers the loads, and because relaxed ordering is all this algorithm needs: the only
+ * ordering it relies on is the barrier at the end of each #threading::parallel_for, which already
+ * synchronizes the workers with the single-threaded merge that follows.
+ *
+ * #Array only aligns its buffer to `alignof(T)`, so check that this is enough for a lock-free
+ * atomic reference rather than assuming it.
+ */
+static_assert(alignof(float) >= std::atomic_ref<float>::required_alignment);
+static_assert(alignof(uint8_t) >= std::atomic_ref<uint8_t>::required_alignment);
+
+static float dist_load(MutableSpan<float> dists, const int vert)
 {
-  std::atomic_ref<float> a(dists[v0]);
-  float old = a.load(std::memory_order_relaxed);
-  while (dist0 < old) {
-    if (a.compare_exchange_weak(old, dist0, std::memory_order_relaxed)) {
+  return std::atomic_ref<float>(dists[vert]).load(std::memory_order_relaxed);
+}
+
+/** Lower `dists[vert]` to `dist`, returning true when the distance actually improved. */
+static bool dist_min_update(MutableSpan<float> dists, const int vert, const float dist)
+{
+  std::atomic_ref<float> ref(dists[vert]);
+  float current = ref.load(std::memory_order_relaxed);
+  while (dist < current) {
+    /* A failed exchange refreshes `current` with the value another thread stored meanwhile. */
+    if (ref.compare_exchange_weak(current, dist, std::memory_order_relaxed)) {
       return true;
     }
   }
   return false;
 }
 
-/* Propagate distance from v1 and v2 to v0 — parallel-safe version. */
-static bool sculpt_geodesic_mesh_test_dist_add(const Span<float3> vert_positions,
-                                               const int v0,
-                                               const int v1,
-                                               const int v2,
-                                               MutableSpan<float> dists,
-                                               const Set<int> &initial_verts)
+/** Claim `edge` for the next level, returning true only for the thread that claimed it first. */
+static bool edge_tag_claim(MutableSpan<uint8_t> edge_tag, const int edge)
 {
-  if (initial_verts.contains(v0)) {
+  return std::atomic_ref<uint8_t>(edge_tag[edge]).exchange(1, std::memory_order_relaxed) == 0;
+}
+
+/** Propagate the distance from `v1`, and across the face containing `v2` when it is given, to
+ * `v0`. */
+static bool geodesic_dist_propagate(const Span<float3> vert_positions,
+                                    const int v0,
+                                    const int v1,
+                                    const int v2,
+                                    MutableSpan<float> dists,
+                                    const BitSpan initial_verts)
+{
+  if (initial_verts[v0]) {
     return false;
   }
 
-  const float d1 = std::atomic_ref<float>(dists[v1]).load(std::memory_order_relaxed);
-  if (d1 == FLT_MAX) {
-    return false;
-  }
-  if (std::atomic_ref<float>(dists[v0]).load(std::memory_order_relaxed) <= d1) {
+  /* The vertices propagated from have been reached already, otherwise the edge would not be in the
+   * queue. Another thread may lower them while this runs, but a stale (larger) distance can only
+   * produce a larger candidate, which the atomic minimum discards; whichever thread lowers them
+   * re-queues this edge, so the final relaxation always sees the converged values. */
+  const float d1 = dist_load(dists, v1);
+  BLI_assert(d1 != FLT_MAX);
+  if (dist_load(dists, v0) <= d1) {
     return false;
   }
 
   float dist0;
   if (v2 != SCULPT_GEODESIC_VERTEX_NONE) {
-    const float d2 = std::atomic_ref<float>(dists[v2]).load(std::memory_order_relaxed);
-    if (d2 == FLT_MAX) {
-      return false;
-    }
-    if (std::atomic_ref<float>(dists[v0]).load(std::memory_order_relaxed) <= d2) {
+    const float d2 = dist_load(dists, v2);
+    BLI_assert(d2 != FLT_MAX);
+    if (dist_load(dists, v0) <= d2) {
       return false;
     }
     dist0 = geodesic_distance_propagate_across_triangle(
@@ -75,7 +101,7 @@ static bool sculpt_geodesic_mesh_test_dist_add(const Span<float3> vert_positions
     dist0 = d1 + len_v3(vec);
   }
 
-  return atomic_dist_min(dists, v0, dist0);
+  return dist_min_update(dists, v0, dist0);
 }
 
 Array<float> distances_create(const Span<float3> vert_positions,
@@ -90,17 +116,14 @@ Array<float> distances_create(const Span<float3> vert_positions,
 {
   const float limit_radius_sq = limit_radius * limit_radius;
 
-  Array<float> dists(vert_positions.size());
-  /* Byte array instead of BitVector for lock-free atomic test-and-set per entry. */
-  Array<uint8_t> edge_tag(edges.size(), 0);
+  Array<float> dists(vert_positions.size(), FLT_MAX);
 
-  Vector<int> queue;
-  Vector<int> queue_next;
-  queue.reserve(edges.size() / 8);
-  queue_next.reserve(edges.size() / 8);
-
-  for (const int i : vert_positions.index_range()) {
-    dists[i] = initial_verts.contains(i) ? 0.0f : FLT_MAX;
+  /* Every relaxation checks whether the target is an initial vertex, so use a tag per vertex
+   * instead of hashing into the set in the hot loop. */
+  BitVector<> initial_vert_tags(vert_positions.size());
+  for (const int vert : initial_verts) {
+    dists[vert] = 0.0f;
+    initial_vert_tags[vert].set();
   }
 
   /* Masks vertices that are further than limit radius from an initial vertex. As there is no need
@@ -126,6 +149,13 @@ Array<float> distances_create(const Span<float3> vert_positions,
     }
   }
 
+  /* A full byte per edge rather than a #BitVector: a single bit cannot be claimed atomically
+   * without also writing the bits packed next to it. */
+  Array<uint8_t> edge_tag(edges.size(), 0);
+
+  Vector<int> queue;
+  Vector<int> queue_next;
+
   /* Add edges adjacent to an initial vertex to the queue. */
   for (const int i : edges.index_range()) {
     const int v1 = edges[i][0];
@@ -138,82 +168,97 @@ Array<float> distances_create(const Span<float3> vert_positions,
     }
   }
 
-  /* Parallel label-correcting traversal. Each level relaxes the whole current edge front in
-   * parallel; distance updates use atomic min, and an edge is re-queued whenever one of its
-   * endpoints improves. Because the relaxation is monotonic (a smaller neighbor distance can only
-   * produce a smaller propagated distance) the loop converges to the same unique fixpoint as the
-   * serial version, independent of the order in which threads process edges. Per-thread output
-   * lists are merged once per level to avoid contention on the shared next queue. */
-  threading::EnumerableThreadSpecific<Vector<int>> tls_queue_next;
+  /* Relax every edge of the front, appending the edges that have to be revisited to
+   * `r_queue_next`. Safe to run concurrently on distinct edges of the same level. */
+  const auto relax_edge = [&](const int edge, Vector<int> &r_queue_next) {
+    int v1 = edges[edge][0];
+    int v2 = edges[edge][1];
 
-  while (!queue.is_empty()) {
-    threading::parallel_for(queue.index_range(), 256, [&](const IndexRange range) {
-      Vector<int> &local_next = tls_queue_next.local();
-      for (const int qi : range) {
-        const int e = queue[qi];
-        int v1 = edges[e][0];
-        int v2 = edges[e][1];
+    const float d1 = dist_load(dists, v1);
+    const float d2 = dist_load(dists, v2);
 
-        const float d1 = std::atomic_ref<float>(dists[v1]).load(std::memory_order_relaxed);
-        const float d2 = std::atomic_ref<float>(dists[v2]).load(std::memory_order_relaxed);
+    if (d1 == FLT_MAX || d2 == FLT_MAX) {
+      /* Only one of the endpoints has been reached: propagate along the edge rather than across a
+       * face, from the endpoint that has a distance to the one that does not. */
+      if (d1 > d2) {
+        std::swap(v1, v2);
+      }
+      geodesic_dist_propagate(
+          vert_positions, v2, v1, SCULPT_GEODESIC_VERTEX_NONE, dists, initial_vert_tags);
+    }
 
-        if (d1 == FLT_MAX || d2 == FLT_MAX) {
-          /* One endpoint unreached: propagate edge-only distance from known to unknown. */
-          if (d1 > d2) {
-            std::swap(v1, v2);
-          }
-          sculpt_geodesic_mesh_test_dist_add(
-              vert_positions, v2, v1, SCULPT_GEODESIC_VERTEX_NONE, dists, initial_verts);
+    for (const int face : edge_to_face_map[edge]) {
+      if (!hide_poly.is_empty() && hide_poly[face]) {
+        continue;
+      }
+      for (const int v_other : corner_verts.slice(faces[face])) {
+        if (ELEM(v_other, v1, v2)) {
+          continue;
+        }
+        if (!geodesic_dist_propagate(vert_positions, v_other, v1, v2, dists, initial_vert_tags)) {
+          continue;
         }
 
-        for (const int face : edge_to_face_map[e]) {
-          if (!hide_poly.is_empty() && hide_poly[face]) {
+        /* The distance of `v_other` improved, so everything that can be reached through it has to
+         * be relaxed again with the new value. */
+        for (const int e_other : vert_to_edge_map[v_other]) {
+          if (e_other == edge) {
             continue;
           }
-          for (const int v_other : corner_verts.slice(faces[face])) {
-            if (ELEM(v_other, v1, v2)) {
-              continue;
-            }
-            if (sculpt_geodesic_mesh_test_dist_add(
-                    vert_positions, v_other, v1, v2, dists, initial_verts))
-            {
-              for (const int e_other : vert_to_edge_map[v_other]) {
-                const int ev_other = edges[e_other][0] == v_other ? edges[e_other][1] :
-                                                                    edges[e_other][0];
-                if (e_other == e) {
-                  continue;
-                }
-                if (!edge_to_face_map[e_other].is_empty() &&
-                    std::atomic_ref<float>(dists[ev_other]).load(std::memory_order_relaxed) ==
-                        FLT_MAX)
-                {
-                  continue;
-                }
-                if (!affected_vert[v_other] && !affected_vert[ev_other]) {
-                  continue;
-                }
-                /* Atomic test-and-set: only one thread enqueues each edge. */
-                if (std::atomic_ref<uint8_t>(edge_tag[e_other])
-                        .exchange(1, std::memory_order_relaxed) == 0)
-                {
-                  local_next.append(e_other);
-                }
-              }
-            }
+          const int ev_other = edges[e_other][0] == v_other ? edges[e_other][1] :
+                                                              edges[e_other][0];
+          if (!edge_to_face_map[e_other].is_empty() && dist_load(dists, ev_other) == FLT_MAX) {
+            continue;
+          }
+          if (!affected_vert[v_other] && !affected_vert[ev_other]) {
+            continue;
+          }
+          if (edge_tag_claim(edge_tag, e_other)) {
+            r_queue_next.append(e_other);
           }
         }
       }
-    });
+    }
+  };
 
-    /* Merge thread-local next queues. */
-    for (Vector<int> &local : tls_queue_next) {
-      queue_next.extend(local);
-      local.clear();
+  /* Label-correcting traversal, one level of the edge front at a time. Relaxation is monotonic (a
+   * smaller distance at a neighbor can only produce a smaller propagated distance) and an edge is
+   * re-queued whenever one of its endpoints improves, so the traversal converges to the same
+   * fixpoint no matter in which order the threads relax the level. */
+
+  /* Sculpt tools request geodesic distances around a brush-sized region, so the first levels hold
+   * no more than the handful of edges touching the initial vertices. Threading a front that small
+   * costs more than relaxing it directly. */
+  constexpr int64_t parallel_threshold = 1024;
+  constexpr int64_t grain_size = 256;
+
+  threading::EnumerableThreadSpecific<Vector<int>> queue_next_by_thread;
+
+  while (!queue.is_empty()) {
+    if (queue.size() < parallel_threshold) {
+      for (const int edge : queue) {
+        relax_edge(edge, queue_next);
+      }
+    }
+    else {
+      threading::parallel_for(queue.index_range(), grain_size, [&](const IndexRange range) {
+        Vector<int> &local_queue_next = queue_next_by_thread.local();
+        for (const int i : range) {
+          relax_edge(queue[i], local_queue_next);
+        }
+      });
+
+      /* The parallel loop above joins its workers, so the per-thread queues are complete here. */
+      for (Vector<int> &local_queue_next : queue_next_by_thread) {
+        queue_next.extend(local_queue_next);
+        local_queue_next.clear();
+      }
     }
 
-    /* Reset edge tags for next level. */
-    for (const int e : queue_next) {
-      edge_tag[e] = 0;
+    /* Tags only deduplicate the appends within one level, so they are cleared before the level
+     * they guarded becomes the front. */
+    for (const int edge : queue_next) {
+      edge_tag[edge] = 0;
     }
 
     queue.clear();

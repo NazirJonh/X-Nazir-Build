@@ -25,8 +25,7 @@ struct Object;
 namespace ed::sculpt_paint::flood_fill {
 
 struct FillDataMesh {
-  Vector<int> queue_current;
-  Vector<int> queue_next;
+  Vector<int> queue;
   BitVector<> visited_verts;
   Span<int> fake_neighbors;
 
@@ -46,8 +45,7 @@ struct FillDataMesh {
 };
 
 struct FillDataGrids {
-  Vector<SubdivCCGCoord> queue_current;
-  Vector<SubdivCCGCoord> queue_next;
+  Vector<SubdivCCGCoord> queue;
   BitVector<> visited_verts;
   Span<int> fake_neighbors;
 
@@ -68,8 +66,7 @@ struct FillDataGrids {
 };
 
 struct FillDataBMesh {
-  Vector<BMVert *> queue_current;
-  Vector<BMVert *> queue_next;
+  Vector<BMVert *> queue;
   BitVector<> visited_verts;
   Span<int> fake_neighbors;
 

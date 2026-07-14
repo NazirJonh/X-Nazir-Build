@@ -486,6 +486,7 @@ static void edit_data_init_mesh(OffsetIndices<int> faces,
   float accum_distance = 0.0f;
 
   Vector<int> next_iteration;
+  Vector<int> neighbors;
 
   while (true) {
     /* Stop adding steps to edit info. This happens when a steps is further away from the boundary
@@ -496,7 +497,6 @@ static void edit_data_init_mesh(OffsetIndices<int> faces,
     }
 
     for (const int from_v : current_iteration) {
-      Vector<int> neighbors;
       for (const int neighbor : vert_neighbors_get_mesh(
                faces, corner_verts, vert_to_face, hide_poly, from_v, neighbors))
       {

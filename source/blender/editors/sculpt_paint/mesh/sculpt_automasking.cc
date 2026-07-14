@@ -270,11 +270,6 @@ static void calc_blurred_cavity_mesh(const Depsgraph &depsgraph,
                                      const int vert,
                                      MutableSpan<float> cavity_factors)
 {
-  struct CavityBlurVert {
-    int vertex;
-    int depth;
-  };
-
   const Mesh &mesh = *id_cast<Mesh *>(object.data);
 
   const OffsetIndices faces = mesh.faces();
@@ -294,53 +289,49 @@ static void calc_blurred_cavity_mesh(const Depsgraph &depsgraph,
    */
   const int num_steps = steps + 1;
 
-  std::queue<CavityBlurVert> queue;
+  Vector<int> queue_current;
+  Vector<int> queue_next;
   Set<int, 64> visited_verts;
 
-  const CavityBlurVert initial{vert, 0};
   visited_verts.add_new(vert);
-  queue.push(initial);
+  queue_current.append(vert);
 
   const float3 starting_position = positions_eval[vert];
 
   Vector<int> neighbors;
-  while (!queue.empty()) {
-    const CavityBlurVert blurvert = queue.front();
-    queue.pop();
+  /* Level-synchronized BFS: depth is the loop counter. All vertices accumulate into `all_verts`;
+   * only those within `num_steps` levels accumulate into `verts_in_range` and expand the front. */
+  for (int depth = 0; !queue_current.is_empty(); depth++) {
+    for (const int current_vert : queue_current) {
+      const float3 &blur_vert_position = positions_eval[current_vert];
+      const float3 &blur_vert_normal = normals_eval[current_vert];
 
-    const int current_vert = blurvert.vertex;
+      const float dist_to_start = math::distance(blur_vert_position, starting_position);
 
-    const float3 &blur_vert_position = positions_eval[current_vert];
-    const float3 &blur_vert_normal = normals_eval[current_vert];
+      all_verts.position += blur_vert_position;
+      all_verts.distance += dist_to_start;
+      all_verts.count++;
 
-    const float dist_to_start = math::distance(blur_vert_position, starting_position);
+      if (depth < num_steps) {
+        verts_in_range.position += blur_vert_position;
+        verts_in_range.normal += blur_vert_normal;
+        verts_in_range.count++;
 
-    all_verts.position += blur_vert_position;
-    all_verts.distance += dist_to_start;
-    all_verts.count++;
+        for (const int neighbor : vert_neighbors_get_mesh(
+                 faces, corner_verts, vert_to_face_map, hide_poly, current_vert, neighbors))
+        {
+          if (visited_verts.contains(neighbor)) {
+            continue;
+          }
 
-    if (blurvert.depth < num_steps) {
-      verts_in_range.position += blur_vert_position;
-      verts_in_range.normal += blur_vert_normal;
-      verts_in_range.count++;
-    }
-
-    /* Use the total number of steps used to get to this particular vert to determine if we should
-     * keep processing */
-    if (blurvert.depth >= num_steps) {
-      continue;
-    }
-
-    for (const int neighbor : vert_neighbors_get_mesh(
-             faces, corner_verts, vert_to_face_map, hide_poly, current_vert, neighbors))
-    {
-      if (visited_verts.contains(neighbor)) {
-        continue;
+          visited_verts.add_new(neighbor);
+          queue_next.append(neighbor);
+        }
       }
-
-      visited_verts.add_new(neighbor);
-      queue.push({neighbor, blurvert.depth + 1});
     }
+
+    queue_current.clear();
+    std::swap(queue_current, queue_next);
   }
 
   BLI_assert(all_verts.count != verts_in_range.count);
@@ -376,11 +367,6 @@ static void calc_blurred_cavity_grids(const Object &object,
                                       const SubdivCCGCoord vert,
                                       MutableSpan<float> cavity_factors)
 {
-  struct CavityBlurVert {
-    int vert;
-    int depth;
-  };
-
   const SculptSession &ss = *object.runtime->sculpt_session;
   const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
   const Span<float3> positions = subdiv_ccg.positions;
@@ -394,54 +380,51 @@ static void calc_blurred_cavity_grids(const Object &object,
    */
   const int num_steps = steps + 1;
 
-  std::queue<CavityBlurVert> queue;
+  Vector<int> queue_current;
+  Vector<int> queue_next;
   Set<int, 64> visited_verts;
 
-  const CavityBlurVert initial{vert.to_index(key), 0};
-  visited_verts.add_new(initial.vert);
-  queue.push(initial);
+  const int initial_idx = vert.to_index(key);
+  visited_verts.add_new(initial_idx);
+  queue_current.append(initial_idx);
 
-  const float3 starting_position = positions[vert.to_index(key)];
+  const float3 starting_position = positions[initial_idx];
 
   SubdivCCGNeighbors neighbors;
-  while (!queue.empty()) {
-    const CavityBlurVert blurvert = queue.front();
-    queue.pop();
+  /* Level-synchronized BFS: depth is the loop counter. All vertices accumulate into `all_verts`;
+   * only those within `num_steps` levels accumulate into `verts_in_range` and expand the front. */
+  for (int depth = 0; !queue_current.is_empty(); depth++) {
+    for (const int current_vert : queue_current) {
+      const float3 &blur_vert_position = positions[current_vert];
+      const float3 &blur_vert_normal = normals[current_vert];
 
-    const int current_vert = blurvert.vert;
+      const float dist_to_start = math::distance(blur_vert_position, starting_position);
 
-    const float3 &blur_vert_position = positions[current_vert];
-    const float3 &blur_vert_normal = normals[current_vert];
+      all_verts.position += blur_vert_position;
+      all_verts.distance += dist_to_start;
+      all_verts.count++;
 
-    const float dist_to_start = math::distance(blur_vert_position, starting_position);
+      if (depth < num_steps) {
+        verts_in_range.position += blur_vert_position;
+        verts_in_range.normal += blur_vert_normal;
+        verts_in_range.count++;
 
-    all_verts.position += blur_vert_position;
-    all_verts.distance += dist_to_start;
-    all_verts.count++;
+        BKE_subdiv_ccg_neighbor_coords_get(
+            subdiv_ccg, SubdivCCGCoord::from_index(key, current_vert), false, neighbors);
+        for (const SubdivCCGCoord neighbor : neighbors.coords) {
+          const int neighbor_idx = neighbor.to_index(key);
+          if (visited_verts.contains(neighbor_idx)) {
+            continue;
+          }
 
-    if (blurvert.depth < num_steps) {
-      verts_in_range.position += blur_vert_position;
-      verts_in_range.normal += blur_vert_normal;
-      verts_in_range.count++;
-    }
-
-    /* Use the total number of steps used to get to this particular vert to determine if we should
-     * keep processing */
-    if (blurvert.depth >= num_steps) {
-      continue;
-    }
-
-    BKE_subdiv_ccg_neighbor_coords_get(
-        subdiv_ccg, SubdivCCGCoord::from_index(key, current_vert), false, neighbors);
-    for (const SubdivCCGCoord neighbor : neighbors.coords) {
-      const int neighbor_idx = neighbor.to_index(key);
-      if (visited_verts.contains(neighbor_idx)) {
-        continue;
+          visited_verts.add_new(neighbor_idx);
+          queue_next.append(neighbor_idx);
+        }
       }
-
-      visited_verts.add_new(neighbor_idx);
-      queue.push({neighbor_idx, blurvert.depth + 1});
     }
+
+    queue_current.clear();
+    std::swap(queue_current, queue_next);
   }
 
   BLI_assert(all_verts.count != verts_in_range.count);
@@ -476,12 +459,6 @@ static void calc_blurred_cavity_bmesh(const Cache &automasking,
                                       BMVert *vert,
                                       MutableSpan<float> cavity_factors)
 {
-  struct CavityBlurVert {
-    BMVert *vertex;
-    int index;
-    int depth;
-  };
-
   AccumulatedVert all_verts;
   AccumulatedVert verts_in_range;
   /* Steps starts at 1, but API and user interface
@@ -489,52 +466,48 @@ static void calc_blurred_cavity_bmesh(const Cache &automasking,
    */
   const int num_steps = steps + 1;
 
-  std::queue<CavityBlurVert> queue;
+  Vector<BMVert *> queue_current;
+  Vector<BMVert *> queue_next;
   Set<int, 64> visited_verts;
 
-  const CavityBlurVert initial{vert, BM_elem_index_get(vert), 0};
-  visited_verts.add_new(initial.index);
-  queue.push(initial);
+  visited_verts.add_new(BM_elem_index_get(vert));
+  queue_current.append(vert);
 
   const float3 starting_position = vert->co;
 
   BMeshNeighborVerts neighbors;
-  while (!queue.empty()) {
-    const CavityBlurVert blurvert = queue.front();
-    queue.pop();
+  /* Level-synchronized BFS: depth is the loop counter. All vertices accumulate into `all_verts`;
+   * only those within `num_steps` levels accumulate into `verts_in_range` and expand the front. */
+  for (int depth = 0; !queue_current.is_empty(); depth++) {
+    for (BMVert *current_vert : queue_current) {
+      const float3 blur_vert_position = current_vert->co;
+      const float3 blur_vert_normal = current_vert->no;
 
-    BMVert *current_vert = blurvert.vertex;
+      const float dist_to_start = math::distance(blur_vert_position, starting_position);
 
-    const float3 blur_vert_position = current_vert->co;
-    const float3 blur_vert_normal = current_vert->no;
+      all_verts.position += blur_vert_position;
+      all_verts.distance += dist_to_start;
+      all_verts.count++;
 
-    const float dist_to_start = math::distance(blur_vert_position, starting_position);
+      if (depth < num_steps) {
+        verts_in_range.position += blur_vert_position;
+        verts_in_range.normal += blur_vert_normal;
+        verts_in_range.count++;
 
-    all_verts.position += blur_vert_position;
-    all_verts.distance += dist_to_start;
-    all_verts.count++;
+        for (BMVert *neighbor : vert_neighbors_get_bmesh(*current_vert, neighbors)) {
+          const int neighbor_idx = BM_elem_index_get(neighbor);
+          if (visited_verts.contains(neighbor_idx)) {
+            continue;
+          }
 
-    if (blurvert.depth < num_steps) {
-      verts_in_range.position += blur_vert_position;
-      verts_in_range.normal += blur_vert_normal;
-      verts_in_range.count++;
-    }
-
-    /* Use the total number of steps used to get to this particular vert to determine if we should
-     * keep processing */
-    if (blurvert.depth >= num_steps) {
-      continue;
-    }
-
-    for (BMVert *neighbor : vert_neighbors_get_bmesh(*current_vert, neighbors)) {
-      const int neighbor_idx = BM_elem_index_get(neighbor);
-      if (visited_verts.contains(neighbor_idx)) {
-        continue;
+          visited_verts.add_new(neighbor_idx);
+          queue_next.append(neighbor);
+        }
       }
-
-      visited_verts.add_new(neighbor_idx);
-      queue.push({neighbor, neighbor_idx, blurvert.depth + 1});
     }
+
+    queue_current.clear();
+    std::swap(queue_current, queue_next);
   }
 
   BLI_assert(all_verts.count != verts_in_range.count);

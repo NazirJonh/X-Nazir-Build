@@ -470,7 +470,7 @@ static void edit_data_init_mesh(OffsetIndices<int> faces,
                                                         BOUNDARY_STEPS_NONE);
   boundary.edit_info.strength_factor = Array<float>(vert_positions.size(), 0.0f);
 
-  std::queue<int> current_iteration;
+  Vector<int> current_iteration;
 
   for (const int i : boundary.verts.index_range()) {
     const int vert = boundary.verts[i];
@@ -479,27 +479,24 @@ static void edit_data_init_mesh(OffsetIndices<int> faces,
     boundary.edit_info.original_vertex_i[index] = index;
     boundary.edit_info.propagation_steps_num[index] = 0;
 
-    current_iteration.push(vert);
+    current_iteration.append(vert);
   }
 
   int propagation_steps_num = 0;
   float accum_distance = 0.0f;
 
-  std::queue<int> next_iteration;
+  Vector<int> next_iteration;
+  Vector<int> neighbors;
 
   while (true) {
     /* Stop adding steps to edit info. This happens when a steps is further away from the boundary
      * than the brush radius or when the entire mesh was already processed. */
-    if (accum_distance > radius || current_iteration.empty()) {
+    if (accum_distance > radius || current_iteration.is_empty()) {
       boundary.max_propagation_steps = propagation_steps_num;
       break;
     }
 
-    while (!current_iteration.empty()) {
-      const int from_v = current_iteration.front();
-      current_iteration.pop();
-
-      Vector<int> neighbors;
+    for (const int from_v : current_iteration) {
       for (const int neighbor : vert_neighbors_get_mesh(
                faces, corner_verts, vert_to_face, hide_poly, from_v, neighbors))
       {
@@ -515,7 +512,7 @@ static void edit_data_init_mesh(OffsetIndices<int> faces,
         boundary.edit_info.propagation_steps_num[neighbor] =
             boundary.edit_info.propagation_steps_num[from_v] + 1;
 
-        next_iteration.push(neighbor);
+        next_iteration.append(neighbor);
 
         /* Check the distance using the vertex that was propagated from the initial vertex that
          * was used to initialize the boundary. */
@@ -526,12 +523,8 @@ static void edit_data_init_mesh(OffsetIndices<int> faces,
       }
     }
 
-    /* Copy the new vertices to the queue to be processed in the next iteration. */
-    while (!next_iteration.empty()) {
-      const int next_v = next_iteration.front();
-      next_iteration.pop();
-      current_iteration.push(next_v);
-    }
+    current_iteration.clear();
+    std::swap(current_iteration, next_iteration);
 
     propagation_steps_num++;
   }
@@ -549,7 +542,7 @@ static void edit_data_init_grids(const SubdivCCG &subdiv_ccg,
   boundary.edit_info.propagation_steps_num = Array<int>(positions.size(), BOUNDARY_STEPS_NONE);
   boundary.edit_info.strength_factor = Array<float>(positions.size(), 0.0f);
 
-  std::queue<SubdivCCGCoord> current_iteration;
+  Vector<SubdivCCGCoord> current_iteration;
 
   for (const int i : boundary.verts.index_range()) {
     const SubdivCCGCoord vert = SubdivCCGCoord::from_index(key, boundary.verts[i]);
@@ -565,26 +558,23 @@ static void edit_data_init_grids(const SubdivCCG &subdiv_ccg,
       boundary.edit_info.original_vertex_i[neighbor.to_index(key)] = index;
     }
 
-    current_iteration.push(vert);
+    current_iteration.append(vert);
   }
 
   int propagation_steps_num = 0;
   float accum_distance = 0.0f;
 
-  std::queue<SubdivCCGCoord> next_iteration;
+  Vector<SubdivCCGCoord> next_iteration;
 
   while (true) {
     /* Stop adding steps to edit info. This happens when a steps is further away from the boundary
      * than the brush radius or when the entire mesh was already processed. */
-    if (accum_distance > radius || current_iteration.empty()) {
+    if (accum_distance > radius || current_iteration.is_empty()) {
       boundary.max_propagation_steps = propagation_steps_num;
       break;
     }
 
-    while (!current_iteration.empty()) {
-      const SubdivCCGCoord from_v = current_iteration.front();
-      current_iteration.pop();
-
+    for (const SubdivCCGCoord from_v : current_iteration) {
       const int from_v_i = from_v.to_index(key);
 
       SubdivCCGNeighbors neighbors;
@@ -625,7 +615,7 @@ static void edit_data_init_grids(const SubdivCCG &subdiv_ccg,
         boundary.edit_info.propagation_steps_num[neighbor_idx] =
             boundary.edit_info.propagation_steps_num[from_v_i] + 1;
 
-        next_iteration.push(neighbor);
+        next_iteration.append(neighbor);
 
         /* When copying the data to the neighbor for the next iteration, it has to be copied to
          * all its duplicates too. This is because it is not possible to know if the updated
@@ -652,12 +642,8 @@ static void edit_data_init_grids(const SubdivCCG &subdiv_ccg,
       }
     }
 
-    /* Copy the new vertices to the queue to be processed in the next iteration. */
-    while (!next_iteration.empty()) {
-      const SubdivCCGCoord next_v = next_iteration.front();
-      next_iteration.pop();
-      current_iteration.push(next_v);
-    }
+    current_iteration.clear();
+    std::swap(current_iteration, next_iteration);
 
     propagation_steps_num++;
   }
@@ -674,7 +660,7 @@ static void edit_data_init_bmesh(BMesh *bm,
   boundary.edit_info.propagation_steps_num = Array<int>(num_verts, BOUNDARY_STEPS_NONE);
   boundary.edit_info.strength_factor = Array<float>(num_verts, 0.0f);
 
-  std::queue<BMVert *> current_iteration;
+  Vector<BMVert *> current_iteration;
 
   for (const int i : boundary.verts.index_range()) {
     const int index = boundary.verts[i];
@@ -685,26 +671,23 @@ static void edit_data_init_bmesh(BMesh *bm,
 
     /* This ensures that all duplicate vertices in the boundary have the same original_vertex
      * index, so the deformation for them will be the same. */
-    current_iteration.push(vert);
+    current_iteration.append(vert);
   }
 
   int propagation_steps_num = 0;
   float accum_distance = 0.0f;
 
-  std::queue<BMVert *> next_iteration;
+  Vector<BMVert *> next_iteration;
 
   while (true) {
     /* Stop adding steps to edit info. This happens when a steps is further away from the boundary
      * than the brush radius or when the entire mesh was already processed. */
-    if (accum_distance > radius || current_iteration.empty()) {
+    if (accum_distance > radius || current_iteration.is_empty()) {
       boundary.max_propagation_steps = propagation_steps_num;
       break;
     }
 
-    while (!current_iteration.empty()) {
-      BMVert *from_v = current_iteration.front();
-      current_iteration.pop();
-
+    for (BMVert *from_v : current_iteration) {
       const int from_v_i = BM_elem_index_get(from_v);
 
       BMeshNeighborVerts neighbors;
@@ -721,7 +704,7 @@ static void edit_data_init_bmesh(BMesh *bm,
         boundary.edit_info.propagation_steps_num[neighbor_idx] =
             boundary.edit_info.propagation_steps_num[from_v_i] + 1;
 
-        next_iteration.push(neighbor);
+        next_iteration.append(neighbor);
 
         /* Check the distance using the vertex that was propagated from the initial vertex that
          * was used to initialize the boundary. */
@@ -732,12 +715,8 @@ static void edit_data_init_bmesh(BMesh *bm,
       }
     }
 
-    /* Copy the new vertices to the queue to be processed in the next iteration. */
-    while (!next_iteration.empty()) {
-      BMVert *next_v = next_iteration.front();
-      next_iteration.pop();
-      current_iteration.push(next_v);
-    }
+    current_iteration.clear();
+    std::swap(current_iteration, next_iteration);
 
     propagation_steps_num++;
   }

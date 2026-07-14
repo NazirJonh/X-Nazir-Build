@@ -8,11 +8,10 @@
 
 #pragma once
 
-#include <queue>
-
 #include "BLI_bit_vector.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_offset_indices.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -26,7 +25,7 @@ struct Object;
 namespace ed::sculpt_paint::flood_fill {
 
 struct FillDataMesh {
-  std::queue<int> queue;
+  Vector<int> queue;
   BitVector<> visited_verts;
   Span<int> fake_neighbors;
 
@@ -46,7 +45,7 @@ struct FillDataMesh {
 };
 
 struct FillDataGrids {
-  std::queue<SubdivCCGCoord> queue;
+  Vector<SubdivCCGCoord> queue;
   BitVector<> visited_verts;
   Span<int> fake_neighbors;
 
@@ -67,7 +66,7 @@ struct FillDataGrids {
 };
 
 struct FillDataBMesh {
-  std::queue<BMVert *> queue;
+  Vector<BMVert *> queue;
   BitVector<> visited_verts;
   Span<int> fake_neighbors;
 

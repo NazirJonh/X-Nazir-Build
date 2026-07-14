@@ -1175,31 +1175,34 @@ static Array<float> diagonals_falloff_create(const Depsgraph &depsgraph,
 
   /* Search and mask as visited the initial vertices using the enabled symmetry passes. */
   BitVector<> visited_verts(totvert);
-  std::queue<int> queue;
+  Vector<int> queue_current;
   for (const int vert : symm_verts) {
-    queue.push(vert);
+    queue_current.append(vert);
     visited_verts[vert].set();
   }
 
-  if (queue.empty()) {
+  if (queue_current.is_empty()) {
     return dists;
   }
 
+  Vector<int> queue_next;
   /* Propagate the falloff increasing the value by 1 each time a new vertex is visited. */
-  while (!queue.empty()) {
-    const int next_vert = queue.front();
-    queue.pop();
-
-    for (const int face : vert_to_face_map[next_vert]) {
-      for (const int vert : corner_verts.slice(faces[face])) {
-        if (visited_verts[vert]) {
-          continue;
+  while (!queue_current.is_empty()) {
+    for (const int next_vert : queue_current) {
+      for (const int face : vert_to_face_map[next_vert]) {
+        for (const int vert : corner_verts.slice(faces[face])) {
+          if (visited_verts[vert]) {
+            continue;
+          }
+          dists[vert] = dists[next_vert] + 1.0f;
+          visited_verts[vert].set();
+          queue_next.append(vert);
         }
-        dists[vert] = dists[next_vert] + 1.0f;
-        visited_verts[vert].set();
-        queue.push(vert);
       }
     }
+
+    queue_current.clear();
+    std::swap(queue_current, queue_next);
   }
 
   return dists;

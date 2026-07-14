@@ -426,8 +426,15 @@ static bool rna_TextureCapabilities_has_texture_angle_source_get(PointerRNA *ptr
 static bool rna_BrushCapabilities_has_overlay_get(PointerRNA *ptr)
 {
   Brush *br = static_cast<Brush *>(ptr->data);
-  return ELEM(
-      br->mtex.brush_map_mode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL);
+  /* Keep this list in sync with the map modes actually drawn by the paint cursor overlay
+   * (see `paint_draw_tex_overlay` for the 2D path and `paint_draw_tex_overlay_3d` for the 3D
+   * path). Modes without a drawing implementation must not advertise an overlay, otherwise the
+   * UI exposes a toggle that does nothing. */
+  return ELEM(br->mtex.brush_map_mode,
+              MTEX_MAP_MODE_VIEW,
+              MTEX_MAP_MODE_TILED,
+              MTEX_MAP_MODE_AREA,
+              MTEX_MAP_MODE_STENCIL);
 }
 
 static bool rna_BrushCapabilities_has_random_texture_angle_get(PointerRNA *ptr)
@@ -773,6 +780,17 @@ static void rna_Brush_stroke_update(Main *bmain, Scene *scene, PointerRNA *ptr)
   rna_Brush_update(bmain, scene, ptr);
 }
 
+static void rna_Brush_use_locked_size_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  Brush *br = static_cast<Brush *>(ptr->data);
+
+  /* Only invalidate overlay when use_locked_size changes - don't modify brush properties */
+  BKE_paint_invalidate_overlay_all();
+
+  /* Minimal notification without side effects */
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
+}
+
 static void rna_TextureSlot_brush_angle_update(bContext *C, PointerRNA *ptr)
 {
   const Main *bmain = CTX_data_main(C);
@@ -791,9 +809,15 @@ static void rna_Brush_set_size(PointerRNA *ptr, int value)
 {
   Brush *brush = static_cast<Brush *>(ptr->data);
 
-  /* scale unprojected size so it stays consistent with brush size */
-  BKE_brush_scale_unprojected_size(&brush->unprojected_size, value, brush->size);
-  brush->size = value;
+  /* Keep the setter idempotent: only rescale the paired unprojected size when `size` truly
+   * changes. The UI and mode switching may re-assign the current value, and rescaling on a no-op
+   * would accumulate rounding drift in `unprojected_size`.
+   * The rescale itself is required so WM_OT_radial_control (which drives `size`) keeps
+   * `unprojected_size` synchronized. */
+  if (brush->size != value) {
+    BKE_brush_scale_unprojected_size(&brush->unprojected_size, value, brush->size);
+    brush->size = value;
+  }
 }
 
 static void rna_Brush_use_gradient_set(PointerRNA *ptr, int value)
@@ -816,9 +840,21 @@ static void rna_Brush_set_unprojected_size(PointerRNA *ptr, float value)
 {
   Brush *brush = static_cast<Brush *>(ptr->data);
 
-  /* scale brush size so it stays consistent with unprojected_size */
-  BKE_brush_scale_size(&brush->size, value, brush->unprojected_size);
-  brush->unprojected_size = value;
+  /* Keep the setter idempotent: re-assigning the current value (e.g. from UI refreshes during
+   * mode switching) must not rescale the paired `size`, otherwise rounding drift accumulates. */
+  if (brush->unprojected_size != value) {
+    if (brush->flag & BRUSH_LOCK_SIZE) {
+      /* Scene/locked-size mode: only store `unprojected_size`. The projected `size` is recomputed
+       * in the paint cursor from `unprojected_size` and the current view, so scaling it here would
+       * fight that recalculation when switching into Scene mode. */
+      brush->unprojected_size = value;
+    }
+    else {
+      /* View mode: scale `size` so it stays consistent with `unprojected_size`. */
+      BKE_brush_scale_size(&brush->size, value, brush->unprojected_size);
+      brush->unprojected_size = value;
+    }
+  }
 }
 
 static const EnumPropertyItem *rna_Brush_direction_itemf(bContext *C,
@@ -3810,7 +3846,7 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, brush_size_unit_items);
   RNA_def_property_ui_text(
       prop, "Size Unit", "Measure brush size relative to the view or the scene");
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
+  RNA_def_property_update(prop, 0, "rna_Brush_use_locked_size_update");
 
   prop = RNA_def_property(srna, "color_type", PROP_ENUM, PROP_NONE); /* as an enum */
   RNA_def_property_enum_bitflag_sdna(prop, nullptr, "flag");

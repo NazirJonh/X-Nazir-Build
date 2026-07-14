@@ -716,7 +716,7 @@ static void object_space_overlays_draw(const PaintCursorContext &pcontext)
   }
 }
 
-static void cursor_space_drawing_setup(const PaintCursorContext &pcontext)
+static void cursor_space_drawing_setup(PaintCursorContext &pcontext)
 {
   const Object &ob = *pcontext.vc.obact;
 
@@ -762,6 +762,14 @@ static void cursor_space_drawing_setup(const PaintCursorContext &pcontext)
   const math::AxisAngle between_vecs(z_axis, world_normal);
   const float4x4 cursor_rot = math::from_rotation<float4x4>(between_vecs);
 
+  /* Cache the tilt-adjusted cursor-space basis so the texture overlay can map a screen-space brush
+   * rotation onto the surface without rebuilding this matrix per layer. The basis lives in
+   * whichever space #cursor_trans left the cursor in: object space on the legacy uniform-scale
+   * path, world space once the non-uniform-scale compensation above kicks in. */
+  pcontext.cursor_space_normal = world_normal;
+  pcontext.cursor_space_x = math::normalize(cursor_rot.x_axis());
+  pcontext.cursor_space_y = math::normalize(cursor_rot.y_axis());
+
   GPU_matrix_mul(cursor_trans.ptr());
   GPU_matrix_mul(cursor_rot.ptr());
 }
@@ -800,11 +808,13 @@ static void layer_brush_height_preview_draw(const uint gpuattr,
   GPU_matrix_pop();
 }
 
-static void cursor_space_overlays_draw(const PaintCursorContext &pcontext)
+static void cursor_space_overlays_draw(PaintCursorContext &pcontext)
 {
   const Brush &brush = *pcontext.brush;
   /* Main inactive cursor. */
   main_inactive_cursor_draw(pcontext);
+
+  paint_cursor_draw_texture_overlays(pcontext);
 
   if (pcontext.mode != PaintMode::Sculpt) {
     return;

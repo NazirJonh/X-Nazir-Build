@@ -719,6 +719,9 @@ bool BKE_paint_brush_set(Main *bmain,
     return false;
   }
 
+  /* Check if brush is actually changing to avoid unnecessary overlay invalidation. */
+  const bool brush_changed = (paint->brush != brush);
+
   /* Update the brush itself. */
   paint->brush = brush;
   /* Update the brush asset reference. */
@@ -731,6 +734,11 @@ bool BKE_paint_brush_set(Main *bmain,
     }
   }
 
+  /* Invalidate overlay when brush changes to force texture reload. */
+  if (brush_changed) {
+    BKE_paint_invalidate_overlay_all();
+  }
+
   return true;
 }
 
@@ -740,6 +748,9 @@ bool BKE_paint_brush_set(Paint *paint, Brush *brush)
     return false;
   }
 
+  /* Check if brush is actually changing to avoid unnecessary overlay invalidation. */
+  const bool brush_changed = (paint->brush != brush);
+
   paint->brush = brush;
 
   MEM_delete(paint->brush_asset_reference);
@@ -748,7 +759,10 @@ bool BKE_paint_brush_set(Paint *paint, Brush *brush)
     paint->brush_asset_reference = asset_reference_create_from_brush(brush);
   }
 
-  BKE_paint_invalidate_overlay_all();
+  /* Invalidate overlay when brush changes to force texture reload. */
+  if (brush_changed) {
+    BKE_paint_invalidate_overlay_all();
+  }
 
   return true;
 }

@@ -24,7 +24,11 @@
  */
 #include "sculpt_undo.hh"
 
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <mutex>
+#include <utility>
 #include <zstd.h>
 
 #include "CLG_log.h"
@@ -42,6 +46,7 @@
 #include "BLI_vector.hh"
 
 #include "DNA_key_types.h"
+#include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
@@ -62,6 +67,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_undo_system.hh"
 
@@ -272,6 +278,69 @@ struct StepData {
   Vector<std::unique_ptr<Node>> nodes;
   std::unique_ptr<PositionUndoStorage> position_step_storage;
   size_t undo_size;
+
+  /**
+   * Sculpt layers: explicit per-element deltas recorded into this step for the active layer.
+   * Undo subtracts the delta from the live layer data, redo adds it. #sculpt_layer_uid is 0 when
+   * no layer was recorded.
+   *
+   * Mesh (vertex) path (#sculpt_layer_grids == false): #sculpt_layer_data holds per-vertex deltas
+   * at the vertices listed in #sculpt_layer_verts, keeping undo memory proportional to the
+   * brushed area rather than the whole mesh. The two arrays are not tightly packed: each touched
+   * PBVH node owns a contiguous slot, and only the slot's leading #sculpt_layer_seg_count[s]
+   * entries (starting at #sculpt_layer_seg_start[s]) are valid, the trailing entries being unused
+   * zero-delta holes. This lets stroke end skip the sequential compact pass (which was on the hot
+   * path); restore iterates the segments instead. When the segment table is empty the arrays are
+   * tightly packed (legacy).
+   *
+   * Multires/grid path (#sculpt_layer_grids == true): #sculpt_layer_verts holds the indices of
+   * the grids touched by the stroke, and #sculpt_layer_data holds `grid_area` tangent-space
+   * deltas per grid, in the order of the grid list (see
+   * #multiresModifier_reshapeFromCCG_into_sculpt_layer). The CCG positions are not restored
+   * directly for these steps: the layer delta is reverted and the composed surface re-evaluated.
+   */
+  int sculpt_layer_uid = 0;
+  bool sculpt_layer_grids = false;
+  Vector<int> sculpt_layer_verts;
+  Vector<float3> sculpt_layer_data;
+  Vector<int> sculpt_layer_seg_start;
+  Vector<int> sculpt_layer_seg_count;
+
+  /** Operator-level sculpt-layer undo (#Type::SculptLayer): captures metadata and optionally a
+   * full data snapshot for reversible influence/visibility and data-edit operations, plus
+   * layer-list changes (add / remove / duplicate / merge / bake) as full layer payloads whose
+   * data ownership toggles between the undo step and the mesh list. Keyed by #uid so restoring
+   * finds the right layer even after list reordering. */
+  struct SculptLayerOpUndo {
+    int uid = 0;
+    float influence = 1.0f;
+    int flag = 0;
+    Array<float3> data;
+    bool has_data = false;
+
+    /** Layers removed by the operator (held by the step after the operator ran). */
+    Vector<SculptLayerUndoPayload> removed;
+    /** Layers added by the operator (in the mesh after the operator ran; extracted on undo). */
+    Vector<SculptLayerUndoPayload> added;
+    /** Bake: each removed payload's contribution is also added to / subtracted from MDisps. */
+    bool is_bake = false;
+
+    /** Bake on a mesh with relative shape keys: uid of the key block the bake created (0 when the
+     * bake used another carrier). #bake_key holds that block while it is detached from the mesh
+     * (between undo and redo); the step owns and frees it then. */
+    int bake_key_uid = 0;
+    KeyBlock *bake_key = nullptr;
+
+    /** Layer reorder (0 when the step is not a move). */
+    int move_uid = 0;
+    int move_from = -1;
+    int move_to = -1;
+
+    /** Solo-base toggle: pre-change flags of every affected layer, swapped with the live flags on
+     * undo/redo (the swap is its own inverse, like the single-layer metadata above). */
+    Vector<int> solo_uids;
+    Vector<int> solo_flags;
+  } sculpt_layer_op;
 
   /** Whether processing code needs to handle the current data as an undo step. */
   bool needs_undo() const
@@ -558,7 +627,8 @@ static void swap_indexed_data(MutableSpan<T> full, const Span<int> indices, Muta
 
 static void restore_position_mesh(Object &object,
                                   PositionUndoStorage &undo_data,
-                                  const MutableSpan<bool> modified_verts)
+                                  const MutableSpan<bool> modified_verts,
+                                  const bool skip_positions_swap)
 {
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *object.runtime->sculpt_session;
@@ -593,7 +663,12 @@ static void restore_position_mesh(Object &object,
         /* When original positions aren't written separately in the undo step, there are no
          * deform modifiers. Therefore the original and evaluated deform positions will be the
          * same, and modifying the positions from the original mesh is enough. */
-        swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, positions);
+        if (!skip_positions_swap) {
+          swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, positions);
+        }
+        else {
+          undo_positions.take_front(unique_verts_num);
+        }
       }
       else {
         /* When original positions are stored in the undo step, undo/redo will cause a reevaluation
@@ -615,11 +690,21 @@ static void restore_position_mesh(Object &object,
             /* The basis key positions and the mesh positions are always kept in sync. */
             scatter_data_mesh(undo_positions.as_span(), verts, positions);
           }
-          swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, active_data);
+          if (!skip_positions_swap) {
+            swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, active_data);
+          }
+          else {
+            undo_positions.take_front(unique_verts_num);
+          }
         }
         else {
           /* There is a deform modifier, but no shape keys. */
-          swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, positions);
+          if (!skip_positions_swap) {
+            swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, positions);
+          }
+          else {
+            undo_positions.take_front(unique_verts_num);
+          }
         }
       }
 
@@ -1068,6 +1153,418 @@ static void refine_subdiv(Depsgraph *depsgraph,
   bke::subdiv::eval_refine_from_mesh(subdiv, id_cast<const Mesh *>(object.data), deformed_verts);
 }
 
+/**
+ * Sculpt layers: revert or re-apply the explicit per-element deltas recorded for the active
+ * layer. The delta is constant, so undo subtracts and redo adds it (no swap needed).
+ */
+static void restore_active_sculpt_layer(StepData &step_data, Object &object)
+{
+  if (step_data.sculpt_layer_uid == 0 || step_data.sculpt_layer_data.is_empty()) {
+    return;
+  }
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, step_data.sculpt_layer_uid);
+  if (!layer || !layer->data) {
+    return;
+  }
+  MutableSpan<float3> live(static_cast<float3 *>(layer->data), layer->totelem);
+  MutableSpan<float3> stored = step_data.sculpt_layer_data;
+  if (step_data.sculpt_layer_grids) {
+    /* Multires/grid path: per-grid tangent-space deltas at the touched grids. Only the layer
+     * data is adjusted here; the CCG positions are re-evaluated from base + layers by the
+     * caller (the composed surface is a deterministic function of the stored data). */
+    const Span<int> grids = step_data.sculpt_layer_verts;
+    if (grids.is_empty() || stored.size() % grids.size() != 0) {
+      return;
+    }
+    const int64_t grid_area = stored.size() / grids.size();
+    const bool undo_grids = step_data.needs_undo();
+    for (const int64_t t : grids.index_range()) {
+      const int64_t start = int64_t(grids[t]) * grid_area;
+      if (start < 0 || start + grid_area > live.size()) {
+        continue;
+      }
+      float3 *layer_grid = live.data() + start;
+      const float3 *delta_grid = stored.data() + t * grid_area;
+      for (int64_t i = 0; i < grid_area; i++) {
+        if (undo_grids) {
+          layer_grid[i] -= delta_grid[i];
+        }
+        else {
+          layer_grid[i] += delta_grid[i];
+        }
+      }
+    }
+    return;
+  }
+  /* Partial delta snapshot (mesh path): add or subtract per-vertex deltas.
+   * #sculpt_layer_data holds the delta (new - old) recorded at stroke end; undo subtracts it,
+   * redo adds it. Unlike the whole-buffer path the delta is constant, so no swap is needed.
+   *
+   * The arrays may carry per-node holes (see #StepData::sculpt_layer_seg_start): when a segment
+   * table is present only the listed ranges are valid, otherwise the arrays are tightly packed. */
+  const Span<int> verts = step_data.sculpt_layer_verts;
+  if (verts.size() != stored.size()) {
+    return;
+  }
+  const bool undo = step_data.needs_undo();
+  const float influence = bke::sculpt_layers::effective(*layer);
+  MutableSpan<float3> positions = mesh.vert_positions_for_write();
+
+  /* Under a shape key the combined surface is recomposed from the base plus layers at evaluation
+   * (the layer overlay is applied on top of the shape-keyed positions), and #mesh.vert_positions
+   * holds the untouched basis. Only revert the layer data here; leave the basis alone and let the
+   * re-evaluation reflect the change, mirroring how the stroke itself never touched the basis. */
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const bool skip_positions = ss.shapekey_active != nullptr;
+
+  const auto apply_range = [&](const int start, const int count) {
+    for (const int64_t i : IndexRange(start, count)) {
+      const int v = verts[i];
+      if (v >= 0 && v < live.size()) {
+        if (undo) {
+          live[v] -= stored[i];
+          if (!skip_positions) {
+            positions[v] -= stored[i] * influence;
+          }
+        }
+        else {
+          live[v] += stored[i];
+          if (!skip_positions) {
+            positions[v] += stored[i] * influence;
+          }
+        }
+      }
+    }
+  };
+  if (step_data.sculpt_layer_seg_start.is_empty()) {
+    /* Legacy tightly-packed layout. */
+    apply_range(0, int(verts.size()));
+  }
+  else {
+    for (const int s : step_data.sculpt_layer_seg_start.index_range()) {
+      apply_range(step_data.sculpt_layer_seg_start[s], step_data.sculpt_layer_seg_count[s]);
+    }
+  }
+}
+
+void store_active_sculpt_layer_grids(Object &object, Vector<int> &&grids, Vector<float3> &&deltas)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data || grids.is_empty() || deltas.is_empty()) {
+    return;
+  }
+  BLI_assert(deltas.size() % grids.size() == 0);
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
+  if (!layer) {
+    return;
+  }
+  step_data->sculpt_layer_uid = layer->uid;
+  step_data->sculpt_layer_grids = true;
+  step_data->sculpt_layer_verts = std::move(grids);
+  step_data->sculpt_layer_data = std::move(deltas);
+}
+
+void store_active_sculpt_layer_verts(Object &object,
+                                     Vector<int> &&verts,
+                                     Vector<float3> &&deltas,
+                                     Vector<int> &&seg_start,
+                                     Vector<int> &&seg_count)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data || verts.is_empty()) {
+    return;
+  }
+  BLI_assert(verts.size() == deltas.size());
+  BLI_assert(seg_start.size() == seg_count.size());
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
+  if (!layer) {
+    return;
+  }
+  step_data->sculpt_layer_uid = layer->uid;
+  step_data->sculpt_layer_verts = std::move(verts);
+  step_data->sculpt_layer_data = std::move(deltas);
+  step_data->sculpt_layer_seg_start = std::move(seg_start);
+  step_data->sculpt_layer_seg_count = std::move(seg_count);
+}
+
+SculptLayerUndoPayload::SculptLayerUndoPayload(SculptLayerUndoPayload &&other) noexcept
+    : name(std::move(other.name)),
+      influence(other.influence),
+      flag(other.flag),
+      totelem(other.totelem),
+      uid(other.uid),
+      domain(other.domain),
+      level(other.level),
+      index(other.index),
+      data(other.data)
+{
+  other.data = nullptr;
+}
+
+SculptLayerUndoPayload &SculptLayerUndoPayload::operator=(SculptLayerUndoPayload &&other) noexcept
+{
+  if (this != &other) {
+    if (data) {
+      MEM_delete_void(data);
+    }
+    name = std::move(other.name);
+    influence = other.influence;
+    flag = other.flag;
+    totelem = other.totelem;
+    uid = other.uid;
+    domain = other.domain;
+    level = other.level;
+    index = other.index;
+    data = other.data;
+    other.data = nullptr;
+  }
+  return *this;
+}
+
+SculptLayerUndoPayload::~SculptLayerUndoPayload()
+{
+  if (data) {
+    MEM_delete_void(data);
+  }
+}
+
+SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh &mesh, SculptLayer &layer)
+{
+  SculptLayerUndoPayload payload;
+  payload.name = layer.name;
+  payload.influence = layer.influence;
+  payload.flag = layer.flag;
+  payload.totelem = layer.totelem;
+  payload.uid = layer.uid;
+  payload.domain = layer.domain;
+  payload.level = layer.level;
+  payload.index = bke::sculpt_layers::index_of(mesh, layer);
+  payload.data = layer.data;
+  layer.data = nullptr;
+  layer.totelem = 0;
+  return payload;
+}
+
+/* Re-create a layer from \a payload and insert it at the recorded list position, transferring
+ * the data buffer back to the mesh. */
+static void sculpt_layer_payload_insert(Mesh &mesh, SculptLayerUndoPayload &payload)
+{
+  SculptLayer *layer = MEM_new<SculptLayer>(__func__);
+  STRNCPY_UTF8(layer->name, payload.name.c_str());
+  layer->influence = payload.influence;
+  layer->flag = payload.flag;
+  layer->totelem = payload.totelem;
+  layer->uid = payload.uid;
+  layer->domain = payload.domain;
+  layer->level = payload.level;
+  layer->data = payload.data;
+  payload.data = nullptr;
+
+  SculptLayer *before = static_cast<SculptLayer *>(
+      BLI_findlink(&mesh.sculpt_layers, payload.index));
+  if (before) {
+    BLI_insertlinkbefore(&mesh.sculpt_layers, before, layer);
+  }
+  else {
+    BLI_addtail(&mesh.sculpt_layers, layer);
+  }
+}
+
+/* Pull the layer identified by `payload.uid` out of the mesh list back into \a payload,
+ * transferring the data buffer to the undo step. Returns false when the layer is missing. */
+static bool sculpt_layer_payload_extract(Mesh &mesh, SculptLayerUndoPayload &payload)
+{
+  SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, payload.uid);
+  if (!layer) {
+    return false;
+  }
+  payload.name = layer->name;
+  payload.influence = layer->influence;
+  payload.flag = layer->flag;
+  payload.totelem = layer->totelem;
+  payload.domain = layer->domain;
+  payload.level = layer->level;
+  payload.index = bke::sculpt_layers::index_of(mesh, *layer);
+  payload.data = layer->data;
+  layer->data = nullptr;
+
+  BLI_remlink(&mesh.sculpt_layers, layer);
+  MEM_delete(layer);
+  const int count = BLI_listbase_count(&mesh.sculpt_layers);
+  mesh.sculpt_layers_active_index = std::clamp(
+      mesh.sculpt_layers_active_index, 0, std::max(0, count - 1));
+  return true;
+}
+
+void push_sculpt_layer_list_change(Object & /*object*/,
+                                   Vector<SculptLayerUndoPayload> &&removed,
+                                   Vector<int> &&added_uids,
+                                   const bool is_bake)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.removed = std::move(removed);
+  step_data->sculpt_layer_op.added.clear();
+  for (const int uid : added_uids) {
+    SculptLayerUndoPayload payload;
+    payload.uid = uid;
+    step_data->sculpt_layer_op.added.append(std::move(payload));
+  }
+  step_data->sculpt_layer_op.is_bake = is_bake;
+}
+
+void push_sculpt_layer_bake_shape_key(Object & /*object*/, const int key_uid)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  step_data->sculpt_layer_op.bake_key_uid = key_uid;
+}
+
+void push_sculpt_layer_move(Object & /*object*/,
+                            const SculptLayer &layer,
+                            const int index_from,
+                            const int index_to)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.move_uid = layer.uid;
+  step_data->sculpt_layer_op.move_from = index_from;
+  step_data->sculpt_layer_op.move_to = index_to;
+}
+
+void push_sculpt_layer_metadata(Object & /*object*/, const SculptLayer &layer)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.uid = layer.uid;
+  step_data->sculpt_layer_op.influence = layer.influence;
+  step_data->sculpt_layer_op.flag = layer.flag;
+  step_data->sculpt_layer_op.has_data = false;
+}
+
+void push_sculpt_layer_solo(Object & /*object*/, Vector<int> &&uids, Vector<int> &&flags)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  BLI_assert(uids.size() == flags.size());
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.solo_uids = std::move(uids);
+  step_data->sculpt_layer_op.solo_flags = std::move(flags);
+}
+
+void push_sculpt_layer_data(Object & /*object*/, const SculptLayer &layer)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.uid = layer.uid;
+  step_data->sculpt_layer_op.influence = layer.influence;
+  step_data->sculpt_layer_op.flag = layer.flag;
+  if (layer.data && layer.totelem > 0) {
+    const Span<float3> src(static_cast<const float3 *>(layer.data), layer.totelem);
+    step_data->sculpt_layer_op.data = Array<float3>(src);
+    step_data->sculpt_layer_op.has_data = true;
+  }
+  else {
+    step_data->sculpt_layer_op.has_data = false;
+  }
+}
+
+bool foreach_recorded_position_mesh(
+    FunctionRef<void(Span<int> verts, Span<float3> orig_positions)> fn)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data || step_data->type != Type::Position) {
+    return false;
+  }
+
+  /* Must run before #push_end, while the per-node undo data is still in the map. */
+  for (const std::unique_ptr<Node> &unode : step_data->undo_nodes_by_pbvh_node.values()) {
+    /* Skip multires (grid) nodes: this path handles the mesh (vertex) domain only. */
+    if (unode->vert_indices.is_empty()) {
+      continue;
+    }
+    const int unique_num = unode->unique_verts_num;
+    if (unique_num <= 0) {
+      continue;
+    }
+
+    /* Prefer #orig_position (original mesh space) when deform modifiers are active, since
+     * #position is then stored in evaluated space; otherwise the two are identical. This keeps the
+     * delta in the same space as the layer data and the live mesh positions. */
+    const Span<float3> orig = !unode->orig_position.is_empty() ?
+                                  unode->orig_position.as_span().take_front(unique_num) :
+                                  unode->position.as_span().take_front(unique_num);
+    fn(unode->vert_indices.as_span().take_front(unique_num), orig);
+  }
+
+  return true;
+}
+
+bool foreach_recorded_eval_position_mesh(
+    FunctionRef<void(Span<int> verts, Span<float3> eval_positions)> fn)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data || step_data->type != Type::Position) {
+    return false;
+  }
+
+  /* Must run before #push_end, while the per-node undo data is still in the map. */
+  for (const std::unique_ptr<Node> &unode : step_data->undo_nodes_by_pbvh_node.values()) {
+    if (unode->vert_indices.is_empty()) {
+      continue;
+    }
+    const int unique_num = unode->unique_verts_num;
+    if (unique_num <= 0) {
+      continue;
+    }
+    /* Always the evaluated/display positions (#Node.position), unlike #foreach_recorded_position_mesh
+     * which prefers #orig_position (base space) when a deform is active. Under a shape key the layer
+     * stroke is captured in the evaluated space, so the recorder diffs these against the post-stroke
+     * #deform_cos to recover the object-space per-vertex layer delta. */
+    fn(unode->vert_indices.as_span().take_front(unique_num),
+       unode->position.as_span().take_front(unique_num));
+  }
+
+  return true;
+}
+
+bool foreach_recorded_grids(FunctionRef<void(Span<int> grids)> fn)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data || step_data->type != Type::Position) {
+    return false;
+  }
+
+  /* Must run before #push_end, while the per-node undo data is still in the map. */
+  for (const std::unique_ptr<Node> &unode : step_data->undo_nodes_by_pbvh_node.values()) {
+    if (unode->grids.is_empty()) {
+      continue;
+    }
+    fn(unode->grids.as_span());
+  }
+
+  return true;
+}
+
 static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
 {
   PRF_scope(ProfileCategory::Editor);
@@ -1095,6 +1592,158 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
    * See #124484. */
   /* TODO: Add explicit type for switching into Sculpt Mode. */
   if (step_data.type == Type::None && step_data.nodes.is_empty()) {
+    return;
+  }
+
+  /* Operator-level sculpt-layer undo: metadata / data / layer-list toggles. Runs the same code
+   * for undo and redo (each sub-operation is its own inverse or direction-aware). */
+  if (step_data.type == Type::SculptLayer) {
+    Mesh &mesh = *id_cast<Mesh *>(object.data);
+    StepData::SculptLayerOpUndo &op = step_data.sculpt_layer_op;
+    const bool is_undo = step_data.needs_undo();
+
+    /* A previously restored base-stroke step may have left the CCG marked dirty; consume it
+     * before the layer set or influences change, otherwise the later flush would reshape the
+     * stale composed CCG against the changed layers and leak the difference into the base. */
+    layers::flush_pending_multires_base(object);
+
+    /* The mesh (vertex) domain recomputes canonical positions from the runtime base after the
+     * change; derive the base from the current, still-consistent state BEFORE the layer list or
+     * metadata is modified. */
+    layers::session_state_ensure(object);
+
+    /* Metadata / data swap for the referenced layer (influence, visibility, clear / invert and
+     * the surviving layer of a merge). */
+    if (op.uid != 0) {
+      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, op.uid)) {
+        std::swap(layer->influence, op.influence);
+        std::swap(layer->flag, op.flag);
+        if (op.has_data && layer->data) {
+          MutableSpan<float3> cur(static_cast<float3 *>(layer->data), layer->totelem);
+          const int64_t n = std::min<int64_t>(cur.size(), op.data.size());
+          for (int64_t i = 0; i < n; i++) {
+            std::swap(cur[i], op.data[i]);
+          }
+        }
+      }
+    }
+
+    /* Solo-base toggle: swap every affected layer's flags with the stored pre-change values. */
+    for (const int64_t i : op.solo_uids.index_range()) {
+      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, op.solo_uids[i])) {
+        std::swap(layer->flag, op.solo_flags[i]);
+      }
+    }
+
+    /* Layer reorder. */
+    if (op.move_uid != 0) {
+      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, op.move_uid)) {
+        const int target = is_undo ? op.move_from : op.move_to;
+        BLI_remlink(&mesh.sculpt_layers, layer);
+        SculptLayer *before = static_cast<SculptLayer *>(
+            BLI_findlink(&mesh.sculpt_layers, target));
+        if (before) {
+          BLI_insertlinkbefore(&mesh.sculpt_layers, before, layer);
+        }
+        else {
+          BLI_addtail(&mesh.sculpt_layers, layer);
+        }
+        bke::sculpt_layers::active_set(mesh, layer);
+      }
+    }
+
+    /* Layer-list changes: toggle the affected layers between the undo step and the mesh list.
+     * `removed` holds layers the operator removed (in the step after the operator ran), `added`
+     * holds layers the operator added (in the mesh after the operator ran). Data buffers move by
+     * pointer, so this is cheap even for dense meshes. */
+    if (is_undo) {
+      for (SculptLayerUndoPayload &payload : op.removed) {
+        sculpt_layer_payload_insert(mesh, payload);
+        if (op.is_bake) {
+          /* Undo of a bake: remove this layer's baked contribution from the base again. Which base
+           * the bake folded it into depends on the session: MDisps for grids, every key block for
+           * absolute shape keys, and for relative shape keys a whole new key block, which is
+           * detached below instead (#bake_key_uid). Without shape keys this is a no-op: the live
+           * positions carry the layer and the recompute below restores them. */
+          if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, payload.uid)) {
+            const float eff = bke::sculpt_layers::effective(*layer);
+            if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+              BKE_multires_sculpt_layer_apply_to_mdisps(mesh, *layer, -eff);
+            }
+            else if (op.bake_key_uid == 0) {
+              bke::sculpt_layers::apply_vert_layer_to_shape_keys(mesh, *layer, -eff);
+            }
+          }
+        }
+      }
+      for (SculptLayerUndoPayload &payload : op.added) {
+        sculpt_layer_payload_extract(mesh, payload);
+      }
+    }
+    else {
+      for (SculptLayerUndoPayload &payload : op.added) {
+        sculpt_layer_payload_insert(mesh, payload);
+      }
+      for (SculptLayerUndoPayload &payload : op.removed) {
+        if (op.is_bake) {
+          /* Redo of a bake: fold the contribution back into the base before extracting (see the
+           * undo branch above for which base that is). */
+          if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, payload.uid)) {
+            const float eff = bke::sculpt_layers::effective(*layer);
+            if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+              BKE_multires_sculpt_layer_apply_to_mdisps(mesh, *layer, eff);
+            }
+            else if (op.bake_key_uid == 0) {
+              bke::sculpt_layers::apply_vert_layer_to_shape_keys(mesh, *layer, eff);
+            }
+          }
+        }
+        sculpt_layer_payload_extract(mesh, payload);
+      }
+    }
+    if (op.bake_key_uid != 0 && mesh.key != nullptr) {
+      /* Relative shape keys: the bake put the combined layer contribution into a new key block.
+       * Undo unlinks it from the mesh (the step keeps it alive until it is freed or redone), redo
+       * links it back at the end of the list, where the bake appended it. Nothing else refers to
+       * it — it was created relative to the reference key and no other block is relative to it — so
+       * the plain unlink / relink is exact. */
+      Key &key = *mesh.key;
+      if (is_undo && op.bake_key == nullptr) {
+        for (KeyBlock &kb : key.block) {
+          if (kb.uid != op.bake_key_uid) {
+            continue;
+          }
+          const int index = BLI_findindex(&key.block, &kb);
+          BLI_remlink(&key.block, &kb);
+          key.totkey--;
+          op.bake_key = &kb;
+          if (object.shapenr > index) {
+            object.shapenr = std::max(1, object.shapenr - 1);
+          }
+          break;
+        }
+      }
+      else if (!is_undo && op.bake_key != nullptr) {
+        BLI_addtail(&key.block, op.bake_key);
+        key.totkey++;
+        op.bake_key = nullptr;
+      }
+    }
+
+    if (op.is_bake && !op.removed.is_empty()) {
+      /* A bake toggles between "contribution in the base" and "contribution in the layers" while
+       * the combined surface stays identical. Re-derive the runtime mesh base against the
+       * unchanged live positions and the new layer set so `base + layers` keeps matching them.
+       * For plain add / remove changes the base derived above (before the list change) is the
+       * correct one and must NOT be re-derived: the live positions do not yet reflect the new
+       * layer set until the recompute below. */
+      layers::invalidate_runtime(object);
+      layers::session_state_ensure(object);
+    }
+
+    /* Bring the positions in sync with the restored layer state: canonical recompute for the
+     * mesh domain, honest re-evaluation for multires. */
+    layers::commit_layers_change(*depsgraph, object);
     return;
   }
 
@@ -1129,6 +1778,22 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       }
 
       if (use_multires_undo(step_data, ss)) {
+        if (step_data.sculpt_layer_uid != 0 && step_data.sculpt_layer_grids) {
+          /* A stroke recorded into a grid sculpt layer: the base MDisps were not modified by the
+           * stroke, so the CCG positions are not restored directly. Revert the layer's explicit
+           * delta and re-evaluate: the composed surface (base + layers) is a deterministic
+           * function of the stored data. Skipping #multires_mark_as_modified is intentional —
+           * a later flush must not bake the composed surface into the base.
+           *
+           * Consume any pending base edits first (e.g. left dirty by a previously restored
+           * base-stroke step): the layer data is about to change, and a later flush against the
+           * changed layer set would leak the delta into the base. */
+          layers::flush_pending_multires_base(object);
+          restore_active_sculpt_layer(step_data, object);
+          Mesh &mesh = *id_cast<Mesh *>(object.data);
+          DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+          break;
+        }
         MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
         SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
         const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
@@ -1152,7 +1817,10 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         }
         const Mesh &mesh = *id_cast<const Mesh *>(object.data);
         Array<bool> modified_verts(mesh.verts_num, false);
-        restore_position_mesh(object, *step_data.position_step_storage, modified_verts);
+
+        const bool skip_positions_swap = (step_data.sculpt_layer_uid != 0 && !step_data.sculpt_layer_verts.is_empty());
+        restore_position_mesh(
+            object, *step_data.position_step_storage, modified_verts, skip_positions_swap);
 
         const IndexMask changed_nodes = IndexMask::from_predicate(
             node_mask,
@@ -1178,6 +1846,18 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       }
       pbvh.update_bounds(*depsgraph, object);
       bke::pbvh::store_bounds_orig(pbvh);
+
+      /* Keep the active sculpt layer in sync with the restored positions. */
+      restore_active_sculpt_layer(step_data, object);
+
+      /* A base-editing stroke (not recorded into a layer) folds itself into the runtime layer base
+       * at stroke end; undoing it restores the positions but leaves that cached base advanced by
+       * the now-undone stroke. Invalidate it so the next stroke re-derives the base from the
+       * restored positions instead of a phantom surface. Recorded-layer strokes (uid != 0) keep the
+       * base unchanged and are already reconciled by #restore_active_sculpt_layer above. */
+      if (step_data.sculpt_layer_uid == 0) {
+        layers::invalidate_runtime(object);
+      }
       break;
     }
     case Type::HideVert: {
@@ -1390,6 +2070,10 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       /* Handled elsewhere. */
       BLI_assert_unreachable();
       break;
+    case Type::SculptLayer:
+      /* Handled via early return above (before the pbvh-type check). */
+      BLI_assert_unreachable();
+      break;
   }
 
   DEG_id_tag_update(&object.id, ID_RECALC_SHADING);
@@ -1400,6 +2084,15 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
 
 static void free_step_data(StepData &step_data)
 {
+  if (KeyBlock *kb = step_data.sculpt_layer_op.bake_key) {
+    /* The step still owns the key block a bake created and an undo detached from the mesh (the redo
+     * that would link it back can no longer happen once the step is freed). */
+    if (kb->data) {
+      MEM_delete_void(kb->data);
+    }
+    MEM_delete(kb);
+    step_data.sculpt_layer_op.bake_key = nullptr;
+  }
   geometry_free_data(&step_data.geometry_original);
   geometry_free_data(&step_data.geometry_modified);
   geometry_free_data(&step_data.bmesh.geometry_enter);
@@ -1665,6 +2358,9 @@ static void fill_node_data_mesh(const Depsgraph &depsgraph,
       store_face_sets(mesh, unode);
       break;
     }
+    case Type::SculptLayer:
+      /* Operator-level layer undo captures metadata/data in StepData directly, not per-node. */
+      break;
   }
 }
 
@@ -1729,6 +2425,9 @@ static void fill_node_data_grids(const Object &object,
       store_face_sets(base_mesh, unode);
       break;
     }
+    case Type::SculptLayer:
+      /* Operator-level layer undo captures metadata/data in StepData directly, not per-node. */
+      break;
   }
 }
 
@@ -1818,6 +2517,7 @@ BLI_NOINLINE static void bmesh_push(const Object &object,
       case Type::Geometry:
       case Type::FaceSet:
       case Type::Color:
+      case Type::SculptLayer:
         break;
     }
   }

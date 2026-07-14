@@ -62,6 +62,7 @@ struct Key;
 struct KeyBlock;
 struct Object;
 struct PaintModeSettings;
+struct SculptLayer;
 struct ReportList;
 struct wmKeyConfig;
 struct wmKeyMap;
@@ -115,6 +116,17 @@ class PositionDeformData {
   MutableSpan<float3> orig_;
 
   std::optional<ShapeKeyData> shape_key_data_;
+
+  /**
+   * When a mesh sculpt-layer stroke is being recorded, the active layer's per-vertex offset buffer.
+   * The translation applied to #orig_ is accumulated into it per dab (see #deform), so the
+   * end-of-stroke recording does not have to rewrite the layer with a full random-access scatter
+   * of the whole brushed area. Empty when no mesh layer is being recorded.
+   */
+  MutableSpan<float3> layer_record_data_;
+
+  /** Accumulate \a translations into #layer_record_data_ at \a verts. No-op when not recording. */
+  void record_layer_offsets(Span<int> verts, Span<float3> translations) const;
 
  public:
   PositionDeformData(const Depsgraph &depsgraph, Object &object_orig);
@@ -782,7 +794,14 @@ const float *brush_frontface_normal_from_falloff_shape(const SculptSession &ss,
                                                        char falloff_shape);
 void cube_tip_init(const Sculpt &sd, const Object &ob, const Brush &brush, float mat[4][4]);
 
-/** Sample the brush's texture value. */
+/**
+ * Sample the brush's texture value.
+ *
+ * \param brush_point: must be the composed (evaluated) position of the element, never the
+ * sculpt-layer base view. The texture is anchored to the surface the user sees and aims at: the
+ * screen-projected mapping modes must land the stamp where the cursor is, and the 3D mapping mode
+ * must keep the pattern stuck to the visible geometry.
+ */
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const float brush_point[3],
@@ -1017,6 +1036,175 @@ void SCULPT_OT_dyntopo_detail_size_edit(wmOperatorType *ot);
 void SCULPT_OT_dynamic_topology_toggle(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint::dyntopo
+
+namespace ed::sculpt_paint::layers {
+
+/* Sculpt layers integration (non-destructive sculpt edits, see also #BKE_sculpt_layers.hh). */
+
+/** True when sculpt layers are available for this object (regular mesh or multires, not dyntopo). */
+bool is_supported(const Object &object);
+/**
+ * True when the layer system actually shapes this object's surface right now: recording is armed,
+ * or at least one layer is enabled (so the composed surface differs from the base). Brushes that
+ * cannot work with a composed surface — the cloth simulation, whose constraints and simulation-area
+ * falloff are solved on it — are rejected in this state (see #sculpt_brush_stroke_invoke).
+ */
+bool in_use(const Object &object);
+/** Element domain (#SCULPT_LAYER_DOMAIN_VERT / #SCULPT_LAYER_DOMAIN_GRID) for the sculpt target. */
+short domain_for(const Object &object);
+/** Number of layer elements for the object (mesh vertices, or total multires grid points). */
+int element_count(const Object &object);
+
+/** Initialize per-session layer state. Call when entering sculpt mode. */
+void session_state_ensure(Object &object);
+
+/* Stroke recording into the active layer. */
+void stroke_record_begin(const Depsgraph &depsgraph, Object &object);
+void stroke_record_end(const Depsgraph &depsgraph, Object &object);
+/** Revert a cancelled stroke's recording, restoring the pre-stroke influence/visibility state. */
+void stroke_record_cancel(const Depsgraph &depsgraph, Object &object);
+
+/**
+ * The active mesh-domain recording layer's per-vertex offset buffer, or an empty span when no mesh
+ * layer is currently being recorded. Used by #PositionDeformData to accumulate a stroke per dab.
+ */
+MutableSpan<float3> active_record_data(Object &object);
+
+/**
+ * Per-element object-space contribution of the enabled sculpt layers ("base view" offset
+ * `O = combined - base`) for the current stroke, or an empty span when the mode is inactive.
+ * Indexed like the PBVH positions (mesh vertex index / CCG element index) and constant for the
+ * stroke's duration. Brushes subtract it from the live positions when computing
+ * surface-shape-dependent inputs (falloff distances, area normal/center, smoothing targets, plane
+ * fits) so the edit does not absorb the layer residual; the resulting translations are still
+ * applied to the live (composed) positions.
+ *
+ * Only strokes that edit THE BASE build one. A stroke recorded into a layer works on the composed
+ * surface — what is drawn is what was seen — so this span is empty while recording and every helper
+ * below degenerates to the plain, layer-less path (see #stroke_record_begin for the trade-off).
+ *
+ * The offset must always be taken relative to #stroke_base_view_dc — never raw. The brush reference
+ * point (#StrokeCache::location_symm and the radius around it) stays on the composed surface, so
+ * removing the raw offset shifts the sampled positions away from the cursor by the layer height:
+ * once that height reaches the brush radius every falloff factor is zeroed and the area-plane
+ * sampling degenerates. The helpers below already do this; a raw consumer must subtract the DC
+ * itself (or be strictly differential, like the smooth brush's neighbor averaging, where a constant
+ * offset cancels).
+ */
+Span<float3> stroke_base_view(const Object &object);
+
+/**
+ * The base-view offset sampled at the current brush contact point (see #stroke_base_view). Zero
+ * when the base view is inactive. Refreshed once per brush action, so it follows the symmetry and
+ * tile passes.
+ */
+float3 stroke_base_view_dc(const Object &object);
+
+/**
+ * Refresh #stroke_base_view_dc for the current brush action. Called once per symmetry / tile pass,
+ * before any brush computation reads the base view.
+ */
+void base_view_dc_update(const Depsgraph &depsgraph, Object &object);
+
+/**
+ * Add the nodes the brush reaches in base-view space to \a node_mask, and return the union.
+ *
+ * The brush measures its falloff on the base view, but the gather selects nodes from their bounds on
+ * the composed surface. The two footprints differ by the layer height, so without this an element
+ * can earn a non-zero factor while its node was never gathered; a node is processed as a whole, so
+ * the stroke boundary then follows node borders (square tiles). The returned mask is a superset —
+ * the added nodes' elements simply get their (usually zero) factor like any other. Returns \a
+ * node_mask unchanged when the base view is inactive. \a radius must cover the brush footprint (pass
+ * the same scaled radius the gather used).
+ */
+IndexMask base_view_extend_node_mask(const Object &object,
+                                     const IndexMask &node_mask,
+                                     float radius,
+                                     IndexMaskMemory &memory);
+
+/**
+ * Base-view adjustment helpers for brush computations. Each returns the input span unchanged
+ * when the base view is inactive; otherwise the adjusted copy (with the DC offset removed) lives in
+ * \a r_storage.
+ */
+/** Compact node positions (one per element of \a verts) minus the base-view offset. */
+Span<float3> base_view_adjust_compact_mesh(const Object &object,
+                                           Span<int> verts,
+                                           Span<float3> positions,
+                                           Vector<float3> &r_storage);
+/**
+ * Gather base-view positions for \a verts from the full \a vert_positions array. Returns an
+ * EMPTY span when the base view is inactive (the caller keeps its indexed code path).
+ */
+Span<float3> base_view_gather_mesh(const Object &object,
+                                   Span<int> verts,
+                                   Span<float3> vert_positions,
+                                   Vector<float3> &r_storage);
+/** Compact node grid positions (CCG node layout) minus the base-view offset. */
+Span<float3> base_view_adjust_compact_grids(const Object &object,
+                                            const SubdivCCG &subdiv_ccg,
+                                            Span<int> grids,
+                                            Span<float3> positions,
+                                            Vector<float3> &r_storage);
+/**
+ * Inverse of #base_view_adjust_compact_mesh: add the base-view offset back into \a positions
+ * in place, lifting brush results computed in base space up to the live (composed) space. No-op
+ * when the base view is inactive. Used by brushes (Pose, Boundary) that build absolute new
+ * positions from the base so the layer residual is carried instead of baked into the base.
+ */
+void base_view_compose_mesh(const Object &object,
+                            Span<int> verts,
+                            MutableSpan<float3> positions);
+/** Grid (CCG node layout) counterpart of #base_view_compose_mesh. */
+void base_view_compose_grids(const Object &object,
+                             const SubdivCCG &subdiv_ccg,
+                             Span<int> grids,
+                             MutableSpan<float3> positions);
+/**
+ * Undo the per-dab layer accumulation of an in-progress stroke that is being cancelled. Must run
+ * before the sculpt undo restores the pre-stroke positions, because the offset is recomputed as
+ * `current_position - pre_stroke_position` from the still-available per-node undo data. Under a
+ * shape key the stroke lives in the evaluated positions (the basis is untouched), so the depsgraph
+ * is needed to diff against them.
+ */
+void cancel_recorded_offsets(const Depsgraph &depsgraph, Object &object);
+
+/**
+ * Bring the live positions in sync after a layer change (influence, visibility, data edit, list
+ * change): canonical recompute from `mesh_base + layers` with a lightweight PBVH refresh for the
+ * mesh domain, honest geometry re-evaluation for multires (the CCG is rebuilt from
+ * `MDisps + sum(enabled layers)`).
+ */
+void commit_layers_change(const Depsgraph &depsgraph, Object &object);
+
+/**
+ * Multires: reshape any pending (lazily flushed) base sculpt edits from the live CCG into the
+ * base MDisps while the CCG and the stored layer set are still consistent. MUST be called before
+ * any change to the grid layer set or influences — a later flush would reshape the stale composed
+ * CCG against the changed layer set and leak the difference into the base. No-op when nothing is
+ * pending or the object has no live grids session.
+ */
+void flush_pending_multires_base(Object &object);
+
+/* Operators. */
+void SCULPT_OT_layer_add(wmOperatorType *ot);
+void SCULPT_OT_layer_remove(wmOperatorType *ot);
+void SCULPT_OT_layer_move(wmOperatorType *ot);
+void SCULPT_OT_layer_duplicate(wmOperatorType *ot);
+void SCULPT_OT_layer_merge_down(wmOperatorType *ot);
+void SCULPT_OT_layer_bake(wmOperatorType *ot);
+void SCULPT_OT_layer_bake_and_editmode_enter(wmOperatorType *ot);
+void SCULPT_OT_layer_clear(wmOperatorType *ot);
+void SCULPT_OT_layer_invert(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_isolate(wmOperatorType *ot);
+void SCULPT_OT_layer_set_influence(wmOperatorType *ot);
+void SCULPT_OT_layer_influence_drag(wmOperatorType *ot);
+void SCULPT_OT_layer_toggle_visibility(wmOperatorType *ot);
+void SCULPT_OT_layer_select(wmOperatorType *ot);
+void SCULPT_OT_layer_toggle_rec(wmOperatorType *ot);
+void SCULPT_OT_layer_solo_base(wmOperatorType *ot);
+
+}  // namespace ed::sculpt_paint::layers
 
 /** \} */
 

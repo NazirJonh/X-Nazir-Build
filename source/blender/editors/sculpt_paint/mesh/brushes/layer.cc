@@ -40,6 +40,8 @@ struct LocalData {
   Vector<float> masks;
   Vector<float> displacement_factors;
   Vector<float3> translations;
+  /* Positions with the sculpt-layer base view removed (see #layers::stroke_base_view). */
+  Vector<float3> base_view_storage;
 };
 
 BLI_NOINLINE static void offset_displacement_factors(const MutableSpan<float> displacement_factors,
@@ -142,18 +144,25 @@ static void calc_faces(const Depsgraph &depsgraph,
   const OrigPositionData orig_data = orig_position_data_get_mesh(object, node);
   const MutableSpan positions = gather_data_mesh(position_data.eval, verts, tls.positions);
 
+  /* Base view: region clipping and falloff distances are measured on the un-layered base so they
+   * are not modulated by the layer pattern. The height offset itself needs no adjustment: it is
+   * built from the original positions, which carry the same offset as the live ones, so it cancels
+   * out of the translation. The texture keeps sampling the composed surface (see
+   * #sculpt_apply_texture). */
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_mesh(
+      object, verts, orig_data.positions, tls.base_view_storage);
+
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
-  filter_region_clip_factors(ss, positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
   }
 
   tls.distances.resize(verts.size());
   const MutableSpan<float> distances = tls.distances;
-  calc_brush_distances(
-      ss, orig_data.positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -240,18 +249,21 @@ static void calc_grids(const Depsgraph &depsgraph,
   const OrigPositionData orig_data = orig_position_data_get_grids(object, node);
   const MutableSpan positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
 
+  /* Base view: see the mesh variant in #calc_faces. */
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, orig_data.positions, tls.base_view_storage);
+
   tls.factors.resize(positions.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
-  filter_region_clip_factors(ss, positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, subdiv_ccg, grids, factors);
   }
 
   tls.distances.resize(positions.size());
   const MutableSpan<float> distances = tls.distances;
-  calc_brush_distances(
-      ss, orig_data.positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);

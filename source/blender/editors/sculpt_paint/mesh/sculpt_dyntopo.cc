@@ -30,6 +30,7 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "ED_sculpt.hh"
 #include "ED_undo.hh"
 
 #include "sculpt_intern.hh"
@@ -194,13 +195,20 @@ static void enable_with_undo(Main &bmain, Depsgraph &depsgraph, const Scene &sce
   }
 }
 
-static wmOperatorStatus sculpt_dynamic_topology_toggle_exec(bContext *C, wmOperator * /*op*/)
+static wmOperatorStatus sculpt_dynamic_topology_toggle_exec(bContext *C, wmOperator *op)
 {
   Main &bmain = *CTX_data_main(C);
   Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
   Scene &scene = *CTX_data_scene(C);
   Object &ob = *CTX_data_active_object(C);
   SculptSession &ss = *ob.runtime->sculpt_session;
+
+  /* Layers cannot survive a BMesh conversion (dyntopo is unsupported for their #bke::pbvh::Tree,
+   * see #layers::is_supported), so block turning it on while un-baked layers are present. Only
+   * gates the enable path; disabling dyntopo back to a regular mesh is always allowed. */
+  if (!ss.bm && !layers::destructive_edit_check(*id_cast<const Mesh *>(ob.data), op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
 
   WM_cursor_wait(true);
 

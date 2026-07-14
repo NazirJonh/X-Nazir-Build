@@ -10,6 +10,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_enumerable_thread_specific.hh"
+#include "BLI_listbase.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
 
@@ -479,6 +480,15 @@ void object_sculpt_mode_enter(Main &bmain,
   }
 
   ensure_valid_pivot(ob, *paint);
+
+  /* Capture the un-layered runtime base for the mesh (vertex) domain and validate grid-domain
+   * layer data against the current top level. This has to happen while the geometry still matches
+   * the stored per-layer influences, i.e. before the user can change anything. Only force-build
+   * the BVH when layers actually exist. */
+  if (mesh && !BLI_listbase_is_empty(&mesh->sculpt_layers)) {
+    bke::object::pbvh_ensure(depsgraph, ob);
+  }
+  layers::session_state_ensure(ob);
 
   /* Flush object mode. */
   DEG_id_tag_update(&ob.id, ID_RECALC_SYNC_TO_EVAL);
@@ -1539,6 +1549,23 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_mask_extract);
   WM_operatortype_append(SCULPT_OT_face_set_extract);
   WM_operatortype_append(SCULPT_OT_paint_mask_slice);
+
+  WM_operatortype_append(layers::SCULPT_OT_layer_add);
+  WM_operatortype_append(layers::SCULPT_OT_layer_remove);
+  WM_operatortype_append(layers::SCULPT_OT_layer_move);
+  WM_operatortype_append(layers::SCULPT_OT_layer_duplicate);
+  WM_operatortype_append(layers::SCULPT_OT_layer_merge_down);
+  WM_operatortype_append(layers::SCULPT_OT_layer_bake);
+  WM_operatortype_append(layers::SCULPT_OT_layer_bake_and_editmode_enter);
+  WM_operatortype_append(layers::SCULPT_OT_layer_clear);
+  WM_operatortype_append(layers::SCULPT_OT_layer_invert);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_isolate);
+  WM_operatortype_append(layers::SCULPT_OT_layer_set_influence);
+  WM_operatortype_append(layers::SCULPT_OT_layer_influence_drag);
+  WM_operatortype_append(layers::SCULPT_OT_layer_toggle_visibility);
+  WM_operatortype_append(layers::SCULPT_OT_layer_select);
+  WM_operatortype_append(layers::SCULPT_OT_layer_toggle_rec);
+  WM_operatortype_append(layers::SCULPT_OT_layer_solo_base);
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

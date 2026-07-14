@@ -1061,6 +1061,19 @@ static void reshape_subdiv_evaluate_limit_at_grid(
   const int corner = multires_reshape_grid_to_corner(reshape_context, grid_coord->grid_index);
   multires_reshape_tangent_matrix_for_corner(
       reshape_context, face_index, corner, dPdu, dPdv, r_tangent_matrix);
+
+  /* These frames only transport existing detail between the pre-edit and post-edit reshape
+   * surfaces (see #evaluate_higher_grid_positions_with_details), so normalize them to keep that
+   * transport a pure rotation. With un-normalized frames the transport multiplies the detail by
+   * the local stretch of the reshape surface, which compounds with every low-level stroke and
+   * blows up near extraordinary vertices where the derivative lengths collapse. Displacement
+   * storage against the base limit surface intentionally keeps the un-normalized frames. */
+  for (int i = 0; i < 3; i++) {
+    const float axis_length = math::length(r_tangent_matrix[i]);
+    if (axis_length > 0.0f) {
+      r_tangent_matrix[i] /= axis_length;
+    }
+  }
 }
 
 /** \} */
@@ -1271,6 +1284,18 @@ static void evaluate_higher_grid_positions_with_details(
         float3 smooth_delta = math::transform_direction(smooth_tangent_matrix,
                                                         original_detail_delta_tangent);
 
+#if MULTIRES_TANGENT_DEBUG
+        /* The detail is encoded against the pre-edit reshape surface and decoded against the
+         * post-edit one; a large total gain means the transport itself manufactures a spike. */
+        multires_reshape_tangent_debug_gain("orig-encode",
+                                            grid_coord,
+                                            orig_sculpt_point->tangent_matrix,
+                                            original_detail_delta,
+                                            original_detail_delta_tangent);
+        multires_reshape_tangent_debug_gain(
+            "total", grid_coord, smooth_tangent_matrix, original_detail_delta, smooth_delta);
+#endif
+
         /* Grid element of the result.
          *
          * NOTE: Displacement is storing object space coordinate. */
@@ -1337,7 +1362,13 @@ void multires_reshape_smooth_object_grids_with_details(
   evaluate_base_surface_grids(&reshape_smooth_context);
 
   reshape_subdiv_refine_final(&reshape_smooth_context);
+#if MULTIRES_TANGENT_DEBUG
+  multires_reshape_tangent_debug_begin(reshape_context, "transport");
+#endif
   evaluate_higher_grid_positions_with_details(&reshape_smooth_context);
+#if MULTIRES_TANGENT_DEBUG
+  multires_reshape_tangent_debug_end();
+#endif
 #else
   UNUSED_VARS(reshape_context);
 #endif

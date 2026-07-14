@@ -64,6 +64,7 @@
 #include "BKE_multires.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
@@ -2312,19 +2313,11 @@ int BKE_sculpt_get_grid_num_faces(const Object &object)
 }
 
 /* Checks if there are any supported deformation modifiers active */
-static bool sculpt_modifiers_active(const Scene *scene, const Sculpt *sd, Object *ob)
+/* Whether any enabled modifier other than the (editable) shape key would make the drawn surface
+ * differ from the sculpt PBVH — a real deforming modifier, or any modifier when not restricted to
+ * only-deform. Shape keys are excluded because sculpt edits them directly. */
+static bool sculpt_non_shapekey_modifiers_active(const Scene *scene, const Sculpt *sd, Object *ob)
 {
-  const Mesh &mesh = *id_cast<Mesh *>(ob->data);
-
-  if (ob->runtime->sculpt_session->bm || BKE_sculpt_multires_active(scene, ob)) {
-    return false;
-  }
-
-  /* Non-locked shape keys could be handled in the same way as deformed mesh. */
-  if ((ob->shapeflag & OB_SHAPE_LOCK) == 0 && mesh.key && ob->shapenr) {
-    return true;
-  }
-
   VirtualModifierData virtual_modifier_data;
   for (ModifierData *md = BKE_modifiers_get_virtual_modifierlist(ob, &virtual_modifier_data); md;
        md = md->next)
@@ -2355,6 +2348,22 @@ static bool sculpt_modifiers_active(const Scene *scene, const Sculpt *sd, Object
   return false;
 }
 
+static bool sculpt_modifiers_active(const Scene *scene, const Sculpt *sd, Object *ob)
+{
+  const Mesh &mesh = *id_cast<Mesh *>(ob->data);
+
+  if (ob->runtime->sculpt_session->bm || BKE_sculpt_multires_active(scene, ob)) {
+    return false;
+  }
+
+  /* Non-locked shape keys could be handled in the same way as deformed mesh. */
+  if ((ob->shapeflag & OB_SHAPE_LOCK) == 0 && mesh.key && ob->shapenr) {
+    return true;
+  }
+
+  return sculpt_non_shapekey_modifiers_active(scene, sd, ob);
+}
+
 static void sculpt_update_object(Depsgraph *depsgraph,
                                  Object *ob,
                                  Object *ob_eval,
@@ -2383,6 +2392,13 @@ static void sculpt_update_object(Depsgraph *depsgraph,
 
   ss.shapekey_active = (mmd == nullptr && ss.bm == nullptr) ? BKE_keyblock_from_object(ob) :
                                                               nullptr;
+
+  /* A shape-key session normally forces #deform_modifiers_active (see #sculpt_modifiers_active),
+   * which routes drawing through the evaluated mesh. When the shape key is the *only* deformer the
+   * PBVH's #deform_cos already hold the final surface, so it can be drawn directly and avoid a full
+   * mesh re-evaluation on every redraw during a stroke. */
+  ss.shapekey_pbvh_draw = ss.shapekey_active != nullptr &&
+                          !sculpt_non_shapekey_modifiers_active(scene, sd, ob);
 
   ss.multires_modifier = mmd;
 
@@ -2422,6 +2438,16 @@ static void sculpt_update_object(Depsgraph *depsgraph,
       BKE_sculptsession_free_deformMats(&ss);
 
       BKE_crazyspace_build_sculpt(depsgraph, scene, ob, ss.deform_imats, ss.deform_cos);
+      /* The crazy-space build reproduces only the shape-keyed/deformed base surface; it evaluates
+       * the modifier stack and does not include the vertex sculpt layers. Compose them back on top
+       * as an object-space overlay so the sculpt display matches the evaluated mesh (and object
+       * mode). This applies to ANY deformer that fills #deform_cos here — a real deforming modifier
+       * (Armature/Lattice/Curve) as well as a shape key. Gating it on a shape key dropped the layers
+       * for objects deformed by a modifier without a shape key (most visibly the layer disappears
+       * after toggling its visibility). #apply_vert_layers is a no-op when the mesh carries no
+       * vertex-domain layers. The mutually exclusive shape-key branch below only runs when crazy
+       * space leaves #deform_cos empty, so the layers are still composed exactly once. */
+      bke::sculpt_layers::apply_vert_layers(mesh_orig->sculpt_layers, ss.deform_cos);
       BKE_pbvh_vert_coords_apply(pbvh, ss.deform_cos);
 
       for (float3x3 &matrix : ss.deform_imats) {
@@ -2437,6 +2463,10 @@ static void sculpt_update_object(Depsgraph *depsgraph,
     ss.deform_cos = Span(static_cast<const float3 *>(ss.shapekey_active->data),
                          mesh_orig->verts_num);
     if (!ss.deform_cos.is_empty()) {
+      /* Compose vertex-domain sculpt layers on top of the active shape key's positions so the
+       * sculpt display shows the layer riding on the morphed form, matching the mesh-eval
+       * composition object mode uses. No-op when the mesh carries no vertex-domain layers. */
+      bke::sculpt_layers::apply_vert_layers(mesh_orig->sculpt_layers, ss.deform_cos);
       BKE_pbvh_vert_coords_apply(pbvh, ss.deform_cos);
     }
   }
@@ -2800,9 +2830,17 @@ bool BKE_sculptsession_use_pbvh_draw(const Object *ob, const RegionView3D *rv3d)
   const bool external_engine = rv3d && rv3d->view_render != nullptr;
 
   if (pbvh->type() == bke::pbvh::Type::Mesh) {
-    /* Regular mesh only draws from pbvh::Tree without modifiers and shape keys,
-     * and without external render engine. */
-    return !(ss->shapekey_active || ss->deform_modifiers_active || external_engine);
+    /* Regular mesh draws from pbvh::Tree without modifiers and without an external render engine.
+     * A shape key on its own is allowed: it deforms #deform_cos (which the PBVH draws from) and no
+     * other modifier changes the surface, so the tree is a faithful copy of what is displayed. A
+     * shape key combined with a real deforming modifier still routes through the evaluated mesh. */
+    if (external_engine) {
+      return false;
+    }
+    if (ss->deform_modifiers_active && !ss->shapekey_pbvh_draw) {
+      return false;
+    }
+    return true;
   }
 
   if (pbvh->type() == bke::pbvh::Type::BMesh) {

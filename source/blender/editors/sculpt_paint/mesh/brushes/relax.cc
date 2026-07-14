@@ -33,11 +33,14 @@ inline namespace relax_cc {
 struct MeshLocalData {
   Vector<float> factors;
   Vector<float> distances;
+  /* Positions with the sculpt-layer base view removed (see #layers::stroke_base_view). */
+  Vector<float3> base_view_storage;
 };
 
 struct GridLocalData {
   Vector<float> factors;
   Vector<float> distances;
+  Vector<float3> base_view_storage;
 };
 
 struct BMeshLocalData {
@@ -119,16 +122,33 @@ BLI_NOINLINE static void calc_factors_faces(const Depsgraph &depsgraph,
 
   const Span<int> verts = node.verts();
 
+  /* Base view: region clipping and falloff distances are measured on the un-layered base so the
+   * factors are not modulated by the layer pattern. The texture keeps sampling the composed
+   * surface (see #sculpt_apply_texture). */
+  const Span<float3> base_view_positions = layers::base_view_gather_mesh(
+      object, verts, positions_eval, tls.base_view_storage);
+
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
-  filter_region_clip_factors(ss, positions_eval, verts, factors);
+  if (base_view_positions.is_empty()) {
+    filter_region_clip_factors(ss, positions_eval, verts, factors);
+  }
+  else {
+    filter_region_clip_factors(ss, base_view_positions, factors);
+  }
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
   }
 
   tls.distances.resize(verts.size());
   const MutableSpan<float> distances = tls.distances;
-  calc_brush_distances(
-      ss, positions_eval, verts, eBrushFalloffShape(brush.falloff_shape), distances);
+  if (base_view_positions.is_empty()) {
+    calc_brush_distances(
+        ss, positions_eval, verts, eBrushFalloffShape(brush.falloff_shape), distances);
+  }
+  else {
+    calc_brush_distances(
+        ss, base_view_positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  }
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -194,6 +214,7 @@ static void do_relax_face_sets_brush_mesh(const Depsgraph &depsgraph,
         smooth::calc_relaxed_translations_faces(
             position_data.eval,
             vert_normals,
+            layers::stroke_base_view(object),
             faces,
             corner_verts,
             vert_to_face_map,
@@ -246,15 +267,19 @@ BLI_NOINLINE static void calc_factors_grids(const Depsgraph &depsgraph,
 
   gather_data_grids(subdiv_ccg, subdiv_ccg.positions.as_span(), grids, positions);
 
+  /* Base view: see the mesh variant in #calc_factors_faces. */
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, positions, tls.base_view_storage);
+
   fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
-  filter_region_clip_factors(ss, positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, subdiv_ccg, grids, factors);
   }
 
   tls.distances.resize(grid_verts_num);
   const MutableSpan<float> distances = tls.distances;
-  calc_brush_distances(ss, positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -330,6 +355,7 @@ static void do_relax_face_sets_brush_grids(const Depsgraph &depsgraph,
       [&](const int i, const int pos) {
         smooth::calc_relaxed_translations_grids(
             subdiv_ccg,
+            layers::stroke_base_view(object),
             faces,
             corner_verts,
             face_sets,
@@ -481,16 +507,20 @@ BLI_NOINLINE static void calc_topology_relax_factors_faces(const Depsgraph &deps
   const OrigPositionData orig_data = orig_position_data_get_mesh(object, node);
   const Span<int> verts = node.verts();
 
+  /* Base view: see #calc_factors_faces. The offset is constant for the stroke, so subtracting it
+   * from the original (pre-stroke) positions yields the pre-stroke base. */
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_mesh(
+      object, verts, orig_data.positions, tls.base_view_storage);
+
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
-  filter_region_clip_factors(ss, orig_data.positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, orig_data.normals, factors);
   }
 
   tls.distances.resize(verts.size());
   const MutableSpan<float> distances = tls.distances;
-  calc_brush_distances(
-      ss, orig_data.positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -547,6 +577,7 @@ static void do_topology_relax_brush_mesh(const Depsgraph &depsgraph,
         smooth::calc_relaxed_translations_faces(
             position_data.eval,
             vert_normals,
+            layers::stroke_base_view(object),
             faces,
             corner_verts,
             vert_to_face_map,
@@ -595,16 +626,19 @@ BLI_NOINLINE static void calc_topology_relax_factors_grids(const Depsgraph &deps
   gather_data_grids(subdiv_ccg, subdiv_ccg.positions.as_span(), grids, positions);
   const OrigPositionData orig_data = orig_position_data_get_grids(object, node);
 
+  /* Base view: see #calc_topology_relax_factors_faces. */
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, orig_data.positions, tls.base_view_storage);
+
   fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
-  filter_region_clip_factors(ss, orig_data.positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, orig_data.normals, factors);
   }
 
   tls.distances.resize(grid_verts_num);
   const MutableSpan<float> distances = tls.distances;
-  calc_brush_distances(
-      ss, orig_data.positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -666,6 +700,7 @@ static void do_topology_relax_brush_grids(const Depsgraph &depsgraph,
       [&](const int i, const int pos) {
         smooth::calc_relaxed_translations_grids(
             subdiv_ccg,
+            layers::stroke_base_view(object),
             faces,
             corner_verts,
             face_sets,

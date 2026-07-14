@@ -262,6 +262,164 @@ class DATA_PT_vertex_groups(MeshButtonsPanel, Panel):
         draw_attribute_warnings(context, layout, None)
 
 
+class MESH_UL_sculpt_layers(UIList):
+    def draw_item(self, context, layout, _data, item, _icon, _active_data, _active_propname, _index):
+        layer = item
+        obj = context.object
+        # Visibility and influence keep the combined surface in sync incrementally, which can't
+        # happen in Edit Mode; keep the name editable but lock the value controls there.
+        values_editable = obj is None or obj.mode != 'EDIT'
+        row = layout.row(align=True)
+        vis = row.row(align=True)
+        vis.enabled = values_editable
+        vis.prop(layer, "enabled", text="", icon='HIDE_OFF' if layer.enabled else 'HIDE_ON', emboss=False)
+        row.prop(layer, "name", text="", emboss=False)
+        sub = layout.row()
+        sub.scale_x = 0.5
+        sub.enabled = values_editable
+        sub.prop(layer, "influence", text="", slider=True)
+
+
+class MESH_MT_sculpt_layer_context_menu(Menu):
+    bl_label = "Sculpt Layer Specials"
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.operator("sculpt.layer_duplicate", icon='DUPLICATE')
+        layout.separator()
+        layout.operator("sculpt.layer_clear")
+        layout.operator("sculpt.layer_invert")
+        layout.separator()
+        layout.operator("sculpt.layer_mask_isolate", text="Isolate by Mask")
+
+
+class SCULPT_PT_layer_editmode_confirm(Panel):
+    # Popped up (as a popover, not a plain dropdown menu) by OBJECT_OT_editmode_toggle
+    # (object_edit.cc) when entering Edit Mode on a mesh that still has sculpt layers: Edit Mode
+    # topology changes can't be tracked by layer data.
+    #
+    # A popover is required (rather than a Menu) so the "Don't Show This Again" checkbox below
+    # can be toggled without immediately closing the popup: only widgets added through
+    # UILayout.template_popup_confirm() are wired to close a popover on click, plain
+    # UILayout.prop() checkboxes are not.
+    bl_space_type = 'VIEW_3D'  # dummy, only ever invoked as a popover
+    bl_region_type = 'WINDOW'
+    bl_label = "Sculpt Layers Present"
+    bl_ui_units_x = 14
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Entering Edit Mode can change the topology sculpt layers depend on.")
+        layout.separator()
+
+        props = layout.template_popup_confirm(
+            "object.editmode_toggle", text="Continue Editing", icon='EDITMODE_HLT', cancel_text="")
+        props.sculpt_layers_bake_confirmed = True
+
+        layout.template_popup_confirm(
+            "sculpt.layer_bake_and_editmode_enter", text="Bake All Layers", icon='CHECKMARK',
+            cancel_text="")
+
+        layout.template_popup_confirm("", text="", cancel_text="Cancel")
+
+        # Separated from the choices above so it reads as "remember my answer", not a fourth
+        # action of its own.
+        layout.separator()
+        layout.prop(
+            context.window_manager,
+            "sculpt_layers_hide_editmode_warning",
+            text="Don't Show This Again This Session",
+        )
+
+
+class DATA_PT_sculpt_layers(MeshButtonsPanel, Panel):
+    bl_label = "Sculpt Layers"
+    bl_options = {'DEFAULT_CLOSED'}
+    COMPAT_ENGINES = {
+        'BLENDER_RENDER',
+        'BLENDER_EEVEE',
+        'BLENDER_WORKBENCH',
+    }
+
+    @classmethod
+    def poll(cls, context):
+        engine = context.engine
+        obj = context.object
+        return (obj and obj.type == 'MESH' and (engine in cls.COMPAT_ENGINES))
+
+    def draw(self, context):
+        layout = self.layout
+
+        ob = context.object
+        mesh = ob.data
+
+        row = layout.row()
+        row.template_list(
+            "MESH_UL_sculpt_layers", "",
+            mesh, "sculpt_layers",
+            mesh, "sculpt_layers_active_index",
+            rows=5,
+        )
+
+        col = row.column(align=True)
+        col.operator("sculpt.layer_add", icon='ADD', text="")
+        col.operator("sculpt.layer_remove", icon='REMOVE', text="")
+        col.separator()
+        col.menu("MESH_MT_sculpt_layer_context_menu", icon='DOWNARROW_HLT', text="")
+        col.separator()
+        col.operator("sculpt.layer_merge_down", icon='TRIA_DOWN_BAR', text="")
+        col.separator()
+        col.operator("sculpt.layer_bake", icon='CHECKMARK', text="")
+
+        active = mesh.sculpt_layers_active
+        if active:
+            sub = layout.column()
+            sub.use_property_split = True
+            # In Edit Mode the live mesh positions can't be updated, so changing a vertex-domain
+            # layer's influence would desync the combined surface (see rna_SculptLayer_influence_set).
+            # Disable the control there instead of silently ignoring edits.
+            sub.enabled = ob.mode != 'EDIT'
+            if ob.mode == 'SCULPT':
+                # Drag handle runs the modal operator for smooth interactive updates; the slider
+                # itself stays for precise keyboard entry. Split manually so the label stays
+                # leftmost and the drag handle sits directly before the slider, not before the
+                # label.
+                row = sub.row(align=True)
+                row.use_property_split = False
+                split = row.split(factor=0.4)
+                split.alignment = 'RIGHT'
+                split.label(text="Influence")
+                value_row = split.row(align=True)
+                value_row.operator("sculpt.layer_influence_drag", text="", icon='ARROW_LEFTRIGHT')
+                value_row.prop(active, "influence", text="")
+            else:
+                sub.prop(active, "influence")
+
+        if ob.mode == 'SCULPT':
+            solo = mesh.sculpt_layers_solo_active
+            row = layout.row(align=True)
+            # Solo Base isolates the base shape, so REC has nothing to record into; disable it
+            # rather than let the user think strokes are still being captured into the layer.
+            rec_row = row.row(align=True)
+            rec_row.enabled = not solo
+            rec_row.operator(
+                "sculpt.layer_toggle_rec",
+                text="REC",
+                icon='RECORD_ON',
+                depress=ob.sculpt_layers_rec_active,
+            )
+            # Isolates the base shape for direct sculpting: hides all layers so surface-dependent
+            # brushes (smooth, grab, flatten) cannot bake the layer residue into the base.
+            row.operator(
+                "sculpt.layer_solo_base",
+                text="Solo Base",
+                icon='SOLO_ON' if solo else 'SOLO_OFF',
+                depress=solo,
+            )
+        else:
+            layout.label(text="Enter Sculpt Mode to record layers", icon='INFO')
+
+
 def draw_shape_key_properties(context, layout):
     layout.use_property_split = True
     ob = context.object
@@ -723,12 +881,16 @@ classes = (
     MESH_MT_shape_key_tree_context_menu,
     MESH_MT_color_attribute_context_menu,
     MESH_MT_attribute_context_menu,
+    MESH_MT_sculpt_layer_context_menu,
+    SCULPT_PT_layer_editmode_confirm,
     MESH_UL_vgroups,
     MESH_UL_uvmaps,
     MESH_UL_attributes,
+    MESH_UL_sculpt_layers,
     DATA_PT_context_mesh,
     DATA_PT_vertex_groups,
     DATA_PT_shape_keys,
+    DATA_PT_sculpt_layers,
     DATA_PT_uv_texture,
     DATA_PT_vertex_colors,
     DATA_PT_mesh_attributes,
@@ -740,6 +902,28 @@ classes = (
     MESH_UL_color_attributes,
     MESH_UL_color_attributes_selector,
 )
+
+
+def register_props():
+    from bpy.props import BoolProperty
+    from bpy.types import WindowManager
+
+    # Session-only (not saved to the .blend file): backs the "Don't Show This Again This
+    # Session" checkbox in SCULPT_MT_layer_editmode_confirm, read from
+    # OBJECT_OT_editmode_toggle (object_edit.cc) before popping that menu up.
+    WindowManager.sculpt_layers_hide_editmode_warning = BoolProperty(
+        name="Don't Show Again",
+        description="Don't warn about sculpt layers when entering Edit Mode again this session",
+        default=False,
+        options={'SKIP_SAVE'},
+    )
+
+
+def unregister_props():
+    from bpy.types import WindowManager
+
+    del WindowManager.sculpt_layers_hide_editmode_warning
+
 
 if __name__ == "__main__":  # only for live edit.
     from bpy.utils import register_class

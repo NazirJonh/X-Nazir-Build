@@ -19,6 +19,7 @@
 
 #include "BLT_translation.hh"
 
+#include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 
 #include "RNA_define.hh"
@@ -2142,6 +2143,13 @@ static void rna_Object_mesh_symmetry_z_set(PointerRNA *ptr, bool value)
   mesh_symmetry_set_common(ptr, value, ME_SYMMETRY_Z);
 }
 
+static bool rna_Object_sculpt_layers_rec_active_get(PointerRNA *ptr)
+{
+  const Object *ob = static_cast<const Object *>(ptr->data);
+  const SculptSession *ss = ob->runtime ? ob->runtime->sculpt_session : nullptr;
+  return ss ? ss->layers.rec_active : false;
+}
+
 static int rna_Object_mesh_symmetry_yz_editable(const PointerRNA *ptr, const char ** /*r_info*/)
 {
   const Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
@@ -3764,6 +3772,15 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_override_funcs(
       prop, nullptr, nullptr, "rna_Object_light_linking_override_apply");
   RNA_def_property_ui_text(prop, "Light Linking", "Light linking settings");
+
+  /* Sculpt Layers REC state. */
+  prop = RNA_def_property(srna, "sculpt_layers_rec_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Object_sculpt_layers_rec_active_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Sculpt Layers REC Active",
+      "True when sculpt layer recording mode is on and strokes go into the active layer");
 
   /* Shadow terminator. */
   prop = RNA_def_property(srna, "shadow_terminator_normal_offset", PROP_FLOAT, PROP_DISTANCE);

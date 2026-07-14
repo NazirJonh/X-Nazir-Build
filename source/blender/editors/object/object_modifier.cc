@@ -1071,6 +1071,15 @@ static bool modifier_apply_obdata(ReportList *reports,
 
     /* Multires: ensure that recent sculpting is applied */
     if (md_eval->type == eModifierType_Multires) {
+      if (BKE_multires_mesh_has_grid_sculpt_layers(*mesh)) {
+        /* Applying the modifier destroys the displacement grids the layers are defined against,
+         * silently turning the layers into stale data. Baking first makes the intent explicit. */
+        BKE_report(reports,
+                   RPT_ERROR,
+                   "Cannot apply the Multires modifier while grid sculpt layers exist: bake "
+                   "layers first");
+        return false;
+      }
       multires_force_sculpt_rebuild(ob);
     }
 

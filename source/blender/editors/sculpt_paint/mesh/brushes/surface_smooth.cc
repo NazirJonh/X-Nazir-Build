@@ -39,6 +39,10 @@ struct LocalData {
   Vector<float3> laplacian_disp;
   Vector<float3> average_positions;
   Vector<float3> translations;
+  /* Positions with the sculpt-layer base view removed, and its neighbor average (see
+   * #layers::stroke_base_view). */
+  Vector<float3> base_view_storage;
+  Vector<float3> base_view_avg;
 };
 
 BLI_NOINLINE static void clamp_factors(const MutableSpan<float> factors)
@@ -82,18 +86,35 @@ BLI_NOINLINE static void do_surface_smooth_brush_mesh(const Depsgraph &depsgraph
         LocalData &tls = all_tls.local();
         const Span<int> verts = nodes[i].verts();
 
+        /* Base view: region clipping and falloff distances are measured on the un-layered base so
+         * the factors are not modulated by the layer pattern. The texture keeps sampling the
+         * composed surface (see #sculpt_apply_texture). */
+        const Span<float3> base_view_positions = layers::base_view_gather_mesh(
+            object, verts, position_data.eval, tls.base_view_storage);
+
         const MutableSpan<float> factors = all_factors.as_mutable_span().slice(node_offsets[pos]);
         fill_factor_from_hide_and_mask(
             attribute_data.hide_vert, attribute_data.mask, verts, factors);
-        filter_region_clip_factors(ss, position_data.eval, verts, factors);
+        if (base_view_positions.is_empty()) {
+          filter_region_clip_factors(ss, position_data.eval, verts, factors);
+        }
+        else {
+          filter_region_clip_factors(ss, base_view_positions, factors);
+        }
         if (brush.flag & BRUSH_FRONTFACE) {
           calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
         }
 
         tls.distances.resize(verts.size());
         const MutableSpan<float> distances = tls.distances;
-        calc_brush_distances(
-            ss, position_data.eval, verts, eBrushFalloffShape(brush.falloff_shape), distances);
+        if (base_view_positions.is_empty()) {
+          calc_brush_distances(
+              ss, position_data.eval, verts, eBrushFalloffShape(brush.falloff_shape), distances);
+        }
+        else {
+          calc_brush_distances(
+              ss, base_view_positions, eBrushFalloffShape(brush.falloff_shape), distances);
+        }
         filter_distances_with_radius(cache.radius, distances, factors);
         apply_hardness_to_distances(cache, distances);
         calc_brush_strength_factors(cache, brush, distances, factors);
@@ -139,6 +160,28 @@ BLI_NOINLINE static void do_surface_smooth_brush_mesh(const Depsgraph &depsgraph
                                                 alpha,
                                                 laplacian_disp,
                                                 translations);
+
+          const Span<float3> base_view = layers::stroke_base_view(object);
+          if (!base_view.is_empty()) {
+            /* Base-aware step: every term above is affine in the positions, so running it on the
+             * base (`position - O`) instead of the composed surface amounts to adding
+             * `O[v] - avg(O)` to both results. The layer detail then rides on the smoothed base
+             * rather than being flattened into it. Averaging the offset with the same operator
+             * (same neighbor lists) keeps boundary handling exact, and the raw offset is correct
+             * here (no #layers::stroke_base_view_dc): only differences of positions are used, which
+             * a constant shift leaves unchanged.
+             *
+             * The displacement step needs no such correction: it reads back the base-space
+             * displacements stored here and is purely differential in them. */
+            tls.base_view_avg.resize(verts.size());
+            const MutableSpan<float3> base_view_avg = tls.base_view_avg;
+            smooth::neighbor_data_average_mesh(base_view, neighbors, base_view_avg);
+            for (const int vi : verts.index_range()) {
+              const float3 correction = base_view[verts[vi]] - base_view_avg[vi];
+              laplacian_disp[vi] += correction;
+              translations[vi] += correction;
+            }
+          }
           scale_translations(translations, factors);
 
           scatter_data_mesh(laplacian_disp.as_span(), verts, all_laplacian_disp);
@@ -212,16 +255,21 @@ BLI_NOINLINE static void do_surface_smooth_brush_grids(
         const Span<int> grids = nodes[i].grids();
         const MutableSpan positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
 
+        /* Base view: see the mesh variant in #do_surface_smooth_brush_mesh. */
+        const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+            object, subdiv_ccg, grids, positions, tls.base_view_storage);
+
         const MutableSpan<float> factors = all_factors.as_mutable_span().slice(node_offsets[pos]);
         fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
-        filter_region_clip_factors(ss, positions, factors);
+        filter_region_clip_factors(ss, calc_positions, factors);
         if (brush.flag & BRUSH_FRONTFACE) {
           calc_front_face(cache.view_normal_symm, subdiv_ccg, grids, factors);
         }
 
         tls.distances.resize(positions.size());
         const MutableSpan<float> distances = tls.distances;
-        calc_brush_distances(ss, positions, eBrushFalloffShape(brush.falloff_shape), distances);
+        calc_brush_distances(
+            ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
         filter_distances_with_radius(cache.radius, distances, factors);
         apply_hardness_to_distances(cache, distances);
         calc_brush_strength_factors(cache, brush, distances, factors);
@@ -260,6 +308,25 @@ BLI_NOINLINE static void do_surface_smooth_brush_grids(
                                                 alpha,
                                                 laplacian_disp,
                                                 translations);
+
+          const Span<float3> base_view = layers::stroke_base_view(object);
+          if (!base_view.is_empty()) {
+            /* Base-aware step; see the mesh variant in #do_surface_smooth_brush_mesh. */
+            tls.base_view_avg.resize(positions.size());
+            const MutableSpan<float3> base_view_avg = tls.base_view_avg;
+            smooth::average_data_grids(subdiv_ccg, base_view, grids, base_view_avg);
+            const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+            for (const int grid : grids.index_range()) {
+              const IndexRange node_range = bke::ccg::grid_range(key, grid);
+              const IndexRange grid_range = bke::ccg::grid_range(key, grids[grid]);
+              for (const int offset : IndexRange(key.grid_area)) {
+                const float3 correction = base_view[grid_range[offset]] -
+                                          base_view_avg[node_range[offset]];
+                laplacian_disp[node_range[offset]] += correction;
+                translations[node_range[offset]] += correction;
+              }
+            }
+          }
           scale_translations(translations, factors);
 
           scatter_data_grids(subdiv_ccg, laplacian_disp.as_span(), grids, all_laplacian_disp);

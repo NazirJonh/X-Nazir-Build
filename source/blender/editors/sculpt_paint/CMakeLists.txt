@@ -104,6 +104,7 @@ set(SRC
   mesh/sculpt_geodesic.cc
   mesh/sculpt_gesture.cc
   mesh/sculpt_hide.cc
+  mesh/sculpt_layers.cc
   mesh/sculpt_mask_extract.cc
   mesh/sculpt_mask_init.cc
   mesh/sculpt_ops.cc

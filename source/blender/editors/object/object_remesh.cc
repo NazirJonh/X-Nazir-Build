@@ -114,6 +114,10 @@ static wmOperatorStatus voxel_remesh_exec(bContext *C, wmOperator *op)
 
   Mesh *mesh = id_cast<Mesh *>(ob->data);
 
+  if (!sculpt_paint::layers::destructive_edit_check(*mesh, op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
+
   if (mesh->remesh_voxel_size <= 0.0f) {
     BKE_report(op->reports, RPT_ERROR, "Voxel remesher cannot run with a voxel size of 0.0");
     return OPERATOR_CANCELLED;
@@ -957,10 +961,17 @@ static void quadriflow_end_job(void *customdata)
 
 static wmOperatorStatus quadriflow_remesh_exec(bContext *C, wmOperator *op)
 {
+  Object *active_ob = CTX_data_active_object(C);
+  if (!sculpt_paint::layers::destructive_edit_check(*BKE_mesh_from_object(active_ob),
+                                                     op->reports))
+  {
+    return OPERATOR_CANCELLED;
+  }
+
   QuadriFlowJob *job = MEM_new_uninitialized<QuadriFlowJob>("QuadriFlowJob");
 
   job->op = op;
-  job->owner = CTX_data_active_object(C);
+  job->owner = active_ob;
   job->scene = CTX_data_scene(C);
 
   job->target_faces = RNA_int_get(op->ptr, "target_faces");

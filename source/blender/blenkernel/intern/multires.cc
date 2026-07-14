@@ -6,6 +6,10 @@
  * \ingroup bke
  */
 
+#include <cstdio>
+
+#include "CLG_log.h"
+
 #include "MEM_guardedalloc.h"
 
 /* for reading old multires */
@@ -34,6 +38,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_scene.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "BKE_object.hh"
@@ -42,6 +47,8 @@
 
 #include <cmath>
 #include <cstring>
+
+static CLG_LogRef LOG = {"bke.multires"};
 
 namespace blender {
 
@@ -238,6 +245,13 @@ void multires_set_tot_level(Object *ob, MultiresModifierData *mmd, const int lvl
 
   mmd->sculptlvl = std::clamp<char>(std::max<char>(mmd->sculptlvl, lvl), 0, mmd->totlvl);
   mmd->renderlvl = std::clamp<char>(std::max<char>(mmd->renderlvl, lvl), 0, mmd->totlvl);
+
+  /* Grid-domain sculpt layers are always stored at the top level; resample them whenever it
+   * changes (Subdivide / Delete Higher / level sync). No-op when the mesh has no grid layers. */
+  if (ob->type == OB_MESH && ob->data) {
+    Mesh *mesh = id_cast<Mesh *>(ob->data);
+    bke::sculpt_layers::resample_grid_layers(*mesh, mesh->corners_num, lvl);
+  }
 }
 
 static void multires_ccg_mark_as_modified(SubdivCCG *subdiv_ccg, const MultiresModifiedFlags flags)
@@ -321,11 +335,39 @@ void multires_flush_sculpt_updates(Object *object)
     return;
   }
 
-  multiresModifier_reshapeFromCCG(
-      sculpt_session->multires_modifier->totlvl, mesh, sculpt_session->subdiv_ccg);
+  /* [DEBUG-flush] Tied to the module-wide #SCULPT_LAYERS_DEBUG_LOG switch (see
+   * `BKE_sculpt_layers.hh`); see also SCULPT_LAYERS_DEBUG_FLUSH in `multires_reshape.cc`. */
+#if SCULPT_LAYERS_DEBUG_LOG
+  printf("[sculpt-layers][flush] multires_flush_sculpt_updates: dirty coords=%d hidden=%d "
+         "totlvl=%d ccg_level=%d\n",
+         int(subdiv_ccg->dirty.coords),
+         int(subdiv_ccg->dirty.hidden),
+         int(sculpt_session->multires_modifier->totlvl),
+         subdiv_ccg->level);
+#endif
+
+  const bool flushed = multiresModifier_reshapeFromCCG(sculpt_session->multires_modifier->totlvl,
+                                                       mesh,
+                                                       subdiv_ccg,
+                                                       MultiresReshapeFromCCGMode::Base);
+  if (!flushed) {
+    /* The composed CCG could not be separated back into an un-layered base (a sculpt layer has
+     * stale level/topology metadata). Keep the dirty flags set so the pending base edits are
+     * retained for a later flush instead of being silently discarded, and report the failure.
+     * The flag is latched: report once per failure streak, otherwise every depsgraph re-evaluation
+     * would re-attempt the flush and spam the log with the same error. */
+    if (!subdiv_ccg->dirty.flush_failed_reported) {
+      subdiv_ccg->dirty.flush_failed_reported = true;
+      CLOG_ERROR(&LOG,
+                 "Multires base flush skipped: sculpt layer data is inconsistent with the mesh; "
+                 "base sculpt edits are kept pending.");
+    }
+    return;
+  }
 
   subdiv_ccg->dirty.coords = false;
   subdiv_ccg->dirty.hidden = false;
+  subdiv_ccg->dirty.flush_failed_reported = false;
 }
 
 void multires_force_sculpt_rebuild(Object *object)

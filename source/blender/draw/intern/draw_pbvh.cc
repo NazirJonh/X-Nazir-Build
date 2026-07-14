@@ -9,11 +9,22 @@
  * Embeds GPU meshes inside of bke::pbvh::Tree nodes, used by mesh sculpt mode.
  */
 
+#include <chrono>
+#include <cstdio>
+
 #include "BLI_map.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
+
+/* Toggleable aggregate timing probe for the per-redraw node buffer extraction. */
+#define PBVH_DRAW_DEBUG_PERF 0
+#if PBVH_DRAW_DEBUG_PERF
+#  define PDP_PERF(...) printf(__VA_ARGS__)
+#else
+#  define PDP_PERF(...) ((void)0)
+#endif
 
 #include "DNA_object_types.h"
 
@@ -24,11 +35,16 @@
 #include "BKE_mesh.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph_query.hh"
 
 #include "GPU_batch.hh"
+#include "GPU_compute.hh"
+#include "GPU_shader.hh"
+#include "GPU_state.hh"
+#include "GPU_vertex_buffer.hh"
 
 #include "DRW_engine.hh"
 #include "DRW_pbvh.hh"
@@ -146,15 +162,33 @@ class DrawCacheImpl : public DrawCache {
    */
   BitVector<> dirty_topology_;
 
+  /* Interactive sculpt-layer influence drag (see #begin_influence_drag). The operator only flips
+   * these flags + accumulates the pending influence delta; the GPU work runs at draw time in
+   * #ensure_influence_drag where a GPU context is bound. */
+  bool influence_drag_active_ = false;
+  bool influence_drag_rebuild_delta_ = false;
+  int influence_drag_layer_uid_ = -1;
+  float influence_drag_pending_scale_ = 0.0f;
+  /** Corner-expanded active-layer delta, one VBO per node, parallel to the position VBOs. */
+  Vector<gpu::VertBufPtr> influence_drag_delta_vbos_;
+  /** Lazily created compute shader for #ensure_influence_drag. */
+  gpu::Shader *influence_drag_shader_ = nullptr;
+
  public:
   ~DrawCacheImpl() override;
 
   void tag_positions_changed(const IndexMask &node_mask) override;
+  void tag_positions_changed_no_normals(const IndexMask &node_mask) override;
+  void tag_normals_changed(const IndexMask &node_mask) override;
   void tag_visibility_changed(const IndexMask &node_mask) override;
   void tag_topology_changed(const IndexMask &node_mask) override;
   void tag_face_sets_changed(const IndexMask &node_mask) override;
   void tag_masks_changed(const IndexMask &node_mask) override;
   void tag_attribute_changed(const IndexMask &node_mask, StringRef attribute_name) override;
+
+  bool begin_influence_drag(int layer_uid) override;
+  void add_influence_drag_delta(float scale) override;
+  void end_influence_drag() override;
 
   Span<gpu::Batch *> ensure_tris_batches(const Object &object,
                                          const ViewportRequest &request,
@@ -174,6 +208,14 @@ class DrawCacheImpl : public DrawCache {
   void free_nodes_with_changed_topology(const bke::pbvh::Tree &pbvh);
 
   BitSpan ensure_use_flat_layout(const Object &object, const OrigMeshData &orig_mesh_data);
+
+  /**
+   * GPU side of the interactive sculpt-layer influence drag: builds the active layer's corner
+   * expanded delta buffers on the first call of a drag, then on each tick adds
+   * `position += delta * pending_scale` into the node position buffers with a compute shader,
+   * avoiding the CPU re-extract + re-upload. No-op outside a drag.
+   */
+  void ensure_influence_drag(const Object &object, const IndexMask &node_mask);
 
   Span<gpu::VertBufPtr> ensure_attribute_data(const Object &object,
                                               const OrigMeshData &orig_mesh_data,
@@ -202,6 +244,24 @@ void DrawCacheImpl::tag_positions_changed(const IndexMask &node_mask)
   if (DrawCacheImpl::AttributeData *data = attribute_vbos_.lookup_ptr(CustomRequest::Position)) {
     data->tag_dirty(node_mask);
   }
+  if (DrawCacheImpl::AttributeData *data = attribute_vbos_.lookup_ptr(CustomRequest::Normal)) {
+    data->tag_dirty(node_mask);
+  }
+}
+
+void DrawCacheImpl::tag_positions_changed_no_normals(const IndexMask &node_mask)
+{
+  /* Position buffers only; the Normal buffers are intentionally left clean so they are not
+   * re-extracted on every interactive-drag tick (see #Tree::tag_positions_changed_no_normals). */
+  if (DrawCacheImpl::AttributeData *data = attribute_vbos_.lookup_ptr(CustomRequest::Position)) {
+    data->tag_dirty(node_mask);
+  }
+}
+
+void DrawCacheImpl::tag_normals_changed(const IndexMask &node_mask)
+{
+  /* Normal buffers only; the influence drag keeps the position buffers on the GPU, so they are
+   * intentionally left clean here (see #Tree::tag_normals_changed). */
   if (DrawCacheImpl::AttributeData *data = attribute_vbos_.lookup_ptr(CustomRequest::Normal)) {
     data->tag_dirty(node_mask);
   }
@@ -477,6 +537,9 @@ DrawCacheImpl::~DrawCacheImpl()
   free_batches(lines_batches_coarse_, lines_batches_coarse_.index_range());
   for (MutableSpan<gpu::Batch *> batches : tris_batches_.values()) {
     free_batches(batches, batches.index_range());
+  }
+  if (influence_drag_shader_) {
+    GPU_shader_free(influence_drag_shader_);
   }
 }
 
@@ -1724,6 +1787,11 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
       node_mask.slice_content(data.dirty_nodes.index_range()), data.dirty_nodes, memory);
   const IndexMask mask = IndexMask::from_union(empty_mask, dirty_mask, memory);
 
+  /* Aggregate timing of the node-buffer extraction loop (one line per redraw call, not per node). */
+#if PBVH_DRAW_DEBUG_PERF
+  const auto pdp_start = std::chrono::high_resolution_clock::now();
+#endif
+
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
       if (const CustomRequest *request_type = std::get_if<CustomRequest>(&attr)) {
@@ -1801,6 +1869,33 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
       break;
     }
   }
+
+#if PBVH_DRAW_DEBUG_PERF
+  const auto pdp_end = std::chrono::high_resolution_clock::now();
+  const long long pdp_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(pdp_end - pdp_start).count();
+  const char *pdp_attr_name = "Generic";
+  if (const CustomRequest *pdp_rq = std::get_if<CustomRequest>(&attr)) {
+    switch (*pdp_rq) {
+      case CustomRequest::Position:
+        pdp_attr_name = "Position";
+        break;
+      case CustomRequest::Normal:
+        pdp_attr_name = "Normal";
+        break;
+      case CustomRequest::Mask:
+        pdp_attr_name = "Mask";
+        break;
+      case CustomRequest::FaceSet:
+        pdp_attr_name = "FaceSet";
+        break;
+    }
+  }
+#endif
+  PDP_PERF("[DEBUG-perf] pbvh_draw_extract: attr=%s rebuilt %d nodes in %lld us\n",
+           pdp_attr_name,
+           int(mask.size()),
+           pdp_us);
 
   /* TODO: It would be good to deallocate the bit vector if all of the bits have been reset to
    * avoid unnecessary processing in subsequent redraws. */
@@ -1881,6 +1976,127 @@ Span<gpu::IndexBufPtr> DrawCacheImpl::ensure_tri_indices(const Object &object,
   return {};
 }
 
+bool DrawCacheImpl::begin_influence_drag(const int layer_uid)
+{
+  influence_drag_active_ = true;
+  influence_drag_rebuild_delta_ = true;
+  influence_drag_layer_uid_ = layer_uid;
+  influence_drag_pending_scale_ = 0.0f;
+  return true;
+}
+
+void DrawCacheImpl::add_influence_drag_delta(const float scale)
+{
+  influence_drag_pending_scale_ += scale;
+}
+
+void DrawCacheImpl::end_influence_drag()
+{
+  /* The delta buffers stay allocated until the next #ensure_influence_drag frees them in a bound
+   * GPU context. */
+  influence_drag_active_ = false;
+  influence_drag_rebuild_delta_ = false;
+  influence_drag_pending_scale_ = 0.0f;
+  influence_drag_layer_uid_ = -1;
+}
+
+void DrawCacheImpl::ensure_influence_drag(const Object &object, const IndexMask &node_mask)
+{
+  if (!influence_drag_active_) {
+    if (!influence_drag_delta_vbos_.is_empty()) {
+      influence_drag_delta_vbos_.clear_and_shrink();
+    }
+    return;
+  }
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  if (pbvh.type() != bke::pbvh::Type::Mesh) {
+    return;
+  }
+  AttributeData *pos_data = attribute_vbos_.lookup_ptr(CustomRequest::Position);
+  if (!pos_data) {
+    return;
+  }
+  Vector<gpu::VertBufPtr> &pos_vbos = pos_data->vbos;
+  const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+
+  /* Build the corner-expanded delta buffers for the dragged layer once at the start of the drag. */
+  if (influence_drag_rebuild_delta_) {
+    influence_drag_rebuild_delta_ = false;
+    Mesh &mesh_orig = *id_cast<Mesh *>(DEG_get_original(&object)->data);
+    const SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh_orig,
+                                                               influence_drag_layer_uid_);
+    const Mesh &mesh_eval = DRW_object_get_data_for_drawing<Mesh>(object);
+    if (!layer || !layer->data || layer->totelem < mesh_eval.verts_num) {
+      /* Topology mismatch or missing data: abandon the GPU path; the operator's release still does
+       * a full CPU reconcile. */
+      PDP_PERF("[DEBUG-perf] influence_drag: rebuild bail (uid=%d layer=%p data=%p totelem=%d verts=%d)\n",
+               influence_drag_layer_uid_,
+               (void *)layer,
+               layer ? layer->data : nullptr,
+               layer ? layer->totelem : -1,
+               mesh_eval.verts_num);
+      influence_drag_active_ = false;
+      return;
+    }
+    const OffsetIndices<int> faces = mesh_eval.faces();
+    const Span<int> corner_verts = mesh_eval.corner_verts();
+    const Span<float3> deltas(static_cast<const float3 *>(layer->data), layer->totelem);
+    influence_drag_delta_vbos_.clear();
+    influence_drag_delta_vbos_.resize(pbvh.nodes_num());
+    ensure_vbos_allocated_mesh(object, position_format(), node_mask, influence_drag_delta_vbos_);
+    node_mask.foreach_index(
+        [&](const int i) {
+          extract_data_vert_mesh<float3>(
+              faces, corner_verts, deltas, nodes[i].faces(), *influence_drag_delta_vbos_[i]);
+        },
+        exec_mode::grain_size(1));
+    flush_vbo_data(influence_drag_delta_vbos_, node_mask);
+  }
+
+  if (influence_drag_pending_scale_ == 0.0f || influence_drag_delta_vbos_.is_empty()) {
+    return;
+  }
+  const float scale = influence_drag_pending_scale_;
+  influence_drag_pending_scale_ = 0.0f;
+
+  if (!influence_drag_shader_) {
+    influence_drag_shader_ = GPU_shader_create_from_info_name("pbvh_layer_drag");
+  }
+  if (!influence_drag_shader_) {
+    return;
+  }
+  GPU_shader_bind(influence_drag_shader_);
+  GPU_shader_uniform_1f(influence_drag_shader_, "scale", scale);
+
+#if PBVH_DRAW_DEBUG_PERF
+  const auto t0 = std::chrono::high_resolution_clock::now();
+#endif
+  int dispatch_count = 0;
+  /* GPU binding/dispatch is not thread-safe, so this loop must stay serial. */
+  node_mask.foreach_index([&](const int i) {
+    if (!pos_vbos[i] || !influence_drag_delta_vbos_[i]) {
+      return;
+    }
+    const int verts_num = nodes[i].corners_num();
+    GPU_shader_uniform_1i(influence_drag_shader_, "verts_num", verts_num);
+    GPU_vertbuf_bind_as_ssbo(influence_drag_delta_vbos_[i].get(), 0);
+    GPU_vertbuf_bind_as_ssbo(pos_vbos[i].get(), 1);
+    GPU_compute_dispatch(influence_drag_shader_, (verts_num + 63) / 64, 1, 1);
+    dispatch_count++;
+  });
+  GPU_memory_barrier(GPU_BARRIER_VERTEX_ATTRIB_ARRAY | GPU_BARRIER_SHADER_STORAGE);
+  GPU_shader_unbind();
+
+#if PBVH_DRAW_DEBUG_PERF
+  const long long us = std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::high_resolution_clock::now() - t0)
+                           .count();
+  PDP_PERF("[DEBUG-perf] influence_drag_compute: %d dispatches in %lld us\n", dispatch_count, us);
+#else
+  UNUSED_VARS(dispatch_count);
+#endif
+}
+
 Span<gpu::Batch *> DrawCacheImpl::ensure_tris_batches(const Object &object,
                                                       const ViewportRequest &request,
                                                       const IndexMask &nodes_to_update)
@@ -1898,6 +2114,10 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_tris_batches(const Object &object,
   for (const AttributeRequest &attr : request.attributes) {
     this->ensure_attribute_data(object, orig_mesh_data, attr, nodes_to_update);
   }
+
+  /* Interactive influence drag: recompute the position buffers on the GPU instead of re-extracting
+   * them from the CPU. Runs after the position VBOs exist and before they are bound into batches. */
+  this->ensure_influence_drag(object, nodes_to_update);
 
   /* Collect VBO spans in a different loop because #ensure_attribute_data invalidates the allocated
    * arrays when its map is changed. */

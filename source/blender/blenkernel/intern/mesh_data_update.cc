@@ -39,6 +39,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_sculpt_layers.hh"
 
 #include "BKE_shrinkwrap.hh"
 #include "DEG_depsgraph.hh"
@@ -344,6 +345,10 @@ static void mesh_calc_modifiers(Depsgraph &depsgraph,
 
   /* Apply all leading deform modifiers. */
   if (use_deform) {
+    /* Whether the virtual ShapeKey modifier actually ran (positions overwritten from the key
+     * blocks). Gates the sculpt-layer composition below so it only re-adds the layer offset when
+     * the shape-key deform discarded it, never double-applying over the baked base positions. */
+    bool applied_shapekey_deform = false;
     for (; md; md = md->next, md_datamask = md_datamask->next) {
       const ModifierTypeInfo *mti = BKE_modifier_get_info(md->type);
 
@@ -368,10 +373,24 @@ static void mesh_calc_modifiers(Depsgraph &depsgraph,
         }
 
         BKE_modifier_deform_verts(md, &mectx, mesh, mesh->vert_positions_for_write());
+        if (md->type == eModifierType_ShapeKey) {
+          applied_shapekey_deform = true;
+        }
       }
       else {
         break;
       }
+    }
+
+    /* Compose vertex-domain sculpt layers as a final object-space offset on top of the shape-keyed
+     * (and leading-deformed) positions. The virtual ShapeKey modifier above overwrites the
+     * positions from the key blocks and would otherwise discard the layer contribution, so it is
+     * re-added here to stay visible on top of the morphed form (mirrors the grid-domain composition
+     * done at subdivision-surface evaluation). Gated on the shape-key deform having run: without it
+     * the vertex layers are still baked into the original positions and adding them here would
+     * double-apply. */
+    if (mesh != nullptr && applied_shapekey_deform) {
+      sculpt_layers::apply_vert_layers_eval(*mesh);
     }
 
     /* Result of all leading deforming modifiers is cached for

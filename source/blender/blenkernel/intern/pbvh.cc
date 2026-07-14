@@ -615,8 +615,57 @@ void Tree::tag_positions_changed(const IndexMask &node_mask)
   normals_dirty_.resize(std::max(normals_dirty_.size(), node_mask.min_array_size()), false);
   node_mask.set_bits(bounds_dirty_);
   node_mask.set_bits(normals_dirty_);
+  /* #bounds_dirty_ is cleared by every #flush_bounds_to_parents (once per dab), so it can't be used
+   * to limit the end-of-stroke original-bounds sync to the touched part of the tree. Accumulate the
+   * touched leaves separately so #store_bounds_orig_for_dirty_leaves can consume the whole stroke. */
+  if (this->type() == Type::Mesh) {
+    bounds_orig_dirty_.resize(std::max(bounds_orig_dirty_.size(), node_mask.min_array_size()), false);
+    node_mask.set_bits(bounds_orig_dirty_);
+  }
   if (this->draw_data) {
     this->draw_data->tag_positions_changed(node_mask);
+  }
+}
+
+void Tree::tag_positions_changed_no_normals(const IndexMask &node_mask)
+{
+  /* Interactive-drag fast path: only the GPU position buffers are refreshed. Node bounds and
+   * normals are deliberately left dirty-free here so the per-tick cost stays low; the drag's end
+   * runs a full #tag_positions_changed and #update_bounds_mesh to reconcile them. */
+  if (this->draw_data) {
+    this->draw_data->tag_positions_changed_no_normals(node_mask);
+  }
+}
+
+void Tree::tag_normals_changed(const IndexMask &node_mask)
+{
+  /* Companion to #tag_positions_changed_no_normals: refresh only the GPU normal buffers. The drag
+   * keeps the position buffers on the GPU, so they are intentionally left untouched here. The mesh
+   * vertex normals must already have been recomputed from the reconciled positions by the caller. */
+  if (this->draw_data) {
+    this->draw_data->tag_normals_changed(node_mask);
+  }
+}
+
+bool Tree::begin_influence_drag(const int layer_uid)
+{
+  if (!this->draw_data) {
+    return false;
+  }
+  return this->draw_data->begin_influence_drag(layer_uid);
+}
+
+void Tree::add_influence_drag_delta(const float scale)
+{
+  if (this->draw_data) {
+    this->draw_data->add_influence_drag_delta(scale);
+  }
+}
+
+void Tree::end_influence_drag()
+{
+  if (this->draw_data) {
+    this->draw_data->end_influence_drag();
   }
 }
 
@@ -1400,6 +1449,62 @@ void store_bounds_orig(Tree &pbvh)
         });
       },
       pbvh.nodes_);
+  /* A full sync leaves nothing pending for the partial #store_bounds_orig_for_dirty_leaves path.
+   * Clearing here prevents the accumulator from being polluted by the whole-tree
+   * #tag_positions_changed calls that precede this on build/rebuild/undo paths. */
+  pbvh.bounds_orig_dirty_.clear_and_shrink();
+}
+
+int Tree::store_bounds_orig_for_dirty_leaves()
+{
+  IndexMaskMemory memory;
+  const IndexMask dirty_leaves = IndexMask::from_bits(bounds_orig_dirty_, memory);
+  if (dirty_leaves.is_empty()) {
+    return 0;
+  }
+  const int dirty_leaves_num = int(dirty_leaves.size());
+
+  std::visit(
+      [&](auto &nodes) {
+        /* The current bounds of every touched leaf and its ancestors are already up to date at this
+         * point, because each brush dab recomputes leaf bounds and runs #flush_bounds_to_parents.
+         * So the original bounds can be copied directly from the current bounds. Untouched sibling
+         * subtrees are left alone: their bounds didn't change this stroke, so their existing
+         * original bounds are still equal to their current bounds and remain valid. */
+        Set<int> parents_to_update;
+        dirty_leaves.foreach_index([&](const int i) {
+          auto &node = nodes[i];
+          const Bounds<float3> old_bounds = node.bounds_orig_;
+          node.bounds_orig_ = node.bounds_;
+          const bool bounds_changed = node.bounds_orig_.min != old_bounds.min ||
+                                      node.bounds_orig_.max != old_bounds.max;
+          if (bounds_changed) {
+            if (const std::optional<int> parent = node.parent()) {
+              parents_to_update.add(*parent);
+            }
+          }
+        });
+
+        while (!parents_to_update.is_empty()) {
+          const int node_index = *parents_to_update.begin();
+          parents_to_update.remove(node_index);
+
+          auto &node = nodes[node_index];
+          const Bounds<float3> old_bounds = node.bounds_orig_;
+          node.bounds_orig_ = node.bounds_;
+          const bool bounds_changed = node.bounds_orig_.min != old_bounds.min ||
+                                      node.bounds_orig_.max != old_bounds.max;
+          if (bounds_changed) {
+            if (const std::optional<int> parent = node.parent()) {
+              parents_to_update.add(*parent);
+            }
+          }
+        }
+      },
+      nodes_);
+
+  bounds_orig_dirty_.clear_and_shrink();
+  return dirty_leaves_num;
 }
 
 void node_update_mask_mesh(const Span<float> mask, MeshNode &node)

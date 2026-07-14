@@ -210,9 +210,16 @@ bool mode_set_ex(bContext *C, eObjectMode mode, bool use_undo, ReportList *repor
   if (!use_undo) {
     wm->op_undo_depth++;
   }
-  WM_operator_name_call_ptr(C, ot, wm::OpCallContext::ExecRegionWin, nullptr, nullptr);
+  const wmOperatorStatus op_status = WM_operator_name_call_ptr(
+      C, ot, wm::OpCallContext::ExecRegionWin, nullptr, nullptr);
   if (!use_undo) {
     wm->op_undo_depth--;
+  }
+
+  if (op_status & OPERATOR_INTERFACE) {
+    /* The operator handed off to a popup (e.g. a confirmation dialog) instead of switching modes
+     * outright; nothing failed, the switch may still complete once the user responds. */
+    return true;
   }
 
   if (ob->mode != mode) {

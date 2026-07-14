@@ -12,7 +12,9 @@
 
 #include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
+#include "BLI_bounds_types.hh"
 #include "BLI_enum_flags.hh"
+#include "BLI_map.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_offset_indices.hh"
@@ -407,6 +409,10 @@ struct SculptSession : NonCopyable, NonMovable {
 
   /* Object is deformed with some modifiers. */
   bool deform_modifiers_active = false;
+  /* The active shape key is the only deformer (no other enabled modifier changes the drawn
+   * surface), so the sculpt PBVH can be drawn directly instead of re-evaluating the mesh every
+   * redraw. Only meaningful for #Type::Mesh sessions with #shapekey_active set. */
+  bool shapekey_pbvh_draw = false;
   /* Coords of deformed mesh but without stroke displacement. */
   Array<float3, 0> deform_cos;
   /* Crazy-space deformation matrices. */
@@ -466,6 +472,61 @@ struct SculptSession : NonCopyable, NonMovable {
     int grids_num = -1;
     int grid_size = -1;
   } persistent;
+
+  /* Sculpt layers (non-destructive sculpt edits, see #BKE_sculpt_layers.hh). Runtime state used
+   * by the editor module to record strokes into the active layer. Multires (grid domain) layers
+   * keep no runtime base: the composed surface is evaluated from `MDisps + sum(enabled layers)`
+   * by the subdivision displacement evaluator, so grid state is fully derived from stored data. */
+  struct {
+    /* True between #stroke_record_begin and #stroke_record_end while a valid active layer is
+     * being recorded. This is the authoritative "recording" signal. */
+    bool recording = false;
+    /* True while REC (record) mode is on: brush strokes are recorded into the active layer (pinned
+     * to influence 1.0). When false, strokes edit the base geometry instead. Transient editing
+     * state, not saved to the blend file. */
+    bool rec_active = false;
+    /* For the mesh (vertex) domain: the vertex positions with every layer's contribution removed
+     * (the un-layered base). Captured lazily on sculpt-mode enter; kept current by non-REC strokes.
+     * Empty for the grid domain. */
+    Array<float3> mesh_base;
+    /* Whether #mesh_base has been initialized for this session. */
+    bool state_valid = false;
+    /* Per-element object-space contribution of the enabled layers ("base view" offset,
+     * `combined[i] - base[i]`), valid only for the duration of one stroke. Brushes subtract it from
+     * the live positions when computing surface-shape-dependent inputs (falloff, area normal,
+     * smoothing targets, plane fits), so neither a base edit nor a stroke recorded into another
+     * layer absorbs the residual of the layers below. While recording, the layer being authored is
+     * excluded (it stays WYSIWYG). Under a shape key the offset is summed straight from the layer
+     * data, which is exactly how it is composed there. Empty when no layer contributes (no enabled
+     * layers, and deform-modifier sessions without a shape key, which cannot record). */
+    Array<float3> base_view;
+    /* The base view offset sampled at the current brush contact point, refreshed once per brush
+     * action (per symmetry / tile pass). Every consumer of #base_view removes it, i.e. the brush
+     * inputs use `base_view[i] - base_view_dc` rather than the raw offset.
+     *
+     * The raw offset cannot be used directly: the brush reference point (#StrokeCache::location_symm
+     * and the radius around it) lives on the *composed* surface, so subtracting the full offset from
+     * the sampled positions moves them away from the cursor by the layer height. Once that height
+     * approaches the brush radius every falloff factor is zeroed (the stroke does nothing) and the
+     * area-plane sampling finds no vertex at all, falling back to a plane through the composed
+     * location, which yanks the still-active vertices by the layer height and tears the mesh.
+     * Removing the offset *at the contact point* keeps the sampled surface anchored under the cursor
+     * while still stripping the layer pattern from the brush inputs, which is what the base view is
+     * for. All consumers are either differential (smoothing, plane fits) or use a matching
+     * adjust / compose pair, so a constant shift is exactly invariant for them. */
+    float3 base_view_dc = float3(0.0f);
+    /* Bounds of the base-view positions (`position[i] - base_view[i]`, without the DC) of each PBVH
+     * leaf node's own elements, computed once per stroke. Empty when the base view is inactive.
+     *
+     * The brush measures its falloff on the base view, but the nodes it processes are selected from
+     * the node bounds on the *composed* surface. Those two footprints differ by the layer height, so
+     * an element can earn a non-zero factor while its node was never gathered — and since a node is
+     * processed as a whole, the stroke boundary then follows node borders (square tiles). These
+     * bounds let the gather add exactly the nodes the base-space footprint reaches (see
+     * #layers::base_view_extend_node_mask), which restores the invariant "every element with a
+     * non-zero factor belongs to a gathered node" without touching the falloff itself. */
+    Array<Bounds<float3>> base_view_node_bounds;
+  } layers;
 
   /* Contains information used by tools and brushes that require different logic based on boundary
    * elements. Typically used for anything which needs to consider neighbor values.

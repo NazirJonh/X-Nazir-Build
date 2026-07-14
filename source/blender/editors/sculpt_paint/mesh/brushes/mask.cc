@@ -33,6 +33,8 @@ struct LocalData {
   Vector<float> distances;
   Vector<float> current_masks;
   Vector<float> new_masks;
+  /* Positions with the sculpt-layer base view removed (see #layers::stroke_base_view). */
+  Vector<float3> base_view_storage;
 };
 
 BLI_NOINLINE static void apply_factors(const float strength,
@@ -72,17 +74,34 @@ static void calc_faces(const Depsgraph &depsgraph,
 
   const Span<int> verts = node.verts();
 
+  /* Base view: the brush footprint follows the un-layered base, so the masked area is not
+   * modulated by the layer pattern. The texture keeps sampling the composed surface (see
+   * #sculpt_apply_texture). */
+  const Span<float3> base_view_positions = layers::base_view_gather_mesh(
+      object, verts, positions, tls.base_view_storage);
+
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide(hide_vert, verts, factors);
-  filter_region_clip_factors(ss, positions, verts, factors);
+  if (base_view_positions.is_empty()) {
+    filter_region_clip_factors(ss, positions, verts, factors);
+  }
+  else {
+    filter_region_clip_factors(ss, base_view_positions, factors);
+  }
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
   }
 
   tls.distances.resize(verts.size());
   const MutableSpan<float> distances = tls.distances;
-  calc_brush_distances(ss, positions, verts, eBrushFalloffShape(brush.falloff_shape), distances);
+  if (base_view_positions.is_empty()) {
+    calc_brush_distances(ss, positions, verts, eBrushFalloffShape(brush.falloff_shape), distances);
+  }
+  else {
+    calc_brush_distances(
+        ss, base_view_positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  }
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -120,17 +139,21 @@ static void calc_grids(const Depsgraph &depsgraph,
   const Span<int> grids = node.grids();
   const MutableSpan positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
 
+  /* Base view: see the mesh variant in #calc_faces. */
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, positions, tls.base_view_storage);
+
   tls.factors.resize(positions.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide(subdiv_ccg, grids, factors);
-  filter_region_clip_factors(ss, positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, subdiv_ccg, grids, factors);
   }
 
   tls.distances.resize(positions.size());
   const MutableSpan<float> distances = tls.distances;
-  calc_brush_distances(ss, positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);

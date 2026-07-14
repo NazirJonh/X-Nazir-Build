@@ -1022,6 +1022,7 @@ static void calc_relax_filter(const Depsgraph &depsgraph,
             const MutableSpan<float3> translations = tls.translations;
             smooth::calc_relaxed_translations_faces(position_data.eval,
                                                     vert_normals,
+                                                    {},
                                                     faces,
                                                     corner_verts,
                                                     vert_to_face_map,
@@ -1075,6 +1076,7 @@ static void calc_relax_filter(const Depsgraph &depsgraph,
             tls.translations.resize(positions.size());
             const MutableSpan<float3> translations = tls.translations;
             smooth::calc_relaxed_translations_grids(subdiv_ccg,
+                                                    {},
                                                     faces,
                                                     corner_verts,
                                                     face_sets,
@@ -1186,6 +1188,7 @@ static void calc_relax_face_sets_filter(const Depsgraph &depsgraph,
             const MutableSpan<float3> translations = tls.translations;
             smooth::calc_relaxed_translations_faces(position_data.eval,
                                                     vert_normals,
+                                                    {},
                                                     faces,
                                                     corner_verts,
                                                     vert_to_face_map,
@@ -1249,6 +1252,7 @@ static void calc_relax_face_sets_filter(const Depsgraph &depsgraph,
             tls.translations.resize(positions.size());
             const MutableSpan<float3> translations = tls.translations;
             smooth::calc_relaxed_translations_grids(subdiv_ccg,
+                                                    {},
                                                     faces,
                                                     corner_verts,
                                                     face_sets,
@@ -2507,6 +2511,12 @@ static wmOperatorStatus sculpt_mesh_filter_start(bContext *C, wmOperator *op)
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
 
   if (!shape_key_check(ob, op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Placed after #BKE_sculpt_update_object_for_edit so the session queried below is the live one.
+   * Both the modal (invoke) and the scripted (exec) paths funnel through here. */
+  if (layers::mask_edit_refuse_deform(ob, op->reports)) {
     return OPERATOR_CANCELLED;
   }
 

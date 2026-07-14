@@ -128,6 +128,9 @@ struct BrushLocalData {
   Vector<float> segment_weights;
   Vector<float3> segment_translations;
   Vector<float3> translations;
+  /* Base-view-adjusted copy of the original positions, so posing a base under visible sculpt
+   * layers rotates the base rather than the composed surface (see #layers::stroke_base_view). */
+  Vector<float3> orig_base_storage;
 };
 
 BLI_NOINLINE static void calc_segment_translations(const Span<float3> positions,
@@ -185,8 +188,15 @@ static void calc_mesh(const Depsgraph &depsgraph,
   const MutableSpan<float> segment_weights = tls.segment_weights;
   const MutableSpan<float3> segment_translations = tls.segment_translations;
 
+  /* Rotate the base surface, not the composed one: strip the layer offset from the pose source so
+   * the layer residual is not baked into the base (see #layers::stroke_base_view). The composed
+   * #orig_data.positions is still used by #reset_translations_to_original below, which carries the
+   * offset back onto the live positions. */
+  const Span<float3> orig_base = layers::base_view_adjust_compact_mesh(
+      object, verts, orig_data.positions, tls.orig_base_storage);
+
   for (const IKChainSegment &segment : cache.pose_ik_chain->segments) {
-    calc_segment_translations(orig_data.positions, segment, segment_translations);
+    calc_segment_translations(orig_base, segment, segment_translations);
     gather_data_mesh(segment.weights.as_span(), verts, segment_weights);
     scale_translations(segment_translations, segment_weights);
     add_arrays(translations, segment_translations);
@@ -236,8 +246,13 @@ static void calc_grids(const Depsgraph &depsgraph,
   const MutableSpan<float> segment_weights = tls.segment_weights;
   const MutableSpan<float3> segment_translations = tls.segment_translations;
 
+  /* Rotate the base surface, not the composed one (see the mesh path above and
+   * #layers::stroke_base_view). */
+  const Span<float3> orig_base = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, orig_data.positions, tls.orig_base_storage);
+
   for (const IKChainSegment &segment : cache.pose_ik_chain->segments) {
-    calc_segment_translations(orig_data.positions, segment, segment_translations);
+    calc_segment_translations(orig_base, segment, segment_translations);
     gather_data_grids(subdiv_ccg, segment.weights.as_span(), grids, segment_weights);
     scale_translations(segment_translations, segment_weights);
     add_arrays(translations, segment_translations);

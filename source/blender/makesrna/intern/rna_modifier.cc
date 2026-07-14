@@ -24,13 +24,18 @@
 #include "BKE_animsys.h"
 #include "BKE_customdata.hh"
 #include "BKE_data_transfer.h"
+#include "BKE_global.hh"
 #include "BKE_mesh_remap.hh"
 #include "BKE_node.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_interface.hh"
+#include "BKE_object_types.hh"
+#include "BKE_paint.hh"
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
+
+#include "ED_sculpt.hh"
 
 #include "rna_internal.hh"
 
@@ -1316,6 +1321,57 @@ static void rna_MultiresModifier_level_range(
 
   *min = 0;
   *max = max_ii(0, mmd->totlvl); /* intentionally _not_ -1 */
+}
+
+/* Common setter body for the viewport/sculpt subdivision level.
+ *
+ * Refuse the change while a sculpt stroke is in progress (#StrokeCache active): switching levels
+ * mid-stroke rebuilds the CCG under the brush and silently drops the stroke's recorded sculpt
+ * layer delta. This mirrors how other topology-changing operations behave during a stroke.
+ *
+ * No sculpt-layer runtime state depends on the level anymore (the composed multires surface is
+ * re-evaluated from stored data), but the mesh-domain runtime base is still invalidated for
+ * consistency when the evaluated geometry changes under the session. */
+static void rna_MultiresModifier_subdiv_level_set_ex(PointerRNA *ptr,
+                                                     const int value,
+                                                     char *target_field)
+{
+  MultiresModifierData *mmd = static_cast<MultiresModifierData *>(ptr->data);
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  const bool in_sculpt = ob && (ob->mode & OB_MODE_SCULPT) && ob->runtime &&
+                         ob->runtime->sculpt_session;
+  if (in_sculpt) {
+    if (ob->runtime->sculpt_session->cache != nullptr) {
+      /* The integer setter has no ReportList, so just refuse the change silently. */
+      return;
+    }
+    if (G_MAIN != nullptr && ob->type == OB_MESH && ob->data != nullptr) {
+      Mesh *mesh = id_cast<Mesh *>(ob->data);
+      /* Before the flush, and before the level moves: a weight-mask editing session keeps its
+       * painted weights in #SubdivCCG::masks and recognizes that buffer by the level it opened at,
+       * so the rebuild this setter triggers would discard them without a word. Closing it stores
+       * them, which is also what settles the base — hence the flush below is then a no-op, kept for
+       * the case where no session was open at all. */
+      blender::ed::sculpt_paint::layers::finish_mask_edit_for_mesh(*G_MAIN, *mesh);
+      blender::ed::sculpt_paint::layers::flush_pending_multires_base_for_mesh(*G_MAIN, *mesh);
+    }
+  }
+  *target_field = char(std::clamp(value, 0, max_ii(0, mmd->totlvl)));
+  if (in_sculpt) {
+    blender::ed::sculpt_paint::layers::invalidate_runtime(*ob);
+  }
+}
+
+static void rna_MultiresModifier_viewport_level_set(PointerRNA *ptr, const int value)
+{
+  MultiresModifierData *mmd = static_cast<MultiresModifierData *>(ptr->data);
+  rna_MultiresModifier_subdiv_level_set_ex(ptr, value, &mmd->lvl);
+}
+
+static void rna_MultiresModifier_sculpt_level_set(PointerRNA *ptr, const int value)
+{
+  MultiresModifierData *mmd = static_cast<MultiresModifierData *>(ptr->data);
+  rna_MultiresModifier_subdiv_level_set_ex(ptr, value, &mmd->sculptlvl);
 }
 
 static bool rna_MultiresModifier_external_get(PointerRNA *ptr)
@@ -3003,13 +3059,15 @@ static void rna_def_modifier_multires(BlenderRNA *brna)
   prop = RNA_def_property(srna, "levels", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_int_sdna(prop, nullptr, "lvl");
   RNA_def_property_ui_text(prop, "Levels", "Number of subdivisions to use in the viewport");
-  RNA_def_property_int_funcs(prop, nullptr, nullptr, "rna_MultiresModifier_level_range");
+  RNA_def_property_int_funcs(
+      prop, nullptr, "rna_MultiresModifier_viewport_level_set", "rna_MultiresModifier_level_range");
   RNA_def_property_update(prop, 0, "rna_Modifier_update");
 
   prop = RNA_def_property(srna, "sculpt_levels", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_int_sdna(prop, nullptr, "sculptlvl");
   RNA_def_property_ui_text(prop, "Sculpt Levels", "Number of subdivisions to use in sculpt mode");
-  RNA_def_property_int_funcs(prop, nullptr, nullptr, "rna_MultiresModifier_level_range");
+  RNA_def_property_int_funcs(
+      prop, nullptr, "rna_MultiresModifier_sculpt_level_set", "rna_MultiresModifier_level_range");
   RNA_def_property_update(prop, 0, "rna_Modifier_update");
 
   prop = RNA_def_property(srna, "render_levels", PROP_INT, PROP_UNSIGNED);

@@ -132,6 +132,11 @@ class AbstractTreeView : public AbstractView, public TreeViewItemContainer {
    * button layout. */
   std::shared_ptr<int> scroll_value_ = nullptr;
   /**
+   * Smallest number of rows the grip may resize this view down to, see #set_min_rows. Defaults to
+   * the shared minimum every tree view has.
+   */
+  int min_rows_ = 4 /*MIN_ROWS*/;
+  /**
    * The total number of items in the tree during the last redraw.
    */
   int last_tot_items_ = 0;
@@ -179,9 +184,12 @@ class AbstractTreeView : public AbstractView, public TreeViewItemContainer {
    * drop target of the view includes them, but they are not interactive (e.g. no mouse-hover
    * highlight).
    *
-   * \note Value should be greater than #MIN_ROWS. This is to prevent resizing below certain
-   * height. */
+   * \note Value should be greater than the view's minimum rows (see #set_min_rows). This is to
+   * prevent resizing below certain height. */
   void set_default_rows(int default_rows);
+  /** Raise the number of rows the resize grip may shrink this view down to, above the #MIN_ROWS
+   * every tree view shares. Call before #set_default_rows, whose value must not fall below it. */
+  void set_min_rows(int min_rows);
   TreeViewSortOrder invert_sort_type_get() const;
   /**
    * Scroll the view so the active item is visible.

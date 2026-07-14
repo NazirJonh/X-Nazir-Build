@@ -737,8 +737,26 @@ static bool can_exec(const bContext &C, ReportList &reports)
     return false;
   }
 
-  if (id_cast<const Mesh *>(object.data)->faces_num == 0) {
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  if (mesh.faces_num == 0) {
     /* No geometry to trim or to detect a valid position for the trimming shape. */
+    return false;
+  }
+
+  /* Both entry points funnel through here — the interactive gestures reach `exec` through the window
+   * manager — and this runs before #gesture::apply, so ahead of every mutation and undo push.
+   *
+   * The session check is needed in addition to the bake check, not instead of it:
+   * #destructive_edit_check counts *layers* (see #bke::sculpt_layers::layers, which never collects
+   * folders), while a session can be anchored on a folder — including an empty one. On a mesh
+   * carrying no layers at all, an empty folder holding a mask therefore passes the bake check while
+   * a session is open, and the changed element count then sends #mask_edit_end down its destructive
+   * branch, which removes the user's own `.sculpt_mask` for good. */
+  if (layers::mask_edit_refuse_deform(object, &reports)) {
+    return false;
+  }
+
+  if (!layers::destructive_edit_check(mesh, &reports)) {
     return false;
   }
 

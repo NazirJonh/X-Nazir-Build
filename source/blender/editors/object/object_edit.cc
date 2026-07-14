@@ -65,6 +65,7 @@
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_softbody.h"
 #include "BKE_workspace.hh"
 
@@ -1018,6 +1019,24 @@ static wmOperatorStatus editmode_toggle_exec(bContext *C, wmOperator *op)
   if (!object_mode_set_ok_or_report(op->reports)) {
     return OPERATOR_CANCELLED;
   }
+
+  /* Scripted / non-interactive callers go through #exec, which switches the mode outright (it
+   * cannot answer the bake-confirm popover shown by #editmode_toggle_invoke). Warn when this
+   * enters Edit Mode on a mesh that still carries sculpt layers: the layers are not deleted, but a
+   * topology edit there will leave their per-element deltas stale. Such layers are then marked in
+   * the layer list, refuse value edits, and are reported on the next sculpt session refresh; the
+   * user repairs them with #SCULPT_OT_layer_validate. A log line lets scripts and C callers detect
+   * the condition up front instead of silently entering Edit Mode. */
+  if (!is_mode_set && obact && obact->type == OB_MESH) {
+    const Mesh *mesh = id_cast<const Mesh *>(obact->data);
+    if (mesh && !blender::bke::sculpt_layers::layers(*mesh).is_empty()) {
+      CLOG_WARN(&LOG,
+                "Entering Edit Mode on mesh '%s' with sculpt layers present; a topology edit will "
+                "invalidate the layer deltas. Bake the layers first to avoid this.",
+                mesh->id.name + 2);
+    }
+  }
+
   if (!is_mode_set) {
     if (!mode_compat_set(C, obact, eObjectMode(mode_flag), op->reports)) {
       return OPERATOR_CANCELLED;
@@ -1082,6 +1101,61 @@ static bool editmode_toggle_poll(bContext *C)
   return OB_TYPE_SUPPORT_EDITMODE(ob->type);
 }
 
+bool editmode_sculpt_layers_confirm(bContext *C, const Object *obact, ReportList *reports)
+{
+  if (obact == nullptr || obact->type != OB_MESH || (obact->mode & OB_MODE_EDIT) != 0) {
+    return false;
+  }
+  /* Needs a window to put a popover in. A background or headless caller has none; it falls through
+   * to the mode switch, where #editmode_toggle_exec logs the same condition for scripts to see. */
+  if (CTX_wm_window(C) == nullptr) {
+    return false;
+  }
+  /* "Don't Show This Again This Session" checkbox in the popup below: a session-only (not saved
+   * to the .blend file) WindowManager property registered from Python, see
+   * SCULPT_PT_layer_editmode_confirm.draw() in properties_data_mesh.py. */
+  wmWindowManager *wm = CTX_wm_manager(C);
+  PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
+  if (RNA_boolean_get(&wm_ptr, "sculpt_layers_hide_editmode_warning")) {
+    return false;
+  }
+  const Mesh *mesh = id_cast<const Mesh *>(obact->data);
+  if (mesh == nullptr || blender::bke::sculpt_layers::layers(*mesh).is_empty()) {
+    return false;
+  }
+  /* A popover (not a plain popup menu): #SCULPT_PT_layer_editmode_confirm's "Don't Show This
+   * Again" checkbox must stay interactive without closing the popup on click, which only a
+   * #BLOCK_KEEP_OPEN popover supports (see that panel's draw() for details). */
+  ui::popover_panel_invoke(C, "SCULPT_PT_layer_editmode_confirm", true, reports);
+  return true;
+}
+
+static wmOperatorStatus editmode_toggle_invoke(bContext *C,
+                                               wmOperator *op,
+                                               const wmEvent * /*event*/)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  const Object *obact = BKE_view_layer_active_object_get(view_layer);
+
+  /* Sculpt layers cannot survive an Edit Mode topology change, so ask before entering and offer to
+   * bake them into the base first instead of silently orphaning the layer data. The "Bake All
+   * Layers" choice takes care of entering Sculpt Mode first if the object is not already in it
+   * (see #layer_bake_and_editmode_enter_exec).
+   *
+   * Also asked from #ed::object::mode_set_ex, which reaches this operator's #exec and would
+   * otherwise walk straight past the question — see the note there. */
+  if (!RNA_boolean_get(op->ptr, "sculpt_layers_bake_confirmed") &&
+      editmode_sculpt_layers_confirm(C, obact, op->reports))
+  {
+    return OPERATOR_INTERFACE;
+  }
+
+  return editmode_toggle_exec(C, op);
+}
+
 void OBJECT_OT_editmode_toggle(wmOperatorType *ot)
 {
 
@@ -1092,10 +1166,20 @@ void OBJECT_OT_editmode_toggle(wmOperatorType *ot)
 
   /* API callbacks. */
   ot->exec = editmode_toggle_exec;
+  ot->invoke = editmode_toggle_invoke;
   ot->poll = editmode_toggle_poll;
 
   /* flags */
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  PropertyRNA *prop;
+  prop = RNA_def_boolean(ot->srna,
+                         "sculpt_layers_bake_confirmed",
+                         false,
+                         "Sculpt Layers Confirmed",
+                         "Internal: skip the sculpt layers Edit Mode warning popup (set when "
+                         "re-invoked after the user made a choice there)");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
 }
 
 /** \} */

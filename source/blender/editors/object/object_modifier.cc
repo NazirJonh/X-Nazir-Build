@@ -93,6 +93,7 @@
 #include "ED_object.hh"
 #include "ED_object_vgroup.hh"
 #include "ED_screen.hh"
+#include "ED_sculpt.hh"
 
 #include "ANIM_bone_collections.hh"
 
@@ -378,6 +379,31 @@ static bool object_modifier_remove(
 
 bool modifier_remove(ReportList *reports, Main *bmain, Scene *scene, Object *ob, ModifierData *md)
 {
+  /* Removing Multires frees the displacement grids that grid-domain sculpt layers store their
+   * tangent displacement against, leaving data no operator can map back onto a mesh that has no
+   * grids. That is the same loss applying it causes, so it is refused the same way — see the
+   * matching guard in #modifier_apply_obdata. */
+  if (md->type == eModifierType_Multires && ob->type == OB_MESH && ob->data != nullptr) {
+    const Mesh &mesh = *id_cast<const Mesh *>(ob->data);
+    if (BKE_multires_mesh_has_grid_sculpt_layers(mesh)) {
+      BKE_report(reports,
+                 RPT_ERROR,
+                 "Cannot remove the Multires modifier while grid sculpt layers exist: bake "
+                 "layers first");
+      return false;
+    }
+    /* After the refusal, so a cancelled removal never ends an edit the user is still working on.
+     * An open weight-mask session keeps its painted weights in the #SubdivCCG this removal tears
+     * down, and identifies that buffer by level, grid count and #SubdivCCG::id — all invalid
+     * afterwards, so a session left open would have its weights silently discarded on close. */
+    if (blender::ed::sculpt_paint::layers::finish_mask_edit(*ob)) {
+      BKE_report(reports,
+                 RPT_INFO,
+                 "Applied the sculpt layer weight mask being edited: removing the Multires "
+                 "modifier cannot preserve an open edit");
+    }
+  }
+
   bool sort_depsgraph = false;
 
   bool ok = object_modifier_remove(bmain, scene, ob, md, &sort_depsgraph);
@@ -1071,6 +1097,15 @@ static bool modifier_apply_obdata(ReportList *reports,
 
     /* Multires: ensure that recent sculpting is applied */
     if (md_eval->type == eModifierType_Multires) {
+      if (BKE_multires_mesh_has_grid_sculpt_layers(*mesh)) {
+        /* Applying the modifier destroys the displacement grids the layers are defined against,
+         * silently turning the layers into stale data. Baking first makes the intent explicit. */
+        BKE_report(reports,
+                   RPT_ERROR,
+                   "Cannot apply the Multires modifier while grid sculpt layers exist: bake "
+                   "layers first");
+        return false;
+      }
       multires_force_sculpt_rebuild(ob);
     }
 

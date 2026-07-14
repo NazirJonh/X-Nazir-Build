@@ -20,6 +20,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_report.hh"
+#include "BKE_sculpt_layers.hh"
 
 #include "BLO_writefile.hh"
 
@@ -135,6 +136,14 @@ static PyObject *bpy_lib_write(BPy_PropertyRNA *self, PyObject *args, PyObject *
     BLI_path_abs_from_cwd(filepath_abs, sizeof(filepath_abs));
   }
 
+  /* Park any open sculpt layer weight-mask editing session for the duration, exactly as the regular
+   * save paths do (see #wm_file_write). A session keeps the layer's weights in the mesh's own
+   * `.sculpt_mask` with the user's mask set aside, and #PartialWriteContext::id_add below copies the
+   * mesh verbatim — so without this the written file would carry a sculpt layer's weight map
+   * masquerading as the user's sculpt mask, silently. Scoped over #id_add as well as the write: the
+   * copies are taken there, not at write time. */
+  const bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard{*bmain_src};
+
   PartialWriteContext partial_write_ctx{*bmain_src};
   const PartialWriteContext::IDAddOptions add_options{
       (PartialWriteContext::IDAddOperations::ADD_DEPENDENCIES |
@@ -166,6 +175,18 @@ static PyObject *bpy_lib_write(BPy_PropertyRNA *self, PyObject *args, PyObject *
   ReportList reports;
 
   BKE_reports_init(&reports, RPT_STORE | RPT_PRINT_HANDLED_BY_OWNER);
+
+  /* Recorded before the write so the wording matches the other writers, but only *surfaced* after
+   * it: a refusal is never a reason to skip the write (see #MaskEditSuspendGuard). */
+  const bool mask_edit_refused = mask_edit_guard.suspend_refused();
+  if (mask_edit_refused) {
+    BKE_report(&reports,
+               RPT_WARNING,
+               "A sculpt layer mask session could not be suspended: the file was saved with the "
+               "layer's mask weights in place of the sculpt mask. Close the mask session and "
+               "repaint the sculpt mask");
+  }
+
   bool success = partial_write_ctx.write(
       filepath_abs, write_flags, path_remap.value_found, reports);
 
@@ -180,6 +201,23 @@ static PyObject *bpy_lib_write(BPy_PropertyRNA *self, PyObject *args, PyObject *
       PyErr_SetString(PyExc_IOError, "Unknown error writing library data");
     }
     py_return_value = nullptr;
+  }
+
+  /* The #ReportList above never reaches Python on its own: the success path prints
+   * #RPT_ERROR_ALL only, which excludes warnings, and the failure path turns errors into the
+   * exception. A Python warning is the only channel a caller can see or filter, so raise one
+   * too. It may be configured as an error, in which case the (already written) file stands but
+   * the call reports failure. */
+  if (mask_edit_refused && py_return_value != nullptr) {
+    if (PyErr_WarnEx(PyExc_RuntimeWarning,
+                     "A sculpt layer mask session could not be suspended: the file was saved with "
+                     "the layer's mask weights in place of the sculpt mask. Close the mask session "
+                     "and repaint the sculpt mask",
+                     1) == -1)
+    {
+      Py_DECREF(py_return_value);
+      py_return_value = nullptr;
+    }
   }
 
   BKE_reports_free(&reports);

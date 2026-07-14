@@ -75,6 +75,7 @@ set(SRC
   grease_pencil/weight_draw.cc
   grease_pencil/weight_smear.cc
 
+  mesh/interface_template_sculpt_layer_tree.cc
   mesh/paint_canvas.cc
   mesh/paint_cursor.cc
   mesh/paint_hide.cc
@@ -104,6 +105,8 @@ set(SRC
   mesh/sculpt_geodesic.cc
   mesh/sculpt_gesture.cc
   mesh/sculpt_hide.cc
+  mesh/sculpt_layer_mask_edit.cc
+  mesh/sculpt_layers.cc
   mesh/sculpt_mask_extract.cc
   mesh/sculpt_mask_init.cc
   mesh/sculpt_ops.cc
@@ -211,6 +214,7 @@ if(WITH_GTESTS)
     mesh/paint_test.cc
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc
+    mesh/sculpt_layer_mask_test.cc
     mesh/sculpt_undo_test.cc
   )
   set(TEST_INC

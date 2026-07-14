@@ -123,6 +123,7 @@
 #include "BKE_report.hh"
 #include "BKE_rigidbody.h"
 #include "BKE_scene.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_shader_fx.hh"
 #include "BKE_softbody.h"
 #include "BKE_speaker.hh"
@@ -1720,7 +1721,63 @@ static void object_update_from_subsurf_ccg(Object *object)
   const int tot_level = mesh_eval->runtime->subdiv_ccg_tot_level;
   Object *object_orig = DEG_get_original(object);
   Mesh *mesh_orig = id_cast<Mesh *>(object_orig->data);
-  multiresModifier_reshapeFromCCG(tot_level, mesh_orig, subdiv_ccg);
+  /* [DEBUG-flush] Tied to the module-wide #SCULPT_LAYERS_DEBUG_LOG switch (see
+   * `BKE_sculpt_layers.hh`); see also SCULPT_LAYERS_DEBUG_FLUSH in `multires_reshape.cc`. */
+#if SCULPT_LAYERS_DEBUG_LOG
+  printf("[sculpt-layers][flush] object_update_from_subsurf_ccg: depsgraph-driven flush, "
+         "tot_level=%d ccg_level=%d\n",
+         tot_level,
+         subdiv_ccg->level);
+#endif
+  /* An open sculpt-layer weight-mask editing session keeps the layer's weights in
+   * #SubdivCCG::masks, which the reshape below and the `CD_GRID_PAINT_MASK` copy at the end of
+   * this function both propagate into persistent storage — permanently replacing the user's mask.
+   * This function has no editor call site to bracket: it runs from #BKE_object_free_derived_caches
+   * on every depsgraph re-evaluation, and mask painting itself sets `dirty.coords` (see
+   * #flush_update_step, which tags multires unconditionally), so it fires during ordinary session
+   * use. Guarded on the *original* object, which is where the sculpt session lives. Placed after
+   * the dirty-flag early return above so a session costs nothing when there is nothing to write.
+   *
+   * Grid sessions only: the only persistent stores written from here are `CD_MDISPS` and
+   * `CD_GRID_PAINT_MASK` (by the reshape and by the two #copy_ccg_data calls below), never the
+   * mesh's `.sculpt_mask` attribute, so a mesh-domain session is not a hazard here. Parking one
+   * would still add and remove a `.sculpt_mask` layer on the mesh in #Main on every re-evaluation
+   * — a stronger mutation from an evaluation path than the in-place displacement writes this
+   * function already admits to, for no protection at all.
+   *
+   * A refusal deliberately does *not* skip the flush; see the identical reasoning at the guard in
+   * #multires_flush_sculpt_updates. Deferring here is the worse failure of the two, because this
+   * runs on every re-evaluation. */
+  /* Load-bearing identity, pinned because the whole bracket is void where it does not hold: the
+   * guard swaps `ss->subdiv_ccg->masks`, while this function reshapes from the CCG on `mesh_eval`.
+   * The two are reached by different accessors — #BKE_object_get_evaluated_mesh_unchecked for the
+   * sculpt session, #BKE_object_get_evaluated_mesh_no_subsurf_unchecked here — which differ by
+   * #BKE_mesh_wrapper_ensure_subdivision, so they name the same #SubdivCCG only while that resolve
+   * is a no-op. Should they ever diverge, the guard would park a buffer this function never reads
+   * and the layer's weights would flush to the base mesh unprotected. */
+  BLI_assert(object_orig->runtime->sculpt_session == nullptr ||
+             object_orig->runtime->sculpt_session->subdiv_ccg == nullptr ||
+             object_orig->runtime->sculpt_session->subdiv_ccg == subdiv_ccg);
+  const bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard(
+      *object_orig, bke::sculpt_layers::MaskEditDomains::GridsOnly);
+
+  const bool flushed = multiresModifier_reshapeFromCCG(
+      tot_level, mesh_orig, subdiv_ccg, MultiresReshapeFromCCGMode::Base);
+  if (!flushed) {
+    /* The composed CCG could not be separated back into an un-layered base (a sculpt layer has
+     * stale level/topology metadata). Keep the dirty flags set so the pending base edits are
+     * retained for a later flush instead of being silently discarded, and report the failure
+     * instead of losing the stroke without a trace. The flag is latched: report once per failure
+     * streak, otherwise every depsgraph re-evaluation would re-attempt the flush and spam the log
+     * with the same error. */
+    if (!subdiv_ccg->dirty.flush_failed_reported) {
+      subdiv_ccg->dirty.flush_failed_reported = true;
+      CLOG_ERROR(&LOG,
+                 "Multires base flush skipped: sculpt layer data is inconsistent with the mesh; "
+                 "base sculpt edits are kept pending.");
+    }
+    return;
+  }
   /* NOTE: we need to reshape into an original mesh from main database,
    * allowing:
    *
@@ -1760,6 +1817,7 @@ static void object_update_from_subsurf_ccg(Object *object)
   /* Everything is now up-to-date. */
   subdiv_ccg->dirty.coords = false;
   subdiv_ccg->dirty.hidden = false;
+  subdiv_ccg->dirty.flush_failed_reported = false;
 }
 
 void BKE_object_eval_assign_data(Object *object_eval, ID *data_eval, bool is_owned)
@@ -4720,6 +4778,15 @@ bool BKE_object_shapekey_free(Main *bmain, Object *ob)
   *key_p = nullptr;
 
   BKE_id_free_us(bmain, key);
+
+  if (ob->type == OB_MESH) {
+    /* The mesh no longer has shape keys, so evaluation stops composing the vertex sculpt layers on
+     * top of the (now gone) shape-key deform. Bake them back into the positions, the carrier a
+     * key-less mesh uses — the counterpart of the strip done when the mesh gained the key (see
+     * #bke::sculpt_layers::bake_vert_layers_into_positions). Without this the layers would silently
+     * drop out of the surface even though their data is still stored. */
+    bke::sculpt_layers::bake_vert_layers_into_positions(*id_cast<Mesh *>(ob->data));
+  }
 
   return true;
 }

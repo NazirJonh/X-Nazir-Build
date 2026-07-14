@@ -8,6 +8,7 @@
 #include "sculpt_smooth.hh"
 
 #include "BLI_enumerable_thread_specific.hh"
+#include "BLI_function_ref.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
@@ -105,13 +106,13 @@ static void neighbor_position_average_interior_grids_impl(const OffsetIndices<in
                                                           const BitSpan boundary_verts,
                                                           const Set<OrderedEdge> &boundary_edges,
                                                           const SubdivCCG &subdiv_ccg,
+                                                          const Span<float3> positions,
                                                           const Span<int> grids,
                                                           const Span<float> factors,
                                                           const MutableSpan<float3> new_positions)
 {
   PRF_scope(ProfileCategory::Editor);
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
-  const Span<float3> positions = subdiv_ccg.positions;
 
   BLI_assert(grids.size() * key.grid_area == new_positions.size());
   if constexpr (use_factors) {
@@ -181,8 +182,15 @@ void neighbor_position_average_interior_grids(const OffsetIndices<int> faces,
                                               const Span<int> grids,
                                               const MutableSpan<float3> new_positions)
 {
-  neighbor_position_average_interior_grids_impl<false>(
-      faces, corner_verts, boundary_verts, boundary_edges, subdiv_ccg, grids, {}, new_positions);
+  neighbor_position_average_interior_grids_impl<false>(faces,
+                                                       corner_verts,
+                                                       boundary_verts,
+                                                       boundary_edges,
+                                                       subdiv_ccg,
+                                                       subdiv_ccg.positions,
+                                                       grids,
+                                                       {},
+                                                       new_positions);
 }
 
 void neighbor_position_average_interior_grids(const OffsetIndices<int> faces,
@@ -199,6 +207,28 @@ void neighbor_position_average_interior_grids(const OffsetIndices<int> faces,
                                                       boundary_verts,
                                                       boundary_edges,
                                                       subdiv_ccg,
+                                                      subdiv_ccg.positions,
+                                                      grids,
+                                                      factors,
+                                                      new_positions);
+}
+
+void neighbor_position_average_interior_grids(const OffsetIndices<int> faces,
+                                              const Span<int> corner_verts,
+                                              const BitSpan boundary_verts,
+                                              const Set<OrderedEdge> &boundary_edges,
+                                              const SubdivCCG &subdiv_ccg,
+                                              const Span<float3> positions,
+                                              const Span<int> grids,
+                                              const Span<float> factors,
+                                              const MutableSpan<float3> new_positions)
+{
+  neighbor_position_average_interior_grids_impl<true>(faces,
+                                                      corner_verts,
+                                                      boundary_verts,
+                                                      boundary_edges,
+                                                      subdiv_ccg,
+                                                      positions,
                                                       grids,
                                                       factors,
                                                       new_positions);
@@ -469,27 +499,27 @@ static float3 translation_to_plane(const float3 &current_position,
 }
 
 static float3 calc_boundary_normal_corner(const float3 &current_position,
-                                          const Span<float3> vert_positions,
+                                          const FunctionRef<float3(int)> position_of,
                                           const Span<int> neighbors)
 {
   PRF_scope(ProfileCategory::Editor);
   float3 normal(0);
   for (const int vert : neighbors) {
-    const float3 to_neighbor = vert_positions[vert] - current_position;
+    const float3 to_neighbor = position_of(vert) - current_position;
     normal += math::normalize(to_neighbor);
   }
   return math::normalize(normal);
 }
 
 static float3 calc_boundary_normal_corner(const CCGKey &key,
-                                          const Span<float3> positions,
+                                          const FunctionRef<float3(int)> position_of,
                                           const float3 &current_position,
                                           const Span<SubdivCCGCoord> neighbors)
 {
   PRF_scope(ProfileCategory::Editor);
   float3 normal(0);
   for (const SubdivCCGCoord &coord : neighbors) {
-    const float3 to_neighbor = positions[coord.to_index(key)] - current_position;
+    const float3 to_neighbor = position_of(coord.to_index(key)) - current_position;
     normal += math::normalize(to_neighbor);
   }
   return math::normalize(normal);
@@ -510,6 +540,7 @@ static float3 calc_boundary_normal_corner(const float3 &current_position,
 
 void calc_relaxed_translations_faces(const Span<float3> vert_positions,
                                      const Span<float3> vert_normals,
+                                     const Span<float3> base_view,
                                      const OffsetIndices<int> faces,
                                      const Span<int> corner_verts,
                                      const GroupedSpan<int> vert_to_face_map,
@@ -525,6 +556,13 @@ void calc_relaxed_translations_faces(const Span<float3> vert_positions,
   PRF_scope(ProfileCategory::Editor);
   BLI_assert(verts.size() == factors.size());
   BLI_assert(verts.size() == translations.size());
+
+  /* Relax the un-layered base when there is one (see #layers::stroke_base_view). Interior normals
+   * stay the composed ones, whose weighted average already cancels the layer pattern. */
+  const bool use_base_view = !base_view.is_empty();
+  auto position_of = [&](const int vert) {
+    return use_base_view ? vert_positions[vert] - base_view[vert] : vert_positions[vert];
+  };
 
   Vector<int> neighbors;
 
@@ -559,12 +597,18 @@ void calc_relaxed_translations_faces(const Span<float3> vert_positions,
       continue;
     }
 
-    const float3 smoothed_position = bke::attribute_math::mix_indices(vert_positions, neighbors);
+    const float3 current_position = position_of(verts[i]);
+
+    float3 smoothed_position(0);
+    for (const int neighbor : neighbors) {
+      smoothed_position += position_of(neighbor);
+    }
+    smoothed_position *= math::rcp(float(neighbors.size()));
 
     /* Normal Calculation */
     float3 normal;
     if (is_boundary && neighbors.size() == 2) {
-      normal = calc_boundary_normal_corner(vert_positions[verts[i]], vert_positions, neighbors);
+      normal = calc_boundary_normal_corner(current_position, position_of, neighbors);
       if (math::is_zero(normal)) {
         translations[i] = float3(0);
         continue;
@@ -574,14 +618,14 @@ void calc_relaxed_translations_faces(const Span<float3> vert_positions,
       normal = vert_normals[verts[i]];
     }
 
-    const float3 translation = translation_to_plane(
-        vert_positions[verts[i]], normal, smoothed_position);
+    const float3 translation = translation_to_plane(current_position, normal, smoothed_position);
 
     translations[i] = translation * factors[i];
   }
 }
 
 void calc_relaxed_translations_grids(const SubdivCCG &subdiv_ccg,
+                                     const Span<float3> base_view,
                                      const OffsetIndices<int> faces,
                                      const Span<int> corner_verts,
                                      const Span<int> face_sets,
@@ -597,6 +641,12 @@ void calc_relaxed_translations_grids(const SubdivCCG &subdiv_ccg,
   const Span<float3> positions = subdiv_ccg.positions;
   const Span<float3> normals = subdiv_ccg.normals;
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+
+  /* See the mesh variant in #calc_relaxed_translations_faces. */
+  const bool use_base_view = !base_view.is_empty();
+  auto position_of = [&](const int vert) {
+    return use_base_view ? positions[vert] - base_view[vert] : positions[vert];
+  };
 
   for (const int i : grids.index_range()) {
     const IndexRange grid_range = bke::ccg::grid_range(key, grids[i]);
@@ -648,12 +698,18 @@ void calc_relaxed_translations_grids(const SubdivCCG &subdiv_ccg,
           continue;
         }
 
-        const float3 smoothed_position = average_positions(key, positions, neighbors);
+        const float3 current_position = position_of(vert);
+
+        float3 smoothed_position(0);
+        for (const SubdivCCGCoord &neighbor : neighbors) {
+          smoothed_position += position_of(neighbor.to_index(key));
+        }
+        smoothed_position *= math::rcp(float(neighbors.size()));
 
         /* Normal Calculation */
         float3 normal;
         if (is_boundary && neighbors.size() == 2) {
-          normal = calc_boundary_normal_corner(key, positions, positions[vert], neighbors);
+          normal = calc_boundary_normal_corner(key, position_of, current_position, neighbors);
           if (math::is_zero(normal)) {
             translations[node_vert] = float3(0);
             continue;
@@ -664,7 +720,7 @@ void calc_relaxed_translations_grids(const SubdivCCG &subdiv_ccg,
         }
 
         const float3 translation = translation_to_plane(
-            positions[vert], normal, smoothed_position);
+            current_position, normal, smoothed_position);
 
         translations[node_vert] = translation * factors[node_vert];
       }

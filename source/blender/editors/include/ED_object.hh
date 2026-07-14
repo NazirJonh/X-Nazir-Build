@@ -463,6 +463,20 @@ bool mode_compat_set(bContext *C, Object *ob, eObjectMode mode, ReportList *repo
 bool mode_set_ex(bContext *C, eObjectMode mode, bool use_undo, ReportList *reports);
 bool mode_set(bContext *C, eObjectMode mode);
 
+/**
+ * Ask the user, through #SCULPT_PT_layer_editmode_confirm, before entering Edit Mode on \a obact
+ * while it still carries un-baked sculpt layers — an Edit Mode topology change cannot preserve
+ * their per-element deltas.
+ *
+ * Returns true when the popover was opened, meaning the caller handed off: the mode switch has
+ * *not* happened, and continues only if the user picks one of the popover's choices (each of which
+ * re-runs #OBJECT_OT_editmode_toggle with `sculpt_layers_bake_confirmed` set).
+ *
+ * Returns false — leaving the caller to switch as usual — when there is nothing to ask about, when
+ * the user silenced the warning for the session, or when there is no window to show it in.
+ */
+bool editmode_sculpt_layers_confirm(bContext *C, const Object *obact, ReportList *reports);
+
 void mode_generic_exit(Main *bmain, Depsgraph *depsgraph, Scene *scene, Object *ob);
 bool mode_generic_has_data(Depsgraph *depsgraph, const Object *ob);
 

@@ -18,12 +18,16 @@
 #include "DNA_modifier_types.h"
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_xr_types.h"
 
 #include "BLI_listbase_iterator.hh"
+#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
@@ -40,6 +44,7 @@
 #include "BKE_lib_override.hh"
 #include "BKE_main.hh"
 #include "BKE_mesh_legacy_convert.hh"
+#include "BKE_multires.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -517,6 +522,27 @@ void do_versions_after_linking_520(FileData *fd, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
+    /* Re-encode multires displacement grids into the well-conditioned tangent space (see
+     * #BKE_multires_construct_tangent_matrix). The conversion rewrites the mesh's shared
+     * #CD_MDISPS in place, so each mesh must be converted exactly once: a mesh used by several
+     * objects (linked duplicates) or an object carrying two Multires modifiers would otherwise be
+     * decoded a second time with the legacy frames and permanently corrupt the displacement. */
+    Set<const void *> converted_meshes;
+    for (Object &ob : bmain->objects) {
+      for (ModifierData &md : ob.modifiers) {
+        if (md.type != eModifierType_Multires) {
+          continue;
+        }
+        if (ob.data == nullptr || !converted_meshes.add(ob.data)) {
+          continue;
+        }
+        MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(&md);
+        multires_do_versions_tangent_space_conversion(&ob, mmd);
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.
@@ -912,6 +938,42 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
     FOREACH_NODETREE_END;
   }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
+    /* The sculpt layer mask overlay is on by default, and its bit is new: every file predating it
+     * stored a zero there, which would otherwise read as "the user turned it off". Set once, so a
+     * later deliberate toggle survives. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            v3d->overlay.flag |= V3D_OVERLAY_SCULPT_SHOW_LAYER_MASK;
+            v3d->overlay.sculpt_mode_layer_mask_opacity = 0.75f;
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 46)) {
+    /* The two layer-preview settings are new members, so a file predating them reads zeros: the
+     * overlay would come up with a zero threshold and a zero opacity, and the user would have to
+     * find both sliders before it showed anything. The flag itself is deliberately left alone — a
+     * new overlay should not switch itself on in an existing file. */
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings != nullptr && scene.toolsettings->sculpt != nullptr) {
+        scene.toolsettings->sculpt->sculpt_layer_preview_threshold = 0.01f;
+        scene.toolsettings->sculpt->sculpt_layer_preview_opacity = 0.75f;
+      }
+    }
+  }
+
+  /* NOTE: no versioning translates sculpt layers written before the layer tree migration, which
+   * removed the flat `Mesh::sculpt_layers` list such code walked. The old list is not a member of
+   * the current SDNA, so a pre-migration file's layers are never read back at all: such a file
+   * opens with no sculpt layers. That is the accepted outcome of the no-backward-compatibility
+   * decision, not a defect. */
 
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning

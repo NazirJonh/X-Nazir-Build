@@ -1216,6 +1216,30 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Lock Z", "Disallow changes to the Z axis of vertices");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
+  prop = RNA_def_property(srna, "show_layer_preview", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flags", SCULPT_SHOW_LAYER_PREVIEW);
+  RNA_def_property_ui_text(prop,
+                           "Show Layer Preview",
+                           "Tint the surface where the active sculpt layer holds recorded "
+                           "displacement");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "layer_preview_threshold", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_layer_preview_threshold");
+  RNA_def_property_range(prop, 0.0001f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.001f, 0.25f, 0.01, 4);
+  RNA_def_property_ui_text(prop,
+                           "Layer Preview Threshold",
+                           "Displacement at which the layer preview reaches full tint, as a "
+                           "fraction of the mesh bounding box diagonal");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "layer_preview_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_layer_preview_opacity");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop, "Layer Preview Opacity", "");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   prop = RNA_def_property(srna, "use_deform_only", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flags", SCULPT_ONLY_DEFORM);
   RNA_def_property_ui_text(prop,

@@ -14,6 +14,9 @@
 #include "BKE_attribute.h"
 #include "BKE_editmesh.hh"
 #include "BKE_mesh_types.hh"
+#include "BKE_sculpt_layers.hh"
+
+#include "CLG_log.h"
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
@@ -24,6 +27,8 @@
 #include "WM_types.hh"
 
 namespace blender {
+
+static CLG_LogRef LOG = {"rna.mesh"};
 
 const EnumPropertyItem rna_enum_mesh_delimit_mode_items[] = {
     {BMO_DELIM_NORMAL, "NORMAL", 0, "Normal", "Delimit by face directions"},
@@ -97,34 +102,62 @@ static const EnumPropertyItem rna_enum_mesh_remesh_mode_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Outside the #RNA_RUNTIME split, unlike the property definition that uses it: the `#else` branch
+ * below is compiled only into the makesrna generator, so a definition placed there never reaches
+ * bf_rna. #SCULPT_OT_layer_group_color_tag links against this too. */
+const EnumPropertyItem rna_enum_sculpt_layergroup_color_items[] = {
+    {SCULPT_LAYER_COLOR_NONE, "NONE", ICON_X, "Reset color tag", ""},
+    {SCULPT_LAYER_COLOR_01, "COLOR1", ICON_SCULPT_LAYERGROUP_COLOR_01, "Color tag 1", ""},
+    {SCULPT_LAYER_COLOR_02, "COLOR2", ICON_SCULPT_LAYERGROUP_COLOR_02, "Color tag 2", ""},
+    {SCULPT_LAYER_COLOR_03, "COLOR3", ICON_SCULPT_LAYERGROUP_COLOR_03, "Color tag 3", ""},
+    {SCULPT_LAYER_COLOR_04, "COLOR4", ICON_SCULPT_LAYERGROUP_COLOR_04, "Color tag 4", ""},
+    {SCULPT_LAYER_COLOR_05, "COLOR5", ICON_SCULPT_LAYERGROUP_COLOR_05, "Color tag 5", ""},
+    {SCULPT_LAYER_COLOR_06, "COLOR6", ICON_SCULPT_LAYERGROUP_COLOR_06, "Color tag 6", ""},
+    {SCULPT_LAYER_COLOR_07, "COLOR7", ICON_SCULPT_LAYERGROUP_COLOR_07, "Color tag 7", ""},
+    {SCULPT_LAYER_COLOR_08, "COLOR8", ICON_SCULPT_LAYERGROUP_COLOR_08, "Color tag 8", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 }  // namespace blender
 
 #ifdef RNA_RUNTIME
 
+#  include <chrono>
+#  include <cstdio>
 #  include <fmt/format.h>
 
 #  include "DNA_material_types.h"
+#  include "DNA_object_types.h"
 #  include "DNA_scene_types.h"
 #  include "DNA_world_types.h"
 
 #  include "BLI_math_geom.h"
 #  include "BLI_math_vector.h"
+#  include "BLI_listbase.h"
 #  include "BLI_string.h"
 #  include "BLI_string_utf8.h"
+#  include "BLI_string_utils.hh"
 
 #  include "BKE_anonymous_attribute_id.hh"
 #  include "BKE_attribute.hh"
 #  include "BKE_attribute_legacy_convert.hh"
 #  include "BKE_customdata.hh"
+#  include "BKE_global.hh"
 #  include "BKE_lib_id.hh"
 #  include "BKE_main.hh"
 #  include "BKE_mesh.hh"
 #  include "BKE_mesh_runtime.hh"
+#  include "BKE_object_types.hh"
+#  include "BKE_paint.hh"
 #  include "BKE_report.hh"
+#  include "BLI_array.hh"
+
+#  include "BKE_sculpt_layers.hh"
 
 #  include "DEG_depsgraph.hh"
 
-#  include "ED_mesh.hh" /* XXX Bad level call */
+#  include "ED_mesh.hh"   /* XXX Bad level call */
+#  include "ED_sculpt.hh" /* XXX Bad level call */
 
 #  include "WM_api.hh"
 
@@ -217,6 +250,501 @@ static void rna_Mesh_update_data_edit_active_color(Main *bmain, Scene *scene, Po
 
   rna_Mesh_update_data_legacy_deg_tag_all(bmain, scene, ptr);
 }
+/* -------------------------------------------------------------------- */
+/** \name Sculpt Layers
+ * \{ */
+
+/* The flat sculpt layer collection: every layer of the mesh, depth-first in tree order, with the
+ * folders flattened away. Backed by #bke::sculpt_layers::layers — the cached span of the root
+ * folder — rather than by a list, because the DNA holds a tree now: a list-base iterator would have
+ * to run over a folder's #SculptLayerGroup::children, and that list interleaves both kinds, which
+ * this collection (declared over #SculptLayer) must never hand out.
+ *
+ * Index-based rather than a snapshot of the span, following #GreasePencil::layers, which exposes
+ * its own tree flat the same way: the span is a *view* into that cache and a tree mutation rebuilds
+ * it, so it is re-read per step (a cache hit) instead of held across the iteration. */
+static void rna_Mesh_sculpt_layers_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  iter->internal.count.item = 0;
+  iter->valid = !bke::sculpt_layers::layers(*rna_mesh(ptr)).is_empty();
+}
+
+static void rna_Mesh_sculpt_layers_next(CollectionPropertyIterator *iter)
+{
+  iter->internal.count.item++;
+  iter->valid = bke::sculpt_layers::layers(*rna_mesh(&iter->parent))
+                    .index_range()
+                    .contains(iter->internal.count.item);
+}
+
+static PointerRNA rna_Mesh_sculpt_layers_get(CollectionPropertyIterator *iter)
+{
+  const Span<SculptLayer *> layers = bke::sculpt_layers::layers(*rna_mesh(&iter->parent));
+  return RNA_pointer_create_with_parent(
+      iter->parent, RNA_SculptLayer, layers[iter->internal.count.item]);
+}
+
+static int rna_Mesh_sculpt_layers_length(PointerRNA *ptr)
+{
+  return int(bke::sculpt_layers::layers(*rna_mesh(ptr)).size());
+}
+
+static PointerRNA rna_Mesh_sculpt_layers_active_get(PointerRNA *ptr)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  SculptLayer *layer = bke::sculpt_layers::active_get(*mesh);
+  return RNA_pointer_create_with_parent(*ptr, RNA_SculptLayer, layer);
+}
+
+static void rna_Mesh_sculpt_layers_active_set(PointerRNA *ptr,
+                                              PointerRNA value,
+                                              ReportList *reports)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  SculptLayer *layer = static_cast<SculptLayer *>(value.data);
+  /* #active_set records a uid, and every mesh hands out uids from its own counter starting at 1, so
+   * a layer belonging to *another* mesh is not rejected downstream — it resolves to whichever local
+   * layer happens to share that uid, silently activating the wrong one. The precondition is stated
+   * on #active_set but nothing enforced it on this path, which is the one a script reaches.
+   * Assigning null stays legal: it clears the active layer. */
+  if (layer != nullptr && !bke::sculpt_layers::layers(*mesh).contains(layer)) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Sculpt layer '%s' does not belong to mesh '%s'",
+                layer->base.name,
+                mesh->id.name + 2);
+    return;
+  }
+  bke::sculpt_layers::active_set(*mesh, layer);
+  /* The REC exemption tracks the active layer, and every operator that changes the active layer
+   * re-derives it (through #commit_layers_change, or directly). Assigning through `bpy` reaches
+   * neither, so without this the exemption would stay on the previously active layer: an armed REC
+   * would then record into a layer whose mask is *not* exempt, which the exemption exists to
+   * prevent. The object has to be found rather than passed, exactly as
+   * #rna_sculpt_layer_node_mask_edit_active does, and for the same reasons. */
+  if (G_MAIN == nullptr) {
+    return;
+  }
+  for (Object &object : G_MAIN->objects) {
+    if (object.data == &mesh->id && (object.mode & OB_MODE_SCULPT)) {
+      ed::sculpt_paint::layers::rec_exemption_refresh(object);
+      /* The overlay draws the active node's weight mask, so the assignment changed what it shows. */
+      ed::sculpt_paint::layers::tag_layer_overlays_dirty(object);
+    }
+  }
+}
+
+static bool rna_Mesh_sculpt_layers_solo_active_get(PointerRNA *ptr)
+{
+  return bke::sculpt_layers::solo_active(*rna_mesh(ptr));
+}
+
+static std::optional<std::string> rna_SculptLayer_path(const PointerRNA *ptr)
+{
+  const SculptLayer *layer = static_cast<const SculptLayer *>(ptr->data);
+  char name_esc[sizeof(layer->base.name) * 2];
+  BLI_str_escape(name_esc, layer->base.name, sizeof(name_esc));
+  return fmt::format("sculpt_layers[\"{}\"]", name_esc);
+}
+
+static void rna_SculptLayer_name_set(PointerRNA *ptr, const char *value)
+{
+  SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
+  STRNCPY_UTF8(layer->base.name, value);
+  /* Unique across the whole tree, through the single authority both node kinds share: this flat
+   * collection and #rna_SculptLayer_path key a layer by name alone, so a name shared with another
+   * layer — even in a different folder — would let either resolve the wrong one. */
+  bke::sculpt_layers::node_name_ensure_unique(layer->base);
+}
+
+/* Every folder of the mesh, depth-first, the root excluded (it is not a row: see
+ * #bke::sculpt_layers::root_group).
+ *
+ * A snapshot array, rather than the index-based re-read the flat layer collection above uses,
+ * because #bke::sculpt_layers::groups has no cache to re-read: it walks the tree and builds a fresh
+ * vector per call, so re-reading it per step would rebuild the whole thing once per folder. The
+ * copy is handed to the iterator, which frees it in #rna_iterator_array_end. */
+static void rna_Mesh_sculpt_layer_groups_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  const Vector<SculptLayerGroup *> groups = bke::sculpt_layers::groups(*rna_mesh(ptr));
+  SculptLayerGroup **array = nullptr;
+  if (!groups.is_empty()) {
+    array = MEM_new_array_uninitialized<SculptLayerGroup *>(size_t(groups.size()), __func__);
+    for (const int64_t i : groups.index_range()) {
+      array[i] = groups[i];
+    }
+  }
+  rna_iterator_array_begin(
+      iter, ptr, array, sizeof(SculptLayerGroup *), groups.size(), true, nullptr);
+}
+
+static int rna_Mesh_sculpt_layer_groups_length(PointerRNA *ptr)
+{
+  return int(bke::sculpt_layers::groups(*rna_mesh(ptr)).size());
+}
+
+static std::optional<std::string> rna_SculptLayerGroup_path(const PointerRNA *ptr)
+{
+  const SculptLayerGroup *group = static_cast<const SculptLayerGroup *>(ptr->data);
+  char name_esc[sizeof(group->base.name) * 2];
+  BLI_str_escape(name_esc, group->base.name, sizeof(name_esc));
+  return fmt::format("sculpt_layer_groups[\"{}\"]", name_esc);
+}
+
+static void rna_SculptLayerGroup_name_set(PointerRNA *ptr, const char *value)
+{
+  SculptLayerGroup *group = static_cast<SculptLayerGroup *>(ptr->data);
+  STRNCPY_UTF8(group->base.name, value);
+  /* Unique across the whole tree — the same single authority #group_add uses, so the two paths
+   * cannot drift apart on what a legal name is. */
+  bke::sculpt_layers::node_name_ensure_unique(group->base);
+}
+
+/* [DEBUG-perf] Per-tick timing for the Sculpt Layers influence slider hot path. Tied to the
+ * module-wide #SCULPT_LAYERS_DEBUG_LOG switch (see `BKE_sculpt_layers.hh`). */
+#  define SCULPT_LAYERS_RNA_DEBUG_PERF SCULPT_LAYERS_DEBUG_LOG
+#  if SCULPT_LAYERS_RNA_DEBUG_PERF
+#    define SLP_RNA_PERF(...) printf(__VA_ARGS__)
+#  else
+#    define SLP_RNA_PERF(...) ((void)0)
+#  endif
+
+/* Apply an incremental influence delta to the mesh vertex positions for a single vert-domain layer.
+ * Grid-domain layers are driven by the sculpt-session operators (they need SubdivCCG), so this is
+ * a no-op for them. */
+static void rna_SculptLayer_apply_mesh_delta(Mesh *mesh, SculptLayer &layer, const float delta)
+{
+  if (mesh->verts_num == 0 || mesh->runtime->edit_mesh ||
+      layer.domain != SCULPT_LAYER_DOMAIN_VERT || delta == 0.0f)
+  {
+    return;
+  }
+  if (mesh->key != nullptr) {
+    /* With shape keys the vertex layers are NOT baked into #mesh.vert_positions (which holds the
+     * untouched basis); they are re-composed as an object-space overlay at evaluation
+     * (#apply_vert_layers_eval). Writing the incremental delta into the basis here would corrupt it
+     * and leak into the surface as an inverted layer. The update callback re-evaluates the geometry
+     * honestly under a shape key (#flush_interactive_update returns false there), so the influence /
+     * visibility change is reflected without touching the basis. */
+    return;
+  }
+  MutableSpan<float3> positions = mesh->vert_positions_for_write();
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
+  const std::chrono::high_resolution_clock::time_point apply_start =
+      std::chrono::high_resolution_clock::now();
+#endif
+  bke::sculpt_layers::apply_delta_mesh(layer, delta, positions);
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
+  const int64_t apply_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::high_resolution_clock::now() - apply_start)
+                               .count();
+  SLP_RNA_PERF("[DEBUG-perf] rna_sculpt_layers: apply_delta_mesh verts=%d took %lld us\n",
+               mesh->verts_num,
+               static_cast<long long>(apply_us));
+#endif
+  mesh->tag_positions_changed();
+}
+
+static float rna_SculptLayer_influence_get(PointerRNA *ptr)
+{
+  return static_cast<const SculptLayer *>(ptr->data)->influence;
+}
+
+/* Grid (multires) layers: consume any pending base sculpt edits BEFORE the influence/visibility
+ * value changes. A later flush would reshape the stale composed CCG against the changed layer set
+ * and leak the difference into the base MDisps. Uses #G_MAIN because property setters get no
+ * context. No-op for the vertex domain and when nothing is pending. */
+static void rna_SculptLayer_flush_pending_base(Mesh *mesh, const SculptLayer &layer)
+{
+  if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || G_MAIN == nullptr) {
+    return;
+  }
+  ed::sculpt_paint::layers::flush_pending_multires_base_for_mesh(*G_MAIN, *mesh);
+}
+
+static bool rna_SculptLayer_is_valid_get(PointerRNA *ptr)
+{
+  const SculptLayer *layer = static_cast<const SculptLayer *>(ptr->data);
+  return !bke::sculpt_layers::is_stale(*rna_mesh(ptr), *layer);
+}
+
+/**
+ * Whether a weight-mask editing session is currently open on \a node.
+ *
+ * The session is per-object runtime state (#SculptSession::layers), and deliberately never
+ * persisted, while an RNA pointer to a sculpt layer or folder names only the #Mesh. The owning
+ * object therefore has to be found rather than passed. Only rows that are actually drawn ask this,
+ * and only an object in Sculpt Mode can carry a session, so the walk costs a pointer comparison per
+ * object per redraw. The tree view itself does not use this path — it already holds the object and
+ * reads the session directly (see #layers::mask_edit_active_uid).
+ */
+static bool rna_sculpt_layer_node_mask_edit_active(const PointerRNA *ptr,
+                                                   const SculptLayerTreeNode &node)
+{
+  /* Uid 0 names the root group and doubles as the session's "not open" sentinel, so it must never
+   * be matched against a live session. Guarded against a null #G_MAIN the same way the sibling
+   * #rna_SculptLayer_flush_pending_base is above: this getter is reachable from `bpy` and from
+   * tooltip/introspection paths during file read and startup, when #G_MAIN is not guaranteed. */
+  if (node.uid == 0 || G_MAIN == nullptr) {
+    return false;
+  }
+  const ID *mesh_id = &rna_mesh(ptr)->id;
+  for (Object &object : G_MAIN->objects) {
+    /* Narrowed to Sculpt Mode objects for the reason #flush_pending_multires_base_for_mesh's
+     * identical test is: an operator run from this menu acts on #CTX_data_active_object, and when
+     * two objects share this mesh, an Object Mode object's leftover session must not make this
+     * getter answer true for a node the active object's operator would instead open a second
+     * session on. */
+    if (object.data != mesh_id || !(object.mode & OB_MODE_SCULPT)) {
+      continue;
+    }
+    const SculptSession *ss = object.runtime->sculpt_session;
+    if (ss != nullptr && ss->layers.mask_edit.node_uid == node.uid) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool rna_SculptLayer_has_mask_get(PointerRNA *ptr)
+{
+  return static_cast<const SculptLayer *>(ptr->data)->base.mask != nullptr;
+}
+
+static bool rna_SculptLayer_mask_edit_active_get(PointerRNA *ptr)
+{
+  return rna_sculpt_layer_node_mask_edit_active(
+      ptr, static_cast<const SculptLayer *>(ptr->data)->base);
+}
+
+static bool rna_SculptLayer_mask_enabled_get(PointerRNA *ptr)
+{
+  return bke::sculpt_layers::mask_enabled(static_cast<const SculptLayer *>(ptr->data)->base);
+}
+
+static bool rna_SculptLayerGroup_has_mask_get(PointerRNA *ptr)
+{
+  return static_cast<const SculptLayerGroup *>(ptr->data)->base.mask != nullptr;
+}
+
+static bool rna_SculptLayerGroup_mask_edit_active_get(PointerRNA *ptr)
+{
+  return rna_sculpt_layer_node_mask_edit_active(
+      ptr, static_cast<const SculptLayerGroup *>(ptr->data)->base);
+}
+
+static bool rna_SculptLayerGroup_mask_enabled_get(PointerRNA *ptr)
+{
+  return bke::sculpt_layers::mask_enabled(static_cast<const SculptLayerGroup *>(ptr->data)->base);
+}
+
+/* A vertex-domain layer keeps the combined mesh positions in sync incrementally, so its influence
+ * and visibility may only change while those positions can be updated; otherwise changing the stored
+ * value would break `positions == base + sum(layers * influence)` with no way to reconcile it.
+ * Grid-domain layers are recomposed from stored data at evaluation and are therefore always safe to
+ * change. Returns the reason the change must be refused, or null when it is allowed. */
+static const char *rna_SculptLayer_value_change_refusal(const Mesh *mesh, const SculptLayer &layer)
+{
+  if (layer.domain != SCULPT_LAYER_DOMAIN_VERT) {
+    return nullptr;
+  }
+  if (mesh->runtime->edit_mesh != nullptr) {
+    /* The live positions belong to the edit mesh and cannot be touched from here. */
+    return "mesh is in Edit Mode";
+  }
+  if (mesh->verts_num == 0) {
+    return "mesh has no vertices";
+  }
+  if (bke::sculpt_layers::is_stale(layer, mesh->verts_num)) {
+    /* The delta cannot be applied to a mismatched vertex range, so #apply_delta_mesh would skip it
+     * while the value still changed — the layer's stored influence would then describe a
+     * contribution the surface does not have. Refusing keeps the two in step until the user repairs
+     * the layer (#SCULPT_OT_layer_validate). */
+    return "layer is stale: its element count no longer matches the mesh topology";
+  }
+  return nullptr;
+}
+
+static void rna_SculptLayer_influence_set(PointerRNA *ptr, float value)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
+  if (const char *refusal = rna_SculptLayer_value_change_refusal(mesh, *layer)) {
+    /* Silently ignored from the UI (the list greys these controls out); report so scripts and
+     * out-of-context edits can tell the change had no effect. */
+    CLOG_WARN(&LOG, "Sculpt layer influence change ignored: %s", refusal);
+    return;
+  }
+  value = (value < -10.0f) ? -10.0f : (value > 10.0f ? 10.0f : value);
+  rna_SculptLayer_flush_pending_base(mesh, *layer);
+  const float old_effective = bke::sculpt_layers::effective(*layer);
+  layer->influence = value;
+  rna_SculptLayer_apply_mesh_delta(mesh, *layer, bke::sculpt_layers::effective(*layer) - old_effective);
+}
+
+static bool rna_SculptLayer_enabled_get(PointerRNA *ptr)
+{
+  return (static_cast<const SculptLayer *>(ptr->data)->base.flag & SCULPT_LAYER_ENABLED) != 0;
+}
+
+static void rna_SculptLayer_enabled_set(PointerRNA *ptr, bool value)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
+  const bool was_enabled = (layer->base.flag & SCULPT_LAYER_ENABLED) != 0;
+  if (was_enabled == value) {
+    return;
+  }
+  if (const char *refusal = rna_SculptLayer_value_change_refusal(mesh, *layer)) {
+    /* Silently ignored from the UI (the list greys these controls out); report so scripts and
+     * out-of-context edits can tell the change had no effect. */
+    CLOG_WARN(&LOG, "Sculpt layer visibility change ignored: %s", refusal);
+    return;
+  }
+  rna_SculptLayer_flush_pending_base(mesh, *layer);
+  const float old_effective = bke::sculpt_layers::effective(*layer);
+  if (value) {
+    layer->base.flag |= SCULPT_LAYER_ENABLED;
+  }
+  else {
+    layer->base.flag &= ~SCULPT_LAYER_ENABLED;
+  }
+  rna_SculptLayer_apply_mesh_delta(mesh, *layer, bke::sculpt_layers::effective(*layer) - old_effective);
+}
+
+static float rna_SculptLayerGroup_influence_get(PointerRNA *ptr)
+{
+  return static_cast<const SculptLayerGroup *>(ptr->data)->influence;
+}
+
+/* Folder influence multiplier. Mirrors #rna_SculptLayer_influence_set but cascades: the change
+ * scales every descendant layer's #effective through the ancestor influence product, so the mesh
+ * update is applied to each descendant vert-domain layer as its own before/after difference.
+ *
+ * Unlike the per-layer setter this cannot be refused wholesale when one descendant is uneditable —
+ * a single value drives many layers. Instead #rna_SculptLayer_apply_mesh_delta is already a no-op for
+ * grid / shape-key / edit-mode / no-verts / (implicitly) stale layers, and the group update callback
+ * brings those descendants up to date by an honest re-evaluation rather than this incremental path. */
+static void rna_SculptLayerGroup_influence_set(PointerRNA *ptr, float value)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  SculptLayerGroup *group = static_cast<SculptLayerGroup *>(ptr->data);
+  value = (value < -10.0f) ? -10.0f : (value > 10.0f ? 10.0f : value);
+
+  const Span<SculptLayer *> descendants = bke::sculpt_layers::layers(*group);
+
+  /* Consume any pending multires base edits before the value changes, once, if a grid descendant
+   * exists: a later flush would reshape the stale composed CCG against the changed layer set and
+   * leak the difference into the base MDisps (see #rna_SculptLayer_flush_pending_base). */
+  for (SculptLayer *layer : descendants) {
+    if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+      rna_SculptLayer_flush_pending_base(mesh, *layer);
+      break;
+    }
+  }
+
+  /* Snapshot each descendant's current effective weight, change the folder influence, re-bake the
+   * cascade onto every layer's #group_influence_cached, then apply just the per-layer difference. */
+  Vector<float> old_effective(descendants.size());
+  for (const int64_t i : descendants.index_range()) {
+    old_effective[i] = bke::sculpt_layers::effective(*descendants[i]);
+  }
+  group->influence = value;
+  bke::sculpt_layers::resync_group_state(*mesh);
+  for (const int64_t i : descendants.index_range()) {
+    SculptLayer &layer = *descendants[i];
+    rna_SculptLayer_apply_mesh_delta(
+        mesh, layer, bke::sculpt_layers::effective(layer) - old_effective[i]);
+  }
+}
+
+static void rna_Mesh_update_sculpt_layers(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  ID *id = ptr->owner_id;
+  if (id->us <= 0) {
+    return;
+  }
+  /* Grid (multires) layers require a full CCG recompute via the sculpt session — the incremental
+   * #rna_SculptLayer_apply_mesh_delta path is a no-op for them (see its domain check). */
+  SculptLayer *changed_layer = static_cast<SculptLayer *>(ptr->data);
+  if (changed_layer && changed_layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+    Mesh &mesh = *rna_mesh(ptr);
+    if (ed::sculpt_paint::layers::sync_multires_for_rna(*bmain, scene, mesh, *changed_layer)) {
+      return;
+    }
+    /* No live grid session: fall through to the full ID_RECALC_GEOMETRY below. */
+  }
+  /* In sculpt mode the live mesh positions were already updated incrementally by the layer setter
+   * (see #rna_SculptLayer_apply_mesh_delta). For a vertex-domain PBVH this lets us refresh the
+   * viewport with a lightweight PBVH invalidation instead of a full geometry re-evaluation, which
+   * keeps the influence slider interactive on dense meshes. */
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
+  const std::chrono::high_resolution_clock::time_point flush_start =
+      std::chrono::high_resolution_clock::now();
+#endif
+  const bool flushed = ed::sculpt_paint::layers::flush_interactive_update(*bmain, *rna_mesh(ptr));
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
+  const int64_t flush_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::high_resolution_clock::now() - flush_start)
+                               .count();
+  SLP_RNA_PERF("[DEBUG-perf] rna_sculpt_layers: flush_interactive_update fast_path=%d took %lld us\n",
+               int(flushed),
+               static_cast<long long>(flush_us));
+#endif
+  if (flushed) {
+    return;
+  }
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
+  const std::chrono::high_resolution_clock::time_point fallback_start =
+      std::chrono::high_resolution_clock::now();
+#endif
+  DEG_id_tag_update(id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_GEOM | ND_DATA, id);
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, nullptr);
+#if SCULPT_LAYERS_RNA_DEBUG_PERF
+  const int64_t fallback_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::high_resolution_clock::now() - fallback_start)
+                                  .count();
+  SLP_RNA_PERF("[DEBUG-perf] rna_sculpt_layers: fallback ID_RECALC_GEOMETRY+notifiers took %lld us\n",
+               static_cast<long long>(fallback_us));
+#endif
+}
+
+/* Update callback for a folder influence change. Cannot reuse #rna_Mesh_update_sculpt_layers: that
+ * casts `ptr->data` to a #SculptLayer for its grid branch, whereas here it is a #SculptLayerGroup. */
+static void rna_Mesh_update_sculpt_layer_group(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  ID *id = ptr->owner_id;
+  if (id->us <= 0) {
+    return;
+  }
+  Mesh &mesh = *rna_mesh(ptr);
+  SculptLayerGroup *group = static_cast<SculptLayerGroup *>(ptr->data);
+  /* Grid (multires) descendants need a full CCG recompute via the sculpt session; the incremental
+   * apply path is a no-op for them. One sync rebuilds the CCG from `MDisps + sum(enabled layers)`,
+   * which already reflects the new folder influence, so a single call covers every grid descendant. */
+  for (SculptLayer *layer : bke::sculpt_layers::layers(*group)) {
+    if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+      if (ed::sculpt_paint::layers::sync_multires_for_rna(*bmain, scene, mesh, *layer)) {
+        return;
+      }
+      /* No live grid session: fall through to the full ID_RECALC_GEOMETRY below. */
+      break;
+    }
+  }
+  /* Vertex-domain descendants were already updated incrementally by the setter, so refresh the
+   * viewport with the lightweight PBVH path when possible and fall back to a full re-evaluation
+   * otherwise (object not in sculpt mode, shape-key / deform sessions, ...). */
+  if (ed::sculpt_paint::layers::flush_interactive_update(*bmain, mesh)) {
+    return;
+  }
+  DEG_id_tag_update(id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_GEOM | ND_DATA, id);
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, nullptr);
+}
+
+/** \} */
+
 static void rna_Mesh_update_select(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   ID *id = ptr->owner_id;
@@ -2906,6 +3434,210 @@ static void rna_def_looptri_poly_value(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
 }
 
+static void rna_def_sculpt_layer(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  static const EnumPropertyItem domain_items[] = {
+      {SCULPT_LAYER_DOMAIN_VERT, "VERTEX", 0, "Vertex", "Per-vertex displacement (regular mesh)"},
+      {SCULPT_LAYER_DOMAIN_GRID, "GRID", 0, "Grid", "Per grid point displacement (multires)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "SculptLayer", nullptr);
+  RNA_def_struct_sdna(srna, "SculptLayer");
+  RNA_def_struct_ui_text(
+      srna, "Sculpt Layer", "A non-destructive sculpt layer storing per-element displacement");
+  RNA_def_struct_path_func(srna, "rna_SculptLayer_path");
+  RNA_def_struct_ui_icon(srna, ICON_OUTLINER_DATA_MESH);
+  /* Button edits of layer properties must not push a global (memfile) undo step: in Sculpt Mode
+   * such a step lands between stroke SCULPT steps and does not compose with the delta-based
+   * sculpt undo (see #SCULPT_OT_layer_solo_base). Undoable changes go through the layer
+   * operators, which push proper sculpt undo steps. A memfile snapshot per slider tick would
+   * also be prohibitively expensive on dense meshes. */
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "base.name");
+  RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_SculptLayer_name_set");
+  RNA_def_property_ui_text(prop, "Name", "Name of the sculpt layer");
+  RNA_def_struct_name_property(srna, prop);
+
+  prop = RNA_def_property(srna, "influence", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(
+      prop, "rna_SculptLayer_influence_get", "rna_SculptLayer_influence_set", nullptr);
+  RNA_def_property_range(prop, -10.0f, 10.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1, 3);
+  /* The influence is applied incrementally to the geometry, so it must not be animated/driven. */
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Influence", "How much this layer contributes to the final sculpted shape");
+  RNA_def_property_update(prop, 0, "rna_Mesh_update_sculpt_layers");
+
+  prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_SculptLayer_enabled_get", "rna_SculptLayer_enabled_set");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop, "Enabled", "Include this layer in the combined result");
+  RNA_def_property_update(prop, 0, "rna_Mesh_update_sculpt_layers");
+
+  prop = RNA_def_property(srna, "lock", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_LOCKED);
+  RNA_def_property_ui_text(prop, "Lock", "Protect this layer from being recorded into");
+  /* Notifier only, as for #SculptLayerGroup.color_tag: the lock state changes what the sculpt layer
+   * list draws but nothing that is evaluated, so there is no update callback to run. */
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
+
+  prop = RNA_def_property(srna, "domain", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "domain");
+  RNA_def_property_enum_items(prop, domain_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Domain", "Element domain the layer is defined on");
+
+  prop = RNA_def_property(srna, "is_valid", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayer_is_valid_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Valid",
+                           "The layer's stored displacement still matches the mesh topology. A "
+                           "stale layer contributes nothing and cannot be edited until it is "
+                           "repaired or removed");
+
+  prop = RNA_def_property(srna, "select", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_SELECTED);
+  RNA_def_property_ui_text(
+      prop, "Select", "Sculpt layer selection state, used for drag and drop reordering");
+  /* Notifier only: selection is a list-drawing concern and contributes nothing to the evaluated
+   * shape. Same reasoning as #SculptLayerGroup.color_tag. */
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
+
+  /* Read-only, and with no update callback: both answer questions about state the mask operators
+   * own, so there is nothing for a write or a re-evaluation to do here. Mirrors #is_valid. */
+  prop = RNA_def_property(srna, "has_mask", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayer_has_mask_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Has Mask",
+                           "The layer carries a per-element weight mask that attenuates its "
+                           "contribution. Use the sculpt layer mask operators to add or remove it");
+
+  prop = RNA_def_property(srna, "mask_edit_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayer_mask_edit_active_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Editing Mask",
+                           "The layer's weight mask is currently being painted with the regular "
+                           "mask tools. The layer's shape updates when the edit is finished");
+
+  /* Read-only for the same reason #SculptLayerGroup.enabled is: a bare flag write would skip the
+   * undo push, the folder chain cache invalidation and the recompose the change needs. The operator
+   * is the only writer. */
+  prop = RNA_def_property(srna, "mask_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayer_mask_enabled_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Mask Enabled",
+                           "The layer's weight mask is in force. When off the mask keeps every "
+                           "painted weight but stops attenuating the layer's contribution");
+}
+
+static void rna_def_sculpt_layer_group(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SculptLayerGroup", nullptr);
+  RNA_def_struct_sdna(srna, "SculptLayerGroup");
+  RNA_def_struct_ui_text(
+      srna, "Sculpt Layer Group", "A folder organizing sculpt layers in the tree view");
+  RNA_def_struct_path_func(srna, "rna_SculptLayerGroup_path");
+  /* Same invariant as #SculptLayer: edits ride on sculpt undo steps pushed by the operators, and a
+   * memfile step from a plain RNA edit would not compose with the stroke SCULPT steps. */
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  /* Explicit: the implicit lookup #RNA_def_property does from the identifier only searches the
+   * top-level members, and the name now lives one level down in #SculptLayerGroup::base. */
+  RNA_def_property_string_sdna(prop, nullptr, "base.name");
+  RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_SculptLayerGroup_name_set");
+  RNA_def_property_ui_text(prop, "Name", "Name of the sculpt layer group");
+  RNA_def_struct_name_property(srna, prop);
+
+  prop = RNA_def_property(srna, "influence", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(
+      prop, "rna_SculptLayerGroup_influence_get", "rna_SculptLayerGroup_influence_set", nullptr);
+  RNA_def_property_range(prop, -10.0f, 10.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1, 3);
+  /* Applied incrementally to the geometry, cascaded onto the descendant layers, so it must not be
+   * animated / driven — mirrors #SculptLayer.influence. */
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Influence", "How much this group's layers contribute to the final sculpted shape");
+  RNA_def_property_update(prop, 0, "rna_Mesh_update_sculpt_layer_group");
+
+  prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_ENABLED);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  /* No setter: a bare flag write would bypass #resync_group_state and leave every descendant
+   * layer's #SCULPT_LAYER_GROUP_HIDDEN bit out of sync with the tree, and it would not push the
+   * sculpt undo step the cascade needs. #SCULPT_OT_layer_group_toggle_visibility is the only path. */
+  RNA_def_property_ui_text(prop,
+                           "Enabled",
+                           "Show the sculpt layers inside this group and its subgroups. Read-only: "
+                           "toggling must cascade to every nested layer, so use the "
+                           "sculpt.layer_group_toggle_visibility operator instead");
+
+  prop = RNA_def_property(srna, "color_tag", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "base.color_tag");
+  RNA_def_property_enum_items(prop, rna_enum_sculpt_layergroup_color_items);
+  RNA_def_property_ui_text(
+      prop, "Color Tag", "Color tag shown on this group's folder icon in the sculpt layer list");
+  /* A notifier and nothing else. Deliberately *not* #rna_Mesh_update_sculpt_layer_group, which the
+   * sibling #influence uses: that callback resyncs multires CCG and otherwise falls through to
+   * #ID_RECALC_GEOMETRY, which would make recoloring a folder recompute the whole mesh. A color
+   * tag changes nothing evaluated. */
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
+
+  prop = RNA_def_property(srna, "select", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_SELECTED);
+  RNA_def_property_ui_text(
+      prop, "Select", "Sculpt layer group selection state, used for drag and drop reordering");
+  /* Notifier only, matching the sibling #color_tag and #SculptLayer.select. */
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
+
+  prop = RNA_def_property(srna, "is_expanded", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_EXPANDED);
+  RNA_def_property_ui_text(prop, "Expanded", "Group is expanded in the tree view");
+
+  /* The folder counterparts of #SculptLayer.has_mask and #SculptLayer.mask_edit_active. A folder's
+   * mask attenuates every layer below it through #bke::sculpt_layers::chain_mask, and is authored
+   * by exactly the same operators, so the two structs expose the same pair. */
+  prop = RNA_def_property(srna, "has_mask", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayerGroup_has_mask_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Has Mask",
+                           "The group carries a per-element weight mask that attenuates every "
+                           "sculpt layer inside it");
+
+  prop = RNA_def_property(srna, "mask_edit_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayerGroup_mask_edit_active_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Editing Mask",
+                           "The group's weight mask is currently being painted with the regular "
+                           "mask tools. The layers' shape updates when the edit is finished");
+
+  prop = RNA_def_property(srna, "mask_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayerGroup_mask_enabled_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Mask Enabled",
+                           "The group's weight mask is in force. When off the mask keeps every "
+                           "painted weight but stops attenuating the layers inside the group");
+}
+
 static void rna_def_mesh(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3370,6 +4102,59 @@ static void rna_def_mesh(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Is Editmode", "True when used in editmode");
 
+  /* Sculpt Layers */
+  prop = RNA_def_property(srna, "sculpt_layers", PROP_COLLECTION, PROP_NONE);
+  /* Flat, not the tree: the folders are walked through and only the layers come out, so a script
+   * that never cared about folders keeps working unchanged. Mirrors how #GreasePencil exposes a
+   * flat `layers` alongside its own tree. */
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Mesh_sculpt_layers_begin",
+                                    "rna_Mesh_sculpt_layers_next",
+                                    nullptr,
+                                    "rna_Mesh_sculpt_layers_get",
+                                    "rna_Mesh_sculpt_layers_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_struct_type(prop, "SculptLayer");
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
+  RNA_def_property_ui_text(
+      prop, "Sculpt Layers", "Non-destructive sculpt layers combined onto the base geometry");
+
+  prop = RNA_def_property(srna, "sculpt_layer_groups", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Mesh_sculpt_layer_groups_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_dereference_get",
+                                    "rna_Mesh_sculpt_layer_groups_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_struct_type(prop, "SculptLayerGroup");
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
+  RNA_def_property_ui_text(
+      prop, "Sculpt Layer Groups", "Folders organizing the mesh's sculpt layers");
+
+  prop = RNA_def_property(srna, "sculpt_layers_active", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "SculptLayer");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_Mesh_sculpt_layers_active_get",
+                                 "rna_Mesh_sculpt_layers_active_set",
+                                 nullptr,
+                                 nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
+  RNA_def_property_ui_text(prop, "Active Sculpt Layer", "Active sculpt layer");
+
+  prop = RNA_def_property(srna, "sculpt_layers_solo_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Mesh_sculpt_layers_solo_active_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Solo Base Active",
+                           "Sculpt layers are temporarily hidden to sculpt the base shape "
+                           "directly (toggled by the Solo Base operator)");
+
   /* pointers */
   rna_def_animdata_common(srna);
   rna_def_texmat_common(srna, "rna_Mesh_texspace_editable");
@@ -3388,6 +4173,8 @@ void RNA_def_mesh(BlenderRNA *brna)
   rna_def_mpolygon(brna);
   rna_def_mloopuv(brna);
   rna_def_mloopcol(brna);
+  rna_def_sculpt_layer(brna);
+  rna_def_sculpt_layer_group(brna);
 }
 
 }  // namespace blender

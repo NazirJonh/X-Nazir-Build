@@ -19,6 +19,7 @@ struct Object;
 struct RegionView3D;
 struct ReportList;
 struct Scene;
+struct SculptLayer;
 struct UndoType;
 struct UndoStep;
 struct bContext;
@@ -116,6 +117,135 @@ void store_mesh_from_eval(const wmOperator &op,
                           const RegionView3D *rv3d,
                           Object &object,
                           Mesh *new_mesh);
+
+namespace layers {
+
+/**
+ * Fast viewport refresh after a sculpt-layer influence or visibility change that was already
+ * applied directly to the mesh vertex positions (see #rna_SculptLayer_apply_mesh_delta).
+ *
+ * When \a mesh is being sculpted with a vertex-domain #bke::pbvh::Tree (and not through a
+ * deform-modifier or shape-key session), this invalidates the PBVH nodes and requests a lightweight
+ * redraw instead of a full geometry re-evaluation, keeping the influence slider interactive.
+ *
+ * \return true if the fast path handled the update; false if the caller should fall back to a full
+ * #ID_RECALC_GEOMETRY tag (object not in sculpt mode, multires, shape-key / deform sessions, ...).
+ */
+bool flush_interactive_update(Main &bmain, Mesh &mesh);
+
+/**
+ * Grid-domain influence or visibility change from the RNA setter: request an honest geometry
+ * re-evaluation (the CCG is rebuilt from `MDisps + sum(enabled layers)`, which already reflects
+ * the changed value) and emit notifiers. MDisps are never written.
+ *
+ * Returns true when a live grid sculpt session was found; false when the caller should fall back
+ * to a full #ID_RECALC_GEOMETRY tag itself (object not in sculpt mode, or no live grid PBVH).
+ */
+bool sync_multires_for_rna(Main &bmain, Scene *scene, Mesh &mesh, SculptLayer &changed_layer);
+
+/**
+ * Drop the cached runtime mesh base (#SculptSession::layers::mesh_base) and mark the session
+ * state as needing a fresh re-capture. Multires keeps no runtime layer state. Safe to call when
+ * no session exists (no-op).
+ */
+void invalidate_runtime(Object &object);
+
+/**
+ * Multires: flush pending base sculpt edits from the live CCG into the base MDisps for the first
+ * sculpt-mode object using \a mesh with a grids PBVH. Must run BEFORE a grid layer's influence or
+ * visibility value changes (e.g. from an RNA setter): a later flush would reshape the stale
+ * composed CCG against the changed layer set and leak the difference into the base.
+ * Returns true when a live grid session was found.
+ */
+bool flush_pending_multires_base_for_mesh(Main &bmain, Mesh &mesh);
+
+/**
+ * Close an open sculpt-layer weight-mask editing session on \a object, storing the painted weights
+ * onto the node exactly as finishing the edit by hand would.
+ *
+ * Must run BEFORE anything that rebuilds the #SubdivCCG at a different subdivision level (the
+ * Subdivide and Delete Higher operators, the viewport / sculpt level sliders). A grid session keeps
+ * its weights in #SubdivCCG::masks and identifies the buffer it opened on by level, grid count and
+ * #SubdivCCG::id; a rebuild invalidates all three, so a session left open across one has its
+ * painted weights silently discarded on close. Storing them first is what keeps the user's work,
+ * and the mask itself survives the change — it is stored at the multires top level and
+ * #multires_set_tot_level resamples it along with the layer coefficients.
+ *
+ * Returns true when a session was actually open, so the caller can say so; false is the common case
+ * and costs one field test.
+ */
+bool finish_mask_edit(Object &object);
+
+/**
+ * #finish_mask_edit for callers that hold a mesh rather than an object (the RNA level setters).
+ * Acts on the first sculpt-mode object using \a mesh, matching
+ * #flush_pending_multires_base_for_mesh.
+ */
+bool finish_mask_edit_for_mesh(Main &bmain, Mesh &mesh);
+
+/**
+ * Reports an info message and returns false when \a mesh still carries sculpt layers that have
+ * not been baked into the base geometry. A topology-destroying edit (Trim, Mask Slice, Remesh,
+ * ...) cannot preserve their per-element data, so callers must cancel the operator when this
+ * returns false.
+ *
+ * \a reports may be null to skip the message.
+ */
+bool destructive_edit_check(const Mesh &mesh, ReportList *reports);
+
+/**
+ * Re-derive which layer, if any, carries the REC exemption on \a object, returning true when the
+ * answer changed.
+ *
+ * Exported for the RNA setter of the active sculpt layer. Every operator that moves the active layer
+ * re-derives the exemption (usually through #commit_layers_change), but assigning
+ * `Mesh.sculpt_layers.active` from `bpy` reaches none of them, and a stale exemption means an armed
+ * REC records into a layer whose weight mask is not exempt.
+ *
+ * Idempotent and one uid lookup, so calling it when nothing moved costs nothing.
+ */
+bool rec_exemption_refresh(Object &object);
+
+/**
+ * Tag every node of \a object so both sculpt layer overlays — the weight mask and the displacement
+ * preview — refill.
+ *
+ * Exported alongside #rec_exemption_refresh and for the same reason: assigning
+ * `Mesh.sculpt_layers.active` from `bpy` changes which node either overlay draws without going
+ * through any of the operators that tag it.
+ *
+ * A no-op when the object has no PBVH, so callers need not check.
+ */
+void tag_layer_overlays_dirty(Object &object);
+
+/**
+ * Refuse (reporting) an action that moves vertices outside the brush stroke path while a weight-mask
+ * editing session is open on \a object. True when it was refused.
+ *
+ * \a reports may be null to skip the message, which is what the mirrored check in a transform's
+ * after-update pass wants: it only needs to know whether the entry point bailed out.
+ *
+ * The reasoning is #mask_edit_blocks_brush's, applied to everything that reaches the surface without
+ * going through a #PaintStroke: the mesh and cloth filters, the transform tools, the line-project
+ * gesture, and the geometry-touching modes of face set editing.
+ *
+ * Two harms, and a caller only has to meet one of them. Anything that consults the mask reads the
+ * *layer's* weights while the user's own mask is parked, so its result is shaped by a mask the user
+ * cannot see and did not paint. And every caller here deforms outright rather than through a stroke,
+ * with recording left disarmed by #mask_edit_enter, so the change lands in the base mesh while the
+ * user believes they are painting a mask — already applied by the time anything could notice. Face
+ * set fairing is the second kind only: it selects by boundary and face-set membership and never
+ * touches the mask.
+ *
+ * Refused rather than closing the session, for the reason #mask_edit_blocks_brush is: ending it
+ * silently would throw away an in-progress mask edit as a side effect of an unrelated action.
+ *
+ * Lives in this header rather than the module-internal `sculpt_intern.hh` because the transform
+ * system calls it from `editors/transform/`.
+ */
+bool mask_edit_refuse_deform(const Object &object, ReportList *reports);
+
+}  // namespace layers
 
 }  // namespace ed::sculpt_paint
 

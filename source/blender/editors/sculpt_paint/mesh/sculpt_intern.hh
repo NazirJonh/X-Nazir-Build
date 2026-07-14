@@ -62,9 +62,13 @@ struct Key;
 struct KeyBlock;
 struct Object;
 struct PaintModeSettings;
+struct SculptLayer;
+struct SculptLayerGroup;
+struct SculptLayerTreeNode;
 struct ReportList;
 struct wmKeyConfig;
 struct wmKeyMap;
+struct wmOperator;
 struct wmOperatorType;
 
 /* -------------------------------------------------------------------- */
@@ -115,6 +119,17 @@ class PositionDeformData {
   MutableSpan<float3> orig_;
 
   std::optional<ShapeKeyData> shape_key_data_;
+
+  /**
+   * When a mesh sculpt-layer stroke is being recorded, the active layer's per-vertex offset buffer.
+   * The translation applied to #orig_ is accumulated into it per dab (see #deform), so the
+   * end-of-stroke recording does not have to rewrite the layer with a full random-access scatter
+   * of the whole brushed area. Empty when no mesh layer is being recorded.
+   */
+  MutableSpan<float3> layer_record_data_;
+
+  /** Accumulate \a translations into #layer_record_data_ at \a verts. No-op when not recording. */
+  void record_layer_offsets(Span<int> verts, Span<float3> translations) const;
 
  public:
   PositionDeformData(const Depsgraph &depsgraph, Object &object_orig);
@@ -782,7 +797,14 @@ const float *brush_frontface_normal_from_falloff_shape(const SculptSession &ss,
                                                        char falloff_shape);
 void cube_tip_init(const Sculpt &sd, const Object &ob, const Brush &brush, float mat[4][4]);
 
-/** Sample the brush's texture value. */
+/**
+ * Sample the brush's texture value.
+ *
+ * \param brush_point: must be the composed (evaluated) position of the element, never the
+ * sculpt-layer base view. The texture is anchored to the surface the user sees and aims at: the
+ * screen-projected mapping modes must land the stamp where the cursor is, and the 3D mapping mode
+ * must keep the pattern stuck to the visible geometry.
+ */
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const float brush_point[3],
@@ -1017,6 +1039,524 @@ void SCULPT_OT_dyntopo_detail_size_edit(wmOperatorType *ot);
 void SCULPT_OT_dynamic_topology_toggle(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint::dyntopo
+
+namespace ed::sculpt_paint::layers {
+
+/* Sculpt layers integration (non-destructive sculpt edits, see also #BKE_sculpt_layers.hh). */
+
+/** True when sculpt layers are available for this object (regular mesh or multires, not dyntopo). */
+bool is_supported(const Object &object);
+/**
+ * True when the layer system actually shapes this object's surface right now: recording is armed,
+ * or at least one layer is enabled and not hidden by a disabled folder (so the composed surface
+ * differs from the base). Brushes that cannot work with a composed surface — the cloth
+ * simulation, whose constraints and simulation-area falloff are solved on it — are rejected in
+ * this state (see #sculpt_brush_stroke_invoke).
+ */
+bool in_use(const Object &object);
+/** Element domain (#SCULPT_LAYER_DOMAIN_VERT / #SCULPT_LAYER_DOMAIN_GRID) for the sculpt target. */
+short domain_for(const Object &object);
+/**
+ * Number of layer elements for the object (mesh vertices, or total multires grid points).
+ *
+ * 64-bit for the grid case, which counts `grids_num * grid_size(level)^2` — see
+ * #bke::sculpt_layers::data_ensure.
+ */
+int64_t element_count(const Object &object);
+
+/** Initialize per-session layer state. Call when entering sculpt mode. */
+void session_state_ensure(Object &object);
+
+/**
+ * Re-derive #SCULPT_LAYER_REC_EXEMPT across \a object's layer tree from its live REC state, so the
+ * composite stops honoring the recording layer's mask (and its folder chain's) while REC is armed.
+ *
+ * The single writer of that bit, and idempotent, so every path that can change either half of the
+ * answer — REC arming and disarming, a change of active layer — simply calls it. Passing a null
+ * session or an object that is not in sculpt mode clears the exemption, which is what makes it safe
+ * to call from the mode-exit path.
+ *
+ * Also the repair for a bit that undo moved, in either direction, and this is what makes the
+ * re-derive mandatory rather than merely tidy. #SCULPT_LAYER_REC_EXEMPT lives in
+ * #SculptLayerTreeNode::flag, which the sculpt undo system snapshots and restores as a whole word
+ * (#push_sculpt_layer_flags_batch swaps it outright), so a restore can just as easily resurrect the
+ * bit from a snapshot taken while REC was armed as drop the one that should be set. The bit is also
+ * deliberately not persisted (see #bke::sculpt_layers::rec_exempt_set), and memfile undo goes
+ * through that same writer and reader, so a memfile restore leaves the tree unexempted.
+ *
+ * Re-deriving from the live session settles all of those the same way. #commit_layers_change calls
+ * this on every path that can restore an undo step, and #stroke_record_begin calls it again at the
+ * one point where being wrong is destructive: a dropped exemption followed by a recorded dab is the
+ * `D / mask` condition the exemption exists to prevent, not a display artifact.
+ *
+ * Returns whether the bit actually moved. Repairing it changes what every composite resolves for
+ * that layer, so the surface a caller is holding becomes stale exactly when this returns true — and
+ * a recompose must run against a runtime base derived *before* the repair, never after it (see the
+ * load-bearing constraint on #bke::sculpt_layers::rec_exempt_set). Callers that cannot recompose
+ * say so at their call site.
+ *
+ * Follows #SculptSession::layers::rec_active exactly, including the cases where a dab would not in
+ * fact be recorded (a layer hidden by a disabled folder, Solo Base). That is deliberate: REC's other
+ * pinning, #SculptLayer::influence, behaves the same way, and one rule the user can see in the REC
+ * button beats two rules that disagree in states the UI does not distinguish.
+ */
+bool rec_exemption_refresh(Object &object);
+
+/**
+ * Set #SculptSession::layers::rec_active to \a armed, running the whole state change the flag is
+ * part of. A no-op when it already holds that value.
+ *
+ * The single writer of that flag, because it is not a UI toggle: its mirror
+ * #SCULPT_LAYER_REC_EXEMPT decides whether the composite honors the active layer's weight mask, so
+ * flipping the flag by hand moves the composed surface without recomposing it. The order below is
+ * load-bearing and is why this is one function rather than a convention:
+ *
+ * - The "is the active layer masked" question is asked with the exemption lifted, since while REC
+ *   is armed the exemption is precisely what makes #node_mask_for_composite answer "unmasked".
+ * - A masked layer drains the multires base first. The lazy CCG flush subtracts each layer's
+ *   contribution with the weights in force at flush time, so a flush landing after the flip would
+ *   subtract an unmasked contribution the evaluator had composed masked, denting the base by the
+ *   difference — permanently.
+ * - The runtime base is derived from the still-consistent pre-change state, and only then does the
+ *   flag move, the exemption follow it and the surface recompose.
+ *
+ * Arming also pins the active layer to enabled with influence 1.0, which is REC's contract with the
+ * user: what is recorded is what is seen. Undo pushes, notifiers and any refusal to arm belong to
+ * the caller — this function performs a decision that has already been made.
+ */
+void rec_active_set(Object &object, bool armed);
+
+/* Stroke recording into the active layer. */
+void stroke_record_begin(const Depsgraph &depsgraph, Object &object);
+void stroke_record_end(const Depsgraph &depsgraph, Object &object);
+/** Revert a cancelled stroke's recording, restoring the pre-stroke influence/visibility state. */
+void stroke_record_cancel(const Depsgraph &depsgraph, Object &object);
+
+/**
+ * Give an armed REC a layer to record into when the mesh has none, so the stroke about to start does
+ * not silently edit the base under a lit REC button. A no-op whenever REC is off or a layer is
+ * already active, which is every ordinary stroke.
+ *
+ * Must be called BEFORE the stroke's own undo step is opened, and is the reason it is a separate
+ * entry point rather than part of #stroke_record_begin: the layer creation is recorded with
+ * #undo::push_sculpt_layer_list_change, which claims #StepData::type for the layer machinery, while
+ * the stroke's dabs claim the same field for positions. Sharing one step would drop one of the two
+ * restores; the creation therefore gets its own step, pushed first.
+ *
+ * The common source of the armed-but-empty state is handled at the source instead — arming REC
+ * creates the layer (see #SCULPT_OT_layer_toggle_rec). This covers what happens afterwards: the last
+ * layer removed, or an undo restoring a layer-less tree, while REC stays armed.
+ */
+void stroke_ensure_rec_layer(const Scene &scene, Object &object);
+
+/**
+ * The active mesh-domain recording layer's per-vertex offset buffer, or an empty span when no mesh
+ * layer is currently being recorded. Used by #PositionDeformData to accumulate a stroke per dab.
+ */
+MutableSpan<float3> active_record_data(Object &object);
+
+/**
+ * Per-element object-space contribution of the enabled sculpt layers ("base view" offset
+ * `O = combined - base`) for the current stroke, or an empty span when the mode is inactive.
+ * Indexed like the PBVH positions (mesh vertex index / CCG element index) and constant for the
+ * stroke's duration. Brushes subtract it from the live positions when computing
+ * surface-shape-dependent inputs (falloff distances, area normal/center, smoothing targets, plane
+ * fits) so the edit does not absorb the layer residual; the resulting translations are still
+ * applied to the live (composed) positions.
+ *
+ * Only strokes that edit THE BASE build one. A stroke recorded into a layer works on the composed
+ * surface — what is drawn is what was seen — so this span is empty while recording and every helper
+ * below degenerates to the plain, layer-less path (see #stroke_record_begin for the trade-off).
+ *
+ * The offset must always be taken relative to #stroke_base_view_dc — never raw. The brush reference
+ * point (#StrokeCache::location_symm and the radius around it) stays on the composed surface, so
+ * removing the raw offset shifts the sampled positions away from the cursor by the layer height:
+ * once that height reaches the brush radius every falloff factor is zeroed and the area-plane
+ * sampling degenerates. The helpers below already do this; a raw consumer must subtract the DC
+ * itself (or be strictly differential, like the smooth brush's neighbor averaging, where a constant
+ * offset cancels).
+ */
+Span<float3> stroke_base_view(const Object &object);
+
+/**
+ * The base-view offset sampled at the current brush contact point (see #stroke_base_view). Zero
+ * when the base view is inactive. Refreshed once per brush action, so it follows the symmetry and
+ * tile passes.
+ */
+float3 stroke_base_view_dc(const Object &object);
+
+/**
+ * Refresh #stroke_base_view_dc for the current brush action. Called once per symmetry / tile pass,
+ * before any brush computation reads the base view.
+ */
+void base_view_dc_update(const Depsgraph &depsgraph, Object &object);
+
+/**
+ * Add the nodes the brush reaches in base-view space to \a node_mask, and return the union.
+ *
+ * The brush measures its falloff on the base view, but the gather selects nodes from their bounds on
+ * the composed surface. The two footprints differ by the layer height, so without this an element
+ * can earn a non-zero factor while its node was never gathered; a node is processed as a whole, so
+ * the stroke boundary then follows node borders (square tiles). The returned mask is a superset —
+ * the added nodes' elements simply get their (usually zero) factor like any other. Returns \a
+ * node_mask unchanged when the base view is inactive. \a radius must cover the brush footprint (pass
+ * the same scaled radius the gather used).
+ */
+IndexMask base_view_extend_node_mask(const Object &object,
+                                     const IndexMask &node_mask,
+                                     float radius,
+                                     IndexMaskMemory &memory);
+
+/**
+ * Base-view adjustment helpers for brush computations. Each returns the input span unchanged
+ * when the base view is inactive; otherwise the adjusted copy (with the DC offset removed) lives in
+ * \a r_storage.
+ */
+/** Compact node positions (one per element of \a verts) minus the base-view offset. */
+Span<float3> base_view_adjust_compact_mesh(const Object &object,
+                                           Span<int> verts,
+                                           Span<float3> positions,
+                                           Vector<float3> &r_storage);
+/**
+ * Gather base-view positions for \a verts from the full \a vert_positions array. Returns an
+ * EMPTY span when the base view is inactive (the caller keeps its indexed code path).
+ */
+Span<float3> base_view_gather_mesh(const Object &object,
+                                   Span<int> verts,
+                                   Span<float3> vert_positions,
+                                   Vector<float3> &r_storage);
+/** Compact node grid positions (CCG node layout) minus the base-view offset. */
+Span<float3> base_view_adjust_compact_grids(const Object &object,
+                                            const SubdivCCG &subdiv_ccg,
+                                            Span<int> grids,
+                                            Span<float3> positions,
+                                            Vector<float3> &r_storage);
+/**
+ * Inverse of #base_view_adjust_compact_mesh: add the base-view offset back into \a positions
+ * in place, lifting brush results computed in base space up to the live (composed) space. No-op
+ * when the base view is inactive. Used by brushes (Pose, Boundary) that build absolute new
+ * positions from the base so the layer residual is carried instead of baked into the base.
+ */
+void base_view_compose_mesh(const Object &object,
+                            Span<int> verts,
+                            MutableSpan<float3> positions);
+/** Grid (CCG node layout) counterpart of #base_view_compose_mesh. */
+void base_view_compose_grids(const Object &object,
+                             const SubdivCCG &subdiv_ccg,
+                             Span<int> grids,
+                             MutableSpan<float3> positions);
+/**
+ * Undo the per-dab layer accumulation of an in-progress stroke that is being cancelled. Must run
+ * before the sculpt undo restores the pre-stroke positions, because the offset is recomputed as
+ * `current_position - pre_stroke_position` from the still-available per-node undo data. Under a
+ * shape key the stroke lives in the evaluated positions (the basis is untouched), so the depsgraph
+ * is needed to diff against them.
+ */
+void cancel_recorded_offsets(const Depsgraph &depsgraph, Object &object);
+
+/**
+ * Bring the live positions in sync after a layer change (influence, visibility, data edit, list
+ * change): canonical recompute from `mesh_base + layers` with a lightweight PBVH refresh for the
+ * mesh domain, honest geometry re-evaluation for multires (the CCG is rebuilt from
+ * `MDisps + sum(enabled layers)`).
+ */
+void commit_layers_change(const Depsgraph &depsgraph, Object &object);
+/**
+ * #commit_layers_change for callers that have no depsgraph to hand.
+ *
+ * The two are the same operation: the recompute reads the object's own session state and the
+ * multires branch only tags the mesh, so nothing here ever consults a depsgraph. The overload
+ * taking one is kept because most callers are operators that already hold it, but the exit paths
+ * that must close a mask editing session (#BKE_sculptsession_free, a mode or object switch) run
+ * without any context at all and would otherwise have no way to commit.
+ */
+void commit_layers_change(Object &object);
+
+/**
+ * Multires: reshape any pending (lazily flushed) base sculpt edits from the live CCG into the
+ * base MDisps while the CCG and the stored layer set are still consistent. MUST be called before
+ * any change to the grid layer set or influences — a later flush would reshape the stale composed
+ * CCG against the changed layer set and leak the difference into the base. No-op when nothing is
+ * pending or the object has no live grids session.
+ */
+void flush_pending_multires_base(Object &object);
+
+/* -------------------------------------------------------------------- */
+/** \name Weight mask editing session
+ *
+ * A node's sparse weight mask (#SculptLayerMask) is authored by expanding it into the mesh's
+ * standard `.sculpt_mask` attribute for the duration of a session, so the whole existing mask
+ * toolset — Mask brush, gesture operators, flood fill, mask filters, the viewport overlay — edits it
+ * with no changes of its own. The user's own sculpt mask is parked in
+ * #SculptSession::layers::mask_edit and restored on exit.
+ * \{ */
+
+/**
+ * Open a mask editing session on \a node, expanding its mask into `.sculpt_mask`. Returns false
+ * (changing nothing) when the session cannot be opened, which the caller must report to the user:
+ *
+ * - The object has no sculpt session, or its PBVH is not the mesh (vertex) kind. The grid domain is
+ *   a separate path and is not handled here.
+ * - A session is already open, or \a node is the root group (uid 0 is the "no session" sentinel).
+ * - REC is armed. Recording writes the full stroke delta into the layer regardless of its mask (see
+ *   #bke::sculpt_layers::node_mask_for_composite), so the two running together would show the user a
+ *   surface that does not match what is being stored.
+ *
+ * A node whose stored mask is missing, or stale against the live vertex count
+ * (#bke::sculpt_layers::is_stale_mask), starts the session from a fully opaque mask. A stale mask is
+ * already inert — every consumer fails open on it — so this reproduces exactly the surface the user
+ * currently sees, rather than expanding a buffer that does not describe this topology.
+ *
+ * Marks the PBVH mask summaries and their draw buffers dirty, but sends no notifier: as everywhere
+ * else in this module — the layer operators in `sculpt_layers.cc`, the mask operators in
+ * `paint_mask.cc` — the redraw belongs to the calling operator. A caller that forgets it opens a
+ * session the user cannot see.
+ *
+ * \a depsgraph and \a bmain are needed only on the multires grid domain, where the base mesh's
+ * `CD_GRID_PAINT_MASK` layer must be materialized *before* the session opens; see the body.
+ */
+bool mask_edit_begin(Depsgraph &depsgraph,
+                     Main &bmain,
+                     Object &object,
+                     SculptLayerTreeNode &node);
+
+/**
+ * Open a session on \a node the way the user's entry points do: disarm REC first (through
+ * #rec_active_set, so the exemption mirror and the composite follow), then #mask_edit_begin.
+ * Returns what #mask_edit_begin returned.
+ *
+ * The disarm is one-way on *both* outcomes, a refused open included. Arming is not the inverse of
+ * disarming: it pins the active layer to enabled with `influence = 1.0f`, so replaying it as a
+ * rollback would silently overwrite an influence the user set, with no undo record. A user who
+ * wants REC back goes through the operator that owns those invariants; see the note in
+ * #mask_edit_end.
+ *
+ * The entry every caller should use, including the undo restore: #mask_edit_begin refuses outright
+ * while REC is armed, and nothing clears REC on the user's behalf anywhere else.
+ */
+bool mask_edit_enter(Depsgraph &depsgraph, Main &bmain, Object &object, SculptLayerTreeNode &node);
+
+/**
+ * Close the open mask editing session: compress `.sculpt_mask` back onto the node and restore the
+ * user's own mask. REC is left as it stands, disarmed. A no-op when no session is open, so it is
+ * safe on every exit path.
+ *
+ * Deliberately takes no #bContext: the paths that must not leave a session open
+ * (#BKE_sculptsession_free, a mode or object switch) have none to give. As with #mask_edit_begin
+ * the notifier is the caller's to send.
+ *
+ * Returns whether the painted weights actually reached the node. False means they were salvaged
+ * from nothing — the domain the session opened on is gone (the multires modifier removed under it,
+ * the CCG rebuilt at another level), so there was nothing left to compress. Callers that tell the
+ * user the edit was applied must check this; the session is closed and cleared either way.
+ */
+bool mask_edit_end(Object &object);
+
+/**
+ * Put back the viewport tool a mask editing session replaced with the Mask brush, when the user has
+ * not since chosen another one. A no-op when no session is open, so it is safe to call
+ * unconditionally next to #mask_edit_end.
+ *
+ * Must run *before* #mask_edit_end, which clears the session struct the parked idname lives on.
+ *
+ * There is no REC half to undo. Entering a session disarms REC and leaving does not put it back —
+ * arming is a heavyweight operation with its own refusals and its own undo record, so it stays the
+ * operator's to perform; see the note in #mask_edit_end.
+ *
+ * Unlike #mask_edit_end this needs a #bContext, because only a context can reach the tool system.
+ * The exit paths that have none (#BKE_sculptsession_free, a mode switch, an undo restore) therefore
+ * close the session without it and leave the Mask brush active — which #mask_edit_enter_ui accounts
+ * for by refusing to park the mask tool's own idname on the next entry.
+ */
+void mask_edit_exit_ui(bContext *C, Object &object);
+
+/** Uid of the node whose mask is being edited, or 0 when no session is open. */
+int mask_edit_active_uid(const SculptSession &ss);
+
+/**
+ * Overload for callers that hold an #Object rather than its session — the tree view rows above all.
+ * Answers 0 for an object with no sculpt session, so it is safe outside Sculpt Mode.
+ */
+int mask_edit_active_uid(const Object &object);
+
+/**
+ * How a weight mask must be cut for a given sculpt target: the number of domain elements it covers
+ * and the number of elements per block.
+ *
+ * \note A wrong block size on the grid domain is not rejected, it is *silently ignored*:
+ * #bke::sculpt_layers::grid_masks_for_composite drops a grid mask whose `block_size` is not the
+ * grid area, so the layer contributes fully with no crash and no warning. That failure mode is why
+ * the choice lives in one pure function rather than at each producer.
+ */
+struct MaskLayout {
+  /** 64-bit to match #SculptLayerMask::totelem; a grid layout counts `grids_num * grid_area`. */
+  int64_t totelem = 0;
+  int block_size = 0;
+};
+
+/**
+ * The mask layout for a sculpt target, or a zeroed #MaskLayout when the target carries no elements
+ * to mask (which every caller must treat as a refusal).
+ *
+ * A folder has no domain of its own, so it takes the same layout as a layer on the same object:
+ * #bke::sculpt_layers::chain_mask folds folder masks into the layers below through
+ * #bke::sculpt_layers::mask_multiply, which returns null unless `totelem` *and* `block_size` agree,
+ * and #bke::sculpt_layers::node_mask_for_composite then gates the product against the live element
+ * count. A folder mask cut any other way is therefore inert. Hence the parameters describe the
+ * object, not the node.
+ *
+ * Pure, so the choice can be tested without a live #SubdivCCG — see the note on #MaskLayout for why
+ * that matters more here than the usual amount.
+ */
+MaskLayout mask_layout_for(bool on_grids, int verts_num, int grids_num, int grid_area);
+
+/**
+ * The layout every mask on \a object must be cut at, or a zeroed #MaskLayout when the object carries
+ * no elements to mask (which every caller must treat as a refusal).
+ *
+ * Defined in `sculpt_layer_mask_edit.cc`. Exported because the merges in `sculpt_layers.cc` size and
+ * cut masks too, and a second derivation of the block size there would be free to drift: a grid mask
+ * cut at any other size is *silently* dropped by #bke::sculpt_layers::grid_masks_for_composite, so
+ * the two would disagree with no crash and no warning.
+ */
+MaskLayout mask_layout_for_object(Object &object);
+
+/**
+ * Dense per-element weights of \a node's own weight mask, or false when it has none usable.
+ *
+ * Defined in `sculpt_layers.cc`; declared here because the mask operators
+ * (`sculpt_layer_mask_edit.cc`) and the merges both fold masks into layer data and must do it from
+ * one implementation.
+ */
+bool gather_node_weight_mask(const SculptLayerTreeNode &node,
+                             int64_t elem_num,
+                             Array<float> &r_dense);
+
+/** Dense product of \a node's mask and every folder mask strictly below \a stop_above (exclusive). */
+bool gather_fold_mask(const SculptLayerTreeNode &node,
+                      const SculptLayerGroup *stop_above,
+                      int64_t elem_num,
+                      Array<float> &r_dense);
+
+/** The first stale mask in the range #gather_fold_mask folds, or null when all are usable. */
+const SculptLayerTreeNode *find_stale_mask_in_fold(const SculptLayerTreeNode &node,
+                                                   const SculptLayerGroup *stop_above,
+                                                   int64_t elem_num);
+
+/**
+ * True when \a sculpt_brush_type must be refused because a weight-mask editing session is open.
+ *
+ * Pure, so the decision is testable without a #bContext or a live session: pass
+ * #mask_edit_active_uid for \a mask_edit_uid.
+ *
+ * A session is entered to paint a mask, so the brushes that only write attributes — the Mask brush
+ * above all, but Paint/Smear/Blur and Draw Face Sets equally — must keep working; they are what the
+ * session exists to borrow. Everything else moves vertices, and while a session is open the
+ * standard mask storage does not hold the user's mask, so a moved vertex would be displaced by the
+ * *layer's weights* wherever a brush consults the mask (automasking, the mask factor every brush
+ * multiplies its strength by). The stroke would be authored against a mask the user cannot see and
+ * did not paint, and no exit path can undo a stroke that was already applied.
+ *
+ * Note that this is *not* a "keeps the CCG clean" rule: the attribute-only brushes tag multires
+ * just as the position brushes do (#flush_update_step calls #multires_mark_as_modified for every
+ * dab on a multires object, before it branches on the update type), so `SubdivCCG::dirty.coords` is
+ * set throughout a grid session either way. Keeping the layer's weights out of the base mesh is the
+ * job of #bke::sculpt_layers::MaskEditSuspendGuard inside the flush primitives, not of this test.
+ *
+ * Refused rather than closing the session for them: ending it silently would throw away an
+ * in-progress mask edit as a side effect of an unrelated action.
+ *
+ * Keyed on what the brush *writes* (#brush_type_is_attribute_only), not on its name or category, so
+ * a new position brush is refused by default rather than by being remembered.
+ */
+inline bool mask_edit_blocks_brush(const int mask_edit_uid, const int sculpt_brush_type)
+{
+  return mask_edit_uid != 0 && !brush_type_is_attribute_only(sculpt_brush_type);
+}
+
+/**
+ * Refill both sculpt layer overlays — the weight mask and the displacement preview. Which node
+ * the overlays show has changed (active layer switched, a mask was added/removed/filled/inverted),
+ * so no node keeps a valid value — unlike a brush stroke, where only the touched nodes go stale.
+ *
+ * Defined in `sculpt_layers.cc` because that file already shares the PBVH/object helpers the
+ * #active_set call sites need; `sculpt_layer_mask_edit.cc` calls it for its out-of-session mask
+ * operators through this declaration.
+ *
+ * Mirrored in `ED_sculpt.hh` for the RNA setter of the active layer, exactly as
+ * #rec_exemption_refresh is and for the same reason.
+ */
+void tag_layer_overlays_dirty(Object &object);
+
+/* #mask_edit_refuse_deform lives in `ED_sculpt.hh`: the transform system calls it from
+ * `editors/transform/`, which cannot see this module-internal header. */
+
+/**
+ * Refuse (reporting) a layer-tree operator whose commit rebuilds the multires CCG while a weight-mask
+ * editing session is open on the grid domain. True when it was refused.
+ *
+ * #commit_layers_change reaches `DEG_id_tag_update(..., ID_RECALC_GEOMETRY)` on the multires path,
+ * which *rebuilds* the CCG rather than flushing it. A grid session keeps its live weights in
+ * #SubdivCCG::masks while #SculptLayerTreeNode::mask still holds the pre-session snapshot, so the
+ * rebuild regenerates the array from `CD_GRID_PAINT_MASK`, #SculptLayerMaskEdit::ccg_id stops
+ * matching, and the close then refuses to compress — the edit is gone with nothing said. Refusing up
+ * front is what turns that silent loss into a message.
+ *
+ * Scoped to the grid domain deliberately: the mesh path recomposes in place
+ * (#recompute_mesh_canonical) and leaves the session's expanded weights untouched, so refusing there
+ * would restrict the UI for nothing.
+ */
+bool mask_edit_refuse_ccg_rebuild(wmOperator *op, const Object &object);
+
+/** \} */
+
+/** Where #SCULPT_OT_layer_move_to places the moved items relative to its anchor. Values are the
+ * operator's `location` enum property, set from #ui::DropLocation by the tree view. */
+enum class MoveLocation : int {
+  Before = 0,
+  After = 1,
+  Into = 2,
+};
+
+/* Operators. */
+void SCULPT_OT_layer_add(wmOperatorType *ot);
+void SCULPT_OT_layer_remove(wmOperatorType *ot);
+void SCULPT_OT_layer_move(wmOperatorType *ot);
+void SCULPT_OT_layer_move_to(wmOperatorType *ot);
+void SCULPT_OT_layer_duplicate(wmOperatorType *ot);
+void SCULPT_OT_layer_merge_down(wmOperatorType *ot);
+void SCULPT_OT_layer_merge_selected(wmOperatorType *ot);
+void SCULPT_OT_layer_bake(wmOperatorType *ot);
+void SCULPT_OT_layer_bake_to_shape_key(wmOperatorType *ot);
+void SCULPT_OT_layer_bake_and_editmode_enter(wmOperatorType *ot);
+void SCULPT_OT_layer_clear(wmOperatorType *ot);
+void SCULPT_OT_layer_invert(wmOperatorType *ot);
+void SCULPT_OT_layer_validate(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_isolate(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_add(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_remove(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_invert(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_apply(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_clear(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_fill(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_edit_toggle(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_edit_finish(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_edit_cancel(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_toggle(wmOperatorType *ot);
+void SCULPT_OT_layer_set_influence(wmOperatorType *ot);
+void SCULPT_OT_layer_influence_drag(wmOperatorType *ot);
+void SCULPT_OT_layer_toggle_visibility(wmOperatorType *ot);
+void SCULPT_OT_layer_select(wmOperatorType *ot);
+void SCULPT_OT_layer_toggle_rec(wmOperatorType *ot);
+void SCULPT_OT_layer_solo_base(wmOperatorType *ot);
+void SCULPT_OT_layer_group_add(wmOperatorType *ot);
+void SCULPT_OT_layer_group_remove(wmOperatorType *ot);
+void SCULPT_OT_layer_group_merge(wmOperatorType *ot);
+void SCULPT_OT_layer_group_delete(wmOperatorType *ot);
+void SCULPT_OT_layer_group_toggle_visibility(wmOperatorType *ot);
+void SCULPT_OT_layer_group_color_tag(wmOperatorType *ot);
+
+}  // namespace ed::sculpt_paint::layers
 
 /** \} */
 

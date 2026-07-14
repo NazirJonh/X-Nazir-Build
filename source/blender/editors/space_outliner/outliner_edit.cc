@@ -45,6 +45,7 @@
 #include "BKE_main.hh"
 #include "BKE_object.hh"
 #include "BKE_report.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
 #include "BKE_workspace.hh"
@@ -974,6 +975,22 @@ static wmOperatorStatus outliner_id_copy_exec(bContext *C, wmOperator *op)
 
   Main *bmain = CTX_data_main(C);
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+
+  /* Park any open sculpt layer weight-mask editing session for the duration, as #view3d_copybuffer
+   * does. A session keeps the layer's weights in the mesh's own `.sculpt_mask` with the user's mask
+   * set aside, and this operator copies whichever IDs are selected in the tree — a Mesh directly, or
+   * an Object or Collection that pulls one in as a dependency. Nothing in the poll stops the active
+   * object from being in sculpt mode meanwhile. Scoped over the #id_add calls too: the copies are
+   * taken there, not at write time. */
+  const bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard{*bmain};
+  if (mask_edit_guard.suspend_refused()) {
+    BKE_report(op->reports,
+               RPT_WARNING,
+               "A sculpt layer mask session could not be suspended: the data-blocks were copied "
+               "with the layer's mask weights in place of the sculpt mask. Close the mask session "
+               "and repaint the sculpt mask");
+  }
+
   PartialWriteContext copybuffer{*bmain};
 
   const int num_ids = outliner_id_copy_tag(

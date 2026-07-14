@@ -207,9 +207,17 @@ AbstractViewItem *AbstractTreeView::navigate_down(AbstractViewItem *from)
   return next_item ? next_item : from;
 }
 
+void AbstractTreeView::set_min_rows(int min_rows)
+{
+  BLI_assert_msg(min_rows >= MIN_ROWS,
+                 "Views may raise the shared minimum, never lower it: below #MIN_ROWS the grip and "
+                 "scroll bar no longer fit the remaining height.");
+  min_rows_ = min_rows;
+}
+
 void AbstractTreeView::set_default_rows(int default_rows)
 {
-  BLI_assert_msg(default_rows >= MIN_ROWS,
+  BLI_assert_msg(default_rows >= min_rows_,
                  "Default value is smaller than the minimum rows. Limit is required to prevent "
                  "resizing below specific height.");
   custom_height_ = std::make_unique<int>(default_rows * padded_item_height());
@@ -241,8 +249,10 @@ std::optional<uiViewState> AbstractTreeView::persistent_state() const
 void AbstractTreeView::persistent_state_apply(const uiViewState &state)
 {
   if (state.custom_height) {
+    /* A height stored before the view raised its minimum (or by another view sharing the state)
+     * must not resurrect a size the grip itself refuses to produce. */
     set_default_rows(std::max(
-        MIN_ROWS, round_fl_to_int(state.custom_height * UI_SCALE_FAC) / padded_item_height()));
+        min_rows_, round_fl_to_int(state.custom_height * UI_SCALE_FAC) / padded_item_height()));
   }
   if (state.scroll_offset) {
     scroll_value_ = std::make_shared<int>(state.scroll_offset);
@@ -469,7 +479,7 @@ std::optional<int> AbstractTreeView::tot_visible_row_count() const
   }
   const int calculate_rows = round_fl_to_int(float(*custom_height_) / padded_item_height());
   /* Clamp value to prevent resizing below minimum number of rows. */
-  return math::max(MIN_ROWS, calculate_rows);
+  return math::max(min_rows_, calculate_rows);
 }
 
 bool AbstractTreeView::supports_scrolling() const

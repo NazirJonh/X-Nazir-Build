@@ -99,7 +99,12 @@ void AbstractViewItem::deactivate()
   if (is_active_) {
     /* Deselect only active item, otherwise selection state before active item is cleared, see:
      * !150891 */
-    is_selected_ = false;
+    /* Through the setter rather than the member: views whose selection lives in the data they
+     * represent mirror it from #set_selected (see the note on #is_selected_). Clearing the member
+     * here left those views' data claiming a selection the view no longer shows, and any code
+     * reading the data back - a drop target deciding what is being dragged, for one - acted on
+     * rows the user had not selected. */
+    this->set_selected(false);
   }
   is_active_ = false;
 }

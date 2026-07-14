@@ -14,6 +14,7 @@
 #include "BLI_bit_group_vector.hh"
 #include "BLI_bit_span_ops.hh"
 #include "BLI_index_mask_fwd.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_offset_indices.hh"
 #include "BLI_ordered_edge.hh"
 #include "BLI_set.hh"
@@ -121,7 +122,42 @@ struct SubdivCCGAdjacentVertex {
 };
 
 /** Representation of subdivision surface which uses CCG grids. */
+/**
+ * Cached base-mesh limit frames for one multires grid (one entry per top-level grid element):
+ * the limit-surface position and the inverse tangent matrix used to encode object-space
+ * displacement back to tangent space. See #SubdivCCG::multires_layer_frames.
+ */
+struct SubdivCCGMultiresLayerFrames {
+  Array<float3> positions;
+  Array<float3x3> inv_tangent_matrices;
+  /**
+   * LRU stamp: the value of #SubdivCCG::multires_layer_frames_clock when this grid was last touched
+   * by a stroke. Higher is more recent; 0 means never used. The eviction policy frees the cached
+   * grid with the lowest stamp when a new grid must be cached and the memory cap is reached.
+   */
+  int64_t last_used = 0;
+};
+
+/**
+ * Serial number for the next #SubdivCCG to come into existence. Monotonic and process-wide, so a
+ * value handed out once is never handed out again — which is what a holder of an old #SubdivCCG::id
+ * relies on to tell "still the same CCG" from "rebuilt at the same address".
+ */
+uint64_t subdiv_ccg_next_id();
+
 struct SubdivCCG : NonCopyable {
+  /**
+   * Identity of this instance, unique for the lifetime of the process.
+   *
+   * A rebuild always constructs a fresh #SubdivCCG (the only creation site is #BKE_subdiv_to_ccg,
+   * and the owning `std::unique_ptr` on #MeshRuntime is replaced wholesale), but the address alone
+   * cannot be compared against a recorded one: the previous instance is freed first, so the
+   * allocator is free to hand the same address back. A serial number cannot repeat, so code that
+   * has to detect a rebuild it did not observe records this instead — see
+   * #SculptLayerMaskEdit::ccg_id, where compressing a mask over a silently rebuilt CCG would store
+   * the user's own sculpt mask as a sculpt layer's weight map.
+   */
+  uint64_t id = subdiv_ccg_next_id();
   /**
    * This is a subdivision surface this CCG was created for.
    *
@@ -196,7 +232,33 @@ struct SubdivCCG : NonCopyable {
     bool coords = false;
     /** Corresponds to MULTIRES_HIDDEN_MODIFIED. */
     bool hidden = false;
+    /** Latched while a base flush keeps failing, so the failure is reported once per streak instead
+     *  of on every depsgraph re-evaluation. Cleared again on the first successful flush. */
+    bool flush_failed_reported = false;
   } dirty;
+
+  /**
+   * Per-grid cache of the base-mesh limit frames (limit position and inverse tangent matrix at
+   * every top-level element of the grid). Sculpt-layer recording re-encodes the sculpted surface
+   * to tangent space at every stroke end, which is dominated by evaluating the base-mesh limit
+   * surface per element; those frames depend only on the coarse control mesh, which does not
+   * change while sculpting detail, so they are cached and reused across strokes.
+   *
+   * Lazily populated per grid (an empty entry means "not cached yet"). Sized to #grids_num, or
+   * empty when unused. Freed automatically with the CCG (a rebuild drops it); it is also cleared
+   * when #multires_layer_frames_coarse_hash no longer matches the coarse mesh (see the reshape
+   * recording path), which catches control-cage edits that do not rebuild the CCG.
+   */
+  Array<SubdivCCGMultiresLayerFrames> multires_layer_frames;
+  /** FNV hash of the coarse control mesh vertex positions the frame cache was built against. */
+  uint64_t multires_layer_frames_coarse_hash = 0;
+  /** Approximate bytes held by #multires_layer_frames, used to bound the cache memory. */
+  int64_t multires_layer_frames_bytes = 0;
+  /**
+   * Monotonic clock advanced once per grid touched by a stroke, stamped into
+   * #SubdivCCGMultiresLayerFrames::last_used to drive LRU eviction. Reset with the cache.
+   */
+  int64_t multires_layer_frames_clock = 0;
 
   ~SubdivCCG();
 };

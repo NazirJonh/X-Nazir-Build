@@ -50,6 +50,15 @@ static void createTransSculpt(bContext *C, TransInfo *t)
     return;
   }
 
+  /* A weight-mask editing session has the user's own sculpt mask parked and the layer's weights in
+   * its place, so a transform would be shaped by a mask the user cannot see and did not paint —
+   * and unlike a refused brush, it has already moved the surface by the time anything could
+   * notice. Mirrored in #special_aftertrans_update__sculpt, which must not end a transform this
+   * never started. */
+  if (t->mode != TFM_DUMMY && sculpt_paint::layers::mask_edit_refuse_deform(ob, t->reports)) {
+    return;
+  }
+
   {
     BLI_assert(t->data_container_len == 1);
     TransDataContainer *tc = t->data_container;
@@ -127,6 +136,17 @@ static void special_aftertrans_update__sculpt(bContext *C, TransInfo *t)
 
   BKE_view_layer_synced_ensure(*t->bmain, t->scene, t->view_layer);
   Object *ob = BKE_view_layer_active_object_get(t->view_layer);
+
+  /* Mirrors the refusal in #createTransSculpt, silently because that pass already reported it:
+   * #sculpt_paint::init_transform was not called, so ending here would close an undo step that was
+   * never opened. Kept for the same reason as the #BKE_id_is_editable mirror above, and it is
+   * unreachable for the same reason too — a refusal returns before `tc->data_len` is set, and
+   * #special_aftertrans_update bails on an empty `data_len_all` before dispatching here. Both are
+   * insurance against that entry condition changing, not live paths. */
+  if (sculpt_paint::layers::mask_edit_refuse_deform(*ob, nullptr)) {
+    return;
+  }
+
   BLI_assert(!(t->options & CTX_PAINT_CURVE));
   sculpt_paint::end_transform(C, *ob);
 }

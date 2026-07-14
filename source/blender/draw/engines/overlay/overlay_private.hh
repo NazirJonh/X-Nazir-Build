@@ -14,6 +14,7 @@
 
 #include "BLI_function_ref.hh"
 
+#include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 #include "DNA_world_types.h"
 
@@ -273,6 +274,25 @@ struct State {
   bool show_sculpt_face_sets() const
   {
     return (this->overlay.flag & V3D_OVERLAY_SCULPT_SHOW_FACE_SETS);
+  }
+  bool show_sculpt_layer_mask() const
+  {
+    return (this->overlay.flag & V3D_OVERLAY_SCULPT_SHOW_LAYER_MASK);
+  }
+  /**
+   * Unlike its neighbors this reads the scene tool settings rather than #View3DOverlay: the toggle
+   * has to be reachable from the sculpt layer context menu in the Properties editor, where the
+   * space data is not a #View3D. #ToolSettings::sculpt is allocated on the first entry into Sculpt
+   * Mode, so it is legitimately null here.
+   */
+  bool show_sculpt_layer_preview() const
+  {
+    const ToolSettings *tool_settings = (this->scene != nullptr) ? this->scene->toolsettings :
+                                                                   nullptr;
+    if (tool_settings == nullptr || tool_settings->sculpt == nullptr) {
+      return false;
+    }
+    return (tool_settings->sculpt->flags & SCULPT_SHOW_LAYER_PREVIEW) != 0;
   }
   bool show_sculpt_curves_cage() const
   {

@@ -123,6 +123,7 @@ def register():
             register_class(cls)
 
     space_filebrowser.register_props()
+    properties_data_mesh.register_props()
     properties_paint_common.register()
 
     from bpy.props import (
@@ -188,6 +189,7 @@ def unregister():
     from bpy.utils import unregister_class
 
     properties_paint_common.unregister()
+    properties_data_mesh.unregister_props()
 
     for mod in reversed(_modules_loaded):
         for cls in reversed(mod.classes):

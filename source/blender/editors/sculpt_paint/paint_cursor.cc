@@ -159,6 +159,7 @@ struct LoadTexData {
   MTex *mtex;
   uchar *buffer;
   bool col;
+  float2 aspect_correction = float2(1.0f);
 
   ImagePool *pool;
   int size;
@@ -227,6 +228,9 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
         x = len * cosf(angle);
         y = len * sinf(angle);
       }
+
+      x *= data->aspect_correction[0];
+      y *= data->aspect_correction[1];
 
       float avg;
       float rgba[4];
@@ -354,6 +358,8 @@ static int load_tex(
     data.mtex = mtex;
     data.buffer = buffer;
     data.col = col;
+    /* Computed once here rather than per texel, acquiring the image buffer is expensive. */
+    data.aspect_correction = BKE_brush_get_aspect_correction(mtex, pool);
     data.pool = pool;
     data.size = size;
     data.rotation = rotation;

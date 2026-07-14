@@ -143,6 +143,9 @@ float BKE_brush_curve_strength(const Brush *br, float p, float len);
  * or 3d world coordinates for 3D mapping.
  *
  * RGBA outputs straight alpha.
+ *
+ * The aspect ratio correction is read from #bke::PaintRuntime, see
+ * #BKE_brush_tex_aspect_correction_update.
  */
 float BKE_brush_sample_tex_3d(const Paint *paint,
                               const Brush *br,
@@ -153,6 +156,23 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
                               ImagePool *pool);
 float BKE_brush_sample_masktex(
     const Paint *paint, Brush *br, const float2 &point, int thread, ImagePool *pool);
+
+/**
+ * Scale to apply to the texture sampling coordinates so that a non-square image texture keeps its
+ * aspect ratio instead of being stretched to fill the square brush footprint.
+ *
+ * \return `1` on both axes unless `mtex` has #MTEX_MAPPING_PRESERVE_ASPECT enabled, uses a mapping
+ * mode with a square footprint and refers to a non-square image.
+ */
+float2 BKE_brush_get_aspect_correction(const MTex *mtex, ImagePool *pool);
+
+/**
+ * Cache the aspect ratio correction of both brush textures in #bke::PaintRuntime, so that
+ * #BKE_brush_sample_tex_3d and #BKE_brush_sample_masktex do not have to acquire the image buffer
+ * for every sample. Call this whenever texture sampling is about to start, typically when a stroke
+ * begins.
+ */
+void BKE_brush_tex_aspect_correction_update(const Paint &paint, const Brush &brush);
 
 /**
  * Get the mask texture for this given object mode.

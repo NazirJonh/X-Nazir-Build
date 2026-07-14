@@ -892,6 +892,9 @@ PaintStroke::PaintStroke(bContext *C, wmOperator *op, int event_type) : event_ty
     BKE_image_release_ibuf(this->brush->mtex.tex->ima, tex_ibuf, nullptr);
   }
 
+  /* Same reasoning as above: acquiring the image buffer during sampling would lock up. */
+  BKE_brush_tex_aspect_correction_update(*this->paint, *this->brush);
+
   if (stroke_mode_ == BrushStrokeMode::Invert) {
     if (this->brush->stroke_method == BRUSH_STROKE_CURVE) {
       RNA_enum_set(op->ptr, "mode", int(BrushStrokeMode::Normal));

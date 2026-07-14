@@ -105,6 +105,15 @@ struct PaintRuntime : NonCopyable, NonMovable {
   /** Position of mouse, used to sample the mask texture. */
   float2 mask_tex_mouse = float2(0.0f, 0.0f);
 
+  /**
+   * Scale applied to the texture sampling coordinates so that a non-square image texture keeps its
+   * aspect ratio instead of being stretched to fill the square brush footprint. Only meaningful
+   * when #MTEX_MAPPING_PRESERVE_ASPECT is enabled, and is `1` otherwise. Cached because computing
+   * it requires acquiring the image buffer, which is far too expensive to do per sample.
+   */
+  float2 tex_aspect_correction = float2(1.0f);
+  float2 mask_tex_aspect_correction = float2(1.0f);
+
   /** ColorSpace cache to avoid locking up during sampling. */
   bool do_linear_conversion = false;
   const ocio::ColorSpace *colorspace = nullptr;

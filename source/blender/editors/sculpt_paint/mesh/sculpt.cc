@@ -2853,8 +2853,11 @@ void sculpt_apply_texture(const SculptSession &ss,
 
       mul_m4_v3(cache.brush_local_mat.ptr(), symm_point);
 
-      float x = symm_point[0];
-      float y = symm_point[1];
+      /* Applied before scale and offset, to match #BKE_brush_sample_tex_3d where the correction
+       * scales the raw coordinate and #MTex::size and #MTex::ofs are applied afterwards. */
+      const float2 &aspect = cache.paint->runtime->tex_aspect_correction;
+      float x = symm_point[0] * aspect[0];
+      float y = symm_point[1] * aspect[1];
 
       x *= mtex->size[0];
       y *= mtex->size[1];

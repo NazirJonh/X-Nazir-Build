@@ -549,6 +549,9 @@ class TextureMaskPanel(BrushPanel):
         col.prop(mask_tex_slot, "offset")
         col.prop(mask_tex_slot, "scale")
 
+        if brush.mask_texture and brush.mask_texture.type == 'IMAGE' and mask_tex_slot.map_mode != 'STENCIL':
+            col.prop(mask_tex_slot, "use_preserve_aspect")
+
 
 class StrokePanel(BrushPanel):
     bl_label = "Stroke"
@@ -1609,6 +1612,9 @@ def brush_texture_settings(layout, brush, sculpt):
     layout.prop(tex_slot, "offset")
     layout.prop(tex_slot, "scale")
 
+    if brush.texture and brush.texture.type == 'IMAGE' and tex_slot.map_mode not in {'STENCIL', '3D'}:
+        layout.prop(tex_slot, "use_preserve_aspect")
+
     if sculpt:
         # texture_sample_bias
         layout.prop(brush, "texture_sample_bias", slider=True, text="Sample Bias")
@@ -1650,6 +1656,9 @@ def brush_mask_texture_settings(layout, brush):
     # scale and offset
     col.prop(mask_tex_slot, "offset")
     col.prop(mask_tex_slot, "scale")
+
+    if brush.mask_texture and brush.mask_texture.type == 'IMAGE' and mask_tex_slot.map_mode != 'STENCIL':
+        col.prop(mask_tex_slot, "use_preserve_aspect")
 
 
 def brush_basic_texpaint_settings(layout, context, brush, *, compact=False):

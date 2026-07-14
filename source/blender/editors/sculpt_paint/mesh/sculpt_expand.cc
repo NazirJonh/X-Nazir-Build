@@ -4213,6 +4213,10 @@ static void cache_initial_config_set(bContext *C, wmOperator *op, Cache &expand_
     copy_v3_v3(expand_cache.fill_color, BKE_brush_color_get(paint, expand_cache.brush));
     expand_cache.fill_color[3] = 1.0f;
     expand_cache.blend_mode = expand_cache.brush->blend;
+
+    /* Expand samples the brush texture without going through #PaintStroke, so the aspect ratio
+     * correction has to be cached here instead. */
+    BKE_brush_tex_aspect_correction_update(*paint, *expand_cache.brush);
   }
   else {
     copy_v4_fl(expand_cache.fill_color, 1.0f);

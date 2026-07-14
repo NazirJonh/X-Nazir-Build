@@ -33,6 +33,7 @@
 #include "BKE_grease_pencil.hh"
 #include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
+#include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
 #include "BKE_lib_remap.hh"
@@ -986,6 +987,43 @@ const MTex *BKE_brush_color_texture_get(const Brush *brush, const eObjectMode ob
   return &brush->mtex;
 }
 
+float2 BKE_brush_get_aspect_correction(const MTex *mtex, ImagePool *pool)
+{
+  if ((mtex->mapping_flags & MTEX_MAPPING_PRESERVE_ASPECT) == 0) {
+    return float2(1.0f);
+  }
+  /* Stencil is placed by its own dimensions and 3D mapping samples the texture in object space,
+   * neither has a square footprint to correct for. */
+  if (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_STENCIL, MTEX_MAP_MODE_3D)) {
+    return float2(1.0f);
+  }
+  if (!mtex->tex || mtex->tex->type != TEX_IMAGE || !mtex->tex->ima) {
+    return float2(1.0f);
+  }
+
+  ImBuf *ibuf = BKE_image_pool_acquire_ibuf(mtex->tex->ima, &mtex->tex->iuser, pool);
+  if (!ibuf || ibuf->x <= 0 || ibuf->y <= 0) {
+    BKE_image_pool_release_ibuf(mtex->tex->ima, ibuf, pool);
+    return float2(1.0f);
+  }
+
+  /* Widen the sampled coordinate range along the image's longer axis, so that the image shrinks
+   * within the square brush footprint instead of being stretched to fill it. */
+  const float aspect = float(ibuf->y) / float(ibuf->x);
+  const float2 correction = (aspect > 1.0f) ? float2(aspect, 1.0f) : float2(1.0f, 1.0f / aspect);
+
+  BKE_image_pool_release_ibuf(mtex->tex->ima, ibuf, pool);
+  return correction;
+}
+
+void BKE_brush_tex_aspect_correction_update(const Paint &paint, const Brush &brush)
+{
+  bke::PaintRuntime &paint_runtime = *paint.runtime;
+  paint_runtime.tex_aspect_correction = BKE_brush_get_aspect_correction(&brush.mtex, nullptr);
+  paint_runtime.mask_tex_aspect_correction = BKE_brush_get_aspect_correction(&brush.mask_mtex,
+                                                                             nullptr);
+}
+
 float BKE_brush_sample_tex_3d(const Paint *paint,
                               const Brush *br,
                               const MTex *mtex,
@@ -1080,6 +1118,9 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
       x = flen * cosf(angle);
       y = flen * sinf(angle);
     }
+
+    x *= paint_runtime->tex_aspect_correction[0];
+    y *= paint_runtime->tex_aspect_correction[1];
 
     float3 co(x, y, 0.0f);
 
@@ -1192,6 +1233,9 @@ float BKE_brush_sample_masktex(
       x = flen * cosf(angle);
       y = flen * sinf(angle);
     }
+
+    x *= paint_runtime->mask_tex_aspect_correction[0];
+    y *= paint_runtime->mask_tex_aspect_correction[1];
 
     co[0] = x;
     co[1] = y;
@@ -1732,14 +1776,16 @@ static bool brush_gen_texture(const Brush *br,
     return false;
   }
 
-  const float step = 2.0 / side;
+  const float2 aspect = BKE_brush_get_aspect_correction(mtex, nullptr);
+
+  const float step = 2.0f / side;
   int ix, iy;
   float x, y;
 
   /* Do normalized canonical view coords for texture. */
   for (y = -1.0, iy = 0; iy < side; iy++, y += step) {
     for (x = -1.0, ix = 0; ix < side; ix++, x += step) {
-      const float co[3] = {x, y, 0.0f};
+      const float co[3] = {x * aspect[0], y * aspect[1], 0.0f};
 
       float intensity;
       float rgba_dummy[4];

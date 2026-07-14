@@ -1264,6 +1264,15 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
 
+  prop = RNA_def_property(srna, "use_preserve_aspect", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "mapping_flags", MTEX_MAPPING_PRESERVE_ASPECT);
+  RNA_def_property_ui_text(prop,
+                           "Preserve Aspect",
+                           "Preserve image aspect ratio for image textures "
+                           "in non-stencil mapping modes");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
   TEXTURE_CAPABILITY(has_texture_angle_source, "Has Texture Angle Source");
   TEXTURE_CAPABILITY(has_random_texture_angle, "Has Random Texture Angle");
   TEXTURE_CAPABILITY(has_texture_angle, "Has Texture Angle Source");

@@ -321,7 +321,7 @@ class ImageAssetGridItem : public PreviewGridItem {
 
   static int preview_icon_id_for_id(const bContext &C, ID &id)
   {
-    if (!ED_preview_id_is_supported(&id)) {
+    if (!ED_preview_id_render_is_supported(&id)) {
       return ui::icon_from_id(&id);
     }
 

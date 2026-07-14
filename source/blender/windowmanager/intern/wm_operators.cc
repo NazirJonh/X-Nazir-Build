@@ -4451,6 +4451,7 @@ static void gesture_polyline_modal_keymap(wmKeyConfig *keyconf)
       {GESTURE_MODAL_CANCEL, "CANCEL", 0, "Cancel", ""},
       {GESTURE_MODAL_SELECT, "SELECT", 0, "Select", ""},
       {GESTURE_MODAL_MOVE, "MOVE", 0, "Move", ""},
+      {GESTURE_MODAL_SNAP, "SNAP", 0, "Snap", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

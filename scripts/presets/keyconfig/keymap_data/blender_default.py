@@ -6393,6 +6393,7 @@ def km_gesture_polyline(_params):
         ("CANCEL", {"type": 'RIGHTMOUSE', "value": 'ANY', "any": True}, None),
         ("SELECT", {"type": 'LEFTMOUSE', "value": 'PRESS', "any": True}, None),
         ("MOVE", {"type": 'SPACE', "value": 'ANY', "any": True}, None),
+        ("SNAP", {"type": 'LEFT_CTRL', "value": 'ANY', "any": True}, None),
     ])
 
     return keymap

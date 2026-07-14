@@ -694,6 +694,13 @@ struct wmGesture {
   /** For gestures that support smoothing, stores if smoothing is enabled using the modal keymap
    * toggle. */
   uint use_smooth : 1;
+  /** For polyline gesture, lock angle when Shift is pressed. */
+  uint use_angle_lock : 1;
+
+  /** Anchor point when angle lock started. */
+  int2 angle_lock_anchor;
+  /** Direction of the locked angle. */
+  float2 angle_lock_direction;
 
   /**
    * customdata

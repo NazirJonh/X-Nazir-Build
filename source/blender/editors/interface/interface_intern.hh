@@ -776,6 +776,13 @@ struct Block {
   int bounds_offset[2] = {};
   /** for doing delayed */
   int bounds = 0, minbounds = 0;
+  /** Minimum width (px) for the first column of a popup-menu (#BLOCK_BOUNDS_POPUP_MENU). 0 = off.
+   * Honored by #block_bounds_calc_text, which otherwise re-sizes each column to its widest text.
+   * Lets a caller hold the first column to a fixed width (e.g. match the dropdown button).
+   * #block_bounds_calc_text also runs for #BLOCK_BOUNDS_TEXT blocks (color ramp, curve mapping,
+   * header menus); those leave this at 0, so their layout is unchanged. Only set it for the
+   * popup-menu case it was validated for. */
+  int menu_first_col_minwidth = 0;
 
   /** Pull-downs, to detect outside, can differ per case how it is created. */
   rctf safety = {};

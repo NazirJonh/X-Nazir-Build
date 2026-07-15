@@ -856,11 +856,19 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
    * toggle above). */
   Layout &source_options = header.row(true);
   if (asset_source) {
-    source_options.op_menu_enum(C,
-                                "UI_OT_id_browser_set_library",
-                                "asset_library_reference",
-                                id_browser_library_ui_name(wm->id_browser_asset_library_ref),
-                                ICON_ASSET_MANAGER);
+    /* The library selector's itemf narrows the list to image libraries via the browsed target
+     * (id_browser_ptr/prop). The popover carries these on the draw context stack (used by
+     * #build_id_grid), but a button's nested menu only inherits the layout's stored context store,
+     * so re-assert them here or the menu itemf would fall back to listing every library. */
+    source_options.context_ptr_set("id_browser_ptr", &target_ptr);
+    if (prop_name) {
+      source_options.context_string_set("id_browser_prop", *prop_name);
+    }
+    /* Columnar dropdown (libraries grouped by folder, first column pinned to the button width),
+     * shared with the asset shelf / grid / file-browser pickers. Backed by the WM's
+     * `id_browser_asset_library_reference` enum, whose set mirrors #UI_OT_id_browser_set_library. */
+    template_asset_library_column_selector(
+        source_options, C, &wm_ptr, "id_browser_asset_library_reference", ICON_ASSET_MANAGER);
     source_options.popover(C, "UI_PT_id_browser_catalog_selector", "", ICON_COLLAPSEMENU);
   }
   else if (show_paint_filters) {

@@ -244,7 +244,9 @@ static void file_panel_asset_catalog_buttons_draw(const bContext *C, Panel *pane
   PointerRNA params_ptr = RNA_pointer_create_discrete(
       &screen->id, RNA_FileAssetSelectParams, params);
 
-  row.prop(&params_ptr, "asset_library_reference", UI_ITEM_NONE, "", ICON_NONE);
+  /* Columnar dropdown (libraries grouped by folder) with the first column pinned to this button's
+   * width. Behaves like the asset-shelf library pickers. */
+  ui::template_asset_library_column_selector(row, C, &params_ptr, "asset_library_reference", ICON_NONE);
   if (params->asset_library_ref.type == ASSET_LIBRARY_LOCAL) {
     bContext *mutable_ctx = CTX_copy(C);
     if (WM_operator_name_poll(mutable_ctx, "asset.bundle_install")) {

@@ -14,6 +14,8 @@
 #include "AS_asset_library.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_rect.h"
+#include "BLI_string.h"
 #include "BLI_string_utf8.h"
 
 #include "BKE_context.hh"
@@ -254,7 +256,7 @@ static void grid_catalog_selector_panel_draw(const bContext *C, Panel *panel)
   ed::asset::list::storage_fetch(&lib_ref, C);
 
   Layout &row = layout.row(true);
-  row.prop(&settings_ptr, "asset_library_reference", UI_ITEM_NONE, "", ICON_NONE);
+  template_asset_library_column_selector(row, C, &settings_ptr, "asset_library_reference", ICON_NONE);
   if (lib_ref.type != ASSET_LIBRARY_LOCAL) {
     row.op("ASSET_OT_library_refresh", "", ICON_FILE_REFRESH);
   }
@@ -328,25 +330,151 @@ static void grid_preview_size_panel_register()
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Library selector menu (vertical, backed by #GridViewSettings)
+/** \name Shared library menu item
  * \{ */
 
-/* Draw the asset-library choices as a plain vertical menu instead of the RNA enum dropdown. The
- * enum dropdown lays folder headings out as side-by-side columns (#ui_def_but_rna__menu); a menu
- * reads top to bottom. Folder headings become labels, and each library is a row that sets the
- * property and closes the menu. Enum construction (folder grouping, per-surface filtering, order)
- * is reused verbatim via the property's item list. */
-static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *arg)
+/* Whether any selectable item in the enum has an icon (used to align icon-less items). */
+static bool library_enum_has_item_with_icon(const EnumPropertyItem *items)
 {
-  PointerRNA *settings_ptr = static_cast<PointerRNA *>(arg);
-  PropertyRNA *prop = RNA_struct_find_property(settings_ptr, "asset_library_reference");
+  for (const EnumPropertyItem *item = items; item->identifier; item++) {
+    if (item->identifier[0] && item->icon) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Add one asset-library choice as a menu entry: a #ButtonType::ButMenu that returns the item value
+ * through the popup handle, highlighted with the active color (#UI_SELECT_DRAW) when it is the
+ * current library. Modeled on the built-in enum dropdown (#def_but_rna__menu): the parent RNA enum
+ * button applies the returned value to the property (with undo) when the menu closes, so this only
+ * has to draw the row -- no radio/checkbox as #Layout::prop_enum would produce. */
+static void library_selector_menu_item(Block *block,
+                                       Layout &column,
+                                       PopupBlockHandle *handle,
+                                       const EnumPropertyItem &item,
+                                       const int current_value,
+                                       const bool has_item_with_icon)
+{
+  int icon = item.icon;
+  if (icon == ICON_NONE && has_item_with_icon) {
+    /* Keep labels aligned with items that do have an icon. */
+    icon = ICON_BLANK1;
+  }
+
+  block_layout_set_current(block, &column);
+
+  Button *but;
+  if (icon) {
+    but = uiDefIconTextBut(block,
+                           ButtonType::ButMenu,
+                           icon,
+                           item.name,
+                           0,
+                           0,
+                           short(UI_UNIT_X * 5),
+                           short(UI_UNIT_Y),
+                           &handle->retvalue,
+                           std::nullopt);
+  }
+  else {
+    /* Height is #UI_UNIT_Y (row height), not #UI_UNIT_X as the built-in #def_but_rna__menu passes
+     * in its icon-less branch (that looks like a long-standing typo there). */
+    but = uiDefButV(block,
+                    ButtonType::ButMenu,
+                    item.name,
+                    0,
+                    0,
+                    short(UI_UNIT_X * 5),
+                    short(UI_UNIT_Y),
+                    &handle->retvalue,
+                    0.0,
+                    0.0,
+                    std::nullopt);
+  }
+
+  button_enum_prop_value_set(but, item.value);
+
+  /* Restore the tooltip the built-in enum dropdown (#def_but_rna__menu) shows: for asset libraries
+   * this is the library path/URL, a useful hint. The enum items are freed after this draw
+   * (#RNA_property_enum_items_gettexted with `free`), so store a copy rather than referencing the
+   * item string directly. */
+  if (item.description && item.description[0]) {
+    char *description_copy = BLI_strdup(item.description);
+    button_func_tooltip_set(
+        but,
+        [](bContext * /*C*/, void *argN, const StringRef /*tip*/) -> std::string {
+          return static_cast<const char *>(argN);
+        },
+        description_copy,
+        MEM_delete_void);
+  }
+
+  if (item.value == current_value) {
+    button_flag_enable(but, UI_SELECT_DRAW);
+  }
+}
+
+/* Draw the standard RNA enum dropdown button (#ButtonType::Menu) for `prop_name` on `ptr`, then
+ * replace its built-in #def_but_rna__menu layout with `draw_fn`. Reusing the real enum button keeps
+ * the reliable open-in-any-region behavior and the native return-value apply (with undo); the
+ * drawer only customizes how the choices are laid out. */
+static void library_selector_menu_button(Layout &row,
+                                          PointerRNA *ptr,
+                                          const StringRefNull prop_name,
+                                          const int icon,
+                                          MenuCreateFunc draw_fn)
+{
+  PropertyRNA *prop = RNA_struct_find_property(ptr, prop_name.c_str());
   if (!prop) {
     return;
   }
 
+  Block *block = row.block();
+  const int64_t first_new = block->buttons_ptrs.size();
+  row.prop(ptr, prop_name, UI_ITEM_NONE, "", icon);
+
+  for (int64_t i = first_new; i < block->buttons_ptrs.size(); i++) {
+    Button *but = block->buttons_ptrs[i].get();
+    if (but->rnaprop == prop && but->type == ButtonType::Menu) {
+      but->menu_create_func = draw_fn;
+      break;
+    }
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Library selector menu (vertical, backed by #GridViewSettings)
+ * \{ */
+
+/* Draw the asset-library choices as a plain vertical menu instead of the RNA enum dropdown. The
+ * enum dropdown lays folder headings out as side-by-side columns (#def_but_rna__menu); a menu reads
+ * top to bottom. Folder headings become labels, and each library is a row. Called with the calling
+ * RNA enum button (#Button::poin), so the source pointer and property are read live from it (no
+ * owned copy that could dangle across popover redraws). */
+static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *but_p)
+{
+  Button *but = static_cast<Button *>(but_p);
+  Block *block = layout->block();
+  PopupBlockHandle *handle = block->handle;
+
+  PointerRNA ptr = but->rnapoin;
+  PropertyRNA *prop = but->rnaprop;
+
   const EnumPropertyItem *items = nullptr;
   bool free = false;
-  RNA_property_enum_items_gettexted(C, settings_ptr, prop, &items, nullptr, &free);
+  RNA_property_enum_items_gettexted(C, &ptr, prop, &items, nullptr, &free);
+  if (!items) {
+    return;
+  }
+
+  block_flag_enable(block, BLOCK_MOVEMOUSE_QUIT);
+  block_layout_set_current(block, layout);
+
+  const int current_value = RNA_property_enum_get(&ptr, prop);
+  const bool has_item_with_icon = library_enum_has_item_with_icon(items);
 
   Layout &col = layout->column(false);
   /* Start "separated" so a leading folder heading gets no divider above it. */
@@ -369,13 +497,103 @@ static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *a
       }
       continue;
     }
-    col.prop_enum(settings_ptr, prop, item->value, item->name, item->icon);
+    library_selector_menu_item(block, col, handle, *item, current_value, has_item_with_icon);
     prev_was_separator = false;
   }
 
   if (free) {
     MEM_delete(items);
   }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Columnar library selector (folders as side-by-side columns)
+ * \{ */
+
+/* Draw the asset-library choices as side-by-side columns (one per folder), like the RNA enum
+ * dropdown but with the first (folder-less) column pinned to the calling button's width. The
+ * built-in dropdown (#def_but_rna__menu) splits the width evenly and re-sizes columns to their
+ * content, so it can't hold the first column to the button; a plain #Layout::row of #Layout::column
+ * items can, because #LayoutRow honors a fixed-size column. Called with the calling RNA enum button
+ * (#Button::poin); the source pointer and property are read live from it. */
+static void asset_library_column_menu_draw(bContext *C, Layout *layout, void *but_p)
+{
+  Button *but = static_cast<Button *>(but_p);
+  Block *block = layout->block();
+  PopupBlockHandle *handle = block->handle;
+
+  PointerRNA ptr = but->rnapoin;
+  PropertyRNA *prop = but->rnaprop;
+
+  const EnumPropertyItem *items = nullptr;
+  bool free = false;
+  RNA_property_enum_items_gettexted(C, &ptr, prop, &items, nullptr, &free);
+  if (!items) {
+    return;
+  }
+
+  block_flag_enable(block, BLOCK_MOVEMOUSE_QUIT);
+  block_layout_set_current(block, layout);
+
+  /* Width of the button that opened this menu (the dropdown), read live from the popup handle. */
+  const Button *calling_but = handle ? handle->popup_create_vars.but : nullptr;
+  const float but_width = calling_but ? BLI_rctf_size_x(&calling_but->rect) : 0.0f;
+
+  /* Pin the first (folder-less) column to the dropdown's width. A popup menu (#BLOCK_BOUNDS_POPUP_MENU)
+   * is re-sized to its widest text per column in #block_bounds_calc_text, ignoring any ui_units_x /
+   * fixed_size set on a column. The only lever that pass honors is #Block.menu_first_col_minwidth,
+   * so hand the button width to it, capped so a very wide dropdown doesn't oversize the column. */
+  if (but_width > 0.0f) {
+    /* Upper bound so an unusually wide dropdown button doesn't stretch the first column across the
+     * whole menu; ten units comfortably fits a typical library name while staying compact. */
+    const int max_first_col_width = 10 * UI_UNIT_X;
+    int pinned_width = int(but_width);
+    if (pinned_width > max_first_col_width) {
+      pinned_width = max_first_col_width;
+    }
+    block->menu_first_col_minwidth = pinned_width;
+  }
+
+  const int current_value = RNA_property_enum_get(&ptr, prop);
+  const bool has_item_with_icon = library_enum_has_item_with_icon(items);
+
+  Layout &columns = layout->row(false);
+  Layout *column = nullptr;
+  for (const EnumPropertyItem *item = items; item->identifier; item++) {
+    /* Empty identifier: a folder heading (has a name) opens a new column; a plain separator is
+     * ignored, since the columns themselves separate the groups. */
+    if (!item->identifier[0]) {
+      if (item->name && item->name[0]) {
+        column = &columns.column(false);
+        column->label(item->name, item->icon);
+        /* Rule line under the heading, matching the built-in enum dropdown (#def_but_rna__menu). */
+        column->separator();
+      }
+      continue;
+    }
+    if (!column) {
+      /* First column: the folder-less root libraries. An empty label aligns this column's rows with
+       * the folder columns, which start one row lower under their heading; its width is set via
+       * #Block.menu_first_col_minwidth above, not via this placeholder. A separator under the empty
+       * label mirrors the heading rule of the folder columns (and #def_but_rna__menu's first column). */
+      column = &columns.column(false);
+      column->label("", ICON_NONE);
+      column->separator();
+    }
+    library_selector_menu_item(block, *column, handle, *item, current_value, has_item_with_icon);
+  }
+
+  if (free) {
+    MEM_delete(items);
+  }
+}
+
+void template_asset_library_column_selector(
+    Layout &row, const bContext * /*C*/, PointerRNA *ptr, StringRefNull prop_name, int icon)
+{
+  library_selector_menu_button(row, ptr, prop_name, icon, asset_library_column_menu_draw);
 }
 
 /** \} */
@@ -393,14 +611,8 @@ void template_grid_library_selector(Layout *layout, bContext *C, PointerRNA *set
   const AssetLibraryReference lib_ref = grid_settings::library_ref_get(*settings_ptr);
 
   Layout &row = layout->row(true);
-  /* The menu draws after this call returns, so give it an owned copy of the settings pointer; the
-   * UI frees it when the menu closes. */
-  PointerRNA *menu_arg = MEM_new<PointerRNA>(__func__);
-  *menu_arg = *settings_ptr;
-  row.menu_fn_argN_free(id_browser_library_ui_name(lib_ref),
-                        ICON_ASSET_MANAGER,
-                        grid_library_selector_menu_draw,
-                        menu_arg);
+  library_selector_menu_button(
+      row, settings_ptr, "asset_library_reference", ICON_ASSET_MANAGER, grid_library_selector_menu_draw);
 
   if (lib_ref.type != ASSET_LIBRARY_LOCAL) {
     row.op("ASSET_OT_library_refresh", "", ICON_FILE_REFRESH);

@@ -49,6 +49,8 @@
 #  include "BKE_wm_runtime.hh"
 #  include "BKE_workspace.hh"
 
+#  include "ED_asset_library.hh"
+
 #  include "wm_event_system.hh"
 
 namespace blender {
@@ -1354,6 +1356,26 @@ static void rna_WindowManager_id_browser_source_update(Main * /*bmain*/,
    * point at nothing. The literal must match #id_browser_grid_session_key
    * (interface_templates_intern.hh), a module-private header not visible from makesrna. */
   ui::grid_view_session_reset_scroll("id_browser_grid");
+}
+
+static int rna_WindowManager_id_browser_asset_library_get(PointerRNA *ptr)
+{
+  const wmWindowManager *wm = static_cast<const wmWindowManager *>(ptr->data);
+  return ed::asset::library_reference_to_enum_value(&wm->id_browser_asset_library_ref);
+}
+
+static void rna_WindowManager_id_browser_asset_library_set(PointerRNA *ptr, int value)
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
+  /* Applies the same side effects as #UI_OT_id_browser_set_library (reset catalog filter and grid
+   * scroll, flag the file modified); the notifier is sent via #RNA_def_property_update below. */
+  ui::id_browser_set_asset_library(*wm, value);
+}
+
+static const EnumPropertyItem *rna_WindowManager_id_browser_asset_library_itemf(
+    bContext *C, PointerRNA * /*ptr*/, PropertyRNA * /*prop*/, bool *r_free)
+{
+  return ui::id_browser_library_rna_itemf(C, r_free);
 }
 
 /* -------------------------------------------------------------------- */
@@ -3103,6 +3125,20 @@ static void rna_def_windowmanager(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "ID Browser Source", "Where the ID browser takes its items from");
   RNA_def_property_update(
       prop, NC_ASSET | ND_ASSET_LIST, "rna_WindowManager_id_browser_source_update");
+
+  /* Asset library browsed by the ID-browser popover's asset source. Backed by
+   * #wmWindowManager::id_browser_asset_library_ref through a dynamic enum (get/set/itemf); the set
+   * applies the same side effects as #UI_OT_id_browser_set_library. Exposed so the shared columnar
+   * library selector (#template_asset_library_column_selector) can drive it like the other pickers. */
+  prop = RNA_def_property(srna, "id_browser_asset_library_reference", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_dummy_DEFAULT_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_WindowManager_id_browser_asset_library_get",
+                              "rna_WindowManager_id_browser_asset_library_set",
+                              "rna_WindowManager_id_browser_asset_library_itemf");
+  RNA_def_property_ui_text(
+      prop, "ID Browser Asset Library", "Asset library browsed by the image browser popover");
+  RNA_def_property_update(prop, NC_ASSET | ND_ASSET_LIST, nullptr);
 
   RNA_api_wm(srna);
   RNA_api_asset_library_loading_status(srna);

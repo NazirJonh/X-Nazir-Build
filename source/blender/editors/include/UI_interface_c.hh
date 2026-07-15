@@ -79,6 +79,7 @@ struct wmOperator;
 struct wmOperatorType;
 struct wmRegionListenerParams;
 struct wmWindow;
+struct wmWindowManager;
 namespace ed::asset {
 struct AssetFilterSettings;
 }
@@ -1271,6 +1272,15 @@ void button_flag2_enable(Button *but, int flag);
 
 void button_drawflag_enable(Button *but, int flag);
 void button_drawflag_disable(Button *but, int flag);
+
+/**
+ * Draw an asset-library enum property (`prop_name` on `ptr`) as a columnar dropdown: folder
+ * headings become side-by-side columns and the first (folder-less) column is pinned to the
+ * selector button's width. Use in place of a plain #Layout::prop on the property, when the enum
+ * groups its items under folder headings.
+ */
+void template_asset_library_column_selector(
+    Layout &row, const bContext *C, PointerRNA *ptr, StringRefNull prop_name, int icon);
 
 void button_dragflag_enable(Button *but, int flag);
 void button_dragflag_disable(Button *but, int flag);
@@ -2596,6 +2606,20 @@ void template_id_browser(Layout *layout,
                          const char *openop,
                          const char *unlinkop,
                          const char *filter_type = nullptr);
+
+/**
+ * Switch the asset library browsed by the ID browser popover (stored on the #wmWindowManager) to
+ * the one identified by \a library_enum_value (see #ed::asset::library_reference_from_enum_value).
+ * Also resets the library-specific catalog filter and grid scroll, and flags the file modified.
+ * Returns true if the library actually changed. Shared by #UI_OT_id_browser_set_library and the
+ * `WindowManager.id_browser_asset_library_reference` RNA property.
+ */
+bool id_browser_set_asset_library(wmWindowManager &wm, int library_enum_value);
+/**
+ * Folder-grouped asset-library enum items for the ID browser's library selector, restricted to
+ * image libraries when the popover browses images. Caller frees the result when `*r_free` is set.
+ */
+const EnumPropertyItem *id_browser_library_rna_itemf(const bContext *C, bool *r_free);
 void template_id_preview(Layout *layout,
                          bContext *C,
                          PointerRNA *ptr,

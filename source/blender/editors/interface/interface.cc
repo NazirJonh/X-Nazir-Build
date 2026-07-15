@@ -460,6 +460,11 @@ static void block_bounds_calc_text(Block *block, float offset)
   const uiStyle *style = style_get();
   std::unique_ptr<Button> *col_bt;
   int i = 0, j, x1addval = offset;
+  /* #block_bounds_calc_text sizes each column to its widest text; a caller may instead want the
+   * first column held to a fixed minimum width (e.g. to match the dropdown button that opened the
+   * menu). When set, the first column's width becomes max(text, this). */
+  const int first_col_minwidth = block->menu_first_col_minwidth;
+  bool is_first_col = first_col_minwidth > 0;
 
   fontstyle_set(&style->widget);
   std::unique_ptr<Button> *end = block->buttons_ptrs.end();
@@ -491,16 +496,19 @@ static void block_bounds_calc_text(Block *block, float offset)
 
     if (bt < end && (bt + 1 < end) && (*bt)->rect.xmin < bt[1]->rect.xmin) {
       /* End of this column, and it's not the last one. */
+      const int col_width = is_first_col ? std::max(i + block->bounds, first_col_minwidth) :
+                                           i + block->bounds;
       for (col_bt = init_col_bt; (col_bt - 1) != bt; col_bt++) {
         (*col_bt)->rect.xmin = x1addval;
-        (*col_bt)->rect.xmax = x1addval + i + block->bounds;
+        (*col_bt)->rect.xmax = x1addval + col_width;
 
         button_update((*col_bt).get()); /* clips text again */
       }
 
       /* And we prepare next column. */
-      x1addval += i + block->bounds;
+      x1addval += col_width;
       i = 0;
+      is_first_col = false;
       init_col_bt = col_bt;
     }
   }
@@ -519,7 +527,15 @@ static void block_bounds_calc_text(Block *block, float offset)
     }
 
     (*col_bt)->rect.xmin = x1addval;
-    (*col_bt)->rect.xmax = max_ff(x1addval + i + block->bounds, offset + block->minbounds);
+    /* Last column may also be the first (single-column menu): honor the first-column minimum too.
+     * #Block.minbounds is a floor on the total menu width (an absolute xmax), not a per-column
+     * width; applying it as a column width would stretch the last column by the whole menu minimum
+     * whenever earlier columns are wide. */
+    int last_col_width = i + block->bounds;
+    if (is_first_col) {
+      last_col_width = std::max(last_col_width, first_col_minwidth);
+    }
+    (*col_bt)->rect.xmax = max_ff(x1addval + last_col_width, offset + block->minbounds);
 
     button_update((*col_bt).get()); /* clips text again */
   }

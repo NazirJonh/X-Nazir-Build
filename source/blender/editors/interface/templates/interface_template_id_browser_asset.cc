@@ -181,10 +181,7 @@ void id_browser_foreach_asset(const bContext &C,
 /** \name Set Library Operator
  * \{ */
 
-static const EnumPropertyItem *rna_id_browser_library_itemf(bContext *C,
-                                                            PointerRNA * /*ptr*/,
-                                                            PropertyRNA * /*prop*/,
-                                                            bool *r_free)
+const EnumPropertyItem *id_browser_library_rna_itemf(const bContext *C, bool *r_free)
 {
   /* Restrict the library list to libraries explicitly set up via "Add Image Library" when the
    * popover is actually browsing images (its only current use -- see
@@ -211,12 +208,35 @@ static const EnumPropertyItem *rna_id_browser_library_itemf(bContext *C,
       /*include_separate_online_essentials=*/false,
       /*exclude_image_libraries=*/false,
       only_image_libraries);
-  if (!items) {
-    *r_free = false;
-    return nullptr;
-  }
-  *r_free = true;
+  *r_free = (items != nullptr);
   return items;
+}
+
+bool id_browser_set_asset_library(wmWindowManager &wm, const int library_enum_value)
+{
+  const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(
+      library_enum_value);
+  const AssetLibraryReference &old_ref = wm.id_browser_asset_library_ref;
+  if (new_ref.type == old_ref.type && new_ref.custom_library_index == old_ref.custom_library_index)
+  {
+    return false;
+  }
+
+  wm.id_browser_asset_library_ref = new_ref;
+  /* Catalog paths are library-specific; a path from the previous library would silently filter
+   * everything out. Reset to "all catalogs" (see the spec: one list, cleared on library change). */
+  id_browser_catalog_paths_set(wm, {});
+  grid_view_session_reset_scroll(id_browser_grid_session_key);
+  WM_file_tag_modified();
+  return true;
+}
+
+static const EnumPropertyItem *rna_id_browser_library_itemf(bContext *C,
+                                                            PointerRNA * /*ptr*/,
+                                                            PropertyRNA * /*prop*/,
+                                                            bool *r_free)
+{
+  return id_browser_library_rna_itemf(C, r_free);
 }
 
 static wmOperatorStatus id_browser_set_library_exec(bContext *C, wmOperator *op)
@@ -226,21 +246,10 @@ static wmOperatorStatus id_browser_set_library_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(
-      RNA_enum_get(op->ptr, "asset_library_reference"));
-  const AssetLibraryReference &old_ref = wm->id_browser_asset_library_ref;
-  if (new_ref.type == old_ref.type && new_ref.custom_library_index == old_ref.custom_library_index)
-  {
+  if (!id_browser_set_asset_library(*wm, RNA_enum_get(op->ptr, "asset_library_reference"))) {
     return OPERATOR_CANCELLED;
   }
 
-  wm->id_browser_asset_library_ref = new_ref;
-  /* Catalog paths are library-specific; a path from the previous library would silently filter
-   * everything out. Reset to "all catalogs" (see the spec: one list, cleared on library change). */
-  id_browser_catalog_paths_set(*wm, {});
-  grid_view_session_reset_scroll(id_browser_grid_session_key);
-
-  WM_file_tag_modified();
   WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST, nullptr);
   if (ARegion *region = CTX_wm_region(C)) {
     ED_region_tag_redraw(region);

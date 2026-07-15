@@ -704,6 +704,24 @@ static AssetWeakReference *asset_reference_create_from_brush(Brush *brush)
   return nullptr;
 }
 
+/**
+ * Reapplies this session's sticky "Use Texture Overlay" state (set by toggling the option on
+ * whichever brush was active before, see #rna_Brush_texture_overlay_session_update) to the brush
+ * that just became active, so the user doesn't have to re-enable it by hand on every brush.
+ */
+static void paint_apply_session_texture_overlay(Paint *paint, Brush *brush)
+{
+  if (brush == nullptr || paint->runtime == nullptr ||
+      !paint->runtime->session_use_texture_overlay)
+  {
+    return;
+  }
+
+  brush->overlay_flags |= BRUSH_OVERLAY_PRIMARY;
+  brush->texture_overlay_alpha = paint->runtime->session_texture_overlay_alpha;
+  BKE_brush_tag_unsaved_changes(brush);
+}
+
 bool BKE_paint_brush_set(Main *bmain,
                          Paint *paint,
                          const AssetWeakReference &brush_asset_reference)
@@ -742,6 +760,7 @@ bool BKE_paint_brush_set(Main *bmain,
   /* Invalidate overlay when brush changes to force texture reload. */
   if (brush_changed) {
     BKE_paint_invalidate_overlay_all();
+    paint_apply_session_texture_overlay(paint, brush);
   }
 
   return true;
@@ -767,6 +786,7 @@ bool BKE_paint_brush_set(Paint *paint, Brush *brush)
   /* Invalidate overlay when brush changes to force texture reload. */
   if (brush_changed) {
     BKE_paint_invalidate_overlay_all();
+    paint_apply_session_texture_overlay(paint, brush);
   }
 
   return true;

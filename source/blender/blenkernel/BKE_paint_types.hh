@@ -47,6 +47,14 @@ struct PaintRuntime : NonCopyable, NonMovable {
   PaintMode paint_mode = PaintMode::Invalid;
   AssetWeakReference *previous_active_brush_reference = nullptr;
 
+  /**
+   * Sticky "Use Texture Overlay" state for this session (not saved to file). Set whenever the
+   * user toggles #BRUSH_OVERLAY_PRIMARY or edits #Brush::texture_overlay_alpha on the active
+   * brush, then reapplied to whichever brush becomes active next in #BKE_paint_brush_set.
+   */
+  bool session_use_texture_overlay = false;
+  int session_texture_overlay_alpha = 100;
+
   float2 last_rake = float2(0.0f, 0.0f);
   float last_rake_angle = 0.0f;
 

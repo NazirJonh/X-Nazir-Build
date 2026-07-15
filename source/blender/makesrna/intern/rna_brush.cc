@@ -791,6 +791,24 @@ static void rna_Brush_use_locked_size_update(Main * /*bmain*/, Scene * /*scene*/
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
 }
 
+/**
+ * Remembers whether the active brush's texture overlay is on (and at what alpha) for the
+ * current paint mode's session, so #BKE_paint_brush_set can reapply it to whichever brush
+ * becomes active next.
+ */
+static void rna_Brush_texture_overlay_session_update(bContext *C, PointerRNA *ptr)
+{
+  Brush *br = static_cast<Brush *>(ptr->data);
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  if (paint && paint->runtime) {
+    paint->runtime->session_use_texture_overlay = (br->overlay_flags & BRUSH_OVERLAY_PRIMARY) !=
+                                                    0;
+    paint->runtime->session_texture_overlay_alpha = br->texture_overlay_alpha;
+  }
+
+  rna_Brush_update(CTX_data_main(C), CTX_data_scene(C), ptr);
+}
+
 static void rna_TextureSlot_brush_angle_update(bContext *C, PointerRNA *ptr)
 {
   const Main *bmain = CTX_data_main(C);
@@ -3927,7 +3945,8 @@ static void rna_def_brush(BlenderRNA *brna)
   prop = RNA_def_property(srna, "use_primary_overlay", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "overlay_flags", BRUSH_OVERLAY_PRIMARY);
   RNA_def_property_ui_text(prop, "Use Texture Overlay", "Show texture in viewport");
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_Brush_texture_overlay_session_update");
 
   prop = RNA_def_property(srna, "use_secondary_overlay", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "overlay_flags", BRUSH_OVERLAY_SECONDARY);
@@ -4028,7 +4047,8 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_int_sdna(prop, nullptr, "texture_overlay_alpha");
   RNA_def_property_range(prop, 0, 100);
   RNA_def_property_ui_text(prop, "Texture Overlay Alpha", "");
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_Brush_texture_overlay_session_update");
 
   prop = RNA_def_property(srna, "mask_overlay_alpha", PROP_INT, PROP_PERCENTAGE);
   RNA_def_property_int_sdna(prop, nullptr, "mask_overlay_alpha");

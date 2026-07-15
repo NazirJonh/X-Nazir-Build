@@ -200,7 +200,12 @@ static const EnumPropertyItem *rna_image_grid_catalog_library_itemf(bContext * /
                                                                     bool *r_free)
 {
   const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
-      true, true, false, false);
+      /*include_readonly=*/true,
+      /*include_current_file=*/true,
+      /*include_remote_libraries=*/false,
+      /*include_separate_online_essentials=*/false,
+      /*exclude_image_libraries=*/false,
+      /*only_image_libraries=*/true);
   if (!items) {
     *r_free = false;
     return nullptr;
@@ -214,7 +219,8 @@ static const EnumPropertyItem *rna_image_grid_writable_library_itemf(bContext * 
                                                                      PropertyRNA * /*prop*/,
                                                                      bool *r_free)
 {
-  const EnumPropertyItem *items = ed::asset::custom_libraries_rna_enum_itemf();
+  const EnumPropertyItem *items = ed::asset::custom_libraries_rna_enum_itemf(
+      /*only_image_libraries=*/true);
   if (!items) {
     *r_free = false;
     return nullptr;

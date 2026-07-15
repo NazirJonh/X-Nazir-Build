@@ -173,6 +173,9 @@ int context(const bContext *C, const char *member, bContextDataResult *result);
 
 const char *brush_shelf_idname_from_paint_mode(PaintMode mode);
 
+/** True if \a idname is one of the brush asset shelves from #brush_shelf_idname_from_paint_mode(). */
+bool shelf_idname_is_brush_shelf(StringRef idname);
+
 void brush_lists_record_recent(StringRef shelf_idname, const AssetWeakReference &weak_ref);
 bool brush_lists_is_favorite(StringRef shelf_idname, const AssetWeakReference &weak_ref);
 void brush_lists_toggle_favorite(StringRef shelf_idname, const AssetWeakReference &weak_ref);

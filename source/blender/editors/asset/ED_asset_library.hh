@@ -53,18 +53,28 @@ AssetLibraryReference library_reference_from_enum_value(int value);
  * \param include_separate_online_essentials: If set, the online essentials will be added as a
  *    separate library from the normal Essentials. Usually they are a part of the normal Essentials
  *    library.
+ * \param exclude_image_libraries: If set, custom libraries set up via "Add Image Library" (which
+ *    only ever contain image assets) are left out of the list. Use for surfaces dedicated to a
+ *    different asset type where a plain, untagged library is still a perfectly valid source (e.g.
+ *    the brush shelf: most brush libraries are never explicitly tagged).
+ * \param only_image_libraries: If set, only custom libraries set up via "Add Image Library" are
+ *    included; every other custom library (tagged or not) is left out. Use for surfaces where an
+ *    untagged library can never actually contribute anything -- image indexing itself is opt-in
+ *    (see #image_library_needs_reindex()), so a plain library never has image assets to show.
  */
 const EnumPropertyItem *library_reference_to_rna_enum_itemf(
     bool include_readonly,
     bool include_current_file,
     bool include_remote_libraries,
-    bool include_separate_online_essentials);
+    bool include_separate_online_essentials,
+    bool exclude_image_libraries = false,
+    bool only_image_libraries = false);
 /**
  * Same as #library_reference_to_rna_enum_itemf(), but only includes custom on-disk asset libraries
  * (libraries on disk, configured in the Preferences). Online asset libraries will be excluded,
  * their on-disk location is just a cache.
  */
-const EnumPropertyItem *custom_libraries_rna_enum_itemf();
+const EnumPropertyItem *custom_libraries_rna_enum_itemf(bool only_image_libraries = false);
 
 /**
  * Find the catalog with the given path in the library. Creates it in case it doesn't exist.

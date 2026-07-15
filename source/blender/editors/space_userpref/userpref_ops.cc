@@ -151,6 +151,7 @@ enum class bUserAssetLibraryAddType {
   Remote = 0,
   Local = 1,
   ImageLibrary = 2,
+  BrushLibrary = 3,
 };
 
 static wmOperatorStatus preferences_asset_library_add_exec(bContext *C, wmOperator *op)
@@ -195,8 +196,26 @@ static wmOperatorStatus preferences_asset_library_add_exec(bContext *C, wmOperat
       }
 
       new_library = BKE_preferences_asset_library_add(&U, name, dirpath);
+      new_library->flag |= ASSET_LIBRARY_IS_IMAGE_LIBRARY;
 
       blender::ed::asset::image_library_on_library_added(C, dirpath);
+
+      MEM_delete(dirpath);
+      break;
+    }
+    case bUserAssetLibraryAddType::BrushLibrary: {
+      char *dirpath = RNA_string_get_alloc(op->ptr, "directory", nullptr, 0, nullptr);
+
+      BLI_path_slash_rstrip(dirpath);
+      if (!name[0]) {
+        BLI_path_split_file_part(dirpath, name, sizeof(name));
+      }
+      if (!name[0]) {
+        STRNCPY(name, DATA_("Brush Library"));
+      }
+
+      new_library = BKE_preferences_asset_library_add(&U, name, dirpath);
+      new_library->flag |= ASSET_LIBRARY_IS_BRUSH_LIBRARY;
 
       MEM_delete(dirpath);
       break;
@@ -246,7 +265,8 @@ static wmOperatorStatus preferences_asset_library_add_invoke(bContext *C,
 
   if ((ELEM(library_type,
             bUserAssetLibraryAddType::Local,
-            bUserAssetLibraryAddType::ImageLibrary)) &&
+            bUserAssetLibraryAddType::ImageLibrary,
+            bUserAssetLibraryAddType::BrushLibrary)) &&
       !RNA_struct_property_is_set(op->ptr, "directory"))
   {
     WM_event_add_fileselect(C, op);
@@ -272,7 +292,8 @@ static void preferences_asset_library_add_ui(bContext * /*C*/, wmOperator *op)
       break;
     }
     case bUserAssetLibraryAddType::Local:
-    case bUserAssetLibraryAddType::ImageLibrary: {
+    case bUserAssetLibraryAddType::ImageLibrary:
+    case bUserAssetLibraryAddType::BrushLibrary: {
       layout->prop(op->ptr, "name", ui::ITEM_R_IMMEDIATE, std::nullopt, ICON_NONE);
       break;
     }
@@ -298,6 +319,12 @@ static constexpr EnumPropertyItem custom_library_type_items[] = {
      "Add Image Library",
      "Add a folder of image files as an image asset library; "
      "creates a catalog tree based on the folder structure"},
+    {int(bUserAssetLibraryAddType::BrushLibrary),
+     "BRUSH_LIBRARY",
+     ICON_BRUSH_DATA,
+     "Add Brush Library",
+     "Add an asset library dedicated to brushes; any image assets it contains are never shown "
+     "in Texture asset browsing"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

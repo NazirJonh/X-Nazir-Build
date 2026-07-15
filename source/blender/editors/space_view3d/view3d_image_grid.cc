@@ -1015,7 +1015,9 @@ static const EnumPropertyItem *rna_image_grid_library_itemf(bContext * /*C*/,
       /*include_readonly=*/true,
       /*include_current_file=*/true,
       /*include_remote_libraries=*/false,
-      /*include_separate_online_essentials=*/false);
+      /*include_separate_online_essentials=*/false,
+      /*exclude_image_libraries=*/false,
+      /*only_image_libraries=*/true);
   if (!items) {
     *r_free = false;
     return nullptr;

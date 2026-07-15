@@ -12,6 +12,8 @@
  * library/catalog selection applies wherever the popover is opened from.
  */
 
+#include <optional>
+
 #include "AS_asset_catalog.hh"
 #include "AS_asset_catalog_tree.hh"
 #include "AS_asset_library.hh"
@@ -31,6 +33,7 @@
 #include "BLT_translation.hh"
 
 #include "DNA_asset_types.h"
+#include "DNA_ID.h"
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
 
@@ -178,16 +181,36 @@ void id_browser_foreach_asset(const bContext &C,
 /** \name Set Library Operator
  * \{ */
 
-static const EnumPropertyItem *rna_id_browser_library_itemf(bContext * /*C*/,
+static const EnumPropertyItem *rna_id_browser_library_itemf(bContext *C,
                                                             PointerRNA * /*ptr*/,
                                                             PropertyRNA * /*prop*/,
                                                             bool *r_free)
 {
+  /* Restrict the library list to libraries explicitly set up via "Add Image Library" when the
+   * popover is actually browsing images (its only current use -- see
+   * #interface_template_id_browser.cc's docstring). Image indexing itself is opt-in (see
+   * #image_library_needs_reindex()), so an untagged library can never surface an image asset here
+   * either. Resolved the same way #build_id_grid() resolves its target idcode. Falls back to the
+   * permissive default for any other browsed ID type. */
+  bool only_image_libraries = false;
+  PointerRNA target_ptr = CTX_data_pointer_get(C, "id_browser_ptr");
+  const std::optional<StringRefNull> prop_name = CTX_data_string_get(C, "id_browser_prop");
+  if (target_ptr.data && prop_name) {
+    if (PropertyRNA *target_prop = RNA_struct_find_property(&target_ptr, prop_name->c_str())) {
+      if (RNA_property_type(target_prop) == PROP_POINTER) {
+        const StructRNA *ptr_type = RNA_property_pointer_type(&target_ptr, target_prop);
+        only_image_libraries = ptr_type && RNA_type_to_ID_code(ptr_type) == ID_IM;
+      }
+    }
+  }
+
   const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
       /*include_readonly=*/true,
       /*include_current_file=*/true,
       /*include_remote_libraries=*/false,
-      /*include_separate_online_essentials=*/false);
+      /*include_separate_online_essentials=*/false,
+      /*exclude_image_libraries=*/false,
+      only_image_libraries);
   if (!items) {
     *r_free = false;
     return nullptr;

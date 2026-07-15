@@ -106,6 +106,15 @@ static void image_library_index_filepath(const char *library_root_path, char r_p
   BLI_path_join(r_path, FILE_MAX, library_root_path, IMAGE_LIBRARY_INDEX_FILENAME);
 }
 
+static void image_library_index_delete_if_exists(const char *library_root_path)
+{
+  char index_path[FILE_MAX];
+  image_library_index_filepath(library_root_path, index_path);
+  if (BLI_exists(index_path)) {
+    BLI_delete(index_path, false, false);
+  }
+}
+
 static std::string relative_dir_from_catalog_path(const StringRef catalog_path)
 {
   std::string rel_dir(catalog_path);
@@ -405,10 +414,37 @@ static void scan_directory_recursive(const char *dir_abs,
   }
 }
 
+/**
+ * Resolve the user asset library that owns `library_root_path`.
+ *
+ * Unlike #BKE_preferences_asset_library_containing_path (which returns the *first* library whose
+ * directory contains the path), this returns the most specific match -- the one with the longest
+ * matching directory. That matters for nested libraries: a library added inside another library's
+ * directory must resolve to itself, not to its enclosing parent, otherwise its type flags (image /
+ * brush / remote) would be read from the wrong library and, for image libraries, its index would be
+ * treated as stale and deleted. For the common non-nested case exactly one library matches, so the
+ * result is identical to a first-match lookup.
+ */
+static const bUserAssetLibrary *image_library_owner_of_root(const char *library_root_path)
+{
+  const bUserAssetLibrary *best = nullptr;
+  size_t best_len = 0;
+  for (const bUserAssetLibrary &user_lib : U.asset_libraries) {
+    if (!user_lib.dirpath[0] || !BLI_path_contains(user_lib.dirpath, library_root_path)) {
+      continue;
+    }
+    const size_t len = BLI_strnlen(user_lib.dirpath, sizeof(user_lib.dirpath));
+    if (len > best_len) {
+      best = &user_lib;
+      best_len = len;
+    }
+  }
+  return best;
+}
+
 static asset_system::AssetLibrary *image_library_load_from_root(const char *library_root_path)
 {
-  const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_containing_path(
-      &U, library_root_path);
+  const bUserAssetLibrary *user_lib = image_library_owner_of_root(library_root_path);
   if (!user_lib) {
     return nullptr;
   }
@@ -421,9 +457,22 @@ static asset_system::AssetLibrary *image_library_load_from_root(const char *libr
 
 static bool image_library_is_remote_root(const char *library_root_path)
 {
-  const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_containing_path(
-      &U, library_root_path);
+  const bUserAssetLibrary *user_lib = image_library_owner_of_root(library_root_path);
   return user_lib && (user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL);
+}
+
+/**
+ * True only for libraries created via "Add Image Library". Indexing is opt-in, not merely
+ * opt-out for brush libraries: a "Local" library that happens to contain loose image files (e.g.
+ * reference photos sitting next to unrelated assets) must not have them surface as texture assets
+ * either. #filelist_readjob_ensure_image_library_indexed() would otherwise opportunistically index
+ * *any* local library it reads a file list for, regardless of which UI triggered that read, so
+ * this has to be enforced here rather than only at the UI-selector level.
+ */
+static bool image_library_root_is_image_library(const char *library_root_path)
+{
+  const bUserAssetLibrary *user_lib = image_library_owner_of_root(library_root_path);
+  return user_lib && (user_lib->flag & ASSET_LIBRARY_IS_IMAGE_LIBRARY);
 }
 
 static bool image_library_is_editable_root(const char *library_root_path)
@@ -488,17 +537,19 @@ int image_library_scan_and_index(const char *library_root_path,
   if (!BLI_is_dir(library_root_path) || image_library_is_remote_root(library_root_path)) {
     return -1;
   }
+  if (!image_library_root_is_image_library(library_root_path)) {
+    /* Remove any stray index (e.g. from before the flag was cleared, or from before this
+     * opt-in policy existed) so its images stop showing up as texture assets. */
+    image_library_index_delete_if_exists(library_root_path);
+    return 0;
+  }
 
   std::set<std::string> catalog_paths;
   Vector<ImageLibraryIndexEntry> image_entries;
   scan_directory_recursive(library_root_path, "", catalog_paths, image_entries, 0);
 
   if (image_entries.is_empty()) {
-    char index_path[FILE_MAX];
-    image_library_index_filepath(library_root_path, index_path);
-    if (BLI_exists(index_path)) {
-      BLI_delete(index_path, false, false);
-    }
+    image_library_index_delete_if_exists(library_root_path);
     return 0;
   }
 
@@ -547,6 +598,15 @@ bool image_library_needs_reindex(const char *library_root_path)
     return false;
   }
   if (!BLI_is_dir(library_root_path) || image_library_is_remote_root(library_root_path)) {
+    return false;
+  }
+  if (!image_library_root_is_image_library(library_root_path)) {
+    /* Only libraries explicitly added via "Add Image Library" are (re)indexed -- see
+     * #image_library_scan_and_index(). Clean up any stray index here (not only in that function)
+     * since callers skip calling it once this returns false, e.g. #image_library_on_startup() and
+     * the Asset Browser's file-list read job, which previously indexed any local library
+     * opportunistically before this opt-in policy existed. */
+    image_library_index_delete_if_exists(library_root_path);
     return false;
   }
 

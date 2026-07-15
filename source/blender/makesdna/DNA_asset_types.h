@@ -58,6 +58,16 @@ enum eAssetLibrary_Flag : int {
   ASSET_LIBRARY_RELATIVE_PATH = (1 << 0),
   ASSET_LIBRARY_DISABLED = (1 << 1),
   ASSET_LIBRARY_USE_REMOTE_URL = (1 << 2),
+  /** Set on libraries created via "Add Image Library": a folder of image files indexed as image
+   * assets. Used to leave these out of UI surfaces that only ever show a different asset type
+   * (e.g. the brush shelf), independent of what happens to be scanned into the library's on-disk
+   * image index (see #image_library_scan_and_index, which -- for image-asset support -- indexes
+   * any local library that has image files in it, not just ones added this way). */
+  ASSET_LIBRARY_IS_IMAGE_LIBRARY = (1 << 3),
+  /** Set on libraries created via "Add Brush Library": a library dedicated to brush assets. Used
+   * to leave these out of Texture asset browsing (the image grid), so incidental image files
+   * living alongside the brushes (e.g. stencil/alpha textures) never show up as texture assets. */
+  ASSET_LIBRARY_IS_BRUSH_LIBRARY = (1 << 4),
 };
 
 enum class AssetAccess : int8_t {

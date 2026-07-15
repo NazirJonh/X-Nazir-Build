@@ -107,7 +107,20 @@ struct AssetLibraryListItem : public ui::AbstractTreeViewItem {
                                    (library.user_library->flag & ASSET_LIBRARY_USE_REMOTE_URL);
 
     if (library.user_library) {
-      row.label(label_, is_remote_library ? ICON_INTERNET : ICON_DISK_DRIVE);
+      int icon;
+      if (is_remote_library) {
+        icon = ICON_INTERNET;
+      }
+      else if (library.user_library->flag & ASSET_LIBRARY_IS_IMAGE_LIBRARY) {
+        icon = ICON_FILE_IMAGE;
+      }
+      else if (library.user_library->flag & ASSET_LIBRARY_IS_BRUSH_LIBRARY) {
+        icon = ICON_BRUSH_DATA;
+      }
+      else {
+        icon = ICON_DISK_DRIVE;
+      }
+      row.label(label_, icon);
     }
     else {
       row.label(label_, ICON_NONE);

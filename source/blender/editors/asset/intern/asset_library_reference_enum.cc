@@ -94,13 +94,31 @@ AssetLibraryReference library_reference_from_enum_value(int value)
 
 static void rna_enum_add_custom_libraries(EnumPropertyItem **item,
                                           int *totitem,
-                                          const bool include_remote_libraries)
+                                          const bool include_remote_libraries,
+                                          const bool exclude_image_libraries,
+                                          const bool only_image_libraries)
 {
   for (const auto [i, user_library] : U.asset_libraries.enumerate()) {
     if (!include_remote_libraries && (user_library.flag & ASSET_LIBRARY_USE_REMOTE_URL)) {
       continue;
     }
     if (!custom_library_is_valid(&user_library)) {
+      continue;
+    }
+    /* Libraries set up via "Add Image Library" only ever contain image assets, so they never
+     * contribute anything to UI surfaces that filter on a different asset type (e.g. the brush
+     * shelf); skip listing them there rather than showing a library that always looks empty. A
+     * plain, untagged library is still a valid brush source, so this is an exclusion, not a
+     * requirement. */
+    if (exclude_image_libraries && (user_library.flag & ASSET_LIBRARY_IS_IMAGE_LIBRARY)) {
+      continue;
+    }
+    /* Texture-only surfaces (image grid, Texture asset shelf) go the other way: only libraries
+     * explicitly tagged "Add Image Library" are shown at all. Image indexing itself is opt-in
+     * (#image_library_needs_reindex()), so an untagged library -- Local, Brush, or otherwise --
+     * can never actually contain a discoverable image asset there; listing it would just be a
+     * picker option that always resolves to an empty grid. */
+    if (only_image_libraries && !(user_library.flag & ASSET_LIBRARY_IS_IMAGE_LIBRARY)) {
       continue;
     }
 
@@ -125,7 +143,9 @@ const EnumPropertyItem *library_reference_to_rna_enum_itemf(
     const bool include_readonly,
     const bool include_current_file,
     const bool include_remote_libraries,
-    const bool include_separate_online_essentials)
+    const bool include_separate_online_essentials,
+    const bool exclude_image_libraries,
+    const bool only_image_libraries)
 {
   EnumPropertyItem *item = nullptr;
   int totitem = 0;
@@ -151,7 +171,11 @@ const EnumPropertyItem *library_reference_to_rna_enum_itemf(
   {
     EnumPropertyItem *custom_item = nullptr;
     int tot_custom_item = 0;
-    rna_enum_add_custom_libraries(&custom_item, &tot_custom_item, include_remote_libraries);
+    rna_enum_add_custom_libraries(&custom_item,
+                                  &tot_custom_item,
+                                  include_remote_libraries,
+                                  exclude_image_libraries,
+                                  only_image_libraries);
 
     /* Add separator if needed. */
     if ((tot_custom_item > 0) && (include_readonly || include_current_file)) {
@@ -167,7 +191,7 @@ const EnumPropertyItem *library_reference_to_rna_enum_itemf(
   return item;
 }
 
-const EnumPropertyItem *custom_libraries_rna_enum_itemf()
+const EnumPropertyItem *custom_libraries_rna_enum_itemf(const bool only_image_libraries)
 {
   EnumPropertyItem *item = nullptr;
   int totitem = 0;
@@ -176,7 +200,9 @@ const EnumPropertyItem *custom_libraries_rna_enum_itemf()
       &item,
       &totitem,
       /* This function should return local/on-disk libraries only, so skip remote ones. */
-      /*include_remote_libraries=*/false);
+      /*include_remote_libraries=*/false,
+      /*exclude_image_libraries=*/false,
+      only_image_libraries);
 
   RNA_enum_item_end(&item, &totitem);
   return item;

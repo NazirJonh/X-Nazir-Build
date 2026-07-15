@@ -85,6 +85,7 @@ from bl_ui.glyph_tag_system.log import (
 )
 from bl_ui.glyph_tag_system.migrations import (
     _normalize_category_data,
+    _normalize_color,
     migrate_json_data,
 )
 from bl_ui.glyph_tag_system.persistence import (
@@ -891,15 +892,23 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
                 cat_tags = category_data.get(KEY_TAGS, [])
                 category_debug_print(f"[GLYPH SAVE] SAVING: '{category}' (GLOBAL) tags={cat_tags}")
 
+                # Symmetric normalization on the write path: the load path validates the
+                # structure (migrate_json_data), but a corrupt in-memory cache must never
+                # reach the file. Coerce the color to three clamped floats and guard tags to
+                # a list of strings (a non-list value like None would otherwise crash
+                # ``list(...)`` or char-split a string).
+                raw_tags = category_data.get(KEY_TAGS, [])
+                tags_out = [str(t) for t in raw_tags] if isinstance(raw_tags, list) else []
+
                 entry_to_save = {
                     KEY_GLYPH: _glyph_to_unicode_escape(category_data.get(KEY_GLYPH, "")),
                     KEY_DISPLAY_NAME: category_data.get(KEY_DISPLAY_NAME, ""),
                     KEY_FIRST_LETTER: category_data.get(KEY_FIRST_LETTER, ""),
-                    KEY_COLOR: list(category_data.get(KEY_COLOR, [0.0, 0.0, 0.0])),
+                    KEY_COLOR: _normalize_color(category_data.get(KEY_COLOR, [0.0, 0.0, 0.0])),
                     KEY_DEFAULT_GLYPH: _glyph_to_unicode_escape(category_data.get(KEY_DEFAULT_GLYPH, "")),
                     KEY_DEFAULT_DISPLAY_NAME: category_data.get(KEY_DEFAULT_DISPLAY_NAME, ""),
                     KEY_BASE_TYPE: category_data.get(KEY_BASE_TYPE, "text_only"),
-                    KEY_TAGS: list(category_data.get(KEY_TAGS, [])),  # Save tags
+                    KEY_TAGS: tags_out,  # Save tags
                     KEY_GLYPH_MODE: category_data.get(KEY_GLYPH_MODE, "auto"),
                     KEY_ICON: {
                         ICON_BLOCK_SOURCE: category_data.get(KEY_ICON_SOURCE, "auto"),
@@ -952,7 +961,8 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
             if isinstance(tag_data, dict):
                 tags_to_save[tag_name] = {
                     KEY_GLYPH: _glyph_to_hex(tag_data.get(KEY_GLYPH, "")),
-                    KEY_COLOR: list(tag_data.get(KEY_COLOR, [0.0, 0.0, 0.0])),
+                    # Symmetric normalization on write: keep the tag color well-formed on disk.
+                    KEY_COLOR: _normalize_color(tag_data.get(KEY_COLOR, [0.0, 0.0, 0.0])),
                     KEY_MODE_FLAGS: tag_data.get(KEY_MODE_FLAGS, _CATEGORY_TAG_DEFAULT_MODE_FLAGS),
                     KEY_ICON_KEY: tag_data.get(KEY_ICON_KEY, ""),
                     KEY_ICON_SOURCE: tag_data.get(KEY_ICON_SOURCE, 0),

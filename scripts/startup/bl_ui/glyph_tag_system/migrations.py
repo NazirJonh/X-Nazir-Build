@@ -104,6 +104,10 @@ def _normalize_category_data(category_data, category_name=None):
         # Current values
         if KEY_GLYPH in category_data:
             glyph_str = category_data[KEY_GLYPH]
+            # Corrupt/hand-edited files may store a non-string glyph (e.g. a list); coerce it
+            # away so downstream single-glyph checks cannot crash on it.
+            if not isinstance(glyph_str, str):
+                glyph_str = ""
             if glyph_str and '\\u' in glyph_str:
                 decoded_glyph = _unicode_escape_to_glyph(glyph_str)
                 entry[KEY_GLYPH] = decoded_glyph
@@ -112,9 +116,12 @@ def _normalize_category_data(category_data, category_name=None):
             else:
                 entry[KEY_GLYPH] = glyph_str
         if KEY_DISPLAY_NAME in category_data:
-            entry[KEY_DISPLAY_NAME] = category_data[KEY_DISPLAY_NAME]
+            display_name = category_data[KEY_DISPLAY_NAME]
+            # Guard against non-string display names from corrupt files (they are sliced below).
+            entry[KEY_DISPLAY_NAME] = display_name if isinstance(display_name, str) else ""
         if KEY_FIRST_LETTER in category_data:
-            entry[KEY_FIRST_LETTER] = category_data.get(KEY_FIRST_LETTER, "") or ""
+            first_letter = category_data.get(KEY_FIRST_LETTER, "")
+            entry[KEY_FIRST_LETTER] = first_letter if isinstance(first_letter, str) else ""
         # Derive first_letter for legacy data when missing but display_name is available.
         if not entry[KEY_FIRST_LETTER] and entry.get(KEY_DISPLAY_NAME):
             entry[KEY_FIRST_LETTER] = entry[KEY_DISPLAY_NAME][:1]
@@ -128,6 +135,8 @@ def _normalize_category_data(category_data, category_name=None):
         # Empty default_glyph is meaningful for text_only categories (fallback letter behavior).
         if KEY_DEFAULT_GLYPH in category_data:
             glyph_str = category_data[KEY_DEFAULT_GLYPH]
+            if not isinstance(glyph_str, str):
+                glyph_str = ""
             if glyph_str and '\\u' in glyph_str:
                 decoded_default = _unicode_escape_to_glyph(glyph_str)
                 entry[KEY_DEFAULT_GLYPH] = decoded_default

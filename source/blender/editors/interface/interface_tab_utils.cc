@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -22,6 +23,8 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
+
+#include "CLG_log.h"
 
 #include "BKE_icons.hh"
 #include "BKE_preview_image.hh"
@@ -42,7 +45,28 @@
 
 namespace blender::ui {
 
+static CLG_LogRef LOG = {"ui.category_tabs"};
+
 static constexpr bool ICON_RESOLVE_DEBUG_ENABLED = false;
+
+/**
+ * Diagnose a Python-bridge JSON response that should be an array but is not. Array-shaped
+ * responses (string or object arrays, including the empty array) are the expected input and
+ * are not reported; only a non-array root (an object such as `{"error": ...}`, `null`, or a
+ * scalar) is logged, so a Python-side failure is visible instead of degrading silently to an
+ * empty result. Extracts the message of an explicit `{"error": ...}` object when present.
+ */
+static void category_tab_json_report_non_array(const char *context,
+                                               const io::serialize::Value &root)
+{
+  if (const io::serialize::DictionaryValue *object = root.as_dictionary_value()) {
+    if (const std::optional<StringRefNull> error = object->lookup_str("error")) {
+      CLOG_WARN(&LOG, "%s: Python bridge returned an error: %s", context, error->c_str());
+      return;
+    }
+  }
+  CLOG_WARN(&LOG, "%s: Python bridge returned a non-array JSON response", context);
+}
 
 bool hex_codepoint_to_utf8(const char *input, char *utf8_out, size_t utf8_max)
 {
@@ -411,6 +435,9 @@ bool category_tab_parse_json_string_array_minimal(const char *json, Vector<std::
   }
   const io::serialize::ArrayValue *array = root->as_array_value();
   if (!array) {
+    /* Valid JSON but not the expected array: surface a Python-side failure instead of
+     * silently returning nothing. */
+    category_tab_json_report_non_array("category_tab_parse_json_string_array_minimal", *root);
     return false;
   }
 

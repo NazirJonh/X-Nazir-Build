@@ -135,6 +135,22 @@ def generate_unique_tag_name():
         i += 1
 
 
+# Characters reserved as delimiters by the packed tag serialization formats: the
+# Tag-Bar UI string ("name|glyph|is_active|r,g,b|icon_key|icon_source;...") and the
+# DNA order/last-active keys ("tags:category;..."). A tag name containing any of them
+# would make the C++ side mis-split the payload and silently corrupt data, so such
+# names are rejected at creation/rename time.
+_TAG_NAME_RESERVED_CHARS = "|;,:"
+
+
+def _tag_name_reserved_char_error(name):
+    """Return an error message if ``name`` contains a reserved delimiter, else None."""
+    for ch in _TAG_NAME_RESERVED_CHARS:
+        if ch in name:
+            return "Tag name cannot contain '{}' (reserved: {})".format(ch, _TAG_NAME_RESERVED_CHARS)
+    return None
+
+
 def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", icon_source='GLYPH', auto_save=True, skip_wm_sync=False):
     """
     Create a new tag.
@@ -164,6 +180,10 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", ico
 
     if len(tag_name) > 32:
         return False, "Tag name too long (max 32 chars)"
+
+    reserved_error = _tag_name_reserved_char_error(tag_name)
+    if reserved_error:
+        return False, reserved_error
 
     if tag_name in state.all_tags_cache:
         return False, f"Tag '{tag_name}' already exists"
@@ -298,6 +318,10 @@ def rename_tag(old_name, new_name, auto_save=True):
         return False, "New tag name cannot be empty"
 
     new_name = new_name.strip()
+
+    reserved_error = _tag_name_reserved_char_error(new_name)
+    if reserved_error:
+        return False, reserved_error
 
     if old_name not in state.all_tags_cache:
         return False, f"Tag '{old_name}' not found"

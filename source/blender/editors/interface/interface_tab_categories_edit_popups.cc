@@ -144,11 +144,9 @@ blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
     return results;
   }
 
-  /* Bail out on an error object or an empty array. */
-  if (strncmp(json.c_str(), "{\"error\":", 9) == 0 || strcmp(json.c_str(), "[]") == 0) {
-    return results;
-  }
-
+  /* An error object ({"error": ...}) or an empty array simply yields no results: the
+   * serialization-based parsers below return nothing for any non-array input, so no
+   * brittle string-prefix matching is needed here. */
   glyph_search_parse_object_array(json.c_str(), max_results, results);
 
   if (results.is_empty()) {

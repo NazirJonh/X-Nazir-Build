@@ -223,37 +223,67 @@ def _normalize_category_data(category_data, category_name=None):
         return default_entry
 
 
+def _normalize_color(color):
+    """Coerce an RGB value to a list of three floats clamped to ``[0, 1]``.
+
+    Guards against legacy string-encoded channels, missing/extra channels and
+    out-of-range values that would otherwise reach the UI swatches unchanged.
+    """
+    result = [0.0, 0.0, 0.0]
+    if isinstance(color, (list, tuple)):
+        for i in range(min(3, len(color))):
+            try:
+                c = float(color[i])
+            except (TypeError, ValueError):
+                c = 0.0
+            result[i] = min(1.0, max(0.0, c))
+    return result
+
+
 def migrate_json_data(data):
     """Validate and normalize a loaded mappings structure.
 
     The on-disk schema starts at version 1 (baseline), so there is no cross-version
-    migration: this only ensures the required top-level sections exist and coerces
-    color values to floats, then stamps the current version.
+    migration. This guards the structure so a valid-but-malformed file cannot poison
+    the caches: required sections are forced to the right container type, ``tag_order``
+    to a list of strings, ``category_orders`` values to lists, and every color to three
+    floats in ``[0, 1]``. Finally it stamps the current version.
     """
-    # Ensure required top-level sections exist.
-    if "all_tags" not in data:
+    if not isinstance(data, dict):
+        data = {}
+
+    # Required top-level sections must be dictionaries (a non-dict here would crash
+    # the loader, e.g. ``all_tags.items()`` if it arrived as a list).
+    if not isinstance(data.get("all_tags"), dict):
         data["all_tags"] = {}
-    if "mappings" not in data:
+    if not isinstance(data.get("mappings"), dict):
         data["mappings"] = {}
-    if "category_orders" not in data:
+    if not isinstance(data.get("category_orders"), dict):
         data["category_orders"] = {}
 
-    # Fix: Convert color strings to floats if needed
-    for space_type_str, categories in data.get("mappings", {}).items():
-        for category, cat_data in categories.items():
+    # ``tag_order`` must be a list of strings.
+    tag_order = data.get("tag_order")
+    data["tag_order"] = (
+        [t for t in tag_order if isinstance(t, str)] if isinstance(tag_order, list) else []
+    )
+
+    # ``category_orders`` values must be lists (the loader decodes them as lists).
+    data["category_orders"] = {
+        key: value for key, value in data["category_orders"].items() if isinstance(value, list)
+    }
+
+    # Normalize tag colors.
+    for tag_data in data["all_tags"].values():
+        if isinstance(tag_data, dict) and "color" in tag_data:
+            tag_data["color"] = _normalize_color(tag_data.get("color"))
+
+    # Normalize category colors within the GLOBAL mappings block.
+    for categories in data["mappings"].values():
+        if not isinstance(categories, dict):
+            continue
+        for cat_data in categories.values():
             if isinstance(cat_data, dict) and "color" in cat_data:
-                color = cat_data["color"]
-                if isinstance(color, list) and len(color) == 3:
-                    fixed_color = []
-                    for c in color:
-                        if isinstance(c, str):
-                            try:
-                                fixed_color.append(float(c))
-                            except ValueError:
-                                fixed_color.append(0.0)
-                        else:
-                            fixed_color.append(float(c) if c is not None else 0.0)
-                    cat_data["color"] = fixed_color
+                cat_data["color"] = _normalize_color(cat_data.get("color"))
 
     data["version"] = CURRENT_JSON_VERSION
     return data

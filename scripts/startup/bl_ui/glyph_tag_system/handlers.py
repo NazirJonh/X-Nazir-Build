@@ -23,7 +23,6 @@ and space_userpref.unregister().
 import bpy
 import json
 
-from bl_ui.glyph_tag_system.defaults import CURRENT_JSON_VERSION
 from bl_ui.glyph_tag_system.conversions import _hex_to_glyph
 from bl_ui.glyph_tag_system.log import (
     category_debug_print,
@@ -239,18 +238,31 @@ def _save_tag_order_only():
         category_debug_print("[TAG ORDER] No filepath for saving")
         return False
 
-    # Create backup
-    create_backup(filepath)
-
+    # Load existing data to preserve the other sections (mappings / all_tags /
+    # category_orders) that this lightweight path does not rebuild. Atomic writes
+    # guarantee a reader sees a complete file, never a partial one.
     try:
-        # Load existing data to preserve other fields
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
-    except Exception:
-        # If load fails, create minimal data
-        data = {'version': CURRENT_JSON_VERSION}
+    except FileNotFoundError:
+        # No file on disk yet: nothing to preserve, and writing a tag_order-only
+        # dict would drop the cache's mappings/tags on the next load. Delegate to the
+        # full save, which persists every section from the cache.
+        return _save_glyph_mappings_to_file()
+    except Exception as e:
+        # A readable-but-corrupt file must NOT be overwritten with a tag_order-only
+        # dict: that would wipe mappings / all_tags / category_orders. Abort instead.
+        category_debug_print(f"[TAG ORDER] Aborting: cannot read existing file: {e}")
+        return False
 
-    # Update tag_order from cache
+    if not isinstance(data, dict):
+        category_debug_print("[TAG ORDER] Aborting: existing file is not a JSON object")
+        return False
+
+    # Back up only once we know there is valid existing data worth preserving.
+    create_backup(filepath)
+
+    # Update tag_order from the cache (source of truth for manual ordering here).
     data['tag_order'] = list(state.tag_order_cache)
 
     # Save back to file

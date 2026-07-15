@@ -2299,3 +2299,4 @@ bool BLO_write_is_undo(BlendWriter *writer)
 /** \} */
 
 }  // namespace blender
+

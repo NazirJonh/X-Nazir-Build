@@ -1765,6 +1765,14 @@ void blo_do_versions_userdef(UserDef *userdef)
     }
   }
 
+  /* Initialize asset library folder support fields. */
+  if (!USER_VERSION_ATLEAST(502, 4)) {
+    for (bUserAssetLibrary &library : userdef->asset_libraries) {
+      library.parent = nullptr;
+      library.type = USER_ASSET_LIBRARY_ITEM_TYPE_LEAF;
+    }
+  }
+
   if (!USER_VERSION_ATLEAST(502, 13)) {
     userdef->geometry_nodes_stack_limit = 100;
   }

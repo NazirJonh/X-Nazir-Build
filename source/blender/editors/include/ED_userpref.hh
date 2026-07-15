@@ -14,6 +14,12 @@ namespace blender {
 
 /* Structs */
 struct SpaceUserPref;
+struct UserDef;
+class bContext;
+
+namespace ui {
+class Layout;
+}  // namespace ui
 
 void ED_operatortypes_userpref();
 

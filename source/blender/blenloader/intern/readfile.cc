@@ -4007,6 +4007,14 @@ static BHead *read_userdef(BlendFileData *bfd, FileData *fd, BHead *bhead)
   BLO_read_struct_list(reader, bPathCompare, &user->autoexec_paths);
   BLO_read_struct_list(reader, bUserScriptDirectory, &user->script_directories);
   BLO_read_struct_list(reader, bUserAssetLibrary, &user->asset_libraries);
+
+  /* Clear runtime parent pointers (contain stale addresses from the saved file),
+   * then restore them from the serialized parent_name strings. */
+  for (bUserAssetLibrary &lib : user->asset_libraries) {
+    lib.parent = nullptr;
+  }
+  BKE_preferences_asset_library_restore_hierarchy(user);
+
   BLO_read_struct_list(reader, bUserExtensionRepo, &user->extension_repos);
   BLO_read_struct_list(reader, bUserAssetShelfSettings, &user->asset_shelves_settings);
 
@@ -6224,3 +6232,4 @@ void BLO_read_data_set_need_preview_render_restart(BlendDataReader *reader)
 /** \} */
 
 }  // namespace blender
+

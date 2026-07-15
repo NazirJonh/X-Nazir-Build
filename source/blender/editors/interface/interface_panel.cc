@@ -14,6 +14,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <sstream>
 #include <string>
 
 #include "MEM_guardedalloc.h"
@@ -22,6 +24,7 @@
 #include "BLI_map.hh"
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
+#include "BLI_serialize.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
@@ -1824,7 +1827,10 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm,
 
   const char *tags_string = category_tags_string_lookup(wm, category, space_type);
 
-  std::string result;
+  /* Serialize the visible tags as a JSON array. The edit dialog parses it back with the
+   * shared serialization layer (see interface_tab_categories_edit.cc). JSON avoids the
+   * delimiter-collision hazards of the previous positional "name|glyph|...;" format. */
+  blender::io::serialize::ArrayValue array;
   for (const CategoryTagDef *tag = static_cast<const CategoryTagDef *>(wm->category_tags.first); tag;
        tag = static_cast<const CategoryTagDef *>(tag->next))
   {
@@ -1864,33 +1870,33 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm,
       }
     }
 
-    if (!result.empty()) {
-      result.push_back(';');
-    }
-    result.append(tag->name);
-    result.push_back('|');
-    result.append(glyph_out);
-    result.push_back('|');
-    result.append(is_active ? "1" : "0");
-    /* Add color in format r,g,b (0.0-1.0) */
-    result.push_back('|');
-    char color_str[32];
-    SNPRINTF(color_str, "%.3f,%.3f,%.3f", tag->color[0], tag->color[1], tag->color[2]);
-    result.append(color_str);
-    /* Add icon_id and icon_source (format: |icon_id|icon_source).
-     * NOTE: This string is parsed in interface_tab_categories_edit.cc:tag_list_panel_draw()
-     * and must follow the expected positional format (name|glyph|is_active|color|icon_id|icon_source). */
-    result.push_back('|');
     int icon_id = ICON_NONE;
     if (tag->icon_source == 1 && tag->icon_key[0] != '\0') {
       icon_id = category_tab_icon_id_resolve_from_key_path(tag->icon_key, nullptr);
     }
-    char icon_str[32];
-    SNPRINTF(icon_str, "%d|%d", icon_id, tag->icon_source);
-    result.append(icon_str);
+
+    std::shared_ptr<blender::io::serialize::DictionaryValue> record = array.append_dict();
+    record->append_str("name", tag->name);
+    record->append_str("glyph", glyph_out);
+    record->append_bool("active", is_active);
+    std::shared_ptr<blender::io::serialize::ArrayValue> color = record->append_array("color");
+    color->append_double(tag->color[0]);
+    color->append_double(tag->color[1]);
+    color->append_double(tag->color[2]);
+    record->append_int("icon_id", icon_id);
+    record->append_int("icon_source", tag->icon_source);
   }
 
-  return result;
+  /* Preserve the previous "no tags -> empty string" contract: callers gate UI layout on
+   * `.empty()`, and an empty JSON array ("[]") would read as non-empty. */
+  if (array.elements().is_empty()) {
+    return {};
+  }
+
+  std::stringstream ss;
+  blender::io::serialize::JsonFormatter formatter;
+  formatter.serialize(ss, array);
+  return ss.str();
 }
 
 static PanelMouseState ui_panel_mouse_state_get(const Block *block,

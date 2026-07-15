@@ -19,6 +19,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <optional>
+#include <sstream>
 #include <string>
 
 #include "MEM_guardedalloc.h"
@@ -33,6 +36,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
+#include "BLI_serialize.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_time.h"
@@ -1351,84 +1355,62 @@ struct EditDialogTagData {
 static Vector<EditDialogTagData> parse_edit_dialog_tag_data(const char *data_str)
 {
   Vector<EditDialogTagData> items;
-  if (data_str == nullptr) {
+  if (data_str == nullptr || data_str[0] == '\0') {
     return items;
   }
 
-  const char *cursor = data_str;
-  while (*cursor != '\0') {
+  /* The producer (interface_panel.cc:get_tags_for_category_ui) emits a JSON array of
+   * records; parse it with the shared serialization layer instead of hand-splitting a
+   * positional "name|glyph|...;" string. */
+  std::istringstream is(data_str);
+  io::serialize::JsonFormatter formatter;
+  std::unique_ptr<io::serialize::Value> root = formatter.deserialize(is);
+  if (!root) {
+    return items;
+  }
+  const io::serialize::ArrayValue *array = root->as_array_value();
+  if (!array) {
+    return items;
+  }
+
+  for (const std::shared_ptr<io::serialize::Value> &element : array->elements()) {
+    const io::serialize::DictionaryValue *record = element->as_dictionary_value();
+    if (!record) {
+      continue;
+    }
+
     EditDialogTagData item{};
 
-    /* Parse tag name. */
-    int i = 0;
-    while (*cursor != '|' && *cursor != '\0' && i < 63) {
-      item.name[i++] = *cursor++;
+    if (const std::optional<StringRefNull> name = record->lookup_str("name")) {
+      BLI_strncpy(item.name, name->c_str(), sizeof(item.name));
     }
-    item.name[i] = '\0';
-    if (*cursor == '|') {
-      cursor++;
+    if (const std::optional<StringRefNull> glyph = record->lookup_str("glyph")) {
+      BLI_strncpy(item.glyph, glyph->c_str(), sizeof(item.glyph));
     }
+    item.is_active = record->lookup_bool("active").value_or(false) ? 1 : 0;
 
-    /* Parse glyph. */
-    i = 0;
-    while (*cursor != '|' && *cursor != '\0' && i < 15) {
-      item.glyph[i++] = *cursor++;
-    }
-    item.glyph[i] = '\0';
-    if (*cursor == '|') {
-      cursor++;
-    }
-
-    /* Parse is_active. */
-    item.is_active = 0;
-    while (*cursor >= '0' && *cursor <= '9') {
-      item.is_active = item.is_active * 10 + (*cursor - '0');
-      cursor++;
-    }
-
-    /* Parse color (format: r,g,b with components in 0.0-1.0). */
-    char tag_color[32];
-    if (*cursor == '|') {
-      cursor++;
-      i = 0;
-      while (*cursor != '|' && *cursor != '\0' && i < 31) {
-        tag_color[i++] = *cursor++;
-      }
-      tag_color[i] = '\0';
-    }
-    else {
-      tag_color[0] = '\0';
-    }
+    /* Color: three channels in 0.0-1.0; `has_color` mirrors the previous "non-black" test. */
     item.color[0] = item.color[1] = item.color[2] = 0.0f;
     item.has_color = false;
-    if (tag_color[0] != '\0') {
-      if (sscanf(tag_color, "%f,%f,%f", &item.color[0], &item.color[1], &item.color[2]) == 3) {
-        if (item.color[0] > 0.001f || item.color[1] > 0.001f || item.color[2] > 0.001f) {
-          item.has_color = true;
+    if (const io::serialize::ArrayValue *color = record->lookup_array("color")) {
+      const Span<std::shared_ptr<io::serialize::Value>> channels = color->elements();
+      for (int c = 0; c < 3 && c < channels.size(); c++) {
+        if (const io::serialize::DoubleValue *dv = channels[c]->as_double_value()) {
+          item.color[c] = float(dv->value());
+        }
+        else if (const io::serialize::IntValue *iv = channels[c]->as_int_value()) {
+          item.color[c] = float(iv->value());
         }
       }
+      if (item.color[0] > 0.001f || item.color[1] > 0.001f || item.color[2] > 0.001f) {
+        item.has_color = true;
+      }
     }
 
-    /* Parse icon_id and icon_source (format: icon_id|icon_source). */
-    item.icon_id = 0;
-    item.icon_source = 0;
-    if (*cursor == '|') {
-      cursor++;
-      if (sscanf(cursor, "%d|%d", &item.icon_id, &item.icon_source) != 2) {
-        item.icon_id = 0;
-        item.icon_source = 0;
-      }
-      /* Advance cursor past the parsed icon_id|icon_source to reach ';' separator. */
-      while (*cursor != '\0' && *cursor != ';') {
-        cursor++;
-      }
-    }
+    item.icon_id = int(record->lookup_int("icon_id").value_or(0));
+    item.icon_source = int(record->lookup_int("icon_source").value_or(0));
 
     items.append(item);
-
-    if (*cursor == ';') {
-      cursor++;
-    }
   }
 
   return items;

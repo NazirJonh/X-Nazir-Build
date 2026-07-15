@@ -291,6 +291,8 @@ class MESH_MT_sculpt_layer_context_menu(Menu):
         layout.operator("sculpt.layer_invert")
         layout.separator()
         layout.operator("sculpt.layer_mask_isolate", text="Isolate by Mask")
+        layout.separator()
+        layout.operator("sculpt.layer_bake_to_shape_key", text="Bake Sculpt Layers to Shape Keys")
 
 
 class SCULPT_PT_layer_editmode_confirm(Panel):

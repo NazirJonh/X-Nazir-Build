@@ -185,6 +185,18 @@ void push_sculpt_layer_list_change(Object &object,
 void push_sculpt_layer_bake_shape_key(Object &object, int key_uid);
 
 /**
+ * Bake on a mesh with NO shape keys yet: record that this step's operator created the mesh's
+ * #Key from scratch (a #KeyBlock::name "Basis" block plus the combined-layer block), rather than
+ * adding one block to an already-existing key like #push_sculpt_layer_bake_shape_key does. Undo
+ * fully tears the #Key back down (#BKE_object_shapekey_free) and redo fully rebuilds it
+ * (#bke::sculpt_layers::bake_vert_layers_into_new_shape_key), rather than preserving the same
+ * #Key / #KeyBlock structs across the undo boundary. \a pre_bake_shapenr is #Object::shapenr
+ * from before the operator ran, restored verbatim on undo. Call between #push_begin and
+ * #push_end, after #push_sculpt_layer_list_change.
+ */
+void push_sculpt_layer_bake_to_shape_key(Object &object, short pre_bake_shapenr);
+
+/**
  * Sculpt layer operators: record a layer reorder (move up/down) into the current
  * #Type::SculptLayer undo step.
  */

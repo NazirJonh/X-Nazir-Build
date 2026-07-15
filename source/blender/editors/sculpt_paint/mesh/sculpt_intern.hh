@@ -1193,6 +1193,7 @@ void SCULPT_OT_layer_move(wmOperatorType *ot);
 void SCULPT_OT_layer_duplicate(wmOperatorType *ot);
 void SCULPT_OT_layer_merge_down(wmOperatorType *ot);
 void SCULPT_OT_layer_bake(wmOperatorType *ot);
+void SCULPT_OT_layer_bake_to_shape_key(wmOperatorType *ot);
 void SCULPT_OT_layer_bake_and_editmode_enter(wmOperatorType *ot);
 void SCULPT_OT_layer_clear(wmOperatorType *ot);
 void SCULPT_OT_layer_invert(wmOperatorType *ot);

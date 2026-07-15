@@ -1556,6 +1556,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(layers::SCULPT_OT_layer_duplicate);
   WM_operatortype_append(layers::SCULPT_OT_layer_merge_down);
   WM_operatortype_append(layers::SCULPT_OT_layer_bake);
+  WM_operatortype_append(layers::SCULPT_OT_layer_bake_to_shape_key);
   WM_operatortype_append(layers::SCULPT_OT_layer_bake_and_editmode_enter);
   WM_operatortype_append(layers::SCULPT_OT_layer_clear);
   WM_operatortype_append(layers::SCULPT_OT_layer_invert);

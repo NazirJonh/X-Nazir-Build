@@ -51,6 +51,8 @@
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 
+#include "BLT_translation.hh"
+
 #include "BKE_attribute.hh"
 #include "BKE_attribute_legacy_convert.hh"
 #include "BKE_ccg.hh"
@@ -330,6 +332,18 @@ struct StepData {
      * (between undo and redo); the step owns and frees it then. */
     int bake_key_uid = 0;
     KeyBlock *bake_key = nullptr;
+
+    /** Bake on a mesh with NO shape keys yet: this step's operator created the mesh's #Key from
+     * scratch. Unlike #bake_key (which detaches/reattaches one block within an already-existing
+     * key), a freshly created key is fully torn down on undo and freshly rebuilt on redo —
+     * nothing referenced it before this step, so there is nothing to preserve piecemeal.
+     * #bake_key_uid / #bake_key are NOT used for these steps: they stay 0 / null, see the
+     * `!op.created_key` guards added to #restore_list in Task 2. */
+    bool created_key = false;
+    /** #Object::shapenr from before the operator ran (captured rather than assumed, though it is
+     * always 1 in practice since the mesh had no #Key yet). Restored verbatim on undo; recomputed
+     * from the freshly rebuilt key's block index on redo. */
+    short pre_bake_shapenr = 1;
 
     /** Layer reorder (0 when the step is not a move). */
     int move_uid = 0;
@@ -1428,6 +1442,16 @@ void push_sculpt_layer_bake_shape_key(Object & /*object*/, const int key_uid)
   step_data->sculpt_layer_op.bake_key_uid = key_uid;
 }
 
+void push_sculpt_layer_bake_to_shape_key(Object & /*object*/, const short pre_bake_shapenr)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  step_data->sculpt_layer_op.created_key = true;
+  step_data->sculpt_layer_op.pre_bake_shapenr = pre_bake_shapenr;
+}
+
 void push_sculpt_layer_move(Object & /*object*/,
                             const SculptLayer &layer,
                             const int index_from,
@@ -1652,6 +1676,20 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       }
     }
 
+    /* Bake-to-shape-key redo: rebuild the #Key this step created from scratch, using the layers
+     * that are still present at this point (the generic layer-list swap below has not run yet —
+     * it would otherwise remove them before #bake_vert_layers_into_new_shape_key can sum them).
+     * Mirrors the operator's own bootstrap (see #layer_bake_to_shape_key_exec). */
+    if (op.created_key && !is_undo) {
+      Main *bmain_rw = CTX_data_main(C);
+      Key *key = mesh.key = BKE_key_add(bmain_rw, &mesh.id);
+      key->type = KEY_RELATIVE;
+      KeyBlock *basis = BKE_keyblock_add_ctime(key, DATA_("Basis"), false);
+      BKE_keyblock_convert_from_mesh(&mesh, key, basis);
+      KeyBlock *baked = bke::sculpt_layers::bake_vert_layers_into_new_shape_key(mesh);
+      object.shapenr = BLI_findindex(&key->block, (baked && baked->data) ? baked : basis) + 1;
+    }
+
     /* Layer-list changes: toggle the affected layers between the undo step and the mesh list.
      * `removed` holds layers the operator removed (in the step after the operator ran), `added`
      * holds layers the operator added (in the mesh after the operator ran). Data buffers move by
@@ -1670,7 +1708,7 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
             if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
               BKE_multires_sculpt_layer_apply_to_mdisps(mesh, *layer, -eff);
             }
-            else if (op.bake_key_uid == 0) {
+            else if (op.bake_key_uid == 0 && !op.created_key) {
               bke::sculpt_layers::apply_vert_layer_to_shape_keys(mesh, *layer, -eff);
             }
           }
@@ -1693,7 +1731,7 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
             if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
               BKE_multires_sculpt_layer_apply_to_mdisps(mesh, *layer, eff);
             }
-            else if (op.bake_key_uid == 0) {
+            else if (op.bake_key_uid == 0 && !op.created_key) {
               bke::sculpt_layers::apply_vert_layer_to_shape_keys(mesh, *layer, eff);
             }
           }
@@ -1728,6 +1766,17 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         key.totkey++;
         op.bake_key = nullptr;
       }
+    }
+
+    /* Bake-to-shape-key undo: fully tear the #Key this step created back down. Runs after the
+     * generic layer-list swap above has already reinserted the removed layers into
+     * `mesh.sculpt_layers`, because #BKE_object_shapekey_free — in this fork — itself calls
+     * #bke::sculpt_layers::bake_vert_layers_into_positions, which needs to see those layers to
+     * fold their contribution back into `vert_positions`. */
+    if (op.created_key && is_undo && mesh.key != nullptr) {
+      Main *bmain_rw = CTX_data_main(C);
+      BKE_object_shapekey_free(bmain_rw, &object);
+      object.shapenr = op.pre_bake_shapenr;
     }
 
     if (op.is_bake && !op.removed.is_empty()) {

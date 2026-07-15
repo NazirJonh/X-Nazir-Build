@@ -60,6 +60,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_context.hh"
+#include "BKE_key.hh"
 #include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_multires.hh"
@@ -1657,6 +1658,82 @@ void SCULPT_OT_layer_bake(wmOperatorType *ot)
   ot->idname = "SCULPT_OT_layer_bake";
   ot->description = "Apply all sculpt layers permanently to the base geometry and remove them";
   ot->exec = layer_bake_exec;
+  /* Irreversible-feeling from the UI (drops every layer into the base), so confirm before running. */
+  ot->invoke = WM_operator_confirm;
+  ot->poll = layers_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (ctx.grids) {
+    BKE_report(op->reports, RPT_ERROR, "Not available for Multires; only Mesh data");
+    return OPERATOR_CANCELLED;
+  }
+  if (ctx.mesh->key != nullptr) {
+    BKE_report(
+        op->reports, RPT_ERROR, "Mesh already has shape keys; use Bake Sculpt Layers instead");
+    return OPERATOR_CANCELLED;
+  }
+  if (BLI_listbase_is_empty(&ctx.mesh->sculpt_layers)) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layers to bake");
+    return OPERATOR_CANCELLED;
+  }
+
+  const short pre_bake_shapenr = ctx.object->shapenr;
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+
+  /* Bootstrap the Key: mirrors #insert_meshkey (object.cc). #BKE_key_add's ID_ME case already
+   * strips the layer contribution out of `vert_positions` (see
+   * #bke::sculpt_layers::strip_vert_layers_from_positions), so `basis` below is seeded with the
+   * un-layered original shape. */
+  Main *bmain = CTX_data_main(C);
+  Key *key = ctx.mesh->key = BKE_key_add(bmain, &ctx.mesh->id);
+  key->type = KEY_RELATIVE;
+  KeyBlock *basis = BKE_keyblock_add_ctime(key, DATA_("Basis"), false);
+  BKE_keyblock_convert_from_mesh(ctx.mesh, key, basis);
+
+  KeyBlock *baked = bke::sculpt_layers::bake_vert_layers_into_new_shape_key(*ctx.mesh);
+
+  Vector<undo::SculptLayerUndoPayload> baked_layers;
+  while (SculptLayer *layer = static_cast<SculptLayer *>(ctx.mesh->sculpt_layers.first)) {
+    baked_layers.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *layer));
+    bke::sculpt_layers::remove(*ctx.mesh, *layer);
+  }
+  undo::push_sculpt_layer_list_change(*ctx.object, std::move(baked_layers), {}, true);
+  undo::push_sculpt_layer_bake_to_shape_key(*ctx.object, pre_bake_shapenr);
+
+  /* Select the usable key as active (matching the pattern #object_shape_key_add uses,
+   * object_shapekey.cc): the baked block when it has data, the Basis otherwise (degenerate
+   * case — see the design spec's "Degenerate case" section). */
+  KeyBlock *active_key = (baked && baked->data) ? baked : basis;
+  ctx.object->shapenr = BLI_findindex(&key->block, active_key) + 1;
+
+  /* The combined surface is unchanged; the runtime mesh base now equals the live positions
+   * composed through the new key instead of the (now absent) layer list. */
+  invalidate_runtime(*ctx.object);
+  session_state_ensure(*ctx.object);
+  undo::push_end(*ctx.object);
+  /* The key data changed and the session's deform snapshot is a pre-bake surface: re-evaluate
+   * so the display is rebuilt from the new keys (unconditional here, unlike #layer_bake_exec's
+   * equivalent tag, because this operator's `ctx.mesh->key` is always non-null by this point). */
+  DEG_id_tag_update(&ctx.mesh->id, ID_RECALC_GEOMETRY);
+  layers_ui_notify(C, *ctx.object);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_bake_to_shape_key(wmOperatorType *ot)
+{
+  ot->name = "Bake Sculpt Layers to Shape Keys";
+  ot->idname = "SCULPT_OT_layer_bake_to_shape_key";
+  ot->description =
+      "Convert the sculpt layer stack into a Basis and a dial-able relative Shape Key holding "
+      "the combined result";
+  ot->exec = layer_bake_to_shape_key_exec;
   /* Irreversible-feeling from the UI (drops every layer into the base), so confirm before running. */
   ot->invoke = WM_operator_confirm;
   ot->poll = layers_poll;

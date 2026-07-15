@@ -440,8 +440,7 @@ static void PREFERENCES_OT_asset_library_remove(wmOperatorType *ot)
 /** \name Add Asset Library Folder Operator
  * \{ */
 
-static wmOperatorStatus preferences_asset_library_folder_add_exec(bContext * /*C*/,
-                                                                   wmOperator *op)
+static wmOperatorStatus preferences_asset_library_folder_add_exec(bContext * /*C*/, wmOperator *op)
 {
   char name[sizeof(bUserAssetLibrary::name)] = "";
 
@@ -462,7 +461,8 @@ static wmOperatorStatus preferences_asset_library_folder_add_exec(bContext * /*C
     parent_folder = BKE_preferences_asset_library_find_by_name(&U, parent_name);
   }
 
-  bUserAssetLibrary *new_folder = BKE_preferences_asset_library_folder_add(&U, name, parent_folder);
+  bUserAssetLibrary *new_folder = BKE_preferences_asset_library_folder_add(
+      &U, name, parent_folder);
 
   /* Activate new folder in the UI list. Uses the remote-aware UI index (same scheme as
    * #preferences_asset_library_add_exec), not the raw listbase index. */
@@ -489,12 +489,8 @@ static void PREFERENCES_OT_asset_library_folder_add(wmOperatorType *ot)
 
   ot->flag = OPTYPE_INTERNAL | OPTYPE_REGISTER;
 
-  RNA_def_string(ot->srna,
-                 "name",
-                 nullptr,
-                 sizeof(bUserAssetLibrary::name),
-                 "Name",
-                 "Name of the folder");
+  RNA_def_string(
+      ot->srna, "name", nullptr, sizeof(bUserAssetLibrary::name), "Name", "Name of the folder");
 
   PropertyRNA *prop = RNA_def_string(ot->srna,
                                      "parent_folder_name",

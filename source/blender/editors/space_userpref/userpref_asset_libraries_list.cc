@@ -138,7 +138,6 @@ class AssetLibraryDragController : public ui::AbstractViewItemDragController {
   void *create_drag_data() const override
   {
     wmDragAssetLibrary *drag_library = MEM_new<wmDragAssetLibrary>(__func__);
-    STRNCPY(drag_library->library_name, library_.name);
     drag_library->library_index = BKE_preferences_asset_library_get_index(&U, &library_);
     return drag_library;
   }
@@ -174,20 +173,24 @@ class AssetLibraryDropTarget : public ui::TreeViewItemDropTarget {
       return false;
     }
 
-    if (library_.type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
-      bUserAssetLibrary *current = &library_;
-      while (current) {
+    /* If dragging a folder, disallow any drop inside its own subtree. For an Into drop the target
+     * item, and for a Before/After drop the target's parent, would become a descendant of the
+     * folder being moved, creating a cycle. Walking up from the target catches both cases,
+     * including leaf targets nested inside the folder. */
+    if (src_library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      for (bUserAssetLibrary *current = &library_; current; current = current->parent) {
         if (current == src_library) {
           *r_disabled_hint = RPT_("Cannot move folder into itself");
           return false;
         }
-        current = current->parent;
       }
+    }
 
-      if (src_library->parent == &library_ && this->behavior_ == ui::DropBehavior::Insert) {
-        *r_disabled_hint = RPT_("Item is already in this folder");
-        return false;
-      }
+    if (library_.type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER && src_library->parent == &library_ &&
+        this->behavior_ == ui::DropBehavior::Insert)
+    {
+      *r_disabled_hint = RPT_("Item is already in this folder");
+      return false;
     }
 
     return true;
@@ -196,31 +199,20 @@ class AssetLibraryDropTarget : public ui::TreeViewItemDropTarget {
   std::string drop_tooltip(const ui::DragInfo &drag_info) const override
   {
     BLI_assert(drag_info.drag_data.type == WM_DRAG_ASSET_LIBRARY);
-    const wmDragAssetLibrary *drag_library = WM_drag_get_asset_library_data(&drag_info.drag_data);
-    bUserAssetLibrary *src_library = BKE_preferences_asset_library_find_index(
-        &U, drag_library->library_index);
-
-    const char *item_type = src_library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER ? "folder" :
-                                                                                       "library";
 
     switch (drag_info.drop_location) {
       case ui::DropLocation::Into:
         if (library_.type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
-          return fmt::format(fmt::runtime(TIP_("Move {} into folder {}")), item_type, library_.name);
+          return fmt::format(fmt::runtime(TIP_("Move into folder {}")), library_.name);
         }
-        else {
-          if (library_.parent) {
-            return fmt::format(
-                fmt::runtime(TIP_("Move {} into folder {}")), item_type, library_.parent->name);
-          }
-          else {
-            return fmt::format(fmt::runtime(TIP_("Move {} to root")), item_type);
-          }
+        if (library_.parent) {
+          return fmt::format(fmt::runtime(TIP_("Move into folder {}")), library_.parent->name);
         }
+        return TIP_("Move to root");
       case ui::DropLocation::Before:
-        return fmt::format(fmt::runtime(TIP_("Move {} above {}")), item_type, library_.name);
+        return fmt::format(fmt::runtime(TIP_("Move above {}")), library_.name);
       case ui::DropLocation::After:
-        return fmt::format(fmt::runtime(TIP_("Move {} below {}")), item_type, library_.name);
+        return fmt::format(fmt::runtime(TIP_("Move below {}")), library_.name);
     }
 
     BLI_assert_unreachable();
@@ -252,9 +244,9 @@ class AssetLibraryDropTarget : public ui::TreeViewItemDropTarget {
     }
 
     /* Remember the currently active library by pointer: the reorder physically moves nodes in the
-     * listbase, which shifts raw indices, and #U.active_asset_library is an index. Without this the
-     * active selection would silently jump to a different item. Fixed items (index < 2) are left
-     * untouched. */
+     * listbase, which shifts raw indices, and #U.active_asset_library is an index. Without this
+     * the active selection would silently jump to a different item. Fixed items (index < 2) are
+     * left untouched. */
     bUserAssetLibrary *active_lib = nullptr;
     {
       const Vector<AnyAssetLibraryDefinition> libs = userpref_ui_asset_libraries();
@@ -263,7 +255,9 @@ class AssetLibraryDropTarget : public ui::TreeViewItemDropTarget {
       }
     }
 
-    BKE_preferences_asset_library_reorder(&U, src_library, &library_, location);
+    if (!BKE_preferences_asset_library_reorder(&U, src_library, &library_, location)) {
+      return false;
+    }
 
     if (active_lib) {
       if (const std::optional<int> idx = userpref_ui_asset_libraries_index_from_user_library(
@@ -357,7 +351,8 @@ class AssetLibraryListItem : public ui::AbstractTreeViewItem {
     }
 
     {
-      PointerRNA library_ptr = RNA_pointer_create_discrete(nullptr, RNA_UserAssetLibrary, &library);
+      PointerRNA library_ptr = RNA_pointer_create_discrete(
+          nullptr, RNA_UserAssetLibrary, &library);
       const BIFIconID icon = library_is_effectively_enabled(library) ? ICON_CHECKBOX_HLT :
                                                                        ICON_CHECKBOX_DEHLT;
       row.prop(&library_ptr, "enabled", ui::ITEM_R_ICON_ONLY, std::nullopt, int(icon));
@@ -487,7 +482,8 @@ struct AssetLibraryList : public ui::AbstractTreeView {
   }
 
  private:
-  void build_user_items_recursive(ui::TreeViewOrItem &view_parent, bUserAssetLibrary *parent_folder)
+  void build_user_items_recursive(ui::TreeViewOrItem &view_parent,
+                                  bUserAssetLibrary *parent_folder)
   {
     const bool use_remote = USER_EXPERIMENTAL_TEST(&U, use_remote_asset_libraries);
 
@@ -500,7 +496,8 @@ struct AssetLibraryList : public ui::AbstractTreeView {
       if (!use_remote && (library.flag & ASSET_LIBRARY_USE_REMOTE_URL)) {
         continue;
       }
-      const std::optional<int> index = userpref_ui_asset_libraries_index_from_user_library(library);
+      const std::optional<int> index = userpref_ui_asset_libraries_index_from_user_library(
+          library);
       if (!index) {
         continue;
       }

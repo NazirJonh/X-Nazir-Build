@@ -2798,7 +2798,8 @@ static bool view_item_rename_poll(bContext *C)
     return false;
   }
   /* When the cursor is over a context menu (not directly over the view), `get_view_focused`
-   * returns null. Fall back to any active item in the region so rename works from context menus. */
+   * returns null. Fall back to any active item in the region so rename works from context menus.
+   */
   const AbstractView *view = get_view_focused(C);
   const AbstractViewItem *active_item = region_views_find_active_item(region, view);
   return active_item != nullptr && view_item_can_rename(*active_item);

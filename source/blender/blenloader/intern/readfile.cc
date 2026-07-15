@@ -6232,4 +6232,3 @@ void BLO_read_data_set_need_preview_render_restart(BlendDataReader *reader)
 /** \} */
 
 }  // namespace blender
-

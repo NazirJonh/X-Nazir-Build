@@ -126,10 +126,8 @@ void BKE_preferences_asset_library_default_add(struct UserDef *userdef) ATTR_NON
  * Create a new folder for organizing asset libraries.
  * \param parent: Parent folder (nullptr for root level).
  */
-struct bUserAssetLibrary *BKE_preferences_asset_library_folder_add(struct UserDef *userdef,
-                                                                   const char *name,
-                                                                   struct bUserAssetLibrary *parent)
-    ATTR_NONNULL(1);
+struct bUserAssetLibrary *BKE_preferences_asset_library_folder_add(
+    struct UserDef *userdef, const char *name, struct bUserAssetLibrary *parent) ATTR_NONNULL(1);
 
 /**
  * Move an asset library or folder to a different parent folder.
@@ -144,16 +142,16 @@ void BKE_preferences_asset_library_move_to_folder(struct UserDef *userdef,
 /**
  * Check if the library is a folder (container for other libraries).
  */
-bool BKE_preferences_asset_library_is_folder(const struct bUserAssetLibrary *library) ATTR_NONNULL()
-    ATTR_WARN_UNUSED_RESULT;
+bool BKE_preferences_asset_library_is_folder(const struct bUserAssetLibrary *library)
+    ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
 
 /**
  * Check if the library can be deleted.
  * Folders can only be deleted if they are empty.
  */
 bool BKE_preferences_asset_library_can_delete(const struct UserDef *userdef,
-                                              const struct bUserAssetLibrary *library) ATTR_NONNULL()
-    ATTR_WARN_UNUSED_RESULT;
+                                              const struct bUserAssetLibrary *library)
+    ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
 
 /** Where to move an asset library or folder relative to the target. */
 enum eBKE_AssetLibraryMoveLocation {
@@ -172,7 +170,8 @@ enum eBKE_AssetLibraryMoveLocation {
 bool BKE_preferences_asset_library_reorder(UserDef *userdef,
                                            bUserAssetLibrary *library,
                                            bUserAssetLibrary *target,
-                                           eBKE_AssetLibraryMoveLocation location) ATTR_NONNULL(1, 2, 3);
+                                           eBKE_AssetLibraryMoveLocation location)
+    ATTR_NONNULL(1, 2, 3);
 
 /**
  * Restore parent pointers from parent_name strings in the asset library hierarchy.
@@ -183,7 +182,7 @@ bool BKE_preferences_asset_library_reorder(UserDef *userdef,
  *
  * Also performs cycle detection and breaks cycles if found (defensive programming).
  *
- * @param userdef: The UserDef structure with asset libraries.
+ * \param userdef: The UserDef structure with asset libraries.
  */
 void BKE_preferences_asset_library_restore_hierarchy(UserDef *userdef);
 

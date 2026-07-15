@@ -1312,7 +1312,8 @@ struct wmDragAssetCatalog {
 
 /** Drag data for asset library items from Preferences. */
 struct wmDragAssetLibrary {
-  char library_name[64];
+  /** Index into #UserDef.asset_libraries of the dragged item (see
+   * #BKE_preferences_asset_library_get_index). */
   int library_index;
 };
 

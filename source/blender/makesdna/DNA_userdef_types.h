@@ -676,9 +676,10 @@ struct bUserAssetLibrary {
   short type = USER_ASSET_LIBRARY_ITEM_TYPE_LEAF;
   char _pad0[2] = {};
 
-  /* Runtime field (not serialized by DNA) */
-  /** Runtime pointer to parent folder. Restored from parent_name after loading.
-   * This field is NOT saved to disk - it's reconstructed when reading the file. */
+  /** Runtime pointer to the parent folder. The persistent hierarchy is stored in #parent_name;
+   * this pointer is written to disk by DNA but its saved value is meaningless (a stale address),
+   * so it is cleared and reconstructed from #parent_name on load
+   * (see #BKE_preferences_asset_library_restore_hierarchy). */
   struct bUserAssetLibrary *parent = nullptr;
 
 #ifdef __cplusplus

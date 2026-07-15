@@ -76,13 +76,12 @@ namespace blender::bke::preferences {
  * Find an asset library by name using linear search in the linked list.
  * Used primarily during hierarchy restoration after file loading.
  *
- * @param userdef: The UserDef structure containing asset libraries.
- * @param name: The name to search for. Must not be NULL.
- * @return: Pointer to the asset library with matching name, or nullptr if not found.
- * @note: The search is case-sensitive and uses full name matching.
+ * \param userdef: The UserDef structure containing asset libraries.
+ * \param name: The name to search for. Must not be null.
+ * \return Pointer to the asset library with matching name, or nullptr if not found.
+ * \note The search is case-sensitive and uses full name matching.
  */
-static bUserAssetLibrary *find_asset_library_by_name(const UserDef *userdef,
-                                                     const char *name)
+static bUserAssetLibrary *find_asset_library_by_name(const UserDef *userdef, const char *name)
 {
   if (!name || name[0] == '\0') {
     return nullptr;
@@ -90,7 +89,8 @@ static bUserAssetLibrary *find_asset_library_by_name(const UserDef *userdef,
 
   for (bUserAssetLibrary *lib = static_cast<bUserAssetLibrary *>(userdef->asset_libraries.first);
        lib;
-       lib = lib->next) {
+       lib = lib->next)
+  {
     if (STREQ(lib->name, name)) {
       return lib;
     }
@@ -103,9 +103,9 @@ static bUserAssetLibrary *find_asset_library_by_name(const UserDef *userdef,
  * Update both the parent pointer and parent_name when changing a library's parent.
  * This ensures parent_name and parent pointer stay synchronized.
  *
- * @param library: The library whose parent is being changed.
- * @param new_parent: The new parent library, or nullptr for root level.
- * @note: This is an internal helper function.
+ * \param library: The library whose parent is being changed.
+ * \param new_parent: The new parent library, or nullptr for root level.
+ * \note This is an internal helper function.
  */
 static void update_asset_library_parent_name(bUserAssetLibrary *library,
                                              bUserAssetLibrary *new_parent)
@@ -128,15 +128,16 @@ static void update_asset_library_parent_name(bUserAssetLibrary *library,
  *
  * This function must be called after loading UserDef from a file.
  *
- * @param userdef: The UserDef structure with asset libraries.
- * @note: Any broken parent_name references will result in the library being placed at root level.
+ * \param userdef: The UserDef structure with asset libraries.
+ * \note Any broken parent_name references will result in the library being placed at root level.
  */
 void restore_asset_library_hierarchy(UserDef *userdef)
 {
   /* First pass: restore parent pointers from parent_name strings saved in DNA. */
   for (bUserAssetLibrary *lib = static_cast<bUserAssetLibrary *>(userdef->asset_libraries.first);
        lib;
-       lib = lib->next) {
+       lib = lib->next)
+  {
     lib->parent = find_asset_library_by_name(userdef, lib->parent_name);
     if (!lib->parent && lib->parent_name[0]) {
       CLOG_WARN(&LOG,
@@ -150,7 +151,8 @@ void restore_asset_library_hierarchy(UserDef *userdef)
   /* Second pass: detect and break cycles using depth limit. */
   for (bUserAssetLibrary *lib = static_cast<bUserAssetLibrary *>(userdef->asset_libraries.first);
        lib;
-       lib = lib->next) {
+       lib = lib->next)
+  {
     if (!lib->parent) {
       continue;
     }
@@ -499,19 +501,6 @@ bool BKE_preferences_asset_library_reorder(UserDef *userdef,
     return false;
   }
 
-  /* Prevent moving a folder into itself or its descendants. */
-  if (location == ASSET_LIBRARY_MOVE_INTO) {
-    if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
-      bUserAssetLibrary *current = target;
-      while (current) {
-        if (current == library) {
-          return false; /* Cannot move folder into itself. */
-        }
-        current = current->parent;
-      }
-    }
-  }
-
   bUserAssetLibrary *new_parent = nullptr;
 
   if (location == ASSET_LIBRARY_MOVE_INTO) {
@@ -524,6 +513,18 @@ bool BKE_preferences_asset_library_reorder(UserDef *userdef,
   else {
     /* Before/After: Move to the same parent as the target. */
     new_parent = target->parent;
+  }
+
+  /* Prevent creating a cycle: the resulting parent must not be the moved folder itself nor any of
+   * its descendants. This also covers Before/After drops onto an item that lives inside the folder
+   * being moved (e.g. dropping a folder right after one of its own children), which would
+   * otherwise set the folder as its own ancestor. */
+  if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+    for (bUserAssetLibrary *current = new_parent; current; current = current->parent) {
+      if (current == library) {
+        return false; /* Would create a cycle. */
+      }
+    }
   }
 
   /* If moving a folder, collect all items in its subtree to move together. */
@@ -1123,6 +1124,3 @@ void BKE_preferences_asset_library_restore_hierarchy(UserDef *userdef)
 /** \} */
 
 }  // namespace blender
-
-
-

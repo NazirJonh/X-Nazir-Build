@@ -662,9 +662,25 @@ void build_asset_view(ui::Layout &layout,
                       std::optional<int> popup_grid_viewport_height_px,
                       std::optional<int> cols_hint)
 {
-  list::storage_fetch(&library_ref, &C);
+  /* Recent/Favorites are identity-keyed lists, not catalog-keyed, and their members can come from
+   * any library. Show them regardless of which library happens to be selected in the header, rather
+   * than silently hiding entries that don't belong to it -- scoping favorites to one library is
+   * still possible via "Only Favorites" combined with picking that library and its "All" catalog. */
+  const bool show_across_all_libraries = settings_is_recent_catalog_active(shelf.settings) ||
+                                         settings_is_favorites_catalog_active(shelf.settings);
+  const AssetLibraryReference effective_library_ref =
+      show_across_all_libraries ? asset_system::all_library_reference() : library_ref;
 
-  const asset_system::AssetLibrary *library = list::library_get_once_available(library_ref);
+  /* Always fetch the actually-selected library, even when it isn't what populates the grid below:
+   * #catalog_tree_draw() and the library selector both key off \a library_ref directly, independent
+   * of which pseudo-catalog happens to be active here, and rely on this fetch to make it available. */
+  list::storage_fetch(&library_ref, &C);
+  if (show_across_all_libraries) {
+    list::storage_fetch(&effective_library_ref, &C);
+  }
+
+  const asset_system::AssetLibrary *library = list::library_get_once_available(
+      effective_library_ref);
   if (!library) {
     return;
   }
@@ -676,7 +692,8 @@ void build_asset_view(ui::Layout &layout,
 
   const std::optional<AssetWeakReference> active_asset = active_asset_for_shelf(shelf, C);
 
-  std::unique_ptr asset_view = std::make_unique<AssetView>(library_ref, shelf, active_asset);
+  std::unique_ptr asset_view = std::make_unique<AssetView>(
+      effective_library_ref, shelf, active_asset);
   asset_view->set_catalog_filter(catalog_filter_from_shelf_settings(shelf.settings, *library));
   asset_view->set_pseudo_filter(
       pseudo_filter_from_shelf_settings(shelf.settings, shelf.type->idname));

@@ -734,7 +734,12 @@ void image_library_on_startup()
   }
 
   for (const bUserAssetLibrary &user_lib : U.asset_libraries) {
-    if (user_lib.flag & (ASSET_LIBRARY_DISABLED | ASSET_LIBRARY_USE_REMOTE_URL)) {
+    if (user_lib.type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      continue;
+    }
+    if ((user_lib.flag & ASSET_LIBRARY_USE_REMOTE_URL) ||
+        !BKE_preferences_asset_library_is_effectively_enabled(&user_lib))
+    {
       continue;
     }
     if (!user_lib.dirpath[0]) {

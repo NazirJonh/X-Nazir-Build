@@ -2659,8 +2659,12 @@ static AbstractView *get_view_focused(bContext *C)
 
 static bool view_focused_poll(bContext *C)
 {
-  const AbstractView *view = get_view_focused(C);
-  return view != nullptr;
+  if (get_view_focused(C)) {
+    return true;
+  }
+  /* Fallback for context menus: the cursor may be over the popup rather than the view itself. */
+  const ARegion *region = CTX_wm_region(C);
+  return region && region_views_find_active_item(region, nullptr) != nullptr;
 }
 
 static wmOperatorStatus view_start_filter_invoke(bContext *C,
@@ -2669,6 +2673,9 @@ static wmOperatorStatus view_start_filter_invoke(bContext *C,
 {
   const ARegion *region = CTX_wm_region(C);
   const AbstractView *hovered_view = region_view_find_at(region, event->xy, 0);
+  if (!hovered_view) {
+    return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
 
   if (!hovered_view->begin_filtering(*C)) {
     return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
@@ -2884,12 +2891,14 @@ static void UI_OT_view_scroll(wmOperatorType *ot)
 
 static bool view_item_rename_poll(bContext *C)
 {
-  const AbstractView *view = get_view_focused(C);
-  if (view == nullptr) {
+  const ARegion *region = CTX_wm_region(C);
+  if (!region) {
     return false;
   }
-
-  const ARegion *region = CTX_wm_region(C);
+  /* When the cursor is over a context menu (not directly over the view), `get_view_focused`
+   * returns null. Fall back to any active item in the region so rename works from context menus.
+   */
+  const AbstractView *view = get_view_focused(C);
   const AbstractViewItem *active_item = region_views_find_active_item(region, view);
   return active_item != nullptr && view_item_can_rename(*active_item);
 }
@@ -3073,6 +3082,18 @@ static wmOperatorStatus view_item_delete_invoke(bContext *C,
 {
   AbstractView *view = get_view_focused(C);
 
+  if (!view) {
+    /* Fallback for context menus: find the view from the active item in the region. */
+    const ARegion *region = CTX_wm_region(C);
+    if (Button *active_but = region ? region_views_find_active_item_but(region) : nullptr) {
+      view = &static_cast<ButtonViewItem *>(active_but)->view_item->get_view();
+    }
+  }
+
+  if (!view) {
+    return OPERATOR_CANCELLED;
+  }
+
   view->foreach_view_item([&](AbstractViewItem &item) {
     if (!item.is_filtered_visible()) {
       return;
@@ -3119,6 +3140,9 @@ static wmOperatorStatus ui_view_item_navigate_invoke(bContext *C,
   ARegion &region = *CTX_wm_region(C);
   const Direction direction = Direction(RNA_enum_get(op->ptr, "direction"));
   AbstractView *view = get_view_focused(C);
+  if (!view) {
+    return OPERATOR_CANCELLED;
+  }
 
   AbstractViewItem *from = view->find_active_or_visible_item();
   AbstractViewItem *next_item = nullptr;
@@ -3199,6 +3223,9 @@ static wmOperatorStatus ui_view_item_focus_invoke(bContext *C,
 {
   ARegion *region = CTX_wm_region(C);
   AbstractView *view = get_view_focused(C);
+  if (!view) {
+    return OPERATOR_CANCELLED;
+  }
 
   view->scroll_active_into_view(C, true);
   ED_region_tag_redraw(region);

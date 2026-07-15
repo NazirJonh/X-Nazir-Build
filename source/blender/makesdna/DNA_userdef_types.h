@@ -644,13 +644,27 @@ struct bUserMenuItem_Prop {
   char _pad0[4] = {};
 };
 
+/**
+ * Type of asset library item in Preferences.
+ * Used to distinguish between actual asset libraries and folder containers.
+ */
+enum eUserAssetLibraryItemType {
+  /** Regular asset library with a path on disk. */
+  USER_ASSET_LIBRARY_ITEM_TYPE_LEAF = 0,
+  /** Folder/container for organizing asset libraries. */
+  USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER = 1,
+};
+
 struct bUserAssetLibrary {
   struct bUserAssetLibrary *next = nullptr, *prev = nullptr;
+  /** Parent folder name for hierarchical organization. Empty string for root level items.
+   * Used for DNA serialization - the parent pointer is restored from this after loading. */
+  char parent_name[/*MAX_NAME*/ 64] = "";
 
   char name[/*MAX_NAME*/ 64] = "";
   /** The path on disk for this asset library. For remote libraries
    * (#ASSET_LIBRARY_USE_REMOTE_URL), this is the download cache directory, where already
-   * downloaded assets will be placed. */
+   * downloaded assets will be placed. Empty for folder containers. */
   char dirpath[/*FILE_MAX*/ 1024] = "";
   /** Only for remote asset libraries (#ASSET_LIBRARY_USE_REMOTE_URL is set). Update using
    * #BKE_preferences_remote_asset_library_url_set() only. */
@@ -658,7 +672,15 @@ struct bUserAssetLibrary {
 
   short import_method = ASSET_IMPORT_PACK;  /* eAssetImportMethod */
   short flag = ASSET_LIBRARY_RELATIVE_PATH; /* eAssetLibrary_Flag */
-  char _pad0[4] = {};
+  /** Type of item: #eUserAssetLibraryItemType (LEAF for library, FOLDER for container). */
+  short type = USER_ASSET_LIBRARY_ITEM_TYPE_LEAF;
+  char _pad0[2] = {};
+
+  /** Runtime pointer to the parent folder. The persistent hierarchy is stored in #parent_name;
+   * this pointer is written to disk by DNA but its saved value is meaningless (a stale address),
+   * so it is cleared and reconstructed from #parent_name on load
+   * (see #BKE_preferences_asset_library_restore_hierarchy). */
+  struct bUserAssetLibrary *parent = nullptr;
 
 #ifdef __cplusplus
   bool is_enabled() const

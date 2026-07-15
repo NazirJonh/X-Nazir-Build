@@ -160,7 +160,12 @@ std::optional<AssetLibraryReference> get_user_library_ref_for_save(
 
   /* Fallback to the first enabled on-disk user library. */
   for (const bUserAssetLibrary &asset_library : U.asset_libraries) {
-    if (asset_library.flag & (ASSET_LIBRARY_DISABLED | ASSET_LIBRARY_USE_REMOTE_URL)) {
+    if (asset_library.type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      continue;
+    }
+    if ((asset_library.flag & ASSET_LIBRARY_USE_REMOTE_URL) ||
+        !BKE_preferences_asset_library_is_effectively_enabled(&asset_library))
+    {
       continue;
     }
     return asset::user_library_to_library_ref(asset_library);

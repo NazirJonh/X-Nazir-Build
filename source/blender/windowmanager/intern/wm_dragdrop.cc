@@ -959,6 +959,15 @@ wmDragAssetCatalog *WM_drag_get_asset_catalog_data(const wmDrag *drag)
   return static_cast<wmDragAssetCatalog *>(drag->poin);
 }
 
+wmDragAssetLibrary *WM_drag_get_asset_library_data(const wmDrag *drag)
+{
+  if (drag->type != WM_DRAG_ASSET_LIBRARY) {
+    return nullptr;
+  }
+
+  return static_cast<wmDragAssetLibrary *>(drag->poin);
+}
+
 void WM_drag_add_asset_list_item(wmDrag *drag, const asset_system::AssetRepresentation *asset)
 {
   BLI_assert(drag->type == WM_DRAG_ASSET_LIST);

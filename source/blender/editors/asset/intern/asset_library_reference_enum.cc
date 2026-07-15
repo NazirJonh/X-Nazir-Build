@@ -46,7 +46,7 @@ int library_reference_to_enum_value(const AssetLibraryReference *library)
 
 static bool custom_library_is_valid(const bUserAssetLibrary *user_library)
 {
-  if (user_library->flag & ASSET_LIBRARY_DISABLED) {
+  if (!BKE_preferences_asset_library_is_effectively_enabled(user_library)) {
     return false;
   }
   if (!user_library->name[0]) {

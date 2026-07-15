@@ -1797,6 +1797,8 @@ void WM_drag_free_imported_drag_ID(Main *bmain, wmDrag *drag, wmDropBox *drop);
 
 wmDragAssetCatalog *WM_drag_get_asset_catalog_data(const wmDrag *drag);
 
+wmDragAssetLibrary *WM_drag_get_asset_library_data(const wmDrag *drag);
+
 /**
  * \note Does not store \a asset in any way, so it's fine to pass a temporary.
  */

@@ -866,6 +866,8 @@ struct ARegion {
 /* #AssetShelfSettings.display_flag */
 enum AssetShelfSettings_DisplayFlag : short {
   ASSETSHELF_SHOW_NAMES = (1 << 0),
+  /** Only show assets that are in the shelf's Favorites list, regardless of selected catalog. */
+  ASSETSHELF_FILTER_FAVORITES_ONLY = (1 << 1),
 };
 ENUM_OPERATORS(AssetShelfSettings_DisplayFlag)
 

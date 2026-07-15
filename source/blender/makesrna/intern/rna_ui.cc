@@ -2956,6 +2956,16 @@ static void rna_def_asset_shelf(BlenderRNA *brna)
       prop, "Asset Library", "Choose the asset library to display assets from");
   RNA_def_property_update(prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
 
+  prop = RNA_def_property(srna, "filter_favorites_only", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "settings.display_flag", ASSETSHELF_FILTER_FAVORITES_ONLY);
+  RNA_def_property_ui_text(prop,
+                           "Only Favorites",
+                           "Only show assets that have been added to Favorites, within the "
+                           "currently selected catalog");
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_AssetShelf_popup_settings_update");
+
   prop = RNA_def_property(srna, "show_names", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "settings.display_flag", ASSETSHELF_SHOW_NAMES);
   RNA_def_property_ui_text(prop,

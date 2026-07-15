@@ -35,6 +35,7 @@ set(SRC
   intern/asset_ops.cc
   intern/asset_shelf.cc
   intern/asset_shelf_asset_view.cc
+  intern/asset_shelf_brush_lists.cc
   intern/asset_shelf_catalog_selector.cc
   intern/asset_shelf_popover.cc
   intern/asset_shelf_regiondata.cc
@@ -60,6 +61,7 @@ set(SRC
   intern/asset_indexer_remote_listing.hh
   intern/asset_library_reference.hh
   intern/asset_shelf.hh
+  intern/asset_shelf_brush_lists.hh
 )
 
 set(LIB
@@ -85,3 +87,17 @@ blender_add_lib(bf_editor_asset "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
 
 # RNA_prototypes.hh
 add_dependencies(bf_editor_asset bf_rna)
+
+if(WITH_GTESTS)
+  set(TEST_SRC
+    intern/tests/asset_shelf_brush_lists_test.cc
+  )
+  set(TEST_INC
+    # The test includes "asset_shelf_brush_lists.hh", which lives next to the sources it tests, not
+    # in the module root that `INC` starts with.
+    intern
+  )
+  set(TEST_LIB
+  )
+  blender_add_test_suite_lib(editor_asset "${TEST_SRC}" "${INC};${TEST_INC}" "${INC_SYS}" "${LIB};${TEST_LIB}")
+endif()

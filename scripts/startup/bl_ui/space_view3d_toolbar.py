@@ -62,6 +62,9 @@ class VIEW3D_MT_brush_context_menu(Menu):
         layout.operator("brush.asset_save", text="Save Changes to Asset")
         layout.operator("brush.asset_revert", text="Revert to Asset")
 
+        layout.separator()
+        layout.operator("brush.asset_favorite_toggle", text="Toggle Favorite", icon='SOLO_ON')
+
 
 class View3DPanel:
     bl_space_type = 'VIEW_3D'

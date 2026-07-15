@@ -184,6 +184,43 @@ bool settings_is_all_catalog_active(const AssetShelfSettings &settings)
   return !settings.active_catalog_path || !settings.active_catalog_path[0];
 }
 
+namespace {
+/* Reserved sentinel values for #AssetShelfSettings::active_catalog_path, distinguishing the
+ * Recent/Favorites pseudo-catalogs from a real catalog path (which is always a sequence of
+ * user-visible names joined by '/' and can never start with a control character) or from the
+ * "All" pseudo-catalog (empty/null). Mirrors how "All" already overloads this one field instead
+ * of adding a new DNA field.
+ *
+ * The escape is deliberately a separate string literal from the text: `\x` consumes every
+ * following hex digit, so `"\x01FAVORITES"` would parse as the single (out of range) character
+ * `\x01FA` instead of `\x01` followed by "FAVORITES". */
+constexpr const char *catalog_sentinel_recent = "\x01" "RECENT";
+constexpr const char *catalog_sentinel_favorites = "\x01" "FAVORITES";
+}  // namespace
+
+void settings_set_recent_catalog_active(AssetShelfSettings &settings)
+{
+  MEM_delete(settings.active_catalog_path);
+  settings.active_catalog_path = BLI_strdup(catalog_sentinel_recent);
+}
+
+bool settings_is_recent_catalog_active(const AssetShelfSettings &settings)
+{
+  return settings.active_catalog_path && STREQ(settings.active_catalog_path, catalog_sentinel_recent);
+}
+
+void settings_set_favorites_catalog_active(AssetShelfSettings &settings)
+{
+  MEM_delete(settings.active_catalog_path);
+  settings.active_catalog_path = BLI_strdup(catalog_sentinel_favorites);
+}
+
+bool settings_is_favorites_catalog_active(const AssetShelfSettings &settings)
+{
+  return settings.active_catalog_path &&
+         STREQ(settings.active_catalog_path, catalog_sentinel_favorites);
+}
+
 static bool use_enabled_catalogs_from_prefs(const AssetShelf &shelf)
 {
   return shelf.type && (shelf.type->flag & ASSET_SHELF_TYPE_FLAG_STORE_CATALOGS_IN_PREFS);

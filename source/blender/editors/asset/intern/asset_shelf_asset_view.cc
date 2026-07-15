@@ -18,8 +18,11 @@
 
 #include "BLI_fnmatch.h"
 #include "BLI_listbase.h"
+#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
+#include "BLI_vector_set.hh"
 
 #include <fmt/format.h>
 
@@ -43,6 +46,7 @@
 #include "WM_api.hh"
 
 #include "asset_shelf.hh"
+#include "asset_shelf_brush_lists.hh"
 
 namespace blender::ed::asset::shelf {
 
@@ -51,6 +55,14 @@ class AssetView : public ui::AbstractGridView {
   const AssetShelf &shelf_;
   std::optional<AssetWeakReference> active_asset_;
   std::optional<asset_system::AssetCatalogFilter> catalog_filter_ = std::nullopt;
+  /** Members of the active Recent/Favorites pseudo-catalog, in the list's own order (most recently
+   * used first, respectively insertion order). #build_items() reproduces that order in the grid,
+   * so the container has to keep it -- an unordered #Set would leave the tiles in library order. */
+  std::optional<VectorSet<BrushAssetRef>> pseudo_filter_ = std::nullopt;
+  /** Favorites of this shelf, looked up once per rebuild. Drives both the "Only Favorites" header
+   * toggle and the per-tile favorite star, so neither has to look up the shelf's lists per asset.
+   * Unset for shelves without the favorites feature (only brush shelves have it). */
+  std::optional<Set<BrushAssetRef>> favorites_ = std::nullopt;
 
   friend class AssetViewItem;
   friend class AssetDragController;
@@ -64,6 +76,11 @@ class AssetView : public ui::AbstractGridView {
   bool begin_filtering(const bContext &C) const override;
 
   void set_catalog_filter(const std::optional<asset_system::AssetCatalogFilter> &catalog_filter);
+  void set_pseudo_filter(std::optional<VectorSet<BrushAssetRef>> pseudo_filter);
+  void set_favorites(std::optional<Set<BrushAssetRef>> favorites);
+
+ private:
+  void add_asset_item(asset_system::AssetRepresentation &asset, bool is_favorite);
 };
 
 class AssetViewItem : public ui::PreviewGridItem {
@@ -73,10 +90,16 @@ class AssetViewItem : public ui::PreviewGridItem {
   mutable uint32_t image_texture_brush_session_uid_ = MAIN_ID_SESSION_UID_UNSET;
   mutable bool image_texture_use_mask_slot_ = false;
 
+  /** Whether this asset is in the shelf's Favorites list. Resolved once per rebuild (see
+   * #AssetView::build_items()), so drawing a tile doesn't have to derive the asset's identity
+   * again. Always false on shelves without the favorites feature. */
+  bool is_favorite_ = false;
+
  public:
   AssetViewItem(asset_system::AssetRepresentation &asset_, StringRef identifier, StringRef label);
 
   void disable_asset_drag();
+  void set_favorite(bool is_favorite);
   void build_grid_tile(const bContext &C, ui::Layout &layout) const override;
   void build_context_menu(bContext &C, ui::Layout &column) const override;
   std::optional<bool> should_be_active() const override;
@@ -140,12 +163,58 @@ AssetView::AssetView(const AssetLibraryReference &library_ref,
   }
 }
 
+void AssetView::add_asset_item(asset_system::AssetRepresentation &asset, const bool is_favorite)
+{
+  const bool show_names = (shelf_.settings.display_flag & ASSETSHELF_SHOW_NAMES);
+  const StringRef identifier = asset.library_relative_identifier();
+
+  AssetViewItem &item = this->add_item<AssetViewItem>(asset, identifier, asset.get_name());
+  item.set_favorite(is_favorite);
+  if (!show_names) {
+    item.hide_label();
+  }
+  if (shelf_.type->flag & ASSET_SHELF_TYPE_FLAG_NO_ASSET_DRAG) {
+    item.disable_asset_drag();
+  }
+  /* Activate on click (release) rather than press so that LMB drag-scroll can intercept the
+   * gesture before selection triggers. Without this, popovers activate view items on press via
+   * #handle_view_item_event (unconditionally, before drag is detectable). Matches the image-grid
+   * template pattern (#select_on_click_set + #always_reactivate_on_click). */
+  item.select_on_click_set();
+  /* Make sure every click calls the #bl_activate_operator. We might want to add a flag to
+   * enable/disable this. Or we only call #bl_activate_operator when an item becomes active, and
+   * add a #bl_click_operator for repeated execution on every click. So far it seems like every
+   * asset shelf use case works with activating on every click though. */
+  item.always_reactivate_on_click();
+  if (shelf_.type->flag & ASSET_SHELF_TYPE_FLAG_ACTIVATE_FOR_CONTEXT_MENU &&
+      !asset.is_online_only())
+  {
+    item.activate_for_context_menu_set();
+  }
+}
+
 void AssetView::build_items()
 {
   const asset_system::AssetLibrary *library = list::library_get_once_available(library_ref_);
   if (!library) {
     return;
   }
+
+  /* Pseudo-catalog (Recent/Favorites): the tiles must follow the list's order, not the library's
+   * iteration order. Matching assets are parked at their position in the list here and added in a
+   * second pass below. The favorite state is parked with them so the second pass doesn't have to
+   * derive the asset's identity a second time. */
+  struct PseudoCatalogEntry {
+    asset_system::AssetRepresentation *asset = nullptr;
+    bool is_favorite = false;
+  };
+  Vector<PseudoCatalogEntry> pseudo_ordered_assets;
+  if (pseudo_filter_) {
+    pseudo_ordered_assets.resize(pseudo_filter_->size());
+  }
+
+  const bool favorites_only = (shelf_.settings.display_flag & ASSETSHELF_FILTER_FAVORITES_ONLY) !=
+                              0;
 
   list::iterate(library_ref_, [&](asset_system::AssetRepresentation &asset) {
     if (!shelf::type_asset_poll(*shelf_.type, asset)) {
@@ -159,34 +228,40 @@ void AssetView::build_items()
       return true;
     }
 
-    const bool show_names = (shelf_.settings.display_flag & ASSETSHELF_SHOW_NAMES);
-    const StringRef identifier = asset.library_relative_identifier();
-
-    AssetViewItem &item = this->add_item<AssetViewItem>(asset, identifier, asset.get_name());
-    if (!show_names) {
-      item.hide_label();
-    }
-    if (shelf_.type->flag & ASSET_SHELF_TYPE_FLAG_NO_ASSET_DRAG) {
-      item.disable_asset_drag();
-    }
-    /* Activate on click (release) rather than press so that LMB drag-scroll can intercept the
-     * gesture before selection triggers. Without this, popovers activate view items on press via
-     * #handle_view_item_event (unconditionally, before drag is detectable). Matches the image-grid
-     * template pattern (#select_on_click_set + #always_reactivate_on_click). */
-    item.select_on_click_set();
-    /* Make sure every click calls the #bl_activate_operator. We might want to add a flag to
-     * enable/disable this. Or we only call #bl_activate_operator when an item becomes active, and
-     * add a #bl_click_operator for repeated execution on every click. So far it seems like every
-     * asset shelf use case works with activating on every click though. */
-    item.always_reactivate_on_click();
-    if (shelf_.type->flag & ASSET_SHELF_TYPE_FLAG_ACTIVATE_FOR_CONTEXT_MENU &&
-        !asset.is_online_only())
-    {
-      item.activate_for_context_menu_set();
+    /* Deriving the asset's identity allocates and copies its two identifier strings, so pay for it
+     * only once, and only when the shelf has favorites or one of the identity-based filters is
+     * active (neither is, for a non-brush shelf). */
+    if (pseudo_filter_ || favorites_) {
+      const BrushAssetRef ref = BrushAssetRef::from_weak_reference(asset.make_weak_reference());
+      const bool is_favorite = favorites_ && favorites_->contains(ref);
+      if (favorites_only && !is_favorite) {
+        /* Skip this asset: header "Only Favorites" toggle is active and it isn't a favorite. */
+        return true;
+      }
+      if (pseudo_filter_) {
+        const int64_t index = pseudo_filter_->index_of_try(ref);
+        if (index < 0) {
+          /* Skip this asset: not in the active Recent/Favorites pseudo-catalog. */
+          return true;
+        }
+        pseudo_ordered_assets[index] = {&asset, is_favorite};
+        return true;
+      }
+      this->add_asset_item(asset, is_favorite);
+      return true;
     }
 
+    this->add_asset_item(asset, false);
     return true;
   });
+
+  for (const PseudoCatalogEntry &entry : pseudo_ordered_assets) {
+    /* Null for list entries the library doesn't contain (any more): removed, renamed, or from a
+     * library that isn't loaded in this session. */
+    if (entry.asset) {
+      this->add_asset_item(*entry.asset, entry.is_favorite);
+    }
+  }
 }
 
 bool AssetView::begin_filtering(const bContext &C) const
@@ -212,10 +287,27 @@ void AssetView::set_catalog_filter(
   }
 }
 
+void AssetView::set_pseudo_filter(std::optional<VectorSet<BrushAssetRef>> pseudo_filter)
+{
+  pseudo_filter_ = std::move(pseudo_filter);
+}
+
+void AssetView::set_favorites(std::optional<Set<BrushAssetRef>> favorites)
+{
+  favorites_ = std::move(favorites);
+}
+
 static std::optional<asset_system::AssetCatalogFilter> catalog_filter_from_shelf_settings(
     const AssetShelfSettings &shelf_settings, const asset_system::AssetLibrary &library)
 {
   if (!shelf_settings.active_catalog_path) {
+    return {};
+  }
+  /* Sentinel values for pseudo-catalogs (Recent/Favorites) must not be forwarded to the real
+   * catalog filter; the pseudo_filter handles them instead. */
+  if (settings_is_recent_catalog_active(shelf_settings) ||
+      settings_is_favorites_catalog_active(shelf_settings))
+  {
     return {};
   }
 
@@ -226,6 +318,43 @@ static std::optional<asset_system::AssetCatalogFilter> catalog_filter_from_shelf
   }
 
   return library.catalog_service().create_catalog_filter(active_catalog->catalog_id);
+}
+
+static std::optional<VectorSet<BrushAssetRef>> pseudo_filter_from_shelf_settings(
+    const AssetShelfSettings &shelf_settings, const StringRef shelf_idname)
+{
+  Span<BrushAssetRef> refs;
+  if (shelf::settings_is_recent_catalog_active(shelf_settings)) {
+    refs = shelf::brush_lists_recent(shelf_idname);
+  }
+  else if (shelf::settings_is_favorites_catalog_active(shelf_settings)) {
+    refs = shelf::brush_lists_favorites(shelf_idname);
+  }
+  else {
+    return std::nullopt;
+  }
+
+  /* A #VectorSet keeps the list's order (which the grid reproduces, see #AssetView::build_items())
+   * alongside the constant-time membership lookup the per-asset filtering needs. */
+  VectorSet<BrushAssetRef> filter;
+  filter.add_multiple(refs);
+  return filter;
+}
+
+/**
+ * The favorites of \a shelf_idname, or nothing for a shelf that doesn't have favorites (only brush
+ * shelves do). Built once per grid rebuild, for both the "Only Favorites" filter and the per-tile
+ * star; #brush_lists_is_favorite() would look up the shelf's lists again for every single asset.
+ */
+static std::optional<Set<BrushAssetRef>> favorites_from_shelf(const StringRef shelf_idname)
+{
+  if (!shelf::shelf_idname_is_brush_shelf(shelf_idname)) {
+    return std::nullopt;
+  }
+
+  Set<BrushAssetRef> favorites;
+  favorites.add_multiple(shelf::brush_lists_favorites(shelf_idname));
+  return favorites;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -240,6 +369,11 @@ AssetViewItem::AssetViewItem(asset_system::AssetRepresentation &asset,
 void AssetViewItem::disable_asset_drag()
 {
   allow_asset_drag_ = false;
+}
+
+void AssetViewItem::set_favorite(const bool is_favorite)
+{
+  is_favorite_ = is_favorite;
 }
 
 /**
@@ -348,6 +482,36 @@ void AssetViewItem::build_grid_tile(const bContext &C, ui::Layout &layout) const
     ui::Button *needs_download_icon = uiItemL_ex(&overlay_row, "", ICON_ERROR, false, false);
     button_label_alpha_factor_set(needs_download_icon, 0.6f);
     button_label_draw_icon_border_set(needs_download_icon, true);
+  }
+
+  /* Favorite toggle. Only shelves with a favorites list get one (#AssetView::favorites_ is unset
+   * for the others). Unlike the indicator icons above this is a real button, not a label, so that
+   * it is clickable at all (#button_is_interactive_ex() ignores non-draggable labels). It is
+   * defined after the tile's view-item button, which is what makes the two coexist: hit-testing
+   * walks the block back to front (#button_find_mouse_over_ex), so a press inside the star goes to
+   * the star and everywhere else to the tile. For the same reason the grid's touch drag-scroll
+   * doesn't arm on it, as that only claims presses landing on a view item (#grid_hit_press()). */
+  if (asset_view.favorites_) {
+    ui::Block *overlay_block = overlay_row.block();
+    /* #uiDefIconButO appends to the block's *current* layout; make that the overlay row. */
+    ui::block_layout_set_current(overlay_block, &overlay_row);
+    ui::Button *favorite_but = uiDefIconButO(overlay_block,
+                                             ui::ButtonType::But,
+                                             "BRUSH_OT_asset_favorite_toggle",
+                                             wm::OpCallContext::ExecDefault,
+                                             is_favorite_ ? ICON_SOLO_ON : ICON_SOLO_OFF,
+                                             0,
+                                             0,
+                                             ICON_DEFAULT_WIDTH_SCALE,
+                                             ICON_DEFAULT_HEIGHT_SCALE,
+                                             std::nullopt);
+    /* Act on this tile's asset, which is not necessarily the active brush (without these
+     * properties the operator falls back to the active brush). */
+    PointerRNA *favorite_opptr = ui::button_operator_ptr_ensure(favorite_but);
+    ed::asset::operator_asset_reference_props_set(asset_, *favorite_opptr);
+    /* The star sits on top of the preview image, which can be any color: draw it like the download
+     * button below, as a white icon over a dark circle. */
+    ui::button_pushbutton_draw_as_overlay_set(favorite_but, true);
   }
 
   /* Download overlay button for online assets. */
@@ -510,6 +674,9 @@ void build_asset_view(ui::Layout &layout,
 
   std::unique_ptr asset_view = std::make_unique<AssetView>(library_ref, shelf, active_asset);
   asset_view->set_catalog_filter(catalog_filter_from_shelf_settings(shelf.settings, *library));
+  asset_view->set_pseudo_filter(
+      pseudo_filter_from_shelf_settings(shelf.settings, shelf.type->idname));
+  asset_view->set_favorites(favorites_from_shelf(shelf.type->idname));
   asset_view->set_tile_size(tile_width, tile_height);
   if (cols_hint) {
     /* Popover snaps its width to whole columns; forcing the column count here keeps the grid from

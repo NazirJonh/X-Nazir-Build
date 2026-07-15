@@ -8,6 +8,7 @@
 #include "BLI_string_utf8.h"
 
 #include "DNA_brush_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
@@ -49,6 +50,39 @@
 #include "paint_intern.hh"
 
 namespace blender::ed::sculpt_paint {
+
+/**
+ * Return the identifier of the brush asset shelf the current context is keyed by, or null when the
+ * context is not in a brush mode at all.
+ *
+ * #BKE_paintmode_get_active_from_context() cannot answer this on its own: it falls back to
+ * #PaintMode::Texture2D for every context it does not recognize (Object mode, no active object, an
+ * Image Editor that is not painting), so it never reports #PaintMode::Invalid there. Reject those
+ * contexts first, then the paint mode it returns is trustworthy.
+ */
+static const char *brush_shelf_idname_from_context(const bContext *C)
+{
+  if (const SpaceImage *sima = CTX_wm_space_image(C)) {
+    /* 2D painting is available whatever the active object does (it may even be absent), but only
+     * while the Image Editor is in paint mode. That is also all #IMAGE_AST_brush_paint polls
+     * for. */
+    if (sima->mode != SI_MODE_PAINT) {
+      return nullptr;
+    }
+  }
+  else {
+    /* Every other space keys the brush shelf off the active object's mode. */
+    const Object *ob = CTX_data_active_object(C);
+    const eObjectMode brush_modes = OB_MODE_ALL_PAINT | OB_MODE_ALL_PAINT_GPENCIL |
+                                    OB_MODE_SCULPT_CURVES;
+    if (!ob || !(ob->mode & brush_modes)) {
+      return nullptr;
+    }
+  }
+
+  const PaintMode mode = BKE_paintmode_get_active_from_context(C);
+  return asset::shelf::brush_shelf_idname_from_paint_mode(mode);
+}
 
 static wmOperatorStatus brush_asset_activate_exec(bContext *C, wmOperator *op)
 {
@@ -127,6 +161,13 @@ static wmOperatorStatus brush_asset_activate_exec(bContext *C, wmOperator *op)
     BKE_paint_previous_asset_reference_clear(paint);
   }
 
+  /* Record for the shelf's "Recent" pseudo-catalog. Keyed by the paint mode, not by whether a shelf
+   * popover happens to be open right now, as this operator can also be run from search, a hotkey or
+   * Python with no popover in the context at all. */
+  if (const char *shelf_idname = brush_shelf_idname_from_context(C)) {
+    asset::shelf::brush_lists_record_recent(shelf_idname, brush_asset_reference);
+  }
+
   WM_main_add_notifier(NC_ASSET | NA_ACTIVATED, nullptr);
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
@@ -149,6 +190,76 @@ void BRUSH_OT_asset_activate(wmOperatorType *ot)
                          "Toggle",
                          "Switch between the current and assigned brushes on consecutive uses.");
   RNA_def_property_flag(prop, PropertyFlag(PROP_HIDDEN | PROP_SKIP_SAVE));
+}
+
+static bool brush_asset_favorite_toggle_poll(bContext *C)
+{
+  /* Favorites are stored per brush asset shelf, so a context without one (Object mode, an Image
+   * Editor that is not painting, ...) has no list to toggle in. Both call sites of this operator
+   * need the same gate: the star icon draws inside a shelf popover, which is only ever open in a
+   * brush mode, and the brush context menu only shows with an active brush. */
+  if (!brush_shelf_idname_from_context(C)) {
+    CTX_wm_operator_poll_msg_set(C, "No brush asset shelf for the current mode");
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Toggles the Favorites status of a brush asset. Two call sites, distinguished by whether the
+ * asset reference properties (registered below) were explicitly set:
+ * - The grid tile's star icon sets them explicitly, since the clicked asset may not be the active
+ *   one.
+ * - The brush context menu leaves them unset and relies on the already active brush: right-clicking
+ *   a shelf tile activates that asset first, so #Paint::brush_asset_reference is already the asset
+ *   the user right-clicked.
+ */
+static wmOperatorStatus brush_asset_favorite_toggle_exec(bContext *C, wmOperator *op)
+{
+  const char *shelf_idname = brush_shelf_idname_from_context(C);
+  if (!shelf_idname) {
+    BKE_report(op->reports, RPT_ERROR, "No brush asset shelf for the current mode");
+    return OPERATOR_CANCELLED;
+  }
+
+  AssetWeakReference weak_ref;
+  if (asset::operator_asset_reference_props_is_set(*op->ptr)) {
+    const asset_system::AssetRepresentation *asset =
+        asset::operator_asset_reference_props_get_asset_from_all_library(
+            *C, *op->ptr, op->reports);
+    if (!asset) {
+      return OPERATOR_CANCELLED;
+    }
+    weak_ref = asset->make_weak_reference();
+  }
+  else {
+    const Paint *paint = BKE_paint_get_active_from_context(C);
+    if (!paint || !paint->brush_asset_reference) {
+      BKE_report(op->reports, RPT_ERROR, "No active brush asset to add to Favorites");
+      return OPERATOR_CANCELLED;
+    }
+    weak_ref = *paint->brush_asset_reference;
+  }
+
+  asset::shelf::brush_lists_toggle_favorite(shelf_idname, weak_ref);
+  WM_main_add_notifier(NC_ASSET | ND_ASSET_CATALOGS, nullptr);
+
+  return OPERATOR_FINISHED;
+}
+
+void BRUSH_OT_asset_favorite_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Brush Favorite";
+  ot->description = "Add or remove the brush asset from the shelf's Favorites list";
+  ot->idname = "BRUSH_OT_asset_favorite_toggle";
+
+  ot->exec = brush_asset_favorite_toggle_exec;
+  ot->poll = brush_asset_favorite_toggle_poll;
+
+  /* No #OPTYPE_UNDO: the favorites live in a JSON file next to the user config, outside of the
+   * .blend, so an undo step could not restore them anyway. */
+
+  asset::operator_asset_reference_props_register(*ot->srna);
 }
 
 static bool brush_asset_save_as_poll(bContext *C)

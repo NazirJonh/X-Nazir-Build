@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 
 namespace blender {
@@ -18,6 +19,7 @@ struct AssetLibraryReference;
 struct AssetShelf;
 struct AssetShelfSettings;
 struct AssetShelfType;
+struct AssetWeakReference;
 struct BlendDataReader;
 struct BlendWriter;
 struct Main;
@@ -28,6 +30,11 @@ struct bContextDataResult;
 struct wmRegionListenerParams;
 struct wmRegionMessageSubscribeParams;
 struct wmWindowManager;
+
+/** Real definition: `BKE_paint_types.hh`, inside `namespace blender` (not global scope -- this
+ * forward declaration must match that exactly or callers passing a real #blender::PaintMode
+ * will fail to compile against this header's functions). */
+enum class PaintMode : int8_t;
 
 class StringRef;
 class StringRefNull;
@@ -155,6 +162,18 @@ AssetShelf *active_shelf_from_area(const ScrArea *area);
 void show_catalog_in_visible_shelves(const bContext &C, const StringRefNull catalog_path);
 
 int context(const bContext *C, const char *member, bContextDataResult *result);
+
+/* -------------------------------------------------------------------- */
+/** \name Brush Recent / Favorite Lists
+ * \{ */
+
+const char *brush_shelf_idname_from_paint_mode(PaintMode mode);
+
+void brush_lists_record_recent(StringRef shelf_idname, const AssetWeakReference &weak_ref);
+bool brush_lists_is_favorite(StringRef shelf_idname, const AssetWeakReference &weak_ref);
+void brush_lists_toggle_favorite(StringRef shelf_idname, const AssetWeakReference &weak_ref);
+
+/** \} */
 
 }  // namespace ed::asset::shelf
 }  // namespace blender

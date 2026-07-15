@@ -11,6 +11,7 @@
 #include "AS_asset_library.hh"
 
 #include "asset_shelf.hh"
+#include "asset_shelf_brush_lists.hh"
 
 #include "BKE_preferences.h"
 #include "BKE_screen.hh"
@@ -179,12 +180,25 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
 
   void build_tree() override
   {
-    if (catalog_tree_.is_empty()) {
-      auto &item = this->add_tree_item<ui::BasicTreeViewItem>(RPT_("No asset catalogs"),
-                                                              ICON_INFO);
-      item.disable_interaction();
-      this->is_flat_ = true;
-      return;
+    /* Recent/Favorites are catalog-independent, so they must be built before the empty-catalog
+     * early-out below -- a brush library that defines no catalogs would otherwise never offer
+     * them. */
+    if (shelf::shelf_idname_is_brush_shelf(shelf_.type->idname)) {
+      auto &recent_item = this->add_tree_item<ui::BasicTreeViewItem>(IFACE_("Recent"));
+      recent_item.set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem &) {
+        settings_set_recent_catalog_active(shelf_.settings);
+        send_redraw_notifier(C);
+      });
+      recent_item.set_is_active_fn(
+          [this]() { return settings_is_recent_catalog_active(shelf_.settings); });
+
+      auto &favorites_item = this->add_tree_item<ui::BasicTreeViewItem>(IFACE_("Favorites"));
+      favorites_item.set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem &) {
+        settings_set_favorites_catalog_active(shelf_.settings);
+        send_redraw_notifier(C);
+      });
+      favorites_item.set_is_active_fn(
+          [this]() { return settings_is_favorites_catalog_active(shelf_.settings); });
     }
 
     auto &all_item = this->add_tree_item<ui::BasicTreeViewItem>(IFACE_("All"));
@@ -195,6 +209,16 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
     all_item.set_is_active_fn(
         [this]() { return settings_is_all_catalog_active(shelf_.settings); });
     all_item.uncollapse_by_default();
+
+    if (catalog_tree_.is_empty()) {
+      auto &item = this->add_tree_item<ui::BasicTreeViewItem>(RPT_("No asset catalogs"),
+                                                              ICON_INFO);
+      item.disable_interaction();
+      /* Every item built above is a leaf here (nothing nests under "All" without catalogs), so no
+       * space needs to be reserved for collapse chevrons. */
+      this->is_flat_ = true;
+      return;
+    }
 
     catalog_tree_.foreach_root_item([&, this](
                                         const asset_system::AssetCatalogTreeItem &catalog_item) {
@@ -497,6 +521,17 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
   ui::Layout &controls = header_row.row(true);
   controls.fixed_size_set(true);
   controls.alignment_set(ui::LayoutAlign::Right);
+  /* Only meaningful on brush shelves (only they have favorites lists), and greyed out while the
+   * "Favorites" pseudo-catalog is itself active, since that view is already favorites-only. */
+  if (shelf_idname_is_brush_shelf(shelf->type->idname)) {
+    ui::Layout &favorites_only_row = controls.row(true);
+    favorites_only_row.enabled_set(!settings_is_favorites_catalog_active(shelf->settings));
+    favorites_only_row.prop(&shelf_ptr,
+                            "filter_favorites_only",
+                            ui::ITEM_R_TOGGLE | ui::ITEM_R_ICON_ONLY,
+                            "",
+                            ICON_SOLO_ON);
+  }
   controls.prop_enum(
       &shelf_ptr, "preview_size_preset", "SMALL", IFACE_("Small"), ICON_SHORTDISPLAY);
   controls.prop_enum(
@@ -623,7 +658,10 @@ static void asset_shelf_popover_listen(const wmRegionListenerParams *params)
 
   switch (wmn->category) {
     case NC_ASSET:
-      if (ELEM(wmn->data, ND_ASSET_LIST_READING, ND_ASSET_LIST_PREVIEW)) {
+      /* #ND_ASSET_CATALOGS also covers the pseudo-catalogs (Recent/Favorites): an open popover has
+       * to rebuild for a favorite toggled from outside of it (brush context menu, Python, another
+       * window). A popup only rebuilds on #RGN_REFRESH_UI, so tagging a redraw is not enough. */
+      if (ELEM(wmn->data, ND_ASSET_LIST_READING, ND_ASSET_LIST_PREVIEW, ND_ASSET_CATALOGS)) {
         ED_region_tag_refresh_ui(region);
       }
       break;

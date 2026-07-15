@@ -5,7 +5,10 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
+#include <utility>
 
+#include "BLI_map.hh"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_offset_indices.hh"
@@ -386,6 +389,63 @@ static GridMeshData build_flat_grid_mesh(const float3 &origin)
   return mesh;
 }
 
+/* Generalizes #build_flat_grid_mesh to an `n x n`-vertex flat triangulated grid (same
+ * row-major layout, each quad split top-left -> bottom-right). Edge indices are assigned
+ * on first use via `edge_index`, so `corner_edges` stays consistent with `edges`. Used to
+ * build a front large enough to exercise #distances_create's parallel branch. */
+static GridMeshData build_flat_grid_mesh_sized(const int n, const float3 &origin)
+{
+  GridMeshData mesh;
+  mesh.positions.reinitialize(n * n);
+  for (const int r : IndexRange(n)) {
+    for (const int c : IndexRange(n)) {
+      mesh.positions[r * n + c] = origin + float3(float(c), float(r), 0.0f);
+    }
+  }
+
+  Map<int64_t, int> edge_index;
+  auto edge_of = [&](int a, int b) -> int {
+    if (a > b) {
+      std::swap(a, b);
+    }
+    const int64_t key = (int64_t(a) << 32) | int64_t(b);
+    return edge_index.lookup_or_add_cb(key, [&]() {
+      const int idx = int(mesh.edges.size());
+      mesh.edges.append(int2(a, b));
+      return idx;
+    });
+  };
+
+  Vector<int> face_offsets;
+  face_offsets.append(0);
+  for (const int r : IndexRange(n - 1)) {
+    for (const int c : IndexRange(n - 1)) {
+      const int tl = r * n + c;
+      const int tr = r * n + c + 1;
+      const int bl = (r + 1) * n + c;
+      const int br = (r + 1) * n + c + 1;
+
+      mesh.corner_verts.append(tl);
+      mesh.corner_verts.append(tr);
+      mesh.corner_verts.append(br);
+      mesh.corner_edges.append(edge_of(tl, tr));
+      mesh.corner_edges.append(edge_of(tr, br));
+      mesh.corner_edges.append(edge_of(br, tl));
+      face_offsets.append(int(mesh.corner_verts.size()));
+
+      mesh.corner_verts.append(tl);
+      mesh.corner_verts.append(br);
+      mesh.corner_verts.append(bl);
+      mesh.corner_edges.append(edge_of(tl, br));
+      mesh.corner_edges.append(edge_of(br, bl));
+      mesh.corner_edges.append(edge_of(bl, tl));
+      face_offsets.append(int(mesh.corner_verts.size()));
+    }
+  }
+  mesh.face_offsets = Array<int>(face_offsets.as_span());
+  return mesh;
+}
+
 static detail::ObjectTopology topology_of(const GridMeshData &mesh)
 {
   return {mesh.positions,
@@ -435,6 +495,108 @@ TEST(sculpt_expand_multi, geodesic_single_mesh_matches_distances_create)
   ASSERT_EQ(result[0].size(), reference.size());
   for (const int i : reference.index_range()) {
     EXPECT_FLOAT_EQ(result[0][i], reference[i]);
+  }
+}
+
+TEST(sculpt_expand_multi, geodesic_distances_create_flat_grid_is_euclidean)
+{
+  /* Flat 3x3 grid, seeded at the center vertex 4. Because the mesh is planar and every
+   * shared edge is already unfolded, the surface geodesic distance equals the Euclidean
+   * distance, so the whole field is hand-derivable: the 4 edge-neighbors are at 1.0, the
+   * 4 diagonal corners at sqrt(2). This pins the ported algorithm's output exactly. */
+  const GridMeshData mesh = build_flat_grid_mesh(float3(0.0f));
+  const OffsetIndices<int> faces(mesh.face_offsets.as_span());
+
+  Array<int> edge_to_face_offsets;
+  Array<int> edge_to_face_indices;
+  const GroupedSpan<int> edge_to_face_map = bke::mesh::build_edge_to_face_map(
+      faces, mesh.corner_edges, mesh.edges.size(), edge_to_face_offsets, edge_to_face_indices);
+  Array<int> vert_to_edge_offsets;
+  Array<int> vert_to_edge_indices;
+  const GroupedSpan<int> vert_to_edge_map = bke::mesh::build_vert_to_edge_map(
+      mesh.edges, mesh.positions.size(), vert_to_edge_offsets, vert_to_edge_indices);
+
+  const Array<float> dists = geodesic::distances_create(mesh.positions,
+                                                        mesh.edges,
+                                                        faces,
+                                                        mesh.corner_verts,
+                                                        vert_to_edge_map,
+                                                        edge_to_face_map,
+                                                        {},
+                                                        Set<int>{4},
+                                                        FLT_MAX);
+
+  const float s2 = std::sqrt(2.0f);
+  const float expected[9] = {s2, 1.0f, s2, 1.0f, 0.0f, 1.0f, s2, 1.0f, s2};
+  ASSERT_EQ(dists.size(), 9);
+  for (const int i : IndexRange(9)) {
+    EXPECT_FLOAT_EQ(dists[i], expected[i]);
+  }
+}
+
+TEST(sculpt_expand_multi, geodesic_distances_create_parallel_is_deterministic)
+{
+  /* 64x64 grid = 4096 verts. Seeding the entire bottom half (all verts with row < 32)
+   * puts several thousand edges into the initial front -- comfortably above
+   * #distances_create's parallel_threshold -- so the parallel branch runs from round one.
+   * The field is then deterministic, so repeated runs must be bit-identical (any
+   * difference means a data race), and it must match the independently-derived
+   * priority-queue (Fast Marching) field elementwise. */
+  const int n = 64;
+  const GridMeshData mesh = build_flat_grid_mesh_sized(n, float3(0.0f));
+  const OffsetIndices<int> faces(mesh.face_offsets.as_span());
+
+  Array<int> edge_to_face_offsets;
+  Array<int> edge_to_face_indices;
+  const GroupedSpan<int> edge_to_face_map = bke::mesh::build_edge_to_face_map(
+      faces, mesh.corner_edges, mesh.edges.size(), edge_to_face_offsets, edge_to_face_indices);
+  Array<int> vert_to_edge_offsets;
+  Array<int> vert_to_edge_indices;
+  const GroupedSpan<int> vert_to_edge_map = bke::mesh::build_vert_to_edge_map(
+      mesh.edges, mesh.positions.size(), vert_to_edge_offsets, vert_to_edge_indices);
+
+  Set<int> seeds;
+  for (const int r : IndexRange(n / 2)) {
+    for (const int c : IndexRange(n)) {
+      seeds.add(r * n + c);
+    }
+  }
+
+  auto run = [&]() {
+    return geodesic::distances_create(mesh.positions,
+                                      mesh.edges,
+                                      faces,
+                                      mesh.corner_verts,
+                                      vert_to_edge_map,
+                                      edge_to_face_map,
+                                      {},
+                                      seeds,
+                                      FLT_MAX);
+  };
+
+  const Array<float> first = run();
+  for (int rep = 0; rep < 3; rep++) {
+    const Array<float> again = run();
+    ASSERT_EQ(again.size(), first.size());
+    for (const int i : first.index_range()) {
+      /* Bit-exact: the atomic-min reduction is order-independent, so a parallel re-run
+       * must reproduce the same float, not merely a close one. */
+      EXPECT_EQ(again[i], first[i]);
+    }
+  }
+
+  const Array<float> fmm = geodesic::distances_create_priority_queue(mesh.positions,
+                                                                     mesh.edges,
+                                                                     faces,
+                                                                     mesh.corner_verts,
+                                                                     vert_to_edge_map,
+                                                                     edge_to_face_map,
+                                                                     {},
+                                                                     seeds,
+                                                                     FLT_MAX);
+  ASSERT_EQ(fmm.size(), first.size());
+  for (const int i : first.index_range()) {
+    EXPECT_FLOAT_EQ(first[i], fmm[i]);
   }
 }
 

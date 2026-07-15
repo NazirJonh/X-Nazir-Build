@@ -64,6 +64,7 @@
 #include "sculpt_dyntopo.hh"
 #include "sculpt_flood_fill.hh"
 #include "sculpt_intern.hh"
+#include "sculpt_islands.hh"
 #include "sculpt_undo.hh"
 
 #include "RNA_access.hh"
@@ -1079,6 +1080,188 @@ static void SCULPT_OT_mask_by_color(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Mask by Topology Island
+ * \{ */
+
+/* Mask every visible vertex of `object`. Used for the objects that do not contain the clicked
+ * island, so that isolating an island hides the rest of the whole multi-object session. */
+static void mask_topology_island_fill_mesh(const Depsgraph &depsgraph, Object &object)
+{
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  IndexMaskMemory memory;
+  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  write_mask_mesh(depsgraph, object, node_mask, [&](MutableSpan<float> mask, Span<int> verts) {
+    for (const int vert : verts) {
+      mask[vert] = 1.0f;
+    }
+  });
+}
+
+static wmOperatorStatus mask_by_topology_island(bContext *C,
+                                                wmOperator *op,
+                                                const float2 region_location)
+{
+  const Scene &scene = *CTX_data_scene(C);
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  Object &active_ob = *CTX_data_active_object(C);
+  View3D *v3d = CTX_wm_view3d(C);
+
+  const Base *base = CTX_data_active_base(C);
+  if (!BKE_base_is_visible(v3d, base)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  if (bke::object::pbvh_get(active_ob)->type() != bke::pbvh::Type::Mesh) {
+    BKE_report(op->reports, RPT_ERROR, "Only available for meshes without dynamic topology");
+    return OPERATOR_CANCELLED;
+  }
+
+  ed::sculpt_paint::mask_overlay_check(*C, *op);
+
+  ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  const Vector<Object *> objects = sculpt_mode_objects(vc);
+  for (Object *object : objects) {
+    BKE_sculpt_update_object_for_edit(depsgraph, object, false);
+  }
+
+  /* The clicked island lives on the front-most object under the cursor, which may differ from the
+   * active object in a multi-object session. Read the seed vertex from that object's session. */
+  Object *hit_ob_ptr = nullptr;
+  cursor_geometry_info_update(C, region_location, false, &hit_ob_ptr);
+  Object &hit_ob = hit_ob_ptr ? *hit_ob_ptr : active_ob;
+  SculptSession &hit_ss = *hit_ob.runtime->sculpt_session;
+
+  if (!std::holds_alternative<int>(hit_ss.active_vert())) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Island keys are per-object and only computed for mesh PBVH; bail if the hit object is not one. */
+  if (bke::object::pbvh_get(hit_ob)->type() != bke::pbvh::Type::Mesh) {
+    BKE_report(op->reports, RPT_ERROR, "Only available for meshes without dynamic topology");
+    return OPERATOR_CANCELLED;
+  }
+
+  islands::ensure_cache(hit_ob);
+  const int active_vert = std::get<int>(hit_ss.active_vert());
+  const int target_island = islands::vert_id_get(hit_ss, active_vert);
+
+  const bool preserve_mask = RNA_boolean_get(op->ptr, "preserve_previous_mask");
+
+  /* When extending the selection (Shift), toggle the island in/out instead of always unmasking.
+   * The active vertex represents the island's current mask state. */
+  float new_island_mask = 0.0f;
+  if (preserve_mask) {
+    const Mesh &mesh = *id_cast<const Mesh *>(hit_ob.data);
+    const VArraySpan<float> current_mask = *mesh.attributes().lookup<float>(
+        ".sculpt_mask", bke::AttrDomain::Point);
+    const float island_current = current_mask.is_empty() ? 0.0f : current_mask[active_vert];
+    new_island_mask = (island_current < 0.5f) ? 1.0f : 0.0f;
+  }
+
+  undo::push_begin_multi_object(scene, op, objects);
+
+  for (Object *object : objects) {
+    /* Non-mesh objects have no comparable island keys and cannot be written by #write_mask_mesh. */
+    if (bke::object::pbvh_get(*object)->type() != bke::pbvh::Type::Mesh) {
+      continue;
+    }
+
+    if (object == &hit_ob) {
+      SculptSession &ss = *object->runtime->sculpt_session;
+      const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(*object);
+      IndexMaskMemory memory;
+      const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+      write_mask_mesh(
+          *depsgraph, *object, node_mask, [&](MutableSpan<float> mask, Span<int> verts) {
+            for (const int vert : verts) {
+              const int island = islands::vert_id_get(ss, vert);
+              if (island == target_island) {
+                mask[vert] = new_island_mask;
+              }
+              else if (!preserve_mask) {
+                /* Mask everything that is not part of the current selection. */
+                mask[vert] = 1.0f;
+              }
+            }
+          });
+    }
+    else if (!preserve_mask) {
+      /* The clicked island only exists on the hit object, so mask the other objects entirely: a
+       * single island is isolated across the whole multi-object session. In preserve (toggle)
+       * mode the other objects are left unchanged. */
+      mask_topology_island_fill_mesh(*depsgraph, *object);
+    }
+  }
+
+  undo::push_end_all_ex(false, true);
+
+  for (Object *object : objects) {
+    flush_update_done(C, *object, UpdateType::Mask);
+    DEG_id_tag_update(&object->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, object);
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus mask_by_topology_island_exec(bContext *C, wmOperator *op)
+{
+  int2 mval;
+  RNA_int_get_array(op->ptr, "location", mval);
+  return mask_by_topology_island(C, op, float2(mval[0], mval[1]));
+}
+
+static wmOperatorStatus mask_by_topology_island_invoke(bContext *C,
+                                                       wmOperator *op,
+                                                       const wmEvent *event)
+{
+  /* When invoked without an explicit value (e.g. from a menu or Quick Favorites), use the held
+   * Shift modifier so a single Shift-click extends the current selection. */
+  if (!RNA_struct_property_is_set(op->ptr, "preserve_previous_mask")) {
+    RNA_boolean_set(op->ptr, "preserve_previous_mask", (event->modifier & KM_SHIFT) != 0);
+  }
+  RNA_int_set_array(op->ptr, "location", event->mval);
+  return mask_by_topology_island(C, op, float2(event->mval[0], event->mval[1]));
+}
+
+static void SCULPT_OT_mask_by_topology_island(wmOperatorType *ot)
+{
+  ot->name = "Mask Topology Island";
+  ot->idname = "SCULPT_OT_mask_by_topology_island";
+  ot->description =
+      "Mask all mesh parts except the clicked topology island, so only the island can be sculpted. "
+      "Shift-click to toggle an island in or out of the unmasked selection.";
+
+  ot->invoke = mask_by_topology_island_invoke;
+  ot->exec = mask_by_topology_island_exec;
+  ot->poll = sculpt_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
+  ot->cursor_pending = WM_CURSOR_EYEDROPPER;
+
+  ot->prop = RNA_def_boolean(
+      ot->srna,
+      "preserve_previous_mask",
+      false,
+      "Extend Selection",
+      "Toggle the clicked island in or out of the unmasked selection, keeping the rest unchanged");
+
+  ot->prop = RNA_def_int_array(ot->srna,
+                               "location",
+                               2,
+                               nullptr,
+                               0,
+                               SHRT_MAX,
+                               "Location",
+                               "Region coordinates of sampling",
+                               0,
+                               SHRT_MAX);
+  RNA_def_property_flag(ot->prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Mask from Cavity
  * \{ */
 
@@ -1744,6 +1927,7 @@ void operatortypes_sculpt()
 
   WM_operatortype_append(color::SCULPT_OT_color_filter);
   WM_operatortype_append(mask::SCULPT_OT_mask_by_color);
+  WM_operatortype_append(mask::SCULPT_OT_mask_by_topology_island);
   WM_operatortype_append(dyntopo::SCULPT_OT_dyntopo_detail_size_edit);
   WM_operatortype_append(mask::SCULPT_OT_mask_init);
 

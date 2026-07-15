@@ -1991,6 +1991,22 @@ class _defs_sculpt:
         )
 
     @ToolDef.from_fn
+    def mask_by_topology_island():
+        def draw_settings(_context, layout, tool):
+            props = tool.operator_properties("sculpt.mask_by_topology_island")
+            layout.prop(props, "preserve_previous_mask")
+
+        return dict(
+            idname="builtin.mask_by_topology_island",
+            label="Mask Topology Island",
+            icon="ops.sculpt.mask_by_topology_island",
+            widget=None,
+            cursor='EYEDROPPER',
+            keymap=(),
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def face_set_edit():
         def draw_settings(_context, layout, tool):
             props = tool.operator_properties("sculpt.face_set_edit")
@@ -4012,6 +4028,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             None,
             _defs_sculpt.face_set_edit,
             _defs_sculpt.mask_by_color,
+            _defs_sculpt.mask_by_topology_island,
             None,
             _defs_transform.translate,
             _defs_transform.rotate,

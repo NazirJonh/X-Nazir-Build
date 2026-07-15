@@ -4015,6 +4015,8 @@ class VIEW3D_MT_mask(Menu):
 
         props = layout.operator("sculpt.mask_by_color", text="Mask by Color")
 
+        layout.operator("sculpt.mask_by_topology_island", text="Mask Topology Island")
+
         layout.separator()
 
         layout.menu("VIEW3D_MT_random_mask", text="Random Mask")

@@ -8445,6 +8445,19 @@ def km_3d_view_tool_sculpt_mask_by_color(params):
     )
 
 
+def km_3d_view_tool_sculpt_mask_by_topology_island(params):
+    return (
+        "3D View Tool: Sculpt, Mask Topology Island",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("sculpt.mask_by_topology_island", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+            ("sculpt.mask_by_topology_island",
+             {"type": params.tool_mouse, "value": 'PRESS', "shift": True},
+             {"properties": [("preserve_previous_mask", True)]}),
+        ]},
+    )
+
+
 def km_3d_view_tool_sculpt_face_set_edit(params):
     return (
         "3D View Tool: Sculpt, Face Set Edit",
@@ -9251,6 +9264,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_cloth_filter(params),
         km_3d_view_tool_sculpt_color_filter(params),
         km_3d_view_tool_sculpt_mask_by_color(params),
+        km_3d_view_tool_sculpt_mask_by_topology_island(params),
         km_3d_view_tool_sculpt_face_set_edit(params),
         km_3d_view_tool_paint_weight_sample_weight(params),
         km_3d_view_tool_paint_weight_sample_vertex_group(params),

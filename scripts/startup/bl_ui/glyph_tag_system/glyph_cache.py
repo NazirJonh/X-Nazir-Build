@@ -29,6 +29,37 @@ from bl_ui.glyph_tag_system.defaults import (
     SPACE_TO_FLAG,
     _CATEGORY_TAG_DEFAULT_MODE_FLAGS,
 )
+from bl_ui.glyph_tag_system.schema_keys import (
+    KEY_ALL_TAGS,
+    KEY_BASE_TYPE,
+    KEY_CATEGORY_ORDERS,
+    KEY_COLOR,
+    KEY_DEFAULT_DISPLAY_NAME,
+    KEY_DEFAULT_GLYPH,
+    KEY_DISCOVERED_IN_MODES,
+    KEY_DISCOVERED_IN_SPACES,
+    KEY_DISPLAY_NAME,
+    KEY_FIRST_LETTER,
+    KEY_GLOBAL,
+    KEY_GLYPH,
+    KEY_GLYPH_MODE,
+    KEY_ICON,
+    KEY_ICON_KEY,
+    KEY_ICON_PATH,
+    KEY_ICON_PROVIDER,
+    KEY_ICON_SOURCE,
+    KEY_MAPPINGS,
+    KEY_MODE_FLAGS,
+    KEY_PENDING_TAG_ASSIGNMENT,
+    KEY_SOURCE_EXTENSION,
+    KEY_TAGS,
+    KEY_TAG_ORDER,
+    KEY_VERSION,
+    ICON_BLOCK_KEY,
+    ICON_BLOCK_PATH,
+    ICON_BLOCK_PROVIDER,
+    ICON_BLOCK_SOURCE,
+)
 from bl_ui.glyph_tag_system.conversions import (
     _category_order_decode,
     _category_order_encode,
@@ -635,10 +666,10 @@ def _load_glyph_mappings_from_file():
     category_debug_print(f"[GLYPH] File exists: {os.path.exists(filepath) if filepath else 'N/A'}")
 
     default_structure = {
-        "version": CURRENT_JSON_VERSION,
-        "all_tags": {},
-        "mappings": {},
-        "category_orders": {}
+        KEY_VERSION: CURRENT_JSON_VERSION,
+        KEY_ALL_TAGS: {},
+        KEY_MAPPINGS: {},
+        KEY_CATEGORY_ORDERS: {}
     }
 
     if not filepath:
@@ -656,8 +687,8 @@ def _load_glyph_mappings_from_file():
 
     # Load into caches with space_type support
     reset_glyph_cache()
-    raw_mappings = data.get('mappings', {})
-    raw_orders = data.get("category_orders", {})
+    raw_mappings = data.get(KEY_MAPPINGS, {})
+    raw_orders = data.get(KEY_CATEGORY_ORDERS, {})
     order_categories = set()
     for _tag_key, category_list in raw_orders.items():
         if isinstance(category_list, list):
@@ -670,7 +701,7 @@ def _load_glyph_mappings_from_file():
     # The schema starts at version 1 (baseline), so `mappings` always has the form
     # {"GLOBAL": {category: data}}; no legacy space-specific or bare-category handling.
     if isinstance(raw_mappings, dict):
-        global_mappings = raw_mappings.get("GLOBAL", {})
+        global_mappings = raw_mappings.get(KEY_GLOBAL, {})
         if isinstance(global_mappings, dict) and global_mappings:
             _pref_log_once(f"[GLYPH LOAD DEBUG] Loading GLOBAL mappings -> {len(global_mappings)} categories")
             for category, cat_data in global_mappings.items():
@@ -691,7 +722,7 @@ def _load_glyph_mappings_from_file():
             category_debug_print(f"[GLYPH] Adding missing invalid category from order list: {repr(category)}")
 
     # Load all_tags cache - convert hex glyphs to Unicode
-    raw_tags = data.get("all_tags", {})
+    raw_tags = data.get(KEY_ALL_TAGS, {})
     category_debug_print(f"[TAGS LOAD] Loading {len(raw_tags)} tags from JSON")
     category_debug_print(f"[TAGS LOAD] raw_tags keys: {list(raw_tags.keys())}")
     reset_all_tags_cache()
@@ -699,18 +730,18 @@ def _load_glyph_mappings_from_file():
         category_debug_print(f"[TAGS LOAD] Processing tag '{tag_name}': {tag_data}")
         if isinstance(tag_data, dict):
             state.all_tags_cache[tag_name] = {
-                "glyph": _hex_to_glyph(tag_data.get("glyph", "")),
-                "color": tag_data.get("color", [0.0, 0.0, 0.0]),
-                "mode_flags": tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS),
-                "icon_key": tag_data.get("icon_key", ""),
-                "icon_source": tag_data.get("icon_source", 0),
+                KEY_GLYPH: _hex_to_glyph(tag_data.get(KEY_GLYPH, "")),
+                KEY_COLOR: tag_data.get(KEY_COLOR, [0.0, 0.0, 0.0]),
+                KEY_MODE_FLAGS: tag_data.get(KEY_MODE_FLAGS, _CATEGORY_TAG_DEFAULT_MODE_FLAGS),
+                KEY_ICON_KEY: tag_data.get(KEY_ICON_KEY, ""),
+                KEY_ICON_SOURCE: tag_data.get(KEY_ICON_SOURCE, 0),
             }
             category_debug_print(f"[TAGS LOAD] Loaded tag '{tag_name}' -> icon_key='{state.all_tags_cache[tag_name]['icon_key']}' icon_source={state.all_tags_cache[tag_name]['icon_source']}")
         else:
             state.all_tags_cache[tag_name] = tag_data
 
     # Load tag order for preserving manual ordering
-    set_tag_order(data.get("tag_order", []))
+    set_tag_order(data.get(KEY_TAG_ORDER, []))
 
     # Load category orders
     reset_category_orders_cache()
@@ -784,16 +815,16 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
         def _has_user_customizations(category_data):
             """Check if category has user customizations (display_name, color, glyph, or tags)."""
             if isinstance(category_data, dict):
-                display_name = category_data.get("display_name", "")
-                color = category_data.get("color", [0.0, 0.0, 0.0])
-                tags = category_data.get("tags", [])
-                glyph = category_data.get("glyph", "")
-                default_glyph = category_data.get("default_glyph", "")
-                glyph_mode = str(category_data.get("glyph_mode", "auto")).lower()
-                icon_source = str(category_data.get("icon_source", "auto")).lower()
-                icon_key = category_data.get("icon_key", "")
-                icon_path = category_data.get("icon_path", "")
-                icon_provider = category_data.get("icon_provider", "")
+                display_name = category_data.get(KEY_DISPLAY_NAME, "")
+                color = category_data.get(KEY_COLOR, [0.0, 0.0, 0.0])
+                tags = category_data.get(KEY_TAGS, [])
+                glyph = category_data.get(KEY_GLYPH, "")
+                default_glyph = category_data.get(KEY_DEFAULT_GLYPH, "")
+                glyph_mode = str(category_data.get(KEY_GLYPH_MODE, "auto")).lower()
+                icon_source = str(category_data.get(KEY_ICON_SOURCE, "auto")).lower()
+                icon_key = category_data.get(KEY_ICON_KEY, "")
+                icon_path = category_data.get(KEY_ICON_PATH, "")
+                icon_provider = category_data.get(KEY_ICON_PROVIDER, "")
                 icon_customized = (icon_source != "auto") or bool(icon_key) or bool(icon_path) or bool(icon_provider)
                 glyph_mode_customized = glyph_mode != "auto"
                 # Check if display_name is not empty, color is not default black, has glyph, has tags, or icon customized.
@@ -840,8 +871,8 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
             _pref_log_once(f"[GLYPH SAVE] Processing: key={cache_key}, category='{category}'")
 
             # Initialize GLOBAL dict if needed (Global-First: always use "GLOBAL")
-            if "GLOBAL" not in mappings_to_save:
-                mappings_to_save["GLOBAL"] = {}
+            if KEY_GLOBAL not in mappings_to_save:
+                mappings_to_save[KEY_GLOBAL] = {}
 
             # Skip invalid category names (glyphs as names) ONLY if they have no user customizations
             if not _is_valid_category_name(category):
@@ -857,58 +888,58 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
 
             if isinstance(category_data, dict):
                 # Debug: print tags for all categories with tags
-                cat_tags = category_data.get("tags", [])
+                cat_tags = category_data.get(KEY_TAGS, [])
                 category_debug_print(f"[GLYPH SAVE] SAVING: '{category}' (GLOBAL) tags={cat_tags}")
 
                 entry_to_save = {
-                    "glyph": _glyph_to_unicode_escape(category_data.get("glyph", "")),
-                    "display_name": category_data.get("display_name", ""),
-                    "first_letter": category_data.get("first_letter", ""),
-                    "color": list(category_data.get("color", [0.0, 0.0, 0.0])),
-                    "default_glyph": _glyph_to_unicode_escape(category_data.get("default_glyph", "")),
-                    "default_display_name": category_data.get("default_display_name", ""),
-                    "base_type": category_data.get("base_type", "text_only"),
-                    "tags": list(category_data.get("tags", [])),  # Save tags
-                    "glyph_mode": category_data.get("glyph_mode", "auto"),
-                    "icon": {
-                        "source": category_data.get("icon_source", "auto"),
-                        "key": category_data.get("icon_key", ""),
-                        "path": category_data.get("icon_path", ""),
-                        "provider": category_data.get("icon_provider", ""),
+                    KEY_GLYPH: _glyph_to_unicode_escape(category_data.get(KEY_GLYPH, "")),
+                    KEY_DISPLAY_NAME: category_data.get(KEY_DISPLAY_NAME, ""),
+                    KEY_FIRST_LETTER: category_data.get(KEY_FIRST_LETTER, ""),
+                    KEY_COLOR: list(category_data.get(KEY_COLOR, [0.0, 0.0, 0.0])),
+                    KEY_DEFAULT_GLYPH: _glyph_to_unicode_escape(category_data.get(KEY_DEFAULT_GLYPH, "")),
+                    KEY_DEFAULT_DISPLAY_NAME: category_data.get(KEY_DEFAULT_DISPLAY_NAME, ""),
+                    KEY_BASE_TYPE: category_data.get(KEY_BASE_TYPE, "text_only"),
+                    KEY_TAGS: list(category_data.get(KEY_TAGS, [])),  # Save tags
+                    KEY_GLYPH_MODE: category_data.get(KEY_GLYPH_MODE, "auto"),
+                    KEY_ICON: {
+                        ICON_BLOCK_SOURCE: category_data.get(KEY_ICON_SOURCE, "auto"),
+                        ICON_BLOCK_KEY: category_data.get(KEY_ICON_KEY, ""),
+                        ICON_BLOCK_PATH: category_data.get(KEY_ICON_PATH, ""),
+                        ICON_BLOCK_PROVIDER: category_data.get(KEY_ICON_PROVIDER, ""),
                     },
                 }
 
                 # Save extension-related fields for "New Add-ons!" feature
-                if category_data.get("source_extension"):
-                    entry_to_save["source_extension"] = category_data.get("source_extension")
+                if category_data.get(KEY_SOURCE_EXTENSION):
+                    entry_to_save[KEY_SOURCE_EXTENSION] = category_data.get(KEY_SOURCE_EXTENSION)
                 # Always save pending_tag_assignment if key exists (including False for "Without Tag")
-                if "pending_tag_assignment" in category_data:
-                    entry_to_save["pending_tag_assignment"] = category_data.get("pending_tag_assignment")
-                if category_data.get("discovered_in_spaces"):
-                    entry_to_save["discovered_in_spaces"] = category_data.get("discovered_in_spaces")
-                if category_data.get("discovered_in_modes"):
-                    entry_to_save["discovered_in_modes"] = category_data.get("discovered_in_modes")
+                if KEY_PENDING_TAG_ASSIGNMENT in category_data:
+                    entry_to_save[KEY_PENDING_TAG_ASSIGNMENT] = category_data.get(KEY_PENDING_TAG_ASSIGNMENT)
+                if category_data.get(KEY_DISCOVERED_IN_SPACES):
+                    entry_to_save[KEY_DISCOVERED_IN_SPACES] = category_data.get(KEY_DISCOVERED_IN_SPACES)
+                if category_data.get(KEY_DISCOVERED_IN_MODES):
+                    entry_to_save[KEY_DISCOVERED_IN_MODES] = category_data.get(KEY_DISCOVERED_IN_MODES)
 
-                mappings_to_save["GLOBAL"][category] = entry_to_save
+                mappings_to_save[KEY_GLOBAL][category] = entry_to_save
             elif isinstance(category_data, str):
                 # Old format - convert to new format
                 glyph = _unicode_escape_to_glyph(category_data) if '\\u' in category_data else category_data
                 base_type = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
-                mappings_to_save["GLOBAL"][category] = {
-                    "glyph": _glyph_to_unicode_escape(glyph),
-                    "display_name": "",
-                    "first_letter": "",
-                    "color": [0.0, 0.0, 0.0],
-                    "default_glyph": _glyph_to_unicode_escape(glyph),
-                    "default_display_name": "",
-                    "base_type": base_type,
-                    "tags": [],
-                    "glyph_mode": "auto",
-                    "icon": {
-                        "source": "auto",
-                        "key": "",
-                        "path": "",
-                        "provider": "",
+                mappings_to_save[KEY_GLOBAL][category] = {
+                    KEY_GLYPH: _glyph_to_unicode_escape(glyph),
+                    KEY_DISPLAY_NAME: "",
+                    KEY_FIRST_LETTER: "",
+                    KEY_COLOR: [0.0, 0.0, 0.0],
+                    KEY_DEFAULT_GLYPH: _glyph_to_unicode_escape(glyph),
+                    KEY_DEFAULT_DISPLAY_NAME: "",
+                    KEY_BASE_TYPE: base_type,
+                    KEY_TAGS: [],
+                    KEY_GLYPH_MODE: "auto",
+                    KEY_ICON: {
+                        ICON_BLOCK_SOURCE: "auto",
+                        ICON_BLOCK_KEY: "",
+                        ICON_BLOCK_PATH: "",
+                        ICON_BLOCK_PROVIDER: "",
                     },
                 }
 
@@ -920,11 +951,11 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
         for tag_name, tag_data in state.all_tags_cache.items():
             if isinstance(tag_data, dict):
                 tags_to_save[tag_name] = {
-                    "glyph": _glyph_to_hex(tag_data.get("glyph", "")),
-                    "color": list(tag_data.get("color", [0.0, 0.0, 0.0])),
-                    "mode_flags": tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS),
-                    "icon_key": tag_data.get("icon_key", ""),
-                    "icon_source": tag_data.get("icon_source", 0),
+                    KEY_GLYPH: _glyph_to_hex(tag_data.get(KEY_GLYPH, "")),
+                    KEY_COLOR: list(tag_data.get(KEY_COLOR, [0.0, 0.0, 0.0])),
+                    KEY_MODE_FLAGS: tag_data.get(KEY_MODE_FLAGS, _CATEGORY_TAG_DEFAULT_MODE_FLAGS),
+                    KEY_ICON_KEY: tag_data.get(KEY_ICON_KEY, ""),
+                    KEY_ICON_SOURCE: tag_data.get(KEY_ICON_SOURCE, 0),
                 }
             else:
                 tags_to_save[tag_name] = tag_data
@@ -939,11 +970,11 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
             pass
 
         data = {
-            'version': CURRENT_JSON_VERSION,
-            'all_tags': tags_to_save,
-            'tag_order': tag_order,  # Save tag order
-            'mappings': mappings_to_save,
-            'category_orders': {
+            KEY_VERSION: CURRENT_JSON_VERSION,
+            KEY_ALL_TAGS: tags_to_save,
+            KEY_TAG_ORDER: tag_order,  # Save tag order
+            KEY_MAPPINGS: mappings_to_save,
+            KEY_CATEGORY_ORDERS: {
                 tag_key: _category_order_encode(category_list)
                 for tag_key, category_list in state.category_orders_cache.items()
             }  # Save category orders (glyphs as \uXXXX)

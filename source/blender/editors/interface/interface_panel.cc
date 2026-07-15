@@ -1876,15 +1876,16 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm,
     }
 
     std::shared_ptr<blender::io::serialize::DictionaryValue> record = array.append_dict();
-    record->append_str("name", tag->name);
-    record->append_str("glyph", glyph_out);
-    record->append_bool("active", is_active);
-    std::shared_ptr<blender::io::serialize::ArrayValue> color = record->append_array("color");
+    record->append_str(category_tag_json::KEY_NAME, tag->name);
+    record->append_str(category_tag_json::KEY_GLYPH, glyph_out);
+    record->append_bool(category_tag_json::KEY_ACTIVE, is_active);
+    std::shared_ptr<blender::io::serialize::ArrayValue> color = record->append_array(
+        category_tag_json::KEY_COLOR);
     color->append_double(tag->color[0]);
     color->append_double(tag->color[1]);
     color->append_double(tag->color[2]);
-    record->append_int("icon_id", icon_id);
-    record->append_int("icon_source", tag->icon_source);
+    record->append_int(category_tag_json::KEY_ICON_ID, icon_id);
+    record->append_int(category_tag_json::KEY_ICON_SOURCE, tag->icon_source);
   }
 
   /* Preserve the previous "no tags -> empty string" contract: callers gate UI layout on

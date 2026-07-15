@@ -17,6 +17,36 @@ from .defaults import (
     CURRENT_JSON_VERSION,
     DEFAULT_CATEGORY_GLYPHS,
 )
+from .schema_keys import (
+    KEY_ALL_TAGS,
+    KEY_BASE_TYPE,
+    KEY_CATEGORY_ORDERS,
+    KEY_COLOR,
+    KEY_DEFAULT_DISPLAY_NAME,
+    KEY_DEFAULT_GLYPH,
+    KEY_DISCOVERED_IN_MODES,
+    KEY_DISCOVERED_IN_SPACES,
+    KEY_DISPLAY_NAME,
+    KEY_FIRST_LETTER,
+    KEY_GLYPH,
+    KEY_GLYPH_MODE,
+    KEY_ICON,
+    KEY_ICON_KEY,
+    KEY_ICON_PATH,
+    KEY_ICON_PROVIDER,
+    KEY_ICON_SOURCE,
+    KEY_MAPPINGS,
+    KEY_MODE_FLAGS,
+    KEY_PENDING_TAG_ASSIGNMENT,
+    KEY_SOURCE_EXTENSION,
+    KEY_TAGS,
+    KEY_TAG_ORDER,
+    KEY_VERSION,
+    ICON_BLOCK_KEY,
+    ICON_BLOCK_PATH,
+    ICON_BLOCK_PROVIDER,
+    ICON_BLOCK_SOURCE,
+)
 from .conversions import (
     _is_single_glyph,
     _unicode_escape_to_glyph,
@@ -36,21 +66,21 @@ def _normalize_category_data(category_data, category_name=None):
                        If category_name is a single glyph, base_type should be glyph_only.
     """
     default_entry = {
-        "glyph": "", "display_name": "", "color": [0.0, 0.0, 0.0],
-        "default_glyph": "", "default_display_name": "", "base_type": "text_only",
-        "first_letter": "",
-        "tags": [],  # NEW: array of tag names
-        "mode_flags": [],  # NEW: array of mode names
-        "glyph_mode": "auto",
-        "icon_source": "auto",
-        "icon_key": "",
-        "icon_path": "",
-        "icon_provider": "",
+        KEY_GLYPH: "", KEY_DISPLAY_NAME: "", KEY_COLOR: [0.0, 0.0, 0.0],
+        KEY_DEFAULT_GLYPH: "", KEY_DEFAULT_DISPLAY_NAME: "", KEY_BASE_TYPE: "text_only",
+        KEY_FIRST_LETTER: "",
+        KEY_TAGS: [],  # NEW: array of tag names
+        KEY_MODE_FLAGS: [],  # NEW: array of mode names
+        KEY_GLYPH_MODE: "auto",
+        KEY_ICON_SOURCE: "auto",
+        KEY_ICON_KEY: "",
+        KEY_ICON_PATH: "",
+        KEY_ICON_PROVIDER: "",
         # Extension-related fields for "New Add-ons!" feature
-        "source_extension": "",
-        "pending_tag_assignment": False,
-        "discovered_in_spaces": [],
-        "discovered_in_modes": [],
+        KEY_SOURCE_EXTENSION: "",
+        KEY_PENDING_TAG_ASSIGNMENT: False,
+        KEY_DISCOVERED_IN_SPACES: [],
+        KEY_DISCOVERED_IN_MODES: [],
     }
 
     if isinstance(category_data, str):
@@ -59,160 +89,160 @@ def _normalize_category_data(category_data, category_name=None):
         base_type = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
         # For glyph_text categories, use category name as default_display_name for tooltip fallback
         default_display_name = "" if base_type == "glyph_only" else category_name
-        return {"glyph": glyph, "display_name": "", "color": [0.0, 0.0, 0.0],
-                "default_glyph": glyph, "default_display_name": default_display_name, "base_type": base_type,
-                "first_letter": "",
-                "tags": [],
-                "glyph_mode": "auto",
-                "icon_source": "auto", "icon_key": "", "icon_path": "", "icon_provider": "",
-                "source_extension": "", "pending_tag_assignment": False,
-                "discovered_in_spaces": [], "discovered_in_modes": []}
+        return {KEY_GLYPH: glyph, KEY_DISPLAY_NAME: "", KEY_COLOR: [0.0, 0.0, 0.0],
+                KEY_DEFAULT_GLYPH: glyph, KEY_DEFAULT_DISPLAY_NAME: default_display_name, KEY_BASE_TYPE: base_type,
+                KEY_FIRST_LETTER: "",
+                KEY_TAGS: [],
+                KEY_GLYPH_MODE: "auto",
+                KEY_ICON_SOURCE: "auto", KEY_ICON_KEY: "", KEY_ICON_PATH: "", KEY_ICON_PROVIDER: "",
+                KEY_SOURCE_EXTENSION: "", KEY_PENDING_TAG_ASSIGNMENT: False,
+                KEY_DISCOVERED_IN_SPACES: [], KEY_DISCOVERED_IN_MODES: []}
     elif isinstance(category_data, dict):
         # New format: dict with glyph, display_name, color, default_glyph, default_display_name, base_type, tags
         entry = default_entry.copy()
 
         # Current values
-        if "glyph" in category_data:
-            glyph_str = category_data["glyph"]
+        if KEY_GLYPH in category_data:
+            glyph_str = category_data[KEY_GLYPH]
             if glyph_str and '\\u' in glyph_str:
                 decoded_glyph = _unicode_escape_to_glyph(glyph_str)
-                entry["glyph"] = decoded_glyph
+                entry[KEY_GLYPH] = decoded_glyph
                 if 'Brushstroke' in str(category_name):
                     category_debug_print(f"[NORMALIZE] Brushstroke glyph decoded: '{glyph_str}' -> '{decoded_glyph}' (len={len(decoded_glyph)})")
             else:
-                entry["glyph"] = glyph_str
-        if "display_name" in category_data:
-            entry["display_name"] = category_data["display_name"]
-        if "first_letter" in category_data:
-            entry["first_letter"] = category_data.get("first_letter", "") or ""
+                entry[KEY_GLYPH] = glyph_str
+        if KEY_DISPLAY_NAME in category_data:
+            entry[KEY_DISPLAY_NAME] = category_data[KEY_DISPLAY_NAME]
+        if KEY_FIRST_LETTER in category_data:
+            entry[KEY_FIRST_LETTER] = category_data.get(KEY_FIRST_LETTER, "") or ""
         # Derive first_letter for legacy data when missing but display_name is available.
-        if not entry["first_letter"] and entry.get("display_name"):
-            entry["first_letter"] = entry["display_name"][:1]
-        if "color" in category_data:
-            color = category_data["color"]
+        if not entry[KEY_FIRST_LETTER] and entry.get(KEY_DISPLAY_NAME):
+            entry[KEY_FIRST_LETTER] = entry[KEY_DISPLAY_NAME][:1]
+        if KEY_COLOR in category_data:
+            color = category_data[KEY_COLOR]
             if isinstance(color, (list, tuple)) and len(color) >= 3:
-                entry["color"] = list(color[:3])
+                entry[KEY_COLOR] = list(color[:3])
 
         # Default values (for reset)
         # IMPORTANT: Distinguish between "field is missing" vs "field is present but intentionally empty".
         # Empty default_glyph is meaningful for text_only categories (fallback letter behavior).
-        if "default_glyph" in category_data:
-            glyph_str = category_data["default_glyph"]
+        if KEY_DEFAULT_GLYPH in category_data:
+            glyph_str = category_data[KEY_DEFAULT_GLYPH]
             if glyph_str and '\\u' in glyph_str:
                 decoded_default = _unicode_escape_to_glyph(glyph_str)
-                entry["default_glyph"] = decoded_default
+                entry[KEY_DEFAULT_GLYPH] = decoded_default
                 if 'Brushstroke' in str(category_name):
                     category_debug_print(f"[NORMALIZE] Brushstroke default_glyph decoded: '{glyph_str}' -> '{decoded_default}'")
             else:
-                entry["default_glyph"] = glyph_str or ""
+                entry[KEY_DEFAULT_GLYPH] = glyph_str or ""
         else:
             # Backward compatibility for legacy data where default_glyph field does not exist.
             # IMPORTANT: Only set default_glyph from glyph for glyph_only categories.
             # For text_only/glyph_text categories, default_glyph should be empty (reset returns first letter).
-            if entry.get("base_type") == "glyph_only":
-                entry["default_glyph"] = entry["glyph"]
+            if entry.get(KEY_BASE_TYPE) == "glyph_only":
+                entry[KEY_DEFAULT_GLYPH] = entry[KEY_GLYPH]
             else:
-                entry["default_glyph"] = ""
+                entry[KEY_DEFAULT_GLYPH] = ""
 
-        if "default_display_name" in category_data:
-            entry["default_display_name"] = category_data["default_display_name"]
+        if KEY_DEFAULT_DISPLAY_NAME in category_data:
+            entry[KEY_DEFAULT_DISPLAY_NAME] = category_data[KEY_DEFAULT_DISPLAY_NAME]
         else:
             # If no default_display_name, set based on base_type
             # For glyph_text categories, use category name for tooltip fallback
-            if entry.get("base_type") == "glyph_text":
-                entry["default_display_name"] = category_name
+            if entry.get(KEY_BASE_TYPE) == "glyph_text":
+                entry[KEY_DEFAULT_DISPLAY_NAME] = category_name
             else:
-                entry["default_display_name"] = ""
+                entry[KEY_DEFAULT_DISPLAY_NAME] = ""
 
         # Base type (for reset): glyph_only, glyph_text, or text_only
-        if "base_type" in category_data:
-            entry["base_type"] = category_data["base_type"]
+        if KEY_BASE_TYPE in category_data:
+            entry[KEY_BASE_TYPE] = category_data[KEY_BASE_TYPE]
         else:
             # Determine base_type from current values
             # Priority: 1) glyph field is not empty -> glyph_text or glyph_only
             #           2) category_name is a single glyph -> glyph_only
             #           3) otherwise -> text_only
-            if entry["glyph"]:
-                entry["base_type"] = "glyph_only" if _is_single_glyph(entry["glyph"]) else "glyph_text"
+            if entry[KEY_GLYPH]:
+                entry[KEY_BASE_TYPE] = "glyph_only" if _is_single_glyph(entry[KEY_GLYPH]) else "glyph_text"
             elif category_name and _is_single_glyph(category_name):
                 # Category name itself is a glyph (e.g., "" for Script 1)
-                entry["base_type"] = "glyph_only"
+                entry[KEY_BASE_TYPE] = "glyph_only"
             else:
-                entry["base_type"] = "text_only"
+                entry[KEY_BASE_TYPE] = "text_only"
 
         # Safety correction for previously serialized incorrect state:
         # text_only AND glyph_text categories must reset to fallback letter, so default_glyph must be empty.
         # Only glyph_only categories should have default_glyph set (to category name).
-        if entry["base_type"] in ("text_only", "glyph_text"):
-            entry["default_glyph"] = ""
+        if entry[KEY_BASE_TYPE] in ("text_only", "glyph_text"):
+            entry[KEY_DEFAULT_GLYPH] = ""
 
         # For glyph_only categories, ensure default_glyph is set to category name (original glyph)
-        if entry["base_type"] == "glyph_only" and category_name and _is_single_glyph(category_name):
-            if not entry.get("default_glyph"):
-                entry["default_glyph"] = category_name
+        if entry[KEY_BASE_TYPE] == "glyph_only" and category_name and _is_single_glyph(category_name):
+            if not entry.get(KEY_DEFAULT_GLYPH):
+                entry[KEY_DEFAULT_GLYPH] = category_name
                 _pref_log_once(f"[GLYPH LOAD] Set default_glyph for glyph_only category '{category_name}'")
 
         # NEW: For reserved categories (in DEFAULT_CATEGORY_GLYPHS), restore default_glyph
         # even if glyph field is empty in JSON. This ensures Reset works correctly.
         if category_name and category_name in DEFAULT_CATEGORY_GLYPHS:
             default_data = DEFAULT_CATEGORY_GLYPHS[category_name]
-            reserved_glyph = default_data.get("glyph", "")
+            reserved_glyph = default_data.get(KEY_GLYPH, "")
             if reserved_glyph:
                 # Only restore if default_glyph is actually empty or incorrect
-                current_default = entry.get("default_glyph", "")
+                current_default = entry.get(KEY_DEFAULT_GLYPH, "")
                 if not current_default or current_default != reserved_glyph:
-                    entry["default_glyph"] = reserved_glyph
-                    entry["base_type"] = "glyph_text"
+                    entry[KEY_DEFAULT_GLYPH] = reserved_glyph
+                    entry[KEY_BASE_TYPE] = "glyph_text"
                     category_debug_print(f"[GLYPH] Restored default_glyph for reserved category '{category_name}': '{reserved_glyph}'")
 
         # NEW: Tags
-        if "tags" in category_data:
-            tags = category_data["tags"]
+        if KEY_TAGS in category_data:
+            tags = category_data[KEY_TAGS]
             if isinstance(tags, list):
-                entry["tags"] = [str(t) for t in tags]
+                entry[KEY_TAGS] = [str(t) for t in tags]
 
         # Extension-related fields for "New Add-ons!" feature
-        if "source_extension" in category_data:
-            entry["source_extension"] = str(category_data["source_extension"])
-        if "pending_tag_assignment" in category_data:
-            val = category_data["pending_tag_assignment"]
-            entry["pending_tag_assignment"] = bool(val) if val else False
-        if "discovered_in_spaces" in category_data:
-            spaces = category_data["discovered_in_spaces"]
+        if KEY_SOURCE_EXTENSION in category_data:
+            entry[KEY_SOURCE_EXTENSION] = str(category_data[KEY_SOURCE_EXTENSION])
+        if KEY_PENDING_TAG_ASSIGNMENT in category_data:
+            val = category_data[KEY_PENDING_TAG_ASSIGNMENT]
+            entry[KEY_PENDING_TAG_ASSIGNMENT] = bool(val) if val else False
+        if KEY_DISCOVERED_IN_SPACES in category_data:
+            spaces = category_data[KEY_DISCOVERED_IN_SPACES]
             if isinstance(spaces, list):
-                entry["discovered_in_spaces"] = [str(s) for s in spaces]
-        if "discovered_in_modes" in category_data:
-            modes = category_data["discovered_in_modes"]
+                entry[KEY_DISCOVERED_IN_SPACES] = [str(s) for s in spaces]
+        if KEY_DISCOVERED_IN_MODES in category_data:
+            modes = category_data[KEY_DISCOVERED_IN_MODES]
             if isinstance(modes, list):
-                entry["discovered_in_modes"] = [str(m) for m in modes]
+                entry[KEY_DISCOVERED_IN_MODES] = [str(m) for m in modes]
 
         # Icon persistence (v7): accept both nested block and legacy flat keys.
-        icon_block = category_data.get("icon", {}) if isinstance(category_data.get("icon", {}), dict) else {}
+        icon_block = category_data.get(KEY_ICON, {}) if isinstance(category_data.get(KEY_ICON, {}), dict) else {}
 
-        glyph_mode = category_data.get("glyph_mode", "auto")
+        glyph_mode = category_data.get(KEY_GLYPH_MODE, "auto")
         if not isinstance(glyph_mode, str):
             glyph_mode = "auto"
         glyph_mode = glyph_mode.lower()
         if glyph_mode not in {"auto", "first_letter"}:
             glyph_mode = "auto"
-        entry["glyph_mode"] = glyph_mode
+        entry[KEY_GLYPH_MODE] = glyph_mode
 
-        icon_source = icon_block.get("source", category_data.get("icon_source", "auto"))
+        icon_source = icon_block.get(ICON_BLOCK_SOURCE, category_data.get(KEY_ICON_SOURCE, "auto"))
         if not isinstance(icon_source, str):
             icon_source = "auto"
         icon_source = icon_source.lower()
         if icon_source not in {"auto", "manual", "off"}:
             icon_source = "auto"
-        entry["icon_source"] = icon_source
+        entry[KEY_ICON_SOURCE] = icon_source
 
-        icon_key = icon_block.get("key", category_data.get("icon_key", ""))
-        entry["icon_key"] = str(icon_key) if icon_key is not None else ""
+        icon_key = icon_block.get(ICON_BLOCK_KEY, category_data.get(KEY_ICON_KEY, ""))
+        entry[KEY_ICON_KEY] = str(icon_key) if icon_key is not None else ""
 
-        icon_path = icon_block.get("path", category_data.get("icon_path", ""))
-        entry["icon_path"] = str(icon_path) if icon_path is not None else ""
+        icon_path = icon_block.get(ICON_BLOCK_PATH, category_data.get(KEY_ICON_PATH, ""))
+        entry[KEY_ICON_PATH] = str(icon_path) if icon_path is not None else ""
 
-        icon_provider = icon_block.get("provider", category_data.get("icon_provider", ""))
-        entry["icon_provider"] = str(icon_provider) if icon_provider is not None else ""
+        icon_provider = icon_block.get(ICON_BLOCK_PROVIDER, category_data.get(KEY_ICON_PROVIDER, ""))
+        entry[KEY_ICON_PROVIDER] = str(icon_provider) if icon_provider is not None else ""
 
         # DEBUG: Log icon data loading for Brushstroke
         if 'Brushstroke' in str(category_name):
@@ -254,36 +284,36 @@ def migrate_json_data(data):
 
     # Required top-level sections must be dictionaries (a non-dict here would crash
     # the loader, e.g. ``all_tags.items()`` if it arrived as a list).
-    if not isinstance(data.get("all_tags"), dict):
-        data["all_tags"] = {}
-    if not isinstance(data.get("mappings"), dict):
-        data["mappings"] = {}
-    if not isinstance(data.get("category_orders"), dict):
-        data["category_orders"] = {}
+    if not isinstance(data.get(KEY_ALL_TAGS), dict):
+        data[KEY_ALL_TAGS] = {}
+    if not isinstance(data.get(KEY_MAPPINGS), dict):
+        data[KEY_MAPPINGS] = {}
+    if not isinstance(data.get(KEY_CATEGORY_ORDERS), dict):
+        data[KEY_CATEGORY_ORDERS] = {}
 
     # ``tag_order`` must be a list of strings.
-    tag_order = data.get("tag_order")
-    data["tag_order"] = (
+    tag_order = data.get(KEY_TAG_ORDER)
+    data[KEY_TAG_ORDER] = (
         [t for t in tag_order if isinstance(t, str)] if isinstance(tag_order, list) else []
     )
 
     # ``category_orders`` values must be lists (the loader decodes them as lists).
-    data["category_orders"] = {
-        key: value for key, value in data["category_orders"].items() if isinstance(value, list)
+    data[KEY_CATEGORY_ORDERS] = {
+        key: value for key, value in data[KEY_CATEGORY_ORDERS].items() if isinstance(value, list)
     }
 
     # Normalize tag colors.
-    for tag_data in data["all_tags"].values():
-        if isinstance(tag_data, dict) and "color" in tag_data:
-            tag_data["color"] = _normalize_color(tag_data.get("color"))
+    for tag_data in data[KEY_ALL_TAGS].values():
+        if isinstance(tag_data, dict) and KEY_COLOR in tag_data:
+            tag_data[KEY_COLOR] = _normalize_color(tag_data.get(KEY_COLOR))
 
     # Normalize category colors within the GLOBAL mappings block.
-    for categories in data["mappings"].values():
+    for categories in data[KEY_MAPPINGS].values():
         if not isinstance(categories, dict):
             continue
         for cat_data in categories.values():
-            if isinstance(cat_data, dict) and "color" in cat_data:
-                cat_data["color"] = _normalize_color(cat_data.get("color"))
+            if isinstance(cat_data, dict) and KEY_COLOR in cat_data:
+                cat_data[KEY_COLOR] = _normalize_color(cat_data.get(KEY_COLOR))
 
-    data["version"] = CURRENT_JSON_VERSION
+    data[KEY_VERSION] = CURRENT_JSON_VERSION
     return data

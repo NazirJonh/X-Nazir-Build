@@ -1381,18 +1381,21 @@ static Vector<EditDialogTagData> parse_edit_dialog_tag_data(const char *data_str
 
     EditDialogTagData item{};
 
-    if (const std::optional<StringRefNull> name = record->lookup_str("name")) {
+    if (const std::optional<StringRefNull> name = record->lookup_str(category_tag_json::KEY_NAME))
+    {
       BLI_strncpy(item.name, name->c_str(), sizeof(item.name));
     }
-    if (const std::optional<StringRefNull> glyph = record->lookup_str("glyph")) {
+    if (const std::optional<StringRefNull> glyph = record->lookup_str(category_tag_json::KEY_GLYPH))
+    {
       BLI_strncpy(item.glyph, glyph->c_str(), sizeof(item.glyph));
     }
-    item.is_active = record->lookup_bool("active").value_or(false) ? 1 : 0;
+    item.is_active = record->lookup_bool(category_tag_json::KEY_ACTIVE).value_or(false) ? 1 : 0;
 
     /* Color: three channels in 0.0-1.0; `has_color` mirrors the previous "non-black" test. */
     item.color[0] = item.color[1] = item.color[2] = 0.0f;
     item.has_color = false;
-    if (const io::serialize::ArrayValue *color = record->lookup_array("color")) {
+    if (const io::serialize::ArrayValue *color = record->lookup_array(category_tag_json::KEY_COLOR))
+    {
       const Span<std::shared_ptr<io::serialize::Value>> channels = color->elements();
       for (int c = 0; c < 3 && c < channels.size(); c++) {
         if (const io::serialize::DoubleValue *dv = channels[c]->as_double_value()) {
@@ -1407,8 +1410,8 @@ static Vector<EditDialogTagData> parse_edit_dialog_tag_data(const char *data_str
       }
     }
 
-    item.icon_id = int(record->lookup_int("icon_id").value_or(0));
-    item.icon_source = int(record->lookup_int("icon_source").value_or(0));
+    item.icon_id = int(record->lookup_int(category_tag_json::KEY_ICON_ID).value_or(0));
+    item.icon_source = int(record->lookup_int(category_tag_json::KEY_ICON_SOURCE).value_or(0));
 
     items.append(item);
   }

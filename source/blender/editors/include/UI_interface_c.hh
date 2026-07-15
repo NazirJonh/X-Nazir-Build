@@ -2874,6 +2874,20 @@ bool panel_category_first_letter_lookup(const wmWindowManager *wm,
                                         int space_type,
                                         char r_letter[8]);
 
+/**
+ * JSON object keys for the tag records emitted by #get_tags_for_category_ui and parsed
+ * back by the edit dialog (interface_tab_categories_edit.cc). Kept as a single source of
+ * truth so the producer and consumer cannot drift apart.
+ */
+namespace category_tag_json {
+constexpr const char *KEY_NAME = "name";
+constexpr const char *KEY_GLYPH = "glyph";
+constexpr const char *KEY_ACTIVE = "active";
+constexpr const char *KEY_COLOR = "color";
+constexpr const char *KEY_ICON_ID = "icon_id";
+constexpr const char *KEY_ICON_SOURCE = "icon_source";
+}  // namespace category_tag_json
+
 std::string get_tags_for_category_ui(const wmWindowManager *wm,
                                       const char *category,
                                       uint32_t filter_mode_flag,

@@ -24,6 +24,7 @@ import bpy
 import json
 
 from bl_ui.glyph_tag_system.conversions import _hex_to_glyph
+from bl_ui.glyph_tag_system.schema_keys import KEY_TAG_ORDER
 from bl_ui.glyph_tag_system.log import (
     category_debug_print,
     save_debug_print,
@@ -263,7 +264,7 @@ def _save_tag_order_only():
     create_backup(filepath)
 
     # Update tag_order from the cache (source of truth for manual ordering here).
-    data['tag_order'] = list(state.tag_order_cache)
+    data[KEY_TAG_ORDER] = list(state.tag_order_cache)
 
     # Save back to file
     try:

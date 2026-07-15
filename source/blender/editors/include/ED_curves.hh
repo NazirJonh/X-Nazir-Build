@@ -258,6 +258,7 @@ bool curves_poll(bContext *C);
 void CURVES_OT_attribute_set(wmOperatorType *ot);
 void CURVES_OT_draw(wmOperatorType *ot);
 void CURVES_OT_extrude(wmOperatorType *ot);
+void CURVES_OT_make_segment(wmOperatorType *ot);
 void CURVES_OT_select_linked_pick(wmOperatorType *ot);
 void CURVES_OT_separate(wmOperatorType *ot);
 
@@ -575,6 +576,36 @@ void resize_curves(bke::CurvesGeometry &curves,
  * reorder curves.
  */
 void reorder_curves(bke::CurvesGeometry &curves, Span<int> old_by_new_indices_map);
+
+/** A selected start or end point of a curve, used by the "Make Segment" operator. */
+struct SelectedEndpoint {
+  enum class Position : uint8_t {
+    Start = 0,
+    End = 1,
+  };
+  int curve_index;
+  Position position;
+};
+
+/**
+ * Collect the selected curve endpoints, validating that exactly two endpoints (and nothing else)
+ * are selected and that no selected curve is cyclic. Assumes a point-domain selection.
+ * \returns false and fills \a r_error_msg if the selection is not a valid pair of endpoints.
+ */
+bool get_selected_endpoints(const bke::CurvesGeometry &curves,
+                            Vector<SelectedEndpoint> &r_endpoints,
+                            std::string &r_error_msg);
+
+/** Close the curve at \a curve by making it cyclic. */
+bool make_curve_cyclic(bke::CurvesGeometry &curves, int curve, std::string &r_error_msg);
+
+/** Join two curves into one at the given selected endpoints, reversing curves as needed. */
+bool join_two_curves(bke::CurvesGeometry &curves,
+                     int curve_a,
+                     SelectedEndpoint::Position end_a,
+                     int curve_b,
+                     SelectedEndpoint::Position end_b,
+                     std::string &r_error_msg);
 
 wmOperatorStatus join_objects_exec(bContext *C, wmOperator *op);
 

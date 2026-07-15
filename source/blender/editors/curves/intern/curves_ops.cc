@@ -183,6 +183,64 @@ static bool editable_curves_point_domain_poll(bContext *C)
   return true;
 }
 
+namespace make_segment {
+
+static wmOperatorStatus exec(bContext *C, wmOperator *op)
+{
+  bool changed = false;
+  for (Curves *curves_id : get_unique_editable_curves(*C)) {
+    bke::CurvesGeometry &curves = curves_id->geometry.wrap();
+
+    /* Skip objects without a selection so that errors are only reported for the curves the user
+     * actually intends to join. */
+    IndexMaskMemory memory;
+    if (retrieve_selected_points(*curves_id, memory).is_empty()) {
+      continue;
+    }
+
+    Vector<SelectedEndpoint> endpoints;
+    std::string error_msg;
+    if (!get_selected_endpoints(curves, endpoints, error_msg)) {
+      BKE_report(op->reports, RPT_WARNING, error_msg.c_str());
+      continue;
+    }
+
+    const SelectedEndpoint &ep1 = endpoints[0];
+    const SelectedEndpoint &ep2 = endpoints[1];
+
+    /* Both endpoints on the same curve closes it, otherwise the two curves are joined. */
+    const bool success =
+        (ep1.curve_index == ep2.curve_index) ?
+            make_curve_cyclic(curves, ep1.curve_index, error_msg) :
+            join_two_curves(
+                curves, ep1.curve_index, ep1.position, ep2.curve_index, ep2.position, error_msg);
+    if (!success) {
+      BKE_report(op->reports, RPT_WARNING, error_msg.c_str());
+      continue;
+    }
+
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_GEOM | ND_DATA, curves_id);
+    changed = true;
+  }
+
+  return changed ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+}  // namespace make_segment
+
+static void CURVES_OT_make_segment(wmOperatorType *ot)
+{
+  ot->name = "Make Segment";
+  ot->idname = __func__;
+  ot->description = "Join two selected curve endpoints or make a curve cyclic";
+
+  ot->poll = editable_curves_point_domain_poll;
+  ot->exec = make_segment::exec;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
 using bke::CurvesGeometry;
 
 namespace convert_to_particle_system {
@@ -1874,6 +1932,7 @@ void operatortypes_curves()
   WM_operatortype_append(CURVES_OT_add_circle);
   WM_operatortype_append(CURVES_OT_add_bezier);
   WM_operatortype_append(CURVES_OT_handle_type_set);
+  WM_operatortype_append(CURVES_OT_make_segment);
 
   ED_operatortypes_curves_pen();
 }

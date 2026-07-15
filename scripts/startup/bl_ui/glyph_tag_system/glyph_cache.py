@@ -62,9 +62,7 @@ from bl_ui.glyph_tag_system.schema_keys import (
 )
 from bl_ui.glyph_tag_system.conversions import (
     _category_order_decode,
-    _category_order_encode,
     _glyph_to_hex,
-    _glyph_to_unicode_escape,
     _hex_to_glyph,
     _is_single_glyph,
     _is_valid_category_name,
@@ -901,11 +899,14 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
                 tags_out = [str(t) for t in raw_tags] if isinstance(raw_tags, list) else []
 
                 entry_to_save = {
-                    KEY_GLYPH: _glyph_to_unicode_escape(category_data.get(KEY_GLYPH, "")),
+                    # Category glyphs are stored on disk as raw UTF-8 (the in-memory form), matching
+                    # the glyph library and the category keys. Legacy files that used \uXXXX escapes
+                    # still load: every reader decodes escapes before use. See conversions.py.
+                    KEY_GLYPH: category_data.get(KEY_GLYPH, ""),
                     KEY_DISPLAY_NAME: category_data.get(KEY_DISPLAY_NAME, ""),
                     KEY_FIRST_LETTER: category_data.get(KEY_FIRST_LETTER, ""),
                     KEY_COLOR: _normalize_color(category_data.get(KEY_COLOR, [0.0, 0.0, 0.0])),
-                    KEY_DEFAULT_GLYPH: _glyph_to_unicode_escape(category_data.get(KEY_DEFAULT_GLYPH, "")),
+                    KEY_DEFAULT_GLYPH: category_data.get(KEY_DEFAULT_GLYPH, ""),
                     KEY_DEFAULT_DISPLAY_NAME: category_data.get(KEY_DEFAULT_DISPLAY_NAME, ""),
                     KEY_BASE_TYPE: category_data.get(KEY_BASE_TYPE, "text_only"),
                     KEY_TAGS: tags_out,  # Save tags
@@ -935,11 +936,11 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
                 glyph = _unicode_escape_to_glyph(category_data) if '\\u' in category_data else category_data
                 base_type = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
                 mappings_to_save[KEY_GLOBAL][category] = {
-                    KEY_GLYPH: _glyph_to_unicode_escape(glyph),
+                    KEY_GLYPH: glyph,
                     KEY_DISPLAY_NAME: "",
                     KEY_FIRST_LETTER: "",
                     KEY_COLOR: [0.0, 0.0, 0.0],
-                    KEY_DEFAULT_GLYPH: _glyph_to_unicode_escape(glyph),
+                    KEY_DEFAULT_GLYPH: glyph,
                     KEY_DEFAULT_DISPLAY_NAME: "",
                     KEY_BASE_TYPE: base_type,
                     KEY_TAGS: [],
@@ -985,9 +986,11 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
             KEY_TAG_ORDER: tag_order,  # Save tag order
             KEY_MAPPINGS: mappings_to_save,
             KEY_CATEGORY_ORDERS: {
-                tag_key: _category_order_encode(category_list)
+                # Order entries are category names, stored as raw UTF-8 (a glyph-only category's
+                # name is its glyph). Legacy \uXXXX entries still decode on load.
+                tag_key: list(category_list)
                 for tag_key, category_list in state.category_orders_cache.items()
-            }  # Save category orders (glyphs as \uXXXX)
+            }
         }
 
         prepare_end = time.perf_counter()

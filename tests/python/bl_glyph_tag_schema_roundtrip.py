@@ -212,6 +212,19 @@ class TestNormalizeCategoryData(unittest.TestCase):
         for key in (sk.KEY_ICON_SOURCE, sk.KEY_ICON_KEY, sk.KEY_ICON_PATH, sk.KEY_ICON_PROVIDER):
             self.assertIn(key, entry)
 
+    def test_glyph_encoding_backward_compat(self):
+        # Category glyphs are now written as raw UTF-8, but legacy files stored \uXXXX escapes.
+        # Both encodings must normalize to the same glyph character on read.
+        glyph = ""
+        raw = mig._normalize_category_data(
+            {sk.KEY_GLYPH: glyph, sk.KEY_DEFAULT_GLYPH: glyph}, category_name="Enc")
+        legacy = mig._normalize_category_data(
+            {sk.KEY_GLYPH: "\\ue3c9", sk.KEY_DEFAULT_GLYPH: "\\ue3c9"}, category_name="Enc")
+        self.assertEqual(raw[sk.KEY_GLYPH], glyph)
+        self.assertEqual(legacy[sk.KEY_GLYPH], glyph)
+        self.assertEqual(raw[sk.KEY_DEFAULT_GLYPH], glyph)
+        self.assertEqual(legacy[sk.KEY_DEFAULT_GLYPH], glyph)
+
     def test_idempotent_on_normalized_output(self):
         # Normalizing an already-normalized entry must be stable for the core fields.
         first = mig._normalize_category_data(

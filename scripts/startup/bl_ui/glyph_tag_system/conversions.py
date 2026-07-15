@@ -144,8 +144,40 @@ def _is_single_edit_apart(a: str, b: str) -> bool:
     return True
 
 
+# ----------------------------------------------------------------------------
+# Glyph representation map (single source of truth).
+#
+# A "glyph" is a Unicode codepoint, almost always in a Private Use Area (Material Symbols
+# font icons). It appears in several encodings, each tied to a specific storage backend.
+# Convert ONLY at these boundaries, and ONLY through the helpers below — never build an
+# escape sequence or a hex string ad-hoc elsewhere.
+#
+#   Backend                         On-disk / stored form        Encode / decode helpers
+#   ------------------------------  ---------------------------  ----------------------------------
+#   In-memory cache (canonical)     raw Unicode char             (none — this is the working form)
+#   JSON file: category glyph /     raw UTF-8                     write: as-is (ensure_ascii=False)
+#     default_glyph, category                                    read:  _unicode_escape_to_glyph
+#     names, category_orders                                            (handles legacy \uXXXX too)
+#   DNA: CategoryTagDef.glyph       bare hex, e.g. "f3c1"        _glyph_to_hex / _hex_to_glyph
+#     (char[8], tags)                                            C++: utf8_to_hex_codepoint /
+#                                                                     tag_glyph_hex_to_utf8
+#   Glyph library                   raw UTF-8 "unicode" field    read-only asset (nlohmann decodes)
+#     (material_symbols.json)         + numeric "codepoint"
+#
+# History: JSON category glyphs used to be written as \uXXXX escapes. They are now written as
+# raw UTF-8 to match the in-memory and library forms (one fewer encoding). Reading stays
+# backward-compatible: every JSON reader passes values through _unicode_escape_to_glyph /
+# _category_order_decode, which decode legacy \uXXXX and leave raw UTF-8 untouched. Tags keep the
+# hex form because DNA stores them in a fixed char[8] field, not a Python string.
+# ----------------------------------------------------------------------------
+
+
 def _glyph_to_unicode_escape(glyph):
-    """Convert a glyph character to \\uXXXX format for reliable JSON storage."""
+    """Convert a glyph character to \\uXXXX format.
+
+    Retained for the public API facade and legacy call sites; the JSON writer no longer uses it
+    (category glyphs are stored as raw UTF-8). See the glyph representation map above.
+    """
     if not glyph:
         return ""
     # Convert to Unicode escape sequence

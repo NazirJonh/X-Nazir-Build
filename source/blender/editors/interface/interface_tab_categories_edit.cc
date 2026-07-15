@@ -2118,8 +2118,9 @@ bool category_tab_try_auto_detect_extension_icon(bContext *C,
   bool detected = false;
 
   if (parsed && parts.size() >= 2) {
-    const std::string icon_path = category_tab_decode_json_unicode(parts[0].c_str());
-    const std::string icon_provider = category_tab_decode_json_unicode(parts[1].c_str());
+    /* The serialization layer already fully decoded these strings. */
+    const std::string &icon_path = parts[0];
+    const std::string &icon_provider = parts[1];
 
     if (!icon_path.empty()) {
       BLI_strncpy(r_icon_path, icon_path.c_str(), 1024);

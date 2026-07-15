@@ -11,12 +11,14 @@
 #include <cctype>
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <sstream>
 #include <string>
 
 #include "BLI_fileops.h"
+#include "BLI_serialize.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
@@ -399,120 +401,30 @@ bool category_tab_parse_json_string_array_minimal(const char *json, Vector<std::
     return false;
   }
 
-  const char *p = json;
-  while (*p && *p != '[') {
-    p++;
-  }
-  if (*p != '[') {
+  /* Parse via the shared serialization layer rather than scanning by hand: it handles escapes,
+   * whitespace and malformed input robustly (returns null), and fully decodes string values. */
+  std::istringstream is(json);
+  io::serialize::JsonFormatter formatter;
+  std::unique_ptr<io::serialize::Value> root = formatter.deserialize(is);
+  if (!root) {
     return false;
   }
-  p++;
+  const io::serialize::ArrayValue *array = root->as_array_value();
+  if (!array) {
+    return false;
+  }
 
   bool parsed_any = false;
-  while (*p && *p != ']') {
-    while (*p && ELEM(*p, ' ', '\n', '\r', '\t', ',')) {
-      p++;
-    }
-    if (*p == ']') {
-      break;
-    }
-
-    if (*p != '"') {
-      p++;
+  for (const std::shared_ptr<io::serialize::Value> &element : array->elements()) {
+    const io::serialize::StringValue *value = element->as_string_value();
+    if (!value || value->value().empty()) {
       continue;
     }
-    p++;
-
-    const char *start = p;
-    while (*p && *p != '"') {
-      if (*p == '\\' && *(p + 1)) {
-        p += 2;
-      }
-      else {
-        p++;
-      }
-    }
-
-    if (*p != '"') {
-      return parsed_any;
-    }
-
-    const std::string value(start, p - start);
-    if (!value.empty()) {
-      r_items.append(value);
-      parsed_any = true;
-    }
-    p++;
+    r_items.append(value->value());
+    parsed_any = true;
   }
 
   return parsed_any;
-}
-
-std::string category_tab_decode_json_unicode(const char *str)
-{
-  if (!str) {
-    return "";
-  }
-
-  std::string result;
-  const size_t len = strlen(str);
-  size_t i = 0;
-
-  while (i < len) {
-    if (i + 5 < len && str[i] == '\\' && str[i + 1] == 'u') {
-      char hex_str[5] = {str[i + 2], str[i + 3], str[i + 4], str[i + 5], 0};
-
-      uint32_t codepoint = 0;
-      for (int j = 0; j < 4; j++) {
-        const char c = hex_str[j];
-        codepoint <<= 4;
-        if (c >= '0' && c <= '9') {
-          codepoint |= (c - '0');
-        }
-        else if (c >= 'a' && c <= 'f') {
-          codepoint |= (c - 'a' + 10);
-        }
-        else if (c >= 'A' && c <= 'F') {
-          codepoint |= (c - 'A' + 10);
-        }
-      }
-
-      char utf8_buf[5];
-      int utf8_len = 0;
-
-      if (codepoint <= 0x7F) {
-        utf8_buf[0] = (char)codepoint;
-        utf8_len = 1;
-      }
-      else if (codepoint <= 0x7FF) {
-        utf8_buf[0] = (char)(0xC0 | (codepoint >> 6));
-        utf8_buf[1] = (char)(0x80 | (codepoint & 0x3F));
-        utf8_len = 2;
-      }
-      else if (codepoint <= 0xFFFF) {
-        utf8_buf[0] = (char)(0xE0 | (codepoint >> 12));
-        utf8_buf[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-        utf8_buf[2] = (char)(0x80 | (codepoint & 0x3F));
-        utf8_len = 3;
-      }
-      else {
-        utf8_buf[0] = (char)(0xF0 | (codepoint >> 18));
-        utf8_buf[1] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
-        utf8_buf[2] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-        utf8_buf[3] = (char)(0x80 | (codepoint & 0x3F));
-        utf8_len = 4;
-      }
-
-      result.append(utf8_buf, utf8_len);
-      i += 6;
-    }
-    else {
-      result += str[i];
-      i++;
-    }
-  }
-
-  return result;
 }
 
 }  // namespace blender::ui

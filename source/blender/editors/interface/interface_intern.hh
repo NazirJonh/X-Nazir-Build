@@ -1220,7 +1220,6 @@ void category_tab_split_tags(const char *tags,
 std::string category_tab_escape_for_python_literal(const char *input);
 bool category_tab_parse_json_string_array_minimal(const char *json,
                                                   Vector<std::string> &r_items);
-std::string category_tab_decode_json_unicode(const char *str);
 
 /**
  * Category lookup utilities.

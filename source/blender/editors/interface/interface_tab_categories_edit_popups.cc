@@ -17,6 +17,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <optional>
+#include <sstream>
 #include <string>
 
 #include "MEM_guardedalloc.h"
@@ -31,6 +34,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
+#include "BLI_serialize.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_time.h"
@@ -88,76 +92,36 @@ static void glyph_search_parse_object_array(const char *json,
                                             const int max_results,
                                             blender::Vector<std::pair<std::string, std::string>> &r_results)
 {
-  const char *p = json;
-
-  while (*p && *p != '[') {
-    p++;
-  }
-  if (*p != '[') {
+  if (!json) {
     return;
   }
-  p++;
 
-  int parsed_count = 0;
-  while (*p && *p != ']') {
-    while (*p && *p != '{') {
-      p++;
-    }
-    if (*p == '{') {
-      p++;
-    }
+  /* Parse via the shared serialization layer instead of scanning for `"unicode":`/`"name":`
+   * substrings by hand: it decodes string values fully and does not depend on key order. */
+  std::istringstream is(json);
+  io::serialize::JsonFormatter formatter;
+  std::unique_ptr<io::serialize::Value> root = formatter.deserialize(is);
+  if (!root) {
+    return;
+  }
+  const io::serialize::ArrayValue *array = root->as_array_value();
+  if (!array) {
+    return;
+  }
 
-    std::string unicode;
-    std::string name;
-
-    while (*p && *p != '}') {
-      if (strncmp(p, "\"unicode\":", 10) == 0) {
-        p += 10;
-        while (*p && *p != '"') {
-          p++;
-        }
-        if (*p == '"') {
-          p++;
-        }
-        const char *start = p;
-        while (*p && *p != '"') {
-          p++;
-        }
-        const std::string raw_unicode(start, p - start);
-        unicode = category_tab_decode_json_unicode(raw_unicode.c_str());
-      }
-      else if (strncmp(p, "\"name\":", 7) == 0) {
-        p += 7;
-        while (*p && *p != '"') {
-          p++;
-        }
-        if (*p == '"') {
-          p++;
-        }
-        const char *start = p;
-        while (*p && *p != '"') {
-          p++;
-        }
-        name = std::string(start, p - start);
-      }
-      else {
-        p++;
-      }
+  for (const std::shared_ptr<io::serialize::Value> &element : array->elements()) {
+    const io::serialize::DictionaryValue *object = element->as_dictionary_value();
+    if (!object) {
+      continue;
     }
-
-    if (!unicode.empty() && !name.empty()) {
-      parsed_count++;
-      r_results.append({unicode, name});
-      if (r_results.size() >= max_results) {
-        break;
-      }
+    const std::optional<StringRefNull> unicode = object->lookup_str("unicode");
+    const std::optional<StringRefNull> name = object->lookup_str("name");
+    if (!unicode || !name || unicode->is_empty() || name->is_empty()) {
+      continue;
     }
-
-    while (*p && *p != ',' && *p != ']') {
-      p++;
-    }
-    if (*p == ',' || *p == '}') {
-      p++;
+    r_results.append({unicode->c_str(), name->c_str()});
+    if (r_results.size() >= max_results) {
+      break;
     }
   }
 }
@@ -191,9 +155,9 @@ blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
     blender::Vector<std::string> string_results;
     if (category_tab_parse_json_string_array_minimal(json.c_str(), string_results)) {
       for (const std::string &value : string_results) {
-        const std::string unicode = category_tab_decode_json_unicode(value.c_str());
-        if (!unicode.empty()) {
-          results.append({unicode, value});
+        /* Values are already decoded; treat each as both glyph and label. */
+        if (!value.empty()) {
+          results.append({value, value});
           if (results.size() >= max_results) {
             break;
           }

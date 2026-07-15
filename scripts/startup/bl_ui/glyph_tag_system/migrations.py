@@ -2,12 +2,12 @@
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-"""JSON schema migrations for the Category Tabs / Glyph / Tag system.
+"""JSON schema normalization for the Category Tabs / Glyph / Tag system.
 
 Pure data transforms extracted from ``space_userpref.py``: they normalize a single
-category entry (:func:`_normalize_category_data`) and migrate a whole mappings file
-from any older on-disk schema version up to ``CURRENT_JSON_VERSION``
-(:func:`migrate_json_data`, dispatched through :data:`MIGRATORS`).
+category entry (:func:`_normalize_category_data`) and validate a whole mappings file
+(:func:`migrate_json_data`). The on-disk schema starts at version 1 (baseline), so
+there is no cross-version migration chain.
 
 This module is bpy-free and free of module-level mutable state; it depends only on the
 lower pure layers of the package (defaults / conversions / log).
@@ -24,7 +24,6 @@ from .conversions import (
 from .log import (
     _pref_log_once,
     category_debug_print,
-    tag_log,
 )
 
 
@@ -224,294 +223,14 @@ def _normalize_category_data(category_data, category_name=None):
         return default_entry
 
 
-# -----------------------------------------------------------------------------
-# JSON Migration Functions
-
-def migrate_v1_to_v2(data):
-    """Migrate v1 (string values) to v2 (dict with glyph/color)."""
-    tag_log("Migrating JSON v1 → v2")
-    mappings = {}
-    for cat_name, glyph_str in data.get("mappings", {}).items():
-        if isinstance(glyph_str, str):
-            mappings[cat_name] = _normalize_category_data(glyph_str)
-    return {"version": 2, "mappings": mappings}
-
-
-def migrate_v2_to_v3(data):
-    """Migrate v2 to v3 (add all_tags and tags arrays)."""
-    tag_log("Migrating JSON v2 → v3")
-    data["all_tags"] = {}  # Empty tag registry
-    for cat_data in data.get("mappings", {}).values():
-        if isinstance(cat_data, dict):
-            cat_data["tags"] = []
-    data["version"] = 3
-    return data
-
-
-def migrate_v3_to_v4(data):
-    """Migrate v3 to v4 (add tag_order for manual ordering)."""
-    tag_log("Migrating JSON v3 → v4")
-    # tag_order will be populated on next save from WM collection order
-    data["tag_order"] = []
-    data["version"] = 4
-    return data
-
-
-def migrate_v4_to_v5(data):
-    """Migrate from v4 to v5: add mode_flags to tags."""
-    tag_log("Migrating JSON v4 → v5")
-    # Add empty mode_flags to all tags (empty = all modes active)
-    if "tags" in data:
-        for tag in data["tags"]:
-            if isinstance(tag, dict) and "mode_flags" not in tag:
-                tag["mode_flags"] = []  # Empty = all modes
-    data["version"] = 5
-    return data
-
-
-def migrate_v5_to_v6(data):
-    """Migrate version 5 to 6: Add category_orders support."""
-    # Add empty category_orders dict if not present
-    if "category_orders" not in data:
-        data["category_orders"] = {}
-        category_debug_print("[MIGRATION] v5->v6: Added category_orders section")
-    data["version"] = 6
-    return data
-
-
-def migrate_v6_to_v7(data):
-    """Migrate version 6 to 7: Add icon persistence block for each category mapping."""
-    mappings = data.get("mappings", {})
-    if isinstance(mappings, dict):
-        for _category, category_data in mappings.items():
-            if not isinstance(category_data, dict):
-                continue
-
-            icon = category_data.get("icon")
-            if not isinstance(icon, dict):
-                icon = {}
-
-            icon_source = icon.get("source", category_data.get("icon_source", "auto"))
-            if not isinstance(icon_source, str):
-                icon_source = "auto"
-            icon_source = icon_source.lower()
-            if icon_source not in {"auto", "manual", "off"}:
-                icon_source = "auto"
-
-            icon["source"] = icon_source
-            icon["key"] = str(icon.get("key", category_data.get("icon_key", "")) or "")
-            icon["path"] = str(icon.get("path", category_data.get("icon_path", "")) or "")
-            icon["provider"] = str(icon.get("provider", category_data.get("icon_provider", "")) or "")
-            category_data["icon"] = icon
-
-    data["version"] = 7
-    return data
-
-
-def migrate_v7_to_v8(data):
-    """Migrate v7 to v8: Add space_type prefixes to category order keys.
-
-    Old format: "tag1;tag2" or "" (empty string)
-    New format: "VIEW3D:tag1;tag2", "IMAGE:", "NODE:", etc.
-
-    This ensures each editor type has its own independent category order storage.
-    """
-    old_orders = data.get("category_orders", {})
-    if not old_orders:
-        data["version"] = 8
-        return data
-
-    new_orders = {}
-
-    # List of space type prefixes used in C++ get_space_type_prefix()
-    space_prefixes = [
-        "VIEW3D:",
-        "IMAGE:",
-        "NODE:",
-        "PROPS:",
-        "OUTLINER:",
-        "FILE:",
-        "SEQUENCE:",
-        "TEXT:",
-        "CLIP:",
-        "SPREADSHEET:",
-        "OTHER:",
-    ]
-
-    for old_key, category_list in old_orders.items():
-        # Check if this key already has a space prefix (new format)
-        has_space_prefix = any(old_key.startswith(prefix) for prefix in space_prefixes)
-
-        if has_space_prefix:
-            # Already in new format - keep as is
-            new_orders[old_key] = category_list
-        else:
-            # Old format - migrate to all space types
-            # This preserves existing order for all editor types
-            for space_prefix in space_prefixes:
-                new_key = space_prefix + old_key
-                new_orders[new_key] = list(category_list) if isinstance(category_list, list) else []
-
-    data["category_orders"] = new_orders
-    data["version"] = 8
-    return data
-
-
-def migrate_v8_to_v9(data):
-    """Migrate v8 to v9: Add extension pending-tag fields to existing categories.
-
-    New fields per category:
-      source_extension  - ID of the extension that introduced this category (empty string)
-      pending_tag_assignment - whether the category is awaiting tag assignment (False)
-      discovered_in_spaces   - list of space type strings where category was discovered ([])
-      discovered_in_modes    - list of mode name strings where category was discovered ([])
-    """
-    tag_log("Migrating JSON v8 → v9")
-    mappings = data.get("mappings", {})
-    if isinstance(mappings, dict):
-        for _space_key, categories in mappings.items():
-            if not isinstance(categories, dict):
-                continue
-            for _cat_name, cat_data in categories.items():
-                if not isinstance(cat_data, dict):
-                    continue
-                cat_data.setdefault("source_extension", "")
-                cat_data.setdefault("pending_tag_assignment", False)
-                cat_data.setdefault("discovered_in_spaces", [])
-                cat_data.setdefault("discovered_in_modes", [])
-    data["version"] = 9
-    return data
-
-
-def migrate_v9_to_v11(data):
-    """Migrate from v9 (space-specific entries) to v11 (Global-First architecture).
-
-    Consolidates all space-specific entries (SPACE_VIEW3D, SPACE_NODE, etc.)
-    into a single GLOBAL entry for each category. Customizations from
-    space-specific entries are merged into GLOBAL with priority given to
-    manual icon settings and non-default values.
-    """
-    mappings = data.get("mappings", {})
-    if not isinstance(mappings, dict):
-        mappings = {}
-
-    global_mappings = mappings.get("GLOBAL", {})
-    if not isinstance(global_mappings, dict):
-        global_mappings = {}
-
-    # Consolidate space-specific entries into GLOBAL
-    for space_key, categories in mappings.items():
-        if space_key == "GLOBAL":
-            continue  # Already processed
-        if not isinstance(categories, dict):
-            continue
-
-        for cat_name, cat_data in categories.items():
-            if not isinstance(cat_data, dict):
-                continue
-
-            if cat_name not in global_mappings:
-                # Create new GLOBAL entry from space-specific
-                global_mappings[cat_name] = dict(cat_data)
-            else:
-                # Merge customizations into existing GLOBAL entry
-                existing = global_mappings[cat_name]
-                if not isinstance(existing, dict):
-                    existing = {}
-                    global_mappings[cat_name] = existing
-
-                # Priority: manual icon > off > auto
-                migrated_icon_source = cat_data.get("icon_source", "auto")
-                existing_icon_source = existing.get("icon_source", "auto")
-
-                should_update_icon = (
-                    existing_icon_source == "auto" or
-                    migrated_icon_source == "manual" or
-                    migrated_icon_source == "off"
-                )
-
-                if should_update_icon:
-                    if migrated_icon_source in ("manual", "off"):
-                        existing["icon_source"] = migrated_icon_source
-                    if cat_data.get("icon_key"):
-                        existing["icon_key"] = cat_data.get("icon_key")
-                    if cat_data.get("icon_path"):
-                        existing["icon_path"] = cat_data.get("icon_path")
-                    if cat_data.get("icon_provider"):
-                        existing["icon_provider"] = cat_data.get("icon_provider")
-
-                # Merge glyph_mode if not auto
-                migrated_glyph_mode = cat_data.get("glyph_mode", "auto")
-                if migrated_glyph_mode != "auto" and existing.get("glyph_mode", "auto") == "auto":
-                    existing["glyph_mode"] = migrated_glyph_mode
-
-                # Merge glyph if GLOBAL doesn't have one
-                migrated_glyph = cat_data.get("glyph", "")
-                if migrated_glyph and not existing.get("glyph"):
-                    existing["glyph"] = migrated_glyph
-
-                # Merge color if GLOBAL doesn't have one
-                migrated_color = cat_data.get("color", [0.0, 0.0, 0.0])
-                if migrated_color and any(c != 0.0 for c in migrated_color):
-                    if not any(c != 0.0 for c in existing.get("color", [0.0, 0.0, 0.0])):
-                        existing["color"] = migrated_color
-
-                # Merge tags (union)
-                migrated_tags = cat_data.get("tags", [])
-                existing_tags = existing.get("tags", [])
-                if migrated_tags:
-                    existing["tags"] = list(set(existing_tags) | set(migrated_tags))
-
-                # Preserve extension-related fields if present
-                for ext_field in ["source_extension", "pending_tag_assignment", "discovered_in_spaces", "discovered_in_modes"]:
-                    if ext_field in cat_data and ext_field not in existing:
-                        existing[ext_field] = cat_data[ext_field]
-
-    # Replace mappings with only GLOBAL
-    data["mappings"] = {"GLOBAL": global_mappings}
-    data["version"] = 11
-    return data
-
-
-def migrate_v11_to_v12(data):
-    """Migrate v11 to v12: Add icon_key and icon_source to all_tags."""
-    tag_log("Migrating JSON v11 → v12 (adding tag icon support)")
-    for tag_name, tag_data in data.get("all_tags", {}).items():
-        if isinstance(tag_data, dict):
-            # Add default icon fields
-            tag_data.setdefault("icon_key", "")
-            tag_data.setdefault("icon_source", 0)
-    data["version"] = 12
-    return data
-
-
-MIGRATORS = {
-    1: migrate_v1_to_v2,
-    2: migrate_v2_to_v3,
-    3: migrate_v3_to_v4,
-    4: migrate_v4_to_v5,
-    5: migrate_v5_to_v6,
-    6: migrate_v6_to_v7,
-    7: migrate_v7_to_v8,
-    8: migrate_v8_to_v9,
-    9: migrate_v9_to_v11,  # Global-First architecture migration
-    11: migrate_v11_to_v12,  # Tag icon support
-}
-
-
 def migrate_json_data(data):
-    """Migrate data to current version with validation."""
-    version = data.get("version", 1)
+    """Validate and normalize a loaded mappings structure.
 
-    while version < CURRENT_JSON_VERSION:
-        migrator = MIGRATORS.get(version)
-        if not migrator:
-            raise ValueError(f"Unknown JSON version: {version}")
-        data = migrator(data)
-        version = data.get("version", version + 1)
-        tag_log(f"Migrated to version {version}")
-
-    # Validate final structure
+    The on-disk schema starts at version 1 (baseline), so there is no cross-version
+    migration: this only ensures the required top-level sections exist and coerces
+    color values to floats, then stamps the current version.
+    """
+    # Ensure required top-level sections exist.
     if "all_tags" not in data:
         data["all_tags"] = {}
     if "mappings" not in data:
@@ -536,4 +255,5 @@ def migrate_json_data(data):
                             fixed_color.append(float(c) if c is not None else 0.0)
                     cat_data["color"] = fixed_color
 
+    data["version"] = CURRENT_JSON_VERSION
     return data

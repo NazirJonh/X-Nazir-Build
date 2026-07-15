@@ -341,7 +341,7 @@ class USERPREF_OT_category_tag_create(Operator):
         category_debug_print(f"[DEBUG CREATE_TAG execute] self.glyph = '{self.glyph}'")
         category_debug_print(f"[DEBUG CREATE_TAG execute] self.name = '{self.name}'")
         category_debug_print(f"[DEBUG CREATE_TAG execute] self.category = '{self.category}'")
-        category_debug_print(f"[DEBUG CREATE_TAG execute] _preview_mode_active = {_su._preview_mode_active}")
+        category_debug_print(f"[DEBUG CREATE_TAG execute] _preview_mode_active = {_su.is_preview_mode_active()}")
         category_debug_print(f"[DEBUG CREATE_TAG execute] self.icon_key = '{self.icon_key}'")
         category_debug_print(f"[DEBUG CREATE_TAG execute] self.icon_source = {self.icon_source}")
         category_debug_print(f"[DEBUG CREATE_TAG execute] self.display_mode_ui = '{self.display_mode_ui}'")
@@ -443,7 +443,7 @@ class USERPREF_OT_category_tag_create(Operator):
             # If category is specified and we're not already in preview mode, enable it
             is_in_edit_dialog = (self.category and self.category != "")
 
-            if is_in_edit_dialog and not _su._preview_mode_active:
+            if is_in_edit_dialog and not _su.is_preview_mode_active():
                 # Enable preview mode for this tag assignment
                 _su.set_preview_mode_active(True)
                 category_debug_print(f"[CREATE_TAG] Enabled preview mode for tag assignment to '{self.category}'")

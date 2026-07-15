@@ -268,8 +268,9 @@ BL_CONTEXT_TO_MODE_FLAG = {
 # ----------------------------------------------------------------------------
 # JSON storage constants
 
-# Current JSON format version
-CURRENT_JSON_VERSION = 12  # Added icon_key and icon_source to tags
+# Current JSON format version. The schema starts at version 1 (baseline); there is
+# no cross-version migration chain.
+CURRENT_JSON_VERSION = 1
 
 # JSON file name in config directory
 GLYPHS_FILENAME = "category_glyphs.json"

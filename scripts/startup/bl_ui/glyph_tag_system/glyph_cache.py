@@ -650,11 +650,9 @@ def _load_glyph_mappings_from_file():
 
     data = load_json_safely(filepath, default_structure)
 
-    # Migrate if needed
-    if data.get("version", 1) < CURRENT_JSON_VERSION:
-        create_backup(filepath)  # Backup before migration
-        data = migrate_json_data(data)
-        _save_glyph_mappings_to_file(data)  # Save migrated data
+    # Normalize the loaded structure (ensure required sections exist, coerce colors).
+    # The schema starts at version 1 (baseline), so there is no cross-version migration.
+    data = migrate_json_data(data)
 
     # Load into caches with space_type support
     reset_glyph_cache()
@@ -668,11 +666,10 @@ def _load_glyph_mappings_from_file():
                 if isinstance(category, str):
                     order_categories.add(category)
 
-    # Load mappings - Global-First Architecture: Only load GLOBAL entries
-    # Space-specific entries (SPACE_VIEW3D, SPACE_NODE, etc.) are ignored for JSON persistence
-    # Old format (category -> data) is migrated to GLOBAL
+    # Load mappings - Global-First Architecture: only GLOBAL entries are persisted.
+    # The schema starts at version 1 (baseline), so `mappings` always has the form
+    # {"GLOBAL": {category: data}}; no legacy space-specific or bare-category handling.
     if isinstance(raw_mappings, dict):
-        # First, try to load GLOBAL mappings
         global_mappings = raw_mappings.get("GLOBAL", {})
         if isinstance(global_mappings, dict) and global_mappings:
             _pref_log_once(f"[GLYPH LOAD DEBUG] Loading GLOBAL mappings -> {len(global_mappings)} categories")
@@ -685,64 +682,6 @@ def _load_glyph_mappings_from_file():
                     # DEBUG: Log Pivot Tools loading
                     if 'Pivot' in str(category):
                         category_debug_print(f"[GLYPH LOAD DEBUG] Loaded 'Pivot Tools': cache_key={cache_key}, tags={normalized_data.get('tags', [])}")
-
-        # Migrate space-specific entries to GLOBAL (for old JSON files)
-        # This ensures backward compatibility with pre-fix JSON files
-        for key, value in raw_mappings.items():
-            if isinstance(key, str) and key.startswith('SPACE_') and isinstance(value, dict):
-                # Old format: space_type -> {category -> data}
-                # Migrate these entries to GLOBAL by merging customizations
-                _pref_log_once(f"[GLYPH LOAD DEBUG] Migrating {key} entries to GLOBAL")
-                for category, cat_data in value.items():
-                    if isinstance(cat_data, (str, dict)):
-                        decoded_category = _unicode_escape_to_glyph(category) if '\\u' in category else category
-                        cache_key = _make_cache_key(-1, decoded_category)  # Always GLOBAL key
-                        normalized_data = _normalize_category_data(cat_data, decoded_category)
-
-                        # If GLOBAL entry already exists, merge customizations
-                        if cache_key in state.glyph_cache:
-                            existing = state.glyph_cache[cache_key]
-                            # Only overwrite if migrated data has customizations
-                            migrated_icon_source = normalized_data.get("icon_source", "auto")
-                            migrated_glyph_mode = normalized_data.get("glyph_mode", "auto")
-                            migrated_glyph = normalized_data.get("glyph", "")
-                            migrated_color = normalized_data.get("color", [0.0, 0.0, 0.0])
-
-                            # Priority: 'manual' > 'off' > 'auto'
-                            existing_icon_source = existing.get("icon_source", "auto")
-                            should_update_icon = (
-                                existing_icon_source == "auto" or
-                                migrated_icon_source == "manual" or
-                                migrated_icon_source == "off"
-                            )
-
-                            if should_update_icon:
-                                if migrated_icon_source in ("manual", "off"):
-                                    existing["icon_source"] = migrated_icon_source
-                                if normalized_data.get("icon_key"):
-                                    existing["icon_key"] = normalized_data.get("icon_key")
-                                if normalized_data.get("icon_path"):
-                                    existing["icon_path"] = normalized_data.get("icon_path")
-                                if normalized_data.get("icon_provider"):
-                                    existing["icon_provider"] = normalized_data.get("icon_provider")
-
-                            if migrated_glyph_mode != "auto" and existing.get("glyph_mode", "auto") == "auto":
-                                existing["glyph_mode"] = migrated_glyph_mode
-                            if migrated_glyph and not existing.get("glyph"):
-                                existing["glyph"] = migrated_glyph
-                            if migrated_color and any(c != 0.0 for c in migrated_color):
-                                if not any(c != 0.0 for c in existing.get("color", [0.0, 0.0, 0.0])):
-                                    existing["color"] = migrated_color
-                        else:
-                            # No existing GLOBAL entry, create new one
-                            state.glyph_cache[cache_key] = normalized_data
-
-            elif key != "GLOBAL" and isinstance(value, (str, dict)):
-                # Very old format: category -> data (migrate to GLOBAL)
-                category = _unicode_escape_to_glyph(key) if '\\u' in key else key
-                cache_key = _make_cache_key(-1, category)  # Always GLOBAL key
-                state.glyph_cache[cache_key] = _normalize_category_data(value, category)
-                category_debug_print(f"[GLYPH LOAD DEBUG] Loaded old-format category: {category}")
 
     # Ensure invalid categories referenced in order lists are kept in cache (as GLOBAL)
     for category in order_categories:

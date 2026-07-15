@@ -7566,8 +7566,7 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
   Brush &brush = *BKE_paint_brush(&paint);
 
   if (stroke_is_first_brush_step_of_symmetry_pass(cache) ||
-      !((brush.stroke_method == BRUSH_STROKE_ANCHORED) ||
-        (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_SNAKE_HOOK) ||
+      !((brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_SNAKE_HOOK) ||
         (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_ROTATE) ||
         cloth::is_cloth_deform_brush(brush)))
   {

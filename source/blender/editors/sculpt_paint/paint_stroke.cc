@@ -19,6 +19,8 @@
 #include "BLI_rand.hh"
 #include "BLI_utildefines.h"
 
+#include "BLT_translation.hh"
+
 #include "DNA_brush_types.h"
 #include "DNA_curve_types.h"
 #include "DNA_object_types.h"
@@ -45,6 +47,8 @@
 
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
+
+#include "UI_resources.hh"
 
 #include "IMB_imbuf_types.hh"
 
@@ -318,52 +322,82 @@ bool PaintStroke::update(bContext *C,
   }
 
   if (brush.stroke_method == BRUSH_STROKE_ANCHORED) {
-    bool hit = false;
-    float2 halfway;
+    if (anchored_repositioning_) {
+      /* Repositioning mode: anchor follows the mouse with a fixed offset while size and rotation
+       * stay locked at the values saved when Space was pressed. On release the anchor remains
+       * in place, so the effective radius equals the original radius — no size collapse. */
+      copy_v2_v2(initial_mouse_, float2(mouse) + anchored_visual_offset_);
 
-    const float dx = mouse[0] - initial_mouse_[0];
-    const float dy = mouse[1] - initial_mouse_[1];
+      paint_runtime.anchored_size = anchored_saved_radius_;
+      paint_runtime.pixel_radius = anchored_saved_radius_ / zoom_2d_;
+      paint_runtime.brush_rotation = paint_runtime.brush_rotation_sec = anchored_saved_rotation_;
 
-    paint_runtime.anchored_size = paint_runtime.pixel_radius = sqrtf(dx * dx + dy * dy);
+      copy_v2_v2(paint_runtime.anchored_initial_mouse, initial_mouse_);
+      copy_v2_v2(paint_runtime.tex_mouse, initial_mouse_);
+      copy_v2_v2(paint_runtime.mask_tex_mouse, initial_mouse_);
+      copy_v2_v2(mouse, initial_mouse_);
 
-    paint_runtime.brush_rotation = paint_runtime.brush_rotation_sec = atan2f(dy, dx) +
-                                                                      float(0.5f * M_PI);
-
-    if (brush.flag & BRUSH_EDGE_TO_EDGE) {
-      halfway[0] = dx * 0.5f + initial_mouse_[0];
-      halfway[1] = dy * 0.5f + initial_mouse_[1];
-
-      if (mode != PaintMode::Texture2D) {
-        if (this->get_location(r_location, halfway, original_)) {
-          hit = true;
-          location_sampled = true;
-          location_success = true;
-          *r_location_is_set = true;
-        }
-        else if (!paint_brush_type_require_location(brush, mode)) {
-          hit = true;
-        }
-      }
-      else {
-        hit = true;
-      }
-    }
-    if (hit) {
-      copy_v2_v2(paint_runtime.anchored_initial_mouse, halfway);
-      copy_v2_v2(paint_runtime.tex_mouse, halfway);
-      copy_v2_v2(paint_runtime.mask_tex_mouse, halfway);
-      copy_v2_v2(mouse, halfway);
-      paint_runtime.anchored_size /= 2.0f;
-      paint_runtime.pixel_radius /= 2.0f;
       stroke_distance_ = paint_runtime.pixel_radius;
+      paint_runtime.draw_anchored = true;
+
+      if (this->get_location(r_location, initial_mouse_, original_)) {
+        location_sampled = true;
+        location_success = true;
+        *r_location_is_set = true;
+      }
+      else if (!paint_brush_type_require_location(brush, mode)) {
+        location_sampled = true;
+        location_success = true;
+      }
     }
     else {
-      copy_v2_v2(paint_runtime.anchored_initial_mouse, initial_mouse_);
-      copy_v2_v2(mouse, initial_mouse_);
-      stroke_distance_ = paint_runtime.pixel_radius;
+      bool hit = false;
+      float2 halfway;
+
+      const float dx = mouse[0] - initial_mouse_[0];
+      const float dy = mouse[1] - initial_mouse_[1];
+
+      paint_runtime.anchored_size = paint_runtime.pixel_radius = sqrtf(dx * dx + dy * dy);
+
+      paint_runtime.brush_rotation = paint_runtime.brush_rotation_sec = atan2f(dy, dx) +
+                                                                        float(0.5f * M_PI);
+
+      if (brush.flag & BRUSH_EDGE_TO_EDGE) {
+        halfway[0] = dx * 0.5f + initial_mouse_[0];
+        halfway[1] = dy * 0.5f + initial_mouse_[1];
+
+        if (mode != PaintMode::Texture2D) {
+          if (this->get_location(r_location, halfway, original_)) {
+            hit = true;
+            location_sampled = true;
+            location_success = true;
+            *r_location_is_set = true;
+          }
+          else if (!paint_brush_type_require_location(brush, mode)) {
+            hit = true;
+          }
+        }
+        else {
+          hit = true;
+        }
+      }
+      if (hit) {
+        copy_v2_v2(paint_runtime.anchored_initial_mouse, halfway);
+        copy_v2_v2(paint_runtime.tex_mouse, halfway);
+        copy_v2_v2(paint_runtime.mask_tex_mouse, halfway);
+        copy_v2_v2(mouse, halfway);
+        paint_runtime.anchored_size /= 2.0f;
+        paint_runtime.pixel_radius /= 2.0f;
+        stroke_distance_ = paint_runtime.pixel_radius;
+      }
+      else {
+        copy_v2_v2(paint_runtime.anchored_initial_mouse, initial_mouse_);
+        copy_v2_v2(mouse, initial_mouse_);
+        stroke_distance_ = paint_runtime.pixel_radius;
+      }
+      paint_runtime.pixel_radius /= zoom_2d_;
+      paint_runtime.draw_anchored = true;
     }
-    paint_runtime.pixel_radius /= zoom_2d_;
-    paint_runtime.draw_anchored = true;
   }
   else {
     /* curve strokes do their own rake calculation */
@@ -963,6 +997,12 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
   paint_runtime->draw_anchored = false;
   paint_runtime->stroke_active = false;
 
+  /* Restore the default cursor if repositioning mode was still active when the stroke ended. */
+  if (anchored_repositioning_) {
+    WM_cursor_set(CTX_wm_window(C), WM_CURSOR_DEFAULT);
+    anchored_repositioning_ = false;
+  }
+
   if (timer_) {
     WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), timer_);
   }
@@ -1498,6 +1538,11 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
       }
 
       first_dab = true;
+
+      if (br->stroke_method == BRUSH_STROKE_ANCHORED) {
+        WorkspaceStatus status(C);
+        status.item(IFACE_("Hold Space to reposition"), ICON_EVENT_SPACEKEY);
+      }
     }
   }
 
@@ -1542,10 +1587,49 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
       return OPERATOR_FINISHED;
     }
   }
-  else if (ELEM(event->type, EVT_RETKEY, EVT_SPACEKEY)) {
+  else if (event->type == EVT_RETKEY) {
     this->line_end(C, op, sample_average.mouse);
     this->done(C, false);
     return OPERATOR_FINISHED;
+  }
+  else if (event->type == EVT_SPACEKEY) {
+    if (br->stroke_method == BRUSH_STROKE_ANCHORED && stroke_started_) {
+      if (event->val == KM_PRESS && !anchored_repositioning_) {
+        anchored_repositioning_ = true;
+        /* Save the current screen-space radius (before zoom adjustment) and rotation. */
+        anchored_saved_radius_ = paint_runtime.anchored_size;
+        anchored_saved_rotation_ = paint_runtime.brush_rotation;
+        /* Vector from the current mouse position to the anchor point. */
+        anchored_visual_offset_ = initial_mouse_ - sample_average.mouse;
+
+        WM_cursor_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
+        {
+          WorkspaceStatus status(C);
+          status.item(IFACE_("Release Space to confirm position"), ICON_EVENT_SPACEKEY);
+        }
+
+        return OPERATOR_RUNNING_MODAL;
+      }
+      else if (event->val == KM_RELEASE && anchored_repositioning_) {
+        /* Exit repositioning. initial_mouse_ is already at the correct new anchor position,
+         * so the radius equals the length of anchored_visual_offset_ (= original radius). */
+        anchored_repositioning_ = false;
+
+        WM_cursor_set(CTX_wm_window(C), WM_CURSOR_DEFAULT);
+        {
+          WorkspaceStatus status(C);
+          status.item(IFACE_("Hold Space to reposition"), ICON_EVENT_SPACEKEY);
+        }
+
+        return OPERATOR_RUNNING_MODAL;
+      }
+    }
+    else {
+      /* Normal Space behavior: finish line strokes and other non-ANCHORED strokes. */
+      this->line_end(C, op, sample_average.mouse);
+      this->done(C, false);
+      return OPERATOR_FINISHED;
+    }
   }
   else if (br->stroke_method == BRUSH_STROKE_LINE) {
     if (event->modifier & KM_ALT) {

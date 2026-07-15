@@ -178,6 +178,15 @@ struct PaintStroke : NonCopyable, NonMovable {
 
   bool original_ = false; /* Ray-cast original mesh at start of stroke. */
 
+  /* Anchored brush repositioning via Space key. */
+  bool anchored_repositioning_ = false;
+  /* Vector from current mouse position to anchor point, saved when entering repositioning. */
+  float2 anchored_visual_offset_ = float2(0.0f, 0.0f);
+  /* Brush radius in screen pixels (before zoom_2d_ adjustment), locked during repositioning. */
+  float anchored_saved_radius_ = 0.0f;
+  /* Brush rotation at the time Space was pressed, locked during repositioning. */
+  float anchored_saved_rotation_ = 0.0f;
+
  public:
   PaintStroke() = delete;
 

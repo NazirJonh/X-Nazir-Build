@@ -15,7 +15,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <sstream>
 #include <string>
 
 #include "MEM_guardedalloc.h"
@@ -24,7 +23,6 @@
 #include "BLI_map.hh"
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
-#include "BLI_serialize.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
@@ -1812,25 +1810,24 @@ LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int
   return nullptr;
 }
 
-std::string get_tags_for_category_ui(const wmWindowManager *wm,
-                                      const char *category,
-                                      uint32_t filter_mode_flag,
-                                      int space_type)
+Vector<CategoryTagUIRecord> get_tags_for_category_ui(const wmWindowManager *wm,
+                                                     const char *category,
+                                                     uint32_t filter_mode_flag,
+                                                     int space_type)
 {
+  Vector<CategoryTagUIRecord> records;
   if (wm == nullptr || category == nullptr) {
-    return {};
+    return records;
   }
 
   if (!category_tag_list_is_valid(&wm->category_tags)) {
-    return {};
+    return records;
   }
 
   const char *tags_string = category_tags_string_lookup(wm, category, space_type);
 
-  /* Serialize the visible tags as a JSON array. The edit dialog parses it back with the
-   * shared serialization layer (see interface_tab_categories_edit.cc). JSON avoids the
-   * delimiter-collision hazards of the previous positional "name|glyph|...;" format. */
-  blender::io::serialize::ArrayValue array;
+  /* Build the visible tags as typed records consumed directly by the edit dialog. An empty
+   * result means "no tags" (callers gate the Tags UI on that). */
   for (const CategoryTagDef *tag = static_cast<const CategoryTagDef *>(wm->category_tags.first); tag;
        tag = static_cast<const CategoryTagDef *>(tag->next))
   {
@@ -1875,29 +1872,22 @@ std::string get_tags_for_category_ui(const wmWindowManager *wm,
       icon_id = category_tab_icon_id_resolve_from_key_path(tag->icon_key, nullptr);
     }
 
-    std::shared_ptr<blender::io::serialize::DictionaryValue> record = array.append_dict();
-    record->append_str(category_tag_json::KEY_NAME, tag->name);
-    record->append_str(category_tag_json::KEY_GLYPH, glyph_out);
-    record->append_bool(category_tag_json::KEY_ACTIVE, is_active);
-    std::shared_ptr<blender::io::serialize::ArrayValue> color = record->append_array(
-        category_tag_json::KEY_COLOR);
-    color->append_double(tag->color[0]);
-    color->append_double(tag->color[1]);
-    color->append_double(tag->color[2]);
-    record->append_int(category_tag_json::KEY_ICON_ID, icon_id);
-    record->append_int(category_tag_json::KEY_ICON_SOURCE, tag->icon_source);
+    CategoryTagUIRecord record{};
+    BLI_strncpy(record.name, tag->name, sizeof(record.name));
+    BLI_strncpy(record.glyph, glyph_out, sizeof(record.glyph));
+    record.is_active = is_active ? 1 : 0;
+    record.color[0] = tag->color[0];
+    record.color[1] = tag->color[1];
+    record.color[2] = tag->color[2];
+    /* Mirror the previous "non-black" test the consumer used to derive `has_color`. */
+    record.has_color = (record.color[0] > 0.001f || record.color[1] > 0.001f ||
+                        record.color[2] > 0.001f);
+    record.icon_id = icon_id;
+    record.icon_source = tag->icon_source;
+    records.append(record);
   }
 
-  /* Preserve the previous "no tags -> empty string" contract: callers gate UI layout on
-   * `.empty()`, and an empty JSON array ("[]") would read as non-empty. */
-  if (array.elements().is_empty()) {
-    return {};
-  }
-
-  std::stringstream ss;
-  blender::io::serialize::JsonFormatter formatter;
-  formatter.serialize(ss, array);
-  return ss.str();
+  return records;
 }
 
 static PanelMouseState ui_panel_mouse_state_get(const Block *block,

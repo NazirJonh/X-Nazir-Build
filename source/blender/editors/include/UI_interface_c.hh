@@ -17,6 +17,7 @@
 #include "BLI_compiler_attrs.h"
 #include "BLI_enum_flags.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_vector.hh"
 #include "BLI_string_utf8_symbols.h"
 #include "BLI_sys_types.h" /* size_t */
 
@@ -2875,23 +2876,29 @@ bool panel_category_first_letter_lookup(const wmWindowManager *wm,
                                         char r_letter[8]);
 
 /**
- * JSON object keys for the tag records emitted by #get_tags_for_category_ui and parsed
- * back by the edit dialog (interface_tab_categories_edit.cc). Kept as a single source of
- * truth so the producer and consumer cannot drift apart.
+ * One tag prepared for the category edit dialog's Tags panel. Produced by
+ * #get_tags_for_category_ui (from #wmWindowManager::category_tags) and consumed directly by the
+ * dialog renderer. Passing typed records avoids the in-process JSON round-trip that the previous
+ * string-based channel used.
  */
-namespace category_tag_json {
-constexpr const char *KEY_NAME = "name";
-constexpr const char *KEY_GLYPH = "glyph";
-constexpr const char *KEY_ACTIVE = "active";
-constexpr const char *KEY_COLOR = "color";
-constexpr const char *KEY_ICON_ID = "icon_id";
-constexpr const char *KEY_ICON_SOURCE = "icon_source";
-}  // namespace category_tag_json
+struct CategoryTagUIRecord {
+  char name[64];
+  char glyph[16];
+  int is_active;
+  float color[3]; /* Meaningful only when `has_color` is true. */
+  bool has_color;
+  int icon_id;
+  int icon_source;
+};
 
-std::string get_tags_for_category_ui(const wmWindowManager *wm,
-                                      const char *category,
-                                      uint32_t filter_mode_flag,
-                                      int space_type = -1);
+/**
+ * Return the tags relevant to `category` for the edit dialog, filtered by `filter_mode_flag`
+ * (0 = all tags). An empty vector means "no tags"; callers gate the Tags UI layout on that.
+ */
+Vector<CategoryTagUIRecord> get_tags_for_category_ui(const wmWindowManager *wm,
+                                                     const char *category,
+                                                     uint32_t filter_mode_flag,
+                                                     int space_type = -1);
 
 /**
  * Get the current object mode as a CategoryTagMode bitmask.

@@ -21,7 +21,6 @@
 #include <cstring>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <string>
 
 #include "MEM_guardedalloc.h"
@@ -36,7 +35,6 @@
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
-#include "BLI_serialize.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_time.h"
@@ -1328,100 +1326,6 @@ void category_tab_edit_popup_ok_cb(bContext *C, void *user_data, int /*retval*/)
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Tag Data String Parsing
- *
- * Parse the serialized tag-data string produced by
- * `interface_panel.cc:get_tags_for_category_ui()`. Each record has the form
- * `name|glyph|is_active|r,g,b|icon_id|icon_source` and records are separated by ';'.
- *
- * The header (active-only glyph labels) and body (toggle buttons) of the tags panel in
- * `category_tab_edit_block_create()` both consume this string; this helper is the single
- * source of truth for the format (previously it was hand-parsed in two identical copies).
- *
- * ARCHITECTURAL NOTE: this string-based channel between panel data prep and tab rendering is a
- * workaround; a future refactor should pass a structured object instead.
- * \{ */
-
-struct EditDialogTagData {
-  char name[64];
-  char glyph[16];
-  int is_active;
-  float color[3]; /* Parsed RGB; meaningful only when `has_color` is true. */
-  bool has_color;
-  int icon_id;
-  int icon_source;
-};
-
-static Vector<EditDialogTagData> parse_edit_dialog_tag_data(const char *data_str)
-{
-  Vector<EditDialogTagData> items;
-  if (data_str == nullptr || data_str[0] == '\0') {
-    return items;
-  }
-
-  /* The producer (interface_panel.cc:get_tags_for_category_ui) emits a JSON array of
-   * records; parse it with the shared serialization layer instead of hand-splitting a
-   * positional "name|glyph|...;" string. */
-  std::istringstream is(data_str);
-  io::serialize::JsonFormatter formatter;
-  std::unique_ptr<io::serialize::Value> root = formatter.deserialize(is);
-  if (!root) {
-    return items;
-  }
-  const io::serialize::ArrayValue *array = root->as_array_value();
-  if (!array) {
-    return items;
-  }
-
-  for (const std::shared_ptr<io::serialize::Value> &element : array->elements()) {
-    const io::serialize::DictionaryValue *record = element->as_dictionary_value();
-    if (!record) {
-      continue;
-    }
-
-    EditDialogTagData item{};
-
-    if (const std::optional<StringRefNull> name = record->lookup_str(category_tag_json::KEY_NAME))
-    {
-      BLI_strncpy(item.name, name->c_str(), sizeof(item.name));
-    }
-    if (const std::optional<StringRefNull> glyph = record->lookup_str(category_tag_json::KEY_GLYPH))
-    {
-      BLI_strncpy(item.glyph, glyph->c_str(), sizeof(item.glyph));
-    }
-    item.is_active = record->lookup_bool(category_tag_json::KEY_ACTIVE).value_or(false) ? 1 : 0;
-
-    /* Color: three channels in 0.0-1.0; `has_color` mirrors the previous "non-black" test. */
-    item.color[0] = item.color[1] = item.color[2] = 0.0f;
-    item.has_color = false;
-    if (const io::serialize::ArrayValue *color = record->lookup_array(category_tag_json::KEY_COLOR))
-    {
-      const Span<std::shared_ptr<io::serialize::Value>> channels = color->elements();
-      for (int c = 0; c < 3 && c < channels.size(); c++) {
-        if (const io::serialize::DoubleValue *dv = channels[c]->as_double_value()) {
-          item.color[c] = float(dv->value());
-        }
-        else if (const io::serialize::IntValue *iv = channels[c]->as_int_value()) {
-          item.color[c] = float(iv->value());
-        }
-      }
-      if (item.color[0] > 0.001f || item.color[1] > 0.001f || item.color[2] > 0.001f) {
-        item.has_color = true;
-      }
-    }
-
-    item.icon_id = int(record->lookup_int(category_tag_json::KEY_ICON_ID).value_or(0));
-    item.icon_source = int(record->lookup_int(category_tag_json::KEY_ICON_SOURCE).value_or(0));
-
-    items.append(item);
-  }
-
-  return items;
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
 /** \name Popup Block Creation
  * \{ */
 
@@ -1801,10 +1705,12 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
   const uint32_t filter_mode_flag = category_tab_popup_local_filter_mode_flag();
 
   /* Get all active tags for the header (unfiltered) */
-  const std::string tags_data_header = get_tags_for_category_ui(wm, category, 0, space_type);
+  const Vector<CategoryTagUIRecord> tags_data_header = get_tags_for_category_ui(
+      wm, category, 0, space_type);
 
   /* Get filtered tags for the body list */
-  const std::string tags_data_body = get_tags_for_category_ui(wm, category, filter_mode_flag, space_type);
+  const Vector<CategoryTagUIRecord> tags_data_body = get_tags_for_category_ui(
+      wm, category, filter_mode_flag, space_type);
 
   /* Don't show tags panel for reserved categories */
   if (!is_reserved) {
@@ -1844,11 +1750,11 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
       buttons_section.alignment_set(LayoutAlign::Right);
 
       /* Show active tags as colored glyph buttons in header */
-      if (!tags_data_header.empty()) {
+      if (!tags_data_header.is_empty()) {
         Layout &glyphs_row = glyphs_section.row(true);
         glyphs_row.alignment_set(LayoutAlign::Left); /* Left align to use full available width */
 
-        for (const EditDialogTagData &tag : parse_edit_dialog_tag_data(tags_data_header.c_str())) {
+        for (const CategoryTagUIRecord &tag : tags_data_header) {
           /* Only show colored glyph for active tags */
           if (tag.name[0] != '\0' && tag.is_active && tag.glyph[0] != '\0') {
             /* Determine what to display: icon takes priority over glyph if icon_source is ICON (1).
@@ -1929,7 +1835,7 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
       const bool show_without_tag = category_is_unassigned_for_context(
           wm, mapping_item, space_type, current_mode_flag);
 
-      if (!tags_data_body.empty() || show_without_tag) {
+      if (!tags_data_body.is_empty() || show_without_tag) {
         /* Create centered container for the grid */
         Layout &centered_row = tags_body.row(false);
         centered_row.alignment_set(LayoutAlign::Center);
@@ -1983,8 +1889,8 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
           }
         }
 
-        if (!tags_data_body.empty()) {
-          for (const EditDialogTagData &tag : parse_edit_dialog_tag_data(tags_data_body.c_str())) {
+        if (!tags_data_body.is_empty()) {
+          for (const CategoryTagUIRecord &tag : tags_data_body) {
             if (tag.name[0] == '\0') {
               continue;
             }

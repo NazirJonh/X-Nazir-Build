@@ -338,6 +338,17 @@ add_blender_test(
   --python ${CMAKE_CURRENT_LIST_DIR}/bl_pyapi_prop_array.py
 )
 
+# Category Tabs / glyph_tag_system JSON schema layer: pure-Python (bpy-free) round-trip,
+# validation and fuzz tests. Runs standalone with the unit-test interpreter (no Blender
+# launch); only registered when a test interpreter is configured.
+if(TEST_PYTHON_EXE)
+  add_python_test(
+    glyph_tag_schema_roundtrip
+    ${CMAKE_CURRENT_LIST_DIR}/bl_glyph_tag_schema_roundtrip.py
+    --startup-dir ${CMAKE_SOURCE_DIR}/scripts/startup
+  )
+endif()
+
 add_blender_test(
   script_pyapi_text
   --python ${CMAKE_CURRENT_LIST_DIR}/bl_pyapi_text.py

@@ -525,6 +525,13 @@ bool BKE_preferences_asset_library_reorder(UserDef *userdef,
     new_parent = target->parent;
   }
 
+  /* Folders never nest inside other folders: a folder always lives at the root level. Reject any
+   * move that would give a folder a folder parent (dropping it into a folder, or before/after an
+   * item that itself lives inside one). Libraries can still be moved into folders. */
+  if (library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER && new_parent != nullptr) {
+    return false;
+  }
+
   /* Prevent creating a cycle: the resulting parent must not be the moved folder itself nor any of
    * its descendants. This also covers Before/After drops onto an item that lives inside the folder
    * being moved (e.g. dropping a folder right after one of its own children), which would

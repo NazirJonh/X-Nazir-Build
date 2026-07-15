@@ -246,6 +246,17 @@ static wmOperatorStatus preferences_asset_library_add_exec(bContext *C, wmOperat
     parent_folder = BKE_preferences_asset_library_find_by_name(&U, parent_name);
   }
 
+  /* No explicit parent given: if the active item in the Preferences list is a folder, drop the new
+   * library straight into it. Lets the generic "Add Asset Library" button honor the selected folder
+   * without the caller having to pass a parent. The new library was appended at the list tail
+   * (#BKE_preferences_asset_library_add), so the active item's index still points at the folder. */
+  if (!parent_folder) {
+    bUserAssetLibrary *active_library = userpref_ui_active_asset_library();
+    if (active_library && active_library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      parent_folder = active_library;
+    }
+  }
+
   /* Move to parent folder if specified. */
   if (parent_folder) {
     BKE_preferences_asset_library_move_to_folder(&U, new_library, parent_folder);
@@ -509,16 +520,10 @@ static wmOperatorStatus preferences_asset_library_folder_add_exec(bContext * /*C
     STRNCPY(name, DATA_("New Folder"));
   }
 
-  bUserAssetLibrary *parent_folder = nullptr;
-  prop = RNA_struct_find_property(op->ptr, "parent_folder_name");
-  if (RNA_property_is_set(op->ptr, prop)) {
-    char parent_name[sizeof(bUserAssetLibrary::name)];
-    RNA_property_string_get(op->ptr, prop, parent_name);
-    parent_folder = BKE_preferences_asset_library_find_by_name(&U, parent_name);
-  }
-
+  /* Folders always live at the root level: nesting folders inside other folders is not supported,
+   * so the parent is always null regardless of any caller-supplied parent. */
   bUserAssetLibrary *new_folder = BKE_preferences_asset_library_folder_add(
-      &U, name, parent_folder);
+      &U, name, /*parent=*/nullptr);
 
   /* Activate new folder in the UI list. Uses the remote-aware UI index (same scheme as
    * #preferences_asset_library_add_exec), not the raw listbase index. */
@@ -547,14 +552,6 @@ static void PREFERENCES_OT_asset_library_folder_add(wmOperatorType *ot)
 
   RNA_def_string(
       ot->srna, "name", nullptr, sizeof(bUserAssetLibrary::name), "Name", "Name of the folder");
-
-  PropertyRNA *prop = RNA_def_string(ot->srna,
-                                     "parent_folder_name",
-                                     nullptr,
-                                     sizeof(bUserAssetLibrary::name),
-                                     "Parent Folder",
-                                     "Name of the parent folder");
-  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 }
 
 /** \} */

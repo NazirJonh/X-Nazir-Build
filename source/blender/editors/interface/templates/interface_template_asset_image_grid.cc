@@ -33,8 +33,11 @@
 #include "BKE_screen.hh"
 
 #include "BLI_set.hh"
+#include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 #include "BLT_translation.hh"
+
+#include "MEM_guardedalloc.h"
 
 #include "IMB_imbuf_types.hh"
 
@@ -953,6 +956,58 @@ static void image_grid_header_popover(Layout &row,
   but->rect.xmax = but->rect.xmin + short(1.6f * UI_UNIT_X);
 }
 
+/* Draw the asset-library choices as a plain vertical menu. The operator's enum dropdown
+ * (#Layout::op_menu_enum) lays folder headings out as side-by-side columns; a menu reads top to
+ * bottom. Folder headings become labels; each library is an operator row that sets the library and
+ * closes the menu. The slot (texture vs mask) is re-applied to the menu's own context because the
+ * operator resolves it from there (#image_grid_is_mask_slot_from_context). */
+static void image_grid_library_selector_menu_draw(bContext * /*C*/, Layout *layout, void *arg)
+{
+  const bool is_mask_slot = POINTER_AS_INT(arg) != 0;
+  layout->context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
+
+  /* Same item source as the operator's own enum (#rna_image_grid_library_itemf): image libraries
+   * only, grouped by folder. */
+  const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
+      /*include_readonly=*/true,
+      /*include_current_file=*/true,
+      /*include_remote_libraries=*/false,
+      /*include_separate_online_essentials=*/false,
+      /*exclude_image_libraries=*/false,
+      /*only_image_libraries=*/true);
+  if (!items) {
+    return;
+  }
+
+  Layout &col = layout->column(false);
+  /* Start "separated" so a leading folder heading gets no divider above it. */
+  bool prev_was_separator = true;
+  for (const EnumPropertyItem *item = items; item->identifier; item++) {
+    /* Empty identifier: a folder heading (has a name) or a plain separator (no name). */
+    if (!item->identifier[0]) {
+      if (item->name && item->name[0]) {
+        /* Divider before each folder name, unless one was just drawn (avoids doubling the
+         * built-in separator before the custom section). */
+        if (!prev_was_separator) {
+          col.separator();
+        }
+        col.label(item->name, item->icon);
+        prev_was_separator = false;
+      }
+      else {
+        col.separator();
+        prev_was_separator = true;
+      }
+      continue;
+    }
+    PointerRNA op_ptr = col.op("VIEW3D_OT_image_grid_set_library", item->name, item->icon);
+    RNA_enum_set(&op_ptr, "asset_library_reference", item->value);
+    prev_was_separator = false;
+  }
+
+  MEM_delete(items);
+}
+
 static void draw_header_row(Layout &layout,
                             ed::view3d::ImageGridUIState &state,
                             const bContext &C,
@@ -961,12 +1016,12 @@ static void draw_header_row(Layout &layout,
   layout.context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
 
   Layout &row = layout.row(true);
-  /* Library selector: dropdown menu of asset libraries. */
-  row.op_menu_enum(&C,
-                   "VIEW3D_OT_image_grid_set_library",
-                   "asset_library_reference",
-                   ed::view3d::image_grid_library_ui_name(state.filter.lib_ref),
-                   ICON_ASSET_MANAGER);
+  /* Library selector: a vertical menu of asset libraries (the operator's enum dropdown lays folder
+   * headings out as side-by-side columns; this reads top to bottom). */
+  row.menu_fn(ed::view3d::image_grid_library_ui_name(state.filter.lib_ref),
+              ICON_ASSET_MANAGER,
+              image_grid_library_selector_menu_draw,
+              POINTER_FROM_INT(is_mask_slot ? 1 : 0));
   /* Catalog selector: opens a popover with library selector + catalog tree. */
   image_grid_header_popover(
       row, C, "VIEW3D_PT_image_grid_catalog_selector", ICON_COLLAPSEMENU, is_mask_slot);

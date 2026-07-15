@@ -40,6 +40,7 @@
 #include "WM_types.hh"
 
 #include "interface_intern.hh"
+#include "interface_templates_intern.hh"
 
 namespace blender::ui {
 
@@ -327,23 +328,83 @@ static void grid_preview_size_panel_register()
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Library selector menu (vertical, backed by #GridViewSettings)
+ * \{ */
+
+/* Draw the asset-library choices as a plain vertical menu instead of the RNA enum dropdown. The
+ * enum dropdown lays folder headings out as side-by-side columns (#ui_def_but_rna__menu); a menu
+ * reads top to bottom. Folder headings become labels, and each library is a row that sets the
+ * property and closes the menu. Enum construction (folder grouping, per-surface filtering, order)
+ * is reused verbatim via the property's item list. */
+static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *arg)
+{
+  PointerRNA *settings_ptr = static_cast<PointerRNA *>(arg);
+  PropertyRNA *prop = RNA_struct_find_property(settings_ptr, "asset_library_reference");
+  if (!prop) {
+    return;
+  }
+
+  const EnumPropertyItem *items = nullptr;
+  bool free = false;
+  RNA_property_enum_items_gettexted(C, settings_ptr, prop, &items, nullptr, &free);
+
+  Layout &col = layout->column(false);
+  /* Start "separated" so a leading folder heading gets no divider above it. */
+  bool prev_was_separator = true;
+  for (const EnumPropertyItem *item = items; item->identifier; item++) {
+    /* Empty identifier: a folder heading (has a name) or a plain separator (no name). */
+    if (!item->identifier[0]) {
+      if (item->name && item->name[0]) {
+        /* Divider before each folder name, unless one was just drawn (avoids doubling the
+         * built-in separator before the custom section). */
+        if (!prev_was_separator) {
+          col.separator();
+        }
+        col.label(item->name, item->icon);
+        prev_was_separator = false;
+      }
+      else {
+        col.separator();
+        prev_was_separator = true;
+      }
+      continue;
+    }
+    col.prop_enum(settings_ptr, prop, item->value, item->name, item->icon);
+    prev_was_separator = false;
+  }
+
+  if (free) {
+    MEM_delete(items);
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Public template entry points
  * \{ */
 
 void template_grid_library_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr)
 {
-  if (!layout || !settings_ptr || !settings_ptr->data) {
+  if (!layout || !C || !settings_ptr || !settings_ptr->data) {
     return;
   }
 
-  Layout &row = layout->row(true);
-  row.prop(settings_ptr, "asset_library_reference", UI_ITEM_NONE, "", ICON_ASSET_MANAGER);
-
   const AssetLibraryReference lib_ref = grid_settings::library_ref_get(*settings_ptr);
+
+  Layout &row = layout->row(true);
+  /* The menu draws after this call returns, so give it an owned copy of the settings pointer; the
+   * UI frees it when the menu closes. */
+  PointerRNA *menu_arg = MEM_new<PointerRNA>(__func__);
+  *menu_arg = *settings_ptr;
+  row.menu_fn_argN_free(id_browser_library_ui_name(lib_ref),
+                        ICON_ASSET_MANAGER,
+                        grid_library_selector_menu_draw,
+                        menu_arg);
+
   if (lib_ref.type != ASSET_LIBRARY_LOCAL) {
     row.op("ASSET_OT_library_refresh", "", ICON_FILE_REFRESH);
   }
-  UNUSED_VARS(C);
 }
 
 void template_grid_catalog_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr)

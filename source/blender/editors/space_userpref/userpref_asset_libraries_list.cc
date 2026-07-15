@@ -105,6 +105,15 @@ std::optional<int> userpref_ui_asset_libraries_index_from_user_library(
   return std::nullopt;
 }
 
+bUserAssetLibrary *userpref_ui_active_asset_library()
+{
+  const Vector<AnyAssetLibraryDefinition> libraries = userpref_ui_asset_libraries();
+  if (U.active_asset_library >= 0 && U.active_asset_library < libraries.size()) {
+    return libraries[U.active_asset_library].user_library;
+  }
+  return nullptr;
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Drag & Drop
  * \{ */
@@ -406,12 +415,10 @@ class AssetLibraryListItem : public ui::AbstractTreeViewItem {
     bUserAssetLibrary &library = *library_.user_library;
 
     if (library.type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      /* Folders can hold libraries but not other folders (no nested folders), so only offer to add
+       * an asset library into this folder -- there is no "Add Subfolder". */
       PointerRNA props = column.op(
           "PREFERENCES_OT_asset_library_add", IFACE_("Add Asset Library"), ICON_NONE);
-      RNA_string_set(&props, "parent_folder_name", library.name);
-
-      props = column.op(
-          "PREFERENCES_OT_asset_library_folder_add", IFACE_("Add Subfolder"), ICON_FILE_FOLDER);
       RNA_string_set(&props, "parent_folder_name", library.name);
 
       column.separator();

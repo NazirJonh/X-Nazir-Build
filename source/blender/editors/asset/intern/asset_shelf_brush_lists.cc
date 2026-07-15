@@ -45,21 +45,43 @@ BrushAssetRef BrushAssetRef::from_weak_reference(const AssetWeakReference &weak_
 
 uint64_t BrushAssetRef::hash() const
 {
-  return get_default_hash(library_type, library_identifier, relative_identifier, blend_filepath);
+  /* Deliberately coarse: #operator== compares the identifier strings with #BLI_path_cmp_normalized,
+   * which can treat byte-different strings as equal (native slash direction, case on Windows).
+   * Hashing the raw strings would then break the "equal keys hash equally" invariant that
+   * #Set/#Map/#VectorSet rely on, so hash only on #library_type -- the one field #operator==
+   * compares exactly. Two equal refs always share it. The recent/favorite lists are tiny (recent is
+   * capped at #BRUSH_ASSET_LISTS_RECENT_MAX), so the extra bucket collisions are irrelevant. */
+  return get_default_hash(library_type);
 }
 
 bool BrushAssetRef::operator==(const BrushAssetRef &other) const
 {
-  return library_type == other.library_type && library_identifier == other.library_identifier &&
-         relative_identifier == other.relative_identifier &&
-         blend_filepath == other.blend_filepath;
+  /* Mirror #AssetWeakReference::operator== (see `asset_weak_reference.cc`) so this cache agrees with
+   * the asset system on when two references identify the same asset: #library_identifier only
+   * participates for custom libraries, and the (asset-library-relative) identifiers are compared
+   * path-normalized rather than byte-exact. #blend_filepath is this module's own addition that
+   * scopes local ("Current File") assets to the .blend file they came from. */
+  if (library_type != other.library_type) {
+    return false;
+  }
+  if (library_type == ASSET_LIBRARY_CUSTOM &&
+      BLI_path_cmp_normalized(library_identifier.c_str(), other.library_identifier.c_str()) != 0)
+  {
+    return false;
+  }
+  if (BLI_path_cmp_normalized(relative_identifier.c_str(), other.relative_identifier.c_str()) != 0) {
+    return false;
+  }
+  return BLI_path_cmp_normalized(blend_filepath.c_str(), other.blend_filepath.c_str()) == 0;
 }
 
 void record_recent_into(Vector<BrushAssetRef> &recent, BrushAssetRef ref, const int max_count)
 {
   recent.remove_if([&](const BrushAssetRef &existing) { return existing == ref; });
   recent.insert(0, std::move(ref));
-  if (recent.size() > max_count) {
+  /* Guard the (public, test-visible) \a max_count: a negative value would make #Vector::resize hit
+   * its `new_size >= 0` assert and crash a debug build. */
+  if (max_count >= 0 && recent.size() > max_count) {
     recent.resize(max_count);
   }
 }
@@ -224,6 +246,10 @@ bool shelf_idname_is_brush_shelf(const StringRef idname)
 namespace {
 struct BrushListsCache {
   bool loaded = false;
+  /** Set when the in-memory lists changed but haven't been written to disk yet. Flushed by
+   * #brush_lists_flush() at exit; see #brush_lists_record_recent() for why recent isn't saved
+   * eagerly. */
+  bool dirty = false;
   Map<std::string, ShelfBrushLists> shelves;
 };
 }  // namespace
@@ -265,9 +291,15 @@ static void cache_save(const Map<std::string, ShelfBrushLists> &shelves)
   BLI_rename_overwrite(tmp_filepath, filepath);
 }
 
-static BrushListsCache &cache_get()
+static BrushListsCache &cache_instance()
 {
   static BrushListsCache cache;
+  return cache;
+}
+
+static BrushListsCache &cache_get()
+{
+  BrushListsCache &cache = cache_instance();
   if (!cache.loaded) {
     cache_load(cache.shelves);
     cache.loaded = true;
@@ -281,7 +313,11 @@ void brush_lists_record_recent(const StringRef shelf_idname, const AssetWeakRefe
   ShelfBrushLists &lists = cache.shelves.lookup_or_add_default(std::string(shelf_idname));
   record_recent_into(
       lists.recent, BrushAssetRef::from_weak_reference(weak_ref), BRUSH_ASSET_LISTS_RECENT_MAX);
-  cache_save(cache.shelves);
+  /* Persist lazily rather than here: brush activation is a hot path (cycling brushes with a hotkey),
+   * and a synchronous serialize + temp-file rename on every activation is a noticeable stall on slow
+   * disks. The change is flushed by #brush_lists_flush() at exit, and opportunistically whenever a
+   * favorite is toggled. Losing the tail of "recent" on a hard crash is acceptable for that list. */
+  cache.dirty = true;
 }
 
 bool brush_lists_is_favorite(const StringRef shelf_idname, const AssetWeakReference &weak_ref)
@@ -299,7 +335,22 @@ void brush_lists_toggle_favorite(const StringRef shelf_idname, const AssetWeakRe
   BrushListsCache &cache = cache_get();
   ShelfBrushLists &lists = cache.shelves.lookup_or_add_default(std::string(shelf_idname));
   toggle_favorite_into(lists.favorites, BrushAssetRef::from_weak_reference(weak_ref));
+  /* Favorites are deliberately curated (not spammed like recent), so persist them immediately to
+   * keep them crash-safe. This write also flushes any recent changes that were only marked dirty. */
   cache_save(cache.shelves);
+  cache.dirty = false;
+}
+
+void brush_lists_flush()
+{
+  /* Use #cache_instance() (not #cache_get()) so a session that never touched the lists doesn't read
+   * the file from disk just to write it back unchanged at exit. */
+  BrushListsCache &cache = cache_instance();
+  if (!cache.loaded || !cache.dirty) {
+    return;
+  }
+  cache_save(cache.shelves);
+  cache.dirty = false;
 }
 
 Span<BrushAssetRef> brush_lists_recent(const StringRef shelf_idname)

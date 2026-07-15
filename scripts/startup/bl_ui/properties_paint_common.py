@@ -411,6 +411,8 @@ class BrushSelectPanel(BrushPanel):
 
         col = row.column()
         col.menu("VIEW3D_MT_brush_context_menu", icon='DOWNARROW_HLT', text="")
+        favorite_icon = 'SOLO_ON' if settings.brush_asset_is_favorite else 'SOLO_OFF'
+        col.operator("brush.asset_favorite_toggle", text="", icon=favorite_icon)
 
 
 class ColorPalettePanel(BrushPanel):

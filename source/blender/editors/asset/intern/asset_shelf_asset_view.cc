@@ -490,8 +490,12 @@ void AssetViewItem::build_grid_tile(const bContext &C, ui::Layout &layout) const
    * defined after the tile's view-item button, which is what makes the two coexist: hit-testing
    * walks the block back to front (#button_find_mouse_over_ex), so a press inside the star goes to
    * the star and everywhere else to the tile. For the same reason the grid's touch drag-scroll
-   * doesn't arm on it, as that only claims presses landing on a view item (#grid_hit_press()). */
-  if (asset_view.favorites_) {
+   * doesn't arm on it, as that only claims presses landing on a view item (#grid_hit_press()).
+   *
+   * A favorite always shows its (filled) star so the state is visible at a glance; a non-favorite
+   * only reveals the (hollow) star while its tile is hovered, matching the download button below.
+   * This keeps the grid uncluttered but still lets the user favorite a brush on demand. */
+  if (asset_view.favorites_ && (is_favorite_ || is_hovered())) {
     ui::Block *overlay_block = overlay_row.block();
     /* #uiDefIconButO appends to the block's *current* layout; make that the overlay row. */
     ui::block_layout_set_current(overlay_block, &overlay_row);

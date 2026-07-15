@@ -236,6 +236,14 @@ std::optional<std::string> image_grid_catalog_path_from_shelf(const AssetShelf &
   if (ed::asset::shelf::settings_is_all_catalog_active(shelf.settings)) {
     return std::nullopt;
   }
+  /* Recent/Favorites are pseudo-catalogs addressed by a reserved sentinel in #active_catalog_path,
+   * not a real catalog path; never hand the raw sentinel back as if it were one. Only reachable if a
+   * brush shelf is ever routed through here, but cheap defensive code against that regression. */
+  if (ed::asset::shelf::settings_is_recent_catalog_active(shelf.settings) ||
+      ed::asset::shelf::settings_is_favorites_catalog_active(shelf.settings))
+  {
+    return std::nullopt;
+  }
   if (shelf.settings.active_catalog_path && shelf.settings.active_catalog_path[0] != '\0') {
     return std::string(shelf.settings.active_catalog_path);
   }

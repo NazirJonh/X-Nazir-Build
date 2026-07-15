@@ -144,6 +144,10 @@ void settings_set_active_catalog(AssetShelfSettings &settings,
                                  const asset_system::AssetCatalogPath &path);
 void settings_set_all_catalog_active(AssetShelfSettings &settings);
 bool settings_is_all_catalog_active(const AssetShelfSettings &settings);
+/** True while the Recent/Favorites pseudo-catalog is the shelf's active "catalog" (stored as a
+ * reserved sentinel in #AssetShelfSettings::active_catalog_path, not a real catalog path). */
+bool settings_is_recent_catalog_active(const AssetShelfSettings &settings);
+bool settings_is_favorites_catalog_active(const AssetShelfSettings &settings);
 
 /** \} */
 
@@ -172,6 +176,9 @@ const char *brush_shelf_idname_from_paint_mode(PaintMode mode);
 void brush_lists_record_recent(StringRef shelf_idname, const AssetWeakReference &weak_ref);
 bool brush_lists_is_favorite(StringRef shelf_idname, const AssetWeakReference &weak_ref);
 void brush_lists_toggle_favorite(StringRef shelf_idname, const AssetWeakReference &weak_ref);
+
+/** Persist any pending in-memory recent-lists change. Called once on Blender exit. */
+void brush_lists_flush();
 
 /** \} */
 

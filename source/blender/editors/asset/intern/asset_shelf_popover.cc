@@ -184,7 +184,8 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
      * early-out below -- a brush library that defines no catalogs would otherwise never offer
      * them. */
     if (shelf::shelf_idname_is_brush_shelf(shelf_.type->idname)) {
-      auto &recent_item = this->add_tree_item<ui::BasicTreeViewItem>(IFACE_("Recent"));
+      auto &recent_item = this->add_tree_item<ui::BasicTreeViewItem>(IFACE_("Recent"),
+                                                                     ICON_RECOVER_LAST);
       recent_item.set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem &) {
         settings_set_recent_catalog_active(shelf_.settings);
         send_redraw_notifier(C);
@@ -192,7 +193,8 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
       recent_item.set_is_active_fn(
           [this]() { return settings_is_recent_catalog_active(shelf_.settings); });
 
-      auto &favorites_item = this->add_tree_item<ui::BasicTreeViewItem>(IFACE_("Favorites"));
+      auto &favorites_item = this->add_tree_item<ui::BasicTreeViewItem>(IFACE_("Favorites"),
+                                                                        ICON_SOLO_ON);
       favorites_item.set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem &) {
         settings_set_favorites_catalog_active(shelf_.settings);
         send_redraw_notifier(C);
@@ -531,6 +533,9 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
                             ui::ITEM_R_TOGGLE | ui::ITEM_R_ICON_ONLY,
                             "",
                             ICON_SOLO_ON);
+    /* Detach the favorites filter (a view toggle) from the preview-size buttons that follow, which
+     * are a different kind of control -- otherwise they read as one merged button group. */
+    controls.separator();
   }
   controls.prop_enum(
       &shelf_ptr, "preview_size_preset", "SMALL", IFACE_("Small"), ICON_SHORTDISPLAY);
@@ -662,6 +667,11 @@ static void asset_shelf_popover_listen(const wmRegionListenerParams *params)
        * to rebuild for a favorite toggled from outside of it (brush context menu, Python, another
        * window). A popup only rebuilds on #RGN_REFRESH_UI, so tagging a redraw is not enough. */
       if (ELEM(wmn->data, ND_ASSET_LIST_READING, ND_ASSET_LIST_PREVIEW, ND_ASSET_CATALOGS)) {
+        ED_region_tag_refresh_ui(region);
+      }
+      /* A brush activated from outside the popover (hotkey, Python, brush context menu, another
+       * window) changes the Recent pseudo-catalog; rebuild so an open popover reflects it. */
+      else if (wmn->action == NA_ACTIVATED) {
         ED_region_tag_refresh_ui(region);
       }
       break;

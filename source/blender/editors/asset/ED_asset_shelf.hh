@@ -177,6 +177,10 @@ void brush_lists_record_recent(StringRef shelf_idname, const AssetWeakReference 
 bool brush_lists_is_favorite(StringRef shelf_idname, const AssetWeakReference &weak_ref);
 void brush_lists_toggle_favorite(StringRef shelf_idname, const AssetWeakReference &weak_ref);
 
+/** Empty \a shelf_idname's recent/favorites list. Persists the change to disk immediately. */
+void brush_lists_clear_recent(StringRef shelf_idname);
+void brush_lists_clear_favorites(StringRef shelf_idname);
+
 /** Persist any pending in-memory recent-lists change. Called once on Blender exit. */
 void brush_lists_flush();
 

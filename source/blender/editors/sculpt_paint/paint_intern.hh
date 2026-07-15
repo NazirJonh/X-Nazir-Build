@@ -345,6 +345,8 @@ bool paint_brush_cursor_poll(bContext *C);
 
 void BRUSH_OT_asset_activate(wmOperatorType *ot);
 void BRUSH_OT_asset_favorite_toggle(wmOperatorType *ot);
+void BRUSH_OT_asset_recent_clear(wmOperatorType *ot);
+void BRUSH_OT_asset_favorites_clear(wmOperatorType *ot);
 void BRUSH_OT_asset_save_as(wmOperatorType *ot);
 void BRUSH_OT_asset_edit_metadata(wmOperatorType *ot);
 void BRUSH_OT_asset_load_preview(wmOperatorType *ot);

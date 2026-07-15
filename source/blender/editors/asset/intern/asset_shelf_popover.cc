@@ -159,6 +159,30 @@ class AssetShelfCatalogTreeViewItem : public ui::BasicTreeViewItem {
   }
 };
 
+/* "Recent" pseudo-catalog tree item; only its context menu differs from a plain #BasicTreeViewItem
+ * (offers clearing the list). */
+class RecentCatalogTreeViewItem : public ui::BasicTreeViewItem {
+ public:
+  using BasicTreeViewItem::BasicTreeViewItem;
+
+  void build_context_menu(bContext & /*C*/, ui::Layout &column) const override
+  {
+    column.op("BRUSH_OT_asset_recent_clear", IFACE_("Clear Recent"), ICON_NONE);
+  }
+};
+
+/* "Favorites" pseudo-catalog tree item; only its context menu differs from a plain
+ * #BasicTreeViewItem (offers clearing the list). */
+class FavoritesCatalogTreeViewItem : public ui::BasicTreeViewItem {
+ public:
+  using BasicTreeViewItem::BasicTreeViewItem;
+
+  void build_context_menu(bContext & /*C*/, ui::Layout &column) const override
+  {
+    column.op("BRUSH_OT_asset_favorites_clear", IFACE_("Clear Favorites"), ICON_NONE);
+  }
+};
+
 class AssetCatalogTreeView : public ui::AbstractTreeView {
   AssetShelf &shelf_;
   asset_system::AssetCatalogTree catalog_tree_;
@@ -184,8 +208,8 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
      * early-out below -- a brush library that defines no catalogs would otherwise never offer
      * them. */
     if (shelf::shelf_idname_is_brush_shelf(shelf_.type->idname)) {
-      auto &recent_item = this->add_tree_item<ui::BasicTreeViewItem>(IFACE_("Recent"),
-                                                                     ICON_RECOVER_LAST);
+      auto &recent_item = this->add_tree_item<RecentCatalogTreeViewItem>(IFACE_("Recent"),
+                                                                         ICON_RECOVER_LAST);
       recent_item.set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem &) {
         settings_set_recent_catalog_active(shelf_.settings);
         send_redraw_notifier(C);
@@ -193,8 +217,8 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
       recent_item.set_is_active_fn(
           [this]() { return settings_is_recent_catalog_active(shelf_.settings); });
 
-      auto &favorites_item = this->add_tree_item<ui::BasicTreeViewItem>(IFACE_("Favorites"),
-                                                                        ICON_SOLO_ON);
+      auto &favorites_item = this->add_tree_item<FavoritesCatalogTreeViewItem>(
+          IFACE_("Favorites"), ICON_SOLO_ON);
       favorites_item.set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem &) {
         settings_set_favorites_catalog_active(shelf_.settings);
         send_redraw_notifier(C);
@@ -526,17 +550,27 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
   /* Only meaningful on brush shelves (only they have favorites lists), and greyed out while the
    * "Favorites" pseudo-catalog is itself active, since that view is already favorites-only. */
   if (shelf_idname_is_brush_shelf(shelf->type->idname)) {
+    controls.label(IFACE_("Filter:"), ICON_NONE);
+    controls.separator();
     ui::Layout &favorites_only_row = controls.row(true);
+    /* #fixed_size_set() / #alignment_set() don't propagate from #controls to this nested row (it
+     * exists only to scope #enabled_set() to this one button, see below), so without repeating them
+     * here this button would size differently from the preset buttons that follow. */
+    favorites_only_row.fixed_size_set(true);
+    favorites_only_row.alignment_set(ui::LayoutAlign::Right);
     favorites_only_row.enabled_set(!settings_is_favorites_catalog_active(shelf->settings));
     favorites_only_row.prop(&shelf_ptr,
                             "filter_favorites_only",
-                            ui::ITEM_R_TOGGLE | ui::ITEM_R_ICON_ONLY,
-                            "",
+                            ui::ITEM_R_TOGGLE,
+                            IFACE_("Only Favorite"),
                             ICON_SOLO_ON);
-    /* Detach the favorites filter (a view toggle) from the preview-size buttons that follow, which
-     * are a different kind of control -- otherwise they read as one merged button group. */
+    /* Detach the favorites filter (a view toggle) from the "Size:" group that follows, which is a
+     * different kind of control -- otherwise they read as one merged button group. */
     controls.separator();
   }
+  controls.label(IFACE_("Size:"), ICON_NONE);
+  /* Detach the label from the preset buttons it introduces, matching the "Filter:" label above. */
+  controls.separator();
   controls.prop_enum(
       &shelf_ptr, "preview_size_preset", "SMALL", IFACE_("Small"), ICON_SHORTDISPLAY);
   controls.prop_enum(

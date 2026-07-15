@@ -262,6 +262,74 @@ void BRUSH_OT_asset_favorite_toggle(wmOperatorType *ot)
   asset::operator_asset_reference_props_register(*ot->srna);
 }
 
+/**
+ * Shared poll for the Recent/Favorites "Clear" operators, invoked from the pseudo-catalogs'
+ * context menu in the shelf popover. Same gate as #brush_asset_favorite_toggle_poll: both need a
+ * brush asset shelf resolved for the current mode to know which list to clear.
+ */
+static bool brush_asset_list_clear_poll(bContext *C)
+{
+  if (!brush_shelf_idname_from_context(C)) {
+    CTX_wm_operator_poll_msg_set(C, "No brush asset shelf for the current mode");
+    return false;
+  }
+  return true;
+}
+
+static wmOperatorStatus brush_asset_recent_clear_exec(bContext *C, wmOperator *op)
+{
+  const char *shelf_idname = brush_shelf_idname_from_context(C);
+  if (!shelf_idname) {
+    BKE_report(op->reports, RPT_ERROR, "No brush asset shelf for the current mode");
+    return OPERATOR_CANCELLED;
+  }
+
+  asset::shelf::brush_lists_clear_recent(shelf_idname);
+  WM_main_add_notifier(NC_ASSET | ND_ASSET_CATALOGS, nullptr);
+
+  return OPERATOR_FINISHED;
+}
+
+void BRUSH_OT_asset_recent_clear(wmOperatorType *ot)
+{
+  ot->name = "Clear Recent Brushes";
+  ot->description = "Remove all brush assets from the shelf's Recent list";
+  ot->idname = "BRUSH_OT_asset_recent_clear";
+
+  ot->invoke = WM_operator_confirm;
+  ot->exec = brush_asset_recent_clear_exec;
+  ot->poll = brush_asset_list_clear_poll;
+
+  /* No #OPTYPE_UNDO: same reasoning as #BRUSH_OT_asset_favorite_toggle. */
+}
+
+static wmOperatorStatus brush_asset_favorites_clear_exec(bContext *C, wmOperator *op)
+{
+  const char *shelf_idname = brush_shelf_idname_from_context(C);
+  if (!shelf_idname) {
+    BKE_report(op->reports, RPT_ERROR, "No brush asset shelf for the current mode");
+    return OPERATOR_CANCELLED;
+  }
+
+  asset::shelf::brush_lists_clear_favorites(shelf_idname);
+  WM_main_add_notifier(NC_ASSET | ND_ASSET_CATALOGS, nullptr);
+
+  return OPERATOR_FINISHED;
+}
+
+void BRUSH_OT_asset_favorites_clear(wmOperatorType *ot)
+{
+  ot->name = "Clear Favorite Brushes";
+  ot->description = "Remove all brush assets from the shelf's Favorites list";
+  ot->idname = "BRUSH_OT_asset_favorites_clear";
+
+  ot->invoke = WM_operator_confirm;
+  ot->exec = brush_asset_favorites_clear_exec;
+  ot->poll = brush_asset_list_clear_poll;
+
+  /* No #OPTYPE_UNDO: same reasoning as #BRUSH_OT_asset_favorite_toggle. */
+}
+
 static bool brush_asset_save_as_poll(bContext *C)
 {
   Paint *paint = BKE_paint_get_active_from_context(C);

@@ -109,6 +109,14 @@ bool brush_lists_is_favorite(StringRef shelf_idname, const AssetWeakReference &w
 /** Add/remove \a weak_ref from \a shelf_idname's favorites. Persists the change to disk. */
 void brush_lists_toggle_favorite(StringRef shelf_idname, const AssetWeakReference &weak_ref);
 
+/** Empty \a shelf_idname's recent list. Persists the change to disk immediately (a no-op if the
+ * list is already empty or unknown). */
+void brush_lists_clear_recent(StringRef shelf_idname);
+
+/** Empty \a shelf_idname's favorites list. Persists the change to disk immediately (a no-op if the
+ * list is already empty or unknown). */
+void brush_lists_clear_favorites(StringRef shelf_idname);
+
 /** Write out any lists change that was only recorded in memory (see #brush_lists_record_recent).
  * Called once on Blender exit; a no-op if nothing is pending. */
 void brush_lists_flush();

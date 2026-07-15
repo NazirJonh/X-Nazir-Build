@@ -341,6 +341,32 @@ void brush_lists_toggle_favorite(const StringRef shelf_idname, const AssetWeakRe
   cache.dirty = false;
 }
 
+void brush_lists_clear_recent(const StringRef shelf_idname)
+{
+  BrushListsCache &cache = cache_get();
+  ShelfBrushLists *lists = cache.shelves.lookup_ptr(std::string(shelf_idname));
+  if (!lists || lists->recent.is_empty()) {
+    return;
+  }
+  lists->recent.clear();
+  /* An explicit, infrequent user action (unlike #brush_lists_record_recent's hot path), so persist
+   * immediately instead of only marking dirty. */
+  cache_save(cache.shelves);
+  cache.dirty = false;
+}
+
+void brush_lists_clear_favorites(const StringRef shelf_idname)
+{
+  BrushListsCache &cache = cache_get();
+  ShelfBrushLists *lists = cache.shelves.lookup_ptr(std::string(shelf_idname));
+  if (!lists || lists->favorites.is_empty()) {
+    return;
+  }
+  lists->favorites.clear();
+  cache_save(cache.shelves);
+  cache.dirty = false;
+}
+
 void brush_lists_flush()
 {
   /* Use #cache_instance() (not #cache_get()) so a session that never touched the lists doesn't read

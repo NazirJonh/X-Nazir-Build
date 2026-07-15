@@ -590,6 +590,8 @@ void ED_operatortypes_paint()
   WM_operatortype_append(BRUSH_OT_stencil_reset_transform);
   WM_operatortype_append(BRUSH_OT_asset_activate);
   WM_operatortype_append(BRUSH_OT_asset_favorite_toggle);
+  WM_operatortype_append(BRUSH_OT_asset_recent_clear);
+  WM_operatortype_append(BRUSH_OT_asset_favorites_clear);
   WM_operatortype_append(BRUSH_OT_asset_save_as);
   WM_operatortype_append(BRUSH_OT_asset_edit_metadata);
   WM_operatortype_append(BRUSH_OT_asset_load_preview);

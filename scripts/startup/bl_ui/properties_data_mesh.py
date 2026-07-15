@@ -283,8 +283,14 @@ class MESH_UL_sculpt_layers(UIList):
 class MESH_MT_sculpt_layer_context_menu(Menu):
     bl_label = "Sculpt Layer Specials"
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
+        ob = context.object
+        mesh = ob.data
+        has_layers = len(mesh.sculpt_layers) > 0
+        has_keys = mesh.shape_keys is not None
+        has_multires = any(mod.type == 'MULTIRES' for mod in ob.modifiers)
+
         layout.operator("sculpt.layer_duplicate", icon='DUPLICATE')
         layout.separator()
         layout.operator("sculpt.layer_clear")
@@ -292,7 +298,21 @@ class MESH_MT_sculpt_layer_context_menu(Menu):
         layout.separator()
         layout.operator("sculpt.layer_mask_isolate", text="Isolate by Mask")
         layout.separator()
-        layout.operator("sculpt.layer_bake_to_shape_key", text="Bake Sculpt Layers to Shape Keys")
+        # Dial-able, non-destructive: no keys yet bootstraps Basis + Sculpt Layers, an existing key
+        # gets one more dial-able block (the operator delegates to sculpt.layer_bake). Meaningless
+        # on Multires, which has no vertex shape keys.
+        col = layout.column()
+        col.enabled = has_layers and not has_multires
+        col.operator(
+            "sculpt.layer_bake_to_shape_key",
+            text="Bake Sculpt Layers to Shape Keys",
+            icon='SHAPEKEY_DATA',
+        )
+        # Permanent fold into the base geometry (or Multires displacement). Only meaningful when
+        # there is no shape key to keep the result dial-able against, or on Multires.
+        col = layout.column()
+        col.enabled = has_layers and (has_multires or not has_keys)
+        col.operator("sculpt.layer_bake", text="Bake Sculpt Layers", icon='CHECKMARK')
 
 
 class SCULPT_PT_layer_editmode_confirm(Panel):
@@ -371,6 +391,9 @@ class DATA_PT_sculpt_layers(MeshButtonsPanel, Panel):
         col.separator()
         col.operator("sculpt.layer_merge_down", icon='TRIA_DOWN_BAR', text="")
         col.separator()
+        # The quick panel button is the permanent bake (fold into the base / Multires): the common,
+        # simple action. Baking into a dial-able Shape Key is the more advanced option and lives in
+        # the Specials dropdown instead.
         col.operator("sculpt.layer_bake", icon='CHECKMARK', text="")
 
         active = mesh.sculpt_layers_active

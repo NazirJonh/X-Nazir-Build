@@ -80,6 +80,8 @@
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 
+#include "UI_interface_icons.hh"
+
 #include "WM_api.hh"
 #include "WM_types.hh"
 
@@ -1652,14 +1654,49 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
   return OPERATOR_FINISHED;
 }
 
+static wmOperatorStatus layer_bake_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* State-aware confirmation matching what #layer_bake_exec actually does with the layers:
+   * - Multires: folded into the displacement (permanent).
+   * - Mesh without shape keys: folded into the base geometry (permanent, the layers are gone).
+   * - Mesh with a relative key: turned into one new dial-able shape key (non-destructive).
+   * - Mesh with an absolute key: folded into every existing key block (no dial). */
+  const char *message;
+  if (ctx.grids) {
+    message = IFACE_("All sculpt layers will be baked into the multires displacement.");
+  }
+  else if (ctx.mesh->key == nullptr) {
+    message = IFACE_(
+        "All sculpt layers will be permanently baked into the base geometry and removed.");
+  }
+  else if (ctx.mesh->key->type == KEY_RELATIVE) {
+    message = IFACE_(
+        "This mesh has shape keys, so all sculpt layers will be baked into a new dial-able shape "
+        "key.");
+  }
+  else {
+    message = IFACE_(
+        "This mesh has shape keys, so all sculpt layers will be baked into the existing shape "
+        "keys.");
+  }
+  return WM_operator_confirm_ex(
+      C, op, IFACE_("Bake Sculpt Layers"), message, IFACE_("Bake"), ui::AlertIcon::Warning, false);
+}
+
 void SCULPT_OT_layer_bake(wmOperatorType *ot)
 {
   ot->name = "Bake Sculpt Layers";
   ot->idname = "SCULPT_OT_layer_bake";
   ot->description = "Apply all sculpt layers permanently to the base geometry and remove them";
   ot->exec = layer_bake_exec;
-  /* Irreversible-feeling from the UI (drops every layer into the base), so confirm before running. */
-  ot->invoke = WM_operator_confirm;
+  /* Irreversible-feeling from the UI (drops every layer into the base), so confirm before running.
+   * A custom invoke tailors the message to the carrier (permanent base fold, multires, or a new /
+   * existing shape key when the mesh already has one). */
+  ot->invoke = layer_bake_invoke;
   ot->poll = layers_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
@@ -1674,14 +1711,19 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
     BKE_report(op->reports, RPT_ERROR, "Not available for Multires; only Mesh data");
     return OPERATOR_CANCELLED;
   }
-  if (ctx.mesh->key != nullptr) {
-    BKE_report(
-        op->reports, RPT_ERROR, "Mesh already has shape keys; use Bake Sculpt Layers instead");
-    return OPERATOR_CANCELLED;
-  }
   if (BLI_listbase_is_empty(&ctx.mesh->sculpt_layers)) {
     BKE_report(op->reports, RPT_ERROR, "No sculpt layers to bake");
     return OPERATOR_CANCELLED;
+  }
+  /* Mesh already has shape keys: #SCULPT_OT_layer_bake already appends one new dial-able relative
+   * block to the existing key (its #bake_key / #bake_key_uid undo path). Delegate rather than
+   * duplicate that logic; the delegate's own sculpt-undo push provides the single undo step, so
+   * this operator adds none of its own here. Mirrors #layer_bake_and_editmode_enter_exec's
+   * #wm::OpCallContext::ExecDefault delegation (which is likewise #OPTYPE_UNDO, so no double push).
+   * The bootstrap below (and its #created_key undo machinery) runs only when there is no key yet. */
+  if (ctx.mesh->key != nullptr) {
+    return WM_operator_name_call(
+        C, "SCULPT_OT_layer_bake", wm::OpCallContext::ExecDefault, nullptr, nullptr);
   }
 
   const short pre_bake_shapenr = ctx.object->shapenr;
@@ -1726,6 +1768,54 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
   return OPERATOR_FINISHED;
 }
 
+static wmOperatorStatus layer_bake_to_shape_key_invoke(bContext *C,
+                                                       wmOperator *op,
+                                                       const wmEvent * /*event*/)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* Pre-check the exec guards here so the popup never appears just to be followed by an error
+   * (confirm-then-fail). The UI already disables this operator for these states; this covers the
+   * search / scripting entry points. */
+  if (ctx.grids) {
+    BKE_report(op->reports, RPT_ERROR, "Not available for Multires; only Mesh data");
+    return OPERATOR_CANCELLED;
+  }
+  if (BLI_listbase_is_empty(&ctx.mesh->sculpt_layers)) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layers to bake");
+    return OPERATOR_CANCELLED;
+  }
+  /* State-aware confirmation, matching what exec (and the delegate #SCULPT_OT_layer_bake) actually
+   * does: no key -> bootstrap Basis + Sculpt Layers; a relative key -> one more dial-able block;
+   * an absolute key -> the contribution folded into every existing block (no dial, see
+   * #bake_vert_layers_into_new_shape_key returning null for non-relative keys). */
+  const char *message;
+  if (ctx.mesh->key == nullptr) {
+    message = IFACE_(
+        "All sculpt layers will be baked into a new Basis and a dial-able \"Sculpt Layers\" "
+        "shape key.");
+  }
+  else if (ctx.mesh->key->type == KEY_RELATIVE) {
+    message = IFACE_(
+        "This mesh already has shape keys. All sculpt layers will be baked into a new dial-able "
+        "shape key.");
+  }
+  else {
+    message = IFACE_(
+        "This mesh already has shape keys. All sculpt layers will be baked into the existing "
+        "shape keys.");
+  }
+  return WM_operator_confirm_ex(C,
+                                op,
+                                IFACE_("Bake Sculpt Layers to Shape Keys"),
+                                message,
+                                IFACE_("Bake"),
+                                ui::AlertIcon::Warning,
+                                false);
+}
+
 void SCULPT_OT_layer_bake_to_shape_key(wmOperatorType *ot)
 {
   ot->name = "Bake Sculpt Layers to Shape Keys";
@@ -1734,8 +1824,9 @@ void SCULPT_OT_layer_bake_to_shape_key(wmOperatorType *ot)
       "Convert the sculpt layer stack into a Basis and a dial-able relative Shape Key holding "
       "the combined result";
   ot->exec = layer_bake_to_shape_key_exec;
-  /* Irreversible-feeling from the UI (drops every layer into the base), so confirm before running. */
-  ot->invoke = WM_operator_confirm;
+  /* Irreversible-feeling from the UI (drops every layer into the base), so confirm before running.
+   * A custom invoke tailors the message to whether the mesh already has shape keys. */
+  ot->invoke = layer_bake_to_shape_key_invoke;
   ot->poll = layers_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }

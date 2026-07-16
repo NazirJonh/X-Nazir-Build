@@ -6,6 +6,7 @@
  * \ingroup edinterface
  */
 
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstdlib>
@@ -39,6 +40,7 @@
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
+#include "UI_tree_view.hh"
 #include "UI_view2d.hh"
 #include "interface_grid_view.hh"
 #include "interface_intern.hh"
@@ -652,12 +654,22 @@ static constexpr double GRID_DRAG_FLING_RELEASE_MAX_IDLE = 0.1;
  * - #RegionV2D: a plain asset region (permanent asset shelf, asset browser window) — pans the
  *   region's View2D, the job the old `asset_view_drag_scroll_handler` did.
  * - #PopupBlock: the non-grid part of an asset-shelf popover — scrolls the whole popup block.
+ * - #TreeView: a tree view that opted in via #AbstractTreeView::set_drag_scroll — writes the
+ *   view's own row offset. Row-quantized, because a tree builds no buttons for rows outside its
+ *   window and so has no sub-row position to hold.
+ *
+ * TODO: #TreeView reaches across abstractions. A tree has nothing to do with a grid, and this file
+ * is its home only because the single pre-button input handler happens to live here; a future tree
+ * wanting drag-scroll has no reason to guess that. It belongs on a shared #AbstractView
+ * drag-scroll API, and should move there together with the pixel-accurate tree scrolling that
+ * replaces the row quantization.
  */
 enum class GridDragSink : int8_t {
   None,
   Session,
   RegionV2D,
   PopupBlock,
+  TreeView,
 };
 
 /**
@@ -682,6 +694,11 @@ struct GridDragState {
   float velocity = 0.0f;
   double last_time = 0.0;
   int last_px = 0;
+  /** #GridDragSink::TreeView only: the view's scroll state, sampled at press because the view
+   * object itself does not survive the per-refresh rebuild. */
+  TreeViewDragScrollHandle tree;
+  /** #GridDragSink::TreeView only: absolute row target is measured from this press snapshot. */
+  int start_rows = 0;
 };
 
 /** Kinetic fling state; owns the timer directly (no #PopupBlockHandle field) so it works in any
@@ -927,7 +944,8 @@ static int grid_handle_wheel_event(bContext * /*C*/, const wmEvent *event, ARegi
 static GridDragSink grid_drag_sink_for_press(const bContext *C,
                                              ARegion *region,
                                              const wmEvent *event,
-                                             std::string *r_grid_id)
+                                             std::string *r_grid_id,
+                                             std::optional<TreeViewDragScrollHandle> *r_tree)
 {
   if (region == nullptr) {
     return GridDragSink::None;
@@ -955,6 +973,20 @@ static GridDragSink grid_drag_sink_for_press(const bContext *C,
    * grid is not a view item, so it keeps the press — see #grid_hit_press). */
   if (grid_hit_press(region, event, r_grid_id) != nullptr) {
     return GridDragSink::Session;
+  }
+  /* A press on a tree view that opted into drag-scrolling (e.g. the asset shelf popover's catalog
+   * tree) scrolls that tree rather than the region or popover around it. Probed after
+   * #grid_hit_press so a grid tile still wins, and before the region sinks below so that a
+   * drag-scrollable tree hosted in an asset shelf or asset browser region is not swallowed by
+   * #GridDragSink::RegionV2D before it is ever considered. Hit by area like the wheel path, not by
+   * z-order: the decline checkpoints above already handed the widgets their presses. */
+  if (AbstractTreeView *tree_view = dynamic_cast<AbstractTreeView *>(
+          region_view_find_at(region, event->xy, 0, nullptr)))
+  {
+    if (std::optional<TreeViewDragScrollHandle> handle = tree_view->drag_scroll_handle()) {
+      *r_tree = std::move(handle);
+      return GridDragSink::TreeView;
+    }
   }
   /* Permanent asset shelf region (e.g. bottom of the 3D viewport): pan its View2D. */
   if (region->regiontype == RGN_TYPE_ASSET_SHELF) {
@@ -1012,7 +1044,8 @@ static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, AReg
     /* Reset on any new press so a missed release never leaves stale state. */
     drag = {};
     std::string grid_id;
-    const GridDragSink sink = grid_drag_sink_for_press(C, region, event, &grid_id);
+    std::optional<TreeViewDragScrollHandle> tree_handle;
+    const GridDragSink sink = grid_drag_sink_for_press(C, region, event, &grid_id, &tree_handle);
     if (sink == GridDragSink::Session) {
       GridSessionState &session = grid_session_state_ensure(grid_id);
       if (session.region == region && grid_session_max_scroll_px(session) > 0) {
@@ -1037,6 +1070,16 @@ static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, AReg
       drag.start_x = event->xy[0];
       drag.start_y = event->xy[1];
       drag.last_y = event->xy[1];
+    }
+    else if (sink == GridDragSink::TreeView) {
+      /* No `last_y` (this sink is absolute, not incremental) and no velocity/fling fields. */
+      drag.active = true;
+      drag.sink = sink;
+      drag.region = region;
+      drag.start_x = event->xy[0];
+      drag.start_y = event->xy[1];
+      drag.tree = std::move(*tree_handle);
+      drag.start_rows = *drag.tree.scroll_value;
     }
     /* Always continue so the grid tile / region button still receives the press for
      * click-selection. */
@@ -1133,6 +1176,27 @@ static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, AReg
         drag.velocity += (velocity_sample - drag.velocity) * mix;
         drag.last_time = now;
         drag.last_px = total_px;
+      }
+      return WM_UI_HANDLER_BREAK;
+    }
+
+    if (drag.sink == GridDragSink::TreeView) {
+      /* Same phone UX and same absolute-from-snapshot model as the session sink above, but the
+       * unit is a whole row: a tree builds no buttons outside its row window, so there is no
+       * partial row to draw. */
+      const int dy_total = event->xy[1] - drag.start_y;
+      const int dy_content = int(roundf(float(dy_total) / std::max(scale, FLT_EPSILON)));
+      /* Clamp here rather than leaning on the clamp in #TreeViewLayoutBuilder::build_from_tree: an
+       * unclamped write would be corrected in place on every rebuild, so each move while parked at
+       * an end would re-tag a refresh for no visible change. Overshoot still costs the reverse
+       * stroke the same distance, exactly as it does for the session sink above. */
+      const int total_rows = std::clamp(
+          drag.start_rows + dy_content / drag.tree.row_height, 0, drag.tree.max_rows);
+      if (total_rows != *drag.tree.scroll_value) {
+        *drag.tree.scroll_value = total_rows;
+        /* Which rows exist as buttons is decided at layout time, so a rebuild is needed, not just a
+         * redraw. Same notification the wheel path uses for these views. */
+        ED_region_tag_refresh_ui(region);
       }
       return WM_UI_HANDLER_BREAK;
     }

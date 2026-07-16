@@ -6,6 +6,8 @@
  * \ingroup edinterface
  */
 
+#include <algorithm>
+
 #include "BKE_context.hh"
 
 #include "BLT_translation.hh"
@@ -512,6 +514,32 @@ void AbstractTreeView::scroll(ViewScrollDirection direction)
   }
   /* Scroll value will be sanitized/clamped when drawing. */
   *scroll_value_ += ((direction == ViewScrollDirection::UP) ? -1 : 1);
+}
+
+void AbstractTreeView::set_drag_scroll(const bool enable)
+{
+  drag_scroll_enabled_ = enable;
+}
+
+std::optional<TreeViewDragScrollHandle> AbstractTreeView::drag_scroll_handle()
+{
+  if (!drag_scroll_enabled_ || !this->supports_scrolling() || this->is_fully_visible()) {
+    return {};
+  }
+  const std::optional<int> visible_row_count = this->tot_visible_row_count();
+  if (!visible_row_count) {
+    /* #supports_scrolling() already implies a custom height, so this cannot happen; bail rather
+     * than hand out a handle whose #TreeViewDragScrollHandle::max_rows would be a guess. */
+    return {};
+  }
+
+  TreeViewDragScrollHandle handle;
+  handle.scroll_value = scroll_value_;
+  /* #is_fully_visible() above rules out a non-positive result; clamp anyway so a caller can divide
+   * and clamp by these without re-checking. */
+  handle.max_rows = std::max(0, last_tot_items_ - *visible_row_count);
+  handle.row_height = std::max(1, padded_item_height());
+  return handle;
 }
 
 void AbstractTreeView::scroll_active_into_view(bContext * /*C*/, bool scroll_active_to_center)
@@ -1281,6 +1309,16 @@ void TreeViewBuilder::build_tree_view(const bContext &C,
   }
 
   tree_view.build_tree();
+
+  /* Drag-scroll and select-on-press are incompatible: a press would commit the selection before
+   * a drag is even detectable, and the arbitration's later #UI_region_free_active_but_all cannot
+   * roll back an already executed `activate()`. Views that opt into drag-scroll (see
+   * #AbstractTreeView::set_drag_scroll) must therefore make all of their items select-on-click,
+   * rather than relying on every item-building call site to opt in individually. */
+  if (tree_view.drag_scroll_enabled_) {
+    tree_view.foreach_item([](AbstractTreeViewItem &item) { item.select_on_click_set(); });
+  }
+
   tree_view.update_from_old(block);
   tree_view.change_state_delayed();
 

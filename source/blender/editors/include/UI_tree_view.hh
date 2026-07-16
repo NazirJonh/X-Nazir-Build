@@ -13,6 +13,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "BLI_enum_flags.hh"
@@ -122,6 +123,25 @@ using TreeViewOrItem = TreeViewItemContainer;
 /** \name Tree-View Base Class
  * \{ */
 
+/**
+ * Everything an LMB drag-scroll needs from a tree view, sampled once when the drag arms.
+ *
+ * The view object is destroyed and rebuilt on every UI refresh, and a refresh runs on every frame
+ * of a scroll, so a drag must never hold a view pointer. #scroll_value keeps a share of the same
+ * #std::shared_ptr the rebuilt view inherits through #AbstractTreeView::update_children_from_old,
+ * which is why the address stays valid across the rebuild. Holding a share also means that if the
+ * tree disappears mid-drag the write lands in a harmless orphaned value rather than freed memory.
+ */
+struct TreeViewDragScrollHandle {
+  /** The view's scroll offset in items. Write through this, then tag the region for a UI refresh:
+   * which rows exist as buttons is decided at layout time, so a redraw alone changes nothing. */
+  std::shared_ptr<int> scroll_value;
+  /** Highest valid #scroll_value: total items minus the visible row count. */
+  int max_rows = 0;
+  /** Height of a single row in block space. */
+  int row_height = 0;
+};
+
 class AbstractTreeView : public AbstractView, public TreeViewItemContainer {
   /* Shared pointer so the pointer can be kept persistent over redraws. The grip button gets a
    * pointer to modify the value on resizing, and it uses it to identify the button over redraws.
@@ -139,6 +159,9 @@ class AbstractTreeView : public AbstractView, public TreeViewItemContainer {
    */
   int last_tot_items_ = 0;
   bool scroll_active_into_view_on_draw_ = false;
+  /** When true, a vertical LMB drag over this view scrolls it by whole rows. See
+   * #set_drag_scroll(). */
+  bool drag_scroll_enabled_ = false;
   /**
    * Collapse/expand state of filter panel.
    */
@@ -194,6 +217,25 @@ class AbstractTreeView : public AbstractView, public TreeViewItemContainer {
    * a sibling grid viewport in a popover) instead of guessing a row count.
    */
   void set_fixed_height_px(int height_px, bool allow_resize = true);
+  /**
+   * Opt this view into LMB drag-scrolling ("touch scroll"): a vertical drag starting anywhere on
+   * the view scrolls it by whole rows instead of reaching the items underneath.
+   *
+   * Off by default, and deliberately not carried over by #update_children_from_old — the host
+   * re-states it on every draw, exactly like the fixed height. Leave it off for any view whose
+   * items are dragged vertically (a reorderable list), because the drag arbitration awards
+   * vertical gestures to the scroll and the items would never be draggable again.
+   *
+   * Enabling this also coerces every item of the view to #AbstractViewItem::select_on_click_set:
+   * activating on press would commit a selection before a drag is even detectable, so the two are
+   * incompatible and the invariant is enforced rather than left to each item-building call site.
+   */
+  void set_drag_scroll(bool enable);
+  /**
+   * \return the state a drag needs in order to scroll this view, or nothing when it cannot be
+   * drag-scrolled: not opted in via #set_drag_scroll(), no scroll bar, or everything already fits.
+   */
+  std::optional<TreeViewDragScrollHandle> drag_scroll_handle();
   TreeViewSortOrder invert_sort_type_get() const;
   /**
    * Scroll the view so the active item is visible.

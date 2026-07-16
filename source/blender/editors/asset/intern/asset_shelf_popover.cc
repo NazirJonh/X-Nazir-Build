@@ -322,6 +322,10 @@ static void catalog_tree_draw(const bContext &C,
    * a stable height with no dead space below either column, and the header stays put even with many
    * catalogs. Grip-less: the popover height is fixed externally. */
   tree_view->set_fixed_height_px(fixed_height_px, /*allow_resize=*/false);
+  /* Match the asset grid beside it: a vertical drag scrolls, it does not reach the catalog rows.
+   * Safe here because catalog items are not draggable — no #create_drag_controller override — so
+   * awarding vertical gestures to the scroll costs nothing. */
+  tree_view->set_drag_scroll(true);
 
   ui::TreeViewBuilder::build_tree_view(C, *tree_view, layout);
 }

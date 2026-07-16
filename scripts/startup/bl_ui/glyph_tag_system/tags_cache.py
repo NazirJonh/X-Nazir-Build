@@ -30,7 +30,20 @@ from bl_ui.glyph_tag_system.log import (
     category_debug_print,
     tag_log,
 )
-from bl_ui.glyph_tag_system.migrations import _normalize_category_data
+from bl_ui.glyph_tag_system.migrations import _normalize_category_data, _normalize_tag_data
+from bl_ui.glyph_tag_system.schema_fields import (
+    TAG_ICON_SOURCE_BLENDER_ICON,
+    TAG_ICON_SOURCE_CUSTOM,
+    TAG_ICON_SOURCE_GLYPH,
+    coerce_tag_field_value,
+)
+from bl_ui.glyph_tag_system.schema_keys import (
+    KEY_COLOR,
+    KEY_GLYPH,
+    KEY_ICON_KEY,
+    KEY_ICON_SOURCE,
+    KEY_MODE_FLAGS,
+)
 from bl_ui.glyph_tag_system._state import (
     state,
     is_glyph_cache_loaded,
@@ -39,6 +52,14 @@ from bl_ui.glyph_tag_system._state import (
 # _get_category_data lives in glyph_cache; importing at module level is safe
 # because glyph_cache does not import from tags_cache.
 from bl_ui.glyph_tag_system.glyph_cache import _get_category_data
+
+# Convenience string form accepted by create_tag/update_tag callers (UI dialogs), converted to
+# the int schema_fields.TAG_FIELDS stores (DNA's CategoryTagDef.icon_source is a C ``int``).
+_TAG_ICON_SOURCE_NAME_TO_INT = {
+    'GLYPH': TAG_ICON_SOURCE_GLYPH,
+    'BLENDER_ICON': TAG_ICON_SOURCE_BLENDER_ICON,
+    'CUSTOM': TAG_ICON_SOURCE_CUSTOM,
+}
 
 
 # -----------------------------------------------------------------------------
@@ -112,11 +133,10 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", ico
         (success: bool, message: str)
     """
     # Convert string icon_source to int for consistent storage
-    icon_source_map = {'GLYPH': 0, 'BLENDER_ICON': 1, 'CUSTOM': 2}
     if isinstance(icon_source, str):
-        icon_source_int = icon_source_map.get(icon_source, 0)
+        icon_source_int = _TAG_ICON_SOURCE_NAME_TO_INT.get(icon_source, TAG_ICON_SOURCE_GLYPH)
     else:
-        icon_source_int = int(icon_source) if icon_source is not None else 0
+        icon_source_int = int(icon_source) if icon_source is not None else TAG_ICON_SOURCE_GLYPH
 
     if not tag_name:
         return False, "Tag name cannot be empty"
@@ -136,13 +156,16 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", ico
     if not glyph and icon_source_int == 0:
         glyph = _hex_to_glyph(DEFAULT_TAG_GLYPH_HEX)
 
-    state.all_tags_cache[tag_name] = {
-        "glyph": glyph,
-        "color": list(color) if color else [0.0, 0.0, 0.0],
-        "mode_flags": mode_flags if mode_flags is not None else _CATEGORY_TAG_DEFAULT_MODE_FLAGS,
-        "icon_key": icon_key if icon_source_int == 1 else "",  # 1 = BLENDER_ICON
-        "icon_source": icon_source_int,  # Store as int (0=GLYPH, 1=BLENDER_ICON, 2=CUSTOM)
-    }
+    # Table-driven (schema_fields.TAG_FIELDS): the same composition and sanitizers the
+    # load/save paths use, so a field cannot silently differ between a freshly created tag and
+    # one round-tripped through disk.
+    state.all_tags_cache[tag_name] = _normalize_tag_data({
+        KEY_GLYPH: glyph,
+        KEY_COLOR: list(color) if color else [0.0, 0.0, 0.0],
+        KEY_MODE_FLAGS: mode_flags if mode_flags is not None else _CATEGORY_TAG_DEFAULT_MODE_FLAGS,
+        KEY_ICON_KEY: icon_key if icon_source_int == TAG_ICON_SOURCE_BLENDER_ICON else "",
+        KEY_ICON_SOURCE: icon_source_int,
+    })
 
     # Always add new tags to the end of the order list
     if tag_name not in state.tag_order_cache:
@@ -237,14 +260,24 @@ def update_tag(tag_name, glyph=None, color=None, icon_key=None, icon_source=None
     if tag_name not in state.all_tags_cache:
         return False, f"Tag '{tag_name}' not found"
 
+    # Each field is sanitized against its schema_fields.TAG_FIELDS row before it reaches the
+    # cache, the same guarantee create_tag/load/save give a full entry, so a point update cannot
+    # leave the cache holding a value the rest of the pipeline would never have produced (e.g. a
+    # negative mode_flags, or an un-decoded hex glyph if a caller ever passed one through here).
     if glyph is not None:
-        state.all_tags_cache[tag_name]["glyph"] = glyph
+        state.all_tags_cache[tag_name][KEY_GLYPH] = coerce_tag_field_value(KEY_GLYPH, glyph)
     if color is not None:
-        state.all_tags_cache[tag_name]["color"] = list(color)
+        state.all_tags_cache[tag_name][KEY_COLOR] = coerce_tag_field_value(KEY_COLOR, list(color))
     if icon_key is not None:
-        state.all_tags_cache[tag_name]["icon_key"] = icon_key
+        state.all_tags_cache[tag_name][KEY_ICON_KEY] = coerce_tag_field_value(KEY_ICON_KEY, icon_key)
     if icon_source is not None:
-        state.all_tags_cache[tag_name]["icon_source"] = icon_source
+        # Accepts the same 'GLYPH'/'BLENDER_ICON'/'CUSTOM' convenience string create_tag does
+        # (operators.py's Edit Tag dialog passes this form). Without the conversion, the
+        # int-enum sanitizer below would not recognize the string, fall back to its default
+        # (GLYPH) and silently discard the user's icon-mode choice on every edit.
+        if isinstance(icon_source, str):
+            icon_source = _TAG_ICON_SOURCE_NAME_TO_INT.get(icon_source, icon_source)
+        state.all_tags_cache[tag_name][KEY_ICON_SOURCE] = coerce_tag_field_value(KEY_ICON_SOURCE, icon_source)
 
     tag_log(f"Updated tag: {tag_name}")
 

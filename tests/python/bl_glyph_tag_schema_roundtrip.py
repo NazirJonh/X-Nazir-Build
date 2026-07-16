@@ -428,6 +428,114 @@ class TestEntryRoundTrip(unittest.TestCase):
         self.assertEqual(set(from_string), {field.key for field in sf.CATEGORY_FIELDS})
 
 
+class TestTagEntryRoundTrip(unittest.TestCase):
+    """save -> load must preserve every field in :data:`schema_fields.TAG_FIELDS`.
+
+    Mirrors :class:`TestEntryRoundTrip`. The tag composition used to be three hand-written
+    literals (load in ``glyph_cache``, save in ``glyph_cache``, ``create_tag`` in
+    ``tags_cache``) that had to be kept in step by eye — the same shape of bug that dropped
+    ``install_mode_flag`` from the category save path. These tests are driven by
+    :data:`schema_fields.TAG_FIELDS` rather than a list of field names, so a field added to the
+    table is covered from the moment it exists.
+
+    A tag has a field the category table does not: the glyph is a raw Unicode character in the
+    entry/cache but a bare hex codepoint on disk (DNA stores it in a fixed ``char[8]``, not a
+    Python string). The probe below exercises that encode/decode along with every other field.
+    """
+
+    PROBES_BY_KIND = {
+        sf.KIND_GLYPH_HEX: "",
+        # The glyph probe above is the decoded form of DEFAULT_TAG_GLYPH_HEX ("e866" in
+        # defaults.py); this doubles test_disk_shape_stores_glyph_as_hex below as a check
+        # against that constant drifting.
+        sf.KIND_COLOR: [0.25, 0.5, 0.75],
+        # Deliberately not 7 (0b111): that is _CATEGORY_TAG_DEFAULT_MODE_FLAGS, and a probe equal
+        # to its own field's default would make test_probe_entry_is_non_default_everywhere
+        # vacuous for this field.
+        sf.KIND_U32: 1024,
+        sf.KIND_STR_COERCE: "OBJECT_DATAMODE",
+    }
+
+    def _probe_value(self, field):
+        if field.kind == sf.KIND_INT_ENUM:
+            for choice in field.choices:
+                if choice != field.default:
+                    return choice
+            self.fail("enum field {0} has no non-default choice".format(field.key))
+        return self.PROBES_BY_KIND[field.kind]
+
+    def _probe_entry(self):
+        raw = {field.key: self._probe_value(field) for field in sf.TAG_FIELDS}
+        return mig._normalize_tag_data(raw)
+
+    def test_every_field_has_a_probe(self):
+        # A kind with no probe would silently skip its fields in the round-trip test below.
+        for field in sf.TAG_FIELDS:
+            if field.kind == sf.KIND_INT_ENUM:
+                continue
+            self.assertIn(field.kind, self.PROBES_BY_KIND,
+                          "field {0} has kind {1} with no probe".format(field.key, field.kind))
+
+    def test_probe_entry_is_non_default_everywhere(self):
+        # Guards the round-trip test against going vacuous: a field whose probe survives
+        # normalization as its own default would pass even if the save path dropped it.
+        entry = self._probe_entry()
+        for field in sf.TAG_FIELDS:
+            self.assertNotEqual(
+                entry[field.key], field.make_default(),
+                "probe for {0} collapsed to its default".format(field.key))
+
+    def test_all_fields_survive_save_load(self):
+        entry = self._probe_entry()
+        on_disk = json.loads(json.dumps(sf.tag_entry_to_disk(entry)))
+        reloaded = mig._normalize_tag_data(on_disk)
+        self.assertEqual(reloaded, entry)
+
+    def test_disk_shape_writes_every_field(self):
+        # Checked for a default entry too, not just a populated one: a writer that omits a
+        # falsy-valued field would never be caught by the probe entry alone, since the probe is
+        # non-default (and therefore truthy where it matters) by construction.
+        for label, entry in (("probe", self._probe_entry()), ("default", mig._normalize_tag_data({}))):
+            on_disk = sf.tag_entry_to_disk(entry)
+            for field in sf.TAG_FIELDS:
+                self.assertIn(field.key, on_disk, "{0}/{1}".format(label, field.key))
+
+    def test_disk_shape_stores_glyph_as_hex(self):
+        # DEFAULT_TAG_GLYPH_HEX in defaults.py is "e866"; the probe glyph above is its decoded
+        # character, chosen so this assertion doubles as a check against that constant drifting.
+        on_disk = sf.tag_entry_to_disk(self._probe_entry())
+        self.assertEqual(on_disk[sk.KEY_GLYPH], "e866")
+
+    def test_normalization_is_a_fixed_point(self):
+        # Re-normalizing an already-normalized entry (raw Unicode glyph, not hex) must change
+        # nothing. This is the test that would catch the hex/glyph shape-detection in
+        # _coerce_tag_glyph drifting into a double-decode.
+        entry = self._probe_entry()
+        self.assertEqual(mig._normalize_tag_data(entry), entry)
+
+    def test_absent_fields_load_as_defaults(self):
+        entry = mig._normalize_tag_data({})
+        for field in sf.TAG_FIELDS:
+            self.assertEqual(entry[field.key], field.make_default(), field.key)
+
+    def test_non_dict_tag_data_normalizes_instead_of_poisoning_cache(self):
+        # The load-time hole that motivated the table: raw non-dict tag data used to be written
+        # into the cache verbatim (glyph_cache.py's ``else: state.all_tags_cache[tag_name] =
+        # tag_data``), where it would crash the first update_tag/create_tag call or any UI code
+        # indexing into it as a dict.
+        entry = mig._normalize_tag_data("corrupt-legacy-value")
+        self.assertEqual(entry, sf.new_tag_entry())
+
+    def test_icon_source_domain_is_int_only(self):
+        # The table only understands the int domain DNA stores; the 'GLYPH'/'BLENDER_ICON'/
+        # 'CUSTOM' convenience strings are a tags_cache.create_tag/update_tag call-site concern
+        # (_TAG_ICON_SOURCE_NAME_TO_INT there), not something the table itself resolves.
+        self.assertEqual(mig._normalize_tag_data({sk.KEY_ICON_SOURCE: 1})[sk.KEY_ICON_SOURCE], 1)
+        self.assertEqual(mig._normalize_tag_data({sk.KEY_ICON_SOURCE: 99})[sk.KEY_ICON_SOURCE], 0)
+        self.assertEqual(
+            mig._normalize_tag_data({sk.KEY_ICON_SOURCE: "BLENDER_ICON"})[sk.KEY_ICON_SOURCE], 0)
+
+
 class TestCategoryMatchesContext(unittest.TestCase):
     """The space/mode predicate shared by the tag-bar count and the bulk-clear.
 

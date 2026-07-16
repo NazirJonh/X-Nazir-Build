@@ -39,8 +39,10 @@ from .schema_keys import (
 from .schema_fields import (
     _normalize_color,
     coerce_entry,
+    coerce_tag_entry,
     field_present,
     new_entry,
+    new_tag_entry,
 )
 from .conversions import (
     _is_single_glyph,
@@ -147,6 +149,21 @@ def _normalize_category_data(category_data, category_name=None):
     entry = coerce_entry(raw)
     _derive_entry_invariants(entry, raw, category_name)
     return entry
+
+
+def _normalize_tag_data(tag_data):
+    """Normalize raw tag data (file or cache) to a well-typed tag entry.
+
+    The entry point callers should use to turn raw tag data trustworthy, mirroring
+    :func:`_normalize_category_data`. Tags have no legacy bare-value shape and, unlike
+    categories, no cross-field derivation today, so this is a thin type guard around
+    :func:`schema_fields.coerce_tag_entry` — kept here rather than inlined at call sites so a
+    future derivation rule has a single place to land, and so callers do not need to know that
+    one exists for categories and not (yet) for tags.
+    """
+    if isinstance(tag_data, dict):
+        return coerce_tag_entry(tag_data)
+    return new_tag_entry()
 
 
 def migrate_json_data(data):

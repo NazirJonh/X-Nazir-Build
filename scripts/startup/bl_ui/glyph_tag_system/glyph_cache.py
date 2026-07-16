@@ -27,7 +27,6 @@ from bl_ui.glyph_tag_system.defaults import (
     DEFAULT_CATEGORY_GLYPHS,
     GLYPHS_FILENAME,
     SPACE_TO_FLAG,
-    _CATEGORY_TAG_DEFAULT_MODE_FLAGS,
 )
 from bl_ui.glyph_tag_system.schema_keys import (
     KEY_ALL_TAGS,
@@ -46,7 +45,6 @@ from bl_ui.glyph_tag_system.schema_keys import (
     KEY_ICON_SOURCE,
     KEY_INSTALL_MODE_FLAG,
     KEY_MAPPINGS,
-    KEY_MODE_FLAGS,
     KEY_PENDING_TAG_ASSIGNMENT,
     KEY_TAGS,
     KEY_TAG_ORDER,
@@ -54,7 +52,6 @@ from bl_ui.glyph_tag_system.schema_keys import (
 )
 from bl_ui.glyph_tag_system.conversions import (
     _category_order_decode,
-    _glyph_to_hex,
     _hex_to_glyph,
     _is_single_glyph,
     _is_valid_category_name,
@@ -75,11 +72,12 @@ from bl_ui.glyph_tag_system.log import (
 )
 from bl_ui.glyph_tag_system.migrations import (
     _normalize_category_data,
-    _normalize_color,
+    _normalize_tag_data,
     migrate_json_data,
 )
 from bl_ui.glyph_tag_system.schema_fields import (
     entry_to_disk,
+    tag_entry_to_disk,
 )
 from bl_ui.glyph_tag_system.modes import (
     category_matches_context,
@@ -725,17 +723,12 @@ def _load_glyph_mappings_from_file():
     reset_all_tags_cache()
     for tag_name, tag_data in raw_tags.items():
         category_debug_print(f"[TAGS LOAD] Processing tag '{tag_name}': {tag_data}")
-        if isinstance(tag_data, dict):
-            state.all_tags_cache[tag_name] = {
-                KEY_GLYPH: _hex_to_glyph(tag_data.get(KEY_GLYPH, "")),
-                KEY_COLOR: tag_data.get(KEY_COLOR, [0.0, 0.0, 0.0]),
-                KEY_MODE_FLAGS: tag_data.get(KEY_MODE_FLAGS, _CATEGORY_TAG_DEFAULT_MODE_FLAGS),
-                KEY_ICON_KEY: tag_data.get(KEY_ICON_KEY, ""),
-                KEY_ICON_SOURCE: tag_data.get(KEY_ICON_SOURCE, 0),
-            }
-            category_debug_print(f"[TAGS LOAD] Loaded tag '{tag_name}' -> icon_key='{state.all_tags_cache[tag_name]['icon_key']}' icon_source={state.all_tags_cache[tag_name]['icon_source']}")
-        else:
-            state.all_tags_cache[tag_name] = tag_data
+        # Table-driven (schema_fields.TAG_FIELDS): every field a tag entry has, including the
+        # hex-to-glyph decode, comes from one place shared with the save path below, so a field
+        # cannot go missing from one of them the way install_mode_flag once did for categories.
+        # Non-dict data (corrupt file) still normalizes instead of poisoning the cache as-is.
+        state.all_tags_cache[tag_name] = _normalize_tag_data(tag_data)
+        category_debug_print(f"[TAGS LOAD] Loaded tag '{tag_name}' -> icon_key='{state.all_tags_cache[tag_name]['icon_key']}' icon_source={state.all_tags_cache[tag_name]['icon_source']}")
 
     # Load tag order for preserving manual ordering
     set_tag_order(data.get(KEY_TAG_ORDER, []))
@@ -906,18 +899,15 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
         if skipped_count > 0:
             category_debug_print(f"[GLYPH] Skipped {skipped_count} categories with invalid names and no customizations")
 
-        # Convert tag glyphs to hex for storage
+        # Convert tag glyphs to hex for storage. Symmetric normalization on the write path (a
+        # corrupt in-memory cache must never reach the file) plus the entry -> disk shape
+        # (glyph -> hex) both come from schema_fields.TAG_FIELDS, shared with the load path
+        # above — see the comment there.
         tags_to_save = {}
         for tag_name, tag_data in state.all_tags_cache.items():
             if isinstance(tag_data, dict):
-                tags_to_save[tag_name] = {
-                    KEY_GLYPH: _glyph_to_hex(tag_data.get(KEY_GLYPH, "")),
-                    # Symmetric normalization on write: keep the tag color well-formed on disk.
-                    KEY_COLOR: _normalize_color(tag_data.get(KEY_COLOR, [0.0, 0.0, 0.0])),
-                    KEY_MODE_FLAGS: tag_data.get(KEY_MODE_FLAGS, _CATEGORY_TAG_DEFAULT_MODE_FLAGS),
-                    KEY_ICON_KEY: tag_data.get(KEY_ICON_KEY, ""),
-                    KEY_ICON_SOURCE: tag_data.get(KEY_ICON_SOURCE, 0),
-                }
+                entry = _normalize_tag_data(tag_data)
+                tags_to_save[tag_name] = tag_entry_to_disk(entry)
             else:
                 tags_to_save[tag_name] = tag_data
 

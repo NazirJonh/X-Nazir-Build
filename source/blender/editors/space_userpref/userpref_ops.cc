@@ -525,6 +525,17 @@ static wmOperatorStatus preferences_asset_library_folder_add_exec(bContext * /*C
   bUserAssetLibrary *new_folder = BKE_preferences_asset_library_folder_add(
       &U, name, /*parent=*/nullptr);
 
+  /* Place the new folder right before the currently selected item, instead of leaving it appended
+   * at the tail of the whole list. If the selection is a library nested in a folder, anchor on
+   * that folder itself: folders cannot nest inside other folders, and #BKE_preferences_asset_library_reorder
+   * rejects any move that would give a folder a non-null parent, so "before the selection" can only
+   * be honored relative to the selected item's root-level folder (i.e. before the whole subtree). */
+  if (bUserAssetLibrary *active_library = userpref_ui_active_asset_library()) {
+    bUserAssetLibrary *insert_before = active_library->parent ? active_library->parent :
+                                                               active_library;
+    BKE_preferences_asset_library_reorder(&U, new_folder, insert_before, ASSET_LIBRARY_MOVE_BEFORE);
+  }
+
   /* Activate new folder in the UI list. Uses the remote-aware UI index (same scheme as
    * #preferences_asset_library_add_exec), not the raw listbase index. */
   if (const std::optional<int> new_active_idx =

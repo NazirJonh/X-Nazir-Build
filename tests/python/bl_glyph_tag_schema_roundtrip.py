@@ -238,6 +238,52 @@ class TestNormalizeCategoryData(unittest.TestCase):
             self.assertEqual(first[key], second[key], "field {0} not idempotent".format(key))
 
 
+class TestInstallModeFlag(unittest.TestCase):
+    """``install_mode_flag`` must cross the serialization boundary in both directions.
+
+    ``_normalize_category_data`` rebuilds the entry from a white-list of fields, so a field that
+    is merely present in the cache is not enough: it has to be copied explicitly or it is dropped
+    on the way through. That matters here because the C++ panel filter falls back to this flag for
+    panels that declare no ``bl_context``, and ``wm_sync_to_wm`` writes the normalized value into a
+    DNA ``uint32_t`` via RNA — hence the range clamp.
+    """
+
+    def test_value_survives_normalization(self):
+        entry = mig._normalize_category_data(
+            {sk.KEY_GLYPH: "X", sk.KEY_INSTALL_MODE_FLAG: 5}, category_name="Ext")
+        self.assertEqual(entry[sk.KEY_INSTALL_MODE_FLAG], 5)
+
+    def test_absent_defaults_to_zero(self):
+        # Files written before the flag was persisted must keep loading unchanged.
+        entry = mig._normalize_category_data({sk.KEY_GLYPH: "X"}, category_name="Plain")
+        self.assertEqual(entry[sk.KEY_INSTALL_MODE_FLAG], 0)
+
+    def test_string_input_branch_defaults_to_zero(self):
+        entry = mig._normalize_category_data("\\ue3c9", category_name="StrCat")
+        self.assertEqual(entry[sk.KEY_INSTALL_MODE_FLAG], 0)
+
+    def test_clamped_to_uint32_range(self):
+        cases = {
+            "non_numeric": ("abc", 0),
+            "none": (None, 0),
+            "list": ([1, 2], 0),
+            "negative": (-1, 0),
+            "overflow": (2 ** 40, 0xFFFFFFFF),
+            "truncated_float": (3.9, 3),
+            "max": (0xFFFFFFFF, 0xFFFFFFFF),
+        }
+        for name, (value, expected) in cases.items():
+            entry = mig._normalize_category_data(
+                {sk.KEY_INSTALL_MODE_FLAG: value}, category_name="Clamp")
+            self.assertEqual(entry[sk.KEY_INSTALL_MODE_FLAG], expected, name)
+
+    def test_idempotent_on_normalized_output(self):
+        first = mig._normalize_category_data(
+            {sk.KEY_GLYPH: "X", sk.KEY_INSTALL_MODE_FLAG: 7}, category_name="Idem")
+        second = mig._normalize_category_data(first, category_name="Idem")
+        self.assertEqual(second[sk.KEY_INSTALL_MODE_FLAG], 7)
+
+
 class TestFuzz(unittest.TestCase):
     """Random/garbage input must never crash the normalization pipeline."""
 

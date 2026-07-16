@@ -35,6 +35,7 @@ from .schema_keys import (
     KEY_ICON_PATH,
     KEY_ICON_PROVIDER,
     KEY_ICON_SOURCE,
+    KEY_INSTALL_MODE_FLAG,
     KEY_MAPPINGS,
     KEY_MODE_FLAGS,
     KEY_PENDING_TAG_ASSIGNMENT,
@@ -81,6 +82,7 @@ def _normalize_category_data(category_data, category_name=None):
         KEY_PENDING_TAG_ASSIGNMENT: False,
         KEY_DISCOVERED_IN_SPACES: [],
         KEY_DISCOVERED_IN_MODES: [],
+        KEY_INSTALL_MODE_FLAG: 0,
     }
 
     if isinstance(category_data, str):
@@ -96,7 +98,8 @@ def _normalize_category_data(category_data, category_name=None):
                 KEY_GLYPH_MODE: "auto",
                 KEY_ICON_SOURCE: "auto", KEY_ICON_KEY: "", KEY_ICON_PATH: "", KEY_ICON_PROVIDER: "",
                 KEY_SOURCE_EXTENSION: "", KEY_PENDING_TAG_ASSIGNMENT: False,
-                KEY_DISCOVERED_IN_SPACES: [], KEY_DISCOVERED_IN_MODES: []}
+                KEY_DISCOVERED_IN_SPACES: [], KEY_DISCOVERED_IN_MODES: [],
+                KEY_INSTALL_MODE_FLAG: 0}
     elif isinstance(category_data, dict):
         # New format: dict with glyph, display_name, color, default_glyph, default_display_name, base_type, tags
         entry = default_entry.copy()
@@ -225,7 +228,18 @@ def _normalize_category_data(category_data, category_name=None):
             if isinstance(modes, list):
                 entry[KEY_DISCOVERED_IN_MODES] = [str(m) for m in modes]
 
-        # Icon persistence (v7): accept both nested block and legacy flat keys.
+        # Mode flag captured when the extension was installed. It is the fallback the C++ side
+        # uses for panels that declare no ``bl_context`` (see #interface_panel.cc), so dropping it
+        # here would silently disable mode-aware filtering for those panels. DNA stores it in a
+        # ``uint32_t``: a corrupt or negative value must never reach the RNA assignment.
+        if KEY_INSTALL_MODE_FLAG in category_data:
+            try:
+                install_mode_flag = int(category_data[KEY_INSTALL_MODE_FLAG])
+            except (TypeError, ValueError):
+                install_mode_flag = 0
+            entry[KEY_INSTALL_MODE_FLAG] = min(max(install_mode_flag, 0), 0xFFFFFFFF)
+
+        # Icon persistence: accept both the nested block and the legacy flat keys.
         icon_block = category_data.get(KEY_ICON, {}) if isinstance(category_data.get(KEY_ICON, {}), dict) else {}
 
         glyph_mode = category_data.get(KEY_GLYPH_MODE, "auto")

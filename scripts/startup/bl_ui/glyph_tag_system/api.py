@@ -15,9 +15,10 @@ consumer:
   system's aggregation hub.
 
 It aggregates the public names from the internal submodules (``defaults``,
-``conversions``, ``glyph_cache``, ``tags_cache``, ``wm_sync``, ``discovery``,
-``handlers``, ``modes``, ``ordering``, ``persistence``, ``unassigned``,
-``properties``, ``operators``, ``tag_ui``) plus the shared state objects owned by
+``conversions``, ``glyph_cache``, ``tags_cache``, ``wm_sync_to_wm``,
+``wm_sync_from_wm``, ``discovery_scan``, ``discovery_merge``, ``handlers``,
+``modes``, ``ordering``, ``persistence``, ``unassigned``, ``properties``,
+``operators``, ``tag_ui``) plus the shared state objects owned by
 ``_state``. Nothing inside the package imports this module, so aggregating every
 submodule here cannot create an import cycle; the internal submodules call each
 other directly.
@@ -177,7 +178,6 @@ from .tags_cache import (
     get_tag_data,
     get_tag_name_by_index,
     get_tag_names,
-    get_tags_for_category_ui,
     remove_category_tag,
     rename_tag,
     set_category_tags,
@@ -343,14 +343,12 @@ from .operators import (
     USERPREF_OT_category_tag_create,
     USERPREF_OT_category_tag_add,
     USERPREF_OT_category_tag_edit,
-    WM_OT_category_tag_set_display_mode,
     WM_OT_category_tag_pick_icon,
     USERPREF_OT_category_tag_delete,
     USERPREF_OT_mark_all_unassigned_as_distributed,
     USERPREF_OT_category_tag_move,
     USERPREF_OT_category_tag_toggle,
     USERPREF_OT_category_clear_tags,
-    USERPREF_OT_category_tag_filter_set,
 )
 
 # -- Tag management UI -------------------------------------------------------

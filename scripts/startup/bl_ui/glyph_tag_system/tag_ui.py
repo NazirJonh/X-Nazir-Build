@@ -810,30 +810,7 @@ class WM_OT_debug_tag_bar_state(bpy.types.Operator):
         return {'FINISHED'}
 
 
-# -----------------------------------------------------------------------------
-# Class Registration
-# -----------------------------------------------------------------------------
-
-
-classes = (
-    VIEW3D_OT_category_tabs_settings,
-    USERPREF_UL_category_tags,
-    USERPREF_OT_tag_mode_toggle,
-    USERPREF_OT_tag_mode_select_all,
-    USERPREF_OT_tag_mode_select_none,
-    USERPREF_OT_category_tag_set_display_mode,
-    USERPREF_PT_tag_mode_filter_popover,
-    USERPREF_PT_tag_management,
-    USERPREF_PT_custom_icon_picker,
-    WM_OT_debug_tag_bar_state,
-)
-
-
-def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
-
-
-def unregister():
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+# NOTE: The classes above are registered by ``space_userpref.register()``, which owns the single
+# class tuple for the whole system (see ``bl_ui/__init__.py``). This module deliberately exposes no
+# ``register()`` of its own: a second registration path would re-register the same ``bl_idname``s
+# and silently unregister the first ones.

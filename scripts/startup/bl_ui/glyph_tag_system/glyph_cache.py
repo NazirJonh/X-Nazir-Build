@@ -48,6 +48,7 @@ from bl_ui.glyph_tag_system.schema_keys import (
     KEY_ICON_PATH,
     KEY_ICON_PROVIDER,
     KEY_ICON_SOURCE,
+    KEY_INSTALL_MODE_FLAG,
     KEY_MAPPINGS,
     KEY_MODE_FLAGS,
     KEY_PENDING_TAG_ASSIGNMENT,
@@ -754,7 +755,11 @@ def _load_glyph_mappings_from_file():
 
 
 def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_sync=False):
-    """Save glyph mappings to JSON file with glyphs in \\uXXXX format.
+    """Save glyph mappings to the JSON file.
+
+    Category glyphs are written as raw UTF-8; tag glyphs are written as bare hex, because DNA
+    stores them in a fixed ``char[8]`` field. See the glyph representation map in
+    :mod:`conversions` — that map is the single source of truth for these boundaries.
 
     Args:
         data: JSON data to save (if None, builds from current cache)
@@ -929,6 +934,10 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
                     entry_to_save[KEY_DISCOVERED_IN_SPACES] = category_data.get(KEY_DISCOVERED_IN_SPACES)
                 if category_data.get(KEY_DISCOVERED_IN_MODES):
                     entry_to_save[KEY_DISCOVERED_IN_MODES] = category_data.get(KEY_DISCOVERED_IN_MODES)
+                # Only extension categories carry a non-zero install flag; keep it out of the file
+                # for everything else. Absent on load means 0, which is the pre-existing behavior.
+                if category_data.get(KEY_INSTALL_MODE_FLAG):
+                    entry_to_save[KEY_INSTALL_MODE_FLAG] = category_data.get(KEY_INSTALL_MODE_FLAG)
 
                 mappings_to_save[KEY_GLOBAL][category] = entry_to_save
             elif isinstance(category_data, str):

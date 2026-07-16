@@ -27,7 +27,6 @@ from bl_ui.glyph_tag_system.conversions import (
     _make_cache_key,
 )
 from bl_ui.glyph_tag_system.log import (
-    _pref_log_once,
     category_debug_print,
     tag_log,
 )
@@ -55,64 +54,6 @@ def get_all_tags():
     return state.all_tags_cache.copy()
 
 
-def get_tags_for_category_ui(wm=None, category="", mode_filter=0, space_type=-1):
-    """
-    Get all tags formatted for C++ UI display.
-    Returns string: "name|glyph|is_active|r,g,b|icon_key|icon_source;name2|glyph2|is_active2|r,g,b|icon_key|icon_source;..."
-    - name: tag name
-    - glyph: unicode glyph character
-    - is_active: 1 if assigned to category, 0 otherwise
-    - r,g,b: RGB color values (0.0-1.0)
-    - icon_key: Blender icon identifier string (e.g., "ICON_OBJECT_DATAMODE")
-    - icon_source: icon source type (0=auto, 1=manual, 2=off)
-
-    Parameters:
-    - wm: window manager (unused, kept for C++ compatibility)
-    - category: category name
-    - mode_filter: mode filter flags (unused for now)
-    - space_type: space type for tag lookup (-1 = global)
-    """
-    # Handle case where function is called with just category (backward compatibility)
-    if wm is not None and not isinstance(wm, str):
-        # Called from C++ with (wm, category, mode_filter, space_type)
-        pass
-    elif category == "" and isinstance(wm, str):
-        # Called with just category as first arg
-        category = wm
-        wm = None
-        space_type = -1
-
-    all_tags = get_all_tags()
-    category_tags = set(get_category_tags(category, space_type))
-
-    _pref_log_once(f"[DEBUG get_tags_for_category_ui] Category='{category}', space_type={space_type}")
-    _pref_log_once(f"[DEBUG get_tags_for_category_ui] all_tags count={len(all_tags)}")
-    _pref_log_once(f"[DEBUG get_tags_for_category_ui] category_tags={category_tags}")
-
-    tag_log(f"get_tags_for_category_ui('{category}', space_type={space_type}): {len(all_tags)} tags found")
-
-    parts = []
-    for name, data in all_tags.items():
-        glyph = data.get("glyph", "")
-        is_active = "1" if name in category_tags else "0"
-        color = data.get("color", [0.0, 0.0, 0.0])
-        # Format color as r,g,b with 3 decimal places
-        color_str = f"{color[0]:.3f},{color[1]:.3f},{color[2]:.3f}"
-        # Get icon data for tag
-        icon_key = data.get("icon_key", "")
-        icon_source = data.get("icon_source", 0)
-        # Debug: Check type of icon_key
-        icon_key_type = type(icon_key).__name__
-        # Use | as separator between fields, ; between tags
-        parts.append(f"{name}|{glyph}|{is_active}|{color_str}|{icon_key}|{icon_source}")
-        _pref_log_once(f"[DEBUG get_tags_for_category_ui] Tag '{name}': glyph='{glyph}', is_active={is_active}, color={color_str}, icon_key='{icon_key}' (type={icon_key_type}), icon_source={icon_source}")
-
-    result = ";".join(parts)
-    tag_log(f"get_tags_for_category_ui result: '{result}'")
-    _pref_log_once(f"[DEBUG get_tags_for_category_ui] Final result: '{result}'")
-    return result
-
-
 def get_tag_data(tag_name):
     """Get glyph and color for a specific tag."""
     tags = get_all_tags()
@@ -135,11 +76,13 @@ def generate_unique_tag_name():
         i += 1
 
 
-# Characters reserved as delimiters by the packed tag serialization formats: the
-# Tag-Bar UI string ("name|glyph|is_active|r,g,b|icon_key|icon_source;...") and the
-# DNA order/last-active keys ("tags:category;..."). A tag name containing any of them
-# would make the C++ side mis-split the payload and silently corrupt data, so such
-# names are rejected at creation/rename time.
+# Characters reserved as delimiters by the packed key formats that still exist: the DNA
+# order/last-active keys ("tags:category;..." — ';' and ':') and the category-order keys
+# ("SPACE:tag1;tag2"). A tag name containing one of them would make the C++ side mis-split the
+# payload and silently corrupt data, so such names are rejected at creation/rename time.
+# '|' and ',' are kept reserved although the packed Tag-Bar UI string that used them is gone
+# (the C++ side now receives typed records): narrowing the rule would let existing tag names
+# become newly invalid on the next writer that packs a name.
 _TAG_NAME_RESERVED_CHARS = "|;,:"
 
 

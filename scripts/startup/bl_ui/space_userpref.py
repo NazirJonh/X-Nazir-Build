@@ -45,11 +45,9 @@ from bl_ui.glyph_tag_system.api import (
     USERPREF_OT_category_tag_delete,
     USERPREF_OT_category_tag_move,
     USERPREF_OT_mark_all_unassigned_as_distributed,
-    WM_OT_category_tag_set_display_mode,
     WM_OT_category_tag_pick_icon,
     USERPREF_OT_category_tag_toggle,
     USERPREF_OT_category_clear_tags,
-    USERPREF_OT_category_tag_filter_set,
     USERPREF_OT_category_tag_filter_set_mode,
     USERPREF_OT_category_tag_remove_from_category,
     VIEW3D_OT_category_tabs_settings,
@@ -3320,11 +3318,9 @@ classes = (
     USERPREF_OT_category_tag_delete,
     USERPREF_OT_category_tag_move,
     USERPREF_OT_mark_all_unassigned_as_distributed,
-    WM_OT_category_tag_set_display_mode,
     WM_OT_category_tag_pick_icon,
     USERPREF_OT_category_tag_toggle,
     USERPREF_OT_category_clear_tags,
-    USERPREF_OT_category_tag_filter_set,
     USERPREF_OT_category_tag_filter_set_mode,
     WM_OT_debug_tag_bar_state,  # Debug operator for tag bar state
 

@@ -848,70 +848,6 @@ class USERPREF_OT_category_tag_edit(Operator):
         return {'CANCELLED'}
 
 
-class WM_OT_category_tag_set_display_mode(Operator):
-    """Set display mode for a tag (Glyph or Icon)"""
-    bl_idname = "wm.category_tag_set_display_mode"
-    bl_label = "Set Tag Display Mode"
-    bl_options = {'REGISTER', 'INTERNAL'}
-
-    mode: bpy.props.EnumProperty(
-        name="Mode",
-        description="Display mode for the tag",
-        items=[
-            ('GLYPH', "Glyph", "Display as glyph character"),
-            ('ICON', "Icon", "Display as Blender icon"),
-        ],
-        default='GLYPH'
-    )
-
-    @classmethod
-    def poll(cls, context):
-        wm = context.window_manager
-        if not wm or not hasattr(wm, 'category_tags'):
-            return False
-        idx = wm.category_tags_active_index
-        return 0 <= idx < len(wm.category_tags)
-
-    def execute(self, context):
-        wm = context.window_manager
-        active_idx = wm.category_tags_active_index
-        tags = wm.category_tags
-
-        if not (0 <= active_idx < len(tags)):
-            self.report({'ERROR'}, "No tag selected")
-            return {'CANCELLED'}
-
-        tag = tags[active_idx]
-        tag_name = tag.name
-
-        # Convert mode to icon_source value (0=GLYPH, 1=ICON)
-        icon_source_val = 1 if self.mode == 'ICON' else 0
-
-        category_debug_print(f"[SET_DISPLAY_MODE] Setting tag '{tag_name}' to mode={self.mode} (icon_source={icon_source_val})")
-
-        # Update WM tag
-        if hasattr(tag, 'icon_source'):
-            tag.icon_source = icon_source_val
-
-        # If switching to GLYPH mode, clear icon_key
-        if self.mode == 'GLYPH' and hasattr(tag, 'icon_key'):
-            tag.icon_key = ""
-
-        # Update state.all_tags_cache
-        if tag_name in state.all_tags_cache and isinstance(state.all_tags_cache[tag_name], dict):
-            state.all_tags_cache[tag_name]["icon_source"] = icon_source_val
-            if self.mode == 'GLYPH':
-                state.all_tags_cache[tag_name]["icon_key"] = ""
-
-        # Save to JSON
-        _get_su()._auto_save_tags()
-
-        # Redraw
-        context.area.tag_redraw()
-        self.report({'INFO'}, f"Set '{tag_name}' to {self.mode} mode")
-        return {'FINISHED'}
-
-
 class WM_OT_category_tag_pick_icon(Operator):
     """Pick an icon for the selected tag"""
     bl_idname = "wm.category_tag_pick_icon"
@@ -1213,60 +1149,7 @@ class USERPREF_OT_category_clear_tags(Operator):
         return {'CANCELLED'}
 
 
-class USERPREF_OT_category_tag_filter_set(Operator):
-    """Set the active tag filter"""
-    bl_idname = "wm.category_tag_filter_set"
-    bl_label = "Set Tag Filter"
-    bl_options = {'REGISTER', 'INTERNAL'}
-
-    tags: bpy.props.StringProperty(
-        name="Tags",
-        description="Comma-separated tag names, or 'All' for no filter"
-    )
-
-    def execute(self, context):
-        # Parse comma-separated tags
-        if self.tags.lower() == "all":
-            tag_list = []
-        else:
-            tag_list = [t.strip() for t in self.tags.split(",") if t.strip()]
-
-        # Store in preferences
-        context.preferences.category_filter_tags = tag_list
-        context.area.tag_redraw()
-        return {'FINISHED'}
-
-
-# -----------------------------------------------------------------------------
-# Registration
-# -----------------------------------------------------------------------------
-
-_classes = (
-    USERPREF_OT_category_tag_remove_from_category,
-    USERPREF_OT_save_category_glyphs,
-    USERPREF_OT_sync_category_glyphs,
-    USERPREF_OT_category_tag_filter_set_mode,
-    USERPREF_OT_category_tag_create,
-    USERPREF_OT_category_tag_add,
-    USERPREF_OT_category_tag_edit,
-    WM_OT_category_tag_set_display_mode,
-    WM_OT_category_tag_pick_icon,
-    USERPREF_OT_category_tag_delete,
-    USERPREF_OT_mark_all_unassigned_as_distributed,
-    USERPREF_OT_category_tag_move,
-    USERPREF_OT_category_tag_toggle,
-    USERPREF_OT_category_clear_tags,
-    USERPREF_OT_category_tag_filter_set,
-)
-
-
-def register():
-    import bpy
-    for cls in _classes:
-        bpy.utils.register_class(cls)
-
-
-def unregister():
-    import bpy
-    for cls in reversed(_classes):
-        bpy.utils.unregister_class(cls)
+# NOTE: The operator classes above are registered by ``space_userpref.register()``, which owns the
+# single class tuple for the whole system (see ``bl_ui/__init__.py``). This module deliberately
+# exposes no ``register()`` of its own: a second registration path would re-register the same
+# ``bl_idname``s and silently unregister the first ones.

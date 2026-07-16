@@ -1,14 +1,5 @@
 # scripts/startup/bl_ui/glyph_library/__init__.py
 
-bl_info = {
-    "name": "Glyph Library",
-    "author": "Blender Team",
-    "version": (1, 0, 0),
-    "blender": (5, 2, 0),
-    "description": "Material Symbols glyph library with search",
-    "category": "UI",
-}
-
 from .registry import GlyphLibrary, get_glyph_library, search_glyphs
 from .translations import TranslationManager, get_translation_manager
 

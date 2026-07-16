@@ -91,6 +91,17 @@ from .defaults import (
 
 KIND_GLYPH = 'GLYPH'
 KIND_GLYPH_HEX = 'GLYPH_HEX'
+# The two plain-string kinds differ in what a corrupt (wrong-type) value becomes, and the split
+# tracks what the field is downstream, not a historical accident:
+# - KIND_STR (display_name, first_letter, default_display_name): user-visible label text. A
+#   corrupt value is dropped to "" so it degrades through the C++ label fallback chain
+#   (display_name -> default_display_name -> category, interface_tab_categories.cc) instead of
+#   surfacing a stringified garbage value (e.g. a stray int rendered as "5") as a UI label —
+#   first_letter is drawn directly as a glyph, where that would be worse still.
+# - KIND_STR_COERCE (icon_key, icon_path, icon_provider, source_extension): opaque identifiers
+#   that are only ever matched or looked up on the C++ side (RNA enum resolution, STREQ/
+#   STRPREFIX comparisons, file-exists checks), never rendered as prose. Coercing a corrupt
+#   value to its string form is harmless there: it just fails to match anything.
 KIND_STR = 'STR'
 KIND_STR_COERCE = 'STR_COERCE'
 KIND_ENUM = 'ENUM'

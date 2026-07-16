@@ -24,6 +24,8 @@
 #include "BLI_vector.hh"
 #include "BLI_vector_set.hh"
 
+#include <algorithm>
+
 #include <fmt/format.h>
 
 #include "BLT_translation.hh"
@@ -403,6 +405,19 @@ static std::optional<wmOperatorCallParams> create_asset_operator_params(
   return wmOperatorCallParams{ot, op_props, wm::OpCallContext::InvokeRegionWin};
 }
 
+/**
+ * Size multiplier for the tile's favorite star, relative to a default-sized icon.
+ *
+ * The star keeps its default size at the default preview size and grows with the preview from
+ * there, up to twice that size. Past that it would start competing with the preview itself for
+ * attention. It never shrinks below the default, matching the small-preview look it had before it
+ * scaled at all.
+ */
+static float favorite_icon_scale(const int preview_size)
+{
+  return std::clamp(preview_size / float(ASSET_SHELF_PREVIEW_SIZE_DEFAULT), 1.0f, 1.5f);
+}
+
 void AssetViewItem::build_grid_tile(const bContext &C, ui::Layout &layout) const
 {
   const AssetView &asset_view = reinterpret_cast<const AssetView &>(this->get_view());
@@ -470,7 +485,27 @@ void AssetViewItem::build_grid_tile(const bContext &C, ui::Layout &layout) const
 
   ui::PreviewGridItem::build_grid_tile_button(overlap.column(true), preview_id);
 
-  ui::Layout &overlay_row = overlap.row(true);
+  /* #LayoutOverlap anchors its children to the top and the overlay row right-aligns them, which
+   * leaves the overlays flush against two edges of the tile. Inset them from the corner by a
+   * fraction of their own size, so the gap reads the same at every preview size.
+   *
+   * Both the padding and the icon scale are computed here rather than next to the star, because the
+   * star is only built while the tile is hovered (see below) -- deriving the row's padding from it
+   * would shift the indicator icons on every hover. */
+  const float overlay_icon_scale = favorite_icon_scale(asset_view.shelf_.settings.preview_size);
+  const short overlay_pad = short(ICON_DEFAULT_WIDTH_SCALE * overlay_icon_scale * 0.2f);
+
+  ui::Layout &overlay_column = overlap.column(false);
+  ui::Block *overlay_block = overlay_column.block();
+
+  /* Empty label acting as a spacer; #Layout::separator() is unusable here, as it draws a line
+   * rather than a gap in menu blocks (the popover is one), and its step differs between menu and
+   * non-menu blocks, which would desync the popover from the shelf region. */
+  ui::block_layout_set_current(overlay_block, &overlay_column);
+  ui::uiDefBut(
+      overlay_block, ui::ButtonType::Label, "", 0, 0, 1, overlay_pad, nullptr, 0, 0, std::nullopt);
+
+  ui::Layout &overlay_row = overlay_column.row(true);
   overlay_row.alignment_set(ui::LayoutAlign::Right);
 
   if (asset_.is_online_only()) {
@@ -496,19 +531,23 @@ void AssetViewItem::build_grid_tile(const bContext &C, ui::Layout &layout) const
    * only reveals the (hollow) star while its tile is hovered, matching the download button below.
    * This keeps the grid uncluttered but still lets the user favorite a brush on demand. */
   if (asset_view.favorites_ && (is_favorite_ || is_hovered())) {
-    ui::Block *overlay_block = overlay_row.block();
-    /* #uiDefIconButO appends to the block's *current* layout; make that the overlay row. */
+    /* Scaling the button rect alone would only center a default-sized icon in a bigger button, so
+     * the icon is scaled separately below. The rect grows along with it to keep the icon's padding
+     * proportional, and to give the star a hit area that matches what is drawn.
+     *
+     * #uiDefIconButO appends to the block's *current* layout; make that the overlay row. */
     ui::block_layout_set_current(overlay_block, &overlay_row);
-    ui::Button *favorite_but = uiDefIconButO(overlay_block,
-                                             ui::ButtonType::But,
-                                             "BRUSH_OT_asset_favorite_toggle",
-                                             wm::OpCallContext::ExecDefault,
-                                             is_favorite_ ? ICON_SOLO_ON : ICON_SOLO_OFF,
-                                             0,
-                                             0,
-                                             ICON_DEFAULT_WIDTH_SCALE,
-                                             ICON_DEFAULT_HEIGHT_SCALE,
-                                             std::nullopt);
+    ui::Button *favorite_but = uiDefIconButO(
+        overlay_block,
+        ui::ButtonType::But,
+        "BRUSH_OT_asset_favorite_toggle",
+        wm::OpCallContext::ExecDefault,
+        is_favorite_ ? ICON_SOLO_ON : ICON_SOLO_OFF,
+        0,
+        0,
+        short(ICON_DEFAULT_WIDTH_SCALE * overlay_icon_scale),
+        short(ICON_DEFAULT_HEIGHT_SCALE * overlay_icon_scale),
+        std::nullopt);
     /* Act on this tile's asset, which is not necessarily the active brush (without these
      * properties the operator falls back to the active brush). */
     PointerRNA *favorite_opptr = ui::button_operator_ptr_ensure(favorite_but);
@@ -516,7 +555,15 @@ void AssetViewItem::build_grid_tile(const bContext &C, ui::Layout &layout) const
     /* The star sits on top of the preview image, which can be any color: draw it like the download
      * button below, as a white icon over a dark circle. */
     ui::button_pushbutton_draw_as_overlay_set(favorite_but, true);
+    /* #widget_draw_icon() derives the drawn icon size from here, not from the button's rect. */
+    ui::button_icon_scale_set(favorite_but, overlay_icon_scale);
   }
+
+  /* Trailing spacer, insetting the row's contents from the tile's right edge (the row is
+   * right-aligned, so this is what pushes them inwards). */
+  ui::block_layout_set_current(overlay_block, &overlay_row);
+  ui::uiDefBut(
+      overlay_block, ui::ButtonType::Label, "", 0, 0, overlay_pad, 1, nullptr, 0, 0, std::nullopt);
 
   /* Download overlay button for online assets. */
   if (is_hovered() && asset_.needs_download()) {

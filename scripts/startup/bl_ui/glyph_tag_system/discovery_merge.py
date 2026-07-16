@@ -44,6 +44,18 @@ from bl_ui.glyph_tag_system.log import (
 from bl_ui.glyph_tag_system.migrations import (
     _normalize_category_data,
 )
+from bl_ui.glyph_tag_system.schema_keys import (
+    KEY_BASE_TYPE,
+    KEY_DEFAULT_DISPLAY_NAME,
+    KEY_DEFAULT_GLYPH,
+    KEY_DISPLAY_NAME,
+    KEY_GLYPH,
+    KEY_INSTALL_MODE_FLAG,
+    KEY_SOURCE_EXTENSION,
+)
+from bl_ui.glyph_tag_system.schema_fields import (
+    new_entry,
+)
 from bl_ui.glyph_tag_system.glyph_cache import (
     _find_panel_label_for_category,
     _save_glyph_mappings_to_file,
@@ -1198,25 +1210,19 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                         if is_from_pending_ext:
                             category_debug_print(f"[MERGE DEBUG]   pending_extension_id: {pending_extension_context.get('extension_id', '')!r}")
 
-            state.glyph_cache[cache_key] = {
-                "glyph": glyph,
-                "display_name": default_display_name,
-                "color": [0.0, 0.0, 0.0],
-                "default_glyph": glyph,
-                "default_display_name": default_display_name,
-                "base_type": base_type,
-                "glyph_mode": "auto",
-                "icon_source": "auto",
-                "icon_key": "",
-                "icon_path": "",
-                "icon_provider": "",
-                # Extension pending-tag fields
-                "source_extension": ext_id,
-                "pending_tag_assignment": False,
-                "discovered_in_spaces": [],
-                "discovered_in_modes": [],
-                "install_mode_flag": 0,  # Mode flag when extension was installed (for mode-aware filtering)
-            }
+            # Built from the field table rather than spelled out, so a newly discovered category
+            # has exactly the fields an entry has. The literal this replaced had already fallen
+            # behind: it was missing first_letter and tags.
+            new_category = new_entry()
+            new_category.update({
+                KEY_GLYPH: glyph,
+                KEY_DISPLAY_NAME: default_display_name,
+                KEY_DEFAULT_GLYPH: glyph,
+                KEY_DEFAULT_DISPLAY_NAME: default_display_name,
+                KEY_BASE_TYPE: base_type,
+                KEY_SOURCE_EXTENSION: ext_id,
+            })
+            state.glyph_cache[cache_key] = new_category
 
             # If an extension was detected (either from pending context or auto-detection), mark as pending.
             if ext_id:
@@ -1266,7 +1272,7 @@ def _merge_discovered_categories(force_refresh=False, skip_icon_detection=False)
                 # This is used when discovered_in_modes is empty (panels don't specify bl_context).
                 # The category should only show "New Add-ons!" in the mode where it was installed.
                 if ext_mode:
-                    state.glyph_cache[cache_key]["install_mode_flag"] = ext_mode
+                    state.glyph_cache[cache_key][KEY_INSTALL_MODE_FLAG] = ext_mode
                     tag_log(
                         f"_merge_discovered_categories: set install_mode_flag={ext_mode:#x} for {category!r}"
                     )

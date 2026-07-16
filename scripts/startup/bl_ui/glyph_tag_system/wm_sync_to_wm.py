@@ -1055,6 +1055,13 @@ def _sync_glyph_mappings_to_wm_impl(force_discovery_merge=False, skip_icon_detec
 
                         # Store normalized version back to cache if data was old format or missing fields.
                         # This allows detected icon paths and inherited extension info to be persisted back to JSON.
+                        #
+                        # Replacing the entry wholesale is lossless because the normalized entry is
+                        # built from the field table, which is the definition of an entry: a key
+                        # outside it is not data, and a key inside it is rebuilt here. Anything the
+                        # cache legitimately carries — including transient state such as
+                        # without_tag_preview — must therefore have a row in that table, or it dies
+                        # right here without a sound.
                         is_legacy_string = isinstance(category_data, str)
                         is_missing_fields = isinstance(category_data, dict) and any(field not in category_data for field in normalized_data)
 

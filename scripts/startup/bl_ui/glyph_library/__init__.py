@@ -4,7 +4,7 @@ bl_info = {
     "name": "Glyph Library",
     "author": "Blender Team",
     "version": (1, 0, 0),
-    "blender": (4, 1, 0),
+    "blender": (5, 2, 0),
     "description": "Material Symbols glyph library with search",
     "category": "UI",
 }

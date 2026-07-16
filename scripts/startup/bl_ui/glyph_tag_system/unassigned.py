@@ -25,7 +25,7 @@ from .defaults import (
     DEFAULT_CATEGORY_GLYPHS,
     SPACE_TO_FLAG,
 )
-from .modes import get_current_tag_mode_flag
+from .modes import category_matches_context, get_current_tag_mode_flag
 from .log import category_debug_print
 
 # Single owner of shared state; ``state.glyph_cache`` is the live dict (see _state.py).
@@ -34,12 +34,12 @@ from ._state import state
 
 def _get_unassigned_categories_count_for_space(context,
                                                space_type,
-                                               space_flag,
                                                _order_key=None):
     """Count unassigned extension categories for a specific editor space.
 
-    Mirrors the C++ unassigned-category predicate so Python headers stay in sync
-    with the shared tag-bar behavior.
+    The space/mode part of the predicate is :func:`modes.category_matches_context`, shared with
+    the bulk-clear in ``glyph_cache`` and mirrored by C++ so Python headers stay in sync with the
+    shared tag-bar behavior.
 
     IMPORTANT: This function checks state.glyph_cache instead of wm.category_glyph_mappings
     to respect preview mode. In preview mode, WM may have tags but pending_tag_assignment
@@ -102,10 +102,8 @@ def _get_unassigned_categories_count_for_space(context,
 
         has_no_tags = not tags or (hasattr(tags, "__len__") and len(tags) == 0)
 
-        # Mirror C++ category_is_unassigned_for_context logic:
-        # - discovered_spaces == 0 means "any space" (legacy/unknown source)
-        # - discovered_spaces != 0 must match the current space_flag
-        space_matches = (discovered_spaces == 0) or (discovered_spaces & space_flag)
+        context_matches = category_matches_context(
+            discovered_spaces, discovered_modes, install_mode_flag, space_type, current_mode_flag)
 
         # Detailed logging for debugging "New Add-ons!" filter issues
         if source_extension and pending_assignment:
@@ -118,30 +116,23 @@ def _get_unassigned_categories_count_for_space(context,
                 source_extension and
                 pending_assignment and
                 has_no_tags and
-                space_matches and
+                context_matches and
                 not _extension_has_tagged_category(wm, source_extension) and
                 not _extension_has_only_reserved_categories(wm, source_extension)):
-            # Mode check: skip for SPACE_NODE (16), or if no mode filtering
-            # Mirror C++: current_mode_flag == 0 or discovered_modes == 0 means "any mode"
-            # BUT: for categories from extensions with discovered_modes == 0, use install_mode_flag
-            # to filter by the mode where extension was installed
-            effective_mode_flags = discovered_modes if discovered_modes != 0 else install_mode_flag
-            if space_type == 16 or current_mode_flag == 0 or effective_mode_flags == 0 or (effective_mode_flags & current_mode_flag):
-                count += 1
-                category_debug_print(f"[NEW ADDONS DEBUG] ✓ COUNTED: {category_name!r}")
-            else:
-                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED mode check: {category_name!r} "
-                                   f"(current_mode_flag={current_mode_flag:#x}, discovered_modes={discovered_modes:#x}, "
-                                   f"install_mode_flag={install_mode_flag:#x})")
+            count += 1
+            category_debug_print(f"[NEW ADDONS DEBUG] ✓ COUNTED: {category_name!r}")
         elif source_extension and pending_assignment:
             # Log why category was NOT counted
             if is_reserved:
                 category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: is_reserved={is_reserved}")
             elif not has_no_tags:
                 category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: has_tags={not has_no_tags}")
-            elif not space_matches:
-                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: space_matches={space_matches} "
-                                   f"(discovered_spaces={discovered_spaces:#x}, space_flag={space_flag:#x})")
+            elif not context_matches:
+                category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED context check: {category_name!r} "
+                                   f"(space_type={space_type}, discovered_spaces={discovered_spaces:#x}, "
+                                   f"current_mode_flag={current_mode_flag:#x}, "
+                                   f"discovered_modes={discovered_modes:#x}, "
+                                   f"install_mode_flag={install_mode_flag:#x})")
             elif _extension_has_tagged_category(wm, source_extension):
                 category_debug_print(f"[NEW ADDONS DEBUG] ✗ FAILED: extension has tagged category")
             elif _extension_has_only_reserved_categories(wm, source_extension):

@@ -31,19 +31,15 @@ from bl_ui.glyph_tag_system.defaults import (
 )
 from bl_ui.glyph_tag_system.schema_keys import (
     KEY_ALL_TAGS,
-    KEY_BASE_TYPE,
     KEY_CATEGORY_ORDERS,
     KEY_COLOR,
-    KEY_DEFAULT_DISPLAY_NAME,
     KEY_DEFAULT_GLYPH,
     KEY_DISCOVERED_IN_MODES,
     KEY_DISCOVERED_IN_SPACES,
     KEY_DISPLAY_NAME,
-    KEY_FIRST_LETTER,
     KEY_GLOBAL,
     KEY_GLYPH,
     KEY_GLYPH_MODE,
-    KEY_ICON,
     KEY_ICON_KEY,
     KEY_ICON_PATH,
     KEY_ICON_PROVIDER,
@@ -52,14 +48,9 @@ from bl_ui.glyph_tag_system.schema_keys import (
     KEY_MAPPINGS,
     KEY_MODE_FLAGS,
     KEY_PENDING_TAG_ASSIGNMENT,
-    KEY_SOURCE_EXTENSION,
     KEY_TAGS,
     KEY_TAG_ORDER,
     KEY_VERSION,
-    ICON_BLOCK_KEY,
-    ICON_BLOCK_PATH,
-    ICON_BLOCK_PROVIDER,
-    ICON_BLOCK_SOURCE,
 )
 from bl_ui.glyph_tag_system.conversions import (
     _category_order_decode,
@@ -86,6 +77,12 @@ from bl_ui.glyph_tag_system.migrations import (
     _normalize_category_data,
     _normalize_color,
     migrate_json_data,
+)
+from bl_ui.glyph_tag_system.schema_fields import (
+    entry_to_disk,
+)
+from bl_ui.glyph_tag_system.modes import (
+    category_matches_context,
 )
 from bl_ui.glyph_tag_system.persistence import (
     safe_file_write,
@@ -455,22 +452,22 @@ def mark_all_unassigned_categories_as_without_tag(space_type=-1, mode_flag=0):
             continue
         # CRITICAL: Process ALL categories with pending=True, regardless of source_extension
         # This includes categories like "Home Builder" (ext='') and "Home Builder 5" (ext='...')
-        if not cat_data.get("pending_tag_assignment", False):
+        if not cat_data.get(KEY_PENDING_TAG_ASSIGNMENT, False):
             continue
-        if cat_data.get("tags"):
-            continue
-
-        discovered_spaces = spaces_to_flags(cat_data.get("discovered_in_spaces", []))
-        if space_type != -1 and discovered_spaces and not (discovered_spaces & SPACE_TO_FLAG.get(_space_type_id_to_str(space_type), 0)):
+        if cat_data.get(KEY_TAGS):
             continue
 
-        effective_mode_flags = modes_to_flags(cat_data.get("discovered_in_modes", []))
-        if effective_mode_flags == 0:
-            effective_mode_flags = int(cat_data.get("install_mode_flag", 0))
-        if mode_flag and effective_mode_flags and not (effective_mode_flags & mode_flag):
+        # Must clear exactly the set the tag bar counted as unassigned, so the shared predicate
+        # decides here too (see #unassigned._get_unassigned_categories_count_for_space).
+        if not category_matches_context(
+                spaces_to_flags(cat_data.get(KEY_DISCOVERED_IN_SPACES, [])),
+                modes_to_flags(cat_data.get(KEY_DISCOVERED_IN_MODES, [])),
+                int(cat_data.get(KEY_INSTALL_MODE_FLAG, 0)),
+                space_type,
+                mode_flag):
             continue
 
-        cat_data["pending_tag_assignment"] = False
+        cat_data[KEY_PENDING_TAG_ASSIGNMENT] = False
         categories_to_clear.append(category_name)
         updated += 1
 
@@ -890,77 +887,21 @@ def _save_glyph_mappings_to_file(data=None, force_discovery_skip=False, skip_wm_
                 else:
                     category_debug_print(f"[GLYPH] Saving category with user customizations: {repr(category)}")
 
-            if isinstance(category_data, dict):
+            if isinstance(category_data, (str, dict)):
                 # Debug: print tags for all categories with tags
-                cat_tags = category_data.get(KEY_TAGS, [])
+                cat_tags = category_data.get(KEY_TAGS, []) if isinstance(category_data, dict) else []
                 category_debug_print(f"[GLYPH SAVE] SAVING: '{category}' (GLOBAL) tags={cat_tags}")
 
-                # Symmetric normalization on the write path: the load path validates the
-                # structure (migrate_json_data), but a corrupt in-memory cache must never
-                # reach the file. Coerce the color to three clamped floats and guard tags to
-                # a list of strings (a non-list value like None would otherwise crash
-                # ``list(...)`` or char-split a string).
-                raw_tags = category_data.get(KEY_TAGS, [])
-                tags_out = [str(t) for t in raw_tags] if isinstance(raw_tags, list) else []
-
-                entry_to_save = {
-                    # Category glyphs are stored on disk as raw UTF-8 (the in-memory form), matching
-                    # the glyph library and the category keys. Legacy files that used \uXXXX escapes
-                    # still load: every reader decodes escapes before use. See conversions.py.
-                    KEY_GLYPH: category_data.get(KEY_GLYPH, ""),
-                    KEY_DISPLAY_NAME: category_data.get(KEY_DISPLAY_NAME, ""),
-                    KEY_FIRST_LETTER: category_data.get(KEY_FIRST_LETTER, ""),
-                    KEY_COLOR: _normalize_color(category_data.get(KEY_COLOR, [0.0, 0.0, 0.0])),
-                    KEY_DEFAULT_GLYPH: category_data.get(KEY_DEFAULT_GLYPH, ""),
-                    KEY_DEFAULT_DISPLAY_NAME: category_data.get(KEY_DEFAULT_DISPLAY_NAME, ""),
-                    KEY_BASE_TYPE: category_data.get(KEY_BASE_TYPE, "text_only"),
-                    KEY_TAGS: tags_out,  # Save tags
-                    KEY_GLYPH_MODE: category_data.get(KEY_GLYPH_MODE, "auto"),
-                    KEY_ICON: {
-                        ICON_BLOCK_SOURCE: category_data.get(KEY_ICON_SOURCE, "auto"),
-                        ICON_BLOCK_KEY: category_data.get(KEY_ICON_KEY, ""),
-                        ICON_BLOCK_PATH: category_data.get(KEY_ICON_PATH, ""),
-                        ICON_BLOCK_PROVIDER: category_data.get(KEY_ICON_PROVIDER, ""),
-                    },
-                }
-
-                # Save extension-related fields for "New Add-ons!" feature
-                if category_data.get(KEY_SOURCE_EXTENSION):
-                    entry_to_save[KEY_SOURCE_EXTENSION] = category_data.get(KEY_SOURCE_EXTENSION)
-                # Always save pending_tag_assignment if key exists (including False for "Without Tag")
-                if KEY_PENDING_TAG_ASSIGNMENT in category_data:
-                    entry_to_save[KEY_PENDING_TAG_ASSIGNMENT] = category_data.get(KEY_PENDING_TAG_ASSIGNMENT)
-                if category_data.get(KEY_DISCOVERED_IN_SPACES):
-                    entry_to_save[KEY_DISCOVERED_IN_SPACES] = category_data.get(KEY_DISCOVERED_IN_SPACES)
-                if category_data.get(KEY_DISCOVERED_IN_MODES):
-                    entry_to_save[KEY_DISCOVERED_IN_MODES] = category_data.get(KEY_DISCOVERED_IN_MODES)
-                # Only extension categories carry a non-zero install flag; keep it out of the file
-                # for everything else. Absent on load means 0, which is the pre-existing behavior.
-                if category_data.get(KEY_INSTALL_MODE_FLAG):
-                    entry_to_save[KEY_INSTALL_MODE_FLAG] = category_data.get(KEY_INSTALL_MODE_FLAG)
-
-                mappings_to_save[KEY_GLOBAL][category] = entry_to_save
-            elif isinstance(category_data, str):
-                # Old format - convert to new format
-                glyph = _unicode_escape_to_glyph(category_data) if '\\u' in category_data else category_data
-                base_type = "glyph_only" if _is_single_glyph(glyph) else "glyph_text"
-                mappings_to_save[KEY_GLOBAL][category] = {
-                    KEY_GLYPH: glyph,
-                    KEY_DISPLAY_NAME: "",
-                    KEY_FIRST_LETTER: "",
-                    KEY_COLOR: [0.0, 0.0, 0.0],
-                    KEY_DEFAULT_GLYPH: glyph,
-                    KEY_DEFAULT_DISPLAY_NAME: "",
-                    KEY_BASE_TYPE: base_type,
-                    KEY_TAGS: [],
-                    KEY_GLYPH_MODE: "auto",
-                    KEY_ICON: {
-                        ICON_BLOCK_SOURCE: "auto",
-                        ICON_BLOCK_KEY: "",
-                        ICON_BLOCK_PATH: "",
-                        ICON_BLOCK_PROVIDER: "",
-                    },
-                }
+                # Symmetric normalization on the write path: a corrupt in-memory cache must never
+                # reach the file, and a legacy string left in the cache is expanded here exactly as
+                # the loader would expand it. Both directions share the field table, so a value that
+                # reached the entry cannot be dropped on the way out.
+                #
+                # Category glyphs are stored on disk as raw UTF-8 (the in-memory form), matching the
+                # glyph library and the category keys. Legacy files that used \uXXXX escapes still
+                # load: every reader decodes escapes before use. See conversions.py.
+                entry = _normalize_category_data(category_data, category)
+                mappings_to_save[KEY_GLOBAL][category] = entry_to_disk(entry)
 
         if skipped_count > 0:
             category_debug_print(f"[GLYPH] Skipped {skipped_count} categories with invalid names and no customizations")

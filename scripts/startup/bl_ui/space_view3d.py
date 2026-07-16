@@ -1813,7 +1813,7 @@ class VIEW3D_HT_tag_bar_tags(Header):
         # Check for pending (unassigned) categories from new add-ons.
         # Use the shared helper so View3D matches the editor-wide tag-bar rules.
         from bl_ui.glyph_tag_system.api import _get_unassigned_categories_count_for_space
-        unassigned_count = _get_unassigned_categories_count_for_space(context, 1, 1 << 0, "VIEW3D:")
+        unassigned_count = _get_unassigned_categories_count_for_space(context, 1, "VIEW3D:")
 
         # Create a row for tag buttons and filter toggle with compact spacing
         row = layout.row(align=True)

@@ -421,7 +421,7 @@ def _get_unassigned_categories_count_for_node_editor(context):
     """
     try:
         from bl_ui.glyph_tag_system.api import _get_unassigned_categories_count_for_space
-        return _get_unassigned_categories_count_for_space(context, 16, 1 << 11, "NODE:")
+        return _get_unassigned_categories_count_for_space(context, 16, "NODE:")
     except Exception as e:
         print(f"[NODE_TAG_BAR] Error checking unassigned categories: {e}")
         return 0

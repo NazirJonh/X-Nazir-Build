@@ -145,8 +145,16 @@ struct SculptLayerUndoPayload {
   int uid = 0;
   short domain = 0;
   short level = 0;
-  /** Position in #Mesh::sculpt_layers at capture time (re-insertion point). */
-  int index = 0;
+  /**
+   * Where the layer sat in #Mesh::sculpt_layers at capture time, recorded as the uid of the layer
+   * it followed (0 when it was the head). Re-insertion goes after that layer.
+   *
+   * A neighbour rather than a position, because a position only names the same slot for as long as
+   * nothing else in the list moves. When several layers are captured together, each one's anchor
+   * may be another captured layer; re-inserting them in capture order then rebuilds the original
+   * sequence, since a layer's anchor is always restored before it is.
+   */
+  int prev_uid = 0;
   /** Owned while stored in the undo step; freed with the step. */
   void *data = nullptr;
 
@@ -159,8 +167,21 @@ struct SculptLayerUndoPayload {
 };
 
 /** Capture \a layer into a payload, transferring ownership of its data buffer. The layer struct
- * itself is left in the mesh list untouched (the caller removes it). */
+ * itself is left in the mesh list untouched (the caller removes it, or gives it a new buffer). */
 SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh &mesh, SculptLayer &layer);
+
+/**
+ * Sculpt layer operators: push a #Type::SculptLayer undo step for layers whose data buffer was
+ * *replaced* rather than edited in place, i.e. a resize (#SCULPT_OT_layer_validate repairing stale
+ * layers). Unlike #push_sculpt_layer_data — which snapshots the buffer and can only restore it when
+ * the size still matches — each payload carries its own `totelem`, so the two states may differ in
+ * size. The layers stay in the list and keep their uid; only the buffers are exchanged.
+ *
+ * Each payload must come from #sculpt_layer_payload_capture (which takes the *old* buffer off the
+ * layer) and the caller must then install the new buffer. Consumed. Call between #push_begin and
+ * #push_end.
+ */
+void push_sculpt_layer_data_resize(Object &object, Vector<SculptLayerUndoPayload> &&resized);
 
 /**
  * Sculpt layer operators: record a layer-list change into the current #Type::SculptLayer undo
@@ -198,16 +219,22 @@ void push_sculpt_layer_bake_to_shape_key(Object &object, short pre_bake_shapenr)
 
 /**
  * Sculpt layer operators: record a layer reorder (move up/down) into the current
- * #Type::SculptLayer undo step.
+ * #Type::SculptLayer undo step. The position is recorded as the uid of the layer \a layer follows
+ * before (\a prev_uid_from) and after (\a prev_uid_to) the move, 0 meaning the head of the list —
+ * see #SculptLayerUndoPayload::prev_uid for why a neighbour rather than an index.
  */
-void push_sculpt_layer_move(Object &object, const SculptLayer &layer, int index_from, int index_to);
+void push_sculpt_layer_move(Object &object,
+                            const SculptLayer &layer,
+                            int prev_uid_from,
+                            int prev_uid_to);
 
 /**
  * Sculpt layer operators: record an active-layer selection change (pure UI state) into the
- * current #Type::SculptLayer undo step. Undo restores \a index_from, redo \a index_to. Kept as a
- * sculpt step (rather than a global undo push) so it composes with stroke SCULPT steps.
+ * current #Type::SculptLayer undo step. Undo restores \a uid_from, redo \a uid_to; 0 means no
+ * active layer. Kept as a sculpt step (rather than a global undo push) so it composes with stroke
+ * SCULPT steps.
  */
-void push_sculpt_layer_active_index(Object &object, int index_from, int index_to);
+void push_sculpt_layer_active(Object &object, int uid_from, int uid_to);
 
 /**
  * Sculpt layers (mesh/vertex domain): iterate the unique vertices recorded into the in-progress

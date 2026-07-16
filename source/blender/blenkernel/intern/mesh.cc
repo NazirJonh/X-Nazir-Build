@@ -200,7 +200,8 @@ static void mesh_copy_data(Main *bmain,
 
   BKE_defgroup_copy_list(&mesh_dst->vertex_group_names, &mesh_src->vertex_group_names);
   blender::bke::sculpt_layers::copy_list(&mesh_dst->sculpt_layers, &mesh_src->sculpt_layers);
-  mesh_dst->sculpt_layers_active_index = mesh_src->sculpt_layers_active_index;
+  /* The copied layers keep their uids, so the active one carries over by identity. */
+  mesh_dst->sculpt_layers_active_uid = mesh_src->sculpt_layers_active_uid;
   mesh_dst->active_color_attribute = static_cast<char *>(
       MEM_dupalloc(mesh_src->active_color_attribute));
   mesh_dst->default_color_attribute = static_cast<char *>(

@@ -16,6 +16,7 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
+#include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_set.hh"
 #include "BLI_sys_types.h"
@@ -68,6 +69,18 @@ void do_versions_after_linking_530(FileData * /*fd*/, Main *bmain)
 
 void blo_do_versions_530(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 {
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 503, 5)) {
+    /* The active sculpt layer moved from a positional index to the layer's stable uid, so that it
+     * keeps naming the same layer when the list changes shape. Translate the stored position; the
+     * uid field itself reads back as 0 ("no active layer") from an older file, since it occupies
+     * what used to be padding. */
+    for (Mesh &mesh : bmain->meshes) {
+      const SculptLayer *active = static_cast<const SculptLayer *>(
+          BLI_findlink(&mesh.sculpt_layers, mesh.sculpt_layers_active_index));
+      mesh.sculpt_layers_active_uid = active ? active->uid : 0;
+    }
+  }
+
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 503, 4)) {
     /* Sculpt layer system V2: grid-domain sculpt layers switched from object-space displacement
      * deltas to tangent-space displacement stored in the MDisps grid layout. Old data cannot be

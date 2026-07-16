@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
+#include <type_traits>
 
 #include "CLG_log.h"
 
@@ -37,6 +38,13 @@ static CLG_LogRef LOG = {"bke.sculpt_layers"};
 
 namespace blender::bke::sculpt_layers {
 
+/* No destructor ever runs on a layer: #free_list and #remove release the nodes with
+ * #MEM_delete_void, because the blend-file reader allocates its own layers C-style and the free
+ * side has to accept both origins. See the allocation notes in `BKE_sculpt_layers.hh`. */
+static_assert(std::is_trivially_destructible_v<SculptLayer>,
+              "SculptLayer must remain trivially destructible (see the allocation notes in "
+              "BKE_sculpt_layers.hh)");
+
 static int unique_uid(const Mesh &mesh)
 {
   int uid = 1;
@@ -44,6 +52,25 @@ static int unique_uid(const Mesh &mesh)
     uid = std::max(uid, layer.uid + 1);
   }
   return uid;
+}
+
+/**
+ * Standalone copy of \a src, with the list links cleared and its own data buffer.
+ *
+ * Every layer duplication routes through here. A shallow struct copy alone would leave the two
+ * layers sharing one #SculptLayer::data allocation, which #free_list would then release twice, so
+ * the deep copy of the buffer must not be separable from the copy of the struct.
+ *
+ * The copy keeps \a src's uid; a caller inserting it into a mesh assigns a fresh one.
+ */
+static SculptLayer *layer_copy(const SculptLayer &src)
+{
+  SculptLayer *layer = MEM_new<SculptLayer>(__func__, src);
+  layer->next = layer->prev = nullptr;
+  if (src.data) {
+    layer->data = MEM_dupalloc_void(src.data);
+  }
+  return layer;
 }
 
 SculptLayer *add(Mesh &mesh,
@@ -77,24 +104,26 @@ SculptLayer *add(Mesh &mesh,
 
 void remove(Mesh &mesh, SculptLayer &layer)
 {
-  const int index = index_of(mesh, layer);
+  /* Hand the active marker to a neighbour, but only when the removed layer held it: unlike the
+   * positional index this replaced, a uid keeps identifying the same layer no matter what happens
+   * elsewhere in the list, so removing some *other* layer must leave the active one alone. */
+  const bool was_active = mesh.sculpt_layers_active_uid == layer.uid;
+  const SculptLayer *successor = layer.next ? layer.next : layer.prev;
+
   BLI_remlink(&mesh.sculpt_layers, &layer);
   if (layer.data) {
     MEM_delete_void(layer.data);
   }
-  MEM_delete(&layer);
+  MEM_delete_void(static_cast<void *>(&layer));
 
-  const int count = BLI_listbase_count(&mesh.sculpt_layers);
-  mesh.sculpt_layers_active_index = std::clamp(index, 0, std::max(0, count - 1));
+  if (was_active) {
+    active_set(mesh, successor);
+  }
 }
 
 SculptLayer *duplicate(Mesh &mesh, const SculptLayer &src)
 {
-  SculptLayer *layer = MEM_dupalloc<SculptLayer>(&src);
-  layer->next = layer->prev = nullptr;
-  if (src.data) {
-    layer->data = MEM_dupalloc_void(src.data);
-  }
+  SculptLayer *layer = layer_copy(src);
   layer->uid = unique_uid(mesh);
 
   BLI_insertlinkafter(&mesh.sculpt_layers, const_cast<SculptLayer *>(&src), layer);
@@ -110,19 +139,17 @@ SculptLayer *duplicate(Mesh &mesh, const SculptLayer &src)
 
 SculptLayer *active_get(Mesh &mesh)
 {
-  return static_cast<SculptLayer *>(
-      BLI_findlink(&mesh.sculpt_layers, mesh.sculpt_layers_active_index));
+  return find_by_uid(mesh, mesh.sculpt_layers_active_uid);
 }
 
 const SculptLayer *active_get(const Mesh &mesh)
 {
-  return static_cast<const SculptLayer *>(
-      BLI_findlink(&mesh.sculpt_layers, mesh.sculpt_layers_active_index));
+  return find_by_uid(mesh, mesh.sculpt_layers_active_uid);
 }
 
 void active_set(Mesh &mesh, const SculptLayer *layer)
 {
-  mesh.sculpt_layers_active_index = layer ? index_of(mesh, *layer) : -1;
+  mesh.sculpt_layers_active_uid = layer ? layer->uid : 0;
 }
 
 int index_of(const Mesh &mesh, const SculptLayer &layer)
@@ -132,7 +159,23 @@ int index_of(const Mesh &mesh, const SculptLayer &layer)
 
 SculptLayer *find_by_uid(Mesh &mesh, const int uid)
 {
+  if (uid == 0) {
+    return nullptr;
+  }
   for (SculptLayer &layer : mesh.sculpt_layers) {
+    if (layer.uid == uid) {
+      return &layer;
+    }
+  }
+  return nullptr;
+}
+
+const SculptLayer *find_by_uid(const Mesh &mesh, const int uid)
+{
+  if (uid == 0) {
+    return nullptr;
+  }
+  for (const SculptLayer &layer : mesh.sculpt_layers) {
     if (layer.uid == uid) {
       return &layer;
     }
@@ -148,6 +191,24 @@ bool solo_active(const Mesh &mesh)
     }
   }
   return false;
+}
+
+bool is_stale(const SculptLayer &layer, const int elem_num)
+{
+  return layer.data != nullptr && layer.totelem != elem_num;
+}
+
+int element_count(const Mesh &mesh, const SculptLayer &layer)
+{
+  if (layer.domain == SCULPT_LAYER_DOMAIN_GRID) {
+    return grid_totelem(mesh.corners_num, layer.level);
+  }
+  return mesh.verts_num;
+}
+
+bool is_stale(const Mesh &mesh, const SculptLayer &layer)
+{
+  return is_stale(layer, element_count(mesh, layer));
 }
 
 MutableSpan<float3> data_ensure(SculptLayer &layer, const int totelem)
@@ -203,12 +264,11 @@ void apply_delta_mesh(const SculptLayer &layer, const float factor, MutableSpan<
   if (layer.data == nullptr || factor == 0.0f) {
     return;
   }
-  const Span<float3> deltas(static_cast<const float3 *>(layer.data), layer.totelem);
-  if (deltas.size() != positions.size()) {
-    /* Stale layer whose element count no longer matches the mesh topology (e.g. a remesh that
-     * bypassed the free hook). Skip it rather than corrupting a mismatched vertex range. */
+  if (is_stale(layer, positions.size())) {
+    /* Skip rather than corrupt a mismatched vertex range. */
     return;
   }
+  const Span<float3> deltas(static_cast<const float3 *>(layer.data), layer.totelem);
   /* Bandwidth-bound vertex pass; parallelize since the influence slider runs this on the whole mesh
    * per tick. #parallel_for stays serial below the grain size, so small meshes pay no overhead. */
   threading::parallel_for(positions.index_range(), 8192, [&](const IndexRange range) {
@@ -237,12 +297,11 @@ void combine_layers_mesh(const Span<float3> base,
     if (eff == 0.0f) {
       continue;
     }
-    const Span<float3> data(static_cast<const float3 *>(layer.data), layer.totelem);
-    if (data.size() != r_positions.size()) {
-      /* Stale layer whose element count no longer matches the mesh topology. Skip it rather than
-       * composing deltas over a mismatched vertex range. */
+    if (is_stale(layer, r_positions.size())) {
+      /* Skip rather than compose deltas over a mismatched vertex range. */
       continue;
     }
+    const Span<float3> data(static_cast<const float3 *>(layer.data), layer.totelem);
     threading::parallel_for(r_positions.index_range(), 8192, [&](const IndexRange range) {
       for (const int64_t i : range) {
         r_positions[i] += data[i] * eff;
@@ -274,7 +333,7 @@ static void shift_vert_layers_in_positions(Mesh &mesh, const float sign)
   bool any = false;
   for (const SculptLayer &layer : mesh.sculpt_layers) {
     if (layer.domain == SCULPT_LAYER_DOMAIN_VERT && layer.data != nullptr &&
-        effective(layer) != 0.0f)
+        !is_stale(layer, mesh.verts_num) && effective(layer) != 0.0f)
     {
       any = true;
       break;
@@ -312,7 +371,7 @@ KeyBlock *bake_vert_layers_into_new_shape_key(Mesh &mesh)
   bool any = false;
   for (const SculptLayer &layer : mesh.sculpt_layers) {
     if (layer.domain == SCULPT_LAYER_DOMAIN_VERT && layer.data != nullptr &&
-        layer.totelem == mesh.verts_num)
+        !is_stale(layer, mesh.verts_num))
     {
       any = true;
       break;
@@ -346,11 +405,10 @@ void apply_vert_layer_to_shape_keys(Mesh &mesh, const SculptLayer &layer, const 
   {
     return;
   }
-  const Span<float3> deltas(static_cast<const float3 *>(layer.data), layer.totelem);
-  if (deltas.size() != mesh.verts_num) {
-    /* Stale layer whose element count no longer matches the topology. */
+  if (is_stale(layer, mesh.verts_num)) {
     return;
   }
+  const Span<float3> deltas(static_cast<const float3 *>(layer.data), layer.totelem);
   apply_delta_mesh(layer, factor, mesh.vert_positions_for_write());
   mesh.tag_positions_changed();
 
@@ -435,12 +493,11 @@ void derive_base_mesh(const Span<float3> positions,
     if (eff == 0.0f) {
       continue;
     }
-    const Span<float3> data(static_cast<const float3 *>(layer.data), layer.totelem);
-    if (data.size() != r_base.size()) {
-      /* Stale layer whose element count no longer matches the mesh topology. Skip it rather than
-       * deriving the base over a mismatched vertex range. */
+    if (is_stale(layer, r_base.size())) {
+      /* Skip rather than derive the base over a mismatched vertex range. */
       continue;
     }
+    const Span<float3> data(static_cast<const float3 *>(layer.data), layer.totelem);
     threading::parallel_for(r_base.index_range(), 8192, [&](const IndexRange range) {
       for (const int64_t i : range) {
         r_base[i] -= data[i] * eff;
@@ -451,12 +508,12 @@ void derive_base_mesh(const Span<float3> positions,
 
 void copy_list(ListBaseT<SculptLayer> *dst, const ListBaseT<SculptLayer> *src)
 {
-  BLI_listbase_clear(dst);
-  BLI_duplicatelist(dst, src);
-  for (SculptLayer &layer : *dst) {
-    if (layer.data) {
-      layer.data = MEM_dupalloc_void(layer.data);
-    }
+  /* Copied one node at a time through #layer_copy rather than with #BLI_duplicatelist: the latter
+   * would shallow-copy the nodes and leave every layer's data buffer shared with the source.
+   * Mirrors #BKE_defgroup_copy_list for the neighboring #Mesh::vertex_group_names. */
+  dst->clear_no_delete();
+  for (const SculptLayer &layer : *src) {
+    BLI_addtail(dst, layer_copy(layer));
   }
 }
 
@@ -466,7 +523,7 @@ void free_list(ListBaseT<SculptLayer> *layers)
     if (layer->data) {
       MEM_delete_void(layer->data);
     }
-    MEM_delete(layer);
+    MEM_delete_void(static_cast<void *>(layer));
   }
 }
 

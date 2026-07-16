@@ -1022,9 +1022,10 @@ static wmOperatorStatus editmode_toggle_exec(bContext *C, wmOperator *op)
   /* Scripted / non-interactive callers go through #exec, which switches the mode outright (it
    * cannot answer the bake-confirm popover shown by #editmode_toggle_invoke). Warn when this
    * enters Edit Mode on a mesh that still carries sculpt layers: the layers are not deleted, but a
-   * topology edit there will leave their per-element deltas stale (caught later by the layer
-   * validators). A log line lets scripts and C callers detect the condition instead of silently
-   * entering Edit Mode. */
+   * topology edit there will leave their per-element deltas stale. Such layers are then marked in
+   * the layer list, refuse value edits, and are reported on the next sculpt session refresh; the
+   * user repairs them with #SCULPT_OT_layer_validate. A log line lets scripts and C callers detect
+   * the condition up front instead of silently entering Edit Mode. */
   if (!is_mode_set && obact && obact->type == OB_MESH) {
     const Mesh *mesh = id_cast<const Mesh *>(obact->data);
     if (mesh && !BLI_listbase_is_empty(&mesh->sculpt_layers)) {

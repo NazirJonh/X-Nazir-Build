@@ -34,7 +34,6 @@
 #include <cstdio>
 #include <limits>
 #include <optional>
-#include <type_traits>
 
 #include "CLG_log.h"
 
@@ -105,13 +104,6 @@ namespace blender::ed::sculpt_paint::layers {
 template<typename... Args> inline void slp_perf_discard(const Args &.../*args*/) {}
 #  define SLP_PERF(...) slp_perf_discard(__VA_ARGS__)
 #endif
-
-/* Sculpt layers are duplicated with C-style allocators (#MEM_dupalloc / #BLI_duplicatelist) and
- * their data buffers with #MEM_dupalloc_void, while the nodes are freed with #MEM_delete. This is
- * only valid as long as #SculptLayer stays trivially destructible. */
-static_assert(std::is_trivially_destructible_v<SculptLayer>,
-              "SculptLayer must remain trivially destructible (see allocation notes in "
-              "sculpt_layers.cc / BKE_sculpt_layers.hh)");
 
 /* -------------------------------------------------------------------------------------------------
  * Helpers
@@ -222,7 +214,7 @@ static void validate_grid_layers(Object &object)
     if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {
       continue;
     }
-    if (layer.totelem == expected && layer.level == totlvl) {
+    if (!bke::sculpt_layers::is_stale(layer, expected) && layer.level == totlvl) {
       continue;
     }
     MEM_delete_void(layer.data);
@@ -234,6 +226,32 @@ static void validate_grid_layers(Object &object)
                 "Grid sculpt layer data reset: stored level/topology no longer matches the mesh.");
       warned = true;
     }
+  }
+}
+
+/* Vertex-domain counterpart of #validate_grid_layers, and the "layer validator" that
+ * #OBJECT_OT_editmode_toggle's warning defers to (see `object_edit.cc`). Unlike the grid one it
+ * only reports: a grid layer's data is wiped because it cannot even be indexed against the MDisps
+ * layout the evaluation walks, whereas a stale vertex layer is simply skipped by every consumer, so
+ * there is no need to destroy the user's data behind their back. The layer stays visibly broken
+ * (marked in the list, its value controls refused by the RNA setters) until the user picks a repair
+ * through #SCULPT_OT_layer_validate. */
+static void warn_stale_vert_layers(Object &object)
+{
+  const Mesh &mesh = mesh_of(object);
+  for (const SculptLayer &layer : mesh.sculpt_layers) {
+    if (layer.domain != SCULPT_LAYER_DOMAIN_VERT || !bke::sculpt_layers::is_stale(mesh, layer)) {
+      continue;
+    }
+    CLOG_WARN(&LOG,
+              "Sculpt layer '%s' is stale: it stores %d elements but the mesh has %d vertices. "
+              "Its displacement is ignored until the layer is reset or removed.",
+              layer.name,
+              layer.totelem,
+              mesh.verts_num);
+    /* One line per session-state refresh is enough to flag the condition; the list marks every
+     * affected layer. */
+    break;
   }
 }
 
@@ -255,6 +273,7 @@ void session_state_ensure(Object &object)
     validate_grid_layers(object);
     return;
   }
+  warn_stale_vert_layers(object);
   if (ss->deform_modifiers_active || ss->shapekey_active) {
     /* Deform modifier / shape key: like the grids path, keep no runtime mesh base. The composed
      * surface is re-derived from `base + sum(enabled layers)` by the depsgraph at evaluation
@@ -1521,12 +1540,12 @@ static wmOperatorStatus layer_move_exec(bContext *C, wmOperator *op)
   }
   const int dir = RNA_enum_get(op->ptr, "direction");
   const int step = (dir == 0) ? -1 : 1;
-  const int index_from = bke::sculpt_layers::index_of(*ctx.mesh, *layer);
+  const int prev_uid_from = layer->prev ? layer->prev->uid : 0;
   if (BLI_listbase_link_move(&ctx.mesh->sculpt_layers, layer, step)) {
     bke::sculpt_layers::active_set(*ctx.mesh, layer);
     undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
     undo::push_sculpt_layer_move(
-        *ctx.object, *layer, index_from, bke::sculpt_layers::index_of(*ctx.mesh, *layer));
+        *ctx.object, *layer, prev_uid_from, layer->prev ? layer->prev->uid : 0);
     undo::push_end(*ctx.object);
     /* Layer order does not affect the additive combination; UI refresh only. */
     layers_ui_notify(C, *ctx.object);
@@ -1585,6 +1604,19 @@ void SCULPT_OT_layer_duplicate(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER;
 }
 
+/* The layer visually below \a layer in the stack, or null when it is the bottom one.
+ *
+ * The only place where the *order* of #Mesh::sculpt_layers carries meaning: the combination is
+ * additive and order-independent everywhere else, so the list order is otherwise presentation. It
+ * is isolated here because that stops being true the moment layers can be nested — "below" then
+ * means the next sibling under the same parent, not simply the next link — and this is the one
+ * definition that would have to change.
+ */
+static SculptLayer *layer_below(SculptLayer &layer)
+{
+  return layer.next;
+}
+
 static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -1592,11 +1624,11 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   SculptLayer *active = bke::sculpt_layers::active_get(*ctx.mesh);
-  if (!active || !active->next) {
+  SculptLayer *below = active ? layer_below(*active) : nullptr;
+  if (!below) {
     BKE_report(op->reports, RPT_ERROR, "No layer below to merge into");
     return OPERATOR_CANCELLED;
   }
-  SculptLayer *below = active->next;
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
   /* Snapshot the surviving layer's pre-merge metadata and data for undo. */
@@ -1628,7 +1660,6 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
 
   Vector<undo::SculptLayerUndoPayload> removed;
   removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *active));
-  bke::sculpt_layers::active_set(*ctx.mesh, below);
   bke::sculpt_layers::remove(*ctx.mesh, *active);
   bke::sculpt_layers::active_set(*ctx.mesh, below);
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
@@ -1674,19 +1705,25 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
   const KeyBlock *bake_key = ctx.grids ?
                                  nullptr :
                                  bke::sculpt_layers::bake_vert_layers_into_new_shape_key(*ctx.mesh);
+  /* Every payload is captured while the list is still intact, so each records the layer it really
+   * followed; undo then re-inserts them in this order and rebuilds the original stack. Capturing
+   * and removing one at a time would make each layer record the head as its neighbour and undo
+   * would rebuild the stack reversed. Capturing does not unlink, so the removal is a second pass. */
   Vector<undo::SculptLayerUndoPayload> baked;
-  while (SculptLayer *layer = static_cast<SculptLayer *>(ctx.mesh->sculpt_layers.first)) {
-    if (ctx.grids && layer->domain == SCULPT_LAYER_DOMAIN_GRID && layer->data) {
+  for (SculptLayer &layer : ctx.mesh->sculpt_layers) {
+    if (ctx.grids && layer.domain == SCULPT_LAYER_DOMAIN_GRID && layer.data) {
       BKE_multires_sculpt_layer_apply_to_mdisps(
-          *ctx.mesh, *layer, bke::sculpt_layers::effective(*layer));
+          *ctx.mesh, layer, bke::sculpt_layers::effective(layer));
     }
     else if (!bake_key) {
       /* Absolute shape keys only; a no-op without shape keys, where the live positions already
        * carry the layer. */
       bke::sculpt_layers::apply_vert_layer_to_shape_keys(
-          *ctx.mesh, *layer, bke::sculpt_layers::effective(*layer));
+          *ctx.mesh, layer, bke::sculpt_layers::effective(layer));
     }
-    baked.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *layer));
+    baked.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer));
+  }
+  while (SculptLayer *layer = static_cast<SculptLayer *>(ctx.mesh->sculpt_layers.first)) {
     bke::sculpt_layers::remove(*ctx.mesh, *layer);
   }
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(baked), {}, true);
@@ -1795,9 +1832,13 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
 
   KeyBlock *baked = bke::sculpt_layers::bake_vert_layers_into_new_shape_key(*ctx.mesh);
 
+  /* Captured in list order before anything is unlinked, so undo restores the original stack — see
+   * #layer_bake_exec for why the two passes cannot be merged. */
   Vector<undo::SculptLayerUndoPayload> baked_layers;
+  for (SculptLayer &layer : ctx.mesh->sculpt_layers) {
+    baked_layers.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer));
+  }
   while (SculptLayer *layer = static_cast<SculptLayer *>(ctx.mesh->sculpt_layers.first)) {
-    baked_layers.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *layer));
     bke::sculpt_layers::remove(*ctx.mesh, *layer);
   }
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(baked_layers), {}, true);
@@ -2003,6 +2044,144 @@ void SCULPT_OT_layer_invert(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER;
 }
 
+enum class ValidateAction {
+  Clear = 0,
+  Remove = 1,
+};
+
+/* Stale layers hold a per-element displacement for an element count the mesh no longer has, so
+ * there is no correct way to apply them: every consumer skips them and the RNA setters refuse to
+ * change their values (see #bke::sculpt_layers::is_stale). Repairing means giving up the stored
+ * shape either way — the deltas cannot be mapped onto the new topology — so the only choice is
+ * whether to keep the layer (and its name / place in the stack) or drop it. */
+static Vector<SculptLayer *> stale_layers_gather(Mesh &mesh)
+{
+  Vector<SculptLayer *> stale;
+  for (SculptLayer &layer : mesh.sculpt_layers) {
+    if (bke::sculpt_layers::is_stale(mesh, layer)) {
+      stale.append(&layer);
+    }
+  }
+  return stale;
+}
+
+static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  const Vector<SculptLayer *> stale = stale_layers_gather(*ctx.mesh);
+  if (stale.is_empty()) {
+    BKE_report(op->reports, RPT_INFO, "No stale sculpt layers to repair");
+    return OPERATOR_CANCELLED;
+  }
+  const ValidateAction action = ValidateAction(RNA_enum_get(op->ptr, "action"));
+
+  session_state_ensure(*ctx.object);
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  if (action == ValidateAction::Remove) {
+    /* Captured in list order while the list is still intact, then removed, so undo restores each
+     * layer next to the neighbour it really had (see #layer_bake_exec). */
+    Vector<undo::SculptLayerUndoPayload> removed;
+    for (SculptLayer *layer : stale) {
+      removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *layer));
+    }
+    for (SculptLayer *layer : stale) {
+      bke::sculpt_layers::remove(*ctx.mesh, *layer);
+    }
+    undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
+  }
+  else {
+    Vector<undo::SculptLayerUndoPayload> resized;
+    for (SculptLayer *layer : stale) {
+      /* Takes the unmappable buffer off the layer and hands it to the undo step, leaving the layer
+       * itself (uid, name, place in the stack) in the list. */
+      resized.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *layer));
+      /* Re-fit to the live count of the layer's *own* domain (not the object's current sculpt
+       * domain, which says nothing about a vertex layer sitting under a multires modifier).
+       * #data_ensure allocates zeroed, which is exactly the wanted result: an empty but usable
+       * layer on the new topology rather than a buffer that cannot be indexed. */
+      bke::sculpt_layers::data_ensure(*layer,
+                                      bke::sculpt_layers::element_count(*ctx.mesh, *layer));
+    }
+    undo::push_sculpt_layer_data_resize(*ctx.object, std::move(resized));
+  }
+  /* A stale layer contributed nothing to the surface, so neither action moves any vertex; the
+   * commit is still needed to rebuild the runtime base and the display from the new layer set. */
+  commit_layers_change(*ctx.depsgraph, *ctx.object);
+  undo::push_end(*ctx.object);
+  layers_ui_notify(C, *ctx.object);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus layer_validate_invoke(bContext *C,
+                                              wmOperator *op,
+                                              const wmEvent * /*event*/)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* Pre-check the exec guard so the popup never appears just to be followed by an error
+   * (confirm-then-fail); the UI already disables this operator when nothing is stale. */
+  const Vector<SculptLayer *> stale = stale_layers_gather(*ctx.mesh);
+  if (stale.is_empty()) {
+    BKE_report(op->reports, RPT_INFO, "No stale sculpt layers to repair");
+    return OPERATOR_CANCELLED;
+  }
+  const ValidateAction action = ValidateAction(RNA_enum_get(op->ptr, "action"));
+  const char *message = (action == ValidateAction::Remove) ?
+                            IFACE_(
+                                "The stale sculpt layers will be deleted. Their stored "
+                                "displacement cannot be mapped onto the current topology and is "
+                                "lost either way.") :
+                            IFACE_(
+                                "The stale sculpt layers will be kept but their stored "
+                                "displacement will be discarded: it cannot be mapped onto the "
+                                "current topology.");
+  return WM_operator_confirm_ex(C,
+                                op,
+                                IFACE_("Repair Stale Sculpt Layers"),
+                                message,
+                                (action == ValidateAction::Remove) ? IFACE_("Remove") :
+                                                                     IFACE_("Reset"),
+                                ui::AlertIcon::Warning,
+                                false);
+}
+
+void SCULPT_OT_layer_validate(wmOperatorType *ot)
+{
+  static const EnumPropertyItem action_items[] = {
+      {int(ValidateAction::Clear),
+       "CLEAR",
+       0,
+       "Reset Data",
+       "Keep the layers, re-fitted to the current topology and zeroed"},
+      {int(ValidateAction::Remove), "REMOVE", 0, "Remove Layers", "Delete the stale layers"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  ot->name = "Repair Stale Sculpt Layers";
+  ot->idname = "SCULPT_OT_layer_validate";
+  ot->description =
+      "Repair sculpt layers whose stored displacement no longer matches the mesh topology, by "
+      "resetting their data or removing them";
+  ot->exec = layer_validate_exec;
+  /* Destructive in both modes (the stored displacement is dropped), so confirm before running. */
+  ot->invoke = layer_validate_invoke;
+  ot->poll = layers_poll;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
+
+  RNA_def_enum(ot->srna,
+               "action",
+               action_items,
+               int(ValidateAction::Clear),
+               "Action",
+               "What to do with the stale layers");
+}
+
 /* Resolves the paint mask into an array indexed exactly like `layer.data`. Vertex layers read
  * the `.sculpt_mask` mesh attribute directly (same index space as the layer). Grid layers read
  * the live `SubdivCCG::masks`, which sits at the CCG's *current* sculpt level and must be
@@ -2013,7 +2192,7 @@ static bool gather_layer_mask(Object &object, const SculptLayer &layer, Array<fl
 {
   if (layer.domain == SCULPT_LAYER_DOMAIN_VERT) {
     const Mesh &mesh = mesh_of(object);
-    if (layer.totelem != mesh.verts_num) {
+    if (layer.data == nullptr || bke::sculpt_layers::is_stale(layer, mesh.verts_num)) {
       return false;
     }
     const bke::AttributeAccessor attributes = mesh.attributes();
@@ -2693,20 +2872,21 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
-  const int index = RNA_int_get(op->ptr, "index");
-  const int count = BLI_listbase_count(&ctx.mesh->sculpt_layers);
-  if (index < 0 || index >= count) {
+  const int uid = RNA_int_get(op->ptr, "uid");
+  if (bke::sculpt_layers::find_by_uid(*ctx.mesh, uid) == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layer with that id");
     return OPERATOR_CANCELLED;
   }
-  if (index == ctx.mesh->sculpt_layers_active_index) {
+  const int uid_from = ctx.mesh->sculpt_layers_active_uid;
+  if (uid == uid_from) {
     return OPERATOR_FINISHED;
   }
   /* Selection must ride on a sculpt undo step: without one, #OPTYPE_UNDO used to push a plain
    * memfile step, and undoing across it between two stroke SCULPT steps corrupted the delta-based
    * sculpt undo state. */
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
-  undo::push_sculpt_layer_active_index(*ctx.object, ctx.mesh->sculpt_layers_active_index, index);
-  ctx.mesh->sculpt_layers_active_index = index;
+  undo::push_sculpt_layer_active(*ctx.object, uid_from, uid);
+  ctx.mesh->sculpt_layers_active_uid = uid;
   undo::push_end(*ctx.object);
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
@@ -2722,7 +2902,10 @@ void SCULPT_OT_layer_select(wmOperatorType *ot)
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
-  RNA_def_int(ot->srna, "index", 0, 0, INT_MAX, "Index", "Index of the layer to make active", 0, INT_MAX);
+  /* Identified by uid rather than by position: an operator's arguments outlive the call (they are
+   * kept for redo), by which point a position may name a different layer. */
+  RNA_def_int(
+      ot->srna, "uid", 0, 0, INT_MAX, "Layer ID", "Unique id of the layer to make active", 0, INT_MAX);
 }
 
 static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)

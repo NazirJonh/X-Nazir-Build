@@ -1197,6 +1197,7 @@ void SCULPT_OT_layer_bake_to_shape_key(wmOperatorType *ot);
 void SCULPT_OT_layer_bake_and_editmode_enter(wmOperatorType *ot);
 void SCULPT_OT_layer_clear(wmOperatorType *ot);
 void SCULPT_OT_layer_invert(wmOperatorType *ot);
+void SCULPT_OT_layer_validate(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_isolate(wmOperatorType *ot);
 void SCULPT_OT_layer_set_influence(wmOperatorType *ot);
 void SCULPT_OT_layer_influence_drag(wmOperatorType *ot);

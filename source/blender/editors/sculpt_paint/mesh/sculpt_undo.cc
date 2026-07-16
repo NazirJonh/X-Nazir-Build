@@ -324,6 +324,12 @@ struct StepData {
     Vector<SculptLayerUndoPayload> removed;
     /** Layers added by the operator (in the mesh after the operator ran; extracted on undo). */
     Vector<SculptLayerUndoPayload> added;
+    /** Layers whose data buffer the operator replaced wholesale, keyed by #uid. Unlike the
+     * in-place #data swap above, this also carries #totelem, so it expresses a *resize* — which is
+     * what repairing a stale layer is (#SCULPT_OT_layer_validate). Each payload's buffer is
+     * swapped with the live layer's on undo and swapped back on redo; the swap is its own
+     * inverse, like the metadata above. */
+    Vector<SculptLayerUndoPayload> resized;
     /** Bake: each removed payload's contribution is also added to / subtracted from MDisps. */
     bool is_bake = false;
 
@@ -332,6 +338,17 @@ struct StepData {
      * (between undo and redo); the step owns and frees it then. */
     int bake_key_uid = 0;
     KeyBlock *bake_key = nullptr;
+    /** Position #bake_key was detached from, so the redo puts it back where it was rather than at
+     * the tail. It is appended at the tail by the bake, but the user is free to reorder or add
+     * blocks before the undo, and #KeyBlock::relative is a positional index into #Key::block. -1
+     * while the block is attached. */
+    int bake_key_index = -1;
+    /** #Object::shapenr from before the undo detached #bake_key, restored when the redo reattaches
+     * it (the detach itself shifts it down when the active block sat after the detached one). */
+    short pre_undo_shapenr = 0;
+    /** Uids of the blocks whose #KeyBlock::relative pointed *at* #bake_key when the undo detached
+     * it, and were remapped to the basis so they would not dangle. The redo points them back. */
+    Vector<int> relative_uids;
 
     /** Bake on a mesh with NO shape keys yet: this step's operator created the mesh's #Key from
      * scratch. Unlike #bake_key (which detaches/reattaches one block within an already-existing
@@ -345,14 +362,18 @@ struct StepData {
      * from the freshly rebuilt key's block index on redo. */
     short pre_bake_shapenr = 1;
 
-    /** Layer reorder (0 when the step is not a move). */
+    /** Layer reorder: uid of the moved layer (0 when the step is not a move), and the uid of the
+     * layer it followed before and after the move (0 = the head). Anchored to a neighbour rather
+     * than to a position for the same reason as #SculptLayerUndoPayload::prev_uid. */
     int move_uid = 0;
-    int move_from = -1;
-    int move_to = -1;
+    int move_prev_from = 0;
+    int move_prev_to = 0;
 
-    /** Active-layer selection change (-1 when the step is not a selection). */
-    int active_from = -1;
-    int active_to = -1;
+    /** Active-layer selection change: the active uid before and after (0 = no active layer, which
+     * is a legal value on both sides — hence the separate flag rather than a sentinel). */
+    bool has_active_change = false;
+    int active_uid_from = 0;
+    int active_uid_to = 0;
 
     /** Solo-base toggle: pre-change flags of every affected layer, swapped with the live flags on
      * undo/redo (the swap is its own inverse, like the single-layer metadata above). */
@@ -1343,7 +1364,7 @@ SculptLayerUndoPayload::SculptLayerUndoPayload(SculptLayerUndoPayload &&other) n
       uid(other.uid),
       domain(other.domain),
       level(other.level),
-      index(other.index),
+      prev_uid(other.prev_uid),
       data(other.data)
 {
   other.data = nullptr;
@@ -1362,7 +1383,7 @@ SculptLayerUndoPayload &SculptLayerUndoPayload::operator=(SculptLayerUndoPayload
     uid = other.uid;
     domain = other.domain;
     level = other.level;
-    index = other.index;
+    prev_uid = other.prev_uid;
     data = other.data;
     other.data = nullptr;
   }
@@ -1376,9 +1397,11 @@ SculptLayerUndoPayload::~SculptLayerUndoPayload()
   }
 }
 
-SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh &mesh, SculptLayer &layer)
+/* Everything a payload mirrors from a layer except the data buffer and the list position, whose
+ * ownership and meaning differ per direction. Kept in one place so that a new #SculptLayer field
+ * cannot be handled on one of the payload paths and forgotten on the others. */
+static void payload_metadata_from_layer(SculptLayerUndoPayload &payload, const SculptLayer &layer)
 {
-  SculptLayerUndoPayload payload;
   payload.name = layer.name;
   payload.influence = layer.influence;
   payload.flag = layer.flag;
@@ -1386,35 +1409,47 @@ SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh &mesh, SculptLayer &lay
   payload.uid = layer.uid;
   payload.domain = layer.domain;
   payload.level = layer.level;
-  payload.index = bke::sculpt_layers::index_of(mesh, layer);
+}
+
+static void layer_metadata_from_payload(SculptLayer &layer, const SculptLayerUndoPayload &payload)
+{
+  STRNCPY_UTF8(layer.name, payload.name.c_str());
+  layer.influence = payload.influence;
+  layer.flag = payload.flag;
+  layer.totelem = payload.totelem;
+  layer.uid = payload.uid;
+  layer.domain = payload.domain;
+  layer.level = payload.level;
+}
+
+SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh & /*mesh*/, SculptLayer &layer)
+{
+  SculptLayerUndoPayload payload;
+  payload_metadata_from_layer(payload, layer);
+  /* Read while the layer is still linked; the caller unlinks it afterwards. */
+  payload.prev_uid = layer.prev ? layer.prev->uid : 0;
   payload.data = layer.data;
   layer.data = nullptr;
   layer.totelem = 0;
   return payload;
 }
 
-/* Re-create a layer from \a payload and insert it at the recorded list position, transferring
+/* Re-create a layer from \a payload and insert it back after its recorded neighbour, transferring
  * the data buffer back to the mesh. */
 static void sculpt_layer_payload_insert(Mesh &mesh, SculptLayerUndoPayload &payload)
 {
   SculptLayer *layer = MEM_new<SculptLayer>(__func__);
-  STRNCPY_UTF8(layer->name, payload.name.c_str());
-  layer->influence = payload.influence;
-  layer->flag = payload.flag;
-  layer->totelem = payload.totelem;
-  layer->uid = payload.uid;
-  layer->domain = payload.domain;
-  layer->level = payload.level;
+  layer_metadata_from_payload(*layer, payload);
   layer->data = payload.data;
   payload.data = nullptr;
 
-  SculptLayer *before = static_cast<SculptLayer *>(
-      BLI_findlink(&mesh.sculpt_layers, payload.index));
-  if (before) {
-    BLI_insertlinkbefore(&mesh.sculpt_layers, before, layer);
+  if (SculptLayer *after = bke::sculpt_layers::find_by_uid(mesh, payload.prev_uid)) {
+    BLI_insertlinkafter(&mesh.sculpt_layers, after, layer);
   }
   else {
-    BLI_addtail(&mesh.sculpt_layers, layer);
+    /* Either it was the head, or the layer it followed is gone too (removed by a later step that
+     * is not being undone). The head is the closest surviving approximation of where it sat. */
+    BLI_addhead(&mesh.sculpt_layers, layer);
   }
 }
 
@@ -1426,21 +1461,13 @@ static bool sculpt_layer_payload_extract(Mesh &mesh, SculptLayerUndoPayload &pay
   if (!layer) {
     return false;
   }
-  payload.name = layer->name;
-  payload.influence = layer->influence;
-  payload.flag = layer->flag;
-  payload.totelem = layer->totelem;
-  payload.domain = layer->domain;
-  payload.level = layer->level;
-  payload.index = bke::sculpt_layers::index_of(mesh, *layer);
+  payload_metadata_from_layer(payload, *layer);
+  payload.prev_uid = layer->prev ? layer->prev->uid : 0;
   payload.data = layer->data;
   layer->data = nullptr;
 
-  BLI_remlink(&mesh.sculpt_layers, layer);
-  MEM_delete(layer);
-  const int count = BLI_listbase_count(&mesh.sculpt_layers);
-  mesh.sculpt_layers_active_index = std::clamp(
-      mesh.sculpt_layers_active_index, 0, std::max(0, count - 1));
+  /* Hands the active marker to a neighbour when this layer held it. */
+  bke::sculpt_layers::remove(mesh, *layer);
   return true;
 }
 
@@ -1485,8 +1512,8 @@ void push_sculpt_layer_bake_to_shape_key(Object & /*object*/, const short pre_ba
 
 void push_sculpt_layer_move(Object & /*object*/,
                             const SculptLayer &layer,
-                            const int index_from,
-                            const int index_to)
+                            const int prev_uid_from,
+                            const int prev_uid_to)
 {
   StepData *step_data = get_step_data();
   if (!step_data) {
@@ -1494,19 +1521,20 @@ void push_sculpt_layer_move(Object & /*object*/,
   }
   step_data->type = Type::SculptLayer;
   step_data->sculpt_layer_op.move_uid = layer.uid;
-  step_data->sculpt_layer_op.move_from = index_from;
-  step_data->sculpt_layer_op.move_to = index_to;
+  step_data->sculpt_layer_op.move_prev_from = prev_uid_from;
+  step_data->sculpt_layer_op.move_prev_to = prev_uid_to;
 }
 
-void push_sculpt_layer_active_index(Object & /*object*/, const int index_from, const int index_to)
+void push_sculpt_layer_active(Object & /*object*/, const int uid_from, const int uid_to)
 {
   StepData *step_data = get_step_data();
   if (!step_data) {
     return;
   }
   step_data->type = Type::SculptLayer;
-  step_data->sculpt_layer_op.active_from = index_from;
-  step_data->sculpt_layer_op.active_to = index_to;
+  step_data->sculpt_layer_op.active_uid_from = uid_from;
+  step_data->sculpt_layer_op.active_uid_to = uid_to;
+  step_data->sculpt_layer_op.has_active_change = true;
 }
 
 void push_sculpt_layer_metadata(Object & /*object*/, const SculptLayer &layer)
@@ -1552,6 +1580,16 @@ void push_sculpt_layer_data(Object & /*object*/, const SculptLayer &layer)
   else {
     step_data->sculpt_layer_op.has_data = false;
   }
+}
+
+void push_sculpt_layer_data_resize(Object & /*object*/, Vector<SculptLayerUndoPayload> &&resized)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.resized = std::move(resized);
 }
 
 bool foreach_recorded_position_mesh(
@@ -1671,10 +1709,8 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
     /* Active-layer selection: pure UI state, no geometry or layer contents involved. Handled
      * before the base derivation / multires flush below, and returns early so undoing a
      * selection never pays a canonical position recompute. */
-    if (op.active_from != -1) {
-      const int count = BLI_listbase_count(&mesh.sculpt_layers);
-      const int target = is_undo ? op.active_from : op.active_to;
-      mesh.sculpt_layers_active_index = std::clamp(target, 0, std::max(0, count - 1));
+    if (op.has_active_change) {
+      mesh.sculpt_layers_active_uid = is_undo ? op.active_uid_from : op.active_uid_to;
       WM_event_add_notifier(C, NC_GEOM | ND_DATA, &mesh.id);
       return;
     }
@@ -1716,6 +1752,16 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       }
     }
 
+    /* Data buffers the operator resized: swap each stored buffer back with the live one. Carries
+     * #totelem alongside the pointer, so the two states may differ in size (which is exactly why
+     * the in-place swap above cannot express this). */
+    for (SculptLayerUndoPayload &payload : op.resized) {
+      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, payload.uid)) {
+        std::swap(layer->data, payload.data);
+        std::swap(layer->totelem, payload.totelem);
+      }
+    }
+
     /* Solo-base toggle: swap every affected layer's flags with the stored pre-change values. */
     for (const int64_t i : op.solo_uids.index_range()) {
       if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, op.solo_uids[i])) {
@@ -1723,18 +1769,16 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       }
     }
 
-    /* Layer reorder. */
+    /* Layer reorder: put the layer back after the neighbour it followed in the target state. */
     if (op.move_uid != 0) {
       if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, op.move_uid)) {
-        const int target = is_undo ? op.move_from : op.move_to;
+        const int target_prev_uid = is_undo ? op.move_prev_from : op.move_prev_to;
         BLI_remlink(&mesh.sculpt_layers, layer);
-        SculptLayer *before = static_cast<SculptLayer *>(
-            BLI_findlink(&mesh.sculpt_layers, target));
-        if (before) {
-          BLI_insertlinkbefore(&mesh.sculpt_layers, before, layer);
+        if (SculptLayer *after = bke::sculpt_layers::find_by_uid(mesh, target_prev_uid)) {
+          BLI_insertlinkafter(&mesh.sculpt_layers, after, layer);
         }
         else {
-          BLI_addtail(&mesh.sculpt_layers, layer);
+          BLI_addhead(&mesh.sculpt_layers, layer);
         }
         bke::sculpt_layers::active_set(mesh, layer);
       }
@@ -1806,9 +1850,14 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
     if (op.bake_key_uid != 0 && mesh.key != nullptr) {
       /* Relative shape keys: the bake put the combined layer contribution into a new key block.
        * Undo unlinks it from the mesh (the step keeps it alive until it is freed or redone), redo
-       * links it back at the end of the list, where the bake appended it. Nothing else refers to
-       * it — it was created relative to the reference key and no other block is relative to it — so
-       * the plain unlink / relink is exact. */
+       * links it back where it was taken from.
+       *
+       * The bake appends the block at the tail and nothing is relative to it at that moment, but
+       * this code runs arbitrarily later: between the bake and its undo the user may have pointed
+       * another block's Relative To at it, moved it (#BKE_keyblock_move) or added blocks around it.
+       * Since #KeyBlock::relative is a positional index into #Key::block, the detach and the
+       * reattach each have to fix those indices up — the same bookkeeping
+       * #BKE_object_shapekey_remove does, mirrored so that undo and redo compose. */
       Key &key = *mesh.key;
       if (is_undo && op.bake_key == nullptr) {
         for (KeyBlock &kb : key.block) {
@@ -1816,9 +1865,30 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
             continue;
           }
           const int index = BLI_findindex(&key.block, &kb);
+          /* The bake never makes its block the reference (it is created relative to the existing
+           * one), so the refkey re-seeding half of #BKE_object_shapekey_remove cannot apply here. */
+          BLI_assert(key.refkey != &kb);
+          op.relative_uids.clear();
+          for (KeyBlock &other : key.block) {
+            if (&other == &kb) {
+              continue;
+            }
+            if (other.relative == index) {
+              /* Would dangle once the block leaves the list: #BKE_key_evaluate_object_ex silently
+               * skips a block whose reference is out of range, so the dependent shape would go
+               * quiet with no explanation. Remap to the basis and remember it for the redo. */
+              op.relative_uids.append(other.uid);
+              other.relative = 0;
+            }
+            else if (other.relative > index) {
+              other.relative -= 1;
+            }
+          }
           BLI_remlink(&key.block, &kb);
           key.totkey--;
           op.bake_key = &kb;
+          op.bake_key_index = index;
+          op.pre_undo_shapenr = object.shapenr;
           if (object.shapenr > index) {
             object.shapenr = std::max(1, object.shapenr - 1);
           }
@@ -1826,9 +1896,36 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         }
       }
       else if (!is_undo && op.bake_key != nullptr) {
-        BLI_addtail(&key.block, op.bake_key);
+        KeyBlock *before = static_cast<KeyBlock *>(BLI_findlink(&key.block, op.bake_key_index));
+        if (before) {
+          BLI_insertlinkbefore(&key.block, before, op.bake_key);
+        }
+        else {
+          BLI_addtail(&key.block, op.bake_key);
+        }
         key.totkey++;
+        /* Undo the index fix-up the detach did, in the reverse order: shift back the blocks it
+         * decremented, then re-point the ones it remapped to the basis. The remapped blocks are
+         * excluded from the shift explicitly rather than by relying on where the block landed, so
+         * the two passes stay independent of its index. */
+        const int index = BLI_findindex(&key.block, op.bake_key);
+        for (KeyBlock &other : key.block) {
+          if (&other == op.bake_key || op.relative_uids.contains(other.uid)) {
+            continue;
+          }
+          if (other.relative >= index) {
+            other.relative += 1;
+          }
+        }
+        for (const int uid : op.relative_uids) {
+          if (KeyBlock *other = BKE_keyblock_find_uid(&key, uid)) {
+            other->relative = short(index);
+          }
+        }
+        op.relative_uids.clear();
+        object.shapenr = op.pre_undo_shapenr;
         op.bake_key = nullptr;
+        op.bake_key_index = -1;
       }
     }
 
@@ -2209,7 +2306,13 @@ static void free_step_data(StepData &step_data)
 {
   if (KeyBlock *kb = step_data.sculpt_layer_op.bake_key) {
     /* The step still owns the key block a bake created and an undo detached from the mesh (the redo
-     * that would link it back can no longer happen once the step is freed). */
+     * that would link it back can no longer happen once the step is freed). Mirrors the tail of
+     * #BKE_object_shapekey_remove; the `relative` fix-up that call also does already happened at
+     * detach time (see #restore_list).
+     *
+     * TODO: drivers keyed to this block's RNA path survive on the #Key, because
+     * #BKE_animdata_drivers_remove_for_rna_struct needs a #Main that is not reachable here. The
+     * detach itself must not remove them (a redo needs them back), so only this path leaks them. */
     if (kb->data) {
       MEM_delete_void(kb->data);
     }

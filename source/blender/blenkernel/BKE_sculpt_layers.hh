@@ -62,22 +62,36 @@ inline constexpr int64_t element_size = sizeof(float3);
  */
 SculptLayer *add(Mesh &mesh, const char *name, short domain, int totelem, short level = 0);
 
-/** Remove \a layer from the mesh and free it (does not touch mesh geometry). */
+/**
+ * Remove \a layer from the mesh and free it (does not touch mesh geometry). When it was the active
+ * layer, a neighbour takes over; otherwise the active layer is left alone.
+ */
 void remove(Mesh &mesh, SculptLayer &layer);
 
 /** Duplicate \a src (including its data) into \a mesh, right after \a src, and make it active. */
 SculptLayer *duplicate(Mesh &mesh, const SculptLayer &src);
 
-/** Active layer or null. */
+/**
+ * The active layer, or null.
+ *
+ * Resolved from #Mesh::sculpt_layers_active_uid rather than from a position in the list: a position
+ * only identifies a layer for as long as nothing inserts, removes or reorders around it, whereas a
+ * uid survives all three. The UI list is the one consumer that genuinely needs an index, and gets
+ * one translated on the fly (see `MeshSculptLayersUI` in `rna_mesh.cc`).
+ */
 SculptLayer *active_get(Mesh &mesh);
 const SculptLayer *active_get(const Mesh &mesh);
-/** Set the active layer (null clears the active index). */
+/** Set the active layer; null clears it. \a layer must belong to \a mesh. */
 void active_set(Mesh &mesh, const SculptLayer *layer);
 
-/** Index of \a layer in the list, or -1. */
+/**
+ * Index of \a layer in the list, or -1. For presentation only (the UI list, log messages) — do not
+ * store it: see #active_get for why the model identifies layers by uid.
+ */
 int index_of(const Mesh &mesh, const SculptLayer &layer);
-/** Find a layer by its stable unique id, or null. */
+/** Find a layer by its stable unique id, or null. Uid 0 means "no layer" and always returns null. */
 SculptLayer *find_by_uid(Mesh &mesh, int uid);
+const SculptLayer *find_by_uid(const Mesh &mesh, int uid);
 
 /** True when any layer carries the Solo Base marker (see #SCULPT_LAYER_SOLO_HIDDEN). */
 bool solo_active(const Mesh &mesh);
@@ -85,6 +99,40 @@ bool solo_active(const Mesh &mesh);
 /* -------------------------------------------------------------------------------------------------
  * Data buffers.
  */
+
+/**
+ * True when \a layer holds data that no longer matches its domain's live element count \a elem_num,
+ * i.e. the topology changed behind the layer's back (an Edit Mode edit, a modifier, a script or an
+ * import that bypassed the layer hooks). The stored deltas are per-element, so there is no
+ * meaningful way to apply them to a different element range; every consumer skips such a layer.
+ *
+ * This is the single authority on staleness: the alternative — comparing #SculptLayer::totelem
+ * against an element count at each use — is the same predicate spelled out once per call site, and
+ * a new call site that spells it slightly differently would silently apply a mismatched buffer.
+ *
+ * A layer with no data buffer is *not* stale: it contributes zeros and is allocated on demand by
+ * #data_ensure. \a elem_num is the mesh vertex count for #SCULPT_LAYER_DOMAIN_VERT layers and the
+ * grid point count for #SCULPT_LAYER_DOMAIN_GRID ones (see #bke::grid_totelem); the editor module's
+ * `element_count` resolves it from an object.
+ */
+bool is_stale(const SculptLayer &layer, int elem_num);
+
+/**
+ * Live element count of \a layer's own domain, resolved from mesh data alone, so it is usable where
+ * no object (and therefore no #SubdivCCG) is reachable, such as an RNA property getter.
+ *
+ * Each layer is measured on its own domain, because a mesh can carry both: adding a multires
+ * modifier to a mesh that already had vertex layers leaves the two kinds side by side, and the
+ * object's current sculpt domain says nothing about the size of the other kind.
+ *
+ * For a grid layer this is the count implied by the layer's *own* storage level, not the multires
+ * top level: a grid layer sitting at a different level is not stale, it is resampled to it
+ * (#resample_grid_layers), whereas a count contradicting its own level cannot be mapped at all.
+ */
+int element_count(const Mesh &mesh, const SculptLayer &layer);
+
+/** #is_stale against #element_count, i.e. staleness judged on the layer's own domain. */
+bool is_stale(const Mesh &mesh, const SculptLayer &layer);
 
 /** Ensure \a layer.data holds \a totelem `float3` elements, zero-filling on (re)allocation. */
 MutableSpan<float3> data_ensure(SculptLayer &layer, int totelem);
@@ -226,10 +274,21 @@ void resample_grid_layers(Mesh &mesh, int grids_num, int new_level);
 /* -------------------------------------------------------------------------------------------------
  * ID lifetime helpers, called from the #Mesh ID type callbacks (see `mesh.cc`).
  *
- * NOTE: layers are duplicated with C-style allocators (#BLI_duplicatelist / #MEM_dupalloc_void) but
- * freed with #MEM_delete. This relies on #SculptLayer staying trivially destructible (enforced by a
- * static assert in `sculpt_layers.cc`). If a non-trivial member is ever added, switch the
- * duplication/free paths to matching C++-style allocators.
+ * NOTE: allocation and freeing of a layer are symmetric, but only in the weaker sense that suits a
+ * DNA type, so both sides are documented here:
+ *
+ * - Nodes are allocated with #MEM_new (#add, #duplicate, #copy_list, the undo payload) or by the
+ *   blend-file reader (#blend_read), which allocates C-style. Both origins end up in the same list.
+ * - Nodes are therefore freed with #MEM_delete_void (#remove, #free_list), the one call that accepts
+ *   both. This mirrors #ListBaseT::free_no_destruct, which frees the neighboring
+ *   #Mesh::vertex_group_names the same way.
+ * - #SculptLayer::data is always allocated with #MEM_new_array_zeroed or #MEM_dupalloc_void and
+ *   freed with #MEM_delete_void.
+ *
+ * No destructor ever runs on a layer, so this holds only while #SculptLayer is trivially
+ * destructible; a static assert in `blenkernel/intern/sculpt_layers.cc` enforces that. If a
+ * non-trivial member is ever added, the free paths must switch to #MEM_delete and #blend_read must
+ * stop handing its nodes to them.
  */
 
 void copy_list(ListBaseT<SculptLayer> *dst, const ListBaseT<SculptLayer> *src);

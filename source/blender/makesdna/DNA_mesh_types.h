@@ -263,18 +263,31 @@ struct Mesh {
   ListBaseT<bDeformGroup> vertex_group_names = {nullptr, nullptr};
   /** The active index in the #vertex_group_names list. */
   int vertex_group_active_index = 0;
-  /* Explicit padding: `vertex_group_active_index` (4 bytes) must be followed by 4 pad bytes so
-   * that `sculpt_layers` (a ListBase, containing two 8-byte pointers) starts on an 8-byte
-   * aligned boundary, as required by the DNA system. */
-  char _pad_sculpt[4] = {};
+  /**
+   * #SculptLayer::uid of the active sculpt layer, or 0 when there is none (uids start at 1).
+   *
+   * Identifies the active layer rather than pointing at a position, because a position is only
+   * meaningful for as long as the list does not change shape underneath it. The UI list still
+   * needs an integer index and gets one translated on the fly (see `MeshSculptLayersUI` in
+   * `rna_mesh.cc`).
+   *
+   * This field occupies what used to be explicit padding: `vertex_group_active_index` (4 bytes)
+   * must be followed by 4 more bytes so that `sculpt_layers` (a ListBase of two 8-byte pointers)
+   * starts on an 8-byte boundary, as the DNA system requires.
+   */
+  int sculpt_layers_active_uid = 0;
 
   /**
    * Non-destructive sculpt layers (#SculptLayer). Each layer stores per-element displacement
    * deltas that are combined additively with the base geometry, scaled by a per-layer influence.
    */
   ListBaseT<SculptLayer> sculpt_layers = {nullptr, nullptr};
-  /** The active index in the #sculpt_layers list. */
-  int sculpt_layers_active_index = 0;
+  /**
+   * Deprecated position of the active sculpt layer, replaced by #sculpt_layers_active_uid. Only
+   * read by versioning, which translates it into a uid; kept because the translation needs the
+   * stored value and DNA cannot supply a field it no longer declares.
+   */
+  DNA_DEPRECATED int sculpt_layers_active_index = 0;
 
   /**
    * The index of the active attribute in the UI. The attribute list is a combination of the

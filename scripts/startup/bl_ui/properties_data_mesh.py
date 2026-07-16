@@ -268,16 +268,27 @@ class MESH_UL_sculpt_layers(UIList):
         obj = context.object
         # Visibility and influence keep the combined surface in sync incrementally, which can't
         # happen in Edit Mode; keep the name editable but lock the value controls there.
-        values_editable = obj is None or obj.mode != 'EDIT'
+        # A stale layer (topology changed behind its back) can't be reconciled at all: the RNA
+        # setters refuse it, so lock the same controls and mark the row instead of offering
+        # values that would silently do nothing.
+        valid = layer.is_valid
+        values_editable = (obj is None or obj.mode != 'EDIT') and valid
         row = layout.row(align=True)
+        row.alert = not valid
         vis = row.row(align=True)
         vis.enabled = values_editable
         vis.prop(layer, "enabled", text="", icon='HIDE_OFF' if layer.enabled else 'HIDE_ON', emboss=False)
         row.prop(layer, "name", text="", emboss=False)
         sub = layout.row()
         sub.scale_x = 0.5
-        sub.enabled = values_editable
-        sub.prop(layer, "influence", text="", slider=True)
+        if valid:
+            sub.enabled = values_editable
+            sub.prop(layer, "influence", text="", slider=True)
+        else:
+            # Drawn as the (read-only) property rather than a label so that hovering explains the
+            # state through its RNA description.
+            sub.alert = True
+            sub.prop(layer, "is_valid", text="", icon='ERROR', emboss=False)
 
 
 class MESH_MT_sculpt_layer_context_menu(Menu):
@@ -297,6 +308,15 @@ class MESH_MT_sculpt_layer_context_menu(Menu):
         layout.operator("sculpt.layer_invert")
         layout.separator()
         layout.operator("sculpt.layer_mask_isolate", text="Isolate by Mask")
+        layout.separator()
+        # Only reachable when the topology changed behind the layers' back; the stored displacement
+        # is unmappable either way, so both entries only choose whether the layer itself survives.
+        col = layout.column()
+        col.enabled = any(not layer.is_valid for layer in mesh.sculpt_layers)
+        props = col.operator("sculpt.layer_validate", text="Reset Stale Layers", icon='ERROR')
+        props.action = 'CLEAR'
+        props = col.operator("sculpt.layer_validate", text="Remove Stale Layers", icon='ERROR')
+        props.action = 'REMOVE'
         layout.separator()
         # Dial-able, non-destructive: no keys yet bootstraps Basis + Sculpt Layers, an existing key
         # gets one more dial-able block (the operator delegates to sculpt.layer_bake). Meaningless

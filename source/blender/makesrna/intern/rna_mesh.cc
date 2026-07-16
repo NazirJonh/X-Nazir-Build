@@ -261,14 +261,26 @@ static void rna_Mesh_sculpt_layers_active_set(PointerRNA *ptr,
   bke::sculpt_layers::active_set(*mesh, static_cast<SculptLayer *>(value.data));
 }
 
+/* The model tracks the active layer by uid (see #bke::sculpt_layers::active_get); these translate
+ * it to and from the list position, because `template_list` can only drive an integer index. Both
+ * `Mesh.sculpt_layers_active_index` and the no-undo `MeshSculptLayersUI.active_index` wrapper share
+ * them, so the two can never disagree. */
 static int rna_Mesh_sculpt_layers_active_index_get(PointerRNA *ptr)
 {
-  return rna_mesh(ptr)->sculpt_layers_active_index;
+  Mesh *mesh = rna_mesh(ptr);
+  const SculptLayer *layer = bke::sculpt_layers::active_get(*mesh);
+  /* No active layer: report 0 rather than -1, which the UI list would draw as "nothing selected"
+   * but also happily write back. */
+  return layer ? bke::sculpt_layers::index_of(*mesh, *layer) : 0;
 }
 
 static void rna_Mesh_sculpt_layers_active_index_set(PointerRNA *ptr, int value)
 {
-  rna_mesh(ptr)->sculpt_layers_active_index = value;
+  Mesh *mesh = rna_mesh(ptr);
+  /* An out-of-range index clears the active layer instead of storing a position that resolves to
+   * nothing; #BLI_findlink already returns null for one. */
+  bke::sculpt_layers::active_set(
+      *mesh, static_cast<SculptLayer *>(BLI_findlink(&mesh->sculpt_layers, value)));
 }
 
 static PointerRNA rna_Mesh_sculpt_layers_ui_get(PointerRNA *ptr)
@@ -375,27 +387,47 @@ static void rna_SculptLayer_flush_pending_base(Mesh *mesh, const SculptLayer &la
   ed::sculpt_paint::layers::flush_pending_multires_base_for_mesh(*G_MAIN, *mesh);
 }
 
+static bool rna_SculptLayer_is_valid_get(PointerRNA *ptr)
+{
+  const SculptLayer *layer = static_cast<const SculptLayer *>(ptr->data);
+  return !bke::sculpt_layers::is_stale(*rna_mesh(ptr), *layer);
+}
+
 /* A vertex-domain layer keeps the combined mesh positions in sync incrementally, so its influence
- * and visibility may only change while those positions can be updated. In Edit Mode the live
- * positions live in the edit mesh and cannot be touched here, so changing the stored value would
- * break `positions == base + sum(layers * influence)` with no way to reconcile it. Grid-domain
- * layers are recomposed from stored data at evaluation and are therefore always safe to change. */
-static bool rna_SculptLayer_value_change_allowed(const Mesh *mesh, const SculptLayer &layer)
+ * and visibility may only change while those positions can be updated; otherwise changing the stored
+ * value would break `positions == base + sum(layers * influence)` with no way to reconcile it.
+ * Grid-domain layers are recomposed from stored data at evaluation and are therefore always safe to
+ * change. Returns the reason the change must be refused, or null when it is allowed. */
+static const char *rna_SculptLayer_value_change_refusal(const Mesh *mesh, const SculptLayer &layer)
 {
   if (layer.domain != SCULPT_LAYER_DOMAIN_VERT) {
-    return true;
+    return nullptr;
   }
-  return mesh->runtime->edit_mesh == nullptr && mesh->verts_num != 0;
+  if (mesh->runtime->edit_mesh != nullptr) {
+    /* The live positions belong to the edit mesh and cannot be touched from here. */
+    return "mesh is in Edit Mode";
+  }
+  if (mesh->verts_num == 0) {
+    return "mesh has no vertices";
+  }
+  if (bke::sculpt_layers::is_stale(layer, mesh->verts_num)) {
+    /* The delta cannot be applied to a mismatched vertex range, so #apply_delta_mesh would skip it
+     * while the value still changed — the layer's stored influence would then describe a
+     * contribution the surface does not have. Refusing keeps the two in step until the user repairs
+     * the layer (#SCULPT_OT_layer_validate). */
+    return "layer is stale: its element count no longer matches the mesh topology";
+  }
+  return nullptr;
 }
 
 static void rna_SculptLayer_influence_set(PointerRNA *ptr, float value)
 {
   Mesh *mesh = rna_mesh(ptr);
   SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
-  if (!rna_SculptLayer_value_change_allowed(mesh, *layer)) {
-    /* Silently ignored in Edit Mode (vertex-domain live positions cannot be reconciled); report so
-     * scripts and out-of-context edits can tell the change had no effect. */
-    CLOG_WARN(&LOG, "Sculpt layer influence change ignored: mesh is in Edit Mode");
+  if (const char *refusal = rna_SculptLayer_value_change_refusal(mesh, *layer)) {
+    /* Silently ignored from the UI (the list greys these controls out); report so scripts and
+     * out-of-context edits can tell the change had no effect. */
+    CLOG_WARN(&LOG, "Sculpt layer influence change ignored: %s", refusal);
     return;
   }
   value = (value < -10.0f) ? -10.0f : (value > 10.0f ? 10.0f : value);
@@ -418,10 +450,10 @@ static void rna_SculptLayer_enabled_set(PointerRNA *ptr, bool value)
   if (was_enabled == value) {
     return;
   }
-  if (!rna_SculptLayer_value_change_allowed(mesh, *layer)) {
-    /* Silently ignored in Edit Mode (vertex-domain live positions cannot be reconciled); report so
-     * scripts and out-of-context edits can tell the change had no effect. */
-    CLOG_WARN(&LOG, "Sculpt layer visibility change ignored: mesh is in Edit Mode");
+  if (const char *refusal = rna_SculptLayer_value_change_refusal(mesh, *layer)) {
+    /* Silently ignored from the UI (the list greys these controls out); report so scripts and
+     * out-of-context edits can tell the change had no effect. */
+    CLOG_WARN(&LOG, "Sculpt layer visibility change ignored: %s", refusal);
     return;
   }
   rna_SculptLayer_flush_pending_base(mesh, *layer);
@@ -3235,6 +3267,15 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, domain_items);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Domain", "Element domain the layer is defined on");
+
+  prop = RNA_def_property(srna, "is_valid", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayer_is_valid_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Valid",
+                           "The layer's stored displacement still matches the mesh topology. A "
+                           "stale layer contributes nothing and cannot be edited until it is "
+                           "repaired or removed");
 }
 
 static void rna_def_mesh_sculpt_layers_ui(BlenderRNA *brna)

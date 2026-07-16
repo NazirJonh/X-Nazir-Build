@@ -18,6 +18,7 @@ struct bUserAssetLibrary;
 struct bContext;
 struct AssetLibraryReference;
 struct EnumPropertyItem;
+struct Main;
 struct StringPropertySearchVisitParams;
 
 namespace asset_system {
@@ -83,6 +84,54 @@ asset_system::AssetCatalog &library_ensure_catalogs_in_path(
     asset_system::AssetLibrary &library, const asset_system::AssetCatalogPath &path);
 
 AssetLibraryReference user_library_to_library_ref(const bUserAssetLibrary &user_library);
+
+/** Result of #library_reference_ensure_resolved(). */
+enum class LibraryRefStatus {
+  /** The reference resolves; #AssetLibraryReference.custom_library_index is now up to date. */
+  Ok,
+  /** The named library is gone from the Preferences (renamed, removed, or the file comes from
+   * another machine). The reference is left untouched so the UI can name it. */
+  Missing,
+};
+
+/**
+ * Resolve \a library_ref against the current Preferences and bring its cached members up to date.
+ *
+ * Does three things at once:
+ * - refreshes #AssetLibraryReference.custom_library_index from the name, so a `.blend` saved after
+ *   this still resolves in Blender versions that only understand the index;
+ * - back-fills #AssetLibraryReference.custom_library_name for legacy references, which also
+ *   canonicalises them as #Map keys (see #DefaultHash<AssetLibraryReference>);
+ * - reports #LibraryRefStatus::Missing when nothing resolves.
+ *
+ * Call from the few gates that are about to use a reference (and can tell the user about it).
+ * Everything that merely needs the library should use
+ * #BKE_preferences_asset_library_find_from_ref() instead, which is const and side-effect free.
+ *
+ * \note Folders and disabled libraries are *not* Missing: they resolve, and each caller keeps its
+ * own existing policy for them (the asset shelf falls back to "All").
+ */
+LibraryRefStatus library_reference_ensure_resolved(AssetLibraryReference &library_ref);
+
+/**
+ * Run \a fn on every #AssetLibraryReference stored in \a bmain, plus the popup asset shelves.
+ *
+ * \warning Add new stored references here. One that is missed is not propagated on rename and will
+ * report Missing instead -- degraded, but visible, never a silent switch to another library.
+ */
+void foreach_library_reference(Main &bmain, FunctionRef<void(AssetLibraryReference &)> fn);
+
+/**
+ * Re-point every stored reference naming \a old_name at \a new_name, so renaming a library in the
+ * Preferences does not break the references in open files.
+ *
+ * Also moves the asset browser's saved catalog collapse state (#UserDef::asset_browser_settings),
+ * which is keyed by the library name rather than by an #AssetLibraryReference.
+ *
+ * Best effort by construction: references in files that are not open cannot be reached and will
+ * report Missing. This mirrors the contract #AssetWeakReference already documents.
+ */
+void library_references_rename(Main &bmain, StringRefNull old_name, StringRefNull new_name);
 
 /**
  * Call after changes to an asset library have been made to reflect the changes in the UI.

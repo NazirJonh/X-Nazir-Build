@@ -33,6 +33,7 @@
 
 #include "BLO_read_write.hh"
 
+#include "DNA_asset_types.h"
 #include "DNA_userdef_types.h"
 
 #include "RNA_define.hh"
@@ -215,11 +216,27 @@ void BKE_preferences_asset_library_remove(UserDef *userdef, bUserAssetLibrary *l
   BLI_freelinkN(&userdef->asset_libraries, library);
 }
 
+/**
+ * Identifiers #BKE_preferences_asset_library_identifier_from_ref() hands out to the builtin
+ * libraries. A custom library is identified by its name alone, so one taking a builtin's
+ * identifier would be silently resolved to that builtin wherever the identifier is turned back
+ * into a reference (asset browser collapse state, image grid catalog filters).
+ */
+static bool asset_library_name_is_reserved(const char *name)
+{
+  return STR_ELEM(name, "local", "all", "essentials", "online_essentials", "default");
+}
+
 void BKE_preferences_asset_library_name_set(UserDef *userdef,
                                             bUserAssetLibrary *library,
                                             const char *name)
 {
   STRNCPY_UTF8(library->name, name);
+  if (asset_library_name_is_reserved(library->name)) {
+    /* Use the delimiter #BLI_uniquename() knows, so it resolves a further clash with an already
+     * existing "local.001" below in the usual way. */
+    BLI_strncat(library->name, ".001", sizeof(library->name));
+  }
   BLI_uniquename(&userdef->asset_libraries,
                  library,
                  name,
@@ -256,6 +273,29 @@ bUserAssetLibrary *BKE_preferences_asset_library_find_by_name(const UserDef *use
 {
   return static_cast<bUserAssetLibrary *>(
       BLI_findstring(&userdef->asset_libraries, name, offsetof(bUserAssetLibrary, name)));
+}
+
+bUserAssetLibrary *BKE_preferences_asset_library_find_from_ref(const UserDef *userdef,
+                                                              const AssetLibraryReference *ref)
+{
+  if (ref->type != ASSET_LIBRARY_CUSTOM) {
+    return nullptr;
+  }
+  if (ref->custom_library_name[0]) {
+    return BKE_preferences_asset_library_find_by_name(userdef, ref->custom_library_name);
+  }
+  /* Written before #AssetLibraryReference.custom_library_name existed: the index is all there is.
+   * It may already be stale, but there is nothing better to go on. */
+  return BKE_preferences_asset_library_find_index(userdef, ref->custom_library_index);
+}
+
+void BKE_preferences_asset_library_reference_set(const UserDef *userdef,
+                                                 AssetLibraryReference *r_ref,
+                                                 const bUserAssetLibrary *user_library)
+{
+  r_ref->type = ASSET_LIBRARY_CUSTOM;
+  STRNCPY(r_ref->custom_library_name, user_library->name);
+  r_ref->custom_library_index = BLI_findindex(&userdef->asset_libraries, user_library);
 }
 
 bUserAssetLibrary *BKE_preferences_asset_library_containing_path(const UserDef *userdef,

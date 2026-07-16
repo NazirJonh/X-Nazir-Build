@@ -26,7 +26,7 @@
 namespace blender {
 
 /* Stable per-library identifier used as the key in #UserDef::asset_browser_settings. */
-static const char *asset_library_identifier_from_library_ref(
+const char *BKE_preferences_asset_library_identifier_from_ref(
     const UserDef *userdef, const AssetLibraryReference *library_ref)
 {
   if (!library_ref) {
@@ -43,8 +43,8 @@ static const char *asset_library_identifier_from_library_ref(
     case ASSET_LIBRARY_ALL:
       return "all";
     case ASSET_LIBRARY_CUSTOM: {
-      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
-          userdef, library_ref->custom_library_index);
+      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(
+          userdef, library_ref);
       return user_library ? user_library->name : "default";
     }
   }
@@ -81,7 +81,8 @@ static bUserAssetBrowserSettings *asset_browser_settings_ensure(UserDef *userdef
 bUserAssetBrowserSettings *BKE_preferences_asset_browser_settings_get_from_library_ref(
     UserDef *userdef, const AssetLibraryReference *library_ref)
 {
-  const char *library_identifier = asset_library_identifier_from_library_ref(userdef, library_ref);
+  const char *library_identifier = BKE_preferences_asset_library_identifier_from_ref(userdef,
+                                                                                     library_ref);
   bUserAssetBrowserSettings *settings = BKE_preferences_asset_browser_settings_get(
       userdef, library_identifier);
 
@@ -115,6 +116,34 @@ void BKE_preferences_asset_browser_settings_set_catalog_collapsed(UserDef *userd
 
   bUserAssetBrowserSettings *settings = asset_browser_settings_ensure(userdef, library_identifier);
   BKE_asset_catalog_state_set_collapsed(settings->catalog_states, catalog_path, collapsed);
+}
+
+void BKE_preferences_asset_browser_settings_rename_library(UserDef *userdef,
+                                                           const char *old_name,
+                                                           const char *new_name)
+{
+  if (!userdef || !old_name || !new_name || !old_name[0] || !new_name[0] ||
+      STREQ(old_name, new_name))
+  {
+    return;
+  }
+
+  bUserAssetBrowserSettings *settings = BKE_preferences_asset_browser_settings_get(userdef,
+                                                                                   old_name);
+  if (!settings) {
+    return;
+  }
+
+  /* The key may still be held by a removed library's leftovers; the live library wins. */
+  if (bUserAssetBrowserSettings *stale = BKE_preferences_asset_browser_settings_get(userdef,
+                                                                                    new_name))
+  {
+    BKE_asset_catalog_state_list_free(stale->catalog_states);
+    BLI_remlink(&userdef->asset_browser_settings, stale);
+    MEM_delete(stale);
+  }
+
+  STRNCPY(settings->library_name, new_name);
 }
 
 void BKE_preferences_asset_browser_settings_blend_write(BlendWriter *writer,

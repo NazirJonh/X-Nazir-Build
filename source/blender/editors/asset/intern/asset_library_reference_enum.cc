@@ -33,12 +33,11 @@ int library_reference_to_enum_value(const AssetLibraryReference *library)
     return library->type;
   }
 
-  /* Note that the path isn't checked for validity here. If an invalid library path is used, the
-   * Asset Browser can give a nice hint on what's wrong. */
-  const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
-      &U, library->custom_library_index);
+  /* Resolve by identity, not by the stored index: the index may be stale, and the enum value must
+   * describe the list as it is right now (that is what the menu items were built from). */
+  const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(&U, library);
   if (user_library) {
-    return ASSET_LIBRARY_CUSTOM + library->custom_library_index;
+    return ASSET_LIBRARY_CUSTOM + BLI_findindex(&U.asset_libraries, user_library);
   }
 
   return ASSET_LIBRARY_LOCAL;
@@ -86,8 +85,7 @@ AssetLibraryReference library_reference_from_enum_value(int value)
     library.custom_library_index = -1;
   }
   else if (custom_library_is_valid(user_library)) {
-    library.custom_library_index = value - ASSET_LIBRARY_CUSTOM;
-    library.type = ASSET_LIBRARY_CUSTOM;
+    BKE_preferences_asset_library_reference_set(&U, &library, user_library);
   }
   return library;
 }
@@ -203,8 +201,7 @@ static void add_custom_libraries_recursive(EnumPropertyItem **item,
     }
 
     AssetLibraryReference library_reference;
-    library_reference.type = ASSET_LIBRARY_CUSTOM;
-    library_reference.custom_library_index = i;
+    BKE_preferences_asset_library_reference_set(&U, &library_reference, &user_library);
 
     const int enum_value = library_reference_to_enum_value(&library_reference);
     EnumPropertyItem tmp = {

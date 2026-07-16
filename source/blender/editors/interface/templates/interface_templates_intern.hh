@@ -139,6 +139,15 @@ void id_browser_add_popover_button(Layout &row,
  * reset (#blender::ui::grid_view_session_reset_scroll), so the two cannot drift apart. */
 constexpr StringRef id_browser_grid_session_key = "id_browser_grid";
 
+/**
+ * Return the browsed asset library, first resolving it against the current Preferences (see
+ * #blender::ed::asset::library_reference_ensure_resolved). Use instead of reading
+ * #wmWindowManager::id_browser_asset_library_ref directly: it is stored in DNA, so its cached
+ * members can go stale (renamed/reordered library) or the library can be gone entirely.
+ */
+const AssetLibraryReference &id_browser_library_ref_ensure_valid(wmWindowManager &wm);
+/** True when the browsed library no longer exists in the Preferences (§5). */
+bool id_browser_library_is_missing(wmWindowManager &wm);
 /** Enabled catalog paths of the ID browser, as a set (the DNA list is the source of truth). */
 Set<std::string> id_browser_catalog_paths_get(const wmWindowManager &wm);
 /** Replace the ID browser's enabled catalog list with \a paths. */

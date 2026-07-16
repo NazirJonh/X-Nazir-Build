@@ -713,10 +713,17 @@ struct ImageGridLibraryCatalogState {
 struct ImageGridSlotDNA {
   /** Number of visible rows for the image grid. 0 = use default (1). */
   short rows = 0;
-  /** Asset library type for the image grid (#eAssetLibraryType). 0 = unset, use current file. */
-  short library_type = 0;
-  /** Custom asset library index for the image grid (used when type is #ASSET_LIBRARY_CUSTOM). */
-  int library_custom_index = 0;
+  /** Struct padding: #library_ref is struct-typed and needs 8-byte native alignment. */
+  char _pad_rows[6] = {};
+  /** Asset library browsed by this slot. */
+  AssetLibraryReference library_ref;
+  /**
+   * Legacy library selection (migrated to #library_ref). Kept for do-version migration from files
+   * written before 5.2 subversion 47. 0 = unset, meaning "current file".
+   */
+  short library_type_legacy = 0;
+  char _pad_lib[2] = {};
+  int library_custom_index_legacy = 0;
   /**
    * Legacy per-view catalog filter (migrated to #library_catalog_states).
    * Kept for do-version migration from files written before 5.2 subversion 40.

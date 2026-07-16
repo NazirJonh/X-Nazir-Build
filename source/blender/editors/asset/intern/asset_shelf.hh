@@ -75,6 +75,9 @@ void settings_blend_read_data(BlendDataReader *reader, AssetShelfSettings &setti
  * The library reference in \a settings will be updated and returned (for convenience).
  */
 AssetLibraryReference &settings_ensure_valid_library_ref(AssetShelfSettings &settings);
+/** True when the settings reference a custom library that no longer resolves at all (as opposed
+ * to one that resolves but is a folder or disabled, which falls back to "All" instead). */
+bool settings_library_is_missing(const AssetShelfSettings &settings);
 
 void settings_set_active_catalog(AssetShelfSettings &settings,
                                  const asset_system::AssetCatalogPath &path);

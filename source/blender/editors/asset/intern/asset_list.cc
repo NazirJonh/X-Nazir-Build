@@ -377,11 +377,12 @@ static std::optional<eFileSelectType> asset_library_reference_to_fileselect_type
     case ASSET_LIBRARY_ONLINE_ESSENTIALS:
       return FILE_ASSET_LIBRARY_ESSENTIALS;
     case ASSET_LIBRARY_CUSTOM: {
-      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
-          &U, library_reference.custom_library_index);
+      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(
+          &U, &library_reference);
       if (!user_library) {
-        /* The caller should make sure the passed library reference is valid. */
-        BLI_assert_unreachable();
+        /* Not a caller bug: a reference can legitimately name a library that is gone (renamed, or
+         * the file came from another machine). Callers that can explain this to the user gate on
+         * #library_reference_ensure_resolved(); everyone else simply fetches nothing. */
         return std::nullopt;
       }
 

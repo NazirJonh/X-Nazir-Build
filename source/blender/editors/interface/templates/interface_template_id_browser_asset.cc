@@ -89,6 +89,18 @@ void id_browser_catalog_paths_set(wmWindowManager &wm, const Set<std::string> &p
 /** \name Library display
  * \{ */
 
+const AssetLibraryReference &id_browser_library_ref_ensure_valid(wmWindowManager &wm)
+{
+  ed::asset::library_reference_ensure_resolved(wm.id_browser_asset_library_ref);
+  return wm.id_browser_asset_library_ref;
+}
+
+bool id_browser_library_is_missing(wmWindowManager &wm)
+{
+  return ed::asset::library_reference_ensure_resolved(wm.id_browser_asset_library_ref) ==
+         ed::asset::LibraryRefStatus::Missing;
+}
+
 const char *id_browser_library_ui_name(const AssetLibraryReference &lib_ref)
 {
   switch (lib_ref.type) {
@@ -101,8 +113,8 @@ const char *id_browser_library_ui_name(const AssetLibraryReference &lib_ref)
     case ASSET_LIBRARY_ONLINE_ESSENTIALS:
       return IFACE_("Online Essentials");
     case ASSET_LIBRARY_CUSTOM: {
-      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
-          &U, lib_ref.custom_library_index);
+      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(&U,
+                                                                                          &lib_ref);
       if (user_library && user_library->name[0]) {
         return user_library->name;
       }
@@ -557,7 +569,11 @@ static void id_browser_catalog_selector_draw(const bContext *C, Panel *panel)
   Layout &layout = *panel->layout;
   layout.operator_context_set(wm::OpCallContext::InvokeDefault);
 
-  const AssetLibraryReference &lib_ref = wm->id_browser_asset_library_ref;
+  if (id_browser_library_is_missing(*wm)) {
+    layout.label(IFACE_("Library not found"), ICON_ERROR);
+    return;
+  }
+  const AssetLibraryReference &lib_ref = id_browser_library_ref_ensure_valid(*wm);
   ed::asset::list::storage_fetch(&lib_ref, C);
 
   asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(lib_ref);

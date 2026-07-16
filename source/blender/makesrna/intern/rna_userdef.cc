@@ -444,7 +444,12 @@ static void rna_userdef_translation_update(Main *bmain, Scene * /*scene*/, Point
 static void rna_userdef_asset_library_name_set(PointerRNA *ptr, const char *value)
 {
   bUserAssetLibrary *library = static_cast<bUserAssetLibrary *>(ptr->data);
+  char old_name[MAX_NAME];
+  STRNCPY(old_name, library->name);
   BKE_preferences_asset_library_name_set(&U, library, value);
+  /* Keep references in open files pointing at this library (see #library_references_rename). RNA
+   * setters get no #bContext, and the Preferences are global anyway. */
+  ed::asset::library_references_rename(*G_MAIN, old_name, library->name);
 }
 
 static void rna_userdef_asset_library_path_set(PointerRNA *ptr, const char *value)

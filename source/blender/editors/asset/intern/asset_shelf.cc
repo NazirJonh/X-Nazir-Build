@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cfloat>
 
+#include <fmt/format.h>
+
 #include "AS_asset_catalog_path.hh"
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
@@ -592,7 +594,18 @@ void region_layout(const bContext *C, ARegion *region)
                                         0,
                                         style);
 
-  build_asset_view(layout, active_shelf->settings.asset_library_reference, *active_shelf, *C);
+  if (settings_library_is_missing(active_shelf->settings)) {
+    /* No asset view to build or fetch, but still fall through to the shared
+     * layout/View2D/resize finalization below -- otherwise the region's scroll state and size
+     * stay frozen at whatever they were before the library went missing. */
+    layout.label(fmt::format(fmt::runtime(IFACE_("Library \"{}\" not found")),
+                             active_shelf->settings.asset_library_reference.custom_library_name)
+                     .c_str(),
+                 ICON_ERROR);
+  }
+  else {
+    build_asset_view(layout, active_shelf->settings.asset_library_reference, *active_shelf, *C);
+  }
 
   int layout_height = ui::block_layout_resolve(block).y;
   BLI_assert(layout_height <= 0);

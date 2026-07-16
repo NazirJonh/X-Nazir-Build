@@ -15,6 +15,8 @@
 
 #include <algorithm>
 
+#include <fmt/format.h>
+
 #include "AS_asset_representation.hh"
 
 #include "BKE_context.hh"
@@ -574,6 +576,14 @@ static void build_id_grid(const bContext &C,
     }
   }
 
+  if (source == ID_BROWSER_SOURCE_ASSET_LIBRARY && id_browser_library_is_missing(*wm)) {
+    layout.label(fmt::format(fmt::runtime(IFACE_("Library \"{}\" not found")),
+                             wm->id_browser_asset_library_ref.custom_library_name)
+                     .c_str(),
+                 ICON_ERROR);
+    return;
+  }
+
   IDBrowserFilter filter;
   /* Built-in paint-slot filter: only for image targets, and only when an Image/Node editor backs
    * its state. Read straight from the space data so a refresh sees the current toggle values. */
@@ -613,7 +623,7 @@ static void build_id_grid(const bContext &C,
       filter,
       list_mode,
       source,
-      wm->id_browser_asset_library_ref,
+      id_browser_library_ref_ensure_valid(*wm),
       id_browser_catalog_paths_get(*wm),
       idcode);
 

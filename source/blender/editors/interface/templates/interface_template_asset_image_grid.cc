@@ -1191,6 +1191,18 @@ void template_asset_image_grid(
   block_add_dynamic_listener(block, ed::asset::list::asset_reading_region_listen_fn);
   block_add_dynamic_listener(block, image_grid_block_listener);
 
+  if (ed::view3d::image_grid_library_is_missing(*v3d, is_mask_slot)) {
+    /* The header row is drawn first on purpose: it carries the library selector, which is how
+     * the user recovers from a missing library. */
+    draw_header_row(*layout, state, *C, is_mask_slot);
+    layout->label(fmt::format(fmt::runtime(IFACE_("Library \"{}\" not found")),
+                              state.filter.lib_ref.custom_library_name)
+                      .c_str(),
+                  ICON_ERROR);
+    layout->label(IFACE_("Pick another library, or restore it in the Preferences"), ICON_NONE);
+    return;
+  }
+
   draw_header_row(*layout, state, *C, is_mask_slot);
   build_image_grid(*layout, *C, state, *ptr, prop, is_mask_slot, is_popover);
   add_browse_image_button(*layout, *C, state, *ptr);

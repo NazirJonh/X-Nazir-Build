@@ -758,8 +758,8 @@ const char *image_library_editable_root_from_asset_library(const AssetLibrary &l
   if (!ref || ref->type != ASSET_LIBRARY_CUSTOM) {
     return nullptr;
   }
-  const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_index(
-      &U, ref->custom_library_index);
+  const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_from_ref(&U,
+                                                                                  &ref.value());
   if (!user_lib || (user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) || !user_lib->dirpath[0]) {
     return nullptr;
   }

@@ -148,8 +148,8 @@ const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref)
     case ASSET_LIBRARY_ONLINE_ESSENTIALS:
       return IFACE_("Online Essentials");
     case ASSET_LIBRARY_CUSTOM: {
-      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
-          &U, lib_ref.custom_library_index);
+      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(
+          &U, &lib_ref);
       if (user_library && user_library->name[0]) {
         return user_library->name;
       }
@@ -862,7 +862,10 @@ static wmOperatorStatus image_shelf_activate_asset_exec(bContext *C, wmOperator 
   {
     image_texture_shelf = ed::asset::shelf::popup_shelf_get_or_create(*C, *shelf_type);
     if (image_texture_shelf) {
-      shelf_lib_ref = image_texture_shelf->settings.asset_library_reference;
+      /* Validated rather than read raw: this reference ends up in #ImageGridUIState::pending and
+       * from there in the grid's filter, which fetches it. */
+      shelf_lib_ref = ed::asset::shelf::settings_ensure_valid_library_ref(
+          image_texture_shelf->settings);
       ed::asset::list::iterate(shelf_lib_ref, [&](asset_system::AssetRepresentation &a) {
         if (a.make_weak_reference() == weak_ref) {
           asset = &a;
@@ -1531,8 +1534,8 @@ static wmOperatorStatus image_grid_refresh_library_exec(bContext *C, wmOperator 
   ImageGridUIState &state = image_grid_state_get(*v3d, false);
 
   if (state.filter.lib_ref.type == ASSET_LIBRARY_CUSTOM) {
-    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_index(
-        &U, state.filter.lib_ref.custom_library_index);
+    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_from_ref(
+        &U, &state.filter.lib_ref);
     if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
       ed::asset::image_library_scan_and_index(user_lib->dirpath);
       ed::asset::image_library_invalidate_cached_previews(user_lib->dirpath);

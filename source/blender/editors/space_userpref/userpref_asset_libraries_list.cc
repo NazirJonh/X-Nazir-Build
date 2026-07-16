@@ -24,6 +24,8 @@
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
 
+#include "ED_asset_library.hh"
+
 #include "MEM_guardedalloc.h"
 
 #include "UI_interface_c.hh"
@@ -379,14 +381,20 @@ class AssetLibraryListItem : public ui::AbstractTreeViewItem {
     return library_.user_library != nullptr;
   }
 
-  bool rename(const bContext & /*C*/, StringRefNull new_name) override
+  bool rename(const bContext &C, StringRefNull new_name) override
   {
     if (!library_.user_library) {
       return false;
     }
     /* Must go through the BKE setter: it also propagates a renamed folder's new name to its
      * children's #parent_name, keeping the hierarchy consistent across save/load. */
+    char old_name[MAX_NAME];
+    STRNCPY(old_name, library_.user_library->name);
     BKE_preferences_asset_library_name_set(&U, library_.user_library, new_name.c_str());
+    /* Read the name back: it may have been uniquified. Keeps references in open files pointing at
+     * this library instead of turning them Missing (see #library_references_rename). */
+    ed::asset::library_references_rename(
+        *CTX_data_main(&C), old_name, library_.user_library->name);
     label_ = library_.user_library->name;
     return true;
   }

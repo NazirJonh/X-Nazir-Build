@@ -174,18 +174,32 @@ struct AssetImportSettings {
  * Information to identify an asset library. May be either one of the predefined types (current
  * 'Main', builtin library, project library), or a custom type as defined in the Preferences.
  *
- * If the type is set to #ASSET_LIBRARY_CUSTOM, `custom_library_index` must be set to identify the
- * custom library. Otherwise it is not used.
+ * If the type is set to #ASSET_LIBRARY_CUSTOM, `custom_library_name` identifies the custom
+ * library. Otherwise neither of the custom members is used.
  */
 struct AssetLibraryReference {
   eAssetLibraryType type = ASSET_LIBRARY_LOCAL;
   char _pad1[2] = {};
   /**
-   * If showing a custom asset library (#ASSET_LIBRARY_CUSTOM), this is the index of the
-   * #bUserAssetLibrary within #UserDef.asset_libraries.
-   * Should be ignored otherwise (but better set to -1 then, for sanity and debugging).
+   * Runtime handle: the index of the #bUserAssetLibrary within #UserDef.asset_libraries. Derived
+   * from #custom_library_name and kept in sync with it, so that Blender versions without the name
+   * field still resolve this reference. Should be ignored for other types (but better set to -1
+   * then, for sanity and debugging).
+   *
+   * \warning Never resolve this directly. An index is a *position*: it shifts whenever the
+   * Preferences list is reordered or an entry removed, silently pointing at a different library.
+   * Use #BKE_preferences_asset_library_find_from_ref().
    */
   int custom_library_index = -1;
+  /**
+   * Persistent identity of the custom library: the #bUserAssetLibrary.name, which is unique
+   * (#BKE_preferences_asset_library_name_set uniquifies it). This is the truth on disk;
+   * #custom_library_index is merely a cache of it.
+   *
+   * Empty means the reference was written before this field existed, and only
+   * #custom_library_index can resolve it.
+   */
+  char custom_library_name[/*MAX_NAME*/ 64] = "";
 };
 
 /**

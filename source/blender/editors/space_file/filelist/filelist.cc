@@ -192,10 +192,9 @@ static bool filelist_compare_asset_libraries(const AssetLibraryReference *librar
   }
   if (library_a->type == ASSET_LIBRARY_CUSTOM) {
     /* Don't only check the index, also check that it's valid. */
-    bUserAssetLibrary *library_ptr_a = BKE_preferences_asset_library_find_index(
-        &U, library_a->custom_library_index);
-    return (library_ptr_a != nullptr) &&
-           (library_a->custom_library_index == library_b->custom_library_index);
+    bUserAssetLibrary *library_ptr_a = BKE_preferences_asset_library_find_from_ref(&U, library_a);
+    bUserAssetLibrary *library_ptr_b = BKE_preferences_asset_library_find_from_ref(&U, library_b);
+    return (library_ptr_a != nullptr) && (library_ptr_a == library_ptr_b);
   }
 
   return true;

@@ -268,13 +268,11 @@ void image_grid_state_persist_to_view3d(View3D &v3d,
                                         const bool is_mask_slot)
 {
   ImageGridSlotDNA &slot = is_mask_slot ? v3d.image_grid_mask : v3d.image_grid;
-  short &library_type = slot.library_type;
-  int &library_custom_index = slot.library_custom_index;
+  AssetLibraryReference &library_ref = slot.library_ref;
   ListBaseT<ImageGridLibraryCatalogState> &library_catalog_states = slot.library_catalog_states;
   ListBaseT<AssetCatalogPathLink> &legacy_enabled_catalog_paths = slot.enabled_catalog_paths_legacy;
 
-  library_type = short(state.filter.lib_ref.type);
-  library_custom_index = state.filter.lib_ref.custom_library_index;
+  library_ref = state.filter.lib_ref;
 
   image_grid_catalog_commit_active(state);
 
@@ -293,7 +291,12 @@ void image_grid_state_persist_to_view3d(View3D &v3d,
       continue;
     }
 
-    const AssetLibraryReference lib_ref = ed::asset::library_reference_from_enum_value(item.key);
+    const AssetLibraryReference lib_ref = image_grid_library_ref_from_key(item.key);
+    if (item.key != "local" && lib_ref.type == ASSET_LIBRARY_LOCAL) {
+      /* A custom library named by this identifier no longer exists in the Preferences -- its
+       * catalog filter is stale and meaningless to keep. */
+      continue;
+    }
     ImageGridLibraryCatalogState *libcat_state = MEM_new<ImageGridLibraryCatalogState>(__func__);
     libcat_state->library_ref = lib_ref;
     for (const std::string &path : paths) {

@@ -3989,8 +3989,8 @@ static const EnumPropertyItem *rna_FileAssetSelectParams_import_method_itemf(
     if ((item->value == FILE_ASSET_IMPORT_LINK) &&
         (params->asset_library_ref.type == ASSET_LIBRARY_CUSTOM))
     {
-      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
-          &U, params->asset_library_ref.custom_library_index);
+      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(
+          &U, &params->asset_library_ref);
       if (user_library && user_library->flag & ASSET_LIBRARY_USE_REMOTE_URL) {
         /* Don't allow linking with remote libraries. */
         continue;

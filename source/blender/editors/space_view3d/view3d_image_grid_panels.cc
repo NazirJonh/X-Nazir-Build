@@ -282,6 +282,13 @@ static void image_grid_catalog_selector_draw(const bContext *C, Panel *panel)
   ui::Layout &layout = *panel->layout;
   layout.operator_context_set(wm::OpCallContext::InvokeDefault);
 
+  if (ed::view3d::image_grid_library_is_missing(
+          *v3d, ed::view3d::image_grid_is_mask_slot_from_context(*C)))
+  {
+    layout.label(IFACE_("Library not found"), ICON_ERROR);
+    return;
+  }
+
   /* Catalog tree. */
   ed::asset::list::storage_fetch(&state.filter.lib_ref, C);
 

@@ -917,9 +917,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
           {
             ImageGridLibraryCatalogState *libcat_state = MEM_new<ImageGridLibraryCatalogState>(
                 "ImageGridLibraryCatalogState");
-            libcat_state->library_ref.type = eAssetLibraryType(v3d->image_grid.library_type);
+            libcat_state->library_ref.type = eAssetLibraryType(
+                v3d->image_grid.library_type_legacy);
             libcat_state->library_ref.custom_library_index =
-                v3d->image_grid.library_custom_index;
+                v3d->image_grid.library_custom_index_legacy;
             BLI_movelisttolist(&libcat_state->enabled_catalog_paths,
                                &v3d->image_grid.enabled_catalog_paths_legacy);
             BLI_addtail(&v3d->image_grid.library_catalog_states, libcat_state);
@@ -940,8 +941,9 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
             continue;
           }
           View3D *v3d = reinterpret_cast<View3D *>(&sl);
-          v3d->image_grid_mask.library_type = v3d->image_grid.library_type;
-          v3d->image_grid_mask.library_custom_index = v3d->image_grid.library_custom_index;
+          v3d->image_grid_mask.library_type_legacy = v3d->image_grid.library_type_legacy;
+          v3d->image_grid_mask.library_custom_index_legacy =
+              v3d->image_grid.library_custom_index_legacy;
 
           for (ImageGridLibraryCatalogState *libcat_state =
                    static_cast<ImageGridLibraryCatalogState *>(
@@ -1004,6 +1006,32 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       if (wm.id_browser_asset_library_ref.type == 0) {
         wm.id_browser_asset_library_ref.type = ASSET_LIBRARY_LOCAL;
         wm.id_browser_asset_library_ref.custom_library_index = -1;
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 47)) {
+    /* image_grid library selection: migrate the type/index pair into a real reference. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_VIEW3D) {
+            continue;
+          }
+          View3D *v3d = reinterpret_cast<View3D *>(&sl);
+          for (ImageGridSlotDNA *slot : {&v3d->image_grid, &v3d->image_grid_mask}) {
+            if (slot->library_type_legacy == 0) {
+              /* Unset: leave #library_ref at its default (#ASSET_LIBRARY_LOCAL). */
+              continue;
+            }
+            slot->library_ref.type = eAssetLibraryType(slot->library_type_legacy);
+            slot->library_ref.custom_library_index = slot->library_custom_index_legacy;
+            /* Deliberately no name back-fill. The saved index may already be stale, and cementing
+             * that guess into every file on disk is exactly what the spec's §2 rejects.
+             * #library_reference_ensure_resolved() back-fills lazily, only for references that are
+             * actually used. */
+          }
+        }
       }
     }
   }

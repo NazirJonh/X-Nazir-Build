@@ -1843,6 +1843,38 @@ static void file_draw_invalid_asset_library_hint(const bContext *C,
   }
 }
 
+static void file_draw_missing_asset_library_hint(const SpaceFile *sfile,
+                                                 ARegion *region,
+                                                 const FileAssetSelectParams *asset_params)
+{
+  uchar text_col[4];
+  ui::theme::get_color_4ubv(TH_TEXT, text_col);
+
+  const View2D *v2d = &region->v2d;
+  const int pad = sfile->layout->tile_border_x;
+  const int width = BLI_rctf_size_x(&v2d->tot) - (2 * pad);
+  const int line_height = sfile->layout->text_line_height;
+  int sx = v2d->tot.xmin + pad;
+  /* For some reason no padding needed. */
+  int sy = v2d->tot.ymax;
+
+  const std::string message = fmt::format(
+      fmt::runtime(RPT_("Asset library \"{}\" was not found in the Preferences")),
+      asset_params->asset_library_ref.custom_library_name);
+  file_draw_string_multiline(
+      sx, sy, message.c_str(), width, line_height, text_col, nullptr, &sy);
+
+  /* Separate a bit further. */
+  sy -= line_height * 2.2f;
+
+  ui::icon_draw(sx, sy - UI_UNIT_Y, ICON_INFO);
+  const char *suggestion = RPT_(
+      "It was renamed or removed in the Preferences, or this file was saved on another system.\n"
+      "Pick a library from the header, or restore this one in the Preferences");
+  file_draw_string_multiline(
+      sx + UI_UNIT_X, sy, suggestion, width - UI_UNIT_X, line_height, text_col, nullptr, &sy);
+}
+
 static void file_draw_asset_library_internet_access_required_hint(const bContext *C,
                                                                   const SpaceFile *sfile,
                                                                   ARegion *region)
@@ -2094,8 +2126,8 @@ static const bUserAssetLibrary *assetlib_as_remote_library(
     return nullptr;
   }
 
-  const bUserAssetLibrary *library = BKE_preferences_asset_library_find_index(
-      &U, asset_library_ref.custom_library_index);
+  const bUserAssetLibrary *library = BKE_preferences_asset_library_find_from_ref(
+      &U, &asset_library_ref);
   if (!library) {
     return nullptr;
   }
@@ -2122,6 +2154,18 @@ bool file_draw_hint_if_invalid(const bContext *C, const SpaceFile *sfile, ARegio
 
   if (is_asset_browser) {
     FileAssetSelectParams *asset_params = ED_fileselect_get_asset_params(sfile);
+
+    if (!asset_params) {
+      return false;
+    }
+
+    if (asset_params->asset_library_ref.type == ASSET_LIBRARY_CUSTOM &&
+        BKE_preferences_asset_library_find_from_ref(&U, &asset_params->asset_library_ref) == nullptr)
+    {
+      setup_view();
+      file_draw_missing_asset_library_hint(sfile, region, asset_params);
+      return true;
+    }
 
     const bUserAssetLibrary *remote_library = assetlib_as_remote_library(
         asset_params->asset_library_ref);

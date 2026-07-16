@@ -1493,9 +1493,9 @@ struct ImageGridFilter {
   blender::Set<std::string> enabled_catalog_paths;
   /**
    * Per-asset-library catalog filters (session), keyed by
-   * #ed::asset::library_reference_to_enum_value(). Synced to #View3D DNA on persist.
+   * #BKE_preferences_asset_library_identifier_from_ref(). Synced to #View3D DNA on persist.
    */
-  blender::Map<int, blender::Set<std::string>> enabled_catalogs_by_library;
+  blender::Map<std::string, blender::Set<std::string>> enabled_catalogs_by_library;
 };
 
 /**
@@ -1566,6 +1566,8 @@ struct ImageGridUIState {
 ImageGridUIState &image_grid_state_get(const View3D &v3d, bool is_mask_slot = false);
 ImageGridUIState &image_grid_state_get_from_context(const bContext &C);
 bool image_grid_is_mask_slot_from_context(const bContext &C);
+/** True when #ImageGridUIState::filter's library no longer exists in the Preferences (§5). */
+bool image_grid_library_is_missing(const View3D &v3d, bool is_mask_slot);
 void image_grid_state_reset_catalog(ImageGridUIState &state);
 /** Store #enabled_catalog_paths into #enabled_catalogs_by_library for the current library. */
 void image_grid_catalog_commit_active(ImageGridUIState &state);
@@ -1574,6 +1576,16 @@ void image_grid_catalog_swap_library(ImageGridUIState &state,
                                      const AssetLibraryReference &old_lib_ref,
                                      const AssetLibraryReference &new_lib_ref);
 void image_grid_state_remove(const View3D &v3d);
+/**
+ * Run \a fn on the live runtime filter library reference of \a v3d's image grid(s) (texture and
+ * mask slots), but only if that runtime state already exists. #ImageGridUIState is a cache
+ * separate from DNA, seeded from DNA once (see #image_grid_state_get) and never automatically
+ * re-synced afterwards -- so a DNA-only rename walk (#foreach_library_reference) would otherwise
+ * leave an already-open grid's live filter pointing at a renamed library's old name until the
+ * View3D's state is torn down or the file is reloaded.
+ */
+void image_grid_foreach_live_library_ref(View3D &v3d,
+                                         blender::FunctionRef<void(AssetLibraryReference &)> fn);
 void image_grid_notify_change(bContext &C, bool is_mask_slot = false);
 
 /**
@@ -1607,6 +1619,14 @@ bool image_grid_filter_matches_shelf(const ImageGridUIState &state, const AssetS
 
 /** Drop unknown catalog paths so an empty set means All is selected. */
 void image_grid_catalog_sanitize_selection(ImageGridUIState &state);
+
+/**
+ * Reverse of the stable #enabled_catalogs_by_library map key: reconstruct the full reference an
+ * identifier names. Returns a default (#ASSET_LIBRARY_LOCAL) reference when \a key names a custom
+ * library no longer present in the Preferences; callers must compare against \a key itself (not
+ * the returned type) to distinguish that case from a legitimate "local" lookup.
+ */
+AssetLibraryReference image_grid_library_ref_from_key(const std::string &key);
 
 void image_grid_state_persist_to_view3d(View3D &v3d,
                                         ImageGridUIState &state,

@@ -28,6 +28,8 @@
 #include "BKE_preferences.h"
 #include "BKE_screen.hh"
 
+#include "ED_asset_library.hh"
+
 #include "asset_shelf.hh"
 
 namespace blender {
@@ -150,16 +152,32 @@ AssetLibraryReference &settings_ensure_valid_library_ref(AssetShelfSettings &set
     return settings.asset_library_reference;
   }
 
-  const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
-      &U, settings.asset_library_reference.custom_library_index);
+  if (ed::asset::library_reference_ensure_resolved(settings.asset_library_reference) ==
+      ed::asset::LibraryRefStatus::Missing)
+  {
+    /* The library is gone, not merely unusable. Keep the reference so #settings_library_is_missing
+     * can name it; #storage_fetch() simply fetches nothing for it. */
+    return settings.asset_library_reference;
+  }
 
-  /* If the library wasn't found, fall back to the "All" library. */
-  if (!user_library || BKE_preferences_asset_library_is_folder(user_library) ||
+  const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(
+      &U, &settings.asset_library_reference);
+  /* Resolvable but not selectable. Unchanged behaviour: fall back to "All". */
+  if (BKE_preferences_asset_library_is_folder(user_library) ||
       !BKE_preferences_asset_library_is_effectively_enabled(user_library))
   {
     settings.asset_library_reference = asset_system::all_library_reference();
   }
   return settings.asset_library_reference;
+}
+
+bool settings_library_is_missing(const AssetShelfSettings &settings)
+{
+  if (settings.asset_library_reference.type != ASSET_LIBRARY_CUSTOM) {
+    return false;
+  }
+  return BKE_preferences_asset_library_find_from_ref(&U, &settings.asset_library_reference) ==
+         nullptr;
 }
 
 void settings_set_active_catalog(AssetShelfSettings &settings,

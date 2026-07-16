@@ -137,7 +137,7 @@ const bUserAssetLibrary *get_asset_library_from_opptr(PointerRNA &ptr)
 {
   const int enum_value = RNA_enum_get(&ptr, "asset_library_reference");
   const AssetLibraryReference lib_ref = asset::library_reference_from_enum_value(enum_value);
-  return BKE_preferences_asset_library_find_index(&U, lib_ref.custom_library_index);
+  return BKE_preferences_asset_library_find_from_ref(&U, &lib_ref);
 }
 
 AssetLibraryReference get_asset_library_ref_from_opptr(PointerRNA &ptr)

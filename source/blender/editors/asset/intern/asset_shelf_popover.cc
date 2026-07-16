@@ -122,10 +122,20 @@ AssetShelf *popup_shelf_get_or_create(const bContext &C, AssetShelfType &shelf_t
   return new_shelf;
 }
 
+void popup_shelves_foreach_library_ref(FunctionRef<void(AssetLibraryReference &)> fn)
+{
+  for (AssetShelf *shelf : StaticPopupShelves::shelves()) {
+    fn(shelf->settings.asset_library_reference);
+  }
+}
+
 void ensure_asset_library_fetched(const bContext &C, const AssetShelfType &shelf_type)
 {
   if (AssetShelf *shelf = lookup_shelf_for_popup(C, shelf_type)) {
-    list::storage_fetch(&shelf->settings.asset_library_reference, &C);
+    /* Runs from the popover *button*'s draw, i.e. on every redraw of its host, whereas the popover
+     * itself only validates the reference once opened. Without this, removing an asset library in
+     * the Preferences leaves the shelf holding a reference #storage_fetch() asserts on. */
+    list::storage_fetch(&settings_ensure_valid_library_ref(shelf->settings), &C);
   }
   else {
     AssetLibraryReference library_ref = asset_system::all_library_reference();

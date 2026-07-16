@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <memory>
 
+#include "BLI_function_ref.hh"
+
 namespace blender {
 
 struct ARegion;
@@ -109,6 +111,12 @@ void type_popup_unlink(const AssetShelfType &shelf_type);
 void ensure_asset_library_fetched(const bContext &C, const AssetShelfType &shelf_type);
 
 /**
+ * Run \a fn on the library reference of every popup shelf. These live in a process-global
+ * singleton rather than in #Main, so a walk over #Main alone would miss them.
+ */
+void popup_shelves_foreach_library_ref(FunctionRef<void(AssetLibraryReference &)> fn);
+
+/**
  * Return the static popup #AssetShelf instance for \a shelf_type, creating it if
  * #type_poll_for_popup passes. Used by UI outside the default asset-shelf popover panel.
  */
@@ -140,6 +148,9 @@ void popup_size_store(wmWindowManager &wm,
  * \{ */
 
 AssetLibraryReference &settings_ensure_valid_library_ref(AssetShelfSettings &settings);
+/** True when the settings reference a custom library that no longer resolves at all (as opposed
+ * to one that resolves but is a folder or disabled, which falls back to "All" instead). */
+bool settings_library_is_missing(const AssetShelfSettings &settings);
 void settings_set_active_catalog(AssetShelfSettings &settings,
                                  const asset_system::AssetCatalogPath &path);
 void settings_set_all_catalog_active(AssetShelfSettings &settings);

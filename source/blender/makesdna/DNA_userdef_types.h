@@ -919,7 +919,7 @@ enum eUserAssetShelfPopupViewFlag {
 struct bUserAssetBrowserSettings {
   struct bUserAssetBrowserSettings *next = nullptr, *prev = nullptr;
 
-  /** Asset library identifier (see asset_library_identifier_from_library_ref). */
+  /** Asset library identifier (see BKE_preferences_asset_library_identifier_from_ref). */
   char library_name[/*MAX_NAME*/ 64] = "";
 
   ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};

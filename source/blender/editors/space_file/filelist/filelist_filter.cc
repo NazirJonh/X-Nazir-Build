@@ -170,9 +170,12 @@ void prepare_filter_asset_library(const FileList *filelist, FileListFilter *filt
   if (!filter->asset_catalog_filter) {
     return;
   }
-  BLI_assert_msg(filelist->asset_library,
-                 "prepare_filter_asset_library() should only be called when the file browser is "
-                 "in asset browser mode");
+  if (!filelist->asset_library) {
+    /* Legitimately null when browsing a custom asset library that no longer resolves in the
+     * Preferences (renamed, removed, or the file came from another machine) -- not a caller bug,
+     * so nothing to update the catalog filter data from. */
+    return;
+  }
 
   file_ensure_updated_catalog_filter_data(filter->asset_catalog_filter, filelist->asset_library);
 }
@@ -180,6 +183,12 @@ void prepare_filter_asset_library(const FileList *filelist, FileListFilter *filt
 bool is_filtered_asset(FileListInternEntry *file, FileListFilter *filter)
 {
   asset_system::AssetRepresentation *asset = file->get_asset();
+  if (!asset) {
+    /* No resolvable asset representation (e.g. a main-data asset entry added while no asset
+     * library was loaded for it, such as when browsing a custom library that no longer resolves
+     * in the Preferences). Nothing to filter on, so it can't be shown. */
+    return false;
+  }
   const AssetMetaData &asset_data = asset->get_metadata();
 
   /* Not used yet for the asset view template. */

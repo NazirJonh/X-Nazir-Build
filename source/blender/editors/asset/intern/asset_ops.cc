@@ -592,8 +592,7 @@ static void do_asset_library_refresh(bContext *C)
    * that the next read job picks up any files added, moved or deleted since the last
    * scan.  The index write is atomic and fast for unchanged libraries. */
   if (library->type == ASSET_LIBRARY_CUSTOM) {
-    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_index(
-        &U, library->custom_library_index);
+    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_from_ref(&U, library);
     if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
       image_library_scan_and_index(user_lib->dirpath);
       image_library_invalidate_cached_previews(user_lib->dirpath);
@@ -1190,8 +1189,7 @@ static const bUserAssetLibrary *selected_asset_library(wmOperator *op)
 {
   const int enum_value = RNA_enum_get(op->ptr, "asset_library_reference");
   const AssetLibraryReference lib_ref = library_reference_from_enum_value(enum_value);
-  const bUserAssetLibrary *lib = BKE_preferences_asset_library_find_index(
-      &U, lib_ref.custom_library_index);
+  const bUserAssetLibrary *lib = BKE_preferences_asset_library_find_from_ref(&U, &lib_ref);
   return lib;
 }
 

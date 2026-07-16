@@ -9,6 +9,7 @@
 #include "DNA_ID.h"
 #include "DNA_asset_types.h"
 #include "DNA_image_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
 
 #include "AS_asset_catalog.hh"
@@ -23,6 +24,7 @@
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
 #include "BKE_main.hh"
+#include "BKE_preferences.h"
 
 #include "MEM_guardedalloc.h"
 
@@ -61,8 +63,7 @@ static ImageGridStatesPerView3D &image_grid_states_ensure(const View3D &v3d)
 }
 
 struct ImageGridView3DDNAFields {
-  short library_type;
-  int library_custom_index;
+  AssetLibraryReference &library_ref;
   ListBaseT<AssetCatalogPathLink> &legacy_enabled_catalog_paths;
   ListBaseT<ImageGridLibraryCatalogState> &library_catalog_states;
 };
@@ -70,15 +71,46 @@ struct ImageGridView3DDNAFields {
 static ImageGridView3DDNAFields image_grid_view3d_dna_fields(View3D &v3d, const bool is_mask_slot)
 {
   ImageGridSlotDNA &slot = is_mask_slot ? v3d.image_grid_mask : v3d.image_grid;
-  return {slot.library_type,
-          slot.library_custom_index,
-          slot.enabled_catalog_paths_legacy,
-          slot.library_catalog_states};
+  return {slot.library_ref, slot.enabled_catalog_paths_legacy, slot.library_catalog_states};
 }
 
-static int image_grid_library_enum_key(const AssetLibraryReference &lib_ref)
+/* Position-independent map key, so a Preferences reorder cannot re-attach one library's catalog
+ * filter to another. */
+static std::string image_grid_library_key(const AssetLibraryReference &lib_ref)
 {
-  return ed::asset::library_reference_to_enum_value(&lib_ref);
+  return BKE_preferences_asset_library_identifier_from_ref(&U, &lib_ref);
+}
+
+/* Reverse of #image_grid_library_key(): reconstruct the reference an identifier names.
+ * Returns a default-constructed (#ASSET_LIBRARY_LOCAL) reference when a custom library's name
+ * doesn't resolve -- the caller must check for that case using the key it looked up with, since
+ * "local" legitimately produces the same default value. */
+AssetLibraryReference image_grid_library_ref_from_key(const std::string &key)
+{
+  if (key == "local") {
+    return asset_system::current_file_library_reference();
+  }
+  if (key == "all") {
+    return asset_system::all_library_reference();
+  }
+  if (key == "essentials") {
+    AssetLibraryReference ref{};
+    ref.type = ASSET_LIBRARY_ESSENTIALS;
+    return ref;
+  }
+  if (key == "online_essentials") {
+    AssetLibraryReference ref{};
+    ref.type = ASSET_LIBRARY_ONLINE_ESSENTIALS;
+    return ref;
+  }
+
+  AssetLibraryReference ref{};
+  if (const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_by_name(
+          &U, key.c_str()))
+  {
+    BKE_preferences_asset_library_reference_set(&U, &ref, user_library);
+  }
+  return ref;
 }
 
 static AssetLibraryReference image_grid_library_ref_from_filter(
@@ -92,7 +124,7 @@ static void image_grid_catalog_load_active(ImageGridUIState &state,
 {
   state.filter.enabled_catalog_paths.clear();
   if (const Set<std::string> *paths = state.filter.enabled_catalogs_by_library.lookup_ptr(
-          image_grid_library_enum_key(lib_ref)))
+          image_grid_library_key(lib_ref)))
   {
     state.filter.enabled_catalog_paths = *paths;
   }
@@ -100,7 +132,7 @@ static void image_grid_catalog_load_active(ImageGridUIState &state,
 
 void image_grid_catalog_commit_active(ImageGridUIState &state)
 {
-  const int key = image_grid_library_enum_key(state.filter.lib_ref);
+  const std::string key = image_grid_library_key(state.filter.lib_ref);
   if (state.filter.enabled_catalog_paths.is_empty()) {
     state.filter.enabled_catalogs_by_library.remove(key);
   }
@@ -142,7 +174,7 @@ static void image_grid_catalog_load_from_view3d_dna(ImageGridUIState &state,
       }
     }
     if (!paths.is_empty()) {
-      state.filter.enabled_catalogs_by_library.add_overwrite(image_grid_library_enum_key(lib_ref),
+      state.filter.enabled_catalogs_by_library.add_overwrite(image_grid_library_key(lib_ref),
                                                              std::move(paths));
     }
   }
@@ -161,14 +193,13 @@ static void image_grid_catalog_load_from_view3d_dna(ImageGridUIState &state,
     }
     if (!legacy_paths.is_empty()) {
       AssetLibraryReference lib_ref{};
-      if (dna.library_type != 0) {
-        lib_ref.type = eAssetLibraryType(dna.library_type);
-        lib_ref.custom_library_index = dna.library_custom_index;
+      if (dna.library_ref.type != 0) {
+        lib_ref = dna.library_ref;
       }
       else {
         lib_ref = asset_system::current_file_library_reference();
       }
-      state.filter.enabled_catalogs_by_library.add_overwrite(image_grid_library_enum_key(lib_ref),
+      state.filter.enabled_catalogs_by_library.add_overwrite(image_grid_library_key(lib_ref),
                                                              std::move(legacy_paths));
     }
   }
@@ -183,9 +214,8 @@ static void image_grid_init_state_from_view3d_dna(ImageGridUIState &state,
   const ImageGridView3DDNAFields dna = image_grid_view3d_dna_fields(const_cast<View3D &>(v3d),
                                                                     is_mask_slot);
 
-  if (dna.library_type != 0) {
-    state.filter.lib_ref.type = eAssetLibraryType(dna.library_type);
-    state.filter.lib_ref.custom_library_index = dna.library_custom_index;
+  if (dna.library_ref.type != 0) {
+    state.filter.lib_ref = dna.library_ref;
   }
   else {
     state.filter.lib_ref = asset_system::current_file_library_reference();
@@ -227,13 +257,27 @@ ImageGridUIState &image_grid_state_get(const View3D &v3d, const bool is_mask_slo
   ImageGridStatesPerView3D &per_v3d = image_grid_states_ensure(v3d);
   ImageGridUIState &state = is_mask_slot ? per_v3d.mask : per_v3d.texture;
   bool &initialized = is_mask_slot ? per_v3d.mask_initialized : per_v3d.texture_initialized;
-  if (initialized) {
-    return state;
+  if (!initialized) {
+    initialized = true;
+    image_grid_init_state_from_view3d_dna(state, v3d, is_mask_slot);
   }
 
-  initialized = true;
-  image_grid_init_state_from_view3d_dna(state, v3d, is_mask_slot);
+  /* Re-checked on every access, not just on init: the Preferences can change at any time while the
+   * state is alive. A Missing library is deliberately not repaired here -- the reference is kept so
+   * the draw code can name it (§6). */
+  ed::asset::library_reference_ensure_resolved(state.filter.lib_ref);
   return state;
+}
+
+bool image_grid_library_is_missing(const View3D &v3d, const bool is_mask_slot)
+{
+  /* #image_grid_state_get already resolved the reference; just ask whether it landed. Using the
+   * const #find_from_ref rather than the mutating gate keeps this safe to call from draw. */
+  const ImageGridUIState &state = image_grid_state_get(v3d, is_mask_slot);
+  if (state.filter.lib_ref.type != ASSET_LIBRARY_CUSTOM) {
+    return false;
+  }
+  return BKE_preferences_asset_library_find_from_ref(&U, &state.filter.lib_ref) == nullptr;
 }
 
 bool image_grid_is_mask_slot_from_context(const bContext &C)
@@ -252,7 +296,7 @@ void image_grid_state_reset_catalog(ImageGridUIState &state)
 {
   state.filter.enabled_catalog_paths.clear();
   state.filter.enabled_catalogs_by_library.remove(
-      image_grid_library_enum_key(state.filter.lib_ref));
+      image_grid_library_key(state.filter.lib_ref));
 }
 
 std::string image_grid_session_id(const View3D &v3d,
@@ -290,6 +334,18 @@ void image_grid_state_remove(const View3D &v3d)
     MEM_delete(static_cast<ImageGridStatesPerView3D *>(v3d_mut.runtime.image_grid_state));
     v3d_mut.runtime.image_grid_state = nullptr;
   }
+}
+
+void image_grid_foreach_live_library_ref(View3D &v3d,
+                                         blender::FunctionRef<void(AssetLibraryReference &)> fn)
+{
+  /* Only touch state that already exists -- a rename must not eagerly create runtime state for a
+   * View3D that has never displayed an image grid. */
+  if (!v3d.runtime.image_grid_state) {
+    return;
+  }
+  fn(image_grid_state_get(v3d, false).filter.lib_ref);
+  fn(image_grid_state_get(v3d, true).filter.lib_ref);
 }
 
 /* -------------------------------------------------------------------- */

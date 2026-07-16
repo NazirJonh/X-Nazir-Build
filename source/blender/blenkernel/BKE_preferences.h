@@ -102,6 +102,36 @@ struct bUserAssetLibrary *BKE_preferences_asset_library_find_by_name(const struc
     ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
 
 /**
+ * Resolve \a ref to the #bUserAssetLibrary it refers to.
+ *
+ * Uses #AssetLibraryReference.custom_library_name (the persistent identity), falling back to
+ * #AssetLibraryReference.custom_library_index only for references written before that field
+ * existed.
+ *
+ * Prefer this over #BKE_preferences_asset_library_find_index() for anything holding an
+ * #AssetLibraryReference: the index is a position in #UserDef.asset_libraries and shifts whenever
+ * the list is reordered or an entry removed.
+ *
+ * \return null if \a ref is not #ASSET_LIBRARY_CUSTOM, or if the library it names is gone.
+ */
+struct bUserAssetLibrary *BKE_preferences_asset_library_find_from_ref(
+    const struct UserDef *userdef, const struct AssetLibraryReference *ref)
+    ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Point \a r_ref at \a user_library. Type, name (the identity) and index (its cache) are set
+ * together, so the two can never disagree.
+ *
+ * This is the only supported way to build a custom library reference. It cannot construct a
+ * reference to a library that does not exist, which is what makes "a custom reference without a
+ * name can only come from a legacy file" an invariant.
+ */
+void BKE_preferences_asset_library_reference_set(const struct UserDef *userdef,
+                                                 struct AssetLibraryReference *r_ref,
+                                                 const struct bUserAssetLibrary *user_library)
+    ATTR_NONNULL();
+
+/**
  * Return the bUserAssetLibrary that contains the given file/directory path. The given path can be
  * the library's top-level directory, or any path inside that directory.
  *
@@ -329,6 +359,18 @@ const EnumPropertyItem *BKE_preferences_active_section_itemf(const UserDef *user
  * Per-library persistent collapse state of asset catalog paths in the asset browser.
  * \{ */
 
+/**
+ * A stable, position-independent identifier for the library \a ref refers to: "local", "all",
+ * "essentials", "online_essentials", or the custom library's (unique) name. "default" when \a ref
+ * names nothing.
+ *
+ * Use as a map key or a settings key. Unlike #AssetLibraryReference.custom_library_index it does
+ * not change when the Preferences list is reordered.
+ */
+const char *BKE_preferences_asset_library_identifier_from_ref(
+    const struct UserDef *userdef, const struct AssetLibraryReference *ref)
+    ATTR_WARN_UNUSED_RESULT;
+
 bUserAssetBrowserSettings *BKE_preferences_asset_browser_settings_get(
     const UserDef *userdef, const char *library_identifier);
 /**
@@ -343,6 +385,16 @@ void BKE_preferences_asset_browser_settings_set_catalog_collapsed(UserDef *userd
                                                                   const char *library_identifier,
                                                                   const char *catalog_path,
                                                                   bool collapsed);
+/**
+ * Move the settings entry keyed by \a old_name over to \a new_name, so renaming a custom library
+ * keeps its saved catalog collapse state instead of silently orphaning it.
+ *
+ * Entries outlive the library they were created for (removing a library does not remove them), so
+ * \a new_name may already be taken by leftovers; those are dropped in favor of the live library.
+ */
+void BKE_preferences_asset_browser_settings_rename_library(UserDef *userdef,
+                                                           const char *old_name,
+                                                           const char *new_name);
 
 void BKE_preferences_asset_browser_settings_blend_write(BlendWriter *writer,
                                                         const bUserAssetBrowserSettings *settings);

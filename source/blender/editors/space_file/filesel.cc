@@ -443,12 +443,24 @@ static void fileselect_refresh_asset_params(FileAssetSelectParams *asset_params)
   FileSelectParams *base_params = &asset_params->base_params;
   bUserAssetLibrary *user_library = nullptr;
 
-  /* Ensure valid repository, or fall-back to local one. */
+  /* Ensure valid repository, or fall-back. */
   if (library->type == ASSET_LIBRARY_CUSTOM) {
-    BLI_assert(library->custom_library_index >= 0);
-
-    user_library = BKE_preferences_asset_library_find_index(&U, library->custom_library_index);
-    if (!user_library || !BKE_preferences_asset_library_is_valid(&U, user_library, false)) {
+    user_library = BKE_preferences_asset_library_find_from_ref(&U, library);
+    if (!user_library) {
+      /* The library is gone from the Preferences (renamed, removed, or this file came from another
+       * machine). Keep the reference: #file_draw_hint_if_invalid() names it and fully replaces the
+       * normal grid draw for this state, so nothing from this list is ever shown. Use the "current
+       * file" job type (matches #ASSET_LIBRARY_LOCAL below): unlike a single on-disk library's job,
+       * it never scans a directory (avoiding the "root must end in a slash" assert on this empty
+       * dir), and unlike the "All" library job, its read function only uses the resolved library
+       * conditionally rather than asserting it non-null -- #AS_asset_library_load() legitimately
+       * returns null for a #ASSET_LIBRARY_CUSTOM reference that no longer resolves, and the "All"
+       * job's own internal assert does not tolerate that. */
+      base_params->dir[0] = '\0';
+      base_params->type = FILE_MAIN_ASSET;
+      return;
+    }
+    if (!BKE_preferences_asset_library_is_valid(&U, user_library, false)) {
       library->type = ASSET_LIBRARY_ALL;
     }
   }

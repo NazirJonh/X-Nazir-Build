@@ -376,10 +376,13 @@ class DATA_PT_sculpt_layers(MeshButtonsPanel, Panel):
         mesh = ob.data
 
         row = layout.row()
+        # The active index is written through the no-undo `sculpt_layers_ui` wrapper: a plain
+        # `sculpt_layers_active_index` button edit would push a global (memfile) undo step, which
+        # does not compose with the stroke-based sculpt undo steps in Sculpt Mode.
         row.template_list(
             "MESH_UL_sculpt_layers", "",
             mesh, "sculpt_layers",
-            mesh, "sculpt_layers_active_index",
+            mesh.sculpt_layers_ui, "active_index",
             rows=5,
         )
 

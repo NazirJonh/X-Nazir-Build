@@ -203,6 +203,13 @@ void push_sculpt_layer_bake_to_shape_key(Object &object, short pre_bake_shapenr)
 void push_sculpt_layer_move(Object &object, const SculptLayer &layer, int index_from, int index_to);
 
 /**
+ * Sculpt layer operators: record an active-layer selection change (pure UI state) into the
+ * current #Type::SculptLayer undo step. Undo restores \a index_from, redo \a index_to. Kept as a
+ * sculpt step (rather than a global undo push) so it composes with stroke SCULPT steps.
+ */
+void push_sculpt_layer_active_index(Object &object, int index_from, int index_to);
+
+/**
  * Sculpt layers (mesh/vertex domain): iterate the unique vertices recorded into the in-progress
  * Position undo step, passing each touched node's vertex indices together with their pre-stroke
  * positions. Returns false when there is no suitable in-progress mesh Position step (e.g. after

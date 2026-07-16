@@ -515,17 +515,24 @@ struct SculptSession : NonCopyable, NonMovable {
      * for. All consumers are either differential (smoothing, plane fits) or use a matching
      * adjust / compose pair, so a constant shift is exactly invariant for them. */
     float3 base_view_dc = float3(0.0f);
-    /* Bounds of the base-view positions (`position[i] - base_view[i]`, without the DC) of each PBVH
-     * leaf node's own elements, computed once per stroke. Empty when the base view is inactive.
+    /* Bounds of the base-view offset (`base_view[i]`, without the DC) over each PBVH leaf node's
+     * elements, computed once per stroke. Empty when the base view is inactive.
      *
      * The brush measures its falloff on the base view, but the nodes it processes are selected from
      * the node bounds on the *composed* surface. Those two footprints differ by the layer height, so
      * an element can earn a non-zero factor while its node was never gathered — and since a node is
-     * processed as a whole, the stroke boundary then follows node borders (square tiles). These
-     * bounds let the gather add exactly the nodes the base-space footprint reaches (see
-     * #layers::base_view_extend_node_mask), which restores the invariant "every element with a
-     * non-zero factor belongs to a gathered node" without touching the falloff itself. */
-    Array<Bounds<float3>> base_view_node_bounds;
+     * processed as a whole, the stroke boundary then follows node borders (square tiles).
+     * #layers::base_view_extend_node_mask subtracts these offset bounds from the node's position
+     * bounds to box the node in base-view space, and adds every node that box brings within the
+     * radius. That restores the invariant "every element with a non-zero factor belongs to a
+     * gathered node" without touching the falloff itself.
+     *
+     * Only the offset is stored, not the base-view positions themselves: the offset is constant for
+     * the whole stroke (the layer data does not change while the base is edited), while the
+     * positions move under the brush. Deriving the box from #Node::bounds_ at test time therefore
+     * follows the stroke, whereas a stored `position - base_view` box would go stale as soon as the
+     * first dab moved anything and would drop nodes the falloff still reaches. */
+    Array<Bounds<float3>> base_view_node_offset_bounds;
   } layers;
 
   /* Contains information used by tools and brushes that require different logic based on boundary

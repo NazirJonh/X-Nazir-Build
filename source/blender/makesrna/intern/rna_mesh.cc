@@ -271,6 +271,11 @@ static void rna_Mesh_sculpt_layers_active_index_set(PointerRNA *ptr, int value)
   rna_mesh(ptr)->sculpt_layers_active_index = value;
 }
 
+static PointerRNA rna_Mesh_sculpt_layers_ui_get(PointerRNA *ptr)
+{
+  return RNA_pointer_create_with_parent(*ptr, RNA_MeshSculptLayersUI, ptr->data);
+}
+
 static bool rna_Mesh_sculpt_layers_solo_active_get(PointerRNA *ptr)
 {
   return bke::sculpt_layers::solo_active(*rna_mesh(ptr));
@@ -3190,6 +3195,12 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
       srna, "Sculpt Layer", "A non-destructive sculpt layer storing per-element displacement");
   RNA_def_struct_path_func(srna, "rna_SculptLayer_path");
   RNA_def_struct_ui_icon(srna, ICON_OUTLINER_DATA_MESH);
+  /* Button edits of layer properties must not push a global (memfile) undo step: in Sculpt Mode
+   * such a step lands between stroke SCULPT steps and does not compose with the delta-based
+   * sculpt undo (see #SCULPT_OT_layer_solo_base). Undoable changes go through the layer
+   * operators, which push proper sculpt undo steps. A memfile snapshot per slider tick would
+   * also be prohibitively expensive on dense meshes. */
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
 
   prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "name");
@@ -3224,6 +3235,33 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, domain_items);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Domain", "Element domain the layer is defined on");
+}
+
+static void rna_def_mesh_sculpt_layers_ui(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  /* Thin no-undo view over the mesh's sculpt-layer UI state. The UI list writes the active index
+   * through this struct rather than #Mesh.sculpt_layers_active_index directly: button edits push
+   * a global undo step per #RNA_struct_undo_check on the button's struct, and #Mesh (an ID struct)
+   * cannot clear #STRUCT_UNDO. A memfile step from a list click between two stroke SCULPT steps
+   * does not compose with the delta-based sculpt undo; undoable selection goes through
+   * #SCULPT_OT_layer_select instead. */
+  srna = RNA_def_struct(brna, "MeshSculptLayersUI", nullptr);
+  RNA_def_struct_sdna(srna, "Mesh");
+  RNA_def_struct_ui_text(
+      srna, "Mesh Sculpt Layers UI", "UI state of the mesh's sculpt layers (no undo on edits)");
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  prop = RNA_def_property(srna, "active_index", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop,
+                             "rna_Mesh_sculpt_layers_active_index_get",
+                             "rna_Mesh_sculpt_layers_active_index_set",
+                             "rna_Mesh_sculpt_layers_active_index_range");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Active Sculpt Layer Index", "Active index in the sculpt layers list");
 }
 
 static void rna_def_mesh(BlenderRNA *brna)
@@ -3726,6 +3764,13 @@ static void rna_def_mesh(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Active Sculpt Layer Index", "Active index in the sculpt layers list");
 
+  prop = RNA_def_property(srna, "sculpt_layers_ui", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MeshSculptLayersUI");
+  RNA_def_property_pointer_funcs(prop, "rna_Mesh_sculpt_layers_ui_get", nullptr, nullptr, nullptr);
+  RNA_def_property_flag(prop, PROP_NEVER_NULL);
+  RNA_def_property_ui_text(
+      prop, "Sculpt Layers UI", "No-undo view of the sculpt layers UI state (active index)");
+
   prop = RNA_def_property(srna, "sculpt_layers_solo_active", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_Mesh_sculpt_layers_solo_active_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
@@ -3753,6 +3798,7 @@ void RNA_def_mesh(BlenderRNA *brna)
   rna_def_mloopuv(brna);
   rna_def_mloopcol(brna);
   rna_def_sculpt_layer(brna);
+  rna_def_mesh_sculpt_layers_ui(brna);
 }
 
 }  // namespace blender

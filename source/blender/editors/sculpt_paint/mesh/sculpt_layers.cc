@@ -144,7 +144,7 @@ void invalidate_runtime(Object &object)
   ss->layers.mesh_base = {};
   ss->layers.base_view = {};
   ss->layers.base_view_dc = float3(0.0f);
-  ss->layers.base_view_node_bounds = {};
+  ss->layers.base_view_node_offset_bounds = {};
 }
 
 bool is_supported(const Object &object)
@@ -325,6 +325,13 @@ static void recompute_mesh_canonical(Object &object)
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(*pbvh, memory);
   pbvh->tag_positions_changed(node_mask);
   pbvh->update_bounds_mesh(mesh.vert_positions());
+  /* The positions just moved outside of a stroke, so the "original" bounds must follow. They are
+   * otherwise only resynced at stroke end (#store_bounds_orig_for_dirty_leaves), which is too late:
+   * the next stroke gathers its nodes against #Node::bounds_orig_ (every brush with accumulate off
+   * passes `use_original`), and stale boxes drop nodes whose geometry the layer change moved under
+   * the cursor. Those nodes then keep their vertices while their neighbors deform — the mesh tears
+   * along leaf-node borders. */
+  bke::pbvh::store_bounds_orig(*pbvh);
   mesh.bounds_set_eager(bke::pbvh::bounds_get(*pbvh));
   if (object.runtime->bounds_eval) {
     object.runtime->bounds_eval = mesh.bounds_min_max();
@@ -495,6 +502,10 @@ bool flush_interactive_update(Main &bmain, Mesh &mesh)
   pbvh->tag_positions_changed(node_mask);
   const auto t_tag1 = std::chrono::high_resolution_clock::now();
   pbvh->update_bounds_mesh(mesh.vert_positions());
+  /* Keep the "original" bounds in step with the moved positions; see #recompute_mesh_canonical for
+   * why a stale copy tears the next stroke along node borders. Cheap next to the bounds update
+   * itself: one copy per node, not per vertex. */
+  bke::pbvh::store_bounds_orig(*pbvh);
   const auto t_bounds_update1 = std::chrono::high_resolution_clock::now();
   mesh.bounds_set_eager(bke::pbvh::bounds_get(*pbvh));
   if (object->runtime->bounds_eval) {
@@ -629,13 +640,15 @@ static Bounds<float3> negative_bounds()
   return {float3(std::numeric_limits<float>::max()), float3(std::numeric_limits<float>::lowest())};
 }
 
-/* Bounds of each leaf node's own elements in base-view space, `position[i] - base_view[i]` (the DC
- * is added at test time, see #base_view_extend_node_mask). Computed once per stroke, right after the
- * base view itself; non-leaf entries stay empty and never intersect anything. */
-static void base_view_node_bounds_ensure(const Depsgraph &depsgraph, Object &object)
+/* Bounds of the base-view offset (`base_view[i]`) over each leaf node's own elements. Computed once
+ * per stroke, right after the base view itself; non-leaf entries stay empty and never intersect
+ * anything. The offset is what is stored rather than the base-view positions, so the box can follow
+ * the live positions as the stroke deforms them — see
+ * #SculptSession::layers::base_view_node_offset_bounds and #base_view_extend_node_mask. */
+static void base_view_node_offset_bounds_ensure(const Depsgraph &depsgraph, Object &object)
 {
   SculptSession *ss = session_of(object);
-  ss->layers.base_view_node_bounds = {};
+  ss->layers.base_view_node_offset_bounds = {};
 
   const Span<float3> base_view = ss->layers.base_view;
   if (base_view.is_empty()) {
@@ -653,9 +666,10 @@ static void base_view_node_bounds_ensure(const Depsgraph &depsgraph, Object &obj
   const Vector<int> leaf_indices = leaves.to_indices<int>();
 
   if (pbvh->type() == bke::pbvh::Type::Mesh) {
-    /* The evaluated positions, not #Mesh::vert_positions: with a shape key (or a deform modifier)
-     * the mesh holds the untouched basis, while the brush — and therefore the mask this bounds test
-     * feeds — works on the deformed surface. Without a deform the two are the same array. */
+    /* Sized against the evaluated positions rather than #Mesh::vert_positions: those are what the
+     * brush — and therefore the mask this feeds — works on, and with a shape key or a deform
+     * modifier the mesh holds the untouched basis instead. A mismatch means the base view cannot be
+     * indexed by the vertices the node bounds cover, so leave the bounds empty. */
     const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
     if (positions.size() != base_view.size()) {
       return;
@@ -665,8 +679,12 @@ static void base_view_node_bounds_ensure(const Depsgraph &depsgraph, Object &obj
       for (const int index : range) {
         const int node_index = leaf_indices[index];
         Bounds<float3> bounds = negative_bounds();
-        for (const int vert : nodes[node_index].verts()) {
-          math::min_max(positions[vert] - base_view[vert], bounds.min, bounds.max);
+        /* #all_verts(), matching #update_node_bounds_mesh: the two are subtracted from each other
+         * at test time, so they must cover the same elements. Using #verts() also dropped the
+         * boundary neighbors, which own no vertex inside the footprint but whose shared vertices
+         * still move — that carved a leaf-node grid into the stroke. */
+        for (const int vert : nodes[node_index].all_verts()) {
+          math::min_max(base_view[vert], bounds.min, bounds.max);
         }
         node_bounds[node_index] = bounds;
       }
@@ -686,7 +704,7 @@ static void base_view_node_bounds_ensure(const Depsgraph &depsgraph, Object &obj
         Bounds<float3> bounds = negative_bounds();
         for (const int grid : nodes[node_index].grids()) {
           for (const int i : bke::ccg::grid_range(key, grid)) {
-            math::min_max(positions[i] - base_view[i], bounds.min, bounds.max);
+            math::min_max(base_view[i], bounds.min, bounds.max);
           }
         }
         node_bounds[node_index] = bounds;
@@ -697,7 +715,7 @@ static void base_view_node_bounds_ensure(const Depsgraph &depsgraph, Object &obj
     return;
   }
 
-  ss->layers.base_view_node_bounds = std::move(node_bounds);
+  ss->layers.base_view_node_offset_bounds = std::move(node_bounds);
 }
 
 IndexMask base_view_extend_node_mask(const Object &object,
@@ -709,31 +727,55 @@ IndexMask base_view_extend_node_mask(const Object &object,
   if (!ss || !ss->cache) {
     return node_mask;
   }
-  const Span<Bounds<float3>> node_bounds = ss->layers.base_view_node_bounds;
-  if (node_bounds.is_empty()) {
+  const Span<Bounds<float3>> offset_bounds = ss->layers.base_view_node_offset_bounds;
+  if (offset_bounds.is_empty()) {
+    return node_mask;
+  }
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
+  if (!pbvh || offset_bounds.size() != pbvh->nodes_num()) {
     return node_mask;
   }
 
   /* The brush measures its falloff on the base view, `position[i] - (base_view[i] - dc)`, so an
    * element is reached when its base-view position lies within the radius of the cursor — that is,
-   * when `position[i] - base_view[i]` lies within the radius of `location - dc`. Gather every node
-   * whose base-view bounds satisfy that, on top of the nodes the composed-space search already
-   * found. The result is a superset, so the elements the gather adds simply receive their (possibly
-   * zero) factor like any other; what matters is that no element with a NON-zero factor is left in
-   * an ungathered node, which is what carved the stroke along node borders. */
+   * when `position[i] - base_view[i]` lies within the radius of `location - dc`. Per node
+   * `position` is bounded by #Node::bounds_ and `base_view` by the stored offset bounds, so their
+   * difference bounds `position - base_view`: a conservative box for the node in base-view space.
+   * Deriving it here rather than storing it keeps it in step with the live positions, which the
+   * stroke moves dab by dab. #Node::bounds_orig_ is merged in because the "use original" brushes
+   * (every brush with accumulate off) measure their falloff on the pre-stroke positions instead.
+   *
+   * Gather every node that box brings within the radius, on top of the nodes the composed-space
+   * search already found. The result is a superset, so the elements the gather adds simply receive
+   * their (possibly zero) factor like any other; what matters is that no element with a NON-zero
+   * factor is left in an ungathered node, which is what carved the stroke along node borders. */
   const float3 center = ss->cache->location_symm - ss->layers.base_view_dc;
   const float radius_sq = radius * radius;
-  const IndexMask reached = IndexMask::from_predicate(
-      IndexMask(node_bounds.index_range()), memory, [&](const int64_t i) {
-        const Bounds<float3> &bounds = node_bounds[i];
-        if (bounds.min.x > bounds.max.x) {
-          /* Empty: a non-leaf node. */
-          return false;
-        }
-        const float3 nearest = math::clamp(center, bounds.min, bounds.max);
-        return math::distance_squared(nearest, center) < radius_sq;
-      });
-  return IndexMask::from_union(node_mask, reached, memory);
+  const auto reached_nodes = [&](const auto nodes) {
+    return IndexMask::from_predicate(
+        IndexMask(offset_bounds.index_range()), memory, [&](const int64_t i) {
+          const Bounds<float3> &offset = offset_bounds[i];
+          if (offset.min.x > offset.max.x) {
+            /* Empty: a non-leaf node. */
+            return false;
+          }
+          const Bounds<float3> &live = nodes[i].bounds();
+          const Bounds<float3> &orig = nodes[i].bounds_orig();
+          const float3 box_min = math::min(live.min, orig.min) - offset.max;
+          const float3 box_max = math::max(live.max, orig.max) - offset.min;
+          const float3 nearest = math::clamp(center, box_min, box_max);
+          return math::distance_squared(nearest, center) < radius_sq;
+        });
+  };
+  if (pbvh->type() == bke::pbvh::Type::Mesh) {
+    return IndexMask::from_union(
+        node_mask, reached_nodes(pbvh->nodes<bke::pbvh::MeshNode>()), memory);
+  }
+  if (pbvh->type() == bke::pbvh::Type::Grids) {
+    return IndexMask::from_union(
+        node_mask, reached_nodes(pbvh->nodes<bke::pbvh::GridsNode>()), memory);
+  }
+  return node_mask;
 }
 
 /* The base view of a shape-key session, summed straight from the layer data:
@@ -759,7 +801,7 @@ static void base_view_ensure(const Depsgraph &depsgraph, Object &object)
   SculptSession *ss = session_of(object);
   ss->layers.base_view = {};
   ss->layers.base_view_dc = float3(0.0f);
-  ss->layers.base_view_node_bounds = {};
+  ss->layers.base_view_node_offset_bounds = {};
 
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
   if (!pbvh || pbvh->type() == bke::pbvh::Type::BMesh) {
@@ -832,7 +874,7 @@ static void base_view_ensure(const Depsgraph &depsgraph, Object &object)
     }
     ss->layers.base_view = std::move(total);
   }
-  base_view_node_bounds_ensure(depsgraph, object);
+  base_view_node_offset_bounds_ensure(depsgraph, object);
   const auto t1 = std::chrono::high_resolution_clock::now();
   SLP_PERF("[DEBUG-perf] base_view_ensure: %zu elems in %lld us\n",
            size_t(ss->layers.base_view.size()),
@@ -1035,7 +1077,7 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
    * layer later reveals the ghost of what was smoothed away. */
   ss->layers.base_view = {};
   ss->layers.base_view_dc = float3(0.0f);
-  ss->layers.base_view_node_bounds = {};
+  ss->layers.base_view_node_offset_bounds = {};
 
   ss->layers.recording = true;
 
@@ -1058,7 +1100,7 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
    * for multires the tangent frames with it). */
   ss->layers.base_view = {};
   ss->layers.base_view_dc = float3(0.0f);
-  ss->layers.base_view_node_bounds = {};
+  ss->layers.base_view_node_offset_bounds = {};
 
   if (!ss->layers.recording) {
     /* REC off: the stroke edits the base. Mesh folds the stroke into the runtime base using the
@@ -1252,7 +1294,7 @@ void stroke_record_cancel(const Depsgraph &depsgraph, Object &object)
   const bool was_recording = ss->layers.recording;
   ss->layers.base_view = {};
   ss->layers.base_view_dc = float3(0.0f);
-  ss->layers.base_view_node_bounds = {};
+  ss->layers.base_view_node_offset_bounds = {};
 
   if (!was_recording) {
     /* REC off: the regular sculpt undo restores positions; the base was not updated yet. */
@@ -1427,7 +1469,9 @@ void SCULPT_OT_layer_add(wmOperatorType *ot)
   ot->description = "Add a new sculpt layer and make it active";
   ot->exec = layer_add_exec;
   ot->poll = layers_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
@@ -1460,7 +1504,9 @@ void SCULPT_OT_layer_remove(wmOperatorType *ot)
   ot->description = "Remove the active sculpt layer and its contribution";
   ot->exec = layer_remove_exec;
   ot->poll = layers_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 static wmOperatorStatus layer_move_exec(bContext *C, wmOperator *op)
@@ -1500,7 +1546,9 @@ void SCULPT_OT_layer_move(wmOperatorType *ot)
   ot->description = "Move the active sculpt layer up or down in the list";
   ot->exec = layer_move_exec;
   ot->poll = layers_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
   RNA_def_enum(ot->srna, "direction", direction_items, 0, "Direction", "");
 }
 
@@ -1532,7 +1580,9 @@ void SCULPT_OT_layer_duplicate(wmOperatorType *ot)
   ot->description = "Duplicate the active sculpt layer";
   ot->exec = layer_duplicate_exec;
   ot->poll = layers_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
@@ -1597,7 +1647,9 @@ void SCULPT_OT_layer_merge_down(wmOperatorType *ot)
   ot->description = "Merge the active sculpt layer into the one below it";
   ot->exec = layer_merge_down_exec;
   ot->poll = layers_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
@@ -1698,7 +1750,9 @@ void SCULPT_OT_layer_bake(wmOperatorType *ot)
    * existing shape key when the mesh already has one). */
   ot->invoke = layer_bake_invoke;
   ot->poll = layers_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op)
@@ -1828,7 +1882,9 @@ void SCULPT_OT_layer_bake_to_shape_key(wmOperatorType *ot)
    * A custom invoke tailors the message to whether the mesh already has shape keys. */
   ot->invoke = layer_bake_to_shape_key_invoke;
   ot->poll = layers_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 /* "Bake All Layers" choice of #SCULPT_PT_layer_editmode_confirm (see
@@ -1879,7 +1935,10 @@ void SCULPT_OT_layer_bake_and_editmode_enter(wmOperatorType *ot)
    * needed (see #layer_bake_and_editmode_enter_exec), so it must stay callable from any mode the
    * sculpt-layers Edit Mode warning can fire from. */
   ot->poll = ED_operator_object_active_editable_mesh;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No #OPTYPE_UNDO: the delegated operators (#SCULPT_OT_layer_bake, #OBJECT_OT_editmode_toggle)
+   * push their own undo steps; an extra global push would insert a memfile step that does not
+   * compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 static wmOperatorStatus layer_clear_exec(bContext *C, wmOperator *op)
@@ -2280,6 +2339,9 @@ static void influence_drag_finish(bContext *C, wmOperator *op, const bool cancel
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
   pbvh.tag_positions_changed(node_mask);
   pbvh.update_bounds_mesh(mesh.vert_positions());
+  /* Keep the "original" bounds in step with the moved positions; see #recompute_mesh_canonical for
+   * why a stale copy tears the next stroke along node borders. */
+  bke::pbvh::store_bounds_orig(pbvh);
   mesh.bounds_set_eager(bke::pbvh::bounds_get(pbvh));
   if (object.runtime->bounds_eval) {
     object.runtime->bounds_eval = mesh.bounds_min_max();
@@ -2516,7 +2578,8 @@ void SCULPT_OT_layer_influence_drag(wmOperatorType *ot)
   ot->invoke = layer_influence_drag_invoke;
   ot->modal = layer_influence_drag_modal;
   ot->poll = layers_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_BLOCKING;
+  /* No #OPTYPE_UNDO: the metadata sculpt undo step pushed across invoke/finish handles Ctrl+Z. */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_BLOCKING;
 }
 
 static wmOperatorStatus layer_toggle_visibility_exec(bContext *C, wmOperator *op)
@@ -2635,7 +2698,16 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
   if (index < 0 || index >= count) {
     return OPERATOR_CANCELLED;
   }
+  if (index == ctx.mesh->sculpt_layers_active_index) {
+    return OPERATOR_FINISHED;
+  }
+  /* Selection must ride on a sculpt undo step: without one, #OPTYPE_UNDO used to push a plain
+   * memfile step, and undoing across it between two stroke SCULPT steps corrupted the delta-based
+   * sculpt undo state. */
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_sculpt_layer_active_index(*ctx.object, ctx.mesh->sculpt_layers_active_index, index);
   ctx.mesh->sculpt_layers_active_index = index;
+  undo::push_end(*ctx.object);
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -2647,7 +2719,9 @@ void SCULPT_OT_layer_select(wmOperatorType *ot)
   ot->description = "Set the active sculpt layer";
   ot->exec = layer_select_exec;
   ot->poll = layers_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
   RNA_def_int(ot->srna, "index", 0, 0, INT_MAX, "Index", "Index of the layer to make active", 0, INT_MAX);
 }
 

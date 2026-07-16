@@ -350,6 +350,10 @@ struct StepData {
     int move_from = -1;
     int move_to = -1;
 
+    /** Active-layer selection change (-1 when the step is not a selection). */
+    int active_from = -1;
+    int active_to = -1;
+
     /** Solo-base toggle: pre-change flags of every affected layer, swapped with the live flags on
      * undo/redo (the swap is its own inverse, like the single-layer metadata above). */
     Vector<int> solo_uids;
@@ -1168,6 +1172,29 @@ static void refine_subdiv(Depsgraph *depsgraph,
 }
 
 /**
+ * Whether the recorded per-element layer deltas of a mesh (vertex domain) Position step can be
+ * applied: the recorded layer must still exist with a data buffer, and the stored arrays must be
+ * consistent. Used to decide whether the position restore may be delegated to
+ * #restore_active_sculpt_layer (`skip_positions_swap`): if this returns false the plain position
+ * swap must run instead, otherwise the step would silently restore nothing (e.g. when the layer
+ * was removed out-of-band, bypassing the layer operators' undo payloads).
+ */
+static bool can_restore_active_sculpt_layer_mesh(const StepData &step_data, Object &object)
+{
+  if (step_data.sculpt_layer_uid == 0 || step_data.sculpt_layer_grids ||
+      step_data.sculpt_layer_data.is_empty())
+  {
+    return false;
+  }
+  if (step_data.sculpt_layer_verts.size() != step_data.sculpt_layer_data.size()) {
+    return false;
+  }
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, step_data.sculpt_layer_uid);
+  return layer != nullptr && layer->data != nullptr;
+}
+
+/**
  * Sculpt layers: revert or re-apply the explicit per-element deltas recorded for the active
  * layer. The delta is constant, so undo subtracts and redo adds it (no swap needed).
  */
@@ -1222,6 +1249,10 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object)
     return;
   }
   const bool undo = step_data.needs_undo();
+  /* Deliberately the CURRENT effective influence, not the one in force when the stroke was
+   * recorded: every influence change keeps `positions == base + sum(data * effective)` (canonical
+   * recompute or the incremental RNA delta), so the positions embed the recorded delta scaled by
+   * the influence in force NOW, and that is the amount to add or remove. */
   const float influence = bke::sculpt_layers::effective(*layer);
   MutableSpan<float3> positions = mesh.vert_positions_for_write();
 
@@ -1467,6 +1498,17 @@ void push_sculpt_layer_move(Object & /*object*/,
   step_data->sculpt_layer_op.move_to = index_to;
 }
 
+void push_sculpt_layer_active_index(Object & /*object*/, const int index_from, const int index_to)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.active_from = index_from;
+  step_data->sculpt_layer_op.active_to = index_to;
+}
+
 void push_sculpt_layer_metadata(Object & /*object*/, const SculptLayer &layer)
 {
   StepData *step_data = get_step_data();
@@ -1626,6 +1668,17 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
     StepData::SculptLayerOpUndo &op = step_data.sculpt_layer_op;
     const bool is_undo = step_data.needs_undo();
 
+    /* Active-layer selection: pure UI state, no geometry or layer contents involved. Handled
+     * before the base derivation / multires flush below, and returns early so undoing a
+     * selection never pays a canonical position recompute. */
+    if (op.active_from != -1) {
+      const int count = BLI_listbase_count(&mesh.sculpt_layers);
+      const int target = is_undo ? op.active_from : op.active_to;
+      mesh.sculpt_layers_active_index = std::clamp(target, 0, std::max(0, count - 1));
+      WM_event_add_notifier(C, NC_GEOM | ND_DATA, &mesh.id);
+      return;
+    }
+
     /* A previously restored base-stroke step may have left the CCG marked dirty; consume it
      * before the layer set or influences change, otherwise the later flush would reshape the
      * stale composed CCG against the changed layers and leak the difference into the base. */
@@ -1644,9 +1697,20 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         std::swap(layer->flag, op.flag);
         if (op.has_data && layer->data) {
           MutableSpan<float3> cur(static_cast<float3 *>(layer->data), layer->totelem);
-          const int64_t n = std::min<int64_t>(cur.size(), op.data.size());
-          for (int64_t i = 0; i < n; i++) {
-            std::swap(cur[i], op.data[i]);
+          /* All-or-nothing: a size mismatch means the layer was resized between capture and
+           * restore (stale layer / out-of-band edit). A partial swap would leave the buffer as
+           * an inconsistent mix of both states, which no further undo/redo could repair. */
+          if (cur.size() == op.data.size()) {
+            for (int64_t i = 0; i < cur.size(); i++) {
+              std::swap(cur[i], op.data[i]);
+            }
+          }
+          else {
+            CLOG_WARN(&LOG,
+                      "Sculpt layer data size changed since the undo step was captured "
+                      "(%d vs %d); skipping the data restore",
+                      int(cur.size()),
+                      int(op.data.size()));
           }
         }
       }
@@ -1867,7 +1931,17 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         const Mesh &mesh = *id_cast<const Mesh *>(object.data);
         Array<bool> modified_verts(mesh.verts_num, false);
 
-        const bool skip_positions_swap = (step_data.sculpt_layer_uid != 0 && !step_data.sculpt_layer_verts.is_empty());
+        /* Delegate the position restore to #restore_active_sculpt_layer only when the recorded
+         * layer deltas are actually applicable; otherwise fall back to the plain swap so the
+         * positions are still undone (the layer data is gone with the layer in that case). */
+        const bool skip_positions_swap = can_restore_active_sculpt_layer_mesh(step_data, object);
+        if (!skip_positions_swap && step_data.sculpt_layer_uid != 0 &&
+            !step_data.sculpt_layer_verts.is_empty())
+        {
+          CLOG_WARN(&LOG,
+                    "Recorded sculpt-layer deltas not applicable (layer removed out-of-band?); "
+                    "falling back to plain position restore");
+        }
         restore_position_mesh(
             object, *step_data.position_step_storage, modified_verts, skip_positions_swap);
 

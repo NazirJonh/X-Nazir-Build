@@ -21,6 +21,7 @@
 
 #include "BLI_rect.h"
 #include "BLI_time.h"
+#include "BLI_utildefines.h"
 
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
@@ -939,13 +940,15 @@ static GridDragSink grid_drag_sink_for_press(const bContext *C,
   if (!grid_scrollbar_hit(region, event->xy).empty()) {
     return GridDragSink::None;
   }
-  /* A press on a resize/divider grip (popup corner grip, catalog-column divider) belongs to the
-   * grip's own drag, not the drag-scroll machine. Every sink below arms unconditionally on any
-   * press in its region/grid, so without this check the whole-popover/whole-region scroll would
-   * win the same MOUSEMOVE threshold race as the grip's own drag-start and free its active button
-   * first, making the resize very hard to trigger. */
+  /* A press on a resize/divider grip (popup corner grip, catalog-column divider) or on a
+   * non-session scroll bar (e.g. the asset shelf popover's catalog tree, whose bar binds to the
+   * view's own scroll value rather than a #GridSessionState, so #grid_scrollbar_hit above misses
+   * it) belongs to that widget's own drag, not the drag-scroll machine. Every sink below arms
+   * unconditionally on any press in its region/grid, so without this check the
+   * whole-popover/whole-region scroll would win the same MOUSEMOVE threshold race as the widget's
+   * own drag-start and free its active button first, leaving the widget dead. */
   const Button *but_over = but_find_mouse_over(region, event);
-  if (but_over && but_over->type == ButtonType::Grip) {
+  if (but_over && ELEM(but_over->type, ButtonType::Grip, ButtonType::Scroll)) {
     return GridDragSink::None;
   }
   /* A press landing on a session-backed grid tile scrolls that grid (a grip/scrollbar over the

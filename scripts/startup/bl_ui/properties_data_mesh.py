@@ -378,6 +378,7 @@ class DATA_PT_sculpt_layers(MeshButtonsPanel, Panel):
 
         col = row.column(align=True)
         col.operator("sculpt.layer_add", icon='ADD', text="")
+        col.operator("sculpt.layer_group_add", icon='NEWFOLDER', text="")
         col.operator("sculpt.layer_remove", icon='REMOVE', text="")
         col.separator()
         col.menu("MESH_MT_sculpt_layer_context_menu", icon='DOWNARROW_HLT', text="")

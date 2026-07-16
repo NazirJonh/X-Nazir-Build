@@ -44,6 +44,7 @@ namespace blender {
 struct KeyBlock;
 struct Mesh;
 struct SculptLayer;
+struct SculptLayerGroup;
 }  // namespace blender
 
 namespace blender::bke::sculpt_layers {
@@ -89,6 +90,48 @@ const SculptLayer *find_by_uid(const Mesh &mesh, int uid);
 
 /** True when any layer carries the Solo Base marker (see #SCULPT_LAYER_SOLO_HIDDEN). */
 bool solo_active(const Mesh &mesh);
+
+/* -------------------------------------------------------------------------------------------------
+ * Group (folder) list management. The owner is always #Mesh::sculpt_layer_groups.
+ */
+
+/**
+ * Allocate a new group under \a parent_uid (0 = root), give it a unique id and a name unique among
+ * its siblings, and append it to the mesh. Unlike #add there is no "active group" to set: groups are
+ * always addressed explicitly by uid (see the design doc's non-goals).
+ */
+SculptLayerGroup *group_add(Mesh &mesh, const char *name, int parent_uid);
+
+/**
+ * Remove \a group from the mesh and free it. Only the group node itself: its direct children are
+ * *not* touched, so the caller must reparent them first (see #SCULPT_OT_layer_group_remove), or they
+ * would keep naming a uid that no longer resolves.
+ */
+void group_remove(Mesh &mesh, SculptLayerGroup &group);
+
+/** Find a group by its stable unique id, or null. Uid 0 means "the root" and always returns null. */
+SculptLayerGroup *group_find_by_uid(Mesh &mesh, int uid);
+const SculptLayerGroup *group_find_by_uid(const Mesh &mesh, int uid);
+
+/**
+ * True when \a group is \a ancestor itself or sits anywhere below it in the tree. Used to reject a
+ * drop of a group into its own subtree, which would detach that subtree into a cycle unreachable
+ * from the root. Walks the #SculptLayerGroup::parent_uid chain, and is bounded by the number of
+ * groups even if the stored data somehow already contains a cycle.
+ */
+bool group_is_descendant_of(const Mesh &mesh, const SculptLayerGroup &group, int ancestor_uid);
+
+/**
+ * Make \a group's name unique among its siblings — the groups sharing its #parent_uid — rather than
+ * across the whole list. #BLI_uniquename cannot express that: it walks one flat #ListBase, whereas
+ * #Mesh::sculpt_layer_groups holds every level of the tree at once, so it would rename a group that
+ * merely shares a name with one in a different folder.
+ *
+ * Public rather than internal to #group_add because the RNA name setter needs the identical rule —
+ * a second, subtly different spelling of "unique among siblings" is exactly the kind of drift that
+ * makes two paths disagree about what a legal name is.
+ */
+void group_name_ensure_unique(const Mesh &mesh, SculptLayerGroup &group);
 
 /* -------------------------------------------------------------------------------------------------
  * Data buffers.
@@ -157,8 +200,34 @@ void apply_delta_mesh(const SculptLayer &layer, float factor, MutableSpan<float3
  * semantics is a one-line edit here rather than a scattered rewrite. The per-context composition
  * math (object-space vertex add, tangent-space grid add, the GPU drag shader) stays specialized by
  * necessity, but the *weight* they multiply by always comes from here.
+ *
+ * The weight also accounts for the folder cascade (#SCULPT_LAYER_GROUP_HIDDEN, maintained by
+ * #resync_group_hidden), so a caller that tests #SCULPT_LAYER_ENABLED itself instead of routing
+ * through here silently ignores folder visibility.
  */
 float effective(const SculptLayer &layer);
+
+/**
+ * Recompute every layer's #SCULPT_LAYER_GROUP_HIDDEN bit from the current folder tree: a layer is
+ * group-hidden exactly when any group on its #SculptLayer::group_uid → #SculptLayerGroup::parent_uid
+ * chain is disabled. Call after every mutation of the tree (create / remove / reparent / toggle a
+ * group), and record the resulting flag changes for undo (see #push_sculpt_layer_flags_batch).
+ *
+ * A full recompute rather than an incremental toggle, because nesting makes an incremental flag
+ * wrong in principle: with a disabled group B inside a disabled group A, one bit on the layer cannot
+ * remember "hidden by A" apart from "hidden by B", so re-enabling A alone would wrongly reveal B's
+ * layers. A recompute depends only on the current tree, never on the history that produced it.
+ *
+ * Each group's effective state is memoized, so the cost does not grow with nesting depth — the tree
+ * is walked once, not once per layer. The uid lookups themselves are linear scans, making this
+ * quadratic in the number of groups; that is fine here, where groups are few, hand-made, and this
+ * runs on a folder mutation rather than on a brush dab.
+ *
+ * Only ever writes #SCULPT_LAYER_GROUP_HIDDEN on existing layers: it adds nothing to either list,
+ * removes nothing, and reorders nothing. Callers rely on that to diff the flags before and after by
+ * walking the same list twice (see the editor's `group_cascade_resync_with_undo`).
+ */
+void resync_group_hidden(Mesh &mesh);
 
 /**
  * Recompute combined vertex positions from an un-layered base:
@@ -289,5 +358,16 @@ void copy_list(ListBaseT<SculptLayer> *dst, const ListBaseT<SculptLayer> *src);
 void free_list(ListBaseT<SculptLayer> *layers);
 void blend_write(BlendWriter *writer, ListBaseT<SculptLayer> *layers);
 void blend_read(BlendDataReader *reader, ListBaseT<SculptLayer> *layers);
+
+/**
+ * The same four ID lifetime helpers for #Mesh::sculpt_layer_groups. Groups own no data buffer, so
+ * these are simpler than the layer versions, but they follow the same allocation contract: nodes
+ * come from #MEM_new (#group_add, #group_copy_list) or C-style from the blend-file reader
+ * (#group_blend_read), and are therefore freed with #MEM_delete_void, which accepts both.
+ */
+void group_copy_list(ListBaseT<SculptLayerGroup> *dst, const ListBaseT<SculptLayerGroup> *src);
+void group_free_list(ListBaseT<SculptLayerGroup> *groups);
+void group_blend_write(BlendWriter *writer, ListBaseT<SculptLayerGroup> *groups);
+void group_blend_read(BlendDataReader *reader, ListBaseT<SculptLayerGroup> *groups);
 
 }  // namespace blender::bke::sculpt_layers

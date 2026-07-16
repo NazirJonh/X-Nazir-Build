@@ -1570,6 +1570,9 @@ void operatortypes_sculpt()
   WM_operatortype_append(layers::SCULPT_OT_layer_select);
   WM_operatortype_append(layers::SCULPT_OT_layer_toggle_rec);
   WM_operatortype_append(layers::SCULPT_OT_layer_solo_base);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_add);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_remove);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_toggle_visibility);
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

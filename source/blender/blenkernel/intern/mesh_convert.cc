@@ -1184,6 +1184,9 @@ void BKE_mesh_nomain_to_mesh(Mesh *mesh_src, Mesh *mesh_dst, Object *ob, bool pr
   if (verts_num_changed && !BLI_listbase_is_empty(&mesh_dst->sculpt_layers)) {
     CLOG_WARN(&LOG, "Sculpt layer data lost when replacing mesh '%s' in Main", mesh_src->id.name);
     blender::bke::sculpt_layers::free_list(&mesh_dst->sculpt_layers);
+    /* The groups only exist to organize the layers, so keeping them would leave a tree of empty
+     * folders behind. */
+    blender::bke::sculpt_layers::group_free_list(&mesh_dst->sculpt_layer_groups);
     mesh_dst->sculpt_layers_active_uid = 0;
   }
 

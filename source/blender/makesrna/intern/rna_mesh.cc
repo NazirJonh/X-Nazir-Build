@@ -287,6 +287,35 @@ static void rna_SculptLayer_name_set(PointerRNA *ptr, const char *value)
                  sizeof(layer->name));
 }
 
+static void rna_Mesh_sculpt_layer_groups_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  rna_iterator_listbase_begin(iter, ptr, &mesh->sculpt_layer_groups, nullptr);
+}
+
+static int rna_Mesh_sculpt_layer_groups_length(PointerRNA *ptr)
+{
+  return BLI_listbase_count(&rna_mesh(ptr)->sculpt_layer_groups);
+}
+
+static std::optional<std::string> rna_SculptLayerGroup_path(const PointerRNA *ptr)
+{
+  const SculptLayerGroup *group = static_cast<const SculptLayerGroup *>(ptr->data);
+  char name_esc[sizeof(group->name) * 2];
+  BLI_str_escape(name_esc, group->name, sizeof(name_esc));
+  return fmt::format("sculpt_layer_groups[\"{}\"]", name_esc);
+}
+
+static void rna_SculptLayerGroup_name_set(PointerRNA *ptr, const char *value)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  SculptLayerGroup *group = static_cast<SculptLayerGroup *>(ptr->data);
+  STRNCPY_UTF8(group->name, value);
+  /* Unique among siblings only — the same single authority #group_add uses, so the two paths cannot
+   * drift apart on what a legal name is. */
+  bke::sculpt_layers::group_name_ensure_unique(*mesh, *group);
+}
+
 /* [DEBUG-perf] Per-tick timing for the Sculpt Layers influence slider hot path. Tied to the
  * module-wide #SCULPT_LAYERS_DEBUG_LOG switch (see `BKE_sculpt_layers.hh`). */
 #  define SCULPT_LAYERS_RNA_DEBUG_PERF SCULPT_LAYERS_DEBUG_LOG
@@ -3243,6 +3272,54 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_LAYER_SELECTED);
   RNA_def_property_ui_text(
       prop, "Select", "Sculpt layer selection state, used for drag and drop reordering");
+
+  prop = RNA_def_property(srna, "group", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "group_uid");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Group",
+                           "Unique id of the group containing this layer, 0 when it sits at the "
+                           "root. Read-only: reparenting goes through the sculpt.layer_move_to / "
+                           "sculpt.layer_group_add / sculpt.layer_group_remove operators, which "
+                           "keep the visibility cascade and undo in step");
+}
+
+static void rna_def_sculpt_layer_group(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SculptLayerGroup", nullptr);
+  RNA_def_struct_sdna(srna, "SculptLayerGroup");
+  RNA_def_struct_ui_text(
+      srna, "Sculpt Layer Group", "A folder organizing sculpt layers in the tree view");
+  RNA_def_struct_path_func(srna, "rna_SculptLayerGroup_path");
+  /* Same invariant as #SculptLayer: edits ride on sculpt undo steps pushed by the operators, and a
+   * memfile step from a plain RNA edit would not compose with the stroke SCULPT steps. */
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_SculptLayerGroup_name_set");
+  RNA_def_property_ui_text(prop, "Name", "Name of the sculpt layer group");
+  RNA_def_struct_name_property(srna, prop);
+
+  prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_LAYER_GROUP_ENABLED);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  /* No setter: a bare flag write would bypass #resync_group_hidden and leave every descendant
+   * layer's #SCULPT_LAYER_GROUP_HIDDEN bit out of sync with the tree, and it would not push the
+   * sculpt undo step the cascade needs. #SCULPT_OT_layer_group_toggle_visibility is the only path. */
+  RNA_def_property_ui_text(
+      prop, "Enabled", "Show the sculpt layers inside this group and its subgroups");
+
+  prop = RNA_def_property(srna, "select", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_LAYER_GROUP_SELECTED);
+  RNA_def_property_ui_text(
+      prop, "Select", "Sculpt layer group selection state, used for drag and drop reordering");
+
+  prop = RNA_def_property(srna, "is_expanded", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_LAYER_GROUP_EXPANDED);
+  RNA_def_property_ui_text(prop, "Expanded", "Group is expanded in the tree view");
 }
 
 static void rna_def_mesh(BlenderRNA *brna)
@@ -3725,6 +3802,21 @@ static void rna_def_mesh(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Sculpt Layers", "Non-destructive sculpt layers combined onto the base geometry");
 
+  prop = RNA_def_property(srna, "sculpt_layer_groups", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Mesh_sculpt_layer_groups_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    "rna_Mesh_sculpt_layer_groups_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_struct_type(prop, "SculptLayerGroup");
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
+  RNA_def_property_ui_text(
+      prop, "Sculpt Layer Groups", "Folders organizing the mesh's sculpt layers");
+
   prop = RNA_def_property(srna, "sculpt_layers_active", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "SculptLayer");
   RNA_def_property_pointer_funcs(prop,
@@ -3763,6 +3855,7 @@ void RNA_def_mesh(BlenderRNA *brna)
   rna_def_mloopuv(brna);
   rna_def_mloopcol(brna);
   rna_def_sculpt_layer(brna);
+  rna_def_sculpt_layer_group(brna);
 }
 
 }  // namespace blender

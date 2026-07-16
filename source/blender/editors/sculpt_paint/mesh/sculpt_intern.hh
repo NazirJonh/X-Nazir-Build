@@ -1045,9 +1045,10 @@ namespace ed::sculpt_paint::layers {
 bool is_supported(const Object &object);
 /**
  * True when the layer system actually shapes this object's surface right now: recording is armed,
- * or at least one layer is enabled (so the composed surface differs from the base). Brushes that
- * cannot work with a composed surface — the cloth simulation, whose constraints and simulation-area
- * falloff are solved on it — are rejected in this state (see #sculpt_brush_stroke_invoke).
+ * or at least one layer is enabled and not hidden by a disabled folder (so the composed surface
+ * differs from the base). Brushes that cannot work with a composed surface — the cloth
+ * simulation, whose constraints and simulation-area falloff are solved on it — are rejected in
+ * this state (see #sculpt_brush_stroke_invoke).
  */
 bool in_use(const Object &object);
 /** Element domain (#SCULPT_LAYER_DOMAIN_VERT / #SCULPT_LAYER_DOMAIN_GRID) for the sculpt target. */
@@ -1186,6 +1187,14 @@ void commit_layers_change(const Depsgraph &depsgraph, Object &object);
  */
 void flush_pending_multires_base(Object &object);
 
+/** Where #SCULPT_OT_layer_move_to places the moved items relative to its anchor. Values are the
+ * operator's `location` enum property, set from #ui::DropLocation by the tree view. */
+enum class MoveLocation : int {
+  Before = 0,
+  After = 1,
+  Into = 2,
+};
+
 /* Operators. */
 void SCULPT_OT_layer_add(wmOperatorType *ot);
 void SCULPT_OT_layer_remove(wmOperatorType *ot);
@@ -1207,6 +1216,9 @@ void SCULPT_OT_layer_toggle_visibility(wmOperatorType *ot);
 void SCULPT_OT_layer_select(wmOperatorType *ot);
 void SCULPT_OT_layer_toggle_rec(wmOperatorType *ot);
 void SCULPT_OT_layer_solo_base(wmOperatorType *ot);
+void SCULPT_OT_layer_group_add(wmOperatorType *ot);
+void SCULPT_OT_layer_group_remove(wmOperatorType *ot);
+void SCULPT_OT_layer_group_toggle_visibility(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint::layers
 

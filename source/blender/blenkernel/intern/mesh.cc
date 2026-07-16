@@ -200,6 +200,8 @@ static void mesh_copy_data(Main *bmain,
 
   BKE_defgroup_copy_list(&mesh_dst->vertex_group_names, &mesh_src->vertex_group_names);
   blender::bke::sculpt_layers::copy_list(&mesh_dst->sculpt_layers, &mesh_src->sculpt_layers);
+  blender::bke::sculpt_layers::group_copy_list(&mesh_dst->sculpt_layer_groups,
+                                               &mesh_src->sculpt_layer_groups);
   /* The copied layers keep their uids, so the active one carries over by identity. */
   mesh_dst->sculpt_layers_active_uid = mesh_src->sculpt_layers_active_uid;
   mesh_dst->active_color_attribute = static_cast<char *>(
@@ -260,6 +262,7 @@ static void mesh_free_data(ID *id)
   CustomData_free(&mesh->face_data);
   mesh->vertex_group_names.free_no_destruct();
   blender::bke::sculpt_layers::free_list(&mesh->sculpt_layers);
+  blender::bke::sculpt_layers::group_free_list(&mesh->sculpt_layer_groups);
   MEM_SAFE_DELETE(mesh->active_color_attribute);
   MEM_SAFE_DELETE(mesh->default_color_attribute);
   MEM_SAFE_DELETE(mesh->active_uv_map_attribute);
@@ -394,6 +397,7 @@ static void mesh_blend_write(BlendWriter *writer, ID *id, const void *id_address
 
   BKE_defbase_blend_write(writer, &mesh->vertex_group_names);
   blender::bke::sculpt_layers::blend_write(writer, &mesh->sculpt_layers);
+  blender::bke::sculpt_layers::group_blend_write(writer, &mesh->sculpt_layer_groups);
   writer->write_string(mesh->active_color_attribute);
   writer->write_string(mesh->default_color_attribute);
   writer->write_string(mesh->active_uv_map_attribute);
@@ -454,6 +458,7 @@ static void mesh_blend_read_data(BlendDataReader *reader, ID *id)
 
   BLO_read_struct_list(reader, bDeformGroup, &mesh->vertex_group_names);
   blender::bke::sculpt_layers::blend_read(reader, &mesh->sculpt_layers);
+  blender::bke::sculpt_layers::group_blend_read(reader, &mesh->sculpt_layer_groups);
 
   CustomData_blend_read(reader, &mesh->vert_data, mesh->verts_num);
   CustomData_blend_read(reader, &mesh->edge_data, mesh->edges_num);

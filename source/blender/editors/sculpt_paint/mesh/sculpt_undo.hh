@@ -18,6 +18,7 @@
 #include "BLI_vector.hh"
 
 struct SculptLayer;
+struct SculptLayerGroup;
 
 namespace blender {
 
@@ -126,12 +127,16 @@ void push_sculpt_layer_metadata(Object &object, const SculptLayer &layer);
 void push_sculpt_layer_data(Object &object, const SculptLayer &layer);
 
 /**
- * Solo Base toggle: push a #Type::SculptLayer undo step that captures the pre-change flags of
- * every layer the toggle modifies (\a uids and \a flags run in parallel and are consumed).
- * Undo/redo swaps the stored flags with the live ones. Call between #push_begin and #push_end,
- * before the flags are modified.
+ * Push a #Type::SculptLayer undo step that captures the pre-change #SculptLayer::flag of a set of
+ * layers (\a uids and \a flags run in parallel and are consumed). Undo/redo swaps the stored flags
+ * with the live ones, which is its own inverse.
+ *
+ * A plain batch flag swap, not tied to any one feature: the Solo Base toggle uses it to hide every
+ * enabled layer at once, and the folder cascade uses it to record the #SCULPT_LAYER_GROUP_HIDDEN
+ * bits #bke::sculpt_layers::resync_group_hidden recomputed. Capture the flags before they are
+ * modified, and call between #push_begin and #push_end.
  */
-void push_sculpt_layer_solo(Object &object, Vector<int> &&uids, Vector<int> &&flags);
+void push_sculpt_layer_flags_batch(Object &object, Vector<int> &&uids, Vector<int> &&flags);
 
 /**
  * Full snapshot of a sculpt layer for undoing layer-list changes (add / remove / duplicate /
@@ -144,6 +149,13 @@ struct SculptLayerUndoPayload {
   int flag = 0;
   int totelem = 0;
   int uid = 0;
+  /**
+   * The group the layer belonged to (0 when it sat at the root). Must be carried like any other
+   * layer field: without it, re-insertion re-creates the layer with the DNA default and undo
+   * silently re-parents it to the root, while its restored #flag may still carry
+   * #SCULPT_LAYER_GROUP_HIDDEN for a group it no longer belongs to.
+   */
+  int group_uid = 0;
   short domain = 0;
   short level = 0;
   /**
@@ -219,26 +231,36 @@ void push_sculpt_layer_bake_shape_key(Object &object, int key_uid);
 void push_sculpt_layer_bake_to_shape_key(Object &object, short pre_bake_shapenr);
 
 /**
- * One layer's reorder within a #push_sculpt_layer_move batch: the uid of the moved layer, and the
- * uid of the layer it followed before (\a prev_from) and after (\a prev_to) the move, 0 meaning
- * the head of the list — see #SculptLayerUndoPayload::prev_uid for why a neighbour rather than an
- * index.
+ * One item's move within a #push_sculpt_layer_reparent batch. Covers both halves of a move at once,
+ * because they are the same thing recorded twice otherwise: where the item sits among its siblings
+ * (\a prev_from / \a prev_to) and which folder contains it (\a group_from / \a group_to). A plain
+ * reorder simply leaves the group fields equal.
  */
-struct LayerMove {
+struct ReparentMove {
   int uid = 0;
+  /** true: #uid resolves in #Mesh::sculpt_layer_groups, false: in #Mesh::sculpt_layers. */
+  bool is_group = false;
+  /** Sibling anchor before / after the move, within whichever list #is_group selects (0 = head).
+   * A neighbour rather than an index, see #SculptLayerUndoPayload::prev_uid. */
   int prev_from = 0;
   int prev_to = 0;
+  /** Containing #SculptLayerGroup::uid before / after the move (0 = root). */
+  int group_from = 0;
+  int group_to = 0;
 };
 
 /**
- * Sculpt layer operators: record one or more layer reorders (move up/down, or a multi-select
- * drag and drop) into the current #Type::SculptLayer undo step as a single batch — one undo step
- * moves every listed layer. \a moves must be in the order the layers were captured (their
- * relative order before the move); #restore_list re-applies them in that same order on both undo
- * and redo, since each entry's anchor may itself be another entry in the same batch (mirrors
- * #SculptLayerUndoPayload::prev_uid).
+ * Sculpt layer operators: record one or more item moves (reorder, reparent, or both at once) into
+ * the current #Type::SculptLayer undo step as a single batch — one undo step moves every listed
+ * item. \a moves must be in the order the items were captured (their relative order before the
+ * move); #restore_list re-applies them in that same order on both undo and redo, since each entry's
+ * anchor may itself be another entry in the same batch (mirrors #SculptLayerUndoPayload::prev_uid).
+ *
+ * The batch only restores positions and parent tags. A reparent that changes what is visible must
+ * additionally record the recomputed flags (#push_sculpt_layer_flags_batch), since
+ * #SCULPT_LAYER_GROUP_HIDDEN is derived state that this batch does not recompute.
  */
-void push_sculpt_layer_move(Object &object, Vector<LayerMove> &&moves);
+void push_sculpt_layer_reparent(Object &object, Vector<ReparentMove> &&moves);
 
 /**
  * Sculpt layer operators: record an active-layer selection change (pure UI state) into the
@@ -247,6 +269,45 @@ void push_sculpt_layer_move(Object &object, Vector<LayerMove> &&moves);
  * SCULPT steps.
  */
 void push_sculpt_layer_active(Object &object, int uid_from, int uid_to);
+
+/**
+ * Full snapshot of a sculpt layer group for undoing group-list changes (create / remove). The
+ * mirror of #SculptLayerUndoPayload, minus the data buffer a group does not have — so it is plain
+ * copyable, no rule of five needed.
+ */
+struct SculptLayerGroupUndoPayload {
+  std::string name;
+  int flag = 0;
+  int uid = 0;
+  int parent_uid = 0;
+  /** Where the group sat in #Mesh::sculpt_layer_groups, as the uid of the group it followed (0 when
+   * it was the head). Re-insertion goes after that group — see #SculptLayerUndoPayload::prev_uid. */
+  int prev_uid = 0;
+};
+
+/** Capture \a group into a payload. The group itself is left in the mesh list untouched. */
+SculptLayerGroupUndoPayload sculpt_layer_group_payload_capture(Mesh &mesh,
+                                                               const SculptLayerGroup &group);
+
+/**
+ * Sculpt layer operators: push a #Type::SculptLayer undo step capturing one group's metadata (name +
+ * flag) for reversible rename / visibility changes. The group counterpart of
+ * #push_sculpt_layer_metadata — it cannot be reused as is, because the uid resolves in a different
+ * list. Capture before the change: undo/redo swaps the stored metadata with the live one. Call
+ * between #push_begin and #push_end.
+ */
+void push_sculpt_layer_group_metadata(Object &object, const SculptLayerGroup &group);
+
+/**
+ * Sculpt layer operators: record a group-list change into the current #Type::SculptLayer undo step.
+ * \a removed holds payloads of groups the operator removes, \a added_uids the uids of groups it
+ * adds. On undo, removed payloads are re-inserted and added groups are extracted into the step (and
+ * vice versa on redo) — the group mirror of #push_sculpt_layer_list_change. Call between
+ * #push_begin and #push_end.
+ */
+void push_sculpt_layer_group_list_change(Object &object,
+                                         Vector<SculptLayerGroupUndoPayload> &&removed,
+                                         Vector<int> &&added_uids);
 
 /**
  * Sculpt layers (mesh/vertex domain): iterate the unique vertices recorded into the in-progress

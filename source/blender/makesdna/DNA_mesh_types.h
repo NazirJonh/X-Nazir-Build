@@ -159,6 +159,15 @@ enum eSculptLayerFlag : int {
    * this selection. Never versioned: a new bit in an existing #flag reads as unset from old files.
    */
   SCULPT_LAYER_SELECTED = 1 << 3,
+  /**
+   * Set when any ancestor group (following the #SculptLayer::group_uid →
+   * #SculptLayerGroup::parent_uid chain) is currently disabled. Maintained by
+   * #bke::sculpt_layers::resync_group_hidden and consulted by #bke::sculpt_layers::effective; the
+   * layer's own #SCULPT_LAYER_ENABLED bit is left untouched, so re-enabling the ancestor restores
+   * exactly what was visible before — the same convention as #SCULPT_LAYER_SOLO_HIDDEN. Never
+   * versioned: a new bit in an existing #flag reads as unset from old files.
+   */
+  SCULPT_LAYER_GROUP_HIDDEN = 1 << 4,
 };
 ENUM_OPERATORS(eSculptLayerFlag)
 
@@ -209,9 +218,67 @@ struct SculptLayer {
    * this invariant. Mirrors #MDisps.level. Unused (0) for the vertex domain.
    */
   short level = 0;
-  char _pad[4] = {};
+  /**
+   * #SculptLayerGroup::uid of the containing group, or 0 when the layer sits at the tree root.
+   *
+   * Placed in what used to be explicit padding rather than appended after #uid: the four bytes are
+   * exactly an #int, so neither the size nor the alignment of #SculptLayer changes and #data keeps
+   * its offset — no versioning is needed, and old files read the field back as 0 (root) because
+   * padding bytes are written as zeros. The same trick #Mesh::sculpt_layers_active_uid used on the
+   * padding after `vertex_group_active_index` (see `versioning_530.cc:75-76`). Inserting it after
+   * #uid instead would shift #domain/#level/#data and require real versioning.
+   */
+  int group_uid = 0;
   /** `float3[totelem]` array of per-element displacement deltas. May be null (treated as zeros). */
   void *data = nullptr;
+};
+
+/** #SculptLayerGroup.flag */
+enum eSculptLayerGroupFlag : int {
+  /**
+   * The group's own enabled state. Descendant layers are not edited when this changes; instead
+   * #bke::sculpt_layers::resync_group_hidden folds the whole ancestor chain into their
+   * #SCULPT_LAYER_GROUP_HIDDEN bit, so a group can be re-enabled without having to remember what
+   * each descendant's own state was.
+   */
+  SCULPT_LAYER_GROUP_ENABLED = 1 << 0,
+  /** Row selected in the tree view. Pure UI state, same semantics as #SCULPT_LAYER_SELECTED. */
+  SCULPT_LAYER_GROUP_SELECTED = 1 << 1,
+  /**
+   * Tree-view expanded (as opposed to collapsed) state. Persisted rather than kept as view-only
+   * runtime state — matching the #GP_LAYER_TREE_NODE_EXPANDED precedent — so it survives a file
+   * save and stays consistent across every window showing the tree. New groups start expanded.
+   */
+  SCULPT_LAYER_GROUP_EXPANDED = 1 << 2,
+};
+ENUM_OPERATORS(eSculptLayerGroupFlag)
+
+/**
+ * A folder in the sculpt layer tree, owned by #Mesh::sculpt_layer_groups and persisted in blend
+ * files.
+ *
+ * Groups exist for organization only: they carry no displacement data and take no part in the
+ * `position = base + sum(layer.data[i] * effective(layer))` model, which stays purely additive and
+ * order-independent. The one thing a group affects is the boolean visibility cascade (see
+ * #bke::sculpt_layers::resync_group_hidden).
+ *
+ * The tree is expressed with parent tags rather than nested lists: a group names its parent through
+ * #parent_uid and a layer names its containing group through #SculptLayer::group_uid. This keeps
+ * #bke::sculpt_layers::effective — the single choke point on the per-vertex/grid evaluation hot
+ * path — a flag test rather than a walk up a group chain.
+ */
+struct SculptLayerGroup {
+  SculptLayerGroup *next = nullptr;
+  SculptLayerGroup *prev = nullptr;
+  /** MAX_NAME. Unique among sibling groups only; groups and layers do not share a namespace. */
+  char name[64] = {};
+  /** #eSculptLayerGroupFlag. */
+  int flag = SCULPT_LAYER_GROUP_ENABLED | SCULPT_LAYER_GROUP_EXPANDED;
+  /** Unique identifier, stable across reordering. Own counter, separate from #SculptLayer::uid. */
+  int uid = 0;
+  /** #SculptLayerGroup::uid of the containing group, or 0 for a root-level group. */
+  int parent_uid = 0;
+  char _pad[4] = {};
 };
 
 struct Mesh {
@@ -286,6 +353,19 @@ struct Mesh {
    * deltas that are combined additively with the base geometry, scaled by a per-layer influence.
    */
   ListBaseT<SculptLayer> sculpt_layers = {nullptr, nullptr};
+  /**
+   * Non-destructive sculpt layer groups (#SculptLayerGroup): the folder tree the layers are
+   * organized into. Purely additive growth of the ID struct — absent from old files, which read it
+   * back as an empty list, exactly how #sculpt_layers itself was once added. No versioning needed.
+   *
+   * Sits right after #sculpt_layers rather than after `sculpt_layers_active_index`: that field and
+   * `attributes_active_index` are a pair of ints whose combined 8 bytes is what puts the following
+   * `mselect` pointer on an 8-byte boundary. A 16-byte ListBase between them would split the pair
+   * and makesdna would refuse to build (it demands explicit padding, it never inserts any).
+   * Here both neighbours are already 8-aligned, so the struct grows by exactly 16 bytes and needs
+   * no new padding at all.
+   */
+  ListBaseT<SculptLayerGroup> sculpt_layer_groups = {nullptr, nullptr};
   /**
    * Deprecated position of the active sculpt layer, replaced by #sculpt_layers_active_uid. Only
    * read by versioning, which translates it into a uid; kept because the translation needs the

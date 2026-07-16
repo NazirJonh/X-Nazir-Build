@@ -365,10 +365,22 @@ struct StepData {
      * from the freshly rebuilt key's block index on redo. */
     short pre_bake_shapenr = 1;
 
-    /** Layer reorder batch (move up/down, or a multi-select drag and drop): empty when the step
-     * is not a move. See #LayerMove for why each entry anchors to a neighbour uid rather than a
-     * position. */
-    Vector<LayerMove> moves;
+    /** Item move batch (reorder, reparent, or both): empty when the step is not a move. See
+     * #ReparentMove for why each entry anchors to a neighbour uid rather than a position. */
+    Vector<ReparentMove> moves;
+
+    /** Group metadata swap: 0 when the step touches no group's metadata. Kept apart from #uid,
+     * which keys into #Mesh::sculpt_layers — the two uid namespaces are separate. */
+    int group_uid = 0;
+    std::string group_name;
+    int group_flag = 0;
+
+    /** Groups the operator removed / added, mirroring #removed / #added for layers exactly —
+     * including #groups_added holding payloads rather than bare uids: the payload is the buffer the
+     * restore extracts a group *into*, so redo can insert it back (see #push_sculpt_layer_group_list_change,
+     * which fills them from uids, and the restore branch in #restore_list). */
+    Vector<SculptLayerGroupUndoPayload> groups_removed;
+    Vector<SculptLayerGroupUndoPayload> groups_added;
 
     /** Active-layer selection change: the active uid before and after (0 = no active layer, which
      * is a legal value on both sides — hence the separate flag rather than a sentinel). */
@@ -376,10 +388,10 @@ struct StepData {
     int active_uid_from = 0;
     int active_uid_to = 0;
 
-    /** Solo-base toggle: pre-change flags of every affected layer, swapped with the live flags on
-     * undo/redo (the swap is its own inverse, like the single-layer metadata above). */
-    Vector<int> solo_uids;
-    Vector<int> solo_flags;
+    /** Batch flag swap (Solo Base, folder visibility cascade): pre-change flags of the affected
+     * layers, swapped with the live ones. See #push_sculpt_layer_flags_batch. */
+    Vector<int> flags_batch_uids;
+    Vector<int> flags_batch_flags;
   } sculpt_layer_op;
 
   /** Whether processing code needs to handle the current data as an undo step. */
@@ -1363,6 +1375,7 @@ SculptLayerUndoPayload::SculptLayerUndoPayload(SculptLayerUndoPayload &&other) n
       flag(other.flag),
       totelem(other.totelem),
       uid(other.uid),
+      group_uid(other.group_uid),
       domain(other.domain),
       level(other.level),
       prev_uid(other.prev_uid),
@@ -1382,6 +1395,7 @@ SculptLayerUndoPayload &SculptLayerUndoPayload::operator=(SculptLayerUndoPayload
     flag = other.flag;
     totelem = other.totelem;
     uid = other.uid;
+    group_uid = other.group_uid;
     domain = other.domain;
     level = other.level;
     prev_uid = other.prev_uid;
@@ -1408,6 +1422,7 @@ static void payload_metadata_from_layer(SculptLayerUndoPayload &payload, const S
   payload.flag = layer.flag;
   payload.totelem = layer.totelem;
   payload.uid = layer.uid;
+  payload.group_uid = layer.group_uid;
   payload.domain = layer.domain;
   payload.level = layer.level;
 }
@@ -1419,6 +1434,7 @@ static void layer_metadata_from_payload(SculptLayer &layer, const SculptLayerUnd
   layer.flag = payload.flag;
   layer.totelem = payload.totelem;
   layer.uid = payload.uid;
+  layer.group_uid = payload.group_uid;
   layer.domain = payload.domain;
   layer.level = payload.level;
 }
@@ -1472,6 +1488,42 @@ static bool sculpt_layer_payload_extract(Mesh &mesh, SculptLayerUndoPayload &pay
   return true;
 }
 
+/* Re-create a group from \a payload and insert it back after its recorded neighbour. The group
+ * mirror of #sculpt_layer_payload_insert, minus the data buffer a group does not own. */
+static void sculpt_layer_group_payload_insert(Mesh &mesh, SculptLayerGroupUndoPayload &payload)
+{
+  SculptLayerGroup *group = MEM_new<SculptLayerGroup>(__func__);
+  STRNCPY_UTF8(group->name, payload.name.c_str());
+  group->flag = payload.flag;
+  group->uid = payload.uid;
+  group->parent_uid = payload.parent_uid;
+
+  if (SculptLayerGroup *after = bke::sculpt_layers::group_find_by_uid(mesh, payload.prev_uid)) {
+    BLI_insertlinkafter(&mesh.sculpt_layer_groups, after, group);
+  }
+  else {
+    /* Either it was the head, or the group it followed is gone too (removed by a later step that is
+     * not being undone). The head is the closest surviving approximation of where it sat. */
+    BLI_addhead(&mesh.sculpt_layer_groups, group);
+  }
+}
+
+/* Pull the group identified by `payload.uid` out of the mesh list back into \a payload. Returns
+ * false when the group is missing. The group mirror of #sculpt_layer_payload_extract. */
+static bool sculpt_layer_group_payload_extract(Mesh &mesh, SculptLayerGroupUndoPayload &payload)
+{
+  SculptLayerGroup *group = bke::sculpt_layers::group_find_by_uid(mesh, payload.uid);
+  if (!group) {
+    return false;
+  }
+  payload.name = group->name;
+  payload.flag = group->flag;
+  payload.parent_uid = group->parent_uid;
+  payload.prev_uid = group->prev ? group->prev->uid : 0;
+  bke::sculpt_layers::group_remove(mesh, *group);
+  return true;
+}
+
 void push_sculpt_layer_list_change(Object & /*object*/,
                                    Vector<SculptLayerUndoPayload> &&removed,
                                    Vector<int> &&added_uids,
@@ -1511,7 +1563,7 @@ void push_sculpt_layer_bake_to_shape_key(Object & /*object*/, const short pre_ba
   step_data->sculpt_layer_op.pre_bake_shapenr = pre_bake_shapenr;
 }
 
-void push_sculpt_layer_move(Object & /*object*/, Vector<LayerMove> &&moves)
+void push_sculpt_layer_reparent(Object & /*object*/, Vector<ReparentMove> &&moves)
 {
   StepData *step_data = get_step_data();
   if (!step_data) {
@@ -1547,7 +1599,52 @@ void push_sculpt_layer_metadata(Object & /*object*/, const SculptLayer &layer)
   step_data->sculpt_layer_op.has_data = false;
 }
 
-void push_sculpt_layer_solo(Object & /*object*/, Vector<int> &&uids, Vector<int> &&flags)
+SculptLayerGroupUndoPayload sculpt_layer_group_payload_capture(Mesh & /*mesh*/,
+                                                               const SculptLayerGroup &group)
+{
+  SculptLayerGroupUndoPayload payload;
+  payload.name = group.name;
+  payload.flag = group.flag;
+  payload.uid = group.uid;
+  payload.parent_uid = group.parent_uid;
+  payload.prev_uid = group.prev ? group.prev->uid : 0;
+  return payload;
+}
+
+void push_sculpt_layer_group_metadata(Object & /*object*/, const SculptLayerGroup &group)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.group_uid = group.uid;
+  /* Always read out of the fixed-size #SculptLayerGroup::name, never from a caller-supplied string,
+   * so the stored copy can never exceed what the swap on restore can write back — otherwise a long
+   * name would be truncated a little more on each undo/redo round trip. */
+  step_data->sculpt_layer_op.group_name = group.name;
+  step_data->sculpt_layer_op.group_flag = group.flag;
+}
+
+void push_sculpt_layer_group_list_change(Object & /*object*/,
+                                         Vector<SculptLayerGroupUndoPayload> &&removed,
+                                         Vector<int> &&added_uids)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.groups_removed = std::move(removed);
+  step_data->sculpt_layer_op.groups_added.clear();
+  for (const int uid : added_uids) {
+    SculptLayerGroupUndoPayload payload;
+    payload.uid = uid;
+    step_data->sculpt_layer_op.groups_added.append(std::move(payload));
+  }
+}
+
+void push_sculpt_layer_flags_batch(Object & /*object*/, Vector<int> &&uids, Vector<int> &&flags)
 {
   StepData *step_data = get_step_data();
   if (!step_data) {
@@ -1555,8 +1652,8 @@ void push_sculpt_layer_solo(Object & /*object*/, Vector<int> &&uids, Vector<int>
   }
   BLI_assert(uids.size() == flags.size());
   step_data->type = Type::SculptLayer;
-  step_data->sculpt_layer_op.solo_uids = std::move(uids);
-  step_data->sculpt_layer_op.solo_flags = std::move(flags);
+  step_data->sculpt_layer_op.flags_batch_uids = std::move(uids);
+  step_data->sculpt_layer_op.flags_batch_flags = std::move(flags);
 }
 
 void push_sculpt_layer_data(Object & /*object*/, const SculptLayer &layer)
@@ -1753,6 +1850,17 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       }
     }
 
+    /* Group metadata swap (rename, visibility toggle). Mirrors the layer swap above, against the
+     * other uid namespace. */
+    if (op.group_uid != 0) {
+      if (SculptLayerGroup *group = bke::sculpt_layers::group_find_by_uid(mesh, op.group_uid)) {
+        std::swap(group->flag, op.group_flag);
+        std::string live_name = group->name;
+        STRNCPY_UTF8(group->name, op.group_name.c_str());
+        op.group_name = std::move(live_name);
+      }
+    }
+
     /* Data buffers the operator resized: swap each stored buffer back with the live one. Carries
      * #totelem alongside the pointer, so the two states may differ in size (which is exactly why
      * the in-place swap above cannot express this). */
@@ -1763,29 +1871,73 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       }
     }
 
-    /* Solo-base toggle: swap every affected layer's flags with the stored pre-change values. */
-    for (const int64_t i : op.solo_uids.index_range()) {
-      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, op.solo_uids[i])) {
-        std::swap(layer->flag, op.solo_flags[i]);
+    /* Batch flag swap (Solo Base, folder visibility cascade): swap every affected layer's flags
+     * with the stored pre-change values. */
+    for (const int64_t i : op.flags_batch_uids.index_range()) {
+      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, op.flags_batch_uids[i])) {
+        std::swap(layer->flag, op.flags_batch_flags[i]);
       }
     }
 
-    /* Layer reorder batch: put each moved layer back after the neighbour it followed in the
-     * target state, in capture order — a layer's anchor is always restored before it is (mirrors
-     * #removed/#added above and #SculptLayerUndoPayload::prev_uid). Active layer is left untouched:
-     * reordering never changes which uid is active, and unlike the single-layer Move Up/Down case
-     * (where the moved layer always *was* the active one), a multi-layer drop's moved set is not
-     * implicitly "the active layer" — forcing one would silently reassign active from a
-     * drag-selection, which is meant to be pure UI state. */
-    for (const LayerMove &move : op.moves) {
-      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, move.uid)) {
-        const int target_prev_uid = is_undo ? move.prev_from : move.prev_to;
-        BLI_remlink(&mesh.sculpt_layers, layer);
-        if (SculptLayer *after = bke::sculpt_layers::find_by_uid(mesh, target_prev_uid)) {
-          BLI_insertlinkafter(&mesh.sculpt_layers, after, layer);
+    /* Group list changes: toggle the affected groups between the undo step and the mesh list, in
+     * capture order (each payload's anchor is restored before it is). Mirrors the layer list branch
+     * below.
+     *
+     * Runs before the #moves branch so that the window in which a #SculptLayer::group_uid names a
+     * group that is not in the list stays as small as possible. The end state does not depend on the
+     * order — #moves writes the parent tag directly rather than resolving it — but #Remove Group
+     * undo (which re-adds the group and reparents its children back into it in one step) reads far
+     * more obviously this way round. */
+    if (is_undo) {
+      for (SculptLayerGroupUndoPayload &payload : op.groups_removed) {
+        sculpt_layer_group_payload_insert(mesh, payload);
+      }
+      for (SculptLayerGroupUndoPayload &payload : op.groups_added) {
+        sculpt_layer_group_payload_extract(mesh, payload);
+      }
+    }
+    else {
+      for (SculptLayerGroupUndoPayload &payload : op.groups_added) {
+        sculpt_layer_group_payload_insert(mesh, payload);
+      }
+      for (SculptLayerGroupUndoPayload &payload : op.groups_removed) {
+        sculpt_layer_group_payload_extract(mesh, payload);
+      }
+    }
+
+    /* Item move batch: put each moved item back into the folder it was in and after the neighbour
+     * it followed in the target state, in capture order — an item's anchor is always restored
+     * before it is (mirrors #removed/#added below and #SculptLayerUndoPayload::prev_uid). The
+     * active layer is left untouched: reordering never changes which uid is active, and a
+     * multi-item drop's moved set is not implicitly "the active layer" — forcing one would silently
+     * reassign active from a drag-selection, which is meant to be pure UI state. */
+    for (const ReparentMove &move : op.moves) {
+      const int target_prev_uid = is_undo ? move.prev_from : move.prev_to;
+      const int target_group_uid = is_undo ? move.group_from : move.group_to;
+      if (move.is_group) {
+        if (SculptLayerGroup *group = bke::sculpt_layers::group_find_by_uid(mesh, move.uid)) {
+          group->parent_uid = target_group_uid;
+          BLI_remlink(&mesh.sculpt_layer_groups, group);
+          if (SculptLayerGroup *after = bke::sculpt_layers::group_find_by_uid(mesh,
+                                                                             target_prev_uid))
+          {
+            BLI_insertlinkafter(&mesh.sculpt_layer_groups, after, group);
+          }
+          else {
+            BLI_addhead(&mesh.sculpt_layer_groups, group);
+          }
         }
-        else {
-          BLI_addhead(&mesh.sculpt_layers, layer);
+      }
+      else {
+        if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, move.uid)) {
+          layer->group_uid = target_group_uid;
+          BLI_remlink(&mesh.sculpt_layers, layer);
+          if (SculptLayer *after = bke::sculpt_layers::find_by_uid(mesh, target_prev_uid)) {
+            BLI_insertlinkafter(&mesh.sculpt_layers, after, layer);
+          }
+          else {
+            BLI_addhead(&mesh.sculpt_layers, layer);
+          }
         }
       }
     }

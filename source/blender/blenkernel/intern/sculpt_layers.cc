@@ -23,6 +23,8 @@
 
 #include "BLI_array.hh"
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
+#include "BLI_set.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
 #include "BLI_task.hh"
@@ -43,6 +45,13 @@ namespace blender::bke::sculpt_layers {
  * side has to accept both origins. See the allocation notes in `BKE_sculpt_layers.hh`. */
 static_assert(std::is_trivially_destructible_v<SculptLayer>,
               "SculptLayer must remain trivially destructible (see the allocation notes in "
+              "BKE_sculpt_layers.hh)");
+
+/* Groups are freed with #MEM_delete_void as well (see #group_free_list), for the same reason: the
+ * blend-file reader allocates them C-style. Asserted separately so that adding a non-trivial member
+ * to the group breaks the build here rather than corrupting the free path silently. */
+static_assert(std::is_trivially_destructible_v<SculptLayerGroup>,
+              "SculptLayerGroup must remain trivially destructible (see the allocation notes in "
               "BKE_sculpt_layers.hh)");
 
 static int unique_uid(const Mesh &mesh)
@@ -188,6 +197,89 @@ bool solo_active(const Mesh &mesh)
   return false;
 }
 
+static int group_unique_uid(const Mesh &mesh)
+{
+  int uid = 1;
+  for (const SculptLayerGroup &group : mesh.sculpt_layer_groups) {
+    uid = std::max(uid, group.uid + 1);
+  }
+  return uid;
+}
+
+SculptLayerGroup *group_find_by_uid(Mesh &mesh, const int uid)
+{
+  return const_cast<SculptLayerGroup *>(group_find_by_uid(const_cast<const Mesh &>(mesh), uid));
+}
+
+const SculptLayerGroup *group_find_by_uid(const Mesh &mesh, const int uid)
+{
+  if (uid == 0) {
+    return nullptr;
+  }
+  for (const SculptLayerGroup &group : mesh.sculpt_layer_groups) {
+    if (group.uid == uid) {
+      return &group;
+    }
+  }
+  return nullptr;
+}
+
+void group_name_ensure_unique(const Mesh &mesh, SculptLayerGroup &group)
+{
+  BLI_uniquename_cb(
+      [&](const StringRefNull check_name) {
+        for (const SculptLayerGroup &other : mesh.sculpt_layer_groups) {
+          if (&other != &group && other.parent_uid == group.parent_uid &&
+              check_name == other.name)
+          {
+            return true;
+          }
+        }
+        return false;
+      },
+      "Group",
+      '.',
+      group.name,
+      sizeof(group.name));
+}
+
+SculptLayerGroup *group_add(Mesh &mesh, const char *name, const int parent_uid)
+{
+  SculptLayerGroup *group = MEM_new<SculptLayerGroup>(__func__);
+  STRNCPY_UTF8(group->name, (name && name[0]) ? name : "Group");
+  group->flag = SCULPT_LAYER_GROUP_ENABLED | SCULPT_LAYER_GROUP_EXPANDED;
+  group->uid = group_unique_uid(mesh);
+  group->parent_uid = parent_uid;
+
+  BLI_addtail(&mesh.sculpt_layer_groups, group);
+  group_name_ensure_unique(mesh, *group);
+  return group;
+}
+
+void group_remove(Mesh &mesh, SculptLayerGroup &group)
+{
+  BLI_remlink(&mesh.sculpt_layer_groups, &group);
+  MEM_delete_void(static_cast<void *>(&group));
+}
+
+bool group_is_descendant_of(const Mesh &mesh, const SculptLayerGroup &group, const int ancestor_uid)
+{
+  if (ancestor_uid == 0) {
+    /* Everything is below the root. */
+    return true;
+  }
+  const SculptLayerGroup *current = &group;
+  /* Bounded by the group count rather than by reaching the root: a cycle in stored data (a corrupt
+   * file, a future editing bug) must not hang the UI, which calls this from a drop check. */
+  for (int guard = BLI_listbase_count(&mesh.sculpt_layer_groups); current && guard >= 0; guard--) {
+    if (current->uid == ancestor_uid) {
+      return true;
+    }
+    current = group_find_by_uid(mesh, current->parent_uid);
+  }
+  return false;
+}
+
 bool is_stale(const SculptLayer &layer, const int elem_num)
 {
   return layer.data != nullptr && layer.totelem != elem_num;
@@ -275,7 +367,68 @@ void apply_delta_mesh(const SculptLayer &layer, const float factor, MutableSpan<
 
 float effective(const SculptLayer &layer)
 {
+  /* A layer inside a disabled folder contributes nothing, but keeps its own #SCULPT_LAYER_ENABLED
+   * bit — re-enabling the folder must restore exactly what was visible before. One flag test rather
+   * than a walk up the group chain, because this runs per vertex / per grid point. */
+  if (layer.flag & SCULPT_LAYER_GROUP_HIDDEN) {
+    return 0.0f;
+  }
   return (layer.flag & SCULPT_LAYER_ENABLED) ? layer.influence : 0.0f;
+}
+
+/**
+ * Effective enabled state of the group \a uid — its own state with every ancestor's folded in —
+ * memoized in \a r_cache.
+ *
+ * Recursive rather than a single pass in list order, because #SculptLayerGroup::parent_uid may name
+ * a group that physically sits later in #Mesh::sculpt_layer_groups: a list-order pass would read a
+ * parent that has not been resolved yet. \a visiting holds the chain currently being resolved, so a
+ * cycle in stored data breaks instead of overflowing the stack.
+ */
+static bool group_effective_enabled(const Mesh &mesh,
+                                    const int uid,
+                                    Map<int, bool> &r_cache,
+                                    Set<int> &visiting)
+{
+  if (uid == 0) {
+    /* The root is always enabled. */
+    return true;
+  }
+  if (const bool *cached = r_cache.lookup_ptr(uid)) {
+    return *cached;
+  }
+  if (!visiting.add(uid)) {
+    /* A cycle, only reachable from corrupt data. Resolving to true keeps the corruption from hiding
+     * layers, and true is also the identity of the `&&` below — so every group in the cycle ends up
+     * with the conjunction of the cycle's own enabled bits, whichever member the walk entered at,
+     * rather than an answer that depends on where it started. */
+    return true;
+  }
+  const SculptLayerGroup *group = group_find_by_uid(mesh, uid);
+  /* A dangling uid (the group was removed without reparenting) is treated as the root. */
+  const bool enabled = !group ||
+                       ((group->flag & SCULPT_LAYER_GROUP_ENABLED) &&
+                        group_effective_enabled(mesh, group->parent_uid, r_cache, visiting));
+  visiting.remove(uid);
+  r_cache.add(uid, enabled);
+  return enabled;
+}
+
+void resync_group_hidden(Mesh &mesh)
+{
+  /* Effective state per group uid, resolved on demand and memoized so that each group costs one
+   * resolve no matter how deep it sits. */
+  Map<int, bool> effective_enabled;
+  Set<int> visiting;
+
+  for (const SculptLayerGroup &group : mesh.sculpt_layer_groups) {
+    group_effective_enabled(mesh, group.uid, effective_enabled, visiting);
+  }
+
+  for (SculptLayer &layer : mesh.sculpt_layers) {
+    const bool hidden = !group_effective_enabled(mesh, layer.group_uid, effective_enabled, visiting);
+    SET_FLAG_FROM_TEST(layer.flag, hidden, SCULPT_LAYER_GROUP_HIDDEN);
+  }
 }
 
 void combine_layers_mesh(const Span<float3> base,
@@ -540,6 +693,36 @@ void blend_read(BlendDataReader *reader, ListBaseT<SculptLayer> *layers)
     BLO_read_array_and_validate_size(reader, &data, &layer.totelem);
     layer.data = data;
   }
+}
+
+void group_copy_list(ListBaseT<SculptLayerGroup> *dst, const ListBaseT<SculptLayerGroup> *src)
+{
+  /* A group owns no heap buffer, so unlike #copy_list a shallow per-node copy is complete; the uids
+   * carry over, which is what keeps every layer's #SculptLayer::group_uid pointing at the copy of
+   * the group it named in the source. */
+  dst->clear_no_delete();
+  for (const SculptLayerGroup &group : *src) {
+    SculptLayerGroup *copy = MEM_new<SculptLayerGroup>(__func__, group);
+    copy->next = copy->prev = nullptr;
+    BLI_addtail(dst, copy);
+  }
+}
+
+void group_free_list(ListBaseT<SculptLayerGroup> *groups)
+{
+  while (SculptLayerGroup *group = static_cast<SculptLayerGroup *>(BLI_pophead(groups))) {
+    MEM_delete_void(static_cast<void *>(group));
+  }
+}
+
+void group_blend_write(BlendWriter *writer, ListBaseT<SculptLayerGroup> *groups)
+{
+  writer->write_struct_list_by_name("SculptLayerGroup", groups);
+}
+
+void group_blend_read(BlendDataReader *reader, ListBaseT<SculptLayerGroup> *groups)
+{
+  BLO_read_struct_list(reader, SculptLayerGroup, groups);
 }
 
 }  // namespace blender::bke::sculpt_layers

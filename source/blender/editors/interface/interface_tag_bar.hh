@@ -123,7 +123,7 @@ void tag_bar_runtime_free_all();
 
 /**
  * Save the last active category for a specific tag combination.
- * Stores in SpaceData's tag_last_active_categories field.
+ * Stores it in the editor's #CategoryTabsState.last_active_categories array (LRU).
  *
  * \param C: Blender context
  * \param tags_combination: Semicolon-separated tag names (sorted alphabetically)

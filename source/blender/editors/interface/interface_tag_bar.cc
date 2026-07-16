@@ -168,15 +168,10 @@ void tag_bar_runtime_free_all()
 /** \name Internal Functions
  * \{ */
 
-/* Forward declarations for per-mode tag filter state functions
+/* Forward declarations for mode-change tracking helpers
  * (defined later in this file, but needed by get_tag_bar_data_global). */
-static char *tag_filter_per_mode_storage_get(const ScrArea *area);
 static uint32_t tag_filter_get_last_mode(const ScrArea *area);
 static void tag_filter_set_last_mode(ScrArea *area, uint32_t mode);
-static void tag_filter_per_mode_save(ScrArea *area,
-                                      uint32_t mode_flag,
-                                      const char *tags,
-                                      int enabled);
 
 /**
  * Per-mode tag filter save/restore.
@@ -204,9 +199,7 @@ static void tag_bar_apply_per_mode_state(const bContext *C,
   const uint32_t last_mode = tag_filter_get_last_mode(area);
 
   if (last_mode == 0) {
-    /* First call: initialize last_mode and save current state as baseline
-     * so that when the user switches away and comes back, the tag is restored. */
-    tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
+    /* First call: record the current mode as the baseline for future change detection. */
     tag_filter_set_last_mode(area, current_mode);
     return;
   }
@@ -215,13 +208,10 @@ static void tag_bar_apply_per_mode_state(const bContext *C,
     return;
   }
 
-  /* Mode changed! Remember current tags before save/restore for carry-over. */
+  /* Mode changed! Remember current tags for carry-over. */
   char prev_tags[256];
   BLI_strncpy(prev_tags, state.active_tags, sizeof(prev_tags));
   const bool prev_enabled = (*state.filter_enabled != 0);
-
-  /* Save current state for the previous mode. */
-  tag_filter_per_mode_save(area, last_mode, state.active_tags, *state.filter_enabled);
 
   /* Rebuild the active tag list for the new mode from all tags that are valid there.
    * This preserves shared selections across modes and supports multi-select. */
@@ -233,9 +223,6 @@ static void tag_bar_apply_per_mode_state(const bContext *C,
   if (!merged_tags.is_empty()) {
     tag_filter_join_tags(merged_tags, state.active_tags, 256);
     *state.filter_enabled = 1;
-
-    /* Update saved state to reflect the merged selection in the new mode. */
-    tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
   }
   else if (prev_enabled) {
     /* No shared tags remain. Fall back to the last selected tag from the previous mode.
@@ -246,22 +233,16 @@ static void tag_bar_apply_per_mode_state(const bContext *C,
     {
       BLI_strncpy(state.active_tags, last_tag, 256);
       *state.filter_enabled = 1;
-      tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
     }
     else {
       state.active_tags[0] = '\0';
       *state.filter_enabled = 0;
-      tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
     }
   }
   else {
-    /* No saved state for this mode and nothing valid to carry over. */
+    /* Nothing valid to carry over. */
     state.active_tags[0] = '\0';
     *state.filter_enabled = 0;
-
-    /* Save initial state for new mode (even if empty) so future returns
-     * to this mode restore the correct state. */
-    tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
   }
 
   /* Update last mode. */
@@ -954,10 +935,9 @@ static bool activate_tag_by_index(bContext *C, int tag_index)
   wmWindowManager *wm = CTX_wm_manager(C);
   tag_bar_buttons_update(C, wm, &state, data);
 
-  /* Save per-mode tag filter state for current mode. */
+  /* Track the current mode so mode changes are detected on the next update. */
   {
     const uint32_t current_mode = get_current_tag_mode_flag(C);
-    tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
     tag_filter_set_last_mode(area, current_mode);
   }
 
@@ -1210,10 +1190,9 @@ static void tag_toggle_impl(bContext &C, const char *tag_name)
     panel_category_tabs_ensure_active_visible(&C, region_ui);
   }
 
-  /* Save per-mode tag filter state for current mode. */
+  /* Track the current mode so mode changes are detected on the next update. */
   {
     const uint32_t current_mode = get_current_tag_mode_flag(&C);
-    tag_filter_per_mode_save(area, current_mode, state.active_tags, *state.filter_enabled);
     tag_filter_set_last_mode(area, current_mode);
   }
 
@@ -2142,17 +2121,16 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
 
 #include "interface_intern.hh"
 
-/* Maximum storage size before LRU cleanup (leave some margin from 1024). */
-#define TAG_LAST_ACTIVE_CATEGORIES_MAX_SIZE 900
+/* makesdna cannot expand #CATEGORY_LAST_ACTIVE_MAX in the DNA array declaration, so that array
+ * uses a literal. Guard that the literal stays in sync with the macro used by the code below. */
+static_assert(sizeof(CategoryTabsState::last_active_categories) / sizeof(CategoryLastActive) ==
+                  CATEGORY_LAST_ACTIVE_MAX,
+              "CategoryTabsState::last_active_categories size must equal CATEGORY_LAST_ACTIVE_MAX");
 
 /**
- * Get the tag_last_active_categories storage buffer for a given area.
- * Returns nullptr if the area type doesn't support tag category memory.
- *
- * \param area: The screen area to get storage for
- * \return Pointer to the storage buffer, or nullptr if unsupported
+ * Get the #CategoryTabsState for a given area, or nullptr if the area type has no tag bar.
  */
-static char *tag_last_active_categories_storage_get(const ScrArea *area)
+static CategoryTabsState *tabs_state_get(const ScrArea *area)
 {
   if (!area || !area->spacedata.first) {
     return nullptr;
@@ -2161,19 +2139,19 @@ static char *tag_last_active_categories_storage_get(const ScrArea *area)
   switch (area->spacetype) {
     case SPACE_VIEW3D: {
       View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-      return v3d->tabs_state.tag_last_active_categories;
+      return &v3d->tabs_state;
     }
     case SPACE_PROPERTIES: {
       SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
-      return sbuts->tabs_state.tag_last_active_categories;
+      return &sbuts->tabs_state;
     }
     case SPACE_NODE: {
       SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
-      return snode->tabs_state.tag_last_active_categories;
+      return &snode->tabs_state;
     }
     case SPACE_IMAGE: {
       SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-      return sima->tabs_state.tag_last_active_categories;
+      return &sima->tabs_state;
     }
     default:
       return nullptr;
@@ -2181,44 +2159,11 @@ static char *tag_last_active_categories_storage_get(const ScrArea *area)
 }
 
 /* -------------------------------------------------------------------- */
-/** \name Per-Mode Tag Filter State
+/** \name Editor Mode-Change Tracking
  * \{ */
 
 /**
- * Get the per-mode tag filter state storage buffer for a given area.
- * Format: "flag|enabled|tags;flag|enabled|tags;..."
- * Returns nullptr if the area type doesn't support per-mode tag state.
- */
-static char *tag_filter_per_mode_storage_get(const ScrArea *area)
-{
-  if (!area || !area->spacedata.first) {
-    return nullptr;
-  }
-
-  switch (area->spacetype) {
-    case SPACE_VIEW3D: {
-      View3D *v3d = static_cast<View3D *>(area->spacedata.first);
-      return v3d->tabs_state.tag_filter_state_per_mode;
-    }
-    case SPACE_PROPERTIES: {
-      SpaceProperties *sbuts = static_cast<SpaceProperties *>(area->spacedata.first);
-      return sbuts->tabs_state.tag_filter_state_per_mode;
-    }
-    case SPACE_NODE: {
-      SpaceNode *snode = static_cast<SpaceNode *>(area->spacedata.first);
-      return snode->tabs_state.tag_filter_state_per_mode;
-    }
-    case SPACE_IMAGE: {
-      SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-      return sima->tabs_state.tag_filter_state_per_mode;
-    }
-    default:
-      return nullptr;
-  }
-}
-
-/**
- * Get the last known mode flag for per-mode tag filter save/restore.
+ * Get the last known mode flag, used to detect editor mode changes.
  */
 static uint32_t tag_filter_get_last_mode(const ScrArea *area)
 {
@@ -2281,76 +2226,6 @@ static void tag_filter_set_last_mode(ScrArea *area, uint32_t mode)
   }
 }
 
-/**
- * Save tag filter state for a specific mode into per-mode storage.
- * Format: "flag|enabled|tags;flag|enabled|tags;..."
- * If an entry for the given mode_flag already exists, it is updated.
- */
-static void tag_filter_per_mode_save(ScrArea *area,
-                                      uint32_t mode_flag,
-                                      const char *tags,
-                                      int enabled)
-{
-  if (!area || mode_flag == 0) {
-    return;
-  }
-
-  char *storage = tag_filter_per_mode_storage_get(area);
-  if (!storage) {
-    return;
-  }
-
-  /* Build new entry for this mode. */
-  char new_entry[320];
-  SNPRINTF(new_entry, "%u|%d|%s", (unsigned)mode_flag, enabled, tags ? tags : "");
-
-  /* Parse existing entries, replace the one for this mode. */
-  blender::Vector<std::string> entries;
-  if (storage[0]) {
-    char *data_copy = BLI_strdup(storage);
-    char *cursor = data_copy;
-    while (*cursor) {
-      char *entry_start = cursor;
-      /* Find next ';' separator. */
-      while (*cursor && *cursor != ';') {
-        cursor++;
-      }
-      if (*cursor == ';') {
-        *cursor = '\0';
-        cursor++;
-      }
-
-      /* Check if this entry is for the same mode. */
-      /* Entry format: "flag|enabled|tags" */
-      unsigned int entry_flag = 0;
-      if (sscanf(entry_start, "%u|", &entry_flag) == 1 && entry_flag == mode_flag) {
-        /* Skip old entry - will be replaced. */
-        continue;
-      }
-      entries.append(std::string(entry_start));
-    }
-    MEM_delete(data_copy);
-  }
-
-  /* Add new/updated entry. */
-  entries.append(std::string(new_entry));
-
-  /* Rebuild storage string. */
-  storage[0] = '\0';
-  for (int i = 0; i < entries.size(); i++) {
-    size_t current_len = strlen(storage);
-    size_t entry_len = entries[i].size();
-    /* +1 for separator or null terminator. */
-    if (current_len + entry_len + 2 >= 1024) {
-      break;  /* Storage full. */
-    }
-    if (i > 0) {
-      BLI_strncat(storage, ";", 1024);
-    }
-    BLI_strncat(storage, entries[i].c_str(), 1024);
-  }
-}
-
 /** \} */
 
 /**
@@ -2387,8 +2262,8 @@ void tag_build_combination_key(const char *active_tags, char *r_key, int max_len
 }
 
 /**
- * Save the last active category for a specific tag combination.
- * Uses LRU cleanup when approaching storage limit to prevent overflow.
+ * Save the last active category for a specific tag combination. Entries are ordered oldest to
+ * newest; when the fixed array is full the oldest entry (index 0) is evicted (LRU).
  */
 void tag_save_last_active_category(bContext *C, const char *tags_combination, const char *category)
 {
@@ -2397,61 +2272,41 @@ void tag_save_last_active_category(bContext *C, const char *tags_combination, co
   }
 
   ScrArea *area = CTX_wm_area(C);
-  char *storage = tag_last_active_categories_storage_get(area);
-  if (!storage) {
+  CategoryTabsState *state = tabs_state_get(area);
+  if (!state) {
     return;
   }
 
-  /* Parse existing data into entries, skipping entry with same tags.
-   * Records are separated by '\n' (newline never appears in a tag key, which
-   * uses ';' internally), so multi-tag combination keys parse correctly. */
-  blender::Vector<std::string> entries;
-  if (storage[0]) {
-    blender::Vector<std::string> tokens;
-    category_tab_split_tags(storage, tokens, "\n");
-    for (const std::string &entry : tokens) {
-      /* Check if this entry is for the same tags. The combination key never
-       * contains ':', so the first ':' always separates key from category. */
-      size_t colon_pos = entry.find(':');
-      if (colon_pos != std::string::npos) {
-        std::string existing_tags = entry.substr(0, colon_pos);
-        if (existing_tags == tags_combination) {
-          /* Skip old entry - will be replaced at the end (most recent). */
-          continue;
-        }
+  CategoryLastActive *entries = state->last_active_categories;
+  int &num = state->last_active_num;
+  /* Guard against a corrupt count from a malformed file. */
+  num = std::clamp(num, 0, CATEGORY_LAST_ACTIVE_MAX);
+
+  /* If an entry for this tag combination already exists, drop it so the updated entry is
+   * re-inserted as the most-recent (highest index). */
+  for (int i = 0; i < num; i++) {
+    if (STREQ(entries[i].tags, tags_combination)) {
+      for (int j = i; j < num - 1; j++) {
+        entries[j] = entries[j + 1];
       }
-      entries.append(entry);
+      num--;
+      break;
     }
   }
 
-  /* Add new entry (most recent goes at the end). */
-  std::string new_entry = std::string(tags_combination) + ":" + category;
-  entries.append(new_entry);
-
-  /* LRU cleanup: remove oldest entries if approaching size limit.
-   * Track the total size once and decrement as entries are dropped to keep
-   * the trim linear in the number of entries. */
-  size_t total_size = 0;
-  for (const std::string &entry : entries) {
-    total_size += entry.size() + 1; /* +1 for separator or null. */
-  }
-  int first_kept = 0;
-  while (first_kept < entries.size() - 1 &&
-         total_size > TAG_LAST_ACTIVE_CATEGORIES_MAX_SIZE)
-  {
-    total_size -= entries[first_kept].size() + 1;
-    first_kept++;
-  }
-
-  /* Rebuild string. Records are separated by '\n' so multi-tag keys (which use
-   * ';' internally) round-trip without ambiguity. */
-  storage[0] = '\0';
-  for (int i = first_kept; i < entries.size(); i++) {
-    if (i > first_kept) {
-      BLI_strncat(storage, "\n", 1024);
+  /* Evict the oldest entry (index 0) when the array is full. */
+  if (num >= CATEGORY_LAST_ACTIVE_MAX) {
+    for (int j = 0; j < num - 1; j++) {
+      entries[j] = entries[j + 1];
     }
-    BLI_strncat(storage, entries[i].c_str(), 1024);
+    num--;
   }
+
+  /* Append the new entry as the most-recent. */
+  CategoryLastActive &slot = entries[num];
+  BLI_strncpy(slot.tags, tags_combination, sizeof(slot.tags));
+  BLI_strncpy(slot.category, category, sizeof(slot.category));
+  num++;
 }
 
 /**
@@ -2465,25 +2320,16 @@ bool tag_get_last_active_category(
   }
 
   ScrArea *area = CTX_wm_area(C);
-  const char *storage = tag_last_active_categories_storage_get(area);
-  if (!storage || !storage[0]) {
+  const CategoryTabsState *state = tabs_state_get(area);
+  if (!state) {
     return false;
   }
 
-  /* Parse and find entry. Records are separated by '\n'; the combination key
-   * never contains ':', so the first ':' separates key from category. */
-  blender::Vector<std::string> entries;
-  category_tab_split_tags(storage, entries, "\n");
-
-  for (const std::string &entry : entries) {
-    size_t colon_pos = entry.find(':');
-    if (colon_pos != std::string::npos) {
-      std::string existing_tags = entry.substr(0, colon_pos);
-      if (existing_tags == tags_combination) {
-        std::string category_str = entry.substr(colon_pos + 1);
-        BLI_strncpy(r_category, category_str.c_str(), max_len);
-        return true;
-      }
+  const int num = std::clamp(state->last_active_num, 0, CATEGORY_LAST_ACTIVE_MAX);
+  for (int i = 0; i < num; i++) {
+    if (STREQ(state->last_active_categories[i].tags, tags_combination)) {
+      BLI_strncpy(r_category, state->last_active_categories[i].category, max_len);
+      return true;
     }
   }
 

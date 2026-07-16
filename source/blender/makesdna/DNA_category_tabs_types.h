@@ -22,6 +22,27 @@
 
 namespace blender {
 
+/* Fixed capacity for the structured last-active-category array. Chosen above realistic use (the
+ * legacy packed buffer was capped at ~1 KB anyway). As a POD array embedded by value in
+ * #CategoryTabsState it serializes, copies and frees automatically with the owning space — no
+ * ListBase / blend-read-write plumbing is needed.
+ *
+ * NOTE: makesdna cannot resolve #defines in array sizes (it reads digits only), so the array
+ * below uses the literal 32. Keep this value and that literal in sync; a static_assert in
+ * interface_tag_bar.cc guards it. */
+#define CATEGORY_LAST_ACTIVE_MAX 32
+
+/**
+ * Last active category for a given tag combination (structured replacement for the
+ * ``tag_last_active_categories`` packed string). Plain data (no pointers).
+ */
+struct CategoryLastActive {
+  /** Semicolon-separated, alphabetically sorted tag names. Empty = no active tags. Key. */
+  char tags[256];
+  /** Category idname to restore for this tag combination. */
+  char category[128];
+};
+
 struct CategoryTabsState {
   /**
    * Comma-separated list of active tag names for category filtering.
@@ -51,29 +72,25 @@ struct CategoryTabsState {
   int tag_bar_scroll_offset = 0;
 
   /**
-   * Last active category for each tag combination.
-   * Format: "tags1:category1;tags2:category2"
-   * - tags: semicolon-separated tag names (sorted alphabetically)
-   * - category: category idname to restore
-   * Example: "Tools:Modify;Create;Modeling:Add Mesh;:General"
-   * (empty tags = default category when no tags active)
+   * LEGACY packed string for last-active-category-per-tag-combination. Superseded by
+   * #last_active_categories; kept only so .blend files written before file subversion 502.47
+   * can be migrated on load (see versioning). Cleared after migration and never written at
+   * runtime. Format was '\n'-separated "tags:category" records (tags = sorted, ';'-separated).
    */
   char tag_last_active_categories[1024] = "";
 
-  /**
-   * Per-mode tag filter state storage.
-   * Format: "flag|enabled|tags;flag|enabled|tags;..."
-   * - flag: uint32 mode flag value (e.g., 1=OBJECT_MODE, 2048=MESH_EDIT)
-   * - enabled: 0 or 1 (tag filter enabled state)
-   * - tags: comma-separated tag names
-   * Example: "1|1|modeling;2048|1|mesh,animation"
-   */
-  char tag_filter_state_per_mode[1024] = "";
+  /* Pad so the following DNA-struct array starts on an 8-byte boundary: makesdna requires every
+   * struct-typed member to be 8-byte aligned. */
+  char _pad2[4] = {0, 0, 0, 0};
 
-  /** Last known mode flag for per-mode tag filter save/restore.
-   * 0 = not initialized yet (first call will set it).
-   * The View3D drives this from the active object's mode; other editors that also carry
-   * tag_filter_state_per_mode key their per-mode state on their own editor-specific mode. */
+  /** Structured last active category per tag combination. Valid entries: [0, last_active_num).
+   * Size is the literal value of #CATEGORY_LAST_ACTIVE_MAX (makesdna cannot expand the macro). */
+  CategoryLastActive last_active_categories[32] = {};
+  int last_active_num = 0;
+
+  /** Last known mode flag for detecting editor mode changes (per-mode filter rebuild).
+   * 0 = not initialized yet (first call will set it). Driven by the View3D from the active
+   * object's mode; other editors key it on their own editor-specific mode. */
   uint32_t tag_filter_last_mode = 0;
 
   /**
@@ -86,7 +103,11 @@ struct CategoryTabsState {
    * Used to distinguish auto-activation (after extension install) from manual activation.
    */
   char new_addon_filter_auto_activated = 0;
-  char _pad1[2] = {0, 0};
+  /* Sized so this struct's total size grew from the pre-502.47 layout (2588 bytes) by an exact
+   * multiple of 16. Every editor embeds #CategoryTabsState by value, so a 16-multiple size delta
+   * keeps all following members in those editors at their original alignment — no per-editor
+   * padding changes are needed. */
+  char _pad1[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
   /**
    * Saved tag filter state when "New Add-on!" filter is activated.

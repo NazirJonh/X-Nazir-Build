@@ -796,6 +796,73 @@ static void do_versions_init_tag_category_memory(Main *bmain)
   }
 }
 
+/* Migrate the legacy ``tag_last_active_categories`` packed string into the structured
+ * #CategoryTabsState.last_active_categories array. The packed format is '\n'-separated
+ * "tags:category" records (the tag key may contain ';' but never ':' or '\n'). */
+static void do_versions_structure_last_active_categories(CategoryTabsState &state)
+{
+  state.last_active_num = 0;
+  const char *cursor = state.tag_last_active_categories;
+  while (*cursor != '\0' && state.last_active_num < CATEGORY_LAST_ACTIVE_MAX) {
+    const char *record_end = cursor;
+    while (*record_end != '\0' && *record_end != '\n') {
+      record_end++;
+    }
+    /* The first ':' separates the tag key from the category id. */
+    const char *colon = cursor;
+    while (colon < record_end && *colon != ':') {
+      colon++;
+    }
+    if (colon < record_end) {
+      CategoryLastActive &slot = state.last_active_categories[state.last_active_num];
+      int tags_ncpy = int(colon - cursor) + 1;
+      if (tags_ncpy > int(sizeof(slot.tags))) {
+        tags_ncpy = int(sizeof(slot.tags));
+      }
+      BLI_strncpy(slot.tags, cursor, tags_ncpy);
+      int cat_ncpy = int(record_end - (colon + 1)) + 1;
+      if (cat_ncpy > int(sizeof(slot.category))) {
+        cat_ncpy = int(sizeof(slot.category));
+      }
+      BLI_strncpy(slot.category, colon + 1, cat_ncpy);
+      state.last_active_num++;
+    }
+    cursor = (*record_end == '\n') ? record_end + 1 : record_end;
+  }
+  /* The packed string is no longer used at runtime. */
+  state.tag_last_active_categories[0] = '\0';
+}
+
+static void do_versions_structure_tag_category_memory(Main *bmain)
+{
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        switch (sl.spacetype) {
+          case SPACE_VIEW3D:
+            do_versions_structure_last_active_categories(
+                reinterpret_cast<View3D *>(&sl)->tabs_state);
+            break;
+          case SPACE_PROPERTIES:
+            do_versions_structure_last_active_categories(
+                reinterpret_cast<SpaceProperties *>(&sl)->tabs_state);
+            break;
+          case SPACE_NODE:
+            do_versions_structure_last_active_categories(
+                reinterpret_cast<SpaceNode *>(&sl)->tabs_state);
+            break;
+          case SPACE_IMAGE:
+            do_versions_structure_last_active_categories(
+                reinterpret_cast<SpaceImage *>(&sl)->tabs_state);
+            break;
+          default:
+            break;
+        }
+      }
+    }
+  }
+}
+
 void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 {
   /* Category runtime lists in WM are rebuilt by Python on startup and must never be trusted from
@@ -1189,6 +1256,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   /* Subversion 45 is reserved by the `Global-Sculpt-Mode-Mesh-V5-Merge-Patch` branch. */
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 46)) {
     do_versions_fix_category_tabs_zoom_in_spaces(bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 47)) {
+    do_versions_structure_tag_category_memory(bmain);
   }
 
   /**

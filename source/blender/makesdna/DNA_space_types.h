@@ -173,7 +173,6 @@ struct SpaceProperties {
   /** Per-editor Category Tabs / Tag Bar state (see #CategoryTabsState). */
   CategoryTabsState tabs_state;
 
-  /* CategoryTabsState is 2588 bytes (≡4 mod 8); pad 4 bytes so `runtime` stays 8-byte aligned. */
   char _pad2[4] = {0};
 
   /* Doesn't necessarily need to be a pointer, but runtime structs are still written to files. */
@@ -716,7 +715,6 @@ struct SpaceImage {
   /** Per-editor Category Tabs / Tag Bar state (see #CategoryTabsState). */
   CategoryTabsState tabs_state;
 
-  /* CategoryTabsState is 2588 bytes (≡4 mod 8); pad 4 bytes so the struct size stays 8-byte aligned. */
   char _pad_tag_filter2[4] = {0};
 };
 

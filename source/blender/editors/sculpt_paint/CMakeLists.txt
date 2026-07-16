@@ -75,6 +75,7 @@ set(SRC
   grease_pencil/weight_draw.cc
   grease_pencil/weight_smear.cc
 
+  mesh/interface_template_sculpt_layer_tree.cc
   mesh/paint_canvas.cc
   mesh/paint_cursor.cc
   mesh/paint_hide.cc

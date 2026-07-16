@@ -153,6 +153,12 @@ enum eSculptLayerFlag : int {
    * residual into the base). Ending the mode re-enables exactly the layers carrying this flag.
    */
   SCULPT_LAYER_SOLO_HIDDEN = 1 << 2,
+  /**
+   * Row selected in the tree view. Pure UI state for multi-item drag and drop reordering; existing
+   * layer operators still act on the single active layer (#Mesh::sculpt_layers_active_uid), not on
+   * this selection. Never versioned: a new bit in an existing #flag reads as unset from old files.
+   */
+  SCULPT_LAYER_SELECTED = 1 << 3,
 };
 ENUM_OPERATORS(eSculptLayerFlag)
 
@@ -267,9 +273,7 @@ struct Mesh {
    * #SculptLayer::uid of the active sculpt layer, or 0 when there is none (uids start at 1).
    *
    * Identifies the active layer rather than pointing at a position, because a position is only
-   * meaningful for as long as the list does not change shape underneath it. The UI list still
-   * needs an integer index and gets one translated on the fly (see `MeshSculptLayersUI` in
-   * `rna_mesh.cc`).
+   * meaningful for as long as the list does not change shape underneath it.
    *
    * This field occupies what used to be explicit padding: `vertex_group_active_index` (4 bytes)
    * must be followed by 4 more bytes so that `sculpt_layers` (a ListBase of two 8-byte pointers)

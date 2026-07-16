@@ -76,19 +76,13 @@ SculptLayer *duplicate(Mesh &mesh, const SculptLayer &src);
  *
  * Resolved from #Mesh::sculpt_layers_active_uid rather than from a position in the list: a position
  * only identifies a layer for as long as nothing inserts, removes or reorders around it, whereas a
- * uid survives all three. The UI list is the one consumer that genuinely needs an index, and gets
- * one translated on the fly (see `MeshSculptLayersUI` in `rna_mesh.cc`).
+ * uid survives all three.
  */
 SculptLayer *active_get(Mesh &mesh);
 const SculptLayer *active_get(const Mesh &mesh);
 /** Set the active layer; null clears it. \a layer must belong to \a mesh. */
 void active_set(Mesh &mesh, const SculptLayer *layer);
 
-/**
- * Index of \a layer in the list, or -1. For presentation only (the UI list, log messages) — do not
- * store it: see #active_get for why the model identifies layers by uid.
- */
-int index_of(const Mesh &mesh, const SculptLayer &layer);
 /** Find a layer by its stable unique id, or null. Uid 0 means "no layer" and always returns null. */
 SculptLayer *find_by_uid(Mesh &mesh, int uid);
 const SculptLayer *find_by_uid(const Mesh &mesh, int uid);

@@ -317,6 +317,9 @@ struct StepData {
     int uid = 0;
     float influence = 1.0f;
     int flag = 0;
+    /** Swapped with the live name like #influence / #flag; for operators that leave the name alone
+     * the swap is simply a no-op, so it needs no separate "was captured" marker. */
+    std::string name;
     Array<float3> data;
     bool has_data = false;
 
@@ -362,12 +365,10 @@ struct StepData {
      * from the freshly rebuilt key's block index on redo. */
     short pre_bake_shapenr = 1;
 
-    /** Layer reorder: uid of the moved layer (0 when the step is not a move), and the uid of the
-     * layer it followed before and after the move (0 = the head). Anchored to a neighbour rather
-     * than to a position for the same reason as #SculptLayerUndoPayload::prev_uid. */
-    int move_uid = 0;
-    int move_prev_from = 0;
-    int move_prev_to = 0;
+    /** Layer reorder batch (move up/down, or a multi-select drag and drop): empty when the step
+     * is not a move. See #LayerMove for why each entry anchors to a neighbour uid rather than a
+     * position. */
+    Vector<LayerMove> moves;
 
     /** Active-layer selection change: the active uid before and after (0 = no active layer, which
      * is a legal value on both sides — hence the separate flag rather than a sentinel). */
@@ -1510,19 +1511,14 @@ void push_sculpt_layer_bake_to_shape_key(Object & /*object*/, const short pre_ba
   step_data->sculpt_layer_op.pre_bake_shapenr = pre_bake_shapenr;
 }
 
-void push_sculpt_layer_move(Object & /*object*/,
-                            const SculptLayer &layer,
-                            const int prev_uid_from,
-                            const int prev_uid_to)
+void push_sculpt_layer_move(Object & /*object*/, Vector<LayerMove> &&moves)
 {
   StepData *step_data = get_step_data();
   if (!step_data) {
     return;
   }
   step_data->type = Type::SculptLayer;
-  step_data->sculpt_layer_op.move_uid = layer.uid;
-  step_data->sculpt_layer_op.move_prev_from = prev_uid_from;
-  step_data->sculpt_layer_op.move_prev_to = prev_uid_to;
+  step_data->sculpt_layer_op.moves = std::move(moves);
 }
 
 void push_sculpt_layer_active(Object & /*object*/, const int uid_from, const int uid_to)
@@ -1547,6 +1543,7 @@ void push_sculpt_layer_metadata(Object & /*object*/, const SculptLayer &layer)
   step_data->sculpt_layer_op.uid = layer.uid;
   step_data->sculpt_layer_op.influence = layer.influence;
   step_data->sculpt_layer_op.flag = layer.flag;
+  step_data->sculpt_layer_op.name = layer.name;
   step_data->sculpt_layer_op.has_data = false;
 }
 
@@ -1572,6 +1569,7 @@ void push_sculpt_layer_data(Object & /*object*/, const SculptLayer &layer)
   step_data->sculpt_layer_op.uid = layer.uid;
   step_data->sculpt_layer_op.influence = layer.influence;
   step_data->sculpt_layer_op.flag = layer.flag;
+  step_data->sculpt_layer_op.name = layer.name;
   if (layer.data && layer.totelem > 0) {
     const Span<float3> src(static_cast<const float3 *>(layer.data), layer.totelem);
     step_data->sculpt_layer_op.data = Array<float3>(src);
@@ -1731,6 +1729,9 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, op.uid)) {
         std::swap(layer->influence, op.influence);
         std::swap(layer->flag, op.flag);
+        std::string live_name = layer->name;
+        STRNCPY_UTF8(layer->name, op.name.c_str());
+        op.name = std::move(live_name);
         if (op.has_data && layer->data) {
           MutableSpan<float3> cur(static_cast<float3 *>(layer->data), layer->totelem);
           /* All-or-nothing: a size mismatch means the layer was resized between capture and
@@ -1769,10 +1770,16 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       }
     }
 
-    /* Layer reorder: put the layer back after the neighbour it followed in the target state. */
-    if (op.move_uid != 0) {
-      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, op.move_uid)) {
-        const int target_prev_uid = is_undo ? op.move_prev_from : op.move_prev_to;
+    /* Layer reorder batch: put each moved layer back after the neighbour it followed in the
+     * target state, in capture order — a layer's anchor is always restored before it is (mirrors
+     * #removed/#added above and #SculptLayerUndoPayload::prev_uid). Active layer is left untouched:
+     * reordering never changes which uid is active, and unlike the single-layer Move Up/Down case
+     * (where the moved layer always *was* the active one), a multi-layer drop's moved set is not
+     * implicitly "the active layer" — forcing one would silently reassign active from a
+     * drag-selection, which is meant to be pure UI state. */
+    for (const LayerMove &move : op.moves) {
+      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, move.uid)) {
+        const int target_prev_uid = is_undo ? move.prev_from : move.prev_to;
         BLI_remlink(&mesh.sculpt_layers, layer);
         if (SculptLayer *after = bke::sculpt_layers::find_by_uid(mesh, target_prev_uid)) {
           BLI_insertlinkafter(&mesh.sculpt_layers, after, layer);
@@ -1780,7 +1787,6 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         else {
           BLI_addhead(&mesh.sculpt_layers, layer);
         }
-        bke::sculpt_layers::active_set(mesh, layer);
       }
     }
 

@@ -152,11 +152,6 @@ void active_set(Mesh &mesh, const SculptLayer *layer)
   mesh.sculpt_layers_active_uid = layer ? layer->uid : 0;
 }
 
-int index_of(const Mesh &mesh, const SculptLayer &layer)
-{
-  return BLI_findindex(&mesh.sculpt_layers, &layer);
-}
-
 SculptLayer *find_by_uid(Mesh &mesh, const int uid)
 {
   if (uid == 0) {

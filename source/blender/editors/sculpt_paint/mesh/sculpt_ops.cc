@@ -1553,8 +1553,10 @@ void operatortypes_sculpt()
   WM_operatortype_append(layers::SCULPT_OT_layer_add);
   WM_operatortype_append(layers::SCULPT_OT_layer_remove);
   WM_operatortype_append(layers::SCULPT_OT_layer_move);
+  WM_operatortype_append(layers::SCULPT_OT_layer_move_to);
   WM_operatortype_append(layers::SCULPT_OT_layer_duplicate);
   WM_operatortype_append(layers::SCULPT_OT_layer_merge_down);
+  WM_operatortype_append(layers::SCULPT_OT_layer_merge_selected);
   WM_operatortype_append(layers::SCULPT_OT_layer_bake);
   WM_operatortype_append(layers::SCULPT_OT_layer_bake_to_shape_key);
   WM_operatortype_append(layers::SCULPT_OT_layer_bake_and_editmode_enter);

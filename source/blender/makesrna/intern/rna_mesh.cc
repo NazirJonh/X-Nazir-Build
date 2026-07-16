@@ -261,47 +261,9 @@ static void rna_Mesh_sculpt_layers_active_set(PointerRNA *ptr,
   bke::sculpt_layers::active_set(*mesh, static_cast<SculptLayer *>(value.data));
 }
 
-/* The model tracks the active layer by uid (see #bke::sculpt_layers::active_get); these translate
- * it to and from the list position, because `template_list` can only drive an integer index. Both
- * `Mesh.sculpt_layers_active_index` and the no-undo `MeshSculptLayersUI.active_index` wrapper share
- * them, so the two can never disagree. */
-static int rna_Mesh_sculpt_layers_active_index_get(PointerRNA *ptr)
-{
-  Mesh *mesh = rna_mesh(ptr);
-  const SculptLayer *layer = bke::sculpt_layers::active_get(*mesh);
-  /* No active layer: report 0 rather than -1, which the UI list would draw as "nothing selected"
-   * but also happily write back. */
-  return layer ? bke::sculpt_layers::index_of(*mesh, *layer) : 0;
-}
-
-static void rna_Mesh_sculpt_layers_active_index_set(PointerRNA *ptr, int value)
-{
-  Mesh *mesh = rna_mesh(ptr);
-  /* An out-of-range index clears the active layer instead of storing a position that resolves to
-   * nothing; #BLI_findlink already returns null for one. */
-  bke::sculpt_layers::active_set(
-      *mesh, static_cast<SculptLayer *>(BLI_findlink(&mesh->sculpt_layers, value)));
-}
-
-static PointerRNA rna_Mesh_sculpt_layers_ui_get(PointerRNA *ptr)
-{
-  return RNA_pointer_create_with_parent(*ptr, RNA_MeshSculptLayersUI, ptr->data);
-}
-
 static bool rna_Mesh_sculpt_layers_solo_active_get(PointerRNA *ptr)
 {
   return bke::sculpt_layers::solo_active(*rna_mesh(ptr));
-}
-
-static void rna_Mesh_sculpt_layers_active_index_range(
-    PointerRNA *ptr, int *min, int *max, int *softmin, int *softmax)
-{
-  Mesh *mesh = rna_mesh(ptr);
-  *min = 0;
-  const int count = BLI_listbase_count(&mesh->sculpt_layers);
-  *max = (count > 0) ? count - 1 : 0;
-  *softmin = *min;
-  *softmax = *max;
 }
 
 static std::optional<std::string> rna_SculptLayer_path(const PointerRNA *ptr)
@@ -3276,33 +3238,11 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
                            "The layer's stored displacement still matches the mesh topology. A "
                            "stale layer contributes nothing and cannot be edited until it is "
                            "repaired or removed");
-}
 
-static void rna_def_mesh_sculpt_layers_ui(BlenderRNA *brna)
-{
-  StructRNA *srna;
-  PropertyRNA *prop;
-
-  /* Thin no-undo view over the mesh's sculpt-layer UI state. The UI list writes the active index
-   * through this struct rather than #Mesh.sculpt_layers_active_index directly: button edits push
-   * a global undo step per #RNA_struct_undo_check on the button's struct, and #Mesh (an ID struct)
-   * cannot clear #STRUCT_UNDO. A memfile step from a list click between two stroke SCULPT steps
-   * does not compose with the delta-based sculpt undo; undoable selection goes through
-   * #SCULPT_OT_layer_select instead. */
-  srna = RNA_def_struct(brna, "MeshSculptLayersUI", nullptr);
-  RNA_def_struct_sdna(srna, "Mesh");
-  RNA_def_struct_ui_text(
-      srna, "Mesh Sculpt Layers UI", "UI state of the mesh's sculpt layers (no undo on edits)");
-  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
-
-  prop = RNA_def_property(srna, "active_index", PROP_INT, PROP_NONE);
-  RNA_def_property_int_funcs(prop,
-                             "rna_Mesh_sculpt_layers_active_index_get",
-                             "rna_Mesh_sculpt_layers_active_index_set",
-                             "rna_Mesh_sculpt_layers_active_index_range");
-  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  prop = RNA_def_property(srna, "select", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_LAYER_SELECTED);
   RNA_def_property_ui_text(
-      prop, "Active Sculpt Layer Index", "Active index in the sculpt layers list");
+      prop, "Select", "Sculpt layer selection state, used for drag and drop reordering");
 }
 
 static void rna_def_mesh(BlenderRNA *brna)
@@ -3796,22 +3736,6 @@ static void rna_def_mesh(BlenderRNA *brna)
   RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
   RNA_def_property_ui_text(prop, "Active Sculpt Layer", "Active sculpt layer");
 
-  prop = RNA_def_property(srna, "sculpt_layers_active_index", PROP_INT, PROP_NONE);
-  RNA_def_property_int_funcs(prop,
-                             "rna_Mesh_sculpt_layers_active_index_get",
-                             "rna_Mesh_sculpt_layers_active_index_set",
-                             "rna_Mesh_sculpt_layers_active_index_range");
-  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
-  RNA_def_property_ui_text(
-      prop, "Active Sculpt Layer Index", "Active index in the sculpt layers list");
-
-  prop = RNA_def_property(srna, "sculpt_layers_ui", PROP_POINTER, PROP_NONE);
-  RNA_def_property_struct_type(prop, "MeshSculptLayersUI");
-  RNA_def_property_pointer_funcs(prop, "rna_Mesh_sculpt_layers_ui_get", nullptr, nullptr, nullptr);
-  RNA_def_property_flag(prop, PROP_NEVER_NULL);
-  RNA_def_property_ui_text(
-      prop, "Sculpt Layers UI", "No-undo view of the sculpt layers UI state (active index)");
-
   prop = RNA_def_property(srna, "sculpt_layers_solo_active", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_Mesh_sculpt_layers_solo_active_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
@@ -3839,7 +3763,6 @@ void RNA_def_mesh(BlenderRNA *brna)
   rna_def_mloopuv(brna);
   rna_def_mloopcol(brna);
   rna_def_sculpt_layer(brna);
-  rna_def_mesh_sculpt_layers_ui(brna);
 }
 
 }  // namespace blender

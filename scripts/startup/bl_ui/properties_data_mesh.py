@@ -262,35 +262,6 @@ class DATA_PT_vertex_groups(MeshButtonsPanel, Panel):
         draw_attribute_warnings(context, layout, None)
 
 
-class MESH_UL_sculpt_layers(UIList):
-    def draw_item(self, context, layout, _data, item, _icon, _active_data, _active_propname, _index):
-        layer = item
-        obj = context.object
-        # Visibility and influence keep the combined surface in sync incrementally, which can't
-        # happen in Edit Mode; keep the name editable but lock the value controls there.
-        # A stale layer (topology changed behind its back) can't be reconciled at all: the RNA
-        # setters refuse it, so lock the same controls and mark the row instead of offering
-        # values that would silently do nothing.
-        valid = layer.is_valid
-        values_editable = (obj is None or obj.mode != 'EDIT') and valid
-        row = layout.row(align=True)
-        row.alert = not valid
-        vis = row.row(align=True)
-        vis.enabled = values_editable
-        vis.prop(layer, "enabled", text="", icon='HIDE_OFF' if layer.enabled else 'HIDE_ON', emboss=False)
-        row.prop(layer, "name", text="", emboss=False)
-        sub = layout.row()
-        sub.scale_x = 0.5
-        if valid:
-            sub.enabled = values_editable
-            sub.prop(layer, "influence", text="", slider=True)
-        else:
-            # Drawn as the (read-only) property rather than a label so that hovering explains the
-            # state through its RNA description.
-            sub.alert = True
-            sub.prop(layer, "is_valid", text="", icon='ERROR', emboss=False)
-
-
 class MESH_MT_sculpt_layer_context_menu(Menu):
     bl_label = "Sculpt Layer Specials"
 
@@ -306,6 +277,13 @@ class MESH_MT_sculpt_layer_context_menu(Menu):
         layout.separator()
         layout.operator("sculpt.layer_clear")
         layout.operator("sculpt.layer_invert")
+        layout.separator()
+        active = mesh.sculpt_layers_active
+        col = layout.column()
+        col.enabled = active is not None and any(
+            layer != active and layer.select for layer in mesh.sculpt_layers
+        )
+        col.operator("sculpt.layer_merge_selected", text="Merge Selected Into Active")
         layout.separator()
         layout.operator("sculpt.layer_mask_isolate", text="Isolate by Mask")
         layout.separator()
@@ -396,15 +374,7 @@ class DATA_PT_sculpt_layers(MeshButtonsPanel, Panel):
         mesh = ob.data
 
         row = layout.row()
-        # The active index is written through the no-undo `sculpt_layers_ui` wrapper: a plain
-        # `sculpt_layers_active_index` button edit would push a global (memfile) undo step, which
-        # does not compose with the stroke-based sculpt undo steps in Sculpt Mode.
-        row.template_list(
-            "MESH_UL_sculpt_layers", "",
-            mesh, "sculpt_layers",
-            mesh.sculpt_layers_ui, "active_index",
-            rows=5,
-        )
+        row.template_sculpt_layer_tree()
 
         col = row.column(align=True)
         col.operator("sculpt.layer_add", icon='ADD', text="")
@@ -934,7 +904,6 @@ classes = (
     MESH_UL_vgroups,
     MESH_UL_uvmaps,
     MESH_UL_attributes,
-    MESH_UL_sculpt_layers,
     DATA_PT_context_mesh,
     DATA_PT_vertex_groups,
     DATA_PT_shape_keys,

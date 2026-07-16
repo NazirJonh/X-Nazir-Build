@@ -112,7 +112,8 @@ void store_active_sculpt_layer_grids(Object &object, Vector<int> &&grids, Vector
 
 /**
  * Sculpt layer operators: push a #Type::SculptLayer undo step that captures the layer's metadata
- * (influence + flag) for reversible influence/visibility changes. Call between #push_begin and
+ * (influence + flag + name) for reversible influence/visibility/rename changes. Capture before the
+ * change: undo/redo swaps the stored metadata with the live one. Call between #push_begin and
  * #push_end; the step's type is set to #Type::SculptLayer automatically.
  */
 void push_sculpt_layer_metadata(Object &object, const SculptLayer &layer);
@@ -218,15 +219,26 @@ void push_sculpt_layer_bake_shape_key(Object &object, int key_uid);
 void push_sculpt_layer_bake_to_shape_key(Object &object, short pre_bake_shapenr);
 
 /**
- * Sculpt layer operators: record a layer reorder (move up/down) into the current
- * #Type::SculptLayer undo step. The position is recorded as the uid of the layer \a layer follows
- * before (\a prev_uid_from) and after (\a prev_uid_to) the move, 0 meaning the head of the list —
- * see #SculptLayerUndoPayload::prev_uid for why a neighbour rather than an index.
+ * One layer's reorder within a #push_sculpt_layer_move batch: the uid of the moved layer, and the
+ * uid of the layer it followed before (\a prev_from) and after (\a prev_to) the move, 0 meaning
+ * the head of the list — see #SculptLayerUndoPayload::prev_uid for why a neighbour rather than an
+ * index.
  */
-void push_sculpt_layer_move(Object &object,
-                            const SculptLayer &layer,
-                            int prev_uid_from,
-                            int prev_uid_to);
+struct LayerMove {
+  int uid = 0;
+  int prev_from = 0;
+  int prev_to = 0;
+};
+
+/**
+ * Sculpt layer operators: record one or more layer reorders (move up/down, or a multi-select
+ * drag and drop) into the current #Type::SculptLayer undo step as a single batch — one undo step
+ * moves every listed layer. \a moves must be in the order the layers were captured (their
+ * relative order before the move); #restore_list re-applies them in that same order on both undo
+ * and redo, since each entry's anchor may itself be another entry in the same batch (mirrors
+ * #SculptLayerUndoPayload::prev_uid).
+ */
+void push_sculpt_layer_move(Object &object, Vector<LayerMove> &&moves);
 
 /**
  * Sculpt layer operators: record an active-layer selection change (pure UI state) into the

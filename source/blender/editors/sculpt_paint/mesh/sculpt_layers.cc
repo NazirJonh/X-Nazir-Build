@@ -1499,16 +1499,39 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
-  SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
-  if (!layer) {
+  /* The tree view can hold several layers selected at once, so a removal targets the whole
+   * selection plus the active layer. The active layer is included even when it sits outside the
+   * selection: it is what the rest of the panel points at, so leaving it behind would contradict
+   * the row the user pressed #X on. Collected in list order, which the payload capture below
+   * relies on. */
+  const SculptLayer *active = bke::sculpt_layers::active_get(*ctx.mesh);
+  Vector<SculptLayer *> targets;
+  for (SculptLayer &layer : ctx.mesh->sculpt_layers) {
+    if ((layer.flag & SCULPT_LAYER_SELECTED) || &layer == active) {
+      targets.append(&layer);
+    }
+  }
+  if (targets.is_empty()) {
     return OPERATOR_CANCELLED;
   }
   /* Derive the mesh base from the still-consistent pre-change state. */
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  /* Capture every payload while the list is still intact so each records the neighbour it really
+   * followed; undo re-inserts them in capture order and rebuilds the original stack. Capturing and
+   * removing one at a time would make each layer record a stale neighbour instead (see
+   * #SCULPT_OT_layer_merge_selected for the same trap). Capturing does not unlink, so removal is a
+   * second pass. */
   Vector<undo::SculptLayerUndoPayload> removed;
-  removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *layer));
-  bke::sculpt_layers::remove(*ctx.mesh, *layer);
+  for (SculptLayer *layer : targets) {
+    removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *layer));
+  }
+  /* No explicit #active_set afterwards: #bke::sculpt_layers::remove hands the active marker to a
+   * neighbour, and when that neighbour is itself a target its own removal hands it on again, so
+   * the marker walks off the removed run on its own. */
+  for (SculptLayer *layer : targets) {
+    bke::sculpt_layers::remove(*ctx.mesh, *layer);
+  }
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
@@ -1520,7 +1543,7 @@ void SCULPT_OT_layer_remove(wmOperatorType *ot)
 {
   ot->name = "Remove Sculpt Layer";
   ot->idname = "SCULPT_OT_layer_remove";
-  ot->description = "Remove the active sculpt layer and its contribution";
+  ot->description = "Remove the selected sculpt layers and their contribution";
   ot->exec = layer_remove_exec;
   ot->poll = layers_poll;
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
@@ -1544,8 +1567,9 @@ static wmOperatorStatus layer_move_exec(bContext *C, wmOperator *op)
   if (BLI_listbase_link_move(&ctx.mesh->sculpt_layers, layer, step)) {
     bke::sculpt_layers::active_set(*ctx.mesh, layer);
     undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
-    undo::push_sculpt_layer_move(
-        *ctx.object, *layer, prev_uid_from, layer->prev ? layer->prev->uid : 0);
+    Vector<undo::LayerMove> moves = {
+        {layer->uid, prev_uid_from, layer->prev ? layer->prev->uid : 0}};
+    undo::push_sculpt_layer_move(*ctx.object, std::move(moves));
     undo::push_end(*ctx.object);
     /* Layer order does not affect the additive combination; UI refresh only. */
     layers_ui_notify(C, *ctx.object);
@@ -1569,6 +1593,91 @@ void SCULPT_OT_layer_move(wmOperatorType *ot)
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
   RNA_def_enum(ot->srna, "direction", direction_items, 0, "Direction", "");
+}
+
+static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Selected layers, in their current relative order (drag data carries no explicit list — it is
+   * always this same selection, see #SculptLayerDragController::create_drag_data). Falls back to
+   * the active layer so the plain "no selection yet" case (e.g. a script call) still does
+   * something sensible. */
+  Vector<SculptLayer *> moved;
+  for (SculptLayer &layer : ctx.mesh->sculpt_layers) {
+    if (layer.flag & SCULPT_LAYER_SELECTED) {
+      moved.append(&layer);
+    }
+  }
+  if (moved.is_empty()) {
+    if (SculptLayer *active = bke::sculpt_layers::active_get(*ctx.mesh)) {
+      moved.append(active);
+    }
+  }
+  if (moved.is_empty()) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const int anchor_uid = RNA_int_get(op->ptr, "anchor_uid");
+  const bool after = RNA_boolean_get(op->ptr, "after");
+
+  Vector<undo::LayerMove> moves;
+  moves.reserve(moved.size());
+  for (const SculptLayer *layer : moved) {
+    moves.append({layer->uid, layer->prev ? layer->prev->uid : 0, 0});
+  }
+
+  /* Chain: the first moved layer lands next to the drop anchor, every following one lands right
+   * after the previously placed layer — preserves the selection's mutual order (see
+   * #SCULPT_LAYERS_TREE_VIEW_PROMPT.md, "Drop"). */
+  SculptLayer *anchor = bke::sculpt_layers::find_by_uid(*ctx.mesh, anchor_uid);
+  SculptLayer *cursor_after = after ? anchor : (anchor ? anchor->prev : nullptr);
+  for (SculptLayer *layer : moved) {
+    BLI_remlink(&ctx.mesh->sculpt_layers, layer);
+    if (cursor_after) {
+      BLI_insertlinkafter(&ctx.mesh->sculpt_layers, cursor_after, layer);
+    }
+    else {
+      BLI_addhead(&ctx.mesh->sculpt_layers, layer);
+    }
+    cursor_after = layer;
+  }
+  for (const int64_t i : moved.index_range()) {
+    moves[i].prev_to = moved[i]->prev ? moved[i]->prev->uid : 0;
+  }
+
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_sculpt_layer_move(*ctx.object, std::move(moves));
+  undo::push_end(*ctx.object);
+  /* Layer order does not affect the additive combination; UI refresh only. */
+  layers_ui_notify(C, *ctx.object);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_move_to(wmOperatorType *ot)
+{
+  ot->name = "Move Sculpt Layer To";
+  ot->idname = "SCULPT_OT_layer_move_to";
+  ot->description = "Move the selected sculpt layers next to another layer";
+  ot->exec = layer_move_to_exec;
+  ot->poll = layers_poll;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
+  RNA_def_int(ot->srna,
+              "anchor_uid",
+              0,
+              0,
+              INT_MAX,
+              "Anchor Layer ID",
+              "Uid of the layer to move next to (0 = head of the list)",
+              0,
+              INT_MAX);
+  RNA_def_boolean(
+      ot->srna, "after", false, "After", "Insert after the anchor layer rather than before");
 }
 
 static wmOperatorStatus layer_duplicate_exec(bContext *C, wmOperator *op)
@@ -1677,6 +1786,99 @@ void SCULPT_OT_layer_merge_down(wmOperatorType *ot)
   ot->idname = "SCULPT_OT_layer_merge_down";
   ot->description = "Merge the active sculpt layer into the one below it";
   ot->exec = layer_merge_down_exec;
+  ot->poll = layers_poll;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
+}
+
+static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  SculptLayer *active = bke::sculpt_layers::active_get(*ctx.mesh);
+  if (!active) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Sources: every selected layer except the active one (a self-merge is a no-op). Mirrors
+   * #layer_merge_down_exec generalized from one fixed neighbour to an arbitrary selection. */
+  Vector<SculptLayer *> sources;
+  for (SculptLayer &layer : ctx.mesh->sculpt_layers) {
+    if (&layer != active && (layer.flag & SCULPT_LAYER_SELECTED)) {
+      sources.append(&layer);
+    }
+  }
+  if (sources.is_empty()) {
+    BKE_report(op->reports, RPT_ERROR, "No selected layers to merge");
+    return OPERATOR_CANCELLED;
+  }
+
+  session_state_ensure(*ctx.object);
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  /* Snapshot the surviving layer's pre-merge metadata and data for undo. */
+  undo::push_sculpt_layer_data(*ctx.object, *active);
+
+  /* Merging with the grid domain requires every buffer at the canonical size (the layers are
+   * validated to the top level, so a missing buffer just means zero displacement). */
+  int n = ctx.grids ? active->totelem : element_count(*ctx.object);
+  if (ctx.grids) {
+    for (const SculptLayer *source : sources) {
+      n = std::max(n, source->totelem);
+    }
+  }
+  MutableSpan<float3> active_data = bke::sculpt_layers::data_ensure(*active, n);
+  const float active_eff = effective(*active);
+  for (float3 &v : active_data) {
+    v *= active_eff;
+  }
+  for (const SculptLayer *source : sources) {
+    if (ctx.grids && source->data && active->level != source->level) {
+      active->level = source->level;
+    }
+    if (!source->data) {
+      continue;
+    }
+    const float source_eff = effective(*source);
+    const Span<float3> source_data(static_cast<const float3 *>(source->data), source->totelem);
+    const int64_t count = std::min<int64_t>(active_data.size(), source_data.size());
+    for (int64_t i = 0; i < count; i++) {
+      active_data[i] += source_data[i] * source_eff;
+    }
+  }
+  active->influence = 1.0f;
+  active->flag |= SCULPT_LAYER_ENABLED;
+
+  /* Every payload is captured while the list is still intact, so each records the neighbour it
+   * really followed; undo then re-inserts them in capture order and rebuilds the original stack.
+   * Capturing and removing one at a time would make each layer record a stale neighbour instead
+   * (see #SCULPT_OT_layer_bake for the same trap). Capturing does not unlink, so removal is a
+   * second pass. */
+  Vector<undo::SculptLayerUndoPayload> removed;
+  for (SculptLayer *source : sources) {
+    removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *source));
+  }
+  for (SculptLayer *source : sources) {
+    bke::sculpt_layers::remove(*ctx.mesh, *source);
+  }
+  bke::sculpt_layers::active_set(*ctx.mesh, active);
+  undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
+  undo::push_end(*ctx.object);
+
+  /* `active * active_eff + Σ(source * source_eff)` at influence 1 equals the previous combination
+   * exactly, so the combined surface (and the live positions) are unchanged. */
+  layers_ui_notify(C, *ctx.object);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_merge_selected(wmOperatorType *ot)
+{
+  ot->name = "Merge Selected Sculpt Layers";
+  ot->idname = "SCULPT_OT_layer_merge_selected";
+  ot->description = "Merge the selected sculpt layers into the active one";
+  ot->exec = layer_merge_selected_exec;
   ot->poll = layers_poll;
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */

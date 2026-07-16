@@ -179,7 +179,7 @@ class Wireframe : Overlay {
         const bool bypass_mode_check = wireframe_no_overlay || !edit_wires_overlap_all;
 
         if (show_surface_wire) {
-          if (BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d)) {
+          if (BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object, state.rv3d)) {
             ResourceHandleRange handle = manager.unique_handle(ob_ref);
 
             for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, SCULPT_BATCH_WIREFRAME)) {

@@ -144,7 +144,8 @@ class Prepass {
 
     particle_sync(manager, ob_ref);
 
-    const bool use_sculpt_pbvh = BKE_sculptsession_use_pbvh_draw(ob_ref.object, draw_ctx.rv3d);
+    const bool use_sculpt_pbvh = BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object,
+                                                                             draw_ctx.rv3d);
 
     if (use_sculpt_pbvh) {
       sculpt_sync(manager, ob_ref);

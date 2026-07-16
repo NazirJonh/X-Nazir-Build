@@ -517,6 +517,17 @@ struct SculptSession : NonCopyable, NonMovable {
   bool needs_flush_to_id = false;
 
   /**
+   * Sculpt-mode data was modified at least once this session (brush stroke, filter, hide/mask
+   * edit, undo restore, ...), so the object's regular evaluated draw caches may be stale and the
+   * viewport must draw from the PBVH. Set sticky alongside #needs_flush_to_id (never cleared for
+   * the session's lifetime); until then the object can be drawn through the regular (much
+   * cheaper) cached-mesh path -- see #BKE_sculptsession_use_pbvh_draw_for_display. This matters
+   * for multi-object sculpt mode, where per-node PBVH drawing of every idle object in the mode
+   * multiplies the per-frame draw cost.
+   */
+  bool pbvh_draw_required = false;
+
+  /**
    * Some tools follows the shading chosen by the last used tool canvas.
    * When not set the viewport shading color would be used.
    *
@@ -636,6 +647,20 @@ void BKE_sculpt_sync_face_visibility_to_grids(const Mesh &mesh, SubdivCCG &subdi
  * drawing the mesh and all updates that come with it.
  */
 bool BKE_sculptsession_use_pbvh_draw(const Object *ob, const RegionView3D *rv3d);
+
+/**
+ * Variant of #BKE_sculptsession_use_pbvh_draw for the draw engines: additionally requires that
+ * the object's sculpt data was actually modified this session (#SculptSession::pbvh_draw_required)
+ * before routing it through the expensive per-node PBVH drawing. An untouched object's evaluated
+ * draw caches are still valid, so the regular cached-mesh path both draws the same result and
+ * avoids per-frame per-node work (frustum culling, batch validation, one draw call per node) --
+ * which otherwise multiplies by the object count in multi-object sculpt mode.
+ *
+ * Editor logic (update tagging, flushing) must keep using #BKE_sculptsession_use_pbvh_draw: the
+ * two predicates only diverge while an object is untouched, and every path that modifies sculpt
+ * data sets #SculptSession::pbvh_draw_required first, so the display can never show stale data.
+ */
+bool BKE_sculptsession_use_pbvh_draw_for_display(const Object *ob, const RegionView3D *rv3d);
 
 namespace bke::object {
 

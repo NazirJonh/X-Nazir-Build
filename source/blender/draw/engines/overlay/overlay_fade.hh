@@ -92,7 +92,7 @@ class Fade : Overlay {
 
     auto fade_sync =
         [](Manager &manager, const ObjectRef &ob_ref, const State &state, PassMain::Sub &sub) {
-          const bool use_sculpt_pbvh = BKE_sculptsession_use_pbvh_draw(ob_ref.object,
+          const bool use_sculpt_pbvh = BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object,
                                                                        state.rv3d) &&
                                        !state.is_image_render;
 

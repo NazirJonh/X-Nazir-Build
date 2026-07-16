@@ -2853,6 +2853,20 @@ bool BKE_sculptsession_use_pbvh_draw(const Object *ob, const RegionView3D *rv3d)
   return true;
 }
 
+bool BKE_sculptsession_use_pbvh_draw_for_display(const Object *ob, const RegionView3D *rv3d)
+{
+  if (!BKE_sculptsession_use_pbvh_draw(ob, rv3d)) {
+    return false;
+  }
+  const SculptSession &ss = *ob->runtime->sculpt_session;
+  /* Dyntopo keeps drawing from the PBVH unconditionally: the BMesh conversion happens on mode
+   * setup, and drawing the evaluated mesh instead would bypass that conversion's state. */
+  if (ss.bm != nullptr) {
+    return true;
+  }
+  return ss.pbvh_draw_required;
+}
+
 /* Returns the face set random color for rendering in the overlay given its ID and a color seed. */
 #define GOLDEN_RATIO_CONJUGATE 0.618033988749895f
 void BKE_paint_face_set_overlay_color_get(const int face_set, const int seed, uchar r_color[4])

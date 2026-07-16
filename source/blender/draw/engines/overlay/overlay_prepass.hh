@@ -210,7 +210,8 @@ class Prepass : Overlay {
 
     particle_sync(manager, ob_ref, res, state);
 
-    const bool use_sculpt_pbvh = BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d) &&
+    const bool use_sculpt_pbvh = BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object,
+                                                                             state.rv3d) &&
                                  !state.is_image_render;
 
     if (use_sculpt_pbvh) {

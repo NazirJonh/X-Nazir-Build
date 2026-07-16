@@ -180,6 +180,9 @@ void mesh_cursor_update_and_init(PaintCursorContext &pcontext)
   vert_random_access_ensure(*vc.obact);
   pcontext.prev_active_vert_index = ss.active_vert_index();
   if (!paint_runtime.stroke_active) {
+    /* `resolve_hit_object = false`: #paint_cursor_context_init already raycast all sculpt-mode
+     * objects and redirected `pcontext.vc.obact` to the one under the cursor; resolving again
+     * here would repeat the multi-object raycast on every cursor redraw. */
     const std::optional<CursorGeometryInfo> gi = cursor_geometry_info_update(
         *pcontext.depsgraph,
         *pcontext.paint,
@@ -187,7 +190,8 @@ void mesh_cursor_update_and_init(PaintCursorContext &pcontext)
         pcontext.vc,
         pcontext.base,
         mval_fl,
-        (pcontext.brush->falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE));
+        (pcontext.brush->falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE),
+        false);
 
     pcontext.is_cursor_over_mesh = gi.has_value();
     const CursorGeometryInfo info = gi.value_or(CursorGeometryInfo{});

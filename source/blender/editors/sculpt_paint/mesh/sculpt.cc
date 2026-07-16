@@ -5870,7 +5870,7 @@ std::optional<CursorGeometryInfo> cursor_geometry_info_update(bContext *C,
   const Base *base = CTX_data_active_base(C);
 
   return cursor_geometry_info_update(
-      *depsgraph, sd.paint, &sd, vc, base, mval, use_sampled_normal, r_hit_ob);
+      *depsgraph, sd.paint, &sd, vc, base, mval, use_sampled_normal, true, r_hit_ob);
 }
 
 std::optional<CursorGeometryInfo> cursor_geometry_info_update(Depsgraph &depsgraph,
@@ -5880,6 +5880,7 @@ std::optional<CursorGeometryInfo> cursor_geometry_info_update(Depsgraph &depsgra
                                                               const Base *base,
                                                               const float2 &mval,
                                                               const bool use_sampled_normal,
+                                                              const bool resolve_hit_object,
                                                               Object **r_hit_ob)
 {
   const Brush &brush = *BKE_paint_brush_for_read(&paint);
@@ -5897,7 +5898,7 @@ std::optional<CursorGeometryInfo> cursor_geometry_info_update(Depsgraph &depsgra
    * "cursor is not over the mesh" clearing behavior. */
   ViewContext vc_local = vc;
   const Base *base_local = base;
-  {
+  if (resolve_hit_object) {
     Object *hit_ob = nullptr;
     float3 unused_location;
     stroke_get_location_bvh_ex(
@@ -6233,8 +6234,41 @@ static bool stroke_get_location_bvh_ex(Depsgraph &depsgraph,
    * pre-call `#vc.obact` automatically -- this matches the original "save before loops, restore
    * after" semantics while making future `continue` / early `return` safe by construction (the
    * pre-RAII guard had to remember to restore on every exit path). */
+  /* Conservative world-ray vs. world-AABB pre-filter: the full per-object raycast setup
+   * (#stroke_modifiers_check, evaluated positions, attribute lookups) is not free, and with
+   * several objects in the mode most of them are usually nowhere near the cursor ray. Gated on
+   * multi-object so the single-object path stays bit-exact. The closest-point fallback loop below
+   * intentionally has no such filter: an object whose bounds the ray misses can still contain the
+   * point nearest to the ray. */
+  const bool use_aabb_prefilter = objects.size() > 1;
+  const float3 ray_dir_world = ray_end_world - ray_start_world;
+
   for (Object *object_ptr : objects) {
     Object &ob = *object_ptr;
+    if (use_aabb_prefilter) {
+      if (const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob)) {
+        const Bounds<float3> bounds = bke::pbvh::bounds_get(*pbvh);
+        Bounds<float3> world_bounds(
+            math::transform_point(ob.object_to_world(), bounds.min));
+        for (const int i : IndexRange(1, 7)) {
+          const float3 corner((i & 1) ? bounds.max.x : bounds.min.x,
+                              (i & 2) ? bounds.max.y : bounds.min.y,
+                              (i & 4) ? bounds.max.z : bounds.min.z);
+          const float3 world_corner = math::transform_point(ob.object_to_world(), corner);
+          world_bounds.min = math::min(world_bounds.min, world_corner);
+          world_bounds.max = math::max(world_bounds.max, world_corner);
+        }
+        if (!isect_ray_aabb_v3_simple(ray_start_world,
+                                      ray_dir_world,
+                                      world_bounds.min,
+                                      world_bounds.max,
+                                      nullptr,
+                                      nullptr))
+        {
+          continue;
+        }
+      }
+    }
     ScopedObactOverride obact_override(vc, ob);
     float3 object_out;
     if (!stroke_get_location_object(

@@ -273,7 +273,7 @@ bool SyncModule::sync_sculpt(const ObjectRef &ob_ref)
     return false;
   }
 
-  bool pbvh_draw = BKE_sculptsession_use_pbvh_draw(ob_ref.object, inst_.rv3d) &&
+  bool pbvh_draw = BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object, inst_.rv3d) &&
                    !inst_.is_image_render;
   if (!pbvh_draw) {
     return false;

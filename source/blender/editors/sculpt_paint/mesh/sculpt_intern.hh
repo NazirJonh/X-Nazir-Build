@@ -682,6 +682,13 @@ std::optional<CursorGeometryInfo> cursor_geometry_info_update(bContext *C,
                                                               const float2 &mval,
                                                               bool use_sampled_normal,
                                                               Object **r_hit_ob = nullptr);
+/**
+ * \param resolve_hit_object: when false, skip the multi-object raycast that redirects the lookup
+ * to the front-most sculpt-mode object and trust `vc.obact` instead. Pass false only when the
+ * caller has already resolved the object under the cursor (e.g. the paint cursor, which raycasts
+ * in #paint_cursor_context_init) -- this runs on every cursor redraw, so the redundant second
+ * multi-object raycast is measurable with several objects in the mode.
+ */
 std::optional<CursorGeometryInfo> cursor_geometry_info_update(Depsgraph &depsgraph,
                                                               const Paint &paint,
                                                               const Sculpt *sd,
@@ -689,6 +696,7 @@ std::optional<CursorGeometryInfo> cursor_geometry_info_update(Depsgraph &depsgra
                                                               const Base *base,
                                                               const float2 &mval,
                                                               bool use_sampled_normal,
+                                                              bool resolve_hit_object = true,
                                                               Object **r_hit_ob = nullptr);
 
 void geometry_preview_lines_update(Depsgraph &depsgraph,

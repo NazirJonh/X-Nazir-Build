@@ -1118,8 +1118,11 @@ static bool paint_cursor_context_init(bContext *C,
   const bke::PaintRuntime &paint_runtime = *pcontext.paint->runtime;
   pcontext.is_stroke_active = paint_runtime.stroke_active;
 
-  /* If in sculpt mode, find the object under the cursor to display the cursor correctly. */
-  if (pcontext.mode == PaintMode::Sculpt && !pcontext.is_stroke_active) {
+  /* If in sculpt mode, find the object under the cursor to display the cursor correctly.
+   * Skipped while navigating: #paint_draw_cursor early-returns before any cursor geometry is
+   * used, so raycasting every sculpt-mode object here would be pure per-redraw waste. */
+  const bool is_navigating = pcontext.vc.rv3d && (pcontext.vc.rv3d->rflag & RV3D_NAVIGATING);
+  if (pcontext.mode == PaintMode::Sculpt && !pcontext.is_stroke_active && !is_navigating) {
     float out[3];
     Object *hit_ob = nullptr;
     const float mval_fl[2] = {float(xy[0] - region->winrct.xmin),

@@ -679,7 +679,7 @@ static bool supports_handle_ranges(DupliObject *dupli, Object *parent, const DRW
     return false;
   }
 
-  if (BKE_sculptsession_use_pbvh_draw(ob, draw_ctx.rv3d)) {
+  if (BKE_sculptsession_use_pbvh_draw_for_display(ob, draw_ctx.rv3d)) {
     return false;
   }
 

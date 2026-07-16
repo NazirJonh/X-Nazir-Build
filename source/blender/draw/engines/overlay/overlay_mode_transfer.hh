@@ -60,7 +60,8 @@ class ModeTransfer : Overlay {
 
     ps_.push_constant("ucolor", float4(flash_color_.xyz() * alpha, alpha));
 
-    const bool use_sculpt_pbvh = BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d) &&
+    const bool use_sculpt_pbvh = BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object,
+                                                                             state.rv3d) &&
                                  !state.is_image_render;
     if (use_sculpt_pbvh) {
       ResourceHandleRange handle = manager.unique_handle_for_sculpt(ob_ref);

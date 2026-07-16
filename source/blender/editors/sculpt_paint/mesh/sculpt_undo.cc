@@ -2120,6 +2120,7 @@ void push_node(const Depsgraph &depsgraph,
   }
 
   ss.needs_flush_to_id = true;
+  ss.pbvh_draw_required = true;
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh:
@@ -2144,6 +2145,7 @@ void push_nodes(const Depsgraph &depsgraph,
   SculptSession &ss = *object.runtime->sculpt_session;
 
   ss.needs_flush_to_id = true;
+  ss.pbvh_draw_required = true;
 
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   if (ss.bm || ELEM(type, Type::DyntopoBegin, Type::DyntopoEnd)) {
@@ -2808,6 +2810,7 @@ static void ensure_sculpt_mode_for_object(Main *bmain,
     }
     if (ob.runtime->sculpt_session) {
       ob.runtime->sculpt_session->needs_flush_to_id = true;
+      ob.runtime->sculpt_session->pbvh_draw_required = true;
     }
     return;
   }
@@ -2827,6 +2830,7 @@ static void ensure_sculpt_mode_for_object(Main *bmain,
 
   if (ob.runtime->sculpt_session) {
     ob.runtime->sculpt_session->needs_flush_to_id = true;
+    ob.runtime->sculpt_session->pbvh_draw_required = true;
   }
 }
 

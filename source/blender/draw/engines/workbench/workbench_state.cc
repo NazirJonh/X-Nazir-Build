@@ -294,7 +294,7 @@ ObjectState::ObjectState(const DRWContext *draw_ctx,
 {
   const bool is_active = (ob == draw_ctx->obact);
 
-  sculpt_pbvh = BKE_sculptsession_use_pbvh_draw(ob, draw_ctx->rv3d) &&
+  sculpt_pbvh = BKE_sculptsession_use_pbvh_draw_for_display(ob, draw_ctx->rv3d) &&
                 !draw_ctx->is_image_render();
   draw_shadow = scene_state.draw_shadows && (ob->dtx & OB_DRAW_NO_SHADOW_CAST) == 0 &&
                 !sculpt_pbvh && !(is_active && DRW_object_use_hide_faces(ob));

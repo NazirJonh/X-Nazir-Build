@@ -569,7 +569,12 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
     }
   });
 
-  if (!layers.is_empty()) {
+  /* Compose the layers into MDisps only for the full-mesh path, where #store_original_grids below
+   * snapshots the composed surface as `T_old`. The restricted (top-level) path skips both the
+   * compose and the snapshot: it reconstructs `T_old` per element in the delta step from #saved_base
+   * plus the same layer sum, which avoids composing into — and dup-allocating a snapshot of — every
+   * touched grid (the dominant part of the store/compose cost). */
+  if (!restrict_to_touched && !layers.is_empty()) {
     mdisps_add_sculpt_layers(
         reshape_context.mdisps, num_grids, grid_area, layers, 1.0f, grid_enabled);
   }
@@ -578,11 +583,12 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
 #endif
 
   /* Standard reshape: after this MDisps holds `T_new`, the tangent displacement of the sculpted
-   * surface at the top level, and the original grids hold `T_old`. Store and assign honour
-   * #grid_enabled: at the top level they touch only the stroke's grids, otherwise (empty mask) every
-   * grid, so the detail-smoothing step refines a subdivision in a single, consistent coordinate
-   * space. */
-  multires_reshape_store_original_grids(&reshape_context, grid_enabled);
+   * surface at the top level. The full-mesh path also snapshots `T_old` into the original grids for
+   * the detail-smoothing step (which honours #grid_enabled — empty mask, every grid). The restricted
+   * path has no smoothing pass and reconstructs `T_old` itself, so it skips the snapshot entirely. */
+  if (!restrict_to_touched) {
+    multires_reshape_store_original_grids(&reshape_context, grid_enabled);
+  }
   multires_reshape_ensure_grids(coarse_mesh, reshape_context.top.level);
   if (!multires_reshape_assign_final_coords_from_ccg(&reshape_context, subdiv_ccg, grid_enabled)) {
     threading::parallel_for(IndexRange(num_grids), 32, [&](const IndexRange range) {
@@ -680,21 +686,40 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
 #endif
 
   /* Accumulate the stroke delta `T_new - T_old` into the layer for the touched grids only, and
-   * collect the explicit per-element undo delta. */
+   * collect the explicit per-element undo delta. `T_new` is the freshly encoded tangent surface in
+   * MDisps; `T_old` is the pre-stroke composed surface. The full-mesh path reads it from the
+   * original-grid snapshot; the restricted path never took that snapshot and rebuilds it in place
+   * from the saved base plus the same layer sum #mdisps_add_sculpt_layers would have composed —
+   * arithmetically identical, `base + sum(layer.data * influence)`. */
   r_undo_delta.resize(touched_grids.size() * int64_t(grid_area));
   threading::parallel_for(touched_grids.index_range(), 8, [&](const IndexRange range) {
     for (const int64_t t : range) {
       const int grid_index = touched_grids[t];
+      const int64_t grid_off = int64_t(grid_index) * grid_area;
       const float3 *new_disps = reinterpret_cast<const float3 *>(
           reshape_context.mdisps[grid_index].disps);
-      const float3 *old_disps = reinterpret_cast<const float3 *>(
-          reshape_context.orig.mdisps[grid_index].disps);
-      float3 *layer_grid = layer_data.data() + int64_t(grid_index) * grid_area;
+      float3 *layer_grid = layer_data.data() + grid_off;
       float3 *undo_grid = r_undo_delta.data() + t * grid_area;
-      for (int i = 0; i < grid_area; i++) {
-        const float3 delta = new_disps[i] - old_disps[i];
-        layer_grid[i] += delta;
-        undo_grid[i] = delta;
+      if (restrict_to_touched) {
+        const float3 *base_grid = saved_base.data() + grid_off;
+        for (int i = 0; i < grid_area; i++) {
+          float3 old_val = base_grid[i];
+          for (const MultiresGridSculptLayer &layer : layers) {
+            old_val += layer.data[grid_off + i] * layer.influence;
+          }
+          const float3 delta = new_disps[i] - old_val;
+          layer_grid[i] += delta;
+          undo_grid[i] = delta;
+        }
+      }
+      else {
+        const float3 *old_disps = reinterpret_cast<const float3 *>(
+            reshape_context.orig.mdisps[grid_index].disps);
+        for (int i = 0; i < grid_area; i++) {
+          const float3 delta = new_disps[i] - old_disps[i];
+          layer_grid[i] += delta;
+          undo_grid[i] = delta;
+        }
       }
     }
   });

@@ -770,6 +770,56 @@ bool BKE_preferences_asset_library_pin_reorder(UserDef *userdef,
   return true;
 }
 
+/* The #UserDef.asset_flag bit carrying \a type's pin, or 0 for a library that has none.
+ *
+ * This is the single place that decides which built-ins are pinnable. #ASSET_LIBRARY_ALL is always
+ * shown, and #ASSET_LIBRARY_CUSTOM keeps #ASSET_LIBRARY_IS_PINNED on its own #bUserAssetLibrary, so
+ * both map to nothing.
+ *
+ * #ASSET_LIBRARY_ONLINE_ESSENTIALS is deliberately absent: the asset shelf builds its library enum
+ * with `include_separate_online_essentials = false` hardcoded (#rna_asset_library_ui_reference_itemf),
+ * and the tab row is derived from that enum, so a bit for it could never produce a tab. If the shelf
+ * ever offers it separately, this is where it is added -- one case and one free bit. */
+static eUserPref_AssetFlag asset_builtin_pin_flag_from_type(const eAssetLibraryType type)
+{
+  switch (type) {
+    case ASSET_LIBRARY_LOCAL:
+      return USER_ASSETS_PIN_CURRENT_FILE;
+    case ASSET_LIBRARY_ESSENTIALS:
+      return USER_ASSETS_PIN_ESSENTIALS;
+    default:
+      return eUserPref_AssetFlag(0);
+  }
+}
+
+bool BKE_preferences_asset_builtin_pin_supported(const eAssetLibraryType type)
+{
+  return asset_builtin_pin_flag_from_type(type) != 0;
+}
+
+bool BKE_preferences_asset_builtin_pin_get(const UserDef *userdef, const eAssetLibraryType type)
+{
+  const eUserPref_AssetFlag flag = asset_builtin_pin_flag_from_type(type);
+  return (flag != 0) && ((userdef->asset_flag & flag) != 0);
+}
+
+void BKE_preferences_asset_builtin_pin_set(UserDef *userdef,
+                                           const eAssetLibraryType type,
+                                           const bool pinned)
+{
+  const eUserPref_AssetFlag flag = asset_builtin_pin_flag_from_type(type);
+  if (flag == 0) {
+    return;
+  }
+
+  if (pinned) {
+    userdef->asset_flag |= flag;
+  }
+  else {
+    userdef->asset_flag &= ~flag;
+  }
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

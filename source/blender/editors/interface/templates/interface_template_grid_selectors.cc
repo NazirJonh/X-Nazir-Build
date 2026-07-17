@@ -22,6 +22,7 @@
 #include "BKE_preferences.h"
 #include "BKE_screen.hh"
 
+#include "DNA_asset_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
 
@@ -450,20 +451,37 @@ static void library_selector_menu_item(Block *block,
    * row); everywhere else this selector is reused the toggle would change state with nothing on
    * screen to show for it.
    *
-   * Only custom libraries can be pinned: All / Current File / Essentials are not entries in
-   * #UserDef.asset_libraries, so there is nowhere to store the flag. Their enum values are exactly
-   * the ones below #ASSET_LIBRARY_CUSTOM, so that one test covers it. Folders never reach here at
-   * all -- they are not selectable leaves.
+   * "All" gets no toggle: it is always the first tab and cannot be unpinned. Folders never reach
+   * here at all -- they are not selectable leaves.
    *
-   * This fires the operator rather than writing the flag directly: the operator owns marking the
-   * Preferences dirty and notifying open popovers, and this keeps that in one place. */
-  if (show_pin && item.value >= ASSET_LIBRARY_CUSTOM) {
-    const AssetLibraryReference library_ref = ed::asset::library_reference_from_enum_value(
-        item.value);
-    if (const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(
-            &U, &library_ref))
-    {
-      const bool is_pinned = (user_library->flag & ASSET_LIBRARY_IS_PINNED) != 0;
+   * This fires the operator rather than writing the flag or the bit directly: the operator owns
+   * marking the Preferences dirty and notifying open popovers, and this keeps that in one place. */
+  if (show_pin) {
+    const bUserAssetLibrary *user_library = nullptr;
+    eAssetLibraryType builtin_type = ASSET_LIBRARY_ALL;
+    bool has_pin = false;
+    bool is_pinned = false;
+
+    if (item.value >= ASSET_LIBRARY_CUSTOM) {
+      const AssetLibraryReference library_ref = ed::asset::library_reference_from_enum_value(
+          item.value);
+      user_library = BKE_preferences_asset_library_find_from_ref(&U, &library_ref);
+      if (user_library) {
+        has_pin = true;
+        is_pinned = (user_library->flag & ASSET_LIBRARY_IS_PINNED) != 0;
+      }
+    }
+    else {
+      /* BKE owns which built-ins have a pin at all (see #asset_builtin_pin_flag_from_type); asking
+       * it means the rule is not restated here. */
+      builtin_type = eAssetLibraryType(item.value);
+      if (BKE_preferences_asset_builtin_pin_supported(builtin_type)) {
+        has_pin = true;
+        is_pinned = BKE_preferences_asset_builtin_pin_get(&U, builtin_type);
+      }
+    }
+
+    if (has_pin) {
       Button *pin_but = uiDefIconButO(
           block,
           ButtonType::But,
@@ -477,7 +495,13 @@ static void library_selector_menu_item(Block *block,
           is_pinned ? TIP_("Unpin this library from the asset shelf popover") :
                       TIP_("Pin this library as a tab at the top of the asset shelf popover"));
       PointerRNA *pin_opptr = button_operator_ptr_ensure(pin_but);
-      RNA_string_set(pin_opptr, "library_name", user_library->name);
+      if (user_library) {
+        RNA_enum_set(pin_opptr, "library_type", ASSET_LIBRARY_CUSTOM);
+        RNA_string_set(pin_opptr, "library_name", user_library->name);
+      }
+      else {
+        RNA_enum_set(pin_opptr, "library_type", int(builtin_type));
+      }
       /* The state to apply is decided here, where the icon showing it is also decided, so the two
        * can never disagree. */
       RNA_boolean_set(pin_opptr, "pinned", !is_pinned);

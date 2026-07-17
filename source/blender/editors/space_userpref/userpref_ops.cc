@@ -36,6 +36,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 #include "RNA_prototypes.hh"
 #include "RNA_types.hh"
 
@@ -531,17 +532,32 @@ static void library_pin_changed_notify()
 
 static wmOperatorStatus preferences_asset_library_pin_set_exec(bContext * /*C*/, wmOperator *op)
 {
+  const bool pinned = RNA_boolean_get(op->ptr, "pinned");
+  const eAssetLibraryType type = eAssetLibraryType(RNA_enum_get(op->ptr, "library_type"));
+
+  /* A built-in library: identified by its type alone, which is a stable constant. `library_name` is
+   * not read at all. */
+  if (type != ASSET_LIBRARY_CUSTOM) {
+    if (!BKE_preferences_asset_builtin_pin_supported(type)) {
+      return OPERATOR_CANCELLED;
+    }
+    if (pinned == BKE_preferences_asset_builtin_pin_get(&U, type)) {
+      /* Nothing to do; not an error. */
+      return OPERATOR_CANCELLED;
+    }
+    BKE_preferences_asset_builtin_pin_set(&U, type, pinned);
+    library_pin_changed_notify();
+    return OPERATOR_FINISHED;
+  }
+
   bUserAssetLibrary *library = library_from_op_props(op);
   if (!library) {
     return OPERATOR_CANCELLED;
   }
-
-  const bool pinned = RNA_boolean_get(op->ptr, "pinned");
   if (pinned == ((library->flag & ASSET_LIBRARY_IS_PINNED) != 0)) {
     /* Nothing to do; not an error. */
     return OPERATOR_CANCELLED;
   }
-
   BKE_preferences_asset_library_pin_set(&U, library, pinned);
   library_pin_changed_notify();
 
@@ -558,6 +574,17 @@ static void PREFERENCES_OT_asset_library_pin_set(wmOperatorType *ot)
   ot->exec = preferences_asset_library_pin_set_exec;
 
   ot->flag = OPTYPE_INTERNAL;
+
+  /* Mirrors #AssetLibraryReference: a type, plus a name that only means anything when the type is
+   * #ASSET_LIBRARY_CUSTOM. That is how a library is identified everywhere else in Blender, and it
+   * is why a built-in needs no name. The enum also lists types with no pin (ALL,
+   * ONLINE_ESSENTIALS); the exec cancels on those rather than silently doing nothing. */
+  RNA_def_enum(ot->srna,
+               "library_type",
+               rna_enum_asset_library_type_items,
+               ASSET_LIBRARY_CUSTOM,
+               "Library Type",
+               "Which library to pin; a custom library is named by \"library_name\"");
 
   RNA_def_string(ot->srna,
                  "library_name",

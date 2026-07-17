@@ -7586,6 +7586,22 @@ static void rna_def_userdef_filepaths(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Active Asset Library",
                            "Index of the asset library being edited in the Preferences UI");
+
+  prop = RNA_def_property(srna, "pin_current_file_library", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "asset_flag", USER_ASSETS_PIN_CURRENT_FILE);
+  RNA_def_property_ui_text(
+      prop,
+      "Pin Current File Library",
+      "Show the Current File library as a tab at the top of the asset shelf popover");
+  RNA_def_property_update(prop, 0, "rna_userdef_asset_library_pin_update");
+
+  prop = RNA_def_property(srna, "pin_essentials_library", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "asset_flag", USER_ASSETS_PIN_ESSENTIALS);
+  RNA_def_property_ui_text(
+      prop,
+      "Pin Essentials Library",
+      "Show the Essentials library as a tab at the top of the asset shelf popover");
+  RNA_def_property_update(prop, 0, "rna_userdef_asset_library_pin_update");
 }
 
 static void rna_def_userdef_asset_libraries(BlenderRNA *brna)

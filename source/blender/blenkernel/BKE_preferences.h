@@ -24,6 +24,8 @@ struct bUserAssetBrowserSettings;
 struct bUserExtensionRepo;
 struct bUserAssetLibrary;
 struct bUserAssetShelfSettings;
+/* Fixed underlying type, so this matches #DNA_asset_types.h exactly and can be forward-declared. */
+enum eAssetLibraryType : short;
 class StringRef;
 struct EnumPropertyItem;
 
@@ -234,6 +236,32 @@ bool BKE_preferences_asset_library_pin_reorder(struct UserDef *userdef,
 /** \return the number of libraries carrying #ASSET_LIBRARY_IS_PINNED. */
 int BKE_preferences_asset_library_pinned_count(const struct UserDef *userdef)
     ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * \return whether the built-in library \a type has a pin of its own at all.
+ *
+ * False for #ASSET_LIBRARY_ALL (always shown, so there is nothing to toggle) and for
+ * #ASSET_LIBRARY_CUSTOM (a custom library carries #ASSET_LIBRARY_IS_PINNED on its own
+ * #bUserAssetLibrary instead). Ask this before offering a pin toggle for a built-in.
+ */
+bool BKE_preferences_asset_builtin_pin_supported(eAssetLibraryType type) ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * \return whether the built-in library \a type is currently pinned, i.e. shown as a tab at the top
+ * of the asset shelf popover. False for a \a type that cannot be pinned.
+ */
+bool BKE_preferences_asset_builtin_pin_get(const struct UserDef *userdef, eAssetLibraryType type)
+    ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Pin or unpin the built-in library \a type. Does nothing for a \a type that cannot be pinned.
+ *
+ * \note Unrelated to #bUserAssetLibrary.pin_order: the built-in tabs are fixed in place and take no
+ * part in that ordering, so nothing has to be compacted here.
+ */
+void BKE_preferences_asset_builtin_pin_set(struct UserDef *userdef,
+                                           eAssetLibraryType type,
+                                           bool pinned) ATTR_NONNULL();
 
 /**
  * Restore parent pointers from parent_name strings in the asset library hierarchy.

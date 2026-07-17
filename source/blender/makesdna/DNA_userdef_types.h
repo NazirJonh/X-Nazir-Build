@@ -65,6 +65,13 @@ ENUM_OPERATORS(eUserPref_Flag)
 /** #UserDef.asset_flag */
 enum eUserPref_AssetFlag : char {
   USER_ASSETS_USE_ONLINE_ESSENTIALS = 1 << 0,
+  /** Show the "Current File" library as a tab at the top of the asset shelf popover.
+   * The built-in libraries are not #bUserAssetLibrary entries, so they have nowhere of their own to
+   * carry #ASSET_LIBRARY_IS_PINNED; these bits replace it. They need no order field to go with them
+   * because the built-in tabs sit in a fixed position and cannot be reordered. */
+  USER_ASSETS_PIN_CURRENT_FILE = 1 << 1,
+  /** Show the "Essentials" library as a tab at the top of the asset shelf popover. */
+  USER_ASSETS_PIN_ESSENTIALS = 1 << 2,
 };
 ENUM_OPERATORS(eUserPref_AssetFlag)
 

@@ -348,19 +348,6 @@ constexpr int LEFT_COL_WIDTH_UNITS = 10;
  * #ui::popup_grid_fixed_viewport_units. */
 constexpr float ASSET_SHELF_POPUP_GRID_DEFAULT_UNITS_Y = 18.0f;
 
-/**
- * Ensure the popover width fits into the window: clamp the total width to the horizontal budget
- * (in #UI_UNIT_X units) available to the right of the popover's pinned left edge. Once the catalog
- * is wide enough to consume the budget, the right (grid) column gives up space instead of the
- * popover growing off screen (the left edge stays fixed, see #ui::BLOCK_POPUP_ANCHOR_LEFT).
- */
-static int layout_width_units_clamped(int left_col_width, int right_col_width, int max_total_units)
-{
-  /* Ensure a reasonable minimum width for the right column. */
-  const int effective_right_width = std::max(right_col_width, 20);
-  return std::min(left_col_width + effective_right_width, max_total_units);
-}
-
 /* Catalog tree column width bounds (in #UI_UNIT_X units) for the interactive vertical grip. */
 constexpr int CATALOG_COL_WIDTH_MIN_UNITS = 6;
 constexpr int CATALOG_COL_WIDTH_MAX_UNITS = 30;
@@ -369,10 +356,10 @@ constexpr float CATALOG_GRIP_WIDTH_UNITS = 0.4f;
 
 /**
  * Coarse ceiling for the user's popup grid-viewport height (in #UI_UNIT_Y units), used as the
- * #default_units cap passed to #ui::popup_grid_fixed_viewport_units. Mirrors
- * #layout_width_units_clamped for the vertical axis. The precise window-fit (subtracting the
- * header/tab rows, resize grip, and popover positioning chrome from the space actually available on
- * the spawn side) is done there for every spawn, so this only needs to be a sane upper bound: the
+ * #default_units cap passed to #ui::popup_grid_fixed_viewport_units. The precise window-fit
+ * (subtracting the header/tab rows, resize grip, and popover positioning chrome from the space
+ * actually available on the spawn side) is done there for every spawn, so this only needs to be a
+ * sane upper bound: the
  * lower bound keeps at least a few preview rows; the upper bound is a whole-window figure minus a
  * small screen-edge margin.
  */
@@ -875,14 +862,28 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
    * the catalog fills the budget the grid gives up columns rather than the popover going off screen. */
   ui::Block *popover_block = panel->layout->block();
   ui::block_flag_enable(popover_block, ui::BLOCK_POPUP_ANCHOR_LEFT);
-  const int width_budget_units = std::max(
-      catalog_units + 1, ui::popup_block_left_anchored_budget_px(win, popover_block) / UI_UNIT_X - 1);
 
-  const int layout_width_units = layout_width_units_clamped(
-      catalog_units, shelf->settings.popup_width_units, width_budget_units);
+  const int tile_w_px = std::max(1, tile_width(shelf->settings));
+  const float tile_w_units = float(tile_w_px) / float(UI_UNIT_X);
+  const float scroll_gutter_units = float(V2D_SCROLL_WIDTH) / float(UI_UNIT_X);
+
+  /* Right (grid) column budget in pixels: the user's width setting, capped so the whole popover
+   * (catalog column + vertical grip + grid column) fits within the width available from the pinned
+   * left edge to the right window margin. Working in pixels/floats and reserving the grip exactly
+   * (rather than the earlier whole-unit slack) keeps the column count idempotent across the
+   * position-dependent refresh: on first open the budget is the full usable window width, but once
+   * the block is positioned the budget becomes its own settled width, and recomputing #grid_cols
+   * from that must reproduce the same value instead of dropping one -- which shrank the popover off
+   * the window edge one frame after it opened. */
+  const float avail_total_px = float(ui::popup_block_left_anchored_budget_px(win, popover_block));
+  const float catalog_px = float(catalog_units) * float(UI_UNIT_X);
+  const float grip_px = CATALOG_GRIP_WIDTH_UNITS * float(UI_UNIT_X);
+  const float user_right_px = float(std::max(int(shelf->settings.popup_width_units), 20)) *
+                              float(UI_UNIT_X);
+  const float right_budget_px = std::min(user_right_px, avail_total_px - catalog_px - grip_px);
 
   /* Ensure the assertion doesn't fail if the window is extremely small. */
-  if (layout_width_units <= catalog_units) {
+  if (right_budget_px < float(tile_w_px)) {
     return;
   }
 
@@ -896,12 +897,8 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
    * instead of covering the last column, and the popover edge still sits right after the scrollbar
    * (no gap). When it does not overflow the gutter is just a thin empty margin, as for any reserved
    * scrollbar. */
-  const int tile_w_px = std::max(1, tile_width(shelf->settings));
-  const float tile_w_units = float(tile_w_px) / float(UI_UNIT_X);
-  const float scroll_gutter_units = float(V2D_SCROLL_WIDTH) / float(UI_UNIT_X);
-  const int raw_right_units = layout_width_units - catalog_units;
   const int grid_cols = std::max(
-      1, int((float(raw_right_units) - scroll_gutter_units) / tile_w_units));
+      1, int((right_budget_px - float(V2D_SCROLL_WIDTH)) / float(tile_w_px)));
   const float right_col_width_units = float(grid_cols) * tile_w_units + scroll_gutter_units;
 
   bScreen *screen = CTX_wm_screen(C);

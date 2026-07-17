@@ -38,7 +38,7 @@
  * down each file's local switch. Set to 0 to compile every probe out as a no-op.
  */
 #ifndef SCULPT_LAYERS_DEBUG_LOG
-#  define SCULPT_LAYERS_DEBUG_LOG 0
+#  define SCULPT_LAYERS_DEBUG_LOG 1
 #endif
 
 struct BlendWriter;

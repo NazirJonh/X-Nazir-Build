@@ -525,22 +525,44 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
   const Vector<MultiresGridSculptLayer> layers = BKE_multires_grid_sculpt_layers_collect(
       *coarse_mesh, grid_area);
 
-  /* The store / assign / detail-smoothing steps must run over ALL grids: smoothing (Catmull-Clark
-   * detail transport from the reshape level up to the top level) reads neighbouring original grids
-   * and refines a subdivision over the whole mesh, so a grid left in a different state (null
-   * original, or tangent-space displacement while its neighbours hold object-space coordinates)
-   * corrupts the result even for touched grids next to it. Recording can run at sculptlvl < totlvl,
-   * in which case the smoothing pass is NOT a no-op, so this constraint is load-bearing. The
-   * per-grid restriction to touched grids is limited to the tangent encode (and its limit-frame
-   * cache) below, which is the part that dominates the per-stroke cost. */
+  /* The store / assign steps normally run over ALL grids because the detail-smoothing pass
+   * (Catmull-Clark detail transport from the reshape level up to the top level) reads neighbouring
+   * original grids and refines a subdivision over the whole mesh; a grid left in a different state
+   * (null original, or tangent-space displacement while its neighbours hold object-space
+   * coordinates) would corrupt the result even for touched grids next to it.
+   *
+   * That constraint only bites when there IS a smoothing pass, i.e. when recording at
+   * `sculptlvl < totlvl`. When recording at the top level (`reshape.level == top.level`) the
+   * smoothing pass is a no-op, no grid ever reads its neighbours, and every phase can be restricted
+   * to the grids the stroke actually touched — which on a dense mesh with a small brush footprint
+   * is the dominant per-stroke cost. `grid_enabled` carries that restriction: a non-empty mask
+   * limits compose / store / assign / save / restore to the touched grids; an empty mask is the
+   * full-mesh reshape and is byte-for-byte the original behavior. The tangent encode below is always
+   * touched-only regardless. */
+  const bool restrict_to_touched = reshape_context.reshape.level == reshape_context.top.level;
+  Array<bool> grid_enabled;
+  if (restrict_to_touched) {
+    grid_enabled = Array<bool>(num_grids, false);
+    for (const int grid_index : touched_grids) {
+      if (grid_index >= 0 && grid_index < num_grids) {
+        grid_enabled[grid_index] = true;
+      }
+    }
+  }
+  const auto grid_active = [&](const int grid_index) {
+    return grid_enabled.is_empty() || grid_enabled[grid_index];
+  };
 
-  /* Save the base displacement of EVERY grid: the reshape below overwrites MDisps of all grids
-   * (object-space assign + detail smoothing) and the base must be restored afterwards for every
-   * grid (MDisps only ever stores the base surface). The stroke delta is only accumulated for the
-   * touched grids below. */
+  /* Save the base displacement of every grid the reshape below will overwrite (object-space assign
+   * plus, at a lower sculpt level, detail smoothing), so it can be restored afterwards — MDisps only
+   * ever stores the base surface (I1). With a restricted reshape only the touched grids are modified,
+   * so only those are saved and restored; the untouched entries of #saved_base are never read. */
   Array<float3> saved_base(int64_t(num_grids) * grid_area);
   threading::parallel_for(IndexRange(num_grids), 32, [&](const IndexRange range) {
     for (const int grid_index : range) {
+      if (!grid_active(grid_index)) {
+        continue;
+      }
       const float3 *disps = reinterpret_cast<const float3 *>(
           reshape_context.mdisps[grid_index].disps);
       std::copy_n(disps, grid_area, saved_base.data() + int64_t(grid_index) * grid_area);
@@ -548,21 +570,26 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
   });
 
   if (!layers.is_empty()) {
-    mdisps_add_sculpt_layers(reshape_context.mdisps, num_grids, grid_area, layers, 1.0f);
+    mdisps_add_sculpt_layers(
+        reshape_context.mdisps, num_grids, grid_area, layers, 1.0f, grid_enabled);
   }
 #if SCULPT_LAYERS_DEBUG_FLUSH
   const auto t_saved = std::chrono::high_resolution_clock::now();
 #endif
 
   /* Standard reshape: after this MDisps holds `T_new`, the tangent displacement of the sculpted
-   * surface at the top level, and the original grids hold `T_old`. Store and assign run over all
-   * grids (see the note above) so the detail-smoothing step refines a subdivision in a single,
-   * consistent coordinate space. */
-  multires_reshape_store_original_grids(&reshape_context, {});
+   * surface at the top level, and the original grids hold `T_old`. Store and assign honour
+   * #grid_enabled: at the top level they touch only the stroke's grids, otherwise (empty mask) every
+   * grid, so the detail-smoothing step refines a subdivision in a single, consistent coordinate
+   * space. */
+  multires_reshape_store_original_grids(&reshape_context, grid_enabled);
   multires_reshape_ensure_grids(coarse_mesh, reshape_context.top.level);
-  if (!multires_reshape_assign_final_coords_from_ccg(&reshape_context, subdiv_ccg, {})) {
+  if (!multires_reshape_assign_final_coords_from_ccg(&reshape_context, subdiv_ccg, grid_enabled)) {
     threading::parallel_for(IndexRange(num_grids), 32, [&](const IndexRange range) {
       for (const int grid_index : range) {
+        if (!grid_active(grid_index)) {
+          continue;
+        }
         float3 *disps = reinterpret_cast<float3 *>(reshape_context.mdisps[grid_index].disps);
         std::copy_n(saved_base.data() + int64_t(grid_index) * grid_area, grid_area, disps);
       }
@@ -633,11 +660,16 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
   const auto t_delta = std::chrono::high_resolution_clock::now();
 #endif
 
-  /* Restore the base into MDisps for ALL grids (I1: layers are never baked into the base). The
-   * assign + detail-smoothing above overwrote every grid's MDisps with the composed/top-level
-   * result, so every grid must be restored to its pre-stroke base — not only the touched ones. */
+  /* Restore the base into MDisps (I1: layers are never baked into the base). The compose + assign
+   * above overwrote every modified grid's MDisps with the composed/top-level result, so each must be
+   * restored to its pre-stroke base. This mirrors #grid_enabled exactly: only the grids that were
+   * saved and modified above are restored — with an empty mask that is every grid, with a restricted
+   * reshape only the touched ones (the rest were never touched). */
   threading::parallel_for(IndexRange(num_grids), 32, [&](const IndexRange range) {
     for (const int grid_index : range) {
+      if (!grid_active(grid_index)) {
+        continue;
+      }
       float3 *disps = reinterpret_cast<float3 *>(reshape_context.mdisps[grid_index].disps);
       std::copy_n(saved_base.data() + int64_t(grid_index) * grid_area, grid_area, disps);
     }

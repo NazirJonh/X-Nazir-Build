@@ -107,6 +107,16 @@ template<typename... Args> inline void slp_perf_discard(const Args &.../*args*/)
 #  define SLP_PERF(...) slp_perf_discard(__VA_ARGS__)
 #endif
 
+/* The mesh-invariant validator (#debug_validate_mesh_invariant) is a correctness check, not a perf
+ * probe: it rebuilds and compares the whole composed surface, an O(verts) serial pass that on a
+ * multi-million vertex mesh costs tens of milliseconds *inside* the stroke-end timing region and so
+ * pollutes every measurement. Keep it on its own switch, off by default, so enabling the perf logs
+ * does not tax the very path being measured. Flip to 1 only when hunting a canonical-invariant
+ * corruption. */
+#ifndef SCULPT_LAYERS_DEBUG_INVARIANT
+#  define SCULPT_LAYERS_DEBUG_INVARIANT 0
+#endif
+
 /* -------------------------------------------------------------------------------------------------
  * Helpers
  */
@@ -383,7 +393,7 @@ static void recompute_mesh_canonical(Object &object)
   DEG_id_tag_update(&object.id, ID_RECALC_SHADING);
 }
 
-#if SCULPT_LAYERS_DEBUG_PERF
+#if SCULPT_LAYERS_DEBUG_INVARIANT
 /* Debug validator for the mesh-domain canonical invariant `positions == mesh_base + sum(enabled
  * vert layers * influence)`. Prints a report when the live positions diverge, tagged with the
  * calling site, so a corruption can be attributed to the operation that introduced it. Only
@@ -870,11 +880,20 @@ static void base_view_ensure(const Depsgraph &depsgraph, Object &object)
     return;
   }
 
+  /* Which composition path built the base view, and how many layers it actually summed. For the
+   * mesh paths the sum is already baked into the maintained invariant (a single subtraction), so
+   * this is 0; only the multires path pays a per-layer cost and is the candidate for a folder-level
+   * composite cache. */
+  const char *path_name = "none";
+  int grid_layers_summed = 0;
+
   const auto t0 = std::chrono::high_resolution_clock::now();
   if (pbvh->type() == bke::pbvh::Type::Mesh && ss->shapekey_active) {
+    path_name = "mesh-shapekey";
     ss->layers.base_view = base_view_from_layer_data(mesh, mesh.verts_num);
   }
   else if (pbvh->type() == bke::pbvh::Type::Mesh) {
+    path_name = "mesh-invariant";
     if (!ss->layers.state_valid) {
       session_state_ensure(object);
     }
@@ -894,6 +913,7 @@ static void base_view_ensure(const Depsgraph &depsgraph, Object &object)
     ss->layers.base_view = std::move(view);
   }
   else if (ss->subdiv_ccg) {
+    path_name = "multires";
     SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
     Array<float3> total(subdiv_ccg.positions.size(), float3(0.0f));
     Array<float3> contrib(subdiv_ccg.positions.size());
@@ -915,15 +935,39 @@ static void base_view_ensure(const Depsgraph &depsgraph, Object &object)
           total[i] += contrib[i] * influence;
         }
       });
+      grid_layers_summed++;
     }
     ss->layers.base_view = std::move(total);
   }
   base_view_node_offset_bounds_ensure(depsgraph, object);
   const auto t1 = std::chrono::high_resolution_clock::now();
-  SLP_PERF("[DEBUG-perf] base_view_ensure: %zu elems in %lld us\n",
+  SLP_PERF("[DEBUG-perf] base_view_ensure: path=%s %zu elems grid_layers_summed=%d in %lld us\n",
+           path_name,
            size_t(ss->layers.base_view.size()),
+           grid_layers_summed,
            static_cast<long long>(
                std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()));
+
+#if SCULPT_LAYERS_DEBUG_PERF
+  /* One-shot census of the tree the composite is built from: how many layers in total, and the
+   * largest single folder's layer count. A folder-level composite cache only pays off when some
+   * folder holds several layers that stay untouched while the stroke edits elsewhere. */
+  {
+    int folder_count = 0;
+    int max_layers_in_folder = 0;
+    for (SculptLayerGroup *group : bke::sculpt_layers::groups(mesh)) {
+      folder_count++;
+      const int n = int(bke::sculpt_layers::layers(*group).size());
+      if (n > max_layers_in_folder) {
+        max_layers_in_folder = n;
+      }
+    }
+    SLP_PERF("[DEBUG-perf] base_view census: layers=%d folders=%d max_layers_in_folder=%d\n",
+             int(bke::sculpt_layers::layers(mesh).size()),
+             folder_count,
+             max_layers_in_folder);
+  }
+#endif
 }
 
 Span<float3> stroke_base_view(const Object &object)
@@ -1147,6 +1191,8 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
   Mesh &mesh = mesh_of(object);
 
+  const auto t_rec_end_start = std::chrono::high_resolution_clock::now();
+
   /* The base view is only valid for the duration of one stroke (the stroke changes the base, and
    * for multires the tangent frames with it). */
   ss->layers.base_view = {};
@@ -1172,6 +1218,10 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
       });
       debug_validate_mesh_invariant(object, "stroke_end_base");
     }
+    SLP_PERF("[DEBUG-perf] stroke_record_end: REC=off mesh base-fold in %lld us\n",
+             static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::high_resolution_clock::now() - t_rec_end_start)
+                                        .count()));
     return;
   }
 
@@ -1203,6 +1253,8 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
           touched.append(int(i));
         }
       }
+      /* Captured before the #std::move below empties #touched (the probe printed 0 otherwise). */
+      const int touched_num = int(touched.size());
 
       if (!touched.is_empty()) {
         Vector<float3> undo_delta;
@@ -1217,6 +1269,12 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
        * skip any depsgraph tag: the live CCG already equals base + layers, so a re-evaluation
        * would only rebuild the PBVH (the per-stroke freeze this system explicitly avoids). */
       subdiv_ccg.dirty.coords = false;
+      SLP_PERF("[DEBUG-perf] stroke_record_end: REC=on multires reshape %d touched grids in %lld us\n",
+               touched_num,
+               static_cast<long long>(
+                   std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::high_resolution_clock::now() - t_rec_end_start)
+                       .count()));
     }
     else if (pbvh->type() == bke::pbvh::Type::Mesh) {
       /* Mesh: #data is accumulated per dab by #PositionDeformData::deform. Record the per-vertex
@@ -1311,6 +1369,12 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
                                               std::move(seg_count));
       }
       debug_validate_mesh_invariant(object, "stroke_end_rec");
+      SLP_PERF("[DEBUG-perf] stroke_record_end: REC=on mesh recorded %d changed verts in %lld us\n",
+               out,
+               static_cast<long long>(
+                   std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::high_resolution_clock::now() - t_rec_end_start)
+                       .count()));
     }
   }
 

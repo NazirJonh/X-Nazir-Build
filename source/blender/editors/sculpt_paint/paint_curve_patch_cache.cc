@@ -51,6 +51,7 @@
 
 #include "mesh/mesh_brush_common.hh"
 #include "mesh/sculpt_intern.hh"
+#include "mesh/sculpt_undo.hh"
 
 /* Temporary performance instrumentation (see previous measurement pass). Times each
  * `curve_patch_restore_and_restamp()` to confirm the C3 node-cull's effect on `relief`. Set to 0 to
@@ -622,6 +623,12 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
     tag_mask = IndexMask::from_bits(touched, tag_memory);
   }
 
+  /* Push the nodes we are about to displace into the active undo step. Curve Patch bypasses
+   * `do_brush_action()`, which normally handles this for standard strokes. Without this, nodes
+   * touched by the patch that were not already pushed by the initial stroke (anchor dab or Roll
+   * stroke) are never saved, and Ctrl+Z fails to restore them. */
+  undo::push_nodes(depsgraph, ob, tag_mask, undo::Type::Position);
+
   /* Unlike the old N-dab re-stamp (which went through `do_brush_action` and inherited its own
    * `pbvh.tag_positions_changed(node_mask)` at `sculpt.cc:3187`), this direct relief action writes
    * the position array directly. The PBVH caches the vertex positions its draw path reads in each
@@ -771,6 +778,54 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
 #endif
 }
 
+/* Shared tail of the Curve Patch handoff: freeze brush params, repoint the ViewContext at the
+ * patch's owned copy, publish the cache, stamp the initial preview and launch the modal editor.
+ * `patch->control_curve` must already be fully built (positions, radii, handles). Used by both the
+ * anchor-drag path and the roll-stroke bridge. */
+static void curve_patch_begin_editing(Object &ob,
+                                      const Brush &brush,
+                                      const ViewContext &vc,
+                                      CurvePatchCache *patch,
+                                      const float3 &plane_normal,
+                                      const float frozen_radius)
+{
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  StrokeCache &cache = *ss.cache;
+
+  patch->frozen_params.radius = frozen_radius;
+  patch->frozen_params.swap_axis = brush.mtex.use_curve_patch_swap_axis;
+  patch->frozen_params.length_mode = brush.mtex.curve_patch_length_mode;
+  patch->frozen_params.length_repeat = brush.mtex.curve_patch_length_repeat;
+  patch->plane_normal = plane_normal;
+
+  /* `cache.vc` otherwise still points at the just-finished stroke's own `ViewContext`, torn down
+   * together with that stroke's operator. Repoint it at this patch's owned copy so every re-stamp's
+   * `calc_local_from_screen()` (via `cache->vc`) dereferences valid memory for the whole lifetime
+   * of the patch (see `CurvePatchCache::view_context`). */
+  patch->view_context = vc;
+  cache.vc = &patch->view_context;
+
+  ss.curve_patch_cache = patch;
+
+  /* Stamp the initial curve right away: neither `curve_patch_edit_invoke()` nor
+   * `curve_patch_edit_modal()` re-stamps on its own until the user performs a first edit, so without
+   * this the mesh would sit pristine with no visible feedback at all until then. */
+  curve_patch_restore_and_restamp(*vc.C, ob, *patch);
+
+  /* This re-stamp runs nested inside the just-finishing stroke's `PaintStroke::done()`, which clears
+   * `RV3D_PAINTING` the instant this call chain returns -- so the fast paint-redraw path
+   * `flush_update_step()` set up is torn down before the viewport redraws. Issue the full
+   * finished-stroke redraw (tags every viewport and refreshes bounds independently of
+   * `RV3D_PAINTING`) so this first preview reaches the screen immediately. */
+  flush_update_done(vc.C, ob, UpdateType::Position);
+
+  /* `vc.C` is the real `bContext` the stroke was invoked with (populated by
+   * `ED_view3d_viewcontext_init()`), required so the modal editor's `invoke()` can register its own
+   * modal handler via `WM_event_add_modal_handler()`. */
+  WM_operator_name_call(
+      vc.C, "SCULPT_OT_curve_patch_edit", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
+}
+
 void curve_patch_start_from_anchor(const Depsgraph &depsgraph,
                                    Object &ob,
                                    Sculpt &sd,
@@ -873,40 +928,81 @@ void curve_patch_start_from_anchor(const Depsgraph &depsgraph,
    * invalidates cached evaluated data so the first `curve_patch_restore_and_restamp()` call sees
    * the real, just-set positions rather than the freshly-constructed curve's stale/default cache. */
   patch->control_curve.tag_positions_changed();
-  patch->frozen_params.radius = cache.initial_radius;
-  patch->frozen_params.swap_axis = brush.mtex.use_curve_patch_swap_axis;
-  patch->frozen_params.length_mode = brush.mtex.curve_patch_length_mode;
-  patch->frozen_params.length_repeat = brush.mtex.curve_patch_length_repeat;
-  patch->plane_normal = cache.sculpt_normal;
 
-  /* `cache.vc` otherwise still points at the just-finished anchor stroke's own `ViewContext`,
-   * which is torn down together with that stroke's operator. Repoint it at this patch's owned
-   * copy so every re-stamp's `calc_local_from_screen()` (via `cache->vc`) dereferences valid
-   * memory for the whole lifetime of the patch (see `CurvePatchCache::view_context`). */
-  patch->view_context = vc;
-  cache.vc = &patch->view_context;
+  curve_patch_begin_editing(ob, brush, vc, patch, cache.sculpt_normal, cache.initial_radius);
+}
 
-  ss.curve_patch_cache = patch;
+void roll_start_curve_patch_from_stroke(const Depsgraph &depsgraph,
+                                        Object &ob,
+                                        Sculpt & /*sd*/,
+                                        const Brush &brush,
+                                        const ViewContext &vc,
+                                        const Span<float3> control_positions,
+                                        const Span<float> control_radii,
+                                        const float3 &plane_normal)
+{
+  BLI_assert(control_positions.size() == control_radii.size());
+  SculptSession &ss = *ob.runtime->sculpt_session;
 
-  /* Stamp the initial 2-point curve right away: neither `curve_patch_edit_invoke()` nor
-   * `curve_patch_edit_modal()` re-stamps on its own until the user performs a first edit
-   * (move/add/remove point, radius, axis toggle), so without this call the mesh would sit
-   * pristine (see the restore above) with no visible feedback at all until then. */
-  curve_patch_restore_and_restamp(*vc.C, ob, *patch);
+  /* Dynamic Topology has no stable per-vertex index for `CurvePatchCache::orig_positions`; refuse
+   * (mirrors `curve_patch_start_from_anchor()`). Ownership of `ss.cache` was handed to us by the
+   * caller, so free it here on every bail path. Checked before the restore below so an unsupported
+   * object is left untouched. */
+  if (bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::BMesh) {
+    BKE_report(
+        CTX_wm_reports(vc.C), RPT_WARNING, "Curve Patch does not support Dynamic Topology");
+    MEM_delete(ss.cache);
+    ss.cache = nullptr;
+    return;
+  }
 
-  /* This re-stamp runs nested inside the just-finishing anchor stroke's `PaintStroke::done()`,
-   * which clears `RV3D_PAINTING` the instant this call chain returns (`paint_stroke.cc`) -- so the
-   * fast paint-redraw path that `curve_patch_restore_and_restamp()`'s `flush_update_step()` sets up
-   * is torn down before the viewport ever redraws. Issue the full finished-stroke redraw a normal
-   * sculpt stroke ends with (`SculptPaintStroke::done()`), which tags every viewport and refreshes
-   * bounds independently of `RV3D_PAINTING`, so this first preview reaches the screen immediately. */
-  flush_update_done(vc.C, ob, UpdateType::Position);
+  if (control_positions.size() < 2) {
+    MEM_delete(ss.cache);
+    ss.cache = nullptr;
+    return;
+  }
 
-  /* `vc.C` is the real `bContext` the anchor stroke was invoked with (populated by
-   * `ED_view3d_viewcontext_init()`), required so the modal editor's `invoke()` can register its
-   * own modal handler via `WM_event_add_modal_handler()`. */
-  WM_operator_name_call(
-      vc.C, "SCULPT_OT_curve_patch_edit", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
+  /* Undo the entire live roll relief back to pristine so the Curve Patch re-stamp starts from a
+   * clean baseline (its `orig_positions` snapshot must not capture already-displaced vertices).
+   * Unlike Curve Patch's single anchor dab, roll is an additive multi-dab stroke, so use the full
+   * position restore (the default case of the internal per-brush `restore_from_undo_step()`),
+   * not the per-dab `restore_from_undo_step_if_necessary()` which does nothing for the roll stroke
+   * method. */
+  undo::restore_position_from_undo_step(depsgraph, ob);
+  bke::pbvh::update_normals(depsgraph, ob, *bke::object::pbvh_get(ob));
+
+  auto *patch = MEM_new<CurvePatchCache>(__func__);
+  const int point_num = int(control_positions.size());
+  paintcurve_geometry_init_bezier(patch->control_curve, point_num);
+
+  MutableSpan<float3> positions = patch->control_curve.positions_for_write();
+  MutableSpan<float> radii = patch->control_curve.radius_for_write();
+  for (const int i : IndexRange(point_num)) {
+    positions[i] = control_positions[i];
+    radii[i] = control_radii[i];
+  }
+
+  /* Materialize + compute the bezier handle positions -- same reason as
+   * `curve_patch_start_from_anchor()`: `calculate_bezier_auto_handles()` early-outs when the handle
+   * position attributes are absent, so without creating them first the AUTO handles are never
+   * computed and the evaluated bezier collapses to the origin. */
+  patch->control_curve.handle_positions_left_for_write();
+  patch->control_curve.handle_positions_right_for_write();
+  patch->control_curve.calculate_bezier_auto_handles();
+  patch->control_curve.calculate_bezier_aligned_handles();
+  patch->control_curve.tag_positions_changed();
+
+  const StrokeCache &cache = *ss.cache;
+
+  /* Fall back to the stroke's surface/view normal if the roll never froze a projection normal
+   * (a stroke too short to paint a single deferred dab). Curve Patch needs a unit plane normal for
+   * its lateral decomposition. */
+  float3 plane = plane_normal;
+  if (math::length_squared(plane) < 1e-8f) {
+    plane = (math::length_squared(cache.sculpt_normal) > 1e-8f) ? cache.sculpt_normal :
+                                                                  cache.view_normal;
+  }
+  curve_patch_begin_editing(ob, brush, vc, patch, math::normalize(plane), cache.initial_radius);
 }
 
 }  // namespace blender::ed::sculpt_paint

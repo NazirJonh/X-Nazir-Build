@@ -2531,6 +2531,62 @@ void sculpt_apply_texture(const SculptSession &ss,
       add_v3_fl(r_rgba, brush.texture_sample_bias);  // v3 -> Ignore alpha
       *r_value -= brush.texture_sample_bias;
     }
+    else if (ss.cache && ss.cache->stroke && ss.cache->stroke->need_roll_mapping()) {
+      float3 point_3d;
+      point_3d[2] = 0.0f;
+
+      float3 tan;
+      float3 point_3d2;
+
+      float3 tile_point = float3(brush_point);
+
+      /* Undo the tile offset added by do_tiled(). cache.plane_offset is the pure tile shift (zero
+       * for the principal tile), without any mirror/radial transform mixed in. */
+      tile_point -= cache.plane_offset;
+
+      /* Undo radial symmetry rotation. */
+      if (cache.radial_symmetry_pass > 0) {
+        mul_m4_v3(cache.symm_rot_mat_inv.ptr(), tile_point);
+      }
+
+      /* Try each mirror-symmetry flip of the vertex and keep the result closest to the strip
+       * center. For mirror_pass=0 (no mirror) the only iteration is i=0 (identity). For
+       * mirror_pass=X, i=1 flips X and maps the mirrored vertex back near the spline. Points
+       * outside the LUT bbox return FLT_MAX U and never win. */
+      point_3d[0] = FLT_MAX;
+      for (int i = 0; i < 8; i++) {
+        if ((int(cache.mirror_symmetry_pass) & i) != i) {
+          continue;
+        }
+
+        float3 symm_pt = tile_point;
+
+        for (int j = 0; j < 3; j++) {
+          if ((i & (1 << j)) && (i & int(cache.mirror_symmetry_pass))) {
+            symm_pt[j] = -symm_pt[j];
+          }
+        }
+
+        cache.stroke->spline_uv(cache, symm_pt, point_3d2, tan);
+
+        if (std::abs(point_3d2[0]) < std::abs(point_3d[0])) {
+          copy_v3_v3(point_3d, point_3d2);
+        }
+      }
+
+      /* U is already normalized to +/-1 at the strip borders. V is pre-normalized in the grid when
+       * pressure-scale is active, otherwise divide by initial_radius for standard tiling. */
+      if (!(mtex->roll_pressure_scale && BKE_brush_use_size_pressure(&brush))) {
+        point_3d[1] /= cache.initial_radius;
+      }
+      float angle = mtex->rot;
+
+      float3 final_pt;
+      rotate_v2_v2fl(final_pt, point_3d, angle);
+
+      paint_get_tex_pixel(mtex, final_pt[0], -final_pt[1], ss.tex_pool, thread_id, r_value, r_rgba);
+      *r_value += brush.texture_sample_bias;
+    }
     else {
       const float2 point_2d = ED_view3d_project_float_v2_m4(
           cache.vc->region, symm_point, cache.projection_mat);
@@ -5966,10 +6022,17 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   StrokeCache *cache = ss.cache;
   cache->stroke_distance = this->stroke_distance();
+  cache->stroke = this;
 
   stroke_modifiers_check(depsgraph, this->vc.rv3d, sd, ob, &brush);
   stroke_cache_update(itemptr);
   restore_from_undo_step_if_necessary(depsgraph, sd, ob);
+
+  /* Precompute roll-mapping center data once per dab (single-threaded) so the per-vertex parallel
+   * loop in sculpt_apply_texture() can use the fast LUT path. */
+  if (cache->stroke && cache->stroke->need_roll_mapping()) {
+    cache->stroke->compute_roll_center(*cache);
+  }
 
   if (dyntopo::stroke_is_dyntopo(ob, brush)) {
     do_symmetrical_brush_actions(
@@ -6058,6 +6121,30 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
        * Stage 03) and keep the undo transaction opened by `stroke_undo_begin()` open (the
        * editor's own commit/cancel closes or discards it — see `curve_patch_start_from_anchor()`). */
       curve_patch_start_from_anchor(*this->depsgraph, ob, sd, *brush, this->vc);
+      return;
+    }
+  }
+
+  /* Roll stroke method with "Edit After Stroke": hand the drawn contour off to the Curve Patch
+   * editor as an editable control curve (the bridge undoes the live roll relief first and re-stamps
+   * via the curve). Skipped for Dynamic Topology (no stable vertex index for the patch's
+   * `orig_positions`). Like the Curve Patch branch above, this keeps `ss.cache` and the open undo
+   * transaction alive for the editor to own -- so it returns before the teardown below. */
+  if (!is_cancel && stroke_started && brush->stroke_method == BRUSH_STROKE_ROLL &&
+      brush->mtex.roll_edit_after && !ss.bm)
+  {
+    Vector<float3> roll_positions;
+    Vector<float> roll_radii;
+    this->extract_roll_control_points(roll_positions, roll_radii);
+    if (roll_positions.size() >= 2) {
+      roll_start_curve_patch_from_stroke(*this->depsgraph,
+                                         ob,
+                                         sd,
+                                         *brush,
+                                         this->vc,
+                                         roll_positions.as_span(),
+                                         roll_radii.as_span(),
+                                         this->roll_plane_normal());
       return;
     }
   }

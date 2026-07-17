@@ -143,8 +143,11 @@ class PaintCurveCursor : Overlay {
     const float2 mval_region = state.cursor_mval_valid ?
                                    float2(state.cursor_mval - origin) :
                                    float2(-1.0e6f);
+    const bool is_curve_patch_active =
+        ed::sculpt_paint::ED_paint_curve_patch_active_control_curve(vc.obact) != nullptr;
+
     const bool is_curve_stroke = ELEM(
-        brush->stroke_method, BRUSH_STROKE_CURVE, BRUSH_STROKE_CURVE_PATCH);
+        brush->stroke_method, BRUSH_STROKE_CURVE, BRUSH_STROKE_CURVE_PATCH) || is_curve_patch_active;
     const bool compute_hover = state.cursor_mval_valid && (is_curves_edit || is_curve_stroke) &&
                                state.is_space_v3d() &&
                                !ed::sculpt_paint::ED_paint_curve_slide_is_active();
@@ -153,7 +156,7 @@ class PaintCurveCursor : Overlay {
                                      !ed::sculpt_paint::ED_paint_curve_slide_is_active() &&
                                      (is_curves_edit || is_curve_stroke);
 
-    if (brush->stroke_method == BRUSH_STROKE_CURVE_PATCH) {
+    if (is_curve_patch_active) {
       if (const bke::CurvesGeometry *control_curve =
               ed::sculpt_paint::ED_paint_curve_patch_active_control_curve(vc.obact))
       {
@@ -167,7 +170,7 @@ class PaintCurveCursor : Overlay {
                                                                             handles_);
       }
     }
-    else {
+    else if (ELEM(brush->stroke_method, BRUSH_STROKE_CURVE, BRUSH_STROKE_CURVE_PATCH)) {
       ed::sculpt_paint::ED_paint_curve_screen_handles_build(
           vc, *brush, sculpt, mval_region, compute_hover, show_insert_preview, handles_);
     }

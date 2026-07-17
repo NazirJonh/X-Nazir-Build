@@ -95,6 +95,15 @@ struct CurvePatchSpline {
                      float3 &r_tangent,
                      float &r_lateral,
                      float *r_normal_dist = nullptr) const;
+
+  /** Raw closest point: arc-length `r_s` (clamped to `[0, total_length()]`), unit `r_tangent`, and
+   * the true 3D Euclidean distance `r_dist`. Unlike #closest_point this does no plane decomposition
+   * and no past-the-end extension -- used by #RollSpline where only (s, tangent, distance) is
+   * needed. No-op (leaves outputs unchanged) when #is_empty(). */
+  void closest_point_dist(const float3 &query,
+                          float &r_s,
+                          float3 &r_tangent,
+                          float &r_dist) const;
 };
 
 /**

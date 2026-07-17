@@ -348,6 +348,7 @@ enum eBrushStrokeType : int8_t {
   BRUSH_STROKE_LINE = 5,
   BRUSH_STROKE_CURVE = 6,
   BRUSH_STROKE_CURVE_PATCH = 7,
+  BRUSH_STROKE_ROLL = 8,
 };
 
 /** #Brush.flag */

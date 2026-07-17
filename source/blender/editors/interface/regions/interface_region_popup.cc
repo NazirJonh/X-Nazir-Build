@@ -522,6 +522,25 @@ static void popup_block_clip(wmWindow *window, Block *block)
     block->rect.xmax += xofs;
   }
 
+  /* TEMP DEBUG: measure vertical overflow that turns the block menu-scrollable. Remove after use. */
+  {
+    const float clip_range = float(win_size[1]) - UI_POPUP_MENU_TOP - margin;
+    const float block_h = block->rect.ymax - block->rect.ymin;
+    if (block_h > clip_range) {
+      printf(
+          "[GRID-DEBUG] popup overflow: block_h=%.1f clip_range=%.1f overflow=%.1f (win_y=%d "
+          "UI_POPUP_MENU_TOP=%d UI_SCREEN_MARGIN=%d UI_UNIT_Y=%d overflow_units=%.2f)\n",
+          block_h,
+          clip_range,
+          block_h - clip_range,
+          win_size[1],
+          int(UI_POPUP_MENU_TOP),
+          margin,
+          int(UI_UNIT_Y),
+          (block_h - clip_range) / float(UI_UNIT_Y));
+    }
+  }
+
   block->rect.ymin = std::max<float>(block->rect.ymin, margin);
   block->rect.ymax = std::min<float>(block->rect.ymax, win_size[1] - UI_POPUP_MENU_TOP);
 

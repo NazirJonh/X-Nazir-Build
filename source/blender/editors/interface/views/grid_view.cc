@@ -1349,27 +1349,41 @@ float popup_grid_fixed_viewport_units(const bContext *C,
   }
   const Button *but = block->handle->popup_create_vars.but;
   ARegion *butregion = block->handle->popup_create_vars.butregion;
-  if (but == nullptr || but->block == nullptr || butregion == nullptr) {
-    return default_units;
-  }
-  const float aspect = but->block->aspect;
-  if (aspect >= 1.0f) {
-    /* Not zoomed in; the full-height popover fits. */
-    return default_units;
-  }
-
-  /* Vertical space on the roomier side, measured from the button *edge* the popover stacks away
-   * from, not its center: the popover grows away from the button, so the center over-counts the
-   * available space by half the button height. At high zoom the button is drawn large (scaling with
-   * 1/aspect), making that a 1-2 unit error - exactly what overflows the tightly-packed grid. */
-  float bx = BLI_rctf_cent_x(&but->rect);
-  float by_bottom = but->rect.ymin;
-  float bx_top = bx;
-  float by_top = but->rect.ymax;
-  block_to_window_fl(butregion, but->block, &bx, &by_bottom);
-  block_to_window_fl(butregion, but->block, &bx_top, &by_top);
   const auto win_size = WM_window_native_pixel_size(CTX_wm_window(C));
-  float avail_px = std::max(by_bottom, float(win_size[1]) - by_top);
+
+  /* Window-fit budget: the vertical pixel space the assembled block may occupy, from which the grid
+   * viewport is sized so the block never overflows the window and turns menu-scrollable (which would
+   * drag the fixed header and the bottom resize grip off screen). Run for every spawn, not just
+   * zoomed (aspect < 1) ones: a user-enlarged popover overflows at aspect >= 1 too, and
+   * #default_units alone does not window-fit the *assembled* block (grid + header/tab rows + grip +
+   * positioning chrome). A default-sized popover is unaffected: its budget exceeds #default_units,
+   * so the final #std::clamp returns #default_units unchanged. */
+  float aspect;
+  float avail_px;
+  if (but == nullptr || but->block == nullptr || butregion == nullptr) {
+    /* No source button (e.g. a panel popover opened without one, where
+     * #PopupBlockHandle::popup_create_vars.but is null): the popover is not anchored to a button
+     * edge, so there is no "roomier side" to measure. Fall back to the authoritative on-screen clip
+     * range the block is bounded to in #popup_block_clip -- it may occupy the whole usable window
+     * height minus the screen-edge reserves. */
+    aspect = 1.0f;
+    avail_px = float(win_size[1]) - UI_POPUP_MENU_TOP - UI_SCREEN_MARGIN;
+  }
+  else {
+    aspect = but->block->aspect;
+    /* Vertical space on the roomier side, measured from the button *edge* the popover stacks away
+     * from, not its center: the popover grows away from the button, so the center over-counts the
+     * available space by half the button height. At high zoom the button is drawn large (scaling
+     * with 1/aspect), making that a 1-2 unit error - exactly what overflows the tightly-packed
+     * grid. */
+    float bx = BLI_rctf_cent_x(&but->rect);
+    float by_bottom = but->rect.ymin;
+    float bx_top = bx;
+    float by_top = but->rect.ymax;
+    block_to_window_fl(butregion, but->block, &bx, &by_bottom);
+    block_to_window_fl(butregion, but->block, &bx_top, &by_top);
+    avail_px = std::max(by_bottom, float(win_size[1]) - by_top);
+  }
 
   /* Chrome the popover wraps around the content when positioned (see
    * #popover_vertical_chrome_px, defined next to the positioning code). Subtracting it keeps

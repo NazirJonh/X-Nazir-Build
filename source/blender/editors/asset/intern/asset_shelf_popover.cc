@@ -368,11 +368,13 @@ constexpr int CATALOG_COL_WIDTH_MAX_UNITS = 30;
 constexpr float CATALOG_GRIP_WIDTH_UNITS = 0.4f;
 
 /**
- * Clamp the user's popup grid-viewport height (in #UI_UNIT_Y units) so the whole popover stays on
- * screen. Mirrors #layout_width_units_clamped for the vertical axis: #popup_grid_fixed_viewport_units
- * only window-fits a zoomed (aspect < 1) spawn, so the general case needs this explicit clamp.
- * The lower bound keeps at least a few preview rows; the upper bound leaves room for the header row
- * above the grid plus a small screen-edge margin.
+ * Coarse ceiling for the user's popup grid-viewport height (in #UI_UNIT_Y units), used as the
+ * #default_units cap passed to #ui::popup_grid_fixed_viewport_units. Mirrors
+ * #layout_width_units_clamped for the vertical axis. The precise window-fit (subtracting the
+ * header/tab rows, resize grip, and popover positioning chrome from the space actually available on
+ * the spawn side) is done there for every spawn, so this only needs to be a sane upper bound: the
+ * lower bound keeps at least a few preview rows; the upper bound is a whole-window figure minus a
+ * small screen-edge margin.
  */
 static int layout_height_units_clamped(const wmWindow *win, int grid_height_units)
 {

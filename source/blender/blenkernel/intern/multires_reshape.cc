@@ -63,7 +63,8 @@ Vector<MultiresGridSculptLayer> BKE_multires_grid_sculpt_layers_collect(const Me
 {
   Vector<MultiresGridSculptLayer> layers;
   const int64_t expected_totelem = int64_t(mesh.corners_num) * grid_area;
-  for (const SculptLayer &layer : mesh.sculpt_layers) {
+  for (const SculptLayer *layer_ptr : bke::sculpt_layers::layers(mesh)) {
+    const SculptLayer &layer = *layer_ptr;
     if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {
       continue;
     }
@@ -158,7 +159,8 @@ static bool subtract_sculpt_layers_from_ccg_positions(Mesh &mesh,
   const int top_grid_size = bke::subdiv::grid_size_from_level(top_level);
   const int64_t expected_totelem = int64_t(mesh.corners_num) * top_grid_size * top_grid_size;
 
-  for (const SculptLayer &layer : mesh.sculpt_layers) {
+  for (const SculptLayer *layer_ptr : bke::sculpt_layers::layers(mesh)) {
+    const SculptLayer &layer = *layer_ptr;
     if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {
       continue;
     }
@@ -197,8 +199,8 @@ static bool subtract_sculpt_layers_from_ccg_positions(Mesh &mesh,
 
 bool BKE_multires_mesh_has_grid_sculpt_layers(const Mesh &mesh)
 {
-  for (const SculptLayer &layer : mesh.sculpt_layers) {
-    if (layer.domain == SCULPT_LAYER_DOMAIN_GRID && layer.data != nullptr) {
+  for (const SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
+    if (layer->domain == SCULPT_LAYER_DOMAIN_GRID && layer->data != nullptr) {
       return true;
     }
   }

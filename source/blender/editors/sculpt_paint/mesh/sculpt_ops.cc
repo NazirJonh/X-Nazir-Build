@@ -39,6 +39,7 @@
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph.hh"
@@ -485,7 +486,7 @@ void object_sculpt_mode_enter(Main &bmain,
    * layer data against the current top level. This has to happen while the geometry still matches
    * the stored per-layer influences, i.e. before the user can change anything. Only force-build
    * the BVH when layers actually exist. */
-  if (mesh && !BLI_listbase_is_empty(&mesh->sculpt_layers)) {
+  if (mesh && !bke::sculpt_layers::layers(*mesh).is_empty()) {
     bke::object::pbvh_ensure(depsgraph, ob);
   }
   layers::session_state_ensure(ob);
@@ -1572,6 +1573,8 @@ void operatortypes_sculpt()
   WM_operatortype_append(layers::SCULPT_OT_layer_solo_base);
   WM_operatortype_append(layers::SCULPT_OT_layer_group_add);
   WM_operatortype_append(layers::SCULPT_OT_layer_group_remove);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_merge);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_delete);
   WM_operatortype_append(layers::SCULPT_OT_layer_group_toggle_visibility);
 }
 

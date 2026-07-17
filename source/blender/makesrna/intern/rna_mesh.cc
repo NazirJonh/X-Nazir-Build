@@ -235,15 +235,39 @@ static void rna_Mesh_update_data_edit_active_color(Main *bmain, Scene *scene, Po
 /** \name Sculpt Layers
  * \{ */
 
+/* The flat sculpt layer collection: every layer of the mesh, depth-first in tree order, with the
+ * folders flattened away. Backed by #bke::sculpt_layers::layers — the cached span of the root
+ * folder — rather than by a list, because the DNA holds a tree now: a list-base iterator would have
+ * to run over a folder's #SculptLayerGroup::children, and that list interleaves both kinds, which
+ * this collection (declared over #SculptLayer) must never hand out.
+ *
+ * Index-based rather than a snapshot of the span, following #GreasePencil::layers, which exposes
+ * its own tree flat the same way: the span is a *view* into that cache and a tree mutation rebuilds
+ * it, so it is re-read per step (a cache hit) instead of held across the iteration. */
 static void rna_Mesh_sculpt_layers_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
 {
-  Mesh *mesh = rna_mesh(ptr);
-  rna_iterator_listbase_begin(iter, ptr, &mesh->sculpt_layers, nullptr);
+  iter->internal.count.item = 0;
+  iter->valid = !bke::sculpt_layers::layers(*rna_mesh(ptr)).is_empty();
+}
+
+static void rna_Mesh_sculpt_layers_next(CollectionPropertyIterator *iter)
+{
+  iter->internal.count.item++;
+  iter->valid = bke::sculpt_layers::layers(*rna_mesh(&iter->parent))
+                    .index_range()
+                    .contains(iter->internal.count.item);
+}
+
+static PointerRNA rna_Mesh_sculpt_layers_get(CollectionPropertyIterator *iter)
+{
+  const Span<SculptLayer *> layers = bke::sculpt_layers::layers(*rna_mesh(&iter->parent));
+  return RNA_pointer_create_with_parent(
+      iter->parent, RNA_SculptLayer, layers[iter->internal.count.item]);
 }
 
 static int rna_Mesh_sculpt_layers_length(PointerRNA *ptr)
 {
-  return BLI_listbase_count(&rna_mesh(ptr)->sculpt_layers);
+  return int(bke::sculpt_layers::layers(*rna_mesh(ptr)).size());
 }
 
 static PointerRNA rna_Mesh_sculpt_layers_active_get(PointerRNA *ptr)
@@ -269,51 +293,62 @@ static bool rna_Mesh_sculpt_layers_solo_active_get(PointerRNA *ptr)
 static std::optional<std::string> rna_SculptLayer_path(const PointerRNA *ptr)
 {
   const SculptLayer *layer = static_cast<const SculptLayer *>(ptr->data);
-  char name_esc[sizeof(layer->name) * 2];
-  BLI_str_escape(name_esc, layer->name, sizeof(name_esc));
+  char name_esc[sizeof(layer->base.name) * 2];
+  BLI_str_escape(name_esc, layer->base.name, sizeof(name_esc));
   return fmt::format("sculpt_layers[\"{}\"]", name_esc);
 }
 
 static void rna_SculptLayer_name_set(PointerRNA *ptr, const char *value)
 {
-  Mesh *mesh = rna_mesh(ptr);
   SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
-  STRNCPY_UTF8(layer->name, value);
-  BLI_uniquename(&mesh->sculpt_layers,
-                 layer,
-                 "Layer",
-                 '.',
-                 offsetof(SculptLayer, name),
-                 sizeof(layer->name));
+  STRNCPY_UTF8(layer->base.name, value);
+  /* Unique among siblings only, through the single authority both node kinds share — the
+   * open-coded #BLI_uniquename this used to spell had the whole flat layer list to compare against,
+   * and no such list exists any more. */
+  bke::sculpt_layers::node_name_ensure_unique(layer->base);
 }
 
+/* Every folder of the mesh, depth-first, the root excluded (it is not a row: see
+ * #bke::sculpt_layers::root_group).
+ *
+ * A snapshot array, rather than the index-based re-read the flat layer collection above uses,
+ * because #bke::sculpt_layers::groups has no cache to re-read: it walks the tree and builds a fresh
+ * vector per call, so re-reading it per step would rebuild the whole thing once per folder. The
+ * copy is handed to the iterator, which frees it in #rna_iterator_array_end. */
 static void rna_Mesh_sculpt_layer_groups_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
 {
-  Mesh *mesh = rna_mesh(ptr);
-  rna_iterator_listbase_begin(iter, ptr, &mesh->sculpt_layer_groups, nullptr);
+  const Vector<SculptLayerGroup *> groups = bke::sculpt_layers::groups(*rna_mesh(ptr));
+  SculptLayerGroup **array = nullptr;
+  if (!groups.is_empty()) {
+    array = MEM_new_array_uninitialized<SculptLayerGroup *>(size_t(groups.size()), __func__);
+    for (const int64_t i : groups.index_range()) {
+      array[i] = groups[i];
+    }
+  }
+  rna_iterator_array_begin(
+      iter, ptr, array, sizeof(SculptLayerGroup *), groups.size(), true, nullptr);
 }
 
 static int rna_Mesh_sculpt_layer_groups_length(PointerRNA *ptr)
 {
-  return BLI_listbase_count(&rna_mesh(ptr)->sculpt_layer_groups);
+  return int(bke::sculpt_layers::groups(*rna_mesh(ptr)).size());
 }
 
 static std::optional<std::string> rna_SculptLayerGroup_path(const PointerRNA *ptr)
 {
   const SculptLayerGroup *group = static_cast<const SculptLayerGroup *>(ptr->data);
-  char name_esc[sizeof(group->name) * 2];
-  BLI_str_escape(name_esc, group->name, sizeof(name_esc));
+  char name_esc[sizeof(group->base.name) * 2];
+  BLI_str_escape(name_esc, group->base.name, sizeof(name_esc));
   return fmt::format("sculpt_layer_groups[\"{}\"]", name_esc);
 }
 
 static void rna_SculptLayerGroup_name_set(PointerRNA *ptr, const char *value)
 {
-  Mesh *mesh = rna_mesh(ptr);
   SculptLayerGroup *group = static_cast<SculptLayerGroup *>(ptr->data);
-  STRNCPY_UTF8(group->name, value);
+  STRNCPY_UTF8(group->base.name, value);
   /* Unique among siblings only — the same single authority #group_add uses, so the two paths cannot
    * drift apart on what a legal name is. */
-  bke::sculpt_layers::group_name_ensure_unique(*mesh, *group);
+  bke::sculpt_layers::node_name_ensure_unique(group->base);
 }
 
 /* [DEBUG-perf] Per-tick timing for the Sculpt Layers influence slider hot path. Tied to the
@@ -430,14 +465,14 @@ static void rna_SculptLayer_influence_set(PointerRNA *ptr, float value)
 
 static bool rna_SculptLayer_enabled_get(PointerRNA *ptr)
 {
-  return (static_cast<const SculptLayer *>(ptr->data)->flag & SCULPT_LAYER_ENABLED) != 0;
+  return (static_cast<const SculptLayer *>(ptr->data)->base.flag & SCULPT_LAYER_ENABLED) != 0;
 }
 
 static void rna_SculptLayer_enabled_set(PointerRNA *ptr, bool value)
 {
   Mesh *mesh = rna_mesh(ptr);
   SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
-  const bool was_enabled = (layer->flag & SCULPT_LAYER_ENABLED) != 0;
+  const bool was_enabled = (layer->base.flag & SCULPT_LAYER_ENABLED) != 0;
   if (was_enabled == value) {
     return;
   }
@@ -450,10 +485,10 @@ static void rna_SculptLayer_enabled_set(PointerRNA *ptr, bool value)
   rna_SculptLayer_flush_pending_base(mesh, *layer);
   const float old_effective = bke::sculpt_layers::effective(*layer);
   if (value) {
-    layer->flag |= SCULPT_LAYER_ENABLED;
+    layer->base.flag |= SCULPT_LAYER_ENABLED;
   }
   else {
-    layer->flag &= ~SCULPT_LAYER_ENABLED;
+    layer->base.flag &= ~SCULPT_LAYER_ENABLED;
   }
   rna_SculptLayer_apply_mesh_delta(mesh, *layer, bke::sculpt_layers::effective(*layer) - old_effective);
 }
@@ -3226,7 +3261,7 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
   RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
 
   prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
-  RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_property_string_sdna(prop, nullptr, "base.name");
   RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_SculptLayer_name_set");
   RNA_def_property_ui_text(prop, "Name", "Name of the sculpt layer");
   RNA_def_struct_name_property(srna, prop);
@@ -3250,7 +3285,7 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
   RNA_def_property_update(prop, 0, "rna_Mesh_update_sculpt_layers");
 
   prop = RNA_def_property(srna, "lock", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_LAYER_LOCKED);
+  RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_LOCKED);
   RNA_def_property_ui_text(prop, "Lock", "Protect this layer from being recorded into");
 
   prop = RNA_def_property(srna, "domain", PROP_ENUM, PROP_NONE);
@@ -3269,19 +3304,9 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
                            "repaired or removed");
 
   prop = RNA_def_property(srna, "select", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_LAYER_SELECTED);
+  RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_SELECTED);
   RNA_def_property_ui_text(
       prop, "Select", "Sculpt layer selection state, used for drag and drop reordering");
-
-  prop = RNA_def_property(srna, "group", PROP_INT, PROP_NONE);
-  RNA_def_property_int_sdna(prop, nullptr, "group_uid");
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
-  RNA_def_property_ui_text(prop,
-                           "Group",
-                           "Unique id of the group containing this layer, 0 when it sits at the "
-                           "root. Read-only: reparenting goes through the sculpt.layer_move_to / "
-                           "sculpt.layer_group_add / sculpt.layer_group_remove operators, which "
-                           "keep the visibility cascade and undo in step");
 }
 
 static void rna_def_sculpt_layer_group(BlenderRNA *brna)
@@ -3299,12 +3324,15 @@ static void rna_def_sculpt_layer_group(BlenderRNA *brna)
   RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
 
   prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  /* Explicit: the implicit lookup #RNA_def_property does from the identifier only searches the
+   * top-level members, and the name now lives one level down in #SculptLayerGroup::base. */
+  RNA_def_property_string_sdna(prop, nullptr, "base.name");
   RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_SculptLayerGroup_name_set");
   RNA_def_property_ui_text(prop, "Name", "Name of the sculpt layer group");
   RNA_def_struct_name_property(srna, prop);
 
   prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_LAYER_GROUP_ENABLED);
+  RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_ENABLED);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   /* No setter: a bare flag write would bypass #resync_group_hidden and leave every descendant
    * layer's #SCULPT_LAYER_GROUP_HIDDEN bit out of sync with the tree, and it would not push the
@@ -3313,12 +3341,12 @@ static void rna_def_sculpt_layer_group(BlenderRNA *brna)
       prop, "Enabled", "Show the sculpt layers inside this group and its subgroups");
 
   prop = RNA_def_property(srna, "select", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_LAYER_GROUP_SELECTED);
+  RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_SELECTED);
   RNA_def_property_ui_text(
       prop, "Select", "Sculpt layer group selection state, used for drag and drop reordering");
 
   prop = RNA_def_property(srna, "is_expanded", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_LAYER_GROUP_EXPANDED);
+  RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_EXPANDED);
   RNA_def_property_ui_text(prop, "Expanded", "Group is expanded in the tree view");
 }
 
@@ -3788,11 +3816,14 @@ static void rna_def_mesh(BlenderRNA *brna)
 
   /* Sculpt Layers */
   prop = RNA_def_property(srna, "sculpt_layers", PROP_COLLECTION, PROP_NONE);
+  /* Flat, not the tree: the folders are walked through and only the layers come out, so a script
+   * that never cared about folders keeps working unchanged. Mirrors how #GreasePencil exposes a
+   * flat `layers` alongside its own tree. */
   RNA_def_property_collection_funcs(prop,
                                     "rna_Mesh_sculpt_layers_begin",
-                                    "rna_iterator_listbase_next",
-                                    "rna_iterator_listbase_end",
-                                    "rna_iterator_listbase_get",
+                                    "rna_Mesh_sculpt_layers_next",
+                                    nullptr,
+                                    "rna_Mesh_sculpt_layers_get",
                                     "rna_Mesh_sculpt_layers_length",
                                     nullptr,
                                     nullptr,
@@ -3805,9 +3836,9 @@ static void rna_def_mesh(BlenderRNA *brna)
   prop = RNA_def_property(srna, "sculpt_layer_groups", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_collection_funcs(prop,
                                     "rna_Mesh_sculpt_layer_groups_begin",
-                                    "rna_iterator_listbase_next",
-                                    "rna_iterator_listbase_end",
-                                    "rna_iterator_listbase_get",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_dereference_get",
                                     "rna_Mesh_sculpt_layer_groups_length",
                                     nullptr,
                                     nullptr,

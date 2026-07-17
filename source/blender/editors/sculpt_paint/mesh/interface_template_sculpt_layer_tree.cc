@@ -45,7 +45,7 @@ class SculptLayerTreeView : public ui::AbstractTreeView {
   void build_tree() override;
 
  private:
-  void build_tree_recursive(ui::TreeViewOrItem &parent, int parent_uid);
+  void build_tree_recursive(ui::TreeViewOrItem &parent, const SculptLayerGroup &group);
 };
 
 struct SculptLayerRef {
@@ -70,18 +70,21 @@ class SculptLayerDragController : public ui::AbstractViewItemDragController {
 
   void *create_drag_data() const override
   {
+    /* Held across both loops, which is safe because neither mutates the tree: the span is a view
+     * into the root folder's cache and any structural change would rebuild it. */
+    const Span<SculptLayer *> layers = bke::sculpt_layers::layers(*mesh_);
     int selected_count = 0;
-    for (const SculptLayer &layer : mesh_->sculpt_layers) {
-      selected_count += (layer.flag & SCULPT_LAYER_SELECTED) != 0;
+    for (const SculptLayer *layer : layers) {
+      selected_count += (layer->base.flag & SCULPT_LAYER_SELECTED) != 0;
     }
 
     /* Allocate one extra element, to use it as null-delimiter. */
     SculptLayer **selected_layers = MEM_new_array_zeroed<SculptLayer *>(selected_count + 1,
                                                                         "Selected Sculpt Layers");
     int i = 0;
-    for (SculptLayer &layer : mesh_->sculpt_layers) {
-      if (layer.flag & SCULPT_LAYER_SELECTED) {
-        selected_layers[i] = &layer;
+    for (SculptLayer *layer : layers) {
+      if (layer->base.flag & SCULPT_LAYER_SELECTED) {
+        selected_layers[i] = layer;
         i++;
       }
     }
@@ -91,21 +94,28 @@ class SculptLayerDragController : public ui::AbstractViewItemDragController {
   }
 };
 
-/* True when \a dest_uid names a folder that is itself being dragged, or one nested inside such a
- * folder. Moving a folder there would detach its subtree from the root. Uid 0 is the root, which
- * is never inside anything. The dragged set is read back from the #SCULPT_LAYER_GROUP_SELECTED
- * flags rather than from #wmDrag::poin, because that is the set #SCULPT_OT_layer_move_to itself
- * acts on — the drag data only carries layers, and serves to mark the drag type. */
-static bool group_dest_is_inside_dragged_group(const Mesh &mesh, const int dest_uid)
+/* True when \a dest is a folder that is itself being dragged, or one nested inside such a folder.
+ * Moving a folder there would detach its subtree from the root. A null \a dest — a node with no
+ * parent, i.e. the root — is never inside anything. The dragged set is read back from the
+ * #SCULPT_LAYER_GROUP_SELECTED flags rather than from #wmDrag::poin, because that is the set
+ * #SCULPT_OT_layer_move_to itself acts on — the drag data only carries layers, and serves to mark
+ * the drag type. */
+static bool group_dest_is_inside_dragged_group(const Mesh &mesh, const SculptLayerGroup *dest)
 {
-  const SculptLayerGroup *dest = bke::sculpt_layers::group_find_by_uid(mesh, dest_uid);
   if (dest == nullptr) {
     return false;
   }
-  for (const SculptLayerGroup &group : mesh.sculpt_layer_groups) {
-    if ((group.flag & SCULPT_LAYER_GROUP_SELECTED) &&
-        bke::sculpt_layers::group_is_descendant_of(mesh, *dest, group.uid))
-    {
+  /* #bke::sculpt_layers::groups never yields the root, which is exactly right here: the root is
+   * never drawn as a row, so it can never carry the selection flag. */
+  for (const SculptLayerGroup *group : bke::sculpt_layers::groups(mesh)) {
+    if (!(group->base.flag & SCULPT_LAYER_GROUP_SELECTED)) {
+      continue;
+    }
+    /* Identity as well as "strictly below": #bke::sculpt_layers::node_is_descendant_of is strict —
+     * a node is not its own descendant — and dropping a folder into itself is just as illegal as
+     * dropping it into its own subtree. Same pair of tests as in #SCULPT_OT_layer_move_to, which
+     * is the operator this target ends up calling. */
+    if (dest == group || bke::sculpt_layers::node_is_descendant_of(dest->base, *group)) {
       return true;
     }
   }
@@ -114,23 +124,20 @@ static bool group_dest_is_inside_dragged_group(const Mesh &mesh, const int dest_
 
 class SculptLayerDropTarget : public ui::TreeViewItemDropTarget {
  private:
-  /* Exactly one is set: the row the drop landed on is either a layer or a group. */
-  SculptLayer *drop_layer_;
-  SculptLayerGroup *drop_group_;
+  /* The node this row draws, of either kind. One node type carrying one uid space is what removed
+   * the former "exactly one of a layer and a group pointer is set" pair: the drop only ever needs
+   * the anchor's identity, and #SculptLayerTreeNode::uid now names it whatever kind it is. */
+  SculptLayerTreeNode *drop_node_;
   Mesh *mesh_;
 
  public:
   SculptLayerDropTarget(ui::AbstractTreeViewItem &item,
                         ui::DropBehavior behavior,
-                        SculptLayer *drop_layer,
-                        SculptLayerGroup *drop_group,
+                        SculptLayerTreeNode *drop_node,
                         Mesh *mesh)
-      : TreeViewItemDropTarget(item, behavior),
-        drop_layer_(drop_layer),
-        drop_group_(drop_group),
-        mesh_(mesh)
+      : TreeViewItemDropTarget(item, behavior), drop_node_(drop_node), mesh_(mesh)
   {
-    BLI_assert((drop_layer_ == nullptr) != (drop_group_ == nullptr));
+    BLI_assert(drop_node_ != nullptr);
   }
 
   bool can_drop(const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
@@ -142,8 +149,7 @@ class SculptLayerDropTarget : public ui::TreeViewItemDropTarget {
      * when that folder is inside a dragged folder — no drop location this row offers would be
      * legal then. #Into has a different destination and is filtered in #choose_drop_location
      * instead, so that a folder can still be dropped next to (just not inside) itself. */
-    const int sibling_dest_uid = drop_layer_ ? drop_layer_->group_uid : drop_group_->parent_uid;
-    return !group_dest_is_inside_dragged_group(*mesh_, sibling_dest_uid);
+    return !group_dest_is_inside_dragged_group(*mesh_, drop_node_->parent);
   }
 
   std::optional<ui::DropLocation> choose_drop_location(const ARegion &region,
@@ -153,9 +159,11 @@ class SculptLayerDropTarget : public ui::TreeViewItemDropTarget {
         region, event);
     /* #can_drop cannot do this: it is not told where in the row the cursor is, and Into is the one
      * location whose destination is this folder itself rather than its parent. Unsetting disables
-     * the drop for this band of the row only (see #DropTargetInterface::choose_drop_location). */
-    if (location == ui::DropLocation::Into && drop_group_ &&
-        group_dest_is_inside_dragged_group(*mesh_, drop_group_->uid))
+     * the drop for this band of the row only (see #DropTargetInterface::choose_drop_location).
+     * A layer row yields a null group here and therefore never filters, which costs nothing: it
+     * offers no Into to begin with (see #create_drop_target). */
+    if (location == ui::DropLocation::Into &&
+        group_dest_is_inside_dragged_group(*mesh_, bke::sculpt_layers::node_as_group(drop_node_)))
     {
       return std::nullopt;
     }
@@ -165,13 +173,13 @@ class SculptLayerDropTarget : public ui::TreeViewItemDropTarget {
   std::string drop_tooltip(const ui::DragInfo &drag_info) const override
   {
     const StringRef drag_name = TIP_("Selected Items");
-    const StringRef drop_name = drop_layer_ ? drop_layer_->name : drop_group_->name;
+    const StringRef drop_name = drop_node_->name;
 
     switch (drag_info.drop_location) {
       case ui::DropLocation::Into:
         /* Only a folder row offers Into (#DropBehavior::ReorderAndInsert); a layer row stays
          * #DropBehavior::Reorder, which never yields it. */
-        BLI_assert(drop_group_ != nullptr);
+        BLI_assert(bke::sculpt_layers::node_as_group(drop_node_) != nullptr);
         return fmt::format(fmt::runtime(TIP_("Move {} into {}")), drag_name, drop_name);
       case ui::DropLocation::Before:
         return fmt::format(fmt::runtime(TIP_("Move {} above {}")), drag_name, drop_name);
@@ -188,9 +196,9 @@ class SculptLayerDropTarget : public ui::TreeViewItemDropTarget {
   {
     wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_layer_move_to", false);
     PointerRNA props_ptr = WM_operator_properties_create_ptr(ot);
-    RNA_int_set(&props_ptr, "anchor_uid", drop_layer_ ? drop_layer_->uid : drop_group_->uid);
-    /* Layer and group uids are separate counters, so the row's kind has to travel with its uid. */
-    RNA_boolean_set(&props_ptr, "anchor_is_group", drop_group_ != nullptr);
+    /* The uid alone names the anchor row: one counter (#bke::sculpt_layers::node_unique_uid) spans
+     * both kinds, so the operator resolves the kind itself and no longer needs to be told it. */
+    RNA_int_set(&props_ptr, "anchor_uid", drop_node_->uid);
     /* Set by value rather than by identifier string: #RNA_enum_set needs no #bContext and cannot
      * silently no-op on a typo'd identifier. The operator's enum items are defined from these same
      * #MoveLocation values. */
@@ -213,36 +221,54 @@ class SculptLayerDropTarget : public ui::TreeViewItemDropTarget {
   }
 };
 
-/* True when the folder \a group_uid names and every folder above it carries \a flag. Uid 0 is the
- * root, which is inside nothing and therefore passes trivially.
+/* True when \a group and every folder above it carry \a flag. A null \a group means "no folder" —
+ * the parent of the root — which is inside nothing and therefore passes trivially. The root itself
+ * is walked like any other folder and carries both flags this is asked about (see
+ * #bke::sculpt_layers::root_group_ensure).
  *
- * Bounded by the group count rather than by reaching the root, for the same reason
- * #bke::sculpt_layers::group_is_descendant_of is: a cycle in stored data (a corrupt file, a future
- * editing bug) must not hang the UI, and this runs on every redraw. */
-static bool ancestors_all_have_flag(const Mesh &mesh, const int group_uid, const int flag)
+ * The walk follows #SculptLayerTreeNode::parent pointers, and is bounded by Floyd cycle detection
+ * rather than by reaching the root — mirroring #bke::sculpt_layers::node_is_descendant_of, which
+ * gave up its own depth cap for the same reason. A cycle in stored data (a corrupt file, a future
+ * editing bug) must not hang the UI, and this runs on every redraw. `fast` is tested after every
+ * single step, so no folder on the chain is skipped before the two meet. */
+static bool ancestors_all_have_flag(const SculptLayerGroup *group, const int flag)
 {
-  const SculptLayerGroup *group = bke::sculpt_layers::group_find_by_uid(mesh, group_uid);
-  for (int guard = BLI_listbase_count(&mesh.sculpt_layer_groups); group && guard >= 0; guard--) {
-    if (!(group->flag & flag)) {
+  const SculptLayerGroup *slow = group;
+  const SculptLayerGroup *fast = group;
+  while (fast != nullptr) {
+    if (!(fast->base.flag & flag)) {
       return false;
     }
-    group = bke::sculpt_layers::group_find_by_uid(mesh, group->parent_uid);
+    fast = fast->base.parent;
+    if (fast == nullptr) {
+      break;
+    }
+    if (!(fast->base.flag & flag)) {
+      return false;
+    }
+    fast = fast->base.parent;
+    slow = slow->base.parent;
+    if (fast != nullptr && fast == slow) {
+      /* The chain closed on itself. Every folder on it carries the flag, or one of the tests above
+       * would already have said otherwise, so there is nothing left to find by going round again. */
+      return true;
+    }
   }
   return true;
 }
 
 /* True when no ancestor folder currently hides \a group. Only the row's own greying-out depends on
  * it — the layers' actual visibility is the stored #SCULPT_LAYER_GROUP_HIDDEN bit, not this. */
-static bool group_visible_by_ancestors(const Mesh &mesh, const SculptLayerGroup &group)
+static bool group_visible_by_ancestors(const SculptLayerGroup &group)
 {
-  return ancestors_all_have_flag(mesh, group.parent_uid, SCULPT_LAYER_GROUP_ENABLED);
+  return ancestors_all_have_flag(group.base.parent, SCULPT_LAYER_GROUP_ENABLED);
 }
 
-/* True when the row for a layer sitting in folder \a group_uid is actually drawn, i.e. no folder on
- * the way up to the root is collapsed. */
-static bool layer_row_is_revealed(const Mesh &mesh, const int group_uid)
+/* True when the row for a node held by folder \a parent is actually drawn, i.e. no folder on the
+ * way up to the root is collapsed. */
+static bool row_is_revealed(const SculptLayerGroup *parent)
 {
-  return ancestors_all_have_flag(mesh, group_uid, SCULPT_LAYER_GROUP_EXPANDED);
+  return ancestors_all_have_flag(parent, SCULPT_LAYER_GROUP_EXPANDED);
 }
 
 class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
@@ -255,9 +281,9 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
 
  public:
   SculptLayerGroupItem(Object *object, SculptLayerGroup *group)
-      : object_(object), group_(group), uid_(group->uid)
+      : object_(object), group_(group), uid_(group->base.uid)
   {
-    label_ = group->name;
+    label_ = group->base.name;
     /* A folder must not hold the view's active state, because nothing in the data can keep it
      * there: #Mesh::sculpt_layers_active_uid names a layer, and no field names a folder. Taking the
      * state anyway starts a tug of war - the active layer's #should_be_active still returns true,
@@ -275,16 +301,14 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
 
   void build_row(ui::Layout &row) override
   {
-    Mesh &mesh = *id_cast<Mesh *>(object_->data);
-
     ui::Layout &vis = row.row(true);
     /* Grey out the eye when an ancestor already hides this folder: the toggle still works and
      * still means "this folder's own state", it just cannot make anything visible right now.
      * Computed on the fly rather than stored — only visible rows pay for it, and it is not undo
      * state. */
-    vis.active_set(group_visible_by_ancestors(mesh, *group_));
-    const int vis_icon = (group_->flag & SCULPT_LAYER_GROUP_ENABLED) ? ICON_HIDE_OFF :
-                                                                       ICON_HIDE_ON;
+    vis.active_set(group_visible_by_ancestors(*group_));
+    const int vis_icon = (group_->base.flag & SCULPT_LAYER_GROUP_ENABLED) ? ICON_HIDE_OFF :
+                                                                            ICON_HIDE_ON;
     /* An operator button, not the RNA property: #SculptLayerGroup.enabled is deliberately
      * non-editable, because a bare flag write would skip the descendants'
      * #SCULPT_LAYER_GROUP_HIDDEN resync and the sculpt undo push that the cascade needs. */
@@ -300,7 +324,7 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
 
   std::optional<bool> should_be_collapsed() const override
   {
-    return !(group_->flag & SCULPT_LAYER_GROUP_EXPANDED);
+    return !(group_->base.flag & SCULPT_LAYER_GROUP_EXPANDED);
   }
 
   bool set_collapsed(const bool collapsed) override
@@ -312,7 +336,7 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
      * directly — from #change_state_delayed and #ensure_parents_uncollapsed — without going
      * through #on_collapse_change, and the DNA flag has to follow those too. No undo and no
      * notifier: the expanded state is pure UI state, like the row selection. */
-    SET_FLAG_FROM_TEST(group_->flag, !collapsed, SCULPT_LAYER_GROUP_EXPANDED);
+    SET_FLAG_FROM_TEST(group_->base.flag, !collapsed, SCULPT_LAYER_GROUP_EXPANDED);
     return true;
   }
 
@@ -328,22 +352,22 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
 
   std::optional<bool> should_be_selected() const override
   {
-    return group_->flag & SCULPT_LAYER_GROUP_SELECTED;
+    return group_->base.flag & SCULPT_LAYER_GROUP_SELECTED;
   }
 
   void set_selected(const bool select) override
   {
     AbstractViewItem::set_selected(select);
-    SET_FLAG_FROM_TEST(group_->flag, select, SCULPT_LAYER_GROUP_SELECTED);
+    SET_FLAG_FROM_TEST(group_->base.flag, select, SCULPT_LAYER_GROUP_SELECTED);
   }
 
   bool matches_single(const ui::AbstractTreeViewItem &other) const override
   {
-    /* Folder names and layer names live in separate namespaces (a folder is only unique among its
-     * sibling folders, a layer only among the layer list) so a folder and a layer may legitimately
-     * share a label. Without this override, #AbstractTreeViewItem::matches_single's label-only
-     * comparison would let #update_from_old carry a folder row's state - a rename in progress, in
-     * particular - onto an unrelated layer row of the same name. */
+    /* Names are only unique among siblings (#node_name_ensure_unique runs over the one shared child
+     * list), so a folder and a layer under *different* parents may legitimately share a label. Without
+     * this override, #AbstractTreeViewItem::matches_single's label-only comparison would let
+     * #update_from_old carry a folder row's state - a rename in progress, in particular - onto an
+     * unrelated layer row of the same name. */
     return dynamic_cast<const SculptLayerGroupItem *>(&other) != nullptr &&
            AbstractTreeViewItem::matches_single(other);
   }
@@ -366,7 +390,7 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
     const bool use_sculpt_undo = (object.mode & OB_MODE_SCULPT) != 0;
     if (use_sculpt_undo) {
       undo::push_begin_ex(*CTX_data_scene(&ctx), object, "Rename Sculpt Layer Group");
-      undo::push_sculpt_layer_group_metadata(object, *group_);
+      undo::push_sculpt_layer_metadata(object, group_->base);
     }
 
     PointerRNA group_ptr = RNA_pointer_create_discrete(&mesh.id, RNA_SculptLayerGroup, group_);
@@ -396,8 +420,13 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
      * disbands exactly the folders the user selected — each call is addressed at its own row and
      * independent of the others. The lookup guards only against a row whose group a previous call
      * already removed. Each row's removal is its own undo step, which is acceptable because
-     * disbanding is cheap and non-destructive (the layers survive). */
-    if (bke::sculpt_layers::group_find_by_uid(mesh, uid_) == nullptr) {
+     * disbanding is cheap and non-destructive (the layers survive). The cast is what makes one uid
+     * space safe to look a folder up in: #node_find_by_uid resolves any node, and reading a layer
+     * as a folder would run the operator against the wrong row. Uid 0 needs no guard here — it
+     * names the root, which is never drawn and so is never a row's uid. */
+    if (bke::sculpt_layers::node_as_group(bke::sculpt_layers::node_find_by_uid(mesh, uid_)) ==
+        nullptr)
+    {
       return;
     }
     wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_layer_group_remove", false);
@@ -412,12 +441,28 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
     /* Drawn here rather than through a Python menu like the layer rows use: a layer menu can act
      * on the active layer, but folders deliberately have no "active" concept — a folder is only
      * ever addressed by explicit uid, and only this item knows which uid its row is. */
+    PointerRNA merge_ptr = layout.op("SCULPT_OT_layer_group_merge",
+                                     IFACE_("Merge Layers"),
+                                     ICON_AUTOMERGE_ON,
+                                     wm::OpCallContext::ExecDefault,
+                                     UI_ITEM_NONE);
+    RNA_int_set(&merge_ptr, "group_uid", uid_);
+
     PointerRNA op_ptr = layout.op("SCULPT_OT_layer_group_remove",
                                   IFACE_("Remove Group"),
                                   ICON_X,
                                   wm::OpCallContext::ExecDefault,
                                   UI_ITEM_NONE);
     RNA_int_set(&op_ptr, "group_uid", uid_);
+
+    /* Invoke (not exec) so the operator's confirmation popup runs: this one deletes the layers,
+     * unlike "Remove Group" which keeps them. */
+    PointerRNA delete_ptr = layout.op("SCULPT_OT_layer_group_delete",
+                                      IFACE_("Delete Group and Layers"),
+                                      ICON_TRASH,
+                                      wm::OpCallContext::InvokeDefault,
+                                      UI_ITEM_NONE);
+    RNA_int_set(&delete_ptr, "group_uid", uid_);
   }
 
   std::unique_ptr<ui::AbstractViewItemDragController> create_drag_controller() const override
@@ -432,7 +477,7 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
     Mesh *mesh = id_cast<Mesh *>(object_->data);
     /* Only a folder row offers Into; a layer row stays #DropBehavior::Reorder. */
     return std::make_unique<SculptLayerDropTarget>(
-        *this, ui::DropBehavior::ReorderAndInsert, nullptr, group_, mesh);
+        *this, ui::DropBehavior::ReorderAndInsert, &group_->base, mesh);
   }
 };
 
@@ -445,10 +490,10 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
  public:
   SculptLayerItem(Object *object, SculptLayer *layer)
   {
-    label_ = layer->name;
+    label_ = layer->base.name;
     layer_ref_.object = object;
     layer_ref_.layer = layer;
-    uid_ = layer->uid;
+    uid_ = layer->base.uid;
   }
 
   void build_row(ui::Layout &row) override
@@ -468,8 +513,8 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
      * 0 and the layer shapes nothing. Mirrors how the Grease Pencil tree greys a layer's controls
      * by its parent group's visibility. The toggle keeps working: it edits the layer's own state,
      * which is what is restored when the folder is re-enabled. */
-    vis.active_set(values_editable && !(layer.flag & SCULPT_LAYER_GROUP_HIDDEN));
-    const int vis_icon = (layer.flag & SCULPT_LAYER_ENABLED) ? ICON_HIDE_OFF : ICON_HIDE_ON;
+    vis.active_set(values_editable && !(layer.base.flag & SCULPT_LAYER_GROUP_HIDDEN));
+    const int vis_icon = (layer.base.flag & SCULPT_LAYER_ENABLED) ? ICON_HIDE_OFF : ICON_HIDE_ON;
     vis.prop(&layer_ptr, "enabled", ui::ITEM_R_ICON_ONLY, "", vis_icon);
 
     uiItemL_ex(&row, this->label_, ICON_NONE, false, false);
@@ -490,7 +535,7 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
   std::optional<bool> should_be_active() const override
   {
     const Mesh &mesh = *id_cast<const Mesh *>(layer_ref_.object->data);
-    if (mesh.sculpt_layers_active_uid != layer_ref_.layer->uid) {
+    if (mesh.sculpt_layers_active_uid != layer_ref_.layer->base.uid) {
       return false;
     }
     /* Claim the active state only once the row is actually drawn. Claiming it while a collapsed
@@ -505,7 +550,7 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
      * #change_state_delayed answers by deselecting the row. The data says the opposite — this is the
      * active layer, it just cannot show it yet. It takes the state back when the folder opens, and
      * the uncollapse is a no-op by then, so the flag survives. */
-    if (!layer_row_is_revealed(mesh, layer_ref_.layer->group_uid)) {
+    if (!row_is_revealed(layer_ref_.layer->base.parent)) {
       return std::nullopt;
     }
     return true;
@@ -515,26 +560,26 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
   {
     wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_layer_select", false);
     PointerRNA props_ptr = WM_operator_properties_create_ptr(ot);
-    RNA_int_set(&props_ptr, "uid", layer_ref_.layer->uid);
+    RNA_int_set(&props_ptr, "uid", layer_ref_.layer->base.uid);
     WM_operator_name_call_ptr(&C, ot, wm::OpCallContext::ExecDefault, &props_ptr, nullptr);
     WM_operator_properties_free(&props_ptr);
   }
 
   std::optional<bool> should_be_selected() const override
   {
-    return layer_ref_.layer->flag & SCULPT_LAYER_SELECTED;
+    return layer_ref_.layer->base.flag & SCULPT_LAYER_SELECTED;
   }
 
   void set_selected(const bool select) override
   {
     AbstractViewItem::set_selected(select);
-    SET_FLAG_FROM_TEST(layer_ref_.layer->flag, select, SCULPT_LAYER_SELECTED);
+    SET_FLAG_FROM_TEST(layer_ref_.layer->base.flag, select, SCULPT_LAYER_SELECTED);
   }
 
   bool matches_single(const ui::AbstractTreeViewItem &other) const override
   {
-    /* Mirrors #SculptLayerGroupItem::matches_single: layer names and folder names are separate
-     * namespaces, so a layer row must not be matched against a folder row of the same label. */
+    /* Mirrors #SculptLayerGroupItem::matches_single: a name is unique only among siblings, so a layer
+     * row must not be matched against a folder row of the same label under a different parent. */
     return dynamic_cast<const SculptLayerItem *>(&other) != nullptr &&
            AbstractTreeViewItem::matches_single(other);
   }
@@ -558,7 +603,7 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
     const bool use_sculpt_undo = (object.mode & OB_MODE_SCULPT) != 0;
     if (use_sculpt_undo) {
       undo::push_begin_ex(*CTX_data_scene(&ctx), object, "Rename Sculpt Layer");
-      undo::push_sculpt_layer_metadata(object, *layer_ref_.layer);
+      undo::push_sculpt_layer_metadata(object, layer_ref_.layer->base);
     }
 
     PointerRNA layer_ptr = RNA_pointer_create_discrete(&mesh.id, RNA_SculptLayer, layer_ref_.layer);
@@ -586,8 +631,12 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
     /* #X deletion fires this once per active-or-selected item (#view_item_delete_invoke), whereas
      * #SCULPT_OT_layer_remove removes that same set in one go. The first call therefore already
      * frees the layers behind the remaining items, so resolve by uid instead of dereferencing the
-     * stored (by then dangling) pointer, and let only the first surviving item run the operator. */
-    if (bke::sculpt_layers::find_by_uid(mesh, uid_) == nullptr) {
+     * stored (by then dangling) pointer, and let only the first surviving item run the operator.
+     * Kind-checked, because one uid space now spans folders too and reading a folder as a layer
+     * would send #SculptLayer::data past the end of the smaller allocation. */
+    if (bke::sculpt_layers::node_as_layer(bke::sculpt_layers::node_find_by_uid(mesh, uid_)) ==
+        nullptr)
+    {
       return;
     }
     WM_operator_name_call(
@@ -615,25 +664,28 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
     Mesh *mesh = id_cast<Mesh *>(layer_ref_.object->data);
     /* #DropBehavior::Reorder, not ReorderAndInsert: nothing can go inside a layer. */
     return std::make_unique<SculptLayerDropTarget>(
-        *this, ui::DropBehavior::Reorder, layer_ref_.layer, nullptr, mesh);
+        *this, ui::DropBehavior::Reorder, &layer_ref_.layer->base, mesh);
   }
 };
 
-void SculptLayerTreeView::build_tree_recursive(ui::TreeViewOrItem &parent, const int parent_uid)
+void SculptLayerTreeView::build_tree_recursive(ui::TreeViewOrItem &parent,
+                                               const SculptLayerGroup &group)
 {
-  Mesh *mesh = id_cast<Mesh *>(object_.data);
-  /* Walks the parent tags, not physically nested lists: both lists are flat and every level lives
-   * in them at once. Folders first, then layers — siblings are ordered per kind, not interleaved
-   * (design doc §2). */
-  for (SculptLayerGroup &group : mesh->sculpt_layer_groups) {
-    if (group.parent_uid == parent_uid) {
-      SculptLayerGroupItem &item = parent.add_tree_item<SculptLayerGroupItem>(&object_, &group);
-      this->build_tree_recursive(item, group.uid);
-    }
-  }
-  for (SculptLayer &layer : mesh->sculpt_layers) {
-    if (layer.group_uid == parent_uid) {
-      parent.add_tree_item<SculptLayerItem>(&object_, &layer);
+  /* One walk over the folder's own children, in list order. That list holds both kinds interleaved
+   * and *is* the sibling order, so the rows come out exactly as the tree stores them — no filtering
+   * by a parent tag, and no ordering rule of this view's own invention. */
+  for (SculptLayerTreeNode &node : group.children) {
+    switch (node.type) {
+      case SCULPT_LAYER_TREE_NODE_TYPE_GROUP: {
+        SculptLayerGroup &child = *bke::sculpt_layers::node_as_group(&node);
+        SculptLayerGroupItem &item = parent.add_tree_item<SculptLayerGroupItem>(&object_, &child);
+        this->build_tree_recursive(item, child);
+        break;
+      }
+      case SCULPT_LAYER_TREE_NODE_TYPE_LAYER: {
+        parent.add_tree_item<SculptLayerItem>(&object_, bke::sculpt_layers::node_as_layer(&node));
+        break;
+      }
     }
   }
 }
@@ -644,8 +696,9 @@ void SculptLayerTreeView::build_tree()
   if (mesh == nullptr) {
     return;
   }
-  /* Uid 0 is the root: a group or layer tagged with it sits at the top level. */
-  this->build_tree_recursive(*this, 0);
+  /* From the root folder's children: the root always exists but is never drawn as a row, so the
+   * top-level rows are its children rather than the tree's own. */
+  this->build_tree_recursive(*this, *bke::sculpt_layers::root_group(*mesh));
 }
 
 void template_layer_tree(ui::Layout *layout, bContext *C)

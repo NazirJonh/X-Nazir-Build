@@ -1218,6 +1218,8 @@ void SCULPT_OT_layer_toggle_rec(wmOperatorType *ot);
 void SCULPT_OT_layer_solo_base(wmOperatorType *ot);
 void SCULPT_OT_layer_group_add(wmOperatorType *ot);
 void SCULPT_OT_layer_group_remove(wmOperatorType *ot);
+void SCULPT_OT_layer_group_merge(wmOperatorType *ot);
+void SCULPT_OT_layer_group_delete(wmOperatorType *ot);
 void SCULPT_OT_layer_group_toggle_visibility(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint::layers

@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <limits>
 #include <optional>
+#include <string>
 
 #include "CLG_log.h"
 
@@ -52,6 +53,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
+#include "BLI_string_utf8.h"
 #include "BLI_task.hh"
 #include "BLI_vector.hh"
 
@@ -114,6 +116,19 @@ static Mesh &mesh_of(Object &object)
   return *id_cast<Mesh *>(object.data);
 }
 
+/* The containing folder's uid, or 0 for a node sitting at the root (the root group holds uid 0, so
+ * this needs no special case — see #bke::sculpt_layers::node_find_by_uid). */
+static int node_parent_uid(const SculptLayerTreeNode &node)
+{
+  return node.parent ? node.parent->base.uid : 0;
+}
+
+/* The sibling \a node follows, as a uid, or 0 when it is the head of its folder. */
+static int node_prev_uid(const SculptLayerTreeNode &node)
+{
+  return node.prev ? node.prev->uid : 0;
+}
+
 /* The single authority for a layer's effective influence (see #BKE_sculpt_layers.hh). Pulled into
  * this namespace so unqualified `effective(layer)` calls resolve to it — do not re-define a local
  * copy, so a future change to the blend/mute semantics stays a one-line edit. */
@@ -155,14 +170,16 @@ bool in_use(const Object &object)
     return true;
   }
   const Mesh &mesh = *id_cast<const Mesh *>(object.data);
-  for (const SculptLayer &layer : mesh.sculpt_layers) {
+  for (const SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
     /* "Armed", not "contributing" — a deliberately weaker question than #effective answers,
      * and the reason this tests flags instead of calling it. A layer dialled to influence 0 is
      * still armed (the slider is live, the next dab records into it), so it keeps the layer
      * machinery on; that is pre-existing behavior and not this task's to change. Folder-hidden
      * is different in kind: such a layer cannot be dialled up at all without first re-enabling
      * its folder, so it is no more armed than an explicitly disabled one. */
-    if ((layer.flag & SCULPT_LAYER_ENABLED) && !(layer.flag & SCULPT_LAYER_GROUP_HIDDEN)) {
+    if ((layer->base.flag & SCULPT_LAYER_ENABLED) &&
+        !(layer->base.flag & SCULPT_LAYER_GROUP_HIDDEN))
+    {
       return true;
     }
   }
@@ -171,7 +188,7 @@ bool in_use(const Object &object)
 
 bool destructive_edit_check(const Mesh &mesh, ReportList *reports)
 {
-  if (BLI_listbase_is_empty(&mesh.sculpt_layers)) {
+  if (bke::sculpt_layers::layers(mesh).is_empty()) {
     return true;
   }
   if (reports) {
@@ -216,17 +233,17 @@ static void validate_grid_layers(Object &object)
   const int totlvl = ss->multires_modifier->totlvl;
   const int expected = bke::grid_totelem(mesh.corners_num, totlvl);
   bool warned = false;
-  for (SculptLayer &layer : mesh.sculpt_layers) {
-    if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {
+  for (SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
+    if (layer->domain != SCULPT_LAYER_DOMAIN_GRID || layer->data == nullptr) {
       continue;
     }
-    if (!bke::sculpt_layers::is_stale(layer, expected) && layer.level == totlvl) {
+    if (!bke::sculpt_layers::is_stale(*layer, expected) && layer->level == totlvl) {
       continue;
     }
-    MEM_delete_void(layer.data);
-    layer.data = nullptr;
-    layer.totelem = 0;
-    layer.level = short(totlvl);
+    MEM_delete_void(layer->data);
+    layer->data = nullptr;
+    layer->totelem = 0;
+    layer->level = short(totlvl);
     if (!warned) {
       CLOG_WARN(&LOG,
                 "Grid sculpt layer data reset: stored level/topology no longer matches the mesh.");
@@ -245,15 +262,15 @@ static void validate_grid_layers(Object &object)
 static void warn_stale_vert_layers(Object &object)
 {
   const Mesh &mesh = mesh_of(object);
-  for (const SculptLayer &layer : mesh.sculpt_layers) {
-    if (layer.domain != SCULPT_LAYER_DOMAIN_VERT || !bke::sculpt_layers::is_stale(mesh, layer)) {
+  for (const SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
+    if (layer->domain != SCULPT_LAYER_DOMAIN_VERT || !bke::sculpt_layers::is_stale(mesh, *layer)) {
       continue;
     }
     CLOG_WARN(&LOG,
               "Sculpt layer '%s' is stale: it stores %d elements but the mesh has %d vertices. "
               "Its displacement is ignored until the layer is reset or removed.",
-              layer.name,
-              layer.totelem,
+              layer->base.name,
+              layer->totelem,
               mesh.verts_num);
     /* One line per session-state refresh is enough to flag the condition; the list marks every
      * affected layer. */
@@ -293,7 +310,8 @@ void session_state_ensure(Object &object)
   Mesh &mesh = mesh_of(object);
   const Span<float3> positions = mesh.vert_positions();
   ss->layers.mesh_base.reinitialize(positions.size());
-  bke::sculpt_layers::derive_base_mesh(positions, mesh.sculpt_layers, ss->layers.mesh_base);
+  bke::sculpt_layers::derive_base_mesh(
+      positions, bke::sculpt_layers::layers(mesh), ss->layers.mesh_base);
   SLP_PERF("[DEBUG-perf] session_state_ensure: captured mesh_base for %zu verts\n",
            size_t(positions.size()));
 }
@@ -338,7 +356,8 @@ static void recompute_mesh_canonical(Object &object)
     /* Capture still could not size the base (no valid pbvh/mesh): nothing safe to do. */
     return;
   }
-  bke::sculpt_layers::combine_layers_mesh(ss->layers.mesh_base, mesh.sculpt_layers, positions);
+  bke::sculpt_layers::combine_layers_mesh(
+      ss->layers.mesh_base, bke::sculpt_layers::layers(mesh), positions);
   mesh.tag_positions_changed();
 
   bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
@@ -393,7 +412,7 @@ static void debug_validate_mesh_invariant(Object &object, const char *where)
   }
   Array<float3> expected(positions.size());
   bke::sculpt_layers::combine_layers_mesh(
-      ss->layers.mesh_base.as_span(), mesh.sculpt_layers, expected);
+      ss->layers.mesh_base.as_span(), bke::sculpt_layers::layers(mesh), expected);
   float max_dev = 0.0f;
   int64_t over = 0;
   int64_t first_bad = -1;
@@ -419,14 +438,14 @@ static void debug_validate_mesh_invariant(Object &object, const char *where)
         static_cast<long long>(positions.size()),
         static_cast<long long>(first_bad));
     int layer_index = 0;
-    for (const SculptLayer &layer : mesh.sculpt_layers) {
+    for (const SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
       printf("  layer[%d] uid=%d domain=%d enabled=%d influence=%.4f totelem=%d\n",
              layer_index++,
-             layer.uid,
-             int(layer.domain),
-             int((layer.flag & SCULPT_LAYER_ENABLED) != 0),
-             double(layer.influence),
-             layer.totelem);
+             layer->base.uid,
+             int(layer->domain),
+             int((layer->base.flag & SCULPT_LAYER_ENABLED) != 0),
+             double(layer->influence),
+             layer->totelem);
     }
   }
   else {
@@ -815,7 +834,7 @@ IndexMask base_view_extend_node_mask(const Object &object,
 static Array<float3> base_view_from_layer_data(const Mesh &mesh, const int64_t verts_num)
 {
   Array<float3> view(verts_num, float3(0.0f));
-  bke::sculpt_layers::apply_vert_layers(mesh.sculpt_layers, view);
+  bke::sculpt_layers::apply_vert_layers(bke::sculpt_layers::layers(mesh), view);
   return view;
 }
 
@@ -841,10 +860,8 @@ static void base_view_ensure(const Depsgraph &depsgraph, Object &object)
   Mesh &mesh = mesh_of(object);
   const short domain = domain_for(object);
   bool any_enabled = false;
-  for (const SculptLayer &layer : mesh.sculpt_layers) {
-    if (layer.domain == domain && effective(layer) != 0.0f &&
-        layer.data != nullptr)
-    {
+  for (const SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
+    if (layer->domain == domain && effective(*layer) != 0.0f && layer->data != nullptr) {
       any_enabled = true;
       break;
     }
@@ -880,15 +897,16 @@ static void base_view_ensure(const Depsgraph &depsgraph, Object &object)
     SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
     Array<float3> total(subdiv_ccg.positions.size(), float3(0.0f));
     Array<float3> contrib(subdiv_ccg.positions.size());
-    for (const SculptLayer &layer : mesh.sculpt_layers) {
+    for (const SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
       /* The weight must be the one the composed surface was built with: #base_view is subtracted
        * from it, so a layer weighted differently here than by #effective leaves a residual the
        * brush then reads as real geometry. */
-      const float influence = effective(layer);
-      if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || influence == 0.0f || layer.data == nullptr) {
+      const float influence = effective(*layer);
+      if (layer->domain != SCULPT_LAYER_DOMAIN_GRID || influence == 0.0f ||
+          layer->data == nullptr) {
         continue;
       }
-      if (!BKE_multires_sculpt_layer_object_contribution(mesh, subdiv_ccg, layer, contrib)) {
+      if (!BKE_multires_sculpt_layer_object_contribution(mesh, subdiv_ccg, *layer, contrib)) {
         /* A partial sum would make the brush inputs inconsistent; fall back to plain behavior. */
         return;
       }
@@ -1051,7 +1069,7 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
    * when the folder is re-enabled. #layer_toggle_rec_exec refuses to arm REC on such a layer, but
    * the folder can be disabled, or the active layer changed, after arming (see #layer_move_to,
    * #layer_select). Treated like Solo Base: there is nothing to record into. */
-  const bool rec_blocked = layer && (layer->flag & SCULPT_LAYER_GROUP_HIDDEN);
+  const bool rec_blocked = layer && (layer->base.flag & SCULPT_LAYER_GROUP_HIDDEN);
   if (!ss->layers.rec_active || rec_blocked || bke::sculpt_layers::solo_active(mesh)) {
     /* REC off, blocked, or Solo Base is isolating the base for direct sculpting (nothing to
      * record into while layers are hidden): the stroke edits the base. Compute the base view so
@@ -1073,7 +1091,7 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
     return;
   }
 
-  if (!layer || layer->domain != domain_for(object) || (layer->flag & SCULPT_LAYER_LOCKED)) {
+  if (!layer || layer->domain != domain_for(object) || (layer->base.flag & SCULPT_LAYER_LOCKED)) {
     return;
   }
   if (grids) {
@@ -1441,20 +1459,26 @@ static void group_cascade_resync_with_undo(Object &object, Mesh &mesh)
 {
   Vector<int> uids;
   Vector<int> flags_before;
-  uids.reserve(BLI_listbase_count(&mesh.sculpt_layers));
-  flags_before.reserve(uids.capacity());
-  for (const SculptLayer &layer : mesh.sculpt_layers) {
-    uids.append(layer.uid);
-    flags_before.append(layer.flag);
+  {
+    const Span<SculptLayer *> before = bke::sculpt_layers::layers(mesh);
+    uids.reserve(before.size());
+    flags_before.reserve(before.size());
+    for (const SculptLayer *layer : before) {
+      uids.append(layer->base.uid);
+      flags_before.append(layer->base.flag);
+    }
   }
 
   bke::sculpt_layers::resync_group_hidden(mesh);
 
+  /* The span is re-read rather than held across the resync. #resync_group_hidden only writes
+   * #SCULPT_LAYER_GROUP_HIDDEN — it adds, removes and reorders nothing — which is what makes
+   * the second walk line up with the first, index for index. */
   Vector<int> changed_uids;
   Vector<int> changed_flags;
   int i = 0;
-  for (const SculptLayer &layer : mesh.sculpt_layers) {
-    if (layer.flag != flags_before[i]) {
+  for (const SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
+    if (layer->base.flag != flags_before[i]) {
       changed_uids.append(uids[i]);
       changed_flags.append(flags_before[i]);
     }
@@ -1518,7 +1542,7 @@ static wmOperatorStatus layer_add_exec(bContext *C, wmOperator *op)
     layer = bke::sculpt_layers::add(
         *ctx.mesh, DATA_("Layer"), domain_for(*ctx.object), element_count(*ctx.object));
   }
-  undo::push_sculpt_layer_list_change(*ctx.object, {}, Vector<int>({layer->uid}), false);
+  undo::push_sculpt_layer_list_change(*ctx.object, {}, Vector<int>({layer->base.uid}), false);
   undo::push_end(*ctx.object);
   /* A new layer starts with zero displacement, so the combined surface is unchanged. */
   /* Auto-enable REC so sculpting immediately records into the freshly added layer; the layer
@@ -1555,9 +1579,9 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
    * relies on. */
   const SculptLayer *active = bke::sculpt_layers::active_get(*ctx.mesh);
   Vector<SculptLayer *> targets;
-  for (SculptLayer &layer : ctx.mesh->sculpt_layers) {
-    if ((layer.flag & SCULPT_LAYER_SELECTED) || &layer == active) {
-      targets.append(&layer);
+  for (SculptLayer *layer : bke::sculpt_layers::layers(*ctx.mesh)) {
+    if ((layer->base.flag & SCULPT_LAYER_SELECTED) || layer == active) {
+      targets.append(layer);
     }
   }
   if (targets.is_empty()) {
@@ -1573,7 +1597,7 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
    * second pass. */
   Vector<undo::SculptLayerUndoPayload> removed;
   for (SculptLayer *layer : targets) {
-    removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *layer));
+    removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer->base));
   }
   /* No explicit #active_set afterwards: #bke::sculpt_layers::remove hands the active marker to a
    * neighbour, and when that neighbour is itself a target its own removal hands it on again, so
@@ -1610,24 +1634,38 @@ static wmOperatorStatus layer_move_exec(bContext *C, wmOperator *op)
   if (!layer) {
     return OPERATOR_CANCELLED;
   }
+  SculptLayerTreeNode &node = layer->base;
+  /* Every node but the root sits in a folder, and the root is never a layer. */
+  BLI_assert(node.parent != nullptr);
+  SculptLayerGroup &parent = *node.parent;
   const int dir = RNA_enum_get(op->ptr, "direction");
-  const int step = (dir == 0) ? -1 : 1;
-  const int prev_uid_from = layer->prev ? layer->prev->uid : 0;
-  if (BLI_listbase_link_move(&ctx.mesh->sculpt_layers, layer, step)) {
-    bke::sculpt_layers::active_set(*ctx.mesh, layer);
-    undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
-    /* Move Up/Down never leaves the layer's folder, so both group fields carry the same uid. */
-    Vector<undo::ReparentMove> moves = {{layer->uid,
-                                         false,
-                                         prev_uid_from,
-                                         layer->prev ? layer->prev->uid : 0,
-                                         layer->group_uid,
-                                         layer->group_uid}};
-    undo::push_sculpt_layer_reparent(*ctx.object, std::move(moves));
-    undo::push_end(*ctx.object);
-    /* Layer order does not affect the additive combination; UI refresh only. */
-    layers_ui_notify(C, *ctx.object);
+
+  /* The neighbouring *row*, which is simply the next sibling — of either kind. A folder is one
+   * indivisible row, so the layer steps over it rather than into it: the swap stays among the
+   * layer's own siblings and Move Up/Down therefore never reparents. Only dragging
+   * (#SCULPT_OT_layer_move_to) does. */
+  SculptLayerTreeNode *neighbour = (dir == 0) ? node.prev : node.next;
+  if (!neighbour) {
+    /* Already the first / last row of its folder. Stepping further would leave the folder,
+     * which is a reparent this operator does not do. */
+    return OPERATOR_FINISHED;
   }
+  const int prev_uid_from = node_prev_uid(node);
+  /* Up: land where the neighbour sat, i.e. after whatever the neighbour followed (null = the head
+   * of the folder). Down: land directly after the neighbour. */
+  SculptLayerTreeNode *after = (dir == 0) ? neighbour->prev : neighbour;
+  bke::sculpt_layers::node_move_into(*ctx.mesh, node, parent, after);
+
+  bke::sculpt_layers::active_set(*ctx.mesh, layer);
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  /* Move Up/Down never leaves the layer's folder, so both group fields carry the same uid. */
+  const int parent_uid = parent.base.uid;
+  Vector<undo::ReparentMove> moves = {
+      {node.uid, prev_uid_from, node_prev_uid(node), parent_uid, parent_uid}};
+  undo::push_sculpt_layer_reparent(*ctx.object, std::move(moves));
+  undo::push_end(*ctx.object);
+  /* Layer order does not affect the additive combination; UI refresh only. */
+  layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
 
@@ -1649,25 +1687,54 @@ void SCULPT_OT_layer_move(wmOperatorType *ot)
   RNA_def_enum(ot->srna, "direction", direction_items, 0, "Direction", "");
 }
 
-/* One moved item: a layer or a group, kept together so the batch preserves the user's selection
- * order across both lists. */
-struct MoveItem {
-  SculptLayer *layer = nullptr;
-  SculptLayerGroup *group = nullptr;
+/* The folder \a uid names, or null when it names no folder the user can act on.
+ *
+ * Three uids are refused, and all three would otherwise resolve to something: uid 0 is the root
+ * folder — #bke::sculpt_layers::node_find_by_uid hands it back, but it is never drawn as a row
+ * and holds every other node, so an operator addressing it would act on the whole tree behind a
+ * control the user cannot see. A layer's uid and a stale uid are refused by the kind-checked cast
+ * and the lookup respectively. One counter spans both kinds now, so the uid cannot be assumed to
+ * name a folder just because a folder operator was the one asking.
+ */
+static SculptLayerGroup *group_row_lookup(Mesh &mesh, const int uid)
+{
+  if (uid == 0) {
+    return nullptr;
+  }
+  return bke::sculpt_layers::node_as_group(bke::sculpt_layers::node_find_by_uid(mesh, uid));
+}
 
-  int uid() const
-  {
-    return layer ? layer->uid : group->uid;
+/* Every selected node at or below \a group, depth-first in tree order — which is exactly the order
+ * the rows are drawn in, so a batch move keeps the selection's mutual order.
+ *
+ * The two kinds carry their selection in different bits (#SCULPT_LAYER_SELECTED vs
+ * #SCULPT_LAYER_GROUP_SELECTED), so the walk has to dispatch on the kind even though both now live
+ * in one children list.
+ *
+ * A selected folder is appended whole and its subtree is *not* descended into: the folder is one
+ * indivisible row, so anything selected inside it travels with it. Collecting such a child
+ * separately would move it next to its own folder instead, silently lifting it out — and, because
+ * a selected folder always precedes its own descendants here, skipping the subtree is also what
+ * keeps the caller from ever being handed a node nested inside another node of the same batch.
+ */
+static void selected_nodes_gather(const SculptLayerGroup &group,
+                                  Vector<SculptLayerTreeNode *> &r_nodes)
+{
+  for (SculptLayerTreeNode &node : group.children) {
+    if (const SculptLayerGroup *child = bke::sculpt_layers::node_as_group(&node)) {
+      if (node.flag & SCULPT_LAYER_GROUP_SELECTED) {
+        r_nodes.append(&node);
+      }
+      else {
+        selected_nodes_gather(*child, r_nodes);
+      }
+      continue;
+    }
+    if (node.flag & SCULPT_LAYER_SELECTED) {
+      r_nodes.append(&node);
+    }
   }
-  int prev_uid() const
-  {
-    return layer ? (layer->prev ? layer->prev->uid : 0) : (group->prev ? group->prev->uid : 0);
-  }
-  int parent_uid() const
-  {
-    return layer ? layer->group_uid : group->parent_uid;
-  }
-};
+}
 
 static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
 {
@@ -1680,156 +1747,109 @@ static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
   const int anchor_uid = RNA_int_get(op->ptr, "anchor_uid");
   const MoveLocation location = MoveLocation(RNA_enum_get(op->ptr, "location"));
 
-  /* The caller states which list the anchor lives in, because layer uids and group uids are
-   * independent counters that both start at 1: the very first layer and the very first folder
-   * already share the number 1, so the uid alone never names a unique row. Into implies a group
-   * (there is nothing "inside" a layer); otherwise #anchor_is_group decides. Exactly one list is
-   * consulted, so a collision cannot silently redirect the drop. */
-  const bool anchor_is_group = RNA_boolean_get(op->ptr, "anchor_is_group") ||
-                               location == MoveLocation::Into;
-  SculptLayer *anchor_layer = nullptr;
-  SculptLayerGroup *anchor_group = nullptr;
-  if (anchor_is_group) {
-    anchor_group = bke::sculpt_layers::group_find_by_uid(mesh, anchor_uid);
-    if (!anchor_group) {
-      BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
-      return OPERATOR_CANCELLED;
-    }
+  SculptLayerGroup &root = *bke::sculpt_layers::root_group(mesh);
+
+  /* The anchor row. The uid alone names it: one counter (#bke::sculpt_layers::node_unique_uid)
+   * now spans layers and folders, so a uid identifies exactly one node of either kind and the
+   * caller no longer has to say which list to resolve it in — which is the whole reason the former
+   * `anchor_is_group` property existed.
+   *
+   * Uid 0 resolves to the root folder, which is never drawn as a row: it stands for "the top
+   * level" rather than for a node to sit beside, so it is normalized to "no anchor" here
+   * (Before/After then mean the head of the root's children, Into means the root itself). Any
+   * other uid that fails to resolve is a stale drag against a row that has since gone. */
+  SculptLayerTreeNode *anchor = bke::sculpt_layers::node_find_by_uid(mesh, anchor_uid);
+  if (anchor == &root.base) {
+    anchor = nullptr;
   }
-  else {
-    /* A miss is not an error: `anchor_uid == 0` means the head of the list. */
-    anchor_layer = bke::sculpt_layers::find_by_uid(mesh, anchor_uid);
+  else if (!anchor) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layer or group with that id");
+    return OPERATOR_CANCELLED;
   }
 
-  /* Selected items, in their current relative order (drag data carries no explicit list — it is
+  /* Destination folder and the sibling the first moved node lands after (null = the folder's
+   * head).
+   *
+   * This is what the tree bought: a folder's children hold both kinds and their order *is* the
+   * sibling order, so "next to the anchor" is one insertion into one list — the anchor's own — no
+   * matter whether the anchor or the moved node is a layer or a folder. The two independent
+   * cursors this used to chain (one per list) could not express "a folder right after this layer"
+   * at all. */
+  SculptLayerGroup *dst = nullptr;
+  SculptLayerTreeNode *cursor = nullptr;
+  if (location == MoveLocation::Into) {
+    /* Into names a folder: there is nothing inside a layer. */
+    dst = anchor ? bke::sculpt_layers::node_as_group(anchor) : &root;
+    if (!dst) {
+      BKE_report(op->reports, RPT_ERROR, "Can only move sculpt layers into a group");
+      return OPERATOR_CANCELLED;
+    }
+    /* Append rather than prepend, and a null cursor means head, so start from the current last
+     * child. */
+    cursor = static_cast<SculptLayerTreeNode *>(dst->children.last);
+  }
+  else {
+    /* Before/After: the drop lands beside the anchor, i.e. among its siblings. */
+    dst = anchor ? anchor->parent : &root;
+    cursor = (location == MoveLocation::After) ? anchor : (anchor ? anchor->prev : nullptr);
+  }
+
+  /* Selected nodes, in their current relative order (drag data carries no explicit list — it is
    * always this same selection, see #SculptLayerDragController::create_drag_data). Falls back to
    * the active layer so a plain "no selection yet" script call still does something sensible. */
-  Vector<MoveItem> moved;
-  for (SculptLayerGroup &group : mesh.sculpt_layer_groups) {
-    if (group.flag & SCULPT_LAYER_GROUP_SELECTED) {
-      MoveItem item;
-      item.group = &group;
-      moved.append(item);
-    }
-  }
-  for (SculptLayer &layer : mesh.sculpt_layers) {
-    if (layer.flag & SCULPT_LAYER_SELECTED) {
-      MoveItem item;
-      item.layer = &layer;
-      moved.append(item);
-    }
-  }
+  Vector<SculptLayerTreeNode *> moved;
+  selected_nodes_gather(root, moved);
   if (moved.is_empty()) {
     if (SculptLayer *active = bke::sculpt_layers::active_get(mesh)) {
-      MoveItem item;
-      item.layer = active;
-      moved.append(item);
+      moved.append(&active->base);
     }
   }
   if (moved.is_empty()) {
     return OPERATOR_CANCELLED;
   }
 
-  /* Target folder: the anchor's own folder for Before/After (the drop lands beside it, i.e. among
-   * its siblings), the anchor itself for Into. */
-  const int target_group_uid = (location == MoveLocation::Into) ?
-                                   anchor_group->uid :
-                                   (anchor_layer ? anchor_layer->group_uid :
-                                                   (anchor_group ? anchor_group->parent_uid : 0));
-
-  /* Reject a folder dropped into its own subtree (including into itself): it would detach that
-   * subtree from the root. Reads as "is the destination inside the folder being moved?" — the root
-   * (0) never is, and a destination that no longer resolves is treated as the root, matching how
-   * #bke::sculpt_layers::group_effective_enabled tolerates a dangling uid. */
-  if (const SculptLayerGroup *target = bke::sculpt_layers::group_find_by_uid(mesh, target_group_uid))
-  {
-    for (const MoveItem &item : moved) {
-      if (item.group && bke::sculpt_layers::group_is_descendant_of(mesh, *target, item.group->uid)) {
-        BKE_report(op->reports, RPT_ERROR, "Cannot move a sculpt layer group into itself");
-        return OPERATOR_CANCELLED;
-      }
+  /* Reject a folder dropped into its own subtree, *including into itself*: either would detach
+   * that subtree from the root, and #bke::sculpt_layers::node_move_into asserts both rather than
+   * handling them. #node_is_descendant_of is strict — a node is not its own descendant — so it
+   * answers only the "strictly below" half and the identity test is spelled out alongside it. */
+  for (const SculptLayerTreeNode *node : moved) {
+    const SculptLayerGroup *group = bke::sculpt_layers::node_as_group(node);
+    if (!group) {
+      continue;
+    }
+    if (dst == group || bke::sculpt_layers::node_is_descendant_of(dst->base, *group)) {
+      BKE_report(op->reports, RPT_ERROR, "Cannot move a sculpt layer group into itself");
+      return OPERATOR_CANCELLED;
     }
   }
 
+  /* Captured before anything moves: the `from` half of each entry describes where the node sat. */
   Vector<undo::ReparentMove> moves;
   moves.reserve(moved.size());
-  for (const MoveItem &item : moved) {
+  for (const SculptLayerTreeNode *node : moved) {
     undo::ReparentMove move;
-    move.uid = item.uid();
-    move.is_group = item.group != nullptr;
-    move.prev_from = item.prev_uid();
-    move.group_from = item.parent_uid();
-    move.group_to = target_group_uid;
+    move.uid = node->uid;
+    move.prev_from = node_prev_uid(*node);
+    move.group_from = node_parent_uid(*node);
+    move.group_to = dst->base.uid;
     moves.append(move);
   }
 
-  /* Chain: the first moved item lands next to the drop anchor, every following one right after the
-   * previously placed one — preserves the selection's mutual order (Этап 1, "Drop"). Layers and
-   * groups chain independently, since they live in separate lists (see the design doc §2: siblings
-   * are ordered per kind, folders first). */
-  SculptLayer *layer_cursor = nullptr;
-  SculptLayerGroup *group_cursor = nullptr;
-  if (location == MoveLocation::After) {
-    layer_cursor = anchor_layer;
-    group_cursor = anchor_group;
-  }
-  else if (location == MoveLocation::Before) {
-    layer_cursor = anchor_layer ? anchor_layer->prev : nullptr;
-    group_cursor = anchor_group ? anchor_group->prev : nullptr;
-  }
-  /* Into: append to the end of the folder's children — a null cursor means "head", so walk to the
-   * last existing child of the target folder instead. */
-  if (location == MoveLocation::Into) {
-    for (SculptLayer &layer : mesh.sculpt_layers) {
-      if (layer.group_uid == target_group_uid) {
-        layer_cursor = &layer;
-      }
+  /* Chain: the first moved node lands next to the drop anchor, every following one right after
+   * the previously placed one, which preserves the selection's mutual order. One cursor for both
+   * kinds, because there is one list. */
+  for (SculptLayerTreeNode *node : moved) {
+    /* Already sitting exactly where it would be re-inserted — reached by dropping a selection
+     * onto one of its own members, or back into the folder it is already the last child of.
+     * #node_move_into asserts `after != &node` rather than tolerating it, since re-linking a node
+     * after itself would splice it into its own stale links. */
+    if (cursor != node) {
+      bke::sculpt_layers::node_move_into(mesh, *node, *dst, cursor);
     }
-    for (SculptLayerGroup &group : mesh.sculpt_layer_groups) {
-      if (group.parent_uid == target_group_uid) {
-        group_cursor = &group;
-      }
-    }
-  }
-
-  for (const MoveItem &item : moved) {
-    if (item.group) {
-      item.group->parent_uid = target_group_uid;
-      /* Already sitting exactly where it would be re-inserted. Removing it and inserting it after
-       * itself would splice the node into its own stale links and drop it out of the list — reached
-       * by dropping a selection onto one of its own members, or back into the folder it is already
-       * the last child of. */
-      if (group_cursor != item.group) {
-        BLI_remlink(&mesh.sculpt_layer_groups, item.group);
-        if (group_cursor) {
-          BLI_insertlinkafter(&mesh.sculpt_layer_groups, group_cursor, item.group);
-        }
-        else {
-          BLI_addhead(&mesh.sculpt_layer_groups, item.group);
-        }
-      }
-      group_cursor = item.group;
-    }
-    else {
-      item.layer->group_uid = target_group_uid;
-      /* Already sitting exactly where it would be re-inserted. Removing it and inserting it after
-       * itself would splice the node into its own stale links and drop it out of the list — reached
-       * by dropping a selection onto one of its own members, or back into the folder it is already
-       * the last child of. */
-      if (layer_cursor != item.layer) {
-        BLI_remlink(&mesh.sculpt_layers, item.layer);
-        if (layer_cursor) {
-          BLI_insertlinkafter(&mesh.sculpt_layers, layer_cursor, item.layer);
-        }
-        else {
-          BLI_addhead(&mesh.sculpt_layers, item.layer);
-        }
-      }
-      layer_cursor = item.layer;
-    }
+    cursor = node;
   }
   for (const int64_t i : moved.index_range()) {
-    moves[i].prev_to = moved[i].prev_uid();
+    moves[i].prev_to = node_prev_uid(*moved[i]);
   }
 
   session_state_ensure(*ctx.object);
@@ -1860,13 +1880,15 @@ void SCULPT_OT_layer_move_to(wmOperatorType *ot)
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
+  /* One uid names one node, of either kind (#bke::sculpt_layers::node_unique_uid), so the caller
+   * no longer has to state which kind the anchor is. */
   RNA_def_int(ot->srna,
               "anchor_uid",
               0,
               0,
               INT_MAX,
               "Anchor ID",
-              "Uid of the layer or group to move next to (0 = head of the list)",
+              "Uid of the layer or group to move next to (0 = the top level)",
               0,
               INT_MAX);
   RNA_def_enum(ot->srna,
@@ -1875,12 +1897,6 @@ void SCULPT_OT_layer_move_to(wmOperatorType *ot)
                int(MoveLocation::After),
                "Location",
                "Where to place the moved items relative to the anchor");
-  RNA_def_boolean(ot->srna,
-                  "anchor_is_group",
-                  false,
-                  "Anchor Is Group",
-                  "Resolve Anchor ID in the sculpt layer groups rather than in the layers. The two "
-                  "have separate uid namespaces, so the same number names one of each");
 }
 
 static wmOperatorStatus layer_duplicate_exec(bContext *C, wmOperator *op)
@@ -1896,7 +1912,7 @@ static wmOperatorStatus layer_duplicate_exec(bContext *C, wmOperator *op)
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
   SculptLayer *copy = bke::sculpt_layers::duplicate(*ctx.mesh, *src);
-  undo::push_sculpt_layer_list_change(*ctx.object, {}, Vector<int>({copy->uid}), false);
+  undo::push_sculpt_layer_list_change(*ctx.object, {}, Vector<int>({copy->base.uid}), false);
   /* The duplicated contribution doubles up in the combined result. */
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
@@ -1918,16 +1934,20 @@ void SCULPT_OT_layer_duplicate(wmOperatorType *ot)
 
 /* The layer visually below \a layer in the stack, or null when it is the bottom one of its folder.
  *
- * The only place where the *order* of #Mesh::sculpt_layers carries meaning: the combination is
- * additive and order-independent everywhere else, so the list order is otherwise presentation.
- * "Below" means the next sibling *within the same folder*, not simply the next link: the list is
- * flat and interleaves every folder's layers, so the plain next link can belong to another folder
- * entirely — merging into it would silently move geometry across a folder boundary.
+ * The only place where sibling *order* carries meaning: the combination is additive and
+ * order-independent everywhere else, so the order is otherwise presentation.
+ *
+ * "Below" still means the next sibling *within the same folder*, and that reason survives the tree
+ * unchanged — merging into a layer of another folder would silently move geometry across a folder
+ * boundary. Only the walk changes: siblings now interleave both kinds, so the next link may be a
+ * folder. Folders stay invisible to Merge Down (one indivisible row it does not reach into), so
+ * they are stepped over, and the sibling walk itself is what keeps the search inside the folder —
+ * the flat list this had to filter by folder tag is gone.
  */
 static SculptLayer *layer_below(SculptLayer &layer)
 {
-  for (SculptLayer *below = layer.next; below; below = below->next) {
-    if (below->group_uid == layer.group_uid) {
+  for (SculptLayerTreeNode *node = layer.base.next; node; node = node->next) {
+    if (SculptLayer *below = bke::sculpt_layers::node_as_layer(node)) {
       return below;
     }
   }
@@ -1950,7 +1970,9 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
    * the merge math below would write zeros: the surviving layer's content would be destroyed while
    * the "combined surface is unchanged" guarantee held only vacuously. Unlike an individually
    * disabled layer, nobody asked for these to contribute nothing. */
-  if ((active->flag & SCULPT_LAYER_GROUP_HIDDEN) || (below->flag & SCULPT_LAYER_GROUP_HIDDEN)) {
+  if ((active->base.flag & SCULPT_LAYER_GROUP_HIDDEN) ||
+      (below->base.flag & SCULPT_LAYER_GROUP_HIDDEN))
+  {
     BKE_report(op->reports, RPT_ERROR, "Cannot merge sculpt layers inside a disabled group");
     return OPERATOR_CANCELLED;
   }
@@ -1981,10 +2003,10 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
     }
   }
   below->influence = 1.0f;
-  below->flag |= SCULPT_LAYER_ENABLED;
+  below->base.flag |= SCULPT_LAYER_ENABLED;
 
   Vector<undo::SculptLayerUndoPayload> removed;
-  removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *active));
+  removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, active->base));
   bke::sculpt_layers::remove(*ctx.mesh, *active);
   bke::sculpt_layers::active_set(*ctx.mesh, below);
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
@@ -2022,9 +2044,9 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
   /* Sources: every selected layer except the active one (a self-merge is a no-op). Mirrors
    * #layer_merge_down_exec generalized from one fixed neighbour to an arbitrary selection. */
   Vector<SculptLayer *> sources;
-  for (SculptLayer &layer : ctx.mesh->sculpt_layers) {
-    if (&layer != active && (layer.flag & SCULPT_LAYER_SELECTED)) {
-      sources.append(&layer);
+  for (SculptLayer *layer : bke::sculpt_layers::layers(*ctx.mesh)) {
+    if (layer != active && (layer->base.flag & SCULPT_LAYER_SELECTED)) {
+      sources.append(layer);
     }
   }
   if (sources.is_empty()) {
@@ -2033,9 +2055,9 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
   }
   /* See #layer_merge_down_exec: at a group-hidden layer's weight of 0 the merge silently zeroes the
    * participants' content instead of preserving the combined surface. */
-  bool any_group_hidden = (active->flag & SCULPT_LAYER_GROUP_HIDDEN) != 0;
+  bool any_group_hidden = (active->base.flag & SCULPT_LAYER_GROUP_HIDDEN) != 0;
   for (const SculptLayer *source : sources) {
-    any_group_hidden |= (source->flag & SCULPT_LAYER_GROUP_HIDDEN) != 0;
+    any_group_hidden |= (source->base.flag & SCULPT_LAYER_GROUP_HIDDEN) != 0;
   }
   if (any_group_hidden) {
     BKE_report(op->reports, RPT_ERROR, "Cannot merge sculpt layers inside a disabled group");
@@ -2075,7 +2097,7 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
     }
   }
   active->influence = 1.0f;
-  active->flag |= SCULPT_LAYER_ENABLED;
+  active->base.flag |= SCULPT_LAYER_ENABLED;
 
   /* Every payload is captured while the list is still intact, so each records the neighbour it
    * really followed; undo then re-inserts them in capture order and rebuilds the original stack.
@@ -2084,7 +2106,7 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
    * second pass. */
   Vector<undo::SculptLayerUndoPayload> removed;
   for (SculptLayer *source : sources) {
-    removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *source));
+    removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, source->base));
   }
   for (SculptLayer *source : sources) {
     bke::sculpt_layers::remove(*ctx.mesh, *source);
@@ -2137,21 +2159,24 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
    * followed; undo then re-inserts them in this order and rebuilds the original stack. Capturing
    * and removing one at a time would make each layer record the head as its neighbour and undo
    * would rebuild the stack reversed. Capturing does not unlink, so the removal is a second pass. */
+  /* An owning copy, not the cached span: #bke::sculpt_layers::remove below invalidates the span,
+   * and the removal pass has to walk the same set the capture pass did. */
+  const Vector<SculptLayer *> all(bke::sculpt_layers::layers(*ctx.mesh));
   Vector<undo::SculptLayerUndoPayload> baked;
-  for (SculptLayer &layer : ctx.mesh->sculpt_layers) {
-    if (ctx.grids && layer.domain == SCULPT_LAYER_DOMAIN_GRID && layer.data) {
+  for (SculptLayer *layer : all) {
+    if (ctx.grids && layer->domain == SCULPT_LAYER_DOMAIN_GRID && layer->data) {
       BKE_multires_sculpt_layer_apply_to_mdisps(
-          *ctx.mesh, layer, bke::sculpt_layers::effective(layer));
+          *ctx.mesh, *layer, bke::sculpt_layers::effective(*layer));
     }
     else if (!bake_key) {
       /* Absolute shape keys only; a no-op without shape keys, where the live positions already
        * carry the layer. */
       bke::sculpt_layers::apply_vert_layer_to_shape_keys(
-          *ctx.mesh, layer, bke::sculpt_layers::effective(layer));
+          *ctx.mesh, *layer, bke::sculpt_layers::effective(*layer));
     }
-    baked.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer));
+    baked.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer->base));
   }
-  while (SculptLayer *layer = static_cast<SculptLayer *>(ctx.mesh->sculpt_layers.first)) {
+  for (SculptLayer *layer : all) {
     bke::sculpt_layers::remove(*ctx.mesh, *layer);
   }
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(baked), {}, true);
@@ -2230,7 +2255,7 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
     BKE_report(op->reports, RPT_ERROR, "Not available for Multires; only Mesh data");
     return OPERATOR_CANCELLED;
   }
-  if (BLI_listbase_is_empty(&ctx.mesh->sculpt_layers)) {
+  if (bke::sculpt_layers::layers(*ctx.mesh).is_empty()) {
     BKE_report(op->reports, RPT_ERROR, "No sculpt layers to bake");
     return OPERATOR_CANCELLED;
   }
@@ -2262,11 +2287,12 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
 
   /* Captured in list order before anything is unlinked, so undo restores the original stack — see
    * #layer_bake_exec for why the two passes cannot be merged. */
+  const Vector<SculptLayer *> all(bke::sculpt_layers::layers(*ctx.mesh));
   Vector<undo::SculptLayerUndoPayload> baked_layers;
-  for (SculptLayer &layer : ctx.mesh->sculpt_layers) {
-    baked_layers.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer));
+  for (SculptLayer *layer : all) {
+    baked_layers.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer->base));
   }
-  while (SculptLayer *layer = static_cast<SculptLayer *>(ctx.mesh->sculpt_layers.first)) {
+  for (SculptLayer *layer : all) {
     bke::sculpt_layers::remove(*ctx.mesh, *layer);
   }
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(baked_layers), {}, true);
@@ -2306,7 +2332,7 @@ static wmOperatorStatus layer_bake_to_shape_key_invoke(bContext *C,
     BKE_report(op->reports, RPT_ERROR, "Not available for Multires; only Mesh data");
     return OPERATOR_CANCELLED;
   }
-  if (BLI_listbase_is_empty(&ctx.mesh->sculpt_layers)) {
+  if (bke::sculpt_layers::layers(*ctx.mesh).is_empty()) {
     BKE_report(op->reports, RPT_ERROR, "No sculpt layers to bake");
     return OPERATOR_CANCELLED;
   }
@@ -2485,9 +2511,9 @@ enum class ValidateAction {
 static Vector<SculptLayer *> stale_layers_gather(Mesh &mesh)
 {
   Vector<SculptLayer *> stale;
-  for (SculptLayer &layer : mesh.sculpt_layers) {
-    if (bke::sculpt_layers::is_stale(mesh, layer)) {
-      stale.append(&layer);
+  for (SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
+    if (bke::sculpt_layers::is_stale(mesh, *layer)) {
+      stale.append(layer);
     }
   }
   return stale;
@@ -2513,7 +2539,7 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
      * layer next to the neighbour it really had (see #layer_bake_exec). */
     Vector<undo::SculptLayerUndoPayload> removed;
     for (SculptLayer *layer : stale) {
-      removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *layer));
+      removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer->base));
     }
     for (SculptLayer *layer : stale) {
       bke::sculpt_layers::remove(*ctx.mesh, *layer);
@@ -2525,7 +2551,7 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
     for (SculptLayer *layer : stale) {
       /* Takes the unmappable buffer off the layer and hands it to the undo step, leaving the layer
        * itself (uid, name, place in the stack) in the list. */
-      resized.append(undo::sculpt_layer_payload_capture(*ctx.mesh, *layer));
+      resized.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer->base));
       /* Re-fit to the live count of the layer's *own* domain (not the object's current sculpt
        * domain, which says nothing about a vertex layer sitting under a multires modifier).
        * #data_ensure allocates zeroed, which is exactly the wanted result: an empty but usable
@@ -2765,7 +2791,7 @@ static wmOperatorStatus layer_set_influence_exec(bContext *C, wmOperator *op)
   const float value = RNA_float_get(op->ptr, "influence");
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
-  undo::push_sculpt_layer_metadata(*ctx.object, *layer);
+  undo::push_sculpt_layer_metadata(*ctx.object, layer->base);
   layer->influence = value;
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
@@ -2924,8 +2950,8 @@ static void influence_drag_finish(bContext *C, wmOperator *op, const bool cancel
     const float target = cancel ? data->start_influence : layer.influence;
     /* Mirrors #effective at the target influence: a layer that is disabled — on its own or through
      * a disabled folder — contributes nothing however far the slider was dragged. */
-    const bool contributes = (layer.flag & SCULPT_LAYER_ENABLED) &&
-                             !(layer.flag & SCULPT_LAYER_GROUP_HIDDEN);
+    const bool contributes = (layer.base.flag & SCULPT_LAYER_ENABLED) &&
+                             !(layer.base.flag & SCULPT_LAYER_GROUP_HIDDEN);
     const float target_eff = contributes ? target : 0.0f;
     layer.influence = target;
     /* The CPU positions sit at #accounted_eff (the start, advanced by any periodic normal-refresh
@@ -2988,7 +3014,7 @@ static wmOperatorStatus layer_influence_drag_invoke(bContext *C,
   const bool grids = (pbvh->type() == bke::pbvh::Type::Grids);
   Mesh &mesh = mesh_of(object);
   SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
-  if (!layer || layer->domain != domain_for(object) || (layer->flag & SCULPT_LAYER_LOCKED)) {
+  if (!layer || layer->domain != domain_for(object) || (layer->base.flag & SCULPT_LAYER_LOCKED)) {
     return OPERATOR_CANCELLED;
   }
   if (!grids) {
@@ -3023,7 +3049,7 @@ static wmOperatorStatus layer_influence_drag_invoke(bContext *C,
    * fast path — the GPU influence compute targets only the direct vertex-domain mesh buffers. */
   data->gpu_active = (grids || data->deg_reeval) ?
                          false :
-                         bke::object::pbvh_get(object)->begin_influence_drag(layer->uid);
+                         bke::object::pbvh_get(object)->begin_influence_drag(layer->base.uid);
   if (grids) {
     /* The drag changes the layer's influence; consume pending base edits first, while the live
      * CCG still matches the stored layers (see #flush_pending_multires_base). */
@@ -3044,14 +3070,14 @@ static wmOperatorStatus layer_influence_drag_invoke(bContext *C,
 
   SLP_PERF("[DEBUG-perf] influence_drag_invoke: gpu_active=%d uid=%d enabled=%d has_data=%d totelem=%d\n",
            int(data->gpu_active),
-           layer->uid,
-           int((layer->flag & SCULPT_LAYER_ENABLED) != 0),
+           layer->base.uid,
+           int((layer->base.flag & SCULPT_LAYER_ENABLED) != 0),
            int(layer->data != nullptr),
            layer->totelem);
 
   /* Capture the pre-drag layer metadata so Ctrl+Z reverts the influence change. */
   undo::push_begin(*CTX_data_scene(C), object, op);
-  undo::push_sculpt_layer_metadata(object, *layer);
+  undo::push_sculpt_layer_metadata(object, layer->base);
 
   WM_event_add_modal_handler(C, op);
   return OPERATOR_RUNNING_MODAL;
@@ -3204,8 +3230,8 @@ static wmOperatorStatus layer_toggle_visibility_exec(bContext *C, wmOperator *op
   }
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
-  undo::push_sculpt_layer_metadata(*ctx.object, *layer);
-  layer->flag ^= SCULPT_LAYER_ENABLED;
+  undo::push_sculpt_layer_metadata(*ctx.object, layer->base);
+  layer->base.flag ^= SCULPT_LAYER_ENABLED;
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
   layers_ui_notify(C, *ctx.object);
@@ -3240,10 +3266,10 @@ static wmOperatorStatus layer_solo_base_exec(bContext *C, wmOperator *op)
 
   /* Layers the toggle changes: the enabled ones when activating, the marked ones when ending. */
   Vector<SculptLayer *> affected;
-  for (SculptLayer &layer : mesh.sculpt_layers) {
+  for (SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
     const int test_flag = solo_active ? SCULPT_LAYER_SOLO_HIDDEN : SCULPT_LAYER_ENABLED;
-    if (layer.flag & test_flag) {
-      affected.append(&layer);
+    if (layer->base.flag & test_flag) {
+      affected.append(layer);
     }
   }
   if (affected.is_empty()) {
@@ -3260,19 +3286,19 @@ static wmOperatorStatus layer_solo_base_exec(bContext *C, wmOperator *op)
   uids.reserve(affected.size());
   flags.reserve(affected.size());
   for (const SculptLayer *layer : affected) {
-    uids.append(layer->uid);
-    flags.append(layer->flag);
+    uids.append(layer->base.uid);
+    flags.append(layer->base.flag);
   }
   undo::push_sculpt_layer_flags_batch(*ctx.object, std::move(uids), std::move(flags));
 
   for (SculptLayer *layer : affected) {
     if (solo_active) {
-      layer->flag |= SCULPT_LAYER_ENABLED;
-      layer->flag &= ~SCULPT_LAYER_SOLO_HIDDEN;
+      layer->base.flag |= SCULPT_LAYER_ENABLED;
+      layer->base.flag &= ~SCULPT_LAYER_SOLO_HIDDEN;
     }
     else {
-      layer->flag &= ~SCULPT_LAYER_ENABLED;
-      layer->flag |= SCULPT_LAYER_SOLO_HIDDEN;
+      layer->base.flag &= ~SCULPT_LAYER_ENABLED;
+      layer->base.flag |= SCULPT_LAYER_SOLO_HIDDEN;
     }
   }
 
@@ -3304,7 +3330,7 @@ static wmOperatorStatus layer_group_toggle_visibility_exec(bContext *C, wmOperat
     return OPERATOR_CANCELLED;
   }
   const int group_uid = RNA_int_get(op->ptr, "group_uid");
-  SculptLayerGroup *group = bke::sculpt_layers::group_find_by_uid(*ctx.mesh, group_uid);
+  SculptLayerGroup *group = group_row_lookup(*ctx.mesh, group_uid);
   if (!group) {
     BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
     return OPERATOR_CANCELLED;
@@ -3315,8 +3341,8 @@ static wmOperatorStatus layer_group_toggle_visibility_exec(bContext *C, wmOperat
   session_state_ensure(*ctx.object);
 
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
-  undo::push_sculpt_layer_group_metadata(*ctx.object, *group);
-  group->flag ^= SCULPT_LAYER_GROUP_ENABLED;
+  undo::push_sculpt_layer_metadata(*ctx.object, group->base);
+  group->base.flag ^= SCULPT_LAYER_GROUP_ENABLED;
   group_cascade_resync_with_undo(*ctx.object, *ctx.mesh);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
@@ -3353,86 +3379,59 @@ static wmOperatorStatus layer_group_add_exec(bContext *C, wmOperator *op)
   }
   Mesh &mesh = *ctx.mesh;
 
-  /* Wrap the current selection, if any: the new folder takes the place of the first selected item
-   * (so it appears where the user was looking) and everything selected moves into it. */
-  Vector<MoveItem> wrapped;
-  for (SculptLayerGroup &group : mesh.sculpt_layer_groups) {
-    if (group.flag & SCULPT_LAYER_GROUP_SELECTED) {
-      MoveItem item;
-      item.group = &group;
-      wrapped.append(item);
-    }
-  }
-  for (SculptLayer &layer : mesh.sculpt_layers) {
-    if (layer.flag & SCULPT_LAYER_SELECTED) {
-      MoveItem item;
-      item.layer = &layer;
-      wrapped.append(item);
-    }
-  }
+  /* Wrap the current selection, if any: the new folder takes the place of the first selected row
+   * (so it appears where the user was looking) and everything selected moves into it.
+   *
+   * The gather skips whatever sits inside a selected folder, which is what makes the wrap safe as
+   * well as right: the first wrapped node is then never nested in another wrapped folder, so the
+   * new folder — a sibling of that first node — is never inside one either, and no move below can
+   * detach a subtree. */
+  Vector<SculptLayerTreeNode *> wrapped;
+  selected_nodes_gather(*bke::sculpt_layers::root_group(mesh), wrapped);
 
-  /* The new folder is a sibling of what it wraps, so it lands in that item's parent; with nothing
-   * selected it goes to the root. */
-  const int parent_uid = wrapped.is_empty() ? 0 : wrapped.first().parent_uid();
+  /* The new folder is a sibling of what it wraps, so it lands in that node's parent, in that
+   * node's own slot; with nothing selected it is appended to the root. Both are read before
+   * anything moves. */
+  SculptLayerGroup *parent = wrapped.is_empty() ? bke::sculpt_layers::root_group(mesh) :
+                                                  wrapped.first()->parent;
+  SculptLayerTreeNode *slot = wrapped.is_empty() ? nullptr : wrapped.first()->prev;
 
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
 
-  SculptLayerGroup *group = bke::sculpt_layers::group_add(mesh, "Group", parent_uid);
+  SculptLayerGroup *group = bke::sculpt_layers::group_add(mesh, "Group", parent->base.uid);
 
-  /* Place the folder where the user was looking: right before the first selected *group*, so it
-   * takes that group's slot among its siblings. #group_add appends, which already lands it last
-   * among its parent's subfolders — the right answer when only layers are wrapped, since folders
-   * always draw before their parent's layers (design doc §2) and a layer's slot is therefore not a
-   * position a folder can take. */
-  for (const MoveItem &item : wrapped) {
-    if (item.group) {
-      BLI_remlink(&mesh.sculpt_layer_groups, group);
-      BLI_insertlinkbefore(&mesh.sculpt_layer_groups, item.group, group);
-      break;
-    }
+  /* #group_add appends to the parent's children; take the wrapped selection's slot instead. With
+   * one children list holding both kinds, a folder can now take a *layer's* slot — the flat lists
+   * could only ever put it before another folder. */
+  if (!wrapped.is_empty()) {
+    bke::sculpt_layers::node_move_into(mesh, group->base, *parent, slot);
   }
   /* Only the uid is recorded here; the anchor is read off the live group when undo extracts it, so
    * this push does not care whether it runs before or after the placement above. */
-  undo::push_sculpt_layer_group_list_change(*ctx.object, {}, {group->uid});
+  undo::push_sculpt_layer_group_list_change(*ctx.object, {}, {group->base.uid});
 
   if (!wrapped.is_empty()) {
     Vector<undo::ReparentMove> moves;
     moves.reserve(wrapped.size());
-    for (const MoveItem &item : wrapped) {
+    for (const SculptLayerTreeNode *node : wrapped) {
       undo::ReparentMove move;
-      move.uid = item.uid();
-      move.is_group = item.group != nullptr;
-      move.prev_from = item.prev_uid();
-      move.group_from = item.parent_uid();
-      move.group_to = group->uid;
+      move.uid = node->uid;
+      move.prev_from = node_prev_uid(*node);
+      move.group_from = node_parent_uid(*node);
+      move.group_to = group->base.uid;
       moves.append(move);
     }
-    SculptLayer *layer_cursor = nullptr;
-    SculptLayerGroup *group_cursor = nullptr;
-    for (const MoveItem &item : wrapped) {
-      if (item.group) {
-        item.group->parent_uid = group->uid;
-        BLI_remlink(&mesh.sculpt_layer_groups, item.group);
-        if (group_cursor) {
-          BLI_insertlinkafter(&mesh.sculpt_layer_groups, group_cursor, item.group);
-        }
-        else {
-          /* Physical order in this flat list carries no parent/child meaning: the tree is built
-           * from parent_uid, and #resync_group_hidden is deliberately order-independent, so a
-           * child can land physically ahead of its parent here without consequence. */
-          BLI_addhead(&mesh.sculpt_layer_groups, item.group);
-        }
-        group_cursor = item.group;
-      }
-      else {
-        item.layer->group_uid = group->uid;
-        /* The layer keeps its place in the flat list; only its folder tag changes. Recording the
-         * unchanged anchors keeps the batch uniform with the drag and drop path. */
-      }
+    /* Into the (empty) new folder in selection order, chaining after the previously placed node —
+     * the same running cursor #layer_move_to_exec uses, and for the same reason: it preserves the
+     * selection's mutual order. */
+    SculptLayerTreeNode *cursor = nullptr;
+    for (SculptLayerTreeNode *node : wrapped) {
+      bke::sculpt_layers::node_move_into(mesh, *node, *group, cursor);
+      cursor = node;
     }
     for (const int64_t i : wrapped.index_range()) {
-      moves[i].prev_to = wrapped[i].prev_uid();
+      moves[i].prev_to = node_prev_uid(*wrapped[i]);
     }
     undo::push_sculpt_layer_reparent(*ctx.object, std::move(moves));
   }
@@ -3464,49 +3463,62 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
   }
   Mesh &mesh = *ctx.mesh;
   const int group_uid = RNA_int_get(op->ptr, "group_uid");
-  SculptLayerGroup *group = bke::sculpt_layers::group_find_by_uid(mesh, group_uid);
+  SculptLayerGroup *group = group_row_lookup(mesh, group_uid);
   if (!group) {
     BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
     return OPERATOR_CANCELLED;
   }
   /* Disbanding, not deleting: the direct children rise to the removed folder's own parent. Nothing
    * inside is removed — cascading deletion is a separate feature (design doc, non-goals). */
-  const int parent_uid = group->parent_uid;
+  SculptLayerGroup &parent = *group->base.parent;
+  const int parent_uid = parent.base.uid;
 
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
 
-  Vector<undo::ReparentMove> moves;
-  for (SculptLayerGroup &child : mesh.sculpt_layer_groups) {
-    if (child.parent_uid == group_uid) {
-      undo::ReparentMove move;
-      move.uid = child.uid;
-      move.is_group = true;
-      move.prev_from = child.prev ? child.prev->uid : 0;
-      move.prev_to = move.prev_from;
-      move.group_from = group_uid;
-      move.group_to = parent_uid;
-      moves.append(move);
-      child.parent_uid = parent_uid;
-    }
+  /* The lift-out is a real relink now, not a retag of a folder field: a folder owns its children,
+   * and #bke::sculpt_layers::group_remove refuses one that still has any (it would leak the
+   * subtree).
+   *
+   * The children land right after the folder itself, in order, so the disbanded contents take the
+   * folder's own slot among its siblings rather than jumping to the end of the parent. The child
+   * list is copied out first — the loop relinks the very nodes it walks. */
+  Vector<SculptLayerTreeNode *> children;
+  for (SculptLayerTreeNode &child : group->children) {
+    children.append(&child);
   }
-  for (SculptLayer &layer : mesh.sculpt_layers) {
-    if (layer.group_uid == group_uid) {
-      undo::ReparentMove move;
-      move.uid = layer.uid;
-      move.is_group = false;
-      move.prev_from = layer.prev ? layer.prev->uid : 0;
-      move.prev_to = move.prev_from;
-      move.group_from = group_uid;
-      move.group_to = parent_uid;
-      moves.append(move);
-      layer.group_uid = parent_uid;
-    }
+  /* Captured before anything moves, so the `from` half of each entry describes where the child
+   * really sat. Reading `prev_from` mid-loop would see a list the earlier moves have already
+   * unlinked from, so every child would record the head as its neighbour and undo would rebuild
+   * the folder's contents reversed (see #SCULPT_OT_layer_move_to for the same two-pass shape). */
+  Vector<undo::ReparentMove> moves;
+  moves.reserve(children.size());
+  for (const SculptLayerTreeNode *child : children) {
+    undo::ReparentMove move;
+    move.uid = child->uid;
+    move.prev_from = node_prev_uid(*child);
+    move.group_from = group_uid;
+    move.group_to = parent_uid;
+    moves.append(move);
+  }
+
+  SculptLayerTreeNode *cursor = &group->base;
+  for (SculptLayerTreeNode *child : children) {
+    bke::sculpt_layers::node_move_into(mesh, *child, parent, cursor);
+    cursor = child;
+  }
+  for (const int64_t i : children.index_range()) {
+    moves[i].prev_to = node_prev_uid(*children[i]);
   }
   undo::push_sculpt_layer_reparent(*ctx.object, std::move(moves));
 
-  Vector<undo::SculptLayerGroupUndoPayload> removed;
-  removed.append(undo::sculpt_layer_group_payload_capture(mesh, *group));
+  /* Captured after the lift-out, which leaves the folder's own slot untouched (the children
+   * landed behind it), so the payload still records the sibling it really followed. The folder is
+   * empty by now, which is what #group_remove requires and what the undo seam mirrors:
+   * #restore_list re-inserts a folder payload *before* it replays the move batch, extracts it
+   * *after*. */
+  Vector<undo::SculptLayerUndoPayload> removed;
+  removed.append(undo::sculpt_layer_payload_capture(mesh, group->base));
   bke::sculpt_layers::group_remove(mesh, *group);
   undo::push_sculpt_layer_group_list_change(*ctx.object, std::move(removed), {});
 
@@ -3540,6 +3552,319 @@ void SCULPT_OT_layer_group_remove(wmOperatorType *ot)
               INT_MAX);
 }
 
+/* Lift every layer in \a subtree_layers out into \a parent, right after \a group's own slot, in the
+ * given order, and record the reparent batch for undo. This empties every folder in the subtree,
+ * which is what lets those folders be removed afterwards and — crucially — what keeps that removal
+ * legal on redo: #restore_list replays this reparent batch (emptying the folders) *before* it
+ * extracts them, so no folder is ever freed with a child still inside (see the seam note on
+ * #push_sculpt_layer_group_list_change). A layer that the caller then removes rides this batch too so
+ * that redo empties the folders the same way; on undo its move is skipped (the node is absent,
+ * re-inserted from the removed list instead). Shared by the merge and delete folder operators. */
+static void lift_subtree_layers_to_parent(Object &object,
+                                          Mesh &mesh,
+                                          SculptLayerGroup &group,
+                                          SculptLayerGroup &parent,
+                                          Span<SculptLayer *> subtree_layers)
+{
+  Vector<undo::ReparentMove> moves;
+  moves.reserve(subtree_layers.size());
+  SculptLayerTreeNode *cursor = &group.base;
+  for (SculptLayer *layer : subtree_layers) {
+    undo::ReparentMove move;
+    move.uid = layer->base.uid;
+    move.prev_from = node_prev_uid(layer->base);
+    move.group_from = node_parent_uid(layer->base);
+    move.group_to = parent.base.uid;
+    bke::sculpt_layers::node_move_into(mesh, layer->base, parent, cursor);
+    move.prev_to = node_prev_uid(layer->base);
+    moves.append(move);
+    cursor = &layer->base;
+  }
+  undo::push_sculpt_layer_reparent(object, std::move(moves));
+}
+
+/* Remove \a group and every folder nested in it, recording them for undo. Every folder must already
+ * be empty — the caller lifts the layers out first (see #lift_subtree_layers_to_parent). Captured
+ * top-down (the order #bke::sculpt_layers::groups yields) so undo re-inserts a parent before its
+ * nested folder; removed deepest-first (the reverse) because a folder still owns its child folders
+ * until those are gone, which #restore_list mirrors by extracting the batch in reverse on redo.
+ * Shared by the merge and delete folder operators. */
+static void remove_folder_subtree_with_undo(Object &object, Mesh &mesh, SculptLayerGroup &group)
+{
+  Vector<SculptLayerGroup *> folders;
+  folders.append(&group);
+  folders.extend(bke::sculpt_layers::groups(group));
+  Vector<undo::SculptLayerUndoPayload> removed_groups;
+  removed_groups.reserve(folders.size());
+  for (SculptLayerGroup *folder : folders) {
+    removed_groups.append(undo::sculpt_layer_payload_capture(mesh, folder->base));
+  }
+  for (int64_t i = folders.size() - 1; i >= 0; i--) {
+    bke::sculpt_layers::group_remove(mesh, *folders[i]);
+  }
+  undo::push_sculpt_layer_group_list_change(object, std::move(removed_groups), {});
+}
+
+static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  Mesh &mesh = *ctx.mesh;
+  const int group_uid = RNA_int_get(op->ptr, "group_uid");
+  SculptLayerGroup *group = group_row_lookup(mesh, group_uid);
+  if (!group) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
+    return OPERATOR_CANCELLED;
+  }
+  /* Read before the removals below free the folder. */
+  const std::string group_name = group->base.name;
+  SculptLayerGroup &parent = *group->base.parent;
+
+  /* Every layer in the folder's subtree, depth-first — an owning copy, because the removals below
+   * invalidate the cached span. The first layer becomes the survivor the rest merge into, exactly as
+   * the active layer is the survivor in #layer_merge_selected_exec. The first layer in depth-first
+   * order can only be preceded by *folders* in its own container (any earlier layer would itself come
+   * first), which is what lets its lift below record a `prev_from` that no #removed payload owns and
+   * that #restore_list can always resolve. */
+  const Vector<SculptLayer *> subtree_layers(bke::sculpt_layers::layers(*group));
+  if (subtree_layers.is_empty()) {
+    BKE_report(op->reports, RPT_ERROR, "No layers in group to merge");
+    return OPERATOR_CANCELLED;
+  }
+  /* Weighting is by #effective, so a group-hidden layer (weight 0) would be silently zeroed rather
+   * than preserved. Testing #SCULPT_LAYER_GROUP_HIDDEN on the layers covers the disabled-folder case
+   * without a separate folder check: the cascade (#resync_group_hidden) has already stamped that bit
+   * on every descendant layer of a disabled folder, this one or any above it. Refuse the whole
+   * operation (same guard as #layer_merge_selected_exec) rather than merge into a zero layer. */
+  for (const SculptLayer *layer : subtree_layers) {
+    if (layer->base.flag & SCULPT_LAYER_GROUP_HIDDEN) {
+      BKE_report(op->reports, RPT_ERROR, "Cannot merge sculpt layers inside a disabled group");
+      return OPERATOR_CANCELLED;
+    }
+  }
+
+  SculptLayer *survivor = subtree_layers.first();
+
+  session_state_ensure(*ctx.object);
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+
+  /* Accumulate `data[i] * effective` of every subtree layer into the survivor at influence 1. The
+   * sum equals the folder's prior combined contribution, so the visible surface is unchanged. Buffer
+   * sizing mirrors #layer_merge_selected_exec: grid buffers all sit at the canonical (top) level. */
+  int n = ctx.grids ? survivor->totelem : element_count(*ctx.object);
+  if (ctx.grids) {
+    for (const SculptLayer *layer : subtree_layers) {
+      n = std::max(n, layer->totelem);
+    }
+  }
+  /* Grow the survivor's buffer to its final size *before* the undo snapshot below, so the snapshot
+   * and the live buffer always match on restore. An initially-empty survivor would otherwise capture
+   * `has_data = false`, the data swap on undo would be skipped, and undoing would leave the merged sum
+   * in place while the sources are re-inserted — doubling their contribution. */
+  MutableSpan<float3> survivor_data = bke::sculpt_layers::data_ensure(*survivor, n);
+
+  /* Pre-merge snapshot of the survivor's data buffer *and* metadata (its name), captured before both
+   * the accumulation and the rename below; undo restores both from this one payload. */
+  undo::push_sculpt_layer_data(*ctx.object, *survivor);
+
+  const float survivor_eff = effective(*survivor);
+  for (float3 &v : survivor_data) {
+    v *= survivor_eff;
+  }
+  for (const SculptLayer *layer : subtree_layers) {
+    if (layer == survivor) {
+      continue;
+    }
+    if (ctx.grids && layer->data && survivor->level != layer->level) {
+      /* Grid layers are kept at the canonical top level (#resample_grid_layers), so in practice
+       * every layer here already agrees and this branch is defensive. It mutates #level after the
+       * undo snapshot above, and neither #push_sculpt_layer_data nor the restore swaps #level, so a
+       * level change would not be undone — acceptable precisely because the levels do not diverge.
+       * Mirrors #layer_merge_selected_exec. */
+      survivor->level = layer->level;
+    }
+    if (!layer->data) {
+      continue;
+    }
+    const float layer_eff = effective(*layer);
+    const Span<float3> layer_data(static_cast<const float3 *>(layer->data), layer->totelem);
+    const int64_t count = std::min<int64_t>(survivor_data.size(), layer_data.size());
+    for (int64_t i = 0; i < count; i++) {
+      survivor_data[i] += layer_data[i] * layer_eff;
+    }
+  }
+  survivor->influence = 1.0f;
+  survivor->base.flag |= SCULPT_LAYER_ENABLED;
+
+  /* Capture the merged-away layers at their *original* positions, before the lift below moves them,
+   * so undo re-inserts them where they really sat. Capturing transfers each buffer to the payload;
+   * the merge already read it above, so this only hands over ownership. The survivor is excluded — it
+   * stays as the merged result. */
+  Vector<undo::SculptLayerUndoPayload> removed_layers;
+  for (SculptLayer *layer : subtree_layers) {
+    if (layer == survivor) {
+      continue;
+    }
+    removed_layers.append(undo::sculpt_layer_payload_capture(mesh, layer->base));
+  }
+
+  /* Lift every subtree layer (the survivor included) out into the folder's parent, right after the
+   * folder itself, so the survivor ends up in the folder's own slot once the folder is gone. */
+  lift_subtree_layers_to_parent(*ctx.object, mesh, *group, parent, subtree_layers);
+
+  /* Remove the merged-away layers, now siblings of the survivor under the parent. */
+  for (SculptLayer *layer : subtree_layers) {
+    if (layer == survivor) {
+      continue;
+    }
+    bke::sculpt_layers::remove(mesh, *layer);
+  }
+  undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed_layers), {}, false);
+
+  remove_folder_subtree_with_undo(*ctx.object, mesh, *group);
+
+  /* Rename the survivor to the folder's name, unique among its new siblings. No extra undo push: the
+   * #push_sculpt_layer_data above already snapshotted the survivor's name. */
+  STRNCPY_UTF8(survivor->base.name, group_name.c_str());
+  bke::sculpt_layers::node_name_ensure_unique(survivor->base);
+
+  bke::sculpt_layers::active_set(mesh, survivor);
+  group_cascade_resync_with_undo(*ctx.object, mesh);
+  commit_layers_change(*ctx.depsgraph, *ctx.object);
+  undo::push_end(*ctx.object);
+  /* `Σ(data · effective)` at influence 1 equals the folder's prior combined contribution, so the
+   * combined surface (and the live positions) are unchanged. */
+  layers_ui_notify(C, *ctx.object);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_group_merge(wmOperatorType *ot)
+{
+  ot->name = "Merge Sculpt Layer Group";
+  ot->idname = "SCULPT_OT_layer_group_merge";
+  ot->description =
+      "Merge every sculpt layer inside a folder into a single layer named after the folder, "
+      "removing the folder and any nested folders";
+  ot->exec = layer_group_merge_exec;
+  ot->poll = layers_poll;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
+  RNA_def_int(ot->srna,
+              "group_uid",
+              0,
+              0,
+              INT_MAX,
+              "Group ID",
+              "Unique id of the sculpt layer group to merge",
+              0,
+              INT_MAX);
+}
+
+static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  Mesh &mesh = *ctx.mesh;
+  const int group_uid = RNA_int_get(op->ptr, "group_uid");
+  SculptLayerGroup *group = group_row_lookup(mesh, group_uid);
+  if (!group) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
+    return OPERATOR_CANCELLED;
+  }
+  SculptLayerGroup &parent = *group->base.parent;
+
+  /* Every layer in the folder's subtree, depth-first — an owning copy, because the removals below
+   * invalidate the cached span. Unlike #SCULPT_OT_layer_group_remove (which disbands the folder and
+   * keeps the layers), this deletes the whole subtree: every layer *and* every folder inside it. */
+  const Vector<SculptLayer *> subtree_layers(bke::sculpt_layers::layers(*group));
+
+  /* Derive the mesh base from the still-consistent pre-change state: dropping the layers changes the
+   * combined surface, and the commit below recomputes it from that base. */
+  session_state_ensure(*ctx.object);
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+
+  /* Capture every layer at its *original* position before the lift below moves it, so undo re-inserts
+   * it where it really sat (with its data buffer). */
+  Vector<undo::SculptLayerUndoPayload> removed_layers;
+  removed_layers.reserve(subtree_layers.size());
+  for (SculptLayer *layer : subtree_layers) {
+    removed_layers.append(undo::sculpt_layer_payload_capture(mesh, layer->base));
+  }
+
+  /* Lift every subtree layer out into the folder's parent before removing it. Same shape as
+   * #layer_group_merge_exec, without a survivor — here nothing is kept. */
+  lift_subtree_layers_to_parent(*ctx.object, mesh, *group, parent, subtree_layers);
+
+  /* No explicit #active_set: #bke::sculpt_layers::remove hands the active marker to a neighbour, and
+   * when that neighbour is itself removed it hands it on again, so the marker walks off the deleted
+   * run on its own (mirrors #layer_remove_exec). */
+  for (SculptLayer *layer : subtree_layers) {
+    bke::sculpt_layers::remove(mesh, *layer);
+  }
+  undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed_layers), {}, false);
+
+  remove_folder_subtree_with_undo(*ctx.object, mesh, *group);
+
+  group_cascade_resync_with_undo(*ctx.object, mesh);
+  commit_layers_change(*ctx.depsgraph, *ctx.object);
+  undo::push_end(*ctx.object);
+  layers_ui_notify(C, *ctx.object);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus layer_group_delete_invoke(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent * /*event*/)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* Pre-check the exec guard here so the confirmation popup never appears just to be followed by an
+   * error (confirm-then-fail), matching #layer_bake_to_shape_key_invoke. */
+  const int group_uid = RNA_int_get(op->ptr, "group_uid");
+  if (!group_row_lookup(*ctx.mesh, group_uid)) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
+    return OPERATOR_CANCELLED;
+  }
+  return WM_operator_confirm_ex(
+      C,
+      op,
+      IFACE_("Delete Group and Layers"),
+      IFACE_("The group and every sculpt layer inside it will be deleted."),
+      IFACE_("Delete"),
+      ui::AlertIcon::Warning,
+      false);
+}
+
+void SCULPT_OT_layer_group_delete(wmOperatorType *ot)
+{
+  ot->name = "Delete Sculpt Layer Group and Layers";
+  ot->idname = "SCULPT_OT_layer_group_delete";
+  ot->description =
+      "Delete a folder together with every sculpt layer and nested folder inside it";
+  ot->exec = layer_group_delete_exec;
+  ot->invoke = layer_group_delete_invoke;
+  ot->poll = layers_poll;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
+  RNA_def_int(ot->srna,
+              "group_uid",
+              0,
+              0,
+              INT_MAX,
+              "Group ID",
+              "Unique id of the sculpt layer group to delete",
+              0,
+              INT_MAX);
+}
+
 static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -3547,7 +3872,13 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   const int uid = RNA_int_get(op->ptr, "uid");
-  if (bke::sculpt_layers::find_by_uid(*ctx.mesh, uid) == nullptr) {
+  /* The kind-checked cast is what refuses a folder's uid — one counter spans both kinds now — and,
+   * with it, uid 0: #node_find_by_uid resolves 0 to the root folder, which is not a layer. That is
+   * a different convention from #Mesh::sculpt_layers_active_uid below, where 0 means "no active
+   * layer"; the two must not be resolved through each other. */
+  if (bke::sculpt_layers::node_as_layer(bke::sculpt_layers::node_find_by_uid(*ctx.mesh, uid)) ==
+      nullptr)
+  {
     BKE_report(op->reports, RPT_ERROR, "No sculpt layer with that id");
     return OPERATOR_CANCELLED;
   }
@@ -3598,7 +3929,7 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
    * positions while the layer contributes nothing: that breaks
    * `positions == base + sum(data * effective)`, the stroke gets absorbed into the base, and
    * re-enabling the folder would apply it a second time. */
-  if (!ss->layers.rec_active && layer && (layer->flag & SCULPT_LAYER_GROUP_HIDDEN)) {
+  if (!ss->layers.rec_active && layer && (layer->base.flag & SCULPT_LAYER_GROUP_HIDDEN)) {
     BKE_report(op->reports,
                RPT_ERROR,
                "The active sculpt layer is inside a disabled group; enable the group to record "
@@ -3610,12 +3941,12 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
   session_state_ensure(*ctx.object);
   if (layer) {
     undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
-    undo::push_sculpt_layer_metadata(*ctx.object, *layer);
+    undo::push_sculpt_layer_metadata(*ctx.object, layer->base);
   }
   ss->layers.rec_active = !ss->layers.rec_active;
   if (ss->layers.rec_active && layer) {
     const float old_eff = effective(*layer);
-    layer->flag |= SCULPT_LAYER_ENABLED;
+    layer->base.flag |= SCULPT_LAYER_ENABLED;
     layer->influence = 1.0f;
     if (effective(*layer) != old_eff) {
       /* REC pins the layer to enabled + influence 1.0; bring the positions in sync so the first

@@ -784,6 +784,7 @@ if(WITH_GTESTS)
     intern/node_socket_value_iter_test.cc
     intern/path_templates_test.cc
     intern/scene_test.cc
+    intern/sculpt_layers_tree_test.cc
     intern/subdiv_ccg_test.cc
     intern/tracking_test.cc
     intern/volume_test.cc

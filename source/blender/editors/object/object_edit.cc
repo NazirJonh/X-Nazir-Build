@@ -65,6 +65,7 @@
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_softbody.h"
 #include "BKE_workspace.hh"
 
@@ -1028,7 +1029,7 @@ static wmOperatorStatus editmode_toggle_exec(bContext *C, wmOperator *op)
    * the condition up front instead of silently entering Edit Mode. */
   if (!is_mode_set && obact && obact->type == OB_MESH) {
     const Mesh *mesh = id_cast<const Mesh *>(obact->data);
-    if (mesh && !BLI_listbase_is_empty(&mesh->sculpt_layers)) {
+    if (mesh && !blender::bke::sculpt_layers::layers(*mesh).is_empty()) {
       CLOG_WARN(&LOG,
                 "Entering Edit Mode on mesh '%s' with sculpt layers present; a topology edit will "
                 "invalidate the layer deltas. Bake the layers first to avoid this.",
@@ -1127,7 +1128,7 @@ static wmOperatorStatus editmode_toggle_invoke(bContext *C,
     PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
     if (!RNA_boolean_get(&wm_ptr, "sculpt_layers_hide_editmode_warning")) {
       const Mesh *mesh = id_cast<const Mesh *>(obact->data);
-      if (mesh && !BLI_listbase_is_empty(&mesh->sculpt_layers)) {
+      if (mesh && !blender::bke::sculpt_layers::layers(*mesh).is_empty()) {
         /* A popover (not a plain popup menu): #SCULPT_PT_layer_editmode_confirm's "Don't Show This
          * Again" checkbox must stay interactive without closing the popup on click, which only a
          * #BLOCK_KEEP_OPEN popover supports (see that panel's draw() for details). */

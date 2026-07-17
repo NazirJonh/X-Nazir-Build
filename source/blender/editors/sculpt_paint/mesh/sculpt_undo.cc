@@ -310,11 +310,16 @@ struct StepData {
 
   /** Operator-level sculpt-layer undo (#Type::SculptLayer): captures metadata and optionally a
    * full data snapshot for reversible influence/visibility and data-edit operations, plus
-   * layer-list changes (add / remove / duplicate / merge / bake) as full layer payloads whose
-   * data ownership toggles between the undo step and the mesh list. Keyed by #uid so restoring
-   * finds the right layer even after list reordering. */
+   * tree changes (add / remove / duplicate / merge / bake, folder create / disband) as full node
+   * payloads whose data ownership toggles between the undo step and the tree. Keyed by #uid so
+   * restoring finds the right node even after the tree has been reordered. */
   struct SculptLayerOpUndo {
+    /** #SculptLayerTreeNode::uid of the node whose metadata was captured, of either kind (0 = no
+     * metadata captured, *not* the root folder — see #sculpt_layer_find). One uid counter spans
+     * layers and folders, so this needs no companion "which kind" field: the restore resolves the
+     * node once and swaps whatever that node has. */
     int uid = 0;
+    /** Layer-only, and only meaningful when #uid names a layer; a folder has no influence. */
     float influence = 1.0f;
     int flag = 0;
     /** Swapped with the live name like #influence / #flag; for operators that leave the name alone
@@ -365,22 +370,22 @@ struct StepData {
      * from the freshly rebuilt key's block index on redo. */
     short pre_bake_shapenr = 1;
 
-    /** Item move batch (reorder, reparent, or both): empty when the step is not a move. See
-     * #ReparentMove for why each entry anchors to a neighbour uid rather than a position. */
+    /** Node move batch (reorder, reparent, or both): empty when the step is not a move. See
+     * #ReparentMove for why each entry anchors to a neighbour uid rather than a position, and why
+     * it no longer says which kind of node it moves. */
     Vector<ReparentMove> moves;
 
-    /** Group metadata swap: 0 when the step touches no group's metadata. Kept apart from #uid,
-     * which keys into #Mesh::sculpt_layers — the two uid namespaces are separate. */
-    int group_uid = 0;
-    std::string group_name;
-    int group_flag = 0;
-
-    /** Groups the operator removed / added, mirroring #removed / #added for layers exactly —
+    /** Folders the operator removed / added, mirroring #removed / #added for layers exactly —
      * including #groups_added holding payloads rather than bare uids: the payload is the buffer the
-     * restore extracts a group *into*, so redo can insert it back (see #push_sculpt_layer_group_list_change,
-     * which fills them from uids, and the restore branch in #restore_list). */
-    Vector<SculptLayerGroupUndoPayload> groups_removed;
-    Vector<SculptLayerGroupUndoPayload> groups_added;
+     * restore extracts a folder *into*, so redo can insert it back (see
+     * #push_sculpt_layer_group_list_change, which fills them from uids, and the restore branch in
+     * #restore_list).
+     *
+     * Kept apart from #removed / #added even though the payload type is now the same, because
+     * #restore_list has to straddle the #moves batch with them: a folder must exist before anything
+     * moves into it, and be empty before it is removed. See the ordering note there. */
+    Vector<SculptLayerUndoPayload> groups_removed;
+    Vector<SculptLayerUndoPayload> groups_added;
 
     /** Active-layer selection change: the active uid before and after (0 = no active layer, which
      * is a legal value on both sides — hence the separate flag rather than a sentinel). */
@@ -1206,6 +1211,25 @@ static void refine_subdiv(Depsgraph *depsgraph,
 }
 
 /**
+ * The layer with \a uid, or null when nothing on \a mesh holds it or the node holding it is a
+ * folder.
+ *
+ * Kind-checked and 0-guarded rather than a bare #bke::sculpt_layers::node_find_by_uid, because one
+ * uid counter now spans both kinds: reinterpreting whatever a uid resolves to would read a
+ * #SculptLayerGroup's child list as #SculptLayer::influence and its #SculptLayer::data pointer past
+ * the end of the smaller allocation. Uid 0 needs a guard of its own — #node_find_by_uid resolves it
+ * to the *root folder*, whereas every uid field that reaches this function uses 0 to mean "nothing
+ * recorded".
+ */
+static SculptLayer *sculpt_layer_find(Mesh &mesh, const int uid)
+{
+  if (uid == 0) {
+    return nullptr;
+  }
+  return bke::sculpt_layers::node_as_layer(bke::sculpt_layers::node_find_by_uid(mesh, uid));
+}
+
+/**
  * Whether the recorded per-element layer deltas of a mesh (vertex domain) Position step can be
  * applied: the recorded layer must still exist with a data buffer, and the stored arrays must be
  * consistent. Used to decide whether the position restore may be delegated to
@@ -1224,7 +1248,7 @@ static bool can_restore_active_sculpt_layer_mesh(const StepData &step_data, Obje
     return false;
   }
   Mesh &mesh = *id_cast<Mesh *>(object.data);
-  const SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, step_data.sculpt_layer_uid);
+  const SculptLayer *layer = sculpt_layer_find(mesh, step_data.sculpt_layer_uid);
   return layer != nullptr && layer->data != nullptr;
 }
 
@@ -1238,7 +1262,7 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object)
     return;
   }
   Mesh &mesh = *id_cast<Mesh *>(object.data);
-  SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, step_data.sculpt_layer_uid);
+  SculptLayer *layer = sculpt_layer_find(mesh, step_data.sculpt_layer_uid);
   if (!layer || !layer->data) {
     return;
   }
@@ -1339,7 +1363,7 @@ void store_active_sculpt_layer_grids(Object &object, Vector<int> &&grids, Vector
   if (!layer) {
     return;
   }
-  step_data->sculpt_layer_uid = layer->uid;
+  step_data->sculpt_layer_uid = layer->base.uid;
   step_data->sculpt_layer_grids = true;
   step_data->sculpt_layer_verts = std::move(grids);
   step_data->sculpt_layer_data = std::move(deltas);
@@ -1362,7 +1386,7 @@ void store_active_sculpt_layer_verts(Object &object,
   if (!layer) {
     return;
   }
-  step_data->sculpt_layer_uid = layer->uid;
+  step_data->sculpt_layer_uid = layer->base.uid;
   step_data->sculpt_layer_verts = std::move(verts);
   step_data->sculpt_layer_data = std::move(deltas);
   step_data->sculpt_layer_seg_start = std::move(seg_start);
@@ -1370,15 +1394,16 @@ void store_active_sculpt_layer_verts(Object &object,
 }
 
 SculptLayerUndoPayload::SculptLayerUndoPayload(SculptLayerUndoPayload &&other) noexcept
-    : name(std::move(other.name)),
-      influence(other.influence),
+    : type(other.type),
+      name(std::move(other.name)),
       flag(other.flag),
-      totelem(other.totelem),
       uid(other.uid),
-      group_uid(other.group_uid),
+      parent_uid(other.parent_uid),
+      prev_uid(other.prev_uid),
+      influence(other.influence),
+      totelem(other.totelem),
       domain(other.domain),
       level(other.level),
-      prev_uid(other.prev_uid),
       data(other.data)
 {
   other.data = nullptr;
@@ -1390,15 +1415,16 @@ SculptLayerUndoPayload &SculptLayerUndoPayload::operator=(SculptLayerUndoPayload
     if (data) {
       MEM_delete_void(data);
     }
+    type = other.type;
     name = std::move(other.name);
-    influence = other.influence;
     flag = other.flag;
-    totelem = other.totelem;
     uid = other.uid;
-    group_uid = other.group_uid;
+    parent_uid = other.parent_uid;
+    prev_uid = other.prev_uid;
+    influence = other.influence;
+    totelem = other.totelem;
     domain = other.domain;
     level = other.level;
-    prev_uid = other.prev_uid;
     data = other.data;
     other.data = nullptr;
   }
@@ -1407,119 +1433,213 @@ SculptLayerUndoPayload &SculptLayerUndoPayload::operator=(SculptLayerUndoPayload
 
 SculptLayerUndoPayload::~SculptLayerUndoPayload()
 {
+  /* A folder payload never acquires a buffer — nothing but the layer branch of
+   * #sculpt_layer_payload_capture / #sculpt_layer_payload_extract ever writes #data — so the free
+   * below is unreachable for one. Asserted rather than assumed: a future path that filled #data
+   * without setting #type would hand a #SculptLayerGroup's bytes to #MEM_delete_void. */
+  BLI_assert(this->is_layer() || data == nullptr);
   if (data) {
     MEM_delete_void(data);
   }
 }
 
-/* Everything a payload mirrors from a layer except the data buffer and the list position, whose
- * ownership and meaning differ per direction. Kept in one place so that a new #SculptLayer field
- * cannot be handled on one of the payload paths and forgotten on the others. */
-static void payload_metadata_from_layer(SculptLayerUndoPayload &payload, const SculptLayer &layer)
+/* Everything a payload mirrors from a node except its slot in the tree, whose meaning differs per
+ * direction, and a layer's data buffer, whose ownership does. Kept in one place so that a new node
+ * field cannot be handled on one of the payload paths and forgotten on the others.
+ *
+ * The layer-only fields are filled only for a layer, which is what keeps a folder payload's copy of
+ * them at the defaults #SculptLayerUndoPayload documents. */
+static void payload_metadata_from_node(SculptLayerUndoPayload &payload,
+                                       const SculptLayerTreeNode &node)
 {
-  payload.name = layer.name;
-  payload.influence = layer.influence;
-  payload.flag = layer.flag;
-  payload.totelem = layer.totelem;
-  payload.uid = layer.uid;
-  payload.group_uid = layer.group_uid;
-  payload.domain = layer.domain;
-  payload.level = layer.level;
+  payload.type = node.type;
+  payload.name = node.name;
+  payload.flag = node.flag;
+  payload.uid = node.uid;
+  /* The parent is a pointer now rather than a stored uid, so it is read off the tree here. Null only
+   * for the root group, which is never captured; 0 then means "the root folder", which is where
+   * #sculpt_layer_payload_insert puts a node back. */
+  payload.parent_uid = node.parent ? node.parent->base.uid : 0;
+  if (const SculptLayer *layer = bke::sculpt_layers::node_as_layer(&node)) {
+    payload.influence = layer->influence;
+    payload.totelem = layer->totelem;
+    payload.domain = layer->domain;
+    payload.level = layer->level;
+  }
 }
 
-static void layer_metadata_from_payload(SculptLayer &layer, const SculptLayerUndoPayload &payload)
+/* The inverse of #payload_metadata_from_node, onto a node the caller allocated for `payload.type`.
+ *
+ * #SculptLayerTreeNode::parent and the sibling links are deliberately not written: linking the node
+ * is what sets them (see #sculpt_layer_payload_insert), and a parent pointer written without the
+ * matching entry in that parent's child list would be a tree that disagrees with itself. */
+static void node_metadata_from_payload(SculptLayerTreeNode &node,
+                                       const SculptLayerUndoPayload &payload)
 {
-  STRNCPY_UTF8(layer.name, payload.name.c_str());
-  layer.influence = payload.influence;
-  layer.flag = payload.flag;
-  layer.totelem = payload.totelem;
-  layer.uid = payload.uid;
-  layer.group_uid = payload.group_uid;
-  layer.domain = payload.domain;
-  layer.level = payload.level;
+  /* Before the kind test below: #SculptLayerTreeNode::type defaults to the layer type, so a folder
+   * rebuilt from a payload would otherwise claim to be a layer. */
+  node.type = payload.type;
+  /* Safe against truncation on repeated round trips: `payload.name` was itself read out of a
+   * fixed-size #SculptLayerTreeNode::name (see #payload_metadata_from_node), so it can never exceed
+   * what this copy back can hold. */
+  STRNCPY_UTF8(node.name, payload.name.c_str());
+  node.flag = payload.flag;
+  node.uid = payload.uid;
+  if (SculptLayer *layer = bke::sculpt_layers::node_as_layer(&node)) {
+    layer->influence = payload.influence;
+    layer->totelem = payload.totelem;
+    layer->domain = payload.domain;
+    layer->level = payload.level;
+  }
 }
 
-SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh & /*mesh*/, SculptLayer &layer)
+/* The folder a recorded `parent_uid` / #ReparentMove::group_to names, falling back to the root.
+ *
+ * Unlike #sculpt_layer_find, uid 0 is *not* guarded away here: the root group holds uid 0, so
+ * "recorded at the top level" and "resolves to the root" are the same lookup, which is exactly why
+ * a payload can store the parent as a plain uid with no separate "was at the root" marker. */
+static SculptLayerGroup *sculpt_layer_parent_resolve(Mesh &mesh, const int parent_uid)
+{
+  SculptLayerGroup *parent = bke::sculpt_layers::node_as_group(
+      bke::sculpt_layers::node_find_by_uid(mesh, parent_uid));
+  if (parent == nullptr) {
+    /* The folder is gone (removed by a later step that is not being undone), or the uid names a
+     * layer. The root is the closest surviving approximation; leaving the node unlinked would leak
+     * it and drop it off the tree entirely. */
+    CLOG_WARN(&LOG,
+              "Sculpt layer undo: folder %d recorded as a parent is missing; falling back to the "
+              "root folder",
+              parent_uid);
+    parent = bke::sculpt_layers::root_group(mesh);
+  }
+  return parent;
+}
+
+/* The sibling \a node must land after inside \a parent for a recorded \a prev_uid, or null for the
+ * head. \a node may be null when nothing is being re-linked yet.
+ *
+ * The anchor may be of either kind: one uid space means a folder and a layer are ordinary siblings
+ * in #SculptLayerGroup::children, so the lookup is over nodes and no kind test applies. */
+static SculptLayerTreeNode *sculpt_layer_anchor_resolve(Mesh &mesh,
+                                                        const int prev_uid,
+                                                        const SculptLayerGroup &parent,
+                                                        const SculptLayerTreeNode *node)
+{
+  if (prev_uid == 0) {
+    /* The head. Not looked up: #node_find_by_uid resolves uid 0 to the root folder, which is never
+     * anyone's sibling. */
+    return nullptr;
+  }
+  SculptLayerTreeNode *after = bke::sculpt_layers::node_find_by_uid(mesh, prev_uid);
+  if (after == nullptr || after == node || after->parent != &parent) {
+    /* Either the anchor is gone (removed by a later step that is not being undone), or it no longer
+     * sits in the folder the node is going into, in which case #node_move_into could not insert
+     * after it at all. The head is the closest surviving approximation of where the node sat. */
+    return nullptr;
+  }
+  return after;
+}
+
+/* Whether \a node may legally be moved into \a dst.
+ *
+ * Only a folder can fail this: putting one inside itself or its own subtree would detach that
+ * subtree from the root and leak it. #node_move_into asserts the two cases rather than handling
+ * them, so a recorded move is checked here first — the tree can have changed since the move was
+ * captured (a later step that is not being undone), which is precisely what a debug-only assert
+ * cannot cover in a release build. */
+static bool sculpt_layer_move_is_legal(const SculptLayerTreeNode &node,
+                                       const SculptLayerGroup &dst)
+{
+  const SculptLayerGroup *moved = bke::sculpt_layers::node_as_group(&node);
+  if (moved == nullptr) {
+    return true;
+  }
+  return &dst != moved && !bke::sculpt_layers::node_is_descendant_of(dst.base, *moved);
+}
+
+SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh & /*mesh*/, SculptLayerTreeNode &node)
 {
   SculptLayerUndoPayload payload;
-  payload_metadata_from_layer(payload, layer);
-  /* Read while the layer is still linked; the caller unlinks it afterwards. */
-  payload.prev_uid = layer.prev ? layer.prev->uid : 0;
-  payload.data = layer.data;
-  layer.data = nullptr;
-  layer.totelem = 0;
+  payload_metadata_from_node(payload, node);
+  /* Read while the node is still linked; the caller unlinks it afterwards. */
+  payload.prev_uid = node.prev ? node.prev->uid : 0;
+  /* Only a layer owns a buffer. This branch is the whole reason a folder payload can never reach the
+   * free in #SculptLayerUndoPayload::~SculptLayerUndoPayload. */
+  if (SculptLayer *layer = bke::sculpt_layers::node_as_layer(&node)) {
+    payload.data = layer->data;
+    layer->data = nullptr;
+    layer->totelem = 0;
+  }
   return payload;
 }
 
-/* Re-create a layer from \a payload and insert it back after its recorded neighbour, transferring
- * the data buffer back to the mesh. */
+/* Re-create the node \a payload holds and link it back where it sat: into the folder it recorded,
+ * right after the sibling it followed. A layer payload hands its data buffer back to the tree. */
 static void sculpt_layer_payload_insert(Mesh &mesh, SculptLayerUndoPayload &payload)
 {
-  SculptLayer *layer = MEM_new<SculptLayer>(__func__);
-  layer_metadata_from_payload(*layer, payload);
-  layer->data = payload.data;
-  payload.data = nullptr;
-
-  if (SculptLayer *after = bke::sculpt_layers::find_by_uid(mesh, payload.prev_uid)) {
-    BLI_insertlinkafter(&mesh.sculpt_layers, after, layer);
+  SculptLayerTreeNode *node = nullptr;
+  if (payload.is_layer()) {
+    SculptLayer *layer = MEM_new<SculptLayer>(__func__);
+    node_metadata_from_payload(layer->base, payload);
+    layer->data = payload.data;
+    payload.data = nullptr;
+    node = &layer->base;
   }
   else {
-    /* Either it was the head, or the layer it followed is gone too (removed by a later step that
-     * is not being undone). The head is the closest surviving approximation of where it sat. */
-    BLI_addhead(&mesh.sculpt_layers, layer);
+    SculptLayerGroup *group = MEM_new<SculptLayerGroup>(__func__);
+    node_metadata_from_payload(group->base, payload);
+    /* A folder coming into existence outside the module's own creation paths — this is one of the
+     * two, next to the blend-file reader — must be given its runtime here: #bke::sculpt_layers::
+     * layers dereferences it rather than allocating it on demand (it is const and runs from
+     * evaluation threads), so without this the next span rebuild of any folder above this one
+     * dereferences null. */
+    bke::sculpt_layers::group_runtime_ensure(*group);
+    node = &group->base;
   }
+
+  /* Through the module's own move rather than a raw #BLI_addhead / #BLI_insertlinkafter: it is what
+   * maintains #SculptLayerTreeNode::parent and tags the cached layer spans of both ends dirty, and a
+   * missed tag hands the eval paths a pointer to a freed node. The node was just allocated and has
+   * no parent to unlink from, which #node_move_into's null-parent branch covers. */
+  SculptLayerGroup &parent = *sculpt_layer_parent_resolve(mesh, payload.parent_uid);
+  bke::sculpt_layers::node_move_into(
+      mesh, *node, parent, sculpt_layer_anchor_resolve(mesh, payload.prev_uid, parent, node));
 }
 
-/* Pull the layer identified by `payload.uid` out of the mesh list back into \a payload,
- * transferring the data buffer to the undo step. Returns false when the layer is missing. */
+/* Pull the node identified by `payload.uid` out of the tree back into \a payload, transferring a
+ * layer's data buffer to the undo step. Returns false when the node is missing.
+ *
+ * A folder must already be empty: it owns its children, so this refuses to guess what an orphaned
+ * subtree should become (#bke::sculpt_layers::group_remove asserts it). The operator records the
+ * lift-out as a reparent batch, which #restore_list re-applies before it gets here. */
 static bool sculpt_layer_payload_extract(Mesh &mesh, SculptLayerUndoPayload &payload)
 {
-  SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, payload.uid);
-  if (!layer) {
+  if (payload.uid == 0) {
+    /* Uid 0 is the root folder, which is never captured into a payload and must never be freed by
+     * one. An uninitialized payload reaching here is a bug elsewhere, not a request to extract it. */
+    BLI_assert_unreachable();
     return false;
   }
-  payload_metadata_from_layer(payload, *layer);
-  payload.prev_uid = layer->prev ? layer->prev->uid : 0;
-  payload.data = layer->data;
-  layer->data = nullptr;
-
-  /* Hands the active marker to a neighbour when this layer held it. */
-  bke::sculpt_layers::remove(mesh, *layer);
-  return true;
-}
-
-/* Re-create a group from \a payload and insert it back after its recorded neighbour. The group
- * mirror of #sculpt_layer_payload_insert, minus the data buffer a group does not own. */
-static void sculpt_layer_group_payload_insert(Mesh &mesh, SculptLayerGroupUndoPayload &payload)
-{
-  SculptLayerGroup *group = MEM_new<SculptLayerGroup>(__func__);
-  STRNCPY_UTF8(group->name, payload.name.c_str());
-  group->flag = payload.flag;
-  group->uid = payload.uid;
-  group->parent_uid = payload.parent_uid;
-
-  if (SculptLayerGroup *after = bke::sculpt_layers::group_find_by_uid(mesh, payload.prev_uid)) {
-    BLI_insertlinkafter(&mesh.sculpt_layer_groups, after, group);
-  }
-  else {
-    /* Either it was the head, or the group it followed is gone too (removed by a later step that is
-     * not being undone). The head is the closest surviving approximation of where it sat. */
-    BLI_addhead(&mesh.sculpt_layer_groups, group);
-  }
-}
-
-/* Pull the group identified by `payload.uid` out of the mesh list back into \a payload. Returns
- * false when the group is missing. The group mirror of #sculpt_layer_payload_extract. */
-static bool sculpt_layer_group_payload_extract(Mesh &mesh, SculptLayerGroupUndoPayload &payload)
-{
-  SculptLayerGroup *group = bke::sculpt_layers::group_find_by_uid(mesh, payload.uid);
-  if (!group) {
+  SculptLayerTreeNode *node = bke::sculpt_layers::node_find_by_uid(mesh, payload.uid);
+  if (node == nullptr) {
     return false;
   }
-  payload.name = group->name;
-  payload.flag = group->flag;
-  payload.parent_uid = group->parent_uid;
-  payload.prev_uid = group->prev ? group->prev->uid : 0;
+  /* Nothing may already be owned here: a payload is extracted into only after it was inserted from
+   * (which nulls the pointer) or while it holds nothing but a uid. */
+  BLI_assert(payload.data == nullptr);
+  payload_metadata_from_node(payload, *node);
+  payload.prev_uid = node->prev ? node->prev->uid : 0;
+
+  if (SculptLayer *layer = bke::sculpt_layers::node_as_layer(node)) {
+    payload.data = layer->data;
+    layer->data = nullptr;
+    /* Hands the active marker to a sibling layer when this layer held it. */
+    bke::sculpt_layers::remove(mesh, *layer);
+    return true;
+  }
+  SculptLayerGroup *group = bke::sculpt_layers::node_as_group(node);
+  /* A node is of one kind or the other, and the layer branch above returned. */
+  BLI_assert(group != nullptr);
   bke::sculpt_layers::group_remove(mesh, *group);
   return true;
 }
@@ -1539,6 +1659,9 @@ void push_sculpt_layer_list_change(Object & /*object*/,
   for (const int uid : added_uids) {
     SculptLayerUndoPayload payload;
     payload.uid = uid;
+    /* Explicit rather than left at the (layer) default, for the same reason
+     * #push_sculpt_layer_group_list_change spells the folder type out. */
+    payload.type = SCULPT_LAYER_TREE_NODE_TYPE_LAYER;
     step_data->sculpt_layer_op.added.append(std::move(payload));
   }
   step_data->sculpt_layer_op.is_bake = is_bake;
@@ -1585,49 +1708,34 @@ void push_sculpt_layer_active(Object & /*object*/, const int uid_from, const int
   step_data->sculpt_layer_op.has_active_change = true;
 }
 
-void push_sculpt_layer_metadata(Object & /*object*/, const SculptLayer &layer)
+void push_sculpt_layer_metadata(Object & /*object*/, const SculptLayerTreeNode &node)
 {
   StepData *step_data = get_step_data();
   if (!step_data) {
     return;
   }
+  /* The root group (uid 0) has no metadata worth recording — it is never renamed, never re-flagged
+   * and never drawn — and #restore_list guards its swap behind `op.uid != 0`, so a root passed here
+   * would be captured only to be silently skipped on restore. No caller does this today; the assert
+   * is the contract, since neither the signature nor a runtime check would otherwise catch it. */
+  BLI_assert(node.uid != 0);
   step_data->type = Type::SculptLayer;
-  step_data->sculpt_layer_op.uid = layer.uid;
-  step_data->sculpt_layer_op.influence = layer.influence;
-  step_data->sculpt_layer_op.flag = layer.flag;
-  step_data->sculpt_layer_op.name = layer.name;
+  step_data->sculpt_layer_op.uid = node.uid;
+  step_data->sculpt_layer_op.flag = node.flag;
+  /* Always read out of the fixed-size #SculptLayerTreeNode::name, never from a caller-supplied
+   * string, so the stored copy can never exceed what the swap on restore can write back — otherwise
+   * a long name would be truncated a little more on each undo/redo round trip. */
+  step_data->sculpt_layer_op.name = node.name;
+  /* Influence is a layer field: a folder has none, and the restore's swap of it is skipped for one.
+   * Left at its default here rather than swapped with a meaningless value. */
+  if (const SculptLayer *layer = bke::sculpt_layers::node_as_layer(&node)) {
+    step_data->sculpt_layer_op.influence = layer->influence;
+  }
   step_data->sculpt_layer_op.has_data = false;
 }
 
-SculptLayerGroupUndoPayload sculpt_layer_group_payload_capture(Mesh & /*mesh*/,
-                                                               const SculptLayerGroup &group)
-{
-  SculptLayerGroupUndoPayload payload;
-  payload.name = group.name;
-  payload.flag = group.flag;
-  payload.uid = group.uid;
-  payload.parent_uid = group.parent_uid;
-  payload.prev_uid = group.prev ? group.prev->uid : 0;
-  return payload;
-}
-
-void push_sculpt_layer_group_metadata(Object & /*object*/, const SculptLayerGroup &group)
-{
-  StepData *step_data = get_step_data();
-  if (!step_data) {
-    return;
-  }
-  step_data->type = Type::SculptLayer;
-  step_data->sculpt_layer_op.group_uid = group.uid;
-  /* Always read out of the fixed-size #SculptLayerGroup::name, never from a caller-supplied string,
-   * so the stored copy can never exceed what the swap on restore can write back — otherwise a long
-   * name would be truncated a little more on each undo/redo round trip. */
-  step_data->sculpt_layer_op.group_name = group.name;
-  step_data->sculpt_layer_op.group_flag = group.flag;
-}
-
 void push_sculpt_layer_group_list_change(Object & /*object*/,
-                                         Vector<SculptLayerGroupUndoPayload> &&removed,
+                                         Vector<SculptLayerUndoPayload> &&removed,
                                          Vector<int> &&added_uids)
 {
   StepData *step_data = get_step_data();
@@ -1638,8 +1746,12 @@ void push_sculpt_layer_group_list_change(Object & /*object*/,
   step_data->sculpt_layer_op.groups_removed = std::move(removed);
   step_data->sculpt_layer_op.groups_added.clear();
   for (const int uid : added_uids) {
-    SculptLayerGroupUndoPayload payload;
+    SculptLayerUndoPayload payload;
     payload.uid = uid;
+    /* Explicit rather than left at the default: the payload is filled in for real only when a later
+     * undo extracts the folder into it, and until then #SculptLayerUndoPayload::is_layer would claim
+     * a folder is a layer. */
+    payload.type = SCULPT_LAYER_TREE_NODE_TYPE_GROUP;
     step_data->sculpt_layer_op.groups_added.append(std::move(payload));
   }
 }
@@ -1663,10 +1775,10 @@ void push_sculpt_layer_data(Object & /*object*/, const SculptLayer &layer)
     return;
   }
   step_data->type = Type::SculptLayer;
-  step_data->sculpt_layer_op.uid = layer.uid;
+  step_data->sculpt_layer_op.uid = layer.base.uid;
   step_data->sculpt_layer_op.influence = layer.influence;
-  step_data->sculpt_layer_op.flag = layer.flag;
-  step_data->sculpt_layer_op.name = layer.name;
+  step_data->sculpt_layer_op.flag = layer.base.flag;
+  step_data->sculpt_layer_op.name = layer.base.name;
   if (layer.data && layer.totelem > 0) {
     const Span<float3> src(static_cast<const float3 *>(layer.data), layer.totelem);
     step_data->sculpt_layer_op.data = Array<float3>(src);
@@ -1820,44 +1932,43 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
      * metadata is modified. */
     layers::session_state_ensure(object);
 
-    /* Metadata / data swap for the referenced layer (influence, visibility, clear / invert and
-     * the surviving layer of a merge). */
+    /* Metadata / data swap for the referenced node — of either kind (a layer's influence,
+     * visibility, clear / invert and the surviving layer of a merge; a folder's rename and
+     * visibility toggle). One uid space means one lookup answers for both, so the folder swap that
+     * used to sit in its own branch against its own uid field is this same code now.
+     *
+     * The 0 test is what keeps uid 0 ("nothing captured" here) away from
+     * #bke::sculpt_layers::node_find_by_uid, where it resolves to the root folder. */
     if (op.uid != 0) {
-      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, op.uid)) {
-        std::swap(layer->influence, op.influence);
-        std::swap(layer->flag, op.flag);
-        std::string live_name = layer->name;
-        STRNCPY_UTF8(layer->name, op.name.c_str());
+      if (SculptLayerTreeNode *node = bke::sculpt_layers::node_find_by_uid(mesh, op.uid)) {
+        std::swap(node->flag, op.flag);
+        std::string live_name = node->name;
+        STRNCPY_UTF8(node->name, op.name.c_str());
         op.name = std::move(live_name);
-        if (op.has_data && layer->data) {
-          MutableSpan<float3> cur(static_cast<float3 *>(layer->data), layer->totelem);
-          /* All-or-nothing: a size mismatch means the layer was resized between capture and
-           * restore (stale layer / out-of-band edit). A partial swap would leave the buffer as
-           * an inconsistent mix of both states, which no further undo/redo could repair. */
-          if (cur.size() == op.data.size()) {
-            for (int64_t i = 0; i < cur.size(); i++) {
-              std::swap(cur[i], op.data[i]);
+        /* Influence and the data buffer are layer fields. A folder capture left both at their
+         * defaults, so there is nothing to swap them with — and reading a folder as a layer would
+         * put #SculptLayer::influence over its child list. */
+        if (SculptLayer *layer = bke::sculpt_layers::node_as_layer(node)) {
+          std::swap(layer->influence, op.influence);
+          if (op.has_data && layer->data) {
+            MutableSpan<float3> cur(static_cast<float3 *>(layer->data), layer->totelem);
+            /* All-or-nothing: a size mismatch means the layer was resized between capture and
+             * restore (stale layer / out-of-band edit). A partial swap would leave the buffer as
+             * an inconsistent mix of both states, which no further undo/redo could repair. */
+            if (cur.size() == op.data.size()) {
+              for (int64_t i = 0; i < cur.size(); i++) {
+                std::swap(cur[i], op.data[i]);
+              }
+            }
+            else {
+              CLOG_WARN(&LOG,
+                        "Sculpt layer data size changed since the undo step was captured "
+                        "(%d vs %d); skipping the data restore",
+                        int(cur.size()),
+                        int(op.data.size()));
             }
           }
-          else {
-            CLOG_WARN(&LOG,
-                      "Sculpt layer data size changed since the undo step was captured "
-                      "(%d vs %d); skipping the data restore",
-                      int(cur.size()),
-                      int(op.data.size()));
-          }
         }
-      }
-    }
-
-    /* Group metadata swap (rename, visibility toggle). Mirrors the layer swap above, against the
-     * other uid namespace. */
-    if (op.group_uid != 0) {
-      if (SculptLayerGroup *group = bke::sculpt_layers::group_find_by_uid(mesh, op.group_uid)) {
-        std::swap(group->flag, op.group_flag);
-        std::string live_name = group->name;
-        STRNCPY_UTF8(group->name, op.group_name.c_str());
-        op.group_name = std::move(live_name);
       }
     }
 
@@ -1865,80 +1976,110 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
      * #totelem alongside the pointer, so the two states may differ in size (which is exactly why
      * the in-place swap above cannot express this). */
     for (SculptLayerUndoPayload &payload : op.resized) {
-      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, payload.uid)) {
+      /* Only a layer has a buffer to resize; #push_sculpt_layer_data_resize is documented for
+       * layers alone, and #sculpt_layer_find would hand back null for a folder anyway. */
+      BLI_assert(payload.is_layer());
+      if (SculptLayer *layer = sculpt_layer_find(mesh, payload.uid)) {
         std::swap(layer->data, payload.data);
         std::swap(layer->totelem, payload.totelem);
       }
     }
 
     /* Batch flag swap (Solo Base, folder visibility cascade): swap every affected layer's flags
-     * with the stored pre-change values. */
+     * with the stored pre-change values. Layers only, both callers included: Solo Base marks
+     * layers, and #bke::sculpt_layers::resync_group_hidden writes #SCULPT_LAYER_GROUP_HIDDEN on
+     * layers rather than on the folders that caused it. */
     for (const int64_t i : op.flags_batch_uids.index_range()) {
-      if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, op.flags_batch_uids[i])) {
-        std::swap(layer->flag, op.flags_batch_flags[i]);
+      if (SculptLayer *layer = sculpt_layer_find(mesh, op.flags_batch_uids[i])) {
+        std::swap(layer->base.flag, op.flags_batch_flags[i]);
       }
     }
 
-    /* Group list changes: toggle the affected groups between the undo step and the mesh list, in
-     * capture order (each payload's anchor is restored before it is). Mirrors the layer list branch
-     * below.
+    /* Folder tree changes, first half: re-create the folders this direction needs to exist.
      *
-     * Runs before the #moves branch so that the window in which a #SculptLayer::group_uid names a
-     * group that is not in the list stays as small as possible. The end state does not depend on the
-     * order — #moves writes the parent tag directly rather than resolving it — but #Remove Group
-     * undo (which re-adds the group and reparents its children back into it in one step) reads far
-     * more obviously this way round. */
+     * The folder branch straddles the #moves batch rather than sitting on one side of it, because a
+     * folder is now a real container: a node can only be linked into a folder that already exists,
+     * and #bke::sculpt_layers::group_remove refuses a folder that still has children (it owns them,
+     * so freeing one would leak the subtree). That gives one rule for both directions — insert
+     * before the moves, extract after them — and it is what makes the two folder operators reverse:
+     *
+     * - "Create a folder, move nodes into it" (#SCULPT_OT_layer_group_add) records the folder in
+     *   #groups_added and the moves after it. Undoing runs the moves backwards, lifting the nodes
+     *   back out, and only then can extract the emptied folder. Redoing re-creates the folder
+     *   first, and only then can move the nodes back in.
+     * - "Disband a folder, lifting its children out" (#SCULPT_OT_layer_group_remove) records the
+     *   lift-out as moves and the folder in #groups_removed, and reverses by the same rule.
+     *
+     * Within one direction the payloads run in capture order, so each one's anchor is restored
+     * before it is, and a folder nested in another is inserted after the folder holding it. */
     if (is_undo) {
-      for (SculptLayerGroupUndoPayload &payload : op.groups_removed) {
-        sculpt_layer_group_payload_insert(mesh, payload);
-      }
-      for (SculptLayerGroupUndoPayload &payload : op.groups_added) {
-        sculpt_layer_group_payload_extract(mesh, payload);
+      for (SculptLayerUndoPayload &payload : op.groups_removed) {
+        sculpt_layer_payload_insert(mesh, payload);
       }
     }
     else {
-      for (SculptLayerGroupUndoPayload &payload : op.groups_added) {
-        sculpt_layer_group_payload_insert(mesh, payload);
-      }
-      for (SculptLayerGroupUndoPayload &payload : op.groups_removed) {
-        sculpt_layer_group_payload_extract(mesh, payload);
+      for (SculptLayerUndoPayload &payload : op.groups_added) {
+        sculpt_layer_payload_insert(mesh, payload);
       }
     }
 
-    /* Item move batch: put each moved item back into the folder it was in and after the neighbour
-     * it followed in the target state, in capture order — an item's anchor is always restored
-     * before it is (mirrors #removed/#added below and #SculptLayerUndoPayload::prev_uid). The
-     * active layer is left untouched: reordering never changes which uid is active, and a
-     * multi-item drop's moved set is not implicitly "the active layer" — forcing one would silently
+    /* Node move batch: put each moved node back into the folder it was in and after the sibling it
+     * followed in the target state, in capture order — a node's anchor is always restored before it
+     * is (mirrors #removed/#added below and #SculptLayerUndoPayload::prev_uid). That anchor may be a
+     * folder rather than a layer: they are siblings in one #SculptLayerGroup::children list, and one
+     * uid counter spans both, which is why an entry no longer has to say which kind it moves.
+     *
+     * The active layer is left untouched: reordering never changes which uid is active, and a
+     * multi-node drop's moved set is not implicitly "the active layer" — forcing one would silently
      * reassign active from a drag-selection, which is meant to be pure UI state. */
     for (const ReparentMove &move : op.moves) {
+      if (move.uid == 0) {
+        /* Uid 0 is the root folder, which never moves. A zeroed entry is not a real move. */
+        BLI_assert_unreachable();
+        continue;
+      }
+      SculptLayerTreeNode *node = bke::sculpt_layers::node_find_by_uid(mesh, move.uid);
+      if (node == nullptr) {
+        /* Gone, removed by a later step that is not being undone. */
+        continue;
+      }
       const int target_prev_uid = is_undo ? move.prev_from : move.prev_to;
       const int target_group_uid = is_undo ? move.group_from : move.group_to;
-      if (move.is_group) {
-        if (SculptLayerGroup *group = bke::sculpt_layers::group_find_by_uid(mesh, move.uid)) {
-          group->parent_uid = target_group_uid;
-          BLI_remlink(&mesh.sculpt_layer_groups, group);
-          if (SculptLayerGroup *after = bke::sculpt_layers::group_find_by_uid(mesh,
-                                                                             target_prev_uid))
-          {
-            BLI_insertlinkafter(&mesh.sculpt_layer_groups, after, group);
-          }
-          else {
-            BLI_addhead(&mesh.sculpt_layer_groups, group);
-          }
-        }
+      SculptLayerGroup &dst = *sculpt_layer_parent_resolve(mesh, target_group_uid);
+      if (!sculpt_layer_move_is_legal(*node, dst)) {
+        CLOG_WARN(&LOG,
+                  "Sculpt layer undo: recorded move of folder %d into %d would nest it in its own "
+                  "subtree; skipping",
+                  move.uid,
+                  target_group_uid);
+        continue;
       }
-      else {
-        if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, move.uid)) {
-          layer->group_uid = target_group_uid;
-          BLI_remlink(&mesh.sculpt_layers, layer);
-          if (SculptLayer *after = bke::sculpt_layers::find_by_uid(mesh, target_prev_uid)) {
-            BLI_insertlinkafter(&mesh.sculpt_layers, after, layer);
-          }
-          else {
-            BLI_addhead(&mesh.sculpt_layers, layer);
-          }
-        }
+      /* Through the module's own move rather than an open-coded relink: it maintains
+       * #SculptLayerTreeNode::parent (which replaced the parent uid tag this branch used to write by
+       * hand) and tags the cached layer spans of *both* the source and the destination folder dirty,
+       * up to the root. Those spans are what the eval paths read, so a missed tag is a pointer to a
+       * freed node rather than a stale row. */
+      bke::sculpt_layers::node_move_into(
+          mesh, *node, dst, sculpt_layer_anchor_resolve(mesh, target_prev_uid, dst, node));
+    }
+
+    /* Folder tree changes, second half: remove the folders this direction no longer needs, now that
+     * the moves above have emptied them. See the first half for why the two are split.
+     *
+     * Reversed relative to the insertion pass: a batch may hold several nested folders (a recursive
+     * merge removes a folder together with every folder inside it), and #sculpt_layer_payload_extract
+     * refuses a folder that still owns children. The insert pass runs the batch top-down so a nested
+     * folder always finds its parent already there; the extract pass therefore has to run it
+     * bottom-up, freeing the deepest folder first. For a single-folder batch (#SCULPT_OT_layer_group_add
+     * / #SCULPT_OT_layer_group_remove) the two orders coincide, so this is a no-op there. */
+    if (is_undo) {
+      for (int64_t i = op.groups_added.size() - 1; i >= 0; i--) {
+        sculpt_layer_payload_extract(mesh, op.groups_added[i]);
+      }
+    }
+    else {
+      for (int64_t i = op.groups_removed.size() - 1; i >= 0; i--) {
+        sculpt_layer_payload_extract(mesh, op.groups_removed[i]);
       }
     }
 
@@ -1969,7 +2110,7 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
            * absolute shape keys, and for relative shape keys a whole new key block, which is
            * detached below instead (#bake_key_uid). Without shape keys this is a no-op: the live
            * positions carry the layer and the recompute below restores them. */
-          if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, payload.uid)) {
+          if (SculptLayer *layer = sculpt_layer_find(mesh, payload.uid)) {
             const float eff = bke::sculpt_layers::effective(*layer);
             if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
               BKE_multires_sculpt_layer_apply_to_mdisps(mesh, *layer, -eff);
@@ -1992,7 +2133,7 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         if (op.is_bake) {
           /* Redo of a bake: fold the contribution back into the base before extracting (see the
            * undo branch above for which base that is). */
-          if (SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh, payload.uid)) {
+          if (SculptLayer *layer = sculpt_layer_find(mesh, payload.uid)) {
             const float eff = bke::sculpt_layers::effective(*layer);
             if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
               BKE_multires_sculpt_layer_apply_to_mdisps(mesh, *layer, eff);
@@ -2088,8 +2229,8 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
     }
 
     /* Bake-to-shape-key undo: fully tear the #Key this step created back down. Runs after the
-     * generic layer-list swap above has already reinserted the removed layers into
-     * `mesh.sculpt_layers`, because #BKE_object_shapekey_free — in this fork — itself calls
+     * generic layer-list swap above has already reinserted the removed layers into the tree,
+     * because #BKE_object_shapekey_free — in this fork — itself calls
      * #bke::sculpt_layers::bake_vert_layers_into_positions, which needs to see those layers to
      * fold their contribution back into `vert_positions`. */
     if (op.created_key && is_undo && mesh.key != nullptr) {

@@ -102,6 +102,11 @@ static void mesh_init_data(ID *id)
   new (&mesh->attribute_storage.wrap()) bke::AttributeStorage();
   mesh->runtime = new bke::MeshRuntime();
 
+  /* The sculpt layer tree's root is always allocated, so that every walk over it has one case
+   * rather than a null check. This is the ID creation path; the blend-file reader has its own call
+   * (see #bke::sculpt_layers::tree_blend_read). */
+  blender::bke::sculpt_layers::root_group_ensure(*mesh);
+
   mesh->face_sets_color_seed = BLI_hash_int(BLI_time_now_seconds_i() & UINT_MAX);
 }
 
@@ -199,9 +204,11 @@ static void mesh_copy_data(Main *bmain,
   mesh_dst->mat = MEM_dupalloc(mesh_src->mat);
 
   BKE_defgroup_copy_list(&mesh_dst->vertex_group_names, &mesh_src->vertex_group_names);
-  blender::bke::sculpt_layers::copy_list(&mesh_dst->sculpt_layers, &mesh_src->sculpt_layers);
-  blender::bke::sculpt_layers::group_copy_list(&mesh_dst->sculpt_layer_groups,
-                                               &mesh_src->sculpt_layer_groups);
+  /* The destination is a shallow copy of the source at this point, so it names the *source's* root
+   * group; cleared first, or the deep copy would be asserted against a root it does not own and the
+   * two meshes would share the tree. */
+  mesh_dst->sculpt_layer_root = nullptr;
+  blender::bke::sculpt_layers::tree_copy(*mesh_dst, *mesh_src);
   /* The copied layers keep their uids, so the active one carries over by identity. */
   mesh_dst->sculpt_layers_active_uid = mesh_src->sculpt_layers_active_uid;
   mesh_dst->active_color_attribute = static_cast<char *>(
@@ -261,8 +268,7 @@ static void mesh_free_data(ID *id)
   CustomData_free(&mesh->corner_data);
   CustomData_free(&mesh->face_data);
   mesh->vertex_group_names.free_no_destruct();
-  blender::bke::sculpt_layers::free_list(&mesh->sculpt_layers);
-  blender::bke::sculpt_layers::group_free_list(&mesh->sculpt_layer_groups);
+  blender::bke::sculpt_layers::tree_free(*mesh);
   MEM_SAFE_DELETE(mesh->active_color_attribute);
   MEM_SAFE_DELETE(mesh->default_color_attribute);
   MEM_SAFE_DELETE(mesh->active_uv_map_attribute);
@@ -396,8 +402,7 @@ static void mesh_blend_write(BlendWriter *writer, ID *id, const void *id_address
   BKE_id_blend_write(writer, &mesh->id);
 
   BKE_defbase_blend_write(writer, &mesh->vertex_group_names);
-  blender::bke::sculpt_layers::blend_write(writer, &mesh->sculpt_layers);
-  blender::bke::sculpt_layers::group_blend_write(writer, &mesh->sculpt_layer_groups);
+  blender::bke::sculpt_layers::tree_blend_write(writer, *mesh);
   writer->write_string(mesh->active_color_attribute);
   writer->write_string(mesh->default_color_attribute);
   writer->write_string(mesh->active_uv_map_attribute);
@@ -457,8 +462,7 @@ static void mesh_blend_read_data(BlendDataReader *reader, ID *id)
   BLO_read_array_and_validate_size(reader, &mesh->mselect, &mesh->totselect);
 
   BLO_read_struct_list(reader, bDeformGroup, &mesh->vertex_group_names);
-  blender::bke::sculpt_layers::blend_read(reader, &mesh->sculpt_layers);
-  blender::bke::sculpt_layers::group_blend_read(reader, &mesh->sculpt_layer_groups);
+  blender::bke::sculpt_layers::tree_blend_read(reader, *mesh);
 
   CustomData_blend_read(reader, &mesh->vert_data, mesh->verts_num);
   CustomData_blend_read(reader, &mesh->edge_data, mesh->edges_num);
@@ -1478,6 +1482,13 @@ void BKE_mesh_copy_parameters_for_eval(Mesh *me_dst, const Mesh *me_src)
   me_dst->mat = MEM_dupalloc(me_src->mat);
   me_dst->totcol = me_src->totcol;
 
+  /* The sculpt layer tree is deliberately not copied here, so `me_dst` keeps the empty root that
+   * #mesh_init_data gave it. This path builds derived / template meshes whose topology differs from
+   * the source (a modifier output, a new-count template), and the layers store *per-element* deltas
+   * that have no meaning against a different element range. The full-mesh combine still sees the
+   * layers because the ID copy path (#mesh_copy_data) does deep-copy the tree via
+   * #bke::sculpt_layers::tree_copy; that is the mesh sculpting composes on, not this one. Handled
+   * the same way, and for the same reason, as #Mesh::runtime edit-mesh state below. */
   me_dst->runtime->edit_mesh = me_src->runtime->edit_mesh;
 }
 

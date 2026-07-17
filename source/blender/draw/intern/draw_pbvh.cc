@@ -2023,8 +2023,8 @@ void DrawCacheImpl::ensure_influence_drag(const Object &object, const IndexMask 
   if (influence_drag_rebuild_delta_) {
     influence_drag_rebuild_delta_ = false;
     Mesh &mesh_orig = *id_cast<Mesh *>(DEG_get_original(&object)->data);
-    const SculptLayer *layer = bke::sculpt_layers::find_by_uid(mesh_orig,
-                                                               influence_drag_layer_uid_);
+    const SculptLayer *layer = bke::sculpt_layers::node_as_layer(
+        bke::sculpt_layers::node_find_by_uid(mesh_orig, influence_drag_layer_uid_));
     const Mesh &mesh_eval = DRW_object_get_data_for_drawing<Mesh>(object);
     if (!layer || !layer->data || layer->totelem < mesh_eval.verts_num) {
       /* Topology mismatch or missing data: abandon the GPU path; the operator's release still does

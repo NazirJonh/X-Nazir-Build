@@ -39,6 +39,9 @@ struct MeshRuntime;
 class AttributeAccessor;
 class MutableAttributeAccessor;
 enum class MeshNormalDomain : int8_t;
+namespace sculpt_layers {
+class SculptLayerGroupRuntime;
+}
 }  // namespace bke
 
 struct AnimData;
@@ -141,7 +144,7 @@ enum eMeshSymmetryType : char {
 };
 ENUM_OPERATORS(eMeshSymmetryType)
 
-/** #SculptLayer.flag */
+/** #SculptLayerTreeNode.flag of a #SculptLayer. */
 enum eSculptLayerFlag : int {
   /** Layer contributes to the combined sculpted result. */
   SCULPT_LAYER_ENABLED = 1 << 0,
@@ -160,8 +163,8 @@ enum eSculptLayerFlag : int {
    */
   SCULPT_LAYER_SELECTED = 1 << 3,
   /**
-   * Set when any ancestor group (following the #SculptLayer::group_uid →
-   * #SculptLayerGroup::parent_uid chain) is currently disabled. Maintained by
+   * Set when any ancestor group (following the #SculptLayerTreeNode::parent chain) is currently
+   * disabled. Maintained by
    * #bke::sculpt_layers::resync_group_hidden and consulted by #bke::sculpt_layers::effective; the
    * layer's own #SCULPT_LAYER_ENABLED bit is left untouched, so re-enabling the ancestor restores
    * exactly what was visible before — the same convention as #SCULPT_LAYER_SOLO_HIDDEN. Never
@@ -177,6 +180,42 @@ enum eSculptLayerDomain : int16_t {
   SCULPT_LAYER_DOMAIN_VERT = 0,
   /** #SculptLayer.data holds one `float3` per multires grid point. */
   SCULPT_LAYER_DOMAIN_GRID = 1,
+};
+
+/** #SculptLayerTreeNode.type */
+enum eSculptLayerTreeNodeType : int8_t {
+  SCULPT_LAYER_TREE_NODE_TYPE_LAYER = 0,
+  SCULPT_LAYER_TREE_NODE_TYPE_GROUP = 1,
+};
+
+struct SculptLayerGroup;
+
+/**
+ * Fields shared by every row of the sculpt layer tree. Embedded as #SculptLayer::base and
+ * #SculptLayerGroup::base, following #GreasePencilLayerTreeNode.
+ *
+ * #next and #prev must stay the first two members, and this struct must stay the first member of
+ * both node types: the blend-file reader relinks a #ListBase by casting each element to #Link and
+ * reading `next` at offset 0, and #ListBaseTIterator does the same, so both only ever see this
+ * node's links no matter which concrete type the list is declared over.
+ */
+struct SculptLayerTreeNode {
+  SculptLayerTreeNode *next = nullptr, *prev = nullptr;
+  /**
+   * The folder holding this node, and the inverse of #SculptLayerGroup::children: a node appears in
+   * exactly the child list of the group named here. Null only for the root group, which is what
+   * terminates every walk up the tree.
+   */
+  SculptLayerGroup *parent = nullptr;
+  /** MAX_NAME. Unique among siblings only. */
+  char name[64] = {};
+  /** #eSculptLayerFlag for a layer, #eSculptLayerGroupFlag for a group. */
+  int flag = 0;
+  /** Unique across every node of the mesh. Stable across reordering. */
+  int uid = 0;
+  /** #eSculptLayerTreeNodeType. */
+  int8_t type = SCULPT_LAYER_TREE_NODE_TYPE_LAYER;
+  char _pad[7] = {};
 };
 
 /**
@@ -195,21 +234,16 @@ enum eSculptLayerDomain : int16_t {
  *   point at subdivision level #level (always the multires top level). The base is #CD_MDISPS
  *   (which never contains layer contributions); layers are composed with the base displacement
  *   at subdivision-surface evaluation time (see `subdiv_displacement_multires.cc`).
- * Owned by #Mesh::sculpt_layers, persisted in blend files.
+ * Held by the #SculptLayerGroup::children list of the folder that contains it (the root group for a
+ * top-level layer), persisted in blend files.
  */
 struct SculptLayer {
-  SculptLayer *next = nullptr;
-  SculptLayer *prev = nullptr;
-  /** MAX_NAME. */
-  char name[64] = {};
+  /** Must stay first: the list links live here, see #SculptLayerTreeNode. */
+  SculptLayerTreeNode base;
   /** Influence factor (soft UI range `0..1` shown as 0..100%, hard range `-10..10`). */
   float influence = 1.0f;
-  /** #eSculptLayerFlag. Defaults to 0; new layers are created enabled via the editor API. */
-  int flag = 0;
   /** Number of elements in #data (mesh vertices, or multires grid points). */
   int totelem = 0;
-  /** Unique identifier, stable across reordering of the list. */
-  int uid = 0;
   /** #eSculptLayerDomain. */
   short domain = 0;
   /**
@@ -218,22 +252,12 @@ struct SculptLayer {
    * this invariant. Mirrors #MDisps.level. Unused (0) for the vertex domain.
    */
   short level = 0;
-  /**
-   * #SculptLayerGroup::uid of the containing group, or 0 when the layer sits at the tree root.
-   *
-   * Placed in what used to be explicit padding rather than appended after #uid: the four bytes are
-   * exactly an #int, so neither the size nor the alignment of #SculptLayer changes and #data keeps
-   * its offset — no versioning is needed, and old files read the field back as 0 (root) because
-   * padding bytes are written as zeros. The same trick #Mesh::sculpt_layers_active_uid used on the
-   * padding after `vertex_group_active_index` (see `versioning_530.cc:75-76`). Inserting it after
-   * #uid instead would shift #domain/#level/#data and require real versioning.
-   */
-  int group_uid = 0;
+  char _pad[4] = {};
   /** `float3[totelem]` array of per-element displacement deltas. May be null (treated as zeros). */
   void *data = nullptr;
 };
 
-/** #SculptLayerGroup.flag */
+/** #SculptLayerTreeNode.flag of a #SculptLayerGroup. */
 enum eSculptLayerGroupFlag : int {
   /**
    * The group's own enabled state. Descendant layers are not edited when this changes; instead
@@ -254,31 +278,48 @@ enum eSculptLayerGroupFlag : int {
 ENUM_OPERATORS(eSculptLayerGroupFlag)
 
 /**
- * A folder in the sculpt layer tree, owned by #Mesh::sculpt_layer_groups and persisted in blend
- * files.
+ * A folder in the sculpt layer tree, persisted in blend files. Every group is reachable from
+ * #Mesh::sculpt_layer_root by following #children.
  *
  * Groups exist for organization only: they carry no displacement data and take no part in the
  * `position = base + sum(layer.data[i] * effective(layer))` model, which stays purely additive and
  * order-independent. The one thing a group affects is the boolean visibility cascade (see
  * #bke::sculpt_layers::resync_group_hidden).
- *
- * The tree is expressed with parent tags rather than nested lists: a group names its parent through
- * #parent_uid and a layer names its containing group through #SculptLayer::group_uid. This keeps
- * #bke::sculpt_layers::effective — the single choke point on the per-vertex/grid evaluation hot
- * path — a flag test rather than a walk up a group chain.
  */
 struct SculptLayerGroup {
-  SculptLayerGroup *next = nullptr;
-  SculptLayerGroup *prev = nullptr;
-  /** MAX_NAME. Unique among sibling groups only; groups and layers do not share a namespace. */
-  char name[64] = {};
-  /** #eSculptLayerGroupFlag. */
-  int flag = SCULPT_LAYER_GROUP_ENABLED | SCULPT_LAYER_GROUP_EXPANDED;
-  /** Unique identifier, stable across reordering. Own counter, separate from #SculptLayer::uid. */
-  int uid = 0;
-  /** #SculptLayerGroup::uid of the containing group, or 0 for a root-level group. */
-  int parent_uid = 0;
-  char _pad[4] = {};
+  /**
+   * Must stay first: the list links live here, see #SculptLayerTreeNode.
+   *
+   * NOTE: #SculptLayerTreeNode::flag defaults to 0 here, not to
+   * `SCULPT_LAYER_GROUP_ENABLED | SCULPT_LAYER_GROUP_EXPANDED` as it did while it was a member
+   * of this struct — a default member initializer cannot reach into an embedded base. Every
+   * group is created through #bke::sculpt_layers::group_add, which sets both bits explicitly.
+   * The root group is the one exception: it is never created through #group_add and keeps uid 0
+   * (see #Mesh::sculpt_layer_root).
+   */
+  SculptLayerTreeNode base;
+  /**
+   * The nodes this folder holds, of both kinds interleaved, owned by this group.
+   *
+   * This list *is* the sibling order, which is why interleaving needs no order field: a folder
+   * dropped between two layers is simply linked between them. Declared over the shared node rather
+   * than over either concrete type because it holds both; dispatch on #SculptLayerTreeNode::type
+   * and reinterpret to the concrete struct (legal because #base is its first member).
+   */
+  ListBaseT<SculptLayerTreeNode> children = {nullptr, nullptr};
+  /**
+   * Runtime-only cache of this folder's flat layer span (see
+   * #bke::sculpt_layers::SculptLayerGroupRuntime). Never persisted: it is written to the file as a
+   * null and rebuilt on read, and every group-creating path allocates it through
+   * #bke::sculpt_layers::group_runtime_ensure.
+   *
+   * A *pointer* rather than the runtime by value, following #GreasePencilLayerTreeGroup::runtime:
+   * the runtime holds a #CacheMutex and a #Vector, neither of which is trivially destructible,
+   * whereas a raw pointer is — and no destructor ever runs on a group (see the allocation notes in
+   * `BKE_sculpt_layers.hh`, and the static asserts in `blenkernel/intern/sculpt_layers.cc` that
+   * enforce this).
+   */
+  bke::sculpt_layers::SculptLayerGroupRuntime *runtime = nullptr;
 };
 
 struct Mesh {
@@ -337,41 +378,32 @@ struct Mesh {
   /** The active index in the #vertex_group_names list. */
   int vertex_group_active_index = 0;
   /**
-   * #SculptLayer::uid of the active sculpt layer, or 0 when there is none (uids start at 1).
+   * #SculptLayerTreeNode::uid of the active sculpt layer, or 0 when there is none (uids start at 1).
    *
    * Identifies the active layer rather than pointing at a position, because a position is only
    * meaningful for as long as the list does not change shape underneath it.
    *
    * This field occupies what used to be explicit padding: `vertex_group_active_index` (4 bytes)
-   * must be followed by 4 more bytes so that `sculpt_layers` (a ListBase of two 8-byte pointers)
-   * starts on an 8-byte boundary, as the DNA system requires.
+   * must be followed by 4 more bytes so that #sculpt_layer_root (an 8-byte pointer) starts on an
+   * 8-byte boundary, as the DNA system requires.
+   *
+   * NOTE: 0 means "no active layer", it does NOT resolve to the root group the way it does for
+   * #bke::sculpt_layers::node_find_by_uid. See #bke::sculpt_layers::active_get, which is the only
+   * correct way to read this field.
    */
   int sculpt_layers_active_uid = 0;
 
   /**
-   * Non-destructive sculpt layers (#SculptLayer). Each layer stores per-element displacement
-   * deltas that are combined additively with the base geometry, scaled by a per-layer influence.
-   */
-  ListBaseT<SculptLayer> sculpt_layers = {nullptr, nullptr};
-  /**
-   * Non-destructive sculpt layer groups (#SculptLayerGroup): the folder tree the layers are
-   * organized into. Purely additive growth of the ID struct — absent from old files, which read it
-   * back as an empty list, exactly how #sculpt_layers itself was once added. No versioning needed.
+   * Root of the non-destructive sculpt layer tree (#SculptLayer / #SculptLayerGroup), owned by the
+   * mesh and *always allocated* — see #bke::sculpt_layers::root_group_ensure, which every path that
+   * produces a mesh (ID creation and the blend-file reader) goes through.
    *
-   * Sits right after #sculpt_layers rather than after `sculpt_layers_active_index`: that field and
-   * `attributes_active_index` are a pair of ints whose combined 8 bytes is what puts the following
-   * `mselect` pointer on an 8-byte boundary. A 16-byte ListBase between them would split the pair
-   * and makesdna would refuse to build (it demands explicit padding, it never inserts any).
-   * Here both neighbours are already 8-aligned, so the struct grows by exactly 16 bytes and needs
-   * no new padding at all.
+   * The root is a real #SculptLayerGroup rather than a bare list so that a folder and "the top
+   * level" are the same type: every walk, insert and reparent then has one case instead of a root
+   * special case. It is never drawn as a row and keeps uid 0. Follows the #GreasePencil
+   * ::root_group_ptr precedent.
    */
-  ListBaseT<SculptLayerGroup> sculpt_layer_groups = {nullptr, nullptr};
-  /**
-   * Deprecated position of the active sculpt layer, replaced by #sculpt_layers_active_uid. Only
-   * read by versioning, which translates it into a uid; kept because the translation needs the
-   * stored value and DNA cannot supply a field it no longer declares.
-   */
-  DNA_DEPRECATED int sculpt_layers_active_index = 0;
+  SculptLayerGroup *sculpt_layer_root = nullptr;
 
   /**
    * The index of the active attribute in the UI. The attribute list is a combination of the
@@ -380,6 +412,12 @@ struct Mesh {
    * Set to -1 when none is active.
    */
   int attributes_active_index = 0;
+  /**
+   * Explicit padding so that the following #mselect pointer stays 8-byte aligned. Needed because
+   * #attributes_active_index lost the neighbouring int it used to pair up with (the deprecated
+   * `sculpt_layers_active_index`); makesdna demands explicit padding and never inserts any.
+   */
+  char _pad2[4] = {};
 
   /**
    * This array represents the selection order when the user manually picks elements in edit-mode,

@@ -17,8 +17,11 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
-struct SculptLayer;
-struct SculptLayerGroup;
+/* Rather than a forward declaration: #SculptLayerUndoPayload stores an #eSculptLayerTreeNodeType and
+ * tests it inline, which needs the enumerators, not just the type's name. The sculpt layer node
+ * types themselves live in this header too, so declaring them separately would only add a second
+ * spelling that has to agree with the first. */
+#include "DNA_mesh_types.h"
 
 namespace blender {
 
@@ -112,12 +115,18 @@ void store_active_sculpt_layer_verts(Object &object,
 void store_active_sculpt_layer_grids(Object &object, Vector<int> &&grids, Vector<float3> &&deltas);
 
 /**
- * Sculpt layer operators: push a #Type::SculptLayer undo step that captures the layer's metadata
- * (influence + flag + name) for reversible influence/visibility/rename changes. Capture before the
- * change: undo/redo swaps the stored metadata with the live one. Call between #push_begin and
- * #push_end; the step's type is set to #Type::SculptLayer automatically.
+ * Sculpt layer operators: push a #Type::SculptLayer undo step that captures \a node's metadata
+ * (flag + name, plus #SculptLayer::influence when it is a layer) for reversible
+ * influence/visibility/rename changes. Capture before the change: undo/redo swaps the stored
+ * metadata with the live one. Call between #push_begin and #push_end; the step's type is set to
+ * #Type::SculptLayer automatically.
+ *
+ * One entry point for both node kinds. The folder counterpart used to be a separate push because
+ * "the uid resolves in a different list"; #bke::sculpt_layers::node_unique_uid now hands out uids
+ * from a single counter spanning both kinds, so a uid names exactly one node and the restore looks
+ * it up once and swaps whatever that node has.
  */
-void push_sculpt_layer_metadata(Object &object, const SculptLayer &layer);
+void push_sculpt_layer_metadata(Object &object, const SculptLayerTreeNode &node);
 
 /**
  * Sculpt layer operators: push a #Type::SculptLayer undo step that captures the layer's metadata
@@ -127,9 +136,9 @@ void push_sculpt_layer_metadata(Object &object, const SculptLayer &layer);
 void push_sculpt_layer_data(Object &object, const SculptLayer &layer);
 
 /**
- * Push a #Type::SculptLayer undo step that captures the pre-change #SculptLayer::flag of a set of
- * layers (\a uids and \a flags run in parallel and are consumed). Undo/redo swaps the stored flags
- * with the live ones, which is its own inverse.
+ * Push a #Type::SculptLayer undo step that captures the pre-change #SculptLayerTreeNode::flag of a
+ * set of layers (\a uids and \a flags run in parallel and are consumed). Undo/redo swaps the
+ * stored flags with the live ones, which is its own inverse.
  *
  * A plain batch flag swap, not tied to any one feature: the Solo Base toggle uses it to hide every
  * enabled layer at once, and the folder cascade uses it to record the #SCULPT_LAYER_GROUP_HIDDEN
@@ -139,37 +148,64 @@ void push_sculpt_layer_data(Object &object, const SculptLayer &layer);
 void push_sculpt_layer_flags_batch(Object &object, Vector<int> &&uids, Vector<int> &&flags);
 
 /**
- * Full snapshot of a sculpt layer for undoing layer-list changes (add / remove / duplicate /
- * merge / bake). The displacement buffer ownership moves between the undo step and the mesh's
- * layer list, so no data copy is made. Move-only.
+ * Full snapshot of one node of the sculpt layer tree — of *either* kind — for undoing tree changes
+ * (layer add / remove / duplicate / merge / bake, folder create / disband).
+ *
+ * One payload rather than a layer one and a folder one: a payload names its slot by the uid of the
+ * sibling it followed, and #bke::sculpt_layers::node_unique_uid now hands out uids from a single
+ * counter spanning both kinds. A uid therefore names exactly one node, and an anchor no longer has
+ * to say which list to resolve it in — which is what the two payloads existed for. A folder is an
+ * ordinary sibling of a layer in #SculptLayerGroup::children and can be one's anchor.
+ *
+ * #type says which kind the payload holds and is the only thing that may be read unconditionally
+ * besides #name / #flag / #uid / #parent_uid / #prev_uid. The layer-only fields (#influence,
+ * #totelem, #domain, #level and the #data buffer) are meaningful only when #is_layer is true; every
+ * path that fills or reads them goes through that test, so a folder payload never acquires a data
+ * buffer and can never reach the free in the destructor.
+ *
+ * The displacement buffer ownership moves between the undo step and the tree, so no data copy is
+ * made. Move-only.
  */
 struct SculptLayerUndoPayload {
+  /** #eSculptLayerTreeNodeType, mirroring #SculptLayerTreeNode::type. */
+  int8_t type = SCULPT_LAYER_TREE_NODE_TYPE_LAYER;
   std::string name;
-  float influence = 1.0f;
   int flag = 0;
-  int totelem = 0;
   int uid = 0;
   /**
-   * The group the layer belonged to (0 when it sat at the root). Must be carried like any other
-   * layer field: without it, re-insertion re-creates the layer with the DNA default and undo
-   * silently re-parents it to the root, while its restored #flag may still carry
-   * #SCULPT_LAYER_GROUP_HIDDEN for a group it no longer belongs to.
+   * The folder the node sat in, as its uid (0 when it sat at the root — the root group holds uid 0,
+   * so this reads back through #bke::sculpt_layers::node_find_by_uid without a special case).
+   *
+   * Must be carried like any other field: without it, re-insertion puts the node back at the root
+   * and undo silently re-parents it, while a layer's restored #flag may still carry
+   * #SCULPT_LAYER_GROUP_HIDDEN for a folder it no longer belongs to.
    */
-  int group_uid = 0;
-  short domain = 0;
-  short level = 0;
+  int parent_uid = 0;
   /**
-   * Where the layer sat in #Mesh::sculpt_layers at capture time, recorded as the uid of the layer
-   * it followed (0 when it was the head). Re-insertion goes after that layer.
+   * Where the node sat among its siblings at capture time, recorded as the uid of the sibling it
+   * followed (0 when it was the head). Re-insertion goes after that sibling.
    *
    * A neighbour rather than a position, because a position only names the same slot for as long as
-   * nothing else in the list moves. When several layers are captured together, each one's anchor
-   * may be another captured layer; re-inserting them in capture order then rebuilds the original
-   * sequence, since a layer's anchor is always restored before it is.
+   * nothing else in the folder moves. When several nodes are captured together, each one's anchor
+   * may be another captured node — of either kind, since a folder and a layer are siblings in one
+   * list — and re-inserting them in capture order then rebuilds the original sequence, since a
+   * node's anchor is always restored before it is.
    */
   int prev_uid = 0;
-  /** Owned while stored in the undo step; freed with the step. */
+
+  /* Layer-only, see #is_layer. Left at their defaults by a folder capture. */
+  float influence = 1.0f;
+  int totelem = 0;
+  short domain = 0;
+  short level = 0;
+  /** Owned while stored in the undo step; freed with the step. Always null for a folder payload. */
   void *data = nullptr;
+
+  /** Whether the layer-only fields above carry anything, i.e. whether #data may be non-null. */
+  bool is_layer() const
+  {
+    return type == SCULPT_LAYER_TREE_NODE_TYPE_LAYER;
+  }
 
   SculptLayerUndoPayload() = default;
   SculptLayerUndoPayload(const SculptLayerUndoPayload &) = delete;
@@ -179,9 +215,15 @@ struct SculptLayerUndoPayload {
   ~SculptLayerUndoPayload();
 };
 
-/** Capture \a layer into a payload, transferring ownership of its data buffer. The layer struct
- * itself is left in the mesh list untouched (the caller removes it, or gives it a new buffer). */
-SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh &mesh, SculptLayer &layer);
+/**
+ * Capture \a node into a payload. For a layer this transfers ownership of its data buffer; a folder
+ * has none to transfer. The node struct itself is left linked in the tree untouched (the caller
+ * removes it, or gives the layer a new buffer).
+ *
+ * Takes the shared #SculptLayerTreeNode rather than either concrete type, so that one call site
+ * spelling covers both kinds; pass `layer.base` or `group.base`.
+ */
+SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh &mesh, SculptLayerTreeNode &node);
 
 /**
  * Sculpt layer operators: push a #Type::SculptLayer undo step for layers whose data buffer was
@@ -231,32 +273,40 @@ void push_sculpt_layer_bake_shape_key(Object &object, int key_uid);
 void push_sculpt_layer_bake_to_shape_key(Object &object, short pre_bake_shapenr);
 
 /**
- * One item's move within a #push_sculpt_layer_reparent batch. Covers both halves of a move at once,
- * because they are the same thing recorded twice otherwise: where the item sits among its siblings
+ * One node's move within a #push_sculpt_layer_reparent batch. Covers both halves of a move at once,
+ * because they are the same thing recorded twice otherwise: where the node sits among its siblings
  * (\a prev_from / \a prev_to) and which folder contains it (\a group_from / \a group_to). A plain
  * reorder simply leaves the group fields equal.
+ *
+ * The entry carries no "which kind of node is this" flag: #bke::sculpt_layers::node_unique_uid hands
+ * out uids from a single counter spanning layers and folders, so #uid names exactly one node and the
+ * restore resolves it — and both anchors — with one #bke::sculpt_layers::node_find_by_uid.
  */
 struct ReparentMove {
   int uid = 0;
-  /** true: #uid resolves in #Mesh::sculpt_layer_groups, false: in #Mesh::sculpt_layers. */
-  bool is_group = false;
-  /** Sibling anchor before / after the move, within whichever list #is_group selects (0 = head).
-   * A neighbour rather than an index, see #SculptLayerUndoPayload::prev_uid. */
+  /** Sibling anchor before / after the move, among the children of #group_from / #group_to
+   * respectively (0 = head). A neighbour rather than an index, and it may name a node of either
+   * kind — see #SculptLayerUndoPayload::prev_uid. */
   int prev_from = 0;
   int prev_to = 0;
-  /** Containing #SculptLayerGroup::uid before / after the move (0 = root). */
+  /** Containing folder's #SculptLayerTreeNode::uid before / after the move (0 = the root folder). */
   int group_from = 0;
   int group_to = 0;
 };
 
 /**
- * Sculpt layer operators: record one or more item moves (reorder, reparent, or both at once) into
+ * Sculpt layer operators: record one or more node moves (reorder, reparent, or both at once) into
  * the current #Type::SculptLayer undo step as a single batch — one undo step moves every listed
- * item. \a moves must be in the order the items were captured (their relative order before the
+ * node. \a moves must be in the order the nodes were captured (their relative order before the
  * move); #restore_list re-applies them in that same order on both undo and redo, since each entry's
  * anchor may itself be another entry in the same batch (mirrors #SculptLayerUndoPayload::prev_uid).
  *
- * The batch only restores positions and parent tags. A reparent that changes what is visible must
+ * That reasoning now spans both kinds: a folder and a layer are siblings in one
+ * #SculptLayerGroup::children list, so a *folder* can be the anchor a layer's \a prev_from /
+ * \a prev_to names, and vice versa. One uid space is what makes that unambiguous; the ordering rule
+ * itself is unchanged, it simply has to hold over a batch mixing the two.
+ *
+ * The batch only restores positions and parents. A reparent that changes what is visible must
  * additionally record the recomputed flags (#push_sculpt_layer_flags_batch), since
  * #SCULPT_LAYER_GROUP_HIDDEN is derived state that this batch does not recompute.
  */
@@ -271,42 +321,43 @@ void push_sculpt_layer_reparent(Object &object, Vector<ReparentMove> &&moves);
 void push_sculpt_layer_active(Object &object, int uid_from, int uid_to);
 
 /**
- * Full snapshot of a sculpt layer group for undoing group-list changes (create / remove). The
- * mirror of #SculptLayerUndoPayload, minus the data buffer a group does not have — so it is plain
- * copyable, no rule of five needed.
- */
-struct SculptLayerGroupUndoPayload {
-  std::string name;
-  int flag = 0;
-  int uid = 0;
-  int parent_uid = 0;
-  /** Where the group sat in #Mesh::sculpt_layer_groups, as the uid of the group it followed (0 when
-   * it was the head). Re-insertion goes after that group — see #SculptLayerUndoPayload::prev_uid. */
-  int prev_uid = 0;
-};
-
-/** Capture \a group into a payload. The group itself is left in the mesh list untouched. */
-SculptLayerGroupUndoPayload sculpt_layer_group_payload_capture(Mesh &mesh,
-                                                               const SculptLayerGroup &group);
-
-/**
- * Sculpt layer operators: push a #Type::SculptLayer undo step capturing one group's metadata (name +
- * flag) for reversible rename / visibility changes. The group counterpart of
- * #push_sculpt_layer_metadata — it cannot be reused as is, because the uid resolves in a different
- * list. Capture before the change: undo/redo swaps the stored metadata with the live one. Call
- * between #push_begin and #push_end.
- */
-void push_sculpt_layer_group_metadata(Object &object, const SculptLayerGroup &group);
-
-/**
- * Sculpt layer operators: record a group-list change into the current #Type::SculptLayer undo step.
- * \a removed holds payloads of groups the operator removes, \a added_uids the uids of groups it
- * adds. On undo, removed payloads are re-inserted and added groups are extracted into the step (and
- * vice versa on redo) — the group mirror of #push_sculpt_layer_list_change. Call between
- * #push_begin and #push_end.
+ * Sculpt layer operators: record a folder-tree change into the current #Type::SculptLayer undo step.
+ * \a removed holds payloads of folders the operator removes, \a added_uids the uids of folders it
+ * adds. On undo, removed payloads are re-inserted and added folders are extracted into the step (and
+ * vice versa on redo). Call between #push_begin and #push_end.
+ *
+ * Folders take the same payload type as layers now, but stay a *separate* list from
+ * #push_sculpt_layer_list_change's for an ordering reason the tree introduced: a node can only be
+ * linked into a folder that exists, and a folder can only be freed once it is empty. #restore_list
+ * therefore inserts folders before it re-applies the #push_sculpt_layer_reparent batch and extracts
+ * them after it, which is exactly what makes "create a folder and move nodes into it" and "disband a
+ * folder, lifting its children out" undo and redo. Merging the two lists would lose that seam.
+ *
+ * #push_sculpt_layer_list_change's own \a removed / \a added run *after* that seam, not inside it:
+ * a step must not record a folder in \a removed / \a added here while, in the same step, a layer
+ * that lives inside it sits in #push_sculpt_layer_list_change's \a removed / \a added. Doing so
+ * would make #restore_list extract the folder while the layer is still one of its children,
+ * hitting the same empty-folder assert this seam exists to avoid (and, without asserts, freeing
+ * the folder with the layer still hanging off it). No operator does this today: folder ops only
+ * ever populate this function's lists plus a reparent batch, and layer add/remove/bake only ever
+ * populate #push_sculpt_layer_list_change's. Nothing in the types stops a future caller from doing
+ * both at once, so it remains a rule to keep rather than a bug that shows up.
+ *
+ * The payload merge above also cuts the other way: a layer's uid and a folder's uid used to be
+ * separate fields before one counter started naming both kinds, so a single
+ * #push_sculpt_layer_metadata or #push_sculpt_layer_data step could name a layer and a folder at
+ * once. Now #uid is the only slot; one such step names exactly one node. No caller has ever
+ * needed both at once.
+ *
+ * The caller must still empty a folder itself (see #SCULPT_OT_layer_group_remove, which records the
+ * lift-out as a reparent batch): what an orphaned subtree should become is the operator's decision.
+ * Within one batch a folder must precede any folder nested inside it (top-down), so that insertion
+ * always finds the parent already there; #restore_list extracts the batch in the reverse order so
+ * that a nested folder is freed before the parent that owns it (see #SCULPT_OT_layer_group_merge,
+ * which removes a whole nested subtree of folders in one step).
  */
 void push_sculpt_layer_group_list_change(Object &object,
-                                         Vector<SculptLayerGroupUndoPayload> &&removed,
+                                         Vector<SculptLayerUndoPayload> &&removed,
                                          Vector<int> &&added_uids);
 
 /**

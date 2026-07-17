@@ -2447,7 +2447,7 @@ static void sculpt_update_object(Depsgraph *depsgraph,
        * after toggling its visibility). #apply_vert_layers is a no-op when the mesh carries no
        * vertex-domain layers. The mutually exclusive shape-key branch below only runs when crazy
        * space leaves #deform_cos empty, so the layers are still composed exactly once. */
-      bke::sculpt_layers::apply_vert_layers(mesh_orig->sculpt_layers, ss.deform_cos);
+      bke::sculpt_layers::apply_vert_layers(bke::sculpt_layers::layers(*mesh_orig), ss.deform_cos);
       BKE_pbvh_vert_coords_apply(pbvh, ss.deform_cos);
 
       for (float3x3 &matrix : ss.deform_imats) {
@@ -2466,7 +2466,7 @@ static void sculpt_update_object(Depsgraph *depsgraph,
       /* Compose vertex-domain sculpt layers on top of the active shape key's positions so the
        * sculpt display shows the layer riding on the morphed form, matching the mesh-eval
        * composition object mode uses. No-op when the mesh carries no vertex-domain layers. */
-      bke::sculpt_layers::apply_vert_layers(mesh_orig->sculpt_layers, ss.deform_cos);
+      bke::sculpt_layers::apply_vert_layers(bke::sculpt_layers::layers(*mesh_orig), ss.deform_cos);
       BKE_pbvh_vert_coords_apply(pbvh, ss.deform_cos);
     }
   }

@@ -213,21 +213,36 @@ class SculptLayerDropTarget : public ui::TreeViewItemDropTarget {
   }
 };
 
+/* True when the folder \a group_uid names and every folder above it carries \a flag. Uid 0 is the
+ * root, which is inside nothing and therefore passes trivially.
+ *
+ * Bounded by the group count rather than by reaching the root, for the same reason
+ * #bke::sculpt_layers::group_is_descendant_of is: a cycle in stored data (a corrupt file, a future
+ * editing bug) must not hang the UI, and this runs on every redraw. */
+static bool ancestors_all_have_flag(const Mesh &mesh, const int group_uid, const int flag)
+{
+  const SculptLayerGroup *group = bke::sculpt_layers::group_find_by_uid(mesh, group_uid);
+  for (int guard = BLI_listbase_count(&mesh.sculpt_layer_groups); group && guard >= 0; guard--) {
+    if (!(group->flag & flag)) {
+      return false;
+    }
+    group = bke::sculpt_layers::group_find_by_uid(mesh, group->parent_uid);
+  }
+  return true;
+}
+
 /* True when no ancestor folder currently hides \a group. Only the row's own greying-out depends on
  * it — the layers' actual visibility is the stored #SCULPT_LAYER_GROUP_HIDDEN bit, not this. */
 static bool group_visible_by_ancestors(const Mesh &mesh, const SculptLayerGroup &group)
 {
-  const SculptLayerGroup *parent = bke::sculpt_layers::group_find_by_uid(mesh, group.parent_uid);
-  /* Bounded by the group count rather than by reaching the root, for the same reason
-   * #bke::sculpt_layers::group_is_descendant_of is: a cycle in stored data (a corrupt file, a
-   * future editing bug) must not hang the UI, and this runs from #build_row on every redraw. */
-  for (int guard = BLI_listbase_count(&mesh.sculpt_layer_groups); parent && guard >= 0; guard--) {
-    if (!(parent->flag & SCULPT_LAYER_GROUP_ENABLED)) {
-      return false;
-    }
-    parent = bke::sculpt_layers::group_find_by_uid(mesh, parent->parent_uid);
-  }
-  return true;
+  return ancestors_all_have_flag(mesh, group.parent_uid, SCULPT_LAYER_GROUP_ENABLED);
+}
+
+/* True when the row for a layer sitting in folder \a group_uid is actually drawn, i.e. no folder on
+ * the way up to the root is collapsed. */
+static bool layer_row_is_revealed(const Mesh &mesh, const int group_uid)
+{
+  return ancestors_all_have_flag(mesh, group_uid, SCULPT_LAYER_GROUP_EXPANDED);
 }
 
 class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
@@ -475,7 +490,25 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
   std::optional<bool> should_be_active() const override
   {
     const Mesh &mesh = *id_cast<const Mesh *>(layer_ref_.object->data);
-    return mesh.sculpt_layers_active_uid == layer_ref_.layer->uid;
+    if (mesh.sculpt_layers_active_uid != layer_ref_.layer->uid) {
+      return false;
+    }
+    /* Claim the active state only once the row is actually drawn. Claiming it while a collapsed
+     * folder hides the row buys nothing — there is no row to highlight — and costs that folder its
+     * collapse: #AbstractTreeViewItem::set_state_active reveals whatever becomes active through
+     * #ensure_parents_uncollapsed, and #SculptLayerGroupItem::set_collapsed persists that into
+     * #SCULPT_LAYER_GROUP_EXPANDED. A block built from scratch (a Properties tab switch, a file
+     * load) starts every row inactive, so this fired on every rebuild and silently re-expanded the
+     * folder holding the active layer.
+     *
+     * Unset rather than false: false states "the data says this row is not the active layer", which
+     * #change_state_delayed answers by deselecting the row. The data says the opposite — this is the
+     * active layer, it just cannot show it yet. It takes the state back when the folder opens, and
+     * the uncollapse is a no-op by then, so the flag survives. */
+    if (!layer_row_is_revealed(mesh, layer_ref_.layer->group_uid)) {
+      return std::nullopt;
+    }
+    return true;
   }
 
   void on_activate(bContext &C) override

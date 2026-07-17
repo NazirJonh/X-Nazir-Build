@@ -243,6 +243,19 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
       : object_(object), group_(group), uid_(group->uid)
   {
     label_ = group->name;
+    /* A folder must not hold the view's active state, because nothing in the data can keep it
+     * there: #Mesh::sculpt_layers_active_uid names a layer, and no field names a folder. Taking the
+     * state anyway starts a tug of war - the active layer's #should_be_active still returns true,
+     * so the next redraw hands the state straight back through
+     * #AbstractTreeViewItem::set_state_active, whose #ensure_parents_uncollapsed then rewrites this
+     * folder's #SCULPT_LAYER_GROUP_EXPANDED. That silently undid every collapse, since a chevron
+     * click activates the folder whenever it holds the active layer (see
+     * #collapse_chevron_click_fn). Refusing the state stops #set_state_active before it deactivates
+     * the layer, so nothing is handed back and the collapse stands. The row still answers to a
+     * click: a selected but inactive view item draws with the selected background, and
+     * #on_activate below keeps doing the selecting that #AbstractViewItem::activate now skips. */
+    this->disable_activatable();
+    this->always_reactivate_on_click();
   }
 
   void build_row(ui::Layout &row) override
@@ -286,6 +299,16 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
      * notifier: the expanded state is pure UI state, like the row selection. */
     SET_FLAG_FROM_TEST(group_->flag, !collapsed, SCULPT_LAYER_GROUP_EXPANDED);
     return true;
+  }
+
+  void on_activate(bContext & /*C*/) override
+  {
+    /* #AbstractViewItem::activate selects the row it activates, but only once the row has taken the
+     * active state - which this one refuses (see the constructor). Select it here instead, so that
+     * clicking a folder still marks it for the operators that read the selection back out of the
+     * flags (#SCULPT_OT_layer_move_to, #SCULPT_OT_layer_group_add). Reached on every click thanks
+     * to #always_reactivate_on_click, since #set_state_active never reports a change. */
+    this->set_selected(true);
   }
 
   std::optional<bool> should_be_selected() const override

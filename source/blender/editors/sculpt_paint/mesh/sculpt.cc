@@ -2357,15 +2357,6 @@ static float brush_strength(const Sculpt &sd,
     case SCULPT_BRUSH_TYPE_DRAW:
     case SCULPT_BRUSH_TYPE_DRAW_SHARP:
     case SCULPT_BRUSH_TYPE_LAYER:
-      /* VDM insert-mesh must faithfully reproduce a baked texture across the standard 0..1 Strength
-       * range, with 1.0 giving the full baked shape. Skip the sensitivity squaring so the slider is
-       * a linear displacement multiplier (shared by the live preview and the generated stamp, with
-       * no non-linear overshoot), and apply a fixed calibration so that full strength matches the
-       * scale at which a standard VDM bake is reproduced 1:1. */
-      if (brush_uses_vector_displacement(brush) && (brush.flag2 & BRUSH_INSERT_MESH)) {
-        const float vdm_insert_scale = 4.0f;
-        return vdm_insert_scale * root_alpha * flip * pressure * overlap * feather;
-      }
       return alpha * flip * pressure * overlap * feather;
     case SCULPT_BRUSH_TYPE_DISPLACEMENT_ERASER:
       return alpha * pressure * overlap * feather;

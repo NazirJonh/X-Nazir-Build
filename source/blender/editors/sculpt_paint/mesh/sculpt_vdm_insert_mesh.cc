@@ -48,6 +48,7 @@
 #include "BLI_array.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
+#include "BLI_math_base.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
@@ -876,11 +877,10 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
    * VDM textures pad their unused area with a flat "neutral" value, but that value is texture
    * dependent (mid-grey, black, ...) and the Sample Bias shifts it further, so it cannot be
    * assumed to be 50 % grey. Measure it directly from the outermost ring of the brush footprint,
-   * which by construction lies in that flat padding. Subtracting this measured baseline from every
-   * displacement makes both the active-region detection and the generated surface independent of
-   * the texture's neutral encoding and of the Sample Bias: padding collapses onto the brush plane
-   * (so it is cropped away and never forms a raised platform) while real content keeps its
-   * relative shape and stays on the front side of the stroke. */
+   * which by construction lies in that flat padding. This measured baseline is used only to
+   * detect the active region below: padding sits near the baseline and is cropped away instead of
+   * forming a raised platform. Vertex positions keep the raw displacement untouched, so the
+   * generated surface matches what a live VDM Draw stroke produces at the same Strength. */
   float3 baseline(0.0f);
   int border_num = 0;
 
@@ -903,8 +903,8 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
     perf->baseline_ns += VDMPerfLog::since(t_baseline);
   }
 
-  /* Re-express every displacement relative to the baseline, then gather the active-region metric
-   * and the deepest recess (used to sink the bottom cap below concave geometry). */
+  /* Gather the active-region metric (relative to the baseline) and the deepest recess (used to
+   * sink the bottom cap below concave geometry). */
   VDMPerfLog::Clock::time_point t_active;
   if (perf) {
     t_active = VDMPerfLog::Clock::now();
@@ -912,8 +912,9 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
 
   float min_depth = 0.0f;
   for (const int n : IndexRange(grid_size)) {
-    disp_vecs[n] -= baseline;
-    active_lens[n] = math::length(disp_vecs[n]);
+    /* Activity is measured relative to the baseline so flat padding is cropped, but the vertex
+     * positions keep the raw displacement so the generated surface matches the live VDM stroke. */
+    active_lens[n] = math::length(disp_vecs[n] - baseline);
     min_depth = math::min(min_depth, math::dot(disp_vecs[n], brush_normal));
   }
 
@@ -1134,8 +1135,12 @@ static Mesh *build_stamps_mesh(const Span<VDMStampData> stamps,
   }
   mesh->corner_verts_for_write().copy_from(corner_verts.as_span());
 
-  bke::mesh_smooth_set(*mesh, false);
   bke::mesh_calc_edges(*mesh, false, false);
+  /* Smooth-shade the displaced surface while keeping the volume's hard corners crisp. The fresh
+   * mesh carries no `sharp_face` attribute, so every face shades smooth; only edges whose dihedral
+   * angle exceeds ~30 degrees — the top/skirt/bottom boundaries — are then marked sharp. Edges must
+   * exist first, hence this runs after #mesh_calc_edges. */
+  bke::mesh_sharp_edges_set_from_angle(*mesh, DEG2RADF(30.0f));
   return mesh;
 }
 
@@ -1188,8 +1193,22 @@ static wmOperatorStatus insert_mesh_exec(bContext *C, wmOperator *op)
     if (perf_ptr) {
       t_res = VDMPerfLog::Clock::now();
     }
-    const int resolution = resolution_from_mesh_density(
+    int resolution = resolution_from_mesh_density(
         active_mesh, pbvh, stamps[0].location, stamps[0].radius, perf_ptr);
+    /* Quality scales the density-derived resolution: Low halves it, High doubles it. Medium keeps
+     * the reference-mesh density. #resolution_from_mesh_density already clamps its result to 256, so
+     * High must allow up to 512 (the operator's resolution maximum); otherwise a dense reference
+     * mesh saturates Medium at 256 and High cannot rise above it. */
+    switch (brush.vdm_insert_quality) {
+      case BRUSH_VDM_INSERT_QUALITY_LOW:
+        resolution = math::clamp(resolution / 2, 2, 512);
+        break;
+      case BRUSH_VDM_INSERT_QUALITY_HIGH:
+        resolution = math::clamp(resolution * 2, 2, 512);
+        break;
+      case BRUSH_VDM_INSERT_QUALITY_MEDIUM:
+        break;
+    }
     if (perf_ptr) {
       perf_ptr->resolution_ns = VDMPerfLog::since(t_res);
       perf_ptr->resolution = resolution;

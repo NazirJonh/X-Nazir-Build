@@ -2372,6 +2372,25 @@ static void rna_def_brush(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem vdm_insert_quality_items[] = {
+      {BRUSH_VDM_INSERT_QUALITY_LOW,
+       "LOW",
+       0,
+       "Low",
+       "Half of the resolution derived from the target mesh density"},
+      {BRUSH_VDM_INSERT_QUALITY_MEDIUM,
+       "MEDIUM",
+       0,
+       "Medium",
+       "Resolution matching the polygon density of the target mesh at the brush footprint"},
+      {BRUSH_VDM_INSERT_QUALITY_HIGH,
+       "HIGH",
+       0,
+       "High",
+       "Twice the resolution derived from the target mesh density"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   static const EnumPropertyItem brush_gradient_items[] = {
       {BRUSH_GRADIENT_PRESSURE, "PRESSURE", 0, "Pressure", ""},
       {BRUSH_GRADIENT_SPACING_REPEAT, "SPACING_REPEAT", 0, "Repeat", ""},
@@ -3784,6 +3803,13 @@ static void rna_def_brush(BlenderRNA *brna)
                            "Into Active Mesh",
                            "Add the generated geometry to the active mesh instead of "
                            "creating a separate object");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "vdm_insert_quality", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "vdm_insert_quality");
+  RNA_def_property_enum_items(prop, vdm_insert_quality_items);
+  RNA_def_property_ui_text(
+      prop, "Quality", "Grid resolution level for the generated insert-mesh stamp");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "use_accumulate", PROP_BOOLEAN, PROP_NONE);

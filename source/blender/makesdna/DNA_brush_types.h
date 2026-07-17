@@ -345,6 +345,10 @@ struct Brush {
 
   float texture_sample_bias = 0; /* value to added to texture samples */
 
+  /** Grid-resolution level for the VDM insert-mesh stamp. See #eBrushVDMInsertQuality. */
+  eBrushVDMInsertQuality vdm_insert_quality = BRUSH_VDM_INSERT_QUALITY_MEDIUM;
+  char _pad3[4] = {};
+
   /**
    * This preset is used to specify an exact function used for the distance falloff instead
    * of doing a Bezier spline evaluation via CurveMapping for performance reasons.

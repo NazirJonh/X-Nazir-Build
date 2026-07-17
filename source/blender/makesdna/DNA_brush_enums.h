@@ -411,6 +411,14 @@ enum eBrushFlags2 : int {
 };
 ENUM_OPERATORS(eBrushFlags2)
 
+/** #Brush.vdm_insert_quality: grid-resolution level for the VDM insert-mesh stamp.
+ * MEDIUM is 0 so files saved before this setting existed keep the previous behavior. */
+enum eBrushVDMInsertQuality : int {
+  BRUSH_VDM_INSERT_QUALITY_MEDIUM = 0,
+  BRUSH_VDM_INSERT_QUALITY_LOW = 1,
+  BRUSH_VDM_INSERT_QUALITY_HIGH = 2,
+};
+
 enum BrushMaskPressureFlags : int {
   BRUSH_MASK_PRESSURE_RAMP = (1 << 1),
   BRUSH_MASK_PRESSURE_CUTOFF = (1 << 2),

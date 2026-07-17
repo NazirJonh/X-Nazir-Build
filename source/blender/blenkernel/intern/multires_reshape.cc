@@ -616,21 +616,64 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
       subdiv_ccg->multires_layer_frames.reinitialize(num_grids);
       subdiv_ccg->multires_layer_frames_coarse_hash = coarse_hash;
       subdiv_ccg->multires_layer_frames_bytes = 0;
+      subdiv_ccg->multires_layer_frames_clock = 0;
     }
-    /* Bound the cache memory; once the budget is spent stop adding new grids (already-cached grids
-     * are still reused). */
-    constexpr int64_t cache_cap_bytes = int64_t(512) * 1024 * 1024;
-    const bool allow_populate = subdiv_ccg->multires_layer_frames_bytes < cache_cap_bytes;
-    multires_reshape_object_grids_to_tangent_displacement_for_grids(
-        &reshape_context, touched_grids, subdiv_ccg->multires_layer_frames, allow_populate);
-    if (allow_populate) {
-      int64_t bytes = 0;
-      for (const SubdivCCGMultiresLayerFrames &gf : subdiv_ccg->multires_layer_frames) {
-        bytes += gf.positions.size() * int64_t(sizeof(float3)) +
-                 gf.inv_tangent_matrices.size() * int64_t(sizeof(float3x3));
+
+    /* Cache the whole mesh's frames when they fit under the memory ceiling (then no stroke ever
+     * re-evaluates the limit surface); above the ceiling keep it and evict the least-recently
+     * touched grids, so the region the brush is working stays warm instead of the first grids
+     * getting frozen in forever. */
+    const int64_t per_grid_bytes = int64_t(grid_area) *
+                                   int64_t(sizeof(float3) + sizeof(float3x3));
+    constexpr int64_t max_frame_cache_bytes = int64_t(4) * 1024 * 1024 * 1024;
+    const int64_t whole_mesh_bytes = int64_t(num_grids) * per_grid_bytes;
+    const int64_t cap_bytes = std::min(max_frame_cache_bytes, whole_mesh_bytes);
+
+    MutableSpan<SubdivCCGMultiresLayerFrames> frames = subdiv_ccg->multires_layer_frames;
+
+    /* Stamp every touched grid as most-recently-used before choosing victims, so a grid this stroke
+     * still needs can never be evicted (its stamp is newer than #stroke_clock_base). */
+    const int64_t stroke_clock_base = subdiv_ccg->multires_layer_frames_clock;
+    for (const int grid_index : touched_grids) {
+      if (grid_index >= 0 && grid_index < num_grids) {
+        frames[grid_index].last_used = ++subdiv_ccg->multires_layer_frames_clock;
       }
-      subdiv_ccg->multires_layer_frames_bytes = bytes;
     }
+
+    Array<bool> populate_grids(num_grids, false);
+    for (const int grid_index : touched_grids) {
+      if (grid_index < 0 || grid_index >= num_grids || !frames[grid_index].positions.is_empty()) {
+        continue;
+      }
+      /* Free least-recently-used cached grids (never one touched this stroke) until this grid fits. */
+      while (subdiv_ccg->multires_layer_frames_bytes + per_grid_bytes > cap_bytes) {
+        int victim = -1;
+        int64_t oldest = subdiv_ccg->multires_layer_frames_clock + 1;
+        for (const int64_t g : IndexRange(num_grids)) {
+          if (frames[g].positions.is_empty() || frames[g].last_used > stroke_clock_base) {
+            continue;
+          }
+          if (frames[g].last_used < oldest) {
+            oldest = frames[g].last_used;
+            victim = int(g);
+          }
+        }
+        if (victim < 0) {
+          /* The cap cannot hold even this stroke's touched set; encode the rest without caching. */
+          break;
+        }
+        frames[victim].positions = {};
+        frames[victim].inv_tangent_matrices = {};
+        subdiv_ccg->multires_layer_frames_bytes -= per_grid_bytes;
+      }
+      if (subdiv_ccg->multires_layer_frames_bytes + per_grid_bytes <= cap_bytes) {
+        populate_grids[grid_index] = true;
+        subdiv_ccg->multires_layer_frames_bytes += per_grid_bytes;
+      }
+    }
+
+    multires_reshape_object_grids_to_tangent_displacement_for_grids(
+        &reshape_context, touched_grids, frames, populate_grids);
   }
 #if SCULPT_LAYERS_DEBUG_FLUSH
   const auto t_reshape = std::chrono::high_resolution_clock::now();

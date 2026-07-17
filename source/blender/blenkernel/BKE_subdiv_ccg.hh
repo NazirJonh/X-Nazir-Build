@@ -130,6 +130,12 @@ struct SubdivCCGAdjacentVertex {
 struct SubdivCCGMultiresLayerFrames {
   Array<float3> positions;
   Array<float3x3> inv_tangent_matrices;
+  /**
+   * LRU stamp: the value of #SubdivCCG::multires_layer_frames_clock when this grid was last touched
+   * by a stroke. Higher is more recent; 0 means never used. The eviction policy frees the cached
+   * grid with the lowest stamp when a new grid must be cached and the memory cap is reached.
+   */
+  int64_t last_used = 0;
 };
 
 struct SubdivCCG : NonCopyable {
@@ -229,6 +235,11 @@ struct SubdivCCG : NonCopyable {
   uint64_t multires_layer_frames_coarse_hash = 0;
   /** Approximate bytes held by #multires_layer_frames, used to bound the cache memory. */
   int64_t multires_layer_frames_bytes = 0;
+  /**
+   * Monotonic clock advanced once per grid touched by a stroke, stamped into
+   * #SubdivCCGMultiresLayerFrames::last_used to drive LRU eviction. Reset with the cache.
+   */
+  int64_t multires_layer_frames_clock = 0;
 
   ~SubdivCCG();
 };

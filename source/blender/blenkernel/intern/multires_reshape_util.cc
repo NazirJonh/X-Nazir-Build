@@ -994,7 +994,7 @@ void multires_reshape_object_grids_to_tangent_displacement_for_grids(
     const MultiresReshapeContext *reshape_context,
     const Span<int> grid_indices,
     const MutableSpan<SubdivCCGMultiresLayerFrames> frame_cache,
-    const bool allow_populate)
+    const Span<bool> populate_grids)
 {
   /* Use the same top-level grid size the rest of the reshape uses for #grid_area, so the element
    * iteration matches the stored MDisps layout exactly. */
@@ -1012,7 +1012,8 @@ void multires_reshape_object_grids_to_tangent_displacement_for_grids(
       const int grid_index = grid_indices[i];
       SubdivCCGMultiresLayerFrames *frames = use_cache ? &frame_cache[grid_index] : nullptr;
       const bool cached = frames != nullptr && !frames->positions.is_empty();
-      const bool populate = frames != nullptr && !cached && allow_populate;
+      const bool populate = frames != nullptr && !cached && !populate_grids.is_empty() &&
+                            populate_grids[grid_index];
       if (populate) {
         frames->positions.reinitialize(grid_area);
         frames->inv_tangent_matrices.reinitialize(grid_area);

@@ -447,14 +447,17 @@ void multires_reshape_object_grids_to_tangent_displacement(
  * \param frame_cache: optional per-grid cache of base-mesh limit frames (indexed by grid index,
  * see #SubdivCCG::multires_layer_frames). When non-empty, already-populated grids reuse their
  * cached frames (skipping the limit-surface evaluation); grids not yet cached are evaluated and,
- * when \a allow_populate is true, stored back.
- * \param allow_populate: whether uncached grids may be added to \a frame_cache (used to cap memory).
+ * when \a populate_grids selects them, stored back.
+ * \param populate_grids: optional per-grid mask (indexed by grid index) of uncached grids that may
+ * be stored into \a frame_cache. Empty means "reuse the cache but add nothing". The caller decides
+ * this after applying the memory cap and LRU eviction, so the encode itself never allocates beyond
+ * what the caller reserved.
  */
 void multires_reshape_object_grids_to_tangent_displacement_for_grids(
     const MultiresReshapeContext *reshape_context,
     Span<int> grid_indices,
     MutableSpan<SubdivCCGMultiresLayerFrames> frame_cache = {},
-    bool allow_populate = true);
+    Span<bool> populate_grids = {});
 
 /** \} */
 

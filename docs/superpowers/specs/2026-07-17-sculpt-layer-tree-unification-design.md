@@ -58,16 +58,29 @@ Adding a folder influence keeps it a sum of independent terms, so row order neve
 result. Order is organisational only.
 
 This matters for the hot path. `effective(const SculptLayer &)` takes only the layer and does no
-tree walk: the folder cascade is pre-baked into the per-layer `SCULPT_LAYER_GROUP_HIDDEN` bit,
-maintained by `resync_group_hidden` on every tree mutation. Folder influence extends that same
-mechanism from a boolean to a float:
+tree walk, because the folder cascade is pre-baked onto the layer by `resync_group_hidden` on every
+tree mutation. Today it reads two independent flags:
 
-```
-effective(layer) = enabled ? layer.influence * layer.group_influence_cached : 0
+```cpp
+if (layer.flag & SCULPT_LAYER_GROUP_HIDDEN) { return 0.0f; }
+return (layer.flag & SCULPT_LAYER_ENABLED) ? layer.influence : 0.0f;
 ```
 
-`group_influence_cached` is the product of the ancestor folders' influence, recomputed by the same
-resync pass. The hot path stays one multiply per element and never walks ancestors.
+Folder influence reuses the *caching strategy*, not the flags: the same resync pass additionally
+computes `group_influence_cached`, a float on the layer holding the product of its ancestor folders'
+influence. The body of `effective()` does change:
+
+```cpp
+if (layer.flag & SCULPT_LAYER_GROUP_HIDDEN) { return 0.0f; }
+return (layer.flag & SCULPT_LAYER_ENABLED) ? layer.influence * layer.group_influence_cached : 0.0f;
+```
+
+`SCULPT_LAYER_GROUP_HIDDEN` stays rather than being folded into the float. It is not merely an
+influence of 0: other consumers read the bit directly — the tree view greys a layer's controls by it
+(`SculptLayerItem::build_row`) and REC refuses to arm on a layer carrying it (`rec_blocked`) — and a
+folder disabled outright is a different statement from a folder dialled to 0.
+
+The hot path stays one multiply per element and never walks ancestors.
 
 Consequence worth recording: **folder influence does not depend on the migration.** It could land on
 the current flat model unchanged. It is included here only because it is cheap once the node exists
@@ -85,22 +98,32 @@ and it validates the node design.
 
 ### Data model
 
-Modelled on Grease Pencil (`DNA_grease_pencil_types.h`): a common base node embedded by both
-concrete types.
+The shape of the node is taken from Grease Pencil (`DNA_grease_pencil_types.h:313`): a common base
+node embedded by both concrete types, with a back-pointer to the parent group.
 
 ```c
 struct SculptLayerTreeNode {
   SculptLayerTreeNode *next, *prev;
+  SculptLayerGroup *parent;  /* Null only for the root group. */
   char name[64];
   int flag;
   int uid;
-  int8_t type;        /* LAYER | GROUP */
-  ...
+  int8_t type;               /* LAYER | GROUP */
+  /* ... padding ... */
 };
 
 struct SculptLayer      { SculptLayerTreeNode base; float influence; int totelem; short domain, level; void *data; };
 struct SculptLayerGroup { SculptLayerTreeNode base; float influence; ListBase children; };
 ```
+
+`SculptLayer::group_uid` and `SculptLayerGroup::parent_uid` collapse into this one `parent` link —
+two spellings of "who contains me" become one. It is a DNA pointer fixed up on read, as Grease
+Pencil does it. The children list remains the structure; `parent` is the back-pointer that lets a
+node answer "which folder holds me" without a search, which undo capture needs on every node.
+
+Code that addresses a parent by uid (undo payloads, operator properties) reads it as
+`node.parent ? node.parent->base.uid : 0`. The root group's own uid is 0, so "uid 0 means the root"
+survives unchanged.
 
 A folder owns an **ordered list of children of both kinds**. That list *is* the sibling order, so
 interleaving needs no extra field.
@@ -115,6 +138,11 @@ thing the migration does not have to rewrite.
 
 ### One uid counter for all nodes
 
+This part is *not* borrowed from Grease Pencil, which addresses nodes by name and position
+(`find_node_by_name`, `get_layer_index`) and has no uids at all. It is an extension of the existing
+sculpt layer model, which already addresses everything by uid and must keep doing so — undo depends
+on it.
+
 Today layer uids and group uids are separate counters that both start at 1, so "the very first layer
 and the very first folder already share the number 1". That forces kind+uid to travel together
 everywhere: `ReparentMove::is_group`, the `anchor_is_group` property on `SCULPT_OT_layer_move_to`,
@@ -128,8 +156,15 @@ reference (`group_uid`, `parent_uid`, `Mesh::sculpt_layers_active_uid`).
 
 `combine_layers_mesh`, `derive_base_mesh` and `apply_vert_layers` currently take
 `const ListBaseT<SculptLayer> &` and walk a flat list. With a tree they take a flat
-`Span<SculptLayer *>` served from a cache in `Mesh::runtime`, invalidated when the tree's topology
-changes — mirroring `GreasePencil::layers()` and its `runtime->layer_cache`.
+`Span<SculptLayer *>` served from a cache that is invalidated when the tree's topology changes.
+
+The cache lives on the **root group's runtime**, not on `Mesh::runtime`, mirroring where Grease
+Pencil actually puts it: `LayerGroupRuntime` (`BKE_grease_pencil.hh:698`) holds `nodes_cache_`,
+`layer_cache_` and `layer_group_cache_` behind one `CacheMutex`, and `GreasePencil::layers()`
+delegates to `root_group().layers()`, which fills it via `ensure_nodes_cache()`.
+`GreasePencilRuntime` itself holds no flat lists. Putting the cache on the group means any group can
+answer "my layers, in order", not just the root — which sub-project 3 (a folder mask applying to a
+folder's subtree) will need.
 
 Without this the tree walk lands on the evaluation hot path. This is load-bearing, not an
 optimisation.
@@ -154,7 +189,12 @@ depend on the lists being flat. Changes:
 
 - `prev_uid` is looked up in the unified tree instead of "whichever list `is_group` selects".
 - `ReparentMove::is_group` and the kind tags disappear with the unified uid counter.
-- `SculptLayerUndoPayload` and `SculptLayerGroupUndoPayload` converge as the structs converge.
+- `SculptLayerUndoPayload` and `SculptLayerGroupUndoPayload` are merged by this migration. They are
+  not near-identical today: the group payload is a mirror with a different field set (`parent_uid`
+  instead of `group_uid`, no `totelem`/`domain`/`level`/data buffer), and the header states outright
+  that the layer version "can't be reused as is, because the uid resolves in a different list"
+  (`sculpt_undo.hh:293-298`). Both reasons are exactly what the unified node and the single uid
+  counter remove, so merging them is a consequence of the migration, not a precondition for it.
 - `push_sculpt_layer_flags_batch` and the resync-diff pattern are unchanged; the resync additionally
   recomputes `group_influence_cached`, which is derived state and needs no undo record of its own —
   it is recomputed from the restored tree, exactly as `SCULPT_LAYER_GROUP_HIDDEN` is today.
@@ -189,9 +229,12 @@ Each step is built and hand-verified before the next.
 
 ## Risks
 
-- The blast radius is 342 references across 29 files, concentrated in the two most fragile areas of
-  this project: `sculpt_undo.cc` (40) and the multires path — `multires_reshape.cc` (22),
-  `subdiv_displacement_multires.cc`, `draw_pbvh.cc`, `key.cc`.
+- The blast radius is wide. Counting `sculpt_layers|sculpt_layer_groups` (the field names) gives 342
+  references across 29 files, of which `sculpt_undo.cc` holds 40 and `multires_reshape.cc` 22.
+  Counting the `SculptLayer` *type* instead gives 495 across 17 files, with 77 in `sculpt_undo.cc`.
+  Either way the mass sits in the two most fragile areas of this project: undo, and the multires
+  path (`multires_reshape.cc`, `subdiv_displacement_multires.cc`, `draw_pbvh.cc`, `key.cc`). Quote
+  the token when re-measuring — the two counts are not comparable.
 - Blend read/write becomes recursive; the allocation contract documented in `BKE_sculpt_layers.hh`
   (nodes from `MEM_new` or the C-style reader, freed with `MEM_delete_void`, trivially destructible,
   enforced by a static assert) must be preserved for the node structs.

@@ -1987,7 +1987,7 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
 
     /* Batch flag swap (Solo Base, folder visibility cascade): swap every affected layer's flags
      * with the stored pre-change values. Layers only, both callers included: Solo Base marks
-     * layers, and #bke::sculpt_layers::resync_group_hidden writes #SCULPT_LAYER_GROUP_HIDDEN on
+     * layers, and #bke::sculpt_layers::resync_group_state writes #SCULPT_LAYER_GROUP_HIDDEN on
      * layers rather than on the folders that caused it. */
     for (const int64_t i : op.flags_batch_uids.index_range()) {
       if (SculptLayer *layer = sculpt_layer_find(mesh, op.flags_batch_uids[i])) {
@@ -2249,6 +2249,13 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       layers::invalidate_runtime(object);
       layers::session_state_ensure(object);
     }
+
+    /* A structural undo (reparent / create / delete) can change a layer's ancestry and staleify its
+     * cached folder-influence product, even though the influence values themselves are never undone
+     * (folder influence is live, non-undoable slider state). Rebuild the float cache from the
+     * restored tree before the recompute below reads it through #effective. Float-only, so it cannot
+     * clobber the #SCULPT_LAYER_GROUP_HIDDEN / Solo-Base flags restored earlier in this branch. */
+    bke::sculpt_layers::refresh_group_influence_cache(mesh);
 
     /* Bring the positions in sync with the restored layer state: canonical recompute for the
      * mesh domain, honest re-evaluation for multires. */

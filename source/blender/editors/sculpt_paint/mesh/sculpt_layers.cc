@@ -1469,11 +1469,13 @@ static void group_cascade_resync_with_undo(Object &object, Mesh &mesh)
     }
   }
 
-  bke::sculpt_layers::resync_group_hidden(mesh);
+  bke::sculpt_layers::resync_group_state(mesh);
 
-  /* The span is re-read rather than held across the resync. #resync_group_hidden only writes
-   * #SCULPT_LAYER_GROUP_HIDDEN — it adds, removes and reorders nothing — which is what makes
-   * the second walk line up with the first, index for index. */
+  /* The span is re-read rather than held across the resync. #resync_group_state adds, removes and
+   * reorders nothing — it only rewrites per-layer derived state — which is what makes the second walk
+   * line up with the first, index for index. Its float #group_influence_cached write is deliberately
+   * outside the diff below, which compares only the int #flag; the float is non-undoable derived
+   * state (folder influence is a live slider), so it is never part of a flags_batch payload. */
   Vector<int> changed_uids;
   Vector<int> changed_flags;
   int i = 0;
@@ -3635,7 +3637,7 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
   }
   /* Weighting is by #effective, so a group-hidden layer (weight 0) would be silently zeroed rather
    * than preserved. Testing #SCULPT_LAYER_GROUP_HIDDEN on the layers covers the disabled-folder case
-   * without a separate folder check: the cascade (#resync_group_hidden) has already stamped that bit
+   * without a separate folder check: the cascade (#resync_group_state) has already stamped that bit
    * on every descendant layer of a disabled folder, this one or any above it. Refuse the whole
    * operation (same guard as #layer_merge_selected_exec) rather than merge into a zero layer. */
   for (const SculptLayer *layer : subtree_layers) {
@@ -3725,7 +3727,7 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
 
   remove_folder_subtree_with_undo(*ctx.object, mesh, *group);
 
-  /* Rename the survivor to the folder's name, unique among its new siblings. No extra undo push: the
+  /* Rename the survivor to the folder's name, made unique across the tree. No extra undo push: the
    * #push_sculpt_layer_data above already snapshotted the survivor's name. */
   STRNCPY_UTF8(survivor->base.name, group_name.c_str());
   bke::sculpt_layers::node_name_ensure_unique(survivor->base);

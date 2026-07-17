@@ -226,35 +226,14 @@ class SculptLayerDropTarget : public ui::TreeViewItemDropTarget {
  * is walked like any other folder and carries both flags this is asked about (see
  * #bke::sculpt_layers::root_group_ensure).
  *
- * The walk follows #SculptLayerTreeNode::parent pointers, and is bounded by Floyd cycle detection
- * rather than by reaching the root — mirroring #bke::sculpt_layers::node_is_descendant_of, which
- * gave up its own depth cap for the same reason. A cycle in stored data (a corrupt file, a future
- * editing bug) must not hang the UI, and this runs on every redraw. `fast` is tested after every
- * single step, so no folder on the chain is skipped before the two meet. */
+ * The cycle-safe ancestor walk lives in #bke::sculpt_layers::find_ancestor, shared with
+ * #bke::sculpt_layers::node_is_descendant_of; here it just looks for the first folder *lacking* the
+ * flag, and "all carry it" is "none lacks it". */
 static bool ancestors_all_have_flag(const SculptLayerGroup *group, const int flag)
 {
-  const SculptLayerGroup *slow = group;
-  const SculptLayerGroup *fast = group;
-  while (fast != nullptr) {
-    if (!(fast->base.flag & flag)) {
-      return false;
-    }
-    fast = fast->base.parent;
-    if (fast == nullptr) {
-      break;
-    }
-    if (!(fast->base.flag & flag)) {
-      return false;
-    }
-    fast = fast->base.parent;
-    slow = slow->base.parent;
-    if (fast != nullptr && fast == slow) {
-      /* The chain closed on itself. Every folder on it carries the flag, or one of the tests above
-       * would already have said otherwise, so there is nothing left to find by going round again. */
-      return true;
-    }
-  }
-  return true;
+  return bke::sculpt_layers::find_ancestor(group, [&](const SculptLayerGroup &ancestor) {
+           return !(ancestor.base.flag & flag);
+         }) == nullptr;
 }
 
 /* True when no ancestor folder currently hides \a group. Only the row's own greying-out depends on
@@ -320,6 +299,16 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
     RNA_int_set(&op_ptr, "group_uid", uid_);
 
     uiItemL_ex(&row, this->label_, ICON_FILE_FOLDER, false, false);
+
+    /* Folder influence slider, mirroring the layer row's: it scales every descendant layer's
+     * contribution through the ancestor cascade. Right-aligned and label-less like the layer's. */
+    Mesh &mesh = *id_cast<Mesh *>(object_->data);
+    PointerRNA group_ptr = RNA_pointer_create_discrete(&mesh.id, RNA_SculptLayerGroup, group_);
+    ui::Layout &sub = row.row(true);
+    sub.alignment_set(ui::LayoutAlign::Right);
+    sub.use_property_decorate_set(false);
+    sub.active_set(object_->mode != OB_MODE_EDIT);
+    sub.prop(&group_ptr, "influence", ui::ITEM_R_SLIDER, "", ICON_NONE);
   }
 
   std::optional<bool> should_be_collapsed() const override
@@ -363,8 +352,8 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
 
   bool matches_single(const ui::AbstractTreeViewItem &other) const override
   {
-    /* Names are only unique among siblings (#node_name_ensure_unique runs over the one shared child
-     * list), so a folder and a layer under *different* parents may legitimately share a label. Without
+    /* Row identity is by kind as well as by label: a rename in progress can momentarily give a
+     * folder row and a layer row the same text before #node_name_ensure_unique settles it. Without
      * this override, #AbstractTreeViewItem::matches_single's label-only comparison would let
      * #update_from_old carry a folder row's state - a rename in progress, in particular - onto an
      * unrelated layer row of the same name. */
@@ -578,8 +567,9 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
 
   bool matches_single(const ui::AbstractTreeViewItem &other) const override
   {
-    /* Mirrors #SculptLayerGroupItem::matches_single: a name is unique only among siblings, so a layer
-     * row must not be matched against a folder row of the same label under a different parent. */
+    /* Mirrors #SculptLayerGroupItem::matches_single: row identity is by kind as well as by label, so
+     * a layer row must not be matched against a folder row that momentarily shares its label during
+     * a rename. */
     return dynamic_cast<const SculptLayerItem *>(&other) != nullptr &&
            AbstractTreeViewItem::matches_single(other);
   }

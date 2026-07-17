@@ -302,9 +302,9 @@ static void rna_SculptLayer_name_set(PointerRNA *ptr, const char *value)
 {
   SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
   STRNCPY_UTF8(layer->base.name, value);
-  /* Unique among siblings only, through the single authority both node kinds share — the
-   * open-coded #BLI_uniquename this used to spell had the whole flat layer list to compare against,
-   * and no such list exists any more. */
+  /* Unique across the whole tree, through the single authority both node kinds share: this flat
+   * collection and #rna_SculptLayer_path key a layer by name alone, so a name shared with another
+   * layer — even in a different folder — would let either resolve the wrong one. */
   bke::sculpt_layers::node_name_ensure_unique(layer->base);
 }
 
@@ -346,8 +346,8 @@ static void rna_SculptLayerGroup_name_set(PointerRNA *ptr, const char *value)
 {
   SculptLayerGroup *group = static_cast<SculptLayerGroup *>(ptr->data);
   STRNCPY_UTF8(group->base.name, value);
-  /* Unique among siblings only — the same single authority #group_add uses, so the two paths cannot
-   * drift apart on what a legal name is. */
+  /* Unique across the whole tree — the same single authority #group_add uses, so the two paths
+   * cannot drift apart on what a legal name is. */
   bke::sculpt_layers::node_name_ensure_unique(group->base);
 }
 
@@ -493,6 +493,52 @@ static void rna_SculptLayer_enabled_set(PointerRNA *ptr, bool value)
   rna_SculptLayer_apply_mesh_delta(mesh, *layer, bke::sculpt_layers::effective(*layer) - old_effective);
 }
 
+static float rna_SculptLayerGroup_influence_get(PointerRNA *ptr)
+{
+  return static_cast<const SculptLayerGroup *>(ptr->data)->influence;
+}
+
+/* Folder influence multiplier. Mirrors #rna_SculptLayer_influence_set but cascades: the change
+ * scales every descendant layer's #effective through the ancestor influence product, so the mesh
+ * update is applied to each descendant vert-domain layer as its own before/after difference.
+ *
+ * Unlike the per-layer setter this cannot be refused wholesale when one descendant is uneditable —
+ * a single value drives many layers. Instead #rna_SculptLayer_apply_mesh_delta is already a no-op for
+ * grid / shape-key / edit-mode / no-verts / (implicitly) stale layers, and the group update callback
+ * brings those descendants up to date by an honest re-evaluation rather than this incremental path. */
+static void rna_SculptLayerGroup_influence_set(PointerRNA *ptr, float value)
+{
+  Mesh *mesh = rna_mesh(ptr);
+  SculptLayerGroup *group = static_cast<SculptLayerGroup *>(ptr->data);
+  value = (value < -10.0f) ? -10.0f : (value > 10.0f ? 10.0f : value);
+
+  const Span<SculptLayer *> descendants = bke::sculpt_layers::layers(*group);
+
+  /* Consume any pending multires base edits before the value changes, once, if a grid descendant
+   * exists: a later flush would reshape the stale composed CCG against the changed layer set and
+   * leak the difference into the base MDisps (see #rna_SculptLayer_flush_pending_base). */
+  for (SculptLayer *layer : descendants) {
+    if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+      rna_SculptLayer_flush_pending_base(mesh, *layer);
+      break;
+    }
+  }
+
+  /* Snapshot each descendant's current effective weight, change the folder influence, re-bake the
+   * cascade onto every layer's #group_influence_cached, then apply just the per-layer difference. */
+  Vector<float> old_effective(descendants.size());
+  for (const int64_t i : descendants.index_range()) {
+    old_effective[i] = bke::sculpt_layers::effective(*descendants[i]);
+  }
+  group->influence = value;
+  bke::sculpt_layers::resync_group_state(*mesh);
+  for (const int64_t i : descendants.index_range()) {
+    SculptLayer &layer = *descendants[i];
+    rna_SculptLayer_apply_mesh_delta(
+        mesh, layer, bke::sculpt_layers::effective(layer) - old_effective[i]);
+  }
+}
+
 static void rna_Mesh_update_sculpt_layers(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   ID *id = ptr->owner_id;
@@ -543,6 +589,39 @@ static void rna_Mesh_update_sculpt_layers(Main *bmain, Scene *scene, PointerRNA 
   SLP_RNA_PERF("[DEBUG-perf] rna_sculpt_layers: fallback ID_RECALC_GEOMETRY+notifiers took %lld us\n",
                static_cast<long long>(fallback_us));
 #endif
+}
+
+/* Update callback for a folder influence change. Cannot reuse #rna_Mesh_update_sculpt_layers: that
+ * casts `ptr->data` to a #SculptLayer for its grid branch, whereas here it is a #SculptLayerGroup. */
+static void rna_Mesh_update_sculpt_layer_group(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  ID *id = ptr->owner_id;
+  if (id->us <= 0) {
+    return;
+  }
+  Mesh &mesh = *rna_mesh(ptr);
+  SculptLayerGroup *group = static_cast<SculptLayerGroup *>(ptr->data);
+  /* Grid (multires) descendants need a full CCG recompute via the sculpt session; the incremental
+   * apply path is a no-op for them. One sync rebuilds the CCG from `MDisps + sum(enabled layers)`,
+   * which already reflects the new folder influence, so a single call covers every grid descendant. */
+  for (SculptLayer *layer : bke::sculpt_layers::layers(*group)) {
+    if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+      if (ed::sculpt_paint::layers::sync_multires_for_rna(*bmain, scene, mesh, *layer)) {
+        return;
+      }
+      /* No live grid session: fall through to the full ID_RECALC_GEOMETRY below. */
+      break;
+    }
+  }
+  /* Vertex-domain descendants were already updated incrementally by the setter, so refresh the
+   * viewport with the lightweight PBVH path when possible and fall back to a full re-evaluation
+   * otherwise (object not in sculpt mode, shape-key / deform sessions, ...). */
+  if (ed::sculpt_paint::layers::flush_interactive_update(*bmain, mesh)) {
+    return;
+  }
+  DEG_id_tag_update(id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_GEOM | ND_DATA, id);
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, nullptr);
 }
 
 /** \} */
@@ -3331,10 +3410,22 @@ static void rna_def_sculpt_layer_group(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Name", "Name of the sculpt layer group");
   RNA_def_struct_name_property(srna, prop);
 
+  prop = RNA_def_property(srna, "influence", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(
+      prop, "rna_SculptLayerGroup_influence_get", "rna_SculptLayerGroup_influence_set", nullptr);
+  RNA_def_property_range(prop, -10.0f, 10.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1, 3);
+  /* Applied incrementally to the geometry, cascaded onto the descendant layers, so it must not be
+   * animated / driven — mirrors #SculptLayer.influence. */
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Influence", "How much this group's layers contribute to the final sculpted shape");
+  RNA_def_property_update(prop, 0, "rna_Mesh_update_sculpt_layer_group");
+
   prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_ENABLED);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  /* No setter: a bare flag write would bypass #resync_group_hidden and leave every descendant
+  /* No setter: a bare flag write would bypass #resync_group_state and leave every descendant
    * layer's #SCULPT_LAYER_GROUP_HIDDEN bit out of sync with the tree, and it would not push the
    * sculpt undo step the cascade needs. #SCULPT_OT_layer_group_toggle_visibility is the only path. */
   RNA_def_property_ui_text(

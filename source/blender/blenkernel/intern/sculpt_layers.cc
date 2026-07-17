@@ -270,33 +270,58 @@ const SculptLayerTreeNode *node_find_by_uid(const Mesh &mesh, const int uid)
   return node_find_in_group(*root, uid);
 }
 
-bool node_is_descendant_of(const SculptLayerTreeNode &node, const SculptLayerGroup &ancestor)
+const SculptLayerGroup *find_ancestor(const SculptLayerGroup *start,
+                                      FunctionRef<bool(const SculptLayerGroup &)> predicate)
 {
-  /* Strictly below: the walk starts at the parent, so a node is never its own descendant. Callers
-   * rejecting "into itself" need their own identity check. */
-  const SculptLayerGroup *slow = node.parent;
-  const SculptLayerGroup *fast = node.parent;
-  /* Floyd cycle detection rather than a depth cap: this takes no #Mesh, so there is no node count to
-   * bound the walk with, and an arbitrary cap would be a second thing to get wrong. `fast` is tested
-   * after every single step, so it visits every group on the chain — including every member of a
-   * cycle, which it covers before `slow` can catch it. A cycle is only reachable from corrupt data,
-   * but this runs on every drop-hover redraw and must not hang the UI. */
+  /* Floyd cycle detection rather than a depth cap: an arbitrary cap would be a second thing to get
+   * wrong. `fast` is tested after every single step, so it visits every group on the chain —
+   * including every member of a cycle, which it covers before `slow` can catch it. A cycle is only
+   * reachable from corrupt data, but this runs on every redraw and must not hang the UI. */
+  const SculptLayerGroup *slow = start;
+  const SculptLayerGroup *fast = start;
   while (fast != nullptr) {
-    if (fast == &ancestor) {
-      return true;
+    if (predicate(*fast)) {
+      return fast;
     }
     fast = fast->base.parent;
     if (fast == nullptr) {
       break;
     }
-    if (fast == &ancestor) {
-      return true;
+    if (predicate(*fast)) {
+      return fast;
     }
     fast = fast->base.parent;
     slow = slow->base.parent;
     if (fast != nullptr && fast == slow) {
-      /* The chain closed on itself without passing \a ancestor, so it never will. */
-      return false;
+      /* The chain closed on itself without a match, so going round again cannot find one. */
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
+bool node_is_descendant_of(const SculptLayerTreeNode &node, const SculptLayerGroup &ancestor)
+{
+  /* Strictly below: the walk starts at the parent, so a node is never its own descendant. Callers
+   * rejecting "into itself" need their own identity check. */
+  return find_ancestor(node.parent,
+                       [&](const SculptLayerGroup &group) { return &group == &ancestor; }) !=
+         nullptr;
+}
+
+/* True when \a name is held by any node of \a group's subtree, \a exclude aside. */
+static bool name_collides_in_subtree(const SculptLayerGroup &group,
+                                     const SculptLayerTreeNode &exclude,
+                                     const StringRef name)
+{
+  for (SculptLayerTreeNode &node : group.children) {
+    if (&node != &exclude && name == node.name) {
+      return true;
+    }
+    if (const SculptLayerGroup *child = node_as_group(&node)) {
+      if (name_collides_in_subtree(*child, exclude, name)) {
+        return true;
+      }
     }
   }
   return false;
@@ -305,15 +330,24 @@ bool node_is_descendant_of(const SculptLayerTreeNode &node, const SculptLayerGro
 void node_name_ensure_unique(SculptLayerTreeNode &node)
 {
   if (node.parent == nullptr) {
-    /* The root has no siblings to collide with. */
+    /* The root is never drawn and needs no name. */
     return;
   }
-  BLI_uniquename(&node.parent->children,
-                 &node,
-                 (node.type == SCULPT_LAYER_TREE_NODE_TYPE_GROUP) ? "Group" : "Layer",
-                 '.',
-                 offsetof(SculptLayerTreeNode, name),
-                 sizeof(node.name));
+  /* Unique across the whole tree, not just the parent's children — see the header for why the flat
+   * RNA collection and #rna_SculptLayer_path require it. Climb to the root so every node is in
+   * scope whatever depth this one sits at. */
+  const SculptLayerGroup *root = node.parent;
+  while (root->base.parent != nullptr) {
+    root = root->base.parent;
+  }
+  BLI_uniquename_cb(
+      [&](const StringRefNull check_name) {
+        return name_collides_in_subtree(*root, node, check_name);
+      },
+      (node.type == SCULPT_LAYER_TREE_NODE_TYPE_GROUP) ? "Group" : "Layer",
+      '.',
+      node.name,
+      sizeof(node.name));
 }
 
 void node_move_into(Mesh &mesh,
@@ -653,36 +687,65 @@ float effective(const SculptLayer &layer)
   if (layer.base.flag & SCULPT_LAYER_GROUP_HIDDEN) {
     return 0.0f;
   }
-  return (layer.base.flag & SCULPT_LAYER_ENABLED) ? layer.influence : 0.0f;
+  /* #group_influence_cached is the product of every ancestor folder's influence, pre-baked by
+   * #resync_group_state so this stays one flat multiply per element rather than a walk up the chain. */
+  return (layer.base.flag & SCULPT_LAYER_ENABLED) ?
+             layer.influence * layer.group_influence_cached :
+             0.0f;
 }
 
 /**
- * Fold \a parent_enabled into each child of \a group and write the result onto the layers below it.
+ * Fold the ancestor state into each child of \a group and write the result onto the layers below it:
+ * \a parent_enabled drives the #SCULPT_LAYER_GROUP_HIDDEN flag and \a parent_influence is the running
+ * product of ancestor folder influences baked onto each layer's #group_influence_cached.
  *
- * Top-down, so each folder simply hands its own effective state to its children and every node is
- * visited exactly once. The memo table, the uid lookups and the cycle guard this replaces were all
- * artifacts of the parent-uid tags, where a child could sit ahead of its parent in the flat list and
- * the ancestor chain had to be re-resolved per layer; a child list cannot express either problem.
+ * When \a write_flags is false the flag write is skipped and only the float cache is refreshed; the
+ * restore path uses that mode so it can rebuild the cache without disturbing the #SCULPT_LAYER_GROUP_HIDDEN
+ * / Solo-Base flags that a structural undo restored separately.
+ *
+ * Top-down, so each folder simply hands its own state to its children and every node is visited
+ * exactly once. The memo table, the uid lookups and the cycle guard this replaces were all artifacts
+ * of the parent-uid tags, where a child could sit ahead of its parent in the flat list and the
+ * ancestor chain had to be re-resolved per layer; a child list cannot express either problem.
  */
-static void resync_group_hidden_recursive(const SculptLayerGroup &group, const bool parent_enabled)
+static void resync_group_state_recursive(const SculptLayerGroup &group,
+                                         const bool parent_enabled,
+                                         const float parent_influence,
+                                         const bool write_flags)
 {
   for (SculptLayerTreeNode &node : group.children) {
     if (SculptLayerGroup *child = node_as_group(&node)) {
-      resync_group_hidden_recursive(
-          *child, parent_enabled && (child->base.flag & SCULPT_LAYER_GROUP_ENABLED) != 0);
+      resync_group_state_recursive(
+          *child,
+          parent_enabled && (child->base.flag & SCULPT_LAYER_GROUP_ENABLED) != 0,
+          parent_influence * child->influence,
+          write_flags);
     }
     else if (SculptLayer *layer = node_as_layer(&node)) {
-      SET_FLAG_FROM_TEST(layer->base.flag, !parent_enabled, SCULPT_LAYER_GROUP_HIDDEN);
+      if (write_flags) {
+        SET_FLAG_FROM_TEST(layer->base.flag, !parent_enabled, SCULPT_LAYER_GROUP_HIDDEN);
+      }
+      layer->group_influence_cached = parent_influence;
     }
   }
 }
 
-void resync_group_hidden(Mesh &mesh)
+void resync_group_state(Mesh &mesh)
 {
   const SculptLayerGroup &root = *root_group(mesh);
   /* The root is read like any other folder rather than assumed enabled, so there is one rule for
-   * every level. #root_group_ensure is what guarantees its enabled bit is actually set. */
-  resync_group_hidden_recursive(root, (root.base.flag & SCULPT_LAYER_GROUP_ENABLED) != 0);
+   * every level. #root_group_ensure is what guarantees its enabled bit is actually set; its own
+   * influence (always the default 1 — no UI reaches it) folds in as the seed of the product. */
+  resync_group_state_recursive(
+      root, (root.base.flag & SCULPT_LAYER_GROUP_ENABLED) != 0, root.influence, true);
+}
+
+void refresh_group_influence_cache(Mesh &mesh)
+{
+  const SculptLayerGroup &root = *root_group(mesh);
+  /* Float-only pass: recompute #group_influence_cached without touching a single flag. */
+  resync_group_state_recursive(
+      root, (root.base.flag & SCULPT_LAYER_GROUP_ENABLED) != 0, root.influence, false);
 }
 
 void combine_layers_mesh(const Span<float3> base,
@@ -1069,6 +1132,10 @@ void tree_blend_read(BlendDataReader *reader, Mesh &mesh)
   group_runtime_ensure(*mesh.sculpt_layer_root);
   mesh.sculpt_layer_root->base.parent = nullptr;
   group_blend_read_children(reader, *mesh.sculpt_layer_root);
+  /* #group_influence_cached is derived state: the value read from the file is stale (or 0 from a file
+   * predating the field), so rebuild it from the reconstructed tree. Float-only, since the flags read
+   * from the file are authoritative and must not be touched here. */
+  refresh_group_influence_cache(mesh);
 }
 
 /** \} */

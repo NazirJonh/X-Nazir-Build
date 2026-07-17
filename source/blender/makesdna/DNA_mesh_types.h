@@ -165,7 +165,7 @@ enum eSculptLayerFlag : int {
   /**
    * Set when any ancestor group (following the #SculptLayerTreeNode::parent chain) is currently
    * disabled. Maintained by
-   * #bke::sculpt_layers::resync_group_hidden and consulted by #bke::sculpt_layers::effective; the
+   * #bke::sculpt_layers::resync_group_state and consulted by #bke::sculpt_layers::effective; the
    * layer's own #SCULPT_LAYER_ENABLED bit is left untouched, so re-enabling the ancestor restores
    * exactly what was visible before — the same convention as #SCULPT_LAYER_SOLO_HIDDEN. Never
    * versioned: a new bit in an existing #flag reads as unset from old files.
@@ -207,7 +207,7 @@ struct SculptLayerTreeNode {
    * terminates every walk up the tree.
    */
   SculptLayerGroup *parent = nullptr;
-  /** MAX_NAME. Unique among siblings only. */
+  /** MAX_NAME. Unique across every node of the mesh tree (see #node_name_ensure_unique). */
   char name[64] = {};
   /** #eSculptLayerFlag for a layer, #eSculptLayerGroupFlag for a group. */
   int flag = 0;
@@ -252,7 +252,14 @@ struct SculptLayer {
    * this invariant. Mirrors #MDisps.level. Unused (0) for the vertex domain.
    */
   short level = 0;
-  char _pad[4] = {};
+  /**
+   * Derived cache: the product of the #influence of every ancestor folder (the running
+   * `Pi_ancestors(influence_folder)` of the position model). Not authored state — it is recomputed
+   * from the tree by #bke::sculpt_layers::resync_group_state on every tree mutation and on blend
+   * read, and #bke::sculpt_layers::effective multiplies it in so the hot path stays a single flat
+   * multiply. Written to blend files like any member, but its stored value is ignored on read.
+   */
+  float group_influence_cached = 1.0f;
   /** `float3[totelem]` array of per-element displacement deltas. May be null (treated as zeros). */
   void *data = nullptr;
 };
@@ -261,7 +268,7 @@ struct SculptLayer {
 enum eSculptLayerGroupFlag : int {
   /**
    * The group's own enabled state. Descendant layers are not edited when this changes; instead
-   * #bke::sculpt_layers::resync_group_hidden folds the whole ancestor chain into their
+   * #bke::sculpt_layers::resync_group_state folds the whole ancestor chain into their
    * #SCULPT_LAYER_GROUP_HIDDEN bit, so a group can be re-enabled without having to remember what
    * each descendant's own state was.
    */
@@ -281,10 +288,11 @@ ENUM_OPERATORS(eSculptLayerGroupFlag)
  * A folder in the sculpt layer tree, persisted in blend files. Every group is reachable from
  * #Mesh::sculpt_layer_root by following #children.
  *
- * Groups exist for organization only: they carry no displacement data and take no part in the
- * `position = base + sum(layer.data[i] * effective(layer))` model, which stays purely additive and
- * order-independent. The one thing a group affects is the boolean visibility cascade (see
- * #bke::sculpt_layers::resync_group_hidden).
+ * Groups carry no displacement data of their own, so the model stays purely additive and
+ * order-independent: `position = base + sum(layer.data[i] * effective(layer))`. A group affects that
+ * sum only through per-layer *weights*, never through a term of its own — its #influence folds into
+ * every descendant layer's #effective as one factor of the ancestor product, and its enabled bit
+ * feeds the boolean visibility cascade (both maintained by #bke::sculpt_layers::resync_group_state).
  */
 struct SculptLayerGroup {
   /**
@@ -298,6 +306,15 @@ struct SculptLayerGroup {
    * (see #Mesh::sculpt_layer_root).
    */
   SculptLayerTreeNode base;
+  /**
+   * Influence multiplier this folder contributes to the cascade (soft UI range `0..1`, hard range
+   * `-10..10`, default 1). It folds into every descendant layer's weight as one factor of
+   * `Pi_ancestors(influence_folder)`; #bke::sculpt_layers::resync_group_state bakes that product onto
+   * each layer's #SculptLayer::group_influence_cached. A folder dialled to 0 is not the same as a
+   * disabled folder: the enabled bit stays a separate #SCULPT_LAYER_GROUP_HIDDEN cascade.
+   */
+  float influence = 1.0f;
+  char _pad[4] = {};
   /**
    * The nodes this folder holds, of both kinds interleaved, owned by this group.
    *

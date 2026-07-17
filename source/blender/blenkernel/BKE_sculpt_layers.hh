@@ -25,6 +25,7 @@
 #include "DNA_listBase.h"
 
 #include "BLI_cache_mutex.hh"
+#include "BLI_function_ref.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -109,14 +110,33 @@ SculptLayerTreeNode *node_find_by_uid(Mesh &mesh, int uid);
 const SculptLayerTreeNode *node_find_by_uid(const Mesh &mesh, int uid);
 
 /**
+ * Walk \a start and its ancestor folders up to the root, returning the first for which \a predicate
+ * is true, or null when none matches.
+ *
+ * The single cycle-safe ancestor walk of the module: both "is X an ancestor of me"
+ * (#node_is_descendant_of) and the tree view's "do all my ancestors carry this flag" row checks are
+ * this one walk with a different predicate, so the fragile Floyd bookkeeping lives in exactly one
+ * place rather than being re-spelled per call site.
+ *
+ * Bounded by cycle detection (Floyd) rather than by reaching the root: a cycle in stored data (a
+ * corrupt file, a future editing bug) must not hang the UI, which calls this on every redraw. The
+ * fast cursor is tested after every single step, so it visits every folder on the chain — including
+ * every member of a cycle — before the slow one can catch it; a chain that closes on itself without
+ * a match therefore never would, and the walk stops.
+ */
+const SculptLayerGroup *find_ancestor(const SculptLayerGroup *start,
+                                      FunctionRef<bool(const SculptLayerGroup &)> predicate);
+
+/**
  * True when \a node sits anywhere strictly below \a ancestor in the tree.
  *
  * Strict: a node is *not* its own descendant. Callers rejecting a drop of a folder into its own
  * subtree therefore need their own identity check for "into itself" — the two questions are
  * separate and this answers only the second.
  *
- * Bounded by cycle detection rather than by reaching the root: a cycle in stored data (a corrupt
- * file, a future editing bug) must not hang the UI, which calls this on every drop-hover redraw.
+ * Bounded by cycle detection rather than by reaching the root (see #find_ancestor, which it walks
+ * with): a cycle in stored data (a corrupt file, a future editing bug) must not hang the UI, which
+ * calls this on every drop-hover redraw.
  */
 bool node_is_descendant_of(const SculptLayerTreeNode &node, const SculptLayerGroup &ancestor);
 
@@ -263,8 +283,9 @@ bool solo_active(const Mesh &mesh);
 
 /**
  * Allocate a new group as the last child of the folder named by \a parent_uid (0 = the root), give
- * it a unique id and a name unique among its siblings. Unlike #add there is no "active group" to
- * set: groups are always addressed explicitly by uid (see the design doc's non-goals).
+ * it a unique id and a name unique across the whole tree (see #node_name_ensure_unique). Unlike #add
+ * there is no "active group" to set: groups are always addressed explicitly by uid (see the design
+ * doc's non-goals).
  *
  * A \a parent_uid that names a layer, or no node at all, falls back to the root.
  */
@@ -279,22 +300,23 @@ SculptLayerGroup *group_add(Mesh &mesh, const char *name, int parent_uid);
 void group_remove(Mesh &mesh, SculptLayerGroup &group);
 
 /**
- * Make \a node's name unique among its siblings — the nodes sharing its parent — rather than across
- * the whole tree. A no-op for a node with no parent (the root), which has no siblings.
+ * Make \a node's name unique across *every* node of the mesh tree — both kinds, at any depth — not
+ * merely among its siblings. A no-op for a node with no parent (the root), which is never drawn and
+ * needs no name.
+ *
+ * Whole-tree rather than per-folder because the flat #Mesh::sculpt_layers RNA collection and
+ * #rna_SculptLayer_path both address a layer by its name alone: two layers sharing a name — even in
+ * different folders — would make either resolve to the wrong one, silently. Follows #GreasePencil,
+ * whose #get_node_names likewise spans the whole tree.
  *
  * The single authority for sculpt layer node names, for *both* kinds. It replaces the former
- * `group_name_ensure_unique` and the open-coded #BLI_uniquename call in the layer add path: those
- * were two spellings of "unique among siblings" only because layers and folders lived in two lists,
- * and a folder's children now interleave both kinds, so one rule has to answer for both. A second,
+ * `group_name_ensure_unique` and the open-coded #BLI_uniquename call in the layer add path, which
+ * were two spellings of the same rule only because layers and folders lived in two lists. A second,
  * subtly different spelling is exactly the kind of drift that makes two paths disagree about what a
  * legal name is.
  *
  * Public rather than internal to #add / #group_add because the RNA name setters need the identical
  * rule.
- *
- * Uses #BLI_uniquename over the parent's children, whose elements are of both kinds: legal because
- * #SculptLayerTreeNode is the first member of both, so #SculptLayerTreeNode::name sits at the same
- * offset in either — which is exactly what the fixed-offset comparison requires.
  */
 void node_name_ensure_unique(SculptLayerTreeNode &node);
 
@@ -366,17 +388,25 @@ void apply_delta_mesh(const SculptLayer &layer, float factor, MutableSpan<float3
  * math (object-space vertex add, tangent-space grid add, the GPU drag shader) stays specialized by
  * necessity, but the *weight* they multiply by always comes from here.
  *
- * The weight also accounts for the folder cascade (#SCULPT_LAYER_GROUP_HIDDEN, maintained by
- * #resync_group_hidden), so a caller that tests #SCULPT_LAYER_ENABLED itself instead of routing
- * through here silently ignores folder visibility.
+ * The weight also accounts for the folder cascade (#SCULPT_LAYER_GROUP_HIDDEN and the ancestor
+ * influence product #SculptLayer::group_influence_cached, both maintained by #resync_group_state),
+ * so a caller that tests #SCULPT_LAYER_ENABLED and reads #SculptLayer::influence itself instead of
+ * routing through here silently ignores folder visibility and folder influence.
  */
 float effective(const SculptLayer &layer);
 
 /**
- * Recompute every layer's #SCULPT_LAYER_GROUP_HIDDEN bit from the current folder tree: a layer is
- * group-hidden exactly when any group on its #SculptLayerTreeNode::parent chain is disabled. Call
- * after every mutation of the tree (create / remove / reparent / toggle a group), and record the
- * resulting flag changes for undo (see #push_sculpt_layer_flags_batch).
+ * Recompute the derived folder-cascade state on every layer from the current tree, in one top-down
+ * walk. Two things are written per layer:
+ * - #SCULPT_LAYER_GROUP_HIDDEN: set exactly when any group on the #SculptLayerTreeNode::parent chain
+ *   is disabled.
+ * - #SculptLayer::group_influence_cached: the product of the #SculptLayerGroup::influence of every
+ *   ancestor folder, which #effective multiplies the layer's own influence by.
+ *
+ * Call after every mutation of the tree (create / remove / reparent / toggle a group / change a
+ * folder influence), and record the resulting *flag* changes for undo (see
+ * #push_sculpt_layer_flags_batch). The float cache is derived, non-undoable state and is deliberately
+ * outside that flag diff.
  *
  * A full recompute rather than an incremental toggle, because nesting makes an incremental flag
  * wrong in principle: with a disabled group B inside a disabled group A, one bit on the layer cannot
@@ -388,12 +418,22 @@ float effective(const SculptLayer &layer);
  * artifacts of the parent-uid tags, where a child could sit ahead of its parent in the flat list and
  * the chain had to be re-resolved per layer.
  *
- * Only ever writes #SCULPT_LAYER_GROUP_HIDDEN on existing layers: it adds no node, removes none, and
- * reorders none. Callers rely on that to diff the flags before and after by walking the tree twice
- * (see the editor's `group_cascade_resync_with_undo`), which is well-defined because #layers returns
- * a deterministic tree order.
+ * Only ever writes those two fields on existing layers: it adds no node, removes none, and reorders
+ * none. Callers rely on that to diff the flags before and after by walking the tree twice (see the
+ * editor's `group_cascade_resync_with_undo`), which is well-defined because #layers returns a
+ * deterministic tree order.
  */
-void resync_group_hidden(Mesh &mesh);
+void resync_group_state(Mesh &mesh);
+
+/**
+ * Float-only counterpart of #resync_group_state: rebuild every layer's
+ * #SculptLayer::group_influence_cached from the tree without touching any flag. Used by the undo
+ * restore path, where a structural change (reparent / create / delete) staleifies the cache even
+ * though the folder influence values themselves are never undone, and the #SCULPT_LAYER_GROUP_HIDDEN
+ * / Solo-Base flags were already restored from the undo payload and must not be disturbed. Also used
+ * on blend read to derive the cache from the reconstructed tree.
+ */
+void refresh_group_influence_cache(Mesh &mesh);
 
 /**
  * Recompute combined vertex positions from an un-layered base:

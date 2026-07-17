@@ -551,4 +551,71 @@ TEST_F(sculpt_layers_tree, composition_is_order_independent)
   }
 }
 
+TEST_F(sculpt_layers_tree, folder_influence_multiplies_down_the_chain)
+{
+  /* Nested folders at 0.5 and 0.5 scale a layer at 1.0 to 0.25: #resync_group_state bakes the
+   * product of every ancestor folder's influence onto the layer as #group_influence_cached, and
+   * #effective multiplies the layer's own influence by that cache — one flat multiply on the hot
+   * path. Halves are exact in binary floating point, so the product is exact and the assertions
+   * below can be bit-for-bit. */
+  SculptLayerGroup *folder_a = group_add(*mesh, "A", 0);
+  ASSERT_NE(folder_a, nullptr);
+  /* Nested directly inside A (parent_uid = A), so the cascade has to climb two folders, not one. */
+  SculptLayerGroup *folder_b = group_add(*mesh, "B", folder_a->base.uid);
+  ASSERT_NE(folder_b, nullptr);
+  SculptLayer *layer = add(*mesh, "L", SCULPT_LAYER_DOMAIN_VERT, 0);
+  ASSERT_NE(layer, nullptr);
+  node_move_into(*mesh, layer->base, *folder_b, nullptr);
+
+  /* #add makes the layer enabled with influence 1, so the 0.25 below can only come from the two
+   * folders — a cascade that ignored either would land on 0.5 or 1.0 instead. */
+  ASSERT_TRUE(layer->base.flag & SCULPT_LAYER_ENABLED);
+  ASSERT_EQ(layer->influence, 1.0f);
+  folder_a->influence = 0.5f;
+  folder_b->influence = 0.5f;
+
+  resync_group_state(*mesh);
+
+  EXPECT_EQ(layer->group_influence_cached, 0.25f);
+  EXPECT_EQ(effective(*layer), 0.25f);
+}
+
+TEST_F(sculpt_layers_tree, folder_influence_zero_yields_base)
+{
+  /* A folder dialled to 0 (while staying *enabled* — distinct from the separate
+   * #SCULPT_LAYER_GROUP_HIDDEN bit) zeroes every layer below it: its influence cascades into the
+   * cache as 0, so #effective returns 0 and #combine_layers_mesh leaves the base untouched. */
+  SculptLayerGroup *folder = group_add(*mesh, "F", 0);
+  ASSERT_NE(folder, nullptr);
+  SculptLayer *layer = add(*mesh, "L", SCULPT_LAYER_DOMAIN_VERT, 3);
+  ASSERT_NE(layer, nullptr);
+  node_move_into(*mesh, layer->base, *folder, nullptr);
+
+  /* Non-zero deltas, so a composition that ignored the folder's 0 influence would visibly move the
+   * base and the equality below would fail. */
+  const MutableSpan<float3> data = data_get(*layer);
+  ASSERT_EQ(data.size(), 3);
+  data[0] = float3(1.0f, 2.0f, 3.0f);
+  data[1] = float3(-4.0f, 5.0f, 0.5f);
+  data[2] = float3(0.25f, -1.5f, 2.0f);
+
+  folder->influence = 0.0f;
+  resync_group_state(*mesh);
+
+  EXPECT_EQ(layer->group_influence_cached, 0.0f);
+  EXPECT_EQ(effective(*layer), 0.0f);
+
+  /* The composite is exactly the base: the one enabled layer contributes nothing through the 0
+   * folder. */
+  const Array<float3> base = {
+      float3(0.5f, 1.0f, -2.0f), float3(3.0f, -0.25f, 4.0f), float3(-1.0f, 0.75f, 0.5f)};
+  Array<float3> result(3);
+  combine_layers_mesh(base, layers(*mesh), result);
+  for (int i = 0; i < 3; i++) {
+    EXPECT_EQ(result[i][0], base[i][0]) << "element " << i << " x";
+    EXPECT_EQ(result[i][1], base[i][1]) << "element " << i << " y";
+    EXPECT_EQ(result[i][2], base[i][2]) << "element " << i << " z";
+  }
+}
+
 }  // namespace blender::bke::sculpt_layers::tests

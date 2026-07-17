@@ -142,7 +142,7 @@ void push_sculpt_layer_data(Object &object, const SculptLayer &layer);
  *
  * A plain batch flag swap, not tied to any one feature: the Solo Base toggle uses it to hide every
  * enabled layer at once, and the folder cascade uses it to record the #SCULPT_LAYER_GROUP_HIDDEN
- * bits #bke::sculpt_layers::resync_group_hidden recomputed. Capture the flags before they are
+ * bits #bke::sculpt_layers::resync_group_state recomputed. Capture the flags before they are
  * modified, and call between #push_begin and #push_end.
  */
 void push_sculpt_layer_flags_batch(Object &object, Vector<int> &&uids, Vector<int> &&flags);

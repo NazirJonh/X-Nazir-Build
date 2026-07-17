@@ -69,6 +69,11 @@ static const EnumPropertyItem sculpt_stroke_method_items[] = {
      "Curve Patch",
      "Anchor-drag a stroke, then edit an explicit control curve with live preview before "
      "committing to the mesh"},
+    {BRUSH_STROKE_ROLL,
+     "ROLL",
+     0,
+     "Roll",
+     "Roll the texture along the freehand stroke path"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -81,6 +86,7 @@ static const EnumPropertyItem rna_enum_brush_texture_slot_map_all_mode_items[] =
     {MTEX_MAP_MODE_STENCIL, "STENCIL", 0, "Stencil", ""},
     {MTEX_MAP_MODE_CURVE_PATCH, "CURVE_PATCH", 0, "Curve Patch",
      "Project the texture onto the surface following an explicit, user-edited control curve"},
+    {MTEX_MAP_MODE_ROLL, "ROLL", 0, "Roll", "Roll texture along the stroke path"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1242,6 +1248,22 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 1, 64, 1, -1);
   RNA_def_property_ui_text(
       prop, "Repeats", "Number of times the texture repeats along the curve length");
+
+  prop = RNA_def_property(srna, "use_roll_pressure_scale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "roll_pressure_scale", 1);
+  RNA_def_property_ui_text(
+      prop, "Pressure Scale", "Scale roll texture with pressure-driven brush radius");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "use_roll_edit_after", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "roll_edit_after", 1);
+  RNA_def_property_ui_text(prop,
+                           "Edit After Stroke",
+                           "After a roll stroke, edit the drawn contour as a Curve Patch control "
+                           "curve before committing to the mesh");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
 
   prop = RNA_def_property(srna, "use_random", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "brush_angle_mode", MTEX_ANGLE_RANDOM);

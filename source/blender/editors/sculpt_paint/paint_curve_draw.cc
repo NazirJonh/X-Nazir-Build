@@ -266,7 +266,7 @@ bool ED_paint_curve_overlay_is_relevant(const Brush *brush,
   if (brush == nullptr) {
     return false;
   }
-  if (ELEM(brush->stroke_method, BRUSH_STROKE_CURVE, BRUSH_STROKE_CURVE_PATCH)) {
+  if (ELEM(brush->stroke_method, BRUSH_STROKE_CURVE, BRUSH_STROKE_CURVE_PATCH, BRUSH_STROKE_ROLL)) {
     return true;
   }
   return ED_paint_curve_is_curves_edit_tool(active_tool_idname);

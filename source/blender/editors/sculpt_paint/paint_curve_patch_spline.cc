@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 
 #include "paint_curve_patch_spline.hh"
 
@@ -156,19 +157,18 @@ float CurvePatchSpline::distance_sq_to(const float3 &query) const
   return best_dist_sq;
 }
 
-void CurvePatchSpline::closest_point(const float3 &query,
-                                     float &r_s,
-                                     float3 &r_tangent,
-                                     float &r_lateral,
-                                     float *r_normal_dist) const
+/* Shared nearest-segment search: fills the winning segment index, its clamped parameter, and the
+ * squared distance. Both public closest-point variants build on this so the math lives in one
+ * place. */
+static void closest_segment(const Span<float3> poly_3d,
+                            const float3 &query,
+                            int &r_i,
+                            float &r_t,
+                            float &r_dist_sq)
 {
-  if (is_empty()) {
-    return;
-  }
-
-  float best_dist_sq = FLT_MAX;
-  int best_i = 0;
-  float best_t = 0.0f;
+  r_dist_sq = FLT_MAX;
+  r_i = 0;
+  r_t = 0.0f;
   for (const int i : IndexRange(poly_3d.size() - 1)) {
     const float3 &a = poly_3d[i];
     const float3 &b = poly_3d[i + 1];
@@ -179,12 +179,28 @@ void CurvePatchSpline::closest_point(const float3 &query,
                         0.0f;
     const float3 closest = a + ab * t;
     const float dist_sq = math::length_squared(query - closest);
-    if (dist_sq < best_dist_sq) {
-      best_dist_sq = dist_sq;
-      best_i = i;
-      best_t = t;
+    if (dist_sq < r_dist_sq) {
+      r_dist_sq = dist_sq;
+      r_i = i;
+      r_t = t;
     }
   }
+}
+
+void CurvePatchSpline::closest_point(const float3 &query,
+                                     float &r_s,
+                                     float3 &r_tangent,
+                                     float &r_lateral,
+                                     float *r_normal_dist) const
+{
+  if (is_empty()) {
+    return;
+  }
+
+  int best_i;
+  float best_t;
+  [[maybe_unused]] float best_dist_sq;
+  closest_segment(poly_3d.as_span(), query, best_i, best_t, best_dist_sq);
 
   r_s = lengths_3d[best_i] + best_t * (lengths_3d[best_i + 1] - lengths_3d[best_i]);
   r_tangent = this->tangent_at(r_s);
@@ -227,6 +243,22 @@ void CurvePatchSpline::closest_point(const float3 &query,
       }
     }
   }
+}
+
+void CurvePatchSpline::closest_point_dist(const float3 &query,
+                                          float &r_s,
+                                          float3 &r_tangent,
+                                          float &r_dist) const
+{
+  if (is_empty()) {
+    return;
+  }
+  int best_i;
+  float best_t, best_dist_sq;
+  closest_segment(poly_3d.as_span(), query, best_i, best_t, best_dist_sq);
+  r_s = lengths_3d[best_i] + best_t * (lengths_3d[best_i + 1] - lengths_3d[best_i]);
+  r_tangent = this->tangent_at(r_s);
+  r_dist = std::sqrt(best_dist_sq);
 }
 
 float curve_patch_texture_tile_span(const int length_mode,

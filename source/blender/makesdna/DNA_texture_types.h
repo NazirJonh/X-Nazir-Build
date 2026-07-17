@@ -288,6 +288,7 @@ enum eMTex_BrushMapMode : char {
   MTEX_MAP_MODE_RANDOM = 4,
   MTEX_MAP_MODE_STENCIL = 5,
   MTEX_MAP_MODE_CURVE_PATCH = 6,
+  MTEX_MAP_MODE_ROLL = 7,
 };
 
 /** #MTex::brush_angle_mode. */
@@ -329,7 +330,15 @@ struct MTex {
   /** For #MTEX_MAP_MODE_CURVE_PATCH REPEAT mode: number of texture repeats along the curve
    * length (RNA-clamped 1..64). */
   char curve_patch_length_repeat = 1;
-  char _pad2[7] = {};
+  /** For #MTEX_MAP_MODE_ROLL / #BRUSH_STROKE_ROLL: scale the rolled texture with the
+   * pressure-driven brush radius so the pattern keeps its aspect ratio under pressure.
+   * `char`, not `bool`: makesdna has no builtin size for `bool`. Carved from `_pad2` so the
+   * struct's total size and every later member's offset are unchanged. */
+  char roll_pressure_scale = 1;
+  /** For #BRUSH_STROKE_ROLL: after the stroke finishes, hand the drawn contour off to the Curve
+   * Patch editor as an editable control curve. */
+  char roll_edit_after = 0;
+  char _pad2[5] = {};
   struct Object *object = nullptr;
   struct Tex *tex = nullptr;
   char uvname[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";

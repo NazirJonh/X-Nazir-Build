@@ -17,6 +17,7 @@
 #include "BLI_bit_vector.hh"
 #include "BLI_map.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
 #include "BLI_vector.hh"
 
 #include "BKE_curves.hh"
@@ -134,5 +135,24 @@ void curve_patch_start_from_anchor(const Depsgraph &depsgraph,
                                     Sculpt &sd,
                                     const Brush &brush,
                                     const ViewContext &vc);
+
+/**
+ * Start the Curve Patch modal editor from a finished #BRUSH_STROKE_ROLL stroke. Builds the control
+ * curve from the stroke's resampled contour (`control_positions`, object space, with a per-point
+ * `control_radii`), after undoing the live roll relief back to a pristine baseline. From there the
+ * handoff is identical to #curve_patch_start_from_anchor: it takes over ownership of
+ * `SculptSession::cache` and the open undo transaction (the caller must not tear either down), and
+ * on any early bail (Dynamic Topology, degenerate input) it frees `ss.cache` itself.
+ * `control_positions.size()` must equal `control_radii.size()`. `plane_normal` is the roll's frozen
+ * projection normal, used as the patch's projection plane.
+ */
+void roll_start_curve_patch_from_stroke(const Depsgraph &depsgraph,
+                                        Object &ob,
+                                        Sculpt &sd,
+                                        const Brush &brush,
+                                        const ViewContext &vc,
+                                        Span<float3> control_positions,
+                                        Span<float> control_radii,
+                                        const float3 &plane_normal);
 
 }  // namespace blender::ed::sculpt_paint

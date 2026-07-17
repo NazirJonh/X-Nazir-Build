@@ -16,6 +16,7 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector.hh"
 #include "BLI_rand.hh"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
@@ -36,6 +37,7 @@
 #include "BKE_curves.hh"
 #include "BKE_global.hh"
 #include "BKE_image.hh"
+#include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 
@@ -541,12 +543,39 @@ void PaintStroke::add_step(bContext *C,
     copy_v3_v3(paint_runtime->last_location, location);
   }
   if (!paint_runtime->last_hit) {
+    /* For roll mapping, record the press position even during a "dry run" (e.g. rake angle not yet
+     * established). update() sets is_location_is_set when the mesh was actually hit, so the 3D
+     * location is valid. Without this, the first recorded roll point ends up one spacing step away
+     * from the real mouse-down position. */
+    if (need_roll_mapping_ && is_location_is_set) {
+      const float3 sn = (vc.obact && vc.obact->runtime->sculpt_session &&
+                         vc.obact->runtime->sculpt_session->cache) ?
+                            vc.obact->runtime->sculpt_session->cache->sculpt_normal :
+                            float3(0);
+      add_roll_point(
+          mval, mouse_out, location, sn, paint_runtime->pixel_radius, pressure, pen_flip_,
+          tilt_.x, tilt_.y);
+    }
     return;
   }
 
   if (curve_point_radius) {
     paint_runtime->pixel_radius = paintcurve_radius_to_pixel_radius(
         this->paint, &brush, *curve_point_radius);
+  }
+
+  {
+    const float3 sn = (vc.obact && vc.obact->runtime->sculpt_session &&
+                       vc.obact->runtime->sculpt_session->cache) ?
+                          vc.obact->runtime->sculpt_session->cache->sculpt_normal :
+                          float3(0);
+    add_roll_point(
+        mval, mouse_out, location, sn, paint_runtime->pixel_radius, pressure, pen_flip_, tilt_.x,
+        tilt_.y);
+  }
+
+  if (need_roll_mapping_) {
+    make_roll_spline(C);
   }
 
   /* Dash */
@@ -559,19 +588,69 @@ void PaintStroke::add_step(bContext *C,
     }
   }
 
+  if (!add_step) {
+    ARegion *region = CTX_wm_region(C);
+    if (region) {
+      ED_region_tag_redraw(region);
+    }
+    tot_samples_++;
+    return;
+  }
+
+  /* Select which recorded point becomes this dab. Roll mapping defers dabs behind the cursor by
+   * `roll_half_points()` so the spline has forward context for smooth UV mapping; other strokes
+   * simply use the point just recorded. */
+  PaintStrokePoint *point;
+
+  if (need_roll_mapping_) {
+    constexpr int buf_cap = PAINT_MAX_INPUT_SAMPLES;
+    const int half = roll_half_points();
+
+    /* Wait until there are enough real spline segments ahead of the dab position to cover the full
+     * brush footprint (~1 brush radius forward). This also handles the num_points_ < 4 case (before
+     * any real segment exists), since half >= 5 for all spacing values. */
+    if (num_points_ < half) {
+      ARegion *region = CTX_wm_region(C);
+      if (region) {
+        ED_region_tag_redraw(region);
+      }
+      tot_samples_++;
+      return;
+    }
+
+    /* Look back half the rolling window to keep the current position centered in the spline. When
+     * there is not enough history, fall back to the oldest available point so painting begins
+     * immediately. */
+    const int oldest_idx = (cur_point_ - num_points_ + buf_cap) % buf_cap;
+    int look_back;
+    if (num_points_ <= half) {
+      look_back = oldest_idx;
+    }
+    else {
+      look_back = (cur_point_ - half + buf_cap) % buf_cap;
+    }
+
+    last_painted_roll_idx_ = look_back;
+    point = &points_[look_back];
+  }
+  else {
+    constexpr int cap = PAINT_MAX_INPUT_SAMPLES;
+    point = &points_[(cur_point_ - 1 + cap) % cap];
+  }
+
   /* Add to stroke */
-  if (add_step) {
+  {
     PointerRNA itemptr;
     RNA_collection_add(op->ptr, "stroke", &itemptr);
-    RNA_float_set(&itemptr, "size", paint_runtime->pixel_radius);
-    RNA_float_set_array(&itemptr, "location", location);
+    RNA_float_set(&itemptr, "size", point->size);
+    RNA_float_set_array(&itemptr, "location", point->location);
     /* Mouse coordinates modified by the stroke type options. */
-    RNA_float_set_array(&itemptr, "mouse", mouse_out);
+    RNA_float_set_array(&itemptr, "mouse", point->mouse_out);
     /* Original mouse coordinates. */
-    RNA_float_set_array(&itemptr, "mouse_event", mval);
-    RNA_float_set(&itemptr, "pressure", pressure);
-    RNA_float_set(&itemptr, "x_tilt", tilt_.x);
-    RNA_float_set(&itemptr, "y_tilt", tilt_.y);
+    RNA_float_set_array(&itemptr, "mouse_event", point->mouse_in);
+    RNA_float_set(&itemptr, "pressure", point->pressure);
+    RNA_float_set(&itemptr, "x_tilt", point->x_tilt);
+    RNA_float_set(&itemptr, "y_tilt", point->y_tilt);
 
     this->update_step(op, &itemptr);
 
@@ -802,12 +881,19 @@ int PaintStroke::space_stroke(bContext *C,
     }
   }
 
+  spacing_raw_ = brush.spacing * 0.01f;
+
   float pressure = last_pressure_;
   float pressure_delta = final_pressure - last_pressure_;
   const float no_pressure_spacing = paint_space_stroke_spacing_no_pressure(
       this->vc, &paint, &brush, last_world_space_position_, zoom_2d_);
   int count = 0;
-  while (length > 0.0f) {
+  /* Safety cap on iterations. paint_space_stroke_spacing() floors at FLT_EPSILON to avoid division
+   * by zero (#129853), but that's not enough to prevent a multi-second hang when pen-lift pressure
+   * -> 0 with size_pressure on. Cap at a large but finite number -- for any realistic brush this is
+   * well above the dab count of a normal stroke. */
+  constexpr int max_dabs_per_event = 10000;
+  while (length > 0.0f && count < max_dabs_per_event) {
     const float spacing = paint_space_stroke_spacing_variable(this->vc,
                                                               &paint,
                                                               &brush,
@@ -935,6 +1021,13 @@ PaintStroke::PaintStroke(bContext *C, wmOperator *op, int event_type) : event_ty
   BKE_paint_set_overlay_override(eOverlayFlags(this->brush->overlay_flags));
 
   paint_runtime->start_pixel_radius = BKE_brush_radius_get(this->paint, this->brush);
+
+  if (this->brush->stroke_method == BRUSH_STROKE_ROLL) {
+    need_roll_mapping_ = true;
+  }
+  if (need_roll_mapping_) {
+    init_roll_cursors();
+  }
 }
 
 void PaintStroke::done(bContext *C, const bool is_cancel)
@@ -979,6 +1072,12 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
   if (stroke_cursor_) {
     WM_paint_cursor_end(static_cast<wmPaintCursor *>(stroke_cursor_));
   }
+  if (roll_cursor_) {
+    WM_paint_cursor_end(static_cast<wmPaintCursor *>(roll_cursor_));
+  }
+  if (debug_cursor_) {
+    WM_paint_cursor_end(static_cast<wmPaintCursor *>(debug_cursor_));
+  }
 }
 
 static bool curves_sculpt_brush_uses_spacing(const eBrushCurvesSculptType tool)
@@ -988,7 +1087,9 @@ static bool curves_sculpt_brush_uses_spacing(const eBrushCurvesSculptType tool)
 
 bool paint_space_stroke_enabled(const Brush &br, const PaintMode mode)
 {
-  if (br.stroke_method != BRUSH_STROKE_SPACE) {
+  /* Roll is a spaced stroke: dabs are placed along the freehand path by spacing, same as Space.
+   * It rides the same #space_stroke() -> #add_step() path, which records the roll polyline. */
+  if (!ELEM(br.stroke_method, BRUSH_STROKE_SPACE, BRUSH_STROKE_ROLL)) {
     return false;
   }
 
@@ -1555,6 +1656,12 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
   PaintSample sample_average;
   this->calc_average_sample(&sample_average);
 
+  if (stroke_sample_index_ == 0) {
+    this->last_mouse_position[0] = event->mval[0];
+    this->last_mouse_position[1] = event->mval[1];
+  }
+  stroke_sample_index_++;
+
   /* Tilt. */
   if (WM_event_is_tablet(event)) {
     tilt_ = event->tablet.tilt;
@@ -1656,12 +1763,22 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
         paint_stroke_line_constrain(this->last_mouse_position, this->constrained_pos, mouse);
       }
       this->line_end(C, op, mouse);
+      /* For smooth stroke, finalize the roll spline at the last smoothed position rather than the
+       * raw cursor position. */
+      const float2 roll_mouse = paint_supports_smooth_stroke(*br, mode, brush_switch_mode_) ?
+                                    last_smoothed_mouse_ :
+                                    mouse;
+      this->finish_roll_stroke(C, op, roll_mouse, pressure);
       this->done(C, false);
       return OPERATOR_FINISHED;
     }
   }
   else if (ELEM(event->type, EVT_RETKEY, EVT_SPACEKEY)) {
     this->line_end(C, op, sample_average.mouse);
+    const float2 roll_mouse2 = paint_supports_smooth_stroke(*br, mode, brush_switch_mode_) ?
+                                   last_smoothed_mouse_ :
+                                   sample_average.mouse;
+    this->finish_roll_stroke(C, op, roll_mouse2, pressure);
     this->done(C, false);
     return OPERATOR_FINISHED;
   }
@@ -1703,6 +1820,7 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
                             mouse,
                             pressure))
     {
+      last_smoothed_mouse_ = mouse;
       if (stroke_started_) {
         if (paint_space_stroke_enabled(*br, mode)) {
           if (this->space_stroke(C, op, mouse, pressure)) {

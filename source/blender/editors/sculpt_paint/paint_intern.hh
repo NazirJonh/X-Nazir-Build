@@ -12,6 +12,9 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_rand.hh"
 #include "BLI_span.hh"
+#include "BLI_vector.hh"
+
+#include "paint_curve_patch_spline.hh"
 
 #include "DNA_object_enums.h"
 #include "DNA_scene_enums.h"
@@ -99,6 +102,64 @@ struct PaintSample {
 };
 
 /**
+ * Per-dab record for the Roll stroke method's ring buffer. Distinct from #PaintSample (the raw
+ * per-event input-averaging sample): this carries the richer state a rolled dab needs -- the 3D
+ * hit location, the frozen surface normal, tilt, size and pen flip.
+ */
+struct PaintStrokePoint {
+  float2 mouse_in = float2(0.0f, 0.0f);
+  float2 mouse_out = float2(0.0f, 0.0f);
+  float3 location = float3(0.0f);
+  float3 surface_normal = float3(0.0f, 0.0f, 1.0f); /* sculpt_normal at recording time. */
+  float pressure = 0.0f;
+  float x_tilt = 0.0f;
+  float y_tilt = 0.0f;
+  bool pen_flip = false;
+  float size = 0.0f;
+};
+
+/**
+ * Live, arc-length-parameterized polyline for the Roll stroke method. Owns the recorded knots
+ * (3D `poly_3d`, screen `poly_2d`, per-knot `pressures`/`normals`) and delegates all 3D
+ * arc-length/closest-point math to a contained #CurvePatchSpline (`core`), rebuilt by
+ * #update_lengths(). Roll-only smoothing (virtual extension, CC grid, LUT) lives in
+ * `paint_stroke_roll.cc`.
+ */
+struct RollSpline {
+  /** Geometric core used only for #closest_point_3d and #evaluate_3d. Its internal
+   * `lengths_3d`/`tangents_3d` use CurvePatchSpline's leading-zero convention and are NOT read by
+   * the roll code directly -- the roll grid/LUT math relies on the #length_parameterize convention
+   * below (no leading zero, one entry per segment). */
+  CurvePatchSpline core;
+  Vector<float3> poly_3d;     /* Recorded 3D knots (authoritative). */
+  Vector<float2> poly_2d;     /* Recorded screen-space knots. */
+  /** Cumulative arc lengths in #length_parameterize convention: one entry per segment (size ==
+   * knots - 1), `lengths_3d.last() == total`. NOT the leading-zero convention `core` uses. */
+  Vector<float> lengths_2d;
+  Vector<float> lengths_3d;
+  Vector<float3> tangents_3d; /* Central-difference tangent at each knot (size == knots). */
+  Vector<float> pressures;    /* Per-knot pen pressure (0..1). */
+  Vector<float3> normals;     /* Per-knot frozen surface normal. */
+
+  void clear();
+  bool is_empty() const;
+  float total_length_3d() const; /* -> core.total_length(). */
+  float total_length_2d() const;
+
+  /** Rebuild `core` from `poly_3d` and recompute `lengths_2d`. Call after mutating the knots. */
+  void update_lengths();
+
+  /** Length of 3D segment `seg_idx` (difference of consecutive `core.lengths_3d`). */
+  float segment_length_3d(int seg_idx) const;
+
+  float3 evaluate_3d(float s) const;              /* -> core.evaluate(s). */
+  float2 tangent_2d_at_index(int poly_idx) const; /* 2D direction from `poly_2d`. */
+
+  /** Closest point on the 3D polyline: arc-length, tangent, distance. -> core.closest_point_dist. */
+  void closest_point_3d(const float3 &query, float &r_s, float3 &r_tan, float &r_dis) const;
+};
+
+/**
  * Common structure for various paint operators (e.g. Sculpt, Grease Pencil, Curves Sculpt)
  *
  * Callback functions defined and stored on this struct (e.g. `StrokeGetLocation`) allow each of
@@ -178,6 +239,34 @@ struct PaintStroke : NonCopyable, NonMovable {
 
   bool original_ = false; /* Ray-cast original mesh at start of stroke. */
 
+  /* last smoothed mouse position (for stabilize stroke finalization) */
+  float2 last_smoothed_mouse_ = float2(0.0f, 0.0f);
+
+  /* --- Roll stroke method (BRUSH_STROKE_ROLL) --- */
+  /* Raw arc length of stroke knots dropped from the head of the ring buffer, subtracted in
+   * spline_uv() so the texture V coordinate stays continuous as the polyline shrinks. */
+  float stroke_distance_world_ = 0.0f;
+  bool need_roll_mapping_ = false;
+  bool roll_virtual_prepended_ = false;     /* True after virtual backward segments are prepended. */
+  int n_virtual_poly_points_ = 0;           /* Polyline points in virtual backward extension. */
+  float roll_virtual_length_ = 0.0f;        /* Arc length of virtual extension (subtracted from V). */
+  float roll_initial_radius_ = 0.0f;        /* cache.initial_radius, captured on first dab. */
+  float3 roll_proj_normal_ = float3(0.0f);  /* Projection normal, frozen on first dab. */
+  float stroke_distance_normalized_ = 0.0f; /* Pressure-normalized V offset for consumed knots. */
+  float roll_virtual_length_normalized_ = 0.0f; /* Normalized arc length of virtual extension. */
+  int initial_backward_ext_count_ = 0;      /* backward_ext knot count at creation, for budget. */
+  void *roll_cursor_ = nullptr;             /* Always-on preview of unflushed spline portion. */
+  void *debug_cursor_ = nullptr;
+  int stroke_sample_index_ = 0;
+  int last_painted_roll_idx_ = -1; /* Ring buffer index of the last deferred dab placed. */
+  float spacing_raw_ = 0.0f;
+  PaintStrokePoint points_[PAINT_MAX_INPUT_SAMPLES];
+  int num_points_ = 0;
+  int cur_point_ = 0;
+  RollSpline roll_spline_;
+  Vector<float2> backward_ext_2d_; /* Virtual backward extension knots (screen space). */
+  Vector<float3> backward_ext_3d_; /* Virtual backward extension knots (world space). */
+
  public:
   PaintStroke() = delete;
 
@@ -225,6 +314,52 @@ struct PaintStroke : NonCopyable, NonMovable {
   float stroke_distance() const
   {
     return stroke_distance_;
+  }
+
+  /**
+   * Compute roll-mapping UV coordinates for a 3D point along the stroke spline.
+   * \param cache: The sculpt stroke cache (for the roll LUT/view axes).
+   * \param co: Object-space position to project.
+   * \param r_out: Output `[U, V, 0]` (U negated to match texture orientation).
+   * \param r_tan: Output tangent at the sampled spline point.
+   */
+  void spline_uv(const StrokeCache &cache,
+                 const float co[3],
+                 float r_out[3],
+                 float r_tan[3]) const;
+
+  float spline_length() const;
+
+  /** Returns true when roll texture mapping is active for this stroke. */
+  bool need_roll_mapping() const
+  {
+    return need_roll_mapping_;
+  }
+
+  /**
+   * Precompute the arc length, position, tangent, surface grid and UV LUT for the brush center.
+   * Call once per dab (single-threaded) before the per-vertex parallel loop; results are stored on
+   * `cache` for #spline_uv() to read.
+   */
+  void compute_roll_center(StrokeCache &cache);
+
+  /** Debug: draw the roll spline overlay in the viewport (developer Paint Debug option). */
+  void draw_debug_roll(bContext *C) const;
+
+  /** Draw the unflushed portion of the roll spline as an always-on preview. */
+  void draw_roll_preview(bContext *C) const;
+
+  /** Resample the recorded real roll knots (excluding virtual extensions) to ~14 object-space
+   * control points with a per-point radius derived from pen pressure, for the Curve Patch handoff.
+   * Fills `r_positions`/`r_radii` (always the same length). Emits nothing when fewer than 2 knots
+   * exist. */
+  void extract_roll_control_points(Vector<float3> &r_positions, Vector<float> &r_radii) const;
+
+  /** The projection normal frozen on the first roll dab, used as the Curve Patch plane normal in
+   * the handoff. */
+  float3 roll_plane_normal() const
+  {
+    return roll_proj_normal_;
   }
 
  protected:
@@ -281,6 +416,25 @@ struct PaintStroke : NonCopyable, NonMovable {
               bool *r_location_is_set);
 
  private:
+  int roll_max_points() const;
+  int roll_half_points() const
+  {
+    return (roll_max_points() * 3) / 5 + 2;
+  }
+  void add_roll_point(const float2 &mouse_in,
+                      const float2 &mouse_out,
+                      const float3 &loc,
+                      const float3 &surface_normal,
+                      float size,
+                      float pressure,
+                      bool pen_flip,
+                      float x_tilt,
+                      float y_tilt);
+  void prepend_virtual_roll_points();
+  void make_roll_spline(bContext *C);
+  void finish_roll_stroke(bContext *C, wmOperator *op, const float2 &mouse_up, float pressure);
+  void init_roll_cursors();
+
   void done(bContext *C, bool is_cancel);
   void add_step(bContext *C,
                 wmOperator *op,

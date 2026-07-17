@@ -37,6 +37,7 @@
 namespace blender {
 
 namespace ed::sculpt_paint {
+struct PaintStroke;
 namespace auto_mask {
 struct Cache;
 }
@@ -245,6 +246,52 @@ struct StrokeCache {
   float3 location_symm = float3(0);
   float3 last_location_symm = float3(0);
   float stroke_distance = 0.0f;
+
+  /* Reference to the PaintStroke for roll texture mapping (#BRUSH_STROKE_ROLL). */
+  PaintStroke *stroke = nullptr;
+
+  /* Precomputed per-dab for fast roll texture mapping. Set by PaintStroke::compute_roll_center()
+   * in update_step() before the per-vertex parallel loop. When roll_center_s < 0 the fast path is
+   * disabled and spline_uv() falls back to the full closest_point(). */
+  float roll_center_s = -1.0f; /* Raw arc-length on world spline at brush center. */
+  float3 roll_center_pos = {}; /* Spline position at roll_center_s. */
+  float3 roll_tangent = {};    /* Normalized tangent at roll_center_s. */
+  int roll_seg_lo = 0;         /* Polyline segment search range (precomputed). */
+  int roll_seg_hi = 0;
+  int roll_center_seg = 0; /* Segment index at roll_center_s. */
+
+  /* Surface interpolation: border curves for quad-patch UV mapping. Computed per-dab in
+   * compute_roll_center() when the preference is enabled. Each vector has the same size as the
+   * polyline in [seg_lo, seg_hi+1]. */
+  bool roll_surface_ready = false;
+  Vector<float3> roll_binormals;    /* Binormal at each polyline vertex in search range. */
+  Vector<float3> roll_border_left;  /* center + binormal * radius. */
+  Vector<float3> roll_border_right; /* center - binormal * radius. */
+
+  /** Subdivided poly-strip for smooth UV mapping. A quad strip (right_border, center, left_border)
+   * subdivided with linear column interpolation, stored as a regular grid [rows * cols],
+   * row-major. */
+  int roll_subdiv_rows = 0;
+  int roll_subdiv_cols = 0;
+  Vector<float3> roll_subdiv_pos;    /* 3D object-space grid (for tangent, debug draw). */
+  Vector<float2> roll_subdiv_pos_2d; /* 2D view-plane projection (for UV search). */
+  Vector<float2> roll_subdiv_uv;
+  float3 roll_proj_normal = {}; /* Projection normal (sculpt_normal or view_normal fallback). */
+  float3 roll_view_x = {};      /* Projection-plane X axis for 2D projection. */
+  float3 roll_view_y = {};      /* Projection-plane Y axis for 2D projection. */
+  int roll_eval_row_lo = 0;     /* Grid row range near dab for per-vertex search. */
+  int roll_eval_row_hi = 0;
+
+  /* Pre-rasterized UV lookup table for fast per-vertex evaluation. Built once per dab from the
+   * subdivided grid; per-vertex cost = O(1). */
+  static constexpr int ROLL_LUT_RES = 128;
+  Vector<float2> roll_lut_uv;         /* UV at each LUT pixel. */
+  Vector<float> roll_lut_dist_sq;     /* Best distance^2 (for rasterization). */
+  Vector<float3> roll_lut_tan;        /* Tangent at each LUT pixel. */
+  Vector<int> roll_lut_row;           /* Polyline row that wrote each pixel. */
+  float2 roll_lut_min = {};           /* 2D bounding box min. */
+  float2 roll_lut_inv_extent = {};    /* 1.0 / (max - min) * LUT_RES. */
+  bool roll_lut_ready = false;
 
   /**
    * Used for alternating between deformations in brushes that need to apply different ones to

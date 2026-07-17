@@ -1608,6 +1608,12 @@ def brush_texture_settings(layout, brush, sculpt):
     # map_mode
     layout.prop(tex_slot, "map_mode", text="Mapping")
 
+    if brush.stroke_method == 'ROLL':
+        row = layout.row()
+        row.active = brush.use_pressure_size
+        row.prop(tex_slot, "use_roll_pressure_scale", text="Pressure Scale")
+        layout.prop(tex_slot, "use_roll_edit_after", text="Edit After Stroke")
+
     layout.separator()
 
     if tex_slot.map_mode == 'STENCIL':

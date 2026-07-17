@@ -35,6 +35,7 @@ set(SRC
   paint_ops.cc
   paint_sample_color.cc
   paint_stroke.cc
+  paint_stroke_roll.cc
   paint_utils.cc
   palette.cc
   sculpt_uv.cc
@@ -226,6 +227,7 @@ if(WITH_GTESTS)
     mesh/sculpt_undo_test.cc
     paint_curve_geometry_test.cc
     paint_curve_patch_spline_test.cc
+    roll_spline_test.cc
   )
   set(TEST_INC
   )

@@ -68,6 +68,10 @@ enum eAssetLibrary_Flag : int {
    * to leave these out of Texture asset browsing (the image grid), so incidental image files
    * living alongside the brushes (e.g. stencil/alpha textures) never show up as texture assets. */
   ASSET_LIBRARY_IS_BRUSH_LIBRARY = (1 << 4),
+  /** Set when the user pins this library, which shows it as a tab at the top of the asset shelf
+   * popover. Distinct from the brush "favorites" feature in the same popover, which is about
+   * individual brush assets, not libraries. */
+  ASSET_LIBRARY_IS_PINNED = (1 << 5),
 };
 
 enum class AssetAccess : int8_t {

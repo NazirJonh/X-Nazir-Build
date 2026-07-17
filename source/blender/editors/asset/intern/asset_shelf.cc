@@ -837,12 +837,20 @@ AssetShelf *active_shelf_from_context(const bContext *C)
 /** \name Catalog toggle buttons
  * \{ */
 
-static ui::Button *add_tab_button(ui::Block &block, StringRefNull name)
+int tab_button_width(const StringRefNull name)
 {
   const uiStyle *style = ui::style_get_dpi();
   const int string_width = ui::fontstyle_string_width(&style->widget, name.c_str());
   const int pad_x = UI_UNIT_X * 0.3f;
-  const int but_width = std::min(string_width + 2 * pad_x, UI_UNIT_X * 8);
+  return string_width + 2 * pad_x;
+}
+
+static ui::Button *add_tab_button(ui::Block &block, StringRefNull name)
+{
+  /* Catalog tabs all share one header row that cannot wrap, so a long catalog name is capped and
+   * ellipsized rather than allowed to push the other tabs out of reach. The popover's library tabs
+   * wrap onto further rows instead, so they show their names in full. */
+  const int but_width = std::min(tab_button_width(name), int(UI_UNIT_X * 8));
 
   ui::Button *but = uiDefBut(
       &block,

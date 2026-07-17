@@ -452,6 +452,59 @@ static bool but_is_row_alignment_group(const Button *left, const Button *right)
   return is_same_align_group && (left->rect.xmin < right->rect.xmin);
 }
 
+/**
+ * Place a horizontal alignment group -- a row of buttons living inside a menu column -- into the
+ * column starting at \a col_xmin and \a col_width wide.
+ *
+ * The row always moves as a unit, so the spacing the layout gave its buttons survives.
+ *
+ * \note Assumes the row is contiguous, i.e. each button's #Button.rect xmax is the next one's xmin.
+ * #block_align_calc runs before this and stitches aligned neighbors to exactly that, so the widths
+ * summed here telescope into the row's span. Were a gap left between two members, the row would
+ * overshoot the column's right edge by that gap.
+ *
+ * \param first: the group's first (leftmost) button.
+ * \param group_end: one past the group's last button.
+ * \param absorb_slack: let the first button swallow the difference between the row's width and the
+ * column's, which leaves the trailing buttons (an icon toggle, say) flush with the column's right
+ * edge -- the same edge every plain button in the column is stretched to. Off, the row keeps the
+ * widths the layout handed it and simply sits at the column's left edge, which is what every menu
+ * that has not opted in to #Block.menu_col_padding expects.
+ *
+ * \note With \a absorb_slack the slack is negative when the column was sized to the row's text
+ * rather than to the placeholder widths the layout handed the row's buttons (see
+ * #Block.menu_col_padding). The row then gives width back instead of taking it, which is the same
+ * arithmetic: the first button ends up spanning the column minus the trailing buttons. It would
+ * only invert if the column were narrower than those trailing buttons -- which is why sizing to
+ * text stays opt-in, for menus whose rows trail an icon.
+ */
+static void block_bounds_place_align_group(std::unique_ptr<Button> *first,
+                                           std::unique_ptr<Button> *group_end,
+                                           const int col_xmin,
+                                           const int col_width,
+                                           const bool absorb_slack)
+{
+  float slack = 0.0f;
+  if (absorb_slack) {
+    float group_width = 0.0f;
+    for (std::unique_ptr<Button> *bt = first; bt < group_end; bt++) {
+      group_width += BLI_rctf_size_x(&(*bt)->rect);
+    }
+    slack = float(col_width) - group_width;
+  }
+
+  const float lead_x = (*first)->rect.xmin;
+
+  for (std::unique_ptr<Button> *bt = first; bt < group_end; bt++) {
+    const bool is_first = (bt == first);
+    /* Everything shifts into the column; everything after the first button shifts by the slack the
+     * first button is about to absorb, so the row stays contiguous. */
+    const float delta = float(col_xmin) - lead_x + (is_first ? 0.0f : slack);
+    (*bt)->rect.xmin += delta;
+    (*bt)->rect.xmax += delta + (is_first ? slack : 0.0f);
+  }
+}
+
 static void block_bounds_calc_text(Block *block, float offset)
 {
   if (block->buttons_ptrs.is_empty()) {
@@ -465,6 +518,22 @@ static void block_bounds_calc_text(Block *block, float offset)
    * menu). When set, the first column's width becomes max(text, this). */
   const int first_col_minwidth = block->menu_first_col_minwidth;
   bool is_first_col = first_col_minwidth > 0;
+  /* A menu that lays its items out in several columns can ask for those columns to hug their
+   * content (see #Block.menu_col_padding). Three things then change, all scoped to that menu: the
+   * padding a column adds on top of its widest text is the caller's figure rather than the
+   * #Block.bounds blanket, a row of aligned buttons is measured by its text, like a plain button
+   * is, instead of by the width the layout handed it, and such a row is stretched to fill its
+   * column. A menu that leaves this at 0 keeps its rows at the widths the layout gave them.
+   *
+   * Note that *placing* an aligned row as a unit is not opt-in and applies to every menu: that is
+   * what this pass always meant to do (see #block_bounds_place_align_group). Only the stretching
+   * is new, and only that is gated here. */
+  const bool cols_hug_text = block->menu_col_padding > 0;
+  const int col_padding = cols_hug_text ? block->menu_col_padding : block->bounds;
+  /* How far short of the column's right edge a row of aligned buttons stops, so its trailing
+   * buttons sit beside the column's content instead of on the boundary with the next column (see
+   * #Block.menu_col_row_inset). */
+  const int row_inset = cols_hug_text ? block->menu_col_row_inset : 0;
 
   fontstyle_set(&style->widget);
   std::unique_ptr<Button> *end = block->buttons_ptrs.end();
@@ -477,28 +546,68 @@ static void block_bounds_calc_text(Block *block, float offset)
       i = std::max(j, i);
     }
 
-    /* Skip all buttons that are in a horizontal alignment group.
-     * We don't want to split them apart (but still check the row's width and apply current
-     * offsets). */
+    /* Measure a horizontal alignment group as one unit, so the column ends up wide enough for the
+     * whole row and the split logic below never tears the row apart.
+     *
+     * Only measure: the row's buttons are positioned later, by the same loops that position the
+     * plain buttons. Moving them here instead would break the column-split test below, which
+     * compares `bt` against the button after it -- one moved and one still at its layout position
+     * are not comparable. */
     if (bt + 1 < end && but_is_row_alignment_group((*bt).get(), bt[1].get())) {
       int width = 0;
       const int alignnr = (*bt)->alignnr;
       for (col_bt = bt; col_bt < end && (*col_bt)->alignnr == alignnr; col_bt++) {
-        width += BLI_rctf_size_x(&(*col_bt)->rect);
-        (*col_bt)->rect.xmin += x1addval;
-        (*col_bt)->rect.xmax += x1addval;
+        /* When the columns hug their text, a member that has text is measured by its text, exactly
+         * as the plain buttons above are: its rect is still whatever width the layout handed out,
+         * and a menu item is defined at a placeholder width (see #def_but_rna__menu) unrelated to
+         * the text -- taking it would peg every column holding a row to that placeholder. A member
+         * with no text to measure (an icon toggle) still contributes its rect, since that is all it
+         * occupies. Otherwise the row keeps its laid-out width, which is what every menu that has
+         * not opted in relies on to keep its rows intact. */
+        const Button *member = (*col_bt).get();
+        width += (cols_hug_text && !member->drawstr.empty()) ?
+                     BLF_width(style->widget.uifont_id,
+                               member->drawstr.c_str(),
+                               member->drawstr.size()) :
+                     int(BLI_rctf_size_x(&member->rect));
       }
       i = std::max(width, i);
       /* Give the following code the last button in the alignment group, there might have to be a
-       * split immediately after. */
-      bt = col_bt != end ? col_bt-- : nullptr;
+       * split immediately after. `col_bt` has stopped one past the group's last button (or at
+       * `end` if the group runs to the end of the block), so step back to that last button. The
+       * group always has at least two buttons here (that's what #but_is_row_alignment_group just
+       * matched), so `col_bt - 1` can never move before `bt`.
+       *
+       * NOTE: this used to read `bt = col_bt != end ? col_bt-- : nullptr`, which is a mis-port of
+       * the linked-list `bt = col_bt ? col_bt->prev : nullptr`: `col_bt--` evaluates to `col_bt`,
+       * i.e. the button *after* the group, and the `nullptr` branch was left unguarded once the
+       * test below became `bt < end` (a null pointer passes it, and is then dereferenced). Both
+       * are upstream defects, not fork-local. */
+      bt = col_bt - 1;
     }
 
     if (bt < end && (bt + 1 < end) && (*bt)->rect.xmin < bt[1]->rect.xmin) {
       /* End of this column, and it's not the last one. */
-      const int col_width = is_first_col ? std::max(i + block->bounds, first_col_minwidth) :
-                                           i + block->bounds;
+      const int col_width = is_first_col ? std::max(i + col_padding, first_col_minwidth) :
+                                           i + col_padding;
       for (col_bt = init_col_bt; (col_bt - 1) != bt; col_bt++) {
+        /* Place a horizontal alignment group as one unit (see #block_bounds_place_align_group);
+         * assigning its buttons the column's rect, as the plain buttons below get, would collapse
+         * the row onto itself. Looped rather than checked once, to cover groups stacked back-to-back
+         * with no plain button between them. The "last column" loop below does the same. */
+        while ((col_bt < bt) && but_is_row_alignment_group((*col_bt).get(), col_bt[1].get())) {
+          const int alignnr = (*col_bt)->alignnr;
+          std::unique_ptr<Button> *group_first = col_bt;
+          for (; (col_bt - 1) != bt && (*col_bt)->alignnr == alignnr; col_bt++) {
+            /* pass */
+          }
+          block_bounds_place_align_group(
+              group_first, col_bt, x1addval, col_width - row_inset, cols_hug_text);
+        }
+        if ((col_bt - 1) == bt) {
+          break;
+        }
+
         (*col_bt)->rect.xmin = x1addval;
         (*col_bt)->rect.xmax = x1addval + col_width;
 
@@ -513,29 +622,41 @@ static void block_bounds_calc_text(Block *block, float offset)
     }
   }
 
-  /* Last column. */
+  /* Last column. Its right edge is the same for every button in it and nothing below changes what
+   * it is built from, so it is computed once here rather than per button: an alignment group needs
+   * it before the loop ever reaches a plain button. */
+  /* Last column may also be the first (single-column menu): honor the first-column minimum too. */
+  int last_col_width = i + col_padding;
+  if (is_first_col) {
+    last_col_width = std::max(last_col_width, first_col_minwidth);
+  }
+  /* #Block.minbounds is a floor on the total menu width (an absolute xmax), not a per-column
+   * width; applying it as a column width would stretch the last column by the whole menu minimum
+   * whenever earlier columns are wide. */
+  const float last_col_xmax = max_ff(x1addval + last_col_width, offset + block->minbounds);
+
   for (col_bt = init_col_bt; col_bt < end; col_bt++) {
-    /* Recognize a horizontally arranged alignment group and skip its items. */
-    if ((col_bt + 1 < end) && but_is_row_alignment_group((*col_bt).get(), col_bt[1].get())) {
+    /* Place a horizontal alignment group as one unit, exactly as the mid-column loop above does
+     * (see #block_bounds_place_align_group). Looped rather than checked once, to cover groups
+     * stacked back-to-back. */
+    while ((col_bt + 1 < end) && but_is_row_alignment_group((*col_bt).get(), col_bt[1].get())) {
       const int alignnr = (*col_bt)->alignnr;
+      std::unique_ptr<Button> *group_first = col_bt;
       for (; col_bt < end && (*col_bt)->alignnr == alignnr; col_bt++) {
         /* pass */
       }
+      block_bounds_place_align_group(group_first,
+                                     col_bt,
+                                     x1addval,
+                                     int(last_col_xmax) - x1addval - row_inset,
+                                     cols_hug_text);
     }
     if (col_bt == end) {
       break;
     }
 
     (*col_bt)->rect.xmin = x1addval;
-    /* Last column may also be the first (single-column menu): honor the first-column minimum too.
-     * #Block.minbounds is a floor on the total menu width (an absolute xmax), not a per-column
-     * width; applying it as a column width would stretch the last column by the whole menu minimum
-     * whenever earlier columns are wide. */
-    int last_col_width = i + block->bounds;
-    if (is_first_col) {
-      last_col_width = std::max(last_col_width, first_col_minwidth);
-    }
-    (*col_bt)->rect.xmax = max_ff(x1addval + last_col_width, offset + block->minbounds);
+    (*col_bt)->rect.xmax = last_col_xmax;
 
     button_update((*col_bt).get()); /* clips text again */
   }
@@ -6121,6 +6242,29 @@ void button_func_pushed_state_set(Button *but, std::function<bool(const Button &
 {
   but->pushed_state_func = std::move(func);
   button_update(but);
+}
+
+void button_tab_menu_set(Button *but, MenuType *mt, void *custom_data)
+{
+  BLI_assert(but->type == ButtonType::Tab);
+  ButtonTab *tab = static_cast<ButtonTab *>(but);
+  tab->menu = mt;
+  tab->custom_data = custom_data;
+}
+
+void *context_active_but_tab_custom_data_get(const bContext *C)
+{
+  /* The popup region is respected because this runs from a tab's context-menu draw callback, while
+   * the popup hosting the tab is still being handled: #CTX_wm_region then points at the region the
+   * popup was invoked from (#PopupBlockHandle.ctx_region, restored by #handle_menu_button), which
+   * holds no tab -- so a tab in a popup would never be found. #popup_context_menu_for_button, which
+   * is what calls this menu's draw, resolves the region for its own hit-tests the same way. Tabs in
+   * an ordinary region (e.g. workspace tabs) set no popup region, so they resolve as before. */
+  const Button *but = context_active_but_get_respect_popup(C);
+  if (but && but->type == ButtonType::Tab) {
+    return but->custom_data;
+  }
+  return nullptr;
 }
 
 Button *uiDefBlockBut(Block *block,

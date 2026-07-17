@@ -1486,6 +1486,10 @@ static void template_ID(const bContext *C,
 
 ID *context_active_but_get_tab_ID(bContext *C)
 {
+  /* Deliberately not #context_active_but_get_respect_popup, which the untyped counterpart
+   * (#context_active_but_tab_custom_data_get) does use: this serves operators (see
+   * #workspace_context_get) rather than a menu draw, so it must keep resolving against the region
+   * the tab lives in, which for an operator may differ from the active popup. */
   Button *but = context_active_but_get(C);
 
   if (but && but->type == ButtonType::Tab) {
@@ -1521,25 +1525,26 @@ static void template_ID_tabs(const bContext *C,
     const int name_width = fontstyle_string_width(&style->widget, id->name + 2);
     const int but_width = name_width + UI_UNIT_X;
 
-    ButtonTab *tab = static_cast<ButtonTab *>(uiDefButR_prop(block,
-                                                             ButtonType::Tab,
-                                                             id->name + 2,
-                                                             0,
-                                                             0,
-                                                             but_width,
-                                                             but_height,
-                                                             &template_id.ptr,
-                                                             template_id.prop,
-                                                             0,
-                                                             0.0f,
-                                                             sizeof(id->name) - 2,
-                                                             ""));
+    Button *tab = uiDefButR_prop(block,
+                                 ButtonType::Tab,
+                                 id->name + 2,
+                                 0,
+                                 0,
+                                 but_width,
+                                 but_height,
+                                 &template_id.ptr,
+                                 template_id.prop,
+                                 0,
+                                 0.0f,
+                                 sizeof(id->name) - 2,
+                                 "");
     button_func_set(tab, [id = id, template_ui = template_id](bContext &C) mutable {
       template_ID_set_property_exec_fn(&C, &template_ui, id);
     });
     button_drag_set_id(tab, id);
-    tab->custom_data = static_cast<void *>(id);
-    tab->menu = mt;
+    /* The menu and the data it acts on are set together, so a tab can never end up with one and
+     * not the other (read back by #context_active_but_get_tab_ID). */
+    button_tab_menu_set(tab, mt, static_cast<void *>(id));
 
     button_drawflag_enable(tab, but_align);
   }

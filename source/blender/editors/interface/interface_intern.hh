@@ -783,6 +783,38 @@ struct Block {
    * header menus); those leave this at 0, so their layout is unchanged. Only set it for the
    * popup-menu case it was validated for. */
   int menu_first_col_minwidth = 0;
+  /** Ask #block_bounds_calc_text for columns that hug their content, and say what each column adds
+   * on top of its widest text (px). 0 = off.
+   *
+   * Off, a column's padding is #Block.bounds, which #block_bounds_calc_popup sets to a blanket 2.5
+   * units. That blanket covers what the pass does not measure -- the left text margin
+   * (#UI_TEXT_MARGIN_X) and an icon column -- plus slack. A single-column enum menu pays it once,
+   * which is why it goes unnoticed there; a menu laying its items out in several columns pays it
+   * per column, and every column ends up wider than its text.
+   *
+   * Setting this also makes a row of aligned buttons in a column measured by its text rather than
+   * by the width the layout handed it, and then stretched to fill the column, so a row hugs the
+   * column as a plain button does. That is deliberately not the default: a menu whose column holds
+   * only such a row would have it sized to its text and the row would then have to give back more
+   * width than its trailing buttons occupy.
+   *
+   * Note that a row is *placed* as a unit regardless of this field (see
+   * #block_bounds_place_align_group) -- only the measuring and the stretching are opt-in. A menu
+   * that leaves this at 0 keeps its rows at the widths the layout gave them, sitting at the
+   * column's left edge.
+   *
+   * Same restraint as #Block.menu_first_col_minwidth: leave it at 0 unless the menu was checked
+   * with it. */
+  int menu_col_padding = 0;
+  /** How far short of a column's right edge a row of aligned buttons stops (px), so its last button
+   * lands beside the column's content rather than on the edge, where the next column begins. Only
+   * read when #Block.menu_col_padding is set.
+   *
+   * Plain buttons are stretched to the whole column and their text is left-aligned, so the padding
+   * simply trails off as empty space; a row's last button is flush right and would otherwise sit in
+   * that space. Keep it smaller than the gap folded into #Block.menu_col_padding: the difference is
+   * what stays between the row's text and its trailing buttons. */
+  int menu_col_row_inset = 0;
 
   /** Pull-downs, to detect outside, can differ per case how it is created. */
   rctf safety = {};

@@ -214,8 +214,11 @@ void library_selector_draw(const bContext *C, ui::Layout &layout, AssetShelf &sh
       &CTX_wm_screen(C)->id, RNA_AssetShelf, &shelf);
 
   ui::Layout &row = layout.row(true);
+  /* Offer the pin toggles only on the popup shelf: it is the only host that draws the pinned
+   * library tab row (see #pinned_tabs_draw). This same function also serves the sidebar's catalog
+   * selector panel, where a pin would set state with nothing on screen to show for it. */
   ui::template_asset_library_column_selector(
-      row, C, &shelf_ptr, "asset_library_reference", ICON_NONE);
+      row, C, &shelf_ptr, "asset_library_reference", ICON_NONE, /*show_pins=*/shelf.is_popup != 0);
   if (shelf.settings.asset_library_reference.type != ASSET_LIBRARY_LOCAL) {
     PointerRNA ptr = row.op("ASSET_OT_library_refresh", "", ICON_FILE_REFRESH);
     RNA_boolean_set(&ptr, "use_shift_for_remote_listing", true);

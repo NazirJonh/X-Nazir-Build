@@ -19,9 +19,11 @@
 #include "BLI_string_utf8.h"
 
 #include "BKE_context.hh"
+#include "BKE_preferences.h"
 #include "BKE_screen.hh"
 
 #include "DNA_screen_types.h"
+#include "DNA_userdef_types.h"
 
 #include "BLT_translation.hh"
 
@@ -333,6 +335,31 @@ static void grid_preview_size_panel_register()
 /** \name Shared library menu item
  * \{ */
 
+/* Seed the menu's return value with the library that is already active.
+ *
+ * These menus are drawn for an RNA enum button (#ButtonType::Menu), and when the menu closes that
+ * parent button unconditionally applies #PopupBlockHandle.retvalue to the property
+ * (#apply_but_BLOCK). Only a library choice writes that field, so any other button that closes the
+ * menu -- the pin toggle -- would leave it at its initial 0, which is not a valid asset-library
+ * enum value and trips the assert in #ed::asset::library_reference_from_enum_value.
+ *
+ * Seeding it with the current value makes such a close apply the library that is already set, i.e.
+ * a no-op. A real choice overwrites the seed before the menu closes.
+ *
+ * \note "No-op" is about the stored value only. The apply still runs: RNA does not short-circuit a
+ * write of an equal value, so closing the menu by clicking a pin re-sets
+ * `asset_library_reference`, fires its update callback and pushes undo on the parent button
+ * (#BUT_UNDO is cleared on the pin itself, not on the button the menu belongs to). That is
+ * invisible but not free. It is the price of the pin closing the menu, which is a deliberate
+ * choice -- the alternatives were traced and are worse -- so fixing it means revisiting that
+ * choice, not this seed. */
+static void library_selector_seed_retvalue(PopupBlockHandle *handle, const int current_value)
+{
+  if (handle) {
+    handle->retvalue = current_value;
+  }
+}
+
 /* Whether any selectable item in the enum has an icon (used to align icon-less items). */
 static bool library_enum_has_item_with_icon(const EnumPropertyItem *items)
 {
@@ -354,7 +381,8 @@ static void library_selector_menu_item(Block *block,
                                        PopupBlockHandle *handle,
                                        const EnumPropertyItem &item,
                                        const int current_value,
-                                       const bool has_item_with_icon)
+                                       const bool has_item_with_icon,
+                                       const bool show_pin)
 {
   int icon = item.icon;
   if (icon == ICON_NONE && has_item_with_icon) {
@@ -362,7 +390,15 @@ static void library_selector_menu_item(Block *block,
     icon = ICON_BLANK1;
   }
 
-  block_layout_set_current(block, &column);
+  /* One row per entry: the choice button fills it, the pin sits at its right edge. Must be
+   * aligned (`row(true)`): #block_bounds_calc_text lays the surrounding menu out in columns by
+   * comparing each button's `xmin` against the next, and would otherwise mistake the boundary
+   * between the choice and pin buttons for a real column break (splitting every pinnable entry
+   * into its own column and starving #Block.menu_first_col_minwidth after the first). Aligning
+   * gives both buttons a shared #Button.alignnr, which #but_is_row_alignment_group() (interface.cc)
+   * uses to skip over the pair as one unit instead of splitting it. */
+  Layout &item_row = column.row(true);
+  block_layout_set_current(block, &item_row);
 
   Button *but;
   if (icon) {
@@ -408,6 +444,45 @@ static void library_selector_menu_item(Block *block,
         },
         description_copy,
         MEM_delete_void);
+  }
+
+  /* Pin toggle. Only drawn for hosts that show the pinned libraries (the asset shelf popover's tab
+   * row); everywhere else this selector is reused the toggle would change state with nothing on
+   * screen to show for it.
+   *
+   * Only custom libraries can be pinned: All / Current File / Essentials are not entries in
+   * #UserDef.asset_libraries, so there is nowhere to store the flag. Their enum values are exactly
+   * the ones below #ASSET_LIBRARY_CUSTOM, so that one test covers it. Folders never reach here at
+   * all -- they are not selectable leaves.
+   *
+   * This fires the operator rather than writing the flag directly: the operator owns marking the
+   * Preferences dirty and notifying open popovers, and this keeps that in one place. */
+  if (show_pin && item.value >= ASSET_LIBRARY_CUSTOM) {
+    const AssetLibraryReference library_ref = ed::asset::library_reference_from_enum_value(
+        item.value);
+    if (const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(
+            &U, &library_ref))
+    {
+      const bool is_pinned = (user_library->flag & ASSET_LIBRARY_IS_PINNED) != 0;
+      Button *pin_but = uiDefIconButO(
+          block,
+          ButtonType::But,
+          "PREFERENCES_OT_asset_library_pin_set",
+          wm::OpCallContext::ExecDefault,
+          is_pinned ? ICON_PINNED : ICON_UNPINNED,
+          0,
+          0,
+          short(UI_UNIT_X),
+          short(UI_UNIT_Y),
+          is_pinned ? TIP_("Unpin this library from the asset shelf popover") :
+                      TIP_("Pin this library as a tab at the top of the asset shelf popover"));
+      PointerRNA *pin_opptr = button_operator_ptr_ensure(pin_but);
+      RNA_string_set(pin_opptr, "library_name", user_library->name);
+      /* The state to apply is decided here, where the icon showing it is also decided, so the two
+       * can never disagree. */
+      RNA_boolean_set(pin_opptr, "pinned", !is_pinned);
+      button_flag_disable(pin_but, BUT_UNDO);
+    }
   }
 
   if (item.value == current_value) {
@@ -474,6 +549,7 @@ static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *b
   block_layout_set_current(block, layout);
 
   const int current_value = RNA_property_enum_get(&ptr, prop);
+  library_selector_seed_retvalue(handle, current_value);
   const bool has_item_with_icon = library_enum_has_item_with_icon(items);
 
   Layout &col = layout->column(false);
@@ -497,7 +573,9 @@ static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *b
       }
       continue;
     }
-    library_selector_menu_item(block, col, handle, *item, current_value, has_item_with_icon);
+    /* No pin: this vertical selector has no host that shows the pinned libraries. */
+    library_selector_menu_item(
+        block, col, handle, *item, current_value, has_item_with_icon, /*show_pin=*/false);
     prev_was_separator = false;
   }
 
@@ -517,8 +595,14 @@ static void grid_library_selector_menu_draw(bContext *C, Layout *layout, void *b
  * built-in dropdown (#def_but_rna__menu) splits the width evenly and re-sizes columns to their
  * content, so it can't hold the first column to the button; a plain #Layout::row of #Layout::column
  * items can, because #LayoutRow honors a fixed-size column. Called with the calling RNA enum button
- * (#Button::poin); the source pointer and property are read live from it. */
-static void asset_library_column_menu_draw(bContext *C, Layout *layout, void *but_p)
+ * (#Button::poin); the source pointer and property are read live from it.
+ *
+ * \param show_pins: see #template_asset_library_column_selector. A #MenuCreateFunc takes no extra
+ * arguments, hence the two thin wrappers below rather than a parameter on the drawer itself. */
+static void asset_library_column_menu_draw_impl(bContext *C,
+                                                Layout *layout,
+                                                void *but_p,
+                                                const bool show_pins)
 {
   Button *but = static_cast<Button *>(but_p);
   Block *block = layout->block();
@@ -557,7 +641,50 @@ static void asset_library_column_menu_draw(bContext *C, Layout *layout, void *bu
   }
 
   const int current_value = RNA_property_enum_get(&ptr, prop);
+  library_selector_seed_retvalue(handle, current_value);
   const bool has_item_with_icon = library_enum_has_item_with_icon(items);
+
+  /* What each column needs beyond its widest text. #block_bounds_calc_text measures the text alone,
+   * so this padding has to carry everything the widget puts around it, or the longest name in each
+   * column gets ellipsized. The figures come from the draw code, not from the layout's estimator
+   * (whose `text_pad_none` is about a different question and is short of what is needed here):
+   *
+   * - 0.125 each side: the menu item's own box padding. #widget_menu_itembut shrinks the rect in
+   *   place and the text is then drawn into that same, smaller rect.
+   * - #UI_TEXT_MARGIN_X: the left text margin, applied via #button_text_padding.
+   * - 0.25: the margin #text_clip_middle keeps free before it starts ellipsizing
+   *   (#UI_TEXT_CLIP_MARGIN). #ButtonType::ButMenu is not one of the types exempt from it.
+   * - The icon column, when the items show icons (#widget_draw_text_icon: 0.2 for a menu item plus
+   *   the icon and its padding).
+   *
+   * Cross-check on the derivation: with an icon these sum to 2.0, so with the gap below they land
+   * exactly on the 2.5-unit blanket #block_bounds_calc_popup hands the pass -- that blanket is the
+   * icon case's requirement, which an ordinary single-column enum menu pays once. This menu draws a
+   * column per folder and would pay it in every one, so it says what its own items need instead.
+   *
+   * WARNING: this is a silent coupling to the draw code, in both directions. Nothing here breaks at
+   * compile time if #widget_menu_itembut or #UI_TEXT_CLIP_MARGIN changes its padding -- the figures
+   * simply drift out of agreement with what is drawn, and the longest name in a column starts
+   * clipping (or gains slack) again. Re-check this block against the draw code after any upstream
+   * merge that touches `interface_widgets.cc`. The one cheap test: open the selector with a folder
+   * whose longest library name nearly fills its column and confirm it is not ellipsized. */
+  {
+    const float box_padding_units = 2.0f * 0.125f;
+    const float clip_margin_units = 0.25f;
+    const float icon_units = has_item_with_icon ? 1.1f : 0.0f;
+    const float col_gap_units = 0.5f;
+    block->menu_col_padding = int((box_padding_units + UI_TEXT_MARGIN_X + clip_margin_units +
+                                   icon_units + col_gap_units) *
+                                  UI_UNIT_X);
+    /* Where a row's pin stops: exactly the inset #widget_draw gives a menu's separator line
+     * (`BLI_rcti_pad(rect, -7 * UI_SCALE_FAC, 0)`), so the pin lines up with the end of the rule
+     * that underlines the column's heading instead of sitting on the column boundary. Written the
+     * same way the draw writes it: #UI_UNIT_X is not a whole 20 * #UI_SCALE_FAC
+     * (#WM_window_dpi_set_userdef rounds it), so a fraction of a unit would not land on the same
+     * pixel. Smaller than `col_gap_units` above, so the row's text keeps its slack and stays
+     * unclipped. */
+    block->menu_col_row_inset = int(7.0f * UI_SCALE_FAC);
+  }
 
   Layout &columns = layout->row(false);
   Layout *column = nullptr;
@@ -582,7 +709,8 @@ static void asset_library_column_menu_draw(bContext *C, Layout *layout, void *bu
       column->label("", ICON_NONE);
       column->separator();
     }
-    library_selector_menu_item(block, *column, handle, *item, current_value, has_item_with_icon);
+    library_selector_menu_item(
+        block, *column, handle, *item, current_value, has_item_with_icon, show_pins);
   }
 
   if (free) {
@@ -590,10 +718,29 @@ static void asset_library_column_menu_draw(bContext *C, Layout *layout, void *bu
   }
 }
 
-void template_asset_library_column_selector(
-    Layout &row, const bContext * /*C*/, PointerRNA *ptr, StringRefNull prop_name, int icon)
+static void asset_library_column_menu_draw(bContext *C, Layout *layout, void *but_p)
 {
-  library_selector_menu_button(row, ptr, prop_name, icon, asset_library_column_menu_draw);
+  asset_library_column_menu_draw_impl(C, layout, but_p, /*show_pins=*/false);
+}
+
+static void asset_library_column_menu_draw_pins(bContext *C, Layout *layout, void *but_p)
+{
+  asset_library_column_menu_draw_impl(C, layout, but_p, /*show_pins=*/true);
+}
+
+void template_asset_library_column_selector(Layout &row,
+                                            const bContext * /*C*/,
+                                            PointerRNA *ptr,
+                                            StringRefNull prop_name,
+                                            int icon,
+                                            const bool show_pins)
+{
+  library_selector_menu_button(
+      row,
+      ptr,
+      prop_name,
+      icon,
+      show_pins ? asset_library_column_menu_draw_pins : asset_library_column_menu_draw);
 }
 
 /** \} */

@@ -11,6 +11,7 @@
 #include <optional>
 
 #include "BLI_function_ref.hh"
+#include "BLI_string_ref.hh"
 
 namespace blender {
 
@@ -53,6 +54,21 @@ AssetShelfType *ensure_shelf_has_type(AssetShelf &shelf);
 AssetShelf *create_shelf_from_type(AssetShelfType &type);
 
 void library_selector_draw(const bContext *C, ui::Layout &layout, AssetShelf &shelf);
+
+/**
+ * Width in pixels a tab button needs to show \a name in full, as used by the shelf's catalog tabs
+ * and the popover's pinned library tabs. Shared so the two tab rows stay visually identical, and so
+ * a row can be measured (for wrapping) without building its buttons.
+ *
+ * \note Capping the result is the caller's call, not this function's: the shelf's catalog tabs sit
+ * in a single header row and cap it, the popover's tab row wraps instead and does not.
+ *
+ * \note This is *not* the only tab width formula in the tree: #template_ID_tabs (workspace and ID
+ * tabs) pads by a whole #UI_UNIT_X rather than the 0.3 each side used here. That is deliberate --
+ * those tabs are a different widget in a different host -- so do not "unify" the two without
+ * deciding which look wins.
+ */
+int tab_button_width(StringRefNull name);
 
 /**
  * Deep-copies \a shelf_regiondata into newly allocated memory. Must be freed using

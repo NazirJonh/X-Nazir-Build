@@ -210,6 +210,32 @@ bool BKE_preferences_asset_library_reorder(UserDef *userdef,
     ATTR_NONNULL(1, 2, 3);
 
 /**
+ * Pin or unpin \a library, which controls whether it appears as a tab at the top of the asset
+ * shelf popover. Maintains the dense ordering of #bUserAssetLibrary.pin_order; a newly pinned
+ * library is appended last.
+ */
+void BKE_preferences_asset_library_pin_set(struct UserDef *userdef,
+                                           struct bUserAssetLibrary *library,
+                                           bool pinned) ATTR_NONNULL();
+
+/**
+ * Move \a library to \a new_index among the pinned libraries, renumbering the others to keep the
+ * order dense. \a new_index is clamped to the valid range.
+ *
+ * \note Unrelated to #BKE_preferences_asset_library_reorder, which reorders the Preferences folder
+ * tree.
+ *
+ * \return false if \a library is not pinned, or is already at \a new_index.
+ */
+bool BKE_preferences_asset_library_pin_reorder(struct UserDef *userdef,
+                                               struct bUserAssetLibrary *library,
+                                               int new_index) ATTR_NONNULL();
+
+/** \return the number of libraries carrying #ASSET_LIBRARY_IS_PINNED. */
+int BKE_preferences_asset_library_pinned_count(const struct UserDef *userdef)
+    ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
+
+/**
  * Restore parent pointers from parent_name strings in the asset library hierarchy.
  *
  * This function must be called after reading UserDef from a file to reconstruct

@@ -674,7 +674,10 @@ struct bUserAssetLibrary {
   short flag = ASSET_LIBRARY_RELATIVE_PATH; /* eAssetLibrary_Flag */
   /** Type of item: #eUserAssetLibraryItemType (LEAF for library, FOLDER for container). */
   short type = USER_ASSET_LIBRARY_ITEM_TYPE_LEAF;
-  char _pad0[2] = {};
+  /** Position of this library in the popover's pinned tab row. Dense over `0 .. N-1` across all
+   * libraries carrying #ASSET_LIBRARY_IS_PINNED; meaningless (and zero) on the others. Written
+   * only by the `BKE_preferences_asset_library_pin_*` functions, which maintain that invariant. */
+  short pin_order = 0;
 
   /** Runtime pointer to the parent folder. The persistent hierarchy is stored in #parent_name;
    * this pointer is written to disk by DNA but its saved value is meaningless (a stale address),

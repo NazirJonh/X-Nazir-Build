@@ -8,6 +8,8 @@
  * User defined asset library API.
  */
 
+#include <algorithm>
+#include <climits>
 #include <cstring>
 
 #include "AS_essentials_library.hh"
@@ -19,6 +21,7 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_appdir.hh"
 #include "BKE_asset.hh"
@@ -208,12 +211,20 @@ bUserAssetLibrary *BKE_preferences_asset_library_add(UserDef *userdef,
   return library;
 }
 
+/* Defined with the rest of the pinned-library API below. Declared here because every removal has to
+ * re-compact the pin order. */
+static void asset_library_pin_order_compact(UserDef *userdef);
+
 void BKE_preferences_asset_library_remove(UserDef *userdef, bUserAssetLibrary *library)
 {
   /* Caller must ensure the library has no children (use BKE_preferences_asset_library_can_delete).
    * Removing a library with children would leave dangling parent pointers. */
   BLI_assert(BKE_preferences_asset_library_can_delete(userdef, library));
   BLI_freelinkN(&userdef->asset_libraries, library);
+
+  /* The entry just removed may have been pinned, which would leave a hole in the ordering. Every
+   * removal in the codebase funnels through here, so this one call covers them all. */
+  asset_library_pin_order_compact(userdef);
 }
 
 /**
@@ -659,6 +670,102 @@ bool BKE_preferences_asset_library_reorder(UserDef *userdef,
   for (int i = 1; i < items_to_move.size(); i++) {
     BLI_insertlinkafter(&userdef->asset_libraries, items_to_move[i - 1], items_to_move[i]);
   }
+
+  return true;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Pinned Asset Libraries
+ * \{ */
+
+/* Re-establish the dense 0..N-1 ordering over the pinned libraries, preserving their relative
+ * order. Every pin mutation ends here, which is what keeps #bUserAssetLibrary.pin_order free of
+ * gaps and duplicates -- the invariant the popover's tab row relies on. */
+static void asset_library_pin_order_compact(UserDef *userdef)
+{
+  Vector<bUserAssetLibrary *> pinned;
+  for (bUserAssetLibrary &library : userdef->asset_libraries) {
+    if (library.flag & ASSET_LIBRARY_IS_PINNED) {
+      pinned.append(&library);
+    }
+  }
+  /* Stable, so two entries that somehow share an order keep their listbase order rather than
+   * swapping unpredictably. */
+  std::stable_sort(pinned.begin(),
+                   pinned.end(),
+                   [](const bUserAssetLibrary *a, const bUserAssetLibrary *b) {
+                     return a->pin_order < b->pin_order;
+                   });
+  for (const int i : pinned.index_range()) {
+    pinned[i]->pin_order = short(i);
+  }
+}
+
+void BKE_preferences_asset_library_pin_set(UserDef *userdef,
+                                           bUserAssetLibrary *library,
+                                           const bool pinned)
+{
+  if (pinned == ((library->flag & ASSET_LIBRARY_IS_PINNED) != 0)) {
+    return;
+  }
+
+  if (pinned) {
+    library->flag |= ASSET_LIBRARY_IS_PINNED;
+    /* Sort last; the compaction below turns this into the real (dense) trailing index, so there is
+     * no need to count the existing pins here. */
+    library->pin_order = SHRT_MAX;
+  }
+  else {
+    library->flag &= ~ASSET_LIBRARY_IS_PINNED;
+    library->pin_order = 0;
+  }
+
+  asset_library_pin_order_compact(userdef);
+}
+
+int BKE_preferences_asset_library_pinned_count(const UserDef *userdef)
+{
+  int count = 0;
+  for (const bUserAssetLibrary &library : userdef->asset_libraries) {
+    if (library.flag & ASSET_LIBRARY_IS_PINNED) {
+      count++;
+    }
+  }
+  return count;
+}
+
+bool BKE_preferences_asset_library_pin_reorder(UserDef *userdef,
+                                               bUserAssetLibrary *library,
+                                               const int new_index)
+{
+  if ((library->flag & ASSET_LIBRARY_IS_PINNED) == 0) {
+    return false;
+  }
+
+  const int count = BKE_preferences_asset_library_pinned_count(userdef);
+  const int target = std::clamp(new_index, 0, count - 1);
+  const int current = library->pin_order;
+  if (target == current) {
+    return false;
+  }
+
+  /* Shift everything between the old and the new slot one step towards the slot being vacated,
+   * then drop the library into the new one. The order is dense on entry (invariant), so this
+   * leaves it dense without a re-compaction. */
+  for (bUserAssetLibrary &other : userdef->asset_libraries) {
+    if (&other == library || (other.flag & ASSET_LIBRARY_IS_PINNED) == 0) {
+      continue;
+    }
+    if (target < current && other.pin_order >= target && other.pin_order < current) {
+      other.pin_order++;
+    }
+    else if (target > current && other.pin_order > current && other.pin_order <= target) {
+      other.pin_order--;
+    }
+  }
+  library->pin_order = short(target);
 
   return true;
 }

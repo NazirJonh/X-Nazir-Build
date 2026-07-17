@@ -1278,9 +1278,17 @@ void button_drawflag_disable(Button *but, int flag);
  * headings become side-by-side columns and the first (folder-less) column is pinned to the
  * selector button's width. Use in place of a plain #Layout::prop on the property, when the enum
  * groups its items under folder headings.
+ *
+ * \param show_pins: add a pin toggle to each custom library's row. Only for hosts that actually
+ * display the pinned libraries (the asset shelf popover's tab row); elsewhere the toggle would
+ * change state with nothing on screen to show for it.
  */
-void template_asset_library_column_selector(
-    Layout &row, const bContext *C, PointerRNA *ptr, StringRefNull prop_name, int icon);
+void template_asset_library_column_selector(Layout &row,
+                                            const bContext *C,
+                                            PointerRNA *ptr,
+                                            StringRefNull prop_name,
+                                            int icon,
+                                            bool show_pins = false);
 
 void button_dragflag_enable(Button *but, int flag);
 void button_dragflag_disable(Button *but, int flag);
@@ -3095,7 +3103,35 @@ void context_active_but_prop_get_filebrowser(const bContext *C,
 void context_active_but_prop_get_templateID(const bContext *C,
                                             PointerRNA *r_ptr,
                                             PropertyRNA **r_prop);
+/**
+ * \return the #ID a #ButtonType::Tab acts on, for tabs backed by one (see #template_ID_tabs).
+ *
+ * Resolves the active button against #CTX_wm_region, *not* against the active popup, which is what
+ * the untyped #context_active_but_tab_custom_data_get below does instead. Pick between the two by
+ * who calls you: this one serves operators, which may run while an unrelated popup is open, so it
+ * must keep resolving against the region the tab lives in.
+ */
 ID *context_active_but_get_tab_ID(bContext *C);
+/**
+ * Attach a context menu to a #ButtonType::Tab, along with the data the menu acts on. Setting both
+ * together is the point: a tab with a menu but no data (or the reverse) is a bug the menu's draw
+ * would have to discover at runtime.
+ *
+ * \param custom_data: borrowed, not owned; must outlive the button. Read back with
+ * #context_active_but_tab_custom_data_get from the menu's draw callback.
+ */
+void button_tab_menu_set(Button *but, MenuType *mt, void *custom_data);
+/**
+ * \return the `custom_data` of the active button if it is a #ButtonType::Tab, else null. The
+ * untyped counterpart to #context_active_but_get_tab_ID, for tabs not backed by an #ID.
+ *
+ * Meant for a tab's context-menu draw callback, so unlike #context_active_but_get_tab_ID it
+ * resolves the button against the popup region when there is one (see
+ * #context_active_but_get_respect_popup): a tab hosted in a popup is not reachable from
+ * #CTX_wm_region, which still points at the region the popup was invoked from. Tabs in an ordinary
+ * region (e.g. workspace tabs) set no popup region, so they resolve identically either way.
+ */
+void *context_active_but_tab_custom_data_get(const bContext *C);
 
 Button *region_active_but_get(const ARegion *region);
 Button *region_but_find_rect_over(const ARegion *region, const rcti *rect_px);

@@ -504,6 +504,154 @@ static void PREFERENCES_OT_asset_library_remove(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Pin Asset Library Operators
+ * \{ */
+
+/* Both operators identify their library by name rather than by index: the index into
+ * #UserDef.asset_libraries shifts whenever the Preferences list is edited, and these operators can
+ * outlive that edit (they are fired from a popover that rebuilds lazily). Names are unique --
+ * #BKE_preferences_asset_library_name_set runs every name through #BLI_uniquename -- and
+ * #AssetLibraryReference identifies its library the same way. */
+static bUserAssetLibrary *library_from_op_props(wmOperator *op)
+{
+  char library_name[sizeof(bUserAssetLibrary::name)];
+  RNA_string_get(op->ptr, "library_name", library_name);
+  return BKE_preferences_asset_library_find_by_name(&U, library_name);
+}
+
+/* Pinning is a Preferences change, so it is global: an asset shelf popover in any window may be
+ * showing the tab row. A popup only rebuilds on #RGN_REFRESH_UI, which is what
+ * #asset_shelf_popover_listen turns this notifier into -- a plain redraw tag would leave a stale
+ * tab row behind. */
+static void library_pin_changed_notify()
+{
+  U.runtime.is_dirty = true;
+  WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+}
+
+static wmOperatorStatus preferences_asset_library_pin_set_exec(bContext * /*C*/, wmOperator *op)
+{
+  bUserAssetLibrary *library = library_from_op_props(op);
+  if (!library) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool pinned = RNA_boolean_get(op->ptr, "pinned");
+  if (pinned == ((library->flag & ASSET_LIBRARY_IS_PINNED) != 0)) {
+    /* Nothing to do; not an error. */
+    return OPERATOR_CANCELLED;
+  }
+
+  BKE_preferences_asset_library_pin_set(&U, library, pinned);
+  library_pin_changed_notify();
+
+  return OPERATOR_FINISHED;
+}
+
+static void PREFERENCES_OT_asset_library_pin_set(wmOperatorType *ot)
+{
+  ot->name = "Pin Asset Library";
+  ot->description =
+      "Pin or unpin an asset library, showing it as a tab at the top of the asset shelf popover";
+  ot->idname = "PREFERENCES_OT_asset_library_pin_set";
+
+  ot->exec = preferences_asset_library_pin_set_exec;
+
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_string(ot->srna,
+                 "library_name",
+                 nullptr,
+                 sizeof(bUserAssetLibrary::name),
+                 "Library Name",
+                 "Name of the asset library to pin or unpin");
+  /* Stated rather than toggled, so a caller that already knows the state it wants (the "Unpin
+   * Library" menu entry, say) cannot flip the wrong way if the flag changed underneath it. */
+  RNA_def_boolean(ot->srna, "pinned", true, "Pinned", "Whether the library should be pinned");
+}
+
+enum class LibraryPinMove {
+  Left = 0,
+  Right = 1,
+  Front = 2,
+  Back = 3,
+};
+
+static const EnumPropertyItem library_pin_move_items[] = {
+    {int(LibraryPinMove::Left), "LEFT", 0, "Move Left", "Move the tab one position to the left"},
+    {int(LibraryPinMove::Right),
+     "RIGHT",
+     0,
+     "Move Right",
+     "Move the tab one position to the right"},
+    {int(LibraryPinMove::Front), "FRONT", 0, "Reorder to Front", "Move the tab to the front"},
+    {int(LibraryPinMove::Back), "BACK", 0, "Reorder to Back", "Move the tab to the back"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static wmOperatorStatus preferences_asset_library_pin_reorder_exec(bContext * /*C*/,
+                                                                   wmOperator *op)
+{
+  bUserAssetLibrary *library = library_from_op_props(op);
+  if (!library) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const int count = BKE_preferences_asset_library_pinned_count(&U);
+  const int current = library->pin_order;
+  int new_index = current;
+  switch (LibraryPinMove(RNA_enum_get(op->ptr, "direction"))) {
+    case LibraryPinMove::Left:
+      new_index = current - 1;
+      break;
+    case LibraryPinMove::Right:
+      new_index = current + 1;
+      break;
+    case LibraryPinMove::Front:
+      new_index = 0;
+      break;
+    case LibraryPinMove::Back:
+      new_index = count - 1;
+      break;
+  }
+
+  /* Returns false at the ends of the row (the index clamps back onto the current one), which is
+   * not an error -- there is simply nowhere left to move. */
+  if (!BKE_preferences_asset_library_pin_reorder(&U, library, new_index)) {
+    return OPERATOR_CANCELLED;
+  }
+  library_pin_changed_notify();
+
+  return OPERATOR_FINISHED;
+}
+
+static void PREFERENCES_OT_asset_library_pin_reorder(wmOperatorType *ot)
+{
+  ot->name = "Reorder Pinned Asset Library";
+  ot->description = "Move a library's tab within the asset shelf popover's pinned tab row";
+  ot->idname = "PREFERENCES_OT_asset_library_pin_reorder";
+
+  ot->exec = preferences_asset_library_pin_reorder_exec;
+
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_string(ot->srna,
+                 "library_name",
+                 nullptr,
+                 sizeof(bUserAssetLibrary::name),
+                 "Library Name",
+                 "Name of the asset library whose tab to move");
+  ot->prop = RNA_def_enum(ot->srna,
+                          "direction",
+                          library_pin_move_items,
+                          int(LibraryPinMove::Left),
+                          "Direction",
+                          "Where to move the tab");
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Add Asset Library Folder Operator
  * \{ */
 
@@ -1462,6 +1610,8 @@ void ED_operatortypes_userpref()
   WM_operatortype_append(PREFERENCES_OT_asset_library_add);
   WM_operatortype_append(PREFERENCES_OT_asset_library_folder_add);
   WM_operatortype_append(PREFERENCES_OT_asset_library_remove);
+  WM_operatortype_append(PREFERENCES_OT_asset_library_pin_set);
+  WM_operatortype_append(PREFERENCES_OT_asset_library_pin_reorder);
 
   WM_operatortype_append(PREFERENCES_OT_extension_repo_add);
   WM_operatortype_append(PREFERENCES_OT_extension_repo_remove);

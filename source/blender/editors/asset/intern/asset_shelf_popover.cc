@@ -31,6 +31,7 @@
 #include "UI_view2d.hh"
 
 #include "ED_asset_filter.hh"
+#include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
 #include "ED_screen.hh"
@@ -379,6 +380,325 @@ static int layout_height_units_clamped(const wmWindow *win, int grid_height_unit
   return std::clamp(grid_height_units, min_units_y, std::max(min_units_y, max_units_y));
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Pinned library tabs
+ * \{ */
+
+/* A pinned library together with the value the shelf's `asset_library_reference` enum uses for it.
+ * Both are read from the same itemf the selector menu is built from, so a tab and the matching menu
+ * entry can never disagree about which library they switch to. */
+struct PinnedLibraryTab {
+  bUserAssetLibrary *library;
+  int enum_value;
+  /** Which wrapped row of the tab strip this tab belongs on. Decided once, by #pinned_tabs_gather,
+   * and followed by #pinned_tabs_draw: the row count sizes the popover, so a draw that wrapped by
+   * its own arithmetic could disagree with the height already reserved for it. */
+  int row;
+};
+
+/* Assign each tab a row, opening a new one whenever it would take the current row past \a budget.
+ * Returns the number of rows used.
+ *
+ * The "All" tab is not in \a tab_widths -- it always leads the first row, so \a all_width seeds
+ * that row. A tab wider than the budget itself stays on its own row rather than wrapping twice. */
+static int pinned_tabs_wrap(const Span<int> tab_widths,
+                            const int all_width,
+                            const int budget,
+                            MutableSpan<int> r_rows)
+{
+  int row_num = 1;
+  int row_width = all_width;
+  for (const int i : tab_widths.index_range()) {
+    if (row_width > 0 && row_width + tab_widths[i] > budget) {
+      row_num++;
+      row_width = 0;
+    }
+    row_width += tab_widths[i];
+    r_rows[i] = row_num - 1;
+  }
+  return row_num;
+}
+
+/* Collect the pinned libraries this shelf can actually show, in tab order, and report how many
+ * wrapped rows they need.
+ *
+ * The list is derived from the shelf's own `asset_library_reference` enum rather than from
+ * #UserDef.asset_libraries directly: that enum already has the per-shelf-type filter applied
+ * (#rna_asset_library_ui_reference_itemf excludes image libraries on brush shelves, and everything
+ * but image libraries on the Texture shelf). Reading it means the tab row cannot drift away from
+ * what the selector offers, and no filter logic is duplicated here.
+ *
+ * Note this does not include the "All" tab, which is not a #bUserAssetLibrary; #pinned_tabs_draw
+ * prepends it. \a r_row_num does account for it. */
+static Vector<PinnedLibraryTab> pinned_tabs_gather(const bContext &C,
+                                                   PointerRNA &shelf_ptr,
+                                                   const int avail_width_px,
+                                                   int *r_row_num)
+{
+  Vector<PinnedLibraryTab> pinned;
+
+  PropertyRNA *prop = RNA_struct_find_property(&shelf_ptr, "asset_library_reference");
+  if (prop) {
+    const EnumPropertyItem *items = nullptr;
+    bool free = false;
+    /* #RNA_property_enum_items_gettexted takes a non-const context; the itemf backing this enum
+     * ignores it entirely (see #rna_asset_library_ui_reference_itemf). */
+    RNA_property_enum_items_gettexted(
+        const_cast<bContext *>(&C), &shelf_ptr, prop, &items, nullptr, &free);
+
+    for (const EnumPropertyItem *item = items; item && item->identifier; item++) {
+      /* An empty identifier is a folder heading or a separator, not a choice. */
+      if (!item->identifier[0] || item->value < ASSET_LIBRARY_CUSTOM) {
+        continue;
+      }
+      const AssetLibraryReference library_ref = library_reference_from_enum_value(item->value);
+      bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(&U,
+                                                                                    &library_ref);
+      if (user_library && (user_library->flag & ASSET_LIBRARY_IS_PINNED)) {
+        pinned.append({user_library, item->value});
+      }
+    }
+
+    if (free) {
+      MEM_delete(items);
+    }
+  }
+
+  std::sort(pinned.begin(), pinned.end(), [](const PinnedLibraryTab &a, const PinnedLibraryTab &b) {
+    return a.library->pin_order < b.library->pin_order;
+  });
+
+  const int all_width = tab_button_width(IFACE_("All"));
+  Vector<int> tab_widths(pinned.size());
+  for (const int i : pinned.index_range()) {
+    tab_widths[i] = tab_button_width(pinned[i].library->name);
+  }
+  Vector<int> rows(pinned.size());
+
+  /* Wrap the strip. This pass decides the row count, which the caller reserves height for. */
+  const int row_num = pinned_tabs_wrap(tab_widths, all_width, avail_width_px, rows);
+
+  /* Even the rows out. Every row is stretched to the strip's full width (a layout row's default
+   * #LayoutAlign::Expand hands the last button whatever is left over), so packing the first row
+   * full and leaving the remainder alone on the last row blows it up across the whole strip.
+   * Re-wrapping with the smallest budget that still needs the same number of rows minimizes the
+   * widest row, which spreads the load -- and with it the stretch -- over the rows.
+   *
+   * The row count cannot change: it is already the minimum (a wider budget never needs more rows),
+   * and only budgets that keep it are accepted. That is what makes this safe to do after the height
+   * has been derived. Fewer rows is likewise impossible, so the search lands on exactly `row_num`.
+   * The row count is monotonic in the budget, so a binary search is exact here rather than a
+   * heuristic. Budgets never exceed `avail_width_px`, so a row cannot be made to overflow the strip
+   * (which would put the squeeze back and re-clip the names). */
+  if (!pinned.is_empty()) {
+    int lo = 1;
+    int hi = std::max(1, avail_width_px);
+    while (lo < hi) {
+      const int mid = lo + (hi - lo) / 2;
+      if (pinned_tabs_wrap(tab_widths, all_width, mid, rows) <= row_num) {
+        hi = mid;
+      }
+      else {
+        lo = mid + 1;
+      }
+    }
+    pinned_tabs_wrap(tab_widths, all_width, lo, rows);
+  }
+
+  for (const int i : pinned.index_range()) {
+    pinned[i].row = rows[i];
+  }
+  *r_row_num = row_num;
+
+  return pinned;
+}
+
+static void library_tab_context_menu_draw(const bContext *C, Menu *menu)
+{
+  /* The menu is opened from a tab, and #interface_context_menu.cc draws it while that tab is still
+   * the active button -- which is how the menu learns which library it is acting on. */
+  const bUserAssetLibrary *user_library = static_cast<const bUserAssetLibrary *>(
+      ui::context_active_but_tab_custom_data_get(C));
+  if (!user_library) {
+    return;
+  }
+  /* Belt and braces. #asset_shelf_popover_listen rebuilds the tab row when the library list
+   * changes, so a tab should never outlive its library -- but the rebuild only happens at the next
+   * draw, while notifiers and handlers run before that, leaving a window in which a click could
+   * still reach a tab whose library was just freed. Checking list membership compares pointers
+   * without dereferencing, so it is safe even on a freed one. */
+  if (BLI_findindex(&U.asset_libraries, user_library) == -1) {
+    return;
+  }
+
+  ui::Layout &layout = *menu->layout;
+  layout.operator_context_set(wm::OpCallContext::ExecDefault);
+
+  const int index = user_library->pin_order;
+  const int count = BKE_preferences_asset_library_pinned_count(&U);
+
+  {
+    ui::Layout &sub = layout.row(false);
+    sub.enabled_set(index > 0);
+    PointerRNA ptr = sub.op(
+        "PREFERENCES_OT_asset_library_pin_reorder", IFACE_("Move Left"), ICON_TRIA_LEFT_BAR);
+    RNA_string_set(&ptr, "library_name", user_library->name);
+    RNA_enum_set_identifier(const_cast<bContext *>(C), &ptr, "direction", "LEFT");
+  }
+  {
+    ui::Layout &sub = layout.row(false);
+    sub.enabled_set(index < count - 1);
+    PointerRNA ptr = sub.op(
+        "PREFERENCES_OT_asset_library_pin_reorder", IFACE_("Move Right"), ICON_TRIA_RIGHT_BAR);
+    RNA_string_set(&ptr, "library_name", user_library->name);
+    RNA_enum_set_identifier(const_cast<bContext *>(C), &ptr, "direction", "RIGHT");
+  }
+
+  layout.separator();
+
+  {
+    PointerRNA ptr = layout.op(
+        "PREFERENCES_OT_asset_library_pin_reorder", IFACE_("Reorder to Front"), ICON_TRIA_LEFT_BAR);
+    RNA_string_set(&ptr, "library_name", user_library->name);
+    RNA_enum_set_identifier(const_cast<bContext *>(C), &ptr, "direction", "FRONT");
+  }
+  {
+    PointerRNA ptr = layout.op(
+        "PREFERENCES_OT_asset_library_pin_reorder", IFACE_("Reorder to Back"), ICON_TRIA_RIGHT_BAR);
+    RNA_string_set(&ptr, "library_name", user_library->name);
+    RNA_enum_set_identifier(const_cast<bContext *>(C), &ptr, "direction", "BACK");
+  }
+
+  layout.separator();
+
+  {
+    PointerRNA ptr = layout.op(
+        "PREFERENCES_OT_asset_library_pin_set", IFACE_("Unpin Library"), ICON_UNPINNED);
+    RNA_string_set(&ptr, "library_name", user_library->name);
+    RNA_boolean_set(&ptr, "pinned", false);
+  }
+}
+
+/* Registered from #popover_panel_register, which runs exactly once (it early-returns when its panel
+ * types already exist). Kept next to the draw callback it registers rather than inlined there, so
+ * the menu's id, label and draw function stay in one place. */
+static void library_tab_context_menu_register()
+{
+  if (WM_menutype_find("ASSETSHELF_MT_library_tab_context", true)) {
+    return;
+  }
+
+  MenuType *mt = MEM_new_zeroed<MenuType>(__func__);
+  STRNCPY_UTF8(mt->idname, "ASSETSHELF_MT_library_tab_context");
+  STRNCPY_UTF8(mt->label, N_("Pinned Library"));
+  STRNCPY_UTF8(mt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  mt->draw = library_tab_context_menu_draw;
+  /* Depends on the active button rather than on the RNA context, which is close enough: the flag's
+   * real job here is to keep the menu out of the menu search, where there would be no tab to act
+   * on and the draw would produce an empty menu. */
+  mt->flag = MenuTypeFlag::ContextDependent;
+  WM_menutype_add(mt);
+}
+
+static void pinned_tabs_draw(ui::Layout &layout,
+                             AssetShelf &shelf,
+                             PointerRNA &shelf_ptr,
+                             const Span<PinnedLibraryTab> pinned)
+{
+  PropertyRNA *library_prop = RNA_struct_find_property(&shelf_ptr, "asset_library_reference");
+  if (!library_prop) {
+    BLI_assert_unreachable();
+    return;
+  }
+
+  ui::Block *block = layout.block();
+  AssetShelfSettings &shelf_settings = shelf.settings;
+
+  /* The rows come from #pinned_tabs_gather (#PinnedLibraryTab.row); this pass only follows them, so
+   * it cannot end up with a different number of rows than the popover reserved height for. */
+  ui::Layout *row = &layout.row(true);
+
+  auto add_tab = [&](const StringRefNull name, const int enum_value) -> ui::Button * {
+    const int tab_width = tab_button_width(name);
+
+    ui::block_layout_set_current(block, row);
+    /* The tab drives the shelf's own `asset_library_reference` property instead of a callback: a
+     * callback-driven tab is dead inside a popup, because #do_but_TAB only applies one on a
+     * #KM_CLICK event and a popup never sees one (#popup_handler consumes every press, so
+     * #wm_handlers_do never synthesizes the click). The shelf's permanent catalog tabs get away
+     * with callbacks only because they live in a regular region. Driving the property also makes a
+     * tab press the exact same action as picking that library in the selector menu, update notifier
+     * included. */
+    ui::Button *but = uiDefButR_prop(block,
+                                     ui::ButtonType::Tab,
+                                     name,
+                                     0,
+                                     0,
+                                     tab_width,
+                                     UI_UNIT_Y,
+                                     &shelf_ptr,
+                                     library_prop,
+                                     -1,
+                                     0,
+                                     enum_value,
+                                     TIP_("Show this asset library in the shelf"));
+    ui::button_flag_disable(but, ui::BUT_UNDO);
+    return but;
+  };
+
+  /* "All" is pinned in both senses: always the first tab, and it can be neither moved nor removed.
+   * It is not a #bUserAssetLibrary, so it has nowhere to store a pin flag -- being unconditional is
+   * what replaces that. */
+  {
+    ui::Button *but = add_tab(IFACE_("All"), ASSET_LIBRARY_ALL);
+    ui::button_func_pushed_state_set(but, [&shelf_settings](const ui::Button &) -> bool {
+      return shelf_settings.asset_library_reference.type == ASSET_LIBRARY_ALL;
+    });
+  }
+
+  int current_row = 0;
+  for (const PinnedLibraryTab &tab : pinned) {
+    if (tab.row != current_row) {
+      row = &layout.row(true);
+      current_row = tab.row;
+    }
+    ui::Button *but = add_tab(tab.library->name, tab.enum_value);
+    /* The pushed state is stated explicitly rather than left to the default enum comparison:
+     * #button_is_pushed_ex reads a tab that has both an RNA property and #custom_data (set just
+     * below, for the context menu) as a workspace-style pointer tab, which never matches an enum
+     * property.
+     *
+     * It may also be evaluated long after this draw: the popover is #BLOCK_KEEP_OPEN and
+     * Preferences opens in a separate window, so a library can be deleted from underneath an open
+     * popover. #asset_shelf_popover_listen rebuilds the row when that happens, but only at the next
+     * draw -- this can run before it. Capture the name, not the pointer, and re-resolve it on
+     * demand, matching #library_from_op_props in `userpref_ops.cc`. */
+    const std::string library_name = tab.library->name;
+    ui::button_func_pushed_state_set(
+        but, [&shelf_settings, library_name](const ui::Button &) -> bool {
+          bUserAssetLibrary *library = BKE_preferences_asset_library_find_by_name(&U,
+                                                                                  library_name.c_str());
+          /* Not pushed once the library is gone, rather than reading a dangling pointer. */
+          if (!library) {
+            return false;
+          }
+          /* Resolve by identity, not by the stored index, which may be stale. */
+          return BKE_preferences_asset_library_find_from_ref(
+                     &U, &shelf_settings.asset_library_reference) == library;
+        });
+    /* Right-click opens the reorder / unpin menu, acting on this tab's library. "All" deliberately
+     * gets no menu: it can be neither moved nor unpinned. The library can be freed while this
+     * button survives (see above); the menu draw itself checks list membership before it is
+     * dereferenced. */
+    ui::button_tab_menu_set(
+        but, WM_menutype_find("ASSETSHELF_MT_library_tab_context", true), tab.library);
+  }
+
+  ui::block_layout_set_current(block, &layout);
+}
+
+/** \} */
+
 static void popover_panel_draw(const bContext *C, Panel *panel)
 {
   const wmWindow *win = CTX_wm_window(C);
@@ -463,16 +783,26 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
       1, int((float(raw_right_units) - scroll_gutter_units) / tile_w_units));
   const float right_col_width_units = float(grid_cols) * tile_w_units + scroll_gutter_units;
 
+  bScreen *screen = CTX_wm_screen(C);
+  /* Make the shelf accessible to nested popovers (e.g. display settings panel). Built here, ahead
+   * of the layout below, because #pinned_tabs_gather (immediately below) needs it to read the
+   * shelf's filtered library enum. */
+  PointerRNA shelf_ptr = RNA_pointer_create_discrete(&screen->id, RNA_AssetShelf, shelf);
+
+  /* The tab row spans the whole popover, both columns. */
+  const int tabs_avail_width_px = int(
+      (float(catalog_units) + CATALOG_GRIP_WIDTH_UNITS + right_col_width_units) * UI_UNIT_X);
+  int tab_row_num = 0;
+  const Vector<PinnedLibraryTab> pinned_libraries = pinned_tabs_gather(
+      *C, shelf_ptr, tabs_avail_width_px, &tab_row_num);
+
   ui::Layout &layout = *panel->layout;
   layout.ui_units_x_set(float(catalog_units) + CATALOG_GRIP_WIDTH_UNITS + right_col_width_units);
 
-  bScreen *screen = CTX_wm_screen(C);
   PointerRNA library_ref_ptr = RNA_pointer_create_discrete(
       &screen->id, RNA_AssetLibraryReference, &shelf->settings.asset_library_reference);
   layout.context_ptr_set("asset_library_reference", &library_ref_ptr);
 
-  /* Make the shelf accessible to nested popovers (e.g. display settings panel). */
-  PointerRNA shelf_ptr = RNA_pointer_create_discrete(&screen->id, RNA_AssetShelf, shelf);
   layout.context_ptr_set("asset_shelf", &shelf_ptr);
 
   /* Asset grid viewport height, derived from the window so the popover fits on screen (see
@@ -484,10 +814,11 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
    * the window so the sticky header holds. */
   const int tile_h_px = std::max(1, tile_height(shelf->settings));
   const float tile_units = float(tile_h_px) / float(UI_UNIT_Y);
-  /* Header + gap consumed above the grid: the search / preset row (~1 unit) plus the ~1-unit gap
-   * below it where the persistent scroll-up arrow is drawn. Only used to shrink the grid when a
-   * zoomed popover would otherwise overflow the window. */
-  const float non_grid_units = 2.0f;
+  /* Header + gap consumed above the grid: the search / preset row (~1 unit), the ~1-unit gap below
+   * it where the persistent scroll-up arrow is drawn, and the pinned tab rows. Counting the tab
+   * rows here is what keeps a zoomed popover inside the window -- this figure is what
+   * #popup_grid_fixed_viewport_units shrinks the grid against. */
+  const float non_grid_units = 2.0f + float(tab_row_num);
   /* User-set popover height (grid-viewport units) overrides the default, clamped to the window.
    * 0 means "not set" — use the type default. */
   const float default_grid_units = (shelf->settings.popup_height_units > 0) ?
@@ -497,6 +828,8 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
   const float grid_units = ui::popup_grid_fixed_viewport_units(
       C, layout.block(), non_grid_units, tile_units, default_grid_units);
   const int grid_viewport_px = std::max(tile_h_px, int(grid_units * UI_UNIT_Y));
+
+  pinned_tabs_draw(layout, *shelf, shelf_ptr, pinned_libraries);
 
   ui::Layout &row = layout.row(false);
   ui::Layout &catalogs_col = row.column(false);
@@ -724,8 +1057,15 @@ static void asset_shelf_popover_listen(const wmRegionListenerParams *params)
       }
       break;
     case NC_SPACE:
-      if (wmn->data == ND_REGIONS_ASSET_SHELF) {
-        /* Redraw to apply changes to preview size or show names instantly. */
+      /* #ND_REGIONS_ASSET_SHELF: redraw to apply changes to preview size or show names instantly.
+       *
+       * #ND_SPACE_ASSET_PARAMS: the Preferences' asset library list itself changed (see
+       * #PREFERENCES_OT_asset_library_remove). The pinned tab row is built from that list, and the
+       * `asset_library_reference` enum values the tabs drive are positional
+       * (#library_reference_to_enum_value counts an index into #UserDef.asset_libraries), so any
+       * add/remove/reorder shifts them. A tab left over from the old list would not just dangle --
+       * it would silently switch the shelf to a *different* library. Rebuild instead. */
+      if (ELEM(wmn->data, ND_REGIONS_ASSET_SHELF, ND_SPACE_ASSET_PARAMS)) {
         ED_region_tag_refresh_ui(region);
       }
       break;
@@ -754,8 +1094,11 @@ void popover_panel_register(ARegionType *region_type)
     pt->listener = asset_shelf_popover_listen;
     /* Move to have first asset item under cursor. */
     pt->offset_units_xy.x = -(LEFT_COL_WIDTH_UNITS + 1.5f);
-    /* Offset so mouse is below search button, over the first row of assets. */
-    pt->offset_units_xy.y = 2.5f;
+    /* Offset so mouse is below search button, over the first row of assets. The pinned library tab
+     * row sits above the search row and pushes the grid down by its height; one row is the common
+     * case, so that is what this compensates for. When many pins wrap onto further rows the open
+     * position drifts, which is accepted -- this is static and the wrap count is not. */
+    pt->offset_units_xy.y = 3.5f;
     BLI_addtail(&region_type->paneltypes, pt);
     WM_paneltype_add(pt);
   }
@@ -773,6 +1116,10 @@ void popover_panel_register(ARegionType *region_type)
     BLI_addtail(&region_type->paneltypes, pt);
     WM_paneltype_add(pt);
   }
+
+  /* Context menu for the pinned library tabs. Registered here with the panels because it shares
+   * their lifetime; #WM_menutype_find is what the tab looks it up with. */
+  library_tab_context_menu_register();
 }
 
 }  // namespace blender::ed::asset::shelf

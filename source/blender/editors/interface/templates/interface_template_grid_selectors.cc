@@ -635,9 +635,21 @@ static void asset_library_column_menu_draw_impl(bContext *C,
   PointerRNA ptr = but->rnapoin;
   PropertyRNA *prop = but->rnaprop;
 
+  /* The enum's itemf may read the calling button's context store (e.g. the ID browser's library
+   * itemf narrows the list to image libraries via `id_browser_ptr`/`id_browser_prop`). This menu
+   * runs from #block_func_POPUP, which copies that store onto the menu layout but not onto \a C, and
+   * only applies it to \a C later in #block_layout_resolve -- after the itemf below has already run.
+   * Present the button's store to the itemf directly, matching #button_context_poll_operator_ex. */
+  const bContextStore *previous_store = CTX_store_get(C);
+  if (but->context) {
+    CTX_store_set(C, but->context);
+  }
   const EnumPropertyItem *items = nullptr;
   bool free = false;
   RNA_property_enum_items_gettexted(C, &ptr, prop, &items, nullptr, &free);
+  if (but->context) {
+    CTX_store_set(C, previous_store);
+  }
   if (!items) {
     return;
   }

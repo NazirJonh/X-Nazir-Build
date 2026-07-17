@@ -1125,8 +1125,13 @@ static Mesh *build_stamps_mesh(const Span<VDMStampData> stamps,
 
   Mesh *mesh = BKE_mesh_new_nomain(positions.size(), 0, face_offsets.size(), corner_verts.size());
   mesh->vert_positions_for_write().copy_from(positions.as_span());
-  mesh->face_offsets_for_write().drop_back(1).copy_from(face_offsets.as_span());
-  mesh->face_offsets_for_write().last() = corner_verts.size();
+  /* A stamp whose displacement stays below the activity threshold produces no active quads, and
+   * hence no faces. The face-offset array is then empty, so writing the trailing offset via #last()
+   * would index out of bounds; only populate the offsets when at least one face exists. */
+  if (!face_offsets.is_empty()) {
+    mesh->face_offsets_for_write().drop_back(1).copy_from(face_offsets.as_span());
+    mesh->face_offsets_for_write().last() = corner_verts.size();
+  }
   mesh->corner_verts_for_write().copy_from(corner_verts.as_span());
 
   bke::mesh_smooth_set(*mesh, false);

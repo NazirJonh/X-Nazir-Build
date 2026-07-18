@@ -1545,6 +1545,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_curve_patch_edit);
   WM_operatortype_append(SCULPT_OT_curve_patch_handle_type_set);
   WM_operatortype_append(SCULPT_OT_curve_patch_delete_point);
+  WM_operatortype_append(SCULPT_OT_curve_patch_toggle_cyclic);
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

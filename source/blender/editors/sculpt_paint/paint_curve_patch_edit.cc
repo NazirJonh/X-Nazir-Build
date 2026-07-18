@@ -36,6 +36,7 @@
  */
 
 #include <optional>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -287,6 +288,73 @@ static bool patch_find_closest_segment(const bke::CurvesGeometry &geom,
  * two entry points cannot drift apart.
  * \{ */
 
+/* Defined below; the cyclic toggle refreshes the status bar, which spells out what C will do next. */
+static void curve_patch_edit_status_set(bContext *C, const CurvePatchCache &patch);
+
+/* -------------------------------------------------------------------- */
+/** \name Session-Local Undo
+ *
+ * See `CurvePatchCache::undo_steps` for why this cannot go through Blender's own undo systems.
+ * \{ */
+
+/* Deep enough for any realistic editing session; the snapshots are a handful of control points
+ * each, so the cap exists to bound a pathological session rather than to save meaningful memory. */
+static constexpr int CURVE_PATCH_UNDO_STEPS_MAX = 64;
+
+/* Record the CURRENT state as a new step. Called after an action completes -- once per action, not
+ * once per event, so a drag is a single step. */
+static void curve_patch_undo_push(CurvePatchCache &patch)
+{
+  /* Anything above the cursor is a redo branch the new edit invalidates. */
+  patch.undo_steps.resize(patch.undo_step_current + 1);
+
+  CurvePatchEditStep step;
+  step.curve = patch.control_curve;
+  step.swap_axis = patch.frozen_params.swap_axis;
+  patch.undo_steps.append(std::move(step));
+
+  if (patch.undo_steps.size() > CURVE_PATCH_UNDO_STEPS_MAX) {
+    patch.undo_steps.remove(0);
+  }
+  patch.undo_step_current = int(patch.undo_steps.size()) - 1;
+}
+
+static void curve_patch_undo_restore(bContext &C, Object &ob, CurvePatchCache &patch)
+{
+  const CurvePatchEditStep &step = patch.undo_steps[patch.undo_step_current];
+  patch.control_curve = step.curve;
+  patch.frozen_params.swap_axis = step.swap_axis;
+  /* The restored curve may hold fewer points than the one just replaced. */
+  patch.active_point = -1;
+
+  curve_patch_edit_status_set(&C, patch);
+  curve_patch_restore_and_restamp(C, ob, patch);
+  ED_region_tag_redraw(CTX_wm_region(&C));
+}
+
+/* Returns false when there is nothing left to undo, i.e. the session is back at the state the
+ * anchor stroke produced. The caller then cancels the patch outright. */
+static bool curve_patch_undo_step_back(bContext &C, Object &ob, CurvePatchCache &patch)
+{
+  if (patch.undo_step_current <= 0) {
+    return false;
+  }
+  patch.undo_step_current--;
+  curve_patch_undo_restore(C, ob, patch);
+  return true;
+}
+
+static void curve_patch_undo_step_forward(bContext &C, Object &ob, CurvePatchCache &patch)
+{
+  if (patch.undo_step_current + 1 >= int(patch.undo_steps.size())) {
+    return;
+  }
+  patch.undo_step_current++;
+  curve_patch_undo_restore(C, ob, patch);
+}
+
+/** \} */
+
 static bool curve_patch_active_point_is_valid(const CurvePatchCache &patch)
 {
   return patch.active_point >= 0 && paintcurve_geometry_is_valid(patch.control_curve) &&
@@ -303,6 +371,8 @@ static bool curve_patch_delete_active_point(bContext &C,
     return false;
   }
   bke::CurvesGeometry &geom = patch.control_curve;
+  /* Two points is the floor whether the curve is open or closed -- a 2-point cyclic Bezier is a
+   * perfectly good loop (see #curve_patch_toggle_cyclic). */
   if (geom.points_num() - 1 < 2) {
     /* Refuse rather than auto-cancelling the whole session -- the user decides explicitly via Esc
      * if they want to cancel the patch instead of losing it to an accidental X/Delete press on the
@@ -318,6 +388,7 @@ static bool curve_patch_delete_active_point(bContext &C,
   paintcurve_geometry_remove_points(geom, delete_mask);
   patch.active_point = -1;
 
+  curve_patch_undo_push(patch);
   curve_patch_restore_and_restamp(C, ob, patch);
   ED_region_tag_redraw(CTX_wm_region(&C));
   return true;
@@ -339,8 +410,41 @@ static void curve_patch_set_active_handle_type(bContext &C,
   geom.calculate_bezier_aligned_handles();
   geom.tag_positions_changed();
 
+  curve_patch_undo_push(patch);
   curve_patch_restore_and_restamp(C, ob, patch);
   ED_region_tag_redraw(CTX_wm_region(&C));
+}
+
+/* Close or re-open the control curve. Returns false only when there is no usable curve at all. */
+static bool curve_patch_toggle_cyclic(bContext &C, Object &ob, CurvePatchCache &patch)
+{
+  bke::CurvesGeometry &geom = patch.control_curve;
+  if (!paintcurve_geometry_is_valid(geom) || geom.curves_num() == 0) {
+    return false;
+  }
+  /* Two points are enough, as everywhere else in Blender: a cyclic Bezier of N points has N
+   * segments (#bke::curves::segments_num), and the two a 2-point loop produces are distinct curves
+   * -- one runs through point 0's right handle into point 1's left, the other through point 1's
+   * right back into point 0's left -- so they bow to opposite sides and enclose a real shape. Only
+   * collinear handles degenerate that, which is equally true of three collinear points and is the
+   * user's business, not a reason to refuse. */
+  const bool was_cyclic = geom.cyclic()[0];
+  geom.cyclic_for_write().first() = !was_cyclic;
+  geom.calculate_bezier_auto_handles();
+  geom.calculate_bezier_aligned_handles();
+  geom.tag_topology_changed();
+
+  curve_patch_undo_push(patch);
+  curve_patch_edit_status_set(&C, patch);
+  curve_patch_restore_and_restamp(C, ob, patch);
+  ED_region_tag_redraw(CTX_wm_region(&C));
+  return true;
+}
+
+static bool curve_patch_is_cyclic(const CurvePatchCache &patch)
+{
+  const bke::CurvesGeometry &geom = patch.control_curve;
+  return paintcurve_geometry_is_valid(geom) && geom.curves_num() > 0 && geom.cyclic()[0];
 }
 
 /* Right-click menu over a control point. The two point actions go through real operators (declared
@@ -355,6 +459,12 @@ static void curve_patch_edit_context_menu_open(bContext *C)
   layout.op_menu_enum(
       C, "SCULPT_OT_curve_patch_handle_type_set", "type", IFACE_("Handle Type"), ICON_NONE);
 
+  const bool is_cyclic = curve_patch_is_cyclic(patch_cache_of(C));
+  layout.separator();
+  layout.op("SCULPT_OT_curve_patch_toggle_cyclic",
+            is_cyclic ? IFACE_("Open Curve") : IFACE_("Close Curve"),
+            ICON_NONE);
+
   const ToolSettings *tool_settings = CTX_data_tool_settings(C);
   Brush *brush = (tool_settings && tool_settings->sculpt) ?
                      BKE_paint_brush(&tool_settings->sculpt->paint) :
@@ -363,17 +473,22 @@ static void curve_patch_edit_context_menu_open(bContext *C)
     PointerRNA tex_slot_ptr = RNA_pointer_create_discrete(
         &brush->id, RNA_BrushTextureSlot, &brush->mtex);
     layout.separator();
-    layout.prop(&tex_slot_ptr,
-                "curve_patch_end_falloff",
-                UI_ITEM_NONE,
-                IFACE_("End Falloff"),
-                ICON_NONE);
-    if (brush->mtex.curve_patch_end_falloff == MTEX_CURVE_PATCH_END_SMOOTH) {
+    /* A closed curve has no ends to fade, and the relief ignores the setting there -- so do not
+     * offer it. The brush panel still shows it: it has no access to the live patch, and the setting
+     * remains meaningful for every open one. */
+    if (!is_cyclic) {
       layout.prop(&tex_slot_ptr,
-                  "curve_patch_end_falloff_length",
+                  "curve_patch_end_falloff",
                   UI_ITEM_NONE,
-                  IFACE_("Falloff Length"),
+                  IFACE_("End Falloff"),
                   ICON_NONE);
+      if (brush->mtex.curve_patch_end_falloff == MTEX_CURVE_PATCH_END_SMOOTH) {
+        layout.prop(&tex_slot_ptr,
+                    "curve_patch_end_falloff_length",
+                    UI_ITEM_NONE,
+                    IFACE_("Falloff Length"),
+                    ICON_NONE);
+      }
     }
     layout.prop(&tex_slot_ptr,
                 "use_curve_patch_swap_axis",
@@ -392,8 +507,10 @@ static void curve_patch_edit_context_menu_open(bContext *C)
 static void curve_patch_edit_status_set(bContext *C, const CurvePatchCache &patch)
 {
   const std::string msg = fmt::format(
-      "Enter: Commit | Esc: Cancel | Tab/S: Swap Texture Axis (currently {})",
-      patch.frozen_params.swap_axis ? "U" : "V");
+      "Enter: Commit | Esc: Cancel | Ctrl+Z: Undo | Tab/S: Swap Texture Axis (currently {}) | C: {} "
+      "Curve",
+      patch.frozen_params.swap_axis ? "U" : "V",
+      curve_patch_is_cyclic(patch) ? "Open" : "Close");
   ED_workspace_status_text(C, msg.c_str());
 }
 
@@ -437,7 +554,13 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
   const double sync_timer_step = 0.05;
   data->sync_timer = WM_event_timer_add(
       CTX_wm_manager(C), CTX_wm_window(C), TIMER, sync_timer_step);
-  curve_patch_edit_status_set(C, patch_cache_of(C));
+  CurvePatchCache &patch = patch_cache_of(C);
+  /* Seed the session undo stack with the state the anchor stroke produced. Ctrl+Z walks back to
+   * this entry and, once there, cancels the patch instead of stepping further. */
+  patch.undo_steps.clear();
+  patch.undo_step_current = -1;
+  curve_patch_undo_push(patch);
+  curve_patch_edit_status_set(C, patch);
   return OPERATOR_RUNNING_MODAL;
 }
 
@@ -694,6 +817,9 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         data.dragging_radius = false;
         data.dragging_handle = false;
         data.dragging_segment = false;
+        /* One undo step per drag, recorded on release -- not one per MOUSEMOVE, which would fill
+         * the stack with intermediate positions nobody wants to step through. */
+        curve_patch_undo_push(patch);
         curve_patch_restore_and_restamp(*C, ob, patch);
       }
       break;
@@ -931,6 +1057,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           patch.active_point = geom.points_num() - 1;
         }
 
+        curve_patch_undo_push(patch);
         curve_patch_restore_and_restamp(*C, ob, patch);
         ED_region_tag_redraw(CTX_wm_region(C));
       }
@@ -948,10 +1075,39 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         data.dragging_segment = false;
       }
       break;
+    case EVT_ZKEY:
+      /* Ctrl+Z / Ctrl+Shift+Z (Cmd on macOS) drive the SESSION undo stack, and are swallowed
+       * whatever the outcome. Letting them reach the global keymap is what caused the bug this
+       * exists for: the session's own sculpt transaction is still open, so `ED_OT_undo` would pop
+       * the PREVIOUS committed stroke -- moving mesh vertices out from under this patch's
+       * `orig_positions` snapshot and leaving the session inconsistent. */
+      if ((event->modifier & (KM_CTRL | KM_OSKEY)) == 0) {
+        /* Plain Z belongs to Sculpt Mode's shading pie menu; only the undo chord is ours. */
+        return OPERATOR_PASS_THROUGH;
+      }
+      if (event->val == KM_PRESS) {
+        if (event->modifier & KM_SHIFT) {
+          curve_patch_undo_step_forward(*C, ob, patch);
+        }
+        else if (!curve_patch_undo_step_back(*C, ob, patch)) {
+          /* Back at the state the anchor stroke produced: there is no earlier in-session state, so
+           * undoing once more discards the patch itself. */
+          curve_patch_edit_finish(C, op, true);
+          return OPERATOR_CANCELLED;
+        }
+      }
+      break;
+    case EVT_CKEY:
+      /* Matches Blender's curve-editing convention for toggling a curve closed. */
+      if (event->val == KM_PRESS) {
+        curve_patch_toggle_cyclic(*C, ob, patch);
+      }
+      break;
     case EVT_TABKEY:
     case EVT_SKEY:
       if (event->val == KM_PRESS) {
         patch.frozen_params.swap_axis = !patch.frozen_params.swap_axis;
+        curve_patch_undo_push(patch);
         curve_patch_edit_status_set(C, patch);
         curve_patch_restore_and_restamp(*C, ob, patch);
         ED_region_tag_redraw(CTX_wm_region(C));
@@ -1153,6 +1309,29 @@ void SCULPT_OT_curve_patch_delete_point(wmOperatorType *ot)
 
   ot->exec = curve_patch_delete_point_exec;
   ot->poll = curve_patch_active_point_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
+}
+
+static wmOperatorStatus curve_patch_toggle_cyclic_exec(bContext *C, wmOperator * /*op*/)
+{
+  Object &ob = *CTX_data_active_object(C);
+  CurvePatchCache &patch = patch_cache_of(C);
+  if (!curve_patch_toggle_cyclic(*C, ob, patch)) {
+    return OPERATOR_CANCELLED;
+  }
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_curve_patch_toggle_cyclic(wmOperatorType *ot)
+{
+  ot->name = "Toggle Curve Patch Cyclic";
+  ot->description = "Close or re-open the Curve Patch control curve";
+  ot->idname = "SCULPT_OT_curve_patch_toggle_cyclic";
+
+  ot->exec = curve_patch_toggle_cyclic_exec;
+  /* Unlike the two point operators this one acts on the whole curve, so it needs no active point. */
+  ot->poll = curve_patch_edit_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
 }

@@ -25,6 +25,7 @@ void CurvePatchSpline::clear()
   lengths_3d.clear();
   tangents_3d.clear();
   radii.clear();
+  cyclic = false;
 }
 
 bool CurvePatchSpline::is_empty() const
@@ -38,15 +39,23 @@ float CurvePatchSpline::total_length() const
 }
 
 void CurvePatchSpline::build_from_positions(const Span<float3> positions,
-                                            const Span<float> radii_in)
+                                            const Span<float> radii_in,
+                                            const bool cyclic_in)
 {
   clear();
   if (positions.size() < 2) {
     return;
   }
+  cyclic = cyclic_in;
 
-  poly_3d.reserve(positions.size());
+  poly_3d.reserve(positions.size() + (cyclic ? 1 : 0));
   poly_3d.extend(positions);
+  if (cyclic) {
+    /* `bke::CurvesGeometry::evaluated_positions()` of a cyclic curve stops just short of wrapping:
+     * it never repeats the first point at the end. Append it so the closing edge exists, otherwise
+     * `total_length()` under-counts by a whole segment and the strip stops short of the join. */
+    poly_3d.append(positions[0]);
+  }
 
   lengths_3d.reserve(poly_3d.size());
   float accum = 0.0f;
@@ -56,14 +65,18 @@ void CurvePatchSpline::build_from_positions(const Span<float3> positions,
     lengths_3d.append(accum);
   }
 
+  const int last = int(poly_3d.size()) - 1;
+  /* On a closed curve `poly_3d[0]` and `poly_3d[last]` are the SAME point, so both take the same
+   * through-the-join central difference. One-sided differences there would make the tangent flip
+   * direction across the join, creasing the ribbon's UV exactly where the pattern has to meet
+   * itself seamlessly. `last - 1` is the vertex before the join, `1` the one after it. */
+  const bool wrap_ends = cyclic && poly_3d.size() >= 3;
   tangents_3d.reserve(poly_3d.size());
   for (const int i : IndexRange(poly_3d.size())) {
     float3 dir;
-    if (i == 0) {
-      dir = poly_3d[1] - poly_3d[0];
-    }
-    else if (i == poly_3d.size() - 1) {
-      dir = poly_3d[i] - poly_3d[i - 1];
+    if (i == 0 || i == last) {
+      dir = wrap_ends ? poly_3d[1] - poly_3d[last - 1] :
+                        (i == 0 ? poly_3d[1] - poly_3d[0] : poly_3d[last] - poly_3d[last - 1]);
     }
     else {
       dir = poly_3d[i + 1] - poly_3d[i - 1];
@@ -74,8 +87,11 @@ void CurvePatchSpline::build_from_positions(const Span<float3> positions,
 
   if (!radii_in.is_empty()) {
     BLI_assert(radii_in.size() == positions.size());
-    radii.reserve(radii_in.size());
+    radii.reserve(poly_3d.size());
     radii.extend(radii_in);
+    if (cyclic) {
+      radii.append(radii_in[0]);
+    }
   }
 }
 
@@ -269,19 +285,35 @@ void CurvePatchSpline::closest_point_dist(const float3 &query,
 float curve_patch_texture_tile_span(const int length_mode,
                                     const int repeat,
                                     const float total_length,
-                                    const float radius_at_s)
+                                    const float radius_at_s,
+                                    const bool cyclic)
 {
+  float span;
   switch (eMTex_CurvePatchLengthMode(length_mode)) {
     case MTEX_CURVE_PATCH_LENGTH_REPEAT:
       /* `max(1, repeat)` guards a repeat count that bypassed RNA's 1..64 range (Python API, an
        * older/edited file) from producing a divide-by-zero or a negative span. */
-      return total_length / float(std::max(1, repeat));
+      span = total_length / float(std::max(1, repeat));
+      break;
     case MTEX_CURVE_PATCH_LENGTH_STRETCH:
-      return total_length;
+      span = total_length;
+      break;
     case MTEX_CURVE_PATCH_LENGTH_DEFAULT:
     default:
-      return std::min(total_length, 2.0f * radius_at_s);
+      span = std::min(total_length, 2.0f * radius_at_s);
+      break;
   }
+
+  /* On a closed curve the pattern has to meet itself at `s == 0`, which only happens when the loop
+   * holds a WHOLE number of tiles -- otherwise the last tile is cut mid-pattern and shows as a seam.
+   * Repeat and Stretch already divide the length into an integer count and come out of the snap
+   * unchanged; Default, whose tile follows the brush radius, generally does not, and gets its tile
+   * stretched or squeezed by up to ~1.5x to the nearest whole count. */
+  if (cyclic && span > 1e-8f && total_length > 1e-8f) {
+    const float tiles = std::max(1.0f, std::round(total_length / span));
+    span = total_length / tiles;
+  }
+  return span;
 }
 
 }  // namespace blender::ed::sculpt_paint

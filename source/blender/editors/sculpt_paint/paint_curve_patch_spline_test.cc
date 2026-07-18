@@ -183,4 +183,62 @@ TEST(paint_curve_patch_spline, tile_span_unknown_mode_falls_back_to_default)
   EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(99, 1, 10.0f, 2.0f), 4.0f);
 }
 
+TEST(paint_curve_patch_spline, cyclic_build_closes_the_loop)
+{
+  /* The four corners of a unit square, as a cyclic curve's evaluated points would arrive: the
+   * first corner is NOT repeated at the end. */
+  const float3 corners[4] = {float3(0.0f, 0.0f, 0.0f),
+                             float3(1.0f, 0.0f, 0.0f),
+                             float3(1.0f, 1.0f, 0.0f),
+                             float3(0.0f, 1.0f, 0.0f)};
+
+  CurvePatchSpline open_spline;
+  open_spline.build_from_positions(Span(corners, 4));
+  EXPECT_FALSE(open_spline.cyclic);
+  /* Three sides only -- the closing one is not part of an open curve. */
+  EXPECT_NEAR(open_spline.total_length(), 3.0f, 1e-5f);
+
+  CurvePatchSpline closed_spline;
+  closed_spline.build_from_positions(Span(corners, 4), {}, /*cyclic=*/true);
+  EXPECT_TRUE(closed_spline.cyclic);
+  EXPECT_EQ(closed_spline.poly_3d.size(), 5);
+  EXPECT_EQ(closed_spline.poly_3d.last(), closed_spline.poly_3d.first());
+  /* The full perimeter, closing side included. */
+  EXPECT_NEAR(closed_spline.total_length(), 4.0f, 1e-5f);
+}
+
+TEST(paint_curve_patch_spline, cyclic_build_makes_join_tangent_continuous)
+{
+  const float3 corners[4] = {float3(0.0f, 0.0f, 0.0f),
+                             float3(1.0f, 0.0f, 0.0f),
+                             float3(1.0f, 1.0f, 0.0f),
+                             float3(0.0f, 1.0f, 0.0f)};
+  CurvePatchSpline spline;
+  spline.build_from_positions(Span(corners, 4), {}, /*cyclic=*/true);
+
+  /* The join's two coincident vertices must report the SAME tangent, otherwise the ribbon's UV
+   * creases exactly where the pattern has to meet itself. */
+  const float3 first = spline.tangents_3d.first();
+  const float3 last = spline.tangents_3d.last();
+  EXPECT_NEAR(first.x, last.x, 1e-5f);
+  EXPECT_NEAR(first.y, last.y, 1e-5f);
+  EXPECT_NEAR(first.z, last.z, 1e-5f);
+}
+
+TEST(paint_curve_patch_spline, tile_span_cyclic_snaps_to_whole_tiles)
+{
+  /* Default mode on a length of 10 with radius 2 wants a 4.0 tile -- 2.5 tiles around the loop,
+   * which would cut the last one mid-pattern. Snapped to 3 whole tiles. */
+  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(
+                      MTEX_CURVE_PATCH_LENGTH_DEFAULT, 1, 10.0f, 2.0f, /*cyclic=*/true),
+                  10.0f / 3.0f);
+  /* Repeat and Stretch already divide the length into whole tiles and must come out unchanged. */
+  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(
+                      MTEX_CURVE_PATCH_LENGTH_REPEAT, 4, 10.0f, 2.0f, /*cyclic=*/true),
+                  2.5f);
+  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(
+                      MTEX_CURVE_PATCH_LENGTH_STRETCH, 1, 10.0f, 2.0f, /*cyclic=*/true),
+                  10.0f);
+}
+
 }  // namespace blender::ed::sculpt_paint::tests

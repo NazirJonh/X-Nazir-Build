@@ -263,9 +263,22 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
       return std::nullopt;
     }
 
-    float s, lateral, normal_dist;
-    float3 tangent;
-    patch.spline.closest_point(symm_co, s, tangent, lateral, &normal_dist);
+    /* Ribbon LUT instead of `CurvePatchSpline::closest_point()`: the old global nearest-segment
+     * search was multi-valued on the concave side of sharp turns (several segments near-equidistant
+     * -> neighboring vertices snapping to different `s`, tearing the texture into fans). The ribbon
+     * assigns UV from the specific quad covering the vertex, staying single-valued through
+     * arbitrarily sharp turns -- the same construction the Roll stroke method uses. A failed sample
+     * means the vertex projects outside the ribbon (off the strip, or past the curve's ends, which
+     * the borders cut off exactly like the old `s` range rejection did). */
+    float2 ribbon_uv;
+    if (!patch.ribbon.sample(symm_co, ribbon_uv)) {
+      return std::nullopt;
+    }
+    const float s = ribbon_uv.y;
+    /* Signed offset from the ribbon plane, measured against the curve point the ribbon mapped this
+     * vertex to (NOT the globally-closest point -- consistent with the ribbon's own branch
+     * choice). */
+    const float normal_dist = math::dot(symm_co - patch.spline.evaluate(s), patch.plane_normal);
 
     /* `CurvePatchSpline::radii` stores the control curve's per-point `radius` attribute
      * verbatim, which is a unitless UI scalar (default 1.0 = "full brush size", see
@@ -296,6 +309,9 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
     if (std::abs(normal_dist) > 2.0f * radius_at_s) {
       return std::nullopt;
     }
+    /* In-plane offset reconstructed from the ribbon's normalized across-strip coordinate; the
+     * falloff formula below is unchanged. */
+    const float lateral = ribbon_uv.x * radius_at_s;
     const float radial_dist = std::sqrt(lateral * lateral + normal_dist * normal_dist);
     const float lateral_falloff = BKE_brush_curve_strength(&brush, radial_dist, radius_at_s);
     if (lateral_falloff <= 0.0f) {
@@ -310,12 +326,10 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
     if (mask_factor <= 0.0f) {
       return std::nullopt;
     }
-    /* `s` extends past `[0, total_length]` for vertices beyond the curve's own ends (see
-     * `closest_point()`'s docs). By design the strip stops exactly at the curve's own ends, with
-     * no rounded "cap" past them -- a cap the width of `radius_at_s` was the actual cause of the
-     * relief visibly continuing past a short curve's ends, since for curves not much longer than
-     * `radius_at_s` those caps alone could double or triple the visible length. Reject any vertex
-     * outside `[0, total_length]` outright instead of tapering it in. */
+    /* The ribbon's first/last rows sit exactly at the curve's ends, so `s` from the LUT is already
+     * confined to `[0, total_length]` and vertices past the ends fail `sample()` above -- by design
+     * the strip stops at the curve's own ends with no rounded "cap" past them. This guard only
+     * backstops interpolation slack at the LUT's edge pixels. */
     if (s < 0.0f || s > total_length) {
       return std::nullopt;
     }
@@ -324,17 +338,13 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
      * normalizes its input by the brush radius -- `MTEX_MAP_MODE_VIEW`/`TILED`/`RANDOM` divide by
      * `pixel_radius`/`start_pixel_radius` (`BKE_brush_sample_tex_3d()`, `brush.cc:1001-1018`), and
      * `MTEX_MAP_MODE_AREA` bakes an equivalent `scale_m4_fl(scale, radius)` into
-     * `cache.brush_local_mat` (`calc_brush_local_mat()`, `sculpt.cc:2832`). `lateral` is bounded
-     * by `±radius_at_s`, so dividing by it spans the texture's normal [-1, 1] across the strip
-     * width.
+     * `cache.brush_local_mat` (`calc_brush_local_mat()`, `sculpt.cc:2832`).
      *
-     * Negated so the texture's X axis matches the paint-cursor overlay: the cursor feeds the
-     * texture a screen-space X that runs left-to-right as `x = (i/size - 0.5) * 2`
-     * (`load_tex_task_cb_ex()`, `paint_cursor.cc`), whereas the spline's `lateral` sign (which side
-     * of the tangent a vertex sits on, from `CurvePatchSpline::closest_point()`) runs the opposite
-     * way -- so without this flip the relief showed the texture mirrored across the curve relative
-     * to what the brush cursor previews. */
-    const float u = -lateral / radius_at_s;
+     * The ribbon's `u` is already normalized to [-1, 1] across the strip, with its sign chosen at
+     * grid construction (`curve_patch_ribbon_build()`: the `cross(tangent, plane_normal)` side
+     * carries +1) to match what `-lateral / radius_at_s` produced before -- the orientation the
+     * paint-cursor overlay previews. */
+    const float u = ribbon_uv.x;
 
     /* `v` (along the strip) maps `s` onto the texture's [-1, 1] domain, centered on the curve's
      * midpoint so the pattern stays symmetric. `tile_span` is the world-space length of one tile,
@@ -669,6 +679,14 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   patch.spline.build_from_positions(geom.evaluated_positions(), evaluated_radii.as_span());
 
   if (patch.spline.is_empty()) {
+    return;
+  }
+
+  /* Rebuild the ribbon UV LUT the relief action samples in place of
+   * `CurvePatchSpline::closest_point()` (see `paint_curve_patch_ribbon.hh`). Built once per
+   * restamp on the main thread; PHASE 1's parallel `compute_vertex()` walk only reads it. */
+  curve_patch_ribbon_build(patch.spline, patch.frozen_params.radius, patch.ribbon);
+  if (!patch.ribbon.ready) {
     return;
   }
 

@@ -20,6 +20,7 @@
 
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
+#include "BLI_task.hh"
 #include "BLI_utildefines.h"
 
 namespace blender::ed::sculpt_paint {
@@ -39,6 +40,7 @@ void CurvePatchRibbonLut::clear()
   axis_y = float3(0.0f);
   v_threshold = 0.0f;
   ready = false;
+  source_hash = 0;
 }
 
 /* -------------------------------------------------------------------- */
@@ -74,8 +76,55 @@ static void ribbon_fix_border_self_intersections(const Span<float3> poly,
     b2d[k] = float2(math::dot(border[k], axis_x), math::dot(border[k], axis_y));
   }
 
-  const int max_loop = count - 1;
+  /* Uniform grid over the segment start points, so the crossing search only visits segments that
+   * can actually reach segment `i`.
+   *
+   * Two segments cross only if their start points are no farther apart than the sum of their
+   * lengths, so a cell of twice the longest segment makes a 3x3 cell neighborhood a conservative
+   * candidate set. The exhaustive scan this replaces tested every later segment for every segment:
+   * quadratic in the TESSELLATED point count, which is where an interactive re-stamp of a long
+   * curve spent most of its time (a Roll hand-off resamples to many control points, and each of
+   * those is subdivided again by the curve's evaluation resolution). */
+  const int seg_num = count - 1;
+  float max_seg_len = 0.0f;
+  float2 grid_min(FLT_MAX), grid_max(-FLT_MAX);
+  for (int k = 0; k < seg_num; k++) {
+    max_seg_len = std::max(max_seg_len, math::distance(b2d[k], b2d[k + 1]));
+    grid_min = math::min(grid_min, b2d[k]);
+    grid_max = math::max(grid_max, b2d[k]);
+  }
+  const float2 grid_extent = math::max(grid_max - grid_min, float2(1e-6f));
+  const float cell_size = std::max(2.0f * max_seg_len, 1e-6f);
+  /* Capped so a curve whose segments are tiny relative to its extent cannot allocate a huge grid;
+   * a coarser grid only widens the candidate set, it never misses a crossing. */
+  const int grid_x = std::clamp(int(grid_extent.x / cell_size) + 1, 1, 512);
+  const int grid_y = std::clamp(int(grid_extent.y / cell_size) + 1, 1, 512);
+  const float2 grid_scale(float(grid_x) / grid_extent.x, float(grid_y) / grid_extent.y);
+  auto cell_x_of = [&](const float2 p) {
+    return std::clamp(int((p.x - grid_min.x) * grid_scale.x), 0, grid_x - 1);
+  };
+  auto cell_y_of = [&](const float2 p) {
+    return std::clamp(int((p.y - grid_min.y) * grid_scale.y), 0, grid_y - 1);
+  };
+
+  /* Counting sort of the segment indices into cells. */
+  Vector<int> cell_start(grid_x * grid_y + 1, 0);
+  Vector<int> cell_segs(seg_num);
+  for (int k = 0; k < seg_num; k++) {
+    cell_start[cell_y_of(b2d[k]) * grid_x + cell_x_of(b2d[k]) + 1]++;
+  }
+  for (int c = 0; c < grid_x * grid_y; c++) {
+    cell_start[c + 1] += cell_start[c];
+  }
+  {
+    Vector<int> cursor(cell_start);
+    for (int k = 0; k < seg_num; k++) {
+      cell_segs[cursor[cell_y_of(b2d[k]) * grid_x + cell_x_of(b2d[k])]++] = k;
+    }
+  }
+
   Vector<float3> orig(border);
+  Vector<int> candidates;
   int skip_until = -1;
 
   for (int i = 0; i < count - 1; i++) {
@@ -87,8 +136,25 @@ static void ribbon_fix_border_self_intersections(const Span<float3> poly,
       continue;
     }
 
-    const int j_max = std::min(count - 2, i + max_loop);
-    for (int j = j_max; j >= i + 2; j--) {
+    /* Gather the nearby later segments, highest index first. The original scan walked `j` downward
+     * from the far end and stopped at its first hit, so it always collapsed the WIDEST loop through
+     * `i`; sorting descending here keeps that choice identical. */
+    candidates.clear();
+    const int cx = cell_x_of(b2d[i]);
+    const int cy = cell_y_of(b2d[i]);
+    for (int oy = std::max(0, cy - 1); oy <= std::min(grid_y - 1, cy + 1); oy++) {
+      for (int ox = std::max(0, cx - 1); ox <= std::min(grid_x - 1, cx + 1); ox++) {
+        const int c = oy * grid_x + ox;
+        for (int t = cell_start[c]; t < cell_start[c + 1]; t++) {
+          if (cell_segs[t] >= i + 2) {
+            candidates.append(cell_segs[t]);
+          }
+        }
+      }
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const int a, const int b) { return a > b; });
+
+    for (const int j : candidates) {
       const float2 d2 = b2d[j + 1] - b2d[j];
       if (math::dot(d2, d2) < 1e-8f) {
         continue;
@@ -443,6 +509,9 @@ static void ribbon_laplacian_smooth(Vector<float3> &grid_pos,
                                     const int rows,
                                     const int cols)
 {
+  if (rows < 3 || cols < 3) {
+    return;
+  }
   constexpr int smooth_iters = 10;
   constexpr float mix = 0.5f;
   const int grid_total = rows * cols;
@@ -451,19 +520,35 @@ static void ribbon_laplacian_smooth(Vector<float3> &grid_pos,
   float3 *src_p = grid_pos.data(), *dst_p = buf_p.data();
   float2 *src_u = grid_uv.data(), *dst_u = buf_u.data();
   for (int iter = 0; iter < smooth_iters; iter++) {
-    memcpy(dst_p, src_p, sizeof(float3) * grid_total);
-    memcpy(dst_u, src_u, sizeof(float2) * grid_total);
-    for (int r = 1; r < rows - 1; r++) {
-      for (int c = 1; c < cols - 1; c++) {
-        const int idx = r * cols + c;
-        const float3 avg_p = 0.25f * (src_p[(r - 1) * cols + c] + src_p[(r + 1) * cols + c] +
-                                      src_p[r * cols + c - 1] + src_p[r * cols + c + 1]);
-        const float2 avg_u = 0.25f * (src_u[(r - 1) * cols + c] + src_u[(r + 1) * cols + c] +
-                                      src_u[r * cols + c - 1] + src_u[r * cols + c + 1]);
-        dst_p[idx] = (1.0f - mix) * src_p[idx] + mix * avg_p;
-        dst_u[idx] = (1.0f - mix) * src_u[idx] + mix * avg_u;
-      }
+    /* Carry over the pinned boundary only -- the loop below writes every interior cell, so copying
+     * the whole grid every iteration moved megabytes per re-stamp to no effect. */
+    for (int c = 0; c < cols; c++) {
+      const int last = (rows - 1) * cols + c;
+      dst_p[c] = src_p[c];
+      dst_u[c] = src_u[c];
+      dst_p[last] = src_p[last];
+      dst_u[last] = src_u[last];
     }
+    for (int r = 1; r < rows - 1; r++) {
+      const int right = r * cols + cols - 1;
+      dst_p[r * cols] = src_p[r * cols];
+      dst_u[r * cols] = src_u[r * cols];
+      dst_p[right] = src_p[right];
+      dst_u[right] = src_u[right];
+    }
+    threading::parallel_for(IndexRange(1, rows - 2), 64, [&](const IndexRange range) {
+      for (const int64_t r : range) {
+        for (int c = 1; c < cols - 1; c++) {
+          const int idx = int(r) * cols + c;
+          const float3 avg_p = 0.25f * (src_p[idx - cols] + src_p[idx + cols] + src_p[idx - 1] +
+                                        src_p[idx + 1]);
+          const float2 avg_u = 0.25f * (src_u[idx - cols] + src_u[idx + cols] + src_u[idx - 1] +
+                                        src_u[idx + 1]);
+          dst_p[idx] = (1.0f - mix) * src_p[idx] + mix * avg_p;
+          dst_u[idx] = (1.0f - mix) * src_u[idx] + mix * avg_u;
+        }
+      }
+    });
     std::swap(src_p, dst_p);
     std::swap(src_u, dst_u);
   }
@@ -479,11 +564,48 @@ static void ribbon_laplacian_smooth(Vector<float3> &grid_pos,
 /** \name Build + Sample
  * \{ */
 
+/** Hash of everything #curve_patch_ribbon_build reads, so an unchanged curve can skip the rebuild.
+ * Deliberately O(n) over the tessellated polyline: still orders of magnitude below the build. */
+static uint64_t ribbon_source_hash(const CurvePatchSpline &spline, const float brush_radius)
+{
+  uint64_t hash = 1469598103934665603ull; /* FNV-1a offset basis. */
+  auto mix = [&hash](const float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    hash = (hash ^ uint64_t(bits)) * 1099511628211ull;
+  };
+  hash ^= uint64_t(spline.poly_3d.size()) * 1099511628211ull;
+  for (const float3 &p : spline.poly_3d) {
+    mix(p.x);
+    mix(p.y);
+    mix(p.z);
+  }
+  for (const float radius : spline.radii) {
+    mix(radius);
+  }
+  mix(brush_radius);
+  mix(spline.plane_normal.x);
+  mix(spline.plane_normal.y);
+  mix(spline.plane_normal.z);
+  return hash;
+}
+
 void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                               const float brush_radius,
                               CurvePatchRibbonLut &r_lut)
 {
-  r_lut.clear();
+  /* Nothing the ribbon depends on has changed, so the existing LUT is still exact. The modal editor
+   * re-stamps on events that never touch the curve (strength slider, Length mode, Repeats count),
+   * and those otherwise paid for a full rebuild each time. */
+  const uint64_t source_hash = ribbon_source_hash(spline, brush_radius);
+  if (r_lut.ready && r_lut.source_hash == source_hash) {
+    return;
+  }
+  /* Deliberately not #clear: the pixel arrays are reused below when the resolution is unchanged.
+   * `ready` stays false until the build completes, so a bail-out leaves the LUT unusable rather
+   * than stale. */
+  r_lut.ready = false;
+  r_lut.source_hash = source_hash;
   if (spline.is_empty() || brush_radius <= 0.0f) {
     return;
   }
@@ -588,25 +710,36 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
    * than ~15% of the largest half-width so the across-strip coordinate keeps sub-strip precision
    * on long thin curves, clamped to keep the per-restamp fill cost bounded. */
   const float max_extent = std::max(ext.x, ext.y);
-  const int res = std::clamp(int(max_extent / (0.15f * R_max)) + 1, 128, 512);
+  /* Quantized to 64-pixel steps: dragging a control point changes the curve's extent slightly on
+   * every event, and an exact resolution would therefore drift by a pixel or two each time and
+   * force the arrays below to be reallocated for no benefit. */
+  const int res_target = int(max_extent / (0.15f * R_max)) + 1;
+  const int res = std::clamp((res_target + 63) / 64 * 64, 128, 512);
   const float2 inv_ext(float(res) / ext.x, float(res) / ext.y);
 
   const int lut_total = res * res;
-  r_lut.res = res;
-  r_lut.uv.reinitialize(lut_total);
-  r_lut.dist_sq.reinitialize(lut_total);
-  r_lut.row.reinitialize(lut_total);
-  r_lut.uv2.reinitialize(lut_total);
-  r_lut.dist_sq2.reinitialize(lut_total);
-  r_lut.row2.reinitialize(lut_total);
-  for (int i = 0; i < lut_total; i++) {
-    r_lut.uv[i] = float2(FLT_MAX, 0.0f);
-    r_lut.dist_sq[i] = FLT_MAX;
-    r_lut.row[i] = -1;
-    r_lut.uv2[i] = float2(FLT_MAX, 0.0f);
-    r_lut.dist_sq2[i] = FLT_MAX;
-    r_lut.row2[i] = -1;
+  /* Reuse the previous allocation whenever the resolution is unchanged. An interactive drag
+   * rebuilds the LUT on every mouse event, and releasing then re-acquiring several megabytes each
+   * time is pure overhead -- only the reset below is actually needed. */
+  if (r_lut.uv.size() != lut_total) {
+    r_lut.uv.reinitialize(lut_total);
+    r_lut.dist_sq.reinitialize(lut_total);
+    r_lut.row.reinitialize(lut_total);
+    r_lut.uv2.reinitialize(lut_total);
+    r_lut.dist_sq2.reinitialize(lut_total);
+    r_lut.row2.reinitialize(lut_total);
   }
+  r_lut.res = res;
+  threading::parallel_for(IndexRange(lut_total), 8192, [&](const IndexRange range) {
+    for (const int64_t i : range) {
+      r_lut.uv[i] = float2(FLT_MAX, 0.0f);
+      r_lut.dist_sq[i] = FLT_MAX;
+      r_lut.row[i] = -1;
+      r_lut.uv2[i] = float2(FLT_MAX, 0.0f);
+      r_lut.dist_sq2[i] = FLT_MAX;
+      r_lut.row2[i] = -1;
+    }
+  });
 
   auto cross2d = [](const float2 a, const float2 b) { return a.x * b.y - a.y * b.x; };
 

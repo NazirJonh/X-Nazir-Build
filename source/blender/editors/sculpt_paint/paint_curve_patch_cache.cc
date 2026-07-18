@@ -719,6 +719,9 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
    * `CurvePatchSpline::closest_point()` (see `paint_curve_patch_ribbon.hh`). Built once per
    * restamp on the main thread; PHASE 1's parallel `compute_vertex()` walk only reads it. */
   curve_patch_ribbon_build(patch.spline, patch.frozen_params.radius, patch.ribbon);
+#if CURVE_PATCH_PROFILING
+  const double prof_t_ribbon = BLI_time_now_seconds(); /* DEBUG-cpatch */
+#endif
   if (!patch.ribbon.ready) {
     return;
   }
@@ -815,11 +818,14 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   prof_prev_start = prof_t0;
   IndexMaskMemory prof_memory;
   const int64_t prof_nodes = IndexMask::from_bits(patch.last_restamp_nodes, prof_memory).size();
+  /* `ribbon` covers the spline rebuild plus the ribbon/LUT build -- previously an unaccounted gap
+   * between `restore` and `normals`, which made `total` look larger than the sum of its parts. */
   printf(
-      "[DEBUG-cpatch] total=%.2fms | restore=%.2f normals=%.2f relief=%.2f flush=%.2f | nodes=%lld "
-      "interval=%.2fms\n",
+      "[DEBUG-cpatch] total=%.2fms | restore=%.2f ribbon=%.2f normals=%.2f relief=%.2f flush=%.2f | "
+      "nodes=%lld interval=%.2fms\n",
       (prof_t_end - prof_t0) * 1000.0,
       (prof_t_restore - prof_t0) * 1000.0,
+      (prof_t_ribbon - prof_t_restore) * 1000.0,
       (prof_t_norm - prof_t_pre_norm) * 1000.0,
       (prof_t_relief - prof_t_norm) * 1000.0,
       (prof_t_end - prof_t_relief) * 1000.0,

@@ -122,20 +122,15 @@ static void image_paint_selection_reset(bContext *C)
 }
 
 /**
- * End every floating session of this editor before the gesture opens its own undo step.
+ * End the floating session of this editor before the gesture opens its own undo step.
  *
- * Not just the move session: transform and warp hold an open image undo step too, and
- * #ED_image_undo_push_begin_selection below would free it from under them. See
- * #image_select_floating_sessions_end.
+ * Whichever tool it belongs to: a lifted session holds an open image undo step, and
+ * #ED_image_undo_push_begin_selection below would free it from under it. See
+ * #image_select_floating_sessions_end_all.
  */
 static void image_select_commit_floating_ops(bContext *C, SpaceImage *sima)
 {
-  image_select_floating_sessions_end(C,
-                                     sima,
-                                     IMAGE_SELECT_FLOATING_TOOL_MOVE |
-                                         IMAGE_SELECT_FLOATING_TOOL_TRANSFORM |
-                                         IMAGE_SELECT_FLOATING_TOOL_GRADIENT |
-                                         IMAGE_SELECT_FLOATING_TOOL_WARP);
+  image_select_floating_sessions_end_all(C, sima);
 }
 
 /** Clear the whole selection (used for simple-click and empty-gesture paths). */

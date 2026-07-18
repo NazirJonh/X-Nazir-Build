@@ -42,6 +42,9 @@ struct ImageSelectTransformGizmoMatrices {
 
 void image_select_transform_state_free(ImageSelectTransformState *state);
 
+/** Tag-dispatched entry point of #image_select_floating_session_free. */
+void image_select_transform_session_free(PaintSelectFloatingSession *session);
+
 /**
  * Commit and free \a sima's floating transform session, if it has one. No-op otherwise.
  * Called through #image_select_floating_sessions_end; see that function for the semantics.

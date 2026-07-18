@@ -20,6 +20,17 @@ void image_select_move_commit(bContext *C, ImageSelectMoveState *state);
 void image_select_move_state_free(ImageSelectMoveState *state);
 
 /**
+ * \a sima's live floating session when it is a move session, else null.
+ *
+ * The typed accessor for callers outside paint_image_select_move.cc: #image_select_session_get
+ * needs #ImageSelectMoveState to be complete, and the struct is defined in that file.
+ */
+ImageSelectMoveState *image_select_move_state_get(SpaceImage *sima);
+
+/** Tag-dispatched entry point of #image_select_floating_session_free. */
+void image_select_move_session_free(PaintSelectFloatingSession *session);
+
+/**
  * Commit and free \a sima's floating move session, if it has one. No-op otherwise.
  * Called through #image_select_floating_sessions_end; see that function for the semantics.
  */

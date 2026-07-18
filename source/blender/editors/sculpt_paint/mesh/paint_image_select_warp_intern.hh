@@ -102,6 +102,9 @@ inline void warp_grid_cell_corners(const float2 *pts,
  * \{ */
 
 struct ImageSelectWarpState : public PaintSelectFloatingSession {
+  static constexpr PaintSelectTool tool_type = PaintSelectTool::Warp;
+  ImageSelectWarpState() : PaintSelectFloatingSession(tool_type) {}
+
   int tile_number = 1001;
 
   /* Single-tile capture: geom.origin_px/size_px is the margin-expanded capture area;
@@ -149,6 +152,17 @@ struct ImageSelectWarpState : public PaintSelectFloatingSession {
 };
 
 void image_select_warp_state_free(ImageSelectWarpState *state);
+
+/**
+ * \a sima's live floating session when it is a warp session, else null.
+ *
+ * The typed accessor for callers outside paint_image_select_warp.cc; see
+ * #image_select_move_state_get for why the template accessor is not used across files.
+ */
+ImageSelectWarpState *image_select_warp_state_get(SpaceImage *sima);
+
+/** Tag-dispatched entry point of #image_select_floating_session_free. */
+void image_select_warp_session_free(PaintSelectFloatingSession *session);
 
 /**
  * Commit and free \a sima's floating warp session, if it has one. No-op otherwise.

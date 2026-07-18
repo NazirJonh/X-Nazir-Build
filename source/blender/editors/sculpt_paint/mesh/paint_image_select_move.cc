@@ -80,10 +80,13 @@ namespace blender {
 /**
  * Runtime state for the image select move operation.
  * Lifetime: allocated in invoke, freed in confirm or cancel.
- * Owned by SpaceImage_Runtime::paint_select.move; survives the initial drag
+ * Owned by SpaceImage_Runtime::paint_select; survives the initial drag
  * modal so the user can navigate freely between drag gestures while floating.
  */
 struct ImageSelectMoveState : public PaintSelectFloatingSession {
+  static constexpr PaintSelectTool tool_type = PaintSelectTool::Move;
+  ImageSelectMoveState() : PaintSelectFloatingSession(tool_type) {}
+
   /* One fragment per selected UDIM tile. */
   blender::Vector<SelectionTileFragment> fragments;
   /* Accumulated drag in UV space (tile 1001 has UV [0,1]x[0,1]). */
@@ -956,20 +959,29 @@ void image_select_move_state_free(ImageSelectMoveState *state)
   MEM_delete(state);
 }
 
+void image_select_move_session_free(PaintSelectFloatingSession *session)
+{
+  /* Only reached through #image_select_floating_session_free, which dispatches on the tag, so the
+   * downcast is the one the tag guarantees. */
+  BLI_assert(session->tool == ImageSelectMoveState::tool_type);
+  image_select_move_state_free(static_cast<ImageSelectMoveState *>(session));
+}
+
+ImageSelectMoveState *image_select_move_state_get(SpaceImage *sima)
+{
+  return image_select_session_get<ImageSelectMoveState>(sima);
+}
+
 void image_select_move_session_end_for_takeover(bContext *C, SpaceImage *sima)
 {
-  if (!sima || !sima->runtime) {
+  ImageSelectMoveState *state = image_select_move_state_get(sima);
+  if (!state) {
     return;
   }
-  ImageSelectMoveState *&state_ref = sima->runtime->paint_select.move;
-  if (!state_ref) {
-    return;
-  }
-  ImageSelectMoveState *state = state_ref;
   /* Cleared before the commit, not after: #image_select_move_commit notifies and tags the image,
    * and anything that looks the session up again in response must not find the state being torn
    * down here. */
-  state_ref = nullptr;
+  image_select_session_clear(sima);
   /* The session may still be mid-drag when another tool takes over (its modal handler is left
    * registered and exits on the next event, seeing a null state). Give the window its normal
    * cursor and the status bar its normal text back here. */
@@ -992,10 +1004,8 @@ bool image_select_move_is_floating(bContext *C)
 
 bool image_select_move_is_floating_in_space(const SpaceImage *sima)
 {
-  if (!sima || !sima->runtime) {
-    return false;
-  }
-  return image_select_floating_state_owns(sima->runtime->paint_select.move, sima);
+  return image_select_floating_state_owns(image_select_session_get<ImageSelectMoveState>(sima),
+                                          sima);
 }
 
 /* Returns true when a selection fragment is currently floating in the active Image Editor. */
@@ -1010,18 +1020,13 @@ static bool image_select_move_poll(bContext *C)
   if (!sima || !sima->runtime) {
     return false;
   }
-  ImageSelectMoveState *&state_ref = sima->runtime->paint_select.move;
-
-  if (image_select_transform_is_floating(C)) {
-    return false;
-  }
-  if (image_select_warp_is_floating(C)) {
-    return false;
-  }
   /* Re-drag an already-floating fragment, no selection needed. */
-  if (state_ref && sima == state_ref->owner_sima) {
+  if (image_select_move_state_get(sima)) {
     return true;
   }
+  /* Whether another tool's session blocks this one is decided in one place, by
+   * #image_paint_selection_poll. The explicit transform / warp rejections that used to sit here
+   * duplicated it, and duplicated it incompletely -- gradient was missing. */
   if (!image_paint_selection_poll(C)) {
     return false;
   }
@@ -1070,8 +1075,7 @@ static wmOperatorStatus image_select_move_modal(bContext *C,
     op->customdata = nullptr;
     return OPERATOR_FINISHED;
   }
-  ImageSelectMoveState *&state_ref = sima->runtime->paint_select.move;
-  ImageSelectMoveState *state = state_ref;
+  ImageSelectMoveState *state = image_select_move_state_get(sima);
   /* `state` is null when the session was ended elsewhere; `is_dragging` is cleared by
    * #image_select_move_undo_step_exec to abort the active drag. Both exits go through
    * #image_select_floating_drag_end so the drag cursor is always given back -- returning here
@@ -1095,9 +1099,9 @@ static wmOperatorStatus image_select_move_modal(bContext *C,
     if (event->val == IMAGE_SELECT_FLOATING_MODAL_CANCEL) {
       image_select_floating_drag_end(C, state);
       image_select_floating_status_clear(C);
+      image_select_session_clear(sima);
       image_select_move_restore_source(C, state);
       image_select_move_state_free(state);
-      state_ref = nullptr;
       op->customdata = nullptr;
       ED_region_tag_redraw(region);
       return OPERATOR_CANCELLED;
@@ -1136,13 +1140,10 @@ static void image_select_move_cancel(bContext *C, wmOperator *op)
   image_select_floating_drag_end(C, nullptr);
   image_select_floating_status_clear(C);
   SpaceImage *sima = CTX_wm_space_image(C);
-  if (sima && sima->runtime) {
-    ImageSelectMoveState *&state_ref = sima->runtime->paint_select.move;
-    if (state_ref) {
-      image_select_move_restore_source(C, state_ref);
-      image_select_move_state_free(state_ref);
-      state_ref = nullptr;
-    }
+  if (ImageSelectMoveState *state = image_select_move_state_get(sima)) {
+    image_select_session_clear(sima);
+    image_select_move_restore_source(C, state);
+    image_select_move_state_free(state);
   }
   op->customdata = nullptr;
   ARegion *region = CTX_wm_region(C);
@@ -1192,11 +1193,8 @@ bool image_select_move_cursor_in_fragment(const ImageSelectMoveState *state,
 bool image_select_move_delegate_to_move_operator(bContext *C, const wmEvent *event)
 {
   SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
-    return false;
-  }
-  ImageSelectMoveState *state = sima->runtime->paint_select.move;
-  if (!state || state->owner_sima != sima || !sima->image) {
+  ImageSelectMoveState *state = image_select_move_state_get(sima);
+  if (!state || !sima->image) {
     return false;
   }
   ARegion *region = CTX_wm_region(C);
@@ -1216,23 +1214,21 @@ static wmOperatorStatus image_select_move_invoke(bContext *C,
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *&state_ref = sima->runtime->paint_select.move;
-
   /* Re-drag path: a fragment is already floating in this space -- start another drag gesture,
    * but only when LMB was pressed inside the fragment's current bounding box.
    * If the press is outside, pass through so selection/commit operators handle it. */
-  if (state_ref && state_ref->owner_sima == sima) {
+  if (ImageSelectMoveState *floating = image_select_move_state_get(sima)) {
     ARegion *region_for_hit = CTX_wm_region(C);
     if (region_for_hit &&
-        !image_select_move_cursor_in_fragment(state_ref, region_for_hit, event, sima->image))
+        !image_select_move_cursor_in_fragment(floating, region_for_hit, event, sima->image))
     {
       return OPERATOR_PASS_THROUGH;
     }
     /* Push the current position so Ctrl+Z can step back to it. */
-    state_ref->drag_position_history.append(state_ref->uv_drag_offset);
-    state_ref->is_dragging = true;
-    state_ref->prev_mouse_xy = int2{event->mval[0], event->mval[1]};
-    op->customdata = state_ref;
+    floating->drag_position_history.append(floating->uv_drag_offset);
+    floating->is_dragging = true;
+    floating->prev_mouse_xy = int2{event->mval[0], event->mval[1]};
+    op->customdata = floating;
     WM_event_add_modal_handler(C, op);
     WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
     image_select_floating_status_set(C, op->type, false);
@@ -1241,19 +1237,10 @@ static wmOperatorStatus image_select_move_invoke(bContext *C,
 
   /* Another tool may still have a session floating in this space. It has to be ended before
    * #image_select_move_lift_source below opens an undo step, which would otherwise free the step
-   * that session still believes it owns. See #image_select_floating_sessions_end. */
-  image_select_floating_sessions_end(C,
-                                     sima,
-                                     IMAGE_SELECT_FLOATING_TOOL_TRANSFORM |
-                                         IMAGE_SELECT_FLOATING_TOOL_GRADIENT |
-                                         IMAGE_SELECT_FLOATING_TOOL_WARP);
+   * that session still believes it owns. See #image_select_floating_sessions_end. The move branch
+   * above already returned, so the slot is guaranteed empty from here on. */
+  image_select_floating_sessions_end(C, sima, PaintSelectTool::Move);
 
-  /* If a floating fragment from a different space is still alive, commit it. */
-  if (state_ref) {
-    image_select_move_commit(C, state_ref);
-    image_select_move_state_free(state_ref);
-    state_ref = nullptr;
-  }
   Image *ima = sima->image;
 
   /* Resolved before anything is lifted: without a region there is nowhere to register the preview
@@ -1284,7 +1271,7 @@ static wmOperatorStatus image_select_move_invoke(bContext *C,
   state->draw_handle = ED_region_draw_cb_activate(
       state->owner_region_type, draw_select_move_preview, state, REGION_DRAW_POST_PIXEL);
 
-  state_ref = state;
+  image_select_session_set(sima, state);
 
   /* Only start dragging immediately when the operator was invoked by an LMB click.
    * When invoked via keyboard shortcut (e.g. a key bound to Move Selection), the cursor
@@ -1321,12 +1308,11 @@ static wmOperatorStatus image_select_move_confirm_exec(bContext *C, wmOperator *
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *&state_ref = sima->runtime->paint_select.move;
-  if (!state_ref) {
+  ImageSelectMoveState *state = image_select_move_state_get(sima);
+  if (!state) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *state = state_ref;
-  state_ref = nullptr;
+  image_select_session_clear(sima);
   image_select_move_commit(C, state);
   image_select_move_state_free(state);
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
@@ -1339,12 +1325,11 @@ static wmOperatorStatus image_select_move_cancel_exec(bContext *C, wmOperator * 
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *&state_ref = sima->runtime->paint_select.move;
-  if (!state_ref) {
+  ImageSelectMoveState *state = image_select_move_state_get(sima);
+  if (!state) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *state = state_ref;
-  state_ref = nullptr;
+  image_select_session_clear(sima);
   image_select_move_restore_source(C, state);
   image_select_move_state_free(state);
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
@@ -1370,8 +1355,7 @@ static wmOperatorStatus image_select_move_undo_step_exec(bContext *C, wmOperator
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *&state_ref = sima->runtime->paint_select.move;
-  ImageSelectMoveState *state = state_ref;
+  ImageSelectMoveState *state = image_select_move_state_get(sima);
   if (!state) {
     return OPERATOR_CANCELLED;
   }
@@ -1401,7 +1385,7 @@ static wmOperatorStatus image_select_move_undo_step_exec(bContext *C, wmOperator
   }
 
   /* History exhausted -- restore source pixels and end the floating operation. */
-  state_ref = nullptr;
+  image_select_session_clear(sima);
   image_select_move_restore_source(C, state);
   image_select_move_state_free(state);
   if (region) {
@@ -1500,7 +1484,6 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
   if (!sima || !sima->image || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *&state_ref = sima->runtime->paint_select.move;
 
   Image *ima = sima->image;
 
@@ -1591,22 +1574,19 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
   }
 
   /* Paste opens an undo step of its own below, so any other tool's floating session has to be
-   * ended first or that step would be freed from under it. See #image_select_floating_sessions_end
-   * for why the session slots are not mutually exclusive to begin with. */
-  image_select_floating_sessions_end(C,
-                                     sima,
-                                     IMAGE_SELECT_FLOATING_TOOL_TRANSFORM |
-                                         IMAGE_SELECT_FLOATING_TOOL_GRADIENT |
-                                         IMAGE_SELECT_FLOATING_TOOL_WARP);
+   * ended first or that step would be freed from under it. See
+   * #image_select_floating_sessions_end. */
+  image_select_floating_sessions_end(C, sima, PaintSelectTool::Move);
 
   /* A fragment may already be floating (pasting twice without confirming). Commit and free it
-   * first, exactly like #image_select_move_invoke does: overwriting `state_ref` below would
-   * leak the old state *and* leave its #ED_region_draw_cb_activate handle registered, drawing a
-   * preview backed by freed memory. */
-  if (state_ref) {
-    image_select_move_commit(C, state_ref);
-    image_select_move_state_free(state_ref);
-    state_ref = nullptr;
+   * first, exactly like #image_select_move_invoke does: leaving it in the slot would leak the old
+   * state *and* leave its #ED_region_draw_cb_activate handle registered, drawing a preview backed
+   * by freed memory. Paste is the one entry point that reaches here with its own tool's session
+   * still live, which is why the takeover above deliberately skips it. */
+  if (ImageSelectMoveState *floating = image_select_move_state_get(sima)) {
+    image_select_session_clear(sima);
+    image_select_move_commit(C, floating);
+    image_select_move_state_free(floating);
   }
 
   ImageSelectMoveState *state = MEM_new<ImageSelectMoveState>(__func__);
@@ -1654,7 +1634,7 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
   }
   state->undo_begun = true;
 
-  state_ref = state;
+  image_select_session_set(sima, state);
 
   /* Clear the canvas selection mask so the lasso/box/circle outline at the copy position
    * disappears while the pasted fragment is floating.  The fragment rectangle preview
@@ -1677,12 +1657,8 @@ wmOperatorStatus image_select_move_convert_to_transform(bContext *C,
                                                         const wmEvent *event)
 {
   SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
-    return OPERATOR_CANCELLED;
-  }
-  ImageSelectMoveState *&move_state_ref = sima->runtime->paint_select.move;
-  ImageSelectMoveState *move_state = move_state_ref;
-  if (!move_state || move_state->owner_sima != sima) {
+  ImageSelectMoveState *move_state = image_select_move_state_get(sima);
+  if (!move_state) {
     return OPERATOR_CANCELLED;
   }
 
@@ -1703,7 +1679,9 @@ wmOperatorStatus image_select_move_convert_to_transform(bContext *C,
   const bool proportional = RNA_boolean_get(op->ptr, "proportional");
 
   move_state->undo_begun = false;
-  move_state_ref = nullptr;
+  /* The slot has to be empty before #image_select_transform_adopt_move_state fills it with the
+   * transform session it builds from the values captured above. */
+  image_select_session_clear(sima);
   image_select_move_state_free(move_state);
 
   const wmOperatorStatus result = image_select_transform_adopt_move_state(C,
@@ -1822,14 +1800,12 @@ void PAINT_OT_image_select_paste(wmOperatorType *ot)
 
 bool ED_image_paint_select_is_moving(SpaceImage *sima)
 {
-  return sima && sima->runtime && sima->runtime->paint_select.move != nullptr;
+  return image_select_move_state_get(sima) != nullptr;
 }
 
 void ED_image_paint_select_move_offset_get(SpaceImage *sima, float r_offset[2])
 {
-  const ImageSelectMoveState *state = (sima && sima->runtime) ?
-                                          sima->runtime->paint_select.move :
-                                          nullptr;
+  const ImageSelectMoveState *state = image_select_move_state_get(sima);
   if (state) {
     copy_v2_v2(r_offset, state->uv_drag_offset);
   }
@@ -1840,8 +1816,7 @@ void ED_image_paint_select_move_offset_get(SpaceImage *sima, float r_offset[2])
 
 void ED_image_paint_select_move_offset_set(SpaceImage *sima, const float offset[2])
 {
-  ImageSelectMoveState *state = (sima && sima->runtime) ? sima->runtime->paint_select.move :
-                                                          nullptr;
+  ImageSelectMoveState *state = image_select_move_state_get(sima);
   if (state) {
     copy_v2_v2(state->uv_drag_offset, offset);
     WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);

@@ -91,27 +91,62 @@ bool image_select_mask_matches(const ImBuf *mask, const ImBuf *ibuf)
 /** \name Cross-tool session teardown
  * \{ */
 
-void image_select_floating_sessions_end(bContext *C, SpaceImage *sima, const int tools)
+void image_select_floating_sessions_end_all(bContext *C, SpaceImage *sima)
 {
-  if (!sima || !sima->runtime) {
+  const PaintSelectFloatingSession *session = image_select_session_active(sima);
+  if (!session) {
     return;
   }
+  /* One slot, so at most one tool can need ending and the old "un-paint the gradient before baking
+   * the lifted fragments" ordering has nothing left to order. Each entry point clears the slot
+   * itself, which is what makes ending a session twice impossible. */
+  switch (session->tool) {
+    case PaintSelectTool::Move:
+      image_select_move_session_end_for_takeover(C, sima);
+      break;
+    case PaintSelectTool::Transform:
+      image_select_transform_session_end_for_takeover(C, sima);
+      break;
+    case PaintSelectTool::Gradient:
+      image_select_gradient_session_end_for_takeover(C, sima);
+      break;
+    case PaintSelectTool::Warp:
+      image_select_warp_session_end_for_takeover(C, sima);
+      break;
+  }
+}
 
-  /* Ordered so the canvas is coherent for whatever is committed afterwards: the gradient preview
-   * is un-painted first (its tile backups were taken with the other tools' fragments already
-   * lifted), then the lifted fragments are baked back down on top of the restored pixels. Each
-   * entry point is a no-op when its slot is empty, so the same tool can never be ended twice. */
-  if (tools & IMAGE_SELECT_FLOATING_TOOL_GRADIENT) {
-    image_select_gradient_session_end_for_takeover(C, sima);
+void image_select_floating_sessions_end(bContext *C,
+                                        SpaceImage *sima,
+                                        const PaintSelectTool taking_over)
+{
+  const PaintSelectFloatingSession *session = image_select_session_active(sima);
+  if (!session || session->tool == taking_over) {
+    return;
   }
-  if (tools & IMAGE_SELECT_FLOATING_TOOL_WARP) {
-    image_select_warp_session_end_for_takeover(C, sima);
+  image_select_floating_sessions_end_all(C, sima);
+}
+
+void image_select_floating_session_free(PaintSelectFloatingSession *session)
+{
+  if (!session) {
+    return;
   }
-  if (tools & IMAGE_SELECT_FLOATING_TOOL_TRANSFORM) {
-    image_select_transform_session_end_for_takeover(C, sima);
-  }
-  if (tools & IMAGE_SELECT_FLOATING_TOOL_MOVE) {
-    image_select_move_session_end_for_takeover(C, sima);
+  /* Dispatched rather than deleted through the base: the base is deliberately non-polymorphic (see
+   * the file header), so only the tool that defines the concrete state can destroy it. */
+  switch (session->tool) {
+    case PaintSelectTool::Move:
+      image_select_move_session_free(session);
+      break;
+    case PaintSelectTool::Transform:
+      image_select_transform_session_free(session);
+      break;
+    case PaintSelectTool::Gradient:
+      image_select_gradient_session_free(session);
+      break;
+    case PaintSelectTool::Warp:
+      image_select_warp_session_free(session);
+      break;
   }
 }
 

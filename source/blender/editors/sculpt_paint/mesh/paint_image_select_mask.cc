@@ -780,15 +780,12 @@ static wmOperatorStatus image_select_all_exec(bContext *C, wmOperator * /*op*/)
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *&g_floating_state = sima->runtime->paint_select.move;
-
-  /* Commit any floating move-selection fragment before changing the selection state,
-   * so the Move Selection undo step is closed before "Select All" opens its own. */
-  if (g_floating_state) {
-    image_select_move_commit(C, g_floating_state);
-    image_select_move_state_free(g_floating_state);
-    g_floating_state = nullptr;
-  }
+  /* End any floating session before changing the selection state, so its undo step is closed
+   * before "Select All" opens its own with #ED_image_undo_push_begin_selection. This used to
+   * commit only a floating *move*, leaving a floating transform / warp holding a step that the
+   * push below then freed under it -- the same dangling-step crash
+   * #image_select_floating_sessions_end exists to prevent. */
+  image_select_floating_sessions_end_all(C, sima);
 
   Image *image = sima->image;
   if (!image) {
@@ -861,15 +858,9 @@ static wmOperatorStatus image_select_none_exec(bContext *C, wmOperator * /*op*/)
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *&g_floating_state = sima->runtime->paint_select.move;
-
-  /* Commit any floating move-selection fragment before changing the selection state,
-   * so the Move Selection undo step is closed before "Select None" opens its own. */
-  if (g_floating_state) {
-    image_select_move_commit(C, g_floating_state);
-    image_select_move_state_free(g_floating_state);
-    g_floating_state = nullptr;
-  }
+  /* End any floating session before changing the selection state, so its undo step is closed
+   * before "Select None" opens its own. See #image_select_all_exec. */
+  image_select_floating_sessions_end_all(C, sima);
 
   Image *image = sima->image;
 
@@ -914,15 +905,9 @@ static wmOperatorStatus image_select_invert_exec(bContext *C, wmOperator * /*op*
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectMoveState *&g_floating_state = sima->runtime->paint_select.move;
-
-  /* Commit any floating move-selection fragment before changing the selection state,
-   * so the Move Selection undo step is closed before "Invert Selection" opens its own. */
-  if (g_floating_state) {
-    image_select_move_commit(C, g_floating_state);
-    image_select_move_state_free(g_floating_state);
-    g_floating_state = nullptr;
-  }
+  /* End any floating session before changing the selection state, so its undo step is closed
+   * before "Invert Selection" opens its own. See #image_select_all_exec. */
+  image_select_floating_sessions_end_all(C, sima);
 
   Image *image = sima->image;
   if (!image) {
@@ -1414,22 +1399,8 @@ void PAINT_OT_image_select_circle(wmOperatorType *ot)
 
 void paint_select_session_free(PaintSelectSession &session)
 {
-  if (session.move) {
-    image_select_move_state_free(session.move);
-    session.move = nullptr;
-  }
-  if (session.transform) {
-    image_select_transform_state_free(session.transform);
-    session.transform = nullptr;
-  }
-  if (session.gradient) {
-    image_select_gradient_state_free(session.gradient);
-    session.gradient = nullptr;
-  }
-  if (session.warp) {
-    image_select_warp_state_free(session.warp);
-    session.warp = nullptr;
-  }
+  image_select_floating_session_free(session.active);
+  session.active = nullptr;
 }
 
 void ED_image_paint_select_session_free(SpaceImage *sima)
@@ -1442,11 +1413,12 @@ void ED_image_paint_select_session_free(SpaceImage *sima)
 
 void ED_image_paint_select_transform_state_free(SpaceImage *sima)
 {
-  if (!sima || !sima->runtime || !sima->runtime->paint_select.transform) {
+  ImageSelectTransformState *state = image_select_transform_state_get(sima);
+  if (!state) {
     return;
   }
-  image_select_transform_state_free(sima->runtime->paint_select.transform);
-  sima->runtime->paint_select.transform = nullptr;
+  image_select_session_clear(sima);
+  image_select_transform_state_free(state);
 }
 
 /** \} */

@@ -824,10 +824,18 @@ struct ImageSelectGradientTileData {
   ImBuf *undo_ibuf = nullptr;
 };
 
-struct ImageSelectGradientState {
-  SpaceImage *owner_sima = nullptr;
-  ARegionType *owner_region_type = nullptr;
-  void *draw_handle = nullptr;
+/**
+ * Runtime state of a floating gradient preview.
+ *
+ * Derives from the shared base like the three lifted-fragment tools, even though it uses only part
+ * of it: #owner_sima, #owner_region_type and #draw_handle used to be duplicated here verbatim.
+ * #iuser is unused (each backed tile carries its own #ImageSelectGradientTileData::iuser),
+ * #is_dragging is unused (the drag lives in the operator's #GradientDragData), and #undo_begun
+ * stays false for the whole session -- see the note on that member.
+ */
+struct ImageSelectGradientState : public PaintSelectFloatingSession {
+  static constexpr PaintSelectTool tool_type = PaintSelectTool::Gradient;
+  ImageSelectGradientState() : PaintSelectFloatingSession(tool_type) {}
 
   Vector<ImageSelectGradientTileData> tiles;
 
@@ -864,10 +872,7 @@ void image_select_gradient_state_free(ImageSelectGradientState *state)
   if (!state) {
     return;
   }
-  if (state->draw_handle && state->owner_region_type) {
-    ED_region_draw_cb_exit(state->owner_region_type, state->draw_handle);
-    state->draw_handle = nullptr;
-  }
+  image_select_floating_draw_handle_clear(*state);
   for (ImageSelectGradientTileData &tile : state->tiles) {
     image_select_gradient_free_tile_data(tile);
   }
@@ -875,9 +880,17 @@ void image_select_gradient_state_free(ImageSelectGradientState *state)
   MEM_delete(state);
 }
 
+void image_select_gradient_session_free(PaintSelectFloatingSession *session)
+{
+  /* Only reached through #image_select_floating_session_free, which dispatches on the tag, so the
+   * downcast is the one the tag guarantees. */
+  BLI_assert(session->tool == ImageSelectGradientState::tool_type);
+  image_select_gradient_state_free(static_cast<ImageSelectGradientState *>(session));
+}
+
 bool image_select_gradient_is_floating_in_space(const SpaceImage *sima)
 {
-  return sima && sima->runtime && sima->runtime->paint_select.gradient != nullptr;
+  return image_select_session_get<ImageSelectGradientState>(sima) != nullptr;
 }
 
 bool image_select_gradient_is_floating(bContext *C)
@@ -887,10 +900,7 @@ bool image_select_gradient_is_floating(bContext *C)
 
 static ImageSelectGradientState *image_select_gradient_state_get(SpaceImage *sima)
 {
-  if (!sima || !sima->runtime) {
-    return nullptr;
-  }
-  return sima->runtime->paint_select.gradient;
+  return image_select_session_get<ImageSelectGradientState>(sima);
 }
 
 static float2 image_select_gradient_mid_uv(const ImageSelectGradientState *state)
@@ -1055,13 +1065,11 @@ static void image_select_gradient_sync_tile_backups(bContext *C,
 
 static void image_select_gradient_commit_floating_ops(bContext *C)
 {
-  /* Every other tool's session, not just move: each of them holds an open image undo step, and
-   * #image_select_gradient_apply_session opens one of its own, which would free theirs. */
-  image_select_floating_sessions_end(C,
-                                     CTX_wm_space_image(C),
-                                     IMAGE_SELECT_FLOATING_TOOL_MOVE |
-                                         IMAGE_SELECT_FLOATING_TOOL_TRANSFORM |
-                                         IMAGE_SELECT_FLOATING_TOOL_WARP);
+  /* Every other tool's session: each of them holds an open image undo step, and
+   * #image_select_gradient_apply_session opens one of its own, which would free theirs. A gradient
+   * session already floating here is left alone -- #image_select_gradient_begin_session restores
+   * and replaces it, which is not the same as the takeover teardown. */
+  image_select_floating_sessions_end(C, CTX_wm_space_image(C), PaintSelectTool::Gradient);
 }
 
 /**
@@ -1293,11 +1301,10 @@ static void image_select_gradient_begin_session(bContext *C,
                                                 const int tile_number,
                                                 const float2 &start_uv)
 {
-  ImageSelectGradientState *&session = sima->runtime->paint_select.gradient;
-  if (session) {
-    image_select_gradient_restore_session_backup(C, session);
-    image_select_gradient_state_free(session);
-    session = nullptr;
+  if (ImageSelectGradientState *previous = image_select_gradient_state_get(sima)) {
+    image_select_session_clear(sima);
+    image_select_gradient_restore_session_backup(C, previous);
+    image_select_gradient_state_free(previous);
   }
 
   ImageSelectGradientState *state = MEM_new<ImageSelectGradientState>(__func__);
@@ -1332,7 +1339,7 @@ static void image_select_gradient_begin_session(bContext *C,
                                                     REGION_DRAW_POST_PIXEL);
   }
 
-  session = state;
+  image_select_session_set(sima, state);
 }
 
 static void image_select_gradient_restore_session_backup(bContext *C,
@@ -1349,15 +1356,11 @@ static void image_select_gradient_restore_session_backup(bContext *C,
 
 void image_select_gradient_session_end_for_takeover(bContext *C, SpaceImage *sima)
 {
-  if (!sima || !sima->runtime) {
+  ImageSelectGradientState *state = image_select_gradient_state_get(sima);
+  if (!state) {
     return;
   }
-  ImageSelectGradientState *&state_ref = sima->runtime->paint_select.gradient;
-  if (!state_ref) {
-    return;
-  }
-  ImageSelectGradientState *state = state_ref;
-  state_ref = nullptr;
+  image_select_session_clear(sima);
   /* Discarded rather than applied, unlike the lifted-fragment tools: the gradient is an
    * unconfirmed preview painted over per-tile backups, so restoring the backups returns the canvas
    * to exactly where the user left it. This is what the tool's own re-invoke and cancel paths do,
@@ -1464,22 +1467,16 @@ static bool image_select_gradient_poll(bContext *C)
   if (!sima) {
     return false;
   }
-  if (sima->mode != SI_MODE_PAINT) {
-    return false;
+  /* Re-invoke over the gradient already floating in this space: re-anchoring the vector needs no
+   * canvas mask, and #image_select_gradient_begin_session restores and replaces the old session.
+   * Tested first because #image_paint_selection_poll rejects a floating gradient. */
+  if (image_select_gradient_state_get(sima)) {
+    return true;
   }
-  if (sima->image != nullptr &&
-      (!ID_IS_EDITABLE(sima->image) || ID_IS_OVERRIDE_LIBRARY(sima->image)))
-  {
-    return false;
-  }
-  if (image_select_transform_is_floating(C)) {
-    return false;
-  }
-  if (image_select_warp_is_floating(C)) {
-    return false;
-  }
-  const ARegion *region = CTX_wm_region(C);
-  if (!region || region->regiontype != RGN_TYPE_WINDOW) {
+  /* Mode, editability, region *and* "another tool is floating in this editor" all come from the
+   * one shared poll, the same way move / transform / warp reach them. This used to be an inline
+   * copy that checked transform and warp but not gradient. */
+  if (!image_paint_selection_poll(C)) {
     return false;
   }
   return sima->image != nullptr;
@@ -1627,10 +1624,8 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
       WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data->timer);
       data->timer = nullptr;
     }
+    image_select_session_clear(sima);
     image_select_gradient_state_free(state);
-    if (sima && sima->runtime) {
-      sima->runtime->paint_select.gradient = nullptr;
-    }
     MEM_delete(data);
     op->customdata = nullptr;
     WM_cursor_modal_restore(CTX_wm_window(C));
@@ -1682,8 +1677,8 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
       else {
         image_select_gradient_restore_session_backup(C, state);
       }
+      image_select_session_clear(sima);
       image_select_gradient_state_free(state);
-      sima->runtime->paint_select.gradient = nullptr;
       MEM_delete(data);
       op->customdata = nullptr;
       WM_cursor_modal_restore(CTX_wm_window(C));
@@ -1793,13 +1788,10 @@ static void image_select_gradient_cancel(bContext *C, wmOperator *op)
     op->customdata = nullptr;
   }
   SpaceImage *sima = CTX_wm_space_image(C);
-  if (sima && sima->runtime) {
-    ImageSelectGradientState *state = sima->runtime->paint_select.gradient;
-    if (state) {
-      image_select_gradient_restore_session_backup(C, state);
-      image_select_gradient_state_free(state);
-      sima->runtime->paint_select.gradient = nullptr;
-    }
+  if (ImageSelectGradientState *state = image_select_gradient_state_get(sima)) {
+    image_select_session_clear(sima);
+    image_select_gradient_restore_session_backup(C, state);
+    image_select_gradient_state_free(state);
   }
   WM_cursor_modal_restore(CTX_wm_window(C));
 }
@@ -1810,13 +1802,13 @@ static wmOperatorStatus image_select_gradient_apply_exec(bContext *C, wmOperator
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectGradientState *state = sima->runtime->paint_select.gradient;
+  ImageSelectGradientState *state = image_select_gradient_state_get(sima);
   if (!state) {
     return OPERATOR_CANCELLED;
   }
+  image_select_session_clear(sima);
   image_select_gradient_apply_session(C, state);
   image_select_gradient_state_free(state);
-  sima->runtime->paint_select.gradient = nullptr;
   return OPERATOR_FINISHED;
 }
 

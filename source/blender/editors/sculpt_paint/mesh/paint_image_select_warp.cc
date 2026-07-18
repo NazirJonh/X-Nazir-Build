@@ -1100,20 +1100,29 @@ void image_select_warp_commit(bContext *C, ImageSelectWarpState *state, ReportLi
  * confirm/cancel/undo_step operators reference it as their poll. */
 static bool image_select_warp_floating_poll(bContext *C);
 
+void image_select_warp_session_free(PaintSelectFloatingSession *session)
+{
+  /* Only reached through #image_select_floating_session_free, which dispatches on the tag, so the
+   * downcast is the one the tag guarantees. */
+  BLI_assert(session->tool == ImageSelectWarpState::tool_type);
+  image_select_warp_state_free(static_cast<ImageSelectWarpState *>(session));
+}
+
+ImageSelectWarpState *image_select_warp_state_get(SpaceImage *sima)
+{
+  return image_select_session_get<ImageSelectWarpState>(sima);
+}
+
 void image_select_warp_session_end_for_takeover(bContext *C, SpaceImage *sima)
 {
-  if (!sima || !sima->runtime) {
+  ImageSelectWarpState *state = image_select_warp_state_get(sima);
+  if (!state) {
     return;
   }
-  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
-  if (!state_ref) {
-    return;
-  }
-  ImageSelectWarpState *state = state_ref;
   /* Cleared before the commit, not after: #image_select_warp_commit notifies and tags the image,
    * and anything that looks the session up again in response must not find the state being torn
    * down here. */
-  state_ref = nullptr;
+  image_select_session_clear(sima);
   /* A control-point drag may still be in progress when another tool takes over (the modal handler
    * is left registered and exits on its next event, seeing a null state). Give the window its
    * normal cursor and the status bar its normal text back here. */
@@ -1131,13 +1140,13 @@ static wmOperatorStatus image_select_warp_confirm_exec(bContext *C, wmOperator *
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
-  if (!state_ref) {
+  ImageSelectWarpState *state = image_select_warp_state_get(sima);
+  if (!state) {
     return OPERATOR_CANCELLED;
   }
-  image_select_warp_commit(C, state_ref, op->reports);
-  image_select_warp_state_free(state_ref);
-  state_ref = nullptr;
+  image_select_session_clear(sima);
+  image_select_warp_commit(C, state, op->reports);
+  image_select_warp_state_free(state);
   ARegion *region = CTX_wm_region(C);
   if (region) {
     ED_region_tag_redraw(region);
@@ -1166,14 +1175,14 @@ static wmOperatorStatus image_select_warp_cancel_exec(bContext *C, wmOperator * 
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
-  if (!state_ref) {
+  ImageSelectWarpState *state = image_select_warp_state_get(sima);
+  if (!state) {
     return OPERATOR_CANCELLED;
   }
+  image_select_session_clear(sima);
   image_select_fragment_restore_source(
-      C, sima->image, state_ref->iuser, {state_ref->fragment}, state_ref->undo_begun);
-  image_select_warp_state_free(state_ref);
-  state_ref = nullptr;
+      C, sima->image, state->iuser, {state->fragment}, state->undo_begun);
+  image_select_warp_state_free(state);
   ARegion *region = CTX_wm_region(C);
   if (region) {
     ED_region_tag_redraw(region);
@@ -1199,20 +1208,20 @@ static wmOperatorStatus image_select_warp_undo_step_exec(bContext *C, wmOperator
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
-  if (!state_ref) {
+  ImageSelectWarpState *state = image_select_warp_state_get(sima);
+  if (!state) {
     return OPERATOR_CANCELLED;
   }
-  if (state_ref->drag_position_history.is_empty()) {
+  if (state->drag_position_history.is_empty()) {
     /* No history: cancel entirely. */
+    image_select_session_clear(sima);
     image_select_fragment_restore_source(
-        C, sima->image, state_ref->iuser, {state_ref->fragment}, state_ref->undo_begun);
-    image_select_warp_state_free(state_ref);
-    state_ref = nullptr;
+        C, sima->image, state->iuser, {state->fragment}, state->undo_begun);
+    image_select_warp_state_free(state);
   }
   else {
-    state_ref->tgt_pts = state_ref->drag_position_history.last();
-    state_ref->drag_position_history.remove_last();
+    state->tgt_pts = state->drag_position_history.last();
+    state->drag_position_history.remove_last();
   }
   ARegion *region = CTX_wm_region(C);
   if (region) {
@@ -1247,10 +1256,8 @@ bool image_select_warp_is_floating(bContext *C)
 
 bool image_select_warp_is_floating_in_space(const SpaceImage *sima)
 {
-  if (!sima || !sima->runtime) {
-    return false;
-  }
-  return image_select_floating_state_owns(sima->runtime->paint_select.warp, sima);
+  return image_select_floating_state_owns(image_select_session_get<ImageSelectWarpState>(sima),
+                                          sima);
 }
 
 static bool image_select_warp_floating_poll(bContext *C)
@@ -1264,15 +1271,13 @@ static bool image_select_warp_poll(bContext *C)
   if (!sima || !sima->runtime) {
     return false;
   }
-  if (image_select_floating_state_owns(sima->runtime->paint_select.warp, sima)) {
+  /* Re-drag a control point of the grid already floating in this space. */
+  if (image_select_warp_state_get(sima)) {
     return true;
   }
-  if (image_select_transform_is_floating(C)) {
-    return false;
-  }
-  if (image_select_gradient_is_floating(C)) {
-    return false;
-  }
+  /* Whether another tool's session blocks this one is decided in one place, by
+   * #image_paint_selection_poll. The explicit transform / gradient rejections that used to sit
+   * here duplicated it. */
   if (!image_paint_selection_poll(C)) {
     return false;
   }
@@ -1391,8 +1396,7 @@ static wmOperatorStatus image_select_warp_modal(bContext *C, wmOperator *op, con
     op->customdata = nullptr;
     return OPERATOR_FINISHED;
   }
-  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
-  ImageSelectWarpState *state = state_ref;
+  ImageSelectWarpState *state = image_select_warp_state_get(sima);
   if (!state || !state->is_dragging) {
     /* Another operator ended the drag (or the whole session) behind our back; the cursor set when
      * the drag started must still be restored. */
@@ -1416,10 +1420,10 @@ static wmOperatorStatus image_select_warp_modal(bContext *C, wmOperator *op, con
     if (event->val == IMAGE_SELECT_FLOATING_MODAL_CANCEL) {
       image_select_floating_drag_end(C, state);
       image_select_floating_status_clear(C);
+      image_select_session_clear(sima);
       image_select_fragment_restore_source(
           C, sima->image, state->iuser, {state->fragment}, state->undo_begun);
       image_select_warp_state_free(state);
-      state_ref = nullptr;
       op->customdata = nullptr;
       ED_region_tag_redraw(region);
       return OPERATOR_CANCELLED;
@@ -1461,14 +1465,11 @@ static void image_select_warp_cancel(bContext *C, wmOperator *op)
   image_select_floating_drag_end(C, nullptr);
   image_select_floating_status_clear(C);
   SpaceImage *sima = CTX_wm_space_image(C);
-  if (sima && sima->runtime) {
-    ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
-    if (state_ref) {
-      image_select_fragment_restore_source(
-          C, sima->image, state_ref->iuser, {state_ref->fragment}, state_ref->undo_begun);
-      image_select_warp_state_free(state_ref);
-      state_ref = nullptr;
-    }
+  if (ImageSelectWarpState *state = image_select_warp_state_get(sima)) {
+    image_select_session_clear(sima);
+    image_select_fragment_restore_source(
+        C, sima->image, state->iuser, {state->fragment}, state->undo_begun);
+    image_select_warp_state_free(state);
   }
   op->customdata = nullptr;
   ARegion *region = CTX_wm_region(C);
@@ -1483,17 +1484,15 @@ static wmOperatorStatus image_select_warp_invoke(bContext *C, wmOperator *op, co
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
-
   /* Already floating in this space: hit-test a point and start a re-drag. */
-  if (state_ref && state_ref->owner_sima == sima) {
+  if (ImageSelectWarpState *floating = image_select_warp_state_get(sima)) {
     ARegion *region = CTX_wm_region(C);
-    const int idx = region ? image_select_warp_pick_point(state_ref, region, event) : -1;
+    const int idx = region ? image_select_warp_pick_point(floating, region, event) : -1;
     if (idx == -1) {
       return OPERATOR_PASS_THROUGH;
     }
-    image_select_warp_begin_drag(state_ref, idx);
-    op->customdata = state_ref;
+    image_select_warp_begin_drag(floating, idx);
+    op->customdata = floating;
     WM_event_add_modal_handler(C, op);
     WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
     image_select_floating_status_set(C, op->type, false);
@@ -1503,12 +1502,9 @@ static wmOperatorStatus image_select_warp_invoke(bContext *C, wmOperator *op, co
 
   /* Another tool may still have a session floating in this space. It has to be ended before
    * #image_select_fragment_lift_source below opens an undo step, which would otherwise free the
-   * step that session still believes it owns. See #image_select_floating_sessions_end. */
-  image_select_floating_sessions_end(C,
-                                     sima,
-                                     IMAGE_SELECT_FLOATING_TOOL_MOVE |
-                                         IMAGE_SELECT_FLOATING_TOOL_TRANSFORM |
-                                         IMAGE_SELECT_FLOATING_TOOL_GRADIENT);
+   * step that session still believes it owns. See #image_select_floating_sessions_end. The warp
+   * branch above already returned, so the slot is guaranteed empty from here on. */
+  image_select_floating_sessions_end(C, sima, PaintSelectTool::Warp);
 
   Image *ima = sima->image;
   if (!ima) {
@@ -1558,7 +1554,7 @@ static wmOperatorStatus image_select_warp_invoke(bContext *C, wmOperator *op, co
                                                  image_select_warp_paintcursor_draw,
                                                  state);
 
-  state_ref = state;
+  image_select_session_set(sima, state);
   ED_region_tag_redraw(region);
 
   /* Only start a drag immediately when invoked by an LMB click on a control point (mirrors

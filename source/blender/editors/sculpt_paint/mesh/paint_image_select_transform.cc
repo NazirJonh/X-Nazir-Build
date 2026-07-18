@@ -80,6 +80,9 @@
 namespace blender {
 
 struct ImageSelectTransformState : public PaintSelectFloatingSession {
+  static constexpr PaintSelectTool tool_type = PaintSelectTool::Transform;
+  ImageSelectTransformState() : PaintSelectFloatingSession(tool_type) {}
+
   /* Unlike move/warp, transform owns gizmos, so it also pins the concrete area/region the cage
    * was built for (hit-testing and gizmo refresh both need them). */
   ScrArea *owner_area = nullptr;
@@ -673,18 +676,18 @@ static bool image_select_transform_poll(bContext *C)
   if (!sima || !sima->runtime) {
     return false;
   }
-  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
-
-  if (image_select_floating_state_owns(state_ref, sima)) {
+  /* Re-anchor / re-drag the transform already floating in this space. */
+  if (image_select_transform_state_get(sima)) {
     return true;
   }
   /* Switch from floating move to transform (keymap / menu) without a canvas mask. */
   if (image_select_move_is_floating_in_space(sima)) {
     return true;
   }
-  if (image_select_warp_is_floating(C)) {
-    return false;
-  }
+  /* Whether another tool's session blocks this one is decided in one place, by
+   * #image_paint_selection_poll; the explicit warp rejection that used to sit here duplicated it.
+   * The floating-move case above is the deliberate exception, because it is a hand-over rather
+   * than a takeover. */
   if (!image_paint_selection_poll(C)) {
     return false;
   }
@@ -705,36 +708,37 @@ static void image_select_transform_cancel(bContext *C, wmOperator *op)
   image_select_floating_drag_end(C, nullptr);
   image_select_floating_status_clear(C);
   SpaceImage *sima = CTX_wm_space_image(C);
-  if (sima && sima->runtime) {
-    ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
-    if (state_ref) {
-      if (state_ref->owner_area) {
-        ED_area_status_text(state_ref->owner_area, nullptr);
-      }
-      image_select_transform_restore_source(C, state_ref);
-      image_select_transform_state_free(state_ref);
-      state_ref = nullptr;
+  if (ImageSelectTransformState *state = image_select_transform_state_get(sima)) {
+    if (state->owner_area) {
+      ED_area_status_text(state->owner_area, nullptr);
     }
+    image_select_session_clear(sima);
+    image_select_transform_restore_source(C, state);
+    image_select_transform_state_free(state);
   }
   op->customdata = nullptr;
 }
 
 static void image_select_transform_commit(bContext *C, ImageSelectTransformState *state);
 
+void image_select_transform_session_free(PaintSelectFloatingSession *session)
+{
+  /* Only reached through #image_select_floating_session_free, which dispatches on the tag, so the
+   * downcast is the one the tag guarantees. */
+  BLI_assert(session->tool == ImageSelectTransformState::tool_type);
+  image_select_transform_state_free(static_cast<ImageSelectTransformState *>(session));
+}
+
 void image_select_transform_session_end_for_takeover(bContext *C, SpaceImage *sima)
 {
-  if (!sima || !sima->runtime) {
+  ImageSelectTransformState *state = image_select_transform_state_get(sima);
+  if (!state) {
     return;
   }
-  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
-  if (!state_ref) {
-    return;
-  }
-  ImageSelectTransformState *state = state_ref;
   /* Cleared before the commit, not after: #image_select_transform_commit notifies and tags the
    * image, and anything that looks the session up again in response must not find the state being
    * torn down here. */
-  state_ref = nullptr;
+  image_select_session_clear(sima);
   if (state->owner_area) {
     ED_area_status_text(state->owner_area, nullptr);
   }
@@ -758,12 +762,11 @@ static wmOperatorStatus image_select_transform_confirm_exec(bContext *C, wmOpera
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
-  if (!state_ref) {
+  ImageSelectTransformState *state = image_select_transform_state_get(sima);
+  if (!state) {
     return OPERATOR_CANCELLED;
   }
 
-  ImageSelectTransformState *state = state_ref;
   ED_area_status_text(state->owner_area, nullptr);
   image_select_floating_status_clear(C);
 
@@ -777,7 +780,7 @@ static wmOperatorStatus image_select_transform_confirm_exec(bContext *C, wmOpera
   RNA_float_set_array(&props_ptr, "scale", scale);
   RNA_float_set_array(&props_ptr, "uv_anchor", uv_anchor);
 
-  state_ref = nullptr;
+  image_select_session_clear(sima);
   image_select_transform_restore_source(C, state);
   image_select_transform_state_free(state);
   if (ARegion *region = CTX_wm_region(C)) {
@@ -800,15 +803,14 @@ static wmOperatorStatus image_select_transform_cancel_exec(bContext *C, wmOperat
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
-  if (!state_ref) {
+  ImageSelectTransformState *state = image_select_transform_state_get(sima);
+  if (!state) {
     return OPERATOR_CANCELLED;
   }
 
-  ImageSelectTransformState *state = state_ref;
   ED_area_status_text(state->owner_area, nullptr);
   image_select_floating_status_clear(C);
-  state_ref = nullptr;
+  image_select_session_clear(sima);
   image_select_transform_restore_source(C, state);
   image_select_transform_state_free(state);
   if (ARegion *region = CTX_wm_region(C)) {
@@ -930,18 +932,13 @@ static ImageSelectTransformState::HandleType image_select_transform_handle_to_in
 
 bool image_select_transform_is_floating_in_space(const SpaceImage *sima)
 {
-  if (!sima || !sima->runtime) {
-    return false;
-  }
-  return image_select_floating_state_owns(sima->runtime->paint_select.transform, sima);
+  return image_select_floating_state_owns(
+      image_select_session_get<ImageSelectTransformState>(sima), sima);
 }
 
 ImageSelectTransformState *image_select_transform_state_get(SpaceImage *sima)
 {
-  if (!sima || !sima->runtime) {
-    return nullptr;
-  }
-  return sima->runtime->paint_select.transform;
+  return image_select_session_get<ImageSelectTransformState>(sima);
 }
 
 bool ED_image_paint_select_is_transforming(SpaceImage *sima)
@@ -1736,15 +1733,11 @@ static wmOperatorStatus image_select_transform_drag_invoke(bContext *C,
                                                            const wmEvent *event)
 {
   SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
-    return OPERATOR_CANCELLED;
-  }
-  ImageSelectTransformState *const stored_state = sima->runtime->paint_select.transform;
-  if (!stored_state || stored_state->owner_sima != sima) {
+  ImageSelectTransformState *state = image_select_transform_state_get(sima);
+  if (!state) {
     return OPERATOR_CANCELLED;
   }
 
-  ImageSelectTransformState *state = stored_state;
   ARegion *region = CTX_wm_region(C);
   if (region) {
     image_select_transform_cache_screen_coords(state, region);
@@ -1766,20 +1759,17 @@ static wmOperatorStatus image_select_transform_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
-  if (state_ref) {
-    image_select_transform_restore_source(C, state_ref);
-    image_select_transform_state_free(state_ref);
-    state_ref = nullptr;
+  /* Re-running the operator (redo panel, F9) discards the session the previous run left floating;
+   * only this tool's own session is handled here, the takeover below covers the rest. */
+  if (ImageSelectTransformState *floating = image_select_transform_state_get(sima)) {
+    image_select_session_clear(sima);
+    image_select_transform_restore_source(C, floating);
+    image_select_transform_state_free(floating);
   }
 
   /* This exec path lifts and commits in one go, opening an undo step in between, so every other
    * tool's session has to be ended first. See #image_select_floating_sessions_end. */
-  image_select_floating_sessions_end(C,
-                                     sima,
-                                     IMAGE_SELECT_FLOATING_TOOL_MOVE |
-                                         IMAGE_SELECT_FLOATING_TOOL_GRADIENT |
-                                         IMAGE_SELECT_FLOATING_TOOL_WARP);
+  image_select_floating_sessions_end(C, sima, PaintSelectTool::Transform);
 
   Image *ima = sima->image;
   ImageUser iuser = sima->iuser;
@@ -1842,50 +1832,34 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
-
-  if (state_ref && state_ref->owner_sima == sima) {
-    ImageSelectTransformState *state = state_ref;
+  if (ImageSelectTransformState *floating = image_select_transform_state_get(sima)) {
     ARegion *region = CTX_wm_region(C);
     if (region) {
-      image_select_transform_cache_screen_coords(state, region);
+      image_select_transform_cache_screen_coords(floating, region);
     }
 
     const float2 mouse_co(event->mval[0], event->mval[1]);
-    const ImageSelectTransformState::HandleType hit = get_active_handle_hit(state, mouse_co);
+    const ImageSelectTransformState::HandleType hit = get_active_handle_hit(floating, mouse_co);
 
     /* Re-drag via keyboard re-invoke: only start drag on handle/quad hit. */
     if (hit == ImageSelectTransformState::HANDLE_NONE) {
       return OPERATOR_PASS_THROUGH;
     }
 
-    return image_select_transform_start_drag_gesture(C, op, state, event, hit);
+    return image_select_transform_start_drag_gesture(C, op, floating, event, hit);
   }
 
-  /* If a transform is already active in a different space, restore it. */
-  if (state_ref) {
-    image_select_transform_restore_source(C, state_ref);
-    image_select_transform_state_free(state_ref);
-    state_ref = nullptr;
-  }
-
-  /* Gradient and warp sessions are ended here, before the move hand-over below: that path passes
-   * the move's *open* undo step straight to the new transform session, so it must not be preceded
-   * by anything that opens or closes a step. Move itself is therefore deliberately absent from
-   * this mask and stays handled by the two branches that follow. */
-  image_select_floating_sessions_end(
-      C, sima, IMAGE_SELECT_FLOATING_TOOL_GRADIENT | IMAGE_SELECT_FLOATING_TOOL_WARP);
-
-  /* Switch from floating move to transform without baking the move to the canvas. */
-  ImageSelectMoveState *&move_state_ref = sima->runtime->paint_select.move;
+  /* Switch from floating move to transform without baking the move to the canvas. This hand-over
+   * passes the move's *open* undo step straight to the new transform session, so it must not be
+   * preceded by anything that opens or closes a step -- which is why it is tested before the
+   * takeover below rather than through it. */
   if (image_select_move_is_floating_in_space(sima)) {
     return image_select_move_convert_to_transform(C, op, event);
   }
-  if (move_state_ref) {
-    image_select_move_commit(C, move_state_ref);
-    image_select_move_state_free(move_state_ref);
-    move_state_ref = nullptr;
-  }
+
+  /* Whatever else may be floating (gradient or warp) is ended before the lift below opens an undo
+   * step. See #image_select_floating_sessions_end. */
+  image_select_floating_sessions_end(C, sima, PaintSelectTool::Transform);
 
   Image *ima = sima->image;
 
@@ -1966,7 +1940,7 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
   state->draw_handle = ED_region_draw_cb_activate(
       state->owner_region_type, draw_select_transform_texture, state, REGION_DRAW_POST_VIEW);
 
-  state_ref = state;
+  image_select_session_set(sima, state);
   op->customdata = nullptr;
   state->is_dragging = false;
   state->active_handle = ImageSelectTransformState::HANDLE_NONE;
@@ -1991,8 +1965,7 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
     op->customdata = nullptr;
     return OPERATOR_FINISHED;
   }
-  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
-  ImageSelectTransformState *state = state_ref;
+  ImageSelectTransformState *state = image_select_transform_state_get(sima);
   if (!state) {
     op->customdata = nullptr;
     return OPERATOR_FINISHED;
@@ -2022,7 +1995,7 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
 
           ED_area_status_text(state->owner_area, nullptr);
           image_select_floating_status_clear(C);
-          state_ref = nullptr;
+          image_select_session_clear(sima);
           image_select_transform_commit(C, state);
           image_select_transform_state_free(state);
           op->customdata = nullptr;
@@ -2033,7 +2006,7 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
         case IMAGE_SELECT_FLOATING_MODAL_UNDO_STEP: {
           ED_area_status_text(state->owner_area, nullptr);
           image_select_floating_status_clear(C);
-          state_ref = nullptr;
+          image_select_session_clear(sima);
           image_select_transform_restore_source(C, state);
           image_select_transform_state_free(state);
           op->customdata = nullptr;
@@ -2179,8 +2152,9 @@ wmOperatorStatus image_select_transform_adopt_move_state(
   state->draw_handle = ED_region_draw_cb_activate(
       state->owner_region_type, draw_select_transform_texture, state, REGION_DRAW_POST_VIEW);
 
-  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
-  state_ref = state;
+  /* #image_select_move_convert_to_transform emptied the slot before calling this, so the assert
+   * inside also checks that the move session really was handed over and not merely forgotten. */
+  image_select_session_set(sima, state);
   op->customdata = nullptr;
   state->is_dragging = false;
   state->active_handle = ImageSelectTransformState::HANDLE_NONE;

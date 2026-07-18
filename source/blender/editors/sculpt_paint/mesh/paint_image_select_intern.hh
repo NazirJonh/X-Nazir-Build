@@ -125,6 +125,9 @@ bool image_select_gradient_is_floating(bContext *C);
 bool image_select_gradient_is_floating_in_space(const SpaceImage *sima);
 void image_select_gradient_state_free(ImageSelectGradientState *state);
 
+/** Tag-dispatched entry point of #image_select_floating_session_free. */
+void image_select_gradient_session_free(PaintSelectFloatingSession *session);
+
 /**
  * Restore the tile backups of \a sima's floating gradient session and free it, if it has one.
  * No-op otherwise. Called through #image_select_floating_sessions_end; see that function for why

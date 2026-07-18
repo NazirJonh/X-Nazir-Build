@@ -21,19 +21,22 @@ namespace gpu {
 class Batch;
 }
 
-struct ImageSelectMoveState;
-struct ImageSelectTransformState;
-struct ImageSelectGradientState;
-struct ImageSelectWarpState;
+struct PaintSelectFloatingSession;
 
-/* Floating selection operation state for Image Paint mode. The individual states are opaque
- * here: they are owned and manipulated by the sculpt_paint module, which is what keeps this
- * header (and therefore every SpaceImage user) free of a dependency on that module. */
+/* Floating selection operation state for Image Paint mode.
+ *
+ * There is exactly one slot. The move / transform / warp tools lift pixels off the canvas and hold
+ * an image undo step open while they float; two sessions being live at once is what used to leave
+ * the older one pointing at a step the newer one's #ED_image_undo_push_begin had already freed. One
+ * slot makes that unrepresentable -- a tool taking over must end whatever is here first. The
+ * gradient holds no step of its own but shares the slot for the same reason: only one floating edit
+ * can own the editor at a time.
+ *
+ * Which tool the session belongs to is carried by #PaintSelectFloatingSession::tool, so the state
+ * stays opaque here and this header (and therefore every SpaceImage user) keeps its independence
+ * from the sculpt_paint module. */
 struct PaintSelectSession {
-  ImageSelectMoveState *move = nullptr;
-  ImageSelectTransformState *transform = nullptr;
-  ImageSelectGradientState *gradient = nullptr;
-  ImageSelectWarpState *warp = nullptr;
+  PaintSelectFloatingSession *active = nullptr;
 };
 
 namespace ed::image {

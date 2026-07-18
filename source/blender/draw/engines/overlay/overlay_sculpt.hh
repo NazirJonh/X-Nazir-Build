@@ -27,15 +27,6 @@
 #include "overlay_symmetry_contour.hh"
 #include "overlay_symmetry_plane.hh"
 
-/* TEMP DEBUG (#SCULPT_OVERLAY_PERF): the #SCULPT_OVERLAY_PERF_LOGGING toggle lives in
- * overlay_symmetry_contour.hh (included above), shared with the contour rebuild sub-timings.
- * Flip it there to enable/disable all sculpt-overlay perf instrumentation - redefining it here
- * would give the two translation units different values. */
-#if SCULPT_OVERLAY_PERF_LOGGING
-#  include <chrono>
-#  include <cstdio>
-#endif
-
 namespace blender::draw::overlay {
 
 /**
@@ -71,12 +62,6 @@ class Sculpts : Overlay {
  public:
   void begin_sync(Resources &res, const State &state) final
   {
-    OVERLAY_PERF_SCOPE("overlay::Sculpts::begin_sync");
-
-#if SCULPT_OVERLAY_PERF_LOGGING
-    const auto sculpt_overlay_perf_t0 = std::chrono::steady_clock::now();
-#endif
-
     show_curves_cage_ = state.show_sculpt_curves_cage();
     show_face_set_ = state.show_sculpt_face_sets();
     show_mask_ = state.show_sculpt_mask();
@@ -95,12 +80,6 @@ class Sculpts : Overlay {
       sculpt_curve_cage_.init();
       symmetry_contour_.begin_sync(res, state, false);
       symmetry_plane_.begin_sync(res, state, false, 0.0f);
-#if SCULPT_OVERLAY_PERF_LOGGING
-      printf("[SCULPT_OVERLAY_PERF] begin_sync DISABLED total_ms=%.4f\n",
-             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                        sculpt_overlay_perf_t0)
-                 .count());
-#endif
       return;
     }
 
@@ -148,15 +127,6 @@ class Sculpts : Overlay {
                                state,
                                show_symmetry_plane_ || show_curves_symmetry_plane_,
                                state.overlay.sculpt_symmetry_plane_opacity);
-
-#if SCULPT_OVERLAY_PERF_LOGGING
-    printf("[SCULPT_OVERLAY_PERF] begin_sync ENABLED total_ms=%.4f show_contour=%d show_plane=%d\n",
-           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                      sculpt_overlay_perf_t0)
-               .count(),
-           show_symmetry_contour_,
-           show_symmetry_plane_);
-#endif
   }
 
   void object_sync(Manager &manager,
@@ -168,18 +138,9 @@ class Sculpts : Overlay {
       return;
     }
 
-    OVERLAY_PERF_SCOPE("overlay::Sculpts::object_sync (per object)");
-
-#if SCULPT_OVERLAY_PERF_LOGGING
-    const auto sculpt_overlay_perf_t0 = std::chrono::steady_clock::now();
-#endif
-
     switch (ob_ref.object->type) {
       case OB_MESH: {
         mesh_sync(manager, ob_ref, state);
-#if SCULPT_OVERLAY_PERF_LOGGING
-        const auto sculpt_overlay_perf_t_after_mesh_sync = std::chrono::steady_clock::now();
-#endif
         if (ob_ref.object->mode == OB_MODE_SCULPT &&
             (show_symmetry_contour_ || show_symmetry_plane_))
         {
@@ -201,21 +162,6 @@ class Sculpts : Overlay {
             symmetry_plane_.object_sync(manager, ob_ref, symmetry_flags, res);
           }
         }
-#if SCULPT_OVERLAY_PERF_LOGGING
-        printf(
-            "[SCULPT_OVERLAY_PERF] object_sync obj=%s mesh_sync_ms=%.4f symmetry_ms=%.4f "
-            "total_ms=%.4f\n",
-            ob_ref.object->id.name,
-            std::chrono::duration<double, std::milli>(sculpt_overlay_perf_t_after_mesh_sync -
-                                                       sculpt_overlay_perf_t0)
-                .count(),
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                       sculpt_overlay_perf_t_after_mesh_sync)
-                .count(),
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                       sculpt_overlay_perf_t0)
-                .count());
-#endif
         break;
       }
       case OB_CURVES: {

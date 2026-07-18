@@ -33,39 +33,6 @@
 
 #include "draw_common.hh"
 
-/* -------------------------------------------------------------------- */
-/** \name TEMP DEBUG (#OVERLAY_PERF): overlay performance instrumentation
- *
- * A/B instrumentation for comparing overlay cost between two builds. Set the toggle to 1 in *both*
- * builds, open the same file with the same viewport and camera, let it run for a few hundred
- * frames, then compare the "Average" of each named timer.
- *
- * #OVERLAY_PERF_SCOPE wraps the enclosing scope in #SCOPED_TIMER_AVERAGED, which prints a running
- * average, minimum and last duration per call. Use at most one per scope: the macro declares static
- * variables with fixed names.
- *
- * #OVERLAY_PERF_GPU_SYNC blocks until the GPU has completed the work submitted so far, so that an
- * enclosing #OVERLAY_PERF_SCOPE also accounts for GPU time. It stalls the pipeline and therefore
- * inflates absolute numbers - those are only meaningful when comparing the same site across builds,
- * never as a measure of real frame time.
- *
- * Grep "OVERLAY_PERF" to find and remove every line tagged by this.
- * \{ */
-
-#define OVERLAY_PERF_LOGGING 1
-
-#if OVERLAY_PERF_LOGGING
-#  include "BLI_timeit.hh"
-#  include "GPU_state.hh"
-#  define OVERLAY_PERF_SCOPE(name) SCOPED_TIMER_AVERAGED(name)
-#  define OVERLAY_PERF_GPU_SYNC() GPU_finish()
-#else
-#  define OVERLAY_PERF_SCOPE(name) ((void)0)
-#  define OVERLAY_PERF_GPU_SYNC() ((void)0)
-#endif
-
-/** \} */
-
 namespace blender {
 
 template<> struct gpu::AttrType<VertexClass> {
@@ -484,6 +451,12 @@ class ShaderModule {
  public:
   /** Shaders */
   StaticShader anti_aliasing = {"overlay_antialiasing_pipeline"};
+  /**
+   * Resolve variant that decodes the per-pixel line width from `line_tx.a`. Deliberately left out
+   * of the async pre-compile list below: it is only needed while a symmetry contour overlay is on,
+   * so it compiles on first use rather than costing every startup.
+   */
+  StaticShader anti_aliasing_line_width = {"overlay_antialiasing_pipeline_line_width"};
   StaticShader armature_degrees_of_freedom = shader_clippable("overlay_armature_dof");
   StaticShader attribute_viewer_mesh = shader_clippable("overlay_viewer_attribute_mesh");
   StaticShader attribute_viewer_pointcloud = shader_clippable(
@@ -701,6 +674,15 @@ struct Resources : public select::SelectMap {
   TextureRef depth_target_tx;
   TextureRef depth_target_in_front_tx;
 
+  /**
+   * Set during sync by any overlay that encodes a per-pixel line width in the alpha channel of
+   * `line_tx` (currently only #SymmetryContourOverlay). #AntiAliasing::begin_sync, which is synced
+   * after every layer, reads it to pick the resolve variant that decodes that width. Decoding it
+   * unconditionally would cost every overlay frame in every mode, so the common case compiles the
+   * decode out entirely. Reset in #begin_sync.
+   */
+  bool line_width_encoded = false;
+
   /** Copy of the settings the current texture was generated with. Used to detect updates. */
   bool weight_ramp_custom = false;
   ColorBand weight_ramp_copy = {};
@@ -807,6 +789,7 @@ struct Resources : public select::SelectMap {
   {
     SelectMap::begin_sync(clipping_plane_count);
     free_movieclips_textures();
+    line_width_encoded = false;
   }
 
   void acquire(const DRWContext *draw_ctx, const State &state)

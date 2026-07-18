@@ -69,7 +69,10 @@ class AntiAliasing : Overlay {
       pass.init();
       pass.framebuffer_set(&framebuffer_ref_);
       pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA_PREMUL);
-      pass.shader_set(res.shaders->anti_aliasing.get());
+      /* Synced after every layer, so #Resources::line_width_encoded already reflects this frame.
+       * The decoding variant is only worth its cost while an overlay actually writes a width. */
+      pass.shader_set(res.line_width_encoded ? res.shaders->anti_aliasing_line_width.get() :
+                                               res.shaders->anti_aliasing.get());
       pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
       pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
       pass.bind_texture("depth_tx", &res.depth_tx);
@@ -82,14 +85,8 @@ class AntiAliasing : Overlay {
 
   void draw_output(Framebuffer &framebuffer, Manager &manager, View & /*view*/) final
   {
-    /* The line anti-aliasing resolve runs full-screen on every overlay frame in every mode, so any
-     * change to its shader is paid whether or not the overlay that motivated it is enabled. */
-    OVERLAY_PERF_SCOPE("overlay::AntiAliasing::draw_output (GPU synced)");
-
     framebuffer_ref_ = framebuffer;
     manager.submit(anti_aliasing_ps_);
-
-    OVERLAY_PERF_GPU_SYNC();
   }
 };
 

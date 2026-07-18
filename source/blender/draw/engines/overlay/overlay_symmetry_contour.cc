@@ -38,10 +38,6 @@
 #include <cmath>
 #include <utility>
 
-#if SCULPT_OVERLAY_PERF_LOGGING
-#  include <cstdio>
-#endif
-
 namespace blender::draw::overlay {
 
 /* -------------------------------------------------------------------- */
@@ -883,12 +879,6 @@ void SymmetryContour::update_contours(const Object *ob,
 
   bool pending_dirty = false;
 
-#if SCULPT_OVERLAY_PERF_LOGGING
-  double perf_extract_ms = 0.0;
-  double perf_loops_ms = 0.0;
-  double perf_emit_ms = 0.0;
-#endif
-
   for (int axis = 0; axis < 3; axis++) {
     const int axis_flag = (axis == 0) ? PAINT_SYMM_X : (axis == 1) ? PAINT_SYMM_Y : PAINT_SYMM_Z;
     if ((symmetry_flags & axis_flag) == 0) {
@@ -899,10 +889,6 @@ void SymmetryContour::update_contours(const Object *ob,
 
     Vector<ContourSegment> segments;
     Set<uint64_t> segment_hashes;
-
-#if SCULPT_OVERLAY_PERF_LOGGING
-    const auto perf_t0 = std::chrono::steady_clock::now();
-#endif
 
     if (pbvh != nullptr) {
       Map<int, Vector<ContourSegment>> &axis_cache = cached_segments_by_axis_[axis];
@@ -1084,11 +1070,6 @@ void SymmetryContour::update_contours(const Object *ob,
       }
     }
 
-#if SCULPT_OVERLAY_PERF_LOGGING
-    const auto perf_t1 = std::chrono::steady_clock::now();
-    perf_extract_ms += std::chrono::duration<double, std::milli>(perf_t1 - perf_t0).count();
-#endif
-
     Vector<ContourLoop> axis_loops;
     build_loops_from_segments(segments, plane, axis_loops);
 
@@ -1104,11 +1085,6 @@ void SymmetryContour::update_contours(const Object *ob,
       }
     }
 
-#if SCULPT_OVERLAY_PERF_LOGGING
-    const auto perf_t2 = std::chrono::steady_clock::now();
-    perf_loops_ms += std::chrono::duration<double, std::milli>(perf_t2 - perf_t1).count();
-#endif
-
     /* Screen-space decimation (operates in object space; persmat folds in the model matrix). */
     if (state.rv3d && state.region) {
       const float4x4 persmat = float4x4(state.rv3d->persmat) * object_to_world;
@@ -1123,11 +1099,6 @@ void SymmetryContour::update_contours(const Object *ob,
     }
 
     cached_contours_.extend(std::move(axis_loops));
-
-#if SCULPT_OVERLAY_PERF_LOGGING
-    const auto perf_t3 = std::chrono::steady_clock::now();
-    perf_emit_ms += std::chrono::duration<double, std::milli>(perf_t3 - perf_t2).count();
-#endif
   }
 
   /* Recompute next frame if the per-frame budget left dirty nodes unprocessed. */
@@ -1144,13 +1115,6 @@ void SymmetryContour::update_contours(const Object *ob,
   prev_positions_count_ = decision.positions_count;
 
   note_emitted();
-
-#if SCULPT_OVERLAY_PERF_LOGGING
-  printf("[SCULPT_OVERLAY_PERF] rebuild extract_ms=%.3f loops_ms=%.3f emit_ms=%.3f\n",
-         perf_extract_ms,
-         perf_loops_ms,
-         perf_emit_ms);
-#endif
 }
 
 void SymmetryContour::end_sync(PassSimple::Sub &pass)
@@ -1272,6 +1236,9 @@ void SymmetryContourOverlay::begin_sync(Resources &res, const State &state, cons
     return;
   }
   released_ = false;
+  /* Tell the anti-aliasing resolve to compile in the width decoding: the contour fragment shader
+   * writes its thickness into `line_tx.a`. */
+  res.line_width_encoded = true;
 
   pass_.init();
   contour_.begin_sync(res, state);

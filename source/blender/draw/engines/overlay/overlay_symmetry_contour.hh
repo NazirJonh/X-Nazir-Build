@@ -27,13 +27,6 @@
 #include "BLI_set.hh"
 #include "BLI_vector.hh"
 
-/* TEMP DEBUG (#SCULPT_OVERLAY_PERF): shared toggle for the sculpt-overlay perf instrumentation used
- * by both overlay_sculpt.hh (per-frame begin_sync/object_sync totals) and overlay_symmetry_contour.cc
- * (per-rebuild extract/loops/emit sub-timings). Set to 1 to enable; 0 compiles it all out. This is
- * the only definition - do not redefine it in the including files, or the two translation units end
- * up with different values. Grep "SCULPT_OVERLAY_PERF" to find/remove every line tagged by this. */
-#define SCULPT_OVERLAY_PERF_LOGGING 0
-
 struct Object;
 struct Mesh;
 struct BMesh;

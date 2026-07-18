@@ -26,6 +26,7 @@
 #include "BLI_rect.hh"
 #include "BLI_set.hh"
 #include "BLI_string_utf8.hh"
+#include "BLI_task_c.hh"
 #include "BLI_utildefines.hh"
 
 #include "BLT_translation.hh"
@@ -76,11 +77,19 @@
 #include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
 
+#include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 #include "IMB_thumbs.hh"
 
 #include "BIF_glutil.hh"
+
+#include "GPU_immediate.hh"
+#include "GPU_immediate_util.hh"
+#include "GPU_shader.hh"
+#include "GPU_shader_builtin.hh"
+#include "GPU_state.hh"
+#include "GPU_texture.hh"
 
 #include "RE_engine.h"
 #include "RE_pipeline.h"
@@ -662,10 +671,231 @@ static Scene *preview_prepare_scene(
   return nullptr;
 }
 
+/**
+ * Fill the preview area with a solid opaque background, so transparent pixels in the render buffer
+ * (unfinished tiles, areas outside the crop region) don't bleed through to the UI behind the
+ * widget.
+ */
+static void ed_preview_draw_background(float x, float y, float w, float h)
+{
+  /* Matches the default render preview background, avoiding UI theme dependencies. */
+  const float col[4] = {0.125f, 0.125f, 0.125f, 1.0f};
+
+  GPU_blend(GPU_BLEND_NONE);
+  GPUVertFormat *format = immVertexFormat();
+  uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+  immUniformColor4fv(col);
+  immRectf(pos, x, y, x + w, y + h);
+  immUnbindProgram();
+}
+
+/* -------------------------------------------------------------------- */
+/** \name GPU Texture Cache Management
+ * \{ */
+
+static void preview_gpu_texture_cache_free(uiPreview *ui_preview)
+{
+  if (ui_preview && ui_preview->cached_gpu_texture) {
+    GPU_texture_free(static_cast<gpu::Texture *>(ui_preview->cached_gpu_texture));
+    ui_preview->cached_gpu_texture = nullptr;
+  }
+}
+
+/**
+ * Create or update the GPU texture cache from `ibuf`.
+ * \return true if the GPU texture was created/updated successfully.
+ */
+static bool preview_gpu_texture_cache_update(uiPreview *ui_preview, ImBuf *ibuf)
+{
+  if (!ui_preview || !ibuf) {
+    return false;
+  }
+
+  /* Free the old GPU texture if the size changed. */
+  if (ui_preview->cached_gpu_texture) {
+    gpu::Texture *old_tex = static_cast<gpu::Texture *>(ui_preview->cached_gpu_texture);
+    if (GPU_texture_width(old_tex) != ibuf->x || GPU_texture_height(old_tex) != ibuf->y) {
+      GPU_texture_free(old_tex);
+      ui_preview->cached_gpu_texture = nullptr;
+    }
+  }
+
+  gpu::TextureFormat format;
+  eGPUDataFormat data_format;
+  const void *data_ptr;
+  if (ibuf->float_data()) {
+    format = gpu::TextureFormat::SFLOAT_32_32_32_32;
+    data_format = GPU_DATA_FLOAT;
+    data_ptr = ibuf->float_data();
+  }
+  else if (ibuf->byte_data()) {
+    format = gpu::TextureFormat::UNORM_8_8_8_8;
+    data_format = GPU_DATA_UBYTE;
+    data_ptr = ibuf->byte_data();
+  }
+  else {
+    return false;
+  }
+
+  if (!ui_preview->cached_gpu_texture) {
+    gpu::Texture *gpu_tex = GPU_texture_create_2d(
+        "preview_cache", ibuf->x, ibuf->y, 1, format, GPU_TEXTURE_USAGE_SHADER_READ, nullptr);
+    if (!gpu_tex) {
+      return false;
+    }
+    /* Filtering keeps the cache usable while the preview is being resized. */
+    GPU_texture_filter_mode(gpu_tex, true);
+    GPU_texture_extend_mode(gpu_tex, GPU_SAMPLER_EXTEND_MODE_EXTEND);
+    ui_preview->cached_gpu_texture = gpu_tex;
+  }
+
+  GPU_texture_update(static_cast<gpu::Texture *>(ui_preview->cached_gpu_texture),
+                     data_format,
+                     data_ptr);
+  return true;
+}
+
+/**
+ * Draw the GPU texture cache directly, avoiding the texture re-upload #ED_draw_imbuf does on every
+ * frame. Falls back to #ED_draw_imbuf when the color management shader can't be set up.
+ */
+static void preview_gpu_texture_cache_draw(uiPreview *ui_preview,
+                                           float x,
+                                           float y,
+                                           float zoomx,
+                                           float zoomy,
+                                           const ColorManagedViewSettings *view_settings,
+                                           const ColorManagedDisplaySettings *display_settings)
+{
+  if (!ui_preview || !ui_preview->cached_gpu_texture || !ui_preview->cached_ibuf) {
+    return;
+  }
+
+  gpu::Texture *gpu_tex = static_cast<gpu::Texture *>(ui_preview->cached_gpu_texture);
+  const ImBuf *ibuf = ui_preview->cached_ibuf;
+
+  GPUVertFormat *vert_format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(vert_format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  const uint texco = GPU_vertformat_attr_add(
+      vert_format, "texCoord", gpu::VertAttrType::SFLOAT_32_32);
+
+  const ColorSpace *colorspace = ibuf->float_data() ? ibuf->float_buffer.colorspace :
+                                                      ibuf->byte_buffer.colorspace;
+  const bool predivide = ibuf->float_data() != nullptr;
+  /* This binds the OCIO shader used to draw the quad below. */
+  if (!IMB_colormanagement_setup_glsl_draw_from_space(
+          view_settings, display_settings, colorspace, ibuf->dither, predivide, false))
+  {
+    ED_draw_imbuf(ibuf, x, y, true, view_settings, display_settings, zoomx, zoomy);
+    return;
+  }
+
+  GPU_texture_bind(gpu_tex, 0);
+
+  const float width = ibuf->x * zoomx;
+  const float height = ibuf->y * zoomy;
+
+  immBegin(GPU_PRIM_TRI_FAN, 4);
+  immAttr2f(texco, 0.0f, 0.0f);
+  immVertex2f(pos, x, y);
+
+  immAttr2f(texco, 1.0f, 0.0f);
+  immVertex2f(pos, x + width, y);
+
+  immAttr2f(texco, 1.0f, 1.0f);
+  immVertex2f(pos, x + width, y + height);
+
+  immAttr2f(texco, 0.0f, 1.0f);
+  immVertex2f(pos, x, y + height);
+  immEnd();
+
+  GPU_texture_unbind(gpu_tex);
+  IMB_colormanagement_finish_glsl_draw();
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Preview Render Cache
+ *
+ * Keeps the last completed render around, so re-renders (parameter tweaks, resizing) can display
+ * the previous result instead of partially rendered tiles.
+ * \{ */
+
+static bool preview_cache_is_valid(const uiPreview *ui_preview)
+{
+  return ui_preview && ui_preview->cached_ibuf && ui_preview->cached_width > 0 &&
+         ui_preview->cached_height > 0;
+}
+
+/**
+ * Whether the cached image should be shown instead of the live render result. The cache is shown
+ * for the whole duration of a render, so partially rendered tiles never become visible.
+ */
+static bool preview_use_cached_image(const uiPreview *ui_preview)
+{
+  return preview_cache_is_valid(ui_preview) &&
+         ui_preview->current_render_id != ui_preview->cached_render_id;
+}
+
+static void preview_cache_clear(uiPreview *ui_preview)
+{
+  if (!ui_preview) {
+    return;
+  }
+  if (ui_preview->cached_ibuf) {
+    IMB_freeImBuf(ui_preview->cached_ibuf);
+    ui_preview->cached_ibuf = nullptr;
+  }
+  preview_gpu_texture_cache_free(ui_preview);
+  ui_preview->cached_width = 0;
+  ui_preview->cached_height = 0;
+}
+
+/** Store `ibuf` as the cached result of the render currently identified by `current_render_id`. */
+static void preview_cache_update(uiPreview *ui_preview, ImBuf *ibuf, int width, int height)
+{
+  IMB_ensure_host_buffer(ibuf);
+
+  /* Reuse the existing buffer when the size matches, to avoid a reallocation per render. */
+  if (ui_preview->cached_ibuf && ui_preview->cached_ibuf->x == ibuf->x &&
+      ui_preview->cached_ibuf->y == ibuf->y)
+  {
+    const size_t pixel_num = size_t(ibuf->x) * ibuf->y;
+    if (ibuf->byte_data() && ui_preview->cached_ibuf->byte_data()) {
+      memcpy(ui_preview->cached_ibuf->byte_data_for_write(), ibuf->byte_data(), 4 * pixel_num);
+    }
+    if (ibuf->float_data() && ui_preview->cached_ibuf->float_data()) {
+      memcpy(ui_preview->cached_ibuf->float_data_for_write(),
+             ibuf->float_data(),
+             sizeof(float) * 4 * pixel_num);
+    }
+  }
+  else {
+    preview_cache_clear(ui_preview);
+    ui_preview->cached_ibuf = IMB_dupImBuf(ibuf);
+  }
+
+  ui_preview->cached_width = width;
+  ui_preview->cached_height = height;
+  ui_preview->cached_render_id = ui_preview->current_render_id;
+
+  preview_gpu_texture_cache_update(ui_preview, ui_preview->cached_ibuf);
+}
+
+/** \} */
+
 /* new UI convention: draw is in pixel space already. */
 /* uses ButtonType::Roundbox button in block to get the rect */
-static bool ed_preview_draw_rect(
-    Scene *scene, const void *owner, int split, int first, const rcti *rect, rcti *newrect)
+static bool ed_preview_draw_rect(Scene *scene,
+                                 const void *owner,
+                                 int split,
+                                 int first,
+                                 const rcti *rect,
+                                 rcti *newrect,
+                                 uiPreview *ui_preview,
+                                 bool is_job_running)
 {
   Render *re;
   RenderView *rv;
@@ -691,39 +921,105 @@ static bool ed_preview_draw_rect(
   /* test if something rendered ok */
   re = RE_GetRender(split_owner);
 
-  if (re == nullptr) {
-    return false;
-  }
+  if (re) {
+    RE_AcquireResultImageViews(re, &rres);
 
-  RE_AcquireResultImageViews(re, &rres);
+    if (!rres.views.is_empty()) {
+      /* material preview only needs monoscopy (view 0) */
+      rv = RE_RenderViewGetById(&rres, 0);
+    }
+    else {
+      /* possible the job clears the views but we're still drawing #45496 */
+      rv = nullptr;
+    }
 
-  if (!rres.views.is_empty()) {
-    /* material preview only needs monoscopy (view 0) */
-    rv = RE_RenderViewGetById(&rres, 0);
-  }
-  else {
-    /* possible the job clears the views but we're still drawing #45496 */
-    rv = nullptr;
-  }
+    /* Draw from the live render buffer whenever it is available, even while the job is still
+     * running. The background fill hides unfinished transparent tiles, so the user sees render
+     * progress without artifacts. Caching is deferred until the job completes. */
+    if (rv && rv->ibuf && rres.rectx > 0 && rres.recty > 0 && newx > 0 && newy > 0) {
+      /* Draw at the render resolution when it matches the widget, otherwise let the GPU scale the
+       * result instead of dropping the frame while the new size is being rendered. */
+      const bool exact_size = (abs(rres.rectx - newx) < 2 && abs(rres.recty - newy) < 2);
+      const int draw_width = exact_size ? rres.rectx : newx;
+      const int draw_height = exact_size ? rres.recty : newy;
 
-  if (rv && rv->ibuf) {
-    if (abs(rres.rectx - newx) < 2 && abs(rres.recty - newy) < 2) {
-      newrect->xmax = max_ii(newrect->xmax, rect->xmin + rres.rectx + offx);
-      newrect->ymax = max_ii(newrect->ymax, rect->ymin + rres.recty);
+      newrect->xmax = max_ii(newrect->xmax, rect->xmin + draw_width + offx);
+      newrect->ymax = max_ii(newrect->ymax, rect->ymin + draw_height);
 
-      if (rres.rectx && rres.recty) {
-        float fx = rect->xmin + offx;
-        float fy = rect->ymin;
+      const float fx = rect->xmin + offx;
+      const float fy = rect->ymin;
 
-        ED_draw_imbuf(
-            rv->ibuf, fx, fy, false, &scene->view_settings, &scene->display_settings, 1.0f, 1.0f);
+      ed_preview_draw_background(fx, fy, draw_width, draw_height);
 
-        ok = true;
+      GPU_blend(GPU_BLEND_ALPHA_PREMULT);
+      if (preview_use_cached_image(ui_preview)) {
+        preview_gpu_texture_cache_draw(ui_preview,
+                                       fx,
+                                       fy,
+                                       float(draw_width) / float(ui_preview->cached_width),
+                                       float(draw_height) / float(ui_preview->cached_height),
+                                       &scene->view_settings,
+                                       &scene->display_settings);
+      }
+      else {
+        ED_draw_imbuf(rv->ibuf,
+                      fx,
+                      fy,
+                      true,
+                      &scene->view_settings,
+                      &scene->display_settings,
+                      float(draw_width) / float(rres.rectx),
+                      float(draw_height) / float(rres.recty));
+      }
+      GPU_blend(GPU_BLEND_NONE);
+
+      ok = true;
+
+      /* Clear the flag after drawing but before caching, so a render started in a previous frame
+       * can update the cache in this one. */
+      const bool render_started_this_frame = ui_preview &&
+                                             (ui_preview->tag &
+                                              UI_PREVIEW_TAG_RENDER_IN_PROGRESS);
+      if (render_started_this_frame) {
+        ui_preview->tag &= ~UI_PREVIEW_TAG_RENDER_IN_PROGRESS;
+      }
+
+      /* Only cache once the job has fully completed and the cache is stale. Caching while
+       * #UI_PREVIEW_TAG_RENDER_IN_PROGRESS is set would store incomplete data. */
+      if (!is_job_running && ui_preview && !render_started_this_frame &&
+          ui_preview->current_render_id != ui_preview->cached_render_id)
+      {
+        preview_cache_update(ui_preview, rv->ibuf, rres.rectx, rres.recty);
       }
     }
   }
 
-  RE_ReleaseResultImageViews(re, &rres);
+  if (!ok && preview_cache_is_valid(ui_preview) && newx > 0 && newy > 0) {
+    /* No current render result, possibly because a new render cleared the views. Fall back to the
+     * cached result, scaled to the requested size. */
+    newrect->xmax = max_ii(newrect->xmax, rect->xmin + newx + offx);
+    newrect->ymax = max_ii(newrect->ymax, rect->ymin + newy);
+
+    const float fx = rect->xmin + offx;
+    const float fy = rect->ymin;
+
+    ed_preview_draw_background(fx, fy, newx, newy);
+    GPU_blend(GPU_BLEND_ALPHA_PREMULT);
+    preview_gpu_texture_cache_draw(ui_preview,
+                                   fx,
+                                   fy,
+                                   float(newx) / float(ui_preview->cached_width),
+                                   float(newy) / float(ui_preview->cached_height),
+                                   &scene->view_settings,
+                                   &scene->display_settings);
+    GPU_blend(GPU_BLEND_NONE);
+
+    ok = true;
+  }
+
+  if (re) {
+    RE_ReleaseResultImageViews(re, &rres);
+  }
 
   return ok;
 }
@@ -751,12 +1047,14 @@ void ED_preview_draw(
     newrect.ymin = rect->ymin;
     newrect.ymax = rect->ymin;
 
+    const bool is_job_running = WM_jobs_test(wm, owner, WM_JOB_TYPE_RENDER_PREVIEW);
+
     if (parent) {
-      ok = ed_preview_draw_rect(scene, owner, 1, 1, rect, &newrect);
-      ok &= ed_preview_draw_rect(scene, owner, 1, 0, rect, &newrect);
+      ok = ed_preview_draw_rect(scene, owner, 1, 1, rect, &newrect, ui_preview, is_job_running);
+      ok &= ed_preview_draw_rect(scene, owner, 1, 0, rect, &newrect, ui_preview, is_job_running);
     }
     else {
-      ok = ed_preview_draw_rect(scene, owner, 0, 0, rect, &newrect);
+      ok = ed_preview_draw_rect(scene, owner, 0, 0, rect, &newrect, ui_preview, is_job_running);
     }
 
     if (ok) {
@@ -766,15 +1064,27 @@ void ED_preview_draw(
     /* start a new preview render job if signaled through sbuts->preview,
      * if no render result was found and no preview render job is running,
      * or if the job is running and the size of preview changed */
+    const bool trigger_size_mismatch = (sp &&
+                                        (abs(sp->sizex - newx) >= 2 || abs(sp->sizey - newy) > 2));
     if ((sbuts != nullptr && sbuts->preview) || (ui_preview->tag & UI_PREVIEW_TAG_DIRTY) ||
-        (!ok && !WM_jobs_test(wm, owner, WM_JOB_TYPE_RENDER_PREVIEW)) ||
-        (sp && (abs(sp->sizex - newx) >= 2 || abs(sp->sizey - newy) > 2)))
+        (!ok && !is_job_running) || trigger_size_mismatch)
     {
       if (sbuts != nullptr) {
         sbuts->preview = 0;
       }
+
+      if (trigger_size_mismatch) {
+        /* The cache has the previous size, it would be stretched for the rest of the render. */
+        preview_cache_clear(ui_preview);
+      }
+
       ED_preview_shader_job(C, owner, id, parent, slot, newx, newy, PR_BUTS_RENDER);
       ui_preview->tag &= ~UI_PREVIEW_TAG_DIRTY;
+      /* Let drawing know a new render is in progress, so it keeps showing the cache. */
+      ui_preview->current_render_id++;
+      if (ui_preview->cached_ibuf) {
+        ui_preview->tag |= UI_PREVIEW_TAG_RENDER_IN_PROGRESS;
+      }
     }
   }
 }
@@ -1146,7 +1456,84 @@ static bool shader_preview_break(void *spv)
 
 static void shader_preview_updatejob(void * /*spv*/) {}
 
-/* Renders texture directly to render buffer. */
+/**
+ * No notifier is sent when the job ends on purpose: #NC_MATERIAL sets `sbuts->preview` in
+ * #space_buttons.cc, which restarts the job immediately and makes the preview flicker. The UI
+ * redraws on the next frame anyway.
+ */
+static void shader_preview_endjob(void * /*spv*/) {}
+
+/** Shared state for the multi-threaded texture preview evaluation. */
+struct TexturePreviewData {
+  ShaderPreview *sp;
+  Tex *tex;
+  float *rect_float;
+  int width;
+  int height;
+  bool cancelled;
+};
+
+static void shader_preview_texture_row_task(void *__restrict userdata,
+                                            const int y,
+                                            const TaskParallelTLS *__restrict tls)
+{
+  TexturePreviewData *data = static_cast<TexturePreviewData *>(userdata);
+
+  if (data->cancelled) {
+    return;
+  }
+
+  ImagePool *thread_pool = *static_cast<ImagePool **>(tls->userdata_chunk);
+  const int width = data->width;
+  const int height = data->height;
+  float *rect_float = data->rect_float + (size_t(y) * width * 4);
+
+  /* Tex coords between -1.0f and 1.0f. */
+  float tex_coord[3] = {0.0f, 0.0f, 0.0f};
+  tex_coord[1] = (float(y) / float(height)) * 2.0f - 1.0f;
+
+  for (int x = 0; x < width; x++) {
+    tex_coord[0] = (float(x) / float(height)) * 2.0f - 1.0f;
+
+    /* Evaluate texture at tex_coord. */
+    TexResult texres = {0};
+    BKE_texture_get_value_ex(data->tex, tex_coord, &texres, thread_pool, true);
+    copy_v4_fl4(rect_float,
+                texres.trgba[0],
+                texres.trgba[1],
+                texres.trgba[2],
+                texres.talpha ? texres.trgba[3] : 1.0f);
+
+    rect_float += 4;
+  }
+
+  /* Checking every row would dominate the cost of a small preview. */
+  if ((y % 8) == 0 && shader_preview_break(data->sp)) {
+    data->cancelled = true;
+  }
+}
+
+static void shader_preview_texture_init_func(const void *__restrict userdata,
+                                             void *__restrict chunk)
+{
+  const TexturePreviewData *data = static_cast<const TexturePreviewData *>(userdata);
+  ImagePool **thread_pool = static_cast<ImagePool **>(chunk);
+
+  *thread_pool = BKE_image_pool_new();
+  BKE_texture_fetch_images_for_pool(data->tex, *thread_pool);
+}
+
+static void shader_preview_texture_free_func(const void *__restrict /*userdata*/,
+                                             void *__restrict chunk)
+{
+  ImagePool **thread_pool = static_cast<ImagePool **>(chunk);
+  if (*thread_pool) {
+    BKE_image_pool_free(*thread_pool);
+    *thread_pool = nullptr;
+  }
+}
+
+/* Renders texture directly to render buffer, using all threads. */
 static void shader_preview_texture(ShaderPreview *sp, Tex *tex, Scene *sce, Render *re)
 {
   /* Setup output buffer. */
@@ -1165,40 +1552,28 @@ static void shader_preview_texture(ShaderPreview *sp, Tex *tex, Scene *sce, Rend
   rv_ibuf->assign_float_data(MEM_new_array_zeroed<float>(size_t(4) * width * height, __func__));
   RE_ReleaseResult(re);
 
-  /* Get texture image pool (if any) */
-  ImagePool *img_pool = BKE_image_pool_new();
-  BKE_texture_fetch_images_for_pool(tex, img_pool);
+  /* Fill in image buffer, one row per task. */
+  TexturePreviewData data;
+  data.sp = sp;
+  data.tex = tex;
+  data.rect_float = rv_ibuf->float_data_for_write();
+  data.width = width;
+  data.height = height;
+  data.cancelled = false;
 
-  /* Fill in image buffer. */
-  float *rect_float = rv_ibuf->float_data_for_write();
-  float tex_coord[3] = {0.0f, 0.0f, 0.0f};
+  TaskParallelSettings settings;
+  BLI_parallel_range_settings_defaults(&settings);
 
-  for (int y = 0; y < height; y++) {
-    /* Tex coords between -1.0f and 1.0f. */
-    tex_coord[1] = (float(y) / float(height)) * 2.0f - 1.0f;
+  /* Texture evaluation is not thread-safe with a shared pool, so give each thread its own. */
+  ImagePool *pool_chunk = nullptr;
+  settings.userdata_chunk = &pool_chunk;
+  settings.userdata_chunk_size = sizeof(ImagePool *);
+  settings.func_init = shader_preview_texture_init_func;
+  settings.func_free = shader_preview_texture_free_func;
+  settings.use_threading = (height > 64);
+  settings.min_iter_per_thread = 4;
 
-    for (int x = 0; x < width; x++) {
-      tex_coord[0] = (float(x) / float(height)) * 2.0f - 1.0f;
-
-      /* Evaluate texture at tex_coord. */
-      TexResult texres = {0};
-      BKE_texture_get_value_ex(tex, tex_coord, &texres, img_pool, true);
-      copy_v4_fl4(rect_float,
-                  texres.trgba[0],
-                  texres.trgba[1],
-                  texres.trgba[2],
-                  texres.talpha ? texres.trgba[3] : 1.0f);
-
-      rect_float += 4;
-    }
-
-    /* Check if we should cancel texture preview. */
-    if (shader_preview_break(sp)) {
-      break;
-    }
-  }
-
-  BKE_image_pool_free(img_pool);
+  BLI_task_parallel_range(0, height, &data, shader_preview_texture_row_task, &settings);
 }
 
 static void shader_preview_render(ShaderPreview *sp, ID *id, int split, int first)
@@ -2402,8 +2777,11 @@ void ED_preview_shader_job(const bContext *C,
 
   /* setup job */
   WM_jobs_customdata_set(wm_job, sp, shader_preview_free);
-  WM_jobs_timer(wm_job, 0.1, NC_MATERIAL, NC_MATERIAL);
-  WM_jobs_callbacks(wm_job, common_preview_startjob, nullptr, shader_preview_updatejob, nullptr);
+  /* #NC_WINDOW rather than #NC_MATERIAL: the latter re-arms `sbuts->preview`, restarting the job
+   * in an endless loop. */
+  WM_jobs_timer(wm_job, 0.1, NC_WINDOW, NC_WINDOW);
+  WM_jobs_callbacks(
+      wm_job, common_preview_startjob, nullptr, shader_preview_updatejob, shader_preview_endjob);
 
   WM_jobs_start(CTX_wm_manager(C), wm_job);
 }

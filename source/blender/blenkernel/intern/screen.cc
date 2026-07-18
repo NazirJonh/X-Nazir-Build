@@ -44,6 +44,10 @@
 #include "BKE_preview_image.hh"
 #include "BKE_screen.hh"
 
+#include "IMB_imbuf.hh"
+
+#include "GPU_texture.hh"
+
 #include "BLO_read_write.hh"
 
 /* TODO(@JulianEisel): For asset shelf region reading/writing. Region read/write should be done via
@@ -479,6 +483,13 @@ ARegion *BKE_area_region_copy(const SpaceType *st, const ARegion *region)
 
   dst->ui_previews.clear_no_delete();
   BLI_duplicatelist(&dst->ui_previews, &region->ui_previews);
+  for (uiPreview &preview : dst->ui_previews) {
+    if (preview.cached_ibuf) {
+      preview.cached_ibuf = IMB_dupImBuf(preview.cached_ibuf);
+    }
+    /* The GPU texture is not shared with the source region, it is re-created on demand. */
+    preview.cached_gpu_texture = nullptr;
+  }
   dst->view_states.clear_no_delete();
   BLI_duplicatelist(&dst->view_states, &region->view_states);
   dst->textbox_states.clear_no_delete();
@@ -739,6 +750,16 @@ void BKE_area_region_free(SpaceType *st, ARegion *region)
   }
 
   region->ui_lists.free_no_destruct();
+  for (uiPreview &preview : region->ui_previews) {
+    if (preview.cached_ibuf) {
+      IMB_freeImBuf(preview.cached_ibuf);
+      preview.cached_ibuf = nullptr;
+    }
+    if (preview.cached_gpu_texture) {
+      GPU_texture_free(static_cast<blender::gpu::Texture *>(preview.cached_gpu_texture));
+      preview.cached_gpu_texture = nullptr;
+    }
+  }
   region->ui_previews.free_no_destruct();
   region->runtime->panels_category.free_no_destruct();
   region->panels_category_active.free_no_destruct();
@@ -1483,6 +1504,13 @@ static void direct_link_region(BlendDataReader *reader, ARegion *region, int spa
   for (uiPreview &ui_preview : region->ui_previews) {
     ui_preview.id_session_uid = MAIN_ID_SESSION_UID_UNSET;
     ui_preview.tag = uiPreviewTag{};
+    /* The render cache is runtime data, the stored pointers are meaningless after read. */
+    ui_preview.cached_ibuf = nullptr;
+    ui_preview.cached_gpu_texture = nullptr;
+    ui_preview.cached_width = 0;
+    ui_preview.cached_height = 0;
+    ui_preview.current_render_id = 0;
+    ui_preview.cached_render_id = -1;
   }
 
   if (spacetype == SPACE_EMPTY) {

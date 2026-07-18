@@ -22,6 +22,7 @@ namespace blender {
 
 struct ARegion;
 struct ARegionType;
+struct ImBuf;
 struct PanelType;
 struct PointerRNA;
 struct Scene;
@@ -503,6 +504,11 @@ struct TransformOrientation {
 enum uiPreviewTag : short {
   /** Preview needs re-rendering, handled in #ED_preview_draw(). */
   UI_PREVIEW_TAG_DIRTY = (1 << 0),
+  /**
+   * A new render job was started; show the cached image until the render completes, to avoid
+   * showing partially rendered tiles.
+   */
+  UI_PREVIEW_TAG_RENDER_IN_PROGRESS = (1 << 1),
 };
 ENUM_OPERATORS(uiPreviewTag)
 
@@ -518,6 +524,25 @@ struct uiPreview {
 
   /** #ID.session_uid of the ID this preview is made for. Unset on file read. */
   unsigned int id_session_uid = 0;
+
+  /** Cached render result, kept to bridge the gap while a new render is in progress. Runtime. */
+  struct ImBuf *cached_ibuf = nullptr;
+  int cached_width = 0;
+  int cached_height = 0;
+  /**
+   * Monotonically increasing counter, incremented each time a new render job starts.
+   * #cached_render_id stores the value at the time the cache was last filled, so a mismatch means
+   * a render is in progress and #cached_ibuf should be displayed instead.
+   */
+  int current_render_id = 0;
+  int cached_render_id = -1;
+
+  /**
+   * GPU texture mirroring #cached_ibuf, so redrawing the cache doesn't re-upload it every frame.
+   * Stored as `void *` to keep GPU headers out of DNA, the actual type is #blender::gpu::Texture.
+   * Runtime.
+   */
+  void *cached_gpu_texture = nullptr;
 };
 
 /**

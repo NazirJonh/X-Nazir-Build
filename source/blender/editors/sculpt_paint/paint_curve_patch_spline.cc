@@ -80,21 +80,26 @@ void CurvePatchSpline::build_from_positions(const Span<float3> positions,
 }
 
 /** Finds the segment index `i` such that `lengths_3d[i] <= s <= lengths_3d[i + 1]`, and the
- * fraction `t` in `[0, 1]` of `s` within that segment. Clamps `s` to `[0, total_length()]`. */
+ * fraction `t` in `[0, 1]` of `s` within that segment. Clamps `s` to `[0, total_length()]`.
+ *
+ * Binary search rather than a linear scan: `lengths_3d` is monotonically increasing by
+ * construction, and the relief walk calls this once per surviving mesh vertex (via `evaluate()`
+ * and `radius_at()`) -- a linear scan made that per-vertex cost grow with the curve's tessellated
+ * length, which defeats the point of the O(1) ribbon LUT lookup that precedes it. */
 static void find_segment(const Span<float> lengths_3d, float s, int &r_i, float &r_t)
 {
+  const int last_seg = int(lengths_3d.size()) - 2;
   const float total = lengths_3d.last();
   s = math::clamp(s, 0.0f, total);
-  for (const int i : IndexRange(lengths_3d.size() - 1)) {
-    if (s <= lengths_3d[i + 1] || i == lengths_3d.size() - 2) {
-      const float seg_len = lengths_3d[i + 1] - lengths_3d[i];
-      r_i = i;
-      r_t = seg_len > 1e-8f ? (s - lengths_3d[i]) / seg_len : 0.0f;
-      return;
-    }
-  }
-  r_i = 0;
-  r_t = 0.0f;
+
+  /* First index whose cumulative length is strictly greater than `s`; the segment starting one
+   * index below it is the one containing `s`. */
+  const float *upper = std::upper_bound(lengths_3d.begin(), lengths_3d.end(), s);
+  const int i = std::clamp(int(upper - lengths_3d.begin()) - 1, 0, last_seg);
+
+  const float seg_len = lengths_3d[i + 1] - lengths_3d[i];
+  r_i = i;
+  r_t = seg_len > 1e-8f ? (s - lengths_3d[i]) / seg_len : 0.0f;
 }
 
 float3 CurvePatchSpline::evaluate(const float s) const

@@ -24,6 +24,7 @@
 
 #include "ED_view3d.hh"
 
+#include "paint_curve_patch_ribbon.hh"
 #include "paint_curve_patch_spline.hh"
 
 struct Brush;
@@ -81,6 +82,11 @@ struct CurvePatchCache {
   /** Rebuilt every call to `curve_patch_restore_and_restamp()` from `control_curve`; kept here so
    * later calls (dynamic growth) can compare against the previous footprint if needed. */
   CurvePatchSpline spline;
+
+  /** Whole-curve ribbon UV lookup table, rebuilt alongside `spline` on every restamp. The relief
+   * action samples this instead of `CurvePatchSpline::closest_point()` so the parameterization
+   * stays single-valued through sharp turns (see `paint_curve_patch_ribbon.hh`). */
+  CurvePatchRibbonLut ribbon;
 
   /** Per-restamp accumulator for blending symmetry passes that land on the same real vertex (a
    * patch straddling a mirror/radial symmetry plane can have both the direct and the mirrored

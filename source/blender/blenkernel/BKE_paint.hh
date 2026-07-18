@@ -128,6 +128,15 @@ void BKE_paint_invalidate_cursor_overlay(const Main &bmain,
                                          CurveMapping *curve);
 void BKE_paint_invalidate_overlay_all();
 ePaintOverlayControlFlags BKE_paint_get_overlay_flags();
+/**
+ * Monotonic counter bumped whenever the active brush's primary texture is invalidated -- assigned,
+ * cleared, its mapping edited, or the texture datablock itself edited -- via
+ * #BKE_paint_invalidate_overlay_tex / #BKE_paint_invalidate_overlay_all. Unlike the reset-on-draw
+ * overlay flags (which the paint cursor consumes), this only ever increases, so a poller can detect
+ * "the brush texture changed" race-free by comparing against a previously stored value. Used by the
+ * Curve Patch live editor to re-project the relief when the texture is edited mid-session.
+ */
+uint64_t BKE_paint_get_overlay_texture_edit_count();
 void BKE_paint_reset_overlay_invalid(ePaintOverlayControlFlags flag);
 void BKE_paint_set_overlay_override(eOverlayFlags flag);
 

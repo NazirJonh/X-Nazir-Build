@@ -51,11 +51,13 @@
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
+#include "BKE_image.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_color_types.h"
 #include "DNA_curves_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -123,14 +125,31 @@ struct CurvePatchEditOpData {
   int last_synced_symm = -1;
   /* Last texture and texture-mapping state this modal re-stamped with. The relief already reads
    * `brush.mtex` live on every re-stamp (size/offset/`tex`), so these only need a re-stamp TRIGGER:
-   * when the assigned texture, its mapping size/offset, the swap-axis flag, or the texture
-   * datablock itself (`Tex_Runtime::last_update`, bumped by any edit to it) changes, re-project.
-   * `swap_axis` also feeds `frozen_params`, so the poll copies it across before re-stamping. */
+   * when the assigned texture, its mapping size/offset, or the swap-axis flag changes, re-project.
+   * Edits to the texture DATABLOCK itself (procedural params, image swap, etc.) are caught via the
+   * `BKE_paint_get_overlay_texture_edit_count()` monotonic counter below -- the brush texture is
+   * not in the depsgraph, so `Tex_Runtime::last_update` on the original never bumps and cannot be
+   * used here. `swap_axis` also feeds `frozen_params`, so the poll copies it across before
+   * re-stamping. */
   bool last_synced_swap_axis = false;
   float last_synced_tex_size[2] = {0.0f, 0.0f};
   float last_synced_tex_ofs[2] = {0.0f, 0.0f};
   const void *last_synced_tex = nullptr;
-  uint64_t last_synced_tex_update = 0;
+  uint64_t last_synced_tex_edit_count = 0;
+  /* Last brush Falloff (distance falloff) this modal re-stamped with. The relief reads the falloff
+   * live on every re-stamp via `BKE_brush_curve_strength()`, which folds in
+   * `Brush::curve_distance_falloff_preset` and the custom `curve_distance_falloff` CurveMapping.
+   * So, like the texture above, these only need to trigger a re-stamp on change: the preset for a
+   * shape switch, and the CurveMapping's `changed_timestamp` (bumped by any edit to the custom
+   * curve, see #BKE_curvemapping_changed). Seeded at invoke. */
+  int last_synced_falloff_preset = -1;
+  int last_synced_falloff_curve_ts = -1;
+  /* Steady-cadence timer (see `curve_patch_edit_invoke`). The live-sync poll at the top of
+   * `curve_patch_edit_modal` only runs on window events, so a discrete brush change made in a panel
+   * with no follow-up event -- e.g. picking a texture or image from a browse menu -- would not
+   * re-project until the next stray event reached this modal. This timer makes the poll tick
+   * regardless, so such changes update the relief promptly. */
+  wmTimer *sync_timer = nullptr;
 };
 
 static CurvePatchCache &patch_cache_of(bContext *C)
@@ -270,13 +289,23 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
       data->last_synced_tex_ofs[0] = brush->mtex.ofs[0];
       data->last_synced_tex_ofs[1] = brush->mtex.ofs[1];
       data->last_synced_tex = brush->mtex.tex;
-      data->last_synced_tex_update = brush->mtex.tex ? brush->mtex.tex->runtime.last_update : 0;
+      data->last_synced_tex_edit_count = BKE_paint_get_overlay_texture_edit_count();
+      data->last_synced_falloff_preset = brush->curve_distance_falloff_preset;
+      data->last_synced_falloff_curve_ts = brush->curve_distance_falloff ?
+                                               brush->curve_distance_falloff->changed_timestamp :
+                                               0;
     }
   }
   if (const Object *ob = CTX_data_active_object(C)) {
     data->last_synced_symm = mesh_symmetry_xyz_get(*ob);
   }
   WM_event_add_modal_handler(C, op);
+  /* Drive the live-sync poll at a steady cadence (see `CurvePatchEditOpData::sync_timer`). 20 Hz:
+   * fast enough that a panel change feels immediate, light enough that idle ticks -- which only
+   * compare scalars and re-stamp on an actual change -- cost nothing. */
+  const double sync_timer_step = 0.05;
+  data->sync_timer = WM_event_timer_add(
+      CTX_wm_manager(C), CTX_wm_window(C), TIMER, sync_timer_step);
   curve_patch_edit_status_set(C, patch_cache_of(C));
   return OPERATOR_RUNNING_MODAL;
 }
@@ -300,6 +329,9 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       !ob_check->runtime->sculpt_session->curve_patch_cache)
   {
     ED_workspace_status_text(C, nullptr);
+    if (data.sync_timer) {
+      WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data.sync_timer);
+    }
     MEM_delete(&data);
     op->customdata = nullptr;
     return OPERATOR_CANCELLED;
@@ -335,9 +367,20 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
        * so these just need to trigger a re-stamp when they change. */
       const bool swap_axis = brush->mtex.use_curve_patch_swap_axis != 0;
       const void *tex = brush->mtex.tex;
-      const uint64_t tex_update = tex ? brush->mtex.tex->runtime.last_update : 0;
+      /* Any edit to the brush's primary texture -- assign/clear, a mapping tweak, or an edit to
+       * the texture datablock itself -- bumps this monotonic counter (see
+       * `BKE_paint_invalidate_overlay_tex`). It replaces the original texture's `last_update`,
+       * which never bumps because brush textures are not evaluated by the depsgraph. */
+      const uint64_t tex_edit_count = BKE_paint_get_overlay_texture_edit_count();
+      /* Brush Falloff (distance falloff) is read live by the relief through
+       * `BKE_brush_curve_strength()`, so watch it as a re-stamp trigger only: the preset for a
+       * shape switch, and the custom curve's `changed_timestamp` for point edits. */
+      const int falloff_preset = brush->curve_distance_falloff_preset;
+      const int falloff_curve_ts = brush->curve_distance_falloff ?
+                                       brush->curve_distance_falloff->changed_timestamp :
+                                       0;
       const bool tex_changed = tex != data.last_synced_tex ||
-                               tex_update != data.last_synced_tex_update ||
+                               tex_edit_count != data.last_synced_tex_edit_count ||
                                brush->mtex.size[0] != data.last_synced_tex_size[0] ||
                                brush->mtex.size[1] != data.last_synced_tex_size[1] ||
                                brush->mtex.ofs[0] != data.last_synced_tex_ofs[0] ||
@@ -345,7 +388,9 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       if (alpha != data.last_synced_alpha || dir_in != data.last_synced_dir_in ||
           length_mode != data.last_synced_length_mode ||
           length_repeat != data.last_synced_length_repeat || symm != data.last_synced_symm ||
-          swap_axis != data.last_synced_swap_axis || tex_changed)
+          swap_axis != data.last_synced_swap_axis || tex_changed ||
+          falloff_preset != data.last_synced_falloff_preset ||
+          falloff_curve_ts != data.last_synced_falloff_curve_ts)
       {
         data.last_synced_alpha = alpha;
         data.last_synced_dir_in = dir_in;
@@ -354,14 +399,29 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         data.last_synced_symm = symm;
         data.last_synced_swap_axis = swap_axis;
         data.last_synced_tex = tex;
-        data.last_synced_tex_update = tex_update;
+        data.last_synced_tex_edit_count = tex_edit_count;
         data.last_synced_tex_size[0] = brush->mtex.size[0];
         data.last_synced_tex_size[1] = brush->mtex.size[1];
         data.last_synced_tex_ofs[0] = brush->mtex.ofs[0];
         data.last_synced_tex_ofs[1] = brush->mtex.ofs[1];
+        data.last_synced_falloff_preset = falloff_preset;
+        data.last_synced_falloff_curve_ts = falloff_curve_ts;
         patch.frozen_params.length_mode = length_mode;
         patch.frozen_params.length_repeat = length_repeat;
         patch.frozen_params.swap_axis = swap_axis;
+        /* The relief samples the texture through `ss.tex_pool`, an `ImagePool` that caches ImBuf
+         * handles for the whole sculpt session (`brush_init_tex`, `sculpt.cc`). A changed image --
+         * a different Image datablock on the texture, or edited pixels -- would otherwise keep
+         * sampling the old buffer. Rebuild the pool on any texture change so the re-stamp below
+         * picks up the new image. Gated on `tex_changed` so ordinary re-stamps (strength/falloff
+         * drags) keep the pool's caching. */
+        if (tex_changed) {
+          ImagePool *&tex_pool = ob.runtime->sculpt_session->tex_pool;
+          if (tex_pool != nullptr) {
+            BKE_image_pool_free(tex_pool);
+          }
+          tex_pool = BKE_image_pool_new();
+        }
         curve_patch_restore_and_restamp(*C, ob, patch);
         ED_region_tag_redraw(CTX_wm_region(C));
       }
@@ -817,7 +877,11 @@ static void curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
     ss.curve_patch_cache = nullptr;
   }
 
-  MEM_delete(static_cast<CurvePatchEditOpData *>(op->customdata));
+  CurvePatchEditOpData *op_data = static_cast<CurvePatchEditOpData *>(op->customdata);
+  if (op_data && op_data->sync_timer) {
+    WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), op_data->sync_timer);
+  }
+  MEM_delete(op_data);
   op->customdata = nullptr;
 }
 

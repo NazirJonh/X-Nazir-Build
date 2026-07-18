@@ -84,8 +84,6 @@ static const EnumPropertyItem rna_enum_brush_texture_slot_map_all_mode_items[] =
     {MTEX_MAP_MODE_3D, "3D", 0, "3D", ""},
     {MTEX_MAP_MODE_RANDOM, "RANDOM", 0, "Random", ""},
     {MTEX_MAP_MODE_STENCIL, "STENCIL", 0, "Stencil", ""},
-    {MTEX_MAP_MODE_CURVE_PATCH, "CURVE_PATCH", 0, "Curve Patch",
-     "Project the texture onto the surface following an explicit, user-edited control curve"},
     {MTEX_MAP_MODE_ROLL, "ROLL", 0, "Roll", "Roll texture along the stroke path"},
     {0, nullptr, 0, nullptr, nullptr},
 };

@@ -26,7 +26,6 @@
 #include "BLI_rect.hh"
 #include "BLI_set.hh"
 #include "BLI_string_utf8.hh"
-#include "BLI_task_c.hh"
 #include "BLI_utildefines.hh"
 
 #include "BLT_translation.hh"
@@ -1123,12 +1122,22 @@ void ED_preview_draw(
     /* Start a new preview render job if signaled through `sbuts->preview`, if no render result was
      * found and no preview render job is running, or if the size of the preview changed. */
 
+    /* Chase the widget size only once it stopped changing. Dragging the grip changes it on every
+     * redraw, and restarting a running job only signals it to stop, so the replacement render does
+     * not begin until the next job timer step. Restarting per frame would spend the whole drag on
+     * those steps rather than on rendering. */
+    const bool size_settled = (newx == ui_preview->last_draw_width &&
+                               newy == ui_preview->last_draw_height);
+    ui_preview->last_draw_width = newx;
+    ui_preview->last_draw_height = newy;
+
     /* The result on screen was rendered for a different widget size, e.g. the preview was resized
      * with the grip. It is drawn scaled to fit meanwhile, but nothing else would ever trigger the
      * re-render that makes it sharp again, since the finished job is gone from the job list. */
     const bool stale_size = (!is_job_running && !size_matches);
     const bool trigger_size_mismatch =
-        stale_size || (sp && (abs(sp->sizex - newx) >= 2 || abs(sp->sizey - newy) > 2));
+        size_settled &&
+        (stale_size || (sp && (abs(sp->sizex - newx) >= 2 || abs(sp->sizey - newy) > 2)));
 
     if ((sbuts != nullptr && sbuts->preview) || (ui_preview->tag & UI_PREVIEW_TAG_DIRTY) ||
         (!ok && !is_job_running) || trigger_size_mismatch)
@@ -1522,82 +1531,7 @@ static void shader_preview_updatejob(void * /*spv*/) {}
  */
 static void shader_preview_endjob(void * /*spv*/) {}
 
-/** Shared state for the multi-threaded texture preview evaluation. */
-struct TexturePreviewData {
-  ShaderPreview *sp;
-  Tex *tex;
-  float *rect_float;
-  int width;
-  /**
-   * Size in pixels the `[-1, 1]` texture coordinate range is mapped over. Normally the preview
-   * height on both axes (square footprint), reduced on one axis for non-square image textures so
-   * the image keeps its aspect ratio.
-   */
-  float span_x;
-  float span_y;
-  bool cancelled;
-};
-
-static void shader_preview_texture_row_task(void *__restrict userdata,
-                                            const int y,
-                                            const TaskParallelTLS *__restrict tls)
-{
-  TexturePreviewData *data = static_cast<TexturePreviewData *>(userdata);
-
-  if (data->cancelled) {
-    return;
-  }
-
-  ImagePool *thread_pool = *static_cast<ImagePool **>(tls->userdata_chunk);
-  const int width = data->width;
-  float *rect_float = data->rect_float + (size_t(y) * width * 4);
-
-  /* Tex coords between -1.0f and 1.0f. */
-  float tex_coord[3] = {0.0f, 0.0f, 0.0f};
-  tex_coord[1] = (float(y) / data->span_y) * 2.0f - 1.0f;
-
-  for (int x = 0; x < width; x++) {
-    tex_coord[0] = (float(x) / data->span_x) * 2.0f - 1.0f;
-
-    /* Evaluate texture at tex_coord. */
-    TexResult texres = {0};
-    BKE_texture_get_value_ex(data->tex, tex_coord, &texres, thread_pool, true);
-    copy_v4_fl4(rect_float,
-                texres.trgba[0],
-                texres.trgba[1],
-                texres.trgba[2],
-                texres.talpha ? texres.trgba[3] : 1.0f);
-
-    rect_float += 4;
-  }
-
-  /* Checking every row would dominate the cost of a small preview. */
-  if ((y % 8) == 0 && shader_preview_break(data->sp)) {
-    data->cancelled = true;
-  }
-}
-
-static void shader_preview_texture_init_func(const void *__restrict userdata,
-                                             void *__restrict chunk)
-{
-  const TexturePreviewData *data = static_cast<const TexturePreviewData *>(userdata);
-  ImagePool **thread_pool = static_cast<ImagePool **>(chunk);
-
-  *thread_pool = BKE_image_pool_new();
-  BKE_texture_fetch_images_for_pool(data->tex, *thread_pool);
-}
-
-static void shader_preview_texture_free_func(const void *__restrict /*userdata*/,
-                                             void *__restrict chunk)
-{
-  ImagePool **thread_pool = static_cast<ImagePool **>(chunk);
-  if (*thread_pool) {
-    BKE_image_pool_free(*thread_pool);
-    *thread_pool = nullptr;
-  }
-}
-
-/* Renders texture directly to render buffer, using all threads. */
+/* Renders texture directly to render buffer. */
 static void shader_preview_texture(ShaderPreview *sp, Tex *tex, Scene *sce, Render *re)
 {
   /* Setup output buffer. */
@@ -1622,53 +1556,91 @@ static void shader_preview_texture(ShaderPreview *sp, Tex *tex, Scene *sce, Rend
    * holes the preview cache can't tell apart from a finished render. */
   float *fill_buffer = MEM_new_array_zeroed<float>(buffer_size, __func__);
 
-  /* Fill in image buffer, one row per task. */
-  TexturePreviewData data;
-  data.sp = sp;
-  data.tex = tex;
-  data.rect_float = fill_buffer;
-  data.width = width;
-  data.cancelled = false;
+  /* Size in pixels the `[-1, 1]` texture coordinate range is mapped over. The preview height on
+   * both axes gives a square footprint, so procedural textures aren't distorted by the widget being
+   * wider than it is tall. Image textures map that square onto the whole image regardless of its
+   * resolution, which stretches non-square images, so for those the span on the longer axis is
+   * shrunk to fit the image into the square with its aspect ratio intact. */
+  float span_x = float(height);
+  float span_y = float(height);
 
-  /* The texture coordinate range is mapped over a square of the preview height, so procedural
-   * textures aren't distorted by the widget being wider than it is tall. Image textures map that
-   * square onto the whole image regardless of its resolution, which stretches non-square images.
-   * Shrink the coordinate span on the longer axis so the image is fitted into the square instead. */
-  data.span_x = float(height);
-  data.span_y = float(height);
+  /* Byte image buffers are converted to scene linear one pixel at a time by the texture evaluation,
+   * through a single-pixel OCIO call. Sample the image raw and convert the whole buffer in one call
+   * once the fill completed, which the color management API documents as much faster. */
+  const ColorSpace *deferred_colorspace = nullptr;
+  bool color_manage = true;
+
   if (tex->type == TEX_IMAGE && tex->ima) {
-    int image_size[2];
-    BKE_image_get_size(tex->ima, &tex->iuser, &image_size[0], &image_size[1]);
-    if (image_size[0] > 0 && image_size[1] > 0) {
-      const float aspect = float(image_size[0]) / float(image_size[1]);
-      if (aspect > 1.0f) {
-        data.span_y = float(height) / aspect;
+    void *image_lock = nullptr;
+    ImBuf *image_ibuf = BKE_image_acquire_ibuf(tex->ima, &tex->iuser, &image_lock);
+    if (image_ibuf) {
+      if (image_ibuf->x > 0 && image_ibuf->y > 0) {
+        const float aspect = float(image_ibuf->x) / float(image_ibuf->y);
+        if (aspect > 1.0f) {
+          span_y = float(height) / aspect;
+        }
+        else {
+          span_x = float(height) * aspect;
+        }
       }
-      else {
-        data.span_x = float(height) * aspect;
+      /* Float buffers are already linear, the evaluation leaves them alone either way. */
+      if (image_ibuf->float_data() == nullptr) {
+        deferred_colorspace = image_ibuf->byte_buffer.colorspace;
+        color_manage = false;
       }
+    }
+    BKE_image_release_ibuf(tex->ima, image_ibuf, image_lock);
+  }
+
+  /* Get texture image pool (if any). */
+  ImagePool *img_pool = BKE_image_pool_new();
+  BKE_texture_fetch_images_for_pool(tex, img_pool);
+
+  /* Fill in image buffer. Kept single-threaded on purpose: measurements showed the row-parallel
+   * version to be an order of magnitude slower for image textures, the threads spend their time
+   * contending rather than sampling. */
+  bool cancelled = false;
+  float *rect_float = fill_buffer;
+  float tex_coord[3] = {0.0f, 0.0f, 0.0f};
+
+  for (int y = 0; y < height; y++) {
+    /* Tex coords between -1.0f and 1.0f. */
+    tex_coord[1] = (float(y) / span_y) * 2.0f - 1.0f;
+
+    for (int x = 0; x < width; x++) {
+      tex_coord[0] = (float(x) / span_x) * 2.0f - 1.0f;
+
+      /* Evaluate texture at tex_coord. */
+      TexResult texres = {0};
+      BKE_texture_get_value_ex(tex, tex_coord, &texres, img_pool, color_manage);
+      copy_v4_fl4(rect_float,
+                  texres.trgba[0],
+                  texres.trgba[1],
+                  texres.trgba[2],
+                  texres.talpha ? texres.trgba[3] : 1.0f);
+
+      rect_float += 4;
+    }
+
+    /* Check if we should cancel texture preview. */
+    if (shader_preview_break(sp)) {
+      cancelled = true;
+      break;
     }
   }
 
-  TaskParallelSettings settings;
-  BLI_parallel_range_settings_defaults(&settings);
-
-  /* Texture evaluation is not thread-safe with a shared pool, so give each thread its own. */
-  ImagePool *pool_chunk = nullptr;
-  settings.userdata_chunk = &pool_chunk;
-  settings.userdata_chunk_size = sizeof(ImagePool *);
-  settings.func_init = shader_preview_texture_init_func;
-  settings.func_free = shader_preview_texture_free_func;
-  settings.use_threading = (height > 64);
-  settings.min_iter_per_thread = 4;
-
-  BLI_task_parallel_range(0, height, &data, shader_preview_texture_row_task, &settings);
+  BKE_image_pool_free(img_pool);
 
   /* Publish in a single step, and only when every row was evaluated. A cancelled fill is discarded
    * so no partial image can reach the screen or the cache. */
-  if (data.cancelled || shader_preview_break(sp)) {
+  if (cancelled) {
     MEM_delete(fill_buffer);
     return;
+  }
+
+  if (deferred_colorspace) {
+    IMB_colormanagement_colorspace_to_scene_linear(
+        fill_buffer, width, height, 4, deferred_colorspace, false);
   }
 
   rr = RE_AcquireResultWrite(re);

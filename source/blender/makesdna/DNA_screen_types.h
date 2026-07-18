@@ -538,6 +538,14 @@ struct uiPreview {
   int cached_render_id = -1;
 
   /**
+   * Widget size seen by the previous draw. Resizing with the grip changes the size on every redraw,
+   * and each restart of the render job costs a job timer step, so the re-render that chases the new
+   * size is only started once the size settled. Runtime.
+   */
+  int last_draw_width = 0;
+  int last_draw_height = 0;
+
+  /**
    * GPU texture mirroring #cached_ibuf, so redrawing the cache doesn't re-upload it every frame.
    * Stored as `void *` to keep GPU headers out of DNA, the actual type is #blender::gpu::Texture.
    * Runtime.

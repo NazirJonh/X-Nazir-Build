@@ -1511,6 +1511,8 @@ static void direct_link_region(BlendDataReader *reader, ARegion *region, int spa
     ui_preview.cached_height = 0;
     ui_preview.current_render_id = 0;
     ui_preview.cached_render_id = -1;
+    ui_preview.last_draw_width = 0;
+    ui_preview.last_draw_height = 0;
   }
 
   if (spacetype == SPACE_EMPTY) {

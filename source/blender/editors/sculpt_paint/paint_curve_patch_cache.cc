@@ -614,6 +614,38 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
       }
     });
   }
+  /* Scope the position-change tag to the nodes that ACTUALLY received a displacement, not the whole
+   * encompassing-sphere query. On a dense mesh the query is ~20-30x larger than the thin strip the
+   * relief lands on, and tagging all of it made the following `bke::pbvh::update_normals()` (and the
+   * draw-time one) recompute normals for the whole region -- the co-equal remaining cost after
+   * parallelization. Multires keeps the full query mask: its `average_stitch_faces()` below rewrites
+   * boundary duplicates across the wider region, so those nodes' normals must refresh too. */
+  IndexMaskMemory tag_memory;
+  IndexMask tag_mask = node_mask;
+  if (mesh) {
+    BitVector<> touched(pbvh.nodes_num(), false);
+    for (const LocalData &local : all_tls) {
+      for (const int node : local.touched_nodes) {
+        touched[node].set();
+      }
+    }
+    tag_mask = IndexMask::from_bits(touched, tag_memory);
+  }
+
+  /* Push the nodes into the active undo step BEFORE anything is displaced. Curve Patch bypasses
+   * `do_brush_action()`, which normally handles this for standard strokes; without it, nodes the
+   * patch reaches that the initial stroke (anchor dab or Roll stroke) never touched are absent from
+   * the step and Ctrl+Z cannot restore them.
+   *
+   * The ordering is the point: `undo::push_nodes()` records each node's CURRENT positions as the
+   * state to restore, and only the first push of a node in a step takes effect. Called after PHASE 2
+   * (where it used to sit, contradicting its own comment) it recorded nodes already carrying the
+   * relief, so undoing a committed patch restored those nodes to a displaced state instead of the
+   * original surface. Here the positions are still pristine: `curve_patch_restore_only()` reset them
+   * at the top of this re-stamp, PHASE 1 is read-only, and any node an earlier symmetry pass wrote
+   * to was pushed by that pass. */
+  undo::push_nodes(depsgraph, ob, tag_mask, undo::Type::Position);
+
   for (LocalData &local : all_tls) {
     for (const ReliefWrite &write : local.writes) {
       /* On a regular mesh this is the sole snapshot of `idx`; on Multires it was already recorded by
@@ -653,30 +685,6 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
         *subdiv_ccg, pbvh.nodes<bke::pbvh::GridsNode>(), node_mask, memory);
     BKE_subdiv_ccg_average_stitch_faces(*subdiv_ccg, faces);
   }
-
-  /* Scope the position-change tag to the nodes that ACTUALLY received a displacement, not the whole
-   * encompassing-sphere query. On a dense mesh the query is ~20-30x larger than the thin strip the
-   * relief lands on, and tagging all of it made the following `bke::pbvh::update_normals()` (and the
-   * draw-time one) recompute normals for the whole region -- the co-equal remaining cost after
-   * parallelization. Multires keeps the full query mask: its `average_stitch_faces()` above rewrites
-   * boundary duplicates across the wider region, so those nodes' normals must refresh too. */
-  IndexMaskMemory tag_memory;
-  IndexMask tag_mask = node_mask;
-  if (mesh) {
-    BitVector<> touched(pbvh.nodes_num(), false);
-    for (const LocalData &local : all_tls) {
-      for (const int node : local.touched_nodes) {
-        touched[node].set();
-      }
-    }
-    tag_mask = IndexMask::from_bits(touched, tag_memory);
-  }
-
-  /* Push the nodes we are about to displace into the active undo step. Curve Patch bypasses
-   * `do_brush_action()`, which normally handles this for standard strokes. Without this, nodes
-   * touched by the patch that were not already pushed by the initial stroke (anchor dab or Roll
-   * stroke) are never saved, and Ctrl+Z fails to restore them. */
-  undo::push_nodes(depsgraph, ob, tag_mask, undo::Type::Position);
 
   /* Unlike the old N-dab re-stamp (which went through `do_brush_action` and inherited its own
    * `pbvh.tag_positions_changed(node_mask)` at `sculpt.cc:3187`), this direct relief action writes

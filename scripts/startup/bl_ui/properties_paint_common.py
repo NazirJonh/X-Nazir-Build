@@ -575,6 +575,10 @@ class StrokePanel(BrushPanel):
             col.row().prop(tex_slot, "curve_patch_length_mode", text="Curve Patch Length", expand=True)
             if tex_slot.curve_patch_length_mode == 'REPEAT':
                 col.prop(tex_slot, "curve_patch_length_repeat", text="Repeats")
+            col.row().prop(tex_slot, "curve_patch_end_falloff", text="End Falloff", expand=True)
+            sub = col.row()
+            sub.enabled = tex_slot.curve_patch_end_falloff == 'SMOOTH'
+            sub.prop(tex_slot, "curve_patch_end_falloff_length", text="Falloff Length", slider=True)
             col.separator()
 
         if brush.stroke_method == 'ANCHORED':

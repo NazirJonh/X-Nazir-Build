@@ -344,6 +344,23 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
         return std::nullopt;
       }
 
+      /* End falloff: fade the relief in and out over `zone` world-space units at each of the
+       * curve's two ends, so the strip does not begin and end with a step. `s` is arc-length along
+       * the WHOLE spline (not a per-branch coordinate), so where a curve overlaps itself the
+       * interior crossing sits at a mid-range `s` and keeps full amplitude -- only the curve's two
+       * true ends fade. The percentage is RNA-clamped to 50, so the two zones can never overlap. */
+      float end_falloff = 1.0f;
+      if (patch.frozen_params.end_falloff_mode == MTEX_CURVE_PATCH_END_SMOOTH) {
+        const float zone = float(patch.frozen_params.end_falloff_percent) * 0.01f * total_length;
+        if (zone > 1e-8f) {
+          const float t = std::min(std::min(s, total_length - s) / zone, 1.0f);
+          end_falloff = t * t * (3.0f - 2.0f * t);
+        }
+      }
+      if (end_falloff <= 0.0f) {
+        return std::nullopt;
+      }
+
       /* `u` (across the strip) is normalized the same way every other brush texture mapping mode
        * normalizes its input by the brush radius -- `MTEX_MAP_MODE_VIEW`/`TILED`/`RANDOM` divide by
        * `pixel_radius`/`start_pixel_radius` (`BKE_brush_sample_tex_3d()`, `brush.cc:1001-1018`), and
@@ -396,8 +413,14 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
         paint_get_tex_pixel(mtex, tex_u, tex_v, ss.tex_pool, thread_id, &tex_value, tex_rgba);
       }
 
-      const float height = tex_value * lateral_falloff * mask_factor * cache.bstrength;
-      return VertexRelief{orig, height, lateral_falloff};
+      const float height = tex_value * lateral_falloff * end_falloff * mask_factor * cache.bstrength;
+      /* `end_falloff` scales the claim WEIGHT as well as the height. Not for the branch merge just
+       * above -- `relief_at()` picks the branch with the largest `|height|` and never reads the
+       * weight -- but for the cross-pass blend in PHASE 2 (`pass_weight_accum`), which averages
+       * every symmetry pass claiming this vertex as `sum(weight * height) / sum(weight)`. A faded
+       * end that kept its full weight would enter that average with the same authority as a
+       * mirrored pass at full amplitude and dent the relief along the symmetry plane. */
+      return VertexRelief{orig, height, lateral_falloff * end_falloff};
     };
 
     /* Relief at one sample position: the stretches covering it merged by keeping the strongest
@@ -963,7 +986,11 @@ static void curve_patch_begin_editing(Object &ob,
   patch->frozen_params.swap_axis = brush.mtex.use_curve_patch_swap_axis;
   patch->frozen_params.length_mode = brush.mtex.curve_patch_length_mode;
   patch->frozen_params.length_repeat = brush.mtex.curve_patch_length_repeat;
+  patch->frozen_params.end_falloff_mode = brush.mtex.curve_patch_end_falloff;
+  patch->frozen_params.end_falloff_percent = brush.mtex.curve_patch_end_falloff_percent;
   patch->plane_normal = plane_normal;
+  /* A fresh session starts with nothing active; the cache may be reused from a previous patch. */
+  patch->active_point = -1;
 
   /* `cache.vc` otherwise still points at the just-finished stroke's own `ViewContext`, torn down
    * together with that stroke's operator. Repoint it at this patch's owned copy so every re-stamp's

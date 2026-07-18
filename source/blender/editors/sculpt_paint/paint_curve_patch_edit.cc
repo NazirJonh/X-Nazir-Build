@@ -35,6 +35,8 @@
  * `paint_curve_draw.cc`).
  */
 
+#include <optional>
+
 #include <fmt/format.h>
 
 #include "MEM_guardedalloc.h"
@@ -63,9 +65,20 @@
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
 
+#include "BLT_translation.hh"
+
+#include "ED_curves.hh"
 #include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
+
+#include "RNA_access.hh"
+#include "RNA_define.hh"
+#include "RNA_prototypes.hh"
+
+#include "UI_interface.hh"
+#include "UI_interface_c.hh"
+#include "UI_interface_layout.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -77,8 +90,9 @@
 
 namespace blender::ed::sculpt_paint {
 
+/* NOTE: the active point index lives on `CurvePatchCache`, not here -- the context menu's operators
+ * cannot reach a running modal's `op->customdata`. See `CurvePatchCache::active_point`. */
 struct CurvePatchEditOpData {
-  int active_point = -1;
   bool dragging_point = false;
   bool dragging_radius = false;
   /* True while dragging one of the point's two Bezier tangent handles (left/right), which shapes
@@ -123,6 +137,12 @@ struct CurvePatchEditOpData {
   int last_synced_length_mode = -1;
   int last_synced_length_repeat = -1;
   int last_synced_symm = -1;
+  /* Last end-falloff state (`MTex::curve_patch_end_falloff` / `curve_patch_end_falloff_percent`)
+   * this modal re-stamped with. Handled exactly like the length values above: read live, copied
+   * into `frozen_params` and re-stamped on change, so switching Hard/Smooth or dragging the
+   * Falloff Length slider fades the strip's ends in real time. Seeded at invoke. */
+  int last_synced_end_falloff_mode = -1;
+  int last_synced_end_falloff_percent = -1;
   /* Last texture and texture-mapping state this modal re-stamped with. The relief already reads
    * `brush.mtex` live on every re-stamp (size/offset/`tex`), so these only need a re-stamp TRIGGER:
    * when the assigned texture, its mapping size/offset, or the swap-axis flag changes, re-project.
@@ -260,6 +280,115 @@ static bool patch_find_closest_segment(const bke::CurvesGeometry &geom,
  * an event actually reached this modal handler -- if the text never appears/updates, the
  * event isn't getting here at all (as opposed to it arriving but the texture effect being hard
  * to see for a given brush/texture setup). */
+/* -------------------------------------------------------------------- */
+/** \name Shared Active-Point Actions
+ *
+ * Bodies shared by the modal's own hotkeys and by the context-menu operators further down, so the
+ * two entry points cannot drift apart.
+ * \{ */
+
+static bool curve_patch_active_point_is_valid(const CurvePatchCache &patch)
+{
+  return patch.active_point >= 0 && paintcurve_geometry_is_valid(patch.control_curve) &&
+         patch.active_point < patch.control_curve.points_num();
+}
+
+/* Returns false (having reported why) when the point cannot be removed. */
+static bool curve_patch_delete_active_point(bContext &C,
+                                            Object &ob,
+                                            CurvePatchCache &patch,
+                                            ReportList *reports)
+{
+  if (!curve_patch_active_point_is_valid(patch)) {
+    return false;
+  }
+  bke::CurvesGeometry &geom = patch.control_curve;
+  if (geom.points_num() - 1 < 2) {
+    /* Refuse rather than auto-cancelling the whole session -- the user decides explicitly via Esc
+     * if they want to cancel the patch instead of losing it to an accidental X/Delete press on the
+     * last removable point. */
+    BKE_report(
+        reports, RPT_WARNING, "Curve Patch needs at least 2 points -- press Esc to cancel instead");
+    return false;
+  }
+
+  const int point = patch.active_point;
+  IndexMaskMemory memory;
+  const IndexMask delete_mask = IndexMask::from_indices<int>(Span<int>(&point, 1), memory);
+  paintcurve_geometry_remove_points(geom, delete_mask);
+  patch.active_point = -1;
+
+  curve_patch_restore_and_restamp(C, ob, patch);
+  ED_region_tag_redraw(CTX_wm_region(&C));
+  return true;
+}
+
+static void curve_patch_set_active_handle_type(bContext &C,
+                                               Object &ob,
+                                               CurvePatchCache &patch,
+                                               const ed::curves::SetHandleType dst_type)
+{
+  bke::CurvesGeometry &geom = patch.control_curve;
+  MutableSpan<int8_t> types_left = geom.handle_types_left_for_write();
+  MutableSpan<int8_t> types_right = geom.handle_types_right_for_write();
+  types_left[patch.active_point] = paintcurve_resolve_handle_type(types_left[patch.active_point],
+                                                                  dst_type);
+  types_right[patch.active_point] = paintcurve_resolve_handle_type(types_right[patch.active_point],
+                                                                   dst_type);
+  geom.calculate_bezier_auto_handles();
+  geom.calculate_bezier_aligned_handles();
+  geom.tag_positions_changed();
+
+  curve_patch_restore_and_restamp(C, ob, patch);
+  ED_region_tag_redraw(CTX_wm_region(&C));
+}
+
+/* Right-click menu over a control point. The two point actions go through real operators (declared
+ * below) because a popup can only invoke operators, never call back into the running modal; the
+ * remaining entries are plain brush properties, which need no operator at all -- the modal's
+ * live-sync poll notices the changed `mtex` values and re-stamps on its next tick. */
+static void curve_patch_edit_context_menu_open(bContext *C)
+{
+  ui::PopupMenu *pup = ui::popup_menu_begin(C, IFACE_("Curve Patch"), ICON_NONE);
+  ui::Layout &layout = *ui::popup_menu_layout(pup);
+  layout.operator_context_set(wm::OpCallContext::InvokeDefault);
+  layout.op_menu_enum(
+      C, "SCULPT_OT_curve_patch_handle_type_set", "type", IFACE_("Handle Type"), ICON_NONE);
+
+  const ToolSettings *tool_settings = CTX_data_tool_settings(C);
+  Brush *brush = (tool_settings && tool_settings->sculpt) ?
+                     BKE_paint_brush(&tool_settings->sculpt->paint) :
+                     nullptr;
+  if (brush != nullptr) {
+    PointerRNA tex_slot_ptr = RNA_pointer_create_discrete(
+        &brush->id, RNA_BrushTextureSlot, &brush->mtex);
+    layout.separator();
+    layout.prop(&tex_slot_ptr,
+                "curve_patch_end_falloff",
+                UI_ITEM_NONE,
+                IFACE_("End Falloff"),
+                ICON_NONE);
+    if (brush->mtex.curve_patch_end_falloff == MTEX_CURVE_PATCH_END_SMOOTH) {
+      layout.prop(&tex_slot_ptr,
+                  "curve_patch_end_falloff_length",
+                  UI_ITEM_NONE,
+                  IFACE_("Falloff Length"),
+                  ICON_NONE);
+    }
+    layout.prop(&tex_slot_ptr,
+                "use_curve_patch_swap_axis",
+                UI_ITEM_NONE,
+                IFACE_("Swap Texture Axis"),
+                ICON_NONE);
+  }
+
+  layout.separator();
+  layout.op("SCULPT_OT_curve_patch_delete_point", std::nullopt, ICON_NONE);
+  ui::popup_menu_end(C, pup);
+}
+
+/** \} */
+
 static void curve_patch_edit_status_set(bContext *C, const CurvePatchCache &patch)
 {
   const std::string msg = fmt::format(
@@ -283,6 +412,8 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
       data->last_synced_dir_in = (brush->flag & BRUSH_DIR_IN) != 0;
       data->last_synced_length_mode = brush->mtex.curve_patch_length_mode;
       data->last_synced_length_repeat = brush->mtex.curve_patch_length_repeat;
+      data->last_synced_end_falloff_mode = brush->mtex.curve_patch_end_falloff;
+      data->last_synced_end_falloff_percent = brush->mtex.curve_patch_end_falloff_percent;
       data->last_synced_swap_axis = brush->mtex.use_curve_patch_swap_axis != 0;
       data->last_synced_tex_size[0] = brush->mtex.size[0];
       data->last_synced_tex_size[1] = brush->mtex.size[1];
@@ -362,6 +493,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
        * symmetry is applied by `do_symmetrical_brush_actions()` inside the re-stamp itself. */
       const int length_mode = brush->mtex.curve_patch_length_mode;
       const int length_repeat = brush->mtex.curve_patch_length_repeat;
+      const int end_falloff_mode = brush->mtex.curve_patch_end_falloff;
+      const int end_falloff_percent = brush->mtex.curve_patch_end_falloff_percent;
       const int symm = mesh_symmetry_xyz_get(ob);
       /* Texture + mapping watch (see `CurvePatchEditOpData`): the relief re-reads `brush.mtex` live,
        * so these just need to trigger a re-stamp when they change. */
@@ -387,7 +520,10 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
                                brush->mtex.ofs[1] != data.last_synced_tex_ofs[1];
       if (alpha != data.last_synced_alpha || dir_in != data.last_synced_dir_in ||
           length_mode != data.last_synced_length_mode ||
-          length_repeat != data.last_synced_length_repeat || symm != data.last_synced_symm ||
+          length_repeat != data.last_synced_length_repeat ||
+          end_falloff_mode != data.last_synced_end_falloff_mode ||
+          end_falloff_percent != data.last_synced_end_falloff_percent ||
+          symm != data.last_synced_symm ||
           swap_axis != data.last_synced_swap_axis || tex_changed ||
           falloff_preset != data.last_synced_falloff_preset ||
           falloff_curve_ts != data.last_synced_falloff_curve_ts)
@@ -396,6 +532,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         data.last_synced_dir_in = dir_in;
         data.last_synced_length_mode = length_mode;
         data.last_synced_length_repeat = length_repeat;
+        data.last_synced_end_falloff_mode = end_falloff_mode;
+        data.last_synced_end_falloff_percent = end_falloff_percent;
         data.last_synced_symm = symm;
         data.last_synced_swap_axis = swap_axis;
         data.last_synced_tex = tex;
@@ -408,6 +546,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         data.last_synced_falloff_curve_ts = falloff_curve_ts;
         patch.frozen_params.length_mode = length_mode;
         patch.frozen_params.length_repeat = length_repeat;
+        patch.frozen_params.end_falloff_mode = end_falloff_mode;
+        patch.frozen_params.end_falloff_percent = end_falloff_percent;
         patch.frozen_params.swap_axis = swap_axis;
         /* The relief samples the texture through `ss.tex_pool`, an `ImagePool` that caches ImBuf
          * handles for the whole sculpt session (`brush_init_tex`, `sculpt.cc`). A changed image --
@@ -491,7 +631,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         const int radius_hit = patch_find_radius_handle_at_pos(
             geom, screen_points.as_span(), loc_fl, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
         if (radius_hit >= 0) {
-          data.active_point = radius_hit;
+          patch.active_point = radius_hit;
           data.dragging_radius = true;
           paintcurve_radius_handle_screen_get_from_geometry(
               geom, screen_points.data(), radius_hit, &data.radius_handle);
@@ -533,7 +673,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           break;
         }
 
-        data.active_point = hit;
+        patch.active_point = hit;
         if (selflag == SEL_F1 || selflag == SEL_F3) {
           data.dragging_handle = true;
           data.handle_is_left = (selflag == SEL_F1);
@@ -572,7 +712,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
          * the win_to_3d projection plane tracks the point's actual depth) but always apply the
          * resulting delta on top of the point's ORIGINAL (drag-start) handle positions, so
          * floating-point drift never accumulates across the drag. */
-        const float3 &pivot = geom.positions()[data.active_point];
+        const float3 &pivot = geom.positions()[patch.active_point];
         float pivot_world[3];
         mul_v3_m4v3(pivot_world, ob_to_world, pivot);
 
@@ -589,7 +729,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
 
         for (int h = 0; h < 3; h++) {
           add_v3_v3v3(
-              paintcurve_geom_co(geom, data.active_point, h), obj_delta, data.point_initial_loc_3d[h]);
+              paintcurve_geom_co(geom, patch.active_point, h), obj_delta, data.point_initial_loc_3d[h]);
         }
         geom.calculate_bezier_auto_handles();
         geom.calculate_bezier_aligned_handles();
@@ -604,7 +744,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         const float mval_fl[2] = {float(event->mval[0]), float(event->mval[1])};
         const float new_radius = paintcurve_radius_from_handle_screen_pos(&data.radius_handle,
                                                                           mval_fl);
-        patch.control_curve.radius_for_write()[data.active_point] = new_radius;
+        patch.control_curve.radius_for_write()[patch.active_point] = new_radius;
         patch.control_curve.tag_positions_changed();
 
         curve_patch_restore_and_restamp(*C, ob, patch);
@@ -624,25 +764,32 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
          * direct-click path (paint_curve.cc): its `pivot_screen + (mval - pivot_screen)` target
          * algebraically reduces to just `mval`, projected onto the plane through the pivot's
          * current world position. */
-        const float3 &pivot = geom.positions()[data.active_point];
+        const float3 &pivot = geom.positions()[patch.active_point];
         float pivot_world[3];
         mul_v3_m4v3(pivot_world, ob_to_world, pivot);
 
         const float mval_curr[2] = {float(event->mval[0]), float(event->mval[1])};
         float world_curr[3];
         ED_view3d_win_to_3d(vc.v3d, vc.region, pivot_world, mval_curr, world_curr);
-        mul_v3_m4v3(paintcurve_geom_co(geom, data.active_point, data.handle_is_left ? 0 : 2),
+        mul_v3_m4v3(paintcurve_geom_co(geom, patch.active_point, data.handle_is_left ? 0 : 2),
                     world_to_ob,
                     world_curr);
 
-        /* A direct handle drag makes that point's shape freely adjustable. Both handle types are
-         * set to Align rather than Free so the curve stays smooth (tangent-continuous) through
-         * the point -- #calculate_bezier_aligned_handles() below re-aligns the OTHER handle's
-         * direction while preserving its own length, the same call every other mutation in this
-         * file already makes. Simpler than #PAINTCURVE_OT_slide's full Free/Vector/Auto handle-
-         * type cycling, matching this editor's reduced command set. */
-        geom.handle_types_left_for_write()[data.active_point] = BEZIER_HANDLE_ALIGN;
-        geom.handle_types_right_for_write()[data.active_point] = BEZIER_HANDLE_ALIGN;
+        /* A direct handle drag makes that point's shape freely adjustable, so a COMPUTED handle
+         * type (Auto/Vector, whose positions #calculate_bezier_auto_handles() would immediately
+         * overwrite) is promoted to Align -- the curve then stays smooth (tangent-continuous)
+         * through the point because #calculate_bezier_aligned_handles() below re-aligns the OTHER
+         * handle's direction while preserving its own length. A type the user chose explicitly via
+         * the context menu (#SCULPT_OT_curve_patch_handle_type_set) is left alone: overwriting it
+         * here would make Free unusable, since dragging either handle of a Free point would
+         * silently re-couple it to its opposite. */
+        for (MutableSpan<int8_t> types :
+             {geom.handle_types_left_for_write(), geom.handle_types_right_for_write()})
+        {
+          if (ELEM(types[patch.active_point], BEZIER_HANDLE_AUTO, BEZIER_HANDLE_VECTOR)) {
+            types[patch.active_point] = BEZIER_HANDLE_ALIGN;
+          }
+        }
         geom.calculate_bezier_auto_handles();
         geom.calculate_bezier_aligned_handles();
         geom.tag_positions_changed();
@@ -682,6 +829,35 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       }
       break;
     case RIGHTMOUSE:
+      /* Plain right-click over a control point opens the context menu -- the equivalent of Paint
+       * Curve's #PAINTCURVE_OT_context_menu, which cannot be reused here because every
+       * `PAINTCURVE_OT_*` operator resolves its data through a `PaintCurve` ID and this editor's
+       * control curve is a standalone `CurvesGeometry`. Ctrl+RMB keeps its insert/append meaning
+       * below; plain RMB away from a point stays the no-op it has always been. */
+      if (event->val == KM_PRESS && (event->modifier & KM_CTRL) == 0) {
+        const bke::CurvesGeometry &geom = patch.control_curve;
+        if (paintcurve_geometry_is_valid(geom)) {
+          Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+          ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+          Vector<PaintCurvePoint> screen_points;
+          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+
+          const float loc_fl[2] = {float(event->mval[0]), float(event->mval[1])};
+          char selflag = 0;
+          const int hit = paintcurve_find_in_screen_points(screen_points.as_span(),
+                                                           loc_fl,
+                                                           /*ignore_pivot=*/false,
+                                                           PAINT_CURVE_POINT_SELECT_THRESHOLD,
+                                                           &selflag);
+          /* A hit on either tangent handle counts as a hit on its point -- same as the pivot,
+           * since every menu entry acts on the whole point. */
+          if (hit >= 0) {
+            patch.active_point = hit;
+            curve_patch_edit_context_menu_open(C);
+          }
+        }
+        break;
+      }
       if (event->val == KM_PRESS && (event->modifier & KM_CTRL)) {
         bke::CurvesGeometry &geom = patch.control_curve;
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
@@ -726,7 +902,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
               const int insert_index = paintcurve_geometry_insert_point_at_segment(
                   geom, segment_index, segment_index_next, /*active_curve=*/0, edge_t);
               if (insert_index >= 0) {
-                data.active_point = insert_index;
+                patch.active_point = insert_index;
                 did_insert = true;
               }
             }
@@ -752,7 +928,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
                               int(geom.points_by_curve()[0].size()) :
                               0;
           paintcurve_geometry_add_point(geom, float3(obj_co), create_new_spline, active_curve, add_index);
-          data.active_point = geom.points_num() - 1;
+          patch.active_point = geom.points_num() - 1;
         }
 
         curve_patch_restore_and_restamp(*C, ob, patch);
@@ -761,32 +937,15 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       break;
     case EVT_XKEY:
     case EVT_DELKEY:
-      if (event->val == KM_PRESS && data.active_point != -1) {
-        bke::CurvesGeometry &geom = patch.control_curve;
-        if (paintcurve_geometry_is_valid(geom) && geom.points_num() - 1 >= 2) {
-          Vector<int> points_to_delete;
-          points_to_delete.append(data.active_point);
-          IndexMaskMemory memory;
-          const IndexMask delete_mask = IndexMask::from_indices<int>(points_to_delete.as_span(),
-                                                                     memory);
-          paintcurve_geometry_remove_points(geom, delete_mask);
-          data.active_point = -1;
-          data.dragging_point = false;
-          data.dragging_radius = false;
-          data.dragging_handle = false;
-          data.dragging_segment = false;
-
-          curve_patch_restore_and_restamp(*C, ob, patch);
-          ED_region_tag_redraw(CTX_wm_region(C));
-        }
-        else {
-          /* Refuse rather than auto-cancelling the whole session -- the user decides explicitly
-           * via Esc if they want to cancel the patch instead of losing it to an accidental
-           * X/Delete press on the last removable point. */
-          BKE_report(op->reports,
-                    RPT_WARNING,
-                    "Curve Patch needs at least 2 points -- press Esc to cancel instead");
-        }
+      if (event->val == KM_PRESS &&
+          curve_patch_delete_active_point(*C, ob, patch, op->reports))
+      {
+        /* The removed point may have been the one under an in-flight drag; drop the drag state so
+         * the next MOUSEMOVE does not index into geometry that no longer has it. */
+        data.dragging_point = false;
+        data.dragging_radius = false;
+        data.dragging_handle = false;
+        data.dragging_segment = false;
       }
       break;
     case EVT_TABKEY:
@@ -926,5 +1085,78 @@ void SCULPT_OT_curve_patch_edit(wmOperatorType *ot)
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Context-Menu Operators
+ *
+ * The only two Curve Patch actions that exist as real `wmOperatorType`s (see this file's header
+ * comment for why everything else is a plain call inside the modal): a popup menu can invoke
+ * operators and nothing else. They act on `CurvePatchCache::active_point`, which the modal sets
+ * from the right-click hit test just before opening the menu.
+ *
+ * Neither carries `OPTYPE_UNDO`: they mutate the live patch inside the session-wide undo step the
+ * modal operator opened, exactly like the modal's own hotkeys do.
+ * \{ */
+
+static bool curve_patch_active_point_poll(bContext *C)
+{
+  if (!curve_patch_edit_poll(C)) {
+    return false;
+  }
+  return curve_patch_active_point_is_valid(patch_cache_of(C));
+}
+
+static wmOperatorStatus curve_patch_handle_type_set_exec(bContext *C, wmOperator *op)
+{
+  Object &ob = *CTX_data_active_object(C);
+  CurvePatchCache &patch = patch_cache_of(C);
+  curve_patch_set_active_handle_type(
+      *C, ob, patch, ed::curves::SetHandleType(RNA_enum_get(op->ptr, "type")));
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_curve_patch_handle_type_set(wmOperatorType *ot)
+{
+  ot->name = "Set Curve Patch Handle Type";
+  ot->description = "Set the handle type of the active Curve Patch control point";
+  ot->idname = "SCULPT_OT_curve_patch_handle_type_set";
+
+  ot->invoke = WM_menu_invoke;
+  ot->exec = curve_patch_handle_type_set_exec;
+  ot->poll = curve_patch_active_point_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
+
+  ot->prop = RNA_def_enum(ot->srna,
+                          "type",
+                          ed::curves::rna_enum_set_handle_type_items,
+                          int(ed::curves::SetHandleType::Auto),
+                          "Type",
+                          nullptr);
+}
+
+static wmOperatorStatus curve_patch_delete_point_exec(bContext *C, wmOperator *op)
+{
+  Object &ob = *CTX_data_active_object(C);
+  CurvePatchCache &patch = patch_cache_of(C);
+  if (!curve_patch_delete_active_point(*C, ob, patch, op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_curve_patch_delete_point(wmOperatorType *ot)
+{
+  ot->name = "Delete Curve Patch Point";
+  ot->description = "Delete the active Curve Patch control point";
+  ot->idname = "SCULPT_OT_curve_patch_delete_point";
+
+  ot->exec = curve_patch_delete_point_exec;
+  ot->poll = curve_patch_active_point_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
+}
+
+/** \} */
 
 }  // namespace blender::ed::sculpt_paint

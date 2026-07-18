@@ -94,8 +94,8 @@ static void paintcurve_finish_topology_edit(bContext *C, PaintCurve *pc, Brush *
   paintcurve_tag_redraw(C, pc);
 }
 
-static int8_t paintcurve_resolve_handle_type(const int8_t handle_type,
-                                             const ed::curves::SetHandleType dst_type)
+int8_t paintcurve_resolve_handle_type(const int8_t handle_type,
+                                      const ed::curves::SetHandleType dst_type)
 {
   switch (dst_type) {
     case ed::curves::SetHandleType::Free:

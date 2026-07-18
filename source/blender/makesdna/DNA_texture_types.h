@@ -304,6 +304,12 @@ enum eMTex_CurvePatchLengthMode : char {
   MTEX_CURVE_PATCH_LENGTH_STRETCH = 2,
 };
 
+/** #MTex::curve_patch_end_falloff — how the relief terminates at the control curve's two ends. */
+enum eMTex_CurvePatchEndFalloff : char {
+  MTEX_CURVE_PATCH_END_HARD = 0,
+  MTEX_CURVE_PATCH_END_SMOOTH = 1,
+};
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -337,7 +343,19 @@ struct MTex {
   /** For #BRUSH_STROKE_ROLL: after the stroke finishes, hand the drawn contour off to the Curve
    * Patch editor as an editable control curve. */
   char roll_edit_after = 0;
-  char _pad2[5] = {};
+  /** For the Curve Patch stroke (#BRUSH_STROKE_CURVE_PATCH): how the relief terminates at the
+   * control curve's two ends. See #eMTex_CurvePatchEndFalloff. Carved from `_pad2` so the struct's
+   * total size and every later member's offset are unchanged. */
+  char curve_patch_end_falloff = MTEX_CURVE_PATCH_END_HARD;
+  /** For the Curve Patch stroke (#BRUSH_STROKE_CURVE_PATCH) SMOOTH end falloff: length of the fade
+   * at each end, as a percentage of the curve's total arc-length (RNA-clamped 0..50). The 50
+   * ceiling keeps the two end zones from ever overlapping. Stored as a percentage in a `char`
+   * rather than a `float` so it fits in `_pad2`: a `float` would need explicit alignment padding
+   * both before itself and before the following pointer (makesdna does not insert padding, see
+   * `check_member_alignment()` in `makesdna.cc`), growing #MTex by 8 bytes for precision this
+   * setting does not need. */
+  char curve_patch_end_falloff_percent = 10;
+  char _pad2[3] = {};
   struct Object *object = nullptr;
   struct Tex *tex = nullptr;
   char uvname[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";

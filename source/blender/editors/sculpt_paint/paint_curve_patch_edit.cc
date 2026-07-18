@@ -69,6 +69,7 @@
 #include "BLT_translation.hh"
 
 #include "ED_curves.hh"
+#include "ED_paint.hh"
 #include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
@@ -171,7 +172,21 @@ struct CurvePatchEditOpData {
    * re-project until the next stray event reached this modal. This timer makes the poll tick
    * regardless, so such changes update the relief promptly. */
   wmTimer *sync_timer = nullptr;
+  /* Snap context reused for the duration of a point drag, mirroring `PointSlideData::snap_ctx`
+   * (paint_curve.cc). Only the scene-snap-element level of #paintcurve_surface_place needs it, so
+   * it is created lazily on the first MOUSEMOVE that reaches that level and freed when the drag
+   * ends -- creating one per mouse move would rebuild the snap BVH on every event. */
+  PaintCurveSnapContext *snap_ctx = nullptr;
 };
+
+/** Release the drag-scoped snap context, if one was created. Safe to call repeatedly. */
+static void curve_patch_edit_snap_ctx_free(CurvePatchEditOpData &data)
+{
+  if (data.snap_ctx != nullptr) {
+    ED_paintcurve_snap_context_destroy(data.snap_ctx);
+    data.snap_ctx = nullptr;
+  }
+}
 
 static CurvePatchCache &patch_cache_of(bContext *C)
 {
@@ -586,6 +601,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     if (data.sync_timer) {
       WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data.sync_timer);
     }
+    curve_patch_edit_snap_ctx_free(data);
     MEM_delete(&data);
     op->customdata = nullptr;
     return OPERATOR_CANCELLED;
@@ -817,6 +833,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         data.dragging_radius = false;
         data.dragging_handle = false;
         data.dragging_segment = false;
+        curve_patch_edit_snap_ctx_free(data);
         /* One undo step per drag, recorded on release -- not one per MOUSEMOVE, which would fill
          * the stack with intermediate positions nobody wants to step through. */
         curve_patch_undo_push(patch);
@@ -844,14 +861,38 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
 
         const float mval_init[2] = {data.drag_start_mval.x, data.drag_start_mval.y};
         const float mval_curr[2] = {float(event->mval[0]), float(event->mval[1])};
-        float world_init[3], world_curr[3];
-        ED_view3d_win_to_3d(vc.v3d, vc.region, pivot_world, mval_init, world_init);
-        ED_view3d_win_to_3d(vc.v3d, vc.region, pivot_world, mval_curr, world_curr);
 
-        float obj_init[3], obj_curr[3], obj_delta[3];
-        mul_v3_m4v3(obj_init, world_to_ob, world_init);
-        mul_v3_m4v3(obj_curr, world_to_ob, world_curr);
-        sub_v3_v3v3(obj_delta, obj_curr, obj_init);
+        /* Keep the point on the surface while it is dragged, same as #paintcurve_point_slide_modal.
+         * `use_depth_fallback` is off: the depth-buffer level needs a viewport redraw, which would
+         * run on every mouse move. On a miss this falls through to the screen-delta path below. */
+        float obj_delta[3];
+        float hit_obj[3];
+        float hit_no_obj[3];
+        if (data.snap_ctx == nullptr) {
+          data.snap_ctx = ED_paintcurve_snap_context_create();
+        }
+        if (paintcurve_surface_place(C,
+                                     data.snap_ctx,
+                                     vc,
+                                     mval_curr,
+                                     pivot_world,
+                                     /*use_depth_fallback=*/false,
+                                     hit_obj,
+                                     hit_no_obj))
+        {
+          sub_v3_v3v3(obj_delta, hit_obj, data.point_initial_loc_3d[1]);
+          paintcurve_geom_set_surface_normal(geom, patch.active_point, float3(hit_no_obj));
+        }
+        else {
+          float world_init[3], world_curr[3];
+          ED_view3d_win_to_3d(vc.v3d, vc.region, pivot_world, mval_init, world_init);
+          ED_view3d_win_to_3d(vc.v3d, vc.region, pivot_world, mval_curr, world_curr);
+
+          float obj_init[3], obj_curr[3];
+          mul_v3_m4v3(obj_init, world_to_ob, world_init);
+          mul_v3_m4v3(obj_curr, world_to_ob, world_curr);
+          sub_v3_v3v3(obj_delta, obj_curr, obj_init);
+        }
 
         for (int h = 0; h < 3; h++) {
           add_v3_v3v3(
@@ -1036,24 +1077,25 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         }
 
         if (!did_insert) {
-          /* Append: extend the single spline at its end (or start it, if empty), matching
-           * #paintcurve_point_add's object-space fallback path (no surface snap, no active brush
-           * context to snap against here) when it is not itself inserting mid-segment. */
-          float ob_origin_world[3];
-          copy_v3_v3(ob_origin_world, ob.object_to_world().location());
-          float world_co[3];
-          ED_view3d_win_to_3d(vc.v3d, vc.region, ob_origin_world, loc_fl, world_co);
-          float world_to_ob[4][4];
-          copy_m4_m4(world_to_ob, ob.world_to_object().ptr());
+          /* Append: extend the single spline at its end (or start it, if empty). Uses the same
+           * placement chain as #paintcurve_point_add so points land on the surface here too;
+           * `patch.plane_normal` only stands in when no real surface was hit. */
           float obj_co[3];
-          mul_v3_m4v3(obj_co, world_to_ob, world_co);
+          float obj_no[3];
+          const bool placed = paintcurve_surface_place(
+              C, nullptr, vc, loc_fl, nullptr, /*use_depth_fallback=*/true, obj_co, obj_no);
 
           const bool create_new_spline = (geom.points_num() == 0);
           int active_curve = 0;
           int add_index = paintcurve_geometry_is_valid(geom) ?
                               int(geom.points_by_curve()[0].size()) :
                               0;
-          paintcurve_geometry_add_point(geom, float3(obj_co), create_new_spline, active_curve, add_index);
+          paintcurve_geometry_add_point(geom,
+                                        float3(obj_co),
+                                        placed ? float3(obj_no) : patch.plane_normal,
+                                        create_new_spline,
+                                        active_curve,
+                                        add_index);
           patch.active_point = geom.points_num() - 1;
         }
 
@@ -1073,6 +1115,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         data.dragging_radius = false;
         data.dragging_handle = false;
         data.dragging_segment = false;
+        curve_patch_edit_snap_ctx_free(data);
       }
       break;
     case EVT_ZKEY:
@@ -1216,8 +1259,11 @@ static void curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
   }
 
   CurvePatchEditOpData *op_data = static_cast<CurvePatchEditOpData *>(op->customdata);
-  if (op_data && op_data->sync_timer) {
-    WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), op_data->sync_timer);
+  if (op_data) {
+    if (op_data->sync_timer) {
+      WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), op_data->sync_timer);
+    }
+    curve_patch_edit_snap_ctx_free(*op_data);
   }
   MEM_delete(op_data);
   op->customdata = nullptr;

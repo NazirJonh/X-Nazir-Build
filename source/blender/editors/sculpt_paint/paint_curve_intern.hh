@@ -43,6 +43,7 @@ struct Main;
 struct Paint;
 struct ViewContext;
 struct bContext;
+struct PaintCurveSnapContext;
 struct wmKeyConfig;
 struct wmKeyMap;
 struct wmOperatorType;
@@ -131,13 +132,48 @@ int paintcurve_active_curve_get(const PaintCurve *pc);
 /** Append `point_num` bezier points as a NEW spline; returns new spline index (or -1). */
 int paintcurve_geometry_add_spline(bke::CurvesGeometry &geom, int point_num);
 /**
+ * Surface normal captured when the point was placed, in the active object's space.
+ * Returns `(0, 0, 1)` for points that predate the attribute.
+ */
+float3 paintcurve_geom_get_surface_normal(const bke::CurvesGeometry &geom, int point_index);
+/** Store the surface normal for `point_index`; `normal` is normalized on write. */
+void paintcurve_geom_set_surface_normal(bke::CurvesGeometry &geom,
+                                        int point_index,
+                                        const float3 &normal);
+/**
+ * Place a curve point under `mval` on the active object's surface.
+ *
+ * Levels, first success wins: scene snap elements (only while the header Snap toggle is on),
+ * the active object's BVH, the depth buffer, and finally the object-origin plane. Shared by the
+ * `PAINTCURVE_OT_*` operators and the curve-patch edit modal so both place points identically.
+ *
+ * \param snap_ctx: reusable snap context, may be null (created and destroyed per call).
+ * \param prev_co_world: previous world position used by the snap heuristics, may be null.
+ * \param use_depth_fallback: allow the depth-buffer level. Off for modal drags, where the
+ * required depth-buffer refresh would run on every mouse move.
+ * \param r_co_obj: hit position in the active object's space.
+ * \param r_no_obj: unit-length surface normal in the active object's space.
+ * \return true when a real surface was hit; false when only the origin plane was used.
+ */
+bool paintcurve_surface_place(bContext *C,
+                              PaintCurveSnapContext *snap_ctx,
+                              const ViewContext &vc,
+                              const float mval[2],
+                              const float prev_co_world[3],
+                              bool use_depth_fallback,
+                              float r_co_obj[3],
+                              float r_no_obj[3]);
+/**
  * Core of #paintcurve_point_add: append a control point at `co`, either extending the spline at
  * `active_curve`/`add_index` or starting a new spline when `create_new_spline` is true.
  * `active_curve` and `add_index` are updated in place to reflect the point that was added,
  * mirroring #PaintCurve.active_curve/add_index.
+ * `surface_normal` is stored per point in the active object's space; see
+ * #paintcurve_geom_set_surface_normal.
  */
 void paintcurve_geometry_add_point(bke::CurvesGeometry &geom,
                                    const float3 &co,
+                                   const float3 &surface_normal,
                                    bool create_new_spline,
                                    int &active_curve,
                                    int &add_index);

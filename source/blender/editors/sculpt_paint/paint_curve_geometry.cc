@@ -708,6 +708,28 @@ bool paintcurve_geom_any_selected(const bke::CurvesGeometry &geom)
   return false;
 }
 
+static constexpr const char *PC_ATTR_SURFACE_NORMAL = "paintcurve_surface_normal";
+
+float3 paintcurve_geom_get_surface_normal(const bke::CurvesGeometry &geom, const int point_index)
+{
+  const bke::AttributeAccessor attrs = geom.attributes();
+  const VArray<float3> normals = *attrs.lookup_or_default<float3>(
+      PC_ATTR_SURFACE_NORMAL, bke::AttrDomain::Point, float3(0.0f, 0.0f, 1.0f));
+  return normals[point_index];
+}
+
+void paintcurve_geom_set_surface_normal(bke::CurvesGeometry &geom,
+                                        const int point_index,
+                                        const float3 &normal)
+{
+  bke::MutableAttributeAccessor attrs = geom.attributes_for_write();
+  bke::SpanAttributeWriter<float3> normals = attrs.lookup_or_add_for_write_span<float3>(
+      PC_ATTR_SURFACE_NORMAL, bke::AttrDomain::Point);
+  const float len = math::length(normal);
+  normals.span[point_index] = (len > 1e-6f) ? (normal / len) : float3(0.0f, 0.0f, 1.0f);
+  normals.finish();
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

@@ -226,6 +226,15 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
     float weight;
   };
 
+  /* Largest world-space half-width anywhere on the curve. Drives the node/grid cull tube below, and
+   * serves as the fall-back supersampling kernel size for vertices that sit just outside the strip
+   * (where no local half-width is available because the ribbon reports no branch for them). */
+  float max_radius = 0.0f;
+  for (const float r : patch.spline.radii) {
+    max_radius = std::max(max_radius, r);
+  }
+  max_radius *= patch.frozen_params.radius;
+
   /* Displaced target position for `idx`, or nullopt if it is rejected. Pure/read-only so it is safe
    * to run concurrently: it never writes `positions` nor mutates the snapshot map. `thread_id`
    * indexes the texture pool's per-thread slot (required for concurrent `paint_get_tex_pixel()`). */
@@ -279,20 +288,15 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
      * arbitrarily sharp turns -- the same construction the Roll stroke method uses. No branch at all
      * means the vertex projects outside the ribbon (off the strip, or past the curve's ends, which
      * the borders cut off exactly like the old `s` range rejection did). */
-    float2 branch_uv[2];
-    const int branch_num = patch.ribbon.sample(symm_co, branch_uv);
-    if (branch_num == 0) {
-      return std::nullopt;
-    }
-
-    /* Relief one stretch of the curve contributes at this vertex, or nullopt when that stretch does
+    /* Relief one stretch of the curve contributes at `sample_co`, or nullopt when that stretch does
      * not actually reach it. */
-    auto branch_relief = [&](const float2 ribbon_uv) -> std::optional<VertexRelief> {
+    auto branch_relief = [&](const float3 &sample_co,
+                             const float2 ribbon_uv) -> std::optional<VertexRelief> {
       const float s = ribbon_uv.y;
       /* Signed offset from the ribbon plane, measured against the curve point the ribbon mapped this
-       * vertex to (NOT the globally-closest point -- consistent with the ribbon's own branch
+       * sample to (NOT the globally-closest point -- consistent with the ribbon's own branch
        * choice). */
-      const float normal_dist = math::dot(symm_co - patch.spline.evaluate(s), patch.plane_normal);
+      const float normal_dist = math::dot(sample_co - patch.spline.evaluate(s), patch.plane_normal);
 
       /* `CurvePatchSpline::radii` stores the control curve's per-point `radius` attribute
        * verbatim, which is a unitless UI scalar (default 1.0 = "full brush size", see
@@ -396,31 +400,38 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
       return VertexRelief{orig, height, lateral_falloff};
     };
 
-    /* Merge the stretches covering this vertex by keeping the strongest displacement rather than
-     * averaging them.
+    /* Relief at one sample position: the stretches covering it merged by keeping the strongest
+     * displacement rather than averaging them.
      *
-     * Where the curve runs alongside itself, both stretches genuinely cover the vertex, and each
+     * Where the curve runs alongside itself, both stretches genuinely cover the sample, and each
      * one's own falloff already fades it out with distance from that stretch's center line. Taking
      * the strongest is the union of two embossed strips: the relief keeps full amplitude
      * everywhere, and the transition between them follows the (smoothly varying) line where the
      * two displacements happen to be equal, so it reads as one strip passing over the other.
+     * Returns nullopt when no stretch reaches the sample at all.
      *
      * Averaging was the alternative -- and is what `pass_weight_accum` does for symmetry passes
      * below -- but it is right there for a different reason: those passes describe the SAME surface
      * mirrored, so averaging reconstructs it. Two stretches of one curve carry DIFFERENT texture
      * positions, and averaging them cancels the pattern into a visibly flattened band along the
      * overlap. */
-    std::optional<VertexRelief> merged;
-    for (const int b : IndexRange(branch_num)) {
-      const std::optional<VertexRelief> relief = branch_relief(branch_uv[b]);
-      if (!relief) {
-        continue;
+    auto relief_at = [&](const float3 &sample_co) -> std::optional<VertexRelief> {
+      float2 branch_uv[2];
+      const int branch_num = patch.ribbon.sample(sample_co, branch_uv);
+      std::optional<VertexRelief> merged;
+      for (const int b : IndexRange(branch_num)) {
+        const std::optional<VertexRelief> relief = branch_relief(sample_co, branch_uv[b]);
+        if (!relief) {
+          continue;
+        }
+        if (!merged || std::abs(relief->height) > std::abs(merged->height)) {
+          merged = relief;
+        }
       }
-      if (!merged || std::abs(relief->height) > std::abs(merged->height)) {
-        merged = relief;
-      }
-    }
-    return merged;
+      return merged;
+    };
+
+    return relief_at(symm_co);
   };
 
   /* Node cull: `calc_brush_node_mask()` returns every node inside the whole-curve encompassing
@@ -433,11 +444,6 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
    * approximation and for slightly-stale node bounds, and at the tube boundary the relief tapers to
    * ~0 anyway, so nothing visible is ever culled. Node centres are mapped into the same canonical
    * space `compute_vertex()` uses, so symmetry passes cull correctly. */
-  float max_radius = 0.0f;
-  for (const float r : patch.spline.radii) {
-    max_radius = std::max(max_radius, r);
-  }
-  max_radius *= patch.frozen_params.radius;
   const float tube_radius = 2.5f * max_radius;
   BitVector<> keep(pbvh.nodes_num(), false);
   auto cull_nodes = [&](const auto nodes) {
@@ -688,6 +694,85 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
   tag_mask.set_bits(patch.last_restamp_nodes);
 }
 
+/**
+ * Light smoothing of the finished relief, run once when a patch is committed.
+ *
+ * Averages each displaced vertex's DISPLACEMENT -- its offset from the pre-patch position -- with
+ * its mesh neighbours'. Vertices the patch never touched hold a zero displacement and are read but
+ * never written, so the strip's edge is pulled toward its undisplaced surroundings (the requested
+ * softening of hard transitions) while the patch's footprint stays exactly what it was and
+ * `curve_patch_restore_only()` remains able to revert it.
+ *
+ * Smoothing the displacement rather than a scalar height along the normal is deliberate: the normals
+ * the relief displaced along live in a cache that the position writes have already invalidated, and
+ * re-fetching it would yield the normals of the DISPLACED surface, not the ones actually used.
+ * Working on the offset vectors avoids needing them at all.
+ *
+ * This replaces a supersampling attempt that sampled the texture several times per vertex. That
+ * failed for a structural reason worth recording: a handful of sparse taps is a sum of shifted
+ * copies of the texture, not a filter, so unless the offsets are smaller than the texture's own
+ * detail the copies stay separately visible and the pattern reads as ghosted. Its offsets were a
+ * fraction of the strip width, which is unrelated to the mesh's vertex spacing -- the sampling rate
+ * anti-aliasing has to match -- so on a dense mesh they were enormous. Re-weighting the taps does
+ * not help; it only changes how strong each copy is.
+ *
+ * Multires is deliberately not handled: its grids duplicate boundary elements, so it would need the
+ * CCG neighbour API plus a re-stitch afterwards. Not worth carrying until the mesh case is proven.
+ */
+static void curve_patch_smooth_relief(Object &ob, const CurvePatchCache &patch)
+{
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  if (pbvh.type() != bke::pbvh::Type::Mesh || patch.orig_positions.is_empty()) {
+    return;
+  }
+
+  /* Deliberately gentle: this is meant to take the hard edge off the profile, not to erase the
+   * texture's own detail. */
+  constexpr int smooth_iters = 2;
+  constexpr float mix = 0.5f;
+
+  Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  MutableSpan<float3> positions = mesh.vert_positions_for_write();
+  const Span<int2> edges = mesh.edges();
+  const int64_t verts_num = positions.size();
+
+  /* Dense rather than a map, so the per-edge gather below is a plain indexed read. */
+  Array<float3> disp(verts_num, float3(0.0f));
+  for (const auto item : patch.orig_positions.items()) {
+    disp[item.key] = positions[item.key] - item.value;
+  }
+
+  Array<float3> accum(verts_num);
+  Array<int> neighbor_num(verts_num);
+  for ([[maybe_unused]] const int iter : IndexRange(smooth_iters)) {
+    accum.fill(float3(0.0f));
+    neighbor_num.fill(0);
+    for (const int2 &edge : edges) {
+      accum[edge[0]] += disp[edge[1]];
+      neighbor_num[edge[0]]++;
+      accum[edge[1]] += disp[edge[0]];
+      neighbor_num[edge[1]]++;
+    }
+    /* `accum` is complete before anything is written back, so every vertex is relaxed against the
+     * PREVIOUS iteration's values -- the result does not depend on the order the map is walked. */
+    for (const auto item : patch.orig_positions.items()) {
+      const int vert = item.key;
+      if (neighbor_num[vert] > 0) {
+        disp[vert] = math::interpolate(
+            disp[vert], accum[vert] / float(neighbor_num[vert]), mix);
+      }
+    }
+  }
+
+  for (const auto item : patch.orig_positions.items()) {
+    positions[item.key] = item.value + disp[item.key];
+  }
+
+  IndexMaskMemory memory;
+  pbvh.tag_positions_changed(IndexMask::from_bits(patch.last_restamp_nodes, memory));
+  mesh.tag_positions_changed_no_normals();
+}
+
 }  // namespace
 
 void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &patch)
@@ -718,7 +803,8 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   /* Rebuild the ribbon UV LUT the relief action samples in place of
    * `CurvePatchSpline::closest_point()` (see `paint_curve_patch_ribbon.hh`). Built once per
    * restamp on the main thread; PHASE 1's parallel `compute_vertex()` walk only reads it. */
-  curve_patch_ribbon_build(patch.spline, patch.frozen_params.radius, patch.ribbon);
+  curve_patch_ribbon_build(
+      patch.spline, patch.frozen_params.radius, patch.ribbon, patch.final_quality);
 #if CURVE_PATCH_PROFILING
   const double prof_t_ribbon = BLI_time_now_seconds(); /* DEBUG-cpatch */
 #endif
@@ -798,6 +884,13 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
                                curve_patch_apply_relief_action,
                                paint_mode_settings,
                                std::nullopt);
+
+  /* Commit only: soften the finished profile once every symmetry pass has contributed. Deliberately
+   * after `do_symmetrical_brush_actions()` rather than inside the relief action -- smoothing a
+   * single pass's result would fight the cross-pass blend the next pass performs. */
+  if (patch.final_quality) {
+    curve_patch_smooth_relief(ob, patch);
+  }
 #if CURVE_PATCH_PROFILING
   const double prof_t_relief = BLI_time_now_seconds(); /* DEBUG-cpatch */
 #endif
@@ -820,9 +913,14 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   const int64_t prof_nodes = IndexMask::from_bits(patch.last_restamp_nodes, prof_memory).size();
   /* `ribbon` covers the spline rebuild plus the ribbon/LUT build -- previously an unaccounted gap
    * between `restore` and `normals`, which made `total` look larger than the sum of its parts. */
+  /* `displaced` is how many vertices THIS re-stamp actually wrote (`pass_weight_accum` is cleared
+   * per re-stamp and gains one entry per written vertex); `snapshot` is how many the patch has ever
+   * touched. A re-stamp that repeats an earlier one must report the same `displaced` and leave
+   * `snapshot` unchanged -- if the commit re-stamp does not, the two passes are not seeing the same
+   * geometry, which is the open question behind the doubled pattern on commit. */
   printf(
       "[DEBUG-cpatch] total=%.2fms | restore=%.2f ribbon=%.2f normals=%.2f relief=%.2f flush=%.2f | "
-      "nodes=%lld interval=%.2fms\n",
+      "nodes=%lld displaced=%lld snapshot=%lld quality=%d lut=%d interval=%.2fms\n",
       (prof_t_end - prof_t0) * 1000.0,
       (prof_t_restore - prof_t0) * 1000.0,
       (prof_t_ribbon - prof_t_restore) * 1000.0,
@@ -830,6 +928,10 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
       (prof_t_relief - prof_t_norm) * 1000.0,
       (prof_t_end - prof_t_relief) * 1000.0,
       (long long)prof_nodes,
+      (long long)patch.pass_weight_accum.size(),
+      (long long)patch.orig_positions.size(),
+      patch.final_quality ? 1 : 0,
+      patch.ribbon.res,
       prof_interval_ms);
   fflush(stdout);
 #endif

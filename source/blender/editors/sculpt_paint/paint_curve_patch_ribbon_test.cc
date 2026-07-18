@@ -171,4 +171,65 @@ TEST(paint_curve_patch_ribbon, parallel_legs_report_both_branches)
   }
 }
 
+TEST(paint_curve_patch_ribbon, high_quality_refines_without_moving_the_mapping)
+{
+  /* The commit-time pass rebuilds the LUT at a finer pixel density so its supersampled taps, which
+   * sit a few percent of a strip-width apart, are not all resolved against the same coarse cell.
+   * Raising the resolution must REFINE the mapping, never shift it. */
+  CurvePatchSpline spline;
+  Vector<float3> points;
+  for (int i = 0; i <= 30; i++) {
+    points.append(float3(float(i) * 0.1f, 0.0f, 0.0f));
+  }
+  spline.build_from_positions(points.as_span());
+  spline.plane_normal = float3(0.0f, 0.0f, 1.0f);
+
+  const float R = 0.5f;
+  CurvePatchRibbonLut fast, fine;
+  curve_patch_ribbon_build(spline, R, fast, false);
+  curve_patch_ribbon_build(spline, R, fine, true);
+  ASSERT_TRUE(fast.ready);
+  ASSERT_TRUE(fine.ready);
+  EXPECT_GT(fine.res, fast.res);
+
+  /* Same UV within what the coarser table's own quantization allows. */
+  for (const float x : {0.5f, 1.5f, 2.5f}) {
+    for (const float y : {-0.2f, 0.0f, 0.2f}) {
+      float2 uv_fast[2], uv_fine[2];
+      const int n_fast = fast.sample(float3(x, y, 0.0f), uv_fast);
+      const int n_fine = fine.sample(float3(x, y, 0.0f), uv_fine);
+      ASSERT_EQ(n_fast, 1);
+      ASSERT_EQ(n_fine, 1);
+      EXPECT_NEAR(uv_fine[0].x, uv_fast[0].x, 0.15f);
+      EXPECT_NEAR(uv_fine[0].y, uv_fast[0].y, 0.15f);
+    }
+  }
+}
+
+TEST(paint_curve_patch_ribbon, quality_setting_participates_in_the_cache_hash)
+{
+  /* The build returns early when `source_hash` matches. If the quality setting were left out of it,
+   * the commit-time rebuild would be answered with the interactive table -- the very table it exists
+   * to replace. */
+  CurvePatchSpline spline;
+  Vector<float3> points;
+  for (int i = 0; i <= 20; i++) {
+    points.append(float3(float(i) * 0.1f, 0.0f, 0.0f));
+  }
+  spline.build_from_positions(points.as_span());
+  spline.plane_normal = float3(0.0f, 0.0f, 1.0f);
+
+  CurvePatchRibbonLut fast, fine;
+  curve_patch_ribbon_build(spline, 0.5f, fast, false);
+  curve_patch_ribbon_build(spline, 0.5f, fine, true);
+  EXPECT_NE(fast.source_hash, fine.source_hash);
+
+  /* Rebuilding with identical inputs leaves a usable table (the early-out path must not clear it).
+   * This does not prove the rebuild was skipped -- the observable state is the same either way. */
+  const int res_before = fine.res;
+  curve_patch_ribbon_build(spline, 0.5f, fine, true);
+  EXPECT_EQ(fine.res, res_before);
+  EXPECT_TRUE(fine.ready);
+}
+
 }  // namespace blender::ed::sculpt_paint::tests

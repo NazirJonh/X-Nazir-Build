@@ -263,6 +263,12 @@ IDTypeInfo IDType_ID_PC = {
 
 static ePaintOverlayControlFlags overlay_flags = ePaintOverlayControlFlags{};
 
+/* Monotonic companion to `overlay_flags` for the primary brush texture. The overlay flags are a
+ * shared, reset-on-draw signal (the paint cursor clears them), which makes them unusable for a
+ * poller. This counter only ever increases -- one bump per primary-texture invalidation -- so a
+ * consumer can detect a change race-free by comparing against a stored value. */
+static uint64_t overlay_texture_edit_count = 0;
+
 void BKE_paint_invalidate_overlay_tex(const Main &bmain,
                                       Scene *scene,
                                       ViewLayer *view_layer,
@@ -280,6 +286,7 @@ void BKE_paint_invalidate_overlay_tex(const Main &bmain,
 
   if (br->mtex.tex == tex) {
     overlay_flags |= PAINT_OVERLAY_INVALID_TEXTURE_PRIMARY;
+    overlay_texture_edit_count++;
   }
   if (br->mask_mtex.tex == tex) {
     overlay_flags |= PAINT_OVERLAY_INVALID_TEXTURE_SECONDARY;
@@ -306,11 +313,17 @@ void BKE_paint_invalidate_overlay_all()
 {
   overlay_flags |= (PAINT_OVERLAY_INVALID_TEXTURE_SECONDARY |
                     PAINT_OVERLAY_INVALID_TEXTURE_PRIMARY | PAINT_OVERLAY_INVALID_CURVE);
+  overlay_texture_edit_count++;
 }
 
 ePaintOverlayControlFlags BKE_paint_get_overlay_flags()
 {
   return overlay_flags;
+}
+
+uint64_t BKE_paint_get_overlay_texture_edit_count()
+{
+  return overlay_texture_edit_count;
 }
 
 void BKE_paint_set_overlay_override(eOverlayFlags flags)

@@ -367,7 +367,7 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
     tex_v = tex_v * mtex_size.y + mtex_ofs.y;
 
     /* Mirrors the null-texture guard `sculpt_apply_texture()` used to apply before dispatching
-     * to the (now-removed) `MTEX_MAP_MODE_CURVE_PATCH` branch: `RE_texture_evaluate()` returns
+     * to the old, now-removed Curve Patch map-mode branch: `RE_texture_evaluate()` returns
      * `false` without writing its intensity output when `mtex->tex` is null, so calling
      * `paint_get_tex_pixel()` unconditionally read an uninitialized `tex_value`. */
     float tex_value = 1.0f;

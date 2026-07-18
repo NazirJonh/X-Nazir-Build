@@ -171,6 +171,9 @@ struct SculptLayerUndoPayload {
   int8_t type = SCULPT_LAYER_TREE_NODE_TYPE_LAYER;
   std::string name;
   int flag = 0;
+  /** #eSculptLayerColorTag, mirroring #SculptLayerTreeNode::color_tag. Carried like #flag so a
+   * removed folder comes back with its color on undo. */
+  int8_t color_tag = SCULPT_LAYER_COLOR_NONE;
   int uid = 0;
   /**
    * The folder the node sat in, as its uid (0 when it sat at the root — the root group holds uid 0,

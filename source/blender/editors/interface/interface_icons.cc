@@ -566,8 +566,12 @@ static void vicon_strip_color_draw_library_data_override_noneditable(
                UI_NO_ICON_OVERLAY_TEXT);
 }
 
-static void vicon_layergroup_color_draw(
-    short color_tag, float x, float y, float w, float /*h*/, float /*alpha*/)
+/* Tint \a base_icon with the theme's collection color \a color_tag. The base icon is a parameter
+ * because the same eight color tags are drawn over different glyphs: a Grease Pencil layer group
+ * in its tree, a plain folder in the sculpt layer tree. Sharing the glyph would make coloring a
+ * folder silently change its shape. */
+static void vicon_layergroup_color_draw_ex(
+    short color_tag, int base_icon, float x, float y, float w, float /*h*/, float /*alpha*/)
 {
   bTheme *btheme = theme::theme_get();
   const ThemeCollectionColor *layergroup_color = &btheme->collection_color[color_tag];
@@ -576,13 +580,26 @@ static void vicon_layergroup_color_draw(
 
   icon_draw_ex(x,
                y,
-               ICON_GREASEPENCIL_LAYER_GROUP,
+               base_icon,
                aspect,
                1.0f,
                0.0f,
                layergroup_color->color,
                btheme->tui.icon_border_intensity > 0.0f,
                UI_NO_ICON_OVERLAY_TEXT);
+}
+
+static void vicon_layergroup_color_draw(
+    short color_tag, float x, float y, float w, float h, float alpha)
+{
+  vicon_layergroup_color_draw_ex(
+      color_tag, ICON_GREASEPENCIL_LAYER_GROUP, x, y, w, h, alpha);
+}
+
+static void vicon_sculpt_layergroup_color_draw(
+    short color_tag, float x, float y, float w, float h, float alpha)
+{
+  vicon_layergroup_color_draw_ex(color_tag, ICON_FILE_FOLDER, x, y, w, h, alpha);
 }
 
 #  define DEF_ICON_LAYERGROUP_COLOR_DRAW(index, color) \
@@ -602,6 +619,24 @@ DEF_ICON_LAYERGROUP_COLOR_DRAW(07, LAYERGROUP_COLOR_07);
 DEF_ICON_LAYERGROUP_COLOR_DRAW(08, LAYERGROUP_COLOR_08);
 
 #  undef DEF_ICON_LAYERGROUP_COLOR_DRAW
+
+#  define DEF_ICON_SCULPT_LAYERGROUP_COLOR_DRAW(index, color) \
+    static void vicon_sculpt_layergroup_color_draw_##index( \
+        float x, float y, float w, float h, float alpha, const uchar * /*mono_rgba[4]*/) \
+    { \
+      vicon_sculpt_layergroup_color_draw(color, x, y, w, h, alpha); \
+    }
+
+DEF_ICON_SCULPT_LAYERGROUP_COLOR_DRAW(01, LAYERGROUP_COLOR_01);
+DEF_ICON_SCULPT_LAYERGROUP_COLOR_DRAW(02, LAYERGROUP_COLOR_02);
+DEF_ICON_SCULPT_LAYERGROUP_COLOR_DRAW(03, LAYERGROUP_COLOR_03);
+DEF_ICON_SCULPT_LAYERGROUP_COLOR_DRAW(04, LAYERGROUP_COLOR_04);
+DEF_ICON_SCULPT_LAYERGROUP_COLOR_DRAW(05, LAYERGROUP_COLOR_05);
+DEF_ICON_SCULPT_LAYERGROUP_COLOR_DRAW(06, LAYERGROUP_COLOR_06);
+DEF_ICON_SCULPT_LAYERGROUP_COLOR_DRAW(07, LAYERGROUP_COLOR_07);
+DEF_ICON_SCULPT_LAYERGROUP_COLOR_DRAW(08, LAYERGROUP_COLOR_08);
+
+#  undef DEF_ICON_SCULPT_LAYERGROUP_COLOR_DRAW
 
 #  define DEF_ICON_NODE_SOCKET_DRAW(name, socket_type) \
     static void icon_node_socket_draw_##name( \
@@ -1006,6 +1041,15 @@ static void init_internal_icons()
   def_internal_vicon(ICON_LAYERGROUP_COLOR_06, vicon_layergroup_color_draw_06);
   def_internal_vicon(ICON_LAYERGROUP_COLOR_07, vicon_layergroup_color_draw_07);
   def_internal_vicon(ICON_LAYERGROUP_COLOR_08, vicon_layergroup_color_draw_08);
+
+  def_internal_vicon(ICON_SCULPT_LAYERGROUP_COLOR_01, vicon_sculpt_layergroup_color_draw_01);
+  def_internal_vicon(ICON_SCULPT_LAYERGROUP_COLOR_02, vicon_sculpt_layergroup_color_draw_02);
+  def_internal_vicon(ICON_SCULPT_LAYERGROUP_COLOR_03, vicon_sculpt_layergroup_color_draw_03);
+  def_internal_vicon(ICON_SCULPT_LAYERGROUP_COLOR_04, vicon_sculpt_layergroup_color_draw_04);
+  def_internal_vicon(ICON_SCULPT_LAYERGROUP_COLOR_05, vicon_sculpt_layergroup_color_draw_05);
+  def_internal_vicon(ICON_SCULPT_LAYERGROUP_COLOR_06, vicon_sculpt_layergroup_color_draw_06);
+  def_internal_vicon(ICON_SCULPT_LAYERGROUP_COLOR_07, vicon_sculpt_layergroup_color_draw_07);
+  def_internal_vicon(ICON_SCULPT_LAYERGROUP_COLOR_08, vicon_sculpt_layergroup_color_draw_08);
 
   def_internal_vicon(ICON_NODE_SOCKET_FLOAT, icon_node_socket_draw_float);
   def_internal_vicon(ICON_NODE_SOCKET_VECTOR, icon_node_socket_draw_vector);

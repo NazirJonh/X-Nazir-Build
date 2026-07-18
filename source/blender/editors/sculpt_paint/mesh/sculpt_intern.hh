@@ -1221,6 +1221,7 @@ void SCULPT_OT_layer_group_remove(wmOperatorType *ot);
 void SCULPT_OT_layer_group_merge(wmOperatorType *ot);
 void SCULPT_OT_layer_group_delete(wmOperatorType *ot);
 void SCULPT_OT_layer_group_toggle_visibility(wmOperatorType *ot);
+void SCULPT_OT_layer_group_color_tag(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint::layers
 

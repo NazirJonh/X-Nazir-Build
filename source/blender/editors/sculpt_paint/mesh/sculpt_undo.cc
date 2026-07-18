@@ -322,6 +322,9 @@ struct StepData {
     /** Layer-only, and only meaningful when #uid names a layer; a folder has no influence. */
     float influence = 1.0f;
     int flag = 0;
+    /** #eSculptLayerColorTag of the node named by #uid, swapped with the live one exactly like
+     * #flag. Folders are the only nodes that ever carry a non-default value today. */
+    int8_t color_tag = SCULPT_LAYER_COLOR_NONE;
     /** Swapped with the live name like #influence / #flag; for operators that leave the name alone
      * the swap is simply a no-op, so it needs no separate "was captured" marker. */
     std::string name;
@@ -1455,6 +1458,7 @@ static void payload_metadata_from_node(SculptLayerUndoPayload &payload,
   payload.type = node.type;
   payload.name = node.name;
   payload.flag = node.flag;
+  payload.color_tag = node.color_tag;
   payload.uid = node.uid;
   /* The parent is a pointer now rather than a stored uid, so it is read off the tree here. Null only
    * for the root group, which is never captured; 0 then means "the root folder", which is where
@@ -1484,6 +1488,7 @@ static void node_metadata_from_payload(SculptLayerTreeNode &node,
    * what this copy back can hold. */
   STRNCPY_UTF8(node.name, payload.name.c_str());
   node.flag = payload.flag;
+  node.color_tag = payload.color_tag;
   node.uid = payload.uid;
   if (SculptLayer *layer = bke::sculpt_layers::node_as_layer(&node)) {
     layer->influence = payload.influence;
@@ -1722,6 +1727,7 @@ void push_sculpt_layer_metadata(Object & /*object*/, const SculptLayerTreeNode &
   step_data->type = Type::SculptLayer;
   step_data->sculpt_layer_op.uid = node.uid;
   step_data->sculpt_layer_op.flag = node.flag;
+  step_data->sculpt_layer_op.color_tag = node.color_tag;
   /* Always read out of the fixed-size #SculptLayerTreeNode::name, never from a caller-supplied
    * string, so the stored copy can never exceed what the swap on restore can write back — otherwise
    * a long name would be truncated a little more on each undo/redo round trip. */
@@ -1942,6 +1948,7 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
     if (op.uid != 0) {
       if (SculptLayerTreeNode *node = bke::sculpt_layers::node_find_by_uid(mesh, op.uid)) {
         std::swap(node->flag, op.flag);
+        std::swap(node->color_tag, op.color_tag);
         std::string live_name = node->name;
         STRNCPY_UTF8(node->name, op.name.c_str());
         op.name = std::move(live_name);

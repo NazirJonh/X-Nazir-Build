@@ -1576,6 +1576,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(layers::SCULPT_OT_layer_group_merge);
   WM_operatortype_append(layers::SCULPT_OT_layer_group_delete);
   WM_operatortype_append(layers::SCULPT_OT_layer_group_toggle_visibility);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_color_tag);
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

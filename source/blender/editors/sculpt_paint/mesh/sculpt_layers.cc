@@ -80,6 +80,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 
 #include "UI_interface_icons.hh"
 
@@ -3435,6 +3436,58 @@ void SCULPT_OT_layer_group_toggle_visibility(wmOperatorType *ot)
               "Unique id of the sculpt layer group to toggle",
               0,
               INT_MAX);
+}
+
+static wmOperatorStatus layer_group_color_tag_exec(bContext *C, wmOperator *op)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  const int group_uid = RNA_int_get(op->ptr, "group_uid");
+  SculptLayerGroup *group = group_row_lookup(*ctx.mesh, group_uid);
+  if (!group) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Neither #session_state_ensure nor #commit_layers_change, unlike every neighbouring group
+   * operator: a color tag is drawn state only, so nothing about the sculpted shape or the layer
+   * cascade depends on it. The undo step is still a sculpt step, so it interleaves correctly with
+   * the stroke steps around it. */
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_sculpt_layer_metadata(*ctx.object, group->base);
+  group->base.color_tag = int8_t(RNA_enum_get(op->ptr, "color_tag"));
+  undo::push_end(*ctx.object);
+  layers_ui_notify(C, *ctx.object);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_group_color_tag(wmOperatorType *ot)
+{
+  ot->name = "Set Sculpt Layer Group Color Tag";
+  ot->idname = "SCULPT_OT_layer_group_color_tag";
+  ot->description = "Set the color tag shown on a sculpt layer folder";
+  ot->exec = layer_group_color_tag_exec;
+  ot->poll = layers_poll;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
+  ot->flag = OPTYPE_REGISTER;
+  RNA_def_int(ot->srna,
+              "group_uid",
+              0,
+              0,
+              INT_MAX,
+              "Group ID",
+              "Unique id of the sculpt layer group to tag",
+              0,
+              INT_MAX);
+  RNA_def_enum(ot->srna,
+               "color_tag",
+               rna_enum_sculpt_layergroup_color_items,
+               SCULPT_LAYER_COLOR_NONE,
+               "Color Tag",
+               "Color tag to assign to the group");
 }
 
 static wmOperatorStatus layer_group_add_exec(bContext *C, wmOperator *op)

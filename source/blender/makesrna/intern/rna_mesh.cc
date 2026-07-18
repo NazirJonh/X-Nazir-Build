@@ -102,6 +102,22 @@ static const EnumPropertyItem rna_enum_mesh_remesh_mode_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Outside the #RNA_RUNTIME split, unlike the property definition that uses it: the `#else` branch
+ * below is compiled only into the makesrna generator, so a definition placed there never reaches
+ * bf_rna. #SCULPT_OT_layer_group_color_tag links against this too. */
+const EnumPropertyItem rna_enum_sculpt_layergroup_color_items[] = {
+    {SCULPT_LAYER_COLOR_NONE, "NONE", ICON_X, "Reset color tag", ""},
+    {SCULPT_LAYER_COLOR_01, "COLOR1", ICON_SCULPT_LAYERGROUP_COLOR_01, "Color tag 1", ""},
+    {SCULPT_LAYER_COLOR_02, "COLOR2", ICON_SCULPT_LAYERGROUP_COLOR_02, "Color tag 2", ""},
+    {SCULPT_LAYER_COLOR_03, "COLOR3", ICON_SCULPT_LAYERGROUP_COLOR_03, "Color tag 3", ""},
+    {SCULPT_LAYER_COLOR_04, "COLOR4", ICON_SCULPT_LAYERGROUP_COLOR_04, "Color tag 4", ""},
+    {SCULPT_LAYER_COLOR_05, "COLOR5", ICON_SCULPT_LAYERGROUP_COLOR_05, "Color tag 5", ""},
+    {SCULPT_LAYER_COLOR_06, "COLOR6", ICON_SCULPT_LAYERGROUP_COLOR_06, "Color tag 6", ""},
+    {SCULPT_LAYER_COLOR_07, "COLOR7", ICON_SCULPT_LAYERGROUP_COLOR_07, "Color tag 7", ""},
+    {SCULPT_LAYER_COLOR_08, "COLOR8", ICON_SCULPT_LAYERGROUP_COLOR_08, "Color tag 8", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 }  // namespace blender
 
 #ifdef RNA_RUNTIME
@@ -3430,6 +3446,17 @@ static void rna_def_sculpt_layer_group(BlenderRNA *brna)
    * sculpt undo step the cascade needs. #SCULPT_OT_layer_group_toggle_visibility is the only path. */
   RNA_def_property_ui_text(
       prop, "Enabled", "Show the sculpt layers inside this group and its subgroups");
+
+  prop = RNA_def_property(srna, "color_tag", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "base.color_tag");
+  RNA_def_property_enum_items(prop, rna_enum_sculpt_layergroup_color_items);
+  RNA_def_property_ui_text(
+      prop, "Color Tag", "Color tag shown on this group's folder icon in the sculpt layer list");
+  /* A notifier and nothing else. Deliberately *not* #rna_Mesh_update_sculpt_layer_group, which the
+   * sibling #influence uses: that callback resyncs multires CCG and otherwise falls through to
+   * #ID_RECALC_GEOMETRY, which would make recoloring a folder recompute the whole mesh. A color
+   * tag changes nothing evaluated. */
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
 
   prop = RNA_def_property(srna, "select", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_SELECTED);

@@ -188,6 +188,24 @@ enum eSculptLayerTreeNodeType : int8_t {
   SCULPT_LAYER_TREE_NODE_TYPE_GROUP = 1,
 };
 
+/**
+ * Folder color tag, drawn in place of the folder icon in the sculpt layer tree. Mirrors
+ * #GroupColorTag, with one deliberate difference: zero means "no tag" here, because the field is
+ * carved out of #SculptLayerTreeNode's existing padding and therefore reads back as zero from
+ * every file written before it existed. Grease Pencil's -1 sentinel would paint all of them.
+ */
+enum eSculptLayerColorTag : int8_t {
+  SCULPT_LAYER_COLOR_NONE = 0,
+  SCULPT_LAYER_COLOR_01 = 1,
+  SCULPT_LAYER_COLOR_02 = 2,
+  SCULPT_LAYER_COLOR_03 = 3,
+  SCULPT_LAYER_COLOR_04 = 4,
+  SCULPT_LAYER_COLOR_05 = 5,
+  SCULPT_LAYER_COLOR_06 = 6,
+  SCULPT_LAYER_COLOR_07 = 7,
+  SCULPT_LAYER_COLOR_08 = 8,
+};
+
 struct SculptLayerGroup;
 
 /**
@@ -215,7 +233,13 @@ struct SculptLayerTreeNode {
   int uid = 0;
   /** #eSculptLayerTreeNodeType. */
   int8_t type = SCULPT_LAYER_TREE_NODE_TYPE_LAYER;
-  char _pad[7] = {};
+  /**
+   * #eSculptLayerColorTag. Taken out of the padding below, so the struct size is unchanged and
+   * older files load without versioning. Held on the shared node rather than on
+   * #SculptLayerGroup so a layer tag stays possible later; only folders expose it today.
+   */
+  int8_t color_tag = SCULPT_LAYER_COLOR_NONE;
+  char _pad[6] = {};
 };
 
 /**

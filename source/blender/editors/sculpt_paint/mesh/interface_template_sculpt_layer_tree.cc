@@ -280,7 +280,32 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
 
   void build_row(ui::Layout &row) override
   {
-    ui::Layout &vis = row.row(true);
+    /* The color tag replaces the folder icon rather than sitting beside it, as in the Grease
+     * Pencil layer tree. The `- 1` offset is the price of #SCULPT_LAYER_COLOR_NONE being zero
+     * (see #eSculptLayerColorTag); Grease Pencil's -1 sentinel needs no offset. */
+    int folder_icon = ICON_FILE_FOLDER;
+    if (group_->base.color_tag != SCULPT_LAYER_COLOR_NONE) {
+      folder_icon = ICON_SCULPT_LAYERGROUP_COLOR_01 + int(group_->base.color_tag) - 1;
+    }
+    uiItemL_ex(&row, this->label_, folder_icon, false, false);
+
+    /* Influence and the eye share one right-aligned container so the eyes line up in a single
+     * column at the panel edge whatever the row's name length. Unaligned (`false`) so the slider
+     * and the eye do not read as one glued button block, and separate sub-rows because their
+     * greying rules differ. */
+    ui::Layout &right = row.row(false);
+    right.alignment_set(ui::LayoutAlign::Right);
+
+    /* Folder influence slider, mirroring the layer row's: it scales every descendant layer's
+     * contribution through the ancestor cascade. */
+    Mesh &mesh = *id_cast<Mesh *>(object_->data);
+    PointerRNA group_ptr = RNA_pointer_create_discrete(&mesh.id, RNA_SculptLayerGroup, group_);
+    ui::Layout &sub = right.row(true);
+    sub.use_property_decorate_set(false);
+    sub.active_set(object_->mode != OB_MODE_EDIT);
+    sub.prop(&group_ptr, "influence", ui::ITEM_R_SLIDER, "", ICON_NONE);
+
+    ui::Layout &vis = right.row(true);
     /* Grey out the eye when an ancestor already hides this folder: the toggle still works and
      * still means "this folder's own state", it just cannot make anything visible right now.
      * Computed on the fly rather than stored — only visible rows pay for it, and it is not undo
@@ -297,18 +322,6 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
                                wm::OpCallContext::ExecDefault,
                                UI_ITEM_NONE);
     RNA_int_set(&op_ptr, "group_uid", uid_);
-
-    uiItemL_ex(&row, this->label_, ICON_FILE_FOLDER, false, false);
-
-    /* Folder influence slider, mirroring the layer row's: it scales every descendant layer's
-     * contribution through the ancestor cascade. Right-aligned and label-less like the layer's. */
-    Mesh &mesh = *id_cast<Mesh *>(object_->data);
-    PointerRNA group_ptr = RNA_pointer_create_discrete(&mesh.id, RNA_SculptLayerGroup, group_);
-    ui::Layout &sub = row.row(true);
-    sub.alignment_set(ui::LayoutAlign::Right);
-    sub.use_property_decorate_set(false);
-    sub.active_set(object_->mode != OB_MODE_EDIT);
-    sub.prop(&group_ptr, "influence", ui::ITEM_R_SLIDER, "", ICON_NONE);
   }
 
   std::optional<bool> should_be_collapsed() const override
@@ -427,9 +440,27 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
 
   void build_context_menu(bContext & /*C*/, ui::Layout &layout) const override
   {
-    /* Drawn here rather than through a Python menu like the layer rows use: a layer menu can act
-     * on the active layer, but folders deliberately have no "active" concept — a folder is only
-     * ever addressed by explicit uid, and only this item knows which uid its row is. */
+    /* Every entry below is drawn here rather than through a Python menu like the layer rows use:
+     * a layer menu can act on the active layer, but folders deliberately have no "active" concept
+     * — a folder is only ever addressed by explicit uid, and only this item knows which uid its
+     * row is. That is also why the color swatches are one button per tag instead of
+     * #operator_enum, which Grease Pencil uses: that helper emits a button per enum value but
+     * cannot also set #group_uid. */
+    ui::Layout &colors = layout.row(true);
+    for (int tag = SCULPT_LAYER_COLOR_NONE; tag <= SCULPT_LAYER_COLOR_08; tag++) {
+      const int icon = (tag == SCULPT_LAYER_COLOR_NONE) ?
+                           ICON_X :
+                           ICON_SCULPT_LAYERGROUP_COLOR_01 + tag - 1;
+      PointerRNA color_ptr = colors.op("SCULPT_OT_layer_group_color_tag",
+                                       "",
+                                       icon,
+                                       wm::OpCallContext::ExecDefault,
+                                       UI_ITEM_NONE);
+      RNA_int_set(&color_ptr, "group_uid", uid_);
+      RNA_enum_set(&color_ptr, "color_tag", tag);
+    }
+    layout.separator();
+
     PointerRNA merge_ptr = layout.op("SCULPT_OT_layer_group_merge",
                                      IFACE_("Merge Layers"),
                                      ICON_AUTOMERGE_ON,
@@ -496,20 +527,15 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
     PointerRNA layer_ptr = RNA_pointer_create_discrete(
         &mesh.id, RNA_SculptLayer, layer_ref_.layer);
 
-    ui::Layout &vis = row.row(true);
-    /* Grey out the eye when a disabled folder already hides this layer: its own
-     * #SCULPT_LAYER_ENABLED bit — which the icon shows — still says "visible", but #effective is
-     * 0 and the layer shapes nothing. Mirrors how the Grease Pencil tree greys a layer's controls
-     * by its parent group's visibility. The toggle keeps working: it edits the layer's own state,
-     * which is what is restored when the folder is re-enabled. */
-    vis.active_set(values_editable && !(layer.base.flag & SCULPT_LAYER_GROUP_HIDDEN));
-    const int vis_icon = (layer.base.flag & SCULPT_LAYER_ENABLED) ? ICON_HIDE_OFF : ICON_HIDE_ON;
-    vis.prop(&layer_ptr, "enabled", ui::ITEM_R_ICON_ONLY, "", vis_icon);
-
     uiItemL_ex(&row, this->label_, ICON_NONE, false, false);
 
-    ui::Layout &sub = row.row(true);
-    sub.alignment_set(ui::LayoutAlign::Right);
+    /* Influence and the eye share one right-aligned container so the eyes line up in a single
+     * column at the panel edge whatever the row's name length. See the folder row for why the
+     * container is unaligned and the two widgets stay in separate sub-rows. */
+    ui::Layout &right = row.row(false);
+    right.alignment_set(ui::LayoutAlign::Right);
+
+    ui::Layout &sub = right.row(true);
     sub.use_property_decorate_set(false);
     if (valid) {
       sub.active_set(values_editable);
@@ -519,6 +545,16 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
       sub.red_alert_set(true);
       sub.prop(&layer_ptr, "is_valid", ui::ITEM_R_ICON_ONLY, "", ICON_ERROR);
     }
+
+    ui::Layout &vis = right.row(true);
+    /* Grey out the eye when a disabled folder already hides this layer: its own
+     * #SCULPT_LAYER_ENABLED bit — which the icon shows — still says "visible", but #effective is
+     * 0 and the layer shapes nothing. Mirrors how the Grease Pencil tree greys a layer's controls
+     * by its parent group's visibility. The toggle keeps working: it edits the layer's own state,
+     * which is what is restored when the folder is re-enabled. */
+    vis.active_set(values_editable && !(layer.base.flag & SCULPT_LAYER_GROUP_HIDDEN));
+    const int vis_icon = (layer.base.flag & SCULPT_LAYER_ENABLED) ? ICON_HIDE_OFF : ICON_HIDE_ON;
+    vis.prop(&layer_ptr, "enabled", ui::ITEM_R_ICON_ONLY, "", vis_icon);
   }
 
   std::optional<bool> should_be_active() const override

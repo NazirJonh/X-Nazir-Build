@@ -33,6 +33,39 @@
 
 #include "draw_common.hh"
 
+/* -------------------------------------------------------------------- */
+/** \name TEMP DEBUG (#OVERLAY_PERF): overlay performance instrumentation
+ *
+ * A/B instrumentation for comparing overlay cost between two builds. Set the toggle to 1 in *both*
+ * builds, open the same file with the same viewport and camera, let it run for a few hundred
+ * frames, then compare the "Average" of each named timer.
+ *
+ * #OVERLAY_PERF_SCOPE wraps the enclosing scope in #SCOPED_TIMER_AVERAGED, which prints a running
+ * average, minimum and last duration per call. Use at most one per scope: the macro declares static
+ * variables with fixed names.
+ *
+ * #OVERLAY_PERF_GPU_SYNC blocks until the GPU has completed the work submitted so far, so that an
+ * enclosing #OVERLAY_PERF_SCOPE also accounts for GPU time. It stalls the pipeline and therefore
+ * inflates absolute numbers - those are only meaningful when comparing the same site across builds,
+ * never as a measure of real frame time.
+ *
+ * Grep "OVERLAY_PERF" to find and remove every line tagged by this.
+ * \{ */
+
+#define OVERLAY_PERF_LOGGING 1
+
+#if OVERLAY_PERF_LOGGING
+#  include "BLI_timeit.hh"
+#  include "GPU_state.hh"
+#  define OVERLAY_PERF_SCOPE(name) SCOPED_TIMER_AVERAGED(name)
+#  define OVERLAY_PERF_GPU_SYNC() GPU_finish()
+#else
+#  define OVERLAY_PERF_SCOPE(name) ((void)0)
+#  define OVERLAY_PERF_GPU_SYNC() ((void)0)
+#endif
+
+/** \} */
+
 namespace blender {
 
 template<> struct gpu::AttrType<VertexClass> {

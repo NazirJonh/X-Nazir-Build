@@ -27,6 +27,11 @@ namespace blender::draw::overlay {
 class SymmetryPlaneOverlay {
  private:
   bool show_ = false;
+  /**
+   * Whether the pass is already empty, so it is only re-initialized on the on-to-off transition
+   * instead of every frame the overlay stays off.
+   */
+  bool released_ = true;
   float opacity_ = 0.2f;
   PassSimple pass_;
 
@@ -38,10 +43,19 @@ class SymmetryPlaneOverlay {
     show_ = show;
     opacity_ = opacity;
 
-    pass_.init();
     if (!show_) {
+      /* Clear the recorded commands once, when the overlay is switched off. Re-initializing an
+       * already empty pass every frame is pure overhead: #draw_on_render never submits it while
+       * the overlay is off, so nothing can be recorded in the meantime. */
+      if (!released_) {
+        pass_.init();
+        released_ = true;
+      }
       return;
     }
+    released_ = false;
+
+    pass_.init();
     pass_.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS_EQUAL | DRW_STATE_BLEND_ALPHA,
                     state.clipping_plane_count);
     pass_.shader_set(res.shaders->sculpt_symmetry_plane.get());

@@ -82,8 +82,14 @@ class AntiAliasing : Overlay {
 
   void draw_output(Framebuffer &framebuffer, Manager &manager, View & /*view*/) final
   {
+    /* The line anti-aliasing resolve runs full-screen on every overlay frame in every mode, so any
+     * change to its shader is paid whether or not the overlay that motivated it is enabled. */
+    OVERLAY_PERF_SCOPE("overlay::AntiAliasing::draw_output (GPU synced)");
+
     framebuffer_ref_ = framebuffer;
     manager.submit(anti_aliasing_ps_);
+
+    OVERLAY_PERF_GPU_SYNC();
   }
 };
 

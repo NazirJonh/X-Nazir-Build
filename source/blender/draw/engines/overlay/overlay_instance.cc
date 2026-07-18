@@ -465,6 +465,8 @@ void Resources::update_theme_settings(const DRWContext *ctx, const State &state)
 
 void Instance::begin_sync()
 {
+  OVERLAY_PERF_SCOPE("overlay::Instance::begin_sync");
+
   /* TODO(fclem): Against design. Should not sync depending on view. */
   View &view = View::default_get();
   state.camera_position = view.viewinv().location();
@@ -524,6 +526,8 @@ void Instance::begin_sync()
 
 void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
 {
+  OVERLAY_PERF_SCOPE("overlay::Instance::object_sync (per object)");
+
   const bool in_object_mode = ob_ref.object->mode == OB_MODE_OBJECT;
   const bool in_edit_mode = ob_ref.object->mode == OB_MODE_EDIT;
   const bool in_paint_mode = object_is_paint_mode(ob_ref.object);
@@ -691,6 +695,8 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
 
 void Instance::end_sync()
 {
+  OVERLAY_PERF_SCOPE("overlay::Instance::end_sync");
+
   origins.end_sync(resources, state);
   resources.end_sync();
 
@@ -856,6 +862,8 @@ void Instance::draw_v2d(Manager &manager, View &view)
 
 void Instance::draw_v3d(Manager &manager, View &view)
 {
+  OVERLAY_PERF_SCOPE("overlay::Instance::draw_v3d (GPU synced)");
+
   double4 clear_color(0.0f);
 
   auto draw = [&](OverlayLayer &layer, Framebuffer &framebuffer) {
@@ -1033,6 +1041,9 @@ void Instance::draw_v3d(Manager &manager, View &view)
       background.draw_vignette(resources.overlay_output_color_only_fb, manager, view);
     }
   }
+
+  /* Let the enclosing timer cover the GPU work this function submitted. */
+  OVERLAY_PERF_GPU_SYNC();
 }
 
 void Instance::draw_text(Framebuffer &framebuffer)

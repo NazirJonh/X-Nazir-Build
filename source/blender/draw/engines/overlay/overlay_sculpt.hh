@@ -71,6 +71,8 @@ class Sculpts : Overlay {
  public:
   void begin_sync(Resources &res, const State &state) final
   {
+    OVERLAY_PERF_SCOPE("overlay::Sculpts::begin_sync");
+
 #if SCULPT_OVERLAY_PERF_LOGGING
     const auto sculpt_overlay_perf_t0 = std::chrono::steady_clock::now();
 #endif
@@ -165,6 +167,8 @@ class Sculpts : Overlay {
     if (!enabled_) {
       return;
     }
+
+    OVERLAY_PERF_SCOPE("overlay::Sculpts::object_sync (per object)");
 
 #if SCULPT_OVERLAY_PERF_LOGGING
     const auto sculpt_overlay_perf_t0 = std::chrono::steady_clock::now();

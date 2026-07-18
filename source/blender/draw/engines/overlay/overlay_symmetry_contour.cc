@@ -1257,13 +1257,15 @@ void SymmetryContourOverlay::begin_sync(Resources &res, const State &state, cons
   show_ = show;
   res_ = &res;
   contour_.set_enabled(show);
-
-  pass_.init();
   sub_ = nullptr;
+
   if (!show_) {
-    /* Only on the on-to-off transition: the retained caches are worth tens of megabytes on a heavy
-     * sculpt and would otherwise stay resident until the file is closed. */
+    /* Only on the on-to-off transition. The caches are worth tens of megabytes on a heavy sculpt
+     * and would otherwise stay resident until the file is closed, while re-initializing an already
+     * empty pass every frame is pure overhead - #draw_line never submits it while the overlay is
+     * off, so there is nothing recorded to clear. */
     if (!released_) {
+      pass_.init();
       contour_.release();
       released_ = true;
     }
@@ -1271,6 +1273,7 @@ void SymmetryContourOverlay::begin_sync(Resources &res, const State &state, cons
   }
   released_ = false;
 
+  pass_.init();
   contour_.begin_sync(res, state);
 
   pass_.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);

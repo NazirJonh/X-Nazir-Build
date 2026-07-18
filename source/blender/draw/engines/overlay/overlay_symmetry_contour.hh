@@ -251,7 +251,11 @@ class SymmetryContour {
 class SymmetryContourOverlay {
  private:
   bool show_ = false;
-  /** Whether nothing is currently retained, so #release is only paid on the on-to-off transition. */
+  /**
+   * Whether nothing is currently retained: the caches are freed and the pass is empty. Lets
+   * #begin_sync do its teardown once, on the on-to-off transition, instead of every frame the
+   * overlay stays off.
+   */
   bool released_ = true;
   /**
    * Set for the overlay layer holding "In Front" objects. Those are depth-tested against

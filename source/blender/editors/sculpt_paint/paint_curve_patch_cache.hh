@@ -83,6 +83,12 @@ struct CurvePatchCache {
    * later calls (dynamic growth) can compare against the previous footprint if needed. */
   CurvePatchSpline spline;
 
+  /** Set for the single re-stamp taken when the patch is committed, cleared the rest of the time.
+   * It switches the relief from one texture sample per vertex to a supersampled average and builds
+   * the ribbon at a higher resolution, so the mesh keeps a smoother, less aliased profile than the
+   * interactive preview could afford. See `docs/superpowers/specs/` for the design. */
+  bool final_quality = false;
+
   /** Whole-curve ribbon UV lookup table, rebuilt alongside `spline` on every restamp. The relief
    * action samples this instead of `CurvePatchSpline::closest_point()` so the parameterization
    * stays single-valued through sharp turns (see `paint_curve_patch_ribbon.hh`). */

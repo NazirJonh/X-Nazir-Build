@@ -76,7 +76,8 @@ struct CurvePatchRibbonLut {
   float v_threshold = 0.0f;
   bool ready = false;
 
-  /** Hash of the inputs this LUT was built from (polyline, radii, plane normal, brush radius).
+  /** Hash of the inputs this LUT was built from (polyline, radii, plane normal, brush radius,
+   * quality setting).
    * #curve_patch_ribbon_build returns immediately when it matches, so the re-stamps that do not
    * touch the curve at all -- a strength-slider drag, a Length-mode change, a re-stamp triggered
    * by an event that moved nothing -- reuse the LUT instead of rebuilding it. */
@@ -106,10 +107,17 @@ struct CurvePatchRibbonLut {
  * Builds the whole-curve ribbon LUT from an already-rebuilt spline. Reads `spline.poly_3d`,
  * `spline.tangents_3d`, `spline.lengths_3d`, `spline.radii` and `spline.plane_normal`. The
  * world-space half-width at vertex `i` is `spline.radii[i] * brush_radius` (`brush_radius` alone
- * when `radii` is empty). Clears `r_lut` when the spline is empty or degenerate.
+ * when `radii` is empty). Leaves `r_lut` unusable (`ready == false`) when the spline is empty or
+ * degenerate.
+ *
+ * \param high_quality: builds at roughly double the pixel density (and a higher cap) for the
+ * one-off re-stamp taken when a patch is committed. The supersampled relief that pass uses places
+ * its samples a fraction of a strip-width apart, which the interactive resolution cannot resolve.
+ * Interactive re-stamps pass false and keep the cheaper table.
  */
 void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                               float brush_radius,
-                              CurvePatchRibbonLut &r_lut);
+                              CurvePatchRibbonLut &r_lut,
+                              bool high_quality = false);
 
 }  // namespace blender::ed::sculpt_paint

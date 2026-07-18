@@ -566,7 +566,9 @@ static void ribbon_laplacian_smooth(Vector<float3> &grid_pos,
 
 /** Hash of everything #curve_patch_ribbon_build reads, so an unchanged curve can skip the rebuild.
  * Deliberately O(n) over the tessellated polyline: still orders of magnitude below the build. */
-static uint64_t ribbon_source_hash(const CurvePatchSpline &spline, const float brush_radius)
+static uint64_t ribbon_source_hash(const CurvePatchSpline &spline,
+                                   const float brush_radius,
+                                   const bool high_quality)
 {
   uint64_t hash = 1469598103934665603ull; /* FNV-1a offset basis. */
   auto mix = [&hash](const float value) {
@@ -587,17 +589,21 @@ static uint64_t ribbon_source_hash(const CurvePatchSpline &spline, const float b
   mix(spline.plane_normal.x);
   mix(spline.plane_normal.y);
   mix(spline.plane_normal.z);
+  /* Without this the commit-time high-quality rebuild would be skipped as a cache hit against the
+   * interactive table, which is exactly the table it needs to replace. */
+  hash = (hash ^ uint64_t(high_quality ? 1 : 0)) * 1099511628211ull;
   return hash;
 }
 
 void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                               const float brush_radius,
-                              CurvePatchRibbonLut &r_lut)
+                              CurvePatchRibbonLut &r_lut,
+                              const bool high_quality)
 {
   /* Nothing the ribbon depends on has changed, so the existing LUT is still exact. The modal editor
    * re-stamps on events that never touch the curve (strength slider, Length mode, Repeats count),
    * and those otherwise paid for a full rebuild each time. */
-  const uint64_t source_hash = ribbon_source_hash(spline, brush_radius);
+  const uint64_t source_hash = ribbon_source_hash(spline, brush_radius, high_quality);
   if (r_lut.ready && r_lut.source_hash == source_hash) {
     return;
   }
@@ -707,14 +713,19 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
 
   /* Adaptive resolution: unlike Roll (whose LUT only covers a ~5-radius window around the dab and
    * gets away with a small fixed size), this LUT spans the WHOLE curve. Aim for pixels no larger
-   * than ~15% of the largest half-width so the across-strip coordinate keeps sub-strip precision
-   * on long thin curves, clamped to keep the per-restamp fill cost bounded. */
+   * than a fraction of the largest half-width so the across-strip coordinate keeps sub-strip
+   * precision on long thin curves, clamped to keep the per-restamp fill cost bounded.
+   *
+   * The high-quality pass roughly doubles the density: its supersampled relief places samples a few
+   * percent of a strip-width apart, and the interactive table's pixels are coarser than that. */
+  const float pixel_fraction = high_quality ? 0.075f : 0.15f;
+  const int res_cap = high_quality ? 1024 : 512;
   const float max_extent = std::max(ext.x, ext.y);
   /* Quantized to 64-pixel steps: dragging a control point changes the curve's extent slightly on
    * every event, and an exact resolution would therefore drift by a pixel or two each time and
    * force the arrays below to be reallocated for no benefit. */
-  const int res_target = int(max_extent / (0.15f * R_max)) + 1;
-  const int res = std::clamp((res_target + 63) / 64 * 64, 128, 512);
+  const int res_target = int(max_extent / (pixel_fraction * R_max)) + 1;
+  const int res = std::clamp((res_target + 63) / 64 * 64, 128, res_cap);
   const float2 inv_ext(float(res) / ext.x, float(res) / ext.y);
 
   const int lut_total = res * res;

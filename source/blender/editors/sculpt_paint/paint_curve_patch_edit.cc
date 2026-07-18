@@ -869,7 +869,19 @@ static void curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
        * nothing is written to the undo stack. */
     }
     else {
+      /* Re-stamp once at final quality before closing the undo step, so the mesh (and the undo
+       * history) keeps the smoothed profile rather than the harder interactive preview. See
+       * `docs/superpowers/specs/2026-07-18-curve-patch-final-quality-design.md`. */
+      patch->final_quality = true;
+      curve_patch_restore_and_restamp(*C, ob, *patch);
+      patch->final_quality = false;
       undo::push_end(ob);
+
+      /* The re-stamp ends in `flush_update_step()`, which only arms the fast paint-redraw path; that
+       * is torn down the instant this operator finishes. Issue the full finished-stroke redraw so
+       * the committed positions actually reach the screen -- same reasoning as the initial preview
+       * stamp in `curve_patch_publish_and_launch_modal()`. */
+      flush_update_done(C, ob, UpdateType::Position);
     }
     MEM_delete(ss.cache);
     ss.cache = nullptr;

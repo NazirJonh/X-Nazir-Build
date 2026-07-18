@@ -31,7 +31,6 @@ struct Resources {
   [[sampler(0)]] sampler2DDepth scene_depth_tx;
 
   [[push_constant]] const float contour_width;
-  [[push_constant]] const float depth_bias;
   [[push_constant]] const int colorid;
 
   [[storage(0, read)]] const VertexData (&data_buf)[];
@@ -44,9 +43,14 @@ struct Clipping {
 };
 
 struct VertOut {
-  [[no_perspective]] float2 stipple_coord;
-  [[flat]] float2 stipple_start;
+  /* Screen-space start/current position of the line, used to recover its direction for the
+   * post-process anti-aliasing (see #pack_line_data). */
+  [[no_perspective]] float2 edge_pos;
+  [[flat]] float2 edge_start;
   [[flat]] float4 final_color;
+  /* World-space occlusion tolerance, carried per-vertex in the unused `w` of #VertexData.pos_ so
+   * that objects of different sizes can share one accumulated buffer and one draw. */
+  [[flat]] float depth_bias;
 };
 
 struct FragOut {
@@ -96,19 +100,17 @@ float4 pack_line_data(float2 frag_co, float2 edge_start, float2 edge_pos)
   const float3 world_pos = obj.point_object_to_world(v_data.pos_.xyz);
   out_position = view.point_world_to_homogenous(world_pos);
 
-  v_out.stipple_coord = v_out.stipple_start = screen_position(out_position);
+  v_out.edge_pos = v_out.edge_start = screen_position(out_position);
+  v_out.depth_bias = v_data.pos_.w;
 
   if (res.colorid != 0) {
     /* TH_CAMERA_PATH is the only color code at the moment. */
     v_out.final_color = uniform_buf.colors.camera_path;
-    v_out.final_color.a = 0.0f; /* No Stipple */
   }
   else {
+    /* The theme alpha is kept: unlike the dashed extra-wire overlays this shader derives from, the
+     * symmetry contour is a solid line whose opacity is user configurable. */
     v_out.final_color = v_data.color_;
-    /* In the original GLSL, final_color.a was set to 1.0f here for stippling.
-     * But SymmetryContour sets line_alpha_ which might be < 1.0.
-     * However, the original code used `final_color = color; final_color.a = 1.0f;`. */
-    v_out.final_color.a = 1.0f;
   }
 
   if (clipping.use_clipping) [[static_branch]] {
@@ -130,30 +132,17 @@ float4 pack_line_data(float2 frag_co, float2 edge_start, float2 edge_pos)
 
   /* Discard if the fragment is further than the surface depth + bias.
    * Using view-space Z (negative). */
-  if (frag_z < scene_z - res.depth_bias) {
+  if (frag_z < scene_z - v_in.depth_bias) {
     gpu_discard_fragment();
+    /* Metal requires `discard` to be followed by a return. */
+    return;
   }
 
   frag_out.frag_color = v_in.final_color;
-  frag_out.line_output = pack_line_data(frag_co.xy, v_in.stipple_start, v_in.stipple_coord);
+  frag_out.line_output = pack_line_data(frag_co.xy, v_in.edge_start, v_in.edge_pos);
+  /* The alpha channel carries the line width for the post-process anti-aliasing, which decodes it
+   * as `w * 255` (see #Line::decode in overlay_antialiasing.bsl.hh). */
   frag_out.line_output.w = res.contour_width / 255.0f;
-
-  /* Stipple / Dashing. */
-  const float dash_width = 6.0f;
-  const float dash_factor = 0.5f;
-
-  float dist = distance(v_in.stipple_start, v_in.stipple_coord);
-  if (v_in.final_color.a == 0.0f) {
-    /* Disable stippling. */
-    dist = 0.0f;
-  }
-
-  if (fract(dist / dash_width) > dash_factor) {
-    gpu_discard_fragment();
-  }
-
-  /* Final color alpha is always 1.0 in the original shader main(). */
-  frag_out.frag_color.a = 1.0f;
 }
 
 PipelineGraphic extra_wire_contour(vert, frag, Clipping{.use_clipping = false});

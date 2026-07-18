@@ -4,14 +4,8 @@
 
 #include "infos/overlay_extra_infos.hh"
 
-#ifdef __cplusplus
-FRAGMENT_SHADER_CREATE_INFO(overlay_extra_wire_object_base)
-#else
 FRAGMENT_SHADER_CREATE_INFO(overlay_extra_wire_base)
-FRAGMENT_SHADER_CREATE_INFO(overlay_extra_wire_object_base)
-#endif
 
-#include "draw_view_lib.glsl"
 #include "overlay_common_lib.glsl"
 #include "select_lib.glsl"
 
@@ -20,9 +14,8 @@ void main()
   frag_color = final_color;
 
   /* Stipple */
-  /* GLSL не поддерживает constexpr, используем обычные константы. */
-  const float dash_width = 6.0f;
-  const float dash_factor = 0.5f;
+  constexpr float dash_width = 6.0f;
+  constexpr float dash_factor = 0.5f;
 
   line_output = pack_line_data(gl_FragCoord.xy, stipple_start, stipple_coord);
 

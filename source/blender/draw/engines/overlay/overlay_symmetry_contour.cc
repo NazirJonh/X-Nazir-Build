@@ -636,6 +636,19 @@ Bounds<float3> compute_object_bounds(const bke::pbvh::Tree *pbvh,
   return {bb_min, bb_max};
 }
 
+/**
+ * Per-fragment occlusion tolerance in world units (the contour is emitted in world space and the
+ * shader compares view-space depths). Scaled by the object's world-space size so it stays
+ * proportional to the geometry: it absorbs the small gap where a straight contour segment cuts a
+ * curved face slightly below the displayed surface, without letting genuinely back-facing parts
+ * leak through.
+ */
+float depth_bias_get(const Bounds<float3> &bounds, const float4x4 &object_to_world)
+{
+  const float3 world_diag = math::transform_direction(object_to_world, bounds.max - bounds.min);
+  return 0.0025f * math::max(math::length(world_diag), 1e-4f);
+}
+
 }  // namespace
 
 /** \} */
@@ -663,7 +676,9 @@ void SymmetryContour::begin_sync(Resources &res, const State &state)
   buffer_unchanged_this_frame_ = true;
 }
 
-void SymmetryContour::emit_loop(const ContourLoop &loop, const float4x4 &object_to_world)
+void SymmetryContour::emit_loop(const ContourLoop &loop,
+                                const float4x4 &object_to_world,
+                                const float depth_bias)
 {
   if (loop.points.size() < 2) {
     return;
@@ -672,12 +687,14 @@ void SymmetryContour::emit_loop(const ContourLoop &loop, const float4x4 &object_
   for (int i = 0; i < loop.points.size() - 1; i++) {
     contour_lines_.append(math::transform_point(object_to_world, loop.points[i]),
                           math::transform_point(object_to_world, loop.points[i + 1]),
-                          color);
+                          color,
+                          depth_bias);
   }
   if (loop.is_closed && loop.points.size() >= 3) {
     contour_lines_.append(math::transform_point(object_to_world, loop.points.last()),
                           math::transform_point(object_to_world, loop.points.first()),
-                          color);
+                          color,
+                          depth_bias);
   }
 }
 
@@ -795,10 +812,14 @@ void SymmetryContour::update_contours(const Object *ob,
     lines_valid_ = true;
   };
 
-  /* Fast path: re-emit the cached contour (transformed by the current matrix) unchanged. */
+  /* Fast path: re-emit the cached contour (transformed by the current matrix) unchanged. The
+   * occlusion bias is re-derived from the retained object-space bounds rather than reused: the
+   * geometry is unchanged, but this is exactly the path taken when the object was moved or scaled,
+   * and the bias is expressed in world units. */
   if (!decision.need_regenerate) {
+    const float depth_bias = depth_bias_get(cached_bounds_, object_to_world);
     for (const ContourLoop &loop : cached_contours_) {
-      emit_loop(loop, object_to_world);
+      emit_loop(loop, object_to_world, depth_bias);
     }
     note_emitted();
     return;
@@ -813,17 +834,12 @@ void SymmetryContour::update_contours(const Object *ob,
     return;
   }
 
-  /* Object size, used to scale tolerances. */
+  /* Object size, used to scale tolerances. Retained so the cheap re-emit path above can re-derive
+   * the occlusion bias after a transform change without recomputing the contour. */
   const Bounds<float3> bounds = compute_object_bounds(pbvh, edit_bm, positions);
+  cached_bounds_ = bounds;
   const float diag = math::max(math::length(bounds.max - bounds.min), 1e-3f);
-
-  /* Per-fragment occlusion tolerance in world units (the contour is emitted in world space and
-   * the shader compares view-space depths). Scaled by the object's world-space size so it stays
-   * proportional to the geometry: it absorbs the small gap where a straight contour segment cuts
-   * a curved face slightly below the displayed surface, without letting genuinely back-facing
-   * parts leak through. */
-  const float3 world_diag = math::transform_direction(object_to_world, bounds.max - bounds.min);
-  depth_bias_ = 0.0025f * math::max(math::length(world_diag), 1e-4f);
+  const float depth_bias = depth_bias_get(bounds, object_to_world);
 
   /* View frustum for PBVH-node culling. */
   float frustum_planes[6][4];
@@ -853,7 +869,9 @@ void SymmetryContour::update_contours(const Object *ob,
    * recompute, so the rest of the cache stays valid instead of being rebuilt from scratch. */
   if (decision.reset_cache) {
     for (int axis = 0; axis < 3; axis++) {
-      cached_segments_by_axis_[axis].clear();
+      /* Roughly the same nodes are about to be re-added, so keep the hash table allocated rather
+       * than freeing and immediately re-growing it. #release drops it for good. */
+      cached_segments_by_axis_[axis].clear_and_keep_capacity();
     }
   }
 
@@ -1101,7 +1119,7 @@ void SymmetryContour::update_contours(const Object *ob,
     }
 
     for (const ContourLoop &loop : axis_loops) {
-      emit_loop(loop, object_to_world);
+      emit_loop(loop, object_to_world, depth_bias);
     }
 
     cached_contours_.extend(std::move(axis_loops));
@@ -1150,11 +1168,39 @@ void SymmetryContour::end_sync(PassSimple::Sub &pass)
   }
   pass.shader_set(contour_shader_);
   pass.push_constant("contour_width", line_thickness_);
-  pass.push_constant("depth_bias", depth_bias_);
   /* Skip the GPU re-upload when every synced object reused its buffer (nothing was re-emitted); the
    * retained buffer on the GPU is still exactly what would be uploaded. */
   const bool skip_upload = buffer_unchanged_this_frame_ && lines_valid_ && frame_object_count_ > 0;
   contour_lines_.end_sync(pass, !skip_upload);
+}
+
+void SymmetryContour::release()
+{
+  /* The per-node segment cache dominates: it holds a #ContourSegment vector for every PBVH leaf
+   * near a symmetry plane, for each enabled axis. #Map::clear frees the storage outright, unlike
+   * the #clear_and_keep_capacity used between rebuilds. The line buffer only drops its item count -
+   * the GPU wrapper offers no way to release the allocation - but it is small next to the cache and
+   * nothing is re-uploaded while the overlay stays off. */
+  for (int axis = 0; axis < 3; axis++) {
+    cached_segments_by_axis_[axis].clear();
+  }
+  cached_contours_.clear_and_shrink();
+  contour_lines_.clear();
+
+  /* Force a full rebuild when the overlay comes back on: every cache this state described is gone.
+   */
+  contours_dirty_ = true;
+  filling_ = false;
+  lines_valid_ = false;
+  buffer_unchanged_this_frame_ = false;
+  emitted_object_ = nullptr;
+  emitted_object_count_ = 0;
+  frame_object_count_ = 0;
+  prev_object_ = nullptr;
+  prev_symmetry_flags_ = 0;
+  prev_enabled_ = false;
+  prev_pbvh_nodes_num_ = -1;
+  prev_positions_count_ = -1;
 }
 
 /** \} */
@@ -1199,8 +1245,10 @@ int symmetry_flags_from_curves_symmetry(const char curves_symmetry)
 /** \name SymmetryContourOverlay
  * \{ */
 
-SymmetryContourOverlay::SymmetryContourOverlay(SelectionType selection_type, const char *pass_name)
-    : pass_(pass_name), contour_(selection_type)
+SymmetryContourOverlay::SymmetryContourOverlay(SelectionType selection_type,
+                                               const char *pass_name,
+                                               const bool in_front)
+    : in_front_(in_front), pass_(pass_name), contour_(selection_type)
 {
 }
 
@@ -1213,8 +1261,15 @@ void SymmetryContourOverlay::begin_sync(Resources &res, const State &state, cons
   pass_.init();
   sub_ = nullptr;
   if (!show_) {
+    /* Only on the on-to-off transition: the retained caches are worth tens of megabytes on a heavy
+     * sculpt and would otherwise stay resident until the file is closed. */
+    if (!released_) {
+      contour_.release();
+      released_ = true;
+    }
     return;
   }
+  released_ = false;
 
   contour_.begin_sync(res, state);
 
@@ -1222,11 +1277,14 @@ void SymmetryContourOverlay::begin_sync(Resources &res, const State &state, cons
   pass_.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
   PassSimple::Sub &sub = pass_.sub("Contours");
   /* No depth test: the contour is drawn on top of the mesh and its occlusion by the surface is
-   * resolved per-fragment against the sampled scene depth instead (see #overlay_extra_wire_frag).
-   * This is why the draw targets the depth-less line frame-buffer in #draw_line. */
+   * resolved per-fragment against the sampled scene depth instead (see
+   * #overlay_symmetry_contour.bsl.hh). This is why the draw targets the depth-less line
+   * frame-buffer in #draw_line. */
   sub.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA, state.clipping_plane_count);
   sub.shader_set(res.shaders->extra_wire_contour.get());
-  sub.bind_texture("scene_depth_tx", &res.depth_tx);
+  /* "In Front" objects are not present in the regular scene depth, so testing against it would let
+   * their whole contour through, back-facing side included. */
+  sub.bind_texture("scene_depth_tx", in_front_ ? &res.depth_in_front_tx : &res.depth_tx);
   sub_ = &sub;
 }
 
@@ -1257,7 +1315,10 @@ void SymmetryContourOverlay::draw_line(Framebuffer & /*framebuffer*/,
   }
   /* Target the depth-less line frame-buffer (shares `line_tx` so post-AA still applies) rather than
    * the caller's line frame-buffer: the latter has the scene depth attached, which cannot be bound
-   * as `scene_depth_tx` at the same time. Occlusion is done in the fragment shader instead. */
+   * as `scene_depth_tx` at the same time. Occlusion is done in the fragment shader instead.
+   * This one frame-buffer serves both overlay layers: the regular and "In Front" line
+   * frame-buffers differ only in their depth attachment, which this one does not have. The layer
+   * distinction is instead in which depth texture #begin_sync bound for the occlusion test. */
   GPU_framebuffer_bind(res_->overlay_line_only_fb);
   manager.submit(pass_, view);
 }

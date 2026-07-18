@@ -21,6 +21,7 @@
 
 #include "overlay_private.hh"
 
+#include "BLI_bounds_types.hh"
 #include "BLI_map.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
@@ -28,9 +29,10 @@
 
 /* TEMP DEBUG (#SCULPT_OVERLAY_PERF): shared toggle for the sculpt-overlay perf instrumentation used
  * by both overlay_sculpt.hh (per-frame begin_sync/object_sync totals) and overlay_symmetry_contour.cc
- * (per-rebuild extract/loops/emit sub-timings). Set to 1 to enable; 0 compiles it all out. Grep
- * "SCULPT_OVERLAY_PERF" to find/remove every line tagged by this. */
-#define SCULPT_OVERLAY_PERF_LOGGING 1
+ * (per-rebuild extract/loops/emit sub-timings). Set to 1 to enable; 0 compiles it all out. This is
+ * the only definition - do not redefine it in the including files, or the two translation units end
+ * up with different values. Grep "SCULPT_OVERLAY_PERF" to find/remove every line tagged by this. */
+#define SCULPT_OVERLAY_PERF_LOGGING 0
 
 struct Object;
 struct Mesh;
@@ -121,6 +123,15 @@ class SymmetryContour {
 
   /** Last computed contour in object space, re-emitted cheaply while nothing changes. */
   Vector<ContourLoop> cached_contours_;
+  /**
+   * Object-space bounds #cached_contours_ was built for. Retained so the occlusion bias can be
+   * re-derived from the current object-to-world matrix on the cheap re-emit path, where the
+   * geometry is unchanged but the transform may not be.
+   *
+   * Qualified: this namespace also holds the #Bounds overlay (overlay_bounds.hh), which hides the
+   * #blender::Bounds template wherever that header is included first.
+   */
+  blender::Bounds<float3> cached_bounds_ = {float3(0.0f), float3(0.0f)};
   /** Per-axis, per-PBVH-node segment cache enabling incremental updates while sculpting. */
   Map<int, Vector<ContourSegment>> cached_segments_by_axis_[3];
   bool contours_dirty_ = true;
@@ -168,8 +179,6 @@ class SymmetryContour {
   float line_thickness_ = 5.0f;
   float3 line_color_ = float3(1.0f, 1.0f, 0.0f);
   float line_alpha_ = 1.0f;
-  /** World-space occlusion tolerance, derived from the object size (see #update_contours). */
-  float depth_bias_ = 0.0f;
   bool enabled_ = false;
 
   /**
@@ -192,8 +201,13 @@ class SymmetryContour {
                                        const bke::pbvh::Tree *pbvh,
                                        bool has_dirty_nodes) const;
 
-  /** Transform an object-space contour to world space and append it to the line buffer. */
-  void emit_loop(const ContourLoop &loop, const float4x4 &object_to_world);
+  /**
+   * Transform an object-space contour to world space and append it to the line buffer.
+   * `depth_bias` is baked per-vertex rather than pushed as a uniform: the buffer accumulates every
+   * synced object into a single draw, so a shared uniform would apply the last object's bias to all
+   * of them.
+   */
+  void emit_loop(const ContourLoop &loop, const float4x4 &object_to_world, float depth_bias);
 
  public:
   SymmetryContour(SelectionType selection_type)
@@ -213,6 +227,13 @@ class SymmetryContour {
                        BMesh *edit_bm = nullptr);
   void end_sync(PassSimple::Sub &pass);
 
+  /**
+   * Drop every retained CPU and GPU buffer. Called when the overlay is switched off: the per-node
+   * segment cache of a heavy sculpt is worth tens of megabytes and would otherwise stay resident
+   * for the rest of the session.
+   */
+  void release();
+
   void mark_dirty()
   {
     contours_dirty_ = true;
@@ -230,6 +251,13 @@ class SymmetryContour {
 class SymmetryContourOverlay {
  private:
   bool show_ = false;
+  /** Whether nothing is currently retained, so #release is only paid on the on-to-off transition. */
+  bool released_ = true;
+  /**
+   * Set for the overlay layer holding "In Front" objects. Those are depth-tested against
+   * `depth_in_front_tx` rather than the regular scene depth, which does not contain them.
+   */
+  bool in_front_ = false;
   PassSimple pass_;
   PassSimple::Sub *sub_ = nullptr;
   SymmetryContour contour_;
@@ -241,7 +269,7 @@ class SymmetryContourOverlay {
   Resources *res_ = nullptr;
 
  public:
-  SymmetryContourOverlay(SelectionType selection_type, const char *pass_name);
+  SymmetryContourOverlay(SelectionType selection_type, const char *pass_name, bool in_front);
 
   void begin_sync(Resources &res, const State &state, bool show);
   void object_sync(const Object *ob,

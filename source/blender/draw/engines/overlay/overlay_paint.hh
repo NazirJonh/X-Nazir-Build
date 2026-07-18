@@ -50,9 +50,14 @@ class Paints : Overlay {
   /* Effective paint context mode, falling back to the object mode when the global context mode
    * doesn't match (e.g. during certain mode transitions). */
   int paint_ctx_mode_ = -1;
-  SymmetryContourOverlay symmetry_contour_ = {SelectionType::DISABLED, "PaintSymmetryContour"};
+  SymmetryContourOverlay symmetry_contour_;
 
  public:
+  Paints(bool in_front)
+      : symmetry_contour_(SelectionType::DISABLED, "PaintSymmetryContour", in_front)
+  {
+  }
+
   void begin_sync(Resources &res, const State &state) final
   {
     paint_ctx_mode_ = state.ctx_mode;

@@ -27,10 +27,10 @@
 #include "overlay_symmetry_contour.hh"
 #include "overlay_symmetry_plane.hh"
 
-/* TEMP DEBUG (#SCULPT_OVERLAY_PERF): the #SCULPT_OVERLAY_PERF_LOGGING toggle now lives in
+/* TEMP DEBUG (#SCULPT_OVERLAY_PERF): the #SCULPT_OVERLAY_PERF_LOGGING toggle lives in
  * overlay_symmetry_contour.hh (included above), shared with the contour rebuild sub-timings.
- * Flip it there to enable/disable all sculpt-overlay perf instrumentation. */
-#define SCULPT_OVERLAY_PERF_LOGGING 0
+ * Flip it there to enable/disable all sculpt-overlay perf instrumentation - redefining it here
+ * would give the two translation units different values. */
 #if SCULPT_OVERLAY_PERF_LOGGING
 #  include <chrono>
 #  include <cstdio>
@@ -46,8 +46,8 @@ namespace blender::draw::overlay {
 class Sculpts : Overlay {
 
  public:
-  Sculpts(SelectionType selection_type)
-      : symmetry_contour_(selection_type, "SculptSymmetryContour"),
+  Sculpts(SelectionType selection_type, bool in_front)
+      : symmetry_contour_(selection_type, "SculptSymmetryContour", in_front),
         symmetry_plane_("SculptSymmetryPlane")
   {
   }
@@ -176,7 +176,9 @@ class Sculpts : Overlay {
 #if SCULPT_OVERLAY_PERF_LOGGING
         const auto sculpt_overlay_perf_t_after_mesh_sync = std::chrono::steady_clock::now();
 #endif
-        if (ob_ref.object->mode == OB_MODE_SCULPT) {
+        if (ob_ref.object->mode == OB_MODE_SCULPT &&
+            (show_symmetry_contour_ || show_symmetry_plane_))
+        {
           /* The contour/plane must track the same axis the brush actually mirrors strokes
            * across, which is #Mesh.symmetry (Object Data Properties > Symmetry) -
            * #do_symmetrical_brush_actions never reads the Sculpt tool settings' own
@@ -357,8 +359,19 @@ class Sculpts : Overlay {
     }
     GPU_framebuffer_bind(framebuffer);
     manager.submit(sculpt_curve_cage_, view);
+  }
 
-    /* Draw the symmetry contour into the line frame-buffer so it feeds post-AA. */
+  /**
+   * The symmetry contour is drawn into the depth-less line frame-buffer so it feeds post-AA, and
+   * is therefore not depth tested against the passes that follow. It is kept out of #draw_line and
+   * submitted by #Instance::draw_v3d after the grid and the mesh line overlays, which share the
+   * same `line_tx` and would otherwise draw over it.
+   */
+  void draw_symmetry_contour(Framebuffer &framebuffer, Manager &manager, View &view)
+  {
+    if (!enabled_) {
+      return;
+    }
     symmetry_contour_.draw_line(framebuffer, manager, view);
   }
 

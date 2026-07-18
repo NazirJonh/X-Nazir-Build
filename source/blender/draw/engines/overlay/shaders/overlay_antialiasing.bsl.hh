@@ -77,7 +77,7 @@ struct Resources {
  * Here, `line_kernel_size` is the inner size of the line with 100% coverage.
  */
 template<typename T>
-T line_coverage(T distance_to_line, float line_kernel_size, bool do_smooth_lines)
+T line_coverage(T distance_to_line, T line_kernel_size, bool do_smooth_lines)
 {
   if (do_smooth_lines) {
     return smoothstep(
@@ -87,7 +87,7 @@ T line_coverage(T distance_to_line, float line_kernel_size, bool do_smooth_lines
 }
 
 template float line_coverage<float>(float, float, bool);
-template float4 line_coverage<float4>(float4, float, bool);
+template float4 line_coverage<float4>(float4, float4, bool);
 
 /**
  * Compute distance-to-line for one of the neighboring crosshair pixels, dependent
@@ -164,26 +164,22 @@ struct FragOut {
                                  neighbor_dist(neighbors[2], int2(0, 1)),
                                  neighbor_dist(neighbors[3], int2(0, -1)));
 
-  /* Compute per-neighbor line coverage */
-  float4 coverage;
-  coverage.x = line_coverage(neighbor_dists.x,
-                             theme.sizes.pixel * 0.5f * neighbors[0].line.width - 0.5f,
-                             srt.do_smooth_lines);
-  coverage.y = line_coverage(neighbor_dists.y,
-                             theme.sizes.pixel * 0.5f * neighbors[1].line.width - 0.5f,
-                             srt.do_smooth_lines);
-  coverage.z = line_coverage(neighbor_dists.z,
-                             theme.sizes.pixel * 0.5f * neighbors[2].line.width - 0.5f,
-                             srt.do_smooth_lines);
-  coverage.w = line_coverage(neighbor_dists.w,
-                             theme.sizes.pixel * 0.5f * neighbors[3].line.width - 0.5f,
-                             srt.do_smooth_lines);
+  /* Compute per-neighbor line coverage. The kernel is per-pixel because a line's width is carried
+   * in its own encoded data (see #Line::decode), so it is built as a vector and resolved in one
+   * call rather than one call per neighbor. */
+  float4 neighbor_kernels = theme.sizes.pixel * 0.5f *
+                                float4(neighbors[0].line.width,
+                                       neighbors[1].line.width,
+                                       neighbors[2].line.width,
+                                       neighbors[3].line.width) -
+                            0.5f;
+  float4 coverage = line_coverage(neighbor_dists, neighbor_kernels, srt.do_smooth_lines);
+
+  float center_kernel = theme.sizes.pixel * 0.5f * center.line.width - 0.5f;
 
   /* Multiply current output color by center pixel's line coverage. */
   if (center.line.is_valid()) {
-    float center_kernel = theme.sizes.pixel * 0.5f * center.line.width - 0.5f;
-    float coverage = line_coverage(center.line.dist, center_kernel, srt.do_smooth_lines);
-    center.color *= coverage;
+    center.color *= line_coverage(center.line.dist, center_kernel, srt.do_smooth_lines);
   }
 
   /* We don't order fragments; instead, we blend using alpha-over/alpha-under
@@ -196,7 +192,6 @@ struct FragOut {
 
 #if 1
   /* Fix aliasing issue with really dense meshes and 1 pixel sized lines. */
-  float center_kernel = theme.sizes.pixel * 0.5f * center.line.width - 0.5f;
   if (!original_center_has_alpha && center.line.is_valid() && center_kernel < 0.45f) {
     float4 lines_raw = float4(neighbors[0].line.dist_raw,
                               neighbors[1].line.dist_raw,

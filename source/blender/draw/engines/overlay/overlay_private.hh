@@ -1131,6 +1131,16 @@ struct VertexPrimitiveBuf {
   }
 
   /**
+   * `extra` is stored in the otherwise unused `w` component of #VertexData.pos_, giving shaders a
+   * spare per-vertex float. Used by the symmetry contour to carry a per-object occlusion bias while
+   * every object accumulates into a single buffer.
+   */
+  void append(const float3 &position, const float4 &color, const float extra)
+  {
+    data_buf.append({float4(position, extra), color});
+  }
+
+  /**
    * `upload` may be set to false to skip the GPU re-upload when the caller knows #data_buf still
    * holds exactly what was uploaded on a previous frame (the draw command is still recorded, so the
    * retained buffer is drawn as-is). Used by the symmetry contour to reuse a static contour while
@@ -1212,6 +1222,18 @@ struct LinePrimitiveBuf : public VertexPrimitiveBuf {
   {
     this->color_id = color_id;
     append(start, end, float4(), select_id);
+  }
+
+  /** See #VertexPrimitiveBuf::append for the meaning of `extra`. */
+  void append(const float3 &start,
+              const float3 &end,
+              const float4 &color,
+              const float extra,
+              select::ID select_id = select::SelectMap::select_invalid_id())
+  {
+    select_buf.select_append(select_id);
+    VertexPrimitiveBuf::append(start, color, extra);
+    VertexPrimitiveBuf::append(end, color, extra);
   }
 
   void end_sync(PassSimple::Sub &pass, bool upload = true)

@@ -400,15 +400,12 @@ void Resources::update_theme_settings(const DRWContext *ctx, const State &state)
   /* Color management. */
   {
     float4 *color = reinterpret_cast<float4 *>(&gb.colors);
-    const int color_len = int(sizeof(gb.colors) / sizeof(float4));
-    for (int i = 0; i < color_len; i++, color++) {
-      float3 rgb = color->xyz();
-      /* Преобразуем только RGB, alpha не трогаем. */
-      srgb_to_linearrgb_v3_v3(rgb, rgb);
-      color->x = rgb.x;
-      color->y = rgb.y;
-      color->z = rgb.z;
-    }
+    /* The loop used to run one element past the end of the array. */
+    float4 *color_end = color + (sizeof(gb.colors) / sizeof(float4));
+    do {
+      /* TODO: more accurate transform. */
+      srgb_to_linearrgb_v4(&color->x, &color->x);
+    } while (++color < color_end);
   }
 
   gb.sizes.pixel = 1.0f;
@@ -890,7 +887,9 @@ void Instance::draw_v3d(Manager &manager, View &view)
     layer.attribute_viewer.draw_line(framebuffer, manager, view);
     layer.armatures.draw_line(framebuffer, manager, view);
     layer.sculpts.draw_line(framebuffer, manager, view);
-    /* NOTE: layer.paints.draw_line moved after grid and meshes to avoid being overdrawn */
+    /* NOTE: the symmetry contour overlays (layer.paints, layer.sculpts.draw_symmetry_contour) are
+     * drawn after the grid and the mesh line overlays, which share `line_tx` and would otherwise
+     * draw over them. */
     layer.grease_pencil.draw_line(framebuffer, manager, view);
     /* NOTE: Temporarily moved after grid drawing (See #136764). */
     // layer.meshes.draw_line(framebuffer, manager, view);
@@ -971,9 +970,6 @@ void Instance::draw_v3d(Manager &manager, View &view)
   }
   {
     /* Overlay (+Line) pass. */
-    const bool is_texture_paint_mode =
-        (state.ctx_mode == CTX_MODE_PAINT_TEXTURE) || (state.object_mode & OB_MODE_TEXTURE_PAINT);
-
     draw(regular, resources.overlay_fb);
     draw_line(regular, resources.overlay_line_fb);
 
@@ -981,38 +977,29 @@ void Instance::draw_v3d(Manager &manager, View &view)
     if (!state.is_depth_only_drawing) {
       grid.draw_line(resources.overlay_line_fb, manager, view);
     }
-    /* Paint symmetry contour.
-     * In Texture Paint we draw it later (after mesh line overlays) to avoid being covered by
-     * subsequent line passes. */
-    if (!is_texture_paint_mode) {
-      regular.paints.draw_line(resources.overlay_line_fb, manager, view);
-    }
 
     /* Here because of custom order of regular.facing. */
     infront.facing.draw(resources.overlay_fb, manager, view);
 
     draw(infront, resources.overlay_in_front_fb);
     draw_line(infront, resources.overlay_line_in_front_fb);
-    if (!is_texture_paint_mode) {
-      infront.paints.draw_line(resources.overlay_line_in_front_fb, manager, view);
-    }
   }
   {
     /* Color only pass. */
-    const bool is_texture_paint_mode =
-        (state.ctx_mode == CTX_MODE_PAINT_TEXTURE) || (state.object_mode & OB_MODE_TEXTURE_PAINT);
-
     motion_paths.draw_color_only(resources.overlay_color_only_fb, manager, view);
     xray_fade.draw_color_only(resources.overlay_color_only_fb, manager, view);
 
     regular.meshes.draw_line(resources.overlay_line_fb, manager, view);
     infront.meshes.draw_line(resources.overlay_line_in_front_fb, manager, view);
 
-    if (is_texture_paint_mode) {
-      /* Keep Texture Paint symmetry contour visible by drawing it after mesh line overlays. */
-      regular.paints.draw_line(resources.overlay_line_fb, manager, view);
-      infront.paints.draw_line(resources.overlay_line_in_front_fb, manager, view);
-    }
+    /* Symmetry contours last. They target the depth-less line frame-buffer and resolve occlusion
+     * per-fragment instead of by depth test, so any later pass writing `line_tx` (the grid, the
+     * mesh line overlays) would simply paint over them. The Edit Mode contour needs no entry here:
+     * it is drawn at the end of #Meshes::draw_line just above. */
+    regular.paints.draw_line(resources.overlay_line_fb, manager, view);
+    infront.paints.draw_line(resources.overlay_line_in_front_fb, manager, view);
+    regular.sculpts.draw_symmetry_contour(resources.overlay_line_fb, manager, view);
+    infront.sculpts.draw_symmetry_contour(resources.overlay_line_in_front_fb, manager, view);
 
     draw_color_only(regular, resources.overlay_color_only_fb);
     draw_color_only(infront, resources.overlay_color_only_fb);

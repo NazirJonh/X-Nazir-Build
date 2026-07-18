@@ -1610,17 +1610,23 @@ static void shader_preview_texture(ShaderPreview *sp, Tex *tex, Scene *sce, Rend
   RE_SetScene(re, sce);
 
   /* Create buffer in empty RenderView created in the init step. */
+  const size_t buffer_size = size_t(4) * width * height;
   RenderResult *rr = RE_AcquireResultWrite(re);
   RenderView *rv = static_cast<RenderView *>(rr->views.first);
   ImBuf *rv_ibuf = RE_RenderViewEnsureImBuf(rr, rv);
-  rv_ibuf->assign_float_data(MEM_new_array_zeroed<float>(size_t(4) * width * height, __func__));
+  rv_ibuf->assign_float_data(MEM_new_array_zeroed<float>(buffer_size, __func__));
   RE_ReleaseResult(re);
+
+  /* Fill a private buffer rather than the render result: the UI draws the render result while this
+   * runs, so filling it row by row exposes half-written scan-lines, and a cancelled fill leaves
+   * holes the preview cache can't tell apart from a finished render. */
+  float *fill_buffer = MEM_new_array_zeroed<float>(buffer_size, __func__);
 
   /* Fill in image buffer, one row per task. */
   TexturePreviewData data;
   data.sp = sp;
   data.tex = tex;
-  data.rect_float = rv_ibuf->float_data_for_write();
+  data.rect_float = fill_buffer;
   data.width = width;
   data.cancelled = false;
 
@@ -1657,6 +1663,19 @@ static void shader_preview_texture(ShaderPreview *sp, Tex *tex, Scene *sce, Rend
   settings.min_iter_per_thread = 4;
 
   BLI_task_parallel_range(0, height, &data, shader_preview_texture_row_task, &settings);
+
+  /* Publish in a single step, and only when every row was evaluated. A cancelled fill is discarded
+   * so no partial image can reach the screen or the cache. */
+  if (data.cancelled || shader_preview_break(sp)) {
+    MEM_delete(fill_buffer);
+    return;
+  }
+
+  rr = RE_AcquireResultWrite(re);
+  rv = static_cast<RenderView *>(rr->views.first);
+  rv_ibuf = RE_RenderViewEnsureImBuf(rr, rv);
+  rv_ibuf->assign_float_data(fill_buffer);
+  RE_ReleaseResult(re);
 }
 
 static void shader_preview_render(ShaderPreview *sp, ID *id, int split, int first)

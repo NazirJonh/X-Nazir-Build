@@ -61,6 +61,14 @@ struct CurvePatchFrozenBrushParams {
   int end_falloff_percent = 0;
 };
 
+/** One snapshot of the session-local undo stack: everything the user edits inside a live Curve
+ * Patch that the relief is derived from. The control curve carries positions, handles, handle
+ * types, radii and `cyclic` internally, so nothing else about it needs storing. */
+struct CurvePatchEditStep {
+  bke::CurvesGeometry curve;
+  bool swap_axis = false;
+};
+
 struct CurvePatchCache {
   /** The user-editable control curve. Not attached to any `Brush`/datablock — a standalone
    * runtime `CurvesGeometry`, built fresh via `paintcurve_geometry_init_bezier()` (see
@@ -76,6 +84,22 @@ struct CurvePatchCache {
    * the modal, the index is reset to -1 whenever an edit session ends or a new control curve is
    * built; consumers must still validate it against `control_curve.points_num()`. */
   int active_point = -1;
+
+  /** Session-local undo stack, owned by the live-edit modal (`SCULPT_OT_curve_patch_edit`).
+   *
+   * Blender's own undo systems cannot cover this: a sculpt undo step stores mesh attributes only
+   * (see #undo::Type) and has no slot for the control curve, so an official step would restore
+   * vertex positions and leave the curve untouched; and the paint-curve undo system refuses Sculpt
+   * Mode outright (`paintcurve_undosys_poll`) and wants a real `PaintCurve` ID, which this runtime
+   * curve is not. On top of that the whole session lives inside ONE open sculpt transaction, so
+   * per-edit official steps would mean closing and reopening it on every drag. A modal that owns
+   * runtime state no undo type describes keeps its own stack -- exactly what the knife tool does
+   * with `KnifeUndoFrame` / `kcd->undostack` (`editmesh_knife.cc`).
+   *
+   * Holds STATES, not deltas, with `undo_step_current` as the cursor: entry 0 is the state the
+   * anchor stroke produced, and a new snapshot truncates any redo branch above the cursor. */
+  Vector<CurvePatchEditStep> undo_steps;
+  int undo_step_current = -1;
 
   /** Plane normal frozen at anchor time (e.g. the anchor dab's `sculpt_normal`), passed to
    * `CurvePatchSpline::plane_normal` on every rebuild. */

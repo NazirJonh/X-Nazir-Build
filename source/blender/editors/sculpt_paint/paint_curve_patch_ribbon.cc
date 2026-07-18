@@ -59,12 +59,20 @@ void CurvePatchRibbonLut::clear()
  *
  * `R` is the largest half-width along the curve: used for the loop-vertex validation radius (with
  * a 20% margin) and the partial-collapse arc budget.
+ *
+ * `cyclic` marks a closed curve, whose border's first and last vertices are the same point. That
+ * makes the loop's own join look exactly like a crossing (the two segments meeting there share an
+ * endpoint, so the segment test reports a hit), and the validation below cannot reject it: it asks
+ * whether every vertex of the supposed loop lies within `R` of the center curve, which on a closed
+ * curve is true of the entire border. Left alone, the whole strip collapses onto that point. See
+ * the skip in the candidate scan.
  */
 static void ribbon_fix_border_self_intersections(const Span<float3> poly,
                                                  const float3 &axis_x,
                                                  const float3 &axis_y,
                                                  const float R,
-                                                 Vector<float3> &border)
+                                                 Vector<float3> &border,
+                                                 const bool cyclic)
 {
   const int count = int(poly.size());
   if (count < 4) {
@@ -155,6 +163,13 @@ static void ribbon_fix_border_self_intersections(const Span<float3> poly,
     std::sort(candidates.begin(), candidates.end(), [](const int a, const int b) { return a > b; });
 
     for (const int j : candidates) {
+      /* On a closed curve the last segment and the first are neighbours THROUGH the join, exactly
+       * like any consecutive pair -- which the candidate gather already excludes via
+       * `cell_segs[t] >= i + 2`. That rule just cannot see across the wrap. Without this skip the
+       * shared join vertex reads as a crossing and collapses the whole strip. */
+      if (cyclic && i == 0 && j == count - 2) {
+        continue;
+      }
       const float2 d2 = b2d[j + 1] - b2d[j];
       if (math::dot(d2, d2) < 1e-8f) {
         continue;
@@ -577,6 +592,9 @@ static uint64_t ribbon_source_hash(const CurvePatchSpline &spline,
     hash = (hash ^ uint64_t(bits)) * 1099511628211ull;
   };
   hash ^= uint64_t(spline.poly_3d.size()) * 1099511628211ull;
+  /* `cyclic` is a build input in its own right (it suppresses the join's false self-intersection),
+   * so it belongs in the hash even though closing a curve also changes `poly_3d`. */
+  hash ^= uint64_t(spline.cyclic) * 1099511628211ull;
   for (const float3 &p : spline.poly_3d) {
     mix(p.x);
     mix(p.y);
@@ -668,8 +686,8 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
     border_right[i] = poly[i] - B * halfwidths[i];
   }
 
-  ribbon_fix_border_self_intersections(poly, axis_x, axis_y, R_max, border_left);
-  ribbon_fix_border_self_intersections(poly, axis_x, axis_y, R_max, border_right);
+  ribbon_fix_border_self_intersections(poly, axis_x, axis_y, R_max, border_left, spline.cyclic);
+  ribbon_fix_border_self_intersections(poly, axis_x, axis_y, R_max, border_right, spline.cyclic);
 
   /* Seed grid: one row per polyline vertex, columns = {right, center, left}. V = raw arc
    * length. */

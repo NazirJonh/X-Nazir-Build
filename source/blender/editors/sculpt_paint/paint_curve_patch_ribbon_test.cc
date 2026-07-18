@@ -232,4 +232,46 @@ TEST(paint_curve_patch_ribbon, quality_setting_participates_in_the_cache_hash)
   EXPECT_TRUE(fine.ready);
 }
 
+TEST(paint_curve_patch_ribbon, closed_loop_strip_survives_the_join)
+{
+  /* Regression: the border self-intersection collapse used to treat a closed curve's own join as a
+   * crossing -- the border's first and last points coincide there, so the segment test reports a
+   * hit at (s = 0, t = 1), and its "all loop vertices lie within R of the center curve" validation
+   * cannot reject it, because on a closed loop that is true of the WHOLE border. The result was
+   * the entire strip collapsing onto one point. */
+  const float loop_radius = 2.0f;
+  const int segments = 48;
+  Vector<float3> points;
+  for (int i = 0; i < segments; i++) {
+    const float a = 2.0f * float(M_PI) * float(i) / float(segments);
+    points.append(float3(loop_radius * std::cos(a), loop_radius * std::sin(a), 0.0f));
+  }
+
+  CurvePatchSpline spline;
+  /* As the evaluated points of a cyclic curve arrive: the first point is not repeated at the end. */
+  spline.build_from_positions(points.as_span(), {}, /*cyclic=*/true);
+  spline.plane_normal = float3(0.0f, 0.0f, 1.0f);
+
+  CurvePatchRibbonLut lut;
+  curve_patch_ribbon_build(spline, 0.3f, lut);
+  ASSERT_TRUE(lut.ready);
+
+  const float total = spline.total_length();
+
+  /* A quarter of the way around, well clear of the join: the strip must still be there, with the
+   * sample sitting on its center line. */
+  float2 uv[2];
+  ASSERT_EQ(lut.sample(float3(0.0f, loop_radius, 0.0f), uv), 1);
+  EXPECT_NEAR(uv[0].x, 0.0f, 0.15f);
+  EXPECT_NEAR(uv[0].y, total * 0.25f, total * 0.05f);
+
+  /* Three quarters around, i.e. on the far side of the join from the first probe. */
+  ASSERT_EQ(lut.sample(float3(0.0f, -loop_radius, 0.0f), uv), 1);
+  EXPECT_NEAR(uv[0].x, 0.0f, 0.15f);
+  EXPECT_NEAR(uv[0].y, total * 0.75f, total * 0.05f);
+
+  /* The loop's interior is not part of the strip. */
+  EXPECT_EQ(lut.sample(float3(0.0f, 0.0f, 0.0f), uv), 0);
+}
+
 }  // namespace blender::ed::sculpt_paint::tests

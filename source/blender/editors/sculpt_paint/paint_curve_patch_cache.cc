@@ -339,7 +339,9 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
       /* The ribbon's first/last rows sit exactly at the curve's ends, so `s` from the LUT is already
        * confined to `[0, total_length]` and vertices past the ends fail `sample()` above -- by design
        * the strip stops at the curve's own ends with no rounded "cap" past them. This guard only
-       * backstops interpolation slack at the LUT's edge pixels. */
+       * backstops interpolation slack at the LUT's edge pixels. On a closed curve the two "ends"
+       * are the same place, so the range is still the right one -- there is simply nothing outside
+       * it. */
       if (s < 0.0f || s > total_length) {
         return std::nullopt;
       }
@@ -350,7 +352,9 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
        * interior crossing sits at a mid-range `s` and keeps full amplitude -- only the curve's two
        * true ends fade. The percentage is RNA-clamped to 50, so the two zones can never overlap. */
       float end_falloff = 1.0f;
-      if (patch.frozen_params.end_falloff_mode == MTEX_CURVE_PATCH_END_SMOOTH) {
+      if (!patch.spline.cyclic &&
+          patch.frozen_params.end_falloff_mode == MTEX_CURVE_PATCH_END_SMOOTH)
+      {
         const float zone = float(patch.frozen_params.end_falloff_percent) * 0.01f * total_length;
         if (zone > 1e-8f) {
           const float t = std::min(std::min(s, total_length - s) / zone, 1.0f);
@@ -381,8 +385,20 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
       const float tile_span = curve_patch_texture_tile_span(patch.frozen_params.length_mode,
                                                             patch.frozen_params.length_repeat,
                                                             total_length,
-                                                            radius_at_s);
-      float v = tile_span > 1e-8f ? (s - total_length * 0.5f) / tile_span * 2.0f : 0.0f;
+                                                            radius_at_s,
+                                                            patch.spline.cyclic);
+      /* Centering on the curve's midpoint keeps an OPEN strip's pattern symmetric between its two
+       * ends. A closed curve has no midpoint to be symmetric about; its anchor is the join at
+       * `s == 0`, where a tile has to START -- hence `v = -1` there (the tile domain is [-1, 1],
+       * matching `u`), running to `+1` one tile later. At `s == total_length`, which `tile_span`
+       * above snapped to a whole tile count `n`, that yields `2n - 1`, congruent to `-1` modulo the
+       * texture's period of 2: the pattern closes on itself. Dropping the `- 1` would put the join
+       * mid-tile and, in Stretch/Default (which do not wrap `v` below), push the whole loop outside
+       * the tile the texture actually occupies. */
+      float v = tile_span > 1e-8f ? (patch.spline.cyclic ?
+                                         s / tile_span * 2.0f - 1.0f :
+                                         (s - total_length * 0.5f) / tile_span * 2.0f) :
+                                    0.0f;
 
       /* REPEAT mode must show a full copy of the texture in every tile regardless of the texture's
        * own extension mode (an image set to Extend/Clip, or a procedural texture with no natural
@@ -825,7 +841,11 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   geom.ensure_can_interpolate_to_evaluated();
   Array<float> evaluated_radii(geom.evaluated_points_num());
   geom.interpolate_to_evaluated(VArraySpan(geom.radius()), evaluated_radii.as_mutable_span());
-  patch.spline.build_from_positions(geom.evaluated_positions(), evaluated_radii.as_span());
+  /* `control_curve` is always a single spline (see `paintcurve_geometry_init_bezier()`), so curve 0
+   * carries the whole patch's cyclic state. */
+  const bool cyclic = geom.curves_num() > 0 && geom.cyclic()[0];
+  patch.spline.build_from_positions(
+      geom.evaluated_positions(), evaluated_radii.as_span(), cyclic);
 
   if (patch.spline.is_empty()) {
     return;

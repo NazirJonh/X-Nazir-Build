@@ -35,6 +35,11 @@ struct CurvePatchSpline {
   /** Frozen projection normal for the whole patch (defines "left"/"right" of the curve for
    * `closest_point()`'s signed lateral offset). Caller sets this before calling `closest_point`. */
   float3 plane_normal = float3(0.0f, 0.0f, 1.0f);
+  /** True when the polyline closes back on itself: `poly_3d.last() == poly_3d.first()` and the
+   * tangents run continuously through that join. Set by #build_from_positions. Consumers that treat
+   * the curve's two ends specially (end falloff, the along-length texture coordinate) must skip that
+   * handling when set -- a loop has no ends. */
+  bool cyclic = false;
 
   void clear();
   bool is_empty() const;
@@ -43,8 +48,12 @@ struct CurvePatchSpline {
   /** Rebuilds `poly_3d`/`lengths_3d`/`tangents_3d` from an already-tessellated polyline.
    * `positions.size() < 2` clears the spline (treated as empty). `radii`, when non-empty, must be
    * the same size as `positions` -- pass an empty span when the caller does not need
-   * `radius_at()`. */
-  void build_from_positions(Span<float3> positions, Span<float> radii = {});
+   * `radius_at()`.
+   *
+   * With `cyclic`, `positions` is taken to be a closed curve's evaluated points, which do NOT
+   * repeat the first point at the end: the closing edge back to `positions[0]` is appended here,
+   * and the tangents at the join are made continuous through it. */
+  void build_from_positions(Span<float3> positions, Span<float> radii = {}, bool cyclic = false);
 
   /** Position on the spline at arc-length `s`, clamped to `[0, total_length()]`. Returns
    * `float3(0)` when `is_empty()`. */
@@ -114,10 +123,15 @@ struct CurvePatchSpline {
  * - STRETCH: `total_length` — exactly one tile across the whole curve.
  * An unrecognized `length_mode` falls back to DEFAULT. Callers still guard the degenerate
  * (near-zero) return before dividing by it.
+ *
+ * With `cyclic`, the resulting span is snapped so the loop holds a whole number of tiles, which is
+ * what makes the pattern meet itself at the join without a seam. Repeat and Stretch already satisfy
+ * that and are unaffected; DEFAULT's radius-driven tile is resized to the nearest whole count.
  */
 float curve_patch_texture_tile_span(int length_mode,
                                     int repeat,
                                     float total_length,
-                                    float radius_at_s);
+                                    float radius_at_s,
+                                    bool cyclic = false);
 
 }  // namespace blender::ed::sculpt_paint

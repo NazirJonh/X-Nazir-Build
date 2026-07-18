@@ -22,7 +22,9 @@
 #include "BKE_lib_id.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_bvh.hh"
 
+#include "BLI_array.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
@@ -452,6 +454,10 @@ bool paintcurve_convert_geometry_space(bContext *C,
     MutableSpan<float3> handles_left = geom.handle_positions_left_for_write();
     MutableSpan<float3> handles_right = geom.handle_positions_right_for_write();
 
+    /* Collected here and written after the loop: adding an attribute while the spans above
+     * are alive would invalidate them. */
+    Array<float3> hit_normals(point_num, float3(0.0f, 0.0f, 1.0f));
+
     for (const int i : IndexRange(point_num)) {
       float3 &center = positions[i];
       float3 &left = handles_left[i];
@@ -467,8 +473,27 @@ bool paintcurve_convert_geometry_space(bContext *C,
         ToolSettings *ts = C != nullptr ? CTX_data_tool_settings(C) : nullptr;
         Paint *paint = C != nullptr ? BKE_paint_get_active_from_context(C) : nullptr;
         const Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+        const Base *base = C != nullptr ? CTX_data_active_base(C) : nullptr;
         bool hit = false;
-        if (ts && ts->sculpt) {
+
+        /* Preferred: yields the surface normal alongside the position. */
+        if (paint != nullptr && base != nullptr && bke::object::pbvh_get(*ob) != nullptr) {
+          const std::optional<ed::sculpt_paint::CursorGeometryInfo> gi =
+              ed::sculpt_paint::cursor_geometry_info_update(*vc->depsgraph,
+                                                            *paint,
+                                                            ts ? ts->sculpt : nullptr,
+                                                            vc_ray,
+                                                            base,
+                                                            float2(center_mval[0],
+                                                                   center_mval[1]),
+                                                            false);
+          if (gi.has_value()) {
+            copy_v3_v3(hit_obj, gi->location);
+            hit_normals[i] = gi->normal;
+            hit = true;
+          }
+        }
+        else if (ts && ts->sculpt) {
           hit = ed::sculpt_paint::stroke_get_location_bvh(
               *vc->depsgraph, vc_ray, *ts->sculpt, brush, hit_obj, center_mval, false);
         }
@@ -476,6 +501,7 @@ bool paintcurve_convert_geometry_space(bContext *C,
           hit = ed::sculpt_paint::stroke_get_location_bvh(
               *vc->depsgraph, vc_ray, *paint, brush, hit_obj, center_mval, false);
         }
+
         if (hit) {
           center = float3(hit_obj);
           mul_v3_m4v3(pivot_world, ob_to_world_ptr, hit_obj);
@@ -495,6 +521,9 @@ bool paintcurve_convert_geometry_space(bContext *C,
       left = math::transform_point(world_to_ob, float3(world_co));
       ED_view3d_win_to_3d(vc->v3d, vc->region, pivot_world, right_mval, world_co);
       right = math::transform_point(world_to_ob, float3(world_co));
+    }
+    for (const int i : IndexRange(point_num)) {
+      paintcurve_geom_set_surface_normal(geom, i, hit_normals[i]);
     }
     geom.calculate_bezier_auto_handles();
     geom.calculate_bezier_aligned_handles();

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstring>
+#include <optional>
 #include <utility>
 
 #include "MEM_guardedalloc.h"
@@ -44,6 +45,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
 
 #include "DEG_depsgraph.hh"
@@ -493,84 +495,174 @@ void PAINTCURVE_OT_new(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
-/** Sculpt mesh raycast fallback when face snap is active. */
-static bool paintcurve_snap_bvh_fallback(bContext *C,
-                                         const ViewContext &vc,
-                                         const float mval[2],
-                                         float r_hit_obj[3])
+/** View direction in object space, used when no real surface normal is available. */
+static float3 paintcurve_view_normal_obj(const ViewContext &vc)
+{
+  if (vc.rv3d == nullptr || vc.obact == nullptr) {
+    return float3(0.0f, 0.0f, 1.0f);
+  }
+  float ob_origin_world[3];
+  copy_v3_v3(ob_origin_world, vc.obact->object_to_world().location());
+  float view_world[3];
+  ED_view3d_global_to_vector(vc.rv3d, ob_origin_world, view_world);
+  /* A direction, so no translation. The view vector points away from the viewer while a
+   * surface normal points towards it, hence the negation. */
+  const float3 normal_obj = math::transform_direction(vc.obact->world_to_object(),
+                                                      -float3(view_world));
+  const float len = math::length(normal_obj);
+  return (len > 1e-6f) ? (normal_obj / len) : float3(0.0f, 0.0f, 1.0f);
+}
+
+/** Whether scene snap elements should be tried before falling back to the surface. */
+static bool paintcurve_wants_element_snap(bContext *C)
+{
+  const ToolSettings *ts = CTX_data_tool_settings(C);
+  return ts != nullptr && (ts->snap_flag & SCE_SNAP) != 0;
+}
+
+/** Ray-cast the active object's BVH. Also returns the surface normal when available. */
+static bool paintcurve_raycast_active_object(bContext *C,
+                                             const ViewContext &vc,
+                                             const float mval[2],
+                                             float r_hit_obj[3],
+                                             float r_no_obj[3])
 {
   if (vc.obact == nullptr || vc.obact->runtime->sculpt_session == nullptr ||
       vc.depsgraph == nullptr)
   {
     return false;
   }
-  ToolSettings *ts = CTX_data_tool_settings(C);
-  if (ts == nullptr || ts->sculpt == nullptr) {
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  if (paint == nullptr) {
     return false;
   }
+  ToolSettings *ts = CTX_data_tool_settings(C);
   ViewContext vc_mut = vc;
-  Paint *paint = BKE_paint_get_active_from_context(C);
-  return ed::sculpt_paint::stroke_get_location_bvh(
-      *vc.depsgraph, vc_mut, *ts->sculpt, BKE_paint_brush(paint), r_hit_obj, mval, false);
-}
 
-/** Snap under \a mval to scene geometry (vertex / edge / face per snap settings). */
-static bool paintcurve_snap_to_geometry(bContext *C,
-                                      PaintCurveSnapContext *snap_ctx,
-                                      const ViewContext &vc,
-                                      const float mval[2],
-                                      const float prev_co_world[3],
-                                      float r_hit_obj[3])
-{
-  PaintCurveSnapContext *ctx = snap_ctx;
-  const bool own_ctx = (ctx == nullptr);
-  if (own_ctx) {
-    ctx = ED_paintcurve_snap_context_create();
+  /* Preferred: a single ray-cast yields both the position and the normal. */
+  const Base *base = CTX_data_active_base(C);
+  if (base != nullptr && bke::object::pbvh_get(*vc.obact) != nullptr) {
+    const std::optional<ed::sculpt_paint::CursorGeometryInfo> gi =
+        ed::sculpt_paint::cursor_geometry_info_update(*vc.depsgraph,
+                                                      *paint,
+                                                      ts ? ts->sculpt : nullptr,
+                                                      vc_mut,
+                                                      base,
+                                                      float2(mval[0], mval[1]),
+                                                      false);
+    if (!gi.has_value()) {
+      return false;
+    }
+    copy_v3_v3(r_hit_obj, gi->location);
+    copy_v3_v3(r_no_obj, gi->normal);
+    return true;
   }
 
-  bool ok = ED_paintcurve_snap_point(C,
-                                     ctx,
-                                     vc.depsgraph,
-                                     vc.v3d,
-                                     vc.region,
-                                     vc.obact,
-                                     mval,
-                                     prev_co_world,
-                                     r_hit_obj);
+  /* Fallback: position only, so the normal falls back to the view direction. */
+  const Brush *brush = BKE_paint_brush(paint);
+  bool hit = false;
+  if (ts != nullptr && ts->sculpt != nullptr) {
+    hit = ed::sculpt_paint::stroke_get_location_bvh(
+        *vc.depsgraph, vc_mut, *ts->sculpt, brush, r_hit_obj, mval, false);
+  }
+  else {
+    hit = ed::sculpt_paint::stroke_get_location_bvh(
+        *vc.depsgraph, vc_mut, *paint, brush, r_hit_obj, mval, false);
+  }
+  if (hit) {
+    copy_v3_v3(r_no_obj, paintcurve_view_normal_obj(vc));
+  }
+  return hit;
+}
 
-  if (!ok) {
-    ToolSettings *ts = CTX_data_tool_settings(C);
-    if (ts != nullptr && (ED_paintcurve_snap_elements(ts) & SCE_SNAP_TO_FACE)) {
-      ok = paintcurve_snap_bvh_fallback(C, vc, mval, r_hit_obj);
+/* Documented in `paint_curve_intern.hh`. */
+bool paintcurve_surface_place(bContext *C,
+                              PaintCurveSnapContext *snap_ctx,
+                              const ViewContext &vc,
+                              const float mval[2],
+                              const float prev_co_world[3],
+                              const bool use_depth_fallback,
+                              float r_co_obj[3],
+                              float r_no_obj[3])
+{
+  copy_v3_v3(r_no_obj, paintcurve_view_normal_obj(vc));
+
+  /* Level 0: scene snap elements (vertex / edge / face), opt-in via the header Snap toggle. */
+  if (paintcurve_wants_element_snap(C)) {
+    PaintCurveSnapContext *ctx = snap_ctx;
+    const bool own_ctx = (ctx == nullptr);
+    if (own_ctx) {
+      ctx = ED_paintcurve_snap_context_create();
+    }
+    const bool ok = ED_paintcurve_snap_point(
+        C, ctx, vc.depsgraph, vc.v3d, vc.region, vc.obact, mval, prev_co_world, r_co_obj);
+    if (own_ctx) {
+      ED_paintcurve_snap_context_destroy(ctx);
+    }
+    if (ok) {
+      /* The element snap yields a position but no normal, so ray-cast purely for the
+       * normal and keep the snapped position. */
+      float unused_co[3];
+      float no_obj[3];
+      if (paintcurve_raycast_active_object(C, vc, mval, unused_co, no_obj)) {
+        copy_v3_v3(r_no_obj, no_obj);
+      }
+      return true;
     }
   }
 
-  if (own_ctx) {
-    ED_paintcurve_snap_context_destroy(ctx);
+  /* Levels 1-2: the active object's surface. */
+  if (paintcurve_raycast_active_object(C, vc, mval, r_co_obj, r_no_obj)) {
+    return true;
   }
-  return ok;
-}
 
-/** Match #transform_snap_flag_from_modifiers_set: header Snap toggle XOR Ctrl. */
-static bool paintcurve_wants_surface_snap(bContext *C, const wmEvent *event)
-{
-  ToolSettings *ts = CTX_data_tool_settings(C);
-  if (ts == nullptr) {
-    return false;
+  /* Level 3: depth of the nearest visible geometry. This needs a depth-buffer refresh, so it
+   * is limited to one-shot placement and skipped during modal drags. */
+  if (use_depth_fallback && vc.region != nullptr && vc.v3d != nullptr && vc.obact != nullptr &&
+      vc.depsgraph != nullptr)
+  {
+    ViewDepths *depths = nullptr;
+    ED_view3d_depth_override(
+        vc.depsgraph, vc.region, vc.v3d, vc.obact, V3D_DEPTH_NO_GPENCIL, false, &depths);
+    const int mval_i[2] = {int(mval[0]), int(mval[1])};
+    float world_co[3];
+    const bool ok = ED_view3d_autodist(vc.region, vc.v3d, mval_i, world_co, nullptr);
+    ED_view3d_depths_free(depths);
+    if (ok) {
+      copy_v3_v3(r_co_obj,
+                 math::transform_point(vc.obact->world_to_object(), float3(world_co)));
+      return true;
+    }
   }
-  const bool use_snap = (ts->snap_flag & SCE_SNAP) != 0;
-  const bool ctrl = event != nullptr && (event->modifier & KM_CTRL) != 0;
-  return use_snap != ctrl;
+
+  /* Level 4: plane through the object origin. Matches the pre-existing behavior. */
+  if (vc.obact != nullptr) {
+    float ob_origin_world[3];
+    copy_v3_v3(ob_origin_world, vc.obact->object_to_world().location());
+    float world_co[3];
+    ED_view3d_win_to_3d(vc.v3d, vc.region, ob_origin_world, mval, world_co);
+    copy_v3_v3(r_co_obj, math::transform_point(vc.obact->world_to_object(), float3(world_co)));
+  }
+  else {
+    zero_v3(r_co_obj);
+  }
+  return false;
 }
 
 void paintcurve_geometry_add_point(bke::CurvesGeometry &geom,
                                    const float3 &co,
+                                   const float3 &surface_normal,
                                    const bool create_new_spline,
                                    int &active_curve,
                                    int &add_index)
 {
   int global_insert_idx;
   int add_index_in_spline;
+
+  /* The shift loop below only covers built-in attributes, so surface normals are moved
+   * separately. Written back after the mutable spans go out of scope: adding an attribute
+   * while they are alive would invalidate them. */
+  Vector<float3> normals_shifted;
 
   if (create_new_spline) {
     active_curve = paintcurve_geometry_add_spline(geom, 1);
@@ -584,6 +676,13 @@ void paintcurve_geometry_add_point(bke::CurvesGeometry &geom,
     global_insert_idx = spline_range.start() + add_index_in_spline;
 
     const int old_total = geom.points_num();
+
+    normals_shifted.reserve(old_total + 1);
+    for (const int i : IndexRange(old_total)) {
+      normals_shifted.append(paintcurve_geom_get_surface_normal(geom, i));
+    }
+    normals_shifted.insert(global_insert_idx, float3(0.0f, 0.0f, 1.0f));
+
     geom.resize(old_total + 1, geom.curves_num());
 
     /* Shift offsets for all splines that come after the active one, and the sentinel.
@@ -610,6 +709,10 @@ void paintcurve_geometry_add_point(bke::CurvesGeometry &geom,
     }
   }
 
+  for (const int i : IndexRange(normals_shifted.size())) {
+    paintcurve_geom_set_surface_normal(geom, i, normals_shifted[i]);
+  }
+
   /* Set new point data. */
   geom.positions_for_write()[global_insert_idx] = co;
   geom.handle_positions_left_for_write()[global_insert_idx] = co;
@@ -619,6 +722,7 @@ void paintcurve_geometry_add_point(bke::CurvesGeometry &geom,
   types_left[global_insert_idx] = BEZIER_HANDLE_ALIGN;
   types_right[global_insert_idx] = BEZIER_HANDLE_ALIGN;
   geom.radius_for_write()[global_insert_idx] = 1.0f;
+  paintcurve_geom_set_surface_normal(geom, global_insert_idx, surface_normal);
 
   /* Preserve junction handle types when extending an existing spline. */
   if (!create_new_spline) {
@@ -696,19 +800,23 @@ static void paintcurve_point_add(bContext *C,
   bke::CurvesGeometry &geom = pc->geometry.wrap();
   const int curves_num = paintcurve_geometry_runtime_is_initialized(geom) ? geom.curves_num() : 0;
 
-  /* Compute 3D object-space position. */
+  /* Compute 3D object-space position and the surface normal at that position. */
   float obj_co[3];
+  float obj_no[3] = {0.0f, 0.0f, 1.0f};
   if (pc->use_3d_space && rv3d && vc.obact) {
     const float mval_fl[2] = {float(loc[0]), float(loc[1])};
-    const bool used_snap = snap_to_surface &&
-                           paintcurve_snap_to_geometry(C, nullptr, vc, mval_fl, nullptr, obj_co);
-    if (!used_snap) {
+    if (snap_to_surface) {
+      /* One-shot placement, so the depth-buffer level is affordable here. */
+      paintcurve_surface_place(C, nullptr, vc, mval_fl, nullptr, true, obj_co, obj_no);
+    }
+    else {
       float ob_origin_world[3];
       copy_v3_v3(ob_origin_world, vc.obact->object_to_world().location());
       float world_co[3];
       ED_view3d_win_to_3d(vc.v3d, vc.region, ob_origin_world, mval_fl, world_co);
       const float (*world_to_ob)[4] = vc.obact->world_to_object().ptr();
       mul_v3_m4v3(obj_co, world_to_ob, world_co);
+      copy_v3_v3(obj_no, paintcurve_view_normal_obj(vc));
     }
   }
   else {
@@ -725,7 +833,8 @@ static void paintcurve_point_add(bContext *C,
 
   int active_curve = pc->active_curve;
   int add_index = pc->add_index;
-  paintcurve_geometry_add_point(geom, float3(obj_co), create_new_spline, active_curve, add_index);
+  paintcurve_geometry_add_point(
+      geom, float3(obj_co), float3(obj_no), create_new_spline, active_curve, add_index);
   pc->active_curve = active_curve;
   pc->add_index = add_index;
 
@@ -743,9 +852,9 @@ static wmOperatorStatus paintcurve_add_point_invoke(bContext *C,
                                                     const wmEvent *event)
 {
   const int loc[2] = {event->mval[0], event->mval[1]};
-  const bool snap_to_surface = paintcurve_wants_surface_snap(C, event);
-  paintcurve_point_add(C, op, loc, snap_to_surface);
+  paintcurve_point_add(C, op, loc, true);
   RNA_int_set_array(op->ptr, "location", loc);
+  RNA_boolean_set(op->ptr, "snap_to_surface", true);
   return OPERATOR_FINISHED;
 }
 
@@ -755,7 +864,7 @@ static wmOperatorStatus paintcurve_add_point_exec(bContext *C, wmOperator *op)
 
   if (RNA_struct_property_is_set(op->ptr, "location")) {
     RNA_int_get_array(op->ptr, "location", loc);
-    paintcurve_point_add(C, op, loc);
+    paintcurve_point_add(C, op, loc, RNA_boolean_get(op->ptr, "snap_to_surface"));
     return OPERATOR_FINISHED;
   }
 
@@ -789,6 +898,11 @@ void PAINTCURVE_OT_add_point(wmOperatorType *ot)
                      "Location of vertex in area space",
                      0,
                      SHRT_MAX);
+  RNA_def_boolean(ot->srna,
+                  "snap_to_surface",
+                  true,
+                  "Snap to Surface",
+                  "Place the point on the active object's surface");
 }
 
 /** Invoke handle slide after adding a point (matches #PAINTCURVE_OT_add_point_slide macro). */
@@ -886,8 +1000,7 @@ static wmOperatorStatus paintcurve_insert_or_add_point_invoke(bContext *C,
     return OPERATOR_FINISHED;
   }
 
-  const bool snap_to_surface = paintcurve_wants_surface_snap(C, event);
-  paintcurve_point_add(C, op, loc, snap_to_surface);
+  paintcurve_point_add(C, op, loc, true);
   RNA_int_set_array(op->ptr, "location", loc);
   return paintcurve_invoke_slide_after_point_add(C, event);
 }
@@ -1842,7 +1955,8 @@ static void paintcurve_point_slide_init_snap_settings(bContext *C, PointSlideDat
 
 static void paintcurve_apply_surface_snap_to_point(bke::CurvesGeometry &geom,
                                                    const PointSlideData *psd,
-                                                   const float hit_obj[3])
+                                                   const float hit_obj[3],
+                                                   const float hit_no_obj[3])
 {
   BLI_assert(psd->select == 1 || psd->move_entire);
   float snap_delta[3];
@@ -1852,6 +1966,7 @@ static void paintcurve_apply_surface_snap_to_point(bke::CurvesGeometry &geom,
                 snap_delta,
                 psd->point_initial_loc_3d[h]);
   }
+  paintcurve_geom_set_surface_normal(geom, psd->point_index, float3(hit_no_obj));
   geom.calculate_bezier_auto_handles();
   geom.calculate_bezier_aligned_handles();
 }
@@ -2439,16 +2554,23 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
         /* Refresh depsgraph after sync-to-source may have tagged updates. */
         psd->vc.depsgraph = CTX_data_depsgraph_pointer(C);
         paintcurve_slide_refresh_object_mats(psd);
-        const bool snap_to_surface = paintcurve_wants_surface_snap(C, event);
+        const bool snap_to_surface = paintcurve_uses_3d_geometry(pc);
         if (psd->is_segment) {
           float depth_world[3];
           float hit_obj[3];
+          float hit_no_obj[3];
           float prev_co_world[3];
           const float3 &seg_co = geom.positions()[psd->segment_index];
           mul_v3_m4v3(prev_co_world, psd->ob_to_world, seg_co);
-          if (snap_to_surface &&
-              paintcurve_snap_to_geometry(
-                  C, psd->snap_ctx, psd->vc, mval_fl, prev_co_world, hit_obj))
+          /* `false`: no depth-buffer fallback inside a modal drag. */
+          if (snap_to_surface && paintcurve_surface_place(C,
+                                                          psd->snap_ctx,
+                                                          psd->vc,
+                                                          mval_fl,
+                                                          prev_co_world,
+                                                          false,
+                                                          hit_obj,
+                                                          hit_no_obj))
           {
             mul_v3_m4v3(depth_world, psd->ob_to_world, hit_obj);
             paintcurve_snap_marker_update(C, psd->vc.region, psd->ob_to_world, hit_obj);
@@ -2473,12 +2595,19 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
           bool snapped = false;
           if (snap_to_surface && (psd->select == 1 || psd->move_entire)) {
             float hit_obj[3];
+            float hit_no_obj[3];
             float prev_co_world[3];
             paintcurve_get_prev_co_world(psd, prev_co_world);
-            if (paintcurve_snap_to_geometry(
-                    C, psd->snap_ctx, psd->vc, mval_fl, prev_co_world, hit_obj))
+            if (paintcurve_surface_place(C,
+                                         psd->snap_ctx,
+                                         psd->vc,
+                                         mval_fl,
+                                         prev_co_world,
+                                         false,
+                                         hit_obj,
+                                         hit_no_obj))
             {
-              paintcurve_apply_surface_snap_to_point(geom, psd, hit_obj);
+              paintcurve_apply_surface_snap_to_point(geom, psd, hit_obj, hit_no_obj);
               snapped = true;
               paintcurve_snap_marker_update(C, psd->vc.region, psd->ob_to_world, hit_obj);
             }

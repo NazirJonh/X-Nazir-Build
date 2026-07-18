@@ -43,6 +43,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
+#include "DNA_texture_types.h"
 #include "DNA_world_types.h"
 
 #include "BKE_animsys.hh"
@@ -886,6 +887,33 @@ static void preview_cache_update(uiPreview *ui_preview, ImBuf *ibuf, int width, 
 
 /** \} */
 
+/**
+ * Fit a `src_width` x `src_height` image into the `dst_width` x `dst_height` widget area without
+ * distorting its aspect ratio, centering it over the background fill. Scaling both axes
+ * independently would stretch the intermediate result whenever the widget was resized along a
+ * single axis, until the re-render at the new size completes.
+ *
+ * \param exact_size: the source already matches the widget, draw it pixel-exact.
+ * \param r_zoom: uniform zoom factor to draw the source with.
+ * \param r_ofs_x: horizontal offset from the widget origin to center the result.
+ * \param r_ofs_y: vertical offset from the widget origin to center the result.
+ */
+static void preview_fit_centered(const int src_width,
+                                 const int src_height,
+                                 const int dst_width,
+                                 const int dst_height,
+                                 const bool exact_size,
+                                 float *r_zoom,
+                                 float *r_ofs_x,
+                                 float *r_ofs_y)
+{
+  *r_zoom = exact_size ? 1.0f :
+                         min_ff(float(dst_width) / float(src_width),
+                                float(dst_height) / float(src_height));
+  *r_ofs_x = floorf((float(dst_width) - float(src_width) * *r_zoom) * 0.5f);
+  *r_ofs_y = floorf((float(dst_height) - float(src_height) * *r_zoom) * 0.5f);
+}
+
 /* new UI convention: draw is in pixel space already. */
 /* uses ButtonType::Roundbox button in block to get the rect */
 static bool ed_preview_draw_rect(Scene *scene,
@@ -938,38 +966,49 @@ static bool ed_preview_draw_rect(Scene *scene,
      * progress without artifacts. Caching is deferred until the job completes. */
     if (rv && rv->ibuf && rres.rectx > 0 && rres.recty > 0 && newx > 0 && newy > 0) {
       /* Draw at the render resolution when it matches the widget, otherwise let the GPU scale the
-       * result instead of dropping the frame while the new size is being rendered. */
+       * result (aspect preserved, centered) instead of dropping the frame while the new size is
+       * being rendered. */
       const bool exact_size = (abs(rres.rectx - newx) < 2 && abs(rres.recty - newy) < 2);
-      const int draw_width = exact_size ? rres.rectx : newx;
-      const int draw_height = exact_size ? rres.recty : newy;
 
-      newrect->xmax = max_ii(newrect->xmax, rect->xmin + draw_width + offx);
-      newrect->ymax = max_ii(newrect->ymax, rect->ymin + draw_height);
+      newrect->xmax = max_ii(newrect->xmax, rect->xmin + newx + offx);
+      newrect->ymax = max_ii(newrect->ymax, rect->ymin + newy);
 
       const float fx = rect->xmin + offx;
       const float fy = rect->ymin;
 
-      ed_preview_draw_background(fx, fy, draw_width, draw_height);
+      ed_preview_draw_background(fx, fy, newx, newy);
 
       GPU_blend(GPU_BLEND_ALPHA_PREMULT);
+      float zoom, ofs_x, ofs_y;
       if (preview_use_cached_image(ui_preview)) {
+        preview_fit_centered(ui_preview->cached_width,
+                             ui_preview->cached_height,
+                             newx,
+                             newy,
+                             exact_size && ui_preview->cached_width == rres.rectx &&
+                                 ui_preview->cached_height == rres.recty,
+                             &zoom,
+                             &ofs_x,
+                             &ofs_y);
         preview_gpu_texture_cache_draw(ui_preview,
-                                       fx,
-                                       fy,
-                                       float(draw_width) / float(ui_preview->cached_width),
-                                       float(draw_height) / float(ui_preview->cached_height),
+                                       fx + ofs_x,
+                                       fy + ofs_y,
+                                       zoom,
+                                       zoom,
                                        &scene->view_settings,
                                        &scene->display_settings);
       }
       else {
+        preview_fit_centered(
+            rres.rectx, rres.recty, newx, newy, exact_size, &zoom, &ofs_x, &ofs_y);
         ED_draw_imbuf(rv->ibuf,
-                      fx,
-                      fy,
+                      fx + ofs_x,
+                      fy + ofs_y,
                       true,
                       &scene->view_settings,
                       &scene->display_settings,
-                      float(draw_width) / float(rres.rectx),
-                      float(draw_height) / float(rres.recty));
+                      zoom,
+                      zoom);
       }
       GPU_blend(GPU_BLEND_NONE);
 
@@ -1003,13 +1042,23 @@ static bool ed_preview_draw_rect(Scene *scene,
     const float fx = rect->xmin + offx;
     const float fy = rect->ymin;
 
+    float zoom, ofs_x, ofs_y;
+    preview_fit_centered(ui_preview->cached_width,
+                         ui_preview->cached_height,
+                         newx,
+                         newy,
+                         false,
+                         &zoom,
+                         &ofs_x,
+                         &ofs_y);
+
     ed_preview_draw_background(fx, fy, newx, newy);
     GPU_blend(GPU_BLEND_ALPHA_PREMULT);
     preview_gpu_texture_cache_draw(ui_preview,
-                                   fx,
-                                   fy,
-                                   float(newx) / float(ui_preview->cached_width),
-                                   float(newy) / float(ui_preview->cached_height),
+                                   fx + ofs_x,
+                                   fy + ofs_y,
+                                   zoom,
+                                   zoom,
                                    &scene->view_settings,
                                    &scene->display_settings);
     GPU_blend(GPU_BLEND_NONE);
@@ -1469,7 +1518,13 @@ struct TexturePreviewData {
   Tex *tex;
   float *rect_float;
   int width;
-  int height;
+  /**
+   * Size in pixels the `[-1, 1]` texture coordinate range is mapped over. Normally the preview
+   * height on both axes (square footprint), reduced on one axis for non-square image textures so
+   * the image keeps its aspect ratio.
+   */
+  float span_x;
+  float span_y;
   bool cancelled;
 };
 
@@ -1485,15 +1540,14 @@ static void shader_preview_texture_row_task(void *__restrict userdata,
 
   ImagePool *thread_pool = *static_cast<ImagePool **>(tls->userdata_chunk);
   const int width = data->width;
-  const int height = data->height;
   float *rect_float = data->rect_float + (size_t(y) * width * 4);
 
   /* Tex coords between -1.0f and 1.0f. */
   float tex_coord[3] = {0.0f, 0.0f, 0.0f};
-  tex_coord[1] = (float(y) / float(height)) * 2.0f - 1.0f;
+  tex_coord[1] = (float(y) / data->span_y) * 2.0f - 1.0f;
 
   for (int x = 0; x < width; x++) {
-    tex_coord[0] = (float(x) / float(height)) * 2.0f - 1.0f;
+    tex_coord[0] = (float(x) / data->span_x) * 2.0f - 1.0f;
 
     /* Evaluate texture at tex_coord. */
     TexResult texres = {0};
@@ -1558,8 +1612,27 @@ static void shader_preview_texture(ShaderPreview *sp, Tex *tex, Scene *sce, Rend
   data.tex = tex;
   data.rect_float = rv_ibuf->float_data_for_write();
   data.width = width;
-  data.height = height;
   data.cancelled = false;
+
+  /* The texture coordinate range is mapped over a square of the preview height, so procedural
+   * textures aren't distorted by the widget being wider than it is tall. Image textures map that
+   * square onto the whole image regardless of its resolution, which stretches non-square images.
+   * Shrink the coordinate span on the longer axis so the image is fitted into the square instead. */
+  data.span_x = float(height);
+  data.span_y = float(height);
+  if (tex->type == TEX_IMAGE && tex->ima) {
+    int image_size[2];
+    BKE_image_get_size(tex->ima, &tex->iuser, &image_size[0], &image_size[1]);
+    if (image_size[0] > 0 && image_size[1] > 0) {
+      const float aspect = float(image_size[0]) / float(image_size[1]);
+      if (aspect > 1.0f) {
+        data.span_y = float(height) / aspect;
+      }
+      else {
+        data.span_x = float(height) * aspect;
+      }
+    }
+  }
 
   TaskParallelSettings settings;
   BLI_parallel_range_settings_defaults(&settings);

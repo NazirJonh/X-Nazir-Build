@@ -30,6 +30,8 @@
  * relief displaces along each vertex's own normal).
  */
 
+#include <cstdint>
+
 #include "BLI_math_vector_types.hh"
 #include "BLI_vector.hh"
 
@@ -69,10 +71,16 @@ struct CurvePatchRibbonLut {
    * `plane_normal`. */
   float3 axis_x = {};
   float3 axis_y = {};
-  /** Max spread of the 4 sampled neighbors' V before #sample falls back to nearest-neighbor
-   * (half a brush radius of arc length -- same rule as Roll's `spline_uv()`). */
+  /** Max arc-length spread within which two sampled candidates are treated as the same stretch of
+   * the curve (half a brush radius -- same rule as Roll's `spline_uv()`). */
   float v_threshold = 0.0f;
   bool ready = false;
+
+  /** Hash of the inputs this LUT was built from (polyline, radii, plane normal, brush radius).
+   * #curve_patch_ribbon_build returns immediately when it matches, so the re-stamps that do not
+   * touch the curve at all -- a strength-slider drag, a Length-mode change, a re-stamp triggered
+   * by an event that moved nothing -- reuse the LUT instead of rebuilding it. */
+  uint64_t source_hash = 0;
 
   void clear();
 

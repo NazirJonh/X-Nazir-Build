@@ -923,7 +923,8 @@ static bool ed_preview_draw_rect(Scene *scene,
                                  const rcti *rect,
                                  rcti *newrect,
                                  uiPreview *ui_preview,
-                                 bool is_job_running)
+                                 bool is_job_running,
+                                 bool *r_size_matches)
 {
   Render *re;
   RenderView *rv;
@@ -934,6 +935,8 @@ static bool ed_preview_draw_rect(Scene *scene,
   const void *split_owner = (!split || first) ? owner :
                                                 static_cast<char *>(const_cast<void *>(owner)) + 1;
   bool ok = false;
+
+  *r_size_matches = false;
 
   if (split) {
     if (first) {
@@ -969,6 +972,7 @@ static bool ed_preview_draw_rect(Scene *scene,
        * result (aspect preserved, centered) instead of dropping the frame while the new size is
        * being rendered. */
       const bool exact_size = (abs(rres.rectx - newx) < 2 && abs(rres.recty - newy) < 2);
+      *r_size_matches = exact_size;
 
       newrect->xmax = max_ii(newrect->xmax, rect->xmin + newx + offx);
       newrect->ymax = max_ii(newrect->ymax, rect->ymin + newy);
@@ -1098,33 +1102,39 @@ void ED_preview_draw(
 
     const bool is_job_running = WM_jobs_test(wm, owner, WM_JOB_TYPE_RENDER_PREVIEW);
 
+    bool size_matches;
     if (parent) {
-      ok = ed_preview_draw_rect(scene, owner, 1, 1, rect, &newrect, ui_preview, is_job_running);
-      ok &= ed_preview_draw_rect(scene, owner, 1, 0, rect, &newrect, ui_preview, is_job_running);
+      bool size_matches_second;
+      ok = ed_preview_draw_rect(
+          scene, owner, 1, 1, rect, &newrect, ui_preview, is_job_running, &size_matches);
+      ok &= ed_preview_draw_rect(
+          scene, owner, 1, 0, rect, &newrect, ui_preview, is_job_running, &size_matches_second);
+      size_matches &= size_matches_second;
     }
     else {
-      ok = ed_preview_draw_rect(scene, owner, 0, 0, rect, &newrect, ui_preview, is_job_running);
+      ok = ed_preview_draw_rect(
+          scene, owner, 0, 0, rect, &newrect, ui_preview, is_job_running, &size_matches);
     }
 
     if (ok) {
       *rect = newrect;
     }
 
-    /* start a new preview render job if signaled through sbuts->preview,
-     * if no render result was found and no preview render job is running,
-     * or if the job is running and the size of preview changed */
-    const bool trigger_size_mismatch = (sp &&
-                                        (abs(sp->sizex - newx) >= 2 || abs(sp->sizey - newy) > 2));
+    /* Start a new preview render job if signaled through `sbuts->preview`, if no render result was
+     * found and no preview render job is running, or if the size of the preview changed. */
+
+    /* The result on screen was rendered for a different widget size, e.g. the preview was resized
+     * with the grip. It is drawn scaled to fit meanwhile, but nothing else would ever trigger the
+     * re-render that makes it sharp again, since the finished job is gone from the job list. */
+    const bool stale_size = (!is_job_running && !size_matches);
+    const bool trigger_size_mismatch =
+        stale_size || (sp && (abs(sp->sizex - newx) >= 2 || abs(sp->sizey - newy) > 2));
+
     if ((sbuts != nullptr && sbuts->preview) || (ui_preview->tag & UI_PREVIEW_TAG_DIRTY) ||
         (!ok && !is_job_running) || trigger_size_mismatch)
     {
       if (sbuts != nullptr) {
         sbuts->preview = 0;
-      }
-
-      if (trigger_size_mismatch) {
-        /* The cache has the previous size, it would be stretched for the rest of the render. */
-        preview_cache_clear(ui_preview);
       }
 
       ED_preview_shader_job(C, owner, id, parent, slot, newx, newy, PR_BUTS_RENDER);

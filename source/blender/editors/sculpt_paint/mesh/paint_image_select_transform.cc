@@ -9,45 +9,50 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
-#include <limits>
 #include <cstring>
+#include <limits>
 
 #include "MEM_guardedalloc.h"
 
 #include "BLI_array.hh"
 #include "BLI_listbase_wrapper.hh"
+#include "BLI_math_geom.h"
+#include "BLI_math_matrix.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
+#include "BLI_set.hh"
 #include "BLI_span.hh"
 #include "BLI_string.h"
+#include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
-#include "BLI_set.hh"
 #include "BLI_vector.hh"
 
 #include "DNA_image_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 
-#include "BKE_context.hh"
 #include "BKE_blender.hh"
+#include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_library.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_screen.hh"
+#include "BKE_undo_system.hh"
 
 #include "DEG_depsgraph.hh"
+
+#include "BLT_translation.hh"
 
 #include "ED_gizmo_library.hh"
 #include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
-#include "ED_select_utils.hh"
 #include "ED_space_api.hh"
 #include "ED_undo.hh"
-
-#include "BKE_undo_system.hh"
 
 #include "BIF_glutil.hh"
 
@@ -62,30 +67,23 @@
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 
-#include "BLI_math_matrix.hh"
-#include "BLI_math_matrix_types.hh"
-#include "BLI_math_geom.h"
-
 #include "UI_interface.hh"
 #include "UI_view2d.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
 
-#include "../paint_intern.hh"
 #include "../../space_image/image_runtime.hh"
+#include "../paint_intern.hh"
 #include "paint_image_select_intern.hh"
-
 
 namespace blender {
 
-struct ImageSelectTransformState {
-  SpaceImage *owner_sima = nullptr;
+struct ImageSelectTransformState : public PaintSelectFloatingSession {
+  /* Unlike move/warp, transform owns gizmos, so it also pins the concrete area/region the cage
+   * was built for (hit-testing and gizmo refresh both need them). */
   ScrArea *owner_area = nullptr;
   ARegion *owner_region = nullptr;
-  ARegionType *owner_region_type = nullptr;
-  ImageUser iuser = {};
-  bool undo_begun = false;
 
   blender::Vector<SelectionTileFragment> fragments;
   blender::Vector<gpu::Texture *> fragment_textures;
@@ -103,8 +101,10 @@ struct ImageSelectTransformState {
   bool use_proportional_scale = true;
 
   /* Snapping state */
-  bool is_snapped = false;                 /* True if the anchor point is magnetically snapped */
-  float2 snap_indicator_screen = {0.0f, 0.0f};  /* Screen coordinates of snapped keypoint for visual feedback */
+  /* True if the anchor point is magnetically snapped. */
+  bool is_snapped = false;
+  /* Screen coordinates of the snapped keypoint, for visual feedback. */
+  float2 snap_indicator_screen = {0.0f, 0.0f};
 
   /* Modal interaction flags */
   enum HandleType {
@@ -134,17 +134,7 @@ struct ImageSelectTransformState {
   float2 drag_start_pivot = {0.0f, 0.0f};
   bool drag_start_anchor_inside_bounds = true;
   int2 prev_mouse_xy = {0, 0};
-  bool is_dragging = false;
-
-  /* Handle returned by ED_region_draw_cb_activate, removed on exit. */
-  void *draw_handle = nullptr;
 };
-
-/** Tile UV origin for UDIM (tile 1001 -> (0, 0), tile 1012 -> (1, 1), etc.). */
-static float2 image_select_tile_uv_origin(const int tile_number)
-{
-  return image_select_udim_tile_uv_origin(tile_number);
-}
 
 static int image_select_transform_ref_tile(const ImageSelectTransformState *state)
 {
@@ -157,7 +147,7 @@ static float2 image_select_view_to_tile_px(const ImageSelectTransformState *stat
                                            const float canvas_w,
                                            const float canvas_h)
 {
-  const float2 tile_uv = image_select_tile_uv_origin(image_select_transform_ref_tile(state));
+  const float2 tile_uv = image_select_udim_tile_uv_origin(image_select_transform_ref_tile(state));
   return float2((view_co.x - tile_uv.x) * canvas_w, (view_co.y - tile_uv.y) * canvas_h);
 }
 
@@ -167,7 +157,7 @@ static float2 image_select_tile_px_to_view(const ImageSelectTransformState *stat
                                            const float canvas_w,
                                            const float canvas_h)
 {
-  const float2 tile_uv = image_select_tile_uv_origin(image_select_transform_ref_tile(state));
+  const float2 tile_uv = image_select_udim_tile_uv_origin(image_select_transform_ref_tile(state));
   return float2(tile_uv.x + tile_px.x / canvas_w, tile_uv.y + tile_px.y / canvas_h);
 }
 
@@ -187,14 +177,13 @@ static bool image_select_transform_source_uv_bounds(const ImageSelectTransformSt
     if (!frag.pixels.fragment_ibuf) {
       continue;
     }
-    const int t_col = (frag.geom.tile_number - 1001) % 10;
-    const int t_row = (frag.geom.tile_number - 1001) / 10;
+    const float2 tile_uv = image_select_udim_tile_uv_origin(frag.geom.tile_number);
     const float fw = float(frag.geom.tile_size_px.x);
     const float fh = float(frag.geom.tile_size_px.y);
     const int2 ui_origin = image_select_fragment_ui_origin(frag);
     const int2 ui_size = image_select_fragment_ui_size(frag);
-    const float x0 = float(t_col) + float(ui_origin.x) / fw + state->uv_translation.x;
-    const float y0 = float(t_row) + float(ui_origin.y) / fh + state->uv_translation.y;
+    const float x0 = tile_uv.x + float(ui_origin.x) / fw + state->uv_translation.x;
+    const float y0 = tile_uv.y + float(ui_origin.y) / fh + state->uv_translation.y;
     const float x1 = x0 + float(ui_size.x) / fw;
     const float y1 = y0 + float(ui_size.y) / fh;
     r_uv_x_min = std::min(r_uv_x_min, x0);
@@ -206,18 +195,20 @@ static bool image_select_transform_source_uv_bounds(const ImageSelectTransformSt
 }
 
 /** Scale \a uv around #ImageSelectTransformState::uv_pivot (no rotation). */
-static float2 image_select_transform_uv_scaled(const ImageSelectTransformState *state, const float2 &uv)
+static float2 image_select_transform_uv_scaled(const ImageSelectTransformState *state,
+                                               const float2 &uv)
 {
   const float2 centered = uv - state->uv_pivot;
   return state->uv_pivot + centered * state->scale;
 }
 
 /** Map global UV to tile-local pixels on the tile that contains \a uv. */
-static bool image_select_transform_uv_to_containing_tile_px(const float2 &uv,
-                                                            const blender::Span<SelectionTileFragment> &fragments,
-                                                            float2 &r_tile_px,
-                                                            float &r_canvas_w,
-                                                            float &r_canvas_h)
+static bool image_select_transform_uv_to_containing_tile_px(
+    const float2 &uv,
+    const blender::Span<SelectionTileFragment> &fragments,
+    float2 &r_tile_px,
+    float &r_canvas_w,
+    float &r_canvas_h)
 {
   const int col = int(floorf(uv.x));
   const int row = int(floorf(uv.y));
@@ -250,6 +241,14 @@ static float2 image_select_transform_pivot_to_screen(const ImageSelectTransformS
   return float2(sx, sy);
 }
 
+/** Column-major 2D rotation: columns are the rotated X and Y axes. */
+static float2x2 image_select_rotation_matrix_2d(const float angle_rad)
+{
+  const float c = cosf(angle_rad);
+  const float s = sinf(angle_rad);
+  return float2x2(float2(c, s), float2(-s, c));
+}
+
 static float2 image_select_transform_uv_to_screen(const ImageSelectTransformState *state,
                                                   const ARegion *region,
                                                   const float2 &uv)
@@ -260,9 +259,7 @@ static float2 image_select_transform_uv_to_screen(const ImageSelectTransformStat
   const float2 scr(sx, sy);
   const float2 rot_center = image_select_transform_pivot_to_screen(state, region);
   const float2 v = scr - rot_center;
-  const float cos_r = cosf(state->rotation);
-  const float sin_r = sinf(state->rotation);
-  return float2(v.x * cos_r - v.y * sin_r, v.x * sin_r + v.y * cos_r) + rot_center;
+  return image_select_rotation_matrix_2d(state->rotation) * v + rot_center;
 }
 
 static float2 image_select_transform_anchor_to_screen(const ImageSelectTransformState *state,
@@ -273,7 +270,10 @@ static float2 image_select_transform_anchor_to_screen(const ImageSelectTransform
   return float2(sx, sy);
 }
 
-/** UV translation delta that keeps #image_select_transform_uv_scaled output unchanged when the pivot moves. */
+/**
+ * UV translation delta that keeps #image_select_transform_uv_scaled output unchanged when the
+ * pivot moves.
+ */
 static float2 image_select_transform_pivot_translation_compensation(const float2 &old_pivot,
                                                                     const float2 &new_pivot,
                                                                     const float2 &scale)
@@ -371,13 +371,6 @@ static float2 image_select_tile_px_to_screen(const ImageSelectTransformState *st
   return float2(sx, sy);
 }
 
-static float2x2 image_select_rotation_matrix_2d(const float angle_rad)
-{
-  const float c = cosf(angle_rad);
-  const float s = sinf(angle_rad);
-  return float2x2(float2(c, s), float2(-s, c));
-}
-
 /** Jacobian of tile-pixel -> screen (columns = screen delta per +1 px in X / Y). */
 static float2x2 image_select_pixel_to_screen_jacobian(const ImageSelectTransformState *state,
                                                       const ARegion *region,
@@ -401,15 +394,15 @@ static float2x2 image_select_rotation_pixel_from_screen(const float2x2 &pixel_to
                                                         const float rotation_rad,
                                                         bool *r_jacobian_ok)
 {
-  const float2x2 R_screen = image_select_rotation_matrix_2d(rotation_rad);
+  const float2x2 rot_screen = image_select_rotation_matrix_2d(rotation_rad);
   bool ok;
-  const float2x2 J_inv = math::invert(pixel_to_screen_jacobian, ok);
+  const float2x2 jacobian_inv = math::invert(pixel_to_screen_jacobian, ok);
   if (!ok) {
     *r_jacobian_ok = false;
-    return R_screen;
+    return rot_screen;
   }
   *r_jacobian_ok = true;
-  return J_inv * R_screen * pixel_to_screen_jacobian;
+  return jacobian_inv * rot_screen * pixel_to_screen_jacobian;
 }
 
 /**
@@ -441,14 +434,13 @@ static bool image_select_transform_screen_corners(const ImageSelectTransformStat
 
   const float2 scr_pivot = image_select_transform_pivot_to_screen(state, region);
 
-  const float cos_r = cosf(state->rotation);
-  const float sin_r = sinf(state->rotation);
+  const float2x2 rot = image_select_rotation_matrix_2d(state->rotation);
   for (int i = 0; i < 4; i++) {
     const float2 uv_scaled = image_select_transform_uv_scaled(state, uv_corners[i]);
     float sx, sy;
     ui::view2d_view_to_region_fl(&region->v2d, uv_scaled.x, uv_scaled.y, &sx, &sy);
     const float2 v = float2(sx, sy) - scr_pivot;
-    r_scr_corners[i] = float2(v.x * cos_r - v.y * sin_r, v.x * sin_r + v.y * cos_r) + scr_pivot;
+    r_scr_corners[i] = rot * v + scr_pivot;
   }
 
   if (r_scr_pivot) {
@@ -457,12 +449,14 @@ static bool image_select_transform_screen_corners(const ImageSelectTransformStat
   return true;
 }
 
-static void image_select_transform_cache_screen_coords(ImageSelectTransformState *state, ARegion *region)
+static void image_select_transform_cache_screen_coords(ImageSelectTransformState *state,
+                                                       ARegion *region)
 {
   if (!state || state->fragments.is_empty() || !region) {
     return;
   }
-  /* Draw callback is registered on #ARegionType; only update hit-test coords for the invoking region. */
+  /* Draw callback is registered on #ARegionType; only update hit-test coords for the invoking
+   * region. */
   if (state->owner_region && region != state->owner_region) {
     return;
   }
@@ -507,13 +501,12 @@ static void image_select_transform_fragment_uv_corners(const SelectionTileFragme
                                                        const ImageSelectTransformState *state,
                                                        float2 r_uv_corners[4])
 {
-  const int t_col = (frag.geom.tile_number - 1001) % 10;
-  const int t_row = (frag.geom.tile_number - 1001) / 10;
+  const float2 tile_uv = image_select_udim_tile_uv_origin(frag.geom.tile_number);
   const float tile_w = float(frag.geom.tile_size_px.x);
   const float tile_h = float(frag.geom.tile_size_px.y);
 
-  const float uv_x0 = float(t_col) + float(frag.geom.origin_px.x) / tile_w + state->uv_translation.x;
-  const float uv_y0 = float(t_row) + float(frag.geom.origin_px.y) / tile_h + state->uv_translation.y;
+  const float uv_x0 = tile_uv.x + float(frag.geom.origin_px.x) / tile_w + state->uv_translation.x;
+  const float uv_y0 = tile_uv.y + float(frag.geom.origin_px.y) / tile_h + state->uv_translation.y;
   const float uv_x1 = uv_x0 + float(frag.geom.size_px.x) / tile_w;
   const float uv_y1 = uv_y0 + float(frag.geom.size_px.y) / tile_h;
 
@@ -553,7 +546,9 @@ static void draw_select_transform_textured_quad(const float2 scr_coords[4], gpu:
   immUnbindProgram();
 }
 
-static void draw_select_transform_texture(const bContext * /*C*/, ARegion *region, void *clientdata)
+static void draw_select_transform_texture(const bContext * /*C*/,
+                                          ARegion *region,
+                                          void *clientdata)
 {
   ImageSelectTransformState *state = static_cast<ImageSelectTransformState *>(clientdata);
   if (!state || state->fragments.is_empty()) {
@@ -579,8 +574,9 @@ static void draw_select_transform_texture(const bContext * /*C*/, ARegion *regio
       scr_coords[i] = image_select_transform_uv_to_screen(state, region, uv_corners[i]);
     }
 
-    ImBuf *interior_ibuf = frag.preview.fragment_display_ibuf ? frag.preview.fragment_display_ibuf :
-                                                        frag.pixels.fragment_ibuf;
+    ImBuf *interior_ibuf = frag.preview.fragment_display_ibuf ?
+                               frag.preview.fragment_display_ibuf :
+                               frag.pixels.fragment_ibuf;
 
     gpu::Texture *&frag_tex = state->fragment_textures[frag_index];
     if (!frag_tex) {
@@ -598,8 +594,11 @@ static void draw_select_transform_texture(const bContext * /*C*/, ARegion *regio
     gpu::Texture *&feather_tex = state->fragment_feather_textures[frag_index];
     if (frag.preview.fragment_feather_display_ibuf && frag.edge_policy.use_outward_feather) {
       if (!feather_tex) {
-        feather_tex = IMB_create_gpu_texture(
-            "TransformFragmentFeather", frag.preview.fragment_feather_display_ibuf, true, false, false);
+        feather_tex = IMB_create_gpu_texture("TransformFragmentFeather",
+                                             frag.preview.fragment_feather_display_ibuf,
+                                             true,
+                                             false,
+                                             false);
         if (feather_tex) {
           GPU_texture_filter_mode(feather_tex, true);
         }
@@ -641,10 +640,7 @@ void image_select_transform_state_free(ImageSelectTransformState *state)
   if (state->owner_region && state->owner_region->runtime->gizmo_map) {
     WM_gizmomap_tag_refresh(state->owner_region->runtime->gizmo_map);
   }
-  if (state->draw_handle && state->owner_region_type) {
-    ED_region_draw_cb_exit(state->owner_region_type, state->draw_handle);
-    state->draw_handle = nullptr;
-  }
+  image_select_floating_draw_handle_clear(*state);
   for (gpu::Texture *tex : state->fragment_textures) {
     if (tex) {
       GPU_texture_free(tex);
@@ -663,8 +659,7 @@ void image_select_transform_state_free(ImageSelectTransformState *state)
 
 bool image_select_transform_is_floating(bContext *C)
 {
-  SpaceImage *sima = CTX_wm_space_image(C);
-  return sima && sima->runtime && sima->runtime->paint_select.transform != nullptr;
+  return image_select_transform_is_floating_in_space(CTX_wm_space_image(C));
 }
 
 static bool image_select_transform_floating_poll(bContext *C)
@@ -678,9 +673,9 @@ static bool image_select_transform_poll(bContext *C)
   if (!sima || !sima->runtime) {
     return false;
   }
-  ImageSelectTransformState *&g_transform_state = sima->runtime->paint_select.transform;
+  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
 
-  if (g_transform_state && sima == g_transform_state->owner_sima) {
+  if (image_select_floating_state_owns(state_ref, sima)) {
     return true;
   }
   /* Switch from floating move to transform (keymap / menu) without a canvas mask. */
@@ -696,8 +691,7 @@ static bool image_select_transform_poll(bContext *C)
   if (!sima->image) {
     return false;
   }
-  const Scene *scene = CTX_data_scene(C);
-  if (!scene->toolsettings->imapaint.use_selection_mask) {
+  if (!BKE_image_paint_selection_mask_has_any(sima->image)) {
     CTX_wm_operator_poll_msg_set(C, "No active selection mask");
     return false;
   }
@@ -708,13 +702,18 @@ static void image_select_transform_cancel(bContext *C, wmOperator *op)
 {
   /* Use the session state directly: with the long-lived modal, op->customdata may already
    * be stale if confirm/cancel exec ran before the modal received its final event. */
+  image_select_floating_drag_end(C, nullptr);
+  image_select_floating_status_clear(C);
   SpaceImage *sima = CTX_wm_space_image(C);
   if (sima && sima->runtime) {
-    ImageSelectTransformState *&g_transform_state = sima->runtime->paint_select.transform;
-    if (g_transform_state) {
-      image_select_transform_restore_source(C, g_transform_state);
-      image_select_transform_state_free(g_transform_state);
-      g_transform_state = nullptr;
+    ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
+    if (state_ref) {
+      if (state_ref->owner_area) {
+        ED_area_status_text(state_ref->owner_area, nullptr);
+      }
+      image_select_transform_restore_source(C, state_ref);
+      image_select_transform_state_free(state_ref);
+      state_ref = nullptr;
     }
   }
   op->customdata = nullptr;
@@ -722,20 +721,54 @@ static void image_select_transform_cancel(bContext *C, wmOperator *op)
 
 static void image_select_transform_commit(bContext *C, ImageSelectTransformState *state);
 
+void image_select_transform_session_end_for_takeover(bContext *C, SpaceImage *sima)
+{
+  if (!sima || !sima->runtime) {
+    return;
+  }
+  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
+  if (!state_ref) {
+    return;
+  }
+  ImageSelectTransformState *state = state_ref;
+  /* Cleared before the commit, not after: #image_select_transform_commit notifies and tags the
+   * image, and anything that looks the session up again in response must not find the state being
+   * torn down here. */
+  state_ref = nullptr;
+  if (state->owner_area) {
+    ED_area_status_text(state->owner_area, nullptr);
+  }
+  /* A handle drag may still be in progress when another tool takes over (the long-lived modal is
+   * left registered and exits on its next event, seeing a null state). Give the window its normal
+   * cursor and the status bar its normal text back here. */
+  image_select_floating_drag_end(C, state);
+  image_select_floating_status_clear(C);
+  image_select_transform_commit(C, state);
+  image_select_transform_state_free(state);
+  if (ARegion *region = CTX_wm_region(C)) {
+    if (region->runtime->gizmo_map) {
+      WM_gizmomap_tag_refresh(region->runtime->gizmo_map);
+    }
+  }
+}
+
 static wmOperatorStatus image_select_transform_confirm_exec(bContext *C, wmOperator * /*op*/)
 {
   SpaceImage *sima = CTX_wm_space_image(C);
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectTransformState *&g_transform_state = sima->runtime->paint_select.transform;
-  if (!g_transform_state) {
+  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
+  if (!state_ref) {
     return OPERATOR_CANCELLED;
   }
 
-  ImageSelectTransformState *state = g_transform_state;
+  ImageSelectTransformState *state = state_ref;
+  ED_area_status_text(state->owner_area, nullptr);
+  image_select_floating_status_clear(C);
 
-  PointerRNA props_ptr = WM_operator_properties_create_ptr(WM_operatortype_find("PAINT_OT_image_select_transform", false));
+  PointerRNA props_ptr = WM_operator_properties_create_ptr(
+      WM_operatortype_find("PAINT_OT_image_select_transform", false));
   float translation[2] = {state->uv_translation.x, state->uv_translation.y};
   float scale[2] = {state->scale.x, state->scale.y};
   float uv_anchor[2] = {state->uv_anchor.x, state->uv_anchor.y};
@@ -744,7 +777,7 @@ static wmOperatorStatus image_select_transform_confirm_exec(bContext *C, wmOpera
   RNA_float_set_array(&props_ptr, "scale", scale);
   RNA_float_set_array(&props_ptr, "uv_anchor", uv_anchor);
 
-  g_transform_state = nullptr;
+  state_ref = nullptr;
   image_select_transform_restore_source(C, state);
   image_select_transform_state_free(state);
   if (ARegion *region = CTX_wm_region(C)) {
@@ -753,7 +786,8 @@ static wmOperatorStatus image_select_transform_confirm_exec(bContext *C, wmOpera
     }
   }
 
-  WM_operator_name_call(C, "PAINT_OT_image_select_transform", wm::OpCallContext::ExecDefault, &props_ptr, nullptr);
+  WM_operator_name_call(
+      C, "PAINT_OT_image_select_transform", wm::OpCallContext::ExecDefault, &props_ptr, nullptr);
   WM_operator_properties_free(&props_ptr);
 
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
@@ -766,13 +800,15 @@ static wmOperatorStatus image_select_transform_cancel_exec(bContext *C, wmOperat
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectTransformState *&g_transform_state = sima->runtime->paint_select.transform;
-  if (!g_transform_state) {
+  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
+  if (!state_ref) {
     return OPERATOR_CANCELLED;
   }
 
-  ImageSelectTransformState *state = g_transform_state;
-  g_transform_state = nullptr;
+  ImageSelectTransformState *state = state_ref;
+  ED_area_status_text(state->owner_area, nullptr);
+  image_select_floating_status_clear(C);
+  state_ref = nullptr;
   image_select_transform_restore_source(C, state);
   image_select_transform_state_free(state);
   if (ARegion *region = CTX_wm_region(C)) {
@@ -894,7 +930,10 @@ static ImageSelectTransformState::HandleType image_select_transform_handle_to_in
 
 bool image_select_transform_is_floating_in_space(const SpaceImage *sima)
 {
-  return sima && sima->runtime && sima->runtime->paint_select.transform != nullptr;
+  if (!sima || !sima->runtime) {
+    return false;
+  }
+  return image_select_floating_state_owns(sima->runtime->paint_select.transform, sima);
 }
 
 ImageSelectTransformState *image_select_transform_state_get(SpaceImage *sima)
@@ -1079,8 +1118,11 @@ void image_select_transform_apply_handle(bContext *C,
   ui::view2d_region_to_view(&region->v2d, mouse_co.x, mouse_co.y, &mouse_uv.x, &mouse_uv.y);
 
   float2 mouse_start_uv;
-  ui::view2d_region_to_view(
-      &region->v2d, state->mouse_start_pos.x, state->mouse_start_pos.y, &mouse_start_uv.x, &mouse_start_uv.y);
+  ui::view2d_region_to_view(&region->v2d,
+                            state->mouse_start_pos.x,
+                            state->mouse_start_pos.y,
+                            &mouse_start_uv.x,
+                            &mouse_start_uv.y);
 
   float uv_x_min, uv_y_min, uv_x_max, uv_y_max;
   if (!image_select_transform_source_uv_bounds(state, uv_x_min, uv_y_min, uv_x_max, uv_y_max)) {
@@ -1114,8 +1156,11 @@ void image_select_transform_apply_handle(bContext *C,
     else {
       state->rotation = raw_angle;
     }
+    /* Kept ASCII in source (no literal degree sign) so the file stays 7-bit; translations are free
+     * to use the real symbol. */
     char status_str[128];
-    SNPRINTF(status_str, "Rotation: %.2f°", state->rotation * 180.0f / float(M_PI));
+    SNPRINTF_UTF8(
+        status_str, IFACE_("Rotation: %.2f deg"), state->rotation * 180.0f / float(M_PI));
     ED_area_status_text(state->owner_area ? state->owner_area : CTX_wm_area(C), status_str);
   }
   else if (active == ImageSelectTransformState::HANDLE_ANCHOR) {
@@ -1192,29 +1237,26 @@ void image_select_transform_apply_handle(bContext *C,
     }
 
     const float2 pivot_start = state->drag_start_anchor;
-    const float cos_r_start = cosf(state->drag_start_rotation);
-    const float sin_r_start = sinf(state->drag_start_rotation);
+    const float2x2 rot_start = image_select_rotation_matrix_2d(state->drag_start_rotation);
     auto apply_forward_start_uv = [&](const float2 uv_pt) -> float2 {
       float2 centered = uv_pt - pivot_start;
       centered *= state->drag_start_scale;
-      const float2 rotated = float2(centered.x * cos_r_start - centered.y * sin_r_start,
-                                    centered.x * sin_r_start + centered.y * cos_r_start);
-      return rotated + pivot_start;
+      return rot_start * centered + pivot_start;
     };
-    const float2 H_start = apply_forward_start_uv(float2(uv_x_min, uv_y_min) + uv_local);
+    const float2 handle_start_uv = apply_forward_start_uv(float2(uv_x_min, uv_y_min) + uv_local);
 
     const float2 ref_anchor = state->drag_start_anchor;
-    const float2 V_curr = mouse_uv - ref_anchor;
-    const float2 V_start = H_start - ref_anchor;
+    const float2 vec_curr = mouse_uv - ref_anchor;
+    const float2 vec_start = handle_start_uv - ref_anchor;
 
-    const float rad = state->drag_start_rotation;
-    const float2 Ux(cosf(rad), sinf(rad));
-    const float2 Uy(-sinf(rad), cosf(rad));
+    /* Columns of the start rotation are the local axes the drag is projected onto. */
+    const float2 axis_x = rot_start[0];
+    const float2 axis_y = rot_start[1];
 
-    const float proj_start_x = math::dot(V_start, Ux);
-    const float proj_start_y = math::dot(V_start, Uy);
-    const float proj_curr_x = math::dot(V_curr, Ux);
-    const float proj_curr_y = math::dot(V_curr, Uy);
+    const float proj_start_x = math::dot(vec_start, axis_x);
+    const float proj_start_y = math::dot(vec_start, axis_y);
+    const float proj_curr_x = math::dot(vec_curr, axis_x);
+    const float proj_curr_y = math::dot(vec_curr, axis_y);
 
     float sx = state->drag_start_scale.x;
     float sy = state->drag_start_scale.y;
@@ -1324,10 +1366,10 @@ bool image_select_transform_calc_gizmo_matrices(const bContext *C,
    *
    * Proof (BL corner, local = (-0.5, -0.5)):
    *   center = BL + 0.5*e0 + 0.5*e1
-   *   M * (-0.5,-0.5) + center = -0.5*e0 - 0.5*e1 + BL + 0.5*e0 + 0.5*e1 = BL  ✓
+   *   M * (-0.5,-0.5) + center = -0.5*e0 - 0.5*e1 + BL + 0.5*e0 + 0.5*e1 = BL  OK
    *
-   * Because the corners come from a screen-space rotation, e0 ⊥ e1 is always guaranteed,
-   * so the cage stays a proper rectangle for any rotation angle and any view2d aspect ratio
+   * Because the corners come from a screen-space rotation, e0 is always guaranteed perpendicular
+   * to e1, so the cage stays a proper rectangle for any rotation angle and any view2d aspect ratio
    * (including non-square UDIM tiles and asymmetric zoom). */
   unit_m4(r_mats->matrix_space);
   unit_m4(r_mats->matrix_basis);
@@ -1382,11 +1424,7 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
     return;
   }
 
-  UndoStack *ustack = ED_undo_stack_get();
-  ImageUndoStep *us_open = (ustack && ustack->step_init &&
-                            ustack->step_init->type == BKE_UNDOSYS_TYPE_IMAGE) ?
-                               reinterpret_cast<ImageUndoStep *>(ustack->step_init) :
-                               nullptr;
+  ImageUndoStep *us_open = image_select_undo_session_step_get();
 
   blender::Set<int> snapshotted_tiles;
   for (const SelectionTileFragment &frag_init : state->fragments) {
@@ -1403,8 +1441,9 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
     const int canvas_w = frag.geom.tile_size_px.x;
     const int canvas_h = frag.geom.tile_size_px.y;
     const bool is_float = frag.pixels.fragment_ibuf->float_buffer.data != nullptr;
-    const int src_col = (frag.geom.tile_number - 1001) % 10;
-    const int src_row = (frag.geom.tile_number - 1001) / 10;
+    const int2 src_col_row = image_select_udim_tile_col_row(frag.geom.tile_number);
+    const int src_col = src_col_row.x;
+    const int src_row = src_col_row.y;
 
     const float2 pixel_translation = float2(
         state->uv_translation.x * float(canvas_w),
@@ -1415,204 +1454,253 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
     /* Build the forward transform matrix: fragment_local -> source_tile_pixel_space. */
     const float2 pivot_commit = pixel_anchor;
 
-  float3x3 forward_matrix;
-  bool jac_used = false;
-  {
-    float2x2 R_linear = image_select_rotation_matrix_2d(state->rotation);
-    ARegion *region = state->owner_region ? state->owner_region : CTX_wm_region(C);
-    if (region) {
-      bool jac_ok;
-      const float2x2 J = image_select_pixel_to_screen_jacobian(
-          state, region, pivot_commit, float(canvas_w), float(canvas_h));
-      R_linear = image_select_rotation_pixel_from_screen(J, state->rotation, &jac_ok);
-      jac_used = jac_ok;
+    float3x3 forward_matrix;
+    bool jac_used = false;
+    {
+      float2x2 rot_linear = image_select_rotation_matrix_2d(state->rotation);
+      ARegion *region = state->owner_region ? state->owner_region : CTX_wm_region(C);
+      if (region) {
+        bool jac_ok;
+        const float2x2 jacobian = image_select_pixel_to_screen_jacobian(
+            state, region, pivot_commit, float(canvas_w), float(canvas_h));
+        rot_linear = image_select_rotation_pixel_from_screen(jacobian, state->rotation, &jac_ok);
+        jac_used = jac_ok;
+      }
+
+      const float2x2 mat_scale = math::from_scale<float2x2>(state->scale);
+      const float2x2 mat_linear = rot_linear * mat_scale;
+      /* Match preview/gizmo order: translate in UV/pixel space, then scale+rotate around pivot.
+       * p' = pivot + mat_linear * ((origin + p_local + translation) - pivot). */
+      const float2 origin_translated = float2(float(frag.geom.origin_px.x),
+                                              float(frag.geom.origin_px.y)) +
+                                       pixel_translation;
+      const float2 linear_offset = origin_translated - pivot_commit;
+      const float2 trans_vec = pivot_commit + mat_linear * linear_offset;
+      forward_matrix[0] = float3(mat_linear[0], 0.0f);
+      forward_matrix[1] = float3(mat_linear[1], 0.0f);
+      forward_matrix[2] = float3(trans_vec, 1.0f);
+    }
+    /* IMB_transform expects a backward matrix: dest_pixel -> fragment_local. */
+    const float3x3 backward_matrix_src = math::invert(forward_matrix);
+
+    const float2 uv_origin_src = float2(float(src_col), float(src_row));
+
+    /* Compute the UV-space AABB of the transformed fragment by projecting all four corners
+     * through the forward matrix into source-tile pixel space, then into UV space. */
+    const float2 corners_local[4] = {
+        {0.0f, 0.0f},
+        {float(frag.geom.size_px.x), 0.0f},
+        {float(frag.geom.size_px.x), float(frag.geom.size_px.y)},
+        {0.0f, float(frag.geom.size_px.y)}};
+    float2 uv_min = float2(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
+    float2 uv_max = float2(std::numeric_limits<float>::lowest(),
+                           std::numeric_limits<float>::lowest());
+    for (const float2 &corner : corners_local) {
+      const float3 src_px = math::transform_point(forward_matrix,
+                                                  float3(corner.x, corner.y, 1.0f));
+      const float2 uv = float2(src_px.x / float(canvas_w) + uv_origin_src.x,
+                               src_px.y / float(canvas_h) + uv_origin_src.y);
+      uv_min = math::min(uv_min, uv);
+      uv_max = math::max(uv_max, uv);
     }
 
-    const float2x2 S = math::from_scale<float2x2>(state->scale);
-    const float2x2 L = R_linear * S;
-    const float a = L[0][0];
-    const float b = L[1][0];
-    const float c = L[0][1];
-    const float d = L[1][1];
-    /* Match preview/gizmo order: translate in UV/pixel space, then scale+rotate around pivot.
-     * p' = pivot + L * ((origin + p_local + translation) - pivot). */
-    const float2 origin_translated = float2(float(frag.geom.origin_px.x), float(frag.geom.origin_px.y)) +
-                                     pixel_translation;
-    const float2 linear_offset = origin_translated - pivot_commit;
-    const float2 trans_vec = pivot_commit + L * linear_offset;
-    forward_matrix[0] = float3(a, c, 0.0f);
-    forward_matrix[1] = float3(b, d, 0.0f);
-    forward_matrix[2] = float3(trans_vec.x, trans_vec.y, 1.0f);
-  }
-  /* IMB_transform expects a backward matrix: dest_pixel -> fragment_local. */
-  const float3x3 backward_matrix_src = math::invert(forward_matrix);
+    const rctf src_crop{0.0f, float(frag.geom.size_px.x), 0.0f, float(frag.geom.size_px.y)};
 
-  const float2 uv_origin_src = float2(float(src_col), float(src_row));
+    for (ImageTile *dest_tile : ListBaseWrapper<ImageTile>(ima->tiles)) {
+      const int dest_tile_num = dest_tile->tile_number;
+      const int2 dst_col_row = image_select_udim_tile_col_row(dest_tile_num);
+      const int dst_col = dst_col_row.x;
+      const int dst_row = dst_col_row.y;
 
-  /* Compute the UV-space AABB of the transformed fragment by projecting all four corners
-   * through the forward matrix into source-tile pixel space, then into UV space. */
-  const float2 corners_local[4] = {
-      {0.0f, 0.0f},
-      {float(frag.geom.size_px.x), 0.0f},
-      {float(frag.geom.size_px.x), float(frag.geom.size_px.y)},
-      {0.0f, float(frag.geom.size_px.y)}};
-  float2 uv_min = float2(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
-  float2 uv_max = float2(std::numeric_limits<float>::lowest(),
-                         std::numeric_limits<float>::lowest());
-  for (const float2 &corner : corners_local) {
-    const float3 src_px = math::transform_point(forward_matrix, float3(corner.x, corner.y, 1.0f));
-    const float2 uv = float2(src_px.x / float(canvas_w) + uv_origin_src.x,
-                             src_px.y / float(canvas_h) + uv_origin_src.y);
-    uv_min = math::min(uv_min, uv);
-    uv_max = math::max(uv_max, uv);
-  }
+      if (uv_max.x <= float(dst_col) || uv_min.x >= float(dst_col + 1) ||
+          uv_max.y <= float(dst_row) || uv_min.y >= float(dst_row + 1)) {
+        continue;
+      }
 
-  const rctf src_crop{0.0f, float(frag.geom.size_px.x), 0.0f, float(frag.geom.size_px.y)};
+      iuser.tile = dest_tile_num;
+      ImBuf *dest_ibuf = BKE_image_acquire_ibuf(ima, &iuser, &lock);
+      if (!dest_ibuf) {
+        continue;
+      }
 
-  for (ImageTile *dest_tile : ListBaseWrapper<ImageTile>(ima->tiles)) {
-    const int dest_tile_num = dest_tile->tile_number;
-    const int dst_col = (dest_tile_num - 1001) % 10;
-    const int dst_row = (dest_tile_num - 1001) / 10;
+      /* Register the pre-state of every destination tile that differs from the source tile.
+       * The source tile was already snapshotted (with its original pixels) inside
+       * lift_source, so re-snapshotting it here would overwrite that with the cleared
+       * (hole) state and break undo for the source tile as well. */
+      if (us_open && !snapshotted_tiles.contains(dest_tile_num)) {
+        ED_image_undo_push(ima, dest_ibuf, &iuser, us_open);
+        ED_image_undo_capture_selection_mask(ima, dest_tile_num);
+        snapshotted_tiles.add(dest_tile_num);
+      }
 
-    if (uv_max.x <= float(dst_col) || uv_min.x >= float(dst_col + 1) ||
-        uv_max.y <= float(dst_row) || uv_min.y >= float(dst_row + 1)) {
-      continue;
-    }
+      const int dest_w = dest_ibuf->x;
+      const int dest_h = dest_ibuf->y;
 
-    iuser.tile = dest_tile_num;
-    ImBuf *dest_ibuf = BKE_image_acquire_ibuf(ima, &iuser, &lock);
-    if (!dest_ibuf) {
-      continue;
-    }
+      /* Build the mapping from destination-tile pixel -> source-tile pixel.
+       *
+       * A destination pixel (px, py) has UV: (px/dest_w + dst_col, py/dest_h + dst_row).
+       * The same UV in source-tile pixel space is:
+       *   src_x = px * (canvas_w / dest_w) + (dst_col - src_col) * canvas_w
+       *   src_y = py * (canvas_h / dest_h) + (dst_row - src_row) * canvas_h
+       *
+       * This is a scale + translate (not a pure translate) when resolutions differ.
+       * In column-major homogeneous 3x3: M[col][row].
+       */
+      const float sx = float(canvas_w) / float(dest_w);
+      const float sy = float(canvas_h) / float(dest_h);
+      const float tx = float(dst_col - src_col) * float(canvas_w);
+      const float ty = float(dst_row - src_row) * float(canvas_h);
 
-    /* Register the pre-state of every destination tile that differs from the source tile.
-     * The source tile was already snapshotted (with its original pixels) inside
-     * lift_source, so re-snapshotting it here would overwrite that with the cleared
-     * (hole) state and break undo for the source tile as well. */
-    if (us_open && !snapshotted_tiles.contains(dest_tile_num)) {
-      ED_image_undo_push(ima, dest_ibuf, &iuser, us_open);
-      ED_image_undo_capture_selection_mask(ima, dest_tile_num);
-      snapshotted_tiles.add(dest_tile_num);
-    }
+      float3x3 mat_dest_to_src = float3x3::identity();
+      mat_dest_to_src[0] = float3(sx, 0.0f, 0.0f);
+      mat_dest_to_src[1] = float3(0.0f, sy, 0.0f);
+      mat_dest_to_src[2] = float3(tx, ty, 1.0f);
 
-    const int dest_w = dest_ibuf->x;
-    const int dest_h = dest_ibuf->y;
+      /* backward_dest maps: dest_tile_px -> src_tile_px -> fragment_local. */
+      const float3x3 backward_dest = backward_matrix_src * mat_dest_to_src;
 
-    /* Build the mapping from destination-tile pixel -> source-tile pixel.
-     *
-     * A destination pixel (px, py) has UV: (px/dest_w + dst_col, py/dest_h + dst_row).
-     * The same UV in source-tile pixel space is:
-     *   src_x = px * (canvas_w / dest_w) + (dst_col - src_col) * canvas_w
-     *   src_y = py * (canvas_h / dest_h) + (dst_row - src_row) * canvas_h
-     *
-     * This is a scale + translate (not a pure translate) when resolutions differ.
-     * In column-major homogeneous 3x3: M[col][row].
-     */
-    const float sx = float(canvas_w) / float(dest_w);
-    const float sy = float(canvas_h) / float(dest_h);
-    const float tx = float(dst_col - src_col) * float(canvas_w);
-    const float ty = float(dst_row - src_row) * float(canvas_h);
+      /* Work on the sub-rectangle of the destination tile the fragment can actually reach instead
+       * of three tile-sized buffers per fragment per tile. `uv_min` / `uv_max` already bound the
+       * transformed fragment in UV space, so converting them into this tile's pixel space gives
+       * the footprint directly.
+       *
+       * The margin covers two things: the outward feather, which #compute_blend_mask_to_4ch
+       * spreads up to `blend_radius_px + 1` pixels past the binary mask, and one pixel of slack
+       * for the truncation inside IMB_transform's edge anti-aliasing. Because the region contains
+       * every pixel the transformed mask can set plus that margin, the feather computed over the
+       * smaller buffer is identical to the full-tile one: pixels beyond the margin have zero
+       * weight anyway, so the buffer border being treated as "nothing selected" is the correct
+       * answer there. */
+      const int region_pad = std::max(1, frag.edge_policy.blend_radius_px + 2);
+      const int reg_x0 = std::max(
+          0, int(floorf((uv_min.x - float(dst_col)) * float(dest_w))) - region_pad);
+      const int reg_y0 = std::max(
+          0, int(floorf((uv_min.y - float(dst_row)) * float(dest_h))) - region_pad);
+      const int reg_x1 = std::min(
+          dest_w, int(ceilf((uv_max.x - float(dst_col)) * float(dest_w))) + region_pad);
+      const int reg_y1 = std::min(
+          dest_h, int(ceilf((uv_max.y - float(dst_row)) * float(dest_h))) + region_pad);
+      if (reg_x1 <= reg_x0 || reg_y1 <= reg_y0) {
+        BKE_image_release_ibuf(ima, dest_ibuf, lock);
+        continue;
+      }
+      const int reg_w = reg_x1 - reg_x0;
+      const int reg_h = reg_y1 - reg_y0;
+      const int region_origin[2] = {reg_x0, reg_y0};
 
-    float3x3 M_dest_to_src = float3x3::identity();
-    M_dest_to_src[0] = float3(sx, 0.0f, 0.0f);
-    M_dest_to_src[1] = float3(0.0f, sy, 0.0f);
-    M_dest_to_src[2] = float3(tx, ty, 1.0f);
+      /* IMB_transform indexes destination pixels from zero with no origin concept, so shifting the
+       * destination is a pure re-indexing: folding a translation by the region origin (in
+       * destination space, hence on the right) into the backward matrix reproduces the full-tile
+       * result exactly within the region. Edge anti-aliasing follows along because it derives its
+       * geometry from `src_crop` through the inverse of this same matrix. Integer offsets only --
+       * a fractional one would change the truncation the AA rasterizer performs. */
+      float3x3 mat_region_offset = float3x3::identity();
+      mat_region_offset[2] = float3(float(reg_x0), float(reg_y0), 1.0f);
+      const float3x3 backward_region = backward_dest * mat_region_offset;
 
-    /* backward_dest maps: dest_tile_px -> src_tile_px -> fragment_local. */
-    const float3x3 backward_dest = backward_matrix_src * M_dest_to_src;
-    /* temp_pixels must match the destination buffer type -- IMB_transform does not support
-     * mixed src/dst types. */
-    ImBuf *temp_pixels = IMB_allocImBuf(
-        dest_ibuf->x, dest_ibuf->y, is_float ? ImBufFlags::FloatData : ImBufFlags::ByteData);
-    ImBuf *temp_mask = IMB_allocImBuf(dest_ibuf->x, dest_ibuf->y, ImBufFlags::FloatData);
-    ImBuf *temp_blend_mask = IMB_allocImBuf(dest_ibuf->x, dest_ibuf->y, ImBufFlags::FloatData);
-    if (!temp_pixels || !temp_mask || !temp_blend_mask) {
-      /* Out of memory: free any partial allocations and skip this tile. */
+      /* temp_pixels must match the destination buffer type -- IMB_transform does not support
+       * mixed src/dst types. */
+      ImBuf *temp_pixels = IMB_allocImBuf(
+          reg_w, reg_h, is_float ? ImBufFlags::FloatData : ImBufFlags::ByteData);
+      ImBuf *temp_mask = IMB_allocImBuf(reg_w, reg_h, ImBufFlags::FloatData);
+      ImBuf *temp_blend_mask = IMB_allocImBuf(reg_w, reg_h, ImBufFlags::FloatData);
+      if (!temp_pixels || !temp_mask || !temp_blend_mask) {
+        /* Out of memory: free any partial allocations and skip this tile. */
+        IMB_freeImBuf(temp_pixels);
+        IMB_freeImBuf(temp_mask);
+        IMB_freeImBuf(temp_blend_mask);
+        BKE_image_release_ibuf(ima, dest_ibuf, lock);
+        continue;
+      }
+      temp_pixels->channels = 4;
+      IMB_rectfill_alpha(temp_pixels, 0.0f);
+
+      /* Fill temp_mask red channel (index 0) with either transform result or full opacity. */
+      float *fill_data = temp_mask->float_data_for_write();
+      const int fill_count = reg_w * reg_h;
+      for (int i = 0; i < fill_count; i++) {
+        fill_data[i * 4 + 0] = 0.0f;
+      }
+
+      IMB_transform(frag.pixels.fragment_ibuf, temp_pixels, IMB_TRANSFORM_MODE_CROP_SRC,
+                    IMB_FILTER_BILINEAR, backward_region, &src_crop);
+
+      /* Transform the fragment selection mask into temp_mask using the same matrix and crop as the
+       * pixel transform above.  The mask and pixel transforms must stay in sync: any dest pixel
+       * that is NOT written to the canvas (because the pixel transform discarded it) must also
+       * receive a zero mask value so global_mask does not mark it as selectable for future brush
+       * strokes.
+       *
+       * IMB_FILTER_NEAREST is intentional here (not BILINEAR like the pixel transform).
+       * IMB_transform with BILINEAR + CROP_SRC calls edge_aa() after rasterisation, which
+       * multiplies boundary pixels by a sub-pixel coverage factor (typically 0.1..0.9).  That
+       * turns the binary 0/1 selection mask into soft values at the boundary: pixels just inside
+       * the rotated/translated region get mask ~= 0.3..0.5, falling below the 0.5 visual threshold
+       * while remaining > 0.  The selection overlay shows those pixels as unselected, but the
+       * paint brush still reaches them -- the user sees strokes bleeding outside the visible
+       * selection boundary.  NEAREST skips edge_aa entirely, keeping global_mask strictly 0 or 1
+       * so the brush constraint matches the visual selection boundary exactly. */
+      if (frag.pixels.fragment_mask_ibuf) {
+        IMB_transform(frag.pixels.fragment_mask_ibuf, temp_mask, IMB_TRANSFORM_MODE_CROP_SRC,
+                      IMB_FILTER_NEAREST, backward_region, &src_crop);
+      }
+      else {
+        float *mask_fill = temp_mask->float_data_for_write();
+        for (int i = 0; i < fill_count; i++) {
+          mask_fill[i * 4 + 0] = 1.0f;
+        }
+      }
+
+      /* Outward feather from the destination-grid binary mask (extends past the selection
+       * edge). */
+      float *blend_fill = temp_blend_mask->float_data_for_write();
+      BKE_image_paint_selection_compute_blend_mask_to_4ch(temp_mask->float_buffer.data,
+                                                          reg_w,
+                                                          reg_h,
+                                                          blend_fill,
+                                                          4,
+                                                          frag.edge_policy);
+
+      /* Alpha-blend the transformed fragment onto the destination canvas.
+       * blend = mask * fragment_alpha so partially-transparent pixels are respected. */
+      image_select_blend_buffer_into_canvas_at(
+          dest_ibuf, temp_pixels, temp_blend_mask, region_origin);
+
+      /* Merge the transformed selection mask into the destination tile's runtime mask. */
+      ImBuf *global_mask = BKE_image_paint_selection_mask_lookup(ima, dest_tile_num);
+      if (!global_mask) {
+        /* If the original selection didn't touch this tile, there may be no runtime mask yet.
+         * Still create one so the merged result can be inspected and subsequent ops see it. */
+        global_mask = BKE_image_paint_selection_mask_get(
+            ima, dest_tile_num, dest_ibuf->x, dest_ibuf->y);
+      }
+
+      /* The merge indexes the runtime mask with destination-tile strides, so it may only run when
+       * the mask really has that resolution. A mask left over from a different resolution would be
+       * written past its allocation; skip the merge (pixels stay committed, the mask stays stale)
+       * rather than corrupting the heap. Only the region is merged: outside it the transformed
+       * mask is zero, so those pixels would be unchanged anyway. */
+      if (global_mask && image_select_mask_matches(global_mask, dest_ibuf)) {
+        float *global_mask_data = global_mask->float_data_for_write();
+        const float *add_data = temp_mask->float_buffer.data;
+        for (int y = 0; y < reg_h; y++) {
+          for (int x = 0; x < reg_w; x++) {
+            const float add = add_data[(int64_t(y) * reg_w + x) * 4 + 0];
+            float &dst = global_mask_data[int64_t(y + reg_y0) * dest_w + (x + reg_x0)];
+            dst = std::clamp(dst + add, 0.0f, 1.0f);
+          }
+        }
+        global_mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
+      }
+
       IMB_freeImBuf(temp_pixels);
       IMB_freeImBuf(temp_mask);
       IMB_freeImBuf(temp_blend_mask);
+
+      dest_ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
+      BKE_image_mark_dirty(ima, dest_ibuf);
       BKE_image_release_ibuf(ima, dest_ibuf, lock);
-      continue;
     }
-    temp_pixels->channels = 4;
-    IMB_rectfill_alpha(temp_pixels, 0.0f);
-
-    /* Fill temp_mask red channel (index 0) with either transform result or full opacity. */
-    float *fill_data = temp_mask->float_data_for_write();
-    const int fill_count = dest_ibuf->x * dest_ibuf->y;
-    for (int i = 0; i < fill_count; i++) {
-      fill_data[i * 4 + 0] = 0.0f;
-    }
-
-    IMB_transform(frag.pixels.fragment_ibuf, temp_pixels, IMB_TRANSFORM_MODE_CROP_SRC,
-                  IMB_FILTER_BILINEAR, backward_dest, &src_crop);
-
-    /* Transform the fragment selection mask into temp_mask using the same matrix and crop as the
-     * pixel transform above.  The mask and pixel transforms must stay in sync: any dest pixel
-     * that is NOT written to the canvas (because the pixel transform discarded it) must also
-     * receive a zero mask value so global_mask does not mark it as selectable for future brush
-     * strokes.
-     *
-     * IMB_FILTER_NEAREST is intentional here (not BILINEAR like the pixel transform).
-     * IMB_transform with BILINEAR + CROP_SRC calls edge_aa() after rasterisation, which
-     * multiplies boundary pixels by a sub-pixel coverage factor (typically 0.1..0.9).  That
-     * turns the binary 0/1 selection mask into soft values at the boundary: pixels just inside
-     * the rotated/translated region get mask ≈ 0.3..0.5, falling below the 0.5 visual threshold
-     * while remaining > 0.  The selection overlay shows those pixels as unselected, but the paint
-     * brush still reaches them -- the user sees strokes bleeding outside the visible selection
-     * boundary.  NEAREST skips edge_aa entirely, keeping global_mask strictly 0 or 1 so the
-     * brush constraint matches the visual selection boundary exactly. */
-    if (frag.pixels.fragment_mask_ibuf) {
-      IMB_transform(frag.pixels.fragment_mask_ibuf, temp_mask, IMB_TRANSFORM_MODE_CROP_SRC,
-                    IMB_FILTER_NEAREST, backward_dest, &src_crop);
-    }
-    else {
-      float *mask_fill = temp_mask->float_data_for_write();
-      for (int i = 0; i < fill_count; i++) {
-        mask_fill[i * 4 + 0] = 1.0f;
-      }
-    }
-
-    /* Outward feather from the destination-grid binary mask (extends past the selection edge). */
-    float *blend_fill = temp_blend_mask->float_data_for_write();
-    BKE_image_paint_selection_compute_blend_mask_to_4ch(temp_mask->float_buffer.data,
-                                                        dest_ibuf->x,
-                                                        dest_ibuf->y,
-                                                        blend_fill,
-                                                        4,
-                                                        frag.edge_policy);
-
-    const int total_pixels = dest_ibuf->x * dest_ibuf->y;
-
-    /* Alpha-blend the transformed fragment onto the destination canvas.
-     * blend = mask * fragment_alpha so partially-transparent pixels are respected. */
-    image_select_blend_buffer_into_canvas(dest_ibuf, temp_pixels, temp_blend_mask);
-
-    /* Merge the transformed selection mask into the destination tile's runtime mask. */
-    ImBuf *global_mask = BKE_image_paint_selection_mask_lookup(ima, dest_tile_num);
-    if (!global_mask) {
-      /* If the original selection didn't touch this tile, there may be no runtime mask yet.
-       * Still create one so the merged result can be inspected and subsequent ops see it. */
-      global_mask = BKE_image_paint_selection_mask_get(ima, dest_tile_num, dest_ibuf->x, dest_ibuf->y);
-    }
-
-    if (global_mask) {
-      float *g_mask = global_mask->float_data_for_write();
-      for (int i = 0; i < total_pixels; i++) {
-        const float add = temp_mask->float_buffer.data[i * 4 + 0];
-        g_mask[i] = std::clamp(g_mask[i] + add, 0.0f, 1.0f);
-      }
-      global_mask->userflags |= IB_DISPLAY_BUFFER_INVALID;
-    }
-
-    IMB_freeImBuf(temp_pixels);
-    IMB_freeImBuf(temp_mask);
-    IMB_freeImBuf(temp_blend_mask);
-
-    dest_ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
-    BKE_image_mark_dirty(ima, dest_ibuf);
-    BKE_image_release_ibuf(ima, dest_ibuf, lock);
-  }
   }
 
   BKE_image_partial_update_mark_full_update(ima);
@@ -1624,11 +1712,12 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
   WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
 }
 
-static wmOperatorStatus image_select_transform_start_drag_gesture(bContext *C,
-                                                                wmOperator *op,
-                                                                ImageSelectTransformState *state,
-                                                                const wmEvent *event,
-                                                                ImageSelectTransformState::HandleType hit)
+static wmOperatorStatus image_select_transform_start_drag_gesture(
+    bContext *C,
+    wmOperator *op,
+    ImageSelectTransformState *state,
+    const wmEvent *event,
+    ImageSelectTransformState::HandleType hit)
 {
   image_select_transform_begin_drag(
       state, event, static_cast<ImageSelectTransformHandleType>(int(hit)));
@@ -1650,12 +1739,12 @@ static wmOperatorStatus image_select_transform_drag_invoke(bContext *C,
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectTransformState *const g_transform_state = sima->runtime->paint_select.transform;
-  if (!g_transform_state || g_transform_state->owner_sima != sima) {
+  ImageSelectTransformState *const stored_state = sima->runtime->paint_select.transform;
+  if (!stored_state || stored_state->owner_sima != sima) {
     return OPERATOR_CANCELLED;
   }
 
-  ImageSelectTransformState *state = g_transform_state;
+  ImageSelectTransformState *state = stored_state;
   ARegion *region = CTX_wm_region(C);
   if (region) {
     image_select_transform_cache_screen_coords(state, region);
@@ -1676,21 +1765,35 @@ static wmOperatorStatus image_select_transform_exec(bContext *C, wmOperator *op)
   if (!sima || !sima->image || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  
-  ImageSelectTransformState *&g_transform_state = sima->runtime->paint_select.transform;
-  if (g_transform_state) {
-    image_select_transform_restore_source(C, g_transform_state);
-    image_select_transform_state_free(g_transform_state);
-    g_transform_state = nullptr;
+
+  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
+  if (state_ref) {
+    image_select_transform_restore_source(C, state_ref);
+    image_select_transform_state_free(state_ref);
+    state_ref = nullptr;
   }
+
+  /* This exec path lifts and commits in one go, opening an undo step in between, so every other
+   * tool's session has to be ended first. See #image_select_floating_sessions_end. */
+  image_select_floating_sessions_end(C,
+                                     sima,
+                                     IMAGE_SELECT_FLOATING_TOOL_MOVE |
+                                         IMAGE_SELECT_FLOATING_TOOL_GRADIENT |
+                                         IMAGE_SELECT_FLOATING_TOOL_WARP);
 
   Image *ima = sima->image;
   ImageUser iuser = sima->iuser;
   if (ima->source == IMA_SRC_TILED) {
+    /* `tiles` can legitimately be empty; mirror the null handling in
+     * #image_paint_selection_resolve_tile rather than dereferencing `tiles.first` blindly. */
     const ImageTile *active = static_cast<const ImageTile *>(
         BLI_findlink(&ima->tiles, ima->active_tile_index));
-    iuser.tile = active ? active->tile_number :
-                          static_cast<const ImageTile *>(ima->tiles.first)->tile_number;
+    if (!active) {
+      active = static_cast<const ImageTile *>(ima->tiles.first);
+    }
+    if (active) {
+      iuser.tile = active->tile_number;
+    }
   }
   const ImageTile *active_tile = BKE_image_get_tile_from_iuser(ima, &iuser);
   int tile_number = active_tile ? active_tile->tile_number : 1001;
@@ -1701,32 +1804,32 @@ static wmOperatorStatus image_select_transform_exec(bContext *C, wmOperator *op)
   if (!image_select_extract_per_tile(op, ima, iuser, &fragments)) {
     return OPERATOR_CANCELLED;
   }
-  
+
   auto *state = MEM_new<ImageSelectTransformState>(__func__);
   state->owner_sima = sima;
   state->iuser = iuser;
   state->fragments = std::move(fragments);
   state->fragment_textures.resize(state->fragments.size(), nullptr);
   state->fragment_feather_textures.resize(state->fragments.size(), nullptr);
-  
+
   float uv_translation[2];
   float scale[2];
   float uv_anchor[2];
   RNA_float_get_array(op->ptr, "translation", uv_translation);
   RNA_float_get_array(op->ptr, "scale", scale);
   RNA_float_get_array(op->ptr, "uv_anchor", uv_anchor);
-  
+
   state->uv_translation = float2(uv_translation[0], uv_translation[1]);
   state->scale = float2(scale[0], scale[1]);
   state->uv_anchor = float2(uv_anchor[0], uv_anchor[1]);
   state->uv_pivot = state->uv_anchor;
   state->rotation = RNA_float_get(op->ptr, "rotation");
   state->use_proportional_scale = RNA_boolean_get(op->ptr, "proportional");
-  
+
   image_select_transform_lift_source(C, state);
   image_select_transform_commit(C, state);
   image_select_transform_state_free(state);
-  
+
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
   return OPERATOR_FINISHED;
 }
@@ -1739,10 +1842,10 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectTransformState *&g_transform_state = sima->runtime->paint_select.transform;
+  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
 
-  if (g_transform_state && g_transform_state->owner_sima == sima) {
-    ImageSelectTransformState *state = g_transform_state;
+  if (state_ref && state_ref->owner_sima == sima) {
+    ImageSelectTransformState *state = state_ref;
     ARegion *region = CTX_wm_region(C);
     if (region) {
       image_select_transform_cache_screen_coords(state, region);
@@ -1760,21 +1863,28 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
   }
 
   /* If a transform is already active in a different space, restore it. */
-  if (g_transform_state) {
-    image_select_transform_restore_source(C, g_transform_state);
-    image_select_transform_state_free(g_transform_state);
-    g_transform_state = nullptr;
+  if (state_ref) {
+    image_select_transform_restore_source(C, state_ref);
+    image_select_transform_state_free(state_ref);
+    state_ref = nullptr;
   }
 
+  /* Gradient and warp sessions are ended here, before the move hand-over below: that path passes
+   * the move's *open* undo step straight to the new transform session, so it must not be preceded
+   * by anything that opens or closes a step. Move itself is therefore deliberately absent from
+   * this mask and stays handled by the two branches that follow. */
+  image_select_floating_sessions_end(
+      C, sima, IMAGE_SELECT_FLOATING_TOOL_GRADIENT | IMAGE_SELECT_FLOATING_TOOL_WARP);
+
   /* Switch from floating move to transform without baking the move to the canvas. */
-  ImageSelectMoveState *&g_floating_move = sima->runtime->paint_select.move;
+  ImageSelectMoveState *&move_state_ref = sima->runtime->paint_select.move;
   if (image_select_move_is_floating_in_space(sima)) {
     return image_select_move_convert_to_transform(C, op, event);
   }
-  if (g_floating_move) {
-    image_select_move_commit(C, g_floating_move);
-    image_select_move_state_free(g_floating_move);
-    g_floating_move = nullptr;
+  if (move_state_ref) {
+    image_select_move_commit(C, move_state_ref);
+    image_select_move_state_free(move_state_ref);
+    move_state_ref = nullptr;
   }
 
   Image *ima = sima->image;
@@ -1783,15 +1893,29 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
    * The true active tile is tracked by ima->active_tile_index. */
   ImageUser iuser = sima->iuser;
   if (ima->source == IMA_SRC_TILED) {
+    /* `tiles` can legitimately be empty; mirror the null handling in
+     * #image_paint_selection_resolve_tile rather than dereferencing `tiles.first` blindly. */
     const ImageTile *active = static_cast<const ImageTile *>(
         BLI_findlink(&ima->tiles, ima->active_tile_index));
-    iuser.tile = active ? active->tile_number :
-                          static_cast<const ImageTile *>(ima->tiles.first)->tile_number;
+    if (!active) {
+      active = static_cast<const ImageTile *>(ima->tiles.first);
+    }
+    if (active) {
+      iuser.tile = active->tile_number;
+    }
   }
   const ImageTile *active_tile = BKE_image_get_tile_from_iuser(ima, &iuser);
   int tile_number = active_tile ? active_tile->tile_number : 1001;
   tile_number = image_paint_selection_resolve_tile(ima, sima, tile_number);
   iuser.tile = tile_number;
+
+  /* Resolved before anything is lifted: the cage gizmos and the preview draw callback both need a
+   * region, so without one the fragment would be lifted into a session the user cannot see or
+   * dismiss (reachable when the operator is called from Python or a menu). */
+  ARegion *region = CTX_wm_region(C);
+  if (!region || !region->runtime->type) {
+    return OPERATOR_CANCELLED;
+  }
 
   auto *state = MEM_new<ImageSelectTransformState>(__func__);
   state->owner_sima = sima;
@@ -1822,21 +1946,19 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
     }
     else {
       const SelectionTileFragment &frag0 = state->fragments[0];
-      const int t0_col = (frag0.geom.tile_number - 1001) % 10;
-      const int t0_row = (frag0.geom.tile_number - 1001) / 10;
+      const float2 t0_uv = image_select_udim_tile_uv_origin(frag0.geom.tile_number);
       const float fw = float(frag0.geom.tile_size_px.x);
       const float fh = float(frag0.geom.tile_size_px.y);
       const int2 ui_origin = image_select_fragment_ui_origin(frag0);
       const int2 ui_size = image_select_fragment_ui_size(frag0);
-      state->uv_anchor = float2(float(t0_col) + (float(ui_origin.x) + float(ui_size.x) * 0.5f) / fw,
-                                float(t0_row) + (float(ui_origin.y) + float(ui_size.y) * 0.5f) / fh);
+      state->uv_anchor = float2(t0_uv.x + (float(ui_origin.x) + float(ui_size.x) * 0.5f) / fw,
+                                t0_uv.y + (float(ui_origin.y) + float(ui_size.y) * 0.5f) / fh);
     }
     state->uv_pivot = state->uv_anchor;
   }
 
   image_select_transform_lift_source(C, state);
 
-  ARegion *region = CTX_wm_region(C);
   state->owner_area = CTX_wm_area(C);
   state->owner_region = region;
   state->owner_region_type = region->runtime->type;
@@ -1844,7 +1966,7 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
   state->draw_handle = ED_region_draw_cb_activate(
       state->owner_region_type, draw_select_transform_texture, state, REGION_DRAW_POST_VIEW);
 
-  g_transform_state = state;
+  state_ref = state;
   op->customdata = nullptr;
   state->is_dragging = false;
   state->active_handle = ImageSelectTransformState::HANDLE_NONE;
@@ -1856,6 +1978,7 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
   /* Long-lived modal for Enter/Esc; handle drags are owned by IMAGE_GGT_paint_select_transform. */
   ED_region_tag_redraw(region);
   WM_event_add_modal_handler(C, op);
+  image_select_floating_status_set(C, op->type, true);
   return OPERATOR_RUNNING_MODAL;
 }
 
@@ -1868,8 +1991,8 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
     op->customdata = nullptr;
     return OPERATOR_FINISHED;
   }
-  ImageSelectTransformState *&g_transform_state = sima->runtime->paint_select.transform;
-  ImageSelectTransformState *state = g_transform_state;
+  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
+  ImageSelectTransformState *state = state_ref;
   if (!state) {
     op->customdata = nullptr;
     return OPERATOR_FINISHED;
@@ -1883,49 +2006,43 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
       return OPERATOR_PASS_THROUGH;
     }
 
-    /* Enter -- commit the transform. */
-    if (ELEM(event->type, EVT_RETKEY, EVT_PADENTER) && event->val == KM_PRESS) {
-      float translation[2] = {state->uv_translation.x, state->uv_translation.y};
-      float scale[2] = {state->scale.x, state->scale.y};
-      float uv_anchor[2] = {state->uv_anchor.x, state->uv_anchor.y};
-      RNA_float_set_array(op->ptr, "translation", translation);
-      RNA_float_set(op->ptr, "rotation", state->rotation);
-      RNA_float_set_array(op->ptr, "scale", scale);
-      RNA_float_set_array(op->ptr, "uv_anchor", uv_anchor);
+    if (event->type == EVT_MODAL_MAP) {
+      /* Confirm commits; both Cancel and Undo Step discard the floating transform. The latter is
+       * deliberately not passed through to the WM: the image undo step opened at lift time is
+       * discarded inside #image_select_transform_restore_source so the undo stack stays clean. */
+      switch (event->val) {
+        case IMAGE_SELECT_FLOATING_MODAL_CONFIRM: {
+          float translation[2] = {state->uv_translation.x, state->uv_translation.y};
+          float scale[2] = {state->scale.x, state->scale.y};
+          float uv_anchor[2] = {state->uv_anchor.x, state->uv_anchor.y};
+          RNA_float_set_array(op->ptr, "translation", translation);
+          RNA_float_set(op->ptr, "rotation", state->rotation);
+          RNA_float_set_array(op->ptr, "scale", scale);
+          RNA_float_set_array(op->ptr, "uv_anchor", uv_anchor);
 
-      ED_area_status_text(state->owner_area, nullptr);
-      g_transform_state = nullptr;
-      image_select_transform_commit(C, state);
-      image_select_transform_state_free(state);
-      op->customdata = nullptr;
-      WM_event_add_notifier(C, NC_WINDOW, nullptr);
-      return OPERATOR_FINISHED;
-    }
-
-    /* Esc -- cancel the transform. */
-    if (event->type == EVT_ESCKEY && event->val == KM_PRESS) {
-      ED_area_status_text(state->owner_area, nullptr);
-      g_transform_state = nullptr;
-      image_select_transform_restore_source(C, state);
-      image_select_transform_state_free(state);
-      op->customdata = nullptr;
-      WM_event_add_notifier(C, NC_WINDOW, nullptr);
-      return OPERATOR_FINISHED;
-    }
-
-    /* Ctrl+Z: cancel the floating transform rather than passing the undo event through to
-     * the WM. The open image undo step (opened at lift time) is discarded inside
-     * image_select_transform_restore_source so the undo stack stays clean. */
-    if (event->type == EVT_ZKEY && event->val == KM_PRESS &&
-        (event->modifier & KM_CTRL) && !(event->modifier & KM_SHIFT))
-    {
-      ED_area_status_text(state->owner_area, nullptr);
-      g_transform_state = nullptr;
-      image_select_transform_restore_source(C, state);
-      image_select_transform_state_free(state);
-      op->customdata = nullptr;
-      WM_event_add_notifier(C, NC_WINDOW, nullptr);
-      return OPERATOR_FINISHED;
+          ED_area_status_text(state->owner_area, nullptr);
+          image_select_floating_status_clear(C);
+          state_ref = nullptr;
+          image_select_transform_commit(C, state);
+          image_select_transform_state_free(state);
+          op->customdata = nullptr;
+          WM_event_add_notifier(C, NC_WINDOW, nullptr);
+          return OPERATOR_FINISHED;
+        }
+        case IMAGE_SELECT_FLOATING_MODAL_CANCEL:
+        case IMAGE_SELECT_FLOATING_MODAL_UNDO_STEP: {
+          ED_area_status_text(state->owner_area, nullptr);
+          image_select_floating_status_clear(C);
+          state_ref = nullptr;
+          image_select_transform_restore_source(C, state);
+          image_select_transform_state_free(state);
+          op->customdata = nullptr;
+          WM_event_add_notifier(C, NC_WINDOW, nullptr);
+          return OPERATOR_FINISHED;
+        }
+        default:
+          break;
+      }
     }
 
     /* All other events (pan/zoom wheels, MOUSEMOVE, etc.).
@@ -1989,16 +2106,17 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
   return OPERATOR_PASS_THROUGH;
 }
 
-wmOperatorStatus image_select_transform_adopt_move_state(bContext *C,
-                                                         wmOperator *op,
-                                                         const wmEvent *event,
-                                                         SpaceImage *sima,
-                                                         blender::Vector<SelectionTileFragment> &&fragments,
-                                                         const float2 uv_drag_offset,
-                                                         const int ref_tile_number,
-                                                         const ImageUser &iuser,
-                                                         const bool undo_begun,
-                                                         const bool proportional)
+wmOperatorStatus image_select_transform_adopt_move_state(
+    bContext *C,
+    wmOperator *op,
+    const wmEvent *event,
+    SpaceImage *sima,
+    blender::Vector<SelectionTileFragment> &&fragments,
+    const float2 uv_drag_offset,
+    const int ref_tile_number,
+    const ImageUser &iuser,
+    const bool undo_begun,
+    const bool proportional)
 {
   if (!sima || !sima->runtime || fragments.is_empty()) {
     selection_tile_fragments_free(fragments);
@@ -2022,14 +2140,13 @@ wmOperatorStatus image_select_transform_adopt_move_state(bContext *C,
     if (!frag.pixels.fragment_ibuf) {
       continue;
     }
-    const int t_col = (frag.geom.tile_number - 1001) % 10;
-    const int t_row = (frag.geom.tile_number - 1001) / 10;
+    const float2 tile_uv = image_select_udim_tile_uv_origin(frag.geom.tile_number);
     const float tile_w = float(frag.geom.tile_size_px.x);
     const float tile_h = float(frag.geom.tile_size_px.y);
     const int2 ui_origin = image_select_fragment_ui_origin(frag);
     const int2 ui_size = image_select_fragment_ui_size(frag);
-    const float uv_x0 = float(t_col) + float(ui_origin.x) / tile_w;
-    const float uv_y0 = float(t_row) + float(ui_origin.y) / tile_h;
+    const float uv_x0 = tile_uv.x + float(ui_origin.x) / tile_w;
+    const float uv_y0 = tile_uv.y + float(ui_origin.y) / tile_h;
     const float uv_x1 = uv_x0 + float(ui_size.x) / tile_w;
     const float uv_y1 = uv_y0 + float(ui_size.y) / tile_h;
     uv_x_min = std::min(uv_x_min, uv_x0);
@@ -2050,7 +2167,7 @@ wmOperatorStatus image_select_transform_adopt_move_state(bContext *C,
   state->use_proportional_scale = proportional;
 
   ARegion *region = CTX_wm_region(C);
-  if (!region) {
+  if (!region || !region->runtime->type) {
     image_select_transform_state_free(state);
     return OPERATOR_CANCELLED;
   }
@@ -2062,8 +2179,8 @@ wmOperatorStatus image_select_transform_adopt_move_state(bContext *C,
   state->draw_handle = ED_region_draw_cb_activate(
       state->owner_region_type, draw_select_transform_texture, state, REGION_DRAW_POST_VIEW);
 
-  ImageSelectTransformState *&g_transform_state = sima->runtime->paint_select.transform;
-  g_transform_state = state;
+  ImageSelectTransformState *&state_ref = sima->runtime->paint_select.transform;
+  state_ref = state;
   op->customdata = nullptr;
   state->is_dragging = false;
   state->active_handle = ImageSelectTransformState::HANDLE_NONE;
@@ -2074,6 +2191,7 @@ wmOperatorStatus image_select_transform_adopt_move_state(bContext *C,
 
   ED_region_tag_redraw(region);
   WM_event_add_modal_handler(C, op);
+  image_select_floating_status_set(C, op->type, true);
   return OPERATOR_RUNNING_MODAL;
 }
 
@@ -2089,15 +2207,60 @@ void PAINT_OT_image_select_transform(wmOperatorType *ot)
   ot->cancel = image_select_transform_cancel;
   ot->poll = image_select_transform_poll;
 
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No OPTYPE_UNDO, see #PAINT_OT_image_select_move. The modal keeps running while the fragment
+   * floats and returns FINISHED from paths that do not own an undo step (see the early exits in
+   * #image_select_transform_modal, taken once confirm/cancel or a switch to another floating tool
+   * has already destroyed the session). With OPTYPE_UNDO the WM would then push whatever step
+   * happens to be open at that moment -- a step opened, and possibly already freed, by a different
+   * tool -- and encode it from stale bookkeeping. */
+  ot->flag = OPTYPE_REGISTER;
 
-  RNA_def_boolean(ot->srna, "proportional", true, "Constrain Proportions", "Maintain uniform aspect ratio when scaling");
-  RNA_def_float_vector(ot->srna, "translation", 2, nullptr, -FLT_MAX, FLT_MAX, "Translation", "Translation of the selection", -1e4f, 1e4f);
-  RNA_def_float(ot->srna, "rotation", 0.0f, -FLT_MAX, FLT_MAX, "Rotation", "Rotation of the selection", -1e4f, 1e4f);
-  
+  RNA_def_boolean(ot->srna,
+                  "proportional",
+                  true,
+                  "Constrain Proportions",
+                  "Maintain uniform aspect ratio when scaling");
+  RNA_def_float_vector(ot->srna,
+                       "translation",
+                       2,
+                       nullptr,
+                       -FLT_MAX,
+                       FLT_MAX,
+                       "Translation",
+                       "Translation of the selection",
+                       -1e4f,
+                       1e4f);
+  RNA_def_float(ot->srna,
+                "rotation",
+                0.0f,
+                -FLT_MAX,
+                FLT_MAX,
+                "Rotation",
+                "Rotation of the selection",
+                -1e4f,
+                1e4f);
+
   static const float default_scale[2] = {1.0f, 1.0f};
-  RNA_def_float_vector(ot->srna, "scale", 2, default_scale, -FLT_MAX, FLT_MAX, "Scale", "Scale of the selection", -1e4f, 1e4f);
-  RNA_def_float_vector(ot->srna, "uv_anchor", 2, nullptr, -FLT_MAX, FLT_MAX, "Anchor", "Pivot point for rotation and scaling", -1e4f, 1e4f);
+  RNA_def_float_vector(ot->srna,
+                       "scale",
+                       2,
+                       default_scale,
+                       -FLT_MAX,
+                       FLT_MAX,
+                       "Scale",
+                       "Scale of the selection",
+                       -1e4f,
+                       1e4f);
+  RNA_def_float_vector(ot->srna,
+                       "uv_anchor",
+                       2,
+                       nullptr,
+                       -FLT_MAX,
+                       FLT_MAX,
+                       "Anchor",
+                       "Pivot point for rotation and scaling",
+                       -1e4f,
+                       1e4f);
 }
 
 void PAINT_OT_image_select_transform_confirm(wmOperatorType *ot)
@@ -2109,6 +2272,8 @@ void PAINT_OT_image_select_transform_confirm(wmOperatorType *ot)
   ot->exec = image_select_transform_confirm_exec;
   ot->poll = image_select_transform_floating_poll;
 
+  /* No OPTYPE_UNDO: commit closes the image undo step opened while the fragment was lifted.
+   * See the note in #PAINT_OT_image_select_move. */
   ot->flag = OPTYPE_REGISTER;
 }
 
@@ -2121,7 +2286,9 @@ void PAINT_OT_image_select_transform_cancel(wmOperatorType *ot)
   ot->exec = image_select_transform_cancel_exec;
   ot->poll = image_select_transform_floating_poll;
 
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No OPTYPE_UNDO: restore_source closes the image undo step opened while the fragment was
+   * lifted. See the note in #PAINT_OT_image_select_move. */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 void PAINT_OT_image_select_transform_drag(wmOperatorType *ot)
@@ -2137,5 +2304,4 @@ void PAINT_OT_image_select_transform_drag(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER;
 }
 
-/** \} */
 }  /* namespace blender */

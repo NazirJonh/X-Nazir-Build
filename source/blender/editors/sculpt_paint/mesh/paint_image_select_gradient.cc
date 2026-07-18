@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2024 Blender Authors
+/* SPDX-FileCopyrightText: 2026 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -14,9 +14,9 @@
 
 #include "BLI_array.hh"
 #include "BLI_listbase_wrapper.hh"
+#include "BLI_math_color.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
-#include "BLI_math_color.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_task.h"
@@ -33,10 +33,12 @@
 #include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_library.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
+#include "BKE_undo_system.hh"
 
 #include "DEG_depsgraph.hh"
 
@@ -45,8 +47,6 @@
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_undo.hh"
-
-#include "BKE_undo_system.hh"
 
 #include "GPU_immediate.hh"
 #include "GPU_state.hh"
@@ -63,8 +63,8 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
-#include "../paint_intern.hh"
 #include "../../space_image/image_runtime.hh"
+#include "../paint_intern.hh"
 #include "paint_image_select_gradient.hh"
 #include "paint_image_select_intern.hh"
 
@@ -72,7 +72,7 @@ namespace blender {
 
 static uint64_t image_paint_gradient_settings_revision = 0;
 
-void image_paint_gradient_bump_settings_revision()
+void ED_image_paint_select_gradient_settings_revision_bump()
 {
   image_paint_gradient_settings_revision++;
 }
@@ -113,25 +113,25 @@ static float image_paint_gradient_remap_midpoint(const float t, const float midp
     return t;
   }
 
-  /* Two cubic Hermite segments meeting at (mid, 0.5) with C¹ continuity.
+  /* Two cubic Hermite segments meeting at (mid, 0.5) with C1 continuity.
    *
    * Tangents are assigned by the Catmull-Rom rule over the three knots
    * (0,0), (mid,0.5), (1,1):
-   *   - start  : one-sided slope of segment 1  → m_start = 0.5 / mid
-   *   - junction: global slope (1-0)/(1-0)      → m_mid   = 1.0
-   *   - end    : one-sided slope of segment 2  → m_end   = 0.5 / (1-mid)
+   *   - start  : one-sided slope of segment 1  -> m_start = 0.5 / mid
+   *   - junction: global slope (1-0)/(1-0)      -> m_mid   = 1.0
+   *   - end    : one-sided slope of segment 2  -> m_end   = 0.5 / (1-mid)
    *
    * Because all three tangents are strictly positive and the unique interior
    * critical point of each Hermite segment lies outside [0,1] for every
-   * mid ∈ (0,1), both segments are guaranteed monotone — no flat zones,
+   * mid in (0,1), both segments are guaranteed monotone -- no flat zones,
    * no overshoot, no derivative discontinuity at the junction.
    *
    * At mid=0.5 the scaled tangents of both segments equal 0.5, so the
    * cubic Hermite degenerates to the identity, matching the linear pass-through.
    *
-   * Scaled tangents (slope × interval width):
-   *   segment 1: m_start × mid = 0.5,  m_mid × mid = mid
-   *   segment 2: m_mid × (1-mid) = (1-mid),  m_end × (1-mid) = 0.5
+   * Scaled tangents (slope * interval width):
+   *   segment 1: m_start * mid = 0.5,  m_mid * mid = mid
+   *   segment 2: m_mid * (1-mid) = (1-mid),  m_end * (1-mid) = 0.5
    */
   if (t <= mid) {
     const float u = t / mid;
@@ -151,8 +151,8 @@ static float image_paint_gradient_remap_midpoint(const float t, const float midp
 }
 
 /**
- * Project \a sample into the gradient's axis-aligned frame: \a r_u runs along start->end, \a r_w is
- * perpendicular (both in the input space). Returns the axis length, or 0 when the endpoints are
+ * Project \a sample into the gradient's axis-aligned frame: \a r_u runs along start->end, \a r_w
+ * is perpendicular (both in the input space). Returns the axis length, or 0 when the endpoints are
  * closer than \a min_len (degenerate gradient). Used by the conical / diamond / square shapes.
  */
 static float image_paint_gradient_axis_frame(const float2 &p0,
@@ -181,14 +181,14 @@ static float image_paint_gradient_axis_frame(const float2 &p0,
 
 /**
  * Core gradient parameter evaluation in a generic 2D space. \a p0 and \a p1 are the gradient
- * endpoints and \a sample is the evaluated point, all expressed in the same space. \a min_len is the
- * smallest endpoint separation treated as non-degenerate: 1 pixel for tile-local pixel space, a
- * sub-texel value for global UV space. New gradient shapes are added here, in the single switch.
+ * endpoints and \a sample is the evaluated point, all expressed in the same space. \a min_len is
+ * the smallest endpoint separation treated as non-degenerate: 1 pixel for tile-local pixel space,
+ * a sub-texel value for global UV space. New gradient shapes are added here, in the single switch.
  *
- * \a axis_scale rescales the input coordinates before evaluation so the radial / conical / diamond /
- * square iso-lines stay isotropic in pixels. In normalized UV space a non-square texture stretches
- * them along the longer axis; passing (width/height, 1) cancels that. The pixel-space path is
- * already isotropic and passes (1, 1).
+ * \a axis_scale rescales the input coordinates before evaluation so the radial / conical /
+ * diamond / square iso-lines stay isotropic in pixels. In normalized UV space a non-square
+ * texture stretches them along the longer axis; passing (width/height, 1) cancels that. The
+ * pixel-space path is already isotropic and passes (1, 1).
  */
 static float image_paint_gradient_eval_t_generic(const ImagePaintGradientParams &params,
                                                  const float2 &p0_in,
@@ -293,7 +293,8 @@ void image_paint_gradient_eval_color(const ImagePaintGradientParams &params,
   BLI_assert(params.colorband != nullptr);
   BKE_colorband_evaluate(params.colorband, t, r_color);
   /* Respect the per-stop alpha of the ramp, scaled by the global gradient opacity (and the
-   * selection mask weight at composite time). This lets a stop fade the gradient to transparent. */
+   * selection mask weight at composite time). This lets a stop fade the gradient to
+   * transparent. */
   r_color[3] *= params.opacity;
 }
 
@@ -351,9 +352,9 @@ static void image_paint_gradient_sanitize_region(rcti &region, const int tile_w,
 }
 
 /**
- * Tile-local pixel bounds of the active selection mask, expanded for blend feathering. Returns false
- * and sets \a r_region empty when the tile has no selection. Shared by the backup and work-region
- * computations so the masked-bounds logic lives in one place.
+ * Tile-local pixel bounds of the active selection mask, expanded for blend feathering. Returns
+ * false and sets \a r_region empty when the tile has no selection. Shared by the backup and
+ * work-region computations so the masked-bounds logic lives in one place.
  */
 static bool image_paint_gradient_selection_bounds_region(const Image *image,
                                                          const int tile_number,
@@ -372,19 +373,15 @@ static bool image_paint_gradient_selection_bounds_region(const Image *image,
   return true;
 }
 
-void image_paint_gradient_calc_work_region(const Scene *scene,
+void image_paint_gradient_calc_work_region(const Scene * /*scene*/,
                                            const Image *image,
                                            const int tile_number,
                                            const int tile_w,
                                            const int tile_h,
-                                           const ImagePaintGradientParams & /*params*/,
-                                           const float2 & /*start_px*/,
-                                           const float2 & /*end_px*/,
                                            const rcti *region_override,
                                            rcti &r_region)
 {
-  const ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
-  if (imapaint->use_selection_mask) {
+  if (BKE_image_paint_selection_mask_has_any(image)) {
     /* Masked gradient: paint every pixel inside the selection bounds. Per-pixel mask
      * weights discard pixels outside the mask; t is still evaluated from global coords. */
     image_paint_gradient_selection_bounds_region(image, tile_number, tile_w, tile_h, r_region);
@@ -399,72 +396,40 @@ void image_paint_gradient_calc_work_region(const Scene *scene,
   }
 }
 
-static float2 image_paint_gradient_tile_uv_origin(const int tile_number)
-{
-  return image_select_udim_tile_uv_origin(tile_number);
-}
-
-static void image_paint_gradient_uv_bounds(const ImagePaintGradientParams &params,
-                                           const float2 &start_uv,
-                                           const float2 &end_uv,
-                                           rctf &r_bounds)
-{
-  if (params.type == ImagePaintGradientType::Linear) {
-    BLI_rctf_init(&r_bounds,
-                  std::min(start_uv.x, end_uv.x),
-                  std::max(start_uv.x, end_uv.x),
-                  std::min(start_uv.y, end_uv.y),
-                  std::max(start_uv.y, end_uv.y));
-  }
-  else {
-    const float radius = len_v2v2(end_uv, start_uv);
-    BLI_rctf_init(&r_bounds,
-                  start_uv.x - radius,
-                  start_uv.x + radius,
-                  start_uv.y - radius,
-                  start_uv.y + radius);
-  }
-}
-
-static bool image_paint_gradient_tile_intersects_uv_bounds(const int tile_number,
-                                                           const rctf &uv_bounds)
-{
-  const float2 origin = image_paint_gradient_tile_uv_origin(tile_number);
-  rctf tile_uv;
-  BLI_rctf_init(&tile_uv, origin.x, origin.x + 1.0f, origin.y, origin.y + 1.0f);
-  rctf dummy;
-  return BLI_rctf_isect(&tile_uv, &uv_bounds, &dummy);
-}
-
-static void image_paint_gradient_calc_work_region_uv(const Scene *scene,
+/**
+ * Work region of \a tile_number: the selection bounds when a mask is active, the whole tile
+ * otherwise.
+ *
+ * \note There is deliberately no bounding-box culling against the gradient vector. That vector
+ * only positions the ramp, it does not bound the painted area. With
+ * #ImagePaintGradientRepeat::None the parameter is *clamped* to [0, 1] (see
+ * #image_paint_gradient_sample_t), so pixels past the drag still receive the ramp's end color
+ * rather than being skipped, and Repeat/Reflect wrap it indefinitely. On top of that, Conical
+ * parameterizes by the angle around the start point and so sweeps the whole plane, Linear is
+ * unbounded perpendicular to its axis, and Diamond/Square reach up to sqrt(2) past the Euclidean
+ * radius because they use the L1 and L-infinity metrics. The bounding box previously used here
+ * dropped tiles in every one of those cases, leaving them silently unpainted. Culling only
+ * becomes sound once the ramp is known not to contribute (a fully transparent end stop, say),
+ * which cannot be decided from the gradient geometry alone.
+ */
+static void image_paint_gradient_calc_work_region_uv(const Scene * /*scene*/,
                                                     const Image *image,
                                                     const int tile_number,
                                                     const int tile_w,
                                                     const int tile_h,
-                                                    const ImagePaintGradientParams &params,
-                                                    const float2 &start_uv,
-                                                    const float2 &end_uv,
+                                                    const ImagePaintGradientParams & /*params*/,
+                                                    const float2 & /*start_uv*/,
+                                                    const float2 & /*end_uv*/,
                                                     rcti &r_region)
 {
   BLI_rcti_init(&r_region, 0, 0, 0, 0);
 
-  const ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
-  if (imapaint->use_selection_mask) {
-    if (image_paint_gradient_selection_bounds_region(image, tile_number, tile_w, tile_h, r_region)) {
+  if (BKE_image_paint_selection_mask_has_any(image)) {
+    if (image_paint_gradient_selection_bounds_region(
+            image, tile_number, tile_w, tile_h, r_region))
+    {
       image_paint_gradient_sanitize_region(r_region, tile_w, tile_h);
     }
-    return;
-  }
-
-  rctf uv_bounds;
-  image_paint_gradient_uv_bounds(params, start_uv, end_uv, uv_bounds);
-
-  const float2 origin = image_paint_gradient_tile_uv_origin(tile_number);
-  rctf tile_uv;
-  BLI_rctf_init(&tile_uv, origin.x, origin.x + 1.0f, origin.y, origin.y + 1.0f);
-
-  rctf dummy;
-  if (!BLI_rctf_isect(&uv_bounds, &tile_uv, &dummy)) {
     return;
   }
 
@@ -510,7 +475,8 @@ struct GradientRowTaskData {
   const ColorSpace *byte_colorspace = nullptr;
   /** Precomputed t -> color table (RGBA, straight alpha). For byte canvases the RGB is already
    * converted to the buffer color space; for float canvases it is scene-linear. This hoists the
-   * expensive per-pixel colorband / sRGB / color-space evaluation out of the rasterization loop. */
+   * expensive per-pixel colorband / sRGB / color-space evaluation out of the rasterization
+   * loop. */
   Array<float4> color_lut;
   rcti work_region;
 };
@@ -531,9 +497,10 @@ static bool image_paint_gradient_prepare_canvas_write(GradientRowTaskData &task_
 }
 
 /**
- * Number of entries in the gradient color lookup table. The gradient color is a 1D function of the
- * parameter t, so it is evaluated once per table entry instead of once per pixel. 1024 entries keep
- * the quantization error below the perceptible threshold even for color ramps with sharp stops.
+ * Number of entries in the gradient color lookup table. The gradient color is a 1D function of
+ * the parameter t, so it is evaluated once per table entry instead of once per pixel. 1024
+ * entries keep the quantization error below the perceptible threshold even for color ramps with
+ * sharp stops.
  */
 static constexpr int GRADIENT_COLOR_LUT_SIZE = 1024;
 
@@ -543,8 +510,8 @@ static constexpr int GRADIENT_COLOR_LUT_SIZE = 1024;
  * scene-linear (float canvas).
  */
 static void image_paint_gradient_build_color_lut(const ImagePaintGradientParams &params,
-                                                  const ColorSpace *byte_colorspace,
-                                                  Array<float4> &lut)
+                                                 const ColorSpace *byte_colorspace,
+                                                 Array<float4> &lut)
 {
   const int n = int(lut.size());
   const float inv = (n > 1) ? 1.0f / float(n - 1) : 0.0f;
@@ -559,7 +526,8 @@ static void image_paint_gradient_build_color_lut(const ImagePaintGradientParams 
   }
 }
 
-static const float4 &image_paint_gradient_lut_sample(const GradientRowTaskData &data, const float t)
+static const float4 &image_paint_gradient_lut_sample(const GradientRowTaskData &data,
+                                                     const float t)
 {
   const int n = int(data.color_lut.size());
   /* t is already clamped/wrapped to [0, 1] by #image_paint_gradient_eval_t. */
@@ -573,7 +541,7 @@ static float image_paint_gradient_row_eval_t(const GradientRowTaskData &data,
                                              const int py)
 {
   if (data.use_global_uv) {
-    const float2 origin = image_paint_gradient_tile_uv_origin(data.tile_number);
+    const float2 origin = image_select_udim_tile_uv_origin(data.tile_number);
     const float2 pixel_uv(origin.x + (float(px) + 0.5f) / float(data.canvas_ibuf->x),
                           origin.y + (float(py) + 0.5f) / float(data.canvas_ibuf->y));
     /* UV is normalized per axis, so a non-square tile makes the metric anisotropic. Correct it by
@@ -662,9 +630,10 @@ static void image_paint_gradient_row_task(void *__restrict userdata,
 }
 
 /**
- * Shared rasterization core. Acquires write access to the canvas, builds the t -> color table once,
- * and runs the threaded per-row composite over \a task_data.work_region. The caller is responsible
- * for filling the coordinate fields (px or uv) and setting #GradientRowTaskData::use_global_uv.
+ * Shared rasterization core. Acquires write access to the canvas, builds the t -> color table
+ * once, and runs the threaded per-row composite over \a task_data.work_region. The caller is
+ * responsible for filling the coordinate fields (px or uv) and setting
+ * #GradientRowTaskData::use_global_uv.
  */
 static void image_paint_gradient_rasterize(GradientRowTaskData &task_data)
 {
@@ -704,7 +673,7 @@ void image_paint_gradient_apply_region(const Scene *scene,
   task_data.scene = scene;
   task_data.image = image;
   task_data.tile_number = tile_number;
-  task_data.use_selection_mask = scene->toolsettings->imapaint.use_selection_mask != 0;
+  task_data.use_selection_mask = BKE_image_paint_selection_mask_has_any(image);
   task_data.use_global_uv = false;
   task_data.params = params;
   task_data.start_px = start_px;
@@ -730,7 +699,7 @@ static void image_paint_gradient_apply_region_uv(const Scene *scene,
   task_data.scene = scene;
   task_data.image = image;
   task_data.tile_number = tile_number;
-  task_data.use_selection_mask = scene->toolsettings->imapaint.use_selection_mask != 0;
+  task_data.use_selection_mask = BKE_image_paint_selection_mask_has_any(image);
   task_data.use_global_uv = true;
   task_data.params = params;
   task_data.start_uv = start_uv;
@@ -754,7 +723,7 @@ static rcti image_paint_gradient_viewport_clip_px(const ARegion *region,
                                                   const int tile_w,
                                                   const int tile_h)
 {
-  const float2 origin = image_paint_gradient_tile_uv_origin(tile_number);
+  const float2 origin = image_select_udim_tile_uv_origin(tile_number);
   const rctf &cur = region->v2d.cur;
   const float fw = float(tile_w);
   const float fh = float(tile_h);
@@ -934,7 +903,7 @@ static ImagePaintGradientParams image_select_gradient_current_params(const Scene
   return image_paint_gradient_params_from_imapaint(scene->toolsettings->imapaint);
 }
 
-/* One-way sync: imapaint → operator props (all marked PROP_SKIP_SAVE).
+/* One-way sync: imapaint -> operator props (all marked PROP_SKIP_SAVE).
  * Runtime params are always read back from imapaint via image_select_gradient_current_params(),
  * so op->ptr values are never used during the session. This sync keeps the operator redo
  * panel consistent and allows future F9 / last-operator repeat to reflect panel state. */
@@ -977,12 +946,16 @@ static bool image_select_gradient_mouse_to_global_uv(const ARegion *region,
   return tile_number != 0;
 }
 
+/**
+ * Tiles the gradient can touch. Without a selection mask that is every tile of the image; see
+ * #image_paint_gradient_calc_work_region_uv for why the gradient geometry cannot cull any.
+ */
 static void image_select_gradient_collect_affected_tiles(
     Image *ima,
-    Scene *scene,
-    const ImagePaintGradientParams &params,
-    const float2 &start_uv,
-    const float2 &end_uv,
+    Scene * /*scene*/,
+    const ImagePaintGradientParams & /*params*/,
+    const float2 & /*start_uv*/,
+    const float2 & /*end_uv*/,
     Vector<int> &r_tile_numbers)
 {
   r_tile_numbers.clear();
@@ -990,11 +963,7 @@ static void image_select_gradient_collect_affected_tiles(
     return;
   }
 
-  const bool use_selection_mask = scene->toolsettings->imapaint.use_selection_mask != 0;
-  rctf uv_bounds;
-  if (!use_selection_mask) {
-    image_paint_gradient_uv_bounds(params, start_uv, end_uv, uv_bounds);
-  }
+  const bool use_selection_mask = BKE_image_paint_selection_mask_has_any(ima);
 
   for (const ImageTile *tile : ListBaseWrapper<ImageTile>(ima->tiles)) {
     if (use_selection_mask) {
@@ -1003,9 +972,7 @@ static void image_select_gradient_collect_affected_tiles(
         continue;
       }
     }
-    else if (!image_paint_gradient_tile_intersects_uv_bounds(tile->tile_number, uv_bounds)) {
-      continue;
-    }
+    /* Unmasked: every tile is affected, see #image_paint_gradient_affects_whole_plane. */
     r_tile_numbers.append(tile->tile_number);
   }
 }
@@ -1088,15 +1055,13 @@ static void image_select_gradient_sync_tile_backups(bContext *C,
 
 static void image_select_gradient_commit_floating_ops(bContext *C)
 {
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime) {
-    return;
-  }
-  if (ImageSelectMoveState *move = sima->runtime->paint_select.move) {
-    image_select_move_commit(C, move);
-    image_select_move_state_free(move);
-    sima->runtime->paint_select.move = nullptr;
-  }
+  /* Every other tool's session, not just move: each of them holds an open image undo step, and
+   * #image_select_gradient_apply_session opens one of its own, which would free theirs. */
+  image_select_floating_sessions_end(C,
+                                     CTX_wm_space_image(C),
+                                     IMAGE_SELECT_FLOATING_TOOL_MOVE |
+                                         IMAGE_SELECT_FLOATING_TOOL_TRANSFORM |
+                                         IMAGE_SELECT_FLOATING_TOOL_WARP);
 }
 
 /**
@@ -1382,6 +1347,25 @@ static void image_select_gradient_restore_session_backup(bContext *C,
   }
 }
 
+void image_select_gradient_session_end_for_takeover(bContext *C, SpaceImage *sima)
+{
+  if (!sima || !sima->runtime) {
+    return;
+  }
+  ImageSelectGradientState *&state_ref = sima->runtime->paint_select.gradient;
+  if (!state_ref) {
+    return;
+  }
+  ImageSelectGradientState *state = state_ref;
+  state_ref = nullptr;
+  /* Discarded rather than applied, unlike the lifted-fragment tools: the gradient is an
+   * unconfirmed preview painted over per-tile backups, so restoring the backups returns the canvas
+   * to exactly where the user left it. This is what the tool's own re-invoke and cancel paths do,
+   * and it is why a floating gradient never holds an open image undo step. */
+  image_select_gradient_restore_session_backup(C, state);
+  image_select_gradient_state_free(state);
+}
+
 static void image_select_gradient_apply_session(bContext *C, ImageSelectGradientState *state)
 {
   Image *ima = state->owner_sima->image;
@@ -1394,7 +1378,6 @@ static void image_select_gradient_apply_session(bContext *C, ImageSelectGradient
     return;
   }
 
-  UndoStack *ustack = ED_undo_stack_get();
   ImageUndoStep *us_open = nullptr;
   bool first_undo = true;
 
@@ -1402,10 +1385,7 @@ static void image_select_gradient_apply_session(bContext *C, ImageSelectGradient
     ImageUser iuser = tile.iuser;
     if (first_undo) {
       ED_image_undo_push_begin_with_image("Gradient", ima, tile.undo_ibuf, &iuser);
-      us_open = (ustack && ustack->step_init &&
-                 ustack->step_init->type == BKE_UNDOSYS_TYPE_IMAGE) ?
-                    reinterpret_cast<ImageUndoStep *>(ustack->step_init) :
-                    nullptr;
+      us_open = image_select_undo_session_step_get();
       first_undo = false;
     }
     else if (us_open) {
@@ -1606,6 +1586,19 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
   ImageSelectGradientState *state = image_select_gradient_state_get(sima);
   GradientDragData *data = static_cast<GradientDragData *>(op->customdata);
   if (!state || !data) {
+    /* The session can be torn down from under a still-registered modal handler, for instance by
+     * #PAINT_OT_image_select_gradient_apply / `_cancel`. Returning #OPERATOR_CANCELLED here does
+     * not run `ot->cancel` -- that is only dispatched from the window manager's teardown paths --
+     * so the drag data, the 30 FPS timer and the modal cursor must be released explicitly. */
+    if (data) {
+      if (data->timer) {
+        WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data->timer);
+        data->timer = nullptr;
+      }
+      MEM_delete(data);
+      op->customdata = nullptr;
+    }
+    WM_cursor_modal_restore(CTX_wm_window(C));
     return OPERATOR_CANCELLED;
   }
 
@@ -1614,8 +1607,8 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
    * whole callback, so the context cannot reveal where the pointer actually is. Resolve both
    * explicitly: `region` is the image region used for all coordinate math, while
    * `region_under_cursor` -- looked up from the window-absolute event position, honoring
-   * overlapping panels -- tells us when the pointer is over the header / tool-settings / N-panel so
-   * those clicks can be handed back to the UI instead of being hijacked by the gradient. */
+   * overlapping panels -- tells us when the pointer is over the header / tool-settings / N-panel
+   * so those clicks can be handed back to the UI instead of being hijacked by the gradient. */
   ScrArea *area = CTX_wm_area(C);
   ARegion *region = area ? BKE_area_find_region_type(area, RGN_TYPE_WINDOW) : nullptr;
   const ARegion *region_under_cursor = area ?
@@ -1670,32 +1663,33 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
     image_select_gradient_update_preview(C, state, false);
   }
 
-  if (event->type == EVT_ESCKEY && event->val == KM_PRESS) {
-    if (data->timer) {
-      WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data->timer);
-      data->timer = nullptr;
+  /* Confirm / cancel go through the shared floating modal keymap, so the bindings are
+   * user-configurable like those of move / transform / warp. Gradient has no undo-step notion, so
+   * that item is simply passed on. */
+  if (event->type == EVT_MODAL_MAP) {
+    if (ELEM(event->val,
+             IMAGE_SELECT_FLOATING_MODAL_CANCEL,
+             IMAGE_SELECT_FLOATING_MODAL_CONFIRM))
+    {
+      const bool confirm = event->val == IMAGE_SELECT_FLOATING_MODAL_CONFIRM;
+      if (data->timer) {
+        WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data->timer);
+        data->timer = nullptr;
+      }
+      if (confirm) {
+        image_select_gradient_apply_session(C, state);
+      }
+      else {
+        image_select_gradient_restore_session_backup(C, state);
+      }
+      image_select_gradient_state_free(state);
+      sima->runtime->paint_select.gradient = nullptr;
+      MEM_delete(data);
+      op->customdata = nullptr;
+      WM_cursor_modal_restore(CTX_wm_window(C));
+      return confirm ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
     }
-    image_select_gradient_restore_session_backup(C, state);
-    image_select_gradient_state_free(state);
-    sima->runtime->paint_select.gradient = nullptr;
-    MEM_delete(data);
-    op->customdata = nullptr;
-    WM_cursor_modal_restore(CTX_wm_window(C));
-    return OPERATOR_CANCELLED;
-  }
-
-  if (ELEM(event->type, EVT_RETKEY, EVT_PADENTER) && event->val == KM_PRESS) {
-    if (data->timer) {
-      WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data->timer);
-      data->timer = nullptr;
-    }
-    image_select_gradient_apply_session(C, state);
-    image_select_gradient_state_free(state);
-    sima->runtime->paint_select.gradient = nullptr;
-    MEM_delete(data);
-    op->customdata = nullptr;
-    WM_cursor_modal_restore(CTX_wm_window(C));
-    return OPERATOR_FINISHED;
+    return OPERATOR_PASS_THROUGH | OPERATOR_RUNNING_MODAL;
   }
 
   /* While no handle is being dragged, a mouse event over the header / tool-settings / N-panel

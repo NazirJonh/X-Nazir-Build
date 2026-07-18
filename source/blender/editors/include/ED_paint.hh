@@ -31,6 +31,7 @@ struct Scene;
 struct SpaceImage;
 struct UndoStep;
 struct UndoType;
+struct wmGizmoGroupType;
 struct wmKeyConfig;
 struct wmOperator;
 
@@ -184,11 +185,43 @@ float ED_image_paint_select_rotation_get(SpaceImage *sima);
 void ED_image_paint_select_rotation_set(SpaceImage *sima, float rotation);
 void ED_image_paint_select_scale_get(SpaceImage *sima, float r_scale[2]);
 void ED_image_paint_select_scale_set(SpaceImage *sima, const float scale[2]);
+/** Register the gizmo group that draws the floating selection transform cage. */
+void ED_image_paint_select_transform_gizmo_setup(wmGizmoGroupType *gzgt);
 
 /* `paint_image_select_move.cc` */
 
 bool ED_image_paint_select_is_moving(SpaceImage *sima);
 void ED_image_paint_select_move_offset_get(SpaceImage *sima, float r_offset[2]);
 void ED_image_paint_select_move_offset_set(SpaceImage *sima, const float offset[2]);
+
+/* `paint_image_select_mask.cc` */
+
+/**
+ * Free every floating selection operation state held by the editor's #PaintSelectSession.
+ * Safe to call with a null runtime; called when the Image Editor space-link is freed.
+ */
+void ED_image_paint_select_session_free(SpaceImage *sima);
+
+/**
+ * Discard only the floating transform state, leaving the rest of the session untouched. Used
+ * when an undo step invalidates the source pixels the floating transform was lifted from.
+ */
+void ED_image_paint_select_transform_state_free(SpaceImage *sima);
+
+/* `paint_image_select_gradient.cc` */
+
+/**
+ * Invalidate the live gradient preview so the next paint-cursor tick of any floating gradient
+ * session re-evaluates the tool settings.
+ */
+void ED_image_paint_select_gradient_settings_revision_bump();
+
+/* `paint_image_select_warp.cc` */
+
+/**
+ * Invalidate the live warp preview so the next non-blocking paint-cursor tick of any floating
+ * warp session picks up a changed #ImagePaintSettings::warp_grid_size.
+ */
+void ED_image_paint_select_warp_settings_revision_bump();
 
 }  // namespace blender

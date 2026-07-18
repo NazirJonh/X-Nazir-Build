@@ -6,6 +6,8 @@
  * \ingroup edinterface
  */
 
+#include <ranges>
+
 #include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_library.hh"
@@ -325,10 +327,17 @@ static void colorband_buttons_layout_compact(Layout &layout,
   if (coba->tot) {
     CBData *cbd = coba->data + coba->cur;
     PointerRNA elem_ptr = RNA_pointer_create_discrete(cb.ptr.owner_id, RNA_ColorRampElement, cbd);
+
+    /* #Layout::prop() does not hand back the button it created, so remember where the block ended
+     * and search only the buttons it appended. This relies on the layout emitting its buttons into
+     * the block immediately (the same assumption as #colorband_buttons_layout below); if that ever
+     * changes, or if the color property stops being drawn as a single button, the update callback
+     * below is silently lost. */
+    const int64_t buttons_num_before = block->buttons_ptrs.size();
     colrow->prop(&elem_ptr, "color", UI_ITEM_NONE, "", ICON_NONE);
 
     /* Trigger the gradient update callback when the active stop color changes. */
-    for (Button &but : block->buttons() | std::views::reverse) {
+    for (Button &but : block->buttons() | std::views::drop(buttons_num_before)) {
       if (but.rnapoin.data != elem_ptr.data || !but.rnaprop) {
         continue;
       }

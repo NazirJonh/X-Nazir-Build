@@ -42,6 +42,7 @@
 #include "BKE_icons.hh"
 #include "BKE_image.hh"
 #include "BKE_image_format.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_image_save.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
@@ -3357,15 +3358,15 @@ static bool image_crop_selection_poll(bContext *C)
     return false;
   }
 
-  const Scene *scene = CTX_data_scene(C);
-  if (!scene || !scene->toolsettings->imapaint.use_selection_mask) {
+  if (!BKE_image_paint_selection_mask_has_any(ima)) {
     CTX_wm_operator_poll_msg_set(C, "Selection mask is not active");
     return false;
   }
 
   const ImageTile *active_tile = BKE_image_get_tile_from_iuser(ima, &iuser);
   const int tile_number = active_tile ? active_tile->tile_number : 1001;
-  if (!BKE_image_paint_selection_mask_lookup(ima, tile_number)) {
+  /* Presence check only: the const overload keeps the poll from invalidating the mask caches. */
+  if (!BKE_image_paint_selection_mask_lookup(const_cast<const Image *>(ima), tile_number)) {
     CTX_wm_operator_poll_msg_set(C, "No selection on active tile");
     return false;
   }
@@ -3382,7 +3383,8 @@ static wmOperatorStatus image_crop_selection_exec(bContext *C, wmOperator *op)
   const ImageTile *active_tile = BKE_image_get_tile_from_iuser(ima, &iuser);
   const int tile_number = active_tile ? active_tile->tile_number : 1001;
 
-  if (!BKE_image_paint_selection_mask_lookup(ima, tile_number)) {
+  /* Presence check only: the const overload avoids advancing the revision. */
+  if (!BKE_image_paint_selection_mask_lookup(const_cast<const Image *>(ima), tile_number)) {
     BKE_report(op->reports, RPT_ERROR, "No selection on active tile");
     return OPERATOR_CANCELLED;
   }

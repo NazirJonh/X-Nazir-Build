@@ -3,20 +3,18 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /*
- * Fragment Shader for animated dashed lines, with uniform multi-color(s),
+ * Fragment Shader for dashed lines, with uniform multi-color(s),
  * or any single-color, and any thickness.
  *
- * Dashed is performed in screen space.
- * Supports animation of dash position for visual feedback (e.g., selection mask).
+ * Identical to `gpu_shader_2D_line_dashed_frag.glsl`, except that the dash pattern is shifted
+ * along the line by `dash_phase`. Advancing that phase over time gives a "marching ants" effect.
  *
- * udash_factor usage:
- * - >= 1.0f: solid line
- * - 0.0 to 1.0: animated dash with offset (creates movement effect)
+ * Dashed is performed in screen space.
  */
 
 #include "infos/gpu_shader_line_dashed_uniform_color_infos.hh"
 
-FRAGMENT_SHADER_CREATE_INFO(gpu_shader_3D_line_dashed_animated_color)
+FRAGMENT_SHADER_CREATE_INFO(gpu_shader_3D_line_dashed_uniform_color_animated)
 
 void main()
 {
@@ -25,13 +23,11 @@ void main()
   if (udash_factor >= 1.0f) {
     fragColor = color;
   }
-  /* Animated dashed line - udash_factor is used as animation offset. */
+  /* Actually dashed line... */
   else {
-    /* Shift dash positions based on udash_factor to create movement animation.
-     * This is used for selection feedback to make the selection region more visible. */
-    float animated_distance = distance_along_line - (udash_factor * dash_width);
-    float normalized_distance = fract(animated_distance / dash_width);
-    if (normalized_distance <= 0.5f) {
+    /* `dash_phase` is in whole dash periods, so it is subtracted after the division. */
+    float normalized_distance = fract(distance_along_line / dash_width - dash_phase);
+    if (normalized_distance <= udash_factor) {
       fragColor = color;
     }
     else if (colors_len > 0) {

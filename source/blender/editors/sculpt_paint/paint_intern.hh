@@ -556,6 +556,11 @@ bool image_select_gradient_is_floating_in_space(const SpaceImage *sima);
 bool image_select_warp_is_floating(bContext *C);
 bool image_select_warp_is_floating_in_space(const SpaceImage *sima);
 void image_paint_clipboard_ensure_atexit_handler();
+/**
+ * Modal keymap shared by the floating-selection operators (move / transform / warp).
+ * Defined in mesh/paint_image_select_floating.cc; registered from #ED_keymap_paint.
+ */
+wmKeyMap *image_select_floating_modal_keymap(wmKeyConfig *keyconf);
 
 
 /* paint_image_2d_curve_mask.cc */

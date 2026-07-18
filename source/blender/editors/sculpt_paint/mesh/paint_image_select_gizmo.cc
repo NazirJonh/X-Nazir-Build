@@ -8,6 +8,10 @@
  * Gizmo group for floating Image Paint selection transform (cage2d + anchor).
  */
 
+#include "MEM_guardedalloc.h"
+
+#include "BLI_math_matrix.h"
+
 #include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 
@@ -15,14 +19,13 @@
 #include "BKE_global.hh"
 
 #include "ED_gizmo_library.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 
 #include "RNA_access.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
-
-#include "BLI_math_matrix.h"
 
 #include "../../space_image/image_runtime.hh"
 #include "paint_image_select_intern.hh"
@@ -32,7 +35,10 @@ namespace blender {
 struct PaintSelectTransformGizmoGroup {
   wmGizmo *gz_cage = nullptr;
   wmGizmo *gz_anchor = nullptr;
-  /** Tracks #WM_gizmomap_get_modal so we can end drag when tweak finishes without a custom_modal release event. */
+  /**
+   * Tracks #WM_gizmomap_get_modal so we can end drag when tweak finishes without a custom_modal
+   * release event.
+   */
   bool was_modal_tweak = false;
 };
 
@@ -42,9 +48,9 @@ static PaintSelectTransformGizmoGroup *paint_select_transform_gizmo_get(wmGizmoG
 }
 
 static wmOperatorStatus paint_select_transform_cage_modal(bContext *C,
-                                                           wmGizmo *gz,
-                                                           const wmEvent *event,
-                                                           eWM_GizmoFlagTweak /*tweak_flag*/)
+                                                          wmGizmo *gz,
+                                                          const wmEvent *event,
+                                                          eWM_GizmoFlagTweak /*tweak_flag*/)
 {
   PaintSelectTransformGizmoGroup *ggd = paint_select_transform_gizmo_get(gz->parent_gzgroup);
   ImageSelectTransformState *state = image_select_transform_state_get(CTX_wm_space_image(C));
@@ -83,9 +89,9 @@ static wmOperatorStatus paint_select_transform_cage_modal(bContext *C,
 }
 
 static wmOperatorStatus paint_select_transform_anchor_modal(bContext *C,
-                                                              wmGizmo *gz,
-                                                              const wmEvent *event,
-                                                              eWM_GizmoFlagTweak /*tweak_flag*/)
+                                                            wmGizmo *gz,
+                                                            const wmEvent *event,
+                                                            eWM_GizmoFlagTweak /*tweak_flag*/)
 {
   PaintSelectTransformGizmoGroup *ggd = paint_select_transform_gizmo_get(gz->parent_gzgroup);
   ImageSelectTransformState *state = image_select_transform_state_get(CTX_wm_space_image(C));
@@ -246,7 +252,8 @@ static void paint_select_transform_gizmo_draw_prepare(const bContext *C, wmGizmo
   copy_m4_m4(ggd->gz_cage->matrix_space, mats.matrix_space);
   copy_m4_m4(ggd->gz_cage->matrix_basis, mats.matrix_basis);
   copy_m4_m4(ggd->gz_cage->matrix_offset, mats.matrix_offset);
-  /* matrix_offset[3] already includes center/pivot layout for rotation (see calc_gizmo_matrices). */
+  /* matrix_offset[3] already includes center/pivot layout for rotation
+   * (see calc_gizmo_matrices). */
 
   unit_m4(ggd->gz_anchor->matrix_space);
   unit_m4(ggd->gz_anchor->matrix_basis);

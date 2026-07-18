@@ -24,6 +24,8 @@ struct wmPaintCursor;
 
 namespace blender {
 
+struct ReportList;
+
 /* -------------------------------------------------------------------- */
 /** \name Constants
  * \{ */
@@ -99,10 +101,7 @@ inline void warp_grid_cell_corners(const float2 *pts,
 /** \name State
  * \{ */
 
-struct ImageSelectWarpState {
-  SpaceImage *owner_sima = nullptr;
-  ARegionType *owner_region_type = nullptr;
-  ImageUser iuser = {};
+struct ImageSelectWarpState : public PaintSelectFloatingSession {
   int tile_number = 1001;
 
   /* Single-tile capture: geom.origin_px/size_px is the margin-expanded capture area;
@@ -121,7 +120,8 @@ struct ImageSelectWarpState {
    * image_select_warp_resize_grid() in paint_image_select_warp.cc. */
   uint64_t applied_settings_revision = 0;
   /* Interpolation mode for grid evaluation (from ImagePaintSettings::warp_interpolation). Read at
-   * invoke and live-updated alongside grid_size -- see image_select_warp_apply_settings_revision. */
+   * invoke and live-updated alongside grid_size -- see
+   * image_select_warp_apply_settings_revision. */
   eImagePaint_WarpInterpolation interp = IMAGE_PAINT_WARP_INTERP_LINEAR;
 
   /* Grid point coordinates normalized to the capture area: [0,0] = capture top-left corner,
@@ -130,8 +130,6 @@ struct ImageSelectWarpState {
   Array<float2> src_pts;
   Array<float2> tgt_pts;
 
-  bool undo_begun = false;
-  void *draw_handle = nullptr;
   /* Paint-cursor "detector": runs on mouse move (and on most redraws) without a running modal
    * operator, so it updates #hover_point_idx and requests a redraw without blocking View2D
    * pan/zoom or UI interaction the way an always-running modal handler would (a running modal
@@ -142,7 +140,6 @@ struct ImageSelectWarpState {
   wmPaintCursor *paint_cursor = nullptr;
 
   int drag_point_idx = -1;
-  bool is_dragging = false;
   /* Index of the control point under the cursor while not dragging (-1 = none), for hover
    * highlighting. Updated by #paint_cursor's callback. */
   int hover_point_idx = -1;
@@ -152,6 +149,12 @@ struct ImageSelectWarpState {
 };
 
 void image_select_warp_state_free(ImageSelectWarpState *state);
+
+/**
+ * Commit and free \a sima's floating warp session, if it has one. No-op otherwise.
+ * Called through #image_select_floating_sessions_end; see that function for the semantics.
+ */
+void image_select_warp_session_end_for_takeover(bContext *C, SpaceImage *sima);
 
 /**
  * Capture a single-tile fragment for warp: the tight selection bbox expanded by a margin
@@ -168,12 +171,13 @@ bool image_select_warp_extract(wmOperator *op,
                                SelectionTileFragment *r_fragment);
 
 /** Place src_pts == tgt_pts on an evenly spaced grid covering the tight selection bbox
- * (state->fragment.geom.selection_*), normalized to the capture area (state->fragment.geom.size_px). */
+ * (state->fragment.geom.selection_*), normalized to the capture area
+ * (state->fragment.geom.size_px). */
 void image_select_warp_init_grid(ImageSelectWarpState *state);
 
 /** Rasterize the current tgt_pts deformation into the canvas at the fragment's capture area,
  * update the destination selection mask, and close the undo step opened at lift time. */
-void image_select_warp_commit(bContext *C, ImageSelectWarpState *state);
+void image_select_warp_commit(bContext *C, ImageSelectWarpState *state, ReportList *reports);
 
 /** \} */
 

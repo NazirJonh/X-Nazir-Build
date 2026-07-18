@@ -2151,8 +2151,9 @@ void RNA_api_ui_layout(StructRNA *srna)
                   "compact",
                   false,
                   "",
-                  "Compact layout: draw the ramp first, move the tools menu below it, hide the "
-                  "active stop selector, and insert stops by clicking the ramp");
+                  "Use a space saving layout: the ramp is drawn first with the add, remove and "
+                  "tools buttons below it, the active color stop index and position fields are "
+                  "hidden, and clicking an empty area of the ramp inserts a new color stop there");
 
   func = RNA_def_function(srna, "template_icon", "template_icon");
   RNA_def_function_ui_description(func, "Display a large icon");

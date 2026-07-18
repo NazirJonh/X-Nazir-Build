@@ -2553,6 +2553,13 @@ void template_preview(Layout *layout,
                       ID *parent,
                       MTex *slot,
                       const char *preview_id);
+/**
+ * \param expand: Show the extended layout with the color mode and interpolation buttons.
+ * \param compact: Use a space saving layout: the ramp is drawn first with the add, remove and
+ * tools buttons below it, the active color stop index and position fields are hidden, and
+ * clicking an empty area of the ramp inserts a new color stop there (see
+ * #ButtonColorBand::insert_on_click).
+ */
 void template_color_ramp(
     Layout *layout, PointerRNA *ptr, StringRefNull propname, bool expand, bool compact = false);
 /**

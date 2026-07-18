@@ -1349,8 +1349,9 @@ struct ImagePaintSettings {
   float clone_alpha = 0.5f;
   char _pad2[4] = {};
 
-  /** Whether 2D texture paint selection masking is active. */
-  char use_selection_mask = 0;
+  /* Formerly `use_selection_mask`. Whether selection masking is active is derived from the image
+   * runtime data (see #BKE_image_paint_selection_mask_has_any), so it is not stored in the file. */
+  char _pad3[1] = {};
   /** Expand paint selection to full UV islands (like UV Editor island select). */
   char use_selection_uv_island = 0;
   /** #eImagePaint_GradientType */
@@ -1369,7 +1370,8 @@ struct ImagePaintSettings {
   char _pad_gradient2[3] = {};
   /**
    * Color ramp (stops + interpolation) for the selection gradient tool. Embedded by value like
-   * #ColorMapping::coba; initialized lazily (see #BKE_colorband_init) when empty.
+   * #ColorMapping::coba, so it needs a runtime #BKE_colorband_init: see #scene_init_data,
+   * #blo_update_defaults_scene and #blo_do_versions_520.
    */
   struct ColorBand gradient_colorband;
 };

@@ -30,6 +30,7 @@
 #  include "BKE_context.hh"
 #  include "BKE_image.hh"
 #  include "BKE_image_format.hh"
+#  include "BKE_image_paint_selection.hh"
 #  include "BKE_image_save.hh"
 #  include "BKE_library.hh"
 #  include "BKE_main.hh"
@@ -294,7 +295,10 @@ static void rna_Image_get_selection_tiles(Image *image,
 {
   blender::Vector<int> tile_nums;
   for (const ImageTile &tile : image->tiles) {
-    if (BKE_image_paint_selection_mask_lookup(image, tile.tile_number) != nullptr) {
+    /* Presence check only: the const overload keeps the query from invalidating the mask caches. */
+    if (BKE_image_paint_selection_mask_lookup(const_cast<const Image *>(image), tile.tile_number) !=
+        nullptr)
+    {
       tile_nums.append(tile.tile_number);
     }
   }
@@ -320,7 +324,9 @@ static void rna_Image_get_selection_mask(Image *image,
   *r_width = 0;
   *r_height = 0;
 
-  ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  /* The mask is only copied out, so the const overload avoids advancing the revision. */
+  const ImBuf *mask = BKE_image_paint_selection_mask_lookup(const_cast<const Image *>(image),
+                                                            tile_number);
   if (mask == nullptr) {
     return;
   }

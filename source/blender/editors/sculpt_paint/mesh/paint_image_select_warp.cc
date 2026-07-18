@@ -27,12 +27,15 @@
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_main.hh"
+#include "BKE_report.hh"
 #include "BKE_screen.hh"
 
 #include "DEG_depsgraph.hh"
 
 #include "ED_image.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_undo.hh"
@@ -54,19 +57,16 @@
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
-#include "BKE_report.hh"
-
-#include "../paint_intern.hh"
 #include "../../space_image/image_runtime.hh"
-#include "paint_image_select_intern.hh"
+#include "../paint_intern.hh"
 #include "paint_image_select_fragment.hh"
-#include "paint_image_select_warp.hh"
+#include "paint_image_select_intern.hh"
 
 namespace blender {
 
 static uint64_t image_paint_warp_settings_revision = 0;
 
-void image_paint_warp_bump_settings_revision()
+void ED_image_paint_select_warp_settings_revision_bump()
 {
   image_paint_warp_settings_revision++;
 }
@@ -232,7 +232,15 @@ bool image_select_warp_extract(wmOperator *op,
 
   BKE_image_release_ibuf(ima, ibuf, lock);
 
-  const ImBuf *tile_mask = BKE_image_paint_selection_mask_lookup(ima, tile_number);
+  /* The mask is only sampled below, so take the `const Image *` overload; the mutable one would
+   * advance the mask revision and invalidate the cached selection outline. */
+  const ImBuf *tile_mask = BKE_image_paint_selection_mask_lookup(const_cast<const Image *>(ima),
+                                                                 tile_number);
+  /* The capture rect is clamped against the tile buffer, so the mask may only be indexed with it
+   * when the two share a resolution. */
+  if (!image_select_mask_matches(tile_mask, tile_w, tile_h)) {
+    tile_mask = nullptr;
+  }
   ImBuf *frag_mask = IMB_allocImBuf(cap_w, cap_h, ImBufFlags::Zero);
   IMB_alloc_float_pixels(frag_mask, 1);
   const float *src_mask = tile_mask ? tile_mask->float_data() : nullptr;
@@ -262,6 +270,23 @@ bool image_select_warp_extract(wmOperator *op,
 
   *r_fragment = std::move(frag);
   return true;
+}
+
+/**
+ * UV rect of a warp fragment's capture area in global (UDIM) UV space: the bottom-left corner and
+ * the size. Grid points are stored normalized to this rect, so screen mapping and the inverse
+ * mapping in the drag modal both go through it.
+ */
+static void image_select_warp_capture_uv_rect(const SelectionTileFragment &frag,
+                                              float2 *r_origin_uv,
+                                              float2 *r_size_uv)
+{
+  const float2 tile_uv = image_select_udim_tile_uv_origin(frag.geom.tile_number);
+  const float tile_w = float(frag.geom.tile_size_px.x);
+  const float tile_h = float(frag.geom.tile_size_px.y);
+  *r_origin_uv = tile_uv + float2(float(frag.geom.origin_px.x) / tile_w,
+                                  float(frag.geom.origin_px.y) / tile_h);
+  *r_size_uv = float2(float(frag.geom.size_px.x) / tile_w, float(frag.geom.size_px.y) / tile_h);
 }
 
 void image_select_warp_init_grid(ImageSelectWarpState *state)
@@ -360,7 +385,8 @@ static void image_select_warp_resize_grid(ImageSelectWarpState *state, const int
 /** Re-read ImagePaintSettings::warp_grid_size and resize the grid if it changed, marking the
  * currently applied revision up to date either way. Only called while not dragging (dragging
  * tracks a specific point index that a resize would invalidate). */
-static void image_select_warp_apply_settings_revision(const bContext *C, ImageSelectWarpState *state)
+static void image_select_warp_apply_settings_revision(const bContext *C,
+                                                      ImageSelectWarpState *state)
 {
   state->applied_settings_revision = image_paint_warp_settings_revision;
   const Scene *scene = CTX_data_scene(C);
@@ -388,7 +414,8 @@ static void draw_select_warp_preview(const bContext *C, ARegion *region, void *a
    * position (the RNA update callback forces one via NC_SPACE | ND_SPACE_IMAGE), whereas the
    * paint cursor only runs while the mouse hovers this region. Skipped while dragging, same as
    * the hover detector. */
-  if (!state->is_dragging && state->applied_settings_revision != image_paint_warp_settings_revision)
+  if (!state->is_dragging &&
+      state->applied_settings_revision != image_paint_warp_settings_revision)
   {
     image_select_warp_apply_settings_revision(C, state);
   }
@@ -397,14 +424,8 @@ static void draw_select_warp_preview(const bContext *C, ARegion *region, void *a
   const int cells = grid_size - 1;
   const int tess_res = cells * IMAGE_SELECT_WARP_CELL_SUBDIV + 1;
 
-  const int t_col = (state->fragment.geom.tile_number - 1001) % 10;
-  const int t_row = (state->fragment.geom.tile_number - 1001) / 10;
-  const float tile_w = float(state->fragment.geom.tile_size_px.x);
-  const float tile_h = float(state->fragment.geom.tile_size_px.y);
-  const float2 cap_origin_uv = float2(float(t_col) + float(state->fragment.geom.origin_px.x) / tile_w,
-                                      float(t_row) + float(state->fragment.geom.origin_px.y) / tile_h);
-  const float2 cap_size_uv = float2(float(state->fragment.geom.size_px.x) / tile_w,
-                                    float(state->fragment.geom.size_px.y) / tile_h);
+  float2 cap_origin_uv, cap_size_uv;
+  image_select_warp_capture_uv_rect(state->fragment, &cap_origin_uv, &cap_size_uv);
 
   auto to_screen = [&](const float2 &capture_normalized) -> float2 {
     const float2 uv = cap_origin_uv + capture_normalized * cap_size_uv;
@@ -422,7 +443,8 @@ static void draw_select_warp_preview(const bContext *C, ARegion *region, void *a
     const float gy = float(y) / float(tess_res - 1) * float(cells);
     for (int x = 0; x < tess_res; x++) {
       const float gx = float(x) / float(tess_res - 1) * float(cells);
-      screen_verts.append(to_screen(warp_grid_eval(state->tgt_pts.data(), grid_size, gx, gy, state->interp)));
+      screen_verts.append(
+          to_screen(warp_grid_eval(state->tgt_pts.data(), grid_size, gx, gy, state->interp)));
       tex_coords.append(warp_grid_eval(state->src_pts.data(), grid_size, gx, gy, state->interp));
     }
   }
@@ -448,12 +470,18 @@ static void draw_select_warp_preview(const bContext *C, ARegion *region, void *a
     const gpu::TextureFormat fmt = (ch >= 4) ? gpu::TextureFormat::SFLOAT_16_16_16_16 :
                                    (ch == 3) ? gpu::TextureFormat::SFLOAT_16_16_16 :
                                                gpu::TextureFormat::SFLOAT_16;
-    tex = GPU_texture_create_2d("warp_preview", frag->x, frag->y, 1, fmt, GPU_TEXTURE_USAGE_SHADER_READ, nullptr);
+    tex = GPU_texture_create_2d(
+        "warp_preview", frag->x, frag->y, 1, fmt, GPU_TEXTURE_USAGE_SHADER_READ, nullptr);
     GPU_texture_update(tex, GPU_DATA_FLOAT, frag->float_buffer.data);
   }
   else if (frag->byte_buffer.data) {
-    tex = GPU_texture_create_2d("warp_preview", frag->x, frag->y, 1,
-                                gpu::TextureFormat::UNORM_8_8_8_8, GPU_TEXTURE_USAGE_SHADER_READ, nullptr);
+    tex = GPU_texture_create_2d("warp_preview",
+                                frag->x,
+                                frag->y,
+                                1,
+                                gpu::TextureFormat::UNORM_8_8_8_8,
+                                GPU_TEXTURE_USAGE_SHADER_READ,
+                                nullptr);
     GPU_texture_update(tex, GPU_DATA_UBYTE, frag->byte_buffer.data);
   }
 
@@ -465,7 +493,8 @@ static void draw_select_warp_preview(const bContext *C, ARegion *region, void *a
     GPU_blend(GPU_BLEND_ALPHA);
     GPUVertFormat *format = immVertexFormat();
     const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
-    const uint texco = GPU_vertformat_attr_add(format, "texCoord", gpu::VertAttrType::SFLOAT_32_32);
+    const uint texco = GPU_vertformat_attr_add(
+        format, "texCoord", gpu::VertAttrType::SFLOAT_32_32);
     immBindBuiltinProgram(GPU_SHADER_3D_IMAGE);
     immBindTexture("image", tex);
 
@@ -626,7 +655,8 @@ static void warp_append_triangle(Vector<WarpTriangle> &tris,
  * live preview showed, with no gaps at cell boundaries. Built once per commit (shared read-only
  * across the parallel row tasks), not per destination pixel.
  */
-static void warp_build_commit_triangles(const ImageSelectWarpState &state, Vector<WarpTriangle> &r_tris)
+static void warp_build_commit_triangles(const ImageSelectWarpState &state,
+                                        Vector<WarpTriangle> &r_tris)
 {
   const int grid_size = state.grid_size;
   const int cells = grid_size - 1;
@@ -678,13 +708,111 @@ struct WarpTriangleHit {
   float2 src_px = {0.0f, 0.0f};
 };
 
-/** Linear scan with a cheap bbox reject; see warp_build_commit_triangles() for why this replaces
- * a single-quadratic-solve-per-cell lookup. */
-static WarpTriangleHit warp_find_triangle(const Vector<WarpTriangle> &tris, const float2 &p)
+/**
+ * Uniform bin grid over the destination-space bounding boxes of the commit tessellation, so a
+ * pixel only tests the triangles that can possibly contain it.
+ *
+ * A direct cell index is not usable here: the lookup happens in *deformed* space, which is only a
+ * regular grid before the warp. Binning the deformed bounding boxes stays correct for arbitrary
+ * (including folded) deformations.
+ *
+ * Stored CSR-style: bin `b` owns `tri_indices[offsets[b] .. offsets[b + 1])`, in ascending
+ * triangle index.
+ */
+struct WarpTriangleGrid {
+  int res_x = 0;
+  int res_y = 0;
+  float2 origin = {0.0f, 0.0f};
+  /* Reciprocal bin size; multiplying avoids a divide per lookup. */
+  float2 inv_bin_size = {0.0f, 0.0f};
+  Vector<int> offsets;
+  Vector<int> tri_indices;
+};
+
+/** Bin coordinate of \a p, clamped so points outside the built extent land in the border bin. */
+static int2 warp_triangle_grid_bin_of(const WarpTriangleGrid &grid, const float2 &p)
+{
+  const int bx = int(std::floor((p.x - grid.origin.x) * grid.inv_bin_size.x));
+  const int by = int(std::floor((p.y - grid.origin.y) * grid.inv_bin_size.y));
+  return int2(std::clamp(bx, 0, grid.res_x - 1), std::clamp(by, 0, grid.res_y - 1));
+}
+
+/**
+ * Build the bin grid for \a tris. Aims at roughly one triangle per bin, clamped so a degenerate
+ * or tiny tessellation cannot blow up the allocation.
+ */
+static void warp_build_triangle_grid(const Vector<WarpTriangle> &tris,
+                                     const int2 cap_size,
+                                     WarpTriangleGrid &r_grid)
+{
+  const int tri_num = int(tris.size());
+  if (tri_num == 0 || cap_size.x <= 0 || cap_size.y <= 0) {
+    return;
+  }
+
+  /* One bin per triangle keeps both the build cost and the per-pixel candidate list at O(1)
+   * amortized, since the tessellation is dense and evenly distributed over the capture area. */
+  const int res = std::clamp(int(std::sqrt(double(tri_num))), 1, 256);
+  r_grid.res_x = res;
+  r_grid.res_y = res;
+  r_grid.origin = float2(0.0f, 0.0f);
+  r_grid.inv_bin_size = float2(float(res) / float(cap_size.x), float(res) / float(cap_size.y));
+
+  const int bin_num = res * res;
+
+  /* Counting sort: one pass to size each bin, one to fill it. Filling in ascending triangle order
+   * is what preserves the linear scan's tie-break (see warp_find_triangle). */
+  r_grid.offsets.resize(bin_num + 1, 0);
+  for (int i = 0; i < tri_num; i++) {
+    const int2 lo = warp_triangle_grid_bin_of(r_grid, tris[i].bbox_min);
+    const int2 hi = warp_triangle_grid_bin_of(r_grid, tris[i].bbox_max);
+    for (int by = lo.y; by <= hi.y; by++) {
+      for (int bx = lo.x; bx <= hi.x; bx++) {
+        r_grid.offsets[by * res + bx + 1]++;
+      }
+    }
+  }
+  for (int b = 0; b < bin_num; b++) {
+    r_grid.offsets[b + 1] += r_grid.offsets[b];
+  }
+
+  Vector<int> cursor(r_grid.offsets.as_span().drop_back(1));
+  r_grid.tri_indices.resize(r_grid.offsets[bin_num]);
+  for (int i = 0; i < tri_num; i++) {
+    const int2 lo = warp_triangle_grid_bin_of(r_grid, tris[i].bbox_min);
+    const int2 hi = warp_triangle_grid_bin_of(r_grid, tris[i].bbox_max);
+    for (int by = lo.y; by <= hi.y; by++) {
+      for (int bx = lo.x; bx <= hi.x; bx++) {
+        r_grid.tri_indices[cursor[by * res + bx]++] = i;
+      }
+    }
+  }
+}
+
+/**
+ * Find the triangle of the commit tessellation containing \a p, in destination space.
+ *
+ * Equivalent to a linear scan over \a tris, including which triangle wins where the deformation
+ * folds and several overlap: a triangle is registered in every bin its bounding box touches, and
+ * bin coordinates are monotonic in position, so the bin holding \a p is guaranteed to list every
+ * triangle whose bbox contains \a p -- in ascending index, exactly the order the scan visited
+ * them. The bin is therefore a superset of the accepted candidates and the first acceptance is
+ * the same one.
+ */
+static WarpTriangleHit warp_find_triangle(const Vector<WarpTriangle> &tris,
+                                          const WarpTriangleGrid &grid,
+                                          const float2 &p)
 {
   WarpTriangleHit hit;
-  for (const WarpTriangle &tri : tris) {
-    if (p.x < tri.bbox_min.x || p.x > tri.bbox_max.x || p.y < tri.bbox_min.y || p.y > tri.bbox_max.y)
+  if (grid.res_x == 0) {
+    return hit;
+  }
+  const int2 bin = warp_triangle_grid_bin_of(grid, p);
+  const int b = bin.y * grid.res_x + bin.x;
+  for (int slot = grid.offsets[b]; slot < grid.offsets[b + 1]; slot++) {
+    const WarpTriangle &tri = tris[grid.tri_indices[slot]];
+    if (p.x < tri.bbox_min.x || p.x > tri.bbox_max.x || p.y < tri.bbox_min.y ||
+        p.y > tri.bbox_max.y)
     {
       continue;
     }
@@ -701,6 +829,7 @@ static WarpTriangleHit warp_find_triangle(const Vector<WarpTriangle> &tris, cons
 struct WarpCommitTaskData {
   const ImageSelectWarpState *state = nullptr;
   const Vector<WarpTriangle> *triangles = nullptr;
+  const WarpTriangleGrid *triangle_grid = nullptr;
   ImBuf *dst_ibuf = nullptr;
   ImBuf *dst_mask_ibuf = nullptr;
   int2 dst_origin_px = {0, 0};
@@ -750,7 +879,7 @@ static void image_select_warp_commit_row_task(void *__restrict userdata,
     bool is_restore = true;
 
     const float2 p_px = float2(float(x) + 0.5f, float(y) + 0.5f);
-    const WarpTriangleHit hit = warp_find_triangle(*data.triangles, p_px);
+    const WarpTriangleHit hit = warp_find_triangle(*data.triangles, *data.triangle_grid, p_px);
     if (hit.found) {
       const float warp_src_fx = std::clamp(hit.src_px.x - 0.5f, 0.0f, float(cap_w) - 1.0001f);
       const float warp_src_fy = std::clamp(hit.src_px.y - 0.5f, 0.0f, float(cap_h) - 1.0001f);
@@ -766,11 +895,17 @@ static void image_select_warp_commit_row_task(void *__restrict userdata,
         const float *mdata = state.fragment.pixels.fragment_mask_ibuf->float_data();
         const int mx = int(std::round(warp_src_fx));
         const int my = int(std::round(warp_src_fy));
-        warp_mask_weight = mdata[std::clamp(my, 0, cap_h - 1) * cap_w + std::clamp(mx, 0, cap_w - 1)] >
-                                  SELECTION_MASK_THRESHOLD ?
-                              1.0f :
-                              0.0f;
+        warp_mask_weight =
+            mdata[std::clamp(my, 0, cap_h - 1) * cap_w + std::clamp(mx, 0, cap_w - 1)] >
+                    SELECTION_MASK_THRESHOLD ?
+                1.0f :
+                0.0f;
       }
+      /* Deliberately not #SELECTION_MASK_THRESHOLD: this only asks whether the warped content
+       * covers this pixel at all, so any non-negligible weight counts. The feathered edge is
+       * meant to composite its color at partial strength while staying outside the binary
+       * selection, which the mask write below reconstructs at #SELECTION_MASK_THRESHOLD. In the
+       * non-feathered path above `warp_mask_weight` is already 0 or 1, so both agree there. */
       if (warp_mask_weight > 0.001f) {
         src_fx = warp_src_fx;
         src_fy = warp_src_fy;
@@ -799,8 +934,8 @@ static void image_select_warp_commit_row_task(void *__restrict userdata,
      * there is no separate "old" location where a hole would be expected.) */
     if (is_restore) {
       const ImBuf *orig_mask_ibuf = state.fragment.pixels.fragment_mask_ibuf;
-      const bool was_selected = orig_mask_ibuf &&
-                                orig_mask_ibuf->float_data()[y * cap_w + x] > SELECTION_MASK_THRESHOLD;
+      const bool was_selected = orig_mask_ibuf && orig_mask_ibuf->float_data()[y * cap_w + x] >
+                                                      SELECTION_MASK_THRESHOLD;
       if (!was_selected) {
         continue;
       }
@@ -860,7 +995,7 @@ static void image_select_warp_commit_row_task(void *__restrict userdata,
   }
 }
 
-void image_select_warp_commit(bContext *C, ImageSelectWarpState *state)
+void image_select_warp_commit(bContext *C, ImageSelectWarpState *state, ReportList *reports)
 {
   if (!state) {
     return;
@@ -891,11 +1026,28 @@ void image_select_warp_commit(bContext *C, ImageSelectWarpState *state)
   Vector<WarpTriangle> triangles;
   warp_build_commit_triangles(*state, triangles);
 
+  /* Bin the tessellation once so each destination pixel only tests its own neighborhood instead
+   * of every triangle; also shared read-only across the row tasks. */
+  WarpTriangleGrid triangle_grid;
+  warp_build_triangle_grid(triangles, state->fragment.geom.size_px, triangle_grid);
+
   WarpCommitTaskData task_data;
   task_data.state = state;
   task_data.triangles = &triangles;
+  task_data.triangle_grid = &triangle_grid;
   task_data.dst_ibuf = ibuf;
-  task_data.dst_mask_ibuf = BKE_image_paint_selection_mask_lookup(ima, state->fragment.geom.tile_number);
+  task_data.dst_mask_ibuf = BKE_image_paint_selection_mask_lookup(
+      ima, state->fragment.geom.tile_number);
+  /* The row task clamps its writes against `dst_ibuf`, so the mask may only be written through
+   * when it shares that resolution. Dropping it leaves the pixels committed and the mask stale,
+   * which is recoverable; writing it would run past the mask allocation. */
+  if (!image_select_mask_matches(task_data.dst_mask_ibuf, ibuf)) {
+    task_data.dst_mask_ibuf = nullptr;
+    BKE_report(reports,
+               RPT_WARNING,
+               "Selection mask resolution does not match the image; pixels were warped but the "
+               "selection was left unchanged");
+  }
   task_data.dst_origin_px = state->fragment.geom.origin_px;
 
   /* Resolve write pointers once, here on the calling thread, before the parallel dispatch.
@@ -909,7 +1061,8 @@ void image_select_warp_commit(bContext *C, ImageSelectWarpState *state)
   task_data.dst_channels = ibuf->channels ? ibuf->channels : 4;
   task_data.dst_float = ibuf->float_data_for_write();
   task_data.dst_byte = task_data.dst_float ? nullptr : ibuf->byte_data_for_write();
-  task_data.dst_mask = task_data.dst_mask_ibuf ? task_data.dst_mask_ibuf->float_data_for_write() : nullptr;
+  task_data.dst_mask = task_data.dst_mask_ibuf ? task_data.dst_mask_ibuf->float_data_for_write() :
+                                                 nullptr;
 
   TaskParallelSettings settings;
   BLI_parallel_range_settings_defaults(&settings);
@@ -947,19 +1100,44 @@ void image_select_warp_commit(bContext *C, ImageSelectWarpState *state)
  * confirm/cancel/undo_step operators reference it as their poll. */
 static bool image_select_warp_floating_poll(bContext *C);
 
-static wmOperatorStatus image_select_warp_confirm_exec(bContext *C, wmOperator * /*op*/)
+void image_select_warp_session_end_for_takeover(bContext *C, SpaceImage *sima)
+{
+  if (!sima || !sima->runtime) {
+    return;
+  }
+  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
+  if (!state_ref) {
+    return;
+  }
+  ImageSelectWarpState *state = state_ref;
+  /* Cleared before the commit, not after: #image_select_warp_commit notifies and tags the image,
+   * and anything that looks the session up again in response must not find the state being torn
+   * down here. */
+  state_ref = nullptr;
+  /* A control-point drag may still be in progress when another tool takes over (the modal handler
+   * is left registered and exits on its next event, seeing a null state). Give the window its
+   * normal cursor and the status bar its normal text back here. */
+  image_select_floating_drag_end(C, state);
+  image_select_floating_status_clear(C);
+  /* No report list: the takeover is not the user's own confirm, so a mask-resolution warning has
+   * no operator to surface it on. #BKE_report tolerates a null list and still logs. */
+  image_select_warp_commit(C, state, nullptr);
+  image_select_warp_state_free(state);
+}
+
+static wmOperatorStatus image_select_warp_confirm_exec(bContext *C, wmOperator *op)
 {
   SpaceImage *sima = CTX_wm_space_image(C);
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectWarpState *&g_state = sima->runtime->paint_select.warp;
-  if (!g_state) {
+  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
+  if (!state_ref) {
     return OPERATOR_CANCELLED;
   }
-  image_select_warp_commit(C, g_state);
-  image_select_warp_state_free(g_state);
-  g_state = nullptr;
+  image_select_warp_commit(C, state_ref, op->reports);
+  image_select_warp_state_free(state_ref);
+  state_ref = nullptr;
   ARegion *region = CTX_wm_region(C);
   if (region) {
     ED_region_tag_redraw(region);
@@ -976,7 +1154,10 @@ void PAINT_OT_image_select_warp_confirm(wmOperatorType *ot)
   ot->exec = image_select_warp_confirm_exec;
   ot->poll = image_select_warp_floating_poll;
 
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No OPTYPE_UNDO: commit closes the image undo step opened while the fragment was lifted.
+   * Letting WM finalize that step first would leave push_end with nothing to close.
+   * See the note in #PAINT_OT_image_select_move. */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 static wmOperatorStatus image_select_warp_cancel_exec(bContext *C, wmOperator * /*op*/)
@@ -985,14 +1166,14 @@ static wmOperatorStatus image_select_warp_cancel_exec(bContext *C, wmOperator * 
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectWarpState *&g_state = sima->runtime->paint_select.warp;
-  if (!g_state) {
+  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
+  if (!state_ref) {
     return OPERATOR_CANCELLED;
   }
   image_select_fragment_restore_source(
-      C, sima->image, g_state->iuser, {g_state->fragment}, g_state->undo_begun);
-  image_select_warp_state_free(g_state);
-  g_state = nullptr;
+      C, sima->image, state_ref->iuser, {state_ref->fragment}, state_ref->undo_begun);
+  image_select_warp_state_free(state_ref);
+  state_ref = nullptr;
   ARegion *region = CTX_wm_region(C);
   if (region) {
     ED_region_tag_redraw(region);
@@ -1018,20 +1199,20 @@ static wmOperatorStatus image_select_warp_undo_step_exec(bContext *C, wmOperator
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectWarpState *&g_state = sima->runtime->paint_select.warp;
-  if (!g_state) {
+  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
+  if (!state_ref) {
     return OPERATOR_CANCELLED;
   }
-  if (g_state->drag_position_history.is_empty()) {
+  if (state_ref->drag_position_history.is_empty()) {
     /* No history: cancel entirely. */
     image_select_fragment_restore_source(
-        C, sima->image, g_state->iuser, {g_state->fragment}, g_state->undo_begun);
-    image_select_warp_state_free(g_state);
-    g_state = nullptr;
+        C, sima->image, state_ref->iuser, {state_ref->fragment}, state_ref->undo_begun);
+    image_select_warp_state_free(state_ref);
+    state_ref = nullptr;
   }
   else {
-    g_state->tgt_pts = g_state->drag_position_history.last();
-    g_state->drag_position_history.remove_last();
+    state_ref->tgt_pts = state_ref->drag_position_history.last();
+    state_ref->drag_position_history.remove_last();
   }
   ARegion *region = CTX_wm_region(C);
   if (region) {
@@ -1066,7 +1247,10 @@ bool image_select_warp_is_floating(bContext *C)
 
 bool image_select_warp_is_floating_in_space(const SpaceImage *sima)
 {
-  return sima && sima->runtime && sima->runtime->paint_select.warp != nullptr;
+  if (!sima || !sima->runtime) {
+    return false;
+  }
+  return image_select_floating_state_owns(sima->runtime->paint_select.warp, sima);
 }
 
 static bool image_select_warp_floating_poll(bContext *C)
@@ -1080,7 +1264,7 @@ static bool image_select_warp_poll(bContext *C)
   if (!sima || !sima->runtime) {
     return false;
   }
-  if (sima->runtime->paint_select.warp && sima == sima->runtime->paint_select.warp->owner_sima) {
+  if (image_select_floating_state_owns(sima->runtime->paint_select.warp, sima)) {
     return true;
   }
   if (image_select_transform_is_floating(C)) {
@@ -1095,8 +1279,7 @@ static bool image_select_warp_poll(bContext *C)
   if (!sima->image) {
     return false;
   }
-  const Scene *scene = CTX_data_scene(C);
-  if (!scene->toolsettings->imapaint.use_selection_mask) {
+  if (!BKE_image_paint_selection_mask_has_any(sima->image)) {
     CTX_wm_operator_poll_msg_set(C, "No active selection mask");
     return false;
   }
@@ -1110,14 +1293,8 @@ static int image_select_warp_pick_point_at(const ImageSelectWarpState *state,
                                            const float mval_x,
                                            const float mval_y)
 {
-  const int t_col = (state->fragment.geom.tile_number - 1001) % 10;
-  const int t_row = (state->fragment.geom.tile_number - 1001) / 10;
-  const float tile_w = float(state->fragment.geom.tile_size_px.x);
-  const float tile_h = float(state->fragment.geom.tile_size_px.y);
-  const float2 cap_origin_uv = float2(float(t_col) + float(state->fragment.geom.origin_px.x) / tile_w,
-                                      float(t_row) + float(state->fragment.geom.origin_px.y) / tile_h);
-  const float2 cap_size_uv = float2(float(state->fragment.geom.size_px.x) / tile_w,
-                                    float(state->fragment.geom.size_px.y) / tile_h);
+  float2 cap_origin_uv, cap_size_uv;
+  image_select_warp_capture_uv_rect(state->fragment, &cap_origin_uv, &cap_size_uv);
 
   constexpr float hit_radius_px = 15.0f;
   for (int i = 0; i < state->tgt_pts.size(); i++) {
@@ -1138,7 +1315,8 @@ static int image_select_warp_pick_point(const ImageSelectWarpState *state,
                                         const ARegion *region,
                                         const wmEvent *event)
 {
-  return image_select_warp_pick_point_at(state, region, float(event->mval[0]), float(event->mval[1]));
+  return image_select_warp_pick_point_at(
+      state, region, float(event->mval[0]), float(event->mval[1]));
 }
 
 /** Snapshot the current tgt_pts and begin dragging control point \a idx. */
@@ -1213,52 +1391,63 @@ static wmOperatorStatus image_select_warp_modal(bContext *C, wmOperator *op, con
     op->customdata = nullptr;
     return OPERATOR_FINISHED;
   }
-  ImageSelectWarpState *&g_state = sima->runtime->paint_select.warp;
-  ImageSelectWarpState *state = g_state;
+  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
+  ImageSelectWarpState *state = state_ref;
   if (!state || !state->is_dragging) {
+    /* Another operator ended the drag (or the whole session) behind our back; the cursor set when
+     * the drag started must still be restored. */
+    image_select_floating_drag_end(C, state);
+    image_select_floating_status_clear(C);
     op->customdata = nullptr;
     return OPERATOR_FINISHED;
   }
+  /* Never dereferenced without this check: the region can disappear mid-drag when the area is
+   * closed or split. */
   ARegion *region = CTX_wm_region(C);
+  if (!region) {
+    image_select_floating_drag_end(C, state);
+    state->drag_point_idx = -1;
+    image_select_floating_status_clear(C);
+    op->customdata = nullptr;
+    return OPERATOR_FINISHED;
+  }
+
+  if (event->type == EVT_MODAL_MAP) {
+    if (event->val == IMAGE_SELECT_FLOATING_MODAL_CANCEL) {
+      image_select_floating_drag_end(C, state);
+      image_select_floating_status_clear(C);
+      image_select_fragment_restore_source(
+          C, sima->image, state->iuser, {state->fragment}, state->undo_begun);
+      image_select_warp_state_free(state);
+      state_ref = nullptr;
+      op->customdata = nullptr;
+      ED_region_tag_redraw(region);
+      return OPERATOR_CANCELLED;
+    }
+    /* Confirm / undo-step are not drag-scoped; let the keymap-bound
+     * #PAINT_OT_image_select_warp_confirm / `_undo_step` operators handle them. */
+    return OPERATOR_PASS_THROUGH | OPERATOR_RUNNING_MODAL;
+  }
 
   switch (event->type) {
     case MOUSEMOVE: {
       float uv_x, uv_y;
-      ui::view2d_region_to_view(&region->v2d, float(event->mval[0]), float(event->mval[1]), &uv_x, &uv_y);
-      const int t_col = (state->fragment.geom.tile_number - 1001) % 10;
-      const int t_row = (state->fragment.geom.tile_number - 1001) / 10;
-      const float tile_w = float(state->fragment.geom.tile_size_px.x);
-      const float tile_h = float(state->fragment.geom.tile_size_px.y);
-      const float2 cap_origin_uv = float2(float(t_col) + float(state->fragment.geom.origin_px.x) / tile_w,
-                                          float(t_row) + float(state->fragment.geom.origin_px.y) / tile_h);
-      const float2 cap_size_uv = float2(float(state->fragment.geom.size_px.x) / tile_w,
-                                        float(state->fragment.geom.size_px.y) / tile_h);
+      ui::view2d_region_to_view(
+          &region->v2d, float(event->mval[0]), float(event->mval[1]), &uv_x, &uv_y);
+      float2 cap_origin_uv, cap_size_uv;
+      image_select_warp_capture_uv_rect(state->fragment, &cap_origin_uv, &cap_size_uv);
       state->tgt_pts[state->drag_point_idx] = (float2(uv_x, uv_y) - cap_origin_uv) / cap_size_uv;
       ED_region_tag_redraw(region);
       return OPERATOR_RUNNING_MODAL;
     }
     case LEFTMOUSE:
       if (event->val == KM_RELEASE) {
-        state->is_dragging = false;
+        image_select_floating_drag_end(C, state);
         state->drag_point_idx = -1;
+        image_select_floating_status_clear(C);
         op->customdata = nullptr;
-        WM_cursor_modal_restore(CTX_wm_window(C));
         ED_region_tag_redraw(region);
         return OPERATOR_FINISHED;
-      }
-      return OPERATOR_RUNNING_MODAL;
-
-    case RIGHTMOUSE:
-    case EVT_ESCKEY:
-      if (event->val == KM_PRESS) {
-        WM_cursor_modal_restore(CTX_wm_window(C));
-        image_select_fragment_restore_source(
-            C, sima->image, state->iuser, {state->fragment}, state->undo_begun);
-        image_select_warp_state_free(state);
-        g_state = nullptr;
-        op->customdata = nullptr;
-        ED_region_tag_redraw(region);
-        return OPERATOR_CANCELLED;
       }
       return OPERATOR_RUNNING_MODAL;
 
@@ -1269,18 +1458,16 @@ static wmOperatorStatus image_select_warp_modal(bContext *C, wmOperator *op, con
 
 static void image_select_warp_cancel(bContext *C, wmOperator *op)
 {
-  wmWindow *win = CTX_wm_window(C);
-  if (win) {
-    WM_cursor_modal_restore(win);
-  }
+  image_select_floating_drag_end(C, nullptr);
+  image_select_floating_status_clear(C);
   SpaceImage *sima = CTX_wm_space_image(C);
   if (sima && sima->runtime) {
-    ImageSelectWarpState *&g_state = sima->runtime->paint_select.warp;
-    if (g_state) {
+    ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
+    if (state_ref) {
       image_select_fragment_restore_source(
-          C, sima->image, g_state->iuser, {g_state->fragment}, g_state->undo_begun);
-      image_select_warp_state_free(g_state);
-      g_state = nullptr;
+          C, sima->image, state_ref->iuser, {state_ref->fragment}, state_ref->undo_begun);
+      image_select_warp_state_free(state_ref);
+      state_ref = nullptr;
     }
   }
   op->customdata = nullptr;
@@ -1296,22 +1483,32 @@ static wmOperatorStatus image_select_warp_invoke(bContext *C, wmOperator *op, co
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectWarpState *&g_state = sima->runtime->paint_select.warp;
+  ImageSelectWarpState *&state_ref = sima->runtime->paint_select.warp;
 
   /* Already floating in this space: hit-test a point and start a re-drag. */
-  if (g_state && g_state->owner_sima == sima) {
+  if (state_ref && state_ref->owner_sima == sima) {
     ARegion *region = CTX_wm_region(C);
-    const int idx = region ? image_select_warp_pick_point(g_state, region, event) : -1;
+    const int idx = region ? image_select_warp_pick_point(state_ref, region, event) : -1;
     if (idx == -1) {
       return OPERATOR_PASS_THROUGH;
     }
-    image_select_warp_begin_drag(g_state, idx);
-    op->customdata = g_state;
+    image_select_warp_begin_drag(state_ref, idx);
+    op->customdata = state_ref;
     WM_event_add_modal_handler(C, op);
     WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
+    image_select_floating_status_set(C, op->type, false);
     ED_region_tag_redraw(region);
     return OPERATOR_RUNNING_MODAL;
   }
+
+  /* Another tool may still have a session floating in this space. It has to be ended before
+   * #image_select_fragment_lift_source below opens an undo step, which would otherwise free the
+   * step that session still believes it owns. See #image_select_floating_sessions_end. */
+  image_select_floating_sessions_end(C,
+                                     sima,
+                                     IMAGE_SELECT_FLOATING_TOOL_MOVE |
+                                         IMAGE_SELECT_FLOATING_TOOL_TRANSFORM |
+                                         IMAGE_SELECT_FLOATING_TOOL_GRADIENT);
 
   Image *ima = sima->image;
   if (!ima) {
@@ -1332,6 +1529,15 @@ static wmOperatorStatus image_select_warp_invoke(bContext *C, wmOperator *op, co
   state->applied_settings_revision = image_paint_warp_settings_revision;
   state->interp = eImagePaint_WarpInterpolation(scene->toolsettings->imapaint.warp_interpolation);
 
+  /* Resolved before any state is committed: without a region there is nowhere to register the
+   * preview draw callback, so the session could never be seen or dismissed (reachable when the
+   * operator is called from Python or a menu outside an Image Editor region). */
+  ARegion *region = CTX_wm_region(C);
+  if (!region || !region->runtime->type) {
+    MEM_delete(state);
+    return OPERATOR_CANCELLED;
+  }
+
   if (!image_select_warp_extract(op, ima, state->iuser, tile_number, &state->fragment)) {
     MEM_delete(state);
     return OPERATOR_CANCELLED;
@@ -1341,7 +1547,6 @@ static wmOperatorStatus image_select_warp_invoke(bContext *C, wmOperator *op, co
   image_select_fragment_lift_source(
       C, ima, state->iuser, {state->fragment}, "Warp Selection", state->undo_begun);
 
-  ARegion *region = CTX_wm_region(C);
   state->owner_region_type = region->runtime->type;
   state->draw_handle = ED_region_draw_cb_activate(
       state->owner_region_type, draw_select_warp_preview, state, REGION_DRAW_POST_PIXEL);
@@ -1353,7 +1558,7 @@ static wmOperatorStatus image_select_warp_invoke(bContext *C, wmOperator *op, co
                                                  image_select_warp_paintcursor_draw,
                                                  state);
 
-  g_state = state;
+  state_ref = state;
   ED_region_tag_redraw(region);
 
   /* Only start a drag immediately when invoked by an LMB click on a control point (mirrors
@@ -1365,6 +1570,7 @@ static wmOperatorStatus image_select_warp_invoke(bContext *C, wmOperator *op, co
       op->customdata = state;
       WM_event_add_modal_handler(C, op);
       WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
+      image_select_floating_status_set(C, op->type, false);
       return OPERATOR_RUNNING_MODAL;
     }
   }
@@ -1375,14 +1581,18 @@ void PAINT_OT_image_select_warp(wmOperatorType *ot)
 {
   ot->name = "Warp Selection";
   ot->idname = "PAINT_OT_image_select_warp";
-  ot->description = "Locally deform the pixels inside the active selection via a draggable control grid";
+  ot->description =
+      "Locally deform the pixels inside the active selection via a draggable control grid";
 
   ot->invoke = image_select_warp_invoke;
   ot->modal = image_select_warp_modal;
   ot->cancel = image_select_warp_cancel;
   ot->poll = image_select_warp_poll;
 
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No OPTYPE_UNDO, see #PAINT_OT_image_select_move and #PAINT_OT_image_select_transform: the
+   * modal outlives the undo step it opened, so letting the WM push on FINISHED would finalize a
+   * step this operator no longer owns. */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 /** \} */
@@ -1396,10 +1606,7 @@ void image_select_warp_state_free(ImageSelectWarpState *state)
   if (!state) {
     return;
   }
-  if (state->draw_handle && state->owner_region_type) {
-    ED_region_draw_cb_exit(state->owner_region_type, state->draw_handle);
-    state->draw_handle = nullptr;
-  }
+  image_select_floating_draw_handle_clear(*state);
   if (state->paint_cursor) {
     /* If the WM's own runtime is already gone, full application exit is tearing down IDs in
      * reverse index order, so #wmWindowManager was freed before this state's owning Image; its

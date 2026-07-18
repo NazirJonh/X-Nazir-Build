@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2024 Blender Authors
+/* SPDX-FileCopyrightText: 2026 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -14,14 +14,19 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_array.hh"
+#include "BLI_bitmap_draw_2d.h"
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_map.hh"
+#include "BLI_math_geom.h"
+#include "BLI_math_matrix.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.h"
-#include "BLI_path_utils.hh"
-#include "BLI_string.h"
 #include "BLI_math_vector_types.hh"
+#include "BLI_path_utils.hh"
+#include "BLI_polyfill_2d.h"
 #include "BLI_rect.h"
 #include "BLI_span.hh"
+#include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
@@ -30,13 +35,15 @@
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 
-#include "BKE_context.hh"
 #include "BKE_blender.hh"
+#include "BKE_context.hh"
 #include "BKE_customdata.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_layer.hh"
 #include "BKE_library.hh"
 #include "BKE_material.hh"
@@ -47,14 +54,12 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_screen.hh"
+#include "BKE_undo_system.hh"
 
+#include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "bmesh.hh"
-
-#include "ED_uvedit.hh"
-
-#include "DEG_depsgraph.hh"
 
 #include "ED_image.hh"
 #include "ED_paint.hh"
@@ -62,8 +67,7 @@
 #include "ED_select_utils.hh"
 #include "ED_space_api.hh"
 #include "ED_undo.hh"
-
-#include "BKE_undo_system.hh"
+#include "ED_uvedit.hh"
 
 #include "BIF_glutil.hh"
 
@@ -78,10 +82,6 @@
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 
-#include "BLI_math_matrix.hh"
-#include "BLI_math_matrix_types.hh"
-#include "BLI_math_geom.h"
-
 #include "BLF_api.hh"
 #include "UI_interface.hh"
 #include "UI_view2d.hh"
@@ -89,37 +89,17 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
-#include "../paint_intern.hh"
 #include "../../space_image/image_runtime.hh"
-#include "paint_image_select_intern.hh"
+#include "../paint_intern.hh"
+#include "paint_image_select_gesture.hh"
 #include "paint_image_select_gradient.hh"
-
+#include "paint_image_select_intern.hh"
 
 namespace blender {
 
 /* -------------------------------------------------------------------- */
 /** \name Internal helpers
  * \{ */
-
-static void image_paint_selection_reset(bContext *C)
-{
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (sima && sima->image) {
-    BKE_image_paint_selection_mask_free(sima->image);
-  }
-
-  Scene *scene = CTX_data_scene(C);
-  scene->toolsettings->imapaint.use_selection_mask = 0;
-
-  DEG_id_tag_update(&scene->id, ID_RECALC_EDITORS);
-  DEG_id_tag_update(&scene->id, ID_RECALC_SYNC_TO_EVAL);
-  WM_event_add_notifier(C, NC_WINDOW, nullptr);
-
-  if (sima && sima->image) {
-    WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, sima->image);
-  }
-}
-
 
 /**
  * Poll for all image paint selection operators.
@@ -205,10 +185,14 @@ static bool foreach_triangle_pixel(const float2 &p0,
 }
 
 /**
- * Triangle-fan a face's UV polygon into tile-local pixel space and visit every covered pixel.
+ * Tessellate a face's UV polygon into tile-local pixel space and visit every covered pixel.
  * Coordinates are mapped to pixels via `(uv - uv_origin) * size`; the point-in-triangle test is
  * orientation-preserving under this map, so the same primitive serves both reads and writes.
  * See #foreach_triangle_pixel for the \a fn contract; an early stop propagates across triangles.
+ *
+ * The polygon is triangulated with #BLI_polyfill_calc rather than fanned from vertex 0: a face
+ * that is convex in 3D can still be concave in UV space, and a fan over a concave polygon emits
+ * triangles that cover area outside the face, flooding the mask beyond the UV island.
  */
 template<typename Fn>
 static void foreach_face_pixel(const BMFace *efa,
@@ -226,12 +210,26 @@ static void foreach_face_pixel(const BMFace *efa,
     px_verts.append(float2((uv[0] - uv_origin.x) * width, (uv[1] - uv_origin.y) * height));
   }
 
-  if (px_verts.size() < 3) {
+  const int verts_num = px_verts.size();
+  if (verts_num < 3) {
     return;
   }
 
-  for (const int i : IndexRange(1, px_verts.size() - 2)) {
-    if (!foreach_triangle_pixel(px_verts[0], px_verts[i], px_verts[i + 1], width, height, fn)) {
+  if (verts_num == 3) {
+    foreach_triangle_pixel(px_verts[0], px_verts[1], px_verts[2], width, height, fn);
+    return;
+  }
+
+  Vector<uint3, 8> tris(verts_num - 2);
+  BLI_polyfill_calc(reinterpret_cast<const float(*)[2]>(px_verts.data()),
+                    uint(verts_num),
+                    0,
+                    reinterpret_cast<uint(*)[3]>(tris.data()));
+
+  for (const uint3 &tri : tris) {
+    if (!foreach_triangle_pixel(
+            px_verts[tri[0]], px_verts[tri[1]], px_verts[tri[2]], width, height, fn))
+    {
       return;
     }
   }
@@ -349,7 +347,9 @@ static bool mesh_object_has_uv_maps(const Object *ob)
   return mesh && !mesh->uv_map_names().is_empty();
 }
 
-/** True when \a ob is a mesh that paints onto \a image (material slots, imapaint, or paint_mode). */
+/**
+ * True when \a ob is a mesh that paints onto \a image (material slots, imapaint, or paint_mode).
+ */
 static bool mesh_object_uses_image(Object *ob, Scene *scene, const Image *image)
 {
   if (!ob || !scene || !scene->toolsettings || ob->type != OB_MESH) {
@@ -446,7 +446,8 @@ static void image_paint_object_collect_from_user(Image *ima,
   }
 }
 
-static Vector<Object *> image_paint_selection_canvas_objects_get(const bContext *C, const Image *image)
+static Vector<Object *> image_paint_selection_canvas_objects_get(const bContext *C,
+                                                                 const Image *image)
 {
   Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
@@ -476,23 +477,18 @@ static Vector<Object *> image_paint_selection_canvas_objects_get(const bContext 
     }
   }
 
-  for (Object *ob :
-       BKE_view_layer_array_from_objects_in_edit_mode_unique_data_with_uvs(*bmain, scene, view_layer, nullptr))
+  for (Object *ob : BKE_view_layer_array_from_objects_in_edit_mode_unique_data_with_uvs(
+           *bmain, scene, view_layer, nullptr))
   {
     add_if_uses_image(ob);
   }
 
+  /* The Image Editor paints sima->image directly, so the active object is a legitimate canvas even
+   * when no material references the image; #mesh_object_uses_image covers that case. There is
+   * deliberately no "no object matched, so use every mesh in the view layer" fallback: rasterizing
+   * the UV islands of arbitrary scene objects into the mask bleeds the selection across unrelated
+   * UV layouts, which is both surprising and hard to diagnose. */
   add_if_uses_image(CTX_data_active_object(C));
-
-  /* Image Editor paints sima->image directly; materials may reference a duplicate ID or
-   * nothing at all while UV layout still lives on scene meshes. */
-  if (objects.is_empty()) {
-    for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
-      if (base.object && mesh_object_has_uv_maps(base.object)) {
-        image_paint_selection_object_add_unique(objects, base.object);
-      }
-    }
-  }
 
   return objects;
 }
@@ -517,7 +513,8 @@ static BMUVOffsets image_paint_selection_uv_offsets_get(BMesh *bm, Object *ob, c
   if (const std::optional<StringRef> uv_name = BKE_paint_canvas_uvmap_name_get(
           &scene->toolsettings->paint_mode, ob))
   {
-    const int layer = CustomData_get_named_layer_index(&bm->ldata, CD_PROP_FLOAT2, uv_name->data());
+    const int layer = CustomData_get_named_layer_index(
+        &bm->ldata, CD_PROP_FLOAT2, uv_name->data());
     if (layer != -1) {
       return BM_uv_map_offsets_from_layer(bm, layer);
     }
@@ -550,7 +547,6 @@ static bool face_uv_intersects_rect(const BMFace *efa,
  * gesture region in UV space (box/lasso/circle). This matches Image Editor selection geometry.
  */
 static void image_paint_selection_expand_uv_islands_for_object(
-    const Depsgraph *depsgraph,
     Scene *scene,
     Object *ob,
     Image *image,
@@ -569,14 +565,14 @@ static void image_paint_selection_expand_uv_islands_for_object(
     bm = em->bm;
   }
   else {
-    const Mesh *mesh = nullptr;
-    if (depsgraph) {
-      Object *ob_eval = DEG_get_evaluated(depsgraph, ob);
-      mesh = BKE_object_get_evaluated_mesh(ob_eval);
-    }
-    if (!mesh) {
-      mesh = id_cast<const Mesh *>(ob->data);
-    }
+    /* Deliberately the *original* mesh, not the evaluated one. This expansion works purely in UV
+     * space on the UV layout the user authored and sees in the UV editor; the evaluated mesh has
+     * post-modifier topology (subdivision, mirror, array) whose face count, face indices and UV
+     * island connectivity need not match it, so seeding and flood-filling there would grow the
+     * selection over geometry that does not exist in the layout being painted. It also keeps this
+     * branch consistent with the edit-mode branch above, which already borrows the original
+     * `em->bm`, and makes the UV-layer lookup by name below reliable. */
+    const Mesh *mesh = id_cast<const Mesh *>(ob->data);
     if (!mesh) {
       return;
     }
@@ -600,7 +596,7 @@ static void image_paint_selection_expand_uv_islands_for_object(
 
   Vector<int> seed_faces;
   seed_faces.reserve(bm->totface);
-  /* O(1) per-face dedup guard — avoids quadratic append_non_duplicates in tile loops. */
+  /* O(1) per-face dedup guard -- avoids quadratic append_non_duplicates in tile loops. */
   Array<bool> face_seen(bm->totface, false);
 
   if (gesture_uv_bounds != nullptr) {
@@ -620,9 +616,10 @@ static void image_paint_selection_expand_uv_islands_for_object(
   else {
     /* Fallback: seed from faces overlapping already-selected mask pixels. */
     for (ImageTile *tile : ListBaseWrapper<ImageTile>(image->tiles)) {
-      const float2 uv_origin(float((tile->tile_number - 1001) % 10),
-                              float((tile->tile_number - 1001) / 10));
-      const ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile->tile_number);
+      const float2 uv_origin = image_select_udim_tile_uv_origin(tile->tile_number);
+      /* Seeding only reads the mask, so take the `const Image *` overload. */
+      const ImBuf *mask = BKE_image_paint_selection_mask_lookup(const_cast<const Image *>(image),
+                                                                tile->tile_number);
       if (!mask) {
         continue;
       }
@@ -715,8 +712,7 @@ static void image_paint_selection_expand_uv_islands_for_object(
     if (faces == nullptr) {
       continue;
     }
-    const float2 uv_origin(float((tile->tile_number - 1001) % 10),
-                            float((tile->tile_number - 1001) / 10));
+    const float2 uv_origin = image_select_udim_tile_uv_origin(tile->tile_number);
 
     ImBuf *mask;
     if (fill_value < 0.5f) {
@@ -749,90 +745,27 @@ static void image_paint_selection_expand_uv_islands_for_object(
   }
 }
 
-static void image_paint_selection_expand_uv_islands(bContext *C,
-                                                    Image *image,
-                                                    const eSelectOp sel_op,
-                                                    const rctf *gesture_uv_bounds)
+void image_paint_selection_expand_uv_islands(bContext *C,
+                                             Image *image,
+                                             const eSelectOp sel_op,
+                                             const rctf *gesture_uv_bounds)
 {
   Scene *scene = CTX_data_scene(C);
   if (!scene->toolsettings->imapaint.use_selection_uv_island) {
     return;
   }
-  if (sel_op == SEL_OP_SUB && !scene->toolsettings->imapaint.use_selection_mask) {
+  if (sel_op == SEL_OP_SUB && !BKE_image_paint_selection_mask_has_any(image)) {
     return;
   }
 
   const float fill_value = (sel_op == SEL_OP_SUB) ? 0.0f : 1.0f;
   const float threshold = SELECTION_MASK_THRESHOLD;
-  const Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
 
   Vector<Object *> objects = image_paint_selection_canvas_objects_get(C, image);
 
   for (Object *ob : objects) {
     image_paint_selection_expand_uv_islands_for_object(
-        depsgraph, scene, ob, image, fill_value, threshold, gesture_uv_bounds);
-  }
-}
-
-static bool image_paint_selection_should_rasterize_gesture(const Scene *scene,
-                                                           const eSelectOp sel_op)
-{
-  const ImagePaintSettings &imapaint = scene->toolsettings->imapaint;
-  if (!imapaint.use_selection_uv_island) {
-    return true;
-  }
-  return ELEM(sel_op, SEL_OP_ADD, SEL_OP_SUB);
-}
-
-static bool image_paint_selection_has_any_tile_mask(Image *image)
-{
-  for (ImageTile *tile : ListBaseWrapper<ImageTile>(image->tiles)) {
-    if (BKE_image_paint_selection_mask_lookup(image, tile->tile_number) != nullptr) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static float2 image_paint_selection_tile_uv_origin_get(const ImageTile &tile)
-{
-  return image_select_udim_tile_uv_origin(tile.tile_number);
-}
-
-static bool image_paint_selection_tile_intersection_get(const float2 &uv_origin,
-                                                        const rctf &gesture_uv_bounds,
-                                                        rctf *r_intersection)
-{
-  rctf tile_rect;
-  tile_rect.xmin = uv_origin.x;
-  tile_rect.xmax = uv_origin.x + 1.0f;
-  tile_rect.ymin = uv_origin.y;
-  tile_rect.ymax = uv_origin.y + 1.0f;
-  return BLI_rctf_isect(&tile_rect, &gesture_uv_bounds, r_intersection);
-}
-
-template<typename Fn>
-static void image_paint_selection_foreach_mask_tile_in_bounds(SpaceImage *sima,
-                                                               Image *image,
-                                                               const rctf &gesture_uv_bounds,
-                                                               Fn &&fn)
-{
-  for (ImageTile *tile : ListBaseWrapper<ImageTile>(image->tiles)) {
-    ImageUser iuser = sima->iuser;
-    iuser.tile = tile->tile_number;
-    ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, nullptr);
-    if (!ibuf) {
-      continue;
-    }
-
-    const float2 uv_origin = image_paint_selection_tile_uv_origin_get(*tile);
-    rctf tile_uv_rect;
-    if (image_paint_selection_tile_intersection_get(uv_origin, gesture_uv_bounds, &tile_uv_rect)) {
-      ImBuf *mask = BKE_image_paint_selection_mask_get(image, tile->tile_number, ibuf->x, ibuf->y);
-      fn(uv_origin, tile_uv_rect, mask);
-    }
-
-    BKE_image_release_ibuf(image, ibuf, nullptr);
+        scene, ob, image, fill_value, threshold, gesture_uv_bounds);
   }
 }
 
@@ -871,8 +804,15 @@ static wmOperatorStatus image_select_all_exec(bContext *C, wmOperator * /*op*/)
   if (image->source == IMA_SRC_TILED) {
     const ImageTile *active = static_cast<const ImageTile *>(
         BLI_findlink(&image->tiles, image->active_tile_index));
-    iuser.tile = active ? active->tile_number :
-                          static_cast<const ImageTile *>(image->tiles.first)->tile_number;
+    if (active == nullptr) {
+      /* A tiled image can legitimately have an out-of-range active index; fall back to the first
+       * tile, and bail out entirely when the tile list is empty. */
+      active = static_cast<const ImageTile *>(image->tiles.first);
+    }
+    if (active == nullptr) {
+      return OPERATOR_CANCELLED;
+    }
+    iuser.tile = active->tile_number;
   }
   const ImageTile *active_tile = BKE_image_get_tile_from_iuser(image, &iuser);
   if (!active_tile) {
@@ -886,12 +826,9 @@ static wmOperatorStatus image_select_all_exec(bContext *C, wmOperator * /*op*/)
 
   ED_image_undo_push_begin_selection("Select All", image);
 
-  ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
-  imapaint->use_selection_mask = 1;
-
   BKE_image_paint_selection_mask_get(image, active_tile->tile_number, ibuf->x, ibuf->y);
   BKE_image_paint_selection_mask_fill(image, active_tile->tile_number, 1.0f);
-  BKE_image_paint_selection_set_edge_policy(image, BKE_image_paint_selection_edge_policy_hard());
+  BKE_image_paint_selection_edge_policy_set(image, BKE_image_paint_selection_edge_policy_hard());
 
   BKE_image_release_ibuf(image, ibuf, nullptr);
 
@@ -945,7 +882,6 @@ static wmOperatorStatus image_select_none_exec(bContext *C, wmOperator * /*op*/)
   }
 
   Scene *scene = CTX_data_scene(C);
-  scene->toolsettings->imapaint.use_selection_mask = 0;
 
   DEG_id_tag_update(&scene->id, ID_RECALC_SYNC_TO_EVAL);
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
@@ -994,11 +930,8 @@ static wmOperatorStatus image_select_invert_exec(bContext *C, wmOperator * /*op*
   }
 
   Scene *scene = CTX_data_scene(C);
-  ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
 
   ED_image_undo_push_begin_selection("Invert Selection", image);
-
-  imapaint->use_selection_mask = 1;
 
   for (ImageTile *tile : ListBaseWrapper<ImageTile>(image->tiles)) {
     ImageUser iuser = sima->iuser;
@@ -1034,135 +967,33 @@ void PAINT_OT_image_select_invert(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Shared gesture-operator helpers
- *
- * Box / lasso / circle selection share the same invoke (delegate-to-move, then record the click
- * for simple-click detection), modal (drag-distance detection), RNA properties, and the
- * commit-floating / deselect / finish boilerplate. These helpers keep that logic in one place so a
- * new gesture shape only has to provide its own rasterization.
- * \{ */
-
-/** Cursor travel (in pixels) above which a press-release is treated as a drag, not a simple click. */
-constexpr int IMAGE_SELECT_CLICK_DRAG_THRESHOLD_PX = 3;
-
-/**
- * Common gesture invoke: hand off to the move operator if the cursor is over a floating fragment,
- * otherwise record the press location and assume a simple click until the cursor moves far enough.
- * Returns true when the event was delegated (the caller should return #OPERATOR_FINISHED).
- */
-static bool image_select_gesture_invoke_begin(bContext *C, wmOperator *op, const wmEvent *event)
-{
-  if (image_select_move_delegate_to_move_operator(C, event)) {
-    return true;
-  }
-  RNA_int_set(op->ptr, "click_x", event->xy[0]);
-  RNA_int_set(op->ptr, "click_y", event->xy[1]);
-  RNA_boolean_set(op->ptr, "is_simple_click", true);
-  return false;
-}
-
-/** Clear the simple-click flag once the cursor has travelled past the drag threshold. */
-static void image_select_gesture_drag_detect(wmOperator *op, const wmEvent *event)
-{
-  if (event->type == MOUSEMOVE && op->customdata) {
-    const int start_x = RNA_int_get(op->ptr, "click_x");
-    const int start_y = RNA_int_get(op->ptr, "click_y");
-    if (abs(event->xy[0] - start_x) > IMAGE_SELECT_CLICK_DRAG_THRESHOLD_PX ||
-        abs(event->xy[1] - start_y) > IMAGE_SELECT_CLICK_DRAG_THRESHOLD_PX)
-    {
-      RNA_boolean_set(op->ptr, "is_simple_click", false);
-    }
-  }
-}
-
-/** Register the simple-click bookkeeping properties shared by every gesture operator. */
-static void image_select_gesture_properties(wmOperatorType *ot)
-{
-  RNA_def_boolean(ot->srna, "is_simple_click", false, "Simple Click", "Click without drag");
-  RNA_def_int(ot->srna, "click_x", 0, INT_MIN, INT_MAX, "Click X", "", INT_MIN, INT_MAX);
-  RNA_def_int(ot->srna, "click_y", 0, INT_MIN, INT_MAX, "Click Y", "", INT_MIN, INT_MAX);
-}
-
-/** Commit and discard any floating move-selection fragment for this editor. */
-static void image_select_commit_floating_move(bContext *C, SpaceImage *sima)
-{
-  ImageSelectMoveState *&state = sima->runtime->paint_select.move;
-  if (state) {
-    image_select_move_commit(C, state);
-    image_select_move_state_free(state);
-    state = nullptr;
-  }
-}
-
-/** Clear the whole selection (used for simple-click and empty-gesture paths). */
-static void image_select_apply_deselect(bContext *C, Scene *scene, Image *image)
-{
-  if (scene->toolsettings->imapaint.use_selection_mask) {
-    ED_image_undo_push_begin_selection("Deselect", image);
-    image_paint_selection_reset(C);
-    ED_image_undo_push_end();
-  }
-}
-
-/** Shared tail of a gesture exec: tag updates, apply the edge policy, and close the undo step. */
-static void image_select_gesture_finish(bContext *C,
-                                        Scene *scene,
-                                        ARegion *region,
-                                        Image *image,
-                                        const PaintSelectionEdgePolicy &edge_policy)
-{
-  DEG_id_tag_update(&scene->id, ID_RECALC_EDITORS);
-  WM_event_add_notifier(C, NC_WINDOW, nullptr);
-  ED_region_tag_redraw(region);
-
-  BKE_image_paint_selection_set_edge_policy(image, edge_policy);
-  BKE_image_paint_selection_blend_mask_invalidate(image);
-  ED_image_undo_push_end();
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
 /** \name Select Box
  * \{ */
 
-static wmOperatorStatus image_select_box_exec(bContext *C, wmOperator *op)
-{
-  Scene *scene = CTX_data_scene(C);
-  ARegion *region = CTX_wm_region(C);
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime || !region) {
-    return OPERATOR_CANCELLED;
-  }
-  Image *image = sima->image;
-  if (!image) {
-    return OPERATOR_CANCELLED;
-  }
-
-  rctf rectf;
-  WM_operator_properties_border_to_rctf(op, &rectf);
-
-  const bool is_simple_click = RNA_boolean_get(op->ptr, "is_simple_click");
-  if (is_simple_click ||
-      (BLI_rctf_size_x(&rectf) == 0.0f && BLI_rctf_size_y(&rectf) == 0.0f))
+/**
+ * Rectangular gesture. The only shape whose coverage is exactly the per-tile intersection
+ * rectangle, so #rasterize_tile can fill \a tile_uv_rect directly.
+ */
+class ImageSelectBoxShape : public ImageSelectGestureShape {
+ public:
+  const char *undo_name() const override
   {
-    image_select_commit_floating_move(C, sima);
-    image_select_apply_deselect(C, scene, image);
-    return OPERATOR_FINISHED;
+    return "Box Select";
   }
 
-  /* Commit any floating move-selection fragment before starting a new selection. */
-  image_select_commit_floating_move(C, sima);
-
-  ui::view2d_region_to_view_rctf(&region->v2d, &rectf, &rectf);
-
-  const eSelectOp sel_op = eSelectOp(RNA_enum_get(op->ptr, "mode"));
-  const bool rasterize_gesture = image_paint_selection_should_rasterize_gesture(scene, sel_op);
-
-  /* Auto-snap selection bounds to UDIM tile borders (integer UV coordinates) when close
-   * enough. This makes it easy to select exactly one full tile or align to tile edges
-   * without pixel-perfect cursor placement. Threshold: 2 % of one tile in UV units. */
+  bool uv_bounds_calc(const ARegion *region, wmOperator *op, rctf &r_uv_bounds) override
   {
+    rctf rectf;
+    WM_operator_properties_border_to_rctf(op, &rectf);
+    if (BLI_rctf_size_x(&rectf) == 0.0f && BLI_rctf_size_y(&rectf) == 0.0f) {
+      return false;
+    }
+
+    ui::view2d_region_to_view_rctf(&region->v2d, &rectf, &rectf);
+
+    /* Auto-snap selection bounds to UDIM tile borders (integer UV coordinates) when close
+     * enough. This makes it easy to select exactly one full tile or align to tile edges
+     * without pixel-perfect cursor placement. Threshold: 2 % of one tile in UV units. */
     const float snap_thresh = 0.02f;
     auto snap_to_udim_border = [](float v, float threshold) -> float {
       const float rounded = roundf(v);
@@ -1172,54 +1003,41 @@ static wmOperatorStatus image_select_box_exec(bContext *C, wmOperator *op)
     rectf.xmax = snap_to_udim_border(rectf.xmax, snap_thresh);
     rectf.ymin = snap_to_udim_border(rectf.ymin, snap_thresh);
     rectf.ymax = snap_to_udim_border(rectf.ymax, snap_thresh);
+
+    r_uv_bounds = rectf;
+    return true;
   }
 
-  ED_image_undo_push_begin_selection("Box Select", image);
+  void rasterize_tile(const float2 &uv_origin,
+                      const rctf &tile_uv_rect,
+                      ImBuf *mask,
+                      const float fill_value) const override
+  {
+    float *data = mask->float_data_for_write();
+    const int x1 = int(roundf((tile_uv_rect.xmin - uv_origin.x) * mask->x));
+    const int y1 = int(roundf((tile_uv_rect.ymin - uv_origin.y) * mask->y));
+    const int x2 = int(roundf((tile_uv_rect.xmax - uv_origin.x) * mask->x));
+    const int y2 = int(roundf((tile_uv_rect.ymax - uv_origin.y) * mask->y));
 
-  /* Subtract: expand islands before filling pixels so we seed from the gesture geometry,
-   * not from remaining selected pixels (which would wrongly deselect unrelated islands). */
-  if (sel_op == SEL_OP_SUB) {
-    image_paint_selection_expand_uv_islands(C, image, sel_op, &rectf);
+    for (int y = y1; y < y2; y++) {
+      for (int x = x1; x < x2; x++) {
+        if (x >= 0 && x < mask->x && y >= 0 && y < mask->y) {
+          data[y * mask->x + x] = fill_value;
+        }
+      }
+    }
   }
 
-  if (sel_op == SEL_OP_SET) {
-    BKE_image_paint_selection_mask_free(image);
+  PaintSelectionEdgePolicy edge_policy() const override
+  {
+    return BKE_image_paint_selection_edge_policy_hard();
   }
+};
 
-  ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
-  imapaint->use_selection_mask = 1;
-
-  if (rasterize_gesture) {
-    image_paint_selection_foreach_mask_tile_in_bounds(
-        sima, image, rectf, [&](const float2 &uv_origin, const rctf &tile_uv_rect, ImBuf *mask) {
-          float *data = mask->float_data_for_write();
-          const int x1 = int(roundf((tile_uv_rect.xmin - uv_origin.x) * mask->x));
-          const int y1 = int(roundf((tile_uv_rect.ymin - uv_origin.y) * mask->y));
-          const int x2 = int(roundf((tile_uv_rect.xmax - uv_origin.x) * mask->x));
-          const int y2 = int(roundf((tile_uv_rect.ymax - uv_origin.y) * mask->y));
-          const float fill_value = (sel_op == SEL_OP_SUB) ? 0.0f : 1.0f;
-
-          for (int y = y1; y < y2; y++) {
-            for (int x = x1; x < x2; x++) {
-              if (x >= 0 && x < mask->x && y >= 0 && y < mask->y) {
-                data[y * mask->x + x] = fill_value;
-              }
-            }
-          }
-        });
-  }
-
-  /* Add/set: expand to full UV islands touched by the gesture. */
-  if (sel_op != SEL_OP_SUB) {
-    image_paint_selection_expand_uv_islands(C, image, sel_op, &rectf);
-  }
-  if (sel_op == SEL_OP_SET && !rasterize_gesture) {
-    imapaint->use_selection_mask = image_paint_selection_has_any_tile_mask(image) ? 1 : 0;
-  }
-
-  image_select_gesture_finish(
-      C, scene, region, image, BKE_image_paint_selection_edge_policy_hard());
-  return OPERATOR_FINISHED;
+static wmOperatorStatus image_select_box_exec(bContext *C, wmOperator *op)
+{
+  ImageSelectBoxShape shape;
+  return image_select_gesture_exec_generic(C, op, shape);
 }
 
 static wmOperatorStatus image_select_box_invoke(bContext *C,
@@ -1240,6 +1058,25 @@ static wmOperatorStatus image_select_box_modal(bContext *C,
   return WM_gesture_box_modal(C, op, event);
 }
 
+/**
+ * Flags shared by all three gesture selection operators.
+ *
+ * No OPTYPE_UNDO: these operators open and close their own image undo step with
+ * #ED_image_undo_push_begin_selection / #ED_image_undo_push_end inside `exec`. Letting WM push a
+ * second step on top would duplicate every selection change in the undo stack. This follows the
+ * convention already documented on #PAINT_OT_image_select_move for the rest of this feature, and
+ * deliberately differs from #UV_OT_select_box / #VIEW3D_OT_select_box, which set OPTYPE_UNDO
+ * precisely because they have no undo step of their own.
+ *
+ * No OPTYPE_BLOCKING either: no gesture selection operator in the editors tree sets it, and the
+ * modal only runs for the duration of a single LMB drag (see #PAINT_OT_image_select_move).
+ *
+ * OPTYPE_REGISTER is kept so the "Adjust Last Operation" panel can still tweak `mode`; the
+ * transient click-tracking properties are hidden from it via PROP_HIDDEN | PROP_SKIP_SAVE in
+ * #image_select_gesture_properties.
+ */
+static constexpr short IMAGE_SELECT_GESTURE_OPTYPE_FLAGS = OPTYPE_REGISTER;
+
 void PAINT_OT_image_select_box(wmOperatorType *ot)
 {
   ot->name = "Select Box";
@@ -1251,7 +1088,7 @@ void PAINT_OT_image_select_box(wmOperatorType *ot)
   ot->exec = image_select_box_exec;
   ot->cancel = WM_gesture_box_cancel;
   ot->poll = image_paint_selection_poll;
-  ot->flag = OPTYPE_REGISTER;
+  ot->flag = IMAGE_SELECT_GESTURE_OPTYPE_FLAGS;
 
   WM_operator_properties_gesture_box(ot);
   WM_operator_properties_select_operation_simple(ot);
@@ -1265,60 +1102,108 @@ void PAINT_OT_image_select_box(wmOperatorType *ot)
 /** \name Select Lasso
  * \{ */
 
+/** Per-scanline sink for #BLI_bitmap_draw_2d_poly_v2i_n writing into a 1-channel float mask. */
+struct MaskPolyFillData {
+  float *data;
+  int width;
+  float fill_value;
+};
+
+static void mask_poly_fill_cb(int x, const int x_end, const int y, void *user_data)
+{
+  const MaskPolyFillData *fill = static_cast<const MaskPolyFillData *>(user_data);
+  float *row = fill->data + int64_t(y) * fill->width;
+  do {
+    row[x] = fill->fill_value;
+  } while (++x != x_end);
+}
+
 /**
- * Scanline polygon fill for a 1-channel float buffer.
- * Fills the interior of \a points with \a color.
- * Requires at least 3 points; silently does nothing otherwise.
+ * Fill the interior of \a points into a 1-channel float buffer.
+ *
+ * Delegates to #BLI_bitmap_draw_2d_poly_v2i_n, which implements the even-odd rule with tracked
+ * sorted spans. That handles self-intersecting lassos (a common freehand accident) correctly and
+ * clips spans to the buffer, both of which the previous hand-rolled scanline fill got wrong.
+ * Passing `(0, 0, width, height)` as the region makes the callback receive absolute buffer
+ * coordinates, since the span callback reports coordinates relative to the region origin.
  */
-static void fill_polygon_float(ImBuf *ibuf, Span<int2> points, float color)
+static void fill_polygon_float(ImBuf *ibuf, const Span<int2> points, const float color)
 {
   if (points.size() < 3) {
     return;
   }
 
-  const int width = ibuf->x;
-  const int height = ibuf->y;
+  MaskPolyFillData fill{};
+  fill.data = ibuf->float_data_for_write();
+  fill.width = ibuf->x;
+  fill.fill_value = color;
 
-  int min_y = points[0].y;
-  int max_y = points[0].y;
-  for (const int2 &p : points) {
-    min_y = min_ii(min_y, p.y);
-    max_y = max_ii(max_y, p.y);
+  BLI_bitmap_draw_2d_poly_v2i_n(0, 0, ibuf->x, ibuf->y, points, mask_poly_fill_cb, &fill);
+}
+
+/** Freehand gesture; caches its UV-space outline for per-tile rasterization. */
+class ImageSelectLassoShape : public ImageSelectGestureShape {
+  bContext *C_;
+  Vector<float2> uv_points_;
+
+ public:
+  explicit ImageSelectLassoShape(bContext *C) : C_(C) {}
+
+  const char *undo_name() const override
+  {
+    return "Lasso Select";
   }
-  min_y = max_ii(min_y, 0);
-  max_y = min_ii(max_y, height - 1);
 
-  Vector<int> intersections;
-  for (int y = min_y; y <= max_y; y++) {
-    intersections.clear();
-    const int n = points.size();
-    for (int i = 0; i < n; i++) {
-      const int next = (i + 1) % n;
-      const int y1 = points[i].y;
-      const int y2 = points[next].y;
-      if ((y1 <= y && y2 > y) || (y2 <= y && y1 > y)) {
-        const float x = float(y - y1) * float(points[next].x - points[i].x) /
-                            float(y2 - y1) +
-                        float(points[i].x);
-        intersections.append(int(x));
-      }
+  bool uv_bounds_calc(const ARegion *region, wmOperator *op, rctf &r_uv_bounds) override
+  {
+    const Array<int2> mcoords = WM_gesture_lasso_path_to_array(C_, op);
+    if (mcoords.size() < 3) {
+      return false;
     }
-    std::sort(intersections.begin(), intersections.end());
 
-    for (int i = 0; i + 1 < int(intersections.size()); i += 2) {
-      const int x1 = max_ii(intersections[i], 0);
-      const int x2 = min_ii(intersections[i + 1], width - 1);
-      float *row = ibuf->float_data_for_write() + y * width;
-      for (int x = x1; x <= x2; x++) {
-        row[x] = color;
-      }
+    /* Convert lasso points to UV space once. */
+    uv_points_.reserve(mcoords.size());
+    BLI_rctf_init_minmax(&r_uv_bounds);
+    for (const int2 &p : mcoords) {
+      float co[2] = {float(p.x), float(p.y)};
+      ui::view2d_region_to_view(&region->v2d, co[0], co[1], &co[0], &co[1]);
+      uv_points_.append(float2(co[0], co[1]));
+      BLI_rctf_do_minmax_v(&r_uv_bounds, co);
     }
+    return true;
   }
+
+  void rasterize_tile(const float2 &uv_origin,
+                      const rctf & /*tile_uv_rect*/,
+                      ImBuf *mask,
+                      const float fill_value) const override
+  {
+    /* Convert UV points to tile pixel space. */
+    Vector<int2> tile_points;
+    tile_points.reserve(uv_points_.size());
+    for (const float2 &uv : uv_points_) {
+      tile_points.append(int2(int(roundf((uv.x - uv_origin.x) * mask->x)),
+                              int(roundf((uv.y - uv_origin.y) * mask->y))));
+    }
+
+    fill_polygon_float(mask, tile_points, fill_value);
+  }
+
+  PaintSelectionEdgePolicy edge_policy() const override
+  {
+    return BKE_image_paint_selection_edge_policy_feathered();
+  }
+};
+
+static wmOperatorStatus image_select_lasso_exec(bContext *C, wmOperator *op)
+{
+  ImageSelectLassoShape shape(C);
+  return image_select_gesture_exec_generic(C, op, shape);
 }
 
 static wmOperatorStatus image_select_lasso_invoke(bContext *C,
-                                                   wmOperator *op,
-                                                   const wmEvent *event)
+                                                  wmOperator *op,
+                                                  const wmEvent *event)
 {
   if (image_select_gesture_invoke_begin(C, op, event)) {
     return OPERATOR_FINISHED;
@@ -1327,101 +1212,11 @@ static wmOperatorStatus image_select_lasso_invoke(bContext *C,
 }
 
 static wmOperatorStatus image_select_lasso_modal(bContext *C,
-                                                  wmOperator *op,
-                                                  const wmEvent *event)
+                                                 wmOperator *op,
+                                                 const wmEvent *event)
 {
   image_select_gesture_drag_detect(op, event);
   return WM_gesture_lasso_modal(C, op, event);
-}
-
-static wmOperatorStatus image_select_lasso_exec(bContext *C, wmOperator *op)
-{
-  Scene *scene = CTX_data_scene(C);
-  ARegion *region = CTX_wm_region(C);
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime || !region) {
-    return OPERATOR_CANCELLED;
-  }
-  Image *image = sima->image;
-  if (!image) {
-    return OPERATOR_CANCELLED;
-  }
-
-  const bool is_simple_click = RNA_boolean_get(op->ptr, "is_simple_click");
-  if (is_simple_click) {
-    image_select_commit_floating_move(C, sima);
-    image_select_apply_deselect(C, scene, image);
-    return OPERATOR_FINISHED;
-  }
-
-  /* Commit any floating move-selection fragment before starting a new selection. */
-  image_select_commit_floating_move(C, sima);
-
-  Array<int2> mcoords = WM_gesture_lasso_path_to_array(C, op);
-  if (mcoords.is_empty() || int(mcoords.size()) < 3) {
-    image_select_apply_deselect(C, scene, image);
-    return OPERATOR_FINISHED;
-  }
-
-  const eSelectOp sel_op = eSelectOp(RNA_enum_get(op->ptr, "mode"));
-  const bool rasterize_gesture = image_paint_selection_should_rasterize_gesture(scene, sel_op);
-
-  ED_image_undo_push_begin_selection("Lasso Select", image);
-
-  if (sel_op == SEL_OP_SET) {
-    BKE_image_paint_selection_mask_free(image);
-  }
-
-  ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
-  imapaint->use_selection_mask = 1;
-
-  /* Convert lasso points to UV space once. */
-  Vector<float2> uv_points;
-  uv_points.reserve(mcoords.size());
-  rctf lasso_uv_bounds;
-  BLI_rctf_init_minmax(&lasso_uv_bounds);
-  for (const int2 &p : mcoords) {
-    float co[2] = {float(p.x), float(p.y)};
-    ui::view2d_region_to_view(&region->v2d, co[0], co[1], &co[0], &co[1]);
-    uv_points.append(float2(co[0], co[1]));
-    BLI_rctf_do_minmax_v(&lasso_uv_bounds, co);
-  }
-
-  /* Subtract: expand islands before filling so we seed from gesture geometry. */
-  if (sel_op == SEL_OP_SUB) {
-    image_paint_selection_expand_uv_islands(C, image, sel_op, &lasso_uv_bounds);
-  }
-
-  if (rasterize_gesture) {
-    image_paint_selection_foreach_mask_tile_in_bounds(
-        sima,
-        image,
-        lasso_uv_bounds,
-        [&](const float2 &uv_origin, const rctf & /*tile_uv_rect*/, ImBuf *mask) {
-          /* Convert UV points to tile pixel space. */
-          Vector<int2> tile_points;
-          tile_points.reserve(uv_points.size());
-          for (const float2 &uv : uv_points) {
-            tile_points.append(int2(int(roundf((uv.x - uv_origin.x) * mask->x)),
-                                    int(roundf((uv.y - uv_origin.y) * mask->y))));
-          }
-
-          const float color = (sel_op == SEL_OP_SUB) ? 0.0f : 1.0f;
-          fill_polygon_float(mask, tile_points, color);
-        });
-  }
-
-  /* Add/set: expand to full UV islands touched by the gesture. */
-  if (sel_op != SEL_OP_SUB) {
-    image_paint_selection_expand_uv_islands(C, image, sel_op, &lasso_uv_bounds);
-  }
-  if (sel_op == SEL_OP_SET && !rasterize_gesture) {
-    imapaint->use_selection_mask = image_paint_selection_has_any_tile_mask(image) ? 1 : 0;
-  }
-
-  image_select_gesture_finish(
-      C, scene, region, image, BKE_image_paint_selection_edge_policy_feathered());
-  return OPERATOR_FINISHED;
 }
 
 void PAINT_OT_image_select_lasso(wmOperatorType *ot)
@@ -1433,8 +1228,11 @@ void PAINT_OT_image_select_lasso(wmOperatorType *ot)
   ot->invoke = image_select_lasso_invoke;
   ot->modal = image_select_lasso_modal;
   ot->exec = image_select_lasso_exec;
+  /* Without a cancel callback the wmGesture held in `op->customdata` leaks when the gesture is
+   * aborted; every other lasso operator in the tree installs this same handler. */
+  ot->cancel = WM_gesture_lasso_cancel;
   ot->poll = image_paint_selection_poll;
-  ot->flag = OPTYPE_REGISTER;
+  ot->flag = IMAGE_SELECT_GESTURE_OPTYPE_FLAGS;
 
   WM_operator_properties_gesture_lasso(ot);
   WM_operator_properties_select_operation_simple(ot);
@@ -1455,6 +1253,10 @@ void PAINT_OT_image_select_lasso(wmOperatorType *ot)
  * the Image Editor view2d can have a non-1:1 aspect ratio (e.g. when
  * multiple UDIM tiles are visible side-by-side), so the screen-pixel
  * radius maps to different UV extents along X and Y.
+ *
+ * NOTE: kept hand-rolled on purpose. blenlib's 2D drawing helpers only cover polygons and
+ * triangles; none of them expresses an axis-aligned ellipse with independent X/Y radii, and
+ * approximating one by a polygon would quantize the outline.
  */
 static void fill_circle_float(ImBuf *ibuf, int cx, int cy, int rx, int ry, float color)
 {
@@ -1479,9 +1281,97 @@ static void fill_circle_float(ImBuf *ibuf, int cx, int cy, int rx, int ry, float
   }
 }
 
+/** Circle gesture; caches its UV-space center and the two UV radii. */
+class ImageSelectCircleShape : public ImageSelectGestureShape {
+  float2 uv_center_;
+  /* Signed along X (the view2d mapping may flip), absolute along Y -- as measured below. */
+  float uv_radius_x_;
+  float uv_radius_y_;
+
+ public:
+  const char *undo_name() const override
+  {
+    return "Circle Select";
+  }
+
+  bool uv_bounds_calc(const ARegion *region, wmOperator *op, rctf &r_uv_bounds) override
+  {
+    const int mradius = RNA_int_get(op->ptr, "radius");
+    if (mradius <= 0) {
+      return false;
+    }
+
+    const int mx = RNA_int_get(op->ptr, "x");
+    const int my = RNA_int_get(op->ptr, "y");
+
+    /* Convert center to UV space. */
+    float co_center[2] = {float(mx), float(my)};
+    ui::view2d_region_to_view(
+        &region->v2d, co_center[0], co_center[1], &co_center[0], &co_center[1]);
+
+    /* Convert radius to UV space along X: measure a point one radius to the right. */
+    float co_edge[2] = {float(mx + mradius), float(my)};
+    ui::view2d_region_to_view(&region->v2d, co_edge[0], co_edge[1], &co_edge[0], &co_edge[1]);
+    const float uv_radius = co_edge[0] - co_center[0];
+
+    /* Convert radius to UV space along Y separately.
+     * The Image Editor view2d can have a non-1:1 pixel-to-UV ratio (e.g. when multiple
+     * UDIM tiles are shown side-by-side), so the horizontal and vertical UV extents of
+     * the same screen-pixel radius differ. Without this correction the circle appears as
+     * a flattened ellipse on all UDIM tiles except the first one. */
+    float co_edge_y[2] = {float(mx), float(my + mradius)};
+    ui::view2d_region_to_view(
+        &region->v2d, co_edge_y[0], co_edge_y[1], &co_edge_y[0], &co_edge_y[1]);
+    const float uv_radius_y = fabsf(co_edge_y[1] - co_center[1]);
+
+    uv_center_ = float2(co_center[0], co_center[1]);
+    uv_radius_x_ = uv_radius;
+    uv_radius_y_ = uv_radius_y;
+
+    const float abs_uv_radius = fabsf(uv_radius);
+    r_uv_bounds.xmin = co_center[0] - abs_uv_radius;
+    r_uv_bounds.xmax = co_center[0] + abs_uv_radius;
+    r_uv_bounds.ymin = co_center[1] - uv_radius_y;
+    r_uv_bounds.ymax = co_center[1] + uv_radius_y;
+    return true;
+  }
+
+  void rasterize_tile(const float2 &uv_origin,
+                      const rctf & /*tile_uv_rect*/,
+                      ImBuf *mask,
+                      const float fill_value) const override
+  {
+    const int cx = int(roundf((uv_center_.x - uv_origin.x) * mask->x));
+    const int cy = int(roundf((uv_center_.y - uv_origin.y) * mask->y));
+    int rx = int(roundf(uv_radius_x_ * mask->x));
+    if (rx <= 0) {
+      rx = 1;
+    }
+    /* Compute Y pixel radius from the separately measured UV Y radius so the circle is
+     * correct on non-square tiles and in views with a non-1:1 aspect ratio. */
+    int ry = int(roundf(uv_radius_y_ * mask->y));
+    if (ry <= 0) {
+      ry = 1;
+    }
+
+    fill_circle_float(mask, cx, cy, rx, ry, fill_value);
+  }
+
+  PaintSelectionEdgePolicy edge_policy() const override
+  {
+    return BKE_image_paint_selection_edge_policy_feathered();
+  }
+};
+
+static wmOperatorStatus image_select_circle_exec(bContext *C, wmOperator *op)
+{
+  ImageSelectCircleShape shape;
+  return image_select_gesture_exec_generic(C, op, shape);
+}
+
 static wmOperatorStatus image_select_circle_invoke(bContext *C,
-                                                    wmOperator *op,
-                                                    const wmEvent *event)
+                                                   wmOperator *op,
+                                                   const wmEvent *event)
 {
   if (image_select_gesture_invoke_begin(C, op, event)) {
     return OPERATOR_FINISHED;
@@ -1490,118 +1380,11 @@ static wmOperatorStatus image_select_circle_invoke(bContext *C,
 }
 
 static wmOperatorStatus image_select_circle_modal(bContext *C,
-                                                   wmOperator *op,
-                                                   const wmEvent *event)
+                                                  wmOperator *op,
+                                                  const wmEvent *event)
 {
   image_select_gesture_drag_detect(op, event);
   return WM_gesture_circle_modal(C, op, event);
-}
-
-static wmOperatorStatus image_select_circle_exec(bContext *C, wmOperator *op)
-{
-  Scene *scene = CTX_data_scene(C);
-  ARegion *region = CTX_wm_region(C);
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (!sima || !sima->runtime || !region) {
-    return OPERATOR_CANCELLED;
-  }
-  Image *image = sima->image;
-  if (!image) {
-    return OPERATOR_CANCELLED;
-  }
-
-  const bool is_simple_click = RNA_boolean_get(op->ptr, "is_simple_click");
-  const int mradius = RNA_int_get(op->ptr, "radius");
-
-  if (is_simple_click || mradius <= 0) {
-    image_select_commit_floating_move(C, sima);
-    image_select_apply_deselect(C, scene, image);
-    return OPERATOR_FINISHED;
-  }
-
-  /* Commit any floating move-selection fragment before starting a new selection. */
-  image_select_commit_floating_move(C, sima);
-
-  const eSelectOp sel_op = eSelectOp(RNA_enum_get(op->ptr, "mode"));
-  const bool rasterize_gesture = image_paint_selection_should_rasterize_gesture(scene, sel_op);
-
-  ED_image_undo_push_begin_selection("Circle Select", image);
-
-  if (sel_op == SEL_OP_SET) {
-    BKE_image_paint_selection_mask_free(image);
-  }
-
-  ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
-  imapaint->use_selection_mask = 1;
-
-  const int mx = RNA_int_get(op->ptr, "x");
-  const int my = RNA_int_get(op->ptr, "y");
-
-  /* Convert center to UV space. */
-  float co_center[2] = {float(mx), float(my)};
-  ui::view2d_region_to_view(&region->v2d, co_center[0], co_center[1], &co_center[0], &co_center[1]);
-
-  /* Convert radius to UV space along X: measure a point one radius to the right. */
-  float co_edge[2] = {float(mx + mradius), float(my)};
-  ui::view2d_region_to_view(&region->v2d, co_edge[0], co_edge[1], &co_edge[0], &co_edge[1]);
-  const float uv_radius = co_edge[0] - co_center[0];
-
-  /* Convert radius to UV space along Y separately.
-   * The Image Editor view2d can have a non-1:1 pixel-to-UV ratio (e.g. when multiple
-   * UDIM tiles are shown side-by-side), so the horizontal and vertical UV extents of
-   * the same screen-pixel radius differ. Without this correction the circle appears as
-   * a flattened ellipse on all UDIM tiles except the first one. */
-  float co_edge_y[2] = {float(mx), float(my + mradius)};
-  ui::view2d_region_to_view(&region->v2d, co_edge_y[0], co_edge_y[1], &co_edge_y[0], &co_edge_y[1]);
-  const float uv_radius_y = fabsf(co_edge_y[1] - co_center[1]);
-
-  const float abs_uv_radius = fabsf(uv_radius);
-  rctf circle_uv_bounds;
-  circle_uv_bounds.xmin = co_center[0] - abs_uv_radius;
-  circle_uv_bounds.xmax = co_center[0] + abs_uv_radius;
-  circle_uv_bounds.ymin = co_center[1] - uv_radius_y;
-  circle_uv_bounds.ymax = co_center[1] + uv_radius_y;
-
-  /* Subtract: expand islands before filling so we seed from gesture geometry. */
-  if (sel_op == SEL_OP_SUB) {
-    image_paint_selection_expand_uv_islands(C, image, sel_op, &circle_uv_bounds);
-  }
-
-  if (rasterize_gesture) {
-    image_paint_selection_foreach_mask_tile_in_bounds(
-        sima,
-        image,
-        circle_uv_bounds,
-        [&](const float2 &uv_origin, const rctf & /*tile_uv_rect*/, ImBuf *mask) {
-          const int cx = int(roundf((co_center[0] - uv_origin.x) * mask->x));
-          const int cy = int(roundf((co_center[1] - uv_origin.y) * mask->y));
-          int rx = int(roundf(uv_radius * mask->x));
-          if (rx <= 0) {
-            rx = 1;
-          }
-          /* Compute Y pixel radius from the separately measured UV Y radius so the circle is
-           * correct on non-square tiles and in views with a non-1:1 aspect ratio. */
-          int ry = int(roundf(uv_radius_y * mask->y));
-          if (ry <= 0) {
-            ry = 1;
-          }
-
-          const float color = (sel_op == SEL_OP_SUB) ? 0.0f : 1.0f;
-          fill_circle_float(mask, cx, cy, rx, ry, color);
-        });
-  }
-
-  /* Add/set: expand to full UV islands touched by the gesture. */
-  if (sel_op != SEL_OP_SUB) {
-    image_paint_selection_expand_uv_islands(C, image, sel_op, &circle_uv_bounds);
-  }
-  if (sel_op == SEL_OP_SET && !rasterize_gesture) {
-    imapaint->use_selection_mask = image_paint_selection_has_any_tile_mask(image) ? 1 : 0;
-  }
-
-  image_select_gesture_finish(
-      C, scene, region, image, BKE_image_paint_selection_edge_policy_feathered());
-  return OPERATOR_FINISHED;
 }
 
 void PAINT_OT_image_select_circle(wmOperatorType *ot)
@@ -1615,7 +1398,7 @@ void PAINT_OT_image_select_circle(wmOperatorType *ot)
   ot->exec = image_select_circle_exec;
   ot->cancel = WM_gesture_circle_cancel;
   ot->poll = image_paint_selection_poll;
-  ot->flag = OPTYPE_REGISTER;
+  ot->flag = IMAGE_SELECT_GESTURE_OPTYPE_FLAGS;
 
   WM_operator_properties_gesture_circle(ot);
   WM_operator_properties_select_operation_simple(ot);
@@ -1647,6 +1430,23 @@ void paint_select_session_free(PaintSelectSession &session)
     image_select_warp_state_free(session.warp);
     session.warp = nullptr;
   }
+}
+
+void ED_image_paint_select_session_free(SpaceImage *sima)
+{
+  if (!sima || !sima->runtime) {
+    return;
+  }
+  paint_select_session_free(sima->runtime->paint_select);
+}
+
+void ED_image_paint_select_transform_state_free(SpaceImage *sima)
+{
+  if (!sima || !sima->runtime || !sima->runtime->paint_select.transform) {
+    return;
+  }
+  image_select_transform_state_free(sima->runtime->paint_select.transform);
+  sima->runtime->paint_select.transform = nullptr;
 }
 
 /** \} */

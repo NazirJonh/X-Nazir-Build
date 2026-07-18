@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2024 Blender Authors
+/* SPDX-FileCopyrightText: 2026 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -30,11 +30,25 @@
 
 #pragma once
 
-#include "BKE_image.hh"
-
 #include "BLI_math_vector_types.hh"
-#include "IMB_imbuf.hh"
 #include "BLI_vector.hh"
+
+#include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
+
+#include "IMB_imbuf.hh"
+
+/* #PaintSelectSession is stored by value on #SpaceImage_Runtime. The dependency only goes this
+ * way: space_image never includes anything from this module. */
+#include "../../space_image/image_runtime.hh"
+
+/* Base state and lifetime helpers shared by move / transform / warp. Included before the
+ * per-tool headers below, which derive their state structs from it. */
+#include "paint_image_select_floating.hh"
+
+/* Owns #SelectionTileFragment and the lift/restore/preview API operating on it. The type must be
+ * complete here because the per-tool headers below store fragments by value and in #Vector. */
+#include "paint_image_select_fragment.hh"
 
 struct ImBuf;
 struct ARegion;
@@ -57,57 +71,6 @@ namespace blender {
 constexpr float SELECTION_MASK_THRESHOLD = IMAGE_PAINT_SELECTION_MASK_THRESHOLD;
 
 /** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Shared types
- * \{ */
-
-struct SelectionTileFragmentPixelData {
-  ImBuf *fragment_ibuf = nullptr;
-  ImBuf *fragment_mask_ibuf = nullptr;
-};
-
-struct SelectionTileFragmentPreviewBuffers {
-  ImBuf *fragment_blend_mask_ibuf = nullptr;
-  ImBuf *fragment_display_ibuf = nullptr;
-  ImBuf *fragment_feather_display_ibuf = nullptr;
-};
-
-struct SelectionTileFragmentGeometry {
-  int2 origin_px = {0, 0};
-  int2 size_px = {0, 0};
-  int2 selection_origin_px = {0, 0};
-  int2 selection_size_px = {0, 0};
-  int2 tile_size_px = {1, 1};
-  int tile_number = 1001;
-};
-
-struct SelectionTileFragment {
-  SelectionTileFragmentPixelData pixels;
-  SelectionTileFragmentPreviewBuffers preview;
-  SelectionTileFragmentGeometry geom;
-  PaintSelectionEdgePolicy edge_policy = BKE_image_paint_selection_edge_policy_feathered();
-};
-
-struct ImageSelectMoveState;
-struct ImageSelectTransformState;
-struct ImageSelectGradientState;
-struct ImageSelectWarpState;
-
-struct PaintSelectSession {
-  ImageSelectMoveState *move = nullptr;
-  ImageSelectTransformState *transform = nullptr;
-  ImageSelectGradientState *gradient = nullptr;
-  ImageSelectWarpState *warp = nullptr;
-};
-
-/** \} */
-
-} /* namespace blender */
-
-#include "paint_image_select_fragment.hh"
-
-namespace blender {
 
 inline void selection_tile_fragment_free(SelectionTileFragment &frag)
 {
@@ -161,6 +124,13 @@ inline float2 image_select_udim_tile_uv_origin(int tile_number)
 bool image_select_gradient_is_floating(bContext *C);
 bool image_select_gradient_is_floating_in_space(const SpaceImage *sima);
 void image_select_gradient_state_free(ImageSelectGradientState *state);
+
+/**
+ * Restore the tile backups of \a sima's floating gradient session and free it, if it has one.
+ * No-op otherwise. Called through #image_select_floating_sessions_end; see that function for why
+ * the gradient is discarded where the lifted-fragment tools are committed.
+ */
+void image_select_gradient_session_end_for_takeover(bContext *C, SpaceImage *sima);
 
 /* Mask selection operators (box/lasso/circle and friends). */
 void PAINT_OT_image_select_all(wmOperatorType *ot);

@@ -730,28 +730,6 @@ void ED_keymap_paint(wmKeyConfig *keyconf)
   /* Image/Texture Paint mode */
   keymap = WM_keymap_ensure(keyconf, "Image Paint", SPACE_EMPTY, RGN_TYPE_WINDOW);
   keymap->poll = image_texture_paint_poll;
-  {
-    KeyMapItem_Params params{};
-    params.value = KM_PRESS;
-    params.modifier = 0;
-    params.direction = KM_ANY;
-
-    /* Re-drag transform handles while floating; pass-through on miss for pan/zoom. */
-    params.type = LEFTMOUSE;
-    WM_keymap_add_item(keymap, "PAINT_OT_image_select_transform_drag", &params);
-    params.value = KM_PRESS_DRAG;
-    WM_keymap_add_item(keymap, "PAINT_OT_image_select_transform_drag", &params);
-    params.value = KM_PRESS;
-
-    params.type = EVT_RETKEY;
-    WM_keymap_add_item(keymap, "PAINT_OT_image_select_transform_confirm", &params);
-
-    params.type = EVT_PADENTER;
-    WM_keymap_add_item(keymap, "PAINT_OT_image_select_transform_confirm", &params);
-
-    params.type = EVT_ESCKEY;
-    WM_keymap_add_item(keymap, "PAINT_OT_image_select_transform_cancel", &params);
-  }
 
   /* face-mask mode */
   keymap = WM_keymap_ensure(
@@ -771,6 +749,9 @@ void ED_keymap_paint(wmKeyConfig *keyconf)
 
   /* sculpt expand. */
   expand::modal_keymap(keyconf);
+
+  /* Image paint floating selection (move / transform / warp). */
+  image_select_floating_modal_keymap(keyconf);
 }
 
 }  // namespace blender

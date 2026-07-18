@@ -266,8 +266,8 @@ class IMAGE_MT_image(Menu):
 
             layout.menu("IMAGE_MT_image_invert")
             layout.operator("image.resize", text="Resize")
-            if context.tool_settings.image_paint.use_selection_mask:
-                layout.operator("image.crop_selection", text="Crop to Selection")
+            # The operator's poll reports when no selection mask is active.
+            layout.operator("image.crop_selection", text="Crop to Selection")
             layout.menu("IMAGE_MT_image_transform")
 
             if ima.packed_file:

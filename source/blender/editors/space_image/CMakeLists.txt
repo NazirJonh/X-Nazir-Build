@@ -36,7 +36,7 @@ set(LIB
   PRIVATE bf::depsgraph
   PRIVATE bf::dna
   PRIVATE bf::draw
-  bf_editor_sculpt_paint
+  PRIVATE bf_editor_sculpt_paint
   bf_editor_uvedit
   PRIVATE bf::gpu
   PRIVATE bf::imbuf

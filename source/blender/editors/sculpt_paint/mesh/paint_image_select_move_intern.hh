@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2024 Blender Authors
+/* SPDX-FileCopyrightText: 2026 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -18,6 +18,12 @@ namespace blender {
 
 void image_select_move_commit(bContext *C, ImageSelectMoveState *state);
 void image_select_move_state_free(ImageSelectMoveState *state);
+
+/**
+ * Commit and free \a sima's floating move session, if it has one. No-op otherwise.
+ * Called through #image_select_floating_sessions_end; see that function for the semantics.
+ */
+void image_select_move_session_end_for_takeover(bContext *C, SpaceImage *sima);
 
 bool image_select_move_cursor_in_fragment(const ImageSelectMoveState *state,
                                           const ARegion *region,

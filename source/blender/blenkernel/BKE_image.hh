@@ -36,7 +36,6 @@ struct Depsgraph;
 struct ID;
 struct ImBuf;
 struct ImBufCache;
-struct ImageUser;
 struct MovieReader;
 struct Image;
 struct ImageFormatData;
@@ -88,18 +87,20 @@ struct PaintSelectionEdgePolicy {
   float edge_gamma = IMAGE_PAINT_SELECTION_BLEND_EDGE_GAMMA;
 };
 
-inline PaintSelectionEdgePolicy BKE_image_paint_selection_edge_policy_hard()
-{
-  PaintSelectionEdgePolicy policy;
-  policy.use_outward_feather = false;
-  policy.blend_radius_px = 0;
-  return policy;
-}
+/**
+ * Cached bounding box of the selected pixels of one UDIM tile. Computing it is O(width * height),
+ * so it is memoized against #bke::ImageRuntime::paint_selection_revision.
+ */
+struct PaintSelectionBounds {
+  /** Inclusive lower corner [x, y]. Only meaningful when #has_selection is true. */
+  int min[2] = {0, 0};
+  /** Exclusive upper corner [x, y]. Only meaningful when #has_selection is true. */
+  int max[2] = {0, 0};
+  /** False when the tile's mask holds no pixel above #IMAGE_PAINT_SELECTION_MASK_THRESHOLD. */
+  bool has_selection = false;
+};
 
-inline PaintSelectionEdgePolicy BKE_image_paint_selection_edge_policy_feathered()
-{
-  return PaintSelectionEdgePolicy{};
-}
+/* The functions operating on these masks live in #BKE_image_paint_selection.hh. */
 
 namespace bke {
 
@@ -135,11 +136,27 @@ struct ImageRuntime {
 
   /* Per-tile selection masks for 2D image paint (runtime only). */
   Map<int, ImBuf *> paint_selection_masks;
-  Map<int, gpu::Texture *> paint_selection_mask_textures;
   /* Cached smooth blend weights derived from #paint_selection_masks (runtime only). */
   Map<int, ImBuf *> paint_selection_blend_masks;
   /** Edge compositing policy for the active selection (box=all hard, lasso/circle=feathered). */
   PaintSelectionEdgePolicy paint_selection_edge_policy;
+  /**
+   * Monotonically increasing counter bumped whenever #paint_selection_masks may have changed.
+   * Consumers cache derived data (such as the editor's outline batch) against it. See
+   * #BKE_image_paint_selection_mask_revision_get.
+   */
+  uint64_t paint_selection_revision = 0;
+  /**
+   * Memoized per-tile results of #BKE_image_paint_selection_mask_bounds, valid only while
+   * #paint_selection_bounds_revision still equals #paint_selection_revision.
+   *
+   * \note The revision counter is global to the image rather than per-tile, so editing any tile
+   * drops every tile's cached box. That is conservative but never stale, and it keeps a single
+   * invalidation signal shared with the editor's outline batch cache. Making it per-tile would
+   * require splitting that signal, which the outline batch consumes as one value.
+   */
+  Map<int, PaintSelectionBounds> paint_selection_bounds_cache;
+  uint64_t paint_selection_bounds_revision = 0;
 };
 
 }  // namespace bke
@@ -164,102 +181,6 @@ void BKE_image_free_gputextures(Image *ima);
  * \note Call from library.
  */
 void BKE_image_free_data(Image *image);
-
-ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int width, int height);
-ImBuf *BKE_image_paint_selection_mask_lookup(Image *image, int tile_number);
-float BKE_image_paint_selection_mask_sample(const Image *image, int tile_number, int x, int y);
-/** Paint/compositing weight: smooth falloff centered on the mask boundary. */
-float BKE_image_paint_selection_blend_sample(const Image *image, int tile_number, int x, int y);
-float BKE_image_paint_selection_blend_sample_bilinear(const Image *image,
-                                                      int tile_number,
-                                                      float fx,
-                                                      float fy);
-ImBuf *BKE_image_paint_selection_compute_blend_mask(
-    const ImBuf *binary_mask, const PaintSelectionEdgePolicy &edge_policy = {});
-void BKE_image_paint_selection_blend_mask_invalidate(Image *image);
-void BKE_image_paint_selection_blend_mask_invalidate_tile(Image *image, int tile_number);
-void BKE_image_paint_selection_bounds_expand_for_blend(int r_min[2],
-                                                       int r_max[2],
-                                                       int tile_width,
-                                                       int tile_height,
-                                                       const PaintSelectionEdgePolicy &edge_policy = {});
-void BKE_image_paint_selection_compute_blend_mask_to_4ch(const float *binary,
-                                                         int width,
-                                                         int height,
-                                                         float *blend_4ch,
-                                                         int binary_stride_channels = 1,
-                                                         const PaintSelectionEdgePolicy &edge_policy = {});
-const PaintSelectionEdgePolicy &BKE_image_paint_selection_edge_policy_get(const Image *image);
-void BKE_image_paint_selection_set_edge_policy(Image *image,
-                                               const PaintSelectionEdgePolicy &edge_policy);
-/** Convenience: true when #PaintSelectionEdgePolicy::use_outward_feather is set. */
-bool BKE_image_paint_selection_use_feather(const Image *image);
-/** Convenience: sets hard or default feathered edge policy. */
-void BKE_image_paint_selection_set_use_feather(Image *image, bool use_feather);
-bool BKE_image_paint_selection_mask_bounds(
-    const Image *image, int tile_number, int r_min[2], int r_max[2]);
-void BKE_image_paint_selection_mask_fill(Image *image, int tile_number, float value);
-void BKE_image_paint_selection_mask_invert(Image *image, int tile_number);
-void BKE_image_paint_selection_mask_merge(Image *image,
-                                          int tile_number,
-                                          const ImBuf *fragment_mask,
-                                          const int origin[2]);
-bool BKE_image_paint_selection_mask_has_any(const Image *image);
-/** First UDIM tile number that has a non-empty selection, or 0 if none. */
-int BKE_image_paint_selection_mask_first_tile_with_selection(const Image *image);
-ImBuf *BKE_image_paint_selection_mask_dup_tile(Image *image, int tile_number);
-void BKE_image_paint_selection_mask_restore_tile(Image *image,
-                                                 int tile_number,
-                                                 const ImBuf *src_mask);
-void BKE_image_paint_selection_mask_free(Image *image);
-void BKE_image_paint_selection_mask_tile_free(Image *image, int tile_number);
-
-/**
- * Extract the pixel data from the bounding box of the active paint selection on the given
- * UDIM tile. Returns a newly-allocated #ImBuf on success; caller must free it via
- * #IMB_freeImBuf(). Preserves the source image's color-space on the returned buffer.
- *
- * \param tile_number: UDIM tile number (1001 for a non-tiled image).
- * \param iuser: Optional image user; its `tile` field is overwritten by this function.
- *   Pass null to use a default image user.
- * \param r_origin: Receives the tile-local pixel coordinates of the bounding box origin [x, y].
- * \param r_size: Receives the dimensions of the returned buffer [width, height].
- * \param r_mask_out: If non-null, receives a newly-allocated 1-channel float #ImBuf containing
- *   the mask fragment (same dimensions as the returned buffer). Caller must free it.
- *   Pass null to skip mask extraction.
- * \return nullptr if there is no selection, the tile has no pixel data, or the bbox is empty.
- */
-ImBuf *BKE_image_paint_selection_extract_pixels(Image *image,
-                                                int tile_number,
-                                                ImageUser *iuser,
-                                                int r_origin[2],
-                                                int r_size[2],
-                                                ImBuf **r_mask_out);
-
-/**
- * Write pixel data into the given UDIM tile at the pixel-coordinate region (x, y, width, height).
- * Marks the image dirty and triggers a partial viewport update. Does NOT push an undo step —
- * follow the same convention as #Image.pixels in the Python API.
- *
- * \param pixels: Flat float array, size = `width * height * channels`.
- * \param channels: Number of channels per pixel. Must match the image buffer channel count.
- * \param x, y: Top-left corner of the destination region in tile-local pixel coordinates.
- * \param width, height: Dimensions of the region to write.
- * \param mask: Optional 1-channel float mask (same `width x height`). When non-null, blending
- *   is lerp: `dst = dst_original * (1 - mask[i]) + pixels[i] * mask[i]`. Pass null for a
- *   hard write of all pixels.
- * \return false if the image has no pixel data, region is out of bounds, or channels mismatch.
- */
-bool BKE_image_paint_selection_write_region(Image *image,
-                                            int tile_number,
-                                            ImageUser *iuser,
-                                            const float *pixels,
-                                            int channels,
-                                            int x,
-                                            int y,
-                                            int width,
-                                            int height,
-                                            const float *mask);
 
 typedef void(StampCallback)(void *data,
                             const char *propname,

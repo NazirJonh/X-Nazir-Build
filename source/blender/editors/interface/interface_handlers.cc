@@ -8042,6 +8042,8 @@ static bool numedit_but_COLORBAND(Button *but, HandleButtonData *data, int mx)
 static int do_but_COLORBAND(
     bContext *C, Block *block, Button *but, HandleButtonData *data, const wmEvent *event)
 {
+  BLI_assert(but->type == ButtonType::ColorBand);
+
   int mx = event->xy[0];
   int my = event->xy[1];
   window_to_block(data->region, block, &mx, &my);
@@ -8085,8 +8087,8 @@ static int do_but_COLORBAND(
        * click is not close to an existing stop handle. The hit distance is a bit wider than the
        * drawn handle half-width so new stops aren't placed right on top of existing ones, while
        * still allowing them to be inserted fairly close together. */
-      const float handle_hit_factor = 1.5f;
-      const int on_handle_dist = int(BLI_rctf_size_y(&but->rect) / handle_hit_factor);
+      const float handle_hit_scale = 2.0f / 3.0f;
+      const int on_handle_dist = int(BLI_rctf_size_y(&but->rect) * handle_hit_scale);
       const bool insert = (event->modifier & KM_CTRL) ||
                           (but_coba->insert_on_click && mindist_unbiased > on_handle_dist);
 

@@ -916,14 +916,20 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
-    /* Initialize gradient tool fields that were added to ImagePaintSettings.
-     * Old files may have garbage in these slots due to struct layout change. */
+    /* Members missing from an old file's SDNA are zeroed by blenloader, never left with garbage.
+     * Zero happens to be the intended default for `gradient_type`, `gradient_repeat` and
+     * `gradient_blend_mode`, but it is out of range or wrong for the rest: `gradient_opacity`
+     * would be fully transparent, `warp_grid_size` would fall outside the RNA range [2, 10], and
+     * the embedded #ColorBand needs an explicit runtime init to hold any stops. Assign the whole
+     * block so the DNA defaults and the versioned values cannot drift apart. */
     for (Scene &scene : bmain->scenes) {
       ImagePaintSettings &imapaint = scene.toolsettings->imapaint;
       imapaint.gradient_type = IMAGE_PAINT_GRADIENT_LINEAR;
       imapaint.gradient_repeat = IMAGE_PAINT_GRADIENT_REPEAT_NONE;
       imapaint.gradient_blend_mode = 0;
       imapaint.gradient_opacity = 1.0f;
+      imapaint.warp_grid_size = 4;
+      imapaint.warp_interpolation = IMAGE_PAINT_WARP_INTERP_LINEAR;
       BKE_colorband_init(&imapaint.gradient_colorband, true);
     }
   }

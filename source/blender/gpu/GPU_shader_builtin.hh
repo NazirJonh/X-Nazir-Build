@@ -46,8 +46,8 @@ enum GPUBuiltinShader {
   GPU_SHADER_2D_DIAG_STRIPES,
   /** Draw dashed lines with custom dash length and uniform color. */
   GPU_SHADER_3D_LINE_DASHED_UNIFORM_COLOR,
-  /** Draw animated dashed lines for selection feedback. */
-  GPU_SHADER_3D_LINE_DASHED_ANIMATED_COLOR,
+  /** Same, with a caller-driven `dash_phase` for a "marching ants" effect. */
+  GPU_SHADER_3D_LINE_DASHED_UNIFORM_COLOR_ANIMATED,
   /** Draw triangles / lines / points with only depth output. */
   GPU_SHADER_3D_DEPTH_ONLY,
   /** Merge viewport overlay texture with the render output. */

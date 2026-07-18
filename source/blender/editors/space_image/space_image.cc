@@ -24,6 +24,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_query.hh"
 #include "BKE_lib_remap.hh"
@@ -40,6 +41,7 @@
 
 #include "ED_asset_shelf.hh"
 #include "ED_image.hh"
+#include "ED_paint.hh"
 #include "ED_mask.hh"
 #include "ED_node.hh"
 #include "ED_render.hh"
@@ -48,6 +50,8 @@
 #include "ED_transform.hh"
 #include "ED_util.hh"
 #include "ED_uvedit.hh"
+
+#include "GPU_batch.hh"
 
 #include "NOD_compositor_gizmos.hh"
 
@@ -63,8 +67,6 @@
 
 #include "image_intern.hh"
 #include "image_runtime.hh"
-
-#include "../sculpt_paint/mesh/paint_image_select_intern.hh"
 
 namespace blender {
 
@@ -200,12 +202,16 @@ static SpaceLink *image_create(const ScrArea * /*area*/, const Scene * /*scene*/
 static void image_selection_mask_timer_update(const Main *bmain,
                                               wmWindow *win,
                                               SpaceImage *sima,
-                                              const Scene *scene)
+                                              const Scene * /*scene*/)
 {
   if (!sima->runtime) {
     return;
   }
-  const bool wants_timer = (scene && scene->toolsettings->imapaint.use_selection_mask);
+  /* Drive the animation from the actual mask data: the timer must not run for an image without
+   * any selection (e.g. right after loading a file), and must stop once the last mask is cleared.
+   * This callback re-evaluates on every notifier the listener receives, including the NC_WINDOW
+   * broadcast sent when a selection is reset. */
+  const bool wants_timer = BKE_image_paint_selection_mask_has_any(sima->image);
   wmTimer *&timer = sima->runtime->selection_mask_timer;
   if (wants_timer == (timer != nullptr)) {
     return;
@@ -235,7 +241,10 @@ static void image_free(SpaceLink *sl)
   /* The wmTimer (if any) is removed in #image_exit while the wmWindowManager is still
    * available; by the time the space-link is freed the timer reference is already gone. */
   if (simage->runtime) {
-    paint_select_session_free(simage->runtime->paint_select);
+    ED_image_paint_select_session_free(simage);
+    /* Freeing without an active GPU context is safe: the backends queue the buffer deletion on
+     * their orphan lists when no context is bound. */
+    GPU_BATCH_DISCARD_SAFE(simage->runtime->selection_outline_batch);
     MEM_delete(simage->runtime);
     simage->runtime = nullptr;
   }
@@ -498,10 +507,7 @@ static void image_listener(const wmSpaceTypeListenerParams *params)
          * the undo step may have already changed the canvas; simply freeing the state
          * hides the gizmo and avoids a stale preview. The pending undo-step (if still in
          * step_init) will be cleaned up automatically on the next push_init call. */
-        if (sima->runtime && sima->runtime->paint_select.transform) {
-          image_select_transform_state_free(sima->runtime->paint_select.transform);
-          sima->runtime->paint_select.transform = nullptr;
-        }
+        ED_image_paint_select_transform_state_free(sima);
       }
       break;
   }
@@ -955,12 +961,10 @@ static void image_main_region_listener(const wmRegionListenerParams *params)
   const wmNotifier *wmn = params->notifier;
 
   SpaceImage *sima = static_cast<SpaceImage *>(area->spacedata.first);
-  Scene *scene = sima->iuser.scene;
 
   /* Redraw selection mask animation on frame change. */
-  if (scene && wmn->category == NC_SCENE && wmn->data == ND_FRAME) {
-    ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
-    if (imapaint->use_selection_mask) {
+  if (wmn->category == NC_SCENE && wmn->data == ND_FRAME) {
+    if (BKE_image_paint_selection_mask_has_any(sima->image)) {
       ED_region_tag_redraw(region);
     }
   }

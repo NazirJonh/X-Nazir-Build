@@ -2172,7 +2172,7 @@ class _defs_image_paint_select:
         return dict(
             idname="builtin.select_warp",
             label="Warp Selection",
-            # No dedicated warp icon asset; reuse the transform icon (see plan Task 8 Step 2).
+            # No dedicated warp icon asset; reuse the transform icon.
             icon="ops.transform.transform",
             widget=None,
             keymap="Image Editor Tool: Paint, Warp Selection",
@@ -2239,36 +2239,6 @@ class _defs_image_paint_select:
             keymap="Image Editor Tool: Paint, Select Circle",
             draw_settings=draw_settings,
             draw_cursor=draw_cursor,
-        )
-
-    @ToolDef.from_fn
-    def invert():
-        return dict(
-            idname="paint.image_select_invert",
-            label="Invert Selection",
-            icon="ops.generic.select_inverse",
-            widget=None,
-            keymap=(),
-        )
-
-    @ToolDef.from_fn
-    def all():
-        return dict(
-            idname="paint.image_select_all",
-            label="Select All",
-            icon="ops.generic.select_all",
-            widget=None,
-            keymap=(),
-        )
-
-    @ToolDef.from_fn
-    def none():
-        return dict(
-            idname="paint.image_select_none",
-            label="Deselect All",
-            icon="ops.generic.deselect_all",
-            widget=None,
-            keymap=(),
         )
 
 

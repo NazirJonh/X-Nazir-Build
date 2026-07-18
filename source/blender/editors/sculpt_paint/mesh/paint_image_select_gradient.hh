@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2024 Blender Authors
+/* SPDX-FileCopyrightText: 2026 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -58,7 +58,9 @@ float image_paint_gradient_eval_t(const ImagePaintGradientParams &params,
                                   float px_y);
 
 /** Interpolate or colorband-evaluate at \a t into \a r_color (RGBA, straight alpha). */
-void image_paint_gradient_eval_color(const ImagePaintGradientParams &params, float t, float r_color[4]);
+void image_paint_gradient_eval_color(const ImagePaintGradientParams &params,
+                                     float t,
+                                     float r_color[4]);
 
 /** Build params from persistent #ImagePaintSettings; the embedded gradient color ramp is used. */
 ImagePaintGradientParams image_paint_gradient_params_from_imapaint(
@@ -71,15 +73,20 @@ void image_paint_gradient_ensure_colorband(ImagePaintSettings &imapaint);
 ImagePaintGradientParams image_paint_gradient_params_from_brush(const Paint *paint,
                                                                 const Brush *brush);
 
-/** Intersection of gradient vector bounds and optional selection mask. */
+/**
+ * Region of \a tile_number the gradient has to paint: the selection bounds (expanded for
+ * feathering) when a mask is active, the whole tile otherwise, intersected with
+ * \a region_override when given.
+ *
+ * \note Takes no gradient geometry on purpose. The gradient vector positions the ramp but does
+ * not bound the painted area -- the ramp parameter is clamped or wrapped outside the drag rather
+ * than discarded -- so it cannot be used to shrink the region.
+ */
 void image_paint_gradient_calc_work_region(const Scene *scene,
                                            const Image *image,
                                            int tile_number,
                                            int tile_w,
                                            int tile_h,
-                                           const ImagePaintGradientParams &params,
-                                           const float2 &start_px,
-                                           const float2 &end_px,
                                            const rcti *region_override,
                                            rcti &r_region);
 
@@ -99,9 +106,6 @@ void image_paint_gradient_apply_region(const Scene *scene,
 
 /** Recompute the floating gradient preview from current tool settings, if active. */
 void image_select_gradient_refresh_preview_from_settings(bContext *C);
-
-/** Bump when #ImagePaintSettings gradient fields change (invalidates live preview). */
-void image_paint_gradient_bump_settings_revision();
 
 struct ImageSelectGradientState;
 

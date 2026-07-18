@@ -17,11 +17,13 @@
 #include "DNA_view2d_types.h"
 
 #include "BLI_listbase_wrapper.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_string_utf8.h"
 #include "BLI_threads.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "IMB_cache.hh"
 #include "IMB_colormanagement.hh"
@@ -31,15 +33,19 @@
 
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_paint.hh"
 
 #include "BIF_glutil.hh"
 
+#include "GPU_batch.hh"
 #include "GPU_immediate.hh"
 #include "GPU_immediate_util.hh"
 #include "GPU_matrix.hh"
 #include "GPU_shader.hh"
 #include "GPU_state.hh"
+#include "GPU_vertex_buffer.hh"
+#include "GPU_vertex_format.hh"
 
 #include "BLF_api.hh"
 
@@ -58,8 +64,7 @@
 #include "RE_pipeline.h"
 
 #include "image_intern.hh"
-
-#include "../sculpt_paint/paint_intern.hh"
+#include "image_runtime.hh"
 
 namespace blender {
 
@@ -442,205 +447,239 @@ void draw_image_sample_line(SpaceImage *sima)
   }
 }
 
-void draw_image_paint_selection_mask(const bContext *C, ARegion *region)
+/* Length of one dash-plus-gap of the selection outline, in UI-scaled pixels. */
+static constexpr float SELECTION_MASK_DASH_WIDTH = 8.0f;
+/* Marching-ants speed, in whole dash periods per second. */
+static constexpr double SELECTION_MASK_DASH_SPEED = 1.0;
+
+/**
+ * Append the outline of the selected pixels of \a mask to \a r_verts as #GPU_PRIM_LINES vertex
+ * pairs, in UV space (the tile at \a uv_origin covers one unit square).
+ *
+ * The winding of each segment encodes which side of it is selected, which is what makes the
+ * animated dashes appear to travel around the selection in a consistent direction.
+ */
+static void image_selection_outline_build_tile(const ImBuf *mask,
+                                               const float2 &uv_origin,
+                                               Vector<float3> &r_verts)
 {
-  SpaceImage *sima = CTX_wm_space_image(C);
-  if (sima->mode != SI_MODE_PAINT) {
+  const float *data = mask->float_buffer.data;
+  if (!data) {
     return;
   }
 
-  Image *ima = ED_space_image(sima);
+  auto append_segment = [&](const float2 &a, const float2 &b, const bool reversed) {
+    if (reversed) {
+      r_verts.append(float3(b.x, b.y, 0.0f));
+      r_verts.append(float3(a.x, a.y, 0.0f));
+    }
+    else {
+      r_verts.append(float3(a.x, a.y, 0.0f));
+      r_verts.append(float3(b.x, b.y, 0.0f));
+    }
+  };
+
+  /* Horizontal edges - borders between selected and unselected rows. */
+  for (int y = 0; y <= mask->y; y++) {
+    int x_start = -1;
+    bool current_bot_sel = false;
+    for (int x = 0; x <= mask->x; x++) {
+      bool is_edge = false;
+      bool bot_sel = false;
+      if (x < mask->x) {
+        if (y < mask->y) {
+          const bool top_sel = (y > 0) && (data[(y - 1) * mask->x + x] > 0.5f);
+          bot_sel = (data[y * mask->x + x] > 0.5f);
+          is_edge = (top_sel != bot_sel);
+        }
+        else {
+          /* Top image boundary: edge exists if the topmost pixel is selected. */
+          is_edge = (data[(y - 1) * mask->x + x] > 0.5f);
+          bot_sel = false;
+        }
+      }
+
+      if (is_edge) {
+        if (x_start < 0) {
+          x_start = x;
+          current_bot_sel = bot_sel;
+        }
+        else if (current_bot_sel != bot_sel) {
+          /* Edge type changed (Top vs Bottom), emit previous segment. */
+          const float fy = uv_origin.y + (float(y) / float(mask->y));
+          append_segment({uv_origin.x + (float(x_start) / float(mask->x)), fy},
+                         {uv_origin.x + (float(x) / float(mask->x)), fy},
+                         current_bot_sel);
+          x_start = x;
+          current_bot_sel = bot_sel;
+        }
+      }
+      else if (x_start >= 0) {
+        const float fy = uv_origin.y + (float(y) / float(mask->y));
+        append_segment({uv_origin.x + (float(x_start) / float(mask->x)), fy},
+                       {uv_origin.x + (float(x) / float(mask->x)), fy},
+                       current_bot_sel);
+        x_start = -1;
+      }
+    }
+  }
+
+  /* Vertical edges - borders between selected and unselected columns. */
+  for (int x = 0; x <= mask->x; x++) {
+    int y_start = -1;
+    bool current_right_sel = false;
+    for (int y = 0; y <= mask->y; y++) {
+      bool is_edge = false;
+      bool right_sel = false;
+      if (y < mask->y) {
+        if (x < mask->x) {
+          const bool left_sel = (x > 0) && (data[y * mask->x + (x - 1)] > 0.5f);
+          right_sel = (data[y * mask->x + x] > 0.5f);
+          is_edge = (left_sel != right_sel);
+        }
+        else {
+          /* Right image boundary: edge exists if the rightmost pixel is selected. */
+          is_edge = (data[y * mask->x + (x - 1)] > 0.5f);
+          right_sel = false;
+        }
+      }
+
+      if (is_edge) {
+        if (y_start < 0) {
+          y_start = y;
+          current_right_sel = right_sel;
+        }
+        else if (current_right_sel != right_sel) {
+          /* Edge type changed (Left vs Right), emit previous segment. */
+          const float fx = uv_origin.x + (float(x) / float(mask->x));
+          append_segment({fx, uv_origin.y + (float(y_start) / float(mask->y))},
+                         {fx, uv_origin.y + (float(y) / float(mask->y))},
+                         !current_right_sel);
+          y_start = y;
+          current_right_sel = right_sel;
+        }
+      }
+      else if (y_start >= 0) {
+        const float fx = uv_origin.x + (float(x) / float(mask->x));
+        append_segment({fx, uv_origin.y + (float(y_start) / float(mask->y))},
+                       {fx, uv_origin.y + (float(y) / float(mask->y))},
+                       !current_right_sel);
+        y_start = -1;
+      }
+    }
+  }
+}
+
+/**
+ * Rebuild #SpaceImage_Runtime::selection_outline_batch from the image's selection masks.
+ *
+ * Extracting the outline is O(width * height) per tile, so this must only run when the masks
+ * actually changed. A null batch is a valid result and means "nothing to draw"; the revision is
+ * still recorded so an empty selection does not trigger a rescan on every redraw.
+ */
+static void image_selection_outline_batch_ensure(ed::image::SpaceImage_Runtime &runtime,
+                                                 const Image *ima)
+{
+  const uint64_t revision = BKE_image_paint_selection_mask_revision_get(ima);
+  if (runtime.selection_outline_image == ima && runtime.selection_outline_revision == revision) {
+    /* Cache is current. A null batch is a valid cached result meaning "nothing to draw".
+     * The initial state (null image) never matches, so the first draw always builds. */
+    return;
+  }
+
+  GPU_BATCH_DISCARD_SAFE(runtime.selection_outline_batch);
+  runtime.selection_outline_image = ima;
+  runtime.selection_outline_revision = revision;
+
+  Vector<float3> verts;
+  for (const ImageTile *tile : ConstListBaseWrapper<ImageTile>(ima->tiles)) {
+    /* Read-only: the const overload must be used so drawing does not advance the revision it is
+     * caching against. */
+    const ImBuf *mask = BKE_image_paint_selection_mask_lookup(ima, tile->tile_number);
+    if (!mask) {
+      continue;
+    }
+    const float2 uv_origin(float((tile->tile_number - 1001) % 10),
+                           float((tile->tile_number - 1001) / 10));
+    image_selection_outline_build_tile(mask, uv_origin, verts);
+  }
+
+  if (verts.is_empty()) {
+    return;
+  }
+
+  GPUVertFormat format = {0};
+  const uint pos = GPU_vertformat_attr_add(&format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+
+  gpu::VertBuf *vbo = GPU_vertbuf_create_with_format(format);
+  GPU_vertbuf_data_alloc(*vbo, uint(verts.size()));
+  for (const int64_t i : verts.index_range()) {
+    GPU_vertbuf_attr_set(vbo, pos, uint(i), &verts[i]);
+  }
+
+  runtime.selection_outline_batch = GPU_batch_create_ex(
+      GPU_PRIM_LINES, vbo, nullptr, GPU_BATCH_OWNS_VBO);
+}
+
+void draw_image_paint_selection_mask(const bContext *C, ARegion *region)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  if (sima->mode != SI_MODE_PAINT || !sima->runtime) {
+    return;
+  }
+
+  const Image *ima = ED_space_image(sima);
   if (!ima) {
     return;
   }
 
-  Scene *scene = CTX_data_scene(C);
-  ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
-  if (!imapaint->use_selection_mask) {
+  if (!BKE_image_paint_selection_mask_has_any(ima)) {
+    /* The last mask was removed: release the cached geometry rather than keeping it alive until
+     * the editor is closed. */
+    GPU_BATCH_DISCARD_SAFE(sima->runtime->selection_outline_batch);
+    sima->runtime->selection_outline_image = nullptr;
     return;
   }
 
+  image_selection_outline_batch_ensure(*sima->runtime, ima);
+  gpu::Batch *batch = sima->runtime->selection_outline_batch;
+  if (!batch) {
+    return;
+  }
+
+  /* The outline is cached in UV space, so it is drawn through the View2D matrix rather than in
+   * region pixels. Both matrices are saved: this runs in the middle of #draw_image_main_helpers
+   * and the drawers that follow rely on the ambient region-pixel space. */
   GPU_matrix_push_projection();
-  ED_region_pixelspace(region);
+  GPU_matrix_push();
+  ui::view2d_view_ortho(&region->v2d);
 
-  GPUVertFormat *format = immVertexFormat();
-  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
-
-  immBindBuiltinProgram(GPU_SHADER_3D_LINE_DASHED_ANIMATED_COLOR);
+  GPU_batch_program_set_builtin(batch, GPU_SHADER_3D_LINE_DASHED_UNIFORM_COLOR_ANIMATED);
 
   float viewport_size[4];
   GPU_viewport_size_get_f(viewport_size);
-  immUniform2f("viewport_size", viewport_size[2] / UI_SCALE_FAC, viewport_size[3] / UI_SCALE_FAC);
-  immUniform1i("colors_len", 2);
-  immUniform4f("color", 0.4f, 0.4f, 0.4f, 1.0f);
-  immUniform4f("color2", 1.0f, 1.0f, 1.0f, 1.0f);
-  immUniform1f("dash_width", 8.0f);
+  GPU_batch_uniform_2f(
+      batch, "viewport_size", viewport_size[2] / UI_SCALE_FAC, viewport_size[3] / UI_SCALE_FAC);
+  GPU_batch_uniform_1i(batch, "colors_len", 2);
+  GPU_batch_uniform_4f(batch, "color", 0.4f, 0.4f, 0.4f, 1.0f);
+  GPU_batch_uniform_4f(batch, "color2", 1.0f, 1.0f, 1.0f, 1.0f);
+  GPU_batch_uniform_1f(batch, "dash_width", SELECTION_MASK_DASH_WIDTH);
+  GPU_batch_uniform_1f(batch, "udash_factor", 0.5f);
 
-  /* Animate dashes with clockwise movement for visual feedback of selection region.
-   * udash_factor is used as animation offset (0.0 to 1.0) to shift dash positions. */
-  float dash_offset = fmod(BLI_time_now_seconds() * 1.0f, 1.0f);
-  immUniform1f("udash_factor", dash_offset);
+  /* Animate the dashes so the selection region reads as active. The phase is the only thing that
+   * changes per frame; the geometry above stays cached. Reduce the (large and growing) time value
+   * modulo one period in double precision before narrowing, otherwise the animation grows visibly
+   * jerky after Blender has been running for a while. */
+  const float dash_phase = float(fmod(BLI_time_now_seconds() * SELECTION_MASK_DASH_SPEED, 1.0));
+  GPU_batch_uniform_1f(batch, "dash_phase", dash_phase);
 
   GPU_line_width(1.0f);
   GPU_blend(GPU_BLEND_ALPHA);
 
-  for (ImageTile *tile : ListBaseWrapper<ImageTile>(ima->tiles)) {
-    ImBuf *mask = BKE_image_paint_selection_mask_lookup(ima, tile->tile_number);
-    if (!mask) {
-      continue;
-    }
-    const float *data = mask->float_buffer.data;
-    if (!data) {
-      continue;
-    }
-
-    const float uv_origin[2] = {float((tile->tile_number - 1001) % 10),
-                                float((tile->tile_number - 1001) / 10)};
-
-    immBeginAtMost(GPU_PRIM_LINES, size_t(mask->x + 1) * (mask->y + 1) * 2);
-
-    /* Horizontal edges - borders between selected and unselected rows. */
-    for (int y = 0; y <= mask->y; y++) {
-      int x_start = -1;
-      bool current_bot_sel = false;
-      for (int x = 0; x <= mask->x; x++) {
-        bool is_edge = false;
-        bool bot_sel = false;
-        if (x < mask->x) {
-          if (y < mask->y) {
-            const bool top_sel = (y > 0) && (data[(y - 1) * mask->x + x] > 0.5f);
-            bot_sel = (data[y * mask->x + x] > 0.5f);
-            is_edge = (top_sel != bot_sel);
-          }
-          else {
-            /* Top image boundary: edge exists if the topmost pixel is selected. */
-            is_edge = (data[(y - 1) * mask->x + x] > 0.5f);
-            bot_sel = false;
-          }
-        }
-
-        if (is_edge) {
-          if (x_start < 0) {
-            x_start = x;
-            current_bot_sel = bot_sel;
-          }
-          else if (current_bot_sel != bot_sel) {
-            /* Edge type changed (Top vs Bottom), draw previous segment. */
-            const float fx1 = uv_origin[0] + (float(x_start) / float(mask->x));
-            const float fx2 = uv_origin[0] + (float(x) / float(mask->x));
-            const float fy = uv_origin[1] + (float(y) / float(mask->y));
-            int rx1, ry1, rx2, ry2;
-            ui::view2d_view_to_region(&region->v2d, fx1, fy, &rx1, &ry1);
-            ui::view2d_view_to_region(&region->v2d, fx2, fy, &rx2, &ry2);
-
-            if (current_bot_sel) {
-              immVertex2f(pos, float(rx2), float(ry2));
-              immVertex2f(pos, float(rx1), float(ry1));
-            }
-            else {
-              immVertex2f(pos, float(rx1), float(ry1));
-              immVertex2f(pos, float(rx2), float(ry2));
-            }
-
-            x_start = x;
-            current_bot_sel = bot_sel;
-          }
-        }
-        else if (x_start >= 0) {
-          const float fx1 = uv_origin[0] + (float(x_start) / float(mask->x));
-          const float fx2 = uv_origin[0] + (float(x) / float(mask->x));
-          const float fy = uv_origin[1] + (float(y) / float(mask->y));
-          int rx1, ry1, rx2, ry2;
-          ui::view2d_view_to_region(&region->v2d, fx1, fy, &rx1, &ry1);
-          ui::view2d_view_to_region(&region->v2d, fx2, fy, &rx2, &ry2);
-
-          if (current_bot_sel) {
-            immVertex2f(pos, float(rx2), float(ry2));
-            immVertex2f(pos, float(rx1), float(ry1));
-          }
-          else {
-            immVertex2f(pos, float(rx1), float(ry1));
-            immVertex2f(pos, float(rx2), float(ry2));
-          }
-          x_start = -1;
-        }
-      }
-    }
-
-    /* Vertical edges - borders between selected and unselected columns. */
-    for (int x = 0; x <= mask->x; x++) {
-      int y_start = -1;
-      bool current_right_sel = false;
-      for (int y = 0; y <= mask->y; y++) {
-        bool is_edge = false;
-        bool right_sel = false;
-        if (y < mask->y) {
-          if (x < mask->x) {
-            const bool left_sel = (x > 0) && (data[y * mask->x + (x - 1)] > 0.5f);
-            right_sel = (data[y * mask->x + x] > 0.5f);
-            is_edge = (left_sel != right_sel);
-          }
-          else {
-            /* Right image boundary: edge exists if the rightmost pixel is selected. */
-            is_edge = (data[y * mask->x + (x - 1)] > 0.5f);
-            right_sel = false;
-          }
-        }
-
-        if (is_edge) {
-          if (y_start < 0) {
-            y_start = y;
-            current_right_sel = right_sel;
-          }
-          else if (current_right_sel != right_sel) {
-            /* Edge type changed (Left vs Right), draw previous segment. */
-            const float fx = uv_origin[0] + (float(x) / float(mask->x));
-            const float fy1 = uv_origin[1] + (float(y_start) / float(mask->y));
-            const float fy2 = uv_origin[1] + (float(y) / float(mask->y));
-            int rx1, ry1, rx2, ry2;
-            ui::view2d_view_to_region(&region->v2d, fx, fy1, &rx1, &ry1);
-            ui::view2d_view_to_region(&region->v2d, fx, fy2, &rx2, &ry2);
-
-            if (current_right_sel) {
-              immVertex2f(pos, float(rx1), float(ry1));
-              immVertex2f(pos, float(rx2), float(ry2));
-            }
-            else {
-              immVertex2f(pos, float(rx2), float(ry2));
-              immVertex2f(pos, float(rx1), float(ry1));
-            }
-
-            y_start = y;
-            current_right_sel = right_sel;
-          }
-        }
-        else if (y_start >= 0) {
-          const float fx = uv_origin[0] + (float(x) / float(mask->x));
-          const float fy1 = uv_origin[1] + (float(y_start) / float(mask->y));
-          const float fy2 = uv_origin[1] + (float(y) / float(mask->y));
-          int rx1, ry1, rx2, ry2;
-          ui::view2d_view_to_region(&region->v2d, fx, fy1, &rx1, &ry1);
-          ui::view2d_view_to_region(&region->v2d, fx, fy2, &rx2, &ry2);
-
-          if (current_right_sel) {
-            immVertex2f(pos, float(rx1), float(ry1));
-            immVertex2f(pos, float(rx2), float(ry2));
-          }
-          else {
-            immVertex2f(pos, float(rx2), float(ry2));
-            immVertex2f(pos, float(rx1), float(ry1));
-          }
-          y_start = -1;
-        }
-      }
-    }
-
-    immEnd();
-  }
-
-  immUnbindProgram();
+  GPU_batch_draw(batch);
 
   GPU_blend(GPU_BLEND_NONE);
+  GPU_matrix_pop();
   GPU_matrix_pop_projection();
 }
 

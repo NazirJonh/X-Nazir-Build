@@ -128,9 +128,6 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 #  include "ED_paint.hh"
 #  include "ED_particle.hh"
 
-#  include "../../editors/sculpt_paint/mesh/paint_image_select_gradient.hh"
-#  include "../../editors/sculpt_paint/mesh/paint_image_select_warp.hh"
-
 namespace blender {
 
 const EnumPropertyItem rna_enum_particle_edit_disconnected_hair_brush_items[] = {
@@ -331,14 +328,14 @@ static void rna_ImagePaintSettings_gradient_update(Main * /*bmain*/,
                                                    PointerRNA * /*ptr*/)
 {
   /* Invalidate the live gradient preview when any gradient setting (including a ramp stop) changes. */
-  image_paint_gradient_bump_settings_revision();
+  ED_image_paint_select_gradient_settings_revision_bump();
 }
 
 static void rna_ImagePaintSettings_warp_update(Main * /*bmain*/,
                                                Scene * /*scene*/,
                                                PointerRNA * /*ptr*/)
 {
-  image_paint_warp_bump_settings_revision();
+  ED_image_paint_select_warp_settings_revision_bump();
   /* NC_SCENE | ND_TOOLSETTINGS (the notifier this property's RNA_def_property_update() call
    * already sends) only reaches the Image Editor's header/tool-settings *region* listener --
    * the main WINDOW region where the grid is drawn is not tagged, so the visible grid would stay
@@ -353,11 +350,10 @@ static void rna_ImagePaintSettings_warp_update(Main * /*bmain*/,
 static PointerRNA rna_ImagePaintSettings_gradient_color_ramp_get(PointerRNA *ptr)
 {
   ImagePaintSettings *imapaint = static_cast<ImagePaintSettings *>(ptr->data);
-  /* The ramp is embedded by value and may be empty in files saved before it existed; build the
-   * default two-stop ramp on first access so the widget always has valid data. */
-  if (imapaint->gradient_colorband.tot == 0) {
-    BKE_colorband_init(&imapaint->gradient_colorband, true);
-  }
+  /* NOTE: no lazy initialization here. RNA getters run from UI redraw and Python and must not
+   * mutate the data they expose (invisible to undo/depsgraph, and it creates false memfile
+   * diffs). The ramp is initialized in #scene_init_data, #blo_update_defaults_scene and
+   * #blo_do_versions_520, so it is always valid by the time this getter can be reached. */
   return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, &imapaint->gradient_colorband);
 }
 
@@ -1643,11 +1639,9 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, -1.0f, 1.0f, 10.0f, 3);
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
-  prop = RNA_def_property(srna, "use_selection_mask", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "use_selection_mask", 1);
-  RNA_def_property_ui_text(
-      prop, "Selection Mask", "Enable selection masking for 2D texture painting");
-  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  /* NOTE: there is deliberately no `use_selection_mask` property. Whether selection masking is
+   * active is derived from the per-image runtime mask data, which #ImagePaintSettings cannot
+   * reach; operator polls query #BKE_image_paint_selection_mask_has_any instead. */
 
   prop = RNA_def_property(srna, "use_selection_uv_island", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "use_selection_uv_island", 1);

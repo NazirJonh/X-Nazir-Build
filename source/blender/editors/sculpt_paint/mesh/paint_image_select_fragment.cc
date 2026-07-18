@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2024 Blender Authors
+/* SPDX-FileCopyrightText: 2026 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -15,6 +15,7 @@
 
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_undo_system.hh"
 
@@ -168,86 +169,127 @@ float image_select_sample_mask_bilinear(const ImBuf *mask, float fx, float fy)
          (1.0f - wx) * wy * v01 + wx * wy * v11;
 }
 
-void image_select_blend_buffer_into_canvas(ImBuf *dst_canvas,
-                                           const ImBuf *src_fragment,
-                                           const ImBuf *blend_mask)
+void image_select_blend_buffer_into_canvas_at(ImBuf *dst_canvas,
+                                              const ImBuf *src_fragment,
+                                              const ImBuf *blend_mask,
+                                              const int origin[2])
 {
   if (!dst_canvas || !src_fragment || !blend_mask || !blend_mask->float_buffer.data) {
     return;
   }
 
-  const int total_pixels = dst_canvas->x * dst_canvas->y;
+  /* The fragment and the blend mask share one coordinate system; the canvas is offset by
+   * `origin` within it, which is what lets callers work on a sub-rectangle of a tile. */
+  const int src_w = src_fragment->x;
+  const int src_h = src_fragment->y;
+  const int ox = origin[0];
+  const int oy = origin[1];
   const float *mask_data = blend_mask->float_buffer.data;
+
+  /* Clip the region to the canvas rather than trusting the caller's arithmetic. */
+  const int x_begin = std::max(0, -ox);
+  const int y_begin = std::max(0, -oy);
+  const int x_end = std::min(src_w, dst_canvas->x - ox);
+  const int y_end = std::min(src_h, dst_canvas->y - oy);
+  if (x_begin >= x_end || y_begin >= y_end) {
+    return;
+  }
 
   if (dst_canvas->float_data() && src_fragment->float_buffer.data) {
     const float *frag_data = src_fragment->float_buffer.data;
     float *canvas = dst_canvas->float_data_for_write();
     const int ch = dst_canvas->channels ? dst_canvas->channels : 4;
-    for (int i = 0; i < total_pixels; i++) {
-      const float m = mask_data[i * 4 + 0];
-      if (m <= 0.001f) {
-        continue;
-      }
-      const float frag_alpha = (ch >= 4) ? frag_data[i * 4 + 3] : 1.0f;
-      const float blend = m * frag_alpha;
-      if (blend <= 0.001f) {
-        continue;
-      }
-      canvas[i * ch + 0] = (1.0f - blend) * canvas[i * ch + 0] + blend * frag_data[i * 4 + 0];
-      canvas[i * ch + 1] = (1.0f - blend) * canvas[i * ch + 1] + blend * frag_data[i * 4 + 1];
-      canvas[i * ch + 2] = (1.0f - blend) * canvas[i * ch + 2] + blend * frag_data[i * 4 + 2];
-      if (ch >= 4) {
-        canvas[i * ch + 3] = (1.0f - blend) * canvas[i * ch + 3] +
-                             blend * frag_data[i * 4 + 3];
+    for (int y = y_begin; y < y_end; y++) {
+      for (int x = x_begin; x < x_end; x++) {
+        const int64_t s = int64_t(y) * src_w + x;
+        const float m = mask_data[s * 4 + 0];
+        if (m <= 0.001f) {
+          continue;
+        }
+        const float frag_alpha = (ch >= 4) ? frag_data[s * 4 + 3] : 1.0f;
+        const float blend = m * frag_alpha;
+        if (blend <= 0.001f) {
+          continue;
+        }
+        const int64_t d = (int64_t(y + oy) * dst_canvas->x + (x + ox)) * ch;
+        canvas[d + 0] = (1.0f - blend) * canvas[d + 0] + blend * frag_data[s * 4 + 0];
+        canvas[d + 1] = (1.0f - blend) * canvas[d + 1] + blend * frag_data[s * 4 + 1];
+        canvas[d + 2] = (1.0f - blend) * canvas[d + 2] + blend * frag_data[s * 4 + 2];
+        if (ch >= 4) {
+          canvas[d + 3] = (1.0f - blend) * canvas[d + 3] + blend * frag_data[s * 4 + 3];
+        }
       }
     }
   }
   else if (dst_canvas->byte_data() && src_fragment->byte_buffer.data) {
     const uint8_t *frag_data = src_fragment->byte_buffer.data;
     uint8_t *canvas = dst_canvas->byte_data_for_write();
-    for (int i = 0; i < total_pixels; i++) {
-      const float m = mask_data[i * 4 + 0];
-      if (m <= 0.001f) {
-        continue;
+    for (int y = y_begin; y < y_end; y++) {
+      for (int x = x_begin; x < x_end; x++) {
+        const int64_t s = int64_t(y) * src_w + x;
+        const float m = mask_data[s * 4 + 0];
+        if (m <= 0.001f) {
+          continue;
+        }
+        const float frag_alpha = frag_data[s * 4 + 3] / 255.0f;
+        const float blend = m * frag_alpha;
+        if (blend <= 0.001f) {
+          continue;
+        }
+        const int64_t d = (int64_t(y + oy) * dst_canvas->x + (x + ox)) * 4;
+        for (int c = 0; c < 4; c++) {
+          canvas[d + c] = uint8_t(std::clamp(
+              (1.0f - blend) * float(canvas[d + c]) + blend * float(frag_data[s * 4 + c]),
+              0.0f,
+              255.0f));
+        }
       }
-      const float frag_alpha = frag_data[i * 4 + 3] / 255.0f;
-      const float blend = m * frag_alpha;
-      if (blend <= 0.001f) {
-        continue;
-      }
-      canvas[i * 4 + 0] = uint8_t(std::clamp(
-          (1.0f - blend) * float(canvas[i * 4 + 0]) + blend * float(frag_data[i * 4 + 0]),
-          0.0f,
-          255.0f));
-      canvas[i * 4 + 1] = uint8_t(std::clamp(
-          (1.0f - blend) * float(canvas[i * 4 + 1]) + blend * float(frag_data[i * 4 + 1]),
-          0.0f,
-          255.0f));
-      canvas[i * 4 + 2] = uint8_t(std::clamp(
-          (1.0f - blend) * float(canvas[i * 4 + 2]) + blend * float(frag_data[i * 4 + 2]),
-          0.0f,
-          255.0f));
-      canvas[i * 4 + 3] = uint8_t(std::clamp(
-          (1.0f - blend) * float(canvas[i * 4 + 3]) + blend * float(frag_data[i * 4 + 3]),
-          0.0f,
-          255.0f));
     }
   }
 }
+
+
+/* -------------------------------------------------------------------- */
+/** \name Image undo session
+ *
+ * The only place in the selection tools that reads or reasons about #UndoStack::step_init.
+ * See the architectural note in `paint_image_select_fragment.hh` for why an open step can go
+ * missing under the floating-selection tools and what the real fix would be.
+ * \{ */
+
+bool image_select_undo_session_is_open()
+{
+  const UndoStack *ustack = ED_undo_stack_get();
+  return ustack && ustack->step_init != nullptr;
+}
+
+ImageUndoStep *image_select_undo_session_step_get()
+{
+  UndoStack *ustack = ED_undo_stack_get();
+  if (!ustack || !ustack->step_init || ustack->step_init->type != BKE_UNDOSYS_TYPE_IMAGE) {
+    return nullptr;
+  }
+  return reinterpret_cast<ImageUndoStep *>(ustack->step_init);
+}
+
+void image_select_undo_session_end()
+{
+  /* ED_image_undo_push_end() does not tolerate a already-finalized step, so only close a step
+   * that is still open. */
+  if (!image_select_undo_session_is_open()) {
+    return;
+  }
+  ED_image_undo_push_end();
+}
+
+/** \} */
 
 void image_select_fragment_undo_push_end_if_open(bool &r_undo_begun)
 {
   if (!r_undo_begun) {
     return;
   }
-
-  /* step_init can be prematurely set to nullptr when another undoable operator runs while a
-   * floating fragment is live. ED_image_undo_push_end() does not tolerate that state, so skip
-   * closing the already-lost undo record instead of crashing. */
-  UndoStack *ustack = ED_undo_stack_get();
-  if (ustack && ustack->step_init != nullptr) {
-    ED_image_undo_push_end();
-  }
+  image_select_undo_session_end();
   r_undo_begun = false;
 }
 
@@ -313,11 +355,7 @@ void image_select_fragment_lift_source(bContext *C,
     r_undo_begun = true;
   }
 
-  UndoStack *ustack = ED_undo_stack_get();
-  ImageUndoStep *us_open = (ustack && ustack->step_init &&
-                            ustack->step_init->type == BKE_UNDOSYS_TYPE_IMAGE) ?
-                               reinterpret_cast<ImageUndoStep *>(ustack->step_init) :
-                               nullptr;
+  ImageUndoStep *us_open = image_select_undo_session_step_get();
 
   for (const SelectionTileFragment &frag : fragments) {
     if (us_open && frag.geom.tile_number != first_tile) {
@@ -437,7 +475,7 @@ void image_select_fragment_restore_source(bContext *C,
 {
   if (!ima) {
     if (undo_begun) {
-      ED_image_undo_push_end();
+      image_select_undo_session_end();
     }
     return;
   }
@@ -545,7 +583,7 @@ void image_select_fragment_restore_source(bContext *C,
   BKE_image_free_gputextures(ima);
 
   if (undo_begun) {
-    ED_image_undo_push_end();
+    image_select_undo_session_end();
     UndoStack *undo_stack = ED_undo_stack_get();
     if (undo_stack) {
       BKE_undosys_stack_clear_active(undo_stack);

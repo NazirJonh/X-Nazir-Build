@@ -28,6 +28,7 @@
 #include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -52,10 +53,9 @@
 namespace blender {
 
 static float paint_2d_selection_mask_sample(
-    const Scene *scene, const Image *image, int tile_number, int x, int y)
+    const Scene * /*scene*/, const Image *image, int tile_number, int x, int y)
 {
-  const ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
-  if (!imapaint->use_selection_mask || !image) {
+  if (!BKE_image_paint_selection_mask_has_any(image)) {
     return 1.0f;
   }
 
@@ -63,10 +63,9 @@ static float paint_2d_selection_mask_sample(
 }
 
 static float paint_2d_selection_blend_sample_bilinear(
-    const Scene *scene, const Image *image, int tile_number, const float fx, const float fy)
+    const Scene * /*scene*/, const Image *image, int tile_number, const float fx, const float fy)
 {
-  const ImagePaintSettings *imapaint = &scene->toolsettings->imapaint;
-  if (!imapaint->use_selection_mask || !image) {
+  if (!BKE_image_paint_selection_mask_has_any(image)) {
     return 1.0f;
   }
 
@@ -844,11 +843,14 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
   paint_curve_mask_cache_update(&cache->curve_mask_cache, brush, diameter, size, pos);
 
   /* Apply selection mask to the curve mask in-place. */
-  const ImagePaintSettings *imapaint_settings = &s->scene->toolsettings->imapaint;
-  if (imapaint_settings->use_selection_mask) {
+  if (BKE_image_paint_selection_mask_has_any(s->image)) {
     const Scene *scene = s->scene;
     const int tile_number = tile->iuser.tile;
-    const ImBuf *sel_mask = BKE_image_paint_selection_mask_lookup(s->image, tile_number);
+    /* Read-only presence check. This runs per dab, so it must take the `const Image *` overload:
+     * the mutable one conservatively advances the mask revision and would force a full selection
+     * outline rebuild on every dab. */
+    const ImBuf *sel_mask = BKE_image_paint_selection_mask_lookup(
+        const_cast<const Image *>(s->image), tile_number);
     if (!sel_mask) {
       /* No mask for this tile, so nothing is selected. */
       ushort *cm = cache->curve_mask_cache.curve_mask;
@@ -1838,7 +1840,7 @@ void paint_2d_stroke_done(void *ps)
   MEM_delete(s);
 }
 
-static void paint_2d_fill_add_pixel_byte(const Scene *scene,
+static void paint_2d_fill_add_pixel_byte(const Scene * /*scene*/,
                                          const Image *image,
                                          int tile_number,
                                          const int x_px,
@@ -1858,7 +1860,7 @@ static void paint_2d_fill_add_pixel_byte(const Scene *scene,
   coordinate = size_t(y_px) * ibuf->x + x_px;
 
   if (!BLI_BITMAP_TEST(touched, coordinate)) {
-    if (scene->toolsettings->imapaint.use_selection_mask) {
+    if (BKE_image_paint_selection_mask_has_any(image)) {
       if (!paint_2d_selection_mask_is_inside(image, tile_number, x_px, y_px)) {
         BLI_BITMAP_SET(touched, coordinate, true);
         return;
@@ -1876,7 +1878,7 @@ static void paint_2d_fill_add_pixel_byte(const Scene *scene,
   }
 }
 
-static void paint_2d_fill_add_pixel_float(const Scene *scene,
+static void paint_2d_fill_add_pixel_float(const Scene * /*scene*/,
                                           const Image *image,
                                           int tile_number,
                                           const int x_px,
@@ -1896,7 +1898,7 @@ static void paint_2d_fill_add_pixel_float(const Scene *scene,
   coordinate = size_t(y_px) * ibuf->x + x_px;
 
   if (!BLI_BITMAP_TEST(touched, coordinate)) {
-    if (scene->toolsettings->imapaint.use_selection_mask) {
+    if (BKE_image_paint_selection_mask_has_any(image)) {
       if (!paint_2d_selection_mask_is_inside(image, tile_number, x_px, y_px)) {
         BLI_BITMAP_SET(touched, coordinate, true);
         return;
@@ -2218,16 +2220,8 @@ void paint_2d_gradient_fill(
   const float2 end_px(image_final[0], image_final[1]);
 
   rcti work_region;
-  image_paint_gradient_calc_work_region(scene,
-                                        ima,
-                                        tile_number,
-                                        ibuf->x,
-                                        ibuf->y,
-                                        params,
-                                        start_px,
-                                        end_px,
-                                        nullptr,
-                                        work_region);
+  image_paint_gradient_calc_work_region(
+      scene, ima, tile_number, ibuf->x, ibuf->y, nullptr, work_region);
 
   if (BLI_rcti_is_empty(&work_region)) {
     BKE_image_release_ibuf(ima, ibuf, nullptr);

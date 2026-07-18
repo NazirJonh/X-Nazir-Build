@@ -484,6 +484,24 @@ def _template_items_image_paint_select_lasso_gesture(params):
         ]
 
 
+def _template_items_image_paint_select_floating():
+    """Undo step / commit / discard for a floating Image Paint selection fragment.
+
+    The operator polls gate these, so they do nothing unless a fragment is actually floating.
+    """
+    return [
+        ("paint.image_select_move_undo_step", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
+        ("paint.image_select_move_confirm", {"type": 'RET', "value": 'PRESS'}, None),
+        ("paint.image_select_move_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
+        ("paint.image_select_warp_undo_step", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
+        ("paint.image_select_warp_confirm", {"type": 'RET', "value": 'PRESS'}, None),
+        ("paint.image_select_warp_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
+        ("paint.image_select_transform_confirm", {"type": 'RET', "value": 'PRESS'}, None),
+        ("paint.image_select_transform_confirm", {"type": 'NUMPAD_ENTER', "value": 'PRESS'}, None),
+        ("paint.image_select_transform_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
+    ]
+
+
 def _template_items_hide_reveal_actions(op_hide, op_reveal):
     return [
         (op_reveal, {"type": 'H', "value": 'PRESS', "alt": True}, None),
@@ -2257,13 +2275,7 @@ def km_image(params):
         # Copy and paste selection.
         ("paint.image_select_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         ("paint.image_select_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
-        # Floating selection: undo step / commit / discard (poll gates these when no fragment is floating).
-        ("paint.image_select_move_undo_step", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
-        ("paint.image_select_move_confirm", {"type": 'RET', "value": 'PRESS'}, None),
-        ("paint.image_select_move_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
-        ("paint.image_select_warp_undo_step", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
-        ("paint.image_select_warp_confirm", {"type": 'RET', "value": 'PRESS'}, None),
-        ("paint.image_select_warp_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
+        *_template_items_image_paint_select_floating(),
         ("paint.image_select_gradient_apply", {"type": 'RET', "value": 'PRESS'}, None),
         ("paint.image_select_gradient_apply", {"type": 'NUMPAD_ENTER', "value": 'PRESS'}, None),
         ("paint.image_select_gradient_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
@@ -5132,13 +5144,10 @@ def km_image_paint(params):
         ("paint.image_select_invert", {"type": 'I', "value": 'PRESS', "ctrl": True}, None),
         ("paint.image_select_move", {"type": 'T', "value": 'PRESS', "ctrl": True}, None),
         ("paint.image_select_transform", {"type": 'T', "value": 'PRESS', "ctrl": True, "shift": True}, None),
-        # Floating selection: undo step / commit / discard (poll gates these when no fragment is floating).
-        ("paint.image_select_move_undo_step", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
-        ("paint.image_select_move_confirm", {"type": 'RET', "value": 'PRESS'}, None),
-        ("paint.image_select_move_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
-        ("paint.image_select_warp_undo_step", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
-        ("paint.image_select_warp_confirm", {"type": 'RET', "value": 'PRESS'}, None),
-        ("paint.image_select_warp_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
+        *_template_items_image_paint_select_floating(),
+        # Re-drag transform handles while floating; passes through on a miss so pan/zoom still work.
+        ("paint.image_select_transform_drag", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+        ("paint.image_select_transform_drag", {"type": params.tool_mouse, "value": 'CLICK_DRAG'}, None),
         # Copy selection.
         ("paint.image_select_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         # Paste selection.
@@ -7445,7 +7454,8 @@ def km_image_editor_tool_paint_select_box(params, *, fallback):
         _fallback_id("Image Editor Tool: Paint, Select Box", fallback),
         {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
         {"items": [
-            *([] if (fallback and not params.use_fallback_tool) else _template_items_image_paint_select_lasso_gesture(params)),
+            *([] if (fallback and not params.use_fallback_tool) else
+               _template_items_image_paint_select_lasso_gesture(params)),
             *([] if (fallback and not params.use_fallback_tool) else _template_items_tool_select_actions_simple(
                 "paint.image_select_box",
                 **(params.select_tweak_event if (fallback and params.use_fallback_tool_select_mouse) else
@@ -7464,7 +7474,8 @@ def km_image_editor_tool_paint_select_circle(params, *, fallback):
         _fallback_id("Image Editor Tool: Paint, Select Circle", fallback),
         {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
         {"items": [
-            *([] if (fallback and not params.use_fallback_tool) else _template_items_image_paint_select_lasso_gesture(params)),
+            *([] if (fallback and not params.use_fallback_tool) else
+               _template_items_image_paint_select_lasso_gesture(params)),
             *([] if (fallback and not params.use_fallback_tool) else _template_items_tool_select_actions_simple(
                 "paint.image_select_circle",
                 **(params.select_tweak_event if (fallback and params.use_fallback_tool_select_mouse) else
@@ -7502,7 +7513,8 @@ def km_image_editor_tool_paint_select_move(params, *, fallback):
         _fallback_id("Image Editor Tool: Paint, Move Selection", fallback),
         {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
         {"items": [
-            *([] if (fallback and not params.use_fallback_tool) else _template_items_image_paint_select_lasso_gesture(params)),
+            *([] if (fallback and not params.use_fallback_tool) else
+               _template_items_image_paint_select_lasso_gesture(params)),
             *([] if (fallback and not params.use_fallback_tool) else [
                 ("paint.image_select_move",
                  {"type": params.tool_mouse, "value": 'PRESS'},
@@ -7522,7 +7534,8 @@ def km_image_editor_tool_paint_select_transform(params, *, fallback):
         _fallback_id("Image Editor Tool: Paint, Transform Select", fallback),
         {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
         {"items": [
-            *([] if (fallback and not params.use_fallback_tool) else _template_items_image_paint_select_lasso_gesture(params)),
+            *([] if (fallback and not params.use_fallback_tool) else
+               _template_items_image_paint_select_lasso_gesture(params)),
             *([] if (fallback and not params.use_fallback_tool) else [
                 ("paint.image_select_transform",
                  {"type": params.tool_mouse, "value": 'PRESS'},

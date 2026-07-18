@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2024 Blender Authors
+/* SPDX-FileCopyrightText: 2026 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -42,6 +42,12 @@ struct ImageSelectTransformGizmoMatrices {
 
 void image_select_transform_state_free(ImageSelectTransformState *state);
 
+/**
+ * Commit and free \a sima's floating transform session, if it has one. No-op otherwise.
+ * Called through #image_select_floating_sessions_end; see that function for the semantics.
+ */
+void image_select_transform_session_end_for_takeover(bContext *C, SpaceImage *sima);
+
 wmOperatorStatus image_select_transform_adopt_move_state(bContext *C,
                                                          wmOperator *op,
                                                          const wmEvent *event,
@@ -73,8 +79,6 @@ void image_select_transform_gizmo_refresh_tweak(const bContext *C,
                                                 wmGizmo *gz_cage,
                                                 wmGizmo *gz_anchor,
                                                 bool *r_was_modal_tweak);
-
-void ED_image_paint_select_transform_gizmo_setup(wmGizmoGroupType *gzgt);
 
 void PAINT_OT_image_select_transform(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_confirm(wmOperatorType *ot);

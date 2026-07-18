@@ -27,6 +27,7 @@
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_image.hh"
+#include "BKE_main.hh"
 #include "BKE_screen.hh"
 
 #include "DEG_depsgraph.hh"
@@ -1404,7 +1405,7 @@ void image_select_warp_state_free(ImageSelectWarpState *state)
      * reverse index order, so #wmWindowManager was freed before this state's owning Image; its
      * paint cursor list -- including this handle -- was already destroyed with it. Touching it
      * again would double-free/null-deref (see #WM_paint_cursor_end). */
-    if (G_MAIN->wm.first) {
+    if (!G_MAIN->wm.is_empty()) {
       WM_paint_cursor_end(state->paint_cursor);
     }
     state->paint_cursor = nullptr;

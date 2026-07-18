@@ -170,10 +170,10 @@ static bool foreach_triangle_pixel(const float2 &p0,
                                    const int height,
                                    Fn &&fn)
 {
-  int min_x = int(floorf(min_fff(p0.x, p1.x, p2.x)));
-  int max_x = int(ceilf(max_fff(p0.x, p1.x, p2.x)));
-  int min_y = int(floorf(min_fff(p0.y, p1.y, p2.y)));
-  int max_y = int(ceilf(max_fff(p0.y, p1.y, p2.y)));
+  int min_x = int(floorf(std::min({p0.x, p1.x, p2.x})));
+  int max_x = int(ceilf(std::max({p0.x, p1.x, p2.x})));
+  int min_y = int(floorf(std::min({p0.y, p1.y, p2.y})));
+  int max_y = int(ceilf(std::max({p0.y, p1.y, p2.y})));
 
   min_x = max_ii(min_x, 0);
   min_y = max_ii(min_y, 0);

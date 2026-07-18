@@ -98,6 +98,14 @@ static const EnumPropertyItem rna_enum_brush_curve_patch_length_mode_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_brush_curve_patch_end_falloff_items[] = {
+    {MTEX_CURVE_PATCH_END_HARD, "HARD", 0, "Hard",
+     "Start and end the relief abruptly at the curve's endpoints"},
+    {MTEX_CURVE_PATCH_END_SMOOTH, "SMOOTH", 0, "Smooth",
+     "Fade the relief in and out over a length at each end of the curve"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 const EnumPropertyItem rna_enum_brush_curve_preset_items[] = {
     {BRUSH_CURVE_CUSTOM, "CUSTOM", ICON_RNDCURVE, "Custom", ""},
     {BRUSH_CURVE_SMOOTH, "SMOOTH", ICON_SMOOTHCURVE, "Smooth", ""},
@@ -1246,6 +1254,25 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 1, 64, 1, -1);
   RNA_def_property_ui_text(
       prop, "Repeats", "Number of times the texture repeats along the curve length");
+
+  prop = RNA_def_property(srna, "curve_patch_end_falloff", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "curve_patch_end_falloff");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_end_falloff_items);
+  RNA_def_property_ui_text(
+      prop, "End Falloff", "How the relief terminates at the control curve's two ends");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "curve_patch_end_falloff_length", PROP_INT, PROP_PERCENTAGE);
+  RNA_def_property_int_sdna(prop, nullptr, "curve_patch_end_falloff_percent");
+  RNA_def_property_range(prop, 0, 50);
+  RNA_def_property_ui_range(prop, 0, 50, 1, -1);
+  RNA_def_property_ui_text(prop,
+                           "Falloff Length",
+                           "Length of the fade at each end of the curve, as a percentage of the "
+                           "curve's total length");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
 
   prop = RNA_def_property(srna, "use_roll_pressure_scale", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "roll_pressure_scale", 1);

@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include "BLI_function_ref.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
@@ -28,6 +30,12 @@ namespace blender {
 namespace bke {
 class CurvesGeometry;
 }
+
+namespace ed::curves {
+/* Forward-declared rather than pulling in `ED_curves.hh`; the underlying type must match the
+ * definition there. */
+enum class SetHandleType : uint8_t;
+}  // namespace ed::curves
 
 struct Brush;
 struct Curve;
@@ -91,6 +99,14 @@ bool paintcurve_geometry_runtime_is_initialized(const bke::CurvesGeometry &geom)
 bool paintcurve_geometry_is_valid(const bke::CurvesGeometry &geom);
 /** Mutable reference to a control point position (`handle_idx` 0 = left, 1 = co, 2 = right). */
 float3 &paintcurve_geom_co(bke::CurvesGeometry &geom, int point_idx, int handle_idx);
+/**
+ * Resolve a `SetHandleType` menu choice against a handle's current type into the concrete
+ * `BEZIER_HANDLE_*` to store. Only `Toggle` actually consults `handle_type`.
+ *
+ * Shared with the Curve Patch editor, which drives the same enum over its own standalone
+ * `CurvesGeometry` (`paint_curve_patch_edit.cc`).
+ */
+int8_t paintcurve_resolve_handle_type(int8_t handle_type, ed::curves::SetHandleType dst_type);
 /** Check if the paint curve is cyclic (single-curve only, use paintcurve_is_curve_cyclic for multi-curve). */
 bool paintcurve_is_cyclic(const PaintCurve *pc);
 bool paintcurve_is_curve_cyclic(const PaintCurve *pc, int curve_index);

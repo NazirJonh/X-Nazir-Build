@@ -54,6 +54,11 @@ struct CurvePatchFrozenBrushParams {
    * immediately. The relief formula reads these fields; the modal writes them before re-stamping. */
   int length_mode = 0;
   int length_repeat = 1;
+  /** #eMTex_CurvePatchEndFalloff and the fade length (percentage of the curve's total arc-length)
+   * applied at the curve's two ends. Live-synced from `brush.mtex` by the same modal poll as
+   * `length_mode`/`length_repeat`. */
+  int end_falloff_mode = 0;
+  int end_falloff_percent = 0;
 };
 
 struct CurvePatchCache {
@@ -63,6 +68,14 @@ struct CurvePatchCache {
   bke::CurvesGeometry control_curve;
 
   CurvePatchFrozenBrushParams frozen_params;
+
+  /** Index into `control_curve` of the point the user last interacted with, or -1 for none. Owned
+   * conceptually by the live-edit modal (`SCULPT_OT_curve_patch_edit`), but stored here rather than
+   * in its `op->customdata` so the small operators the modal's context menu invokes -- which cannot
+   * reach a running modal's customdata -- can act on the clicked point. Because this cache outlives
+   * the modal, the index is reset to -1 whenever an edit session ends or a new control curve is
+   * built; consumers must still validate it against `control_curve.points_num()`. */
+  int active_point = -1;
 
   /** Plane normal frozen at anchor time (e.g. the anchor dab's `sculpt_normal`), passed to
    * `CurvePatchSpline::plane_normal` on every rebuild. */

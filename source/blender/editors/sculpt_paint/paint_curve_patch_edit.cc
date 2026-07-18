@@ -862,11 +862,22 @@ static void curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
   if (patch) {
     if (is_cancel) {
       curve_patch_restore_only(ob, *patch);
-      /* Undo transaction opened by the anchor stroke's `stroke_undo_begin()` is deliberately
-       * never closed here -- matches the existing cancelled-stroke idiom at
-       * `mesh/sculpt.cc:SculptPaintStroke::done()` (`if (!is_cancel && stroke_started) {
-       * stroke_undo_end(...); }`): an unclosed `push_begin_ex` transaction is simply discarded,
-       * nothing is written to the undo stack. */
+      /* Close the transaction even on cancel, AFTER the restore above has put the mesh back.
+       *
+       * This deliberately departs from the cancelled-stroke idiom at
+       * `mesh/sculpt.cc:SculptPaintStroke::done()`, which leaves `push_begin_ex` unclosed on the
+       * assumption that the transaction is then discarded. That holds for a stroke that never
+       * painted, but not here: every interactive re-stamp calls `undo::push_nodes()`, so by the time
+       * the user presses Esc the step is already full of nodes. Leaving it unclosed puts a step on
+       * the stack whose `type` is `Type::Position` but whose `position_step_storage` was never
+       * built -- that allocation happens only in `undo::push_end()` (`sculpt_undo.cc`) -- and
+       * `restore_list()` dereferences that pointer unconditionally, so undoing onto such a step
+       * crashes on a null read.
+       *
+       * Closing it here is safe precisely because the restore ran first: the nodes were pushed
+       * carrying their pristine positions and the mesh now matches them, so the resulting step is a
+       * no-op to undo or redo through. */
+      undo::push_end(ob);
     }
     else {
       /* Re-stamp once at final quality before closing the undo step, so the mesh (and the undo

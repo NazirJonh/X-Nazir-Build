@@ -41,16 +41,26 @@ struct CurvePatchRibbonLut {
   /** The LUT is `res * res` pixels; 0 until built. Chosen adaptively from the curve's extent so U
    * precision stays sub-strip even for long thin curves (see #curve_patch_ribbon_build). */
   int res = 0;
-  /** Per-pixel `(u, s)`: `u` in `[-1, 1]` across the strip (sign matches the old
-   * `-lateral / radius` convention, positive toward `cross(tangent, plane_normal)`), `s` the
+  /** Per-pixel `(u, s)` of the PRIMARY branch: `u` in `[-1, 1]` across the strip (sign matches the
+   * old `-lateral / radius` convention, positive toward `cross(tangent, plane_normal)`), `s` the
    * world-space arc length along the curve. `u == FLT_MAX` marks a pixel no ribbon quad covered. */
   Vector<float2> uv;
   /** Squared distance between the pixel center and its bilinear fit -- overlap arbitration during
-   * rasterization and the nearest-neighbor fallback during sampling. */
+   * rasterization and anchor selection during sampling. */
   Vector<float> dist_sq;
-  /** Subdivided-grid row that wrote each pixel; earlier rows win on far-apart overlaps so
-   * competing branches at a sharp turn do not flicker per pixel. -1 = empty. */
+  /** Subdivided-grid row that wrote each pixel. -1 = empty. */
   Vector<int> row;
+
+  /** SECONDARY branch covering the same pixel: a second, distant stretch of the curve that also
+   * overlaps here (the curve running close to itself). Same encoding and empty marker as the
+   * primary arrays above; empty whenever only one stretch covers the pixel.
+   *
+   * Keeping the runner-up rather than discarding it is what lets the relief merge two parallel
+   * stretches instead of picking one and leaving a hard seam along their medial axis -- see
+   * #sample and the branch loop in `curve_patch_apply_relief_action()`. */
+  Vector<float2> uv2;
+  Vector<float> dist_sq2;
+  Vector<int> row2;
   /** 2D bounding box min of the projected grid (with margin). */
   float2 bb_min = {};
   /** `res / (bb_max - bb_min)` per axis. */
@@ -68,12 +78,20 @@ struct CurvePatchRibbonLut {
 
   /**
    * Projects `co` onto the ribbon plane and bilinearly samples the LUT.
-   * \param r_uv: `(u, s)` as documented on #uv.
-   * \return false when the LUT is not ready, `co` projects outside the rasterized ribbon, or all
-   * four neighboring pixels are empty -- callers reject such vertices, which reproduces the old
-   * "outside the strip / past the curve ends" rejections by construction.
+   *
+   * Where the curve runs close to itself, two distinct stretches can legitimately cover `co`, and
+   * committing to one of them leaves a hard seam along their medial axis (the texture's
+   * along-length coordinate jumps from one stretch's arc length to the other's). Both are reported
+   * instead so the caller can evaluate the relief for each and merge them.
+   *
+   * \param r_uv: filled with up to two `(u, s)` pairs as documented on #uv, ordered best-fitting
+   * first. Entries past the return value are untouched.
+   * \return the number of distinct stretches covering `co` (0, 1 or 2). 0 means the LUT is not
+   * ready, `co` projects outside the rasterized ribbon, or every neighboring pixel is empty --
+   * callers reject such vertices, which reproduces the "outside the strip / past the curve ends"
+   * rejections by construction.
    */
-  bool sample(const float3 &co, float2 &r_uv) const;
+  int sample(const float3 &co, float2 r_uv[2]) const;
 };
 
 /**

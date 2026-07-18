@@ -263,61 +263,6 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
       return std::nullopt;
     }
 
-    /* Ribbon LUT instead of `CurvePatchSpline::closest_point()`: the old global nearest-segment
-     * search was multi-valued on the concave side of sharp turns (several segments near-equidistant
-     * -> neighboring vertices snapping to different `s`, tearing the texture into fans). The ribbon
-     * assigns UV from the specific quad covering the vertex, staying single-valued through
-     * arbitrarily sharp turns -- the same construction the Roll stroke method uses. A failed sample
-     * means the vertex projects outside the ribbon (off the strip, or past the curve's ends, which
-     * the borders cut off exactly like the old `s` range rejection did). */
-    float2 ribbon_uv;
-    if (!patch.ribbon.sample(symm_co, ribbon_uv)) {
-      return std::nullopt;
-    }
-    const float s = ribbon_uv.y;
-    /* Signed offset from the ribbon plane, measured against the curve point the ribbon mapped this
-     * vertex to (NOT the globally-closest point -- consistent with the ribbon's own branch
-     * choice). */
-    const float normal_dist = math::dot(symm_co - patch.spline.evaluate(s), patch.plane_normal);
-
-    /* `CurvePatchSpline::radii` stores the control curve's per-point `radius` attribute
-     * verbatim, which is a unitless UI scalar (default 1.0 = "full brush size", see
-     * `curve_patch_start_from_anchor()`) -- everywhere else it is read
-     * (`paint_curve_sync.cc:paintcurve_radius_handle_screen_get_from_geometry()`) it is only
-     * ever turned into a SCREEN-PIXEL handle length, never a world-space distance. Scale it by
-     * the frozen brush radius (the same world-space value the old dab-based re-stamp used
-     * globally) to get an actual world-space falloff radius comparable to `lateral`/`s` below. */
-    const float radius_at_s = patch.spline.radius_at(s) * patch.frozen_params.radius;
-    if (radius_at_s <= 0.0f) {
-      return std::nullopt;
-    }
-
-    /* `normal_dist` is the vertex's signed offset along the anchor plane's normal from the
-     * closest point on the curve -- how far it "lifts off" that plane. On a flat surface it is
-     * ~0 everywhere. On a faceted surface (e.g. the side faces of a cube when the curve sits on
-     * the top face) it grows large, and without rejecting those vertices the relief leaked onto
-     * faces that should never receive the projection: `closest_point` picked them up (they ARE
-     * close to the curve in 3D) but `lateral` alone only measured the in-plane offset, so they
-     * passed the lateral falloff with a small apparent distance. Hybrid handling per the
-     * redesign discussion: a hard cutoff rejects far-off-plane vertices outright (clean result
-     * on faceted meshes), and the lateral falloff is computed from the TRUE 3D distance
-     * `sqrt(lateral^2 + normal_dist^2)` so what survives blends smoothly across edges instead of
-     * producing a hard seam at the cutoff. The cutoff is set to one brush diameter: anything
-     * farther off-plane than the strip is wide is definitely not part of the target face, while
-     * near-edge vertices on the intended face (small `normal_dist` from slight surface curvature)
-     * still pass. */
-    if (std::abs(normal_dist) > 2.0f * radius_at_s) {
-      return std::nullopt;
-    }
-    /* In-plane offset reconstructed from the ribbon's normalized across-strip coordinate; the
-     * falloff formula below is unchanged. */
-    const float lateral = ribbon_uv.x * radius_at_s;
-    const float radial_dist = std::sqrt(lateral * lateral + normal_dist * normal_dist);
-    const float lateral_falloff = BKE_brush_curve_strength(&brush, radial_dist, radius_at_s);
-    if (lateral_falloff <= 0.0f) {
-      return std::nullopt;
-    }
-
     /* Clip the relief by the sculpt mask, mirroring every dab-based brush's own
      * `fill_factor_from_hide_and_mask()` (`sculpt.cc:7233`): a fully-masked (mask == 1) vertex
      * must stay untouched by the projection, the same way it stays untouched by a normal brush
@@ -326,68 +271,156 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
     if (mask_factor <= 0.0f) {
       return std::nullopt;
     }
-    /* The ribbon's first/last rows sit exactly at the curve's ends, so `s` from the LUT is already
-     * confined to `[0, total_length]` and vertices past the ends fail `sample()` above -- by design
-     * the strip stops at the curve's own ends with no rounded "cap" past them. This guard only
-     * backstops interpolation slack at the LUT's edge pixels. */
-    if (s < 0.0f || s > total_length) {
+
+    /* Ribbon LUT instead of `CurvePatchSpline::closest_point()`: the old global nearest-segment
+     * search was multi-valued on the concave side of sharp turns (several segments near-equidistant
+     * -> neighboring vertices snapping to different `s`, tearing the texture into fans). The ribbon
+     * assigns UV from the specific quad covering the vertex, staying single-valued through
+     * arbitrarily sharp turns -- the same construction the Roll stroke method uses. No branch at all
+     * means the vertex projects outside the ribbon (off the strip, or past the curve's ends, which
+     * the borders cut off exactly like the old `s` range rejection did). */
+    float2 branch_uv[2];
+    const int branch_num = patch.ribbon.sample(symm_co, branch_uv);
+    if (branch_num == 0) {
       return std::nullopt;
     }
 
-    /* `u` (across the strip) is normalized the same way every other brush texture mapping mode
-     * normalizes its input by the brush radius -- `MTEX_MAP_MODE_VIEW`/`TILED`/`RANDOM` divide by
-     * `pixel_radius`/`start_pixel_radius` (`BKE_brush_sample_tex_3d()`, `brush.cc:1001-1018`), and
-     * `MTEX_MAP_MODE_AREA` bakes an equivalent `scale_m4_fl(scale, radius)` into
-     * `cache.brush_local_mat` (`calc_brush_local_mat()`, `sculpt.cc:2832`).
+    /* Relief one stretch of the curve contributes at this vertex, or nullopt when that stretch does
+     * not actually reach it. */
+    auto branch_relief = [&](const float2 ribbon_uv) -> std::optional<VertexRelief> {
+      const float s = ribbon_uv.y;
+      /* Signed offset from the ribbon plane, measured against the curve point the ribbon mapped this
+       * vertex to (NOT the globally-closest point -- consistent with the ribbon's own branch
+       * choice). */
+      const float normal_dist = math::dot(symm_co - patch.spline.evaluate(s), patch.plane_normal);
+
+      /* `CurvePatchSpline::radii` stores the control curve's per-point `radius` attribute
+       * verbatim, which is a unitless UI scalar (default 1.0 = "full brush size", see
+       * `curve_patch_start_from_anchor()`) -- everywhere else it is read
+       * (`paint_curve_sync.cc:paintcurve_radius_handle_screen_get_from_geometry()`) it is only
+       * ever turned into a SCREEN-PIXEL handle length, never a world-space distance. Scale it by
+       * the frozen brush radius (the same world-space value the old dab-based re-stamp used
+       * globally) to get an actual world-space falloff radius comparable to `lateral`/`s` below. */
+      const float radius_at_s = patch.spline.radius_at(s) * patch.frozen_params.radius;
+      if (radius_at_s <= 0.0f) {
+        return std::nullopt;
+      }
+
+      /* `normal_dist` is the vertex's signed offset along the anchor plane's normal from the
+       * closest point on the curve -- how far it "lifts off" that plane. On a flat surface it is
+       * ~0 everywhere. On a faceted surface (e.g. the side faces of a cube when the curve sits on
+       * the top face) it grows large, and without rejecting those vertices the relief leaked onto
+       * faces that should never receive the projection: `closest_point` picked them up (they ARE
+       * close to the curve in 3D) but `lateral` alone only measured the in-plane offset, so they
+       * passed the lateral falloff with a small apparent distance. Hybrid handling per the
+       * redesign discussion: a hard cutoff rejects far-off-plane vertices outright (clean result
+       * on faceted meshes), and the lateral falloff is computed from the TRUE 3D distance
+       * `sqrt(lateral^2 + normal_dist^2)` so what survives blends smoothly across edges instead of
+       * producing a hard seam at the cutoff. The cutoff is set to one brush diameter: anything
+       * farther off-plane than the strip is wide is definitely not part of the target face, while
+       * near-edge vertices on the intended face (small `normal_dist` from slight surface curvature)
+       * still pass. */
+      if (std::abs(normal_dist) > 2.0f * radius_at_s) {
+        return std::nullopt;
+      }
+      /* In-plane offset reconstructed from the ribbon's normalized across-strip coordinate; the
+       * falloff formula below is unchanged. */
+      const float lateral = ribbon_uv.x * radius_at_s;
+      const float radial_dist = std::sqrt(lateral * lateral + normal_dist * normal_dist);
+      const float lateral_falloff = BKE_brush_curve_strength(&brush, radial_dist, radius_at_s);
+      if (lateral_falloff <= 0.0f) {
+        return std::nullopt;
+      }
+
+      /* The ribbon's first/last rows sit exactly at the curve's ends, so `s` from the LUT is already
+       * confined to `[0, total_length]` and vertices past the ends fail `sample()` above -- by design
+       * the strip stops at the curve's own ends with no rounded "cap" past them. This guard only
+       * backstops interpolation slack at the LUT's edge pixels. */
+      if (s < 0.0f || s > total_length) {
+        return std::nullopt;
+      }
+
+      /* `u` (across the strip) is normalized the same way every other brush texture mapping mode
+       * normalizes its input by the brush radius -- `MTEX_MAP_MODE_VIEW`/`TILED`/`RANDOM` divide by
+       * `pixel_radius`/`start_pixel_radius` (`BKE_brush_sample_tex_3d()`, `brush.cc:1001-1018`), and
+       * `MTEX_MAP_MODE_AREA` bakes an equivalent `scale_m4_fl(scale, radius)` into
+       * `cache.brush_local_mat` (`calc_brush_local_mat()`, `sculpt.cc:2832`).
+       *
+       * The ribbon's `u` is already normalized to [-1, 1] across the strip, with its sign chosen at
+       * grid construction (`curve_patch_ribbon_build()`: the `cross(tangent, plane_normal)` side
+       * carries +1) to match what `-lateral / radius_at_s` produced before -- the orientation the
+       * paint-cursor overlay previews. */
+      const float u = ribbon_uv.x;
+
+      /* `v` (along the strip) maps `s` onto the texture's [-1, 1] domain, centered on the curve's
+       * midpoint so the pattern stays symmetric. `tile_span` is the world-space length of one tile,
+       * selected by the frozen length mode (Default hybrid / Repeat N / Stretch) -- see
+       * #curve_patch_texture_tile_span. The degenerate `tile_span == 0` (collapsed curve) maps to
+       * `v = 0`. */
+      const float tile_span = curve_patch_texture_tile_span(patch.frozen_params.length_mode,
+                                                            patch.frozen_params.length_repeat,
+                                                            total_length,
+                                                            radius_at_s);
+      float v = tile_span > 1e-8f ? (s - total_length * 0.5f) / tile_span * 2.0f : 0.0f;
+
+      /* REPEAT mode must show a full copy of the texture in every tile regardless of the texture's
+       * own extension mode (an image set to Extend/Clip, or a procedural texture with no natural
+       * period, would otherwise never visibly repeat -- only the [-1, 1] center tile would carry the
+       * pattern and the rest would smear the edge). Wrap the along-length coordinate back into a
+       * single tile's [-1, 1) domain (period 2, sawtooth) so each of the N tiles re-samples the whole
+       * texture. Default/Stretch keep the continuous coordinate: Stretch is a single tile already,
+       * and Default deliberately relies on the texture's own tiling for its hybrid look. */
+      if (patch.frozen_params.length_mode == MTEX_CURVE_PATCH_LENGTH_REPEAT) {
+        v -= 2.0f * std::floor((v + 1.0f) * 0.5f);
+      }
+
+      float tex_u = u;
+      float tex_v = v;
+      if (patch.frozen_params.swap_axis) {
+        std::swap(tex_u, tex_v);
+      }
+      tex_u = tex_u * mtex_size.x + mtex_ofs.x;
+      tex_v = tex_v * mtex_size.y + mtex_ofs.y;
+
+      /* Mirrors the null-texture guard `sculpt_apply_texture()` used to apply before dispatching
+       * to the old, now-removed Curve Patch map-mode branch: `RE_texture_evaluate()` returns
+       * `false` without writing its intensity output when `mtex->tex` is null, so calling
+       * `paint_get_tex_pixel()` unconditionally read an uninitialized `tex_value`. */
+      float tex_value = 1.0f;
+      float tex_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+      if (mtex->tex != nullptr) {
+        paint_get_tex_pixel(mtex, tex_u, tex_v, ss.tex_pool, thread_id, &tex_value, tex_rgba);
+      }
+
+      const float height = tex_value * lateral_falloff * mask_factor * cache.bstrength;
+      return VertexRelief{orig, height, lateral_falloff};
+    };
+
+    /* Merge the stretches covering this vertex by keeping the strongest displacement rather than
+     * averaging them.
      *
-     * The ribbon's `u` is already normalized to [-1, 1] across the strip, with its sign chosen at
-     * grid construction (`curve_patch_ribbon_build()`: the `cross(tangent, plane_normal)` side
-     * carries +1) to match what `-lateral / radius_at_s` produced before -- the orientation the
-     * paint-cursor overlay previews. */
-    const float u = ribbon_uv.x;
-
-    /* `v` (along the strip) maps `s` onto the texture's [-1, 1] domain, centered on the curve's
-     * midpoint so the pattern stays symmetric. `tile_span` is the world-space length of one tile,
-     * selected by the frozen length mode (Default hybrid / Repeat N / Stretch) -- see
-     * #curve_patch_texture_tile_span. The degenerate `tile_span == 0` (collapsed curve) maps to
-     * `v = 0`. */
-    const float tile_span = curve_patch_texture_tile_span(patch.frozen_params.length_mode,
-                                                          patch.frozen_params.length_repeat,
-                                                          total_length,
-                                                          radius_at_s);
-    float v = tile_span > 1e-8f ? (s - total_length * 0.5f) / tile_span * 2.0f : 0.0f;
-
-    /* REPEAT mode must show a full copy of the texture in every tile regardless of the texture's
-     * own extension mode (an image set to Extend/Clip, or a procedural texture with no natural
-     * period, would otherwise never visibly repeat -- only the [-1, 1] center tile would carry the
-     * pattern and the rest would smear the edge). Wrap the along-length coordinate back into a
-     * single tile's [-1, 1) domain (period 2, sawtooth) so each of the N tiles re-samples the whole
-     * texture. Default/Stretch keep the continuous coordinate: Stretch is a single tile already,
-     * and Default deliberately relies on the texture's own tiling for its hybrid look. */
-    if (patch.frozen_params.length_mode == MTEX_CURVE_PATCH_LENGTH_REPEAT) {
-      v -= 2.0f * std::floor((v + 1.0f) * 0.5f);
+     * Where the curve runs alongside itself, both stretches genuinely cover the vertex, and each
+     * one's own falloff already fades it out with distance from that stretch's center line. Taking
+     * the strongest is the union of two embossed strips: the relief keeps full amplitude
+     * everywhere, and the transition between them follows the (smoothly varying) line where the
+     * two displacements happen to be equal, so it reads as one strip passing over the other.
+     *
+     * Averaging was the alternative -- and is what `pass_weight_accum` does for symmetry passes
+     * below -- but it is right there for a different reason: those passes describe the SAME surface
+     * mirrored, so averaging reconstructs it. Two stretches of one curve carry DIFFERENT texture
+     * positions, and averaging them cancels the pattern into a visibly flattened band along the
+     * overlap. */
+    std::optional<VertexRelief> merged;
+    for (const int b : IndexRange(branch_num)) {
+      const std::optional<VertexRelief> relief = branch_relief(branch_uv[b]);
+      if (!relief) {
+        continue;
+      }
+      if (!merged || std::abs(relief->height) > std::abs(merged->height)) {
+        merged = relief;
+      }
     }
-
-    float tex_u = u;
-    float tex_v = v;
-    if (patch.frozen_params.swap_axis) {
-      std::swap(tex_u, tex_v);
-    }
-    tex_u = tex_u * mtex_size.x + mtex_ofs.x;
-    tex_v = tex_v * mtex_size.y + mtex_ofs.y;
-
-    /* Mirrors the null-texture guard `sculpt_apply_texture()` used to apply before dispatching
-     * to the old, now-removed Curve Patch map-mode branch: `RE_texture_evaluate()` returns
-     * `false` without writing its intensity output when `mtex->tex` is null, so calling
-     * `paint_get_tex_pixel()` unconditionally read an uninitialized `tex_value`. */
-    float tex_value = 1.0f;
-    float tex_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    if (mtex->tex != nullptr) {
-      paint_get_tex_pixel(mtex, tex_u, tex_v, ss.tex_pool, thread_id, &tex_value, tex_rgba);
-    }
-
-    const float height = tex_value * lateral_falloff * mask_factor * cache.bstrength;
-    return VertexRelief{orig, height, lateral_falloff};
+    return merged;
   };
 
   /* Node cull: `calc_brush_node_mask()` returns every node inside the whole-curve encompassing

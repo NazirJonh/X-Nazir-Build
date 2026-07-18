@@ -30,6 +30,9 @@ void CurvePatchRibbonLut::clear()
   uv.clear();
   dist_sq.clear();
   row.clear();
+  uv2.clear();
+  dist_sq2.clear();
+  row2.clear();
   bb_min = float2(0.0f);
   inv_extent = float2(0.0f);
   axis_x = float3(0.0f);
@@ -593,10 +596,16 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
   r_lut.uv.reinitialize(lut_total);
   r_lut.dist_sq.reinitialize(lut_total);
   r_lut.row.reinitialize(lut_total);
+  r_lut.uv2.reinitialize(lut_total);
+  r_lut.dist_sq2.reinitialize(lut_total);
+  r_lut.row2.reinitialize(lut_total);
   for (int i = 0; i < lut_total; i++) {
     r_lut.uv[i] = float2(FLT_MAX, 0.0f);
     r_lut.dist_sq[i] = FLT_MAX;
     r_lut.row[i] = -1;
+    r_lut.uv2[i] = float2(FLT_MAX, 0.0f);
+    r_lut.dist_sq2[i] = FLT_MAX;
+    r_lut.row2[i] = -1;
   }
 
   auto cross2d = [](const float2 a, const float2 b) { return a.x * b.y - a.y * b.x; };
@@ -681,14 +690,28 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
 
           const int li = py * res + px;
           const int existing_row = r_lut.row[li];
-          bool write;
+          /* Rows iterate low to high, so a recorded row is never ahead of `r`; "within 2 rows"
+           * therefore means "the same stretch of the curve as this candidate". */
+          auto same_stretch = [r](const int other) { return other >= 0 && r - other <= 2; };
+          auto store_primary = [&]() {
+            r_lut.dist_sq[li] = dsq;
+            r_lut.row[li] = r;
+            r_lut.uv[li] = cand_uv;
+          };
+          auto store_secondary = [&]() {
+            r_lut.dist_sq2[li] = dsq;
+            r_lut.row2[li] = r;
+            r_lut.uv2[li] = cand_uv;
+          };
+
           if (existing_row < 0) {
-            write = true;
+            store_primary();
           }
-          else if (r - existing_row <= 2) {
-            /* Same stretch of the curve (rows iterate low to high, so the existing row is never
-             * ahead of `r`): the better bilinear fit wins. */
-            write = (dsq < r_lut.dist_sq[li]);
+          else if (same_stretch(existing_row)) {
+            /* Same stretch as the primary: the better bilinear fit wins. */
+            if (dsq < r_lut.dist_sq[li]) {
+              store_primary();
+            }
           }
           else {
             /* Two DISTANT stretches of a self-approaching curve competing for the same pixel --
@@ -703,16 +726,33 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
              * to ~0 -- punching a relief-free hole into the strip that should have been fully
              * covered, bounded by a staircase along the LUT's own pixel grid.
              *
-             * Prefer the leg that covers the pixel more centrally instead. |u| varies smoothly
-             * across the ribbon, so the resulting branch boundary is a smooth curve (the two legs'
-             * medial axis) rather than a pixel-quantized age boundary, and neither leg can steal
-             * pixels it only barely reaches. */
-            write = std::abs(cand_uv.x) < std::abs(r_lut.uv[li].x);
-          }
-          if (write) {
-            r_lut.dist_sq[li] = dsq;
-            r_lut.row[li] = r;
-            r_lut.uv[li] = cand_uv;
+             * Rank the two legs by which covers the pixel more centrally instead. |u| varies
+             * smoothly across the ribbon, so the ranking (and hence the boundary where it flips)
+             * varies smoothly too, rather than following a pixel-quantized age boundary, and
+             * neither leg can steal pixels it only barely reaches.
+             *
+             * The loser is not discarded: it is kept as the SECONDARY branch so the relief can
+             * merge both legs where they overlap instead of switching hard along the ranking
+             * boundary. */
+            if (std::abs(cand_uv.x) < std::abs(r_lut.uv[li].x)) {
+              /* Candidate is the more central leg: demote the incumbent, promote the candidate. */
+              r_lut.dist_sq2[li] = r_lut.dist_sq[li];
+              r_lut.row2[li] = r_lut.row[li];
+              r_lut.uv2[li] = r_lut.uv[li];
+              store_primary();
+            }
+            else if (r_lut.row2[li] < 0) {
+              store_secondary();
+            }
+            else if (same_stretch(r_lut.row2[li])) {
+              if (dsq < r_lut.dist_sq2[li]) {
+                store_secondary();
+              }
+            }
+            else if (std::abs(cand_uv.x) < std::abs(r_lut.uv2[li].x)) {
+              /* A third leg reaches this pixel: keep the two most central ones. */
+              store_secondary();
+            }
           }
         }
       }
@@ -727,10 +767,10 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
   r_lut.ready = true;
 }
 
-bool CurvePatchRibbonLut::sample(const float3 &co, float2 &r_uv) const
+int CurvePatchRibbonLut::sample(const float3 &co, float2 r_uv[2]) const
 {
   if (!ready) {
-    return false;
+    return 0;
   }
   const int RES = res;
   const float2 query = float2(math::dot(co, axis_x), math::dot(co, axis_y));
@@ -738,7 +778,7 @@ bool CurvePatchRibbonLut::sample(const float3 &co, float2 &r_uv) const
   if (UNLIKELY(!std::isfinite(fc.x) || !std::isfinite(fc.y) || fc.x < -0.5f ||
                fc.x > float(RES) - 0.5f || fc.y < -0.5f || fc.y > float(RES) - 0.5f))
   {
-    return false;
+    return 0;
   }
 
   const float fx = std::clamp(fc.x - 0.5f, 0.0f, float(RES - 2));
@@ -748,79 +788,74 @@ bool CurvePatchRibbonLut::sample(const float3 &co, float2 &r_uv) const
   const float tx = fx - float(ix);
   const float ty = fy - float(iy);
 
-  float2 uv00 = uv[iy * RES + ix];
-  float2 uv10 = uv[iy * RES + ix + 1];
-  float2 uv01 = uv[(iy + 1) * RES + ix];
-  float2 uv11 = uv[(iy + 1) * RES + ix + 1];
-
-  /* Fill never-rasterized pixels from the nearest valid neighbor so the bilinear sample does not
-   * blend against garbage; reject outright when all four are empty (query is off the ribbon). */
-  constexpr float INVALID = FLT_MAX * 0.5f;
-  const bool b00 = uv00.x >= INVALID;
-  const bool b10 = uv10.x >= INVALID;
-  const bool b01 = uv01.x >= INVALID;
-  const bool b11 = uv11.x >= INVALID;
-  if (UNLIKELY(b00 || b10 || b01 || b11)) {
-    if (b00 && b10 && b01 && b11) {
-      return false;
-    }
-    const float2 fill_uv = !b00 ? uv00 : !b10 ? uv10 : !b01 ? uv01 : uv11;
-    if (b00) {
-      uv00 = fill_uv;
-    }
-    if (b10) {
-      uv10 = fill_uv;
-    }
-    if (b01) {
-      uv01 = fill_uv;
-    }
-    if (b11) {
-      uv11 = fill_uv;
-    }
-  }
-
-  const float2 uvs[4] = {uv00, uv10, uv01, uv11};
-  const float weights[4] = {
+  const int pixels[4] = {
+      iy * RES + ix, iy * RES + ix + 1, (iy + 1) * RES + ix, (iy + 1) * RES + ix + 1};
+  const float pixel_weights[4] = {
       (1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty};
 
-  /* Overlap discontinuity: where the curve doubles back, the 4 sampled pixels can straddle the
-   * boundary between the two legs, and blending V across it would fabricate a curve position that
-   * lies on neither leg. */
-  const float v_min = std::min({uv00.y, uv10.y, uv01.y, uv11.y});
-  const float v_max = std::max({uv00.y, uv10.y, uv01.y, uv11.y});
-  if (UNLIKELY(v_max - v_min > v_threshold)) {
-    /* Anchor on the best-fitting pixel, then interpolate only across the neighbors that agree with
-     * it -- the ones belonging to the same leg -- renormalizing their bilinear weights.
-     *
-     * Deliberately not a plain nearest-neighbor pick (which is what Roll does here): snapping the
-     * whole 2x2 neighborhood to one pixel quantizes the result to the LUT grid, and along a
-     * boundary that runs across many pixels that reads as a staircase in the relief. Averaging the
-     * agreeing subset keeps the mapping continuous within each leg while still refusing to blend
-     * ACROSS legs. */
-    const float ds[4] = {dist_sq[iy * RES + ix],
-                         dist_sq[iy * RES + ix + 1],
-                         dist_sq[(iy + 1) * RES + ix],
-                         dist_sq[(iy + 1) * RES + ix + 1]};
-    int anchor = 0;
-    for (int k = 1; k < 4; k++) {
-      if (ds[k] < ds[anchor]) {
+  /* Collect every stretch of the curve recorded across the 2x2 neighborhood: both slots of all
+   * four pixels. Which slot a given stretch occupies is NOT consistent between pixels -- the
+   * primary/secondary ranking flips across the two stretches' medial axis -- so the slots are
+   * pooled here and re-grouped by arc length below rather than being read positionally. */
+  constexpr float INVALID = FLT_MAX * 0.5f;
+  struct Candidate {
+    float2 uv;
+    float weight;
+    float dist_sq;
+  };
+  Candidate candidates[8];
+  int candidate_num = 0;
+  for (int k = 0; k < 4; k++) {
+    if (uv[pixels[k]].x < INVALID) {
+      candidates[candidate_num++] = {uv[pixels[k]], pixel_weights[k], dist_sq[pixels[k]]};
+    }
+    if (uv2[pixels[k]].x < INVALID) {
+      candidates[candidate_num++] = {uv2[pixels[k]], pixel_weights[k], dist_sq2[pixels[k]]};
+    }
+  }
+  if (UNLIKELY(candidate_num == 0)) {
+    /* Nothing rasterized anywhere nearby: the query is off the ribbon. */
+    return 0;
+  }
+
+  /* Group the candidates into stretches by arc length, most confidently-fit stretch first.
+   *
+   * Within one group the candidates are averaged with their bilinear weights (renormalized), which
+   * keeps the mapping smooth and continuous inside each stretch. Across groups nothing is blended:
+   * averaging two stretches' arc lengths would fabricate a curve position lying on neither. This
+   * replaces Roll's nearest-neighbor fallback, which snapped the whole neighborhood to one pixel
+   * and so quantized the result to the LUT grid -- visible as a staircase along any boundary that
+   * runs across many pixels. */
+  bool grouped[8] = {};
+  int branch_num = 0;
+  for (int attempt = 0; attempt < 4 && branch_num < 2; attempt++) {
+    int anchor = -1;
+    for (int k = 0; k < candidate_num; k++) {
+      if (!grouped[k] && (anchor < 0 || candidates[k].dist_sq < candidates[anchor].dist_sq)) {
         anchor = k;
       }
     }
+    if (anchor < 0) {
+      break;
+    }
     float2 accum(0.0f);
     float weight_sum = 0.0f;
-    for (int k = 0; k < 4; k++) {
-      if (std::abs(uvs[k].y - uvs[anchor].y) <= v_threshold) {
-        accum += uvs[k] * weights[k];
-        weight_sum += weights[k];
+    for (int k = 0; k < candidate_num; k++) {
+      if (!grouped[k] && std::abs(candidates[k].uv.y - candidates[anchor].uv.y) <= v_threshold) {
+        grouped[k] = true;
+        accum += candidates[k].uv * candidates[k].weight;
+        weight_sum += candidates[k].weight;
       }
     }
-    r_uv = weight_sum > 1e-6f ? accum / weight_sum : uvs[anchor];
-    return true;
+    /* A group can carry zero total weight when it only occupies pixels the query sits exactly on
+     * the far edge of. It contributes nothing, so skip it and let the next attempt find the next
+     * stretch rather than spending one of the two output slots on it. */
+    if (weight_sum > 1e-6f) {
+      r_uv[branch_num] = accum / weight_sum;
+      branch_num++;
+    }
   }
-
-  r_uv = uvs[0] * weights[0] + uvs[1] * weights[1] + uvs[2] * weights[2] + uvs[3] * weights[3];
-  return true;
+  return branch_num;
 }
 
 /** \} */

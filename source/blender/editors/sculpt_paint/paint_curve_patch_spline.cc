@@ -14,6 +14,7 @@
 
 #include "DNA_texture_types.h"
 
+#include "BLI_hash.h"
 #include "BLI_math_vector.hh"
 #include "BLI_utildefines.h"
 
@@ -314,6 +315,138 @@ float curve_patch_texture_tile_span(const int length_mode,
     span = total_length / tiles;
   }
   return span;
+}
+
+/* Hash channels, so the same stamp's size / angle / strength / two jitter axes stay independent. */
+enum {
+  STAMP_HASH_SIZE = 0,
+  STAMP_HASH_ANGLE = 1,
+  STAMP_HASH_STRENGTH = 2,
+  STAMP_HASH_JITTER_V = 3,
+  STAMP_HASH_JITTER_U = 4,
+};
+
+static float stamp_random(const int index, const uint32_t seed, const int channel)
+{
+  return BLI_hash_int_3d_to_float(uint32_t(index), seed, uint32_t(channel));
+}
+
+/* Absolute ceiling on the number of stamps a single build can produce. The 1% Spacing floor used
+ * below is relative to the brush radius, not an absolute step size, so it does not by itself bound
+ * `stamp_num`: a long curve paired with a very small radius still yields a tiny step and asks for
+ * millions of stamps (e.g. a 1000-unit curve at radius 0.001 wants ~50 million). An interactive
+ * patch tops out at a few hundred stamps even for a full-screen curve at default spacing, so 10000
+ * is generous headroom while keeping the `reserve()` below bounded and the narrowing to `int` safe
+ * from overflow. */
+static constexpr int CURVE_PATCH_STAMP_NUM_MAX = 10000;
+
+void curve_patch_stamps_build(const CurvePatchSpline &spline,
+                              const float radius,
+                              const float spacing_frac,
+                              const float jitter_amount,
+                              const float size_random,
+                              const float strength_random,
+                              const float base_angle,
+                              const float random_angle,
+                              const uint32_t seed,
+                              Vector<CurvePatchStamp> &r_stamps)
+{
+  r_stamps.clear();
+  const float total_length = spline.total_length();
+  if (spline.is_empty() || total_length <= 1e-6f || radius <= 1e-6f) {
+    return;
+  }
+
+  /* Floor Spacing at 1% of the diameter, the same lower bound the brush's own Spacing slider
+   * enforces, so a zero or near-zero Spacing does not produce a zero-length `step`. This floor is
+   * relative to `radius`, though, not an absolute distance, so it does not by itself bound the
+   * stamp count -- see `CURVE_PATCH_STAMP_NUM_MAX`, which is what actually does. */
+  const float step = std::max(spacing_frac, 0.01f) * 2.0f * radius;
+
+  int stamp_num;
+  float used_step;
+  if (spline.cyclic) {
+    /* A loop has no ends: placing a stamp at `total_length` would double up on the one at 0. Fit a
+     * whole number of steps instead and stop one step short of the seam. Compute in `double` and
+     * clamp before narrowing to `int`, since `total_length / step` can be arbitrarily large for a
+     * long curve with a small radius, and an `int` overflow here is undefined behavior. */
+    const double raw_num = std::round(double(total_length) / double(step));
+    stamp_num = int(std::clamp(raw_num, 1.0, double(CURVE_PATCH_STAMP_NUM_MAX)));
+    /* `used_step` is derived FROM `stamp_num` on this branch, so it must be recomputed after the
+     * clamp above -- otherwise a clamped count would leave a gap short of the seam. */
+    used_step = total_length / float(stamp_num);
+  }
+  else {
+    const double raw_num = std::floor(double(total_length) / double(step)) + 1.0;
+    stamp_num = int(std::clamp(raw_num, 1.0, double(CURVE_PATCH_STAMP_NUM_MAX)));
+    /* `used_step` is the requested step and is independent of `stamp_num` on this branch, so
+     * clamping the count simply truncates the stamp row instead of leaving a gap. */
+    used_step = step;
+  }
+
+  r_stamps.reserve(stamp_num);
+  for (const int i : IndexRange(stamp_num)) {
+    CurvePatchStamp stamp;
+    const float s = float(i) * used_step;
+    stamp.center_v = s + jitter_amount * (2.0f * stamp_random(i, seed, STAMP_HASH_JITTER_V) - 1.0f);
+    stamp.center_u = jitter_amount * (2.0f * stamp_random(i, seed, STAMP_HASH_JITTER_U) - 1.0f);
+    /* Shrink only. Growing past the brush radius would make the visible patch wider than the brush
+     * cursor promises and would force the ribbon to widen for the size setting too. The 0.05 floor
+     * keeps a fully-randomized stamp from collapsing to nothing. */
+    const float size_factor = 1.0f - size_random * stamp_random(i, seed, STAMP_HASH_SIZE);
+    stamp.half_extent = radius * std::max(size_factor, 0.05f);
+    stamp.angle = base_angle + random_angle * stamp_random(i, seed, STAMP_HASH_ANGLE);
+    const float strength_factor = 1.0f -
+                                  strength_random * stamp_random(i, seed, STAMP_HASH_STRENGTH);
+    stamp.strength = std::max(strength_factor, 0.05f);
+    r_stamps.append(stamp);
+  }
+
+  /* Jitter along the curve can reorder neighbours; the relief binary-searches this list by
+   * `center_v`, so restore the ordering rather than assume it. */
+  std::sort(r_stamps.begin(), r_stamps.end(), [](const CurvePatchStamp &a, const CurvePatchStamp &b) {
+    return a.center_v < b.center_v;
+  });
+}
+
+void curve_patch_stamps_add_cyclic_wrap(Vector<CurvePatchStamp> &stamps,
+                                        const float total_length,
+                                        const float max_extent)
+{
+  if (stamps.is_empty() || total_length <= 1e-6f || max_extent <= 0.0f) {
+    return;
+  }
+
+  /* A loop shorter than the search window would otherwise qualify every stamp on both sides at
+   * once, and a truly faithful answer there would need ghosts at every multiple of the length --
+   * an unbounded tiling for a loop that is smaller than a single stamp. Clamping the reach to one
+   * period keeps the result bounded (at most two ghosts per stamp) and deterministic; such a loop
+   * is degenerate for Stamps mode either way, since its stamps already overlap themselves. */
+  const float reach = std::min(max_extent, total_length);
+
+  /* Snapshot the original count: the loop appends to the same vector it reads, and ghosts must
+   * never spawn ghosts of their own. */
+  const int real_num = stamps.size();
+  for (const int i : IndexRange(real_num)) {
+    /* Taken by value -- `append()` below may reallocate and invalidate a reference. */
+    const CurvePatchStamp stamp = stamps[i];
+    if (stamp.center_v < reach) {
+      CurvePatchStamp ghost = stamp;
+      ghost.center_v = stamp.center_v + total_length;
+      stamps.append(ghost);
+    }
+    if (stamp.center_v > total_length - reach) {
+      CurvePatchStamp ghost = stamp;
+      ghost.center_v = stamp.center_v - total_length;
+      stamps.append(ghost);
+    }
+  }
+
+  /* The ghosts land outside `[0, total_length]` on both sides, so the list is no longer ordered by
+   * arc length -- restore it, since the relief binary-searches by `center_v`. */
+  std::sort(stamps.begin(), stamps.end(), [](const CurvePatchStamp &a, const CurvePatchStamp &b) {
+    return a.center_v < b.center_v;
+  });
 }
 
 }  // namespace blender::ed::sculpt_paint

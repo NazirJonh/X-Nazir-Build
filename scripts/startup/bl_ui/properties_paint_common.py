@@ -571,10 +571,18 @@ class StrokePanel(BrushPanel):
 
         if mode == 'SCULPT' and brush.stroke_method == 'CURVE_PATCH':
             tex_slot = brush.texture_slot
+            col.row().prop(tex_slot, "curve_patch_stamp_mode", text="Curve Patch", expand=True)
             col.prop(tex_slot, "use_curve_patch_swap_axis", text="Swap Axis")
-            col.row().prop(tex_slot, "curve_patch_length_mode", text="Curve Patch Length", expand=True)
-            if tex_slot.curve_patch_length_mode == 'REPEAT':
-                col.prop(tex_slot, "curve_patch_length_repeat", text="Repeats")
+            if tex_slot.curve_patch_stamp_mode == 'STAMPS':
+                col.prop(brush, "spacing", text="Spacing", slider=True)
+                col.prop(brush, "jitter", text="Jitter", slider=True)
+                col.prop(tex_slot, "curve_patch_stamp_size_random", text="Random Size", slider=True)
+                col.prop(tex_slot, "curve_patch_stamp_strength_random", text="Random Strength", slider=True)
+                col.prop(tex_slot, "random_angle", text="Random Rotation")
+            else:
+                col.row().prop(tex_slot, "curve_patch_length_mode", text="Curve Patch Length", expand=True)
+                if tex_slot.curve_patch_length_mode == 'REPEAT':
+                    col.prop(tex_slot, "curve_patch_length_repeat", text="Repeats")
             col.row().prop(tex_slot, "curve_patch_end_falloff", text="End Falloff", expand=True)
             sub = col.row()
             sub.enabled = tex_slot.curve_patch_end_falloff == 'SMOOTH'

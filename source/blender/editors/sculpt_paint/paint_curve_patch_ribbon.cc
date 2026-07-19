@@ -583,7 +583,8 @@ static void ribbon_laplacian_smooth(Vector<float3> &grid_pos,
  * Deliberately O(n) over the tessellated polyline: still orders of magnitude below the build. */
 static uint64_t ribbon_source_hash(const CurvePatchSpline &spline,
                                    const float brush_radius,
-                                   const bool high_quality)
+                                   const bool high_quality,
+                                   const float end_margin)
 {
   uint64_t hash = 1469598103934665603ull; /* FNV-1a offset basis. */
   auto mix = [&hash](const float value) {
@@ -610,18 +611,23 @@ static uint64_t ribbon_source_hash(const CurvePatchSpline &spline,
   /* Without this the commit-time high-quality rebuild would be skipped as a cache hit against the
    * interactive table, which is exactly the table it needs to replace. */
   hash = (hash ^ uint64_t(high_quality ? 1 : 0)) * 1099511628211ull;
+  /* The end extension changes the strip's geometry without touching any of the spline data hashed
+   * above, so a margin change would otherwise be served from the stale table -- switching between
+   * Ribbon and Stamps mode, or moving the Jitter slider, would leave the ends unextended. */
+  mix(end_margin);
   return hash;
 }
 
 void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                               const float brush_radius,
                               CurvePatchRibbonLut &r_lut,
-                              const bool high_quality)
+                              const bool high_quality,
+                              const float end_margin)
 {
   /* Nothing the ribbon depends on has changed, so the existing LUT is still exact. The modal editor
    * re-stamps on events that never touch the curve (strength slider, Length mode, Repeats count),
    * and those otherwise paid for a full rebuild each time. */
-  const uint64_t source_hash = ribbon_source_hash(spline, brush_radius, high_quality);
+  const uint64_t source_hash = ribbon_source_hash(spline, brush_radius, high_quality, end_margin);
   if (r_lut.ready && r_lut.source_hash == source_hash) {
     return;
   }
@@ -634,17 +640,61 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
     return;
   }
 
-  const Span<float3> poly = spline.poly_3d.as_span();
-  const Span<float3> tangents = spline.tangents_3d.as_span();
+  const bool have_radii = spline.radii.size() == spline.poly_3d.size();
+
+  /* End extension. Prepending/appending one extrapolated sample at each end has to happen HERE,
+   * before anything below reads the polyline: the half-widths, the two border curves, the
+   * self-intersection collapse, both subdivision passes, the smoothing and the rasterization all
+   * walk the same index space, so extending afterwards would leave them disagreeing about which
+   * index is which. Local copies rather than mutating the spline: `spline` is shared, const, and
+   * everything else (the stamp layout, `evaluate()`, the node cull) must keep seeing the curve's
+   * true ends.
+   *
+   * A cyclic curve is never extended -- it has no ends, and appending a sample past the join would
+   * make the strip overlap itself there and re-introduce the false self-intersection the `cyclic`
+   * flag exists to suppress. */
+  const bool extend = end_margin > 0.0f && !spline.cyclic && spline.poly_3d.size() >= 2 &&
+                      spline.lengths_3d.size() == spline.poly_3d.size();
+  Vector<float3> poly_ext, tangents_ext;
+  Vector<float> lengths_ext, radii_ext;
+  if (extend) {
+    const int n = int(spline.poly_3d.size());
+    poly_ext.reserve(n + 2);
+    tangents_ext.reserve(n + 2);
+    lengths_ext.reserve(n + 2);
+    /* The extrapolated positions follow the END TANGENTS, so the extension continues the curve's
+     * direction instead of the last segment's chord. Its radius is copied from the end sample so
+     * the strip keeps its width all the way out, and its arc length simply continues past the ends
+     * -- negative at the start, which is why `v` may no longer be assumed non-negative. */
+    poly_ext.append(spline.poly_3d.first() - spline.tangents_3d.first() * end_margin);
+    tangents_ext.append(spline.tangents_3d.first());
+    lengths_ext.append(-end_margin);
+    poly_ext.extend(spline.poly_3d.as_span());
+    tangents_ext.extend(spline.tangents_3d.as_span());
+    lengths_ext.extend(spline.lengths_3d.as_span());
+    poly_ext.append(spline.poly_3d.last() + spline.tangents_3d.last() * end_margin);
+    tangents_ext.append(spline.tangents_3d.last());
+    lengths_ext.append(spline.lengths_3d.last() + end_margin);
+    if (have_radii) {
+      radii_ext.reserve(n + 2);
+      radii_ext.append(spline.radii.first());
+      radii_ext.extend(spline.radii.as_span());
+      radii_ext.append(spline.radii.last());
+    }
+  }
+
+  const Span<float3> poly = extend ? poly_ext.as_span() : spline.poly_3d.as_span();
+  const Span<float3> tangents = extend ? tangents_ext.as_span() : spline.tangents_3d.as_span();
+  const Span<float> lengths = extend ? lengths_ext.as_span() : spline.lengths_3d.as_span();
+  const Span<float> radii = extend ? radii_ext.as_span() : spline.radii.as_span();
   const int count = int(poly.size());
-  const bool have_radii = spline.radii.size() == poly.size();
   const float3 plane_normal = math::normalize(spline.plane_normal);
 
   /* Per-vertex world half-width; `R_max` drives the collapse validation and the LUT resolution. */
   float R_max = 0.0f;
   Vector<float> halfwidths(count);
   for (int i = 0; i < count; i++) {
-    const float w = have_radii ? std::max(spline.radii[i] * brush_radius, brush_radius * 0.01f) :
+    const float w = have_radii ? std::max(radii[i] * brush_radius, brush_radius * 0.01f) :
                                  brush_radius;
     halfwidths[i] = w;
     R_max = std::max(R_max, w);
@@ -696,7 +746,7 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
   Vector<float3> grid_pos(rows * cols);
   Vector<float2> grid_uv(rows * cols);
   for (int k = 0; k < count; k++) {
-    const float v = spline.lengths_3d[k];
+    const float v = lengths[k];
     grid_pos[k * 3 + 0] = border_right[k];
     grid_pos[k * 3 + 1] = poly[k];
     grid_pos[k * 3 + 2] = border_left[k];

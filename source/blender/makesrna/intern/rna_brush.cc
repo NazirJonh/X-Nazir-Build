@@ -106,6 +106,14 @@ static const EnumPropertyItem rna_enum_brush_curve_patch_end_falloff_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_mode_items[] = {
+    {MTEX_CURVE_PATCH_STAMP_RIBBON, "RIBBON", 0, "Ribbon",
+     "Project one continuous texture stretched along the whole curve"},
+    {MTEX_CURVE_PATCH_STAMP_STAMPS, "STAMPS", 0, "Stamps",
+     "Place separate randomized texture stamps spaced along the curve"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 const EnumPropertyItem rna_enum_brush_curve_preset_items[] = {
     {BRUSH_CURVE_CUSTOM, "CUSTOM", ICON_RNDCURVE, "Custom", ""},
     {BRUSH_CURVE_SMOOTH, "SMOOTH", ICON_SMOOTHCURVE, "Smooth", ""},
@@ -1271,6 +1279,32 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
                            "Falloff Length",
                            "Length of the fade at each end of the curve, as a percentage of the "
                            "curve's total length");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "curve_patch_stamp_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "curve_patch_stamp_mode");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_stamp_mode_items);
+  RNA_def_property_ui_text(
+      prop, "Stamp Mode", "Whether the patch is one stretched texture or discrete stamps");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "curve_patch_stamp_size_random", PROP_INT, PROP_PERCENTAGE);
+  RNA_def_property_int_sdna(prop, nullptr, "curve_patch_stamp_size_random");
+  RNA_def_property_range(prop, 0, 100);
+  RNA_def_property_ui_range(prop, 0, 100, 1, -1);
+  RNA_def_property_ui_text(
+      prop, "Random Size", "Randomly shrink each stamp by up to this fraction of the brush size");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "curve_patch_stamp_strength_random", PROP_INT, PROP_PERCENTAGE);
+  RNA_def_property_int_sdna(prop, nullptr, "curve_patch_stamp_strength_random");
+  RNA_def_property_range(prop, 0, 100);
+  RNA_def_property_ui_range(prop, 0, 100, 1, -1);
+  RNA_def_property_ui_text(
+      prop, "Random Strength", "Randomly reduce each stamp's relief strength by up to this fraction");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
 

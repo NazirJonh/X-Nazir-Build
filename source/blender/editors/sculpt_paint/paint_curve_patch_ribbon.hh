@@ -114,10 +114,20 @@ struct CurvePatchRibbonLut {
  * one-off re-stamp taken when a patch is committed. The supersampled relief that pass uses places
  * its samples a fraction of a strip-width apart, which the interactive resolution cannot resolve.
  * Interactive re-stamps pass false and keep the cheaper table.
+ *
+ * \param end_margin: world-space distance to extend the strip PAST each of a non-cyclic curve's two
+ * ends, along the end tangents. Stamps mode needs it because a stamp centered on the very first or
+ * last point reaches half its own size beyond the curve, and the part outside the rasterized strip
+ * would get no UV and be clipped by a hard straight edge. The extension carries the end radius, so
+ * the strip keeps its width through it, and the arc length it reports runs from `-end_margin` to
+ * `total_length + end_margin` -- `v` is raw arc length and is deliberately allowed outside
+ * `[0, total_length]` there. A cyclic curve has no ends and is never extended. 0 (the default)
+ * reproduces the unextended strip exactly.
  */
 void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                               float brush_radius,
                               CurvePatchRibbonLut &r_lut,
-                              bool high_quality = false);
+                              bool high_quality = false,
+                              float end_margin = 0.0f);
 
 }  // namespace blender::ed::sculpt_paint

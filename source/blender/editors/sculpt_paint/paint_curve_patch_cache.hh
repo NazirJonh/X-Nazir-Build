@@ -59,6 +59,20 @@ struct CurvePatchFrozenBrushParams {
    * `length_mode`/`length_repeat`. */
   int end_falloff_mode = 0;
   int end_falloff_percent = 0;
+  /** #eMTex_CurvePatchStampMode plus the two per-stamp randomization amounts, as fractions in
+   * `[0, 1]` (the DNA fields are percentages). Live-synced from `brush.mtex` by the same modal
+   * handler as `length_mode`/`end_falloff_mode`. */
+  int stamp_mode = 0;
+  float stamp_size_random = 0.0f;
+  float stamp_strength_random = 0.0f;
+  /** Seed for the Stamps-mode randomization, rolled ONCE per patch (and re-rolled only by the
+   * explicit Reseed action). It is not persisted: the control curve is session-local runtime data,
+   * so there is nothing for a stored seed to reproduce. Freezing it here is what keeps the relief
+   * stable across the re-stamps that fire on every interactive event. */
+  uint32_t stamp_seed = 0;
+  /** World-space radius per unit of the brush's Size slider, captured at patch start. Converts a
+   * live Size change into a world radius, and absolute (pixel) brush jitter into world units. */
+  float radius_per_size = 0.0f;
 };
 
 /** One snapshot of the session-local undo stack: everything the user edits inside a live Curve
@@ -67,6 +81,9 @@ struct CurvePatchFrozenBrushParams {
 struct CurvePatchEditStep {
   bke::CurvesGeometry curve;
   bool swap_axis = false;
+  /* Snapshotted for the same reason as `swap_axis`: the Reseed action changes the visible relief
+   * without touching `curve`, so without this Ctrl+Z could not walk back over a reseed. */
+  uint32_t stamp_seed = 0;
 };
 
 struct CurvePatchCache {
@@ -76,6 +93,11 @@ struct CurvePatchCache {
   bke::CurvesGeometry control_curve;
 
   CurvePatchFrozenBrushParams frozen_params;
+
+  /** Stamps-mode layout, rebuilt once per re-stamp on the main thread right after the spline (see
+   * `curve_patch_stamps_build`). PHASE 1's parallel per-vertex walk only reads it. Empty in Ribbon
+   * mode. */
+  Vector<CurvePatchStamp> stamps;
 
   /** Index into `control_curve` of the point the user last interacted with, or -1 for none. Owned
    * conceptually by the live-edit modal (`SCULPT_OT_curve_patch_edit`), but stored here rather than
@@ -130,6 +152,30 @@ struct CurvePatchCache {
    * action samples this instead of `CurvePatchSpline::closest_point()` so the parameterization
    * stays single-valued through sharp turns (see `paint_curve_patch_ribbon.hh`). */
   CurvePatchRibbonLut ribbon;
+
+  /** World-space brush radius the `ribbon` above was actually built from, recorded by
+   * `curve_patch_restore_and_restamp()` on every restamp right before the build.
+   *
+   * In Ribbon mode this equals `frozen_params.radius`. In Stamps mode it is WIDENED by the layout's
+   * jitter amount so stamps pushed sideways still fall inside the strip. Because the ribbon's `u`
+   * is normalized across the half-width it was built with, anything reconstructing a world-space
+   * lateral offset from `u` -- and anything bounding how far from the curve the relief can reach --
+   * must scale by THIS radius, not by `frozen_params.radius`. It lives here rather than in
+   * `frozen_params` because it is not frozen at anchor time: it is re-derived per restamp from the
+   * live brush's jitter, exactly like `stamps` next to it. */
+  float ribbon_radius = 0.0f;
+
+  /** World-space distance the `ribbon` above was extended PAST each of a non-cyclic curve's two
+   * ends, recorded next to `ribbon_radius` and for the same reason: the sites that need it are in
+   * other functions than the one that computes it.
+   *
+   * 0 in Ribbon mode, where the strip stops exactly at the curve's ends. In Stamps mode it is the
+   * farthest a stamp centered on an end point can reach beyond that end, so those stamps render
+   * whole instead of being clipped by the strip's edge. Everything bounding the relief's reach
+   * ALONG the curve must add it: the arc-length range the relief accepts, the PBVH cull tube and
+   * the whole-curve search sphere, all of which are otherwise derived from the curve's own points
+   * and would cut the overhang off again. */
+  float ribbon_end_margin = 0.0f;
 
   /** Per-restamp accumulator for blending symmetry passes that land on the same real vertex (a
    * patch straddling a mirror/radial symmetry plane can have both the direct and the mirrored

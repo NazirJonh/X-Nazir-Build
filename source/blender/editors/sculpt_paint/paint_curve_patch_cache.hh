@@ -65,6 +65,10 @@ struct CurvePatchFrozenBrushParams {
   int stamp_mode = 0;
   float stamp_size_random = 0.0f;
   float stamp_strength_random = 0.0f;
+  /** #eMTex_CurvePatchStampProjection: which coordinate frame the stamps' texture is sampled in.
+   * Live-synced from `brush.mtex` by the same modal handler as `stamp_mode` -- without that the
+   * user would flip the Projection toggle mid-edit and see nothing change until the next patch. */
+  int stamp_projection = 0;
   /** Seed for the Stamps-mode randomization, rolled ONCE per patch (and re-rolled only by the
    * explicit Reseed action). It is not persisted: the control curve is session-local runtime data,
    * so there is nothing for a stored seed to reproduce. Freezing it here is what keeps the relief
@@ -164,6 +168,20 @@ struct CurvePatchCache {
    * `frozen_params` because it is not frozen at anchor time: it is re-derived per restamp from the
    * live brush's jitter, exactly like `stamps` next to it. */
   float ribbon_radius = 0.0f;
+
+  /** Conservative arc-length half-window covering one stamp's full footprint, resolved ONCE per
+   * restamp right after the stamp layout and read by every consumer that has to find or cover a
+   * stamp: the per-vertex search window, the cyclic seam wrap and the ribbon's end extension.
+   *
+   * Those three were separate call sites of #curve_patch_stamp_reach, and their agreement is a
+   * correctness requirement, not a coincidence -- a stamp reaching past any one of them is silently
+   * clipped, and a seam ghost placed with a smaller bound than the search window uses is never
+   * found at all. The PLANAR projection widens the bound (a laterally jittered stamp covers more
+   * arc length once its frame stops following the curve), which is exactly the kind of change that
+   * would have had to be repeated in three places. Storing it once makes that impossible.
+   *
+   * 0 in Ribbon mode, where there are no stamps to bound. */
+  float stamp_search_reach = 0.0f;
 
   /** World-space distance the `ribbon` above was extended PAST each of a non-cyclic curve's two
    * ends, recorded next to `ribbon_radius` and for the same reason: the sites that need it are in

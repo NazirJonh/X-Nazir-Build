@@ -114,6 +114,14 @@ static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_mode_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_projection_items[] = {
+    {MTEX_CURVE_PATCH_STAMP_PROJ_CURVE, "CURVE", 0, "Curve-Following",
+     "Sample the stamp in the curve's own space, so the texture bends along the curve"},
+    {MTEX_CURVE_PATCH_STAMP_PROJ_PLANAR, "PLANAR", 0, "Planar",
+     "Sample the stamp on a rigid frame, so the texture keeps its shape through sharp turns"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 const EnumPropertyItem rna_enum_brush_curve_preset_items[] = {
     {BRUSH_CURVE_CUSTOM, "CUSTOM", ICON_RNDCURVE, "Custom", ""},
     {BRUSH_CURVE_SMOOTH, "SMOOTH", ICON_SMOOTHCURVE, "Smooth", ""},
@@ -1296,6 +1304,14 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 0, 100, 1, -1);
   RNA_def_property_ui_text(
       prop, "Random Size", "Randomly shrink each stamp by up to this fraction of the brush size");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "curve_patch_stamp_projection", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "curve_patch_stamp_projection");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_stamp_projection_items);
+  RNA_def_property_ui_text(
+      prop, "Projection", "How each stamp's texture frame is built along the curve");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
 

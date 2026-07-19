@@ -399,6 +399,37 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
     const float strength_factor = 1.0f -
                                   strength_random * stamp_random(i, seed, STAMP_HASH_STRENGTH);
     stamp.strength = std::max(strength_factor, 0.05f);
+
+    /* Freeze the stamp's rigid world frame. `side` uses `cross(T, plane_normal)`, matching the
+     * ribbon's own convention (`curve_patch_ribbon_build()`: the `+B` side carries `u = +1`), so a
+     * stamp's `center_u` means the same direction in both projections. Getting this backwards would
+     * mirror every PLANAR stamp against its CURVE counterpart. */
+    const float3 tangent = spline.tangent_at(stamp.center_v);
+    float3 side = math::cross(tangent, spline.plane_normal);
+    const float side_len = math::length(side);
+    if (side_len > 1e-7f) {
+      side /= side_len;
+    }
+    else {
+      /* The tangent is parallel to the plane normal, so the cross product carries no direction.
+       * Any in-plane axis will do: the stamp is degenerate here either way, and a finite frame
+       * keeps the relief from producing NaNs. Mirrors the ribbon's own fallback. */
+      float3 fallback = math::cross(spline.plane_normal, float3(0.0f, 0.0f, 1.0f));
+      if (math::length_squared(fallback) < 1e-6f) {
+        fallback = math::cross(spline.plane_normal, float3(1.0f, 0.0f, 0.0f));
+      }
+      side = math::normalize(fallback);
+    }
+    /* Re-derive the along-curve axis from `side` rather than reusing `tangent`: `cross(N, side)` is
+     * `tangent` projected into the anchor plane and re-normalized in one step, which is what makes
+     * the pair exactly orthonormal even where the curve tilts out of the plane. */
+    const float3 tangent_in_plane = math::cross(spline.plane_normal, side);
+    const float cos_a = std::cos(stamp.angle);
+    const float sin_a = std::sin(stamp.angle);
+    stamp.origin = spline.evaluate(stamp.center_v) + side * stamp.center_u;
+    stamp.axis_v = tangent_in_plane * cos_a + side * sin_a;
+    stamp.axis_u = -tangent_in_plane * sin_a + side * cos_a;
+
     r_stamps.append(stamp);
   }
 

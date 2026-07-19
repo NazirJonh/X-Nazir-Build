@@ -358,8 +358,10 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
        * ends), so `s` from the LUT is already confined to that range and vertices past it fail
        * `sample()` above. This guard only backstops interpolation slack at the LUT's edge pixels;
        * it must admit the extension, or the overhanging halves of the end stamps would be rejected
-       * here and clipped exactly as before. On a closed curve the two "ends" are the same place and
-       * the margin is 0, so the range is unchanged -- there is simply nothing outside it. */
+       * here and clipped exactly as before. On a closed curve `ribbon_end_margin` is set the same as
+       * on an open one (Stamps mode assigns it unconditionally), so the guard is technically looser
+       * there too -- but a cyclic LUT never reports an `s` outside `[0, total_length]` in the first
+       * place, so the extra slack never admits anything the sampler would otherwise have rejected. */
       if (s < -patch.ribbon_end_margin || s > total_length + patch.ribbon_end_margin) {
         return std::nullopt;
       }
@@ -1035,10 +1037,12 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
        * an ARC-LENGTH window. On a bend the chord is shorter than the arc, so a vertex inside a
        * stamp's world square can have an `s` outside this window and get silently clipped. The
        * arc/chord ratio for a circular bend of turn angle theta across the stamp's reach is
-       * `sin(theta/2) / (theta/2)`, which peaks at `PI / 2 ~= 1.571` for a 180-degree hairpin -- the
-       * worst turn a single stamp's span can encounter. 1.6 rounds that up. The bound only has to
-       * be conservative: the per-stamp test in the candidate loop below is exact, so an over-wide
-       * window just costs a few extra candidates, while a too-narrow one silently clips stamps. */
+       * `(theta/2) / sin(theta/2)`; this bound is sized for turns up to a 180-degree hairpin, where
+       * the ratio reaches `PI / 2 ~= 1.571`, and 1.6 rounds that up. A curve that spirals tighter
+       * than a half-turn within roughly one stamp's reach exceeds what this bound was designed for
+       * and is out of scope here. The bound only has to be conservative within that scope: the
+       * per-stamp test in the candidate loop below is exact, so an over-wide window just costs a
+       * few extra candidates, while a too-narrow one silently clips stamps. */
       constexpr float PLANAR_BEND_SLACK = 1.6f;
       /* Resolve the one bound every consumer below shares. On top of the bend slack above, PLANAR
        * also adds `jitter_amount`: a stamp pushed sideways off the curve keeps a rigid frame, so
@@ -1071,15 +1075,14 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
        * curve visibly bare.
        *
        * #curve_patch_stamp_reach is a stamp's corner reach; `jitter_amount` covers a center jittered
-       * further along the curve. The same shared bound the per-vertex search window uses on `v`.
-       *
-       * `stamp_search_reach` already carries `jitter_amount` under PLANAR, so adding it again there
-       * would double-count. Take the larger of the two instead: the margin must cover BOTH a
-       * stamp's corner reach past the end and a center jittered further along, under either
-       * projection. */
-      patch.ribbon_end_margin = std::max(
-          patch.stamp_search_reach,
-          curve_patch_stamp_reach(patch.frozen_params.radius) + jitter_amount);
+       * further along the curve. Deliberately NOT `stamp_search_reach`: that bound also carries
+       * `PLANAR_BEND_SLACK`, which exists to cover a stamp's arc/chord gap on a BEND -- but an end
+       * stamp's overhang is not tested against a bend, it is rendered by the ribbon's own straight
+       * extrapolation along the end tangent (see `curve_patch_stamps_build()`'s PLANAR frame
+       * extrapolation). Slack bought there would only inflate the strip, the PBVH cull tube, and the
+       * whole-curve search sphere for no correctness gain, and it would force a full LUT rebuild on
+       * every CURVE<->PLANAR toggle since `end_margin` feeds the ribbon's source hash. */
+      patch.ribbon_end_margin = curve_patch_stamp_reach(patch.frozen_params.radius) + jitter_amount;
     }
   }
 

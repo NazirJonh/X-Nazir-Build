@@ -1238,6 +1238,245 @@ TEST_F(sculpt_layers_tree, move_into_own_subtree_is_refused)
   EXPECT_EQ(children_of(*outer).size(), 1);
 }
 
+TEST_F(sculpt_layers_tree, chain_mask_terminates_on_a_cyclic_parent_chain)
+{
+  /* The other direction of corruption. Every guard above walks *child lists*; #chain_mask's own
+   * guard (#ancestor_chain_has_cycle) walks #SculptLayerTreeNode::parent, which no child-list
+   * corruption can bend — #graft_child_raw deliberately leaves the moved node's own links alone, so
+   * a tree built by it has a perfectly well-formed parent chain and never reaches this guard at all.
+   * A cyclic parent chain has to be built directly, which is what this test does.
+   *
+   * The failure mode is the worst one in the module: #chain_mask recurses into the *parent's*
+   * #CacheMutex from inside its own #ensure, and that mutex is not recursive, so a chain that closes
+   * on itself deadlocks the redraw with no crash and no dump. The guard therefore runs before any
+   * lock is taken, and the documented safe result is null (sculpt_layers.cc:284-297) — the module's
+   * existing "no mask" state, which leaves the cache exactly as it was rather than handing anyone a
+   * half-built fold.
+   *
+   * Reaching the end of this test at all is half the assertion; the returned nulls are the other
+   * half. */
+  SculptLayerGroup *outer = group_add(*mesh, "Outer", 0);
+  ASSERT_NE(outer, nullptr);
+  SculptLayerGroup *inner = group_add(*mesh, "Inner", outer->base.uid);
+  ASSERT_NE(inner, nullptr);
+  SculptLayerGroup *leaf = group_add(*mesh, "Leaf", inner->base.uid);
+  ASSERT_NE(leaf, nullptr);
+  /* A sibling of the whole corrupt branch, so the guard can be shown to be scoped to the walk that
+   * hits the cycle rather than being a global bail-out. */
+  SculptLayerGroup *sane = group_add(*mesh, "Sane", 0);
+  ASSERT_NE(sane, nullptr);
+
+  /* Masks everywhere, so a null below means "the guard fired" and never "there was nothing to
+   * fold" — which is the only other way #chain_mask returns null (see
+   * #chain_mask_is_null_without_masks). */
+  outer->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 255);
+  inner->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 255);
+  leaf->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 255);
+  sane->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 200);
+
+  /* Warmed while the tree is still well-formed. This is what makes the assertions below test the
+   * guard rather than a cold cache: after the corruption, a #chain_mask that consulted its cache
+   * before checking the chain would hand back this perfectly valid stale mask and pass a test that
+   * only asserted "did not hang". */
+  ASSERT_NE(chain_mask(*leaf), nullptr);
+  ASSERT_EQ(mask_value_at(*chain_mask(*leaf), 0), 255);
+
+  SculptLayerGroup *const outer_parent = outer->base.parent;
+  SculptLayerGroup *const inner_parent = inner->base.parent;
+
+  /* `Outer -> Inner -> Outer`, with `Leaf` hanging off the cycle rather than sitting on it. The tail
+   * is the case a naive "have I seen the node I started from" check gets wrong and Floyd does not:
+   * the walk from `Leaf` never returns to `Leaf`, it merely never terminates. Child lists are left
+   * untouched, so the tree stays walkable downward and #tree_free is unaffected. */
+  outer->base.parent = inner;
+  inner->base.parent = outer;
+
+  /* The tail case. */
+  EXPECT_EQ(chain_mask(*leaf), nullptr);
+  /* Both nodes *on* the cycle, from either entry point. */
+  EXPECT_EQ(chain_mask(*inner), nullptr);
+  EXPECT_EQ(chain_mask(*outer), nullptr);
+
+  /* The degenerate cycle: a node that is its own parent, which is one link rather than two and is
+   * the shape a single bad uid in a file produces. */
+  SculptLayerGroup *const sane_parent = sane->base.parent;
+  sane->base.parent = sane;
+  EXPECT_EQ(chain_mask(*sane), nullptr);
+  sane->base.parent = sane_parent;
+
+  /* And a branch that never meets the cycle is unaffected — the guard is a property of the walk, not
+   * of the mesh. */
+  ASSERT_NE(chain_mask(*sane), nullptr);
+  EXPECT_EQ(mask_value_at(*chain_mask(*sane), 0), 200);
+
+  /* Restored so the fixture tears a well-formed tree down. */
+  outer->base.parent = outer_parent;
+  inner->base.parent = inner_parent;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name REC exemption over a live tree (#rec_exempt_set)
+ *
+ * The companion to the #SCULPT_LAYER_REC_EXEMPT cases in `sculpt_layers_mask_test.cc`, which pin
+ * what the composite does once the bit is set. What is pinned here is the setter: *which* node
+ * carries the bit, which needs a #Mesh with a real layer tree.
+ * \{ */
+
+static bool is_rec_exempt(const SculptLayer &layer)
+{
+  return (layer.base.flag & SCULPT_LAYER_REC_EXEMPT) != 0;
+}
+
+TEST_F(sculpt_layers_tree, rec_exempt_set_moves_the_single_bit_and_reports_the_change)
+{
+  /* At most one exempt layer in the tree, at any depth, and a `changed` return that says whether a
+   * caller holding a composed surface has to recompose it. That return is load-bearing rather than
+   * informational: the recompose is conditional on it (see #rec_exempt_set's contract), so a setter
+   * that always answered true would recompose the mesh on every idle refresh, and one that always
+   * answered false would leave a surface composed under the wrong masks on screen. */
+  SculptLayer *a = add(*mesh, "A", SCULPT_LAYER_DOMAIN_VERT, 0);
+  SculptLayer *b = add(*mesh, "B", SCULPT_LAYER_DOMAIN_VERT, 0);
+  SculptLayerGroup *folder = group_add(*mesh, "Folder", 0);
+  ASSERT_NE(folder, nullptr);
+  SculptLayer *nested = add(*mesh, "Nested", SCULPT_LAYER_DOMAIN_VERT, 0);
+  node_move_into(*mesh, nested->base, *folder, nullptr);
+
+  ASSERT_FALSE(is_rec_exempt(*a));
+  ASSERT_FALSE(is_rec_exempt(*b));
+  ASSERT_FALSE(is_rec_exempt(*nested));
+
+  /* Armed on a layer one folder down, which a walk over the root's own children would never reach.
+   * Doing this first is deliberate: it is also what leaves the bit somewhere only the recursive walk
+   * can clear it from, for the assertion after next. */
+  EXPECT_TRUE(rec_exempt_set(*mesh, nested));
+  EXPECT_TRUE(is_rec_exempt(*nested));
+  EXPECT_FALSE(is_rec_exempt(*a));
+  EXPECT_FALSE(is_rec_exempt(*b));
+
+  /* Idempotent, and says so. */
+  EXPECT_FALSE(rec_exempt_set(*mesh, nested));
+  EXPECT_TRUE(is_rec_exempt(*nested));
+
+  /* Arming a different layer must *clear* the nested one rather than add a second exempt node: two
+   * layers ignoring their masks at once is two layers recording raw deltas against a surface only
+   * one of them was measured on. */
+  EXPECT_TRUE(rec_exempt_set(*mesh, a));
+  EXPECT_TRUE(is_rec_exempt(*a));
+  EXPECT_FALSE(is_rec_exempt(*nested)) << "the bit was left behind on a layer inside a folder";
+  EXPECT_FALSE(is_rec_exempt(*b));
+
+  /* Null clears throughout — the sculpt-mode entry and exit path. */
+  EXPECT_TRUE(rec_exempt_set(*mesh, nullptr));
+  EXPECT_FALSE(is_rec_exempt(*a));
+  EXPECT_FALSE(is_rec_exempt(*b));
+  EXPECT_FALSE(is_rec_exempt(*nested));
+  /* Nothing left to clear, so nothing changed: this is the overwhelmingly common call, and the one
+   * whose false answer is what makes the caller's recompose conditional. */
+  EXPECT_FALSE(rec_exempt_set(*mesh, nullptr));
+}
+
+TEST_F(sculpt_layers_tree, rec_exempt_set_repairs_a_tree_with_several_exempt_layers)
+{
+  /* The state #rec_exempt_set exists to repair, not merely the state it produces. An undo restore
+   * writes flags straight back into the nodes, so the tree can arrive here with the bit on more than
+   * one layer — or on none while the editor believes one is armed. A setter that returned as soon as
+   * it had written the requested layer's bit would leave every other one exactly as the restore left
+   * it, which is why the loop visits the whole tree. */
+  SculptLayer *a = add(*mesh, "A", SCULPT_LAYER_DOMAIN_VERT, 0);
+  SculptLayer *b = add(*mesh, "B", SCULPT_LAYER_DOMAIN_VERT, 0);
+  SculptLayerGroup *folder = group_add(*mesh, "Folder", 0);
+  ASSERT_NE(folder, nullptr);
+  SculptLayer *nested = add(*mesh, "Nested", SCULPT_LAYER_DOMAIN_VERT, 0);
+  node_move_into(*mesh, nested->base, *folder, nullptr);
+
+  /* Written by hand rather than through the setter, because the setter is precisely what cannot
+   * produce this state. */
+  a->base.flag |= SCULPT_LAYER_REC_EXEMPT;
+  b->base.flag |= SCULPT_LAYER_REC_EXEMPT;
+  nested->base.flag |= SCULPT_LAYER_REC_EXEMPT;
+
+  /* `b` is already exempt, so the requested layer's own bit does not move at all — the true below
+   * can only come from the two the loop had to clear. */
+  EXPECT_TRUE(rec_exempt_set(*mesh, b));
+  EXPECT_TRUE(is_rec_exempt(*b));
+  EXPECT_FALSE(is_rec_exempt(*a));
+  EXPECT_FALSE(is_rec_exempt(*nested));
+
+  /* And the tree is back in a state the setter agrees with. */
+  EXPECT_FALSE(rec_exempt_set(*mesh, b));
+}
+
+TEST_F(sculpt_layers_tree, composite_ignores_every_mask_of_an_armed_rec_layer)
+{
+  /* The invariant BKE_sculpt_layers.hh:911-916 states and nothing pinned: while REC is armed on a
+   * layer, *every* composite ignores that layer's mask and the masks of the folders above it. The
+   * reason is arithmetic rather than stylistic — the brush moves the composed surface by D and the
+   * delta is stored raw, so a masked layer would have to store `D / mask[i]` to reproduce that same
+   * D: unbounded where the mask fades and undefined where it is zero.
+   *
+   * `composite_weights_match_the_shared_mask_authority` drives the same public composite but never
+   * sets the bit, so it says nothing about this. Both masks are uniform, so every value below is one
+   * exact expression and can be compared bit for bit. */
+  const int totelem = 4096;
+  SculptLayerGroup *folder = group_add(*mesh, "Folder", 0);
+  ASSERT_NE(folder, nullptr);
+  folder->base.mask = mask_new(totelem, SCULPT_LAYER_MASK_VERT_BLOCK, 128);
+  ASSERT_NE(folder->base.mask, nullptr);
+  tag_chain_mask_dirty(*folder);
+
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_VERT, totelem);
+  ASSERT_NE(layer, nullptr);
+  node_move_into(*mesh, layer->base, *folder, nullptr);
+  /* A unit offset along z over a zero base, so a composed z reads back as the weight applied. */
+  data_get(*layer).fill(float3(0.0f, 0.0f, 1.0f));
+  layer->base.mask = mask_new(totelem, SCULPT_LAYER_MASK_VERT_BLOCK, 128);
+  ASSERT_NE(layer->base.mask, nullptr);
+
+  /* The exemption drops *masks* and nothing else, so the influence has to be 1 for the composed z to
+   * be the mask weight alone. */
+  ASSERT_EQ(effective(*layer), 1.0f);
+
+  const Array<float3> base(totelem, float3(0.0f));
+  Array<float3> result(totelem);
+
+  /* Disarmed: the pair fold, normalized in one step (see #mask_block_weight). */
+  const float masked = 1.0f * float(128 * 128) * (1.0f / (255.0f * 255.0f));
+  combine_layers_mesh(base, layers(*mesh), result);
+  ASSERT_EQ(result[0].z, masked)
+      << "both masks must apply while REC is disarmed, or the assertions below are vacuous";
+  ASSERT_LT(masked, 1.0f);
+
+  ASSERT_TRUE(rec_exempt_set(*mesh, layer));
+
+  combine_layers_mesh(base, layers(*mesh), result);
+  for (const int i : {0, 1, totelem - 1}) {
+    /* Exactly 1, not `masked` and not the layer's own mask alone: the folder chain has to disappear
+     * with the layer's own mask, which is why #node_mask_for_composite returns before the chain is
+     * even read. A folder mask left in force would scale the recorded delta just as the layer's own
+     * would, reintroducing the division REC exists to avoid. */
+    EXPECT_EQ(result[i].z, 1.0f) << "element " << i;
+  }
+
+  /* The inverse resolves the masks independently, so it has to reach the same answer while the bit
+   * is still set — this is what keeps a REC stroke's flush from denting the base. */
+  Array<float3> derived(totelem);
+  derive_base_mesh(result, layers(*mesh), derived);
+  for (const int i : {0, 1, totelem - 1}) {
+    EXPECT_EQ(derived[i].z, base[i].z) << "element " << i;
+  }
+
+  /* And the cost of breaking the caller-side constraint at BKE_sculpt_layers.hh:936-941, made
+   * concrete: disarming between the forward compose above and its inverse has the base absorb the
+   * whole difference between the unmasked and the masked contribution. Not a display artifact — a
+   * permanent dent, which is why the one caller that must flip the bit flushes first. */
+  ASSERT_TRUE(rec_exempt_set(*mesh, nullptr));
+  derive_base_mesh(result, layers(*mesh), derived);
+  EXPECT_EQ(derived[0].z, 1.0f - masked);
+  EXPECT_NE(derived[0].z, base[0].z);
+}
+
 /** \} */
 
 }  // namespace blender::bke::sculpt_layers::tests

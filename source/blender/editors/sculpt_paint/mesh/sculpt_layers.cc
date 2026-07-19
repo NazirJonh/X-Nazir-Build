@@ -103,9 +103,39 @@ namespace blender::ed::sculpt_paint::layers {
 #define SCULPT_LAYERS_DEBUG_PERF SCULPT_LAYERS_DEBUG_LOG
 #if SCULPT_LAYERS_DEBUG_PERF
 #  define SLP_PERF(...) printf(__VA_ARGS__)
+
+using SlpPerfTimePoint = std::chrono::high_resolution_clock::time_point;
+
+inline SlpPerfTimePoint slp_perf_now()
+{
+  return std::chrono::high_resolution_clock::now();
+}
+
+inline long long slp_perf_us(const SlpPerfTimePoint a, const SlpPerfTimePoint b)
+{
+  return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count();
+}
 #else
 template<typename... Args> inline void slp_perf_discard(const Args &.../*args*/) {}
 #  define SLP_PERF(...) slp_perf_discard(__VA_ARGS__)
+
+/* #SLP_PERF forwards to a *function* in the disabled build, so its arguments are still evaluated:
+ * writing the clock reads inline would leave every `now()` call and every elapsed-time computation
+ * in the hot path with only the `printf` compiled out. Routing the probes through these two helpers
+ * instead collapses them to an empty struct and a constant, which is what actually makes the
+ * disabled build free. Timing probes must go through #slp_perf_now / #slp_perf_us, never
+ * `std::chrono` directly. */
+struct SlpPerfTimePoint {};
+
+inline SlpPerfTimePoint slp_perf_now()
+{
+  return {};
+}
+
+inline long long slp_perf_us(const SlpPerfTimePoint /*a*/, const SlpPerfTimePoint /*b*/)
+{
+  return 0;
+}
 #endif
 
 /* The mesh-invariant validator (#debug_validate_mesh_invariant) is a correctness check, not a perf
@@ -544,6 +574,15 @@ void commit_layers_change(Object &object)
     {
       session_state_ensure(object);
     }
+    /* Pins the ordering the comment above argues for, so a future reshuffle fails loudly instead of
+     * silently denting the base. Moving #rec_exemption_refresh above the capture would leave an
+     * invalid state here on exactly the runs where the capture was needed; when the state was
+     * already valid the capture is skipped and there is nothing for the exemption to corrupt, which
+     * is why the relaxed cases are permitted. */
+    BLI_assert_msg(!ss || ss->deform_modifiers_active || ss->shapekey_active ||
+                       (ss->layers.state_valid &&
+                        ss->layers.mesh_base.size() == mesh_of(object).verts_num),
+                   "The mesh base must be captured before the REC exemption is refreshed");
   }
   /* Before the recompose below, not after: the exemption decides how the recording layer's mask is
    * weighed, so a resync afterwards would leave the freshly composed positions one step stale. Every
@@ -600,11 +639,11 @@ bool flush_pending_multires_base_for_mesh(Main &bmain, Mesh &mesh)
 
 bool flush_interactive_update(Main &bmain, Mesh &mesh)
 {
-  const auto t_start = std::chrono::high_resolution_clock::now();
+  const auto t_start = slp_perf_now();
 
   /* Sculpt mode owns a single active object, so the first object using this mesh in sculpt mode
    * with a live session is the relevant one. */
-  const auto t_search0 = std::chrono::high_resolution_clock::now();
+  const auto t_search0 = slp_perf_now();
   Object *object = nullptr;
   for (Object &ob : bmain.objects) {
     if (ob.data != &mesh.id || !(ob.mode & OB_MODE_SCULPT) || !ob.runtime->sculpt_session) {
@@ -613,7 +652,7 @@ bool flush_interactive_update(Main &bmain, Mesh &mesh)
     object = &ob;
     break;
   }
-  const auto t_search1 = std::chrono::high_resolution_clock::now();
+  const auto t_search1 = slp_perf_now();
   if (!object) {
     return false;
   }
@@ -635,39 +674,36 @@ bool flush_interactive_update(Main &bmain, Mesh &mesh)
    * redraw. This avoids the per-tick #ID_RECALC_GEOMETRY that would rebuild the evaluated mesh and
    * the whole PBVH, which is what makes the influence slider lag on dense meshes. */
   IndexMaskMemory memory;
-  const auto t_leaf0 = std::chrono::high_resolution_clock::now();
+  const auto t_leaf0 = slp_perf_now();
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(*pbvh, memory);
-  const auto t_leaf1 = std::chrono::high_resolution_clock::now();
+  const auto t_leaf1 = slp_perf_now();
   pbvh->tag_positions_changed(node_mask);
-  const auto t_tag1 = std::chrono::high_resolution_clock::now();
+  const auto t_tag1 = slp_perf_now();
   pbvh->update_bounds_mesh(mesh.vert_positions());
   /* Keep the "original" bounds in step with the moved positions; see #recompute_mesh_canonical for
    * why a stale copy tears the next stroke along node borders. Cheap next to the bounds update
    * itself: one copy per node, not per vertex. */
   bke::pbvh::store_bounds_orig(*pbvh);
-  const auto t_bounds_update1 = std::chrono::high_resolution_clock::now();
+  const auto t_bounds_update1 = slp_perf_now();
   mesh.bounds_set_eager(bke::pbvh::bounds_get(*pbvh));
   if (object->runtime->bounds_eval) {
     object->runtime->bounds_eval = mesh.bounds_min_max();
   }
-  const auto t_bounds_block1 = std::chrono::high_resolution_clock::now();
+  const auto t_bounds_block1 = slp_perf_now();
 
   DEG_id_tag_update(&object->id, ID_RECALC_SHADING);
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, &object->id);
 
-  const auto t_end = std::chrono::high_resolution_clock::now();
-  const auto us = [](const auto a, const auto b) {
-    return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count();
-  };
+  const auto t_end = slp_perf_now();
   SLP_PERF("[DEBUG-perf] flush_interactive_update: search=%lldus all_leaf_nodes=%lldus "
            "tag_positions_changed=%lldus update_bounds_mesh=%lldus bounds_block=%lldus "
            "total=%lldus leaf_nodes=%lld verts=%d\n",
-           static_cast<long long>(us(t_search0, t_search1)),
-           static_cast<long long>(us(t_leaf0, t_leaf1)),
-           static_cast<long long>(us(t_leaf1, t_tag1)),
-           static_cast<long long>(us(t_tag1, t_bounds_update1)),
-           static_cast<long long>(us(t_bounds_update1, t_bounds_block1)),
-           static_cast<long long>(us(t_start, t_end)),
+           slp_perf_us(t_search0, t_search1),
+           slp_perf_us(t_leaf0, t_leaf1),
+           slp_perf_us(t_leaf1, t_tag1),
+           slp_perf_us(t_tag1, t_bounds_update1),
+           slp_perf_us(t_bounds_update1, t_bounds_block1),
+           slp_perf_us(t_start, t_end),
            static_cast<long long>(node_mask.size()),
            mesh.verts_num);
   return true;
@@ -979,7 +1015,7 @@ static void base_view_ensure(const Depsgraph &depsgraph, Object &object)
   const char *path_name = "none";
   int grid_layers_summed = 0;
 
-  const auto t0 = std::chrono::high_resolution_clock::now();
+  const auto t0 = slp_perf_now();
   if (pbvh->type() == bke::pbvh::Type::Mesh && ss->shapekey_active) {
     path_name = "mesh-shapekey";
     ss->layers.base_view = base_view_from_layer_data(mesh, mesh.verts_num);
@@ -1032,13 +1068,12 @@ static void base_view_ensure(const Depsgraph &depsgraph, Object &object)
     ss->layers.base_view = std::move(total);
   }
   base_view_node_offset_bounds_ensure(depsgraph, object);
-  const auto t1 = std::chrono::high_resolution_clock::now();
+  const auto t1 = slp_perf_now();
   SLP_PERF("[DEBUG-perf] base_view_ensure: path=%s %zu elems grid_layers_summed=%d in %lld us\n",
            path_name,
            size_t(ss->layers.base_view.size()),
            grid_layers_summed,
-           static_cast<long long>(
-               std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()));
+           slp_perf_us(t0, t1));
 
 #if SCULPT_LAYERS_DEBUG_PERF
   /* One-shot census of the tree the composite is built from: how many layers in total, and the
@@ -1320,7 +1355,7 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
   Mesh &mesh = mesh_of(object);
 
-  const auto t_rec_end_start = std::chrono::high_resolution_clock::now();
+  const auto t_rec_end_start = slp_perf_now();
 
   /* The base view is only valid for the duration of one stroke (the stroke changes the base, and
    * for multires the tangent frames with it). */
@@ -1348,9 +1383,7 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
       debug_validate_mesh_invariant(object, "stroke_end_base");
     }
     SLP_PERF("[DEBUG-perf] stroke_record_end: REC=off mesh base-fold in %lld us\n",
-             static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                        std::chrono::high_resolution_clock::now() - t_rec_end_start)
-                                        .count()));
+             slp_perf_us(t_rec_end_start, slp_perf_now()));
     return;
   }
 
@@ -1400,10 +1433,7 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
       subdiv_ccg.dirty.coords = false;
       SLP_PERF("[DEBUG-perf] stroke_record_end: REC=on multires reshape %d touched grids in %lld us\n",
                touched_num,
-               static_cast<long long>(
-                   std::chrono::duration_cast<std::chrono::microseconds>(
-                       std::chrono::high_resolution_clock::now() - t_rec_end_start)
-                       .count()));
+               slp_perf_us(t_rec_end_start, slp_perf_now()));
     }
     else if (pbvh->type() == bke::pbvh::Type::Mesh) {
       /* Mesh: #data is accumulated per dab by #PositionDeformData::deform. Record the per-vertex
@@ -1500,10 +1530,7 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
       debug_validate_mesh_invariant(object, "stroke_end_rec");
       SLP_PERF("[DEBUG-perf] stroke_record_end: REC=on mesh recorded %d changed verts in %lld us\n",
                out,
-               static_cast<long long>(
-                   std::chrono::duration_cast<std::chrono::microseconds>(
-                       std::chrono::high_resolution_clock::now() - t_rec_end_start)
-                       .count()));
+               slp_perf_us(t_rec_end_start, slp_perf_now()));
     }
   }
 
@@ -2085,7 +2112,7 @@ static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
   undo::push_sculpt_layer_reparent(*ctx.object, std::move(moves));
   /* A move across a folder boundary changes what is visible (the destination folder may be
-   * disabled), so unlike the Этап 1 reorder this is not a UI-only refresh. */
+   * disabled), so unlike a plain same-folder reorder this is not a UI-only refresh. */
   group_cascade_resync_with_undo(*ctx.object, mesh);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
@@ -3605,6 +3632,11 @@ static wmOperatorStatus layer_influence_drag_modal(bContext *C, wmOperator *op, 
       break;
     case RIGHTMOUSE:
     case EVT_ESCKEY:
+      /* NOTE: #influence_drag_finish reverts the influence and then still calls #undo::push_end,
+       * so a content-neutral step is left on the stack even though this reports as cancelled.
+       * Deliberate: #push_begin ran in #invoke and the sculpt undo API offers no way to discard an
+       * open step, and leaving it unclosed would corrupt the stack. Reporting #OPERATOR_FINISHED
+       * instead would be worse — callers and macros would read Escape as a confirm. */
       influence_drag_finish(C, op, true);
       return OPERATOR_CANCELLED;
     default:

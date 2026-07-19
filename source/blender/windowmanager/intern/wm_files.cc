@@ -2049,6 +2049,17 @@ static ImBuf *blend_file_thumb_from_camera(const bContext *C,
 
 bool write_crash_blend()
 {
+  /* NOTE: Deliberately *not* bracketed by a #MaskEditSuspendGuard, unlike every other writer here.
+   * This is a debugging entry point with no in-tree callers, invoked by hand from a debugger on a
+   * process that has already crashed or been stopped. Suspending a session is not a read: it
+   * allocates and it adds/removes a `.sculpt_mask` layer on the mesh in #Main. Doing that here
+   * would perturb the very state the crash file is meant to preserve, and a failure inside it
+   * loses the file altogether — the outcome this function exists to avoid.
+   *
+   * The accepted consequence: if a sculpt layer weight-mask editing session is open, the crash
+   * file carries that layer's weights in place of the user's sculpt mask. That is correct for a
+   * post-mortem snapshot, which should show the session as it actually was, and the file is not
+   * one the user loads and keeps working in. */
   char filepath[FILE_MAX];
 
   STRNCPY(filepath, BKE_main_blendfile_path_from_global());

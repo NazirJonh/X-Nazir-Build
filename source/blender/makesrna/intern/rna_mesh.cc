@@ -3459,6 +3459,9 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
   prop = RNA_def_property(srna, "lock", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_LOCKED);
   RNA_def_property_ui_text(prop, "Lock", "Protect this layer from being recorded into");
+  /* Notifier only, as for #SculptLayerGroup.color_tag: the lock state changes what the sculpt layer
+   * list draws but nothing that is evaluated, so there is no update callback to run. */
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
 
   prop = RNA_def_property(srna, "domain", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "domain");
@@ -3479,6 +3482,9 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_SELECTED);
   RNA_def_property_ui_text(
       prop, "Select", "Sculpt layer selection state, used for drag and drop reordering");
+  /* Notifier only: selection is a list-drawing concern and contributes nothing to the evaluated
+   * shape. Same reasoning as #SculptLayerGroup.color_tag. */
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
 
   /* Read-only, and with no update callback: both answer questions about state the mask operators
    * own, so there is nothing for a write or a re-evaluation to do here. Mirrors #is_valid. */
@@ -3539,8 +3545,11 @@ static void rna_def_sculpt_layer_group(BlenderRNA *brna)
   /* No setter: a bare flag write would bypass #resync_group_state and leave every descendant
    * layer's #SCULPT_LAYER_GROUP_HIDDEN bit out of sync with the tree, and it would not push the
    * sculpt undo step the cascade needs. #SCULPT_OT_layer_group_toggle_visibility is the only path. */
-  RNA_def_property_ui_text(
-      prop, "Enabled", "Show the sculpt layers inside this group and its subgroups");
+  RNA_def_property_ui_text(prop,
+                           "Enabled",
+                           "Show the sculpt layers inside this group and its subgroups. Read-only: "
+                           "toggling must cascade to every nested layer, so use the "
+                           "sculpt.layer_group_toggle_visibility operator instead");
 
   prop = RNA_def_property(srna, "color_tag", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "base.color_tag");
@@ -3557,6 +3566,8 @@ static void rna_def_sculpt_layer_group(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_SELECTED);
   RNA_def_property_ui_text(
       prop, "Select", "Sculpt layer group selection state, used for drag and drop reordering");
+  /* Notifier only, matching the sibling #color_tag and #SculptLayer.select. */
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
 
   prop = RNA_def_property(srna, "is_expanded", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_EXPANDED);

@@ -21,6 +21,7 @@
 #include "BKE_node.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_report.hh"
+#include "BKE_sculpt_layers.hh"
 
 #include "BLO_readfile.hh"
 
@@ -165,6 +166,21 @@ static wmOperatorStatus node_clipboard_copy_exec(bContext *C, wmOperator *op)
   Main *bmain = CTX_data_main(C);
   SpaceNode *snode = CTX_wm_space_node(C);
   bNodeTree *node_tree = snode->edittree;
+
+  /* Park any open sculpt layer weight-mask editing session for the duration. Narrower than the
+   * outliner and 3D viewport copy paths, but reachable the same way: an ID referenced by a copied
+   * node (an Object socket, an Object Info node) is added below with #ADD_DEPENDENCIES, which pulls
+   * in its Mesh — and that Object may be the one in sculpt mode, since the poll only asks for a node
+   * editor. Without this the buffer would carry a layer's weight map masquerading as the user's
+   * sculpt mask. Scoped over the #id_add calls: the copies are taken there, not at write time. */
+  const bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard{*bmain};
+  if (mask_edit_guard.suspend_refused()) {
+    BKE_report(op->reports,
+               RPT_WARNING,
+               "A sculpt layer mask session could not be suspended: any mesh copied as a node "
+               "dependency carries the layer's mask weights in place of the sculpt mask. Close the "
+               "mask session and repaint the sculpt mask");
+  }
 
   PartialWriteContext copy_buffer{*bmain};
   bNodeTree *copy_tree = reinterpret_cast<bNodeTree *>(

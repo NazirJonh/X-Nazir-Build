@@ -58,6 +58,91 @@ TEST(sculpt_layers_mask, copy_is_deep)
   mask_free(dst);
 }
 
+/**
+ * The three block tables #mask_copy allocates, per block. Spelled from the element types rather than
+ * as `6`, since that is what the accounting has to track if a table's type ever changes.
+ */
+static constexpr int64_t mask_per_block_bytes = int64_t(sizeof(int8_t) + sizeof(uint8_t) +
+                                                       sizeof(int));
+
+TEST(sculpt_layers_mask, size_in_bytes_counts_what_a_copy_allocates)
+{
+  /* The undo system charges a captured mask against its memory budget with this (sculpt_undo.cc:1730,
+   * 1905, 1914), and what an undo step actually holds is a #mask_copy. So this has to count the copy's
+   * allocations — the struct, the three per-block tables, and the dense payload — and not, say,
+   * #totelem, which for a uniform mask is arbitrarily large while the copy costs nothing per element.
+   * Undercounting here does not misreport a number in a panel: it lets the undo stack grow past the
+   * user's memory limit before the eviction pass notices.
+   *
+   * A uniform mask is the case where the two spellings diverge most: 10000 elements, zero bytes of
+   * payload. */
+  SculptLayerMask *uniform = mask_new(10000, SCULPT_LAYER_MASK_VERT_BLOCK, 255);
+  ASSERT_EQ(uniform->blocks_num, 3);
+  ASSERT_EQ(uniform->data_num, 0);
+  EXPECT_EQ(mask_size_in_bytes(*uniform),
+            int64_t(sizeof(SculptLayerMask)) + 3 * mask_per_block_bytes);
+  mask_free(uniform);
+
+  /* One dense block and one uniform: the payload term appears, and it is sized by #data_num rather
+   * than by #totelem — the uniform block stores nothing. */
+  Array<float> dense(8192, 1.0f);
+  dense[10] = 0.0f;
+  SculptLayerMask *mixed = mask_compress(dense, SCULPT_LAYER_MASK_VERT_BLOCK);
+  ASSERT_NE(mixed, nullptr);
+  ASSERT_EQ(mixed->blocks_num, 2);
+  ASSERT_EQ(mixed->data_num, SCULPT_LAYER_MASK_VERT_BLOCK);
+  EXPECT_EQ(mask_size_in_bytes(*mixed),
+            int64_t(sizeof(SculptLayerMask)) + 2 * mask_per_block_bytes +
+                int64_t(SCULPT_LAYER_MASK_VERT_BLOCK));
+  mask_free(mixed);
+}
+
+TEST(sculpt_layers_mask, size_in_bytes_tracks_a_block_going_dense)
+{
+  /* The accounting has to move when the storage does. Two masks over the same domain, differing only
+   * in that one block is dense in the second: the difference must be exactly that block's payload,
+   * which is the property an implementation that read #totelem (identical in both) would lose. */
+  Array<float> all_uniform(8192, 1.0f);
+  SculptLayerMask *before = mask_compress(all_uniform, SCULPT_LAYER_MASK_VERT_BLOCK);
+  ASSERT_NE(before, nullptr);
+  ASSERT_EQ(before->data_num, 0) << "a fully uniform mask is what this compares against";
+
+  Array<float> one_dense(8192, 1.0f);
+  one_dense[10] = 0.0f;
+  SculptLayerMask *after = mask_compress(one_dense, SCULPT_LAYER_MASK_VERT_BLOCK);
+  ASSERT_NE(after, nullptr);
+  ASSERT_EQ(after->blocks_num, before->blocks_num) << "the domain must be the only thing unchanged";
+  ASSERT_EQ(after->totelem, before->totelem);
+
+  EXPECT_EQ(mask_size_in_bytes(*after) - mask_size_in_bytes(*before),
+            int64_t(SCULPT_LAYER_MASK_VERT_BLOCK));
+
+  mask_free(before);
+  mask_free(after);
+}
+
+TEST(sculpt_layers_mask, size_in_bytes_of_a_neutralized_mask_is_the_struct_alone)
+{
+  /* A mask neutralized by #mask_blend_read describes no blocks and leaves its three tables null, and
+   * #mask_copy carries those nulls over verbatim rather than allocating zero-length arrays. The
+   * per-block and payload terms therefore both vanish, and the answer is the bare struct — no
+   * multiplication by a null table's length, which is the shape that would otherwise have needed its
+   * own branch. */
+  SculptLayerMask *mask = mask_new(10000, SCULPT_LAYER_MASK_VERT_BLOCK, 255);
+  ASSERT_NE(mask, nullptr);
+  /* Only the counts are neutralized here; the arrays stay allocated so #mask_free still owns them,
+   * which is the same treatment `sculpt_layers_tree.composite_ignores_a_mask_describing_no_blocks`
+   * gives it. The accounting must follow the counts, since those are what #mask_copy reads. */
+  const int blocks_num = mask->blocks_num;
+  mask->blocks_num = 0;
+  mask->data_num = 0;
+
+  EXPECT_EQ(mask_size_in_bytes(*mask), int64_t(sizeof(SculptLayerMask)));
+
+  mask->blocks_num = blocks_num;
+  mask_free(mask);
+}
+
 TEST(sculpt_layers_mask, expand_compress_round_trip)
 {
   /* The round trip is what the edit session does on enter and exit, so drift here would corrupt a
@@ -523,9 +608,12 @@ TEST(sculpt_layers_mask, grid_composite_requires_the_grid_area_block_size)
  * needed and no guard is used — the bit lives on each case's own local #SculptLayer and dies with
  * it, which is the whole point of moving it off a process-wide slot.
  *
- * #rec_exempt_set, which decides *which* node carries the bit, needs a #Mesh with a layer tree and
- * is exercised from the tree tests; what is pinned here is what the composite does once the bit is
- * set.
+ * #rec_exempt_set, which decides *which* node carries the bit, needs a #Mesh with a layer tree, so
+ * it is pinned in `sculpt_layers_tree_test.cc` by
+ * `rec_exempt_set_moves_the_single_bit_and_reports_the_change` and
+ * `rec_exempt_set_repairs_a_tree_with_several_exempt_layers`, with
+ * `composite_ignores_every_mask_of_an_armed_rec_layer` driving the real composite over an armed
+ * layer. What is pinned here is what the mask resolution does once the bit is set.
  * \{ */
 
 TEST(sculpt_layers_mask, rec_exemption_drops_the_layers_own_mask)

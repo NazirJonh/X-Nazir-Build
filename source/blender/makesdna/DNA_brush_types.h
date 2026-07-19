@@ -477,7 +477,12 @@ struct Brush {
    * because #MTex is shared with particle systems and line style, which have no use for it. */
   ListBaseT<BrushCurvePatchTextureSlot> curve_patch_texture_slots = {nullptr, nullptr};
   int curve_patch_texture_active_index = 0;
-  char _pad5[4] = {};
+
+  /** When set, committing a Curve Patch (or Roll) edit assigns a new face set to the faces its
+   * relief actually raised. Off by default, which is also what a file written before this field
+   * existed reads back as, so no versioning is required. */
+  char curve_patch_face_set = 0;
+  char _pad5[3] = {};
 
   /** Curve Patch RIBBON mode Start / Middle / End textures, active only when
    * #MTex::curve_patch_ribbon_texture_source is #MTEX_CURVE_PATCH_TEX_MULTI. A null entry leaves its

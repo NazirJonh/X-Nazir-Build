@@ -382,6 +382,7 @@ void extrude_update_status_text(bContext *C, const ExtrudeState &ex)
                                     4 * -1,
                                     B_UNIT_LENGTH,
                                     scene->unit,
+                                    true,
                                     true);
   }
 

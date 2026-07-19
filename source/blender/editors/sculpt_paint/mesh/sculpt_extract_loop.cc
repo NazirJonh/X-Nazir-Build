@@ -6,6 +6,8 @@
  * \ingroup edsculpt
  */
 
+#include <optional>
+
 #include "BKE_context.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_screen.hh"
@@ -115,12 +117,12 @@ static void update_preview(bContext &C, ExtractLoopModalData &data, const float 
     }
   }
 
-  CursorGeometryInfo cgi;
-  if (!cursor_geometry_info_update(&C, &cgi, mval, false)) {
+  const std::optional<CursorGeometryInfo> cgi = cursor_geometry_info_update(&C, mval, false);
+  if (!cgi) {
     return;
   }
   data.initial_hit = true;
-  data.shared.base.hit_location = cgi.location;
+  data.shared.base.hit_location = cgi->location;
 
   data.shared.seed_edge = find_seed_edge_screen_space(data.shared, mval);
   if (!data.shared.seed_edge) {

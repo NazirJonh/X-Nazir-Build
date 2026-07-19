@@ -11,6 +11,8 @@
  * the loop walker, reusing the shared #extract scaffolding.
  */
 
+#include <optional>
+
 #include "BKE_context.hh"
 #include "BKE_object.hh"
 
@@ -131,11 +133,11 @@ void extract_region_hover_update(bContext *C,
   state.shared.preview_faces.clear();
   state.seed_face_index = -1;
 
-  CursorGeometryInfo cgi;
-  if (!cursor_geometry_info_update(C, &cgi, mval, false)) {
+  const std::optional<CursorGeometryInfo> cgi = cursor_geometry_info_update(C, mval, false);
+  if (!cgi) {
     return;
   }
-  state.shared.hit_location = cgi.location;
+  state.shared.hit_location = cgi->location;
 
   BMFace *seed = find_seed_face(state.shared, mval);
   select_region(state.shared, state.source, state.mask_threshold, seed);

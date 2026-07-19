@@ -11,6 +11,8 @@
  * output and preview drawing are reused from the shared #extract engine.
  */
 
+#include <optional>
+
 #include "BKE_context.hh"
 #include "BKE_object.hh"
 #include "BKE_paint_bvh.hh"
@@ -93,11 +95,11 @@ static void update_preview(bContext &C, ExtractRegionModalData &data, const floa
   data.shared.preview_faces.clear();
   data.seed_face = nullptr;
 
-  CursorGeometryInfo cgi;
-  if (!cursor_geometry_info_update(&C, &cgi, mval, false)) {
+  const std::optional<CursorGeometryInfo> cgi = cursor_geometry_info_update(&C, mval, false);
+  if (!cgi) {
     return;
   }
-  data.shared.hit_location = cgi.location;
+  data.shared.hit_location = cgi->location;
 
   data.seed_face = find_seed_face(data.shared, mval);
   select_region(data.shared, data.source, data.mask_threshold, data.seed_face);

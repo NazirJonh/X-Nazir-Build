@@ -11,6 +11,8 @@
  * refresh) lives in the shared #extract layer.
  */
 
+#include <optional>
+
 #include "BKE_context.hh"
 #include "BKE_object.hh"
 
@@ -163,11 +165,11 @@ void extract_loop_hover_update(bContext *C,
     }
   }
 
-  CursorGeometryInfo cgi;
-  if (!cursor_geometry_info_update(C, &cgi, mval, false)) {
+  const std::optional<CursorGeometryInfo> cgi = cursor_geometry_info_update(C, mval, false);
+  if (!cgi) {
     return;
   }
-  state.shared.base.hit_location = cgi.location;
+  state.shared.base.hit_location = cgi->location;
 
   state.shared.seed_edge = find_seed_edge_screen_space(state.shared, mval);
   if (!state.shared.seed_edge) {

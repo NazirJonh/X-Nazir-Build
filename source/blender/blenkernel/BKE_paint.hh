@@ -8,6 +8,7 @@
  * \ingroup bke
  */
 
+#include <string>
 #include <variant>
 
 #include "BLI_array.hh"
@@ -501,6 +502,17 @@ struct SculptLayerMaskEdit {
    * with the rest of the session on close.
    */
   bool suspend_refusal_reported = false;
+  /**
+   * Idname of the 3D viewport's active tool as it was when the session opened, empty when it could
+   * not be read (no viewport on screen).
+   *
+   * Restored on exit only if the active tool is still `builtin_brush.mask`: a user who switched
+   * tools deliberately inside the session has made a choice that closing the session must not undo.
+   *
+   * The tool is the *only* thing the session parks. Entering also disarms REC, but that is not put
+   * back on exit: arming carries invariants and an undo record that only its operator can supply.
+   */
+  std::string saved_tool_id;
 };
 
 struct SculptSession : NonCopyable, NonMovable {

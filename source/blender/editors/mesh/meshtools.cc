@@ -941,7 +941,13 @@ static wmOperatorStatus mesh_reorder_vertices_spatial_exec(bContext *C, wmOperat
   Mesh *mesh = id_cast<Mesh *>(ob->data);
   Scene *scene = CTX_data_scene(C);
 
-  if (ob->mode == OB_MODE_SCULPT && mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) {
+  /* Asked of the live session rather than of #ME_SCULPT_DYNAMIC_TOPOLOGY: the flag is only a
+   * request, and entering sculpt mode can leave it set while skipping dyntopo (see
+   * #object_sculpt_mode_enter, which does so for un-baked sculpt layers). Reading the flag would
+   * refuse here naming a dyntopo session that is not running. */
+  if (ob->mode == OB_MODE_SCULPT && ob->runtime->sculpt_session != nullptr &&
+      ob->runtime->sculpt_session->bm != nullptr)
+  {
     /* Dyntopo not supported. */
     BKE_report(op->reports, RPT_INFO, "Not supported in dynamic topology sculpting");
     return OPERATOR_CANCELLED;

@@ -236,11 +236,22 @@ static wmOperatorStatus symmetrize_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  /* A weight-mask editing session must be refused in its own right, not left to the bake check
+   * below: #destructive_edit_check counts *layers* (see #bke::sculpt_layers::layers, which never
+   * collects folders), while a session can be anchored on a folder — including an empty one. On a
+   * mesh carrying no layers at all, an empty folder holding a mask therefore passes the bake check
+   * while a session is open, and the changed element count then sends #mask_edit_end down its
+   * destructive branch, which removes the user's own `.sculpt_mask` for good. Left un-gated by
+   * `ss.bm`: a session cannot legitimately exist under dyntopo, and refusing is the safe answer if
+   * one somehow does. */
+  if (layers::mask_edit_refuse_deform(ob, op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
+
   /* Mirroring changes the element count, which leaves every sculpt layer describing a domain that no
-   * longer exists — the same reason trim, dyntopo and the remesh operators refuse. Covers an open
-   * weight-mask editing session as a consequence: a session cannot exist without a layer to hold it.
-   * Conditioned on `!ss.bm` exactly as #sculpt_dyntopo.cc's own check is: under dyntopo the live
-   * geometry is the BMesh and the stored layers do not describe it. */
+   * longer exists — the same reason trim, dyntopo and the remesh operators refuse. Conditioned on
+   * `!ss.bm` exactly as #sculpt_dyntopo.cc's own check is: under dyntopo the live geometry is the
+   * BMesh and the stored layers do not describe it. */
   if (!ss.bm && !layers::destructive_edit_check(*id_cast<const Mesh *>(ob.data), op->reports)) {
     return OPERATOR_CANCELLED;
   }
@@ -459,7 +470,23 @@ void object_sculpt_mode_enter(Main &bmain,
 
   /* Check dynamic-topology flag; re-enter dynamic-topology mode when changing modes,
    * As long as no data was added that is not supported. */
-  if (mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) {
+  /* A saved file can pair the dyntopo flag with un-baked sculpt layers, a combination
+   * #sculpt_dynamic_topology_toggle_exec refuses to create interactively. Entering sculpt mode must
+   * still succeed, so only dyntopo is skipped here, and #ME_SCULPT_DYNAMIC_TOPOLOGY is deliberately
+   * left set: the obstruction is temporary — baking the layers lifts it — and quietly rewriting DNA
+   * during a mode switch would cost the user a saved setting for a reason never shown to them.
+   * Unlike the unsupported-data cases below, this is not overridable by \a force_dyntopo, which
+   * exists to push past attribute warnings rather than past data that dyntopo would silently ignore:
+   * under a BMesh every layer turns stale and each consumer skips it. */
+  const bool layers_block_dyntopo = (mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) &&
+                                    !layers::destructive_edit_check(*mesh, nullptr);
+  if (layers_block_dyntopo) {
+    /* Reported here rather than by #destructive_edit_check, whose message names a destructive mesh
+     * edit — the user only switched modes, and nothing in that text would connect the refusal to
+     * dyntopo. */
+    BKE_report(reports, RPT_INFO, "Dynamic Topology disabled: bake the sculpt layers first");
+  }
+  if ((mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) && !layers_block_dyntopo) {
     MultiresModifierData *mmd = BKE_sculpt_multires_active(&scene, &ob);
 
     const char *message_unsupported = nullptr;
@@ -644,9 +671,13 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
     BKE_paint_brushes_validate(&bmain, &ts.sculpt->paint);
 
     if (ob.mode & mode_flag) {
-      Mesh *mesh = id_cast<Mesh *>(ob.data);
-      /* Dyntopo adds its own undo step. */
-      if ((mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) == 0) {
+      /* Dyntopo adds its own undo step. Asked of the live session rather than of
+       * #ME_SCULPT_DYNAMIC_TOPOLOGY: the flag is only a request. #object_sculpt_mode_enter leaves it
+       * set while skipping dyntopo when un-baked sculpt layers block it, so the flag no longer
+       * answers "did dyntopo actually turn on" — and trusting it there would skip this push as well,
+       * leaving the mode switch with no sculpt undo step at all. */
+      const SculptSession *ss = ob.runtime->sculpt_session;
+      if (ss == nullptr || ss->bm == nullptr) {
         /* Without this the memfile undo step is used,
          * while it works it causes lag when undoing the first undo step, see #71564. */
         wmWindowManager *wm = CTX_wm_manager(C);

@@ -67,6 +67,41 @@ class Sculpts : Overlay {
     float face_set_opacity = show_face_set_ ? state.overlay.sculpt_mode_face_sets_opacity : 0.0f;
     float mask_opacity = show_mask_ ? state.overlay.sculpt_mode_mask_opacity : 0.0f;
 
+    /* Black reproduces the previous look exactly: `mix(float3(1), float3(0), a)` is `1 - a`, which
+     * is the formula this overlay used before the tint existed. So the ordinary sculpt mask is
+     * unchanged and no blend state had to move. */
+    float3 mask_tint = float3(0.0f);
+    if (state.object_active != nullptr && state.object_active->runtime != nullptr) {
+      /* #Object::runtime and #bke::ObjectRuntime::sculpt_session are both plain pointers in this
+       * fork (see `BKE_object_types.hh`), so no `.get()` here. `state.object_active` is the
+       * original object (`BKE_view_layer_active_object_get()` returns `base->object`), but the
+       * depsgraph copies the session pointer verbatim onto the evaluated object during eval
+       * (`deg_eval_copy_on_write.cc`), so both objects share the exact same #SculptSession and
+       * reading it here sees the same `mask_edit` state that #mesh_sync reads from the evaluated
+       * object. */
+      const SculptSession *ss = state.object_active->runtime->sculpt_session;
+      if (ss != nullptr && ss->layers.mask_edit.node_uid != 0 &&
+          ss->layers.mask_edit.suspend_depth == 0)
+      {
+        /* A layer weight mask is being edited, and the buffer this overlay is reading holds that
+         * layer's weights rather than the user's own mask. Cool tint so the two modes cannot be
+         * mistaken for each other. Multiplicative blending can only darken, so this reads as a
+         * blue darkening rather than as a blue glow.
+         *
+         * No channel is left at 1.0. A channel at full strength is never darkened at all, so a
+         * tint of pure blue would go invisible on a blue surface — exactly where the mask still
+         * has to be read. Holding blue just below 1.0 keeps a floor of darkening on every
+         * material while the hue stays unmistakably cool.
+         *
+         * #suspend_depth is what makes the second sentence true rather than merely likely: a
+         * suspended session has the *user's* mask back in the live buffer with its own weights
+         * parked, so tinting on #node_uid alone would color the user's mask blue. Not reachable
+         * today — every suspend bracket is a synchronous RAII scope that closes before the redraw
+         * — which is precisely why it is a condition here and not a comment. */
+        mask_tint = float3(0.12f, 0.45f, 0.95f);
+      }
+    }
+
     {
       sculpt_mask_.init();
       sculpt_mask_.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
@@ -78,6 +113,7 @@ class Sculpts : Overlay {
         sub.shader_set(res.shaders->sculpt_mesh.get());
         sub.push_constant("mask_opacity", mask_opacity);
         sub.push_constant("face_sets_opacity", face_set_opacity);
+        sub.push_constant("mask_tint", mask_tint);
         mesh_ps_ = &sub;
       }
       {

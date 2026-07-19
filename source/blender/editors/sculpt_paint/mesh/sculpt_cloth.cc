@@ -2475,8 +2475,8 @@ static wmOperatorStatus sculpt_cloth_filter_invoke(bContext *C,
   }
 
   /* Refused before the undo push below: a filter deforms the surface outright, so by the time
-   * anything could notice it has already been applied. See #mask_edit_refuse_deform_op. */
-  if (layers::mask_edit_refuse_deform_op(op, ob)) {
+   * anything could notice it has already been applied. See #mask_edit_refuse_deform. */
+  if (layers::mask_edit_refuse_deform(ob, op->reports)) {
     return OPERATOR_CANCELLED;
   }
 

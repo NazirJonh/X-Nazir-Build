@@ -2064,10 +2064,20 @@ static void restore_mask_session(bContext *C,
      * the session closed is the only state the rest of the restore can be consistent with. */
     return;
   }
-  if (!layers::mask_edit_begin(*depsgraph, *CTX_data_main(C), object, *node)) {
-    /* Refused rather than failed — REC armed, a domain the session cannot open on. The world stays
-     * consistent (no session, the user's own mask live); only the redo of a session the user opened
-     * by hand is not reproduced, which is a state they can simply re-enter. */
+  /* #mask_edit_enter, not #mask_edit_begin, and this is load-bearing rather than tidiness. REC is
+   * live session state that no undo step captures (see the #rec_exemption_refresh note below), so
+   * decoding a step cannot assume it stands where it did when that step was recorded. The reachable
+   * case: the user closes a session, arms REC — allowed, since the refusal in #layer_toggle_rec_exec
+   * only guards against arming *over* an open session — then presses Ctrl+Z. #mask_edit_begin
+   * refuses outright while REC is armed, so it would silently reopen nothing and leave the undo
+   * state disagreeing with the world. The shared entry disarms REC under the #rec_active_set
+   * contract first, which is the state the recorded step describes anyway. */
+  if (!layers::mask_edit_enter(*depsgraph, *CTX_data_main(C), object, *node)) {
+    /* Refused rather than failed — a stroke still recording, a domain the session cannot open on.
+     * (Not REC being armed: the entry above disarms it, and that disarm is one-way, here as
+     * everywhere else.) The world stays consistent (no session, the user's own mask live); only the
+     * redo of a session the user opened by hand is not reproduced, which is a state they can simply
+     * re-enter. */
     CLOG_WARN(&LOG,
               "Sculpt layer undo: could not reopen the mask editing session on node %d",
               wanted_uid);

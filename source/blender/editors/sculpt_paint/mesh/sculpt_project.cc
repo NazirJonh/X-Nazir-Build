@@ -17,6 +17,8 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "ED_sculpt.hh"
+
 #include "mesh_brush_common.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_gesture.hh"
@@ -243,6 +245,19 @@ static wmOperatorStatus gesture_line_invoke(bContext *C, wmOperator *op, const w
 
 static wmOperatorStatus gesture_line_exec(bContext *C, wmOperator *op)
 {
+  /* Placed here rather than in #gesture_line_invoke because the modal gesture runs this callback to
+   * commit, so this is the single point both entry paths reach the mesh through — and it precedes
+   * the undo push and the deformation that #gesture::apply performs together in #gesture_begin.
+   * Projection consults the mask (see #fill_factor_from_hide_and_mask in the apply functions), so
+   * with a weight-mask session open the result would be shaped by weights the user cannot see and
+   * did not paint, on a deformation that is already applied before anything could notice. See
+   * #mask_edit_refuse_deform. Only the mask session is checked: projection moves positions without
+   * changing the element count, so unbaked layers survive it, exactly as for the mesh and cloth
+   * filters. */
+  if (layers::mask_edit_refuse_deform(*CTX_data_active_object(C), op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
+
   std::unique_ptr<gesture::GestureData> gesture_data = gesture::init_from_line(C, op);
   if (!gesture_data) {
     return OPERATOR_CANCELLED;

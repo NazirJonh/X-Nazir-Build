@@ -22,14 +22,18 @@
 
 #include <climits>
 #include <limits>
+#include <string>
 #include <utility>
 
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BLI_array.hh"
 #include "BLI_index_mask.hh"
+#include "BLI_listbase_iterator.hh"
 #include "BLI_span.hh"
 
 #include "BKE_attribute.hh"
@@ -43,10 +47,13 @@
 #include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_ccg.hh"
 
+#include "ED_sculpt.hh"
+
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "sculpt_intern.hh"
@@ -443,6 +450,29 @@ bool mask_edit_begin(Depsgraph &depsgraph,
   return true;
 }
 
+bool mask_edit_enter(Depsgraph &depsgraph, Main &bmain, Object &object, SculptLayerTreeNode &node)
+{
+  SculptSession *ss = session_of(object);
+  if (ss == nullptr) {
+    return false;
+  }
+  /* Disarmed through #rec_active_set rather than by writing the flag, because the flag has a DNA
+   * mirror (#SCULPT_LAYER_REC_EXEMPT) that decides whether the composite honors this very mask. The
+   * worst case that contract exists for is exactly this one: a node entering a mask edit carries a
+   * weight map by definition, so the protective multires flush is not a theoretical branch here. */
+  rec_active_set(object, false);
+  if (!mask_edit_begin(depsgraph, bmain, object, node)) {
+    /* Left disarmed, even though this is the rollback of a *failed* entry, because the two halves of
+     * #rec_active_set are not inverses of each other: disarming only clears the flag, while arming
+     * pins the active layer to #SCULPT_LAYER_ENABLED with `influence = 1.0f` (see
+     * #layer_toggle_rec_exec). Re-arming here would therefore overwrite an influence the user set
+     * while REC was armed, with no undo record to get it back. Disarming is one-way on every path
+     * for that reason; see the note in #mask_edit_end. */
+    return false;
+  }
+  return true;
+}
+
 /**
  * Close a session that was opened on the mesh (vertex) domain. \a node is null when it was deleted
  * while its mask was being edited.
@@ -585,6 +615,14 @@ void mask_edit_end(Object &object)
     mask_edit_end_mesh(object, *ss, node);
   }
 
+  /* REC is deliberately *not* re-armed here, even though entering the session disarmed it. Arming is
+   * not a flag assignment: #layer_toggle_rec_exec pins the active layer to enabled with
+   * `influence = 1.0`, brackets that in an undo push, and refuses outright when the active layer
+   * sits in a disabled folder — none of which this path can reproduce. The tree can have moved under
+   * the session (a layer or its folder switched off), so replaying the arming from here would pin
+   * state the user just changed, with no undo record and past the refusal that protects
+   * `positions == base + sum(data * effective)`. Leaving REC disarmed costs the user one click
+   * through the operator that owns those invariants. */
   ss->layers.mask_edit = SculptLayerMaskEdit{};
 
   if (node != nullptr) {
@@ -778,12 +816,14 @@ static bool mask_op_refuse_during_session(wmOperator *op,
   return true;
 }
 
-bool mask_edit_refuse_deform_op(wmOperator *op, const Object &object)
+bool mask_edit_refuse_deform(const Object &object, ReportList *reports)
 {
   if (mask_edit_active_uid(object) == 0) {
     return false;
   }
-  BKE_report(op->reports, RPT_ERROR, "Close the sculpt layer mask session to sculpt geometry");
+  if (reports != nullptr) {
+    BKE_report(reports, RPT_ERROR, "Close the sculpt layer mask session to sculpt geometry");
+  }
   return true;
 }
 
@@ -837,16 +877,161 @@ static wmOperatorStatus mask_flood_fill_delegate(bContext *C, const char *mode, 
 /** Register the `node_uid` property every mask operator is addressed by. */
 static void mask_op_properties(wmOperatorType *ot)
 {
-  RNA_def_int(ot->srna,
-              "node_uid",
-              0,
-              0,
-              INT_MAX,
-              "Item ID",
-              "Unique id of the sculpt layer or folder to act on; zero means the active layer",
-              0,
-              INT_MAX);
+  PropertyRNA *prop = RNA_def_int(
+      ot->srna,
+      "node_uid",
+      0,
+      0,
+      INT_MAX,
+      "Item ID",
+      "Unique id of the sculpt layer or folder to act on; zero means the active layer",
+      0,
+      INT_MAX);
+  /* This addresses the operator at one tree row; it is not a setting to carry into the next run.
+   * These operators are #OPTYPE_REGISTER, so without #PROP_SKIP_SAVE the window manager restores
+   * the previous value whenever a caller leaves the property unset — and the panel's own "Add Mask"
+   * button deliberately leaves it unset to mean "the active layer". One invocation from a folder's
+   * context menu, which does set it, would then pin every later invocation to that folder. */
+  RNA_def_property_flag(prop, PropertyFlag(PROP_HIDDEN | PROP_SKIP_SAVE));
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Session UI state
+ * \{ */
+
+/**
+ * Fill `r_tkey` and `r_workspace` for the 3D viewport's tool slot, false when there is no viewport
+ * on screen.
+ *
+ * The key is built by #WM_toolsystem_key_from_context rather than by hand: `bToolKey::mode` for
+ * #SPACE_VIEW3D is an #eContextObjectMode, not an #eObjectMode, and a constant from the wrong
+ * family would silently name a tool slot that does not exist.
+ *
+ * Which viewport is found does not matter. A #bToolRef is stored on the #WorkSpace keyed by
+ * (space type, mode), not per area, so every 3D viewport of a workspace shares one active tool and
+ * yields the same key.
+ */
+static bool view3d_tool_key_get(bContext *C, bToolKey *r_tkey, WorkSpace **r_workspace)
+{
+  bScreen *screen = CTX_wm_screen(C);
+  WorkSpace *workspace = CTX_wm_workspace(C);
+  if (screen == nullptr || workspace == nullptr) {
+    return false;
+  }
+  Main *bmain = CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  if (bmain == nullptr || view_layer == nullptr) {
+    return false;
+  }
+  for (ScrArea &area : screen->areabase) {
+    if (area.spacetype != SPACE_VIEW3D) {
+      continue;
+    }
+    if (!WM_toolsystem_key_from_context(*bmain, scene, view_layer, &area, r_tkey)) {
+      continue;
+    }
+    *r_workspace = workspace;
+    return true;
+  }
+  return false;
+}
+
+/** Idname of the viewport's active tool, empty when it cannot be read. */
+static std::string view3d_tool_id_get(bContext *C)
+{
+  bToolKey tkey;
+  WorkSpace *workspace = nullptr;
+  if (!view3d_tool_key_get(C, &tkey, &workspace)) {
+    return "";
+  }
+  const bToolRef *tref = WM_toolsystem_ref_find(workspace, &tkey);
+  return (tref != nullptr) ? std::string(tref->idname) : std::string("");
+}
+
+/**
+ * Make `tool_id` the viewport's active tool. Failure is ignored by every caller: a mask session is
+ * an edit of data, and neither a missing viewport nor a tool that will not switch is a reason to
+ * refuse it.
+ *
+ * Callable from the Properties editor, which is where the sculpt layer panel lives:
+ * #WM_toolsystem_ref_set_by_id_ex sets the `space_type` operator property explicitly, and
+ * #WM_OT_tool_set_by_id does not consult `context.space_data` once that property is set.
+ */
+static void view3d_tool_id_set(bContext *C, const char *tool_id)
+{
+  bToolKey tkey;
+  WorkSpace *workspace = nullptr;
+  if (!view3d_tool_key_get(C, &tkey, &workspace)) {
+    return;
+  }
+  WM_toolsystem_ref_set_by_id_ex(C, workspace, &tkey, tool_id, false);
+}
+
+/** Idname of the tool a mask edit session activates, and the value the restore keys off. */
+static constexpr const char *mask_tool_id = "builtin_brush.mask";
+
+/**
+ * What the user is told when opening a session disarmed REC.
+ *
+ * Shared by both entry points so the two read alike, and worth saying at all because the disarm is
+ * one-way: arming pins the active layer's influence and carries its own undo record, so
+ * #mask_edit_end cannot replay it and the user has to press REC again themselves.
+ */
+static constexpr const char *rec_disarmed_note =
+    "Layer recording (REC) was turned off and is not turned back on when the mask edit finishes";
+
+/**
+ * Open a mask edit session and put the UI into the state that edit needs: REC disarmed and the Mask
+ * brush active. #mask_edit_enter owns the REC half, one-way on both outcomes; only the tool is this
+ * function's own, because only a #bContext can reach the tool system.
+ *
+ * The tool is switched *after* the session opens, so a refused open leaves the user holding the tool
+ * they had rather than the mask brush of a session that does not exist.
+ */
+static bool mask_edit_enter_ui(bContext *C,
+                               Depsgraph &depsgraph,
+                               Main &bmain,
+                               Object &object,
+                               SculptLayerTreeNode &node)
+{
+  std::string prev_tool_id = view3d_tool_id_get(C);
+  if (!mask_edit_enter(depsgraph, bmain, object, node)) {
+    return false;
+  }
+  /* Non-null: #mask_edit_enter refuses without a session. */
+  SculptSession &ss = *session_of(object);
+
+  /* Never parked when it already *is* the mask tool, which is the self-poisoning case. A session
+   * that closed without passing through #mask_edit_exit_ui — a layer selection, leaving Sculpt
+   * Mode — leaves the mask tool active, so the next entry would park that idname and the restore
+   * below, which fires only while the mask tool is still active, would match itself and put the
+   * user's real tool out of reach for good. An empty parked value means "nothing to restore", which
+   * is the honest answer once the original tool is no longer known. */
+  if (prev_tool_id != mask_tool_id) {
+    ss.layers.mask_edit.saved_tool_id = std::move(prev_tool_id);
+  }
+
+  view3d_tool_id_set(C, mask_tool_id);
+  return true;
+}
+
+void mask_edit_exit_ui(bContext *C, Object &object)
+{
+  SculptSession *ss = session_of(object);
+  if (ss == nullptr || ss->layers.mask_edit.node_uid == 0) {
+    return;
+  }
+  const std::string saved_tool_id = ss->layers.mask_edit.saved_tool_id;
+
+  /* Conditional, unlike REC: a user who picked a different tool during the session made a choice,
+   * and closing the session is not a reason to overrule it. */
+  if (!saved_tool_id.empty() && view3d_tool_id_get(C) == mask_tool_id) {
+    view3d_tool_id_set(C, saved_tool_id.c_str());
+  }
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Add / remove
@@ -877,7 +1062,36 @@ static wmOperatorStatus layer_mask_add_exec(bContext *C, wmOperator *op)
    * invisible — every consumer was already ignoring it. Hence no #commit_layers_change here. */
   ctx.node->mask = bke::sculpt_layers::mask_new(ctx.layout.totelem, ctx.layout.block_size, 255);
   tag_masked_chains_dirty(*ctx.node);
+
+  /* Adding a mask and then editing it is one intention, so the session opens here rather than
+   * making the user find "Edit Mask" as a second step. The session marker rides the same undo step
+   * so that undoing the add also closes the session it opened. */
+  /* Read before the entry below, which disarms it. */
+  const SculptSession *ss = session_of(*ctx.object);
+  const bool rec_was_armed = ss != nullptr && ss->layers.rec_active;
+  const bool entered = mask_edit_enter_ui(
+      C, *ctx.depsgraph, *CTX_data_main(C), *ctx.object, *ctx.node);
+  if (entered) {
+    /* Pushed only on success, and therefore after the open rather than before it. A marker left
+     * behind by a refused open is harmless to undo — nothing to close — but a redo would replay it
+     * and open a session this execution never created. The late push is admissible because
+     * #push_sculpt_layer_mask_session writes two scalars onto the step and reads no layer state, so
+     * unlike #push_sculpt_layer_mask above it has nothing to capture before the mutation. */
+    undo::push_sculpt_layer_mask_session(*ctx.object, ctx.node->uid, true);
+  }
   undo::push_end(*ctx.object);
+
+  if (!entered) {
+    /* The mask itself was added, which is what the operator is named for, so this is a warning
+     * rather than a cancel — cancelling would discard a mask that is on the node. */
+    BKE_report(op->reports, RPT_WARNING, "Added the weight mask, but could not start editing it");
+  }
+  /* Reported on both outcomes, unlike the message above: #mask_edit_enter disarms REC before it can
+   * refuse, so a failed entry costs the user their armed recording just as a successful one does.
+   * Its own report rather than folded into either message, because only this one is conditional. */
+  if (rec_was_armed) {
+    BKE_report(op->reports, RPT_INFO, rec_disarmed_note);
+  }
   mask_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -886,7 +1100,9 @@ void SCULPT_OT_layer_mask_add(wmOperatorType *ot)
 {
   ot->name = "Add Sculpt Layer Mask";
   ot->idname = "SCULPT_OT_layer_mask_add";
-  ot->description = "Give this sculpt layer or folder a per-element weight mask, fully opaque";
+  ot->description =
+      "Give this sculpt layer or folder a per-element weight mask, fully opaque, and where "
+      "possible open it for painting with the mask tools";
   ot->exec = layer_mask_add_exec;
   ot->poll = mask_ops_poll;
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
@@ -1106,6 +1322,8 @@ static wmOperatorStatus layer_mask_edit_toggle_exec(bContext *C, wmOperator *op)
      * and it is not wanted either. Undoing a close reopens the session (see #mask_session_boundary)
      * and expands the very mask this close just stored, which is the state the user left. */
     undo::push_sculpt_layer_mask_session(*ctx.object, ctx.node->uid, false);
+    /* Before #mask_edit_end, which clears the session struct the parked UI state lives on. */
+    mask_edit_exit_ui(C, *ctx.object);
     /* Compresses the painted weights onto the node, puts the user's own sculpt mask back and
      * recomposes the surface itself, so nothing more is needed here. */
     mask_edit_end(*ctx.object);
@@ -1127,13 +1345,6 @@ static wmOperatorStatus layer_mask_edit_toggle_exec(bContext *C, wmOperator *op)
                 open_node ? open_node->name : "");
     return OPERATOR_CANCELLED;
   }
-  if (ss->layers.rec_active || ss->layers.recording) {
-    BKE_report(op->reports,
-               RPT_ERROR,
-               "Recording is armed; turn REC off before editing a weight mask, as a recorded "
-               "stroke ignores the mask");
-    return OPERATOR_CANCELLED;
-  }
   if (ctx.node->uid == 0) {
     BKE_report(op->reports, RPT_ERROR, "Select a sculpt layer or folder first");
     return OPERATOR_CANCELLED;
@@ -1144,26 +1355,44 @@ static wmOperatorStatus layer_mask_edit_toggle_exec(bContext *C, wmOperator *op)
    * replaces a missing or unusable mask with an opaque one, and undoing the open has to be able to
    * put back whatever was there. */
   undo::push_sculpt_layer_mask(*ctx.object, *ctx.node);
-  undo::push_sculpt_layer_mask_session(*ctx.object, ctx.node->uid, true);
-  if (!mask_edit_begin(*ctx.depsgraph, *CTX_data_main(C), *ctx.object, *ctx.node)) {
-    /* Everything this function refuses for was ruled out above, so reaching here means the object
-     * changed under the operator (its session or PBVH went away). The step is closed rather than
-     * abandoned: its payloads only swap the node's mask for an identical value, so restoring it is
-     * a no-op the user cannot see. */
+  /* Read before the entry below, which disarms it. */
+  const bool rec_was_armed = ss->layers.rec_active;
+  if (!mask_edit_enter_ui(C, *ctx.depsgraph, *CTX_data_main(C), *ctx.object, *ctx.node)) {
+    /* The refusals reported above are the ones worth a message of their own; what is left here is a
+     * stroke still recording into a layer (#mask_edit_begin refuses on
+     * #SculptSession::layers::recording, which no poll can rule out because a modal stroke is in
+     * flight) and the object having changed under the operator, its session or PBVH gone. The step
+     * is closed rather than abandoned: its payloads only swap the node's mask for an identical
+     * value, so restoring it is a no-op the user cannot see. */
     undo::push_end(*ctx.object);
     BKE_report(op->reports, RPT_ERROR, "Could not start editing the weight mask");
+    /* Said on the refusal path too: #mask_edit_enter disarms REC before it can refuse, so a failed
+     * open costs the user their armed recording just as a successful one does. */
+    if (rec_was_armed) {
+      BKE_report(op->reports, RPT_INFO, rec_disarmed_note);
+    }
     return OPERATOR_CANCELLED;
   }
+  /* Pushed only on success, and therefore after the open rather than before it, for the reason
+   * #layer_mask_add_exec spells out: a marker left behind by a refused open is harmless to undo, but
+   * a redo would replay it and open a session this execution never created. */
+  undo::push_sculpt_layer_mask_session(*ctx.object, ctx.node->uid, true);
   undo::push_end(*ctx.object);
 
   /* The one place the user is told what a session is, because nothing on screen says it: the mask
    * they paint does not change the surface until this operator is run again. Live preview is a
-   * separate piece of work and this message must not imply it exists. */
+   * separate piece of work and this message must not imply it exists.
+   *
+   * The REC half is named only when it actually happened, because the disarm is silent and one-way:
+   * without it a user who had recording armed would find their next stroke no longer going into the
+   * layer, with nothing having said so. */
   BKE_reportf(op->reports,
               RPT_INFO,
               "Editing the weight mask of '%s'. Paint it with the mask tools; the layer's shape "
-              "updates when you finish the mask edit",
-              ctx.node->name);
+              "updates when you finish the mask edit%s%s",
+              ctx.node->name,
+              rec_was_armed ? ". " : "",
+              rec_was_armed ? rec_disarmed_note : "");
   mask_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }

@@ -1543,6 +1543,38 @@ static bool edit_op_init(bContext *C, wmOperator *op)
 
   BKE_sculpt_update_object_for_edit(depsgraph, ob, false);
 
+  /* Both entry points funnel through here, so gating it once covers `exec` and `invoke` alike. The
+   * checks sit after #BKE_sculpt_update_object_for_edit so the session they query is the live one,
+   * and before the undo pushes in #edit_modify_coordinates and #edit_modify_geometry.
+   *
+   * Only the modes that reach geometry are gated: #EditMode::Grow and #EditMode::Shrink rewrite the
+   * `.sculpt_face_set` attribute alone, leaving positions and topology untouched. */
+  if (ELEM(mode, EditMode::FairPositions, EditMode::FairTangency, EditMode::DeleteGeometry)) {
+    /* Fairing deforms the surface outright, outside any brush stroke, so by the time anything could
+     * notice it has already been applied. A session also leaves recording disarmed (see
+     * #mask_edit_enter), so the deformation would land in the base mesh while the user believes
+     * they are painting a mask. See #mask_edit_refuse_deform.
+     *
+     * #EditMode::DeleteGeometry needs this in addition to the bake check below, not instead of it:
+     * #destructive_edit_check counts *layers* (see #bke::sculpt_layers::layers, which never collects
+     * folders), while a session can be anchored on a folder — including an empty one. On a mesh with
+     * no layers at all, an empty folder holding a mask therefore passes the bake check while a
+     * session is open, and the changed element count then sends #mask_edit_end down its destructive
+     * branch, which removes the user's own `.sculpt_mask` for good. */
+    if (layers::mask_edit_refuse_deform(*ob, op->reports)) {
+      return false;
+    }
+  }
+  if (mode == EditMode::DeleteGeometry) {
+    /* Deleting faces changes the element count, which leaves every sculpt layer describing a domain
+     * that no longer exists — the same reason trim and the remesh operators refuse. Unlike the check
+     * in #sculpt_ops.cc no `!ss.bm` gate is needed: #edit_is_operation_valid above already rejects
+     * this mode for anything but a #bke::pbvh::Type::Mesh. */
+    if (!layers::destructive_edit_check(*id_cast<const Mesh *>(ob->data), op->reports)) {
+      return false;
+    }
+  }
+
   return true;
 }
 

@@ -1229,6 +1229,75 @@ bool rec_exemption_refresh(Object &object)
   return bke::sculpt_layers::rec_exempt_set(mesh, bke::sculpt_layers::active_get(mesh));
 }
 
+void rec_active_set(Object &object, const bool armed)
+{
+  SculptSession *ss = session_of(object);
+  if (ss == nullptr || ss->layers.rec_active == armed) {
+    return;
+  }
+  /* Tested rather than asserted, for the reason #rec_exemption_refresh gives: the session-bearing
+   * exit paths this can be reached from also run for objects that carry no sculpt layer tree. */
+  if (object.type != OB_MESH || object.data == nullptr) {
+    return;
+  }
+  SculptLayer *layer = bke::sculpt_layers::active_get(mesh_of(object));
+
+  /* Does this layer carry any weight map at all — its own or a folder's? Asked through the one
+   * resolver rather than by reading #SculptLayerTreeNode::mask here, so "masked" means exactly what
+   * the composite means by it (staleness, block-size mismatch and all).
+   *
+   * The exemption has to be lifted for the duration of the question: while REC is armed it is
+   * precisely what makes #node_mask_for_composite answer "unmasked", so the disarming half would
+   * always answer no. Restored immediately, and before anything that composes: the call below only
+   * resolves pointers, this runs on the main thread with no evaluation in flight, and both
+   * #session_state_ensure and the multires flush further down measure the layer against the surface
+   * as it stands *now* — either of them seeing a different exemption than the one the live positions
+   * were composed with would dent the base by the difference. */
+  bool layer_masked = false;
+  if (layer != nullptr) {
+    const int flag_before = layer->base.flag;
+    layer->base.flag &= ~SCULPT_LAYER_REC_EXEMPT;
+    layer_masked =
+        bke::sculpt_layers::node_mask_for_composite(*layer, element_count(object)).primary !=
+        nullptr;
+    layer->base.flag = flag_before;
+  }
+
+  /* Multires, and before the exemption flips. The CCG can be holding base edits whose lazy flush
+   * subtracts each layer's contribution with the weights in force at flush time; letting that flush
+   * land after the flip would subtract an unmasked contribution the evaluator had composed masked
+   * and dent the base by the difference. Only reachable for a masked layer, which is why it is not
+   * paid on the (overwhelmingly common) unmasked toggle. */
+  if (layer_masked) {
+    flush_pending_multires_base(object);
+  }
+
+  /* Derive the runtime base from the still-consistent pre-change state. */
+  session_state_ensure(object);
+  /* Captured before the flip rather than after it, so that it measures the pre-toggle contribution
+   * by construction. Reading it afterwards happens to give the same answer only because #effective
+   * consults the layer and never the session, which is not a property this code should depend on. */
+  const float old_eff = layer ? effective(*layer) : 0.0f;
+  ss->layers.rec_active = armed;
+  if (armed && layer) {
+    layer->base.flag |= SCULPT_LAYER_ENABLED;
+    layer->influence = 1.0f;
+  }
+  /* The result is not consulted here, and the condition below is used instead. This is the one site
+   * that flips the bit on purpose, so it nearly always moves — but it only moves the *surface* when
+   * the layer carries a weight map, which #layer_masked answers exactly. Recomposing on the return
+   * value would recompute the whole mesh on every unmasked toggle, which is the common case. */
+  rec_exemption_refresh(object);
+  /* REC pins the layer to enabled + influence 1.0 and, for a masked layer, drops its weight map as
+   * well; either way the composed surface moves, so the positions are brought in sync and the first
+   * recorded stroke starts from the surface the user actually sees. Both halves of the toggle
+   * recompose when a mask is involved — putting the mask back on disarm changes the surface exactly
+   * as much as dropping it did. */
+  if (layer && (effective(*layer) != old_eff || layer_masked)) {
+    commit_layers_change(object);
+  }
+}
+
 void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
 {
   SculptSession *ss = session_of(object);
@@ -1835,6 +1904,8 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
    * mask storage with the user's own mask parked, so every subsequent brush is silently masked by a
    * layer that no longer exists. Closed *before* the payload capture below so the capture takes the
    * settled mask #mask_edit_end just compressed onto the node, rather than the pre-session value. */
+  /* Before the close, which clears the session struct the parked tool idname lives on. */
+  mask_edit_exit_ui(C, *ctx.object);
   mask_edit_end(*ctx.object);
   /* Derive the mesh base from the still-consistent pre-change state. */
   session_state_ensure(*ctx.object);
@@ -2495,6 +2566,8 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
    * mask the user is currently painting: the fold reads the mask off the node
    * (#node_mask_for_composite / #grid_masks_for_composite), and during a session the node still
    * holds the pre-session snapshot while the live edits sit in the standard mask storage. */
+  /* Before the close, which clears the session struct the parked tool idname lives on. */
+  mask_edit_exit_ui(C, *ctx.object);
   mask_edit_end(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
   if (session_uid != 0) {
@@ -2624,6 +2697,8 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
    * and the fold below has to see the mask the user is currently painting. */
   const SculptSession *bake_ss = session_of(*ctx.object);
   const int session_uid = bake_ss ? bake_ss->layers.mask_edit.node_uid : 0;
+  /* Before the close, which clears the session struct the parked tool idname lives on. */
+  mask_edit_exit_ui(C, *ctx.object);
   mask_edit_end(*ctx.object);
 
   const short pre_bake_shapenr = ctx.object->shapenr;
@@ -2906,6 +2981,8 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
    * spelled out in #layer_remove_exec. Closing it also puts the node's weights back on the node,
    * which is what lets #undo::push_sculpt_layer_mask below capture a mask that is not stale by
    * construction. */
+  /* Before the close, which clears the session struct the parked tool idname lives on. */
+  mask_edit_exit_ui(C, *ctx.object);
   mask_edit_end(*ctx.object);
 
   session_state_ensure(*ctx.object);
@@ -3984,6 +4061,8 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
    * #layer_remove_exec for what that state does to every subsequent brush. Closed before the mask
    * report just below as well as before the removal: #mask_edit_end compresses the session's weights
    * back onto the folder, so the report tests the mask the folder really ends up losing. */
+  /* Before the close, which clears the session struct the parked tool idname lives on. */
+  mask_edit_exit_ui(C, *ctx.object);
   mask_edit_end(*ctx.object);
 
   /* The folder's own weight mask attenuates its whole subtree through
@@ -4341,6 +4420,8 @@ static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
   /* This deletes the folder, every nested folder and every layer below it, so an open session on any
    * of them would be orphaned — see #layer_remove_exec. Closed before the payload captures below so
    * each captures the settled mask rather than the pre-session value. */
+  /* Before the close, which clears the session struct the parked tool idname lives on. */
+  mask_edit_exit_ui(C, *ctx.object);
   mask_edit_end(*ctx.object);
 
   /* Derive the mesh base from the still-consistent pre-change state: dropping the layers changes the
@@ -4462,6 +4543,8 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
    * with the mask tools still writing into the layer's mask — and the user's own mask still parked
    * — would be a state with no visible cause. Closed before the undo push below so the step
    * records the settled layer data rather than the borrowed mask storage. */
+  /* Before the close, which clears the session struct the parked tool idname lives on. */
+  mask_edit_exit_ui(C, *ctx.object);
   mask_edit_end(*ctx.object);
   /* Selection must ride on a sculpt undo step: without one, #OPTYPE_UNDO used to push a plain
    * memfile step, and undoing across it between two stroke SCULPT steps corrupted the delta-based
@@ -4556,65 +4639,19 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  /* Does this layer carry any weight map at all — its own or a folder's? Asked through the one
-   * resolver rather than by reading #SculptLayerTreeNode::mask here, so "masked" means exactly what
-   * the composite means by it (staleness, block-size mismatch and all).
-   *
-   * The exemption has to be lifted for the duration of the question: while REC is armed it is
-   * precisely what makes #node_mask_for_composite answer "unmasked", so the disarming half would
-   * always answer no. Restored immediately, and before anything that composes: the call below only
-   * resolves pointers, an operator runs on the main thread with no evaluation in flight, and both
-   * #session_state_ensure and the multires flush further down measure the layer against the surface
-   * as it stands *now* — either of them seeing a different exemption than the one the live positions
-   * were composed with would dent the base by the difference. */
-  bool layer_masked = false;
-  if (layer != nullptr) {
-    const int flag_before = layer->base.flag;
-    layer->base.flag &= ~SCULPT_LAYER_REC_EXEMPT;
-    layer_masked =
-        bke::sculpt_layers::node_mask_for_composite(*layer, element_count(*ctx.object)).primary !=
-        nullptr;
-    layer->base.flag = flag_before;
-  }
-
-  /* Multires, and before the exemption flips. The CCG can be holding base edits whose lazy flush
-   * subtracts each layer's contribution with the weights in force at flush time; letting that flush
-   * land after the flip would subtract an unmasked contribution the evaluator had composed masked
-   * and dent the base by the difference. Only reachable for a masked layer, which is why it is not
-   * paid on the (overwhelmingly common) unmasked toggle. */
-  if (layer_masked) {
-    flush_pending_multires_base(*ctx.object);
-  }
-
-  /* Derive the runtime base from the still-consistent pre-change state, then capture pre-change
-   * layer metadata so Ctrl+Z can revert the enabled/influence normalization. */
-  session_state_ensure(*ctx.object);
+  /* Captured before the flip so Ctrl+Z can revert the enabled/influence normalization that
+   * #rec_active_set applies when arming. Everything else that call does ahead of the normalization
+   * — measuring whether the layer is masked, and the protective multires flush that measurement
+   * gates — reads and writes nothing this push touches, so pushing first cannot change their
+   * outcome; only the normalization has to land after the capture, and it does. */
   if (layer) {
     undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
     undo::push_sculpt_layer_metadata(*ctx.object, layer->base);
   }
-  /* Captured before the flip rather than after it, so that it measures the pre-toggle contribution
-   * by construction. Reading it afterwards happens to give the same answer only because #effective
-   * consults the layer and never the session, which is not a property this code should depend on. */
-  const float old_eff = layer ? effective(*layer) : 0.0f;
-  ss->layers.rec_active = !ss->layers.rec_active;
-  if (ss->layers.rec_active && layer) {
-    layer->base.flag |= SCULPT_LAYER_ENABLED;
-    layer->influence = 1.0f;
-  }
-  /* The result is not consulted here, and the condition below is used instead. This is the one site
-   * that flips the bit on purpose, so it nearly always moves — but it only moves the *surface* when
-   * the layer carries a weight map, which #layer_masked answers exactly. Recomposing on the return
-   * value would recompute the whole mesh on every unmasked toggle, which is the common case. */
-  rec_exemption_refresh(*ctx.object);
-  /* REC pins the layer to enabled + influence 1.0 and, for a masked layer, drops its weight map as
-   * well; either way the composed surface moves, so the positions are brought in sync and the first
-   * recorded stroke starts from the surface the user actually sees. Both halves of the toggle
-   * recompose when a mask is involved — putting the mask back on disarm changes the surface exactly
-   * as much as dropping it did. */
-  if (layer && (effective(*layer) != old_eff || layer_masked)) {
-    commit_layers_change(*ctx.depsgraph, *ctx.object);
-  }
+  /* The whole state change lives there, shared with the mask-editing entry so that both go through
+   * one ordering of the multires flush, the exemption refresh and the recompose. Only the undo
+   * bracket, the refusals above and the notifiers below are this operator's own. */
+  rec_active_set(*ctx.object, !ss->layers.rec_active);
   if (layer) {
     undo::push_end(*ctx.object);
   }

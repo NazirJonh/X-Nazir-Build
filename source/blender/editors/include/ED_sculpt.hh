@@ -182,6 +182,33 @@ bool destructive_edit_check(const Mesh &mesh, ReportList *reports);
  */
 bool rec_exemption_refresh(Object &object);
 
+/**
+ * Refuse (reporting) an action that moves vertices outside the brush stroke path while a weight-mask
+ * editing session is open on \a object. True when it was refused.
+ *
+ * \a reports may be null to skip the message, which is what the mirrored check in a transform's
+ * after-update pass wants: it only needs to know whether the entry point bailed out.
+ *
+ * The reasoning is #mask_edit_blocks_brush's, applied to everything that reaches the surface without
+ * going through a #PaintStroke: the mesh and cloth filters, the transform tools, the line-project
+ * gesture, and the geometry-touching modes of face set editing.
+ *
+ * Two harms, and a caller only has to meet one of them. Anything that consults the mask reads the
+ * *layer's* weights while the user's own mask is parked, so its result is shaped by a mask the user
+ * cannot see and did not paint. And every caller here deforms outright rather than through a stroke,
+ * with recording left disarmed by #mask_edit_enter, so the change lands in the base mesh while the
+ * user believes they are painting a mask — already applied by the time anything could notice. Face
+ * set fairing is the second kind only: it selects by boundary and face-set membership and never
+ * touches the mask.
+ *
+ * Refused rather than closing the session, for the reason #mask_edit_blocks_brush is: ending it
+ * silently would throw away an in-progress mask edit as a side effect of an unrelated action.
+ *
+ * Lives in this header rather than the module-internal `sculpt_intern.hh` because the transform
+ * system calls it from `editors/transform/`.
+ */
+bool mask_edit_refuse_deform(const Object &object, ReportList *reports);
+
 }  // namespace layers
 
 }  // namespace ed::sculpt_paint

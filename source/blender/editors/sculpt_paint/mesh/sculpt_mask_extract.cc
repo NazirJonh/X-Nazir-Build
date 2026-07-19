@@ -447,6 +447,19 @@ static wmOperatorStatus paint_mask_slice_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  /* Slicing rewrites the active object's own mesh (see the #BKE_mesh_nomain_to_mesh below), on both
+   * the "new object" and the in-place paths, so the element count changes either way.
+   *
+   * The session check is needed in addition to the bake check, not instead of it:
+   * #destructive_edit_check counts *layers* (see #bke::sculpt_layers::layers, which never collects
+   * folders), while a session can be anchored on a folder — including an empty one. On a mesh
+   * carrying no layers at all, an empty folder holding a mask therefore passes the bake check while
+   * a session is open, and the changed element count then sends #mask_edit_end down its destructive
+   * branch, which removes the user's own `.sculpt_mask` for good. */
+  if (layers::mask_edit_refuse_deform(ob, op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
+
   if (!layers::destructive_edit_check(*mesh, op->reports)) {
     return OPERATOR_CANCELLED;
   }

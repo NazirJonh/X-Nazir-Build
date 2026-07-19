@@ -2516,7 +2516,7 @@ static wmOperatorStatus sculpt_mesh_filter_start(bContext *C, wmOperator *op)
 
   /* Placed after #BKE_sculpt_update_object_for_edit so the session queried below is the live one.
    * Both the modal (invoke) and the scripted (exec) paths funnel through here. */
-  if (layers::mask_edit_refuse_deform_op(op, ob)) {
+  if (layers::mask_edit_refuse_deform(ob, op->reports)) {
     return OPERATOR_CANCELLED;
   }
 

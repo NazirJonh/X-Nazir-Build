@@ -1096,6 +1096,30 @@ void session_state_ensure(Object &object);
  */
 bool rec_exemption_refresh(Object &object);
 
+/**
+ * Set #SculptSession::layers::rec_active to \a armed, running the whole state change the flag is
+ * part of. A no-op when it already holds that value.
+ *
+ * The single writer of that flag, because it is not a UI toggle: its mirror
+ * #SCULPT_LAYER_REC_EXEMPT decides whether the composite honors the active layer's weight mask, so
+ * flipping the flag by hand moves the composed surface without recomposing it. The order below is
+ * load-bearing and is why this is one function rather than a convention:
+ *
+ * - The "is the active layer masked" question is asked with the exemption lifted, since while REC
+ *   is armed the exemption is precisely what makes #node_mask_for_composite answer "unmasked".
+ * - A masked layer drains the multires base first. The lazy CCG flush subtracts each layer's
+ *   contribution with the weights in force at flush time, so a flush landing after the flip would
+ *   subtract an unmasked contribution the evaluator had composed masked, denting the base by the
+ *   difference — permanently.
+ * - The runtime base is derived from the still-consistent pre-change state, and only then does the
+ *   flag move, the exemption follow it and the surface recompose.
+ *
+ * Arming also pins the active layer to enabled with influence 1.0, which is REC's contract with the
+ * user: what is recorded is what is seen. Undo pushes, notifiers and any refusal to arm belong to
+ * the caller — this function performs a decision that has already been made.
+ */
+void rec_active_set(Object &object, bool armed);
+
 /* Stroke recording into the active layer. */
 void stroke_record_begin(const Depsgraph &depsgraph, Object &object);
 void stroke_record_end(const Depsgraph &depsgraph, Object &object);
@@ -1274,14 +1298,49 @@ bool mask_edit_begin(Depsgraph &depsgraph,
                      SculptLayerTreeNode &node);
 
 /**
+ * Open a session on \a node the way the user's entry points do: disarm REC first (through
+ * #rec_active_set, so the exemption mirror and the composite follow), then #mask_edit_begin.
+ * Returns what #mask_edit_begin returned.
+ *
+ * The disarm is one-way on *both* outcomes, a refused open included. Arming is not the inverse of
+ * disarming: it pins the active layer to enabled with `influence = 1.0f`, so replaying it as a
+ * rollback would silently overwrite an influence the user set, with no undo record. A user who
+ * wants REC back goes through the operator that owns those invariants; see the note in
+ * #mask_edit_end.
+ *
+ * The entry every caller should use, including the undo restore: #mask_edit_begin refuses outright
+ * while REC is armed, and nothing clears REC on the user's behalf anywhere else.
+ */
+bool mask_edit_enter(Depsgraph &depsgraph, Main &bmain, Object &object, SculptLayerTreeNode &node);
+
+/**
  * Close the open mask editing session: compress `.sculpt_mask` back onto the node and restore the
- * user's own mask. A no-op when no session is open, so it is safe on every exit path.
+ * user's own mask. REC is left as it stands, disarmed. A no-op when no session is open, so it is
+ * safe on every exit path.
  *
  * Deliberately takes no #bContext: the paths that must not leave a session open
  * (#BKE_sculptsession_free, a mode or object switch) have none to give. As with #mask_edit_begin
  * the notifier is the caller's to send.
  */
 void mask_edit_end(Object &object);
+
+/**
+ * Put back the viewport tool a mask editing session replaced with the Mask brush, when the user has
+ * not since chosen another one. A no-op when no session is open, so it is safe to call
+ * unconditionally next to #mask_edit_end.
+ *
+ * Must run *before* #mask_edit_end, which clears the session struct the parked idname lives on.
+ *
+ * There is no REC half to undo. Entering a session disarms REC and leaving does not put it back —
+ * arming is a heavyweight operation with its own refusals and its own undo record, so it stays the
+ * operator's to perform; see the note in #mask_edit_end.
+ *
+ * Unlike #mask_edit_end this needs a #bContext, because only a context can reach the tool system.
+ * The exit paths that have none (#BKE_sculptsession_free, a mode switch, an undo restore) therefore
+ * close the session without it and leave the Mask brush active — which #mask_edit_enter_ui accounts
+ * for by refusing to park the mask tool's own idname on the next entry.
+ */
+void mask_edit_exit_ui(bContext *C, Object &object);
 
 /** Uid of the node whose mask is being edited, or 0 when no session is open. */
 int mask_edit_active_uid(const SculptSession &ss);
@@ -1353,24 +1412,8 @@ inline bool mask_edit_blocks_brush(const int mask_edit_uid, const int sculpt_bru
   return mask_edit_uid != 0 && !brush_type_is_attribute_only(sculpt_brush_type);
 }
 
-/**
- * Refuse (reporting) an operator that moves vertices outside the brush stroke path while a
- * weight-mask editing session is open. True when it was refused.
- *
- * The reasoning is #mask_edit_blocks_brush's, applied to the operators that reach the surface
- * without going through a #PaintStroke: the mesh and cloth filters, the trim and line-project
- * gestures, symmetrize, the dyntopo operators. With the user's own mask parked, every one of them
- * reads the *layer's* weights wherever it consults the mask, so the result would be shaped by a mask
- * the user cannot see and did not paint — and unlike a refused brush, a filter has already been
- * applied by the time anything could notice.
- *
- * The topology-changing members are worse still: a changed element count sends #mask_edit_end down
- * its destructive branch, which loses the user's parked mask outright.
- *
- * Refused rather than closing the session, for the reason #mask_edit_blocks_brush is: ending it
- * silently would throw away an in-progress mask edit as a side effect of an unrelated action.
- */
-bool mask_edit_refuse_deform_op(wmOperator *op, const Object &object);
+/* #mask_edit_refuse_deform lives in `ED_sculpt.hh`: the transform system calls it from
+ * `editors/transform/`, which cannot see this module-internal header. */
 
 /**
  * Refuse (reporting) a layer-tree operator whose commit rebuilds the multires CCG while a weight-mask

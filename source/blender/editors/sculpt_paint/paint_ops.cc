@@ -545,6 +545,131 @@ static void BRUSH_OT_stencil_reset_transform(wmOperatorType *ot)
       ot->srna, "mask", false, "Modify Mask Stencil", "Modify either the primary or mask stencil");
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Curve Patch Texture Slots
+ * \{ */
+
+static bool curve_patch_texture_slot_poll(bContext *C)
+{
+  const Paint *paint = BKE_paint_get_active_from_context(C);
+  return paint != nullptr && BKE_paint_brush_for_read(paint) != nullptr;
+}
+
+static wmOperatorStatus curve_patch_texture_slot_add_exec(bContext *C, wmOperator * /*op*/)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = BKE_paint_brush(paint);
+
+  /* `MEM_new` runs the struct's default constructor, so the `weight = 1.0f` DNA member
+   * initializer already applies here -- unlike a C-style zeroing allocation, no explicit
+   * assignment is needed. */
+  BrushCurvePatchTextureSlot *slot = MEM_new<BrushCurvePatchTextureSlot>(__func__);
+  BLI_addtail(&brush->curve_patch_texture_slots, slot);
+  brush->curve_patch_texture_active_index = brush->curve_patch_texture_slots.count() - 1;
+
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+static void BRUSH_OT_curve_patch_texture_slot_add(wmOperatorType *ot)
+{
+  ot->name = "Add Curve Patch Texture";
+  ot->description = "Add a texture slot to the brush's Curve Patch texture list";
+  ot->idname = "BRUSH_OT_curve_patch_texture_slot_add";
+
+  ot->exec = curve_patch_texture_slot_add_exec;
+  ot->poll = curve_patch_texture_slot_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus curve_patch_texture_slot_remove_exec(bContext *C, wmOperator * /*op*/)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = BKE_paint_brush(paint);
+
+  BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(
+      BLI_findlink(&brush->curve_patch_texture_slots, brush->curve_patch_texture_active_index));
+  if (slot == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* The list holds a user on its texture (registered in `brush_foreach_id`), so dropping the slot
+   * must drop that user too -- `BLI_freelinkN` knows nothing about ID reference counts. */
+  if (slot->tex != nullptr) {
+    id_us_min(&slot->tex->id);
+    /* Cleared as well as decremented so the slot never sits in the list holding a pointer it no
+     * longer owns a user on, however briefly. Nothing reads it between here and the free today, but
+     * a future edit that adds a step in between would otherwise inherit a dangling reference. */
+    slot->tex = nullptr;
+  }
+  BLI_freelinkN(&brush->curve_patch_texture_slots, slot);
+  brush->curve_patch_texture_active_index = std::max(
+      0, brush->curve_patch_texture_active_index - 1);
+
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+static void BRUSH_OT_curve_patch_texture_slot_remove(wmOperatorType *ot)
+{
+  ot->name = "Remove Curve Patch Texture";
+  ot->description = "Remove the active texture slot from the brush's Curve Patch texture list";
+  ot->idname = "BRUSH_OT_curve_patch_texture_slot_remove";
+
+  ot->exec = curve_patch_texture_slot_remove_exec;
+  ot->poll = curve_patch_texture_slot_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus curve_patch_texture_slot_move_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = BKE_paint_brush(paint);
+
+  BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(
+      BLI_findlink(&brush->curve_patch_texture_slots, brush->curve_patch_texture_active_index));
+  if (slot == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const int direction = RNA_enum_get(op->ptr, "type");
+  /* `0` is admitted because the `type` enum's DEFAULT is 0 and no item carries that value: running
+   * the operator without setting `type` (F3 search, a bare `bpy.ops` call) would otherwise abort a
+   * debug build. `BLI_listbase_link_move()` early-returns on a zero step. Same reasoning, and the
+   * same admitted value, as `palette_color_move_exec()`. */
+  BLI_assert(ELEM(direction, -1, 0, 1));
+  if (BLI_listbase_link_move(&brush->curve_patch_texture_slots, slot, direction)) {
+    brush->curve_patch_texture_active_index += direction;
+    WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+static void BRUSH_OT_curve_patch_texture_slot_move(wmOperatorType *ot)
+{
+  static const EnumPropertyItem slot_move[] = {
+      {-1, "UP", 0, "Up", ""},
+      {1, "DOWN", 0, "Down", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  ot->name = "Move Curve Patch Texture";
+  ot->description = "Move the active texture slot up or down in the list";
+  ot->idname = "BRUSH_OT_curve_patch_texture_slot_move";
+
+  ot->exec = curve_patch_texture_slot_move_exec;
+  ot->poll = curve_patch_texture_slot_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  ot->prop = RNA_def_enum(ot->srna, "type", slot_move, 0, "Type", "");
+}
+
+/** \} */
+
 /**************************** registration **********************************/
 
 void ED_operatormacros_paint()
@@ -612,6 +737,9 @@ void ED_operatortypes_paint()
   WM_operatortype_append(BRUSH_OT_stencil_control);
   WM_operatortype_append(BRUSH_OT_stencil_fit_image_aspect);
   WM_operatortype_append(BRUSH_OT_stencil_reset_transform);
+  WM_operatortype_append(BRUSH_OT_curve_patch_texture_slot_add);
+  WM_operatortype_append(BRUSH_OT_curve_patch_texture_slot_remove);
+  WM_operatortype_append(BRUSH_OT_curve_patch_texture_slot_move);
   WM_operatortype_append(BRUSH_OT_asset_activate);
   WM_operatortype_append(BRUSH_OT_asset_save_as);
   WM_operatortype_append(BRUSH_OT_asset_edit_metadata);

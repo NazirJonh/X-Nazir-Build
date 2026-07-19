@@ -15,6 +15,8 @@
  * live stroke.
  */
 
+#include <cstdint>
+
 #include "BLI_math_base.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
@@ -133,6 +135,19 @@ struct CurvePatchSpline {
 };
 
 /**
+ * Pick a texture slot for one stamp from a cumulative weight table.
+ *
+ * `weights_cdf` is non-decreasing and its last entry is the total weight. `random01` is a
+ * hash-derived value in `[0, 1]`. Returns the index of the first entry strictly greater than
+ * `random01 * total`, or -1 when the table is empty or its total is not positive -- which is what
+ * makes a list of all-zero weights degrade to the brush's own texture rather than to nothing.
+ *
+ * A slot with zero weight occupies no width in the table and is therefore never returned, which is
+ * what lets the UI disable a slot without deleting it.
+ */
+int curve_patch_stamp_pick_texture(Span<float> weights_cdf, float random01);
+
+/**
  * World-space length onto which one texture tile (`[-1, 1]`) is mapped along the control curve's
  * arc-length, selected by `length_mode` (see #eMTex_CurvePatchLengthMode):
  * - DEFAULT: `min(total_length, 2 * radius_at_s)` — one tile on short curves, radius-tiled on long.
@@ -150,6 +165,55 @@ float curve_patch_texture_tile_span(int length_mode,
                                     float total_length,
                                     float radius_at_s,
                                     bool cyclic = false);
+
+/** Which of the three Ribbon CAPS stretches an arc-length position falls into. */
+enum class CurvePatchTextureZone : int8_t {
+  Start = 0,
+  Middle = 1,
+  End = 2,
+};
+
+struct CurvePatchTextureZoneSample {
+  CurvePatchTextureZone zone = CurvePatchTextureZone::Middle;
+  /** Texture coordinate along the curve, in the same `[-1, 1]`-per-tile domain the relief feeds into
+   * the mapping's size/offset. */
+  float v = 0.0f;
+  /** False for a degenerate zone (a middle squeezed to zero length by two oversized caps); the
+   * relief leaves such a position untouched instead of dividing by zero. */
+  bool valid = true;
+};
+
+/**
+ * Resolve the texture zone and along-curve texture coordinate at arc length `s`.
+ *
+ * With `caps_enabled == false` this returns `{Middle, <the pre-caps formula>, true}` -- including the
+ * cyclic `-1` tile centering and the REPEAT sawtooth wrap -- so the original Ribbon output is
+ * reproduced exactly and the caps feature cannot regress it.
+ *
+ * `cap_start_length` and `cap_end_length` are WORLD-space lengths; the UI stores them in brush
+ * diameters and the caller resolves them. Both are clamped to `>= 0` and, when their sum exceeds
+ * `total_length`, scaled by the same factor so their ratio is preserved and the middle collapses
+ * rather than either cap overrunning the curve. Each cap carries exactly one tile (`v` spans
+ * `[-1, 1]` across it) and never repeats.
+ *
+ * `radius_for_middle_tile` is used ONLY by the middle zone, and only because
+ * #curve_patch_texture_tile_span's DEFAULT mode is radius-driven. The caps deliberately ignore it:
+ * their extent is already fixed in world units by the caller.
+ *
+ * The middle applies `length_mode`/`length_repeat` over the REMAINING span, always as if the curve
+ * were open -- caps sit at the seam of a cyclic curve, so the requirement that the pattern meet
+ * itself across the join no longer applies. The cost is a visible seam for cyclic + REPEAT + CAPS,
+ * which is an accepted trade-off.
+ */
+CurvePatchTextureZoneSample curve_patch_texture_zone_at(float s,
+                                                        float total_length,
+                                                        float radius_for_middle_tile,
+                                                        bool caps_enabled,
+                                                        float cap_start_length,
+                                                        float cap_end_length,
+                                                        int length_mode,
+                                                        int length_repeat,
+                                                        bool cyclic);
 
 /** One texture stamp placed along the control curve in the ribbon's UV space, where `v` is arc
  * length along the curve and `u` is the signed lateral offset from it (both in world units). Used
@@ -170,6 +234,11 @@ struct CurvePatchStamp {
   float angle = 0.0f;
   /** Per-stamp relief strength multiplier in `(0, 1]`. */
   float strength = 1.0f;
+  /** Index into the cache's `stamp_texture_variants`, or -1 when this stamp samples the brush's own
+   * texture (SINGLE mode, an empty list, or a list whose weights all sum to zero). Ghost copies made
+   * by #curve_patch_stamps_add_cyclic_wrap inherit it by whole-struct copy, so a seam stamp shows
+   * the same texture on both sides of the join. */
+  int tex_index = -1;
   /** World-space frame of the stamp, frozen at layout time and used only by the PLANAR projection
    * (#MTEX_CURVE_PATCH_STAMP_PROJ_PLANAR), which reads a vertex's stamp-local coordinates as
    * `dot(co - origin, axis_*)` instead of going through the ribbon's curvilinear `(s, u)`. That is
@@ -203,6 +272,11 @@ struct CurvePatchStamp {
  * With `spline.cyclic`, the step is snapped so a whole number of stamps fits the loop and the final
  * stamp does not land on top of the first at the seam.
  *
+ * `texture_weights_cdf` is the cumulative weight table of the brush's texture list, or empty for the
+ * single-texture case. Each stamp draws its `tex_index` from it through
+ * #curve_patch_stamp_pick_texture on its own hash channel, so the choice is as stable across
+ * re-stamps as every other per-stamp random quantity here.
+ *
  * `r_stamps` is cleared first and comes back sorted by `center_v`.
  */
 void curve_patch_stamps_build(const CurvePatchSpline &spline,
@@ -214,6 +288,7 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
                               float base_angle,
                               float random_angle,
                               uint32_t seed,
+                              Span<float> texture_weights_cdf,
                               Vector<CurvePatchStamp> &r_stamps);
 
 /**

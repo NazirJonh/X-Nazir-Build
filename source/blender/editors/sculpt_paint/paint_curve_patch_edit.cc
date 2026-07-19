@@ -35,6 +35,7 @@
  * `paint_curve_draw.cc`).
  */
 
+#include <cstring>
 #include <optional>
 #include <utility>
 
@@ -43,6 +44,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_index_mask.hh"
+#include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix_types.hh"
@@ -92,6 +94,38 @@
 #include "paint_curve_patch_cache.hh"
 
 namespace blender::ed::sculpt_paint {
+
+/* Cheap order-sensitive digest of a brush's Curve Patch texture list, used only to detect that the
+ * list changed and the patch must be re-stamped. Not a hash with any security or collision
+ * guarantee -- a missed change would merely delay a re-stamp until the next edit. */
+static uint64_t curve_patch_texture_list_digest(const Brush &brush)
+{
+  uint64_t digest = 1469598103934665603ull;
+  /* Range-for, NOT `LISTBASE_FOREACH`: that macro is private to `listbase.cc` in this branch.
+   * `ListBaseT<T>` iterates directly -- see `for (PaletteColor &color : palette->colors)` in
+   * `blenkernel/intern/paint.cc`. */
+  for (const BrushCurvePatchTextureSlot &slot : brush.curve_patch_texture_slots) {
+    digest = (digest ^ uint64_t(uintptr_t(slot.tex))) * 1099511628211ull;
+    uint32_t weight_bits;
+    memcpy(&weight_bits, &slot.weight, sizeof(weight_bits));
+    digest = (digest ^ uint64_t(weight_bits)) * 1099511628211ull;
+  }
+  return digest;
+}
+
+/* Pointer-only counterpart to the digest above, folding in each slot's `tex` pointer but not its
+ * weight. A weight-only edit re-stamps (it changes `curve_patch_texture_list_digest()`) but does
+ * not change WHICH images are sampled, so it must not by itself invalidate `ss.tex_pool` -- this
+ * narrower digest is what the pool-rebuild gate watches instead. Same Horner-style combinator as
+ * above, so a pure slot reorder still changes it. */
+static uint64_t curve_patch_texture_pointer_digest(const Brush &brush)
+{
+  uint64_t digest = 1469598103934665603ull;
+  for (const BrushCurvePatchTextureSlot &slot : brush.curve_patch_texture_slots) {
+    digest = (digest ^ uint64_t(uintptr_t(slot.tex))) * 1099511628211ull;
+  }
+  return digest;
+}
 
 /* NOTE: the active point index lives on `CurvePatchCache`, not here -- the context menu's operators
  * cannot reach a running modal's `op->customdata`. See `CurvePatchCache::active_point`. */
@@ -157,6 +191,19 @@ struct CurvePatchEditOpData {
    * above -- read live, copied into `frozen_params` and re-stamped on change. Seeded at invoke. */
   int last_synced_stamp_mode = -1;
   int last_synced_stamp_projection = -1;
+  /* Multi-texture watch. The list's contents have no single scalar to compare, so two cheap
+   * digests stand in for one: `last_synced_texture_list_digest` folds in both slot pointers and
+   * weights and drives the re-stamp trigger (`multi_texture_changed`); the narrower
+   * `last_synced_texture_pointer_digest` folds in only the pointers and drives the `ImagePool`
+   * rebuild (`texture_identity_changed`) below, which only needs to notice a change to WHICH
+   * images are sampled, not how they are weighted. */
+  int last_synced_stamp_tex_source = -1;
+  int last_synced_ribbon_tex_source = -1;
+  float last_synced_cap_start_length = -1.0f;
+  float last_synced_cap_end_length = -1.0f;
+  uint64_t last_synced_texture_list_digest = 0;
+  uint64_t last_synced_texture_pointer_digest = 0;
+  const void *last_synced_cap_tex[3] = {nullptr, nullptr, nullptr};
   int last_synced_stamp_size_random = -1;
   int last_synced_stamp_strength_random = -1;
   int last_synced_spacing = -1;
@@ -610,6 +657,15 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
       data->last_synced_brush_size = BKE_brush_size_get(&sd.paint, brush);
       data->last_synced_stamp_mode = brush->mtex.curve_patch_stamp_mode;
       data->last_synced_stamp_projection = brush->mtex.curve_patch_stamp_projection;
+      data->last_synced_stamp_tex_source = brush->mtex.curve_patch_stamp_texture_source;
+      data->last_synced_ribbon_tex_source = brush->mtex.curve_patch_ribbon_texture_source;
+      data->last_synced_cap_start_length = brush->curve_patch_cap_start_length;
+      data->last_synced_cap_end_length = brush->curve_patch_cap_end_length;
+      data->last_synced_texture_list_digest = curve_patch_texture_list_digest(*brush);
+      data->last_synced_texture_pointer_digest = curve_patch_texture_pointer_digest(*brush);
+      data->last_synced_cap_tex[0] = brush->curve_patch_tex_start;
+      data->last_synced_cap_tex[1] = brush->curve_patch_tex_middle;
+      data->last_synced_cap_tex[2] = brush->curve_patch_tex_end;
       data->last_synced_stamp_size_random = brush->mtex.curve_patch_stamp_size_random;
       data->last_synced_stamp_strength_random = brush->mtex.curve_patch_stamp_strength_random;
       data->last_synced_spacing = brush->spacing;
@@ -726,6 +782,36 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
        * `frozen_params`. */
       const float stamp_rot = brush->mtex.rot;
       const float stamp_random_angle = brush->mtex.random_angle;
+      /* Multi-texture settings. The relief reads all of them live off the brush and the cache, so
+       * these exist purely to trigger a re-stamp -- nothing is copied into `frozen_params`. */
+      const int stamp_tex_source = brush->mtex.curve_patch_stamp_texture_source;
+      const int ribbon_tex_source = brush->mtex.curve_patch_ribbon_texture_source;
+      const float cap_start_length = brush->curve_patch_cap_start_length;
+      const float cap_end_length = brush->curve_patch_cap_end_length;
+      const uint64_t texture_list_digest = curve_patch_texture_list_digest(*brush);
+      const uint64_t texture_pointer_digest = curve_patch_texture_pointer_digest(*brush);
+      const void *cap_tex[3] = {brush->curve_patch_tex_start,
+                                brush->curve_patch_tex_middle,
+                                brush->curve_patch_tex_end};
+      const bool multi_texture_changed =
+          stamp_tex_source != data.last_synced_stamp_tex_source ||
+          ribbon_tex_source != data.last_synced_ribbon_tex_source ||
+          cap_start_length != data.last_synced_cap_start_length ||
+          cap_end_length != data.last_synced_cap_end_length ||
+          texture_list_digest != data.last_synced_texture_list_digest ||
+          cap_tex[0] != data.last_synced_cap_tex[0] ||
+          cap_tex[1] != data.last_synced_cap_tex[1] ||
+          cap_tex[2] != data.last_synced_cap_tex[2];
+      /* Narrower than `multi_texture_changed` above: true only when the set of sampled IMAGES
+       * changed -- a cap texture reassignment or a list slot added/removed/retargeted/reordered --
+       * as opposed to a cap-length drag or a slot weight edit, which re-stamp but keep sampling the
+       * same images. Drives the `ss.tex_pool` rebuild gate below; a cap-length or weight-only change
+       * must not free/reallocate the pool on every tick of a slider drag. */
+      const bool texture_identity_changed =
+          texture_pointer_digest != data.last_synced_texture_pointer_digest ||
+          cap_tex[0] != data.last_synced_cap_tex[0] ||
+          cap_tex[1] != data.last_synced_cap_tex[1] ||
+          cap_tex[2] != data.last_synced_cap_tex[2];
       const int symm = mesh_symmetry_xyz_get(ob);
       /* Texture + mapping watch (see `CurvePatchEditOpData`): the relief re-reads `brush.mtex` live,
        * so these just need to trigger a re-stamp when they change. */
@@ -766,7 +852,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           spacing != data.last_synced_spacing || jitter != data.last_synced_jitter ||
           jitter_absolute != data.last_synced_jitter_absolute ||
           stamp_rot != data.last_synced_stamp_rot ||
-          stamp_random_angle != data.last_synced_stamp_random_angle)
+          stamp_random_angle != data.last_synced_stamp_random_angle || multi_texture_changed)
       {
         data.last_synced_alpha = alpha;
         data.last_synced_dir_in = dir_in;
@@ -799,6 +885,15 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         data.last_synced_jitter_absolute = jitter_absolute;
         data.last_synced_stamp_rot = stamp_rot;
         data.last_synced_stamp_random_angle = stamp_random_angle;
+        data.last_synced_stamp_tex_source = stamp_tex_source;
+        data.last_synced_ribbon_tex_source = ribbon_tex_source;
+        data.last_synced_cap_start_length = cap_start_length;
+        data.last_synced_cap_end_length = cap_end_length;
+        data.last_synced_texture_list_digest = texture_list_digest;
+        data.last_synced_texture_pointer_digest = texture_pointer_digest;
+        data.last_synced_cap_tex[0] = cap_tex[0];
+        data.last_synced_cap_tex[1] = cap_tex[1];
+        data.last_synced_cap_tex[2] = cap_tex[2];
         patch.frozen_params.stamp_mode = stamp_mode;
         patch.frozen_params.stamp_projection = stamp_projection;
         patch.frozen_params.stamp_size_random = float(stamp_size_random) / 100.0f;
@@ -811,10 +906,14 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         /* The relief samples the texture through `ss.tex_pool`, an `ImagePool` that caches ImBuf
          * handles for the whole sculpt session (`brush_init_tex`, `sculpt.cc`). A changed image --
          * a different Image datablock on the texture, or edited pixels -- would otherwise keep
-         * sampling the old buffer. Rebuild the pool on any texture change so the re-stamp below
-         * picks up the new image. Gated on `tex_changed` so ordinary re-stamps (strength/falloff
-         * drags) keep the pool's caching. */
-        if (tex_changed) {
+         * sampling the old buffer. Rebuild the pool whenever the set of sampled textures' IDENTITY
+         * changes: the brush's own texture (`tex_changed`), or a cap/list texture reassignment
+         * (`texture_identity_changed`, a list/cap counterpart of the same idea). Deliberately NOT
+         * gated on the broader `multi_texture_changed`: a cap-length drag or a slot WEIGHT edit
+         * re-stamps (see `multi_texture_changed` above) but samples the same images as before, so
+         * rebuilding the pool for those would only free and reallocate it needlessly on every tick
+         * of a slider drag. */
+        if (tex_changed || texture_identity_changed) {
           ImagePool *&tex_pool = ob.runtime->sculpt_session->tex_pool;
           if (tex_pool != nullptr) {
             BKE_image_pool_free(tex_pool);

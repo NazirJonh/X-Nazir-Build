@@ -14,11 +14,16 @@
  * re-stamp recompute that uses it.
  */
 
+#include <array>
+
+#include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
 #include "BLI_map.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
+
+#include "DNA_texture_types.h"
 
 #include "BKE_curves.hh"
 
@@ -102,6 +107,44 @@ struct CurvePatchCache {
    * `curve_patch_stamps_build`). PHASE 1's parallel per-vertex walk only reads it. Empty in Ribbon
    * mode. */
   Vector<CurvePatchStamp> stamps;
+
+  /** Resolved texture variants for this restamp: copies of `Brush::mtex` with only `tex` swapped, so
+   * every mapping setting (Size / Offset / Angle / Swap Axis) stays shared. Rebuilt on every restamp
+   * because the texture source toggles are live-synced like `stamp_mode`. Empty in SINGLE mode,
+   * where the relief reads `brush.mtex` directly.
+   *
+   * The `tex` inside a variant is a raw pointer, not a registered ID reference. Safe within
+   * Blender's event model: this array is rebuilt at the top of every restamp from the brush's own
+   * (registered) fields, and a restamp is not interrupted, so there is no window in which a deleted
+   * texture could be read from here.
+   *
+   * #Array rather than #Vector: `MTex` carries #DNA_DEFINE_CXX_METHODS, which DELETES its copy and
+   * move constructors so a DNA struct cannot be duplicated except through the explicit
+   * shallow-copy path. `Vector` relocates its elements when it grows, which needs a move
+   * constructor; `Array` only ever default-constructs in place, so it is the container this type
+   * can actually live in. Sized once per restamp and filled via `dna::shallow_copy()`. */
+  Array<MTex> stamp_texture_variants;
+  /** Cumulative weight table over `stamp_texture_variants`, one entry per variant, non-decreasing.
+   * Empty unless STAMPS + LIST is active with at least one positive weight. */
+  Vector<float> stamp_texture_weights_cdf;
+  /** Ribbon CAPS variants indexed by #CurvePatchTextureZone. An entry with a null `tex` marks a zone
+   * the user left empty; the relief returns no displacement there. Left default-constructed rather
+   * than `= {}`-initialized: `MTex`'s deleted copy assignment (see #DNA_DEFINE_CXX_METHODS) makes
+   * `std::array::fill()` and any copy-based reset ill-formed, so entries are reset element-wise
+   * through `dna::shallow_zero_initialize()` instead. */
+  std::array<MTex, 3> ribbon_zone_variants;
+  /** Whether the Ribbon texture source is MULTI this restamp -- NOT "the caps are being drawn". It
+   * is set purely from `MTex::curve_patch_ribbon_texture_source`, deliberately without also testing
+   * `stamp_mode`, so it is true in Stamps mode too even though Stamps has no caps. Adding that test
+   * would create a second place obliged to stay in sync with the relief's branch selector, which is
+   * exactly the drift `stamp_search_reach` above was burned by. Instead the invariant is one-way:
+   * ONLY the Ribbon branch of `branch_relief()` reads this field (and `ribbon_zone_variants` /
+   * `world_cap_*` with it), and that branch runs only when `stamp_mode` is not STAMPS.
+   *
+   * The two cap lengths are already resolved from brush diameters into world units. */
+  bool caps_enabled = false;
+  float world_cap_start = 0.0f;
+  float world_cap_end = 0.0f;
 
   /** Index into `control_curve` of the point the user last interacted with, or -1 for none. Owned
    * conceptually by the live-edit modal (`SCULPT_OT_curve_patch_edit`), but stored here rather than

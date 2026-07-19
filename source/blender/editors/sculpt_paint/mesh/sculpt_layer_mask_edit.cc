@@ -1298,6 +1298,77 @@ void SCULPT_OT_layer_mask_invert(wmOperatorType *ot)
   mask_op_properties(ot);
 }
 
+static wmOperatorStatus layer_mask_toggle_exec(bContext *C, wmOperator *op)
+{
+  MaskOpContext ctx;
+  if (!mask_op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The row button is only drawn for a node that carries a mask, so this is reachable from a script
+   * or a stale menu alone — reported rather than silently ignored, since "nothing happened" would
+   * otherwise be indistinguishable from a switch that does not work. Add Mask is the way in. */
+  if (ctx.node->mask == nullptr) {
+    BKE_reportf(op->reports, RPT_ERROR, "'%s' carries no weight mask to switch", ctx.node->name);
+    return OPERATOR_CANCELLED;
+  }
+  /* Uid 0 is the root folder, which is never drawn as a row and whose metadata
+   * #undo::push_sculpt_layer_metadata refuses to capture. Guarded here exactly as
+   * #layer_mask_edit_toggle_exec guards it. */
+  if (ctx.node->uid == 0) {
+    BKE_report(op->reports, RPT_ERROR, "Select a sculpt layer or folder first");
+    return OPERATOR_CANCELLED;
+  }
+  /* A session anywhere is refused, not just one on this node: the session is per-object state, and
+   * #commit_layers_change below reaches ID_RECALC_GEOMETRY on the grid domain, which rebuilds the
+   * CCG and discards the session's expanded weights outright. See #mask_op_refuse_during_session. */
+  if (mask_op_refuse_during_session(op, *ctx.object, *ctx.node)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Derive the runtime base from the still-consistent pre-change state, before the bit moves: the
+   * effective mask of a node scales its contribution, so flipping it moves the composed surface.
+   * #mask_op_context_get has already consumed any pending multires base edits for the same reason —
+   * skipping that flush dents the base irreversibly rather than merely leaving it stale. */
+  session_state_ensure(*ctx.object);
+
+  const bool enable = !bke::sculpt_layers::mask_enabled(*ctx.node);
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  /* Captures #SculptLayerTreeNode::flag whole, which is where the bit lives; no undo field of its
+   * own is needed. The matching restore additionally invalidates a folder's chain cache. */
+  undo::push_sculpt_layer_metadata(*ctx.object, *ctx.node);
+  bke::sculpt_layers::mask_enabled_set(*ctx.node, enable);
+  /* A no-op for a layer, whose mask caches nowhere; for a folder this is what makes the change
+   * visible, since #chain_mask would otherwise keep serving the product built a moment ago. */
+  tag_masked_chains_dirty(*ctx.node);
+  commit_layers_change(*ctx.depsgraph, *ctx.object);
+  undo::push_end(*ctx.object);
+  /* Two spellings rather than one format string chosen by a ternary, so both remain extractable for
+   * translation. */
+  if (enable) {
+    BKE_reportf(op->reports, RPT_INFO, "Enabled the weight mask of '%s'", ctx.node->name);
+  }
+  else {
+    BKE_reportf(op->reports, RPT_INFO, "Disabled the weight mask of '%s'", ctx.node->name);
+  }
+  mask_ui_notify(C, *ctx.object);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_mask_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Sculpt Layer Mask";
+  ot->idname = "SCULPT_OT_layer_mask_toggle";
+  /* "Keeping the weights" is the whole difference from Remove Mask, which reads alike in a menu. */
+  ot->description =
+      "Switch this sculpt layer or folder's weight mask on or off, keeping the painted weights";
+  ot->exec = layer_mask_toggle_exec;
+  ot->poll = mask_ops_poll;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
+   * memfile step that does not compose with the stroke SCULPT steps. */
+  ot->flag = OPTYPE_REGISTER;
+  mask_op_properties(ot);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

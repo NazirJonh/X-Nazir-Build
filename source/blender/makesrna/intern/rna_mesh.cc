@@ -501,6 +501,11 @@ static bool rna_SculptLayer_mask_edit_active_get(PointerRNA *ptr)
       ptr, static_cast<const SculptLayer *>(ptr->data)->base);
 }
 
+static bool rna_SculptLayer_mask_enabled_get(PointerRNA *ptr)
+{
+  return bke::sculpt_layers::mask_enabled(static_cast<const SculptLayer *>(ptr->data)->base);
+}
+
 static bool rna_SculptLayerGroup_has_mask_get(PointerRNA *ptr)
 {
   return static_cast<const SculptLayerGroup *>(ptr->data)->base.mask != nullptr;
@@ -510,6 +515,11 @@ static bool rna_SculptLayerGroup_mask_edit_active_get(PointerRNA *ptr)
 {
   return rna_sculpt_layer_node_mask_edit_active(
       ptr, static_cast<const SculptLayerGroup *>(ptr->data)->base);
+}
+
+static bool rna_SculptLayerGroup_mask_enabled_get(PointerRNA *ptr)
+{
+  return bke::sculpt_layers::mask_enabled(static_cast<const SculptLayerGroup *>(ptr->data)->base);
 }
 
 /* A vertex-domain layer keeps the combined mesh positions in sync incrementally, so its influence
@@ -3503,6 +3513,17 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
                            "Editing Mask",
                            "The layer's weight mask is currently being painted with the regular "
                            "mask tools. The layer's shape updates when the edit is finished");
+
+  /* Read-only for the same reason #SculptLayerGroup.enabled is: a bare flag write would skip the
+   * undo push, the folder chain cache invalidation and the recompose the change needs. The operator
+   * is the only writer. */
+  prop = RNA_def_property(srna, "mask_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayer_mask_enabled_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Mask Enabled",
+                           "The layer's weight mask is in force. When off the mask keeps every "
+                           "painted weight but stops attenuating the layer's contribution");
 }
 
 static void rna_def_sculpt_layer_group(BlenderRNA *brna)
@@ -3591,6 +3612,14 @@ static void rna_def_sculpt_layer_group(BlenderRNA *brna)
                            "Editing Mask",
                            "The group's weight mask is currently being painted with the regular "
                            "mask tools. The layers' shape updates when the edit is finished");
+
+  prop = RNA_def_property(srna, "mask_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayerGroup_mask_enabled_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Mask Enabled",
+                           "The group's weight mask is in force. When off the mask keeps every "
+                           "painted weight but stops attenuating the layers inside the group");
 }
 
 static void rna_def_mesh(BlenderRNA *brna)

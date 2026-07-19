@@ -1463,6 +1463,7 @@ void SCULPT_OT_layer_mask_invert(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_clear(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_fill(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_edit_toggle(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_toggle(wmOperatorType *ot);
 void SCULPT_OT_layer_set_influence(wmOperatorType *ot);
 void SCULPT_OT_layer_influence_drag(wmOperatorType *ot);
 void SCULPT_OT_layer_toggle_visibility(wmOperatorType *ot);

@@ -1655,6 +1655,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_clear);
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_fill);
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_edit_toggle);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_toggle);
   WM_operatortype_append(layers::SCULPT_OT_layer_set_influence);
   WM_operatortype_append(layers::SCULPT_OT_layer_influence_drag);
   WM_operatortype_append(layers::SCULPT_OT_layer_toggle_visibility);

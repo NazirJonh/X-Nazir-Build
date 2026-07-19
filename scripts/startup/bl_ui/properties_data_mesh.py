@@ -295,6 +295,10 @@ class MESH_MT_sculpt_layer_context_menu(Menu):
                 layout.operator("sculpt.layer_mask_edit_toggle", text="Finish Mask Edit")
             else:
                 layout.operator("sculpt.layer_mask_edit_toggle", text="Edit Mask")
+            if active.mask_enabled:
+                layout.operator("sculpt.layer_mask_toggle", text="Disable Mask")
+            else:
+                layout.operator("sculpt.layer_mask_toggle", text="Enable Mask")
             layout.operator("sculpt.layer_mask_invert", text="Invert Mask")
             layout.operator("sculpt.layer_mask_clear", text="Clear Mask")
             layout.operator("sculpt.layer_mask_fill", text="Fill Mask")

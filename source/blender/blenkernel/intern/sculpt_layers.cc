@@ -316,7 +316,11 @@ const SculptLayerMask *chain_mask(const SculptLayerGroup &group)
     const SculptLayerMask *parent_chain = (group.base.parent != nullptr) ?
                                               chain_mask(*group.base.parent) :
                                               nullptr;
-    const SculptLayerMask *own = group.base.mask;
+    /* Read as absent while the folder's switch is off, so every branch below — "nothing at all",
+     * "the ancestors' product alone", "this folder's mask alone" — handles the switched off case
+     * without a case of its own. Only this folder's own mask is affected; the ancestors' product
+     * arrives already folded and is not this switch's to touch. */
+    const SculptLayerMask *own = mask_enabled(group.base) ? group.base.mask : nullptr;
 
     if (parent_chain == nullptr && own == nullptr) {
       /* Stays null: the whole point is that an unmasked tree costs the composite nothing. */
@@ -851,6 +855,23 @@ bool rec_exempt_set(const Mesh &mesh, const SculptLayer *layer)
   return changed;
 }
 
+/* The one place the two spellings of the bit are required to agree. Checked here rather than in
+ * `DNA_mesh_types.h` because that header is parsed by makesdna, which does not accept a static
+ * assert. */
+BLI_STATIC_ASSERT(int(SCULPT_LAYER_MASK_DISABLED) == int(SCULPT_LAYER_GROUP_MASK_DISABLED),
+                  "The layer and folder spellings of the mask-disabled bit must share one value, "
+                  "so #mask_enabled can answer for a node of either kind without a type test");
+
+bool mask_enabled(const SculptLayerTreeNode &node)
+{
+  return (node.flag & SCULPT_LAYER_MASK_DISABLED) == 0;
+}
+
+void mask_enabled_set(SculptLayerTreeNode &node, const bool enable)
+{
+  SET_FLAG_FROM_TEST(node.flag, !enable, SCULPT_LAYER_MASK_DISABLED);
+}
+
 /* #CompositeMask and #node_mask_for_composite are declared in `BKE_sculpt_layers.hh`: the multires
  * grid composite resolves a layer's masks through the same function, so a layer's mask cannot be
  * resolved one way on the vertex domain and another way on the grid domain. */
@@ -867,7 +888,14 @@ CompositeMask node_mask_for_composite(const SculptLayer &layer, const int64_t el
   if (layer.base.flag & SCULPT_LAYER_REC_EXEMPT) {
     return masks;
   }
-  if (layer.base.mask != nullptr && !is_stale_mask(*layer.base.mask, elem_num)) {
+  /* Not folded into the #SCULPT_LAYER_REC_EXEMPT return above, deliberately: that one drops the
+   * folder chain as well, while this one leaves the chain alone. Each folder carries its own switch
+   * for the user to reach, so a layer's switch answering for its ancestors too would make the
+   * result unreadable from the tree rows. The chain then slides into #primary through the existing
+   * branch at the end of this function, so a switched off layer mask needs no case of its own. */
+  if (layer.base.mask != nullptr && mask_enabled(layer.base) &&
+      !is_stale_mask(*layer.base.mask, elem_num))
+  {
     masks.primary = layer.base.mask;
   }
   /* Every node but the root carries a parent, and a layer is never the root; the test is for a node

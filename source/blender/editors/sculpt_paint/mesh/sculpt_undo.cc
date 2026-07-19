@@ -2184,6 +2184,19 @@ static void restore_list(bContext *C,
     if (op.uid != 0) {
       if (SculptLayerTreeNode *node = bke::sculpt_layers::node_find_by_uid(mesh, op.uid)) {
         std::swap(node->flag, op.flag);
+        /* #SCULPT_LAYER_GROUP_MASK_DISABLED rides in the word just swapped, and it decides whether
+         * this folder's own mask is folded into the cached chain product. Without this the bit
+         * would be restored while the cache kept the product built under the other state, and the
+         * recompose below would run against a mask the tree no longer describes.
+         *
+         * Unconditional rather than gated on a bit difference: the tag is cheap and idempotent, and
+         * testing one bit here would put knowledge of which bits exist into a branch whose whole
+         * design is to swap the word wholesale. A layer needs nothing — its mask is read straight
+         * off the node and caches nowhere — which is why this is scoped to folders, exactly as the
+         * matching invalidation in the mask branch below is. */
+        if (SculptLayerGroup *group = bke::sculpt_layers::node_as_group(node)) {
+          bke::sculpt_layers::tag_chain_mask_dirty(*group);
+        }
         std::swap(node->color_tag, op.color_tag);
         std::string live_name = node->name;
         STRNCPY_UTF8(node->name, op.name.c_str());

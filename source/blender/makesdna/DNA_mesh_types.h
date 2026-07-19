@@ -192,6 +192,25 @@ enum eSculptLayerFlag : int {
    * Never versioned: a new bit in an existing #flag reads as unset from old files.
    */
   SCULPT_LAYER_REC_EXEMPT = 1 << 5,
+  /**
+   * The node's own weight mask is switched off: it stays on the node with every painted weight
+   * intact, but the composite ignores it. What the user reaches for to compare "with mask" against
+   * "without mask" without destroying the weights, which Remove Mask would.
+   *
+   * Only the node's *own* mask, deliberately unlike #SCULPT_LAYER_REC_EXEMPT, which additionally
+   * drops the folder chain above the layer. That wider radius exists because REC stores its delta
+   * raw and any surviving factor would distort it; nothing here needs it, and "own mask only"
+   * composes — every folder carries this same bit, so switching a layer clear of every mask is a
+   * matter of switching it and the folders above it.
+   *
+   * Persisted, deliberately unlike #SCULPT_LAYER_REC_EXEMPT, which is stripped on write: that bit
+   * is invisible to the user, so a file opening with it set would show a mask that silently
+   * vanished. This one is set by a visible button whose state the tree row always shows.
+   *
+   * Never versioned: a new bit in an existing #flag reads as unset from old files, and unset is
+   * "the mask is in force" — the behavior every existing file was saved with.
+   */
+  SCULPT_LAYER_MASK_DISABLED = 1 << 6,
 };
 ENUM_OPERATORS(eSculptLayerFlag)
 
@@ -369,6 +388,16 @@ enum eSculptLayerGroupFlag : int {
    * save and stays consistent across every window showing the tree. New groups start expanded.
    */
   SCULPT_LAYER_GROUP_EXPANDED = 1 << 2,
+  /**
+   * The folder counterpart of #SCULPT_LAYER_MASK_DISABLED, and deliberately the *same numeric
+   * value*: it lets #bke::sculpt_layers::mask_enabled answer for a node of either kind without a
+   * type test, exactly as #SculptLayerTreeNode::mask serves both with one implementation. A
+   * #BLI_STATIC_ASSERT next to that function holds the two spellings together.
+   *
+   * Switches off this folder's own mask, so every layer below it stops being attenuated by it. The
+   * masks of folders further up are unaffected and keep applying.
+   */
+  SCULPT_LAYER_GROUP_MASK_DISABLED = 1 << 6,
 };
 ENUM_OPERATORS(eSculptLayerGroupFlag)
 

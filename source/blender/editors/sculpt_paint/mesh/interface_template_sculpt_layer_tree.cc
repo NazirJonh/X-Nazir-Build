@@ -251,7 +251,8 @@ static bool row_is_revealed(const SculptLayerGroup *parent)
 }
 
 /**
- * The weight-mask button, drawn at the left of a row's right-hand controls for both node kinds.
+ * The weight-mask buttons — the on/off switch and the edit toggle — drawn at the left of a row's
+ * right-hand controls for both node kinds.
  *
  * Shown only when the node actually carries a mask: with none there is nothing to edit, and Add Mask
  * in the row's context menu is the way in. It sits in its own sub-row, as the influence slider and
@@ -274,6 +275,22 @@ static void mask_button_draw(ui::Layout &parent,
     return;
   }
   ui::Layout &mask_row = parent.row(true);
+
+  /* Left of the edit button: the row then reads as "does this mask act" before "edit it" — state
+   * ahead of the action on it — and the state switch is not the control nearest the row edge, where
+   * a click aimed at editing would land. Both live in the one aligned #mask_row rather than in
+   * sub-rows of their own, because they describe the same mask and must grey out together.
+   *
+   * #ICON_MOD_MASK has no "off" counterpart in this build, so the checkbox pair carries the state;
+   * it is the same HLT/DEHLT idiom the edit button beside it already uses. */
+  const bool mask_on = bke::sculpt_layers::mask_enabled(node);
+  PointerRNA toggle_ptr = mask_row.op("SCULPT_OT_layer_mask_toggle",
+                                      "",
+                                      mask_on ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT,
+                                      wm::OpCallContext::ExecDefault,
+                                      UI_ITEM_NONE);
+  RNA_int_set(&toggle_ptr, "node_uid", node.uid);
+
   const bool editing = mask_edit_active_uid(object) == node.uid;
   PointerRNA op_ptr = mask_row.op("SCULPT_OT_layer_mask_edit_toggle",
                                   "",
@@ -521,6 +538,12 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
                    "SCULPT_OT_layer_mask_edit_toggle",
                    editing ? IFACE_("Finish Mask Edit") : IFACE_("Edit Mask"),
                    ICON_MOD_MASK,
+                   uid_);
+      mask_menu_op(layout,
+                   "SCULPT_OT_layer_mask_toggle",
+                   bke::sculpt_layers::mask_enabled(group_->base) ? IFACE_("Disable Mask") :
+                                                                    IFACE_("Enable Mask"),
+                   ICON_NONE,
                    uid_);
       mask_menu_op(layout, "SCULPT_OT_layer_mask_invert", IFACE_("Invert Mask"), ICON_NONE, uid_);
       mask_menu_op(layout, "SCULPT_OT_layer_mask_clear", IFACE_("Clear Mask"), ICON_NONE, uid_);

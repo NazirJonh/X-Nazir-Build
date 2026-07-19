@@ -761,4 +761,152 @@ TEST(sculpt_layers_mask, rec_exemption_is_a_no_op_on_a_stale_mask)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Mask switch (#SCULPT_LAYER_MASK_DISABLED)
+ *
+ * The user-facing counterpart of the REC exemption above: a mask the user switched off keeps every
+ * painted weight but stops attenuating anything. What is pinned here is where the switch reaches —
+ * the node's own mask and nothing else — because that boundary is the whole design and is the part
+ * a later change is most likely to blur.
+ * \{ */
+
+TEST(sculpt_layers_mask, mask_switch_answers_for_both_node_kinds)
+{
+  SculptLayer layer;
+  SculptLayerGroup folder;
+
+  /* Unset is "in force", which is what makes old files read unchanged. */
+  EXPECT_TRUE(mask_enabled(layer.base));
+  EXPECT_TRUE(mask_enabled(folder.base));
+
+  mask_enabled_set(layer.base, false);
+  mask_enabled_set(folder.base, false);
+  EXPECT_FALSE(mask_enabled(layer.base));
+  EXPECT_FALSE(mask_enabled(folder.base));
+  /* One bit under two names: a layer and a folder switched off hold the identical word. Were the
+   * two enum values to drift apart, this is the assertion that fails alongside the static assert. */
+  EXPECT_EQ(layer.base.flag, folder.base.flag);
+
+  /* The setter is its own inverse, and leaves no residue in the word. */
+  mask_enabled_set(layer.base, true);
+  EXPECT_TRUE(mask_enabled(layer.base));
+  EXPECT_EQ(layer.base.flag, 0);
+}
+
+TEST(sculpt_layers_mask, switched_off_layer_mask_leaves_the_composite)
+{
+  const int totelem = 10000;
+  SculptLayer layer;
+  layer.base.mask = mask_new(totelem, SCULPT_LAYER_MASK_VERT_BLOCK, 128);
+
+  EXPECT_EQ(node_mask_for_composite(layer, totelem).primary, layer.base.mask);
+
+  mask_enabled_set(layer.base, false);
+  EXPECT_EQ(node_mask_for_composite(layer, totelem).primary, nullptr);
+
+  /* Switching it back on returns the very same mask: the switch hides a mask, it never discards
+   * one. That is the entire point of having it instead of Remove Mask. */
+  mask_enabled_set(layer.base, true);
+  EXPECT_EQ(node_mask_for_composite(layer, totelem).primary, layer.base.mask);
+
+  mask_free(layer.base.mask);
+}
+
+TEST(sculpt_layers_mask, switched_off_layer_mask_keeps_the_folder_chain)
+{
+  /* The line this feature is drawn along, and the one worth a test of its own: unlike
+   * #SCULPT_LAYER_REC_EXEMPT, the switch drops the node's *own* mask only. A folder above it keeps
+   * attenuating the layer, because that folder carries its own switch for the user to reach. Were
+   * the two to be folded into one early return, this is the test that fails. */
+  const int totelem = 10000;
+  SculptLayerGroup folder;
+  group_runtime_ensure(folder);
+  folder.base.uid = 3;
+  folder.base.mask = mask_new(totelem, SCULPT_LAYER_MASK_VERT_BLOCK, 64);
+
+  SculptLayer layer;
+  layer.base.uid = 7;
+  layer.base.parent = &folder;
+  layer.base.mask = mask_new(totelem, SCULPT_LAYER_MASK_VERT_BLOCK, 128);
+
+  mask_enabled_set(layer.base, false);
+  const CompositeMask masks = node_mask_for_composite(layer, totelem);
+  /* The chain slides into #primary once the layer's own mask is gone — the existing branch at the
+   * end of #node_mask_for_composite, which the switch reuses rather than duplicating. */
+  EXPECT_NE(masks.primary, nullptr);
+  EXPECT_NE(masks.primary, layer.base.mask);
+  EXPECT_EQ(masks.secondary, nullptr);
+
+  mask_free(layer.base.mask);
+  mask_free(folder.base.mask);
+  group_runtime_free(folder);
+}
+
+TEST(sculpt_layers_mask, switched_off_folder_mask_leaves_the_chain)
+{
+  /* Two nested folders, both masked. Switching the inner one off must leave the outer one's
+   * contribution standing: the switch is per node, never per subtree. Checked by result — the
+   * product a layer under the inner folder resolves to — rather than by asking whether the cache
+   * was tagged, so the test still fails if the invalidation runs but changes nothing. */
+  const int totelem = 10000;
+  SculptLayerGroup outer;
+  group_runtime_ensure(outer);
+  outer.base.uid = 2;
+  outer.base.mask = mask_new(totelem, SCULPT_LAYER_MASK_VERT_BLOCK, 64);
+
+  SculptLayerGroup inner;
+  group_runtime_ensure(inner);
+  inner.base.uid = 3;
+  inner.base.parent = &outer;
+  inner.base.mask = mask_new(totelem, SCULPT_LAYER_MASK_VERT_BLOCK, 32);
+
+  /* Warm the cache first: the switch has to survive an already-built product, which is exactly the
+   * state a user toggling the button is in. */
+  const SculptLayerMask *both = chain_mask(inner);
+  ASSERT_NE(both, nullptr);
+  Array<float> weights_with_both(totelem);
+  mask_expand(*both, weights_with_both.as_mutable_span());
+
+  mask_enabled_set(inner.base, false);
+  tag_chain_mask_dirty(inner);
+
+  const SculptLayerMask *outer_only = chain_mask(inner);
+  ASSERT_NE(outer_only, nullptr);
+  Array<float> weights_outer_only(totelem);
+  mask_expand(*outer_only, weights_outer_only.as_mutable_span());
+
+  /* The inner folder's factor is gone, the outer folder's is not: the product got *lighter*, and
+   * did not collapse to "no mask at all". Read through #mask_expand rather than off the block
+   * tables, so the assertion is about the weight the composite would apply. */
+  EXPECT_GT(weights_outer_only[0], weights_with_both[0]);
+  EXPECT_LT(weights_outer_only[0], 1.0f);
+
+  mask_free(inner.base.mask);
+  mask_free(outer.base.mask);
+  group_runtime_free(inner);
+  group_runtime_free(outer);
+}
+
+TEST(sculpt_layers_mask, switched_off_lone_folder_mask_yields_no_chain)
+{
+  const int totelem = 10000;
+  SculptLayerGroup folder;
+  group_runtime_ensure(folder);
+  folder.base.uid = 3;
+  folder.base.mask = mask_new(totelem, SCULPT_LAYER_MASK_VERT_BLOCK, 64);
+
+  ASSERT_NE(chain_mask(folder), nullptr);
+
+  mask_enabled_set(folder.base, false);
+  tag_chain_mask_dirty(folder);
+  /* Null, not a mask of ones: an unmasked chain must cost the composite nothing, which is the
+   * existing "stays null" branch the switch reuses. */
+  EXPECT_EQ(chain_mask(folder), nullptr);
+
+  mask_free(folder.base.mask);
+  group_runtime_free(folder);
+}
+
+/** \} */
+
 }  // namespace blender::bke::sculpt_layers::tests

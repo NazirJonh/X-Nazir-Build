@@ -904,6 +904,32 @@ struct CompositeMask {
 CompositeMask node_mask_for_composite(const SculptLayer &layer, int64_t elem_num);
 
 /**
+ * Whether \a node's own weight mask is in force (#SCULPT_LAYER_MASK_DISABLED unset).
+ *
+ * Answers for a layer and for a folder alike: the two enums spell the bit differently but share one
+ * value, which a #BLI_STATIC_ASSERT beside the definition pins.
+ *
+ * Consulted on the *composite* path only — #node_mask_for_composite for a layer, the #chain_mask
+ * rebuild for a folder. The operators that author a mask deliberately do not consult it: a switched
+ * off mask stays fully editable, so its weights can be prepared before it is switched back on.
+ */
+bool mask_enabled(const SculptLayerTreeNode &node);
+
+/**
+ * Switch \a node's own weight mask on or off, leaving the mask itself untouched.
+ *
+ * Exists so that no caller holding a base-typed node has to choose between the two spellings of the
+ * bit: #SCULPT_LAYER_MASK_DISABLED written onto a folder would be right by value and wrong by
+ * meaning, and would read as a bug at every later glance. Knowledge of which symbol names the bit
+ * stays in this pair.
+ *
+ * Writes the flag and nothing else. The effective mask of a node moves the composed surface, so
+ * every caller must additionally invalidate the folder chain cache (#tag_chain_mask_dirty) and
+ * recompose — see #SCULPT_OT_layer_mask_toggle for the full order.
+ */
+void mask_enabled_set(SculptLayerTreeNode &node, bool enable);
+
+/**
  * Mark \a layer as the one REC is armed on, clearing #SCULPT_LAYER_REC_EXEMPT from every other
  * layer of \a mesh. Passing null clears the exemption throughout, which is what the sculpt-mode
  * exit and entry paths call.

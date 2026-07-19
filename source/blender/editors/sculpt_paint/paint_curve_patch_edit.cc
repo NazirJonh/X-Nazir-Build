@@ -961,7 +961,16 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
                            data.dragging_segment;
   const ScrArea *area = CTX_wm_area(C);
   const ARegion *region = CTX_wm_region(C);
-  const bool is_commit_key = ELEM(event->type, EVT_RETKEY, EVT_PADENTER, EVT_ESCKEY);
+  /* The undo chord is ours no matter where the cursor is. `EVT_ZKEY`'s case below deliberately
+   * swallows it -- letting it reach the global keymap lets `ED_OT_undo` pop a previously committed
+   * stroke out from under this patch's `orig_positions` snapshot -- but that case sits BEHIND this
+   * gate, so with the cursor over a panel or the header the chord escaped anyway and did exactly
+   * what it was written to prevent. Plain Z is deliberately not exempt: it belongs to Sculpt Mode's
+   * shading pie, and the case below passes it through on its own. */
+  const bool is_undo_chord = (event->type == EVT_ZKEY) &&
+                             (event->modifier & (KM_CTRL | KM_OSKEY)) != 0;
+  const bool is_commit_key = ELEM(event->type, EVT_RETKEY, EVT_PADENTER, EVT_ESCKEY) ||
+                             is_undo_chord;
   const ARegion *region_hovered = area ? ED_area_find_region_xy_visual(
                                              area, RGN_TYPE_ANY, event->xy) :
                                          nullptr;

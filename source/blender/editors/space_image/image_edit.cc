@@ -343,13 +343,18 @@ void ED_image_get_uv_aspect(Image *ima, ImageUser *iuser, float *r_aspx, float *
 
 void ED_image_mouse_pos(SpaceImage *sima, const ARegion *region, const int mval[2], float co[2])
 {
-  int sx, sy, width, height;
+  int width, height;
   float zoomx, zoomy;
 
   ED_space_image_get_zoom(sima, region, &zoomx, &zoomy);
   ED_space_image_get_size(sima, &width, &height);
 
-  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+  /* Origin anchor in the navigation frame: the zoom scaling below is relative to the un-rotated
+   * pixel of view (0, 0). The rotation is applied separately, to the input point. */
+  float anchor[2];
+  ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+  const int sx = int(anchor[0]);
+  const int sy = int(anchor[1]);
 
   /* Undo the canvas rotation (screen->view) about the pivot before the axis-aligned mapping.
    * The image is displayed as `screen = Rot(-rotation) * axis_map(view)`, so the inverse
@@ -376,13 +381,18 @@ void ED_image_view_center_to_point(SpaceImage *sima, float x, float y)
 void ED_image_point_pos(
     SpaceImage *sima, const ARegion *region, float x, float y, float *r_x, float *r_y)
 {
-  int sx, sy, width, height;
+  int width, height;
   float zoomx, zoomy;
 
   ED_space_image_get_zoom(sima, region, &zoomx, &zoomy);
   ED_space_image_get_size(sima, &width, &height);
 
-  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+  /* Origin anchor in the navigation frame: the zoom scaling below is relative to the un-rotated
+   * pixel of view (0, 0). The rotation is applied separately, to the input point. */
+  float anchor[2];
+  ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+  const int sx = int(anchor[0]);
+  const int sy = int(anchor[1]);
 
   /* Undo the canvas rotation (screen->view) about the pivot before the axis-aligned mapping.
    * See #ED_image_mouse_pos for the direction convention. */
@@ -400,9 +410,13 @@ void ED_image_point_pos__reverse(SpaceImage *sima,
 {
   float zoomx, zoomy;
   int width, height;
-  int sx, sy;
 
-  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &sx, &sy);
+  /* Origin anchor in the navigation frame: the zoom scaling below is relative to the un-rotated
+   * pixel of view (0, 0). The rotation is applied separately, to the output point. */
+  float anchor[2];
+  ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+  const int sx = int(anchor[0]);
+  const int sy = int(anchor[1]);
   ED_space_image_get_size(sima, &width, &height);
   ED_space_image_get_zoom(sima, region, &zoomx, &zoomy);
 

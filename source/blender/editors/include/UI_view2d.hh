@@ -324,10 +324,20 @@ void view2d_listview_view_to_cell(float columnwidth,
 /** \name Coordinate Conversion
  * \{ */
 
+/**
+ * \warning Axis-aligned (navigation frame) and **permanently so**: a rotated `x'` depends on both
+ * `x` and `y`, so a rotation cannot be expressed in a single-component function. Code that needs
+ * the display frame must use the two-component form.
+ */
 float view2d_region_to_view_x(const View2D *v2d, float x);
 float view2d_region_to_view_y(const View2D *v2d, float y);
 /**
- * Convert from screen/region space to 2d-View space
+ * Convert from screen/region space to 2d-View space.
+ *
+ * \note **Display frame.** This is the exact inverse of what #view2d_view_ortho draws: it undoes
+ * the canvas rotation. Anything that *finds or places data* on the canvas wants this. Code that
+ * writes `cur` / zoom / pan wants #view2d_region_to_view_zoom_anchor instead — see its docs for
+ * why that distinction is load-bearing and not cosmetic.
  *
  * \param x, y: coordinates to convert
  * \param r_view_x, r_view_y: resultant coordinates
@@ -337,6 +347,42 @@ void view2d_region_to_view(const View2D *v2d, float x, float y, float *r_view_x,
 void view2d_region_to_view_rctf(const View2D *v2d, const rctf *rect_src, rctf *rect_dst)
     ATTR_NONNULL();
 
+/**
+ * Convert a region point to the view point that a zoom operation must keep fixed on screen.
+ *
+ * \note This is the **navigation frame**: the axis-aligned `mask -> cur` map, *without* the
+ * canvas rotation. It is not a mistake. The display maps view to screen as
+ * `Rot_{A(pivot)}(-rotation) . A`, and zoom scales `cur` uniformly, so the on-screen fixed point
+ * of a zoom is `A(anchor)` — the *axis-aligned* projection. Feeding a rotation-aware point here
+ * makes the image swing about the pivot on every zoom step. Only zoom code may call this.
+ */
+void view2d_region_to_view_zoom_anchor(
+    const View2D *v2d, float x, float y, float *r_view_x, float *r_view_y) ATTR_NONNULL();
+
+/**
+ * Axis-aligned preimage of a border-zoom rect: the `cur` a zoom-to-border must adopt.
+ *
+ * \note Navigation frame, same reasoning as #view2d_region_to_view_zoom_anchor. `cur' = A^-1(B)`
+ * is the provably correct answer here — a rotated quad would be wrong, not better.
+ */
+void view2d_region_to_view_rctf_zoom_bounds(const View2D *v2d,
+                                            const rctf *rect_src,
+                                            rctf *rect_dst) ATTR_NONNULL();
+
+/**
+ * Axis-aligned view-to-region projection.
+ *
+ * \note Navigation frame. For code that reasons about `cur` / zoom / pan / the rotation pivot
+ * itself, where the canvas rotation must not be applied.
+ */
+void view2d_view_to_region_navigation_fl(
+    const View2D *v2d, float x, float y, float *r_region_x, float *r_region_y) ATTR_NONNULL();
+
+/**
+ * \warning Axis-aligned (navigation frame) and **permanently so**: a rotated `x'` depends on both
+ * `x` and `y`, so a rotation cannot be expressed in a single-component function. Code that needs
+ * the display frame must use the two-component form.
+ */
 float view2d_view_to_region_x(const View2D *v2d, float x);
 float view2d_view_to_region_y(const View2D *v2d, float y);
 /**

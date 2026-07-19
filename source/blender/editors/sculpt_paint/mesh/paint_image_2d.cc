@@ -1570,16 +1570,6 @@ static bool is_inside_tile(const int size[2], const float pos[2], const float br
          (pos[1] < size[1] + brush[1]);
 }
 
-/* Convert a region (screen) point to image view space, compensating for canvas rotation.
- * The image is displayed as `screen = Rot(-rotation) * axis_map(view)`, so undo it by rotating the
- * screen point about the pivot before the axis-aligned mapping (screen->view uses inverse=false). */
-static void paint_2d_region_to_view_rotated(View2D *v2d, const float in[2], float out[2])
-{
-  float p[2] = {in[0], in[1]};
-  ui::view2d_rotate_region_point(v2d, p, false);
-  ui::view2d_region_to_view(v2d, p[0], p[1], &out[0], &out[1]);
-}
-
 static void paint_2d_uv_to_coord(ImagePaintTile *tile, const float uv[2], float coord[2])
 {
   coord[0] = (uv[0] - tile->uv_origin[0]) * tile->size[0];
@@ -1603,12 +1593,12 @@ void paint_2d_stroke(void *ps,
     s->blend = IMB_BLEND_ERASE_ALPHA;
   }
 
-  paint_2d_region_to_view_rotated(s->v2d, mval, new_uv);
-  paint_2d_region_to_view_rotated(s->v2d, prev_mval, old_uv);
+  ui::view2d_region_to_view(s->v2d, mval[0], mval[1], &new_uv[0], &new_uv[1]);
+  ui::view2d_region_to_view(s->v2d, prev_mval[0], prev_mval[1], &old_uv[0], &old_uv[1]);
 
   float last_uv[2], start_uv[2];
   const float origin[2] = {0.0f, 0.0f};
-  paint_2d_region_to_view_rotated(s->v2d, origin, start_uv);
+  ui::view2d_region_to_view(s->v2d, origin[0], origin[1], &start_uv[0], &start_uv[1]);
   if (painter->firsttouch) {
     /* paint exactly once on first touch */
     copy_v2_v2(last_uv, new_uv);
@@ -1945,7 +1935,7 @@ void paint_2d_bucket_fill(const bContext *C,
   View2D *v2d = s ? s->v2d : &CTX_wm_region(C)->v2d;
   float uv_origin[2];
   float image_init[2];
-  paint_2d_region_to_view_rotated(v2d, mouse_init, image_init);
+  ui::view2d_region_to_view(v2d, mouse_init[0], mouse_init[1], &image_init[0], &image_init[1]);
 
   int tile_number = BKE_image_get_tile_from_pos(ima, image_init, image_init, uv_origin);
 
@@ -2155,8 +2145,10 @@ void paint_2d_gradient_fill(
     return;
   }
 
-  paint_2d_region_to_view_rotated(s->v2d, mouse_final, image_final);
-  paint_2d_region_to_view_rotated(s->v2d, mouse_init, image_init);
+  ui::view2d_region_to_view(
+      s->v2d, mouse_final[0], mouse_final[1], &image_final[0], &image_final[1]);
+  ui::view2d_region_to_view(
+      s->v2d, mouse_init[0], mouse_init[1], &image_init[0], &image_init[1]);
   sub_v2_v2(image_init, uv_origin);
   sub_v2_v2(image_final, uv_origin);
 

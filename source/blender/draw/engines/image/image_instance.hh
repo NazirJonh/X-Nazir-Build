@@ -5,7 +5,6 @@
 #pragma once
 
 #include <cmath>
-#include <cstdio>
 
 #include <DRW_render.hh>
 
@@ -280,25 +279,6 @@ class Instance : public DrawEngine {
       m[1][1] = scale_y * cos_r;
       m[2][0] = scale_x * rot_tx + translate_x;
       m[2][1] = scale_y * rot_ty + translate_y;
-
-      /* TEMPORARY diagnostic logging for off-center pivot rotation investigation.
-       * Compare pivot_sx/sy (normalized screen UV from M_base^-1) against the view2d
-       * pixel pivot normalized by winx/winy — they must match for image and overlays to agree.
-       * Remove once P1 is resolved. */
-      std::printf("[IMGROT-DRW] rotation=%.5f pivot=(%.5f, %.5f)\n", rotation, pivot.x, pivot.y);
-      std::printf("[IMGROT-DRW] winx=%d winy=%d aspect_x=%.5f aspect_y=%.5f\n",
-                  region->winx,
-                  region->winy,
-                  aspect_x,
-                  aspect_y);
-      std::printf("[IMGROT-DRW] scale_x=%.5f scale_y=%.5f translate=(%.5f, %.5f)\n",
-                  scale_x,
-                  scale_y,
-                  translate_x,
-                  translate_y);
-      std::printf("[IMGROT-DRW] pivot_sx=%.5f pivot_sy=%.5f  (normalized screen UV)\n",
-                  pivot_sx,
-                  pivot_sy);
     }
 
     const Scene *scene = DRW_context_get()->scene;

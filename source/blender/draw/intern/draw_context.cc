@@ -486,45 +486,7 @@ void DRWContext::acquire_data()
         float viewmat_copy[4][4];
         copy_m4_m4(viewmat_copy, (float (*)[4])viewmat.ptr());
 
-        /* TEMPORARY diagnostic logging for off-center pivot rotation investigation.
-         * Dump viewmat (cur→region_space[0,1]) BEFORE and AFTER post-multiplying by rotmat, plus
-         * where the image corner (0,0) and (1,1) land. Compare against [IMGROT-ORTHO] /
-         * [IMGROT-POSTVIEW]. Remove once P1 is resolved. */
-        const float (*vm)[4] = (const float (*)[4])viewmat.ptr();
-        std::printf("[IMGROT-OVL] rotation=%.5f pivot=(%.5f, %.5f)\n",
-                    v2d->rotation,
-                    v2d->rotation_pivot[0],
-                    v2d->rotation_pivot[1]);
-        std::printf("[IMGROT-OVL] viewmat_before rows:\n");
-        std::printf("[IMGROT-OVL]   [%.5f %.5f %.5f %.5f]\n",
-                    vm[0][0],
-                    vm[1][0],
-                    vm[2][0],
-                    vm[3][0]);
-        std::printf("[IMGROT-OVL]   [%.5f %.5f %.5f %.5f]\n",
-                    vm[0][1],
-                    vm[1][1],
-                    vm[2][1],
-                    vm[3][1]);
-        std::printf("[IMGROT-OVL]   [%.5f %.5f %.5f %.5f]\n",
-                    vm[0][2],
-                    vm[1][2],
-                    vm[2][2],
-                    vm[3][2]);
-
         mul_m4_m4m4((float (*)[4])viewmat.ptr(), viewmat_copy, rotmat);
-
-        /* Where do image corners (0,0) and (1,1) land after the rotated viewmat? */
-        const float (*vm2)[4] = (const float (*)[4])viewmat.ptr();
-        float c00[3] = {0.0f, 0.0f, 1.0f};
-        float c11[3] = {1.0f, 1.0f, 1.0f};
-        mul_m4_v3(vm2, c00);
-        mul_m4_v3(vm2, c11);
-        std::printf("[IMGROT-OVL] corner(0,0)->(%.5f, %.5f)  corner(1,1)->(%.5f, %.5f)\n",
-                    c00[0],
-                    c00[1],
-                    c11[0],
-                    c11[1]);
       }
 
       float4x4 winmat = float4x4::identity();
@@ -1545,34 +1507,6 @@ static void drw_callbacks_post_scene_2D(DRWContext &draw_ctx, View2D &v2d)
       GPU_matrix_push();
       float rotmat[4][4];
       ui::view2d_view_rotation_matrix(&v2d, rotmat);
-
-      /* TEMPORARY diagnostic logging for off-center pivot rotation investigation.
-       * Dump the active model-view matrix BEFORE applying rotmat (the POST_VIEW callback path also
-       * assumes identity here). Compare with [IMGROT-ORTHO] from view2d_view_ortho. Remove once P1
-       * is resolved. */
-      float mv_before[4][4];
-      GPU_matrix_model_view_get(mv_before);
-      std::printf("[IMGROT-POSTVIEW] rotation=%.5f pivot=(%.5f, %.5f)\n",
-                  v2d.rotation,
-                  v2d.rotation_pivot[0],
-                  v2d.rotation_pivot[1]);
-      std::printf("[IMGROT-POSTVIEW] mv_before rows:\n");
-      std::printf("[IMGROT-POSTVIEW]   [%.5f %.5f %.5f %.5f]\n",
-                  mv_before[0][0],
-                  mv_before[1][0],
-                  mv_before[2][0],
-                  mv_before[3][0]);
-      std::printf("[IMGROT-POSTVIEW]   [%.5f %.5f %.5f %.5f]\n",
-                  mv_before[0][1],
-                  mv_before[1][1],
-                  mv_before[2][1],
-                  mv_before[3][1]);
-      std::printf("[IMGROT-POSTVIEW]   [%.5f %.5f %.5f %.5f]\n",
-                  mv_before[0][2],
-                  mv_before[1][2],
-                  mv_before[2][2],
-                  mv_before[3][2]);
-
       GPU_matrix_mul(rotmat);
     }
 

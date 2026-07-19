@@ -586,7 +586,7 @@ static void image_view_zoom_init(bContext *C, wmOperator *op, const wmEvent *eve
   vpd->snap = false;
   vpd->launch_event = WM_userdef_event_type_from_keymap_type(event->type);
 
-  ui::view2d_region_to_view(
+  ui::view2d_region_to_view_zoom_anchor(
       &region->v2d, event->mval[0], event->mval[1], &vpd->location[0], &vpd->location[1]);
 
   if (U.viewzoom == USER_ZOOM_CONTINUE) {
@@ -650,7 +650,7 @@ static wmOperatorStatus image_view_zoom_invoke(bContext *C, wmOperator *op, cons
     ARegion *region = CTX_wm_region(C);
     float delta, factor, location[2];
 
-    ui::view2d_region_to_view(
+    ui::view2d_region_to_view_zoom_anchor(
         &region->v2d, event->mval[0], event->mval[1], &location[0], &location[1]);
 
     delta = event->prev_xy[0] - event->xy[0] + event->prev_xy[1] - event->xy[1];
@@ -1120,7 +1120,7 @@ static wmOperatorStatus image_view_zoom_in_invoke(bContext *C,
   ARegion *region = CTX_wm_region(C);
   float location[2];
 
-  ui::view2d_region_to_view(
+  ui::view2d_region_to_view_zoom_anchor(
       &region->v2d, event->mval[0], event->mval[1], &location[0], &location[1]);
   RNA_float_set_array(op->ptr, "location", location);
 
@@ -1181,7 +1181,7 @@ static wmOperatorStatus image_view_zoom_out_invoke(bContext *C,
   ARegion *region = CTX_wm_region(C);
   float location[2];
 
-  ui::view2d_region_to_view(
+  ui::view2d_region_to_view_zoom_anchor(
       &region->v2d, event->mval[0], event->mval[1], &location[0], &location[1]);
   RNA_float_set_array(op->ptr, "location", location);
 
@@ -1282,7 +1282,7 @@ static wmOperatorStatus image_view_zoom_border_exec(bContext *C, wmOperator *op)
 
   WM_operator_properties_border_to_rctf(op, &bounds);
 
-  ui::view2d_region_to_view_rctf(&region->v2d, &bounds, &bounds);
+  ui::view2d_region_to_view_rctf_zoom_bounds(&region->v2d, &bounds, &bounds);
 
   struct {
     float xof;

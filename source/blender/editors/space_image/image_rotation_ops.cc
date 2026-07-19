@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 
 #include "DNA_space_enums.h"
 #include "DNA_space_types.h"
@@ -207,7 +206,7 @@ static void image_space_pivot_apply_offset_compensation(SpaceImage *sima,
   /* Axis-aligned pixel position of `current_pivot` — where it will sit once it becomes the pivot
    * (the pivot pixel is invariant under rotation). */
   float pivot_px_new[2];
-  ui::view2d_view_to_region_fl(
+  ui::view2d_view_to_region_navigation_fl(
       &region->v2d, current_pivot[0], current_pivot[1], &pivot_px_new[0], &pivot_px_new[1]);
 
   /* Pan so that `current_pivot` stays at `screen_old`: `pivot_px_new + (-zoom * dxof) = screen_old`,
@@ -218,34 +217,8 @@ static void image_space_pivot_apply_offset_compensation(SpaceImage *sima,
   const float dxof = (pivot_px_new[0] - screen_old[0]) / zoomx;
   const float dyof = (pivot_px_new[1] - screen_old[1]) / zoomy;
 
-  const float xof_before = sima->xof;
-  const float yof_before = sima->yof;
   sima->xof += dxof;
   sima->yof += dyof;
-
-  /* TEMPORARY diagnostic logging for off-center pivot rotation investigation.
-   * Shows the inputs and the resulting xof/yof change. Remove once P1 is resolved. */
-  std::printf("[IMGROT-OPS] compensation CALLED\n");
-  std::printf("[IMGROT-OPS]   rotation=%.5f initial_pivot=(%.5f,%.5f) current_pivot=(%.5f,%.5f)\n",
-              sima->rotation,
-              initial_pivot[0],
-              initial_pivot[1],
-              current_pivot[0],
-              current_pivot[1]);
-  std::printf("[IMGROT-OPS]   screen_old=(%.5f,%.5f) pivot_px_new=(%.5f,%.5f) zoom=(%.5f,%.5f)\n",
-              screen_old[0],
-              screen_old[1],
-              pivot_px_new[0],
-              pivot_px_new[1],
-              zoomx,
-              zoomy);
-  std::printf("[IMGROT-OPS]   dxof=%.5f dyof=%.5f  xof: %.5f -> %.5f  yof: %.5f -> %.5f\n",
-              dxof,
-              dyof,
-              xof_before,
-              sima->xof,
-              yof_before,
-              sima->yof);
 }
 
 static void image_view_rotate_interactive_update_header(wmOperator *op, bContext *C)
@@ -539,26 +512,6 @@ static wmOperatorStatus image_view_rotate_interactive_invoke(bContext *C,
 
   data->use_center_pivot = RNA_boolean_get(op->ptr, "use_center_pivot");
 
-  /* TEMPORARY diagnostic logging for off-center pivot rotation investigation.
-   * Shows the full state at operator start. Remove once P1 is resolved. */
-  std::printf("[IMGROT-INVOKE] === rotate interactive start ===\n");
-  std::printf("[IMGROT-INVOKE]   use_center_pivot=%d initial_rotation=%.5f\n",
-              int(data->use_center_pivot),
-              data->initial_rotation);
-  std::printf("[IMGROT-INVOKE]   initial pivot=(%.5f,%.5f) initial xof=%.5f yof=%.5f\n",
-              sima->rotation_pivot[0],
-              sima->rotation_pivot[1],
-              data->initial_offset[0],
-              data->initial_offset[1]);
-  std::printf("[IMGROT-INVOKE]   v2d.cur=(%.5f..%.5f, %.5f..%.5f)\n",
-              region->v2d.cur.xmin,
-              region->v2d.cur.xmax,
-              region->v2d.cur.ymin,
-              region->v2d.cur.ymax);
-  int img_w, img_h;
-  ED_space_image_get_size(sima, &img_w, &img_h);
-  std::printf("[IMGROT-INVOKE]   image_size=%dx%d mval=(%d,%d)\n", img_w, img_h, event->mval[0], event->mval[1]);
-
   if (data->use_center_pivot) {
     data->initial_pivot[0] = sima->rotation_pivot[0];
     data->initial_pivot[1] = sima->rotation_pivot[1];
@@ -577,12 +530,6 @@ static wmOperatorStatus image_view_rotate_interactive_invoke(bContext *C,
     ED_image_point_pos__reverse(sima, region, pivot_uv, pivot_region);
     data->pivot_screen[0] = float(region->winrct.xmin + int(pivot_region[0]));
     data->pivot_screen[1] = float(region->winrct.ymin + int(pivot_region[1]));
-
-    std::printf("[IMGROT-INVOKE] CENTER branch: pivot set to (%.5f,%.5f) xof=%.5f yof=%.5f\n",
-                sima->rotation_pivot[0],
-                sima->rotation_pivot[1],
-                sima->xof,
-                sima->yof);
 
     /* Ensure the indicator is visible immediately when invoked from the gizmo button.
      * The rotate gizmo starts a modal operator, but the draw callback won't run until the next
@@ -656,12 +603,6 @@ static wmOperatorStatus image_view_rotate_interactive_invoke(bContext *C,
     /* Patch behavior: draw pivot indicator exactly at click position in cursor mode. */
     data->pivot_screen[0] = float(region->winrct.xmin + event->mval[0]);
     data->pivot_screen[1] = float(region->winrct.ymin + event->mval[1]);
-
-    std::printf("[IMGROT-INVOKE] CURSOR branch: pivot set to (%.5f,%.5f) xof=%.5f yof=%.5f\n",
-                sima->rotation_pivot[0],
-                sima->rotation_pivot[1],
-                sima->xof,
-                sima->yof);
   }
 
   float cursor_screen[2] = {float(event->xy[0]), float(event->xy[1])};
@@ -710,20 +651,6 @@ static wmOperatorStatus image_view_rotate_interactive_modal(bContext *C,
       sima->rotation = target_rotation;
       normalize_rotation_angle(sima->rotation);
       ED_space_image_rotation_cache_update(sima);
-
-      /* TEMPORARY diagnostic logging for off-center pivot rotation investigation.
-       * Shows the per-MOUSEMOVE state. Remove once P1 is resolved. */
-      std::printf("[IMGROT-MODAL] rotation=%.5f (initial %.5f + angle %.5f)\n",
-                  sima->rotation,
-                  data->initial_rotation,
-                  angle);
-      std::printf("[IMGROT-MODAL]   pivot=(%.5f,%.5f) xof=%.5f yof=%.5f (initial xof=%.5f yof=%.5f)\n",
-                  sima->rotation_pivot[0],
-                  sima->rotation_pivot[1],
-                  sima->xof,
-                  sima->yof,
-                  data->initial_offset[0],
-                  data->initial_offset[1]);
 
       image_view_rotate_interactive_update_header(op, C);
       ED_region_tag_redraw(region);

@@ -34,6 +34,7 @@
 #include "BLI_execution_mode.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
+#include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
 #include "BLI_rand.hh"
@@ -474,10 +475,23 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
           stamp_u = stamp_u * mtex_size.x + mtex_ofs.x;
           stamp_v = stamp_v * mtex_size.y + mtex_ofs.y;
 
+          /* A LIST-mode stamp samples its own variant; SINGLE keeps the brush's texture. */
+          const MTex &stamp_mtex = it->tex_index >= 0 &&
+                                           it->tex_index < patch.stamp_texture_variants.size() ?
+                                       patch.stamp_texture_variants[it->tex_index] :
+                                       *mtex;
+          /* An empty slot in the LIST is an unconfigured slot, not a request to sculpt flat -- skip
+           * the stamp entirely BEFORE it can win the merge below with the default `sample` of 1.0.
+           * SINGLE mode deliberately keeps the old behavior, where a brush with no texture sculpts
+           * a smooth, full-amplitude shape. */
+          if (it->tex_index >= 0 && stamp_mtex.tex == nullptr) {
+            continue;
+          }
           float sample = 1.0f;
           float sample_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-          if (mtex->tex != nullptr) {
-            paint_get_tex_pixel(mtex, stamp_u, stamp_v, ss.tex_pool, thread_id, &sample, sample_rgba);
+          if (stamp_mtex.tex != nullptr) {
+            paint_get_tex_pixel(
+                &stamp_mtex, stamp_u, stamp_v, ss.tex_pool, thread_id, &sample, sample_rgba);
           }
           /* The brush's own falloff curve fades the stamp toward its rim, so overlapping stamps
            * meet along a smooth seam instead of showing the square's hard edge. */
@@ -507,55 +521,51 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
         }
       }
       else {
-      /* `v` (along the strip) maps `s` onto the texture's [-1, 1] domain, centered on the curve's
-       * midpoint so the pattern stays symmetric. `tile_span` is the world-space length of one tile,
-       * selected by the frozen length mode (Default hybrid / Repeat N / Stretch) -- see
-       * #curve_patch_texture_tile_span. The degenerate `tile_span == 0` (collapsed curve) maps to
-       * `v = 0`. */
-      const float tile_span = curve_patch_texture_tile_span(patch.frozen_params.length_mode,
-                                                            patch.frozen_params.length_repeat,
-                                                            total_length,
-                                                            falloff_radius_at_s,
-                                                            patch.spline.cyclic);
-      /* Centering on the curve's midpoint keeps an OPEN strip's pattern symmetric between its two
-       * ends. A closed curve has no midpoint to be symmetric about; its anchor is the join at
-       * `s == 0`, where a tile has to START -- hence `v = -1` there (the tile domain is [-1, 1],
-       * matching `u`), running to `+1` one tile later. At `s == total_length`, which `tile_span`
-       * above snapped to a whole tile count `n`, that yields `2n - 1`, congruent to `-1` modulo the
-       * texture's period of 2: the pattern closes on itself. Dropping the `- 1` would put the join
-       * mid-tile and, in Stretch/Default (which do not wrap `v` below), push the whole loop outside
-       * the tile the texture actually occupies. */
-      float v = tile_span > 1e-8f ? (patch.spline.cyclic ?
-                                         s / tile_span * 2.0f - 1.0f :
-                                         (s - total_length * 0.5f) / tile_span * 2.0f) :
-                                    0.0f;
+      /* Zone + along-length coordinate in one call. With caps off this is the same formula, in the
+       * same operand order, that used to be inlined here -- the contract the regression test
+       * `texture_zone_caps_disabled_matches_reference` pins down. That test compares against a
+       * verbatim copy of the old formula to within `1e-5f` rather than bit-exactly, because the two
+       * live in different translation units and cross-TU float codegen need not reproduce identical
+       * bits for textually identical expressions; the operand-order guarantee is what keeps SINGLE
+       * mode's output unchanged, and it is verified by inspection. */
+      const CurvePatchTextureZoneSample zone_sample = curve_patch_texture_zone_at(
+          s,
+          total_length,
+          falloff_radius_at_s,
+          patch.caps_enabled,
+          patch.world_cap_start,
+          patch.world_cap_end,
+          patch.frozen_params.length_mode,
+          patch.frozen_params.length_repeat,
+          patch.spline.cyclic);
+      if (!zone_sample.valid) {
+        /* Two oversized caps squeezed the middle to nothing; leave that stretch untouched. */
+        return std::nullopt;
+      }
 
-      /* REPEAT mode must show a full copy of the texture in every tile regardless of the texture's
-       * own extension mode (an image set to Extend/Clip, or a procedural texture with no natural
-       * period, would otherwise never visibly repeat -- only the [-1, 1] center tile would carry the
-       * pattern and the rest would smear the edge). Wrap the along-length coordinate back into a
-       * single tile's [-1, 1) domain (period 2, sawtooth) so each of the N tiles re-samples the whole
-       * texture. Default/Stretch keep the continuous coordinate: Stretch is a single tile already,
-       * and Default deliberately relies on the texture's own tiling for its hybrid look. */
-      if (patch.frozen_params.length_mode == MTEX_CURVE_PATCH_LENGTH_REPEAT) {
-        v -= 2.0f * std::floor((v + 1.0f) * 0.5f);
+      const MTex &zone_mtex = patch.caps_enabled ?
+                                  patch.ribbon_zone_variants[int(zone_sample.zone)] :
+                                  *mtex;
+      if (patch.caps_enabled && zone_mtex.tex == nullptr) {
+        /* An unassigned zone leaves its stretch of the ribbon alone, which is what makes a
+         * caps-only ribbon (no Middle texture) possible. */
+        return std::nullopt;
       }
 
       float tex_u = u;
-      float tex_v = v;
+      float tex_v = zone_sample.v;
       if (patch.frozen_params.swap_axis) {
         std::swap(tex_u, tex_v);
       }
       tex_u = tex_u * mtex_size.x + mtex_ofs.x;
       tex_v = tex_v * mtex_size.y + mtex_ofs.y;
 
-      /* Mirrors the null-texture guard `sculpt_apply_texture()` used to apply before dispatching
-       * to the old, now-removed Curve Patch map-mode branch: `RE_texture_evaluate()` returns
-       * `false` without writing its intensity output when `mtex->tex` is null, so calling
+      /* Mirrors the null-texture guard `sculpt_apply_texture()` used to apply: `RE_texture_evaluate()`
+       * returns `false` without writing its intensity output when `tex` is null, so calling
        * `paint_get_tex_pixel()` unconditionally read an uninitialized `tex_value`. */
       float tex_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-      if (mtex->tex != nullptr) {
-        paint_get_tex_pixel(mtex, tex_u, tex_v, ss.tex_pool, thread_id, &tex_value, tex_rgba);
+      if (zone_mtex.tex != nullptr) {
+        paint_get_tex_pixel(&zone_mtex, tex_u, tex_v, ss.tex_pool, thread_id, &tex_value, tex_rgba);
       }
       }
 
@@ -1007,6 +1017,64 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
    * Ribbon toggle mid-edit would leave the bound holding a stale value from the last Stamps-mode
    * restamp instead of the "no stamps to bound" state Ribbon mode actually has. */
   patch.stamp_search_reach = 0.0f;
+
+  /* Resolve which textures this restamp samples. Done here, once, on the main thread: PHASE 1's
+   * parallel per-vertex walk only reads the result. */
+  patch.stamp_texture_variants.reinitialize(0);
+  patch.stamp_texture_weights_cdf.clear();
+  /* Element-wise rather than `std::array::fill()`: `MTex` deletes its copy assignment (see
+   * #DNA_DEFINE_CXX_METHODS), so DNA's explicit shallow-copy path is the only way to write one. */
+  for (MTex &zone_variant : patch.ribbon_zone_variants) {
+    zone_variant = dna::shallow_zero_initialize();
+  }
+  patch.caps_enabled = false;
+  patch.world_cap_start = 0.0f;
+  patch.world_cap_end = 0.0f;
+  if (const Brush *tex_brush = BKE_paint_brush_for_read(cache.paint)) {
+    if (tex_brush->mtex.curve_patch_stamp_texture_source == MTEX_CURVE_PATCH_TEX_MULTI) {
+      /* Sized up front because `Array` cannot grow -- the container is fixed-size precisely because
+       * `MTex` has no move constructor for a growing one to relocate through. */
+      const int slot_num = tex_brush->curve_patch_texture_slots.count();
+      patch.stamp_texture_variants.reinitialize(slot_num);
+      patch.stamp_texture_weights_cdf.reserve(slot_num);
+      float running = 0.0f;
+      int slot_index = 0;
+      /* Range-for, NOT `LISTBASE_FOREACH`: that macro is private to `listbase.cc` in this branch.
+       * `ListBaseT<T>` iterates directly -- see `for (PaletteColor &color : palette->colors)` in
+       * `blenkernel/intern/paint.cc`. */
+      for (const BrushCurvePatchTextureSlot &slot : tex_brush->curve_patch_texture_slots) {
+        /* `dna::shallow_copy()` rather than plain assignment: `MTex` deletes its copy assignment so
+         * that DNA structs cannot be duplicated without opting into a shallow (non-owning) copy,
+         * which is exactly what is wanted here -- only `tex` differs between variants. */
+        MTex &variant = patch.stamp_texture_variants[slot_index];
+        variant = dna::shallow_copy(tex_brush->mtex);
+        variant.tex = slot.tex;
+        /* Negative weights would make the table decrease and break the search; clamp rather than
+         * reject, so a Python-set value cannot corrupt the layout. */
+        running += std::max(slot.weight, 0.0f);
+        patch.stamp_texture_weights_cdf.append(running);
+        slot_index++;
+      }
+    }
+    if (tex_brush->mtex.curve_patch_ribbon_texture_source == MTEX_CURVE_PATCH_TEX_MULTI) {
+      patch.caps_enabled = true;
+      const Tex *zone_textures[3] = {tex_brush->curve_patch_tex_start,
+                                     tex_brush->curve_patch_tex_middle,
+                                     tex_brush->curve_patch_tex_end};
+      for (const int i : IndexRange(3)) {
+        patch.ribbon_zone_variants[i] = dna::shallow_copy(tex_brush->mtex);
+        patch.ribbon_zone_variants[i].tex = const_cast<Tex *>(zone_textures[i]);
+      }
+      /* The UI stores cap lengths in brush DIAMETERS while `radius` is the ribbon's half-width,
+       * hence the factor of two. The BASE radius, not the per-point one: a zone boundary that moved
+       * with `radius_at_s` would not be a boundary at all. */
+      patch.world_cap_start = tex_brush->curve_patch_cap_start_length * 2.0f *
+                              patch.frozen_params.radius;
+      patch.world_cap_end = tex_brush->curve_patch_cap_end_length * 2.0f *
+                            patch.frozen_params.radius;
+    }
+  }
+
   if (patch.frozen_params.stamp_mode == MTEX_CURVE_PATCH_STAMP_STAMPS) {
     const Brush *stamp_brush = BKE_paint_brush_for_read(cache.paint);
     if (stamp_brush != nullptr) {
@@ -1032,6 +1100,7 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
                                stamp_brush->mtex.rot,
                                stamp_brush->mtex.random_angle,
                                patch.frozen_params.stamp_seed,
+                               patch.stamp_texture_weights_cdf,
                                patch.stamps);
       /* PLANAR tests candidate vertices against a rigid WORLD-space frame, but this reach is still
        * an ARC-LENGTH window. On a bend the chord is shorter than the arc, so a vertex inside a

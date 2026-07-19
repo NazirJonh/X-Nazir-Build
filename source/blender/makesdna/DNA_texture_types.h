@@ -326,6 +326,16 @@ enum eMTex_CurvePatchStampProjection : char {
   MTEX_CURVE_PATCH_STAMP_PROJ_PLANAR = 1,
 };
 
+/** #MTex::curve_patch_stamp_texture_source / #MTex::curve_patch_ribbon_texture_source — whether the
+ * Curve Patch samples the brush's own texture or the brush's multi-texture data.
+ *
+ * SINGLE is 0 so a file written before these fields existed reads back as today's behavior and no
+ * versioning code is needed. */
+enum eMTex_CurvePatchTexSource : char {
+  MTEX_CURVE_PATCH_TEX_SINGLE = 0,
+  MTEX_CURVE_PATCH_TEX_MULTI = 1,
+};
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -386,10 +396,18 @@ struct MTex {
    * #eMTex_CurvePatchStampProjection. Default 0 (CURVE) reproduces the original behavior, so no
    * versioning code is needed for files written before this field existed. */
   char curve_patch_stamp_projection = MTEX_CURVE_PATCH_STAMP_PROJ_CURVE;
-  /** The ten `char` fields above exactly filled what used to be `_pad2`, so this eleventh one
+  /** For the Curve Patch stroke (#BRUSH_STROKE_CURVE_PATCH) STAMPS mode: whether every stamp
+   * samples this slot's own texture or draws one at random from the brush's texture list. See
+   * #eMTex_CurvePatchTexSource. */
+  char curve_patch_stamp_texture_source = MTEX_CURVE_PATCH_TEX_SINGLE;
+  /** For the Curve Patch stroke (#BRUSH_STROKE_CURVE_PATCH) RIBBON mode: whether the whole ribbon
+   * carries this slot's texture or splits into the brush's Start / Middle / End textures. See
+   * #eMTex_CurvePatchTexSource. */
+  char curve_patch_ribbon_texture_source = MTEX_CURVE_PATCH_TEX_SINGLE;
+  /** The twelve `char` fields above exactly filled what used to be `_pad2`, so this thirteenth one
    * leaves `object` below misaligned. makesdna does NOT insert alignment padding on its own (see
    * `check_member_alignment()` in `makesdna.cc`) -- it must be declared. */
-  char _pad2[7] = {};
+  char _pad2[5] = {};
   struct Object *object = nullptr;
   struct Tex *tex = nullptr;
   char uvname[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";

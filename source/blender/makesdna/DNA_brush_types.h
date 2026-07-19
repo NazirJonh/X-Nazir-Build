@@ -169,6 +169,26 @@ struct BrushCurvesSculptSettings {
 
 /** Max number of propagation steps for automasking settings. */
 #define AUTOMASKING_BOUNDARY_EDGES_MAX_PROPAGATION_STEPS 20
+
+/** One entry in a brush's Curve Patch texture list (#Brush::curve_patch_texture_slots), used by the
+ * Curve Patch STAMPS mode when its texture source is #MTEX_CURVE_PATCH_TEX_MULTI.
+ *
+ * Must stay trivially copyable: `brush_copy_data()` duplicates the list with `BLI_duplicatelist()`,
+ * which copies each node's bytes through `MEM_dupallocN` and runs no constructor. Adding a member
+ * with a non-trivial constructor (a `std::string`, a container) would leave that member's bytes
+ * aliased between the two brushes. */
+struct BrushCurvePatchTextureSlot {
+  struct BrushCurvePatchTextureSlot *next = nullptr, *prev = nullptr;
+  /** Sampled through a copy of #Brush::mtex with only this `tex` swapped in, so every mapping
+   * setting stays shared with the brush. A null `tex` makes the stamp that drew this slot skip
+   * itself entirely -- unlike the brush's own null texture, which sculpts flat. */
+  struct Tex *tex = nullptr;
+  /** Relative probability weight in the per-stamp draw. Zero disables the slot without deleting it;
+   * a list whose weights all sum to zero falls back to the brush's own texture. */
+  float weight = 1.0f;
+  char _pad[4] = {};
+};
+
 /**
  * \note Any change to members that is user visible and that may make the brush differ from the one
  * saved in the asset library should be followed by a #BKE_brush_tag_unsaved_changes() call.
@@ -450,6 +470,27 @@ struct Brush {
 
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve = nullptr;
   struct MeshAutomaskingSettings *mesh_automasking_settings = nullptr;
+
+  /** Curve Patch STAMPS mode texture list, active only when
+   * #MTex::curve_patch_stamp_texture_source is #MTEX_CURVE_PATCH_TEX_MULTI. Lives here rather than
+   * on #MTex because it is ownership data (ID pointers with user counts), not mapping settings, and
+   * because #MTex is shared with particle systems and line style, which have no use for it. */
+  ListBaseT<BrushCurvePatchTextureSlot> curve_patch_texture_slots = {nullptr, nullptr};
+  int curve_patch_texture_active_index = 0;
+  char _pad5[4] = {};
+
+  /** Curve Patch RIBBON mode Start / Middle / End textures, active only when
+   * #MTex::curve_patch_ribbon_texture_source is #MTEX_CURVE_PATCH_TEX_MULTI. A null entry leaves its
+   * stretch of the ribbon untouched. */
+  struct Tex *curve_patch_tex_start = nullptr;
+  struct Tex *curve_patch_tex_middle = nullptr;
+  struct Tex *curve_patch_tex_end = nullptr;
+
+  /** Arc length the Start / End textures occupy, in brush DIAMETERS -- 1.0 makes a cap as long as
+   * the ribbon is wide, so its texture is not distorted. Zero means no cap, which is also what a
+   * file written before this field existed reads back as. */
+  float curve_patch_cap_start_length = 1.0f;
+  float curve_patch_cap_end_length = 1.0f;
 };
 
 struct PaletteColor {

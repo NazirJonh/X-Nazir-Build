@@ -5,6 +5,7 @@
 import bpy
 from bpy.types import (
     Menu,
+    UIList,
 )
 from bpy.app.translations import (
     contexts as i18n_contexts,
@@ -550,6 +551,15 @@ class TextureMaskPanel(BrushPanel):
         col.prop(mask_tex_slot, "scale")
 
 
+class SCULPT_UL_curve_patch_textures(UIList):
+    def draw_item(self, _context, layout, _data, item, _icon, _active_data, _active_propname, _index):
+        if item.texture:
+            layout.prop(item.texture, "name", text="", emboss=False, icon_value=layout.icon(item.texture))
+        else:
+            layout.label(text="Empty", icon='TEXTURE_DATA')
+        layout.prop(item, "weight", text="", emboss=False)
+
+
 class StrokePanel(BrushPanel):
     bl_label = "Stroke"
     bl_options = {'DEFAULT_CLOSED'}
@@ -580,7 +590,37 @@ class StrokePanel(BrushPanel):
                 col.prop(tex_slot, "curve_patch_stamp_strength_random", text="Random Strength", slider=True)
                 col.prop(tex_slot, "random_angle", text="Random Rotation")
                 col.row().prop(tex_slot, "curve_patch_stamp_projection", text="Projection", expand=True)
+                col.separator()
+                col.row().prop(tex_slot, "curve_patch_stamp_texture_source", text="Textures", expand=True)
+                if tex_slot.curve_patch_stamp_texture_source == 'LIST':
+                    row = col.row()
+                    row.template_list(
+                        "SCULPT_UL_curve_patch_textures", "",
+                        brush, "curve_patch_texture_slots",
+                        brush, "curve_patch_texture_active_index",
+                        rows=3,
+                    )
+                    sub = row.column(align=True)
+                    sub.operator("brush.curve_patch_texture_slot_add", icon='ADD', text="")
+                    sub.operator("brush.curve_patch_texture_slot_remove", icon='REMOVE', text="")
+                    sub.separator()
+                    sub.operator("brush.curve_patch_texture_slot_move", icon='TRIA_UP', text="").type = 'UP'
+                    sub.operator("brush.curve_patch_texture_slot_move", icon='TRIA_DOWN', text="").type = 'DOWN'
+                    slots = brush.curve_patch_texture_slots
+                    index = brush.curve_patch_texture_active_index
+                    if 0 <= index < len(slots):
+                        active_slot = slots[index]
+                        col.template_ID(active_slot, "texture", new="texture.new")
+                        col.prop(active_slot, "weight", text="Weight")
             else:
+                col.row().prop(tex_slot, "curve_patch_ribbon_texture_source", text="Textures", expand=True)
+                if tex_slot.curve_patch_ribbon_texture_source == 'CAPS':
+                    col.template_ID(brush, "curve_patch_texture_start", new="texture.new")
+                    col.prop(brush, "curve_patch_cap_start_length", text="Start Length")
+                    col.template_ID(brush, "curve_patch_texture_middle", new="texture.new")
+                    col.template_ID(brush, "curve_patch_texture_end", new="texture.new")
+                    col.prop(brush, "curve_patch_cap_end_length", text="End Length")
+                    col.separator()
                 col.row().prop(tex_slot, "curve_patch_length_mode", text="Curve Patch Length", expand=True)
                 if tex_slot.curve_patch_length_mode == 'REPEAT':
                     col.prop(tex_slot, "curve_patch_length_repeat", text="Repeats")
@@ -2005,6 +2045,7 @@ def brush_basic_grease_pencil_vertex_settings(layout, context, brush, *, compact
 
 
 classes = (
+    SCULPT_UL_curve_patch_textures,
     VIEW3D_MT_tools_projectpaint_clone,
 )
 

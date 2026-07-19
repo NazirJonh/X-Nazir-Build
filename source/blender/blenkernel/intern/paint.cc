@@ -263,9 +263,10 @@ IDTypeInfo IDType_ID_PC = {
 
 static ePaintOverlayControlFlags overlay_flags = ePaintOverlayControlFlags{};
 
-/* Monotonic companion to `overlay_flags` for the primary brush texture. The overlay flags are a
+/* Monotonic companion to `overlay_flags` for any texture the active brush actually samples --
+ * primary `mtex`, plus the Curve Patch's list and three cap textures. The overlay flags are a
  * shared, reset-on-draw signal (the paint cursor clears them), which makes them unusable for a
- * poller. This counter only ever increases -- one bump per primary-texture invalidation -- so a
+ * poller. This counter only ever increases -- one bump per sampled-texture invalidation -- so a
  * consumer can detect a change race-free by comparing against a stored value. */
 static uint64_t overlay_texture_edit_count = 0;
 
@@ -290,6 +291,33 @@ void BKE_paint_invalidate_overlay_tex(const Main &bmain,
   }
   if (br->mask_mtex.tex == tex) {
     overlay_flags |= PAINT_OVERLAY_INVALID_TEXTURE_SECONDARY;
+  }
+
+  /* The Curve Patch stroke samples the brush's multi-texture data -- a list of stamp textures plus
+   * three ribbon cap textures -- through the same `ImagePool` as `mtex`, but none of those pointers
+   * live in `mtex`, so the two checks above never see them. Without this, editing the image on a
+   * list texture leaves the relief sampling a stale `ImBuf` until some unrelated watched setting
+   * happens to change.
+   *
+   * A null `tex` is rejected up front: the cap pointers are null whenever the user has not assigned
+   * them, and a null-vs-null match would bump the counter on every unrelated texture edit.
+   *
+   * Only the edit counter is bumped, NOT `PAINT_OVERLAY_INVALID_TEXTURE_PRIMARY`: that flag drives
+   * the paint cursor's texture preview, which shows `mtex` alone and never these. */
+  if (tex != nullptr) {
+    bool curve_patch_uses_tex = ELEM(
+        tex, br->curve_patch_tex_start, br->curve_patch_tex_middle, br->curve_patch_tex_end);
+    if (!curve_patch_uses_tex) {
+      for (const BrushCurvePatchTextureSlot &slot : br->curve_patch_texture_slots) {
+        if (slot.tex == tex) {
+          curve_patch_uses_tex = true;
+          break;
+        }
+      }
+    }
+    if (curve_patch_uses_tex) {
+      overlay_texture_edit_count++;
+    }
   }
 }
 

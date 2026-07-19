@@ -141,6 +141,11 @@ static void brush_copy_data(Main * /*bmain*/,
 
   /* enable fake user by default */
   id_fake_user_set(&brush_dst->id);
+
+  /* Deep-copy the Curve Patch texture list. The `Tex` user counts inside it are handled generically
+   * by `brush_foreach_id()` during the copy, so nothing here calls `id_us_plus()`. */
+  BLI_duplicatelist(&brush_dst->curve_patch_texture_slots,
+                    &brush_src->curve_patch_texture_slots);
 }
 
 static void brush_free_data(ID *id)
@@ -183,6 +188,8 @@ static void brush_free_data(ID *id)
   MEM_SAFE_DELETE(brush->gradient);
 
   BKE_previewimg_id_free(&brush->id);
+
+  BLI_freelistN(&brush->curve_patch_texture_slots);
 }
 
 static void brush_make_local(Main *bmain, ID *id, const int flags)
@@ -231,6 +238,16 @@ static void brush_foreach_id(ID *id, LibraryForeachIDData *data)
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->gpencil_settings->material, IDWALK_CB_USER);
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->gpencil_settings->material_alt, IDWALK_CB_USER);
   }
+  /* Registered directly rather than through `BKE_texture_mtex_foreach_id()`: that wrapper exists for
+   * the shared `MTex` struct, while these are plain `Tex` pointers owned by the brush. This is what
+   * gives them user counts, library override and ID remapping -- brush copy and free rely on it. */
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->curve_patch_tex_start, IDWALK_CB_USER);
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->curve_patch_tex_middle, IDWALK_CB_USER);
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->curve_patch_tex_end, IDWALK_CB_USER);
+  for (BrushCurvePatchTextureSlot &slot : brush->curve_patch_texture_slots) {
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, slot.tex, IDWALK_CB_USER);
+  }
+
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, BKE_texture_mtex_foreach_id(data, &brush->mtex));
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data,
                                           BKE_texture_mtex_foreach_id(data, &brush->mask_mtex));
@@ -329,6 +346,8 @@ static void brush_blend_write(BlendWriter *writer, ID *id, const void *id_addres
   }
 
   BKE_previewimg_blend_write(writer, brush->preview);
+
+  writer->write_struct_list(&brush->curve_patch_texture_slots);
 }
 
 static void brush_blend_read_data(BlendDataReader *reader, ID *id)
@@ -477,6 +496,10 @@ static void brush_blend_read_data(BlendDataReader *reader, ID *id)
   BKE_previewimg_blend_read(reader, brush->preview);
 
   brush->has_unsaved_changes = false;
+
+  /* The `Tex` pointers inside are resolved automatically through `brush_foreach_id()`, so there is
+   * nothing for `brush_blend_read_after_liblink()` to do here. */
+  BLO_read_struct_list(reader, BrushCurvePatchTextureSlot, &brush->curve_patch_texture_slots);
 }
 
 static void brush_blend_read_after_liblink(BlendLibReader * /*reader*/, ID *id)
@@ -640,6 +663,8 @@ static void brush_defaults(Brush *brush)
   FROM_DEFAULT(falloff_shape);
   FROM_DEFAULT(tip_scale_x);
   FROM_DEFAULT(tip_roundness);
+  FROM_DEFAULT(curve_patch_cap_start_length);
+  FROM_DEFAULT(curve_patch_cap_end_length);
 
 #undef FROM_DEFAULT
 #undef FROM_DEFAULT_PTR

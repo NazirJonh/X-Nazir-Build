@@ -1466,7 +1466,9 @@ static void curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
       patch->final_quality = true;
       curve_patch_restore_and_restamp(*C, ob, *patch);
       patch->final_quality = false;
-      undo::push_end(ob);
+      /* Closes the position undo step itself -- see `curve_patch_finish_commit()` for why closing
+       * it here would be wrong. */
+      curve_patch_finish_commit(*C, ob, *patch);
 
       /* The re-stamp ends in `flush_update_step()`, which only arms the fast paint-redraw path; that
        * is torn down the instant this operator finishes. Issue the full finished-stroke redraw so

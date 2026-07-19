@@ -4168,6 +4168,14 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Active Curve Patch Texture", "Index of the active texture slot");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  prop = RNA_def_property(srna, "use_curve_patch_face_set", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "curve_patch_face_set", 1);
+  RNA_def_property_ui_text(prop,
+                           "Create Face Set",
+                           "Assign a new face set to the geometry raised by each Curve Patch or "
+                           "Roll stroke");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   prop = RNA_def_property(srna, "curve_patch_texture_start", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "curve_patch_tex_start");
   RNA_def_property_struct_type(prop, "Texture");

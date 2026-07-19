@@ -630,6 +630,10 @@ class StrokePanel(BrushPanel):
             sub.prop(tex_slot, "curve_patch_end_falloff_length", text="Falloff Length", slider=True)
             col.separator()
 
+        if mode == 'SCULPT' and brush.stroke_method in {'CURVE_PATCH', 'ROLL'}:
+            col.prop(brush, "use_curve_patch_face_set", text="Create Face Set")
+            col.separator()
+
         if brush.stroke_method == 'ANCHORED':
             col.prop(brush, "use_edge_to_edge", text="Edge to Edge")
 

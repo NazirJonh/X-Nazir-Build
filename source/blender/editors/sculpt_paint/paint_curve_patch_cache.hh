@@ -280,6 +280,27 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
 void curve_patch_restore_only(Object &ob, const CurvePatchCache &patch);
 
 /**
+ * Finish a committed Curve Patch edit: close the patch's position undo step, and -- if the brush's
+ * `curve_patch_face_set` flag is set and the relief actually raised anything -- assign a fresh face
+ * set to the raised faces in an undo step of its own.
+ *
+ * Call ONCE, from the commit branch of `SCULPT_OT_curve_patch_edit`, INSTEAD of a bare
+ * `undo::push_end()`, and after the final-quality re-stamp so the threshold is measured against the
+ * smoothed profile the user will actually keep. Never called on cancel.
+ *
+ * Closing the undo step belongs here rather than in the caller because HOW it must be closed
+ * depends on whether a face set follows: an undo step carries exactly one `undo::Type`, so the face
+ * set needs a second step, and opening one would destroy the position step unless that step was
+ * force-pushed first (see the implementation). That is only knowable after the raised faces have
+ * been computed.
+ *
+ * "Raised" is measured as displacement from `patch.orig_positions`, thresholded at a fraction of
+ * this patch's own maximum displacement -- relative rather than absolute, because displacement is
+ * in scene units and would otherwise behave differently on differently scaled objects.
+ */
+void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &patch);
+
+/**
  * Start the Curve Patch modal editor (`SCULPT_OT_curve_patch_edit`) right after a
  * `BRUSH_STROKE_CURVE_PATCH` anchor stroke finishes. Takes over ownership of the just-finished
  * stroke's `SculptSession::cache` and the undo transaction opened by `stroke_undo_begin()` for

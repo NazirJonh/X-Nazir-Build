@@ -18,18 +18,22 @@
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
 
+#include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
+#include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_subdiv_ccg.hh"
+#include "BKE_undo_system.hh"
 
 #include "BLI_array.hh"
 #include "BLI_assert.h"
+#include "BLI_bit_vector.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_execution_mode.hh"
 #include "BLI_index_mask.hh"
@@ -46,12 +50,15 @@
 
 #include "WM_api.hh"
 
+#include "ED_sculpt.hh"
+#include "ED_undo.hh"
 #include "ED_view3d.hh"
 
 #include "paint_curve_intern.hh"
 #include "paint_intern.hh"
 
 #include "mesh/mesh_brush_common.hh"
+#include "mesh/sculpt_face_set.hh"
 #include "mesh/sculpt_intern.hh"
 #include "mesh/sculpt_undo.hh"
 
@@ -965,7 +972,244 @@ static void curve_patch_smooth_relief(Object &ob, const CurvePatchCache &patch)
   mesh.tag_positions_changed_no_normals();
 }
 
+/** Largest displacement any snapshotted element has undergone, in scene units. `positions` must be
+ * the array `patch.orig_positions` is keyed into for the object's current `bke::pbvh::Type`. */
+static float curve_patch_max_displacement(const Span<float3> positions,
+                                          const Map<int, float3> &orig_positions)
+{
+  float max_disp = 0.0f;
+  for (const auto item : orig_positions.items()) {
+    max_disp = math::max(max_disp, math::distance(positions[item.key], item.value));
+  }
+  return max_disp;
+}
+
 }  // namespace
+
+void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &patch)
+{
+  /* Every early exit below still has to close the patch's position undo step, just without forcing
+   * it into the stack -- `wm_operator_finished()` picks it up from `ustack->step_init` afterwards,
+   * which is what the plain `undo::push_end()` this function replaced always relied on. */
+
+  const SculptSession &ss = *ob.runtime->sculpt_session;
+  /* Read the LIVE brush rather than `patch.frozen_params`: this toggle is a commit-time behavior
+   * switch, not a relief parameter, so the user may flip it while the patch is being edited. Same
+   * live-sync pattern the texture-source toggles use in `curve_patch_restore_and_restamp()`. */
+  const Brush *brush = ss.cache ? BKE_paint_brush_for_read(ss.cache->paint) : nullptr;
+  if (brush == nullptr || brush->curve_patch_face_set == 0) {
+    undo::push_end(ob);
+    return;
+  }
+  if (patch.orig_positions.is_empty()) {
+    undo::push_end(ob);
+    return;
+  }
+
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  /* Dynamic Topology has no stable vertex index, so `orig_positions` cannot exist for it; the patch
+   * is refused outright at `curve_patch_start_from_anchor()`. Guarded anyway so this stays correct
+   * if that ever changes. */
+  if (pbvh.type() == bke::pbvh::Type::BMesh) {
+    undo::push_end(ob);
+    return;
+  }
+
+  Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  IndexMaskMemory memory;
+  BitVector<> raised_faces(mesh.faces_num, false);
+
+  if (pbvh.type() == bke::pbvh::Type::Grids) {
+    const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+    const Span<float3> positions = subdiv_ccg.positions;
+
+    const float max_disp = curve_patch_max_displacement(positions, patch.orig_positions);
+    if (max_disp <= 0.0f) {
+      /* Exactly zero rather than an epsilon, for the same reason as the Mesh branch below. */
+      undo::push_end(ob);
+      return;
+    }
+    const float threshold = max_disp * 0.005f;
+
+    /* Every grid belongs to exactly one base-mesh face, so a raised grid element marks its face
+     * directly -- no vertex indirection and no `raised_verts` step on this path. Sequential rather
+     * than parallel: this walks a `Map`, whose own slot iteration is single-threaded anyway (the
+     * same reason `curve_patch_restore_only()` gave up on parallelizing its equivalent loop). */
+    for (const auto item : patch.orig_positions.items()) {
+      if (math::distance(positions[item.key], item.value) > threshold) {
+        raised_faces[subdiv_ccg.grid_to_face_map[item.key / subdiv_ccg.grid_area]].set();
+      }
+    }
+  }
+  else {
+    const Span<float3> positions = mesh.vert_positions();
+
+    /* Pass 1: the patch's own maximum displacement, which the threshold is a fraction of. */
+    const float max_disp = curve_patch_max_displacement(positions, patch.orig_positions);
+    if (max_disp <= 0.0f) {
+      /* A patch that displaced nothing (fully transparent texture, zero strength) must not burn a
+       * face set ID. Compared against exactly zero rather than an epsilon: an absolute epsilon in
+       * scene units would false-trigger on a heavily scaled-down object, and the relative threshold
+       * derived from `max_disp` below already handles anything that did move but only barely. */
+      undo::push_end(ob);
+      return;
+    }
+    const float threshold = max_disp * 0.005f;
+
+    /* Pass 2: which vertices cleared the threshold. Displacement is applied along the vertex normal,
+     * so this distance IS the relief height. */
+    BitVector<> raised_verts(mesh.verts_num, false);
+    for (const auto item : patch.orig_positions.items()) {
+      if (math::distance(positions[item.key], item.value) > threshold) {
+        raised_verts[item.key].set();
+      }
+    }
+
+    const OffsetIndices<int> faces = mesh.faces();
+    const Span<int> corner_verts = mesh.corner_verts();
+
+    /* A face joins the set if ANY of its vertices was raised, so the set covers the relief's slopes
+     * as well as its plateau rather than stopping short of them. Kept as a bit vector rather than
+     * going straight to an `IndexMask`, because the node mask below has to test membership per face.
+     * Filled through `parallel_for_aligned()` rather than plain `parallel_for()`: a `BitVector` bit
+     * write is a non-atomic `*int_ |= mask_` read-modify-write on the 64-bit word the bit lives in
+     * (`BLI_bit_ref.hh`), so two threads landing on faces whose indices share a word would race --
+     * `BLI_bit_vector.hh` documents this directly ("Writing to separate bits in the same int is not
+     * thread-safe"). Aligning sub-ranges to `bits::BitsPerInt` guarantees every thread's slice starts
+     * and ends on a word boundary, so no two threads ever touch the same word. Same pattern
+     * `enabled_state_to_bitmap()` in `sculpt_expand.cc` uses to fill a per-vertex `BitVector` in
+     * parallel. */
+    threading::parallel_for_aligned(
+        faces.index_range(), 2048, bits::BitsPerInt, [&](const IndexRange range) {
+          for (const int face : range) {
+            for (const int vert : corner_verts.slice(faces[face])) {
+              if (raised_verts[vert]) {
+                raised_faces[face].set();
+                break;
+              }
+            }
+          }
+        });
+  }
+
+  const IndexMask face_mask = IndexMask::from_bits(raised_faces, memory);
+  if (face_mask.is_empty()) {
+    undo::push_end(ob);
+    return;
+  }
+
+  /* Derived from the faces actually being written, NOT from `patch.last_restamp_nodes`. A node
+   * enters that set only when one of its OWN unique vertices moved, but a face joins `face_mask`
+   * when any of its corners moved -- and the faces around a vertex are spread across neighboring
+   * nodes. A node owning such a face would otherwise be missing here, leaving that face's previous
+   * face set unsaved (so Ctrl+Z could not restore it) and its draw buffers untagged. On the Mesh
+   * path there is a second way the two could disagree: committing also runs
+   * `curve_patch_smooth_relief()`, which widens the displaced set without widening
+   * `last_restamp_nodes`. Deriving the node mask from the face mask makes them agree by
+   * construction, on both paths. */
+  IndexMask node_mask;
+  if (pbvh.type() == bke::pbvh::Type::Grids) {
+    const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+    const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+    /* A `GridsNode` carries grids, not faces, and one face's grids can straddle two nodes -- so
+     * every node holding ANY grid of a raised face is included, which is what keeps the undo record
+     * and the redraw tag complete on both sides of such a split. */
+    node_mask = IndexMask::from_predicate(
+        nodes.index_range(),
+        memory,
+        [&](const int i) {
+          for (const int grid : nodes[i].grids()) {
+            if (raised_faces[subdiv_ccg.grid_to_face_map[grid]]) {
+              return true;
+            }
+          }
+          return false;
+        },
+        exec_mode::grain_size(64));
+  }
+  else {
+    const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+    node_mask = IndexMask::from_predicate(
+        nodes.index_range(),
+        memory,
+        [&](const int i) {
+          for (const int face : nodes[i].faces()) {
+            if (raised_faces[face]) {
+              return true;
+            }
+          }
+          return false;
+        },
+        exec_mode::grain_size(64));
+  }
+
+  /* Force the patch's position step into the undo stack before opening a second one. This operator
+   * carries `OPTYPE_UNDO`, so `wm->op_undo_depth` is non-zero here and a plain `push_end()` would
+   * leave that step parked in `ustack->step_init` -- where `push_begin_ex()` below would free it
+   * (`undo_system.cc`), losing the ability to undo the relief at all. Precedent for the forced
+   * form: `mesh/sculpt_dyntopo.cc`.
+   *
+   * Forced ONLY when that step is still there AND still ours. The patch does not open its own
+   * transaction: it inherits the one `stroke_undo_begin()` opened for the anchor stroke, which
+   * survives because `SCULPT_OT_brush_stroke` carries no `OPTYPE_UNDO` and the Curve Patch branch
+   * of its `done()` returns before `stroke_undo_end()` (see this file's header comment on taking
+   * over the transaction). But it is not safe from everything: the modal deliberately passes events
+   * through whenever the cursor leaves its region, so the user can invoke an unrelated `OPTYPE_UNDO`
+   * operator -- Mask Flood Fill, say -- while the patch is live, and that operator's own
+   * `push_begin()` frees our `step_init` out from under us. The patch then reaches this point owning
+   * a transaction that no longer exists.
+   *
+   * Forcing in that state CRASHES rather than misbehaving: `push_end_ex()`'s forced branch calls
+   * `BKE_undosys_step_push()` with a NULL context, which is safe only while `step_init` is set,
+   * because the undo type is then read from that step. Otherwise it falls back to
+   * `BKE_undosys_type_from_context(nullptr)`, which polls every registered undo type with the null
+   * context until one dereferences it -- `armature_undosys_poll()` reaches `CTX_data_main()` and
+   * reads through null. The type test matters for the same reason: a foreign `step_init` would be
+   * pushed under a foreign type.
+   *
+   * Skipping the force when the step is gone costs nothing here -- its only purpose is to protect an
+   * open step from the `push_begin_ex()` below, and there is none left to protect. What the relief's
+   * own undo does in that case is a pre-existing question this function does not answer: the
+   * re-stamps' `undo::push_nodes()` never required an open step either, because
+   * `BKE_undosys_stack_init_or_active_with_type()` silently falls back to the ACTIVE step. */
+  const UndoStack *undo_stack = ED_undo_stack_get();
+  const bool patch_step_is_ours = undo_stack && undo_stack->step_init &&
+                                  undo_stack->step_init->type == BKE_UNDOSYS_TYPE_SCULPT;
+  undo::push_end_ex(ob, patch_step_is_ours);
+
+  /* A Face Set write cannot share the patch's step: a step carries exactly one `undo::Type`, and
+   * appending `FaceSet` to a `Position` step would retype it, silently stripping the position
+   * storage Ctrl+Z needs. The cost is that undoing the commit takes two presses -- face set first,
+   * then relief -- which is the tradeoff that was chosen deliberately. */
+  const Scene &scene = *CTX_data_scene(&C);
+  const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(&C);
+  undo::push_begin_ex(scene, ob, "Curve Patch Face Set");
+  undo::push_nodes(depsgraph, ob, node_mask, undo::Type::FaceSet);
+
+  /* Order matters: the attribute has to EXIST before the next available ID is queried. On a mesh
+   * that never had face sets, `find_next_available_id()` reads an empty span and answers 1, while
+   * `ensure_face_sets_mesh()` then creates every face at 1 -- so querying first would put the whole
+   * mesh and this patch in the same set. Creating first makes the answer 2. Same ordering the trim
+   * gesture relies on (`sculpt_trim.cc` creates in `gesture_begin`). */
+  face_set::create_face_sets_mesh(ob);
+  const int face_set_id = face_set::find_next_available_id(ob);
+
+  bke::SpanAttributeWriter<int> face_sets = face_set::ensure_face_sets_mesh(mesh);
+  face_mask.foreach_index(
+      [&](const int face) { face_sets.span[face] = face_set_id; }, exec_mode::grain_size(4096));
+  /* Values changed, topology did not, so the nodes only need their face-set data refreshed -- no
+   * PBVH rebuild, no `islands::invalidate()`. Tagged before the writer is finished, matching the
+   * order `face_sets_update()` uses in `mesh/sculpt_face_set.cc`. */
+  pbvh.tag_face_sets_changed(node_mask);
+
+  /* `ensure_face_sets_mesh()` hands back an open writer -- unlike `create_face_sets_mesh()`, it
+   * MUST be finished explicitly (see `sculpt_face_set.hh`). */
+  face_sets.finish();
+
+  /* Left parked in `ustack->step_init` on purpose: this is the last step of the operator, so
+   * `wm_operator_finished()` pushes it via the operator's own `OPTYPE_UNDO`. */
+  undo::push_end(ob);
+}
 
 void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &patch)
 {

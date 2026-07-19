@@ -7,7 +7,6 @@
  */
 
 #include <algorithm>
-#include <cstdio>
 #include <cstring>
 
 #include "MEM_guardedalloc.h"
@@ -819,8 +818,8 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
                              BRUSH_GRADIENT_SPACING_CLAMP) ||
                         (cache->last_pressure != pressure))) ||
                       BKE_brush_color_jitter_get_settings(painter->paint, brush);
-  float tex_rotation = brush->mtex.rot;
-  float mask_rotation = brush->mask_mtex.rot;
+  float tex_rotation = -brush->mtex.rot;
+  float mask_rotation = -brush->mask_mtex.rot;
 
   painter->pool = BKE_image_pool_new();
 

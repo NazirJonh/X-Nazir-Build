@@ -247,7 +247,6 @@ bool ED_image_tools_paint_poll(bContext *C);
 void ED_paint_cursor_start(Paint *paint, bool (*poll)(bContext *C));
 
 /* Canvas rotation support */
-void ED_space_image_rotation_cache_update(SpaceImage *sima);
 bool ED_space_image_rotation_supported(const SpaceImage *sima);
 
 }  // namespace blender

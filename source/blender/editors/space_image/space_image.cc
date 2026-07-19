@@ -701,6 +701,7 @@ static void image_main_region_set_view2d(SpaceImage *sima, ARegion *region)
   }
   else {
     region->v2d.rotation = 0.0f;
+    copy_v2_fl(region->v2d.rotation_pivot, 0.5f);
   }
 }
 

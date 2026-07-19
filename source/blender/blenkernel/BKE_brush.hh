@@ -144,30 +144,8 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
                               float4 &rgba,
                               int thread,
                               ImagePool *pool);
-/**
- * Version with additional rotation offset for canvas rotation compensation.
- * The rotation_offset is added to the brush rotation for texture sampling.
- */
-float BKE_brush_sample_tex_3d(const Paint *paint,
-                              const Brush *br,
-                              const MTex *mtex,
-                              const float3 &point,
-                              float4 &rgba,
-                              int thread,
-                              ImagePool *pool,
-                              float rotation_offset);
 float BKE_brush_sample_masktex(
     const Paint *paint, Brush *br, const float2 &point, int thread, ImagePool *pool);
-/**
- * Version with additional rotation offset for canvas rotation compensation.
- * The rotation_offset is added to the brush rotation for mask sampling.
- */
-float BKE_brush_sample_masktex(const Paint *paint,
-                               Brush *br,
-                               const float2 &point,
-                               int thread,
-                               ImagePool *pool,
-                               float rotation_offset);
 
 /**
  * Get the mask texture for this given object mode.

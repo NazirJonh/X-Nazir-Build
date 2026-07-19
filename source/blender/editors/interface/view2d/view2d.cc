@@ -1840,6 +1840,12 @@ void view2d_view_rotation_matrix(const View2D *v2d, float r_mat[4][4])
   if (v2d->rotation == 0.0f) {
     return;
   }
+  /* NOTE: The DRW image engine bakes the same aspect-correct rotation about the same pivot into
+   * its screen-space to sampler-space transform (see `Instance::end_sync` in
+   * `draw/engines/image/image_instance.hh`). It works on a different matrix in a different space,
+   * so the two cannot share code directly, but they must stay geometrically equivalent: if the
+   * convention here changes, that one has to change with it or the image will drift away from the
+   * overlays. */
   /* view->pixel scale per axis, so the screen-space rotation stays square (aspect-correct). */
   const float sx = float(BLI_rcti_size_x(&v2d->mask) + 1) / BLI_rctf_size_x(&v2d->cur);
   const float sy = float(BLI_rcti_size_y(&v2d->mask) + 1) / BLI_rctf_size_y(&v2d->cur);

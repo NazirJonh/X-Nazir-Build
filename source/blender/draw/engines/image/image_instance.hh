@@ -244,7 +244,12 @@ class Instance : public DrawEngine {
      * be recovered directly. The rotation must happen in screen space about the screen position of
      * the pivot (square in pixels), exactly like the interactive tools and overlays, so that the
      * displayed image stays aligned with them regardless of zoom/pan. We therefore rotate the screen
-     * input first and then apply the base map: `m_rot = m_base * R_screen`. */
+     * input first and then apply the base map: `m_rot = m_base * R_screen`.
+     *
+     * NOTE: This must stay geometrically equivalent to `view2d_view_rotation_matrix`
+     * (`editors/interface/view2d/view2d.cc`), which applies the same rotation for the overlays and
+     * the POST_VIEW callbacks. The two work in different spaces and so cannot share code, but a
+     * change to one convention requires the matching change here. */
     const float rotation = space_->get_canvas_rotation();
     if (rotation != 0.0f) {
       float3x3 &m = state.ss_to_texture;

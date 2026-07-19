@@ -1055,33 +1055,6 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
   return intensity;
 }
 
-/**
- * Overloaded version with rotation offset for canvas rotation compensation.
- * This allows passing canvas rotation without modifying global paint_runtime state.
- */
-float BKE_brush_sample_tex_3d(const Paint *paint,
-                              const Brush *br,
-                              const MTex *mtex,
-                              const float3 &point,
-                              float4 &rgba,
-                              int thread,
-                              ImagePool *pool,
-                              float rotation_offset)
-{
-  /* Temporarily modify brush_rotation to account for canvas rotation.
-   * This is safe because we restore the original value before returning.
-   * The rotation_offset is subtracted because that's how brush_rotation is used
-   * in the texture sampling code. */
-  bke::PaintRuntime *runtime = const_cast<bke::PaintRuntime *>(paint->runtime);
-  const float original_rotation = runtime->brush_rotation;
-  runtime->brush_rotation -= rotation_offset;
-
-  float result = BKE_brush_sample_tex_3d(paint, br, mtex, point, rgba, thread, pool);
-
-  runtime->brush_rotation = original_rotation;
-  return result;
-}
-
 float BKE_brush_sample_masktex(
     const Paint *paint, Brush *br, const float2 &point, const int thread, ImagePool *pool)
 {
@@ -1195,29 +1168,6 @@ float BKE_brush_sample_masktex(
   }
 
   return intensity;
-}
-
-/**
- * Overloaded version with rotation offset for canvas rotation compensation.
- * This allows passing canvas rotation without modifying global paint_runtime state.
- */
-float BKE_brush_sample_masktex(const Paint *paint,
-                               Brush *br,
-                               const float2 &point,
-                               int thread,
-                               ImagePool *pool,
-                               float rotation_offset)
-{
-  /* Temporarily modify brush_rotation_sec to account for canvas rotation.
-   * This is safe because we restore the original value before returning. */
-  bke::PaintRuntime *runtime = const_cast<bke::PaintRuntime *>(paint->runtime);
-  const float original_rotation = runtime->brush_rotation_sec;
-  runtime->brush_rotation_sec -= rotation_offset;
-
-  float result = BKE_brush_sample_masktex(paint, br, point, thread, pool);
-
-  runtime->brush_rotation_sec = original_rotation;
-  return result;
 }
 
 /* -------------------------------------------------------------------- */

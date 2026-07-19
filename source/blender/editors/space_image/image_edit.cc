@@ -609,9 +609,6 @@ bool ED_space_image_maskedit_mask_visible_splines_poll(bContext *C)
 /** \name Canvas Rotation Support
  * \{ */
 
-#include "BLI_math_base.h"
-#include "BLI_math_matrix.h"
-
 /**
  * Check if canvas rotation is supported in the current mode.
  * Rotation is supported in View, Paint, and Mask modes.
@@ -623,16 +620,6 @@ bool ED_space_image_rotation_supported(const SpaceImage *sima)
     return false;
   }
   return ELEM(sima->mode, SI_MODE_VIEW, SI_MODE_PAINT, SI_MODE_MASK);
-}
-
-/**
- * Update cached sin/cos values for canvas rotation.
- * Must be called whenever sima->rotation is changed.
- */
-void ED_space_image_rotation_cache_update(SpaceImage *sima)
-{
-  sima->rotation_sin = sinf(sima->rotation);
-  sima->rotation_cos = cosf(sima->rotation);
 }
 
 /** \} */

@@ -169,6 +169,7 @@ if(WITH_GTESTS)
   )
   set(TEST_SRC
     interface_ops_test.cc
+    view2d/view2d_test.cc
   )
 
   set(TEST_LIB

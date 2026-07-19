@@ -69,7 +69,10 @@ class Cursor : Overlay {
     }
     else {
       const SpaceImage *sima = reinterpret_cast<const SpaceImage *>(state.space_data);
-      /* Rotation-compensated UV->screen projection for the 2D cursor in the Image Editor. */
+      /* Rotation-compensated UV->screen projection for the 2D cursor in the Image Editor.
+       * The cast is needed because the whole `ED_space_image_*` size/zoom chain acquires (and so
+       * locks) the image buffer, and therefore takes a mutable #SpaceImage. Nothing here writes to
+       * it. */
       float cursor_screen[2];
       ED_image_point_pos__reverse(
           const_cast<SpaceImage *>(sima), state.region, sima->cursor, cursor_screen);

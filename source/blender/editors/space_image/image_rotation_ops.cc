@@ -16,6 +16,9 @@
 #include "BLI_dial_2d.h"
 #include "BLI_math_base.h"
 #include "BLI_math_rotation.h"
+#include "BLI_math_vector.h"
+#include "BLI_string.h"
+#include "BLI_utildefines.h"
 
 #include "BKE_context.hh"
 #include "BKE_main.hh"
@@ -40,12 +43,8 @@
 #include "WM_types.hh"
 
 #include "BLF_api.hh"
-#include "BLI_string.h"
 
-#include "UI_interface.hh" /* UI_SCALE_FAC */
 #include "UI_interface_icons.hh"
-#include "UI_resources.hh"
-#include "UI_view2d.hh"
 
 #include "image_intern.hh"
 
@@ -85,7 +84,6 @@ static wmOperatorStatus image_view_rotate_cw_exec(bContext *C, wmOperator * /*op
 
   sima->rotation -= DEG2RADF(90.0f);
   normalize_rotation_angle(sima->rotation);
-  ED_space_image_rotation_cache_update(sima);
 
   ED_region_tag_redraw(region);
   return OPERATOR_FINISHED;
@@ -111,7 +109,6 @@ static wmOperatorStatus image_view_rotate_ccw_exec(bContext *C, wmOperator * /*o
 
   sima->rotation += DEG2RADF(90.0f);
   normalize_rotation_angle(sima->rotation);
-  ED_space_image_rotation_cache_update(sima);
 
   ED_region_tag_redraw(region);
   return OPERATOR_FINISHED;
@@ -136,7 +133,6 @@ static wmOperatorStatus image_view_rotate_reset_exec(bContext *C, wmOperator * /
   ARegion *region = CTX_wm_region(C);
 
   sima->rotation = 0.0f;
-  ED_space_image_rotation_cache_update(sima);
 
   ED_region_tag_redraw(region);
   return OPERATOR_FINISHED;
@@ -169,13 +165,6 @@ struct ImageRotateInteractiveData {
   wmPaintCursor *cursor;
   bool use_center_pivot;
 };
-
-static float len_v2v2(const float a[2], const float b[2])
-{
-  const float dx = a[0] - b[0];
-  const float dy = a[1] - b[1];
-  return sqrtf(dx * dx + dy * dy);
-}
 
 /* Compensate the view offset (`sima->xof/yof`) so the displayed image does not jump when the
  * rotation pivot changes while rotation is non-zero.
@@ -628,6 +617,38 @@ static wmOperatorStatus image_view_rotate_interactive_invoke(bContext *C,
   return OPERATOR_RUNNING_MODAL;
 }
 
+/* Tear down the modal state. When `restore_state` is true the view is reset to the values captured
+ * on invoke (cancel), otherwise the interactively set rotation is kept (confirm). */
+static void image_view_rotate_interactive_finish(bContext *C,
+                                                 wmOperator *op,
+                                                 const bool restore_state)
+{
+  ImageRotateInteractiveData *data = static_cast<ImageRotateInteractiveData *>(op->customdata);
+  if (data == nullptr) {
+    return;
+  }
+
+  if (restore_state) {
+    SpaceImage *sima = CTX_wm_space_image(C);
+    sima->rotation = data->initial_rotation;
+    copy_v2_v2(sima->rotation_pivot, data->initial_pivot);
+    sima->xof = data->initial_offset[0];
+    sima->yof = data->initial_offset[1];
+    ED_region_tag_redraw(CTX_wm_region(C));
+  }
+
+  WM_cursor_modal_restore(CTX_wm_window(C));
+  ED_area_status_text(CTX_wm_area(C), nullptr);
+  if (data->cursor) {
+    WM_paint_cursor_end(data->cursor);
+  }
+  if (data->dial) {
+    BLI_dial_free(data->dial);
+  }
+  MEM_delete(data);
+  op->customdata = nullptr;
+}
+
 static wmOperatorStatus image_view_rotate_interactive_modal(bContext *C,
                                                             wmOperator *op,
                                                             const wmEvent *event)
@@ -650,7 +671,6 @@ static wmOperatorStatus image_view_rotate_interactive_modal(bContext *C,
 
       sima->rotation = target_rotation;
       normalize_rotation_angle(sima->rotation);
-      ED_space_image_rotation_cache_update(sima);
 
       image_view_rotate_interactive_update_header(op, C);
       ED_region_tag_redraw(region);
@@ -661,56 +681,11 @@ static wmOperatorStatus image_view_rotate_interactive_modal(bContext *C,
   }
 
   if (event->type == data->init_event_type && event->val == KM_RELEASE) {
-    WM_cursor_modal_restore(CTX_wm_window(C));
-    ED_area_status_text(CTX_wm_area(C), nullptr);
-    if (data->cursor) {
-      WM_paint_cursor_end(data->cursor);
-    }
-    if (data->dial) {
-      BLI_dial_free(data->dial);
-    }
-    MEM_delete(data);
-    op->customdata = nullptr;
+    image_view_rotate_interactive_finish(C, op, false);
     return OPERATOR_FINISHED;
   }
-  if (event->type == RIGHTMOUSE && event->val == KM_PRESS) {
-    sima->rotation = data->initial_rotation;
-    ED_space_image_rotation_cache_update(sima);
-    sima->rotation_pivot[0] = data->initial_pivot[0];
-    sima->rotation_pivot[1] = data->initial_pivot[1];
-    sima->xof = data->initial_offset[0];
-    sima->yof = data->initial_offset[1];
-    ED_region_tag_redraw(region);
-    WM_cursor_modal_restore(CTX_wm_window(C));
-    ED_area_status_text(CTX_wm_area(C), nullptr);
-    if (data->cursor) {
-      WM_paint_cursor_end(data->cursor);
-    }
-    if (data->dial) {
-      BLI_dial_free(data->dial);
-    }
-    MEM_delete(data);
-    op->customdata = nullptr;
-    return OPERATOR_CANCELLED;
-  }
-  if (event->type == EVT_ESCKEY && event->val == KM_PRESS) {
-    sima->rotation = data->initial_rotation;
-    ED_space_image_rotation_cache_update(sima);
-    sima->rotation_pivot[0] = data->initial_pivot[0];
-    sima->rotation_pivot[1] = data->initial_pivot[1];
-    sima->xof = data->initial_offset[0];
-    sima->yof = data->initial_offset[1];
-    ED_region_tag_redraw(region);
-    WM_cursor_modal_restore(CTX_wm_window(C));
-    ED_area_status_text(CTX_wm_area(C), nullptr);
-    if (data->cursor) {
-      WM_paint_cursor_end(data->cursor);
-    }
-    if (data->dial) {
-      BLI_dial_free(data->dial);
-    }
-    MEM_delete(data);
-    op->customdata = nullptr;
+  if (ELEM(event->type, RIGHTMOUSE, EVT_ESCKEY) && event->val == KM_PRESS) {
+    image_view_rotate_interactive_finish(C, op, true);
     return OPERATOR_CANCELLED;
   }
 
@@ -719,30 +694,7 @@ static wmOperatorStatus image_view_rotate_interactive_modal(bContext *C,
 
 static void image_view_rotate_interactive_cancel(bContext *C, wmOperator *op)
 {
-  ImageRotateInteractiveData *data = static_cast<ImageRotateInteractiveData *>(op->customdata);
-
-  if (data) {
-    SpaceImage *sima = CTX_wm_space_image(C);
-    sima->rotation = data->initial_rotation;
-    ED_space_image_rotation_cache_update(sima);
-    sima->rotation_pivot[0] = data->initial_pivot[0];
-    sima->rotation_pivot[1] = data->initial_pivot[1];
-    sima->xof = data->initial_offset[0];
-    sima->yof = data->initial_offset[1];
-
-    WM_cursor_modal_restore(CTX_wm_window(C));
-
-    if (data->cursor) {
-      WM_paint_cursor_end(data->cursor);
-    }
-    if (data->dial) {
-      BLI_dial_free(data->dial);
-    }
-    MEM_delete(data);
-    op->customdata = nullptr;
-  }
-
-  ED_area_status_text(CTX_wm_area(C), nullptr);
+  image_view_rotate_interactive_finish(C, op, true);
 }
 
 void IMAGE_OT_view_rotate_interactive(wmOperatorType *ot)

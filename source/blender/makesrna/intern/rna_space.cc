@@ -2154,12 +2154,6 @@ static void rna_SpaceImageEditor_cursor_location_set(PointerRNA *ptr, const floa
   }
 }
 
-static void rna_SpaceImage_rotation_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
-{
-  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
-  ED_space_image_rotation_cache_update(sima);
-}
-
 static void rna_SpaceImageEditor_image_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
@@ -6360,7 +6354,7 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "rotation");
   RNA_def_property_ui_text(prop, "Rotation", "Canvas rotation angle");
   RNA_def_property_range(prop, -M_PI, M_PI);
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, "rna_SpaceImage_rotation_update");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 
   prop = RNA_def_property(srna, "rotation_pivot", PROP_FLOAT, PROP_XYZ);
   RNA_def_property_float_sdna(prop, nullptr, "rotation_pivot");

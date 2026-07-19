@@ -662,9 +662,6 @@ struct SpaceImage {
   float rotation = 0;
   /** Pivot point for canvas rotation in UV space (default: 0.5, 0.5 = center). */
   float rotation_pivot[2] = {0.5f, 0.5f};
-  /** Cached sin/cos for rotation (updated when rotation changes). */
-  float rotation_sin = 0;
-  float rotation_cos = 1;
   /** Storage for offset while render drawing. */
   float centx = 0, centy = 0;
 

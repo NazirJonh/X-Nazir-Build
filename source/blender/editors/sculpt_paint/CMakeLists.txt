@@ -105,6 +105,7 @@ set(SRC
   mesh/sculpt_geodesic.cc
   mesh/sculpt_gesture.cc
   mesh/sculpt_hide.cc
+  mesh/sculpt_layer_mask_edit.cc
   mesh/sculpt_layers.cc
   mesh/sculpt_mask_extract.cc
   mesh/sculpt_mask_init.cc
@@ -213,6 +214,7 @@ if(WITH_GTESTS)
     mesh/paint_test.cc
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc
+    mesh/sculpt_layer_mask_test.cc
     mesh/sculpt_undo_test.cc
   )
   set(TEST_INC

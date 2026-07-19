@@ -381,6 +381,128 @@ struct PersistentMultiresData {
   MutableSpan<float> displacements;
 };
 
+/**
+ * State of a sculpt layer mask editing session.
+ *
+ * While a session is open the node's sparse mask is expanded into the standard mask buffer, so the
+ * whole existing toolset — Mask brush, gesture operators, flood fill, mask filters, the viewport
+ * overlay and its undo steps — works on it unchanged. The user's own sculpt mask is parked here for
+ * the duration.
+ *
+ * Runtime only. The dense buffer is never written to a .blend, so a crash costs an unfinished
+ * session but cannot corrupt the file.
+ *
+ * Lives here rather than in the editor module's `sculpt_intern.hh` because it is held by value on
+ * #SculptSession, which blenkernel owns.
+ */
+struct SculptLayerMaskEdit {
+  /**
+   * Uid of the #SculptLayerTreeNode whose mask is being edited; 0 when no session is open. Uid 0
+   * names the root group, which is never drawn and therefore never editable, so the sentinel
+   * collides with nothing (see #bke::sculpt_layers::node_find_by_uid).
+   */
+  int node_uid = 0;
+  /**
+   * True when the session was opened on the multires grid domain rather than on mesh vertices.
+   *
+   * Recorded rather than re-derived from the live #bke::pbvh::Tree on exit. The two domains park
+   * the user's mask in different places — a mesh attribute against #SubdivCCG::masks — and the
+   * exit path is destructive about the one it did not use (it removes the storage when the session
+   * created it). Should the multires modifier be removed while a session is open, a re-derived
+   * domain would make the exit restore one domain and delete the other's mask.
+   */
+  bool on_grids = false;
+  /** True when the mesh already carried a `.sculpt_mask` attribute before the session opened. */
+  bool had_vert_mask = false;
+  /** The user's sculpt mask, parked. Empty when #had_vert_mask is false. */
+  Array<float> saved_vert_mask;
+  /**
+   * True when #SubdivCCG::masks was already materialized before the session opened. The grid
+   * counterpart of #had_vert_mask, kept separate because the two answer different questions: an
+   * absent mesh mask is a missing attribute, an absent grid mask is an empty array.
+   */
+  bool had_grid_mask = false;
+  /** The user's grid sculpt mask, parked. Empty when #had_grid_mask is false. */
+  Array<float> saved_grid_mask;
+  /**
+   * `SubdivCCG::grid_area` as it was when the session opened, and therefore the block size the
+   * node's mask is cut at. Zero for a vertex-domain session.
+   *
+   * The exit path refuses to compress a grid mask whose grid area no longer matches: a subdivision
+   * level change rebuilds the CCG and re-derives #SubdivCCG::masks from the base mesh, so the
+   * expanded weights the session was authoring are simply gone and compressing what replaced them
+   * would store the user's own sculpt mask onto the node.
+   */
+  int grid_area = 0;
+  /**
+   * `SubdivCCG::grids_num` as it was when the session opened. Zero for a vertex-domain session.
+   *
+   * #grid_area alone cannot catch a base-topology change that rebuilds the CCG at the same
+   * subdivision level: `grids_num` changes while `grid_area` does not, and comparing
+   * `masks.size()` against a total re-derived from the *live* CCG is self-consistent by
+   * construction, so it cannot detect the rebuild either. Checked alongside #grid_area in the exit
+   * path for exactly the case that check exists for.
+   */
+  int grids_num = 0;
+  /**
+   * `SubdivCCG::id` as it was when the session opened. Zero for a vertex-domain session, and never
+   * a valid id (#subdiv_ccg_next_id starts at one).
+   *
+   * #grid_area and #grids_num together still cannot see every rebuild: one at the *same*
+   * subdivision level over the *same* base topology leaves both unchanged, and `masks.size()` with
+   * them. Such a rebuild re-derives #SubdivCCG::masks from `CD_GRID_PAINT_MASK` — the user's own
+   * sculpt mask, since the suspend guards make sure the session's weights never reach that layer —
+   * so the exit path would find an apparently intact domain and compress the user's mask onto the
+   * node as the layer's weight map, losing the painted weights without a word. It is reachable:
+   * every mask operator re-evaluates the depsgraph before it runs, and anything that tagged the
+   * mesh `ID_RECALC_GEOMETRY` during the session rebuilds the CCG there.
+   *
+   * An id rather than the #SubdivCCG address, which would be worthless: the old instance is freed
+   * before the new one is allocated, so the allocator may hand back the same address.
+   */
+  uint64_t ccg_id = 0;
+  /**
+   * Number of #bke::sculpt_layers::MaskEditSuspendGuard instances currently holding this session
+   * parked. Non-zero means the session's dense weights are in #suspended_dense and the standard
+   * mask storage holds the user's own mask again.
+   *
+   * A session keeps the node's weights in the *persistent* store — the `.sculpt_mask` attribute on
+   * the original mesh, or #SubdivCCG::masks, which the multires flush copies into the base mesh's
+   * `CD_GRID_PAINT_MASK` layer. Anything that serializes the file, or that flushes the CCG into the
+   * base mesh, would therefore record the layer's weights as the user's own mask. Such an operation
+   * is bracketed by a suspend/resume pair rather than by closing the session, because it can happen
+   * without the user asking for it (auto-save runs on a timer) and closing a session the user is
+   * working in would be both surprising and lossy.
+   *
+   * A counter rather than a flag because the brackets nest: a save parks the whole #Main and then
+   * calls a flush that parks the object again. With a flag the inner bracket's exit would put the
+   * layer's weights back before the outer one's operation had run — the precise corruption the
+   * brackets exist to prevent. Only the transition to and from zero performs the swap, so the
+   * scheme is correct at any nesting depth.
+   *
+   * Distinct from "no session": #node_uid stays set while suspended, so nothing else in the feature
+   * has to know the difference.
+   */
+  int suspend_depth = 0;
+  /**
+   * The session's dense weights, parked while #suspend_depth is non-zero. Empty otherwise.
+   *
+   * The counterpart of #saved_vert_mask / #saved_grid_mask with the two roles swapped: while
+   * suspended it is the *session's* buffer that is held here and the *user's* that is live.
+   */
+  Array<float> suspended_dense;
+  /**
+   * True once a refused suspend has been logged for this session.
+   *
+   * A refusal is reported, never silent, but it is also persistent: the condition that makes a
+   * suspend impossible (a parked buffer describing a domain the object no longer has) does not
+   * clear itself, so every subsequent depsgraph re-evaluation would re-report the same fact.
+   * Latched here rather than on the CCG because the mesh domain has no CCG to latch on, and reset
+   * with the rest of the session on close.
+   */
+  bool suspend_refusal_reported = false;
+};
+
 struct SculptSession : NonCopyable, NonMovable {
   /* The current active shapekey for the mesh. Only non-null for Type::Mesh */
   KeyBlock *shapekey_active = nullptr;
@@ -533,6 +655,8 @@ struct SculptSession : NonCopyable, NonMovable {
      * follows the stroke, whereas a stored `position - base_view` box would go stale as soon as the
      * first dab moved anything and would drop nodes the falloff still reaches. */
     Array<Bounds<float3>> base_view_node_offset_bounds;
+    /* Open weight-mask editing session, if any. See #SculptLayerMaskEdit. */
+    SculptLayerMaskEdit mask_edit;
   } layers;
 
   /* Contains information used by tools and brushes that require different logic based on boundary

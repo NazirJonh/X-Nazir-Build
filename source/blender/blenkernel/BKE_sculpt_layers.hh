@@ -41,14 +41,16 @@
 #  define SCULPT_LAYERS_DEBUG_LOG 0
 #endif
 
-struct BlendWriter;
-struct BlendDataReader;
-
 namespace blender {
+struct BlendDataReader;
+struct BlendWriter;
 struct KeyBlock;
+struct Main;
 struct Mesh;
+struct Object;
 struct SculptLayer;
 struct SculptLayerGroup;
+struct SculptLayerMask;
 struct SculptLayerTreeNode;
 }  // namespace blender
 
@@ -185,6 +187,21 @@ class SculptLayerGroupRuntime {
    * the child lists; never persisted.
    */
   Vector<SculptLayer *> layer_cache_;
+
+  /** Guards #chain_mask_. */
+  CacheMutex chain_mask_mutex_;
+  /**
+   * Product of the masks of every node from the root down to the owning group inclusive, or null
+   * when no node on that chain carries one. Built by #chain_mask; never persisted.
+   *
+   * Built lazily rather than pushed top-down the way #SculptLayer::group_influence_cached is: that
+   * one is a single float per layer, so an eager resync on every tree mutation is free, while this
+   * is potentially megabytes per folder.
+   */
+  SculptLayerMask *chain_mask_ = nullptr;
+
+  /** Releases #chain_mask_; defined out of line, where #mask_free is in scope. */
+  ~SculptLayerGroupRuntime();
 };
 
 /**
@@ -205,7 +222,8 @@ void group_runtime_ensure(SculptLayerGroup &group);
  * Free \a group's runtime and null the pointer. Call before freeing the group itself.
  *
  * The one part of a group that is freed with #MEM_delete rather than #MEM_delete_void: it is never
- * allocated by the blend-file reader, and its destructor has to run to release the cached vector.
+ * allocated by the blend-file reader, and its destructor has to run to release the cached vector
+ * and the cached chain mask.
  */
 void group_runtime_free(SculptLayerGroup &group);
 
@@ -218,10 +236,37 @@ void group_runtime_free(SculptLayerGroup &group);
  * contents did not change — which is what lets a rebuild higher up reuse their still-valid caches.
  *
  * Every path that links, unlinks or reorders a node must call this. A missed call is not a stale
- * row in the UI: the cached span is what the eval paths read, so it hands out a pointer to a freed
- * layer.
+ * row in the UI: the cached span is what the eval paths read, so it hands out a pointer to freed
+ * memory.
+ *
+ * The chain mask is a separate cache with the opposite dependency direction and its own entry point
+ * (#tag_chain_mask_dirty); a structural mutation only touches it when it actually *reparents* a
+ * node, which is why the two are not tagged together.
  */
 void tag_layers_cache_dirty(SculptLayerGroup &group);
+
+/**
+ * Invalidate the chain mask (#chain_mask) of \a group *and of every folder below it*, so the next
+ * #chain_mask call rebuilds it.
+ *
+ * Downward, the mirror image of #tag_layers_cache_dirty: a chain mask folds in every *ancestor's*
+ * mask, so it is the descendants that go stale when anything at \a group changes, and the ancestors
+ * that do not.
+ *
+ * Every path that edits, adds or replaces a *folder's* mask must call this, as must every path that
+ * moves a *folder* to a different parent (#node_move_into does so for the moved subtree). Kept apart
+ * from #tag_layers_cache_dirty deliberately: a reorder among siblings cannot change any chain, and
+ * a cached chain mask is potentially megabytes per folder, so tagging it from every structural
+ * mutation would throw the whole tree's products away on every layer creation.
+ *
+ * A *layer's* mask is exempt, and skipping the call for one is an optimization rather than an
+ * oversight: #chain_mask folds in #SculptLayerGroup::base's mask alone, so a layer's mask is never
+ * part of any product and is read straight off the node by the composite instead.
+ *
+ * A missed call where it does apply is not a stale row in the UI: #chain_mask hands out a pointer
+ * into the cache, and the next rebuild frees the one it replaces.
+ */
+void tag_chain_mask_dirty(SculptLayerGroup &group);
 
 /**
  * Every layer at or below \a group, depth-first in tree order (a folder's own children follow it).
@@ -376,6 +421,11 @@ void data_clear(SculptLayer &layer);
  * influence changes (factor = new - old), when toggling visibility (factor = +/- influence) and
  * when removing a layer (factor = -influence). A layer whose element count does not match
  * \a positions (stale after a topology change) is skipped rather than partially applied.
+ *
+ * Attenuated by the layer's weight mask and by the folder chain above it, exactly as
+ * #combine_layers_mesh is. That is not optional: this is how a contribution the composite already
+ * laid down gets *incrementally* corrected, so a delta measured without the mask would eat into the
+ * masked region a little on every slider drag and would over-subtract when a layer is removed.
  */
 void apply_delta_mesh(const SculptLayer &layer, float factor, MutableSpan<float3> positions);
 
@@ -440,6 +490,10 @@ void refresh_group_influence_cache(Mesh &mesh);
  * `r_positions[i] = base[i] + sum_over_enabled_vert_layers(data[i] * effective(layer))`.
  * Only #SCULPT_LAYER_DOMAIN_VERT layers contribute. A layer whose element count does not match
  * \a base (stale after a topology change) is skipped. \a r_positions and \a base may not alias.
+ *
+ * A layer carrying a weight mask, or sitting under a folder that does, is attenuated per element by
+ * the product of those masks — see #chain_mask. The sum above is then over `data[i] *
+ * effective(layer) * mask[i]`. A node with no mask anywhere on its chain costs one pointer test.
  */
 void combine_layers_mesh(Span<float3> base,
                          Span<SculptLayer *> layers,
@@ -448,6 +502,9 @@ void combine_layers_mesh(Span<float3> base,
 /**
  * Inverse of #combine_layers_mesh: recover the un-layered base from combined positions,
  * `r_base[i] = positions[i] - sum_over_enabled_vert_layers(data[i] * effective(layer))`.
+ *
+ * Exactly the forward pass with a negated weight, masks included — it runs the same code, so the two
+ * cannot drift apart. Anything else would move the base a little on every flush, cumulatively.
  */
 void derive_base_mesh(Span<float3> positions,
                       Span<SculptLayer *> layers,
@@ -461,6 +518,9 @@ void derive_base_mesh(Span<float3> positions,
  * onto whatever the positions already hold. Used both by the mesh-eval composition step and by the
  * sculpt-mode display path (composing onto the active shape key's deformed positions). A layer whose
  * element count does not match \a positions is skipped.
+ *
+ * Masked like #combine_layers_mesh: it routes each layer through #apply_delta_mesh, which is where
+ * the weight — folder chain and all — is resolved for every path in this module.
  */
 void apply_vert_layers(Span<SculptLayer *> layers, MutableSpan<float3> positions);
 
@@ -539,6 +599,419 @@ void apply_vert_layer_to_shape_keys(Mesh &mesh, const SculptLayer &layer, float 
  * \a grids_num is the number of displacement grids (`Mesh::corners_num`).
  */
 void resample_grid_layers(Mesh &mesh, int grids_num, int new_level);
+
+/**
+ * Resample every grid-domain weight mask in the tree to \a new_level, the mask counterpart of
+ * #resample_grid_layers and called alongside it.
+ *
+ * Masks ride through the same resamplers the layer coefficients do, so a weight lands on exactly
+ * the grid point of the coefficient it weights; a mask that slid relative to its layer on a level
+ * change would show up as the mask drifting across the surface.
+ *
+ * Walks folders as well as layers: a folder's mask attenuates its whole subtree through
+ * #chain_mask, so leaving it at the old level would silently drop it (#is_stale_mask would reject
+ * it and the subtree would spring back to its full contribution). Grid masks are recognized by
+ * their own geometry — `block_size` is a CCG grid area and `totelem` is that times \a grids_num —
+ * so a vertex-domain mask on the same tree is left untouched. `new_level <= 0` drops grid masks
+ * entirely, there being no grid domain left for them to describe.
+ */
+void resample_grid_masks(Mesh &mesh, int grids_num, int new_level);
+
+/* -------------------------------------------------------------------------------------------------
+ * Weight masks (#SculptLayerMask). Attached to a #SculptLayerTreeNode through its `mask` pointer;
+ * this section only owns the container's own lifetime, not the tree's use of it.
+ */
+
+/** Number of blocks needed to cover \a totelem elements. */
+int mask_blocks_num(int totelem, int block_size);
+
+/**
+ * True when \a mask cannot be indexed over a domain of \a elem_num elements, so every consumer must
+ * treat the node as unmasked rather than apply it.
+ *
+ * The mask counterpart of #is_stale, and the single authority for the same reason: a call site that
+ * spells the condition itself would sooner or later spell it slightly differently and index a block
+ * table that does not describe the domain it is walking.
+ *
+ * Two distinct states answer true here, and both are reachable in normal use:
+ * - The element count disagrees, i.e. the topology changed behind the mask's back, or the mask came
+ *   from #chain_mask and was folded from an ancestor sized to a different domain.
+ * - The mask describes no blocks at all. #mask_blend_read neutralizes a mask from a truncated or
+ *   hand-edited file to `totelem == 0, blocks_num == 0` with null array pointers, and #chain_mask
+ *   can pass that on as a *non-null* product. On an empty domain the counts would otherwise agree
+ *   and a block loop would run zero iterations, which reads as "this node contributes nothing"
+ *   rather than "this node is unmasked" — silently dropping its whole contribution.
+ */
+bool is_stale_mask(const SculptLayerMask &mask, int64_t elem_num);
+
+/**
+ * Allocate a mask covering \a totelem elements, every block uniform at \a fill.
+ * Returns null for `totelem == 0` — an empty domain carries no mask.
+ */
+SculptLayerMask *mask_new(int totelem, int block_size, uint8_t fill);
+
+void mask_free(SculptLayerMask *mask);
+
+/** Deep copy. The shallow DNA struct copy done by #tree_copy must never be relied on. */
+SculptLayerMask *mask_copy(const SculptLayerMask &src);
+
+/** Value at a single element. Intended for tests and UI, not for hot loops — those go per block. */
+uint8_t mask_value_at(const SculptLayerMask &mask, int elem);
+
+/** A single block as the composite loops see it. */
+struct MaskBlock {
+  bool uniform;
+  /** Valid when #uniform. */
+  uint8_t value;
+  /** Valid when not #uniform: `block_size` bytes (fewer in the tail block). */
+  const uint8_t *data;
+};
+
+/** \a block is a block index, not an element index — in `[0, mask.blocks_num)`. */
+MaskBlock mask_block(const SculptLayerMask &mask, int block);
+
+/** Write \a mask into a dense float buffer of `mask.totelem` elements, values in 0..1. */
+void mask_expand(const SculptLayerMask &mask, MutableSpan<float> r_dense);
+
+/**
+ * Build a mask from a dense float buffer. Blocks whose bytes all agree collapse to uniform, which
+ * is what keeps a mask from degrading to dense storage across repeated edit sessions.
+ */
+SculptLayerMask *mask_compress(Span<float> dense, int block_size);
+
+/* -------------------------------------------------------------------- */
+/** \name Weight mask editing session: suspend and resume
+ *
+ * While an editing session is open (opened and closed by the editor module, see #mask_edit_begin)
+ * the node's weights sit in the *persistent* mask store — the `.sculpt_mask` attribute on the
+ * original mesh, or #SubdivCCG::masks, which the multires flush copies into the base mesh's
+ * `CD_GRID_PAINT_MASK` layer. That is what lets the whole existing mask toolset author them
+ * unchanged, and also what makes them dangerous: anything that serializes the mesh, or that
+ * flushes the CCG into the base mesh, would record the layer's weights as the user's own mask.
+ *
+ * Such an operation is bracketed rather than made to close the session: auto-save runs on a timer
+ * and a depsgraph re-evaluation flushes, so closing would discard the user's in-progress mask edit
+ * for a reason they never asked for. Inside the bracket the parked mask is back in place and the
+ * operation sees exactly the state it would have seen with no session open.
+ *
+ * The mechanics live here rather than in the editor module because the two writers that must be
+ * bracketed are blenkernel's own — #multires_flush_sculpt_updates and
+ * #object_update_from_subsurf_ccg, the latter reached from #BKE_object_free_derived_caches on every
+ * depsgraph re-evaluation, with no editor call site to wrap. Both bracket themselves, so every
+ * caller is covered by construction, including callers that do not exist yet. Only the session's
+ * *policy* — which node, when to open and close — stays in the editor module.
+ * \{ */
+
+/** Which open sessions a #MaskEditSuspendGuard parks. */
+enum class MaskEditDomains {
+  /**
+   * Both domains. For a writer that serializes the mesh, where either store reaches the file.
+   */
+  All,
+  /**
+   * Grid-domain sessions only; a mesh-domain session is left alone entirely, neither parked nor
+   * refused.
+   *
+   * For a writer that only ever touches `CD_GRID_PAINT_MASK`, where a mesh-domain session is not a
+   * hazard in the first place. Parking one there would still cost: #mask_edit_suspend_mesh adds and
+   * removes a `.sculpt_mask` layer on the mesh in #Main, and both flush primitives run from
+   * evaluation — #object_update_from_subsurf_ccg on every depsgraph re-evaluation. Churning
+   * attribute storage from there is a far stronger mutation than the in-place displacement writes
+   * those functions already admit to, for no protection at all.
+   */
+  GridsOnly,
+};
+
+/**
+ * Parks any open sculpt-layer weight-mask editing session for the guard's lifetime, then puts it
+ * back.
+ *
+ * The only way to suspend a session: the suspend and resume primitives are file-private to the
+ * implementation, so a bracket cannot be left stranded by an early return, and the nesting of two
+ * brackets cannot un-park a session that an outer one still needs parked.
+ *
+ * The whole-#Main form covers a write of the .blend, where any object may be the one in sculpt
+ * mode; the single-object form covers a write derived from that one object. Both are no-ops when no
+ * session is open, which is the common case on every save and every re-evaluation.
+ */
+class MaskEditSuspendGuard {
+  Main *bmain_ = nullptr;
+  Object *object_ = nullptr;
+  /* Held so the resume filters exactly as the suspend did. A guard that declined to park a session
+   * must not release a reference an enclosing guard took, which an unfiltered resume would do. */
+  MaskEditDomains domains_ = MaskEditDomains::All;
+  bool refused_ = false;
+
+ public:
+  explicit MaskEditSuspendGuard(Main &bmain);
+  explicit MaskEditSuspendGuard(Object &object, MaskEditDomains domains = MaskEditDomains::All);
+  ~MaskEditSuspendGuard();
+
+  MaskEditSuspendGuard(const MaskEditSuspendGuard &) = delete;
+  MaskEditSuspendGuard &operator=(const MaskEditSuspendGuard &) = delete;
+
+  /**
+   * True when a session is open but could not be parked, so the guarded region would see the
+   * layer's weights in the persistent store after all.
+   *
+   * A suspend refuses rather than destroys: the only way to park a mask whose buffer no longer
+   * matches the live domain would be to drop the user's own mask, and a bracket fires on operations
+   * the user never asked for.
+   *
+   * A refusal is *not* a reason to skip the write, and no caller may treat it as one. The condition
+   * that causes it — a parked buffer describing a domain the object no longer has — does not clear
+   * itself, so a caller that defers would defer forever; for the multires flush that means every
+   * depsgraph re-evaluation returning early and the user's base sculpting accumulating in a CCG
+   * that is discarded at the next rebuild. The answer is for reporting only: tell the user what was
+   * written and why, then write it. Every refusal is also logged once per session by the
+   * implementation, so a caller with nowhere to report to is still not silent.
+   */
+  bool suspend_refused() const
+  {
+    return refused_;
+  }
+};
+
+/**
+ * Resume an open session regardless of how many brackets are holding it parked, discarding their
+ * depth.
+ *
+ * For the close path alone, which must compress the session's own weights and would otherwise
+ * store the *user's* mask onto the node. Every other resume belongs to a #MaskEditSuspendGuard.
+ * A no-op when no session is open or none is suspended.
+ */
+void mask_edit_force_resume(Object &object);
+
+/**
+ * Give up every open weight-mask editing session in \a bmain: put each one's parked user mask back
+ * into the standard storage and forget the session, without compressing anything onto its node.
+ *
+ * For a global (memfile) undo decode, and for nothing else. A memfile step is a serialization of the
+ * whole #Main taken with every session suspended (#BKE_memfile_undo_encode brackets itself), so what
+ * it records is the user's own mask and the node's mask as it stood *before* the session opened. The
+ * session's in-flight weights are in neither. Decoding therefore replaces the mask storage under a
+ * session state that still claims to own it, and the next close would compress the user's restored
+ * mask onto the node and then overwrite that mask with the parked buffer — both halves corrupted,
+ * silently.
+ *
+ * Abandoned rather than closed: closing means compressing the session's dense weights onto its node,
+ * and after the decode those weights are gone by definition — the snapshot never held them. What is
+ * left to do is exactly what this does, restore the user's mask and drop the session, which is also
+ * the state the decoded #Main describes. A #MaskEditSuspendGuard cannot serve here for the same
+ * reason: it would put the session back on the far side of the decode, pointing at a buffer that has
+ * been replaced.
+ *
+ * Losing the in-progress mask edit is inherent to a global undo across it and is logged, not silent.
+ * Must run *before* the decode replaces the mesh data, while the storage the session borrowed is
+ * still the one it borrowed. A no-op when no session is open, which is the common case.
+ */
+void mask_edit_abandon_all(Main &bmain);
+
+/** \} */
+
+/**
+ * The per-element product of \a a and \a b, as a new mask the caller owns.
+ *
+ * A block that is uniform on both sides stays uniform, and a uniform zero on either side keeps the
+ * block uniform as well. That is what lets a folder mask be folded into a whole subtree without
+ * pushing every layer under it onto the composite's dense path.
+ *
+ * Returns null when the two do not describe the same domain (#SculptLayerMask::totelem and
+ * `block_size` must both agree), which is also how a mask neutralized by #mask_blend_read reads.
+ * Null rather than a product built from one side, and deliberately not an assert: masks go stale as
+ * a matter of course when the mesh's element count changes, and once the operands disagree neither
+ * one can be trusted to index the domain — a product sized by either block table would read past
+ * the end of the other. Null is the module's existing "no mask" state, which every consumer already
+ * has to handle.
+ */
+SculptLayerMask *mask_multiply(const SculptLayerMask &a, const SculptLayerMask &b);
+
+/**
+ * The product of the masks of every node from the root down to \a group inclusive, or null when no
+ * node on that chain carries one.
+ *
+ * Cached on the group's runtime (#SculptLayerGroupRuntime::chain_mask_) and rebuilt only after
+ * #tag_chain_mask_dirty, so a composite that consults it per element does not refold the chain per
+ * call.
+ *
+ * The mask is owned by that runtime, not by the caller, and is a view into it in exactly the sense
+ * the span from #layers is: it stays valid only until the next #tag_chain_mask_dirty on \a group or
+ * on any folder above it, which is what a mask edit anywhere on the chain and a move of the subtree
+ * both trigger. A caller holding it across one of those reads freed memory. In particular, the
+ * rebuild folds in the *parent's* cached product after the parent's own lock has been released
+ * again, so the lock held while that pointer is read is only this group's — structurally the same
+ * exposure #layers already has when it extends its span from a child's cache, and bounded by the
+ * same rule: the tag, not the rebuild, is the moment a held pointer went stale.
+ *
+ * The result may be *stale*, and callers must gate it with #is_stale_mask before indexing anything
+ * with it. It is internally self-consistent — its own `blocks_num`, `block_offset` and `data_num`
+ * agree, so it can never be read out of its own bounds — but it is sized to whatever the ancestors
+ * happen to carry, which need not be the domain the caller is walking. Neither is a non-null result
+ * proof that the chain describes any elements at all: a mask neutralized by #mask_blend_read
+ * (`totelem == 0`, `blocks_num == 0`) folds through as a non-null product of zero blocks.
+ *
+ * Returns null on a tree whose parent chain closes on itself, which is only reachable from corrupt
+ * data; see the guard in the implementation for why it is answered rather than asserted.
+ */
+const SculptLayerMask *chain_mask(const SculptLayerGroup &group);
+
+/**
+ * The weight maps that attenuate a layer's contribution, resolved for one composite pass over a
+ * domain of a known size. At most two, and never a materialized product of them (see
+ * #node_mask_for_composite).
+ *
+ * Both null means unmasked. Otherwise #primary is set and #secondary may be; when both are set they
+ * are guaranteed to agree on `totelem` and `block_size`, so they share one block index.
+ */
+struct CompositeMask {
+  const SculptLayerMask *primary = nullptr;
+  const SculptLayerMask *secondary = nullptr;
+};
+
+/**
+ * The weight maps that apply to \a layer over a domain of \a elem_num elements: its own mask, and
+ * the product of the folder masks above it (#chain_mask). Both are gated by #is_stale_mask, the
+ * chain no less than the layer's own — #chain_mask is folded from whatever the ancestors carry and
+ * is never resized to the live domain, so it can name an element count this composite does not have.
+ *
+ * The two are handed back side by side rather than multiplied into one mask. A product would have to
+ * be materialized (a whole second mask's worth of allocation and writes) and then cached somewhere
+ * to be worth it, and neither is justified: the composite already streams 24 bytes per element, so
+ * the second mask costs one more byte load and one more multiply, and only in blocks that are dense
+ * on both sides. Folding it per block instead needs no allocation, no cache, and no invalidation.
+ *
+ * Shared by the vertex composite (`sculpt_layers.cc`) and the multires grid composite
+ * (`multires_reshape.cc`, `subdiv_displacement_multires.cc`), so a layer's mask resolves exactly
+ * once no matter which domain it is composed on.
+ *
+ * A layer flagged #SCULPT_LAYER_REC_EXEMPT resolves to no masks at all — neither its own nor the
+ * folder chain's. See #rec_exempt_set for why.
+ */
+CompositeMask node_mask_for_composite(const SculptLayer &layer, int64_t elem_num);
+
+/**
+ * Mark \a layer as the one REC is armed on, clearing #SCULPT_LAYER_REC_EXEMPT from every other
+ * layer of \a mesh. Passing null clears the exemption throughout, which is what the sculpt-mode
+ * exit and entry paths call.
+ *
+ * While REC is armed on a layer, every composite ignores that layer's mask and the masks of the
+ * folders above it. The brush moves the *composed* surface by D and the recorded delta is stored
+ * raw, so a masked layer would have to store `D / mask[i]` to reproduce that same D — unbounded
+ * where the mask reaches zero, and undefined where it is exactly zero. #layer_toggle_rec_exec
+ * already pins #SculptLayer::influence to 1.0 for precisely that reason; this is the same pinning
+ * applied to the other factor of the same product.
+ *
+ * The answer lives on the node rather than in a variable of this module because the composites
+ * reach a layer through a #Mesh or through bare spans, and the vertex composite under a shape key
+ * runs on an *evaluated* mesh with no #Object and no #SculptSession in scope at all (see
+ * #apply_vert_layers_eval). #SculptLayerTreeNode::flag rides the original-to-evaluated copy
+ * verbatim, so the exemption arrives wherever the layer does — and is scoped to the one mesh that
+ * owns the node, which no process-wide slot could be.
+ *
+ * The editor module is the single *persistent* writer
+ * (#ed::sculpt_paint::layers::rec_exemption_refresh). A caller may still clear the bit temporarily
+ * around a question that must be answered as though REC were disarmed, as #layer_toggle_rec_exec
+ * does when it asks whether the layer carries a mask at all; what no other site does is leave a
+ * value of its own behind. Idempotent, and cheap enough (one flag write per layer) to call from
+ * every path that can change either half of the answer.
+ *
+ * Returns whether any layer's bit actually moved, so that a caller holding a composed surface knows
+ * whether that surface is now stale and has to be recomposed. False on the overwhelmingly common
+ * "nothing to repair" call, which is what lets the recompose be conditional.
+ *
+ * Load-bearing constraint for callers: do not flip the bit between a forward compose of a layer and
+ * the inverse of that same compose. #combine_layers_mesh and #derive_base_mesh each resolve the
+ * layer's masks independently, so a flip in between would have the base absorb the difference
+ * between the masked and the unmasked contribution — a permanent dent, not a display artifact. The
+ * one caller that must flip it (#layer_toggle_rec_exec) therefore flushes anything holding an
+ * un-inverted compose first.
+ */
+bool rec_exempt_set(const Mesh &mesh, const SculptLayer *layer);
+
+/**
+ * #node_mask_for_composite for a #SCULPT_LAYER_DOMAIN_GRID layer, additionally requiring that the
+ * masks are cut one block per grid (`block_size == grid_area`) — the contract the multires paths
+ * rely on when they use a grid index as a block index. Masks cut any other way are dropped and the
+ * layer contributes fully, consistent with how #is_stale_mask fails open.
+ */
+CompositeMask grid_masks_for_composite(const SculptLayer &layer, int64_t elem_num, int grid_area);
+
+/** How #mask_elem_weight has to combine the tables in a #MaskBlockWeight. */
+enum class MaskFold : int8_t {
+  /** No per-element table: #MaskBlockWeight::weight is the whole factor. */
+  Uniform = 0,
+  /** One dense table. */
+  Single = 1,
+  /** Two sides, at least one of them dense. */
+  Pair = 2,
+};
+
+/**
+ * One block of a #CompositeMask folded against a scalar weight, so a composite loop decides per
+ * block and not per element.
+ *
+ * This and #mask_elem_weight are the single spelling of a masked layer's weight, and deliberately
+ * so: the multires path composes a layer onto the base in four separate places and subtracts it
+ * back in three of them, and a forward and an inverse written apart would drift the base a little
+ * on every flush — silently and cumulatively. Every direction folds through here, and the inverse
+ * is the *same* fold with a negated \a weight, which is exact in binary floating point.
+ */
+struct MaskBlockWeight {
+  MaskFold fold = MaskFold::Uniform;
+  /** The layer contributes nothing over this block; the caller skips it outright. */
+  bool skip = false;
+  /** Scalar factor with every uniform side already folded in. */
+  float weight = 1.0f;
+  /** Per-element tables, null when that side is uniform (its value is below) or absent. */
+  const uint8_t *data_a = nullptr;
+  const uint8_t *data_b = nullptr;
+  /** Valid for #MaskFold::Pair when the corresponding table is null. */
+  uint8_t value_a = 255;
+  uint8_t value_b = 255;
+};
+
+/**
+ * Fold \a block of \a masks against \a weight. \a block is a block index, and the caller must have
+ * established that it indexes both masks — which #node_mask_for_composite guarantees.
+ */
+MaskBlockWeight mask_block_weight(const CompositeMask &masks, int block, float weight);
+
+/**
+ * The weight of element \a i within the block \a w was folded for.
+ *
+ * The two-mask case normalizes the product in one step, `a * b / 255^2`, rather than scaling each
+ * side to 0..1 first: 1/255 is not exact in binary floating point, so a fully opaque folder folded
+ * in as a separate factor would not leave its subtree's weight quite alone.
+ */
+inline float mask_elem_weight(const MaskBlockWeight &w, const int i)
+{
+  switch (w.fold) {
+    case MaskFold::Uniform:
+      return w.weight;
+    case MaskFold::Single:
+      return w.weight * float(w.data_a[i]) * (1.0f / 255.0f);
+    case MaskFold::Pair: {
+      const int value_a = (w.data_a != nullptr) ? int(w.data_a[i]) : int(w.value_a);
+      const int value_b = (w.data_b != nullptr) ? int(w.data_b[i]) : int(w.value_b);
+      return w.weight * float(value_a * value_b) * (1.0f / (255.0f * 255.0f));
+    }
+  }
+  return w.weight;
+}
+
+/**
+ * Write \a mask and its arrays. Called from the tree walk in #tree_blend_write, which has already
+ * written the node the mask hangs off of — the node's #SculptLayerTreeNode::mask pointer is the
+ * address the reader resolves this struct from, so it is stored as-is rather than nulled.
+ */
+void mask_blend_write(BlendWriter *writer, const SculptLayerMask &mask);
+
+/**
+ * Read \a mask's arrays back and validate them against each other. A file whose arrays are missing,
+ * short, or inconsistent with the block table leaves the mask in the stale state (`totelem == 0`,
+ * `blocks_num == 0`) rather than one the composite loops would read out of bounds.
+ */
+void mask_blend_read(BlendDataReader *reader, SculptLayerMask *mask);
 
 /* -------------------------------------------------------------------------------------------------
  * ID lifetime helpers, called from the #Mesh ID type callbacks (see `mesh.cc`).

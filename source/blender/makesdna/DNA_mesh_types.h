@@ -171,6 +171,27 @@ enum eSculptLayerFlag : int {
    * versioned: a new bit in an existing #flag reads as unset from old files.
    */
   SCULPT_LAYER_GROUP_HIDDEN = 1 << 4,
+  /**
+   * REC is armed on this layer, so every composite ignores this layer's mask *and* the masks of the
+   * folders above it. See #bke::sculpt_layers::rec_exempt_set for why the exemption has to exist.
+   *
+   * Session state living in a DNA field, which is unusual and deliberate. The composite reaches a
+   * layer through an *evaluated* mesh with no #Object and no #SculptSession in scope (see
+   * #bke::sculpt_layers::apply_vert_layers_eval), so the answer has to travel with the layer
+   * itself; #flag is one of the members the original-to-evaluated copy carries verbatim, exactly as
+   * #SculptLayerTreeNode::uid does. An #ID::session_uid cannot be used for this — the copy starts
+   * at `sizeof(ID)` and never carries the header — and a process-wide slot cannot either, because
+   * it is scoped to nothing and would exempt an unrelated mesh's layer.
+   *
+   * Never persisted: `group_blend_write_recursive` — the per-node walk
+   * #bke::sculpt_layers::tree_blend_write drives, in `blenkernel/intern/sculpt_layers.cc` — strips
+   * it from the sanitized copy it writes, and the matching reader (`group_blend_read_children`)
+   * clears it again. A file that opened with this bit set would show a layer whose weight map has
+   * silently vanished, with nothing in the UI to explain it and no operator that puts it back.
+   *
+   * Never versioned: a new bit in an existing #flag reads as unset from old files.
+   */
+  SCULPT_LAYER_REC_EXEMPT = 1 << 5,
 };
 ENUM_OPERATORS(eSculptLayerFlag)
 
@@ -209,6 +230,43 @@ enum eSculptLayerColorTag : int8_t {
 struct SculptLayerGroup;
 
 /**
+ * Optional per-element weight map attached to a sculpt layer tree node.
+ *
+ * Stored sparsely: elements are grouped into fixed-size blocks, and a block that holds a single
+ * repeated value keeps only that value. A typical mask covers a small part of the mesh, so most
+ * blocks stay uniform — which is what keeps this affordable next to the node's own offset data
+ * (a mask costs roughly 1-2% of the layer it modulates).
+ *
+ * Values are `uint8` mapping 0..255 onto 0..1. The quantization is invisible for a weight, and the
+ * byte width is what keeps the composite loop from becoming bandwidth-bound.
+ */
+typedef struct SculptLayerMask {
+  /** Domain element count this mask describes. Used to detect a stale mask, as #SculptLayer::totelem does. */
+  int totelem;
+  /** Elements per block. Grids use `grid_area`; meshes use #SCULPT_LAYER_MASK_VERT_BLOCK. */
+  int block_size;
+  int blocks_num;
+  int data_num;
+  int flag;
+  char _pad[4];
+  /** `blocks_num` entries of #eSculptLayerMaskBlockKind. */
+  int8_t *block_kind;
+  /** `blocks_num` entries: the value of a uniform block. Meaningless for a dense block. */
+  uint8_t *block_value;
+  /** `blocks_num` entries: byte offset into #data, -1 for a uniform block. */
+  int *block_offset;
+  /** `data_num` bytes: the contents of every dense block, back to back. */
+  uint8_t *data;
+} SculptLayerMask;
+
+typedef enum eSculptLayerMaskBlockKind {
+  SCULPT_LAYER_MASK_BLOCK_UNIFORM = 0,
+  SCULPT_LAYER_MASK_BLOCK_DENSE = 1,
+} eSculptLayerMaskBlockKind;
+
+#define SCULPT_LAYER_MASK_VERT_BLOCK 4096
+
+/**
  * Fields shared by every row of the sculpt layer tree. Embedded as #SculptLayer::base and
  * #SculptLayerGroup::base, following #GreasePencilLayerTreeNode.
  *
@@ -240,6 +298,13 @@ struct SculptLayerTreeNode {
    */
   int8_t color_tag = SCULPT_LAYER_COLOR_NONE;
   char _pad[6] = {};
+  /**
+   * Optional weight map. Null means there is no mask, which is *not* the same as a mask full of
+   * ones: a node without a mask skips the masked code paths entirely and costs nothing.
+   *
+   * Lives on the shared base so folders and layers are served by one implementation.
+   */
+  struct SculptLayerMask *mask = nullptr;
 };
 
 /**

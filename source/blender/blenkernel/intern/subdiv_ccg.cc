@@ -8,6 +8,9 @@
 
 #include "BKE_subdiv_ccg.hh"
 
+#include <atomic>
+#include <cstdint>
+
 #include "MEM_guardedalloc.h"
 
 #include "BLI_enumerable_thread_specific.hh"
@@ -372,6 +375,14 @@ static void subdiv_ccg_init_faces_neighborhood(SubdivCCG &subdiv_ccg)
 /* -------------------------------------------------------------------- */
 /** \name Creation / evaluation
  * \{ */
+
+uint64_t subdiv_ccg_next_id()
+{
+  /* Relaxed ordering is enough: the counter carries no data, and all a reader ever does with an id
+   * is compare it for equality against one it recorded itself. */
+  static std::atomic<uint64_t> next_id = 1;
+  return next_id.fetch_add(1, std::memory_order_relaxed);
+}
 
 std::unique_ptr<SubdivCCG> BKE_subdiv_to_ccg(Subdiv &subdiv,
                                              const SubdivToCCGSettings &settings,

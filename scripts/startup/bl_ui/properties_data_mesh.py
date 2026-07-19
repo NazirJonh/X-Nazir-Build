@@ -287,6 +287,23 @@ class MESH_MT_sculpt_layer_context_menu(Menu):
         layout.separator()
         layout.operator("sculpt.layer_mask_isolate", text="Isolate by Mask")
         layout.separator()
+        # Weight mask of the active layer. Folders get the same entries from their own row's context
+        # menu, which is drawn in C++: nothing in the data names an "active" folder, so a folder can
+        # only ever be addressed by the uid its row knows.
+        if active is not None and active.has_mask:
+            if active.mask_edit_active:
+                layout.operator("sculpt.layer_mask_edit_toggle", text="Finish Mask Edit")
+            else:
+                layout.operator("sculpt.layer_mask_edit_toggle", text="Edit Mask")
+            layout.operator("sculpt.layer_mask_invert", text="Invert Mask")
+            layout.operator("sculpt.layer_mask_clear", text="Clear Mask")
+            layout.operator("sculpt.layer_mask_fill", text="Fill Mask")
+            layout.operator("sculpt.layer_mask_remove", text="Remove Mask")
+        else:
+            col = layout.column()
+            col.enabled = active is not None
+            col.operator("sculpt.layer_mask_add", text="Add Mask")
+        layout.separator()
         # Only reachable when the topology changed behind the layers' back; the stored displacement
         # is unmappable either way, so both entries only choose whether the layer itself survives.
         col = layout.column()

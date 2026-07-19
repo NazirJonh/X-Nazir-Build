@@ -328,10 +328,29 @@ static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &s
 
   /* Create sculpt mode session data. */
   if (ob.runtime->sculpt_session != nullptr) {
+    /* Entering sculpt mode over a session that was never exited — a script setting `object.mode`
+     * directly, or a mode switch that skipped #object_sculpt_mode_exit. A leftover weight-mask
+     * session would otherwise be discarded with the #SculptSession while its weights sat in the
+     * mesh's `.sculpt_mask` attribute, permanently passing for the user's own mask. A no-op in the
+     * ordinary case and for the vertex/weight paint sessions that also land here, which can never
+     * have one open. */
+    layers::mask_edit_end(ob);
     BKE_sculptsession_free(&ob);
   }
   ob.runtime->sculpt_session = MEM_new<SculptSession>(__func__);
   ob.runtime->sculpt_session->mode_type = OB_MODE_SCULPT;
+
+  /* Every entry, not just the skipped-exit case above. #SCULPT_LAYER_REC_EXEMPT lives on the mesh's
+   * own layer nodes, so it is not lost when the #SculptSession is, and any path that armed REC and
+   * never reached #object_sculpt_mode_exit — a mode switch that bypassed the exit, a script
+   * assigning `object.mode` — leaves this mesh with a layer still exempt while nothing is
+   * recording. The freshly built session has no REC armed, so reading it back here is what makes
+   * entering sculpt mode self-healing.
+   *
+   * Nothing here can recompose on the result, and nothing has to: there is no runtime base and no
+   * PBVH yet at this point, and the full geometry re-evaluation two lines below composes the surface
+   * from scratch under whatever answer this just settled. */
+  layers::rec_exemption_refresh(ob);
 
   /* Trigger evaluation of modifier stack to ensure
    * multires modifier sets .runtime.ccg in
@@ -512,6 +531,19 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
 
   mesh->runtime->corner_tris_cache.unfreeze();
 
+  /* Close any open weight-mask editing session BEFORE the flush below, and this ordering is
+   * load-bearing rather than incidental: while a session is open the layer's weights occupy
+   * #SubdivCCG::masks, and #multires_flush_sculpt_updates copies that array straight into the base
+   * mesh's persistent `CD_GRID_PAINT_MASK` layer. Flushing first would overwrite the user's paint
+   * mask with the layer's weights permanently — the session's own restore cannot undo a write to
+   * CustomData, and the next CCG rebuild re-derives `masks` from the corrupted base layer.
+   *
+   * This is also the last point at which the session *can* be closed. #BKE_sculptsession_free below
+   * is blenkernel and must not call into the editors, and by the time it runs the derived caches
+   * that carry the CCG are about to go; here the mesh, the attribute API, the #SubdivCCG and the
+   * tree are all still alive. */
+  layers::mask_edit_end(ob);
+
   multires_flush_sculpt_updates(&ob);
 
   /* Not needed for now. */
@@ -541,6 +573,18 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
   ob.mode &= ~mode_flag;
 
   BKE_sculptsession_free(&ob);
+
+  /* After the session is gone, which is what makes this a *clear*: REC is session state, so the
+   * refresh reads "no session, no REC" and drops the exemption. It has to be dropped, because
+   * #SCULPT_LAYER_REC_EXEMPT lives on the mesh's layer nodes rather than on the session and would
+   * otherwise outlive the mode — leaving this mesh rendering, and every later operator composing,
+   * with a layer whose weight map is silently absent.
+   *
+   * This is the one caller that *cannot* recompose on the result even in principle: the session it
+   * would need is already freed above, so there is no runtime base to recompose from. It does not
+   * have to. The mode exit tears the sculpt PBVH down and tags the object for a full re-evaluation
+   * below, so the next composed surface is built from stored data under the settled answer. */
+  layers::rec_exemption_refresh(ob);
 
   paint_cursor_delete_textures();
 
@@ -1565,6 +1609,12 @@ void operatortypes_sculpt()
   WM_operatortype_append(layers::SCULPT_OT_layer_invert);
   WM_operatortype_append(layers::SCULPT_OT_layer_validate);
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_isolate);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_add);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_remove);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_invert);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_clear);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_fill);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_edit_toggle);
   WM_operatortype_append(layers::SCULPT_OT_layer_set_influence);
   WM_operatortype_append(layers::SCULPT_OT_layer_influence_drag);
   WM_operatortype_append(layers::SCULPT_OT_layer_toggle_visibility);

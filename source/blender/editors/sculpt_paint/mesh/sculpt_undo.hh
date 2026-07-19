@@ -203,6 +203,19 @@ struct SculptLayerUndoPayload {
   short level = 0;
   /** Owned while stored in the undo step; freed with the step. Always null for a folder payload. */
   void *data = nullptr;
+  /**
+   * The node's weight mask (#SculptLayerTreeNode::mask), owned while stored in the undo step and
+   * freed with it — exactly as #data is, and for the same reason: #bke::sculpt_layers::remove and
+   * #group_remove free the node's mask along with the node, so a payload that did not take it first
+   * would come back maskless and the user's weights would be gone with no way to recover them.
+   *
+   * Unlike #data this is *not* layer-only: a folder carries a mask too (it attenuates its whole
+   * subtree through #bke::sculpt_layers::chain_mask), so both kinds of payload may hold one.
+   *
+   * Null is a legal captured state and simply means the node had no mask, which is not the same as
+   * a mask full of ones — see #SculptLayerTreeNode::mask.
+   */
+  SculptLayerMask *mask = nullptr;
 
   /** Whether the layer-only fields above carry anything, i.e. whether #data may be non-null. */
   bool is_layer() const
@@ -219,14 +232,49 @@ struct SculptLayerUndoPayload {
 };
 
 /**
+ * What a #sculpt_layer_payload_capture is capturing *for*, which is what decides whether the node's
+ * weight mask comes with it.
+ *
+ * Spelled out at every call site rather than defaulted: both answers silently lose user data when
+ * they are the wrong one — capturing for a removal without the mask drops the weights when the node
+ * is freed, and capturing for a buffer swap *with* the mask strips a node that stays in the tree.
+ */
+enum class PayloadCapture {
+  /**
+   * The caller removes the node right afterwards. The mask is taken into the payload, ahead of the
+   * #bke::sculpt_layers::remove / #group_remove that would otherwise free it with the node.
+   */
+  NodeRemoved,
+  /**
+   * The node stays in the tree and only its data buffer is being replaced
+   * (#SCULPT_OT_layer_validate). The mask is left on the live node: nothing replaces it, and the
+   * restore for these payloads swaps buffers alone.
+   */
+  DataOnly,
+};
+
+/**
  * Capture \a node into a payload. For a layer this transfers ownership of its data buffer; a folder
- * has none to transfer. The node struct itself is left linked in the tree untouched (the caller
- * removes it, or gives the layer a new buffer).
+ * has none to transfer. For either kind \a capture decides whether the node's weight mask is
+ * transferred too. The node struct itself is left linked in the tree untouched (the caller removes
+ * it, or gives the layer a new buffer).
  *
  * Takes the shared #SculptLayerTreeNode rather than either concrete type, so that one call site
  * spelling covers both kinds; pass `layer.base` or `group.base`.
  */
-SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh &mesh, SculptLayerTreeNode &node);
+SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh &mesh,
+                                                    SculptLayerTreeNode &node,
+                                                    PayloadCapture capture);
+
+/**
+ * Re-create the node \a payload holds and link it back where it sat: into the folder it recorded,
+ * right after the sibling it followed. Hands a layer's data buffer and either kind's weight mask
+ * back to the tree, leaving \a payload owning neither.
+ *
+ * Used by #restore_list; exposed for the unit test that pins the ownership hand-back, which is the
+ * far half of the transfer #sculpt_layer_payload_capture performs.
+ */
+void sculpt_layer_payload_insert(Mesh &mesh, SculptLayerUndoPayload &payload);
 
 /**
  * Sculpt layer operators: push a #Type::SculptLayer undo step for layers whose data buffer was
@@ -362,6 +410,72 @@ void push_sculpt_layer_active(Object &object, int uid_from, int uid_to);
 void push_sculpt_layer_group_list_change(Object &object,
                                          Vector<SculptLayerUndoPayload> &&removed,
                                          Vector<int> &&added_uids);
+
+/**
+ * Sculpt layer operators: push a #Type::SculptLayer undo step that captures \a node's weight mask
+ * (#SculptLayerTreeNode::mask) as it is *before* the operator changes it. Undo/redo swaps the stored
+ * mask with the live one, which is its own inverse — the same discipline the metadata and the
+ * layer-data snapshot above use, and the reason one snapshot suffices where a before/after pair
+ * would have to copy a mask back in on every restore.
+ *
+ * A full snapshot is affordable here: a mask is stored sparsely (uniform blocks collapse to a single
+ * byte) and mask *operator* steps are rare. Mask brush strokes do not come through here at all —
+ * while an editing session is open they go through the ordinary per-node #Type::Mask steps against
+ * the dense storage the session installed.
+ *
+ * A null mask is a legal state on either side of the swap and simply means the node had none, so
+ * "no mask captured" is expressed by not calling this rather than by a null pointer. Serves both
+ * node kinds. Call between #push_begin and #push_end.
+ *
+ * \warning Must not be called for the node a weight-mask editing session is currently open on. That
+ * node's live weights are in the dense standard mask storage the session installed;
+ * #SculptLayerTreeNode::mask still holds the value from before the session opened and is not
+ * rewritten until #layers::mask_edit_end closes it. A capture taken here would snapshot that stale
+ * mask, and the restore would swap it into a field the next close overwrites — an undo that changes
+ * nothing the user can see. The call is refused and logged as an error rather than allowed to
+ * mislead.
+ *
+ * This is a hard constraint on the mask *operators* (Invert / Clear / Fill), which are Task 12's:
+ * editing the mask of the node under an open session is the natural workflow, so each of those
+ * operators must either close the session around its edit (recording the boundary with
+ * #push_sculpt_layer_mask_session, so undo reopens it) or capture and restore through the dense
+ * session buffer as ordinary #Type::Mask steps do. Calling this function during a session is not
+ * one of the options.
+ */
+void push_sculpt_layer_mask(Object &object, const SculptLayerTreeNode &node);
+
+/**
+ * Sculpt layer operators: record that this step opens (\a entering) or closes a weight-mask editing
+ * session on the node with uid \a node_uid. Call between #push_begin and #push_end.
+ *
+ * A session parks the user's sculpt mask and puts the node's own weights into the standard mask
+ * storage in its place, so the meaning of every #Type::Mask step depends on whether one is open.
+ * Restoring across this step therefore has to move the session itself, which #restore_list does
+ * before anything else — see #mask_session_boundary.
+ */
+void push_sculpt_layer_mask_session(Object &object, int node_uid, bool entering);
+
+/** Which session #restore_list must leave open, as decided by #mask_session_boundary. */
+struct MaskSessionBoundary {
+  /** The node the session belongs to; 0 when the step records no session change. */
+  int node_uid = 0;
+  /** Whether the session must be open once this step has been restored. */
+  bool want_open = false;
+};
+
+/**
+ * Which side of a recorded session boundary a restore lands on.
+ *
+ * Pure, so the rule can be tested without an undo stack, a #bContext or a live session — which is
+ * the whole point of factoring it out: the effect it drives (closing and reopening a session)
+ * cannot be exercised in a unit test, but getting the direction backwards is exactly the kind of
+ * mistake that would only show up as corrupted user masks.
+ *
+ * Undo lands on the state *before* the step and redo on the state *after* it. An "entering" step has
+ * the session open on its after side and closed on its before side; an "exiting" step the other way
+ * round. \a step_session_uid of 0 means the step records no session change at all.
+ */
+MaskSessionBoundary mask_session_boundary(int step_session_uid, bool step_entering, bool is_undo);
 
 /**
  * Sculpt layers (mesh/vertex domain): iterate the unique vertices recorded into the in-progress

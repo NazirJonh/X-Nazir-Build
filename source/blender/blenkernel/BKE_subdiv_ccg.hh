@@ -138,7 +138,26 @@ struct SubdivCCGMultiresLayerFrames {
   int64_t last_used = 0;
 };
 
+/**
+ * Serial number for the next #SubdivCCG to come into existence. Monotonic and process-wide, so a
+ * value handed out once is never handed out again — which is what a holder of an old #SubdivCCG::id
+ * relies on to tell "still the same CCG" from "rebuilt at the same address".
+ */
+uint64_t subdiv_ccg_next_id();
+
 struct SubdivCCG : NonCopyable {
+  /**
+   * Identity of this instance, unique for the lifetime of the process.
+   *
+   * A rebuild always constructs a fresh #SubdivCCG (the only creation site is #BKE_subdiv_to_ccg,
+   * and the owning `std::unique_ptr` on #MeshRuntime is replaced wholesale), but the address alone
+   * cannot be compared against a recorded one: the previous instance is freed first, so the
+   * allocator is free to hand the same address back. A serial number cannot repeat, so code that
+   * has to detect a rebuild it did not observe records this instead — see
+   * #SculptLayerMaskEdit::ccg_id, where compressing a mask over a silently rebuilt CCG would store
+   * the user's own sculpt mask as a sculpt layer's weight map.
+   */
+  uint64_t id = subdiv_ccg_next_id();
   /**
    * This is a subdivision surface this CCG was created for.
    *

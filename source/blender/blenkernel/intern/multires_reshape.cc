@@ -81,9 +81,19 @@ Vector<MultiresGridSculptLayer> BKE_multires_grid_sculpt_layers_collect(const Me
        * never select a different set — the classic source of a base leak is structurally removed. */
       continue;
     }
-    layers.append({static_cast<const float3 *>(layer.data), eff});
+    const bke::sculpt_layers::CompositeMask masks = bke::sculpt_layers::grid_masks_for_composite(
+        layer, expected_totelem, grid_area);
+    layers.append({static_cast<const float3 *>(layer.data), eff, masks});
   }
   return layers;
+}
+
+bke::sculpt_layers::MaskBlockWeight BKE_multires_grid_sculpt_layer_weight(
+    const MultiresGridSculptLayer &layer, const int grid_index, const float sign)
+{
+  /* One grid is exactly one mask block, so the grid index is the block index. Guaranteed by the
+   * `block_size == grid_area` check in #grid_masks_for_composite. */
+  return bke::sculpt_layers::mask_block_weight(layer.masks, grid_index, sign * layer.influence);
 }
 
 /* The temporary composition is only correct when every displacement grid is already allocated at
@@ -116,9 +126,22 @@ static void mdisps_add_sculpt_layers(MDisps *mdisps,
       float3 *disps = reinterpret_cast<float3 *>(mdisps[grid_index].disps);
       for (const MultiresGridSculptLayer &layer : layers) {
         const float3 *layer_data = layer.data + int64_t(grid_index) * grid_area;
-        const float factor = sign * layer.influence;
+        /* Folded once per grid, not per element: an unmasked layer and a layer whose mask is
+         * uniform over this grid both collapse to a single scalar, and a grid the layer is fully
+         * masked out of is skipped outright. */
+        const bke::sculpt_layers::MaskBlockWeight weight =
+            BKE_multires_grid_sculpt_layer_weight(layer, grid_index, sign);
+        if (weight.skip) {
+          continue;
+        }
+        if (weight.fold == bke::sculpt_layers::MaskFold::Uniform) {
+          for (int i = 0; i < grid_area; i++) {
+            disps[i] += layer_data[i] * weight.weight;
+          }
+          continue;
+        }
         for (int i = 0; i < grid_area; i++) {
-          disps[i] += layer_data[i] * factor;
+          disps[i] += layer_data[i] * bke::sculpt_layers::mask_elem_weight(weight, i);
         }
       }
     }
@@ -224,7 +247,12 @@ void BKE_multires_sculpt_layer_apply_to_mdisps(Mesh &mesh, const SculptLayer &la
   if (!sculpt_grid_layers_applicable(mdisps, mesh.corners_num, grid_area)) {
     return;
   }
-  const MultiresGridSculptLayer scaled = {static_cast<const float3 *>(layer.data), factor};
+  /* The bake writes the layer's *masked* contribution into the base, and the matching undo passes
+   * a negated \a factor through this same path — so the two cancel exactly. */
+  const MultiresGridSculptLayer scaled = {
+      static_cast<const float3 *>(layer.data),
+      factor,
+      bke::sculpt_layers::grid_masks_for_composite(layer, layer.totelem, grid_area)};
   mdisps_add_sculpt_layers(mdisps, mesh.corners_num, grid_area, Span(&scaled, 1), 1.0f);
 }
 
@@ -702,10 +730,22 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
       float3 *undo_grid = r_undo_delta.data() + t * grid_area;
       if (restrict_to_touched) {
         const float3 *base_grid = saved_base.data() + grid_off;
+        /* Folded once per grid, ahead of the element loop, through the same helper
+         * #mdisps_add_sculpt_layers uses — that is what keeps this reconstruction of `T_old`
+         * arithmetically identical to the composition it stands in for. */
+        Vector<bke::sculpt_layers::MaskBlockWeight, 8> weights;
+        weights.reserve(layers.size());
+        for (const MultiresGridSculptLayer &layer : layers) {
+          weights.append(BKE_multires_grid_sculpt_layer_weight(layer, grid_index));
+        }
         for (int i = 0; i < grid_area; i++) {
           float3 old_val = base_grid[i];
-          for (const MultiresGridSculptLayer &layer : layers) {
-            old_val += layer.data[grid_off + i] * layer.influence;
+          for (const int li : layers.index_range()) {
+            if (weights[li].skip) {
+              continue;
+            }
+            old_val += layers[li].data[grid_off + i] *
+                       bke::sculpt_layers::mask_elem_weight(weights[li], i);
           }
           const float3 delta = new_disps[i] - old_val;
           layer_grid[i] += delta;

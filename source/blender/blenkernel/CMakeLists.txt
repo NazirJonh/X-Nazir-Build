@@ -268,6 +268,7 @@ set(SRC
   intern/scene.cc
   intern/screen.cc
   intern/sculpt_layers.cc
+  intern/sculpt_layers_mask.cc
   intern/shader_fx.cc
   intern/shrinkwrap.cc
   intern/softbody.cc
@@ -784,6 +785,7 @@ if(WITH_GTESTS)
     intern/node_socket_value_iter_test.cc
     intern/path_templates_test.cc
     intern/scene_test.cc
+    intern/sculpt_layers_mask_test.cc
     intern/sculpt_layers_tree_test.cc
     intern/subdiv_ccg_test.cc
     intern/tracking_test.cc

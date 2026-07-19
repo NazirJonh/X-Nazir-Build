@@ -32,6 +32,7 @@
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_main.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_undo_system.hh"
 
 #include "BLO_readfile.hh"
@@ -58,6 +59,19 @@ bool BKE_memfile_undo_decode(MemFileUndoData *mfu,
   int success = 0, fileflags;
 
   STRNCPY(mainstr, BKE_main_blendfile_path(bmain)); /* temporal store */
+
+  /* A sculpt-layer weight-mask editing session cannot survive this read. The step being decoded was
+   * encoded with every session suspended (see #BKE_memfile_undo_encode), so it holds the user's own
+   * mask and the node's mask from before the session opened; the weights the session was authoring
+   * are in neither, and the read is about to replace the storage they live in. Anything left of the
+   * session afterwards would point at a buffer that is not the one it parked its mask out of, and
+   * the next close would compress the user's restored mask onto the node and then overwrite that
+   * mask with the parked copy — corrupting both.
+   *
+   * Given up here, before the read, while the storage the session borrowed is still the one it
+   * borrowed. A #MaskEditSuspendGuard cannot serve: it would put the session back on the far side of
+   * the read, which is the state this exists to prevent. */
+  bke::sculpt_layers::mask_edit_abandon_all(*bmain);
 
   fileflags = G.fileflags;
   G.fileflags |= G_FILE_NO_UI;
@@ -101,6 +115,24 @@ bool BKE_memfile_undo_decode(MemFileUndoData *mfu,
 MemFileUndoData *BKE_memfile_undo_encode(Main *bmain, MemFileUndoData *mfu_prev)
 {
   MemFileUndoData *mfu = MEM_new_zeroed<MemFileUndoData>(__func__);
+
+  /* A memfile undo step is a serialization of the whole #Main, so it is exposed to the same hazard
+   * every other writer of the file is: while a sculpt-layer weight-mask editing session is open the
+   * node's weights sit in the mesh's `.sculpt_mask` attribute (or in #SubdivCCG::masks), and a step
+   * encoded there would record them as the user's own sculpt mask — to be handed back as such by
+   * the undo that decodes it.
+   *
+   * Bracketed rather than made to close the session, exactly as auto-save is: a memfile step is
+   * pushed by any operator that does not push one of its own, so the user runs into this while doing
+   * something entirely unrelated to the mask they are painting, and closing their session as a side
+   * effect would be both surprising and lossy. Inside the bracket the parked mask is back in place
+   * and the encode sees precisely the state it would have seen with no session open.
+   *
+   * Placed on the primitive rather than on its caller (#memfile_undosys_step_encode), so that every
+   * caller is covered by construction — including callers that do not exist yet — and so that both
+   * the `UNDO_DISK` and the in-memory branch below are covered by one bracket. This mirrors where
+   * the multires flush and #object_update_from_subsurf_ccg bracket themselves. */
+  const bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard(*bmain);
 
   /* This flag used to be set because the undo step was written as #BLENDER_QUIT_FILE. It's not
    * clear whether there are still good reasons to keep it. Undo can also be thought of as a kind

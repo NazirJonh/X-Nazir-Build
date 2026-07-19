@@ -250,6 +250,50 @@ static bool row_is_revealed(const SculptLayerGroup *parent)
   return ancestors_all_have_flag(parent, SCULPT_LAYER_GROUP_EXPANDED);
 }
 
+/**
+ * The weight-mask button, drawn at the left of a row's right-hand controls for both node kinds.
+ *
+ * Shown only when the node actually carries a mask: with none there is nothing to edit, and Add Mask
+ * in the row's context menu is the way in. It sits in its own sub-row, as the influence slider and
+ * the eye already do, so a future greying rule for one cannot spill onto the others.
+ *
+ * The icon is the *only* thing that says a session is open, and it has to be, because the mask is
+ * painted into the standard mask storage and does not reshape the layer until the session closes.
+ * There is no live preview to reflect here; the operator's report explains the delay when the
+ * session starts.
+ *
+ * The session is read straight off the object rather than through the #SculptLayer.mask_edit_active
+ * RNA the Python menu uses: this row already holds the object, whereas that getter has only the mesh
+ * and has to go looking for one.
+ */
+static void mask_button_draw(ui::Layout &parent,
+                             const Object &object,
+                             const SculptLayerTreeNode &node)
+{
+  if (node.mask == nullptr) {
+    return;
+  }
+  ui::Layout &mask_row = parent.row(true);
+  const bool editing = mask_edit_active_uid(object) == node.uid;
+  PointerRNA op_ptr = mask_row.op("SCULPT_OT_layer_mask_edit_toggle",
+                                  "",
+                                  editing ? ICON_CLIPUV_DEHLT : ICON_CLIPUV_HLT,
+                                  wm::OpCallContext::ExecDefault,
+                                  UI_ITEM_NONE);
+  RNA_int_set(&op_ptr, "node_uid", node.uid);
+}
+
+/** One `node_uid`-addressed mask operator entry in a row's context menu. */
+static void mask_menu_op(ui::Layout &layout,
+                         const char *idname,
+                         const char *text,
+                         const int icon,
+                         const int uid)
+{
+  PointerRNA op_ptr = layout.op(idname, text, icon, wm::OpCallContext::ExecDefault, UI_ITEM_NONE);
+  RNA_int_set(&op_ptr, "node_uid", uid);
+}
+
 class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
  private:
   Object *object_;
@@ -295,6 +339,8 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
      * greying rules differ. */
     ui::Layout &right = row.row(false);
     right.alignment_set(ui::LayoutAlign::Right);
+
+    mask_button_draw(right, *object_, group_->base);
 
     /* Folder influence slider, mirroring the layer row's: it scales every descendant layer's
      * contribution through the ancestor cascade. */
@@ -461,6 +507,28 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
     }
     layout.separator();
 
+    /* The folder counterpart of the layer rows' Python menu, which acts on the active layer. A
+     * folder has no "active" state — nothing in the data names one — so its mask entries are drawn
+     * here, where the row's own uid is known, exactly as the color swatches above are. A folder's
+     * mask attenuates every layer below it (#bke::sculpt_layers::chain_mask), which is why it gets
+     * the same set of entries a layer does. */
+    if (group_->base.mask == nullptr) {
+      mask_menu_op(layout, "SCULPT_OT_layer_mask_add", IFACE_("Add Mask"), ICON_MOD_MASK, uid_);
+    }
+    else {
+      const bool editing = mask_edit_active_uid(*object_) == uid_;
+      mask_menu_op(layout,
+                   "SCULPT_OT_layer_mask_edit_toggle",
+                   editing ? IFACE_("Finish Mask Edit") : IFACE_("Edit Mask"),
+                   ICON_MOD_MASK,
+                   uid_);
+      mask_menu_op(layout, "SCULPT_OT_layer_mask_invert", IFACE_("Invert Mask"), ICON_NONE, uid_);
+      mask_menu_op(layout, "SCULPT_OT_layer_mask_clear", IFACE_("Clear Mask"), ICON_NONE, uid_);
+      mask_menu_op(layout, "SCULPT_OT_layer_mask_fill", IFACE_("Fill Mask"), ICON_NONE, uid_);
+      mask_menu_op(layout, "SCULPT_OT_layer_mask_remove", IFACE_("Remove Mask"), ICON_X, uid_);
+    }
+    layout.separator();
+
     PointerRNA merge_ptr = layout.op("SCULPT_OT_layer_group_merge",
                                      IFACE_("Merge Layers"),
                                      ICON_AUTOMERGE_ON,
@@ -534,6 +602,8 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
      * container is unaligned and the two widgets stay in separate sub-rows. */
     ui::Layout &right = row.row(false);
     right.alignment_set(ui::LayoutAlign::Right);
+
+    mask_button_draw(right, *layer_ref_.object, layer.base);
 
     ui::Layout &sub = right.row(true);
     sub.use_property_decorate_set(false);

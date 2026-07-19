@@ -243,18 +243,62 @@ static void validate_grid_layers(Object &object)
   }
   const int totlvl = ss->multires_modifier->totlvl;
   const int expected = bke::grid_totelem(mesh.corners_num, totlvl);
-  bool warned = false;
-  for (SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
-    if (layer->domain != SCULPT_LAYER_DOMAIN_GRID || layer->data == nullptr) {
-      continue;
+
+  const auto needs_repair = [&](const SculptLayer &layer) {
+    if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {
+      return false;
     }
-    if (!bke::sculpt_layers::is_stale(*layer, expected) && layer->level == totlvl) {
+    return bke::sculpt_layers::is_stale(layer, expected) || layer.level != totlvl;
+  };
+
+  bool any_repair = false;
+  for (const SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
+    if (needs_repair(*layer)) {
+      any_repair = true;
+      break;
+    }
+  }
+  if (!any_repair) {
+    return;
+  }
+
+  /* The weight masks are the second per-element carrier on this domain and have to move with the
+   * data, the same pairing #multires_set_tot_level makes between #resample_grid_layers and
+   * #resample_grid_masks. Run first, and over the whole tree so folder masks come along: it is what
+   * rescues the common case where only the level moved, and it is the only chance to do so — after
+   * the wipe below a mask left at the old level would read as stale forever, and a stale mask is
+   * unreachable rather than merely inert (#SCULPT_OT_layer_validate never offers a layer that is no
+   * longer stale, while #mask_button_draw still draws its mask button). */
+  bke::sculpt_layers::resample_grid_masks(mesh, mesh.corners_num, totlvl);
+
+  bool warned = false;
+  bool mask_warned = false;
+  for (SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
+    if (!needs_repair(*layer)) {
       continue;
     }
     MEM_delete_void(layer->data);
     layer->data = nullptr;
     layer->totelem = 0;
     layer->level = short(totlvl);
+    /* Whatever the resample above could not carry across — a mask whose geometry no longer names a
+     * level on this topology, which is exactly the case the resampler leaves alone — is dropped
+     * rather than left in place, for the unreachability reason given above. Weights that select
+     * among deltas cannot outlive the deltas: this layer's data was just wiped. */
+    if (layer->base.mask != nullptr &&
+        bke::sculpt_layers::is_stale_mask(*layer->base.mask, expected))
+    {
+      bke::sculpt_layers::mask_free(layer->base.mask);
+      layer->base.mask = nullptr;
+      if (!mask_warned) {
+        /* Logged rather than reported: this runs from the session-state refresh, which has no
+         * #ReportList to speak through. #layer_validate_exec, the operator counterpart, reports. */
+        CLOG_WARN(&LOG,
+                  "Grid sculpt layer weight mask dropped: it could not be mapped onto the current "
+                  "topology, so the layer now contributes in full.");
+        mask_warned = true;
+      }
+    }
     if (!warned) {
       CLOG_WARN(&LOG,
                 "Grid sculpt layer data reset: stored level/topology no longer matches the mesh.");
@@ -398,7 +442,14 @@ static void recompute_mesh_canonical(Object &object)
 /* Debug validator for the mesh-domain canonical invariant `positions == mesh_base + sum(enabled
  * vert layers * influence)`. Prints a report when the live positions diverge, tagged with the
  * calling site, so a corruption can be attributed to the operation that introduced it. Only
- * meaningful for the common mesh path (no deform modifiers / shape keys). */
+ * meaningful for the common mesh path (no deform modifiers / shape keys).
+ *
+ * The invariant now presumes *masked* composition: #derive_base_mesh and #combine_layers_mesh both
+ * attenuate a layer by its own mask and by the folder chain above it, and they do it through one
+ * shared routine, so the round trip through #session_state_ensure stays exact. The consequence is
+ * that a position written by any path that still adds a layer unmasked no longer disappears into
+ * the base — it is reported here as a divergence instead of being silently absorbed. That is the
+ * intended behavior: such a write is the defect, and this is the check that names it. */
 static void debug_validate_mesh_invariant(Object &object, const char *where)
 {
   SculptSession *ss = session_of(object);
@@ -469,8 +520,41 @@ static void debug_validate_mesh_invariant(Object & /*object*/, const char * /*wh
 
 void commit_layers_change(const Depsgraph & /*depsgraph*/, Object &object)
 {
+  commit_layers_change(object);
+}
+
+void commit_layers_change(Object &object)
+{
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
-  if (pbvh && pbvh->type() == bke::pbvh::Type::Mesh) {
+  const bool mesh_path = pbvh && pbvh->type() == bke::pbvh::Type::Mesh;
+  if (mesh_path) {
+    /* The base is captured here, before the refresh below, and not left to the lazy capture inside
+     * #recompute_mesh_canonical. #derive_base_mesh recovers the base by subtracting each layer's
+     * contribution at the weights in force when it runs, so deriving it after the exemption moved
+     * would subtract an unmasked contribution from positions that were composed masked and fold the
+     * difference into the base permanently — the dent #bke::sculpt_layers::rec_exempt_set warns
+     * about. #layer_toggle_rec_exec settles the base before its own flip for the same reason.
+     *
+     * Guarded exactly as #recompute_mesh_canonical guards its own lazy capture, so the capture is
+     * still paid at most once and is not paid at all on the multires and deform / shape-key paths,
+     * which keep no runtime mesh base and re-evaluate instead. */
+    const SculptSession *ss = session_of(object);
+    if (ss && !ss->deform_modifiers_active && !ss->shapekey_active &&
+        (!ss->layers.state_valid || ss->layers.mesh_base.size() != mesh_of(object).verts_num))
+    {
+      session_state_ensure(object);
+    }
+  }
+  /* Before the recompose below, not after: the exemption decides how the recording layer's mask is
+   * weighed, so a resync afterwards would leave the freshly composed positions one step stale. Every
+   * operation that can move a layer, reparent it or restore an undo step passes through here, which
+   * is what keeps the exemption tracking the active layer without each of those paths having to know
+   * that REC exists. Idempotent and one uid lookup, so calling it on every commit is free.
+   *
+   * The result is deliberately not consulted: this function recomposes unconditionally on both
+   * paths below, so there is no stale surface left for a caller to act on. */
+  rec_exemption_refresh(object);
+  if (mesh_path) {
     recompute_mesh_canonical(object);
     debug_validate_mesh_invariant(object, "commit_layers_change");
     return;
@@ -1086,6 +1170,23 @@ void base_view_compose_grids(const Object &object,
  * Stroke recording (active layer)
  */
 
+bool rec_exemption_refresh(Object &object)
+{
+  /* Tested rather than asserted, because this is called from the sculpt-mode entry and exit paths,
+   * which also run for the vertex- and weight-paint sessions and could be reached for a non-mesh
+   * object by a script assigning `object.mode`. Sculpt layers only ever exist on a #Mesh, so there
+   * is nothing to repair on any other object type. */
+  if (object.type != OB_MESH || object.data == nullptr) {
+    return false;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (ss == nullptr || !ss->layers.rec_active) {
+    return bke::sculpt_layers::rec_exempt_set(mesh, nullptr);
+  }
+  return bke::sculpt_layers::rec_exempt_set(mesh, bke::sculpt_layers::active_get(mesh));
+}
+
 void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
 {
   SculptSession *ss = session_of(object);
@@ -1104,6 +1205,26 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
    * and the non-REC base update on the mesh path). */
   if (!ss->layers.state_valid) {
     session_state_ensure(object);
+  }
+
+  /* Resynced here as well as at every state change, because a stroke is the one point where the
+   * exemption being wrong is destructive rather than cosmetic: the delta this stroke stores is
+   * measured against the surface the composite is showing right now.
+   *
+   * After the base capture above and never before it. #session_state_ensure inverts the composite to
+   * recover the base, so a flip in between would have the base absorb the difference between the
+   * masked and the unmasked contribution — permanent, and not something a later commit can undo (see
+   * #bke::sculpt_layers::rec_exempt_set). Nothing between the two reads the exemption: the
+   * statements skipped over are a #bke::object::pbvh_get, a null / BMesh test and one bool.
+   *
+   * Reordering alone would only downgrade the failure to a surface one composite stale, so the
+   * repair is completed here: when the bit actually moved, the positions were composed under the old
+   * answer and are recomposed now, against the base just settled. #commit_layers_change re-runs the
+   * refresh, which is idempotent and answers false the second time, so this cannot recurse. Only
+   * reachable when an undo restore moved the bit, so the ordinary stroke start pays one flag test
+   * per layer and nothing else. */
+  if (rec_exemption_refresh(object)) {
+    commit_layers_change(depsgraph, object);
   }
 
   Mesh &mesh = mesh_of(object);
@@ -1610,13 +1731,23 @@ static wmOperatorStatus layer_add_exec(bContext *C, wmOperator *op)
         *ctx.mesh, DATA_("Layer"), domain_for(*ctx.object), element_count(*ctx.object));
   }
   undo::push_sculpt_layer_list_change(*ctx.object, {}, Vector<int>({layer->base.uid}), false);
-  undo::push_end(*ctx.object);
-  /* A new layer starts with zero displacement, so the combined surface is unchanged. */
   /* Auto-enable REC so sculpting immediately records into the freshly added layer; the layer
    * itself already starts enabled at influence 1.0 (see #bke::sculpt_layers::add). */
   if (SculptSession *ss = session_of(*ctx.object)) {
     ss->layers.rec_active = true;
   }
+  /* The new layer starts with zero displacement, so *it* adds nothing to the surface — but this
+   * operator also moves the active layer, and the REC exemption has to follow it. Left behind,
+   * #SCULPT_LAYER_REC_EXEMPT would keep a previously-active masked layer composing unmasked while it
+   * is no longer the recording target, since #node_mask_for_composite short-circuits on that bit and
+   * #bke::sculpt_layers::rec_exempt_set is the only thing that moves it. That is a real surface
+   * change, so it is recomposed here, and inside this step rather than after #push_end so the
+   * recompose rides the same undo step as the add (mirrors #layer_select_exec). #session_state_ensure
+   * already ran above, against the pre-change exemption, so no dent is folded into the base. */
+  if (rec_exemption_refresh(*ctx.object)) {
+    commit_layers_change(*ctx.depsgraph, *ctx.object);
+  }
+  undo::push_end(*ctx.object);
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -1654,9 +1785,23 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
   if (targets.is_empty()) {
     return OPERATOR_CANCELLED;
   }
+  /* Read before the close below, which clears it. Zero when no session is open, which is the common
+   * case. */
+  const SculptSession *ss = session_of(*ctx.object);
+  const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
+  /* A removal closes an open weight-mask editing session, exactly as a change of active layer does
+   * (see #layer_select_exec). Left open across the deletion of its own node the session becomes
+   * invisible — the row and its mask icon are gone — while the node's weights stay in the standard
+   * mask storage with the user's own mask parked, so every subsequent brush is silently masked by a
+   * layer that no longer exists. Closed *before* the payload capture below so the capture takes the
+   * settled mask #mask_edit_end just compressed onto the node, rather than the pre-session value. */
+  mask_edit_end(*ctx.object);
   /* Derive the mesh base from the still-consistent pre-change state. */
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  if (session_uid != 0) {
+    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
+  }
   /* Capture every payload while the list is still intact so each records the neighbour it really
    * followed; undo re-inserts them in capture order and rebuilds the original stack. Capturing and
    * removing one at a time would make each layer record a stale neighbour instead (see
@@ -1664,7 +1809,8 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
    * second pass. */
   Vector<undo::SculptLayerUndoPayload> removed;
   for (SculptLayer *layer : targets) {
-    removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer->base));
+    removed.append(undo::sculpt_layer_payload_capture(
+        *ctx.mesh, layer->base, undo::PayloadCapture::NodeRemoved));
   }
   /* No explicit #active_set afterwards: #bke::sculpt_layers::remove hands the active marker to a
    * neighbour, and when that neighbour is itself a target its own removal hands it on again, so
@@ -2021,6 +2167,36 @@ static SculptLayer *layer_below(SculptLayer &layer)
   return nullptr;
 }
 
+/* True when \a node's contribution is attenuated by a weight mask — its own, or one carried by any
+ * folder above it (the chain #bke::sculpt_layers::chain_mask folds).
+ *
+ * The merge operators refuse on this. A merge sums `data[i] * effective` into one surviving layer,
+ * and that layer can carry only one mask, so a merge of participants whose masks differ has no
+ * result that is both correct and reversible: some attenuation would have to be baked into the
+ * data and the rest discarded. Worse, a source's *folder chain* cannot be baked at all — the
+ * survivor sits under its own chain, so a source's attenuation folded into the survivor's data
+ * would then be multiplied by the survivor's chain as well, and the folder merge dissolves the very
+ * folder whose mask attenuated the subtree. Refusing loses nothing silently; folding would.
+ *
+ * Presence is tested rather than #bke::sculpt_layers::node_mask_for_composite, deliberately: that
+ * resolver needs the domain's element count and drops any mask that does not describe it, so a mask
+ * gone stale behind a topology change — still the user's data, still destroyed by the merge — would
+ * answer "unmasked" here and be lost without a word. Fails closed, which is the point.
+ */
+static bool node_chain_carries_mask(const SculptLayerTreeNode &node)
+{
+  if (node.mask != nullptr) {
+    return true;
+  }
+  /* Terminates at the root, whose #SculptLayerTreeNode::parent is null. */
+  for (const SculptLayerGroup *group = node.parent; group != nullptr; group = group->base.parent) {
+    if (group->base.mask != nullptr) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -2041,6 +2217,16 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
       (below->base.flag & SCULPT_LAYER_GROUP_HIDDEN))
   {
     BKE_report(op->reports, RPT_ERROR, "Cannot merge sculpt layers inside a disabled group");
+    return OPERATOR_CANCELLED;
+  }
+  /* See #node_chain_carries_mask: the merged layer carries one mask, so no accumulation of masked
+   * participants preserves the surface. Refused rather than folded, in the same shape as the
+   * disabled-group refusal above. */
+  if (node_chain_carries_mask(active->base) || node_chain_carries_mask(below->base)) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Cannot merge sculpt layers with a weight mask; remove the masks on the layers and "
+               "their folders first");
     return OPERATOR_CANCELLED;
   }
   session_state_ensure(*ctx.object);
@@ -2073,14 +2259,19 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
   below->base.flag |= SCULPT_LAYER_ENABLED;
 
   Vector<undo::SculptLayerUndoPayload> removed;
-  removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, active->base));
+  removed.append(undo::sculpt_layer_payload_capture(
+      *ctx.mesh, active->base, undo::PayloadCapture::NodeRemoved));
   bke::sculpt_layers::remove(*ctx.mesh, *active);
   bke::sculpt_layers::active_set(*ctx.mesh, below);
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
   undo::push_end(*ctx.object);
 
   /* `below * below_eff + active * active_eff` at influence 1 equals the previous combination
-   * exactly, so the combined surface (and the live positions) are unchanged. */
+   * exactly, so the combined surface (and the live positions) are unchanged — and therefore no
+   * #commit_layers_change is needed. This identity holds only because a masked participant was
+   * refused above: with a mask in play the merged layer would attenuate the sum differently than
+   * the parts were attenuated, the live positions would no longer match the composite, and the
+   * next #derive_base_mesh would absorb the difference into the base permanently. */
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -2089,7 +2280,9 @@ void SCULPT_OT_layer_merge_down(wmOperatorType *ot)
 {
   ot->name = "Merge Sculpt Layer Down";
   ot->idname = "SCULPT_OT_layer_merge_down";
-  ot->description = "Merge the active sculpt layer into the one below it";
+  ot->description =
+      "Merge the active sculpt layer into the one below it. Weight masks are not preserved, so a "
+      "layer that carries one, or that sits in a folder that does, cannot be merged";
   ot->exec = layer_merge_down_exec;
   ot->poll = layers_poll;
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
@@ -2128,6 +2321,20 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
   }
   if (any_group_hidden) {
     BKE_report(op->reports, RPT_ERROR, "Cannot merge sculpt layers inside a disabled group");
+    return OPERATOR_CANCELLED;
+  }
+  /* See #node_chain_carries_mask. Sources may sit in other folders than the active layer, so even
+   * folding a source's own mask into the sum would leave it under the *survivor's* folder chain
+   * rather than its own. */
+  bool any_masked = node_chain_carries_mask(active->base);
+  for (const SculptLayer *source : sources) {
+    any_masked |= node_chain_carries_mask(source->base);
+  }
+  if (any_masked) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Cannot merge sculpt layers with a weight mask; remove the masks on the layers and "
+               "their folders first");
     return OPERATOR_CANCELLED;
   }
 
@@ -2173,7 +2380,8 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
    * second pass. */
   Vector<undo::SculptLayerUndoPayload> removed;
   for (SculptLayer *source : sources) {
-    removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, source->base));
+    removed.append(undo::sculpt_layer_payload_capture(
+        *ctx.mesh, source->base, undo::PayloadCapture::NodeRemoved));
   }
   for (SculptLayer *source : sources) {
     bke::sculpt_layers::remove(*ctx.mesh, *source);
@@ -2183,7 +2391,11 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
   undo::push_end(*ctx.object);
 
   /* `active * active_eff + Σ(source * source_eff)` at influence 1 equals the previous combination
-   * exactly, so the combined surface (and the live positions) are unchanged. */
+   * exactly, so the combined surface (and the live positions) are unchanged — and therefore no
+   * #commit_layers_change is needed. This identity holds only because a masked participant was
+   * refused above: with a mask in play the merged layer would attenuate the sum differently than
+   * the parts were attenuated, the live positions would no longer match the composite, and the
+   * next #derive_base_mesh would absorb the difference into the base permanently. */
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -2192,7 +2404,9 @@ void SCULPT_OT_layer_merge_selected(wmOperatorType *ot)
 {
   ot->name = "Merge Selected Sculpt Layers";
   ot->idname = "SCULPT_OT_layer_merge_selected";
-  ot->description = "Merge the selected sculpt layers into the active one";
+  ot->description =
+      "Merge the selected sculpt layers into the active one. Weight masks are not preserved, so a "
+      "layer that carries one, or that sits in a folder that does, cannot be merged";
   ot->exec = layer_merge_selected_exec;
   ot->poll = layers_poll;
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
@@ -2241,7 +2455,8 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
       bke::sculpt_layers::apply_vert_layer_to_shape_keys(
           *ctx.mesh, *layer, bke::sculpt_layers::effective(*layer));
     }
-    baked.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer->base));
+    baked.append(undo::sculpt_layer_payload_capture(
+        *ctx.mesh, layer->base, undo::PayloadCapture::NodeRemoved));
   }
   for (SculptLayer *layer : all) {
     bke::sculpt_layers::remove(*ctx.mesh, *layer);
@@ -2357,7 +2572,8 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
   const Vector<SculptLayer *> all(bke::sculpt_layers::layers(*ctx.mesh));
   Vector<undo::SculptLayerUndoPayload> baked_layers;
   for (SculptLayer *layer : all) {
-    baked_layers.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer->base));
+    baked_layers.append(undo::sculpt_layer_payload_capture(
+        *ctx.mesh, layer->base, undo::PayloadCapture::NodeRemoved));
   }
   for (SculptLayer *layer : all) {
     bke::sculpt_layers::remove(*ctx.mesh, *layer);
@@ -2599,14 +2815,28 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
   }
   const ValidateAction action = ValidateAction(RNA_enum_get(op->ptr, "action"));
 
+  /* Read before the close below, which clears it. Zero when no session is open. */
+  const SculptSession *ss = session_of(*ctx.object);
+  const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
+  /* Both actions rewrite the very nodes a session could be open on — Remove deletes them outright,
+   * Clear drops a mask that no longer fits (below) — so the session is closed first, for the reason
+   * spelled out in #layer_remove_exec. Closing it also puts the node's weights back on the node,
+   * which is what lets #undo::push_sculpt_layer_mask below capture a mask that is not stale by
+   * construction. */
+  mask_edit_end(*ctx.object);
+
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  if (session_uid != 0) {
+    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
+  }
   if (action == ValidateAction::Remove) {
     /* Captured in list order while the list is still intact, then removed, so undo restores each
      * layer next to the neighbour it really had (see #layer_bake_exec). */
     Vector<undo::SculptLayerUndoPayload> removed;
     for (SculptLayer *layer : stale) {
-      removed.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer->base));
+      removed.append(undo::sculpt_layer_payload_capture(
+          *ctx.mesh, layer->base, undo::PayloadCapture::NodeRemoved));
     }
     for (SculptLayer *layer : stale) {
       bke::sculpt_layers::remove(*ctx.mesh, *layer);
@@ -2618,13 +2848,39 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
     for (SculptLayer *layer : stale) {
       /* Takes the unmappable buffer off the layer and hands it to the undo step, leaving the layer
        * itself (uid, name, place in the stack) in the list. */
-      resized.append(undo::sculpt_layer_payload_capture(*ctx.mesh, layer->base));
+      resized.append(undo::sculpt_layer_payload_capture(
+          *ctx.mesh, layer->base, undo::PayloadCapture::DataOnly));
       /* Re-fit to the live count of the layer's *own* domain (not the object's current sculpt
        * domain, which says nothing about a vertex layer sitting under a multires modifier).
        * #data_ensure allocates zeroed, which is exactly the wanted result: an empty but usable
        * layer on the new topology rather than a buffer that cannot be indexed. */
-      bke::sculpt_layers::data_ensure(*layer,
-                                      bke::sculpt_layers::element_count(*ctx.mesh, *layer));
+      const int new_count = bke::sculpt_layers::element_count(*ctx.mesh, *layer);
+      bke::sculpt_layers::data_ensure(*layer, new_count);
+      /* The weight mask is the layer's second per-element carrier and has to be re-fitted with the
+       * first, or it keeps its old `totelem` forever: #is_stale_mask then rejects it and the layer
+       * composites at full strength, while #mask_button_draw still offers a mask button (it tests
+       * only for a non-null mask) that can no longer do anything. Dropped rather than resampled —
+       * the deltas this repair gives up cannot be mapped onto the new topology, and neither can the
+       * weights that select among them; the grid resamplers only move a mask between *levels*, not
+       * between topologies, and the vertex domain has no resampler at all. A mask that already fits
+       * the new count is kept: nothing about it needs repairing. */
+      if (layer->base.mask != nullptr &&
+          bke::sculpt_layers::is_stale_mask(*layer->base.mask, new_count))
+      {
+        /* Recorded before it is freed so undo puts the user's weights back. Safe here because the
+         * session close above guarantees no node carries live weights in the standard storage. */
+        undo::push_sculpt_layer_mask(*ctx.object, layer->base);
+        bke::sculpt_layers::mask_free(layer->base.mask);
+        layer->base.mask = nullptr;
+        /* Reported for the same reason #layer_group_remove_exec reports its own: nothing is
+         * corrupted, but the layer going back to contributing in full would otherwise be a shape
+         * change with no explanation on screen. */
+        BKE_reportf(op->reports,
+                    RPT_INFO,
+                    "Removed the weight mask of sculpt layer '%s'; it no longer matches the mesh "
+                    "and the layer now contributes in full",
+                    layer->base.name);
+      }
     }
     undo::push_sculpt_layer_data_resize(*ctx.object, std::move(resized));
   }
@@ -2785,6 +3041,20 @@ static wmOperatorStatus layer_mask_isolate_exec(bContext *C, wmOperator *op)
   }
   SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
   if (!layer || !layer->data) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The same exclusion #layer_toggle_rec_exec makes, for the same storage reason. #gather_layer_mask
+   * reads exactly the two buffers a session borrows — the `.sculpt_mask` attribute and
+   * #SubdivCCG::masks — which hold the node's *weights* while a session is open, not the paint mask
+   * this operator is defined on. Refused rather than folded: the paint mask is not in the store at
+   * all but parked in #SculptLayerMaskEdit::saved_vert_mask, and reaching into that would be a
+   * second spelling of the session's storage contract. */
+  const SculptSession *ss = session_of(*ctx.object);
+  if (ss && ss->layers.mask_edit.node_uid != 0) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "A sculpt layer weight mask is being edited; finish the mask edit before isolating "
+               "by mask");
     return OPERATOR_CANCELLED;
   }
 
@@ -3223,7 +3493,16 @@ static wmOperatorStatus layer_influence_drag_modal(bContext *C, wmOperator *op, 
       if (data->gpu_active) {
         /* GPU path: queue this tick's effective-influence delta; the compute that updates the
          * position buffers runs at draw time. CPU positions are reconciled on the periodic normal
-         * refresh below and once more on release. */
+         * refresh below and once more on release.
+         *
+         * NOTE: this delta is a scalar applied to the whole position buffer, so it does not honor a
+         * weight mask on the layer or on a folder above it, while the CPU reconcile does. A masked
+         * layer therefore displays as if unmasked *during* a drag and snaps to the correct shape on
+         * release. Display only — nothing is stored from this path, and the reconcile is what the
+         * positions end up being. Left as is deliberately: masking it means resolving
+         * #bke::sculpt_layers::node_mask_for_composite per element and uploading the result, which
+         * is a second spelling of the composite's fold living in the drag path. It belongs with
+         * whoever owns the GPU drag, together with the mask upload it needs. */
         pbvh.add_influence_drag_delta(new_eff - old_eff);
         data->prev_influence = value;
         SLP_PERF("[DEBUG-perf] influence_drag_modal: gpu tick value=%.4f scale=%.5f\n",
@@ -3592,8 +3871,32 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
   SculptLayerGroup &parent = *group->base.parent;
   const int parent_uid = parent.base.uid;
 
+  /* Read before the close below, which clears it. Zero when no session is open. */
+  const SculptSession *ss = session_of(*ctx.object);
+  const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
+  /* Disbanding destroys this folder, so an open session on it would be orphaned — see
+   * #layer_remove_exec for what that state does to every subsequent brush. Closed before the mask
+   * report just below as well as before the removal: #mask_edit_end compresses the session's weights
+   * back onto the folder, so the report tests the mask the folder really ends up losing. */
+  mask_edit_end(*ctx.object);
+
+  /* The folder's own weight mask attenuates its whole subtree through
+   * #bke::sculpt_layers::chain_mask, and disbanding destroys it with the folder: the lifted-out
+   * children go back to contributing in full. Nothing is corrupted — the surface is recomposed
+   * below and the mask rides the undo payload — but the shape change would otherwise have no
+   * explanation on screen. Reported before the removal, which frees the name. */
+  if (group->base.mask != nullptr) {
+    BKE_reportf(op->reports,
+                RPT_INFO,
+                "Removed the weight mask of group '%s'; its contents now contribute in full",
+                group->base.name);
+  }
+
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  if (session_uid != 0) {
+    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
+  }
 
   /* The lift-out is a real relink now, not a retag of a folder field: a folder owns its children,
    * and #bke::sculpt_layers::group_remove refuses one that still has any (it would leak the
@@ -3637,7 +3940,8 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
    * #restore_list re-inserts a folder payload *before* it replays the move batch, extracts it
    * *after*. */
   Vector<undo::SculptLayerUndoPayload> removed;
-  removed.append(undo::sculpt_layer_payload_capture(mesh, group->base));
+  removed.append(undo::sculpt_layer_payload_capture(
+      mesh, group->base, undo::PayloadCapture::NodeRemoved));
   bke::sculpt_layers::group_remove(mesh, *group);
   undo::push_sculpt_layer_group_list_change(*ctx.object, std::move(removed), {});
 
@@ -3716,7 +4020,8 @@ static void remove_folder_subtree_with_undo(Object &object, Mesh &mesh, SculptLa
   Vector<undo::SculptLayerUndoPayload> removed_groups;
   removed_groups.reserve(folders.size());
   for (SculptLayerGroup *folder : folders) {
-    removed_groups.append(undo::sculpt_layer_payload_capture(mesh, folder->base));
+    removed_groups.append(undo::sculpt_layer_payload_capture(
+        mesh, folder->base, undo::PayloadCapture::NodeRemoved));
   }
   for (int64_t i = folders.size() - 1; i >= 0; i--) {
     bke::sculpt_layers::group_remove(mesh, *folders[i]);
@@ -3763,6 +4068,22 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
       return OPERATOR_CANCELLED;
     }
   }
+  /* See #node_chain_carries_mask. Acute here: the folder being dissolved may itself carry the mask
+   * that attenuated the whole subtree, and it does not survive the merge to carry it afterwards.
+   * The folder's own node is tested explicitly as well, so an empty-of-masks subtree under a masked
+   * folder is caught even though the layer walk below would already reach that folder as an
+   * ancestor. */
+  bool any_masked = node_chain_carries_mask(group->base);
+  for (const SculptLayer *layer : subtree_layers) {
+    any_masked |= node_chain_carries_mask(layer->base);
+  }
+  if (any_masked) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Cannot merge a sculpt layer group with a weight mask; remove the masks on the "
+               "group and its layers first");
+    return OPERATOR_CANCELLED;
+  }
 
   SculptLayer *survivor = subtree_layers.first();
 
@@ -3770,7 +4091,8 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
 
   /* Accumulate `data[i] * effective` of every subtree layer into the survivor at influence 1. The
-   * sum equals the folder's prior combined contribution, so the visible surface is unchanged. Buffer
+   * sum equals the folder's prior combined contribution, so the visible surface is unchanged —
+   * which holds only because a masked participant, or a masked folder, was refused above. Buffer
    * sizing mirrors #layer_merge_selected_exec: grid buffers all sit at the canonical (top) level. */
   int n = ctx.grids ? survivor->totelem : element_count(*ctx.object);
   if (ctx.grids) {
@@ -3826,7 +4148,8 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
     if (layer == survivor) {
       continue;
     }
-    removed_layers.append(undo::sculpt_layer_payload_capture(mesh, layer->base));
+    removed_layers.append(undo::sculpt_layer_payload_capture(
+        mesh, layer->base, undo::PayloadCapture::NodeRemoved));
   }
 
   /* Lift every subtree layer (the survivor included) out into the folder's parent, right after the
@@ -3865,7 +4188,8 @@ void SCULPT_OT_layer_group_merge(wmOperatorType *ot)
   ot->idname = "SCULPT_OT_layer_group_merge";
   ot->description =
       "Merge every sculpt layer inside a folder into a single layer named after the folder, "
-      "removing the folder and any nested folders";
+      "removing the folder and any nested folders. Weight masks are not preserved, so a folder or "
+      "layer that carries one cannot be merged";
   ot->exec = layer_group_merge_exec;
   ot->poll = layers_poll;
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
@@ -3902,17 +4226,29 @@ static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
    * keeps the layers), this deletes the whole subtree: every layer *and* every folder inside it. */
   const Vector<SculptLayer *> subtree_layers(bke::sculpt_layers::layers(*group));
 
+  /* Read before the close below, which clears it. Zero when no session is open. */
+  const SculptSession *ss = session_of(*ctx.object);
+  const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
+  /* This deletes the folder, every nested folder and every layer below it, so an open session on any
+   * of them would be orphaned — see #layer_remove_exec. Closed before the payload captures below so
+   * each captures the settled mask rather than the pre-session value. */
+  mask_edit_end(*ctx.object);
+
   /* Derive the mesh base from the still-consistent pre-change state: dropping the layers changes the
    * combined surface, and the commit below recomputes it from that base. */
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  if (session_uid != 0) {
+    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
+  }
 
   /* Capture every layer at its *original* position before the lift below moves it, so undo re-inserts
    * it where it really sat (with its data buffer). */
   Vector<undo::SculptLayerUndoPayload> removed_layers;
   removed_layers.reserve(subtree_layers.size());
   for (SculptLayer *layer : subtree_layers) {
-    removed_layers.append(undo::sculpt_layer_payload_capture(mesh, layer->base));
+    removed_layers.append(undo::sculpt_layer_payload_capture(
+        mesh, layer->base, undo::PayloadCapture::NodeRemoved));
   }
 
   /* Lift every subtree layer out into the folder's parent before removing it. Same shape as
@@ -4003,14 +4339,56 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
   }
   const int uid_from = ctx.mesh->sculpt_layers_active_uid;
   if (uid == uid_from) {
+    /* Nothing changes, so an open session must survive: re-selecting the row whose mask is being
+     * edited is exactly what a user does while working. */
     return OPERATOR_FINISHED;
   }
+  /* Read before the close below, which clears it. Zero when no session is open, which is the
+   * common case. */
+  const SculptSession *ss = session_of(*ctx.object);
+  const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
+
+  /* Any change of the active layer closes an open weight-mask editing session, whichever node it
+   * was opened on. The session is presented as a mode of the row it belongs to, so leaving that row
+   * with the mask tools still writing into the layer's mask — and the user's own mask still parked
+   * — would be a state with no visible cause. Closed before the undo push below so the step
+   * records the settled layer data rather than the borrowed mask storage. */
+  mask_edit_end(*ctx.object);
   /* Selection must ride on a sculpt undo step: without one, #OPTYPE_UNDO used to push a plain
    * memfile step, and undoing across it between two stroke SCULPT steps corrupted the delta-based
    * sculpt undo state. */
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  /* The close above is part of what this step did, so undoing it must reopen the session and
+   * redoing it must close one again. No mask has to be captured alongside: #mask_edit_end compresses
+   * the session's dense weights onto #SculptLayerTreeNode::mask, so the node already carries exactly
+   * the mask the session was authoring, and the reopen on undo expands that same mask back into the
+   * standard storage. Recording a mask here would be redundant at best — and actively wrong at
+   * worst, since #undo::push_sculpt_layer_mask refuses a node with an open session and the pre-close
+   * value of that field is stale by construction.
+   *
+   * Pushed after #push_begin because there is no step to record into before it, which is why the uid
+   * is read out above rather than here. */
+  if (session_uid != 0) {
+    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
+  }
   undo::push_sculpt_layer_active(*ctx.object, uid_from, uid);
   ctx.mesh->sculpt_layers_active_uid = uid;
+  /* REC stays armed across a change of active layer, so the exemption has to follow the new active
+   * layer rather than stay on the old one.
+   *
+   * Moving it off a masked layer puts that layer's weight map back into the composite, and onto
+   * another masked layer takes that one's out, so the composed surface moves and has to be brought
+   * back in line. The runtime base is settled first, against the pre-move exemption, for the reason
+   * spelled out on #bke::sculpt_layers::rec_exempt_set: derived afterwards it would absorb the
+   * difference permanently. Both halves are conditional, so the common case (REC disarmed, or
+   * neither layer masked) costs one guard and one flag test per layer. */
+  const SculptSession *ss_select = session_of(*ctx.object);
+  if (ss_select && !ss_select->layers.state_valid) {
+    session_state_ensure(*ctx.object);
+  }
+  if (rec_exemption_refresh(*ctx.object)) {
+    commit_layers_change(*ctx.depsgraph, *ctx.object);
+  }
   undo::push_end(*ctx.object);
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
@@ -4055,6 +4433,47 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
                "into it");
     return OPERATOR_CANCELLED;
   }
+  /* Also only the arming half, and the mirror image of the refusal #mask_edit_begin already makes
+   * against an armed REC. The two states are exclusive in both directions: while a session is open
+   * the node's weights occupy the standard mask storage, and arming REC would exempt from the
+   * composite a mask the user is looking at and painting into. */
+  if (!ss->layers.rec_active && ss->layers.mask_edit.node_uid != 0) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "A sculpt layer weight mask is being edited; finish the mask edit before recording");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Does this layer carry any weight map at all — its own or a folder's? Asked through the one
+   * resolver rather than by reading #SculptLayerTreeNode::mask here, so "masked" means exactly what
+   * the composite means by it (staleness, block-size mismatch and all).
+   *
+   * The exemption has to be lifted for the duration of the question: while REC is armed it is
+   * precisely what makes #node_mask_for_composite answer "unmasked", so the disarming half would
+   * always answer no. Restored immediately, and before anything that composes: the call below only
+   * resolves pointers, an operator runs on the main thread with no evaluation in flight, and both
+   * #session_state_ensure and the multires flush further down measure the layer against the surface
+   * as it stands *now* — either of them seeing a different exemption than the one the live positions
+   * were composed with would dent the base by the difference. */
+  bool layer_masked = false;
+  if (layer != nullptr) {
+    const int flag_before = layer->base.flag;
+    layer->base.flag &= ~SCULPT_LAYER_REC_EXEMPT;
+    layer_masked =
+        bke::sculpt_layers::node_mask_for_composite(*layer, element_count(*ctx.object)).primary !=
+        nullptr;
+    layer->base.flag = flag_before;
+  }
+
+  /* Multires, and before the exemption flips. The CCG can be holding base edits whose lazy flush
+   * subtracts each layer's contribution with the weights in force at flush time; letting that flush
+   * land after the flip would subtract an unmasked contribution the evaluator had composed masked
+   * and dent the base by the difference. Only reachable for a masked layer, which is why it is not
+   * paid on the (overwhelmingly common) unmasked toggle. */
+  if (layer_masked) {
+    flush_pending_multires_base(*ctx.object);
+  }
+
   /* Derive the runtime base from the still-consistent pre-change state, then capture pre-change
    * layer metadata so Ctrl+Z can revert the enabled/influence normalization. */
   session_state_ensure(*ctx.object);
@@ -4062,16 +4481,27 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
     undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
     undo::push_sculpt_layer_metadata(*ctx.object, layer->base);
   }
+  /* Captured before the flip rather than after it, so that it measures the pre-toggle contribution
+   * by construction. Reading it afterwards happens to give the same answer only because #effective
+   * consults the layer and never the session, which is not a property this code should depend on. */
+  const float old_eff = layer ? effective(*layer) : 0.0f;
   ss->layers.rec_active = !ss->layers.rec_active;
   if (ss->layers.rec_active && layer) {
-    const float old_eff = effective(*layer);
     layer->base.flag |= SCULPT_LAYER_ENABLED;
     layer->influence = 1.0f;
-    if (effective(*layer) != old_eff) {
-      /* REC pins the layer to enabled + influence 1.0; bring the positions in sync so the first
-       * recorded stroke starts from the surface the user actually sees. */
-      commit_layers_change(*ctx.depsgraph, *ctx.object);
-    }
+  }
+  /* The result is not consulted here, and the condition below is used instead. This is the one site
+   * that flips the bit on purpose, so it nearly always moves — but it only moves the *surface* when
+   * the layer carries a weight map, which #layer_masked answers exactly. Recomposing on the return
+   * value would recompute the whole mesh on every unmasked toggle, which is the common case. */
+  rec_exemption_refresh(*ctx.object);
+  /* REC pins the layer to enabled + influence 1.0 and, for a masked layer, drops its weight map as
+   * well; either way the composed surface moves, so the positions are brought in sync and the first
+   * recorded stroke starts from the surface the user actually sees. Both halves of the toggle
+   * recompose when a mask is involved — putting the mask back on disarm changes the surface exactly
+   * as much as dropping it did. */
+  if (layer && (effective(*layer) != old_eff || layer_masked)) {
+    commit_layers_change(*ctx.depsgraph, *ctx.object);
   }
   if (layer) {
     undo::push_end(*ctx.object);

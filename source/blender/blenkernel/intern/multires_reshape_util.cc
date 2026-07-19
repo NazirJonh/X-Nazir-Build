@@ -39,6 +39,7 @@
 #include "BKE_mesh_runtime.hh"
 #include "BKE_multires.hh"
 #include "BKE_multires_grid_resample.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv.hh"
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_subdiv_eval.hh"
@@ -1177,6 +1178,13 @@ bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
     return false;
   }
 
+  /* A CCG finer than the layer's storage level cannot be served: #grid_subsample hands back the
+   * source unchanged when asked to *up*sample, which is shorter than the buffer indexed below. */
+  if (cur_level > layer.level) {
+    multires_reshape_context_free(&reshape_context);
+    return false;
+  }
+
   /* Subsample the tangent coefficients from the storage level down to the current CCG level
    * (exact at the coarse grid points), then transform each coefficient into object space with
    * the limit-surface tangent matrix — the same frames the displacement evaluator uses. */
@@ -1184,11 +1192,45 @@ bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
   const Array<float3> subsampled = bke::grid_subsample(
       layer_data, layer.level, cur_level, grids_num);
 
+  /* The mask lives on the layer's own (top-level) grid domain, while this loop walks the CCG's
+   * current level. #grid_subsample maps a current-level point `(x, y)` to the top-level point
+   * `(x * step, y * step)` — an exact index stride, because CCG grids are nested. Sampling the
+   * mask through that *same* stride is what makes this direction symmetric with the forward one:
+   * the weight applied to a coefficient here is read from the very element the coefficient itself
+   * was read from, so the contribution subtracted on flush is exactly the contribution the
+   * displacement evaluator composed. At the top level `step` is 1 and this degenerates to the
+   * forward path's own `y * grid_size + x`. Any other sampling (interpolating the mask, or
+   * re-cutting it at the CCG level) would leave a residual the base absorbs on every flush. */
+  const int step = (top_grid_size - 1) / (cur_grid_size - 1);
+  const bke::sculpt_layers::CompositeMask masks = bke::sculpt_layers::grid_masks_for_composite(
+      layer, layer.totelem, top_grid_size * top_grid_size);
+
   threading::parallel_for(IndexRange(grids_num), 8, [&](const IndexRange range) {
     for (const int grid_index : range) {
       const int64_t grid_start = int64_t(grid_index) * cur_grid_area;
+      /* One grid is one mask block, so this folds once per grid. The contribution is defined at
+       * influence 1.0 — callers scale it — so only the mask is folded in here.
+       *
+       * That fixed 1.0 makes this the one direction whose association order differs from the
+       * forward one: #subtract_sculpt_layers_from_ccg_positions multiplies the result by the
+       * layer's effective influence afterwards, giving `(m * 1) * eff`, where the evaluator's
+       * collector folds the influence into the same expression as `m * eff`. The difference is a
+       * single rounding step (~1 ulp) and is forced: the influence-drag caller needs this buffer at
+       * influence 1.0 so it can rescale it per tick without recomputing it. It is also dominated by
+       * the residual the surrounding transform already carries — the tangent frames are evaluated
+       * from the limit surface and subsampled per level, so the coefficient this weight multiplies
+       * is itself not bit-identical to the one the displacement evaluator saw. Any exact-cancellation
+       * claim belongs to the mask fold alone, not to this whole product. */
+      const bke::sculpt_layers::MaskBlockWeight weight = bke::sculpt_layers::mask_block_weight(
+          masks, grid_index, 1.0f);
+      /* Invariant over the grid, so it is answered once here rather than per element. */
+      if (weight.skip) {
+        r_contrib.slice(grid_start, cur_grid_area).fill(float3(0.0f));
+        continue;
+      }
       for (int y = 0; y < cur_grid_size; y++) {
         for (int x = 0; x < cur_grid_size; x++) {
+          const int64_t elem = grid_start + int64_t(y) * cur_grid_size + x;
           GridCoord grid_coord;
           grid_coord.grid_index = grid_index;
           grid_coord.u = float(x) / float(cur_grid_size - 1);
@@ -1197,8 +1239,9 @@ bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
           float3x3 tangent_matrix;
           multires_reshape_evaluate_base_mesh_limit_at_grid(
               &reshape_context, &grid_coord, P, tangent_matrix);
-          const int64_t elem = grid_start + int64_t(y) * cur_grid_size + x;
-          r_contrib[elem] = math::transform_direction(tangent_matrix, subsampled[elem]);
+          const int mask_local = (y * step) * top_grid_size + x * step;
+          r_contrib[elem] = math::transform_direction(tangent_matrix, subsampled[elem]) *
+                            bke::sculpt_layers::mask_elem_weight(weight, mask_local);
         }
       }
     }

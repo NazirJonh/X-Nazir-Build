@@ -6391,6 +6391,25 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
+  /* A weight-mask editing session has the layer's mask sitting in the standard mask storage exactly
+   * so the mask tools can author it, which is why the attribute-only brushes keep working here. The
+   * brushes that move vertices are refused instead: with the user's mask parked, everything that
+   * consults the mask — automasking, and the mask factor every brush multiplies its strength by —
+   * would read the layer's weights, so the stroke would be shaped by a mask the user cannot see and
+   * did not paint. Refused rather than silently closing the session, which would throw away an
+   * in-progress mask edit as a side effect of an unrelated action. See #mask_edit_blocks_brush. */
+  if (const SculptSession *ss = ob.runtime->sculpt_session) {
+    if (layers::mask_edit_blocks_brush(layers::mask_edit_active_uid(*ss), brush.sculpt_brush_type))
+    {
+      BKE_report(op->reports,
+                 RPT_ERROR,
+                 "Close the sculpt layer mask session to sculpt geometry");
+      stroke->cancel(C);
+      MEM_delete(stroke);
+      return OPERATOR_CANCELLED;
+    }
+  }
+
   if (brush_type_is_mask(brush.sculpt_brush_type)) {
     MultiresModifierData *mmd = BKE_sculpt_multires_active(&scene, &ob);
     BKE_sculpt_mask_layers_ensure(CTX_data_depsgraph_pointer(C), CTX_data_main(C), &ob, mmd);
@@ -6439,6 +6458,30 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
 static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
 {
   brush_stroke_init(C, op);
+
+  /* The scripted and redo path into the same stroke, so it must refuse a geometry brush during a
+   * weight-mask editing session for the reason #sculpt_brush_stroke_invoke does. Checked before the
+   * stroke is allocated: there is nothing to cancel yet.
+   *
+   * Every lookup is null-tested, unlike the invoke path: this runs from Python, where
+   * `('EXEC_DEFAULT')` bypasses the poll that would otherwise have established an active object, a
+   * sculpt tool-settings block and a brush. A missing one simply means there is no session to
+   * refuse, so the check is skipped rather than the operator failed — the stroke below reports its
+   * own missing prerequisites. */
+  {
+    const Object *ob = CTX_data_active_object(C);
+    const ToolSettings *tool_settings = CTX_data_tool_settings(C);
+    const Sculpt *sd = tool_settings ? tool_settings->sculpt : nullptr;
+    const Brush *brush = sd ? BKE_paint_brush_for_read(&sd->paint) : nullptr;
+    const SculptSession *ss = ob ? ob->runtime->sculpt_session : nullptr;
+    if (ss != nullptr && brush != nullptr &&
+        layers::mask_edit_blocks_brush(layers::mask_edit_active_uid(*ss),
+                                       brush->sculpt_brush_type))
+    {
+      BKE_report(op->reports, RPT_ERROR, "Close the sculpt layer mask session to sculpt geometry");
+      return OPERATOR_CANCELLED;
+    }
+  }
 
   SculptPaintStroke *stroke = MEM_new<SculptPaintStroke>(__func__, C, op, 0);
   op->customdata = stroke;

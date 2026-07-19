@@ -127,6 +127,7 @@ const EnumPropertyItem rna_enum_sculpt_layergroup_color_items[] = {
 #  include <fmt/format.h>
 
 #  include "DNA_material_types.h"
+#  include "DNA_object_types.h"
 #  include "DNA_scene_types.h"
 #  include "DNA_world_types.h"
 
@@ -146,6 +147,8 @@ const EnumPropertyItem rna_enum_sculpt_layergroup_color_items[] = {
 #  include "BKE_main.hh"
 #  include "BKE_mesh.hh"
 #  include "BKE_mesh_runtime.hh"
+#  include "BKE_object_types.hh"
+#  include "BKE_paint.hh"
 #  include "BKE_report.hh"
 #  include "BLI_array.hh"
 
@@ -433,6 +436,66 @@ static bool rna_SculptLayer_is_valid_get(PointerRNA *ptr)
 {
   const SculptLayer *layer = static_cast<const SculptLayer *>(ptr->data);
   return !bke::sculpt_layers::is_stale(*rna_mesh(ptr), *layer);
+}
+
+/**
+ * Whether a weight-mask editing session is currently open on \a node.
+ *
+ * The session is per-object runtime state (#SculptSession::layers), and deliberately never
+ * persisted, while an RNA pointer to a sculpt layer or folder names only the #Mesh. The owning
+ * object therefore has to be found rather than passed. Only rows that are actually drawn ask this,
+ * and only an object in Sculpt Mode can carry a session, so the walk costs a pointer comparison per
+ * object per redraw. The tree view itself does not use this path — it already holds the object and
+ * reads the session directly (see #layers::mask_edit_active_uid).
+ */
+static bool rna_sculpt_layer_node_mask_edit_active(const PointerRNA *ptr,
+                                                   const SculptLayerTreeNode &node)
+{
+  /* Uid 0 names the root group and doubles as the session's "not open" sentinel, so it must never
+   * be matched against a live session. Guarded against a null #G_MAIN the same way the sibling
+   * #rna_SculptLayer_flush_pending_base is above: this getter is reachable from `bpy` and from
+   * tooltip/introspection paths during file read and startup, when #G_MAIN is not guaranteed. */
+  if (node.uid == 0 || G_MAIN == nullptr) {
+    return false;
+  }
+  const ID *mesh_id = &rna_mesh(ptr)->id;
+  for (Object &object : G_MAIN->objects) {
+    /* Narrowed to Sculpt Mode objects for the reason #flush_pending_multires_base_for_mesh's
+     * identical test is: an operator run from this menu acts on #CTX_data_active_object, and when
+     * two objects share this mesh, an Object Mode object's leftover session must not make this
+     * getter answer true for a node the active object's operator would instead open a second
+     * session on. */
+    if (object.data != mesh_id || !(object.mode & OB_MODE_SCULPT)) {
+      continue;
+    }
+    const SculptSession *ss = object.runtime->sculpt_session;
+    if (ss != nullptr && ss->layers.mask_edit.node_uid == node.uid) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool rna_SculptLayer_has_mask_get(PointerRNA *ptr)
+{
+  return static_cast<const SculptLayer *>(ptr->data)->base.mask != nullptr;
+}
+
+static bool rna_SculptLayer_mask_edit_active_get(PointerRNA *ptr)
+{
+  return rna_sculpt_layer_node_mask_edit_active(
+      ptr, static_cast<const SculptLayer *>(ptr->data)->base);
+}
+
+static bool rna_SculptLayerGroup_has_mask_get(PointerRNA *ptr)
+{
+  return static_cast<const SculptLayerGroup *>(ptr->data)->base.mask != nullptr;
+}
+
+static bool rna_SculptLayerGroup_mask_edit_active_get(PointerRNA *ptr)
+{
+  return rna_sculpt_layer_node_mask_edit_active(
+      ptr, static_cast<const SculptLayerGroup *>(ptr->data)->base);
 }
 
 /* A vertex-domain layer keeps the combined mesh positions in sync incrementally, so its influence
@@ -3402,6 +3465,24 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_SELECTED);
   RNA_def_property_ui_text(
       prop, "Select", "Sculpt layer selection state, used for drag and drop reordering");
+
+  /* Read-only, and with no update callback: both answer questions about state the mask operators
+   * own, so there is nothing for a write or a re-evaluation to do here. Mirrors #is_valid. */
+  prop = RNA_def_property(srna, "has_mask", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayer_has_mask_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Has Mask",
+                           "The layer carries a per-element weight mask that attenuates its "
+                           "contribution. Use the sculpt layer mask operators to add or remove it");
+
+  prop = RNA_def_property(srna, "mask_edit_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayer_mask_edit_active_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Editing Mask",
+                           "The layer's weight mask is currently being painted with the regular "
+                           "mask tools. The layer's shape updates when the edit is finished");
 }
 
 static void rna_def_sculpt_layer_group(BlenderRNA *brna)
@@ -3466,6 +3547,25 @@ static void rna_def_sculpt_layer_group(BlenderRNA *brna)
   prop = RNA_def_property(srna, "is_expanded", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_EXPANDED);
   RNA_def_property_ui_text(prop, "Expanded", "Group is expanded in the tree view");
+
+  /* The folder counterparts of #SculptLayer.has_mask and #SculptLayer.mask_edit_active. A folder's
+   * mask attenuates every layer below it through #bke::sculpt_layers::chain_mask, and is authored
+   * by exactly the same operators, so the two structs expose the same pair. */
+  prop = RNA_def_property(srna, "has_mask", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayerGroup_has_mask_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Has Mask",
+                           "The group carries a per-element weight mask that attenuates every "
+                           "sculpt layer inside it");
+
+  prop = RNA_def_property(srna, "mask_edit_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_SculptLayerGroup_mask_edit_active_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Editing Mask",
+                           "The group's weight mask is currently being painted with the regular "
+                           "mask tools. The layers' shape updates when the edit is finished");
 }
 
 static void rna_def_mesh(BlenderRNA *brna)

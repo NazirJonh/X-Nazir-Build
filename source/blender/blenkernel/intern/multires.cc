@@ -247,10 +247,13 @@ void multires_set_tot_level(Object *ob, MultiresModifierData *mmd, const int lvl
   mmd->renderlvl = std::clamp<char>(std::max<char>(mmd->renderlvl, lvl), 0, mmd->totlvl);
 
   /* Grid-domain sculpt layers are always stored at the top level; resample them whenever it
-   * changes (Subdivide / Delete Higher / level sync). No-op when the mesh has no grid layers. */
+   * changes (Subdivide / Delete Higher / level sync). No-op when the mesh has no grid layers.
+   * The weight masks live on the same domain and must move with them — a mask left at the old
+   * level would be rejected as stale and its layer would spring back to full contribution. */
   if (ob->type == OB_MESH && ob->data) {
     Mesh *mesh = id_cast<Mesh *>(ob->data);
     bke::sculpt_layers::resample_grid_layers(*mesh, mesh->corners_num, lvl);
+    bke::sculpt_layers::resample_grid_masks(*mesh, mesh->corners_num, lvl);
   }
 }
 
@@ -345,6 +348,32 @@ void multires_flush_sculpt_updates(Object *object)
          int(sculpt_session->multires_modifier->totlvl),
          subdiv_ccg->level);
 #endif
+
+  /* An open sculpt-layer weight-mask editing session keeps the layer's weights in
+   * #SubdivCCG::masks, and the reshape below copies those into the base mesh's *persistent*
+   * `CD_GRID_PAINT_MASK` layer — permanently replacing the user's paint mask. Parked here, inside
+   * the primitive, rather than at the call sites: this is reached from operators, from undo, from
+   * bake and from a plain depsgraph re-evaluation, and a bracket per caller cannot cover a caller
+   * that does not exist yet. Placed after the dirty-flag early return above so a session costs
+   * nothing on the overwhelmingly common flush that has nothing to write.
+   *
+   * Grid sessions only: this function writes `CD_MDISPS` and `CD_GRID_PAINT_MASK`, never the
+   * mesh's `.sculpt_mask` attribute, so a mesh-domain session has nothing to lose here and parking
+   * one would churn attribute storage on the mesh in #Main for no protection (see
+   * #bke::sculpt_layers::MaskEditDomains::GridsOnly).
+   *
+   * A refusal deliberately does *not* skip the flush. It is reachable and persistent — subdividing
+   * during a session rebuilds the CCG, after which the parked buffer never matches again — and
+   * deferring on it would make every subsequent flush, including the depsgraph-driven one on every
+   * re-evaluation, return early for as long as the session stays open, losing all base sculpting at
+   * the next CCG rebuild. It is also unnecessary: a grid suspend can only refuse when
+   * #SubdivCCG::masks was reallocated or emptied under the session, and that is exactly the event
+   * that discarded the session's expanded weights, so what remains in the buffer is the mask
+   * re-derived from the base mesh rather than the layer's. There is nothing left to protect. The
+   * refusal is logged once per session by the implementation, and the session's own close path
+   * (#mask_edit_end_grids) already refuses to compress a mask whose domain moved. */
+  const bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard(
+      *object, bke::sculpt_layers::MaskEditDomains::GridsOnly);
 
   const bool flushed = multiresModifier_reshapeFromCCG(sculpt_session->multires_modifier->totlvl,
                                                        mesh,

@@ -618,4 +618,542 @@ TEST_F(sculpt_layers_tree, folder_influence_zero_yields_base)
   }
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Grid mask resampling (#resample_grid_masks)
+ *
+ * The mask counterpart of #resample_grid_layers. No #SubdivCCG is needed: the mask carries its own
+ * geometry, so the level change is pure index math over the tree.
+ * \{ */
+
+/* Grid size at \a level, mirroring #CCG_grid_size without pulling in the CCG header. */
+static int test_grid_size(const int level)
+{
+  return (1 << (level - 1)) + 1;
+}
+
+/** A grid mask over \a grids_num grids at \a level, every element set to \a fill. */
+static SculptLayerMask *grid_mask_new(const int grids_num, const int level, const uint8_t fill)
+{
+  const int gs = test_grid_size(level);
+  const int area = gs * gs;
+  return mask_new(grids_num * area, area, fill);
+}
+
+TEST_F(sculpt_layers_tree, resample_grid_masks_moves_a_layer_mask_to_the_new_level)
+{
+  /* One grid, level 2 (3x3 = 9 elements) up to level 3 (5x5 = 25). The mask must land on the new
+   * level's block size, or the multires paths would stop recognizing it as one block per grid. */
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_GRID, 0);
+  ASSERT_NE(layer, nullptr);
+  layer->base.mask = grid_mask_new(1, 2, 200);
+  ASSERT_NE(layer->base.mask, nullptr);
+  ASSERT_EQ(layer->base.mask->totelem, 9);
+
+  resample_grid_masks(*mesh, 1, 3);
+
+  ASSERT_NE(layer->base.mask, nullptr);
+  EXPECT_EQ(layer->base.mask->totelem, 25);
+  EXPECT_EQ(layer->base.mask->block_size, 25);
+  /* A uniform mask stays uniform and keeps its value through the resample: interpolating between
+   * equal samples must not perturb it. */
+  EXPECT_EQ(mask_value_at(*layer->base.mask, 0), 200);
+  EXPECT_EQ(mask_value_at(*layer->base.mask, 24), 200);
+}
+
+TEST_F(sculpt_layers_tree, resample_grid_masks_round_trips_through_a_higher_level)
+{
+  /* Up then back down must be the identity: subsampling reads exactly the points upsampling
+   * interpolated *through*, so the coarse samples are preserved. This is the property that keeps a
+   * mask from sliding across the surface as the user steps the multires level up and down. */
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_GRID, 0);
+  ASSERT_NE(layer, nullptr);
+  const int gs = test_grid_size(2);
+  Array<float> dense(gs * gs);
+  for (const int i : dense.index_range()) {
+    dense[i] = float(i % 5) * 0.25f;
+  }
+  layer->base.mask = mask_compress(dense, gs * gs);
+  ASSERT_NE(layer->base.mask, nullptr);
+  Array<uint8_t> before(dense.size());
+  for (const int i : dense.index_range()) {
+    before[i] = mask_value_at(*layer->base.mask, i);
+  }
+
+  resample_grid_masks(*mesh, 1, 4);
+  ASSERT_EQ(layer->base.mask->totelem, test_grid_size(4) * test_grid_size(4));
+  resample_grid_masks(*mesh, 1, 2);
+
+  ASSERT_EQ(layer->base.mask->totelem, gs * gs);
+  for (const int i : dense.index_range()) {
+    EXPECT_EQ(mask_value_at(*layer->base.mask, i), before[i]) << "element " << i;
+  }
+}
+
+TEST_F(sculpt_layers_tree, resample_grid_masks_walks_folders_too)
+{
+  /* A folder's mask attenuates its whole subtree through #chain_mask, so it has to move with the
+   * level like a layer's own. Left behind it would be rejected as stale and the subtree would
+   * silently spring back to its full contribution — the failure mode is *more* visible than a lost
+   * layer mask, not less. */
+  SculptLayerGroup *folder = group_add(*mesh, "Folder", 0);
+  ASSERT_NE(folder, nullptr);
+  folder->base.mask = grid_mask_new(1, 2, 90);
+  root_group(*mesh)->base.mask = grid_mask_new(1, 2, 30);
+
+  resample_grid_masks(*mesh, 1, 3);
+
+  ASSERT_NE(folder->base.mask, nullptr);
+  EXPECT_EQ(folder->base.mask->totelem, 25);
+  EXPECT_EQ(mask_value_at(*folder->base.mask, 0), 90);
+  /* The root is the one node a children-only walk would miss. */
+  ASSERT_NE(root_group(*mesh)->base.mask, nullptr);
+  EXPECT_EQ(root_group(*mesh)->base.mask->totelem, 25);
+  EXPECT_EQ(mask_value_at(*root_group(*mesh)->base.mask, 0), 30);
+}
+
+TEST_F(sculpt_layers_tree, resample_grid_masks_leaves_vertex_masks_alone)
+{
+  /* Grid masks are recognized by their own geometry rather than by the domain of the node they hang
+   * off — a folder has no domain at all. A vertex mask must not be mistaken for one. */
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_VERT, 0);
+  ASSERT_NE(layer, nullptr);
+  layer->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 111);
+  const SculptLayerMask *before = layer->base.mask;
+
+  resample_grid_masks(*mesh, 1, 3);
+
+  EXPECT_EQ(layer->base.mask, before);
+  EXPECT_EQ(layer->base.mask->totelem, 4096);
+  EXPECT_EQ(layer->base.mask->block_size, SCULPT_LAYER_MASK_VERT_BLOCK);
+}
+
+TEST_F(sculpt_layers_tree, resample_grid_masks_drops_grid_masks_when_no_levels_remain)
+{
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_GRID, 0);
+  ASSERT_NE(layer, nullptr);
+  layer->base.mask = grid_mask_new(1, 2, 200);
+
+  resample_grid_masks(*mesh, 1, 0);
+
+  /* No grid domain is left for a mask to describe. */
+  EXPECT_EQ(layer->base.mask, nullptr);
+}
+
+/** \} */
+
+TEST_F(sculpt_layers_tree, tree_copy_deep_copies_masks)
+{
+  /* #tree_copy shallow-copies each DNA node, so a mask pointer carried over verbatim would be freed
+   * twice when both meshes are released — and would let one mesh's mask edits appear on the other.
+   * This is the same hazard already handled for #SculptLayerGroup::runtime. */
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_VERT, 0);
+  ASSERT_NE(layer, nullptr);
+  layer->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 200);
+  ASSERT_NE(layer->base.mask, nullptr);
+
+  /* The root carries a mask too: it is the one node #group_copy_children never visits, so a copy
+   * that only walked the children would leave the two roots sharing one mask. */
+  root_group(*mesh)->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 100);
+
+  /* A folder nested inside the root exercises #group_copy_children's group branch, the one mask
+   * copy site the top-level layer and the root above do not reach. */
+  SculptLayerGroup *folder = group_add(*mesh, "Folder", 0);
+  ASSERT_NE(folder, nullptr);
+  folder->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 50);
+  const int folder_uid = folder->base.uid;
+
+  Mesh *copy = BKE_mesh_new_nomain(0, 0, 0, 0);
+  tree_copy(*copy, *mesh);
+
+  const Span<SculptLayer *> copied = layers(*root_group(*copy));
+  ASSERT_EQ(copied.size(), 1);
+  ASSERT_NE(copied[0]->base.mask, nullptr);
+  EXPECT_NE(copied[0]->base.mask, layer->base.mask);
+  EXPECT_EQ(mask_value_at(*copied[0]->base.mask, 0), 200);
+
+  ASSERT_NE(root_group(*copy)->base.mask, nullptr);
+  EXPECT_NE(root_group(*copy)->base.mask, root_group(*mesh)->base.mask);
+  EXPECT_EQ(mask_value_at(*root_group(*copy)->base.mask, 0), 100);
+
+  SculptLayerGroup *copied_folder = node_as_group(node_find_by_uid(*copy, folder_uid));
+  ASSERT_NE(copied_folder, nullptr);
+  ASSERT_NE(copied_folder->base.mask, nullptr);
+  EXPECT_NE(copied_folder->base.mask, folder->base.mask);
+  EXPECT_EQ(mask_value_at(*copied_folder->base.mask, 0), 50);
+
+  BKE_id_free(nullptr, copy);
+  /* Must still be readable: the copy's destruction may not have touched these masks. */
+  EXPECT_EQ(mask_value_at(*layer->base.mask, 0), 200);
+  EXPECT_EQ(mask_value_at(*root_group(*mesh)->base.mask, 0), 100);
+  EXPECT_EQ(mask_value_at(*folder->base.mask, 0), 50);
+}
+
+TEST_F(sculpt_layers_tree, chain_mask_is_null_without_masks)
+{
+  /* A tree with no masks at all must hand back null, not a mask full of ones: null is what lets the
+   * composite skip the masked paths entirely. */
+  SculptLayerGroup *group = group_add(*mesh, "Folder", 0);
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(chain_mask(*group), nullptr);
+}
+
+TEST_F(sculpt_layers_tree, chain_mask_multiplies_down_the_tree)
+{
+  SculptLayerGroup *outer = group_add(*mesh, "Outer", 0);
+  ASSERT_NE(outer, nullptr);
+  SculptLayerGroup *inner = group_add(*mesh, "Inner", outer->base.uid);
+  ASSERT_NE(inner, nullptr);
+  outer->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 255);
+  inner->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 128);
+
+  const SculptLayerMask *chain = chain_mask(*inner);
+  ASSERT_NE(chain, nullptr);
+  EXPECT_EQ(mask_value_at(*chain, 0), 128);
+}
+
+TEST_F(sculpt_layers_tree, chain_mask_invalidates_on_ancestor_edit)
+{
+  /* Missing this invalidation gives a use-after-free, not a stale UI row — the same hazard already
+   * documented for #SculptLayerGroupRuntime::layer_cache_. */
+  SculptLayerGroup *outer = group_add(*mesh, "Outer", 0);
+  ASSERT_NE(outer, nullptr);
+  SculptLayerGroup *inner = group_add(*mesh, "Inner", outer->base.uid);
+  ASSERT_NE(inner, nullptr);
+  outer->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 255);
+  ASSERT_NE(chain_mask(*inner), nullptr);
+  EXPECT_EQ(mask_value_at(*chain_mask(*inner), 0), 255);
+
+  mask_free(outer->base.mask);
+  outer->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 0);
+  /* #tag_chain_mask_dirty, not #tag_layers_cache_dirty: a mask edit changes no folder's membership,
+   * and the two caches propagate in opposite directions from separate entry points. */
+  tag_chain_mask_dirty(*outer);
+
+  ASSERT_NE(chain_mask(*inner), nullptr);
+  EXPECT_EQ(mask_value_at(*chain_mask(*inner), 0), 0);
+}
+
+TEST_F(sculpt_layers_tree, chain_mask_folds_in_the_root_mask)
+{
+  /* The root is a folder like any other on this walk, and the one whose mask nothing else in the
+   * module ever reaches: #group_copy_children and #group_blend_read_children both only descend into
+   * *children*, so a chain that started at the top-level folder instead would look correct
+   * everywhere except here — and would drop a mask the user applied to the whole mesh. */
+  root_group(*mesh)->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 128);
+  SculptLayerGroup *folder = group_add(*mesh, "Folder", 0);
+  ASSERT_NE(folder, nullptr);
+
+  /* The root's own chain is just its own mask: it has no ancestor to fold in. */
+  const SculptLayerMask *root_chain = chain_mask(*root_group(*mesh));
+  ASSERT_NE(root_chain, nullptr);
+  EXPECT_EQ(mask_value_at(*root_chain, 0), 128);
+  /* Copied rather than aliased, as every other level is — the runtime owns what it hands out. */
+  EXPECT_NE(root_chain, root_group(*mesh)->base.mask);
+
+  /* The folder carries no mask of its own, so its chain is the root's alone rather than null. */
+  const SculptLayerMask *folder_chain = chain_mask(*folder);
+  ASSERT_NE(folder_chain, nullptr);
+  EXPECT_EQ(mask_value_at(*folder_chain, 0), 128);
+
+  /* And with a mask of its own the two multiply: 128 by 128 over 255 rounds to 64. */
+  folder->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 128);
+  tag_chain_mask_dirty(*folder);
+  ASSERT_NE(chain_mask(*folder), nullptr);
+  EXPECT_EQ(mask_value_at(*chain_mask(*folder), 0), 64);
+}
+
+TEST_F(sculpt_layers_tree, composite_applies_layer_mask)
+{
+  /* Masked elements must land at base, unmasked at base + offset. Verified through the public
+   * composite so the block dispatch is exercised, not just the container.
+   *
+   * 8192 elements is two full blocks: the first is dense (one element differs) and the second is
+   * uniform, so one call covers both sides of the dispatch. #combine_layers_mesh never consults the
+   * mesh, so the fixture's empty mesh is irrelevant — the layer is sized to the arrays below. */
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_VERT, 8192);
+  ASSERT_NE(layer, nullptr);
+  const MutableSpan<float3> offsets = data_get(*layer);
+  ASSERT_EQ(offsets.size(), 8192);
+  offsets.fill(float3(0.0f, 0.0f, 1.0f));
+
+  Array<float> dense(8192, 1.0f);
+  dense[10] = 0.0f;
+  layer->base.mask = mask_compress(dense, SCULPT_LAYER_MASK_VERT_BLOCK);
+  ASSERT_NE(layer->base.mask, nullptr);
+  ASSERT_EQ(layer->base.mask->block_kind[0], SCULPT_LAYER_MASK_BLOCK_DENSE);
+  ASSERT_EQ(layer->base.mask->block_kind[1], SCULPT_LAYER_MASK_BLOCK_UNIFORM);
+
+  const Array<float3> base(8192, float3(0.0f));
+  Array<float3> result(8192);
+  combine_layers_mesh(base, layers(*mesh), result);
+
+  EXPECT_NEAR(result[10].z, 0.0f, 1e-5f) << "the masked element must stay at the base";
+  EXPECT_NEAR(result[11].z, 1.0f, 1e-5f) << "its neighbour in the same dense block must not";
+  EXPECT_NEAR(result[5000].z, 1.0f, 1e-5f) << "the uniform block must fold to a plain scalar";
+
+  /* The inverse must undo exactly what the forward pass did, mask and all: #derive_base_mesh is
+   * what recovers the un-layered base on every flush, so a weight the two spell differently would
+   * drift the base a little each time — silently and cumulatively. */
+  Array<float3> derived(8192);
+  derive_base_mesh(result, layers(*mesh), derived);
+  for (const int i : {10, 11, 5000}) {
+    EXPECT_EQ(derived[i].z, base[i].z) << "element " << i;
+  }
+}
+
+TEST_F(sculpt_layers_tree, composite_applies_folder_mask_to_a_masked_layer)
+{
+  /* A layer mask and a folder chain mask must both apply, multiplied. This is the one case the
+   * per-block dispatch has to carry two masks through at once, and the case where a forward and an
+   * inverse spelled separately would disagree. */
+  SculptLayerGroup *folder = group_add(*mesh, "Folder", 0);
+  ASSERT_NE(folder, nullptr);
+  folder->base.mask = mask_new(8192, SCULPT_LAYER_MASK_VERT_BLOCK, 128);
+  ASSERT_NE(folder->base.mask, nullptr);
+  /* The chain-mask cache happens to be cold here, so the tag is not what makes this test pass today
+   * — it is what keeps it testing the mask instead of the cache's initial state. */
+  tag_chain_mask_dirty(*folder);
+
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_VERT, 8192);
+  ASSERT_NE(layer, nullptr);
+  node_move_into(*mesh, layer->base, *folder, nullptr);
+  data_get(*layer).fill(float3(0.0f, 0.0f, 1.0f));
+
+  Array<float> dense(8192, 1.0f);
+  dense[10] = 0.0f;
+  layer->base.mask = mask_compress(dense, SCULPT_LAYER_MASK_VERT_BLOCK);
+  ASSERT_NE(layer->base.mask, nullptr);
+
+  const Array<float3> base(8192, float3(0.0f));
+  Array<float3> result(8192);
+  combine_layers_mesh(base, layers(*mesh), result);
+
+  EXPECT_NEAR(result[10].z, 0.0f, 1e-5f) << "zero on either side annihilates the element";
+  /* 255 by 128 over 255 squared: the folder halves what the layer lets through. */
+  EXPECT_NEAR(result[11].z, 128.0f / 255.0f, 1e-5f);
+  EXPECT_NEAR(result[5000].z, 128.0f / 255.0f, 1e-5f);
+
+  Array<float3> derived(8192);
+  derive_base_mesh(result, layers(*mesh), derived);
+  for (const int i : {10, 11, 5000}) {
+    EXPECT_NEAR(derived[i].z, base[i].z, 1e-6f) << "element " << i;
+  }
+}
+
+TEST_F(sculpt_layers_tree, composite_ignores_a_mask_of_the_wrong_size)
+{
+  /* A mask sized to a stale element count cannot be indexed over the live domain, so the layer must
+   * compose unmasked rather than be dropped or read out of bounds. The same guard is what keeps a
+   * mask neutralized by #mask_blend_read (`totelem == 0`, `blocks_num == 0`) off the block loop:
+   * looping over zero blocks would silently drop the layer's whole contribution. */
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_VERT, 3);
+  ASSERT_NE(layer, nullptr);
+  data_get(*layer).fill(float3(0.0f, 0.0f, 1.0f));
+  layer->base.mask = mask_new(4096, SCULPT_LAYER_MASK_VERT_BLOCK, 0);
+  ASSERT_NE(layer->base.mask, nullptr);
+
+  const Array<float3> base(3, float3(0.0f));
+  Array<float3> result(3);
+  combine_layers_mesh(base, layers(*mesh), result);
+  for (const int i : IndexRange(3)) {
+    EXPECT_EQ(result[i].z, 1.0f) << "element " << i;
+  }
+}
+
+TEST_F(sculpt_layers_tree, composite_uniform_zero_and_opaque_blocks_have_correct_values)
+{
+  /* A uniform-zero block must contribute nothing and a uniform-opaque (255) block must contribute
+   * fully, which is the one case the other composite tests never isolate: their zero is a single
+   * element inside a dense block, not a whole uniform one. Block 0 is uniformly zero and block 1
+   * uniformly opaque, so both values are pinned in one call.
+   *
+   * This is a value test, not a branch test: #accumulate_layer has a `continue` that skips a
+   * uniform-zero block outright as a performance shortcut (a masked layer must stay cheaper than an
+   * unmasked one over a parked region). Removing that `continue` would make the loop add `data *
+   * 0.0f` instead, which is numerically identical, so every assertion below would still pass. This
+   * test therefore cannot detect whether the shortcut is taken; it only pins the values it must not
+   * change. */
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_VERT, 8192);
+  ASSERT_NE(layer, nullptr);
+  data_get(*layer).fill(float3(0.0f, 0.0f, 1.0f));
+
+  Array<float> dense(8192, 1.0f);
+  dense.as_mutable_span().slice(0, SCULPT_LAYER_MASK_VERT_BLOCK).fill(0.0f);
+  layer->base.mask = mask_compress(dense, SCULPT_LAYER_MASK_VERT_BLOCK);
+  ASSERT_NE(layer->base.mask, nullptr);
+  ASSERT_EQ(layer->base.mask->block_kind[0], SCULPT_LAYER_MASK_BLOCK_UNIFORM);
+  ASSERT_EQ(layer->base.mask->block_kind[1], SCULPT_LAYER_MASK_BLOCK_UNIFORM);
+
+  const Array<float3> base(8192, float3(0.0f));
+  Array<float3> result(8192);
+  combine_layers_mesh(base, layers(*mesh), result);
+
+  EXPECT_NEAR(result[0].z, 0.0f, 1e-5f) << "the skipped block must be left at the base";
+  EXPECT_NEAR(result[4095].z, 0.0f, 1e-5f) << "including its last element";
+  EXPECT_NEAR(result[4096].z, 1.0f, 1e-5f) << "the opaque block must still receive the offset";
+
+  /* Skipping a block on the way out has to skip the same block on the way back, or the base would
+   * drift by the layer's offset over exactly the region the user parked. */
+  Array<float3> derived(8192);
+  derive_base_mesh(result, layers(*mesh), derived);
+  for (const int i : {0, 4095, 4096}) {
+    EXPECT_EQ(derived[i].z, base[i].z) << "element " << i;
+  }
+}
+
+TEST_F(sculpt_layers_tree, composite_ignores_a_mask_describing_no_blocks)
+{
+  /* The other half of #is_stale_mask: a mask that names the right element count but describes no
+   * blocks at all, which is how #mask_blend_read neutralizes a mask from a truncated file. The
+   * layer must compose FULLY — a block loop over zero blocks would add nothing at all, and
+   * "silently drops the layer's contribution" is precisely the failure the guard exists to stop. */
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_VERT, 8192);
+  ASSERT_NE(layer, nullptr);
+  data_get(*layer).fill(float3(0.0f, 0.0f, 1.0f));
+
+  layer->base.mask = mask_new(8192, SCULPT_LAYER_MASK_VERT_BLOCK, 0);
+  ASSERT_NE(layer->base.mask, nullptr);
+  /* Only the block count is neutralized; the arrays stay allocated so #mask_free still owns them. */
+  layer->base.mask->blocks_num = 0;
+  EXPECT_TRUE(is_stale_mask(*layer->base.mask, 8192));
+
+  const Array<float3> base(8192, float3(0.0f));
+  Array<float3> result(8192);
+  combine_layers_mesh(base, layers(*mesh), result);
+  for (const int i : {0, 4096, 8191}) {
+    EXPECT_NEAR(result[i].z, 1.0f, 1e-5f) << "element " << i;
+  }
+}
+
+TEST_F(sculpt_layers_tree, composite_masks_a_short_tail_block)
+{
+  /* 5000 elements is one full block and a 904-element tail. The container's own tail handling is
+   * pinned by `sculpt_layers_mask.tail_block_is_partial`; what is asserted here is the *composite's*
+   * per-block dispatch over that tail, which derives its extent from the position span rather than
+   * from the block size and would otherwise run 4096 elements off the end of a 904-element block. */
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_VERT, 5000);
+  ASSERT_NE(layer, nullptr);
+  data_get(*layer).fill(float3(0.0f, 0.0f, 1.0f));
+
+  Array<float> dense(5000, 1.0f);
+  /* One masked element in each block, so the full block and the short tail are both dense. */
+  dense[10] = 0.0f;
+  dense[4999] = 0.0f;
+  layer->base.mask = mask_compress(dense, SCULPT_LAYER_MASK_VERT_BLOCK);
+  ASSERT_NE(layer->base.mask, nullptr);
+  ASSERT_EQ(layer->base.mask->blocks_num, 2);
+
+  const Array<float3> base(5000, float3(0.0f));
+  Array<float3> result(5000);
+  combine_layers_mesh(base, layers(*mesh), result);
+
+  EXPECT_NEAR(result[10].z, 0.0f, 1e-5f) << "masked element in the full block";
+  EXPECT_NEAR(result[11].z, 1.0f, 1e-5f) << "its neighbour in the full block";
+  EXPECT_NEAR(result[4096].z, 1.0f, 1e-5f) << "first element of the short tail";
+  EXPECT_NEAR(result[4998].z, 1.0f, 1e-5f) << "next to last element of the short tail";
+  EXPECT_NEAR(result[4999].z, 0.0f, 1e-5f) << "masked last element of the short tail";
+
+  Array<float3> derived(5000);
+  derive_base_mesh(result, layers(*mesh), derived);
+  for (const int i : {10, 11, 4096, 4998, 4999}) {
+    EXPECT_EQ(derived[i].z, base[i].z) << "element " << i;
+  }
+}
+
+/**
+ * Assert that every element of \a result carries exactly the weight #mask_block_weight and
+ * #mask_elem_weight say it should, given \a layer's resolved masks and its effective influence.
+ *
+ * The caller arranges for the layer's data to be `(0, 0, 1)` everywhere over a zero base, so a
+ * composed `z` *is* the weight the composite applied — which makes this an equality test, not an
+ * approximate one. Bit-exact deliberately: the failure this guards against is a fold that differs
+ * in the last place, and a tolerance would hide precisely that.
+ */
+static void expect_composite_weights_match_authority(const SculptLayer &layer,
+                                                     const Span<float3> result,
+                                                     const float weight)
+{
+  const CompositeMask masks = node_mask_for_composite(layer, result.size());
+  ASSERT_NE(masks.primary, nullptr);
+  const int block_size = masks.primary->block_size;
+  for (const int64_t i : result.index_range()) {
+    const MaskBlockWeight block_weight = mask_block_weight(masks, int(i / block_size), weight);
+    /* A skipped block contributes nothing, so over a zero base its elements stay at zero. */
+    const float expected = block_weight.skip ? 0.0f :
+                                               mask_elem_weight(block_weight, int(i % block_size));
+    EXPECT_EQ(result[i].z, expected) << "element " << i;
+  }
+}
+
+TEST_F(sculpt_layers_tree, composite_weights_match_the_shared_mask_authority)
+{
+  /* The cross-path oracle for the mask fold. #mask_block_weight / #mask_elem_weight are the single
+   * spelling of a masked layer's weight, shared by the vertex composite here and by the multires
+   * grid composite; a second spelling anywhere would drift the base silently on every flush. The
+   * companion test in `sculpt_layers_mask_test.cc` pins those two functions against literals, which
+   * says nothing about whether the vertex composite actually calls them — so this drives the *real*
+   * public composite (#combine_layers_mesh) and compares every element against the authority
+   * computed independently.
+   *
+   * It fails if #accumulate_layer ever reintroduces its own arithmetic, reassociates the two-mask
+   * product, scales the sides separately, mishandles the short tail block, or skips a block the
+   * authority does not (and the reverse). It does *not* police mask resolution — both sides ask
+   * #node_mask_for_composite — only the fold applied on top of it.
+   *
+   * The domain is 5000 elements over a 4096-element block: one full block, one short tail. */
+  const int totelem = 5000;
+  SculptLayerGroup *folder = group_add(*mesh, "Folder", 0);
+  ASSERT_NE(folder, nullptr);
+
+  SculptLayer *layer = add(*mesh, "Layer", SCULPT_LAYER_DOMAIN_VERT, totelem);
+  ASSERT_NE(layer, nullptr);
+  node_move_into(*mesh, layer->base, *folder, nullptr);
+  /* A unit offset along z, so a composed z reads back as the weight that was applied to it. */
+  data_get(*layer).fill(float3(0.0f, 0.0f, 1.0f));
+
+  /* Block 0 varies per element (including both extremes) so it stays dense; the tail block is
+   * constant so #mask_compress collapses it to uniform. One call therefore covers both block kinds
+   * on each side of the single/pair dispatch. */
+  Array<float> dense(totelem);
+  for (const int i : IndexRange(SCULPT_LAYER_MASK_VERT_BLOCK)) {
+    dense[i] = float(i % 256) / 255.0f;
+  }
+  dense.as_mutable_span().drop_front(SCULPT_LAYER_MASK_VERT_BLOCK).fill(0.5f);
+  layer->base.mask = mask_compress(dense, SCULPT_LAYER_MASK_VERT_BLOCK);
+  ASSERT_NE(layer->base.mask, nullptr);
+  ASSERT_EQ(layer->base.mask->blocks_num, 2);
+  ASSERT_EQ(layer->base.mask->block_kind[0], SCULPT_LAYER_MASK_BLOCK_DENSE);
+  ASSERT_EQ(layer->base.mask->block_kind[1], SCULPT_LAYER_MASK_BLOCK_UNIFORM);
+
+  folder->base.mask = mask_new(totelem, SCULPT_LAYER_MASK_VERT_BLOCK, 128);
+  ASSERT_NE(folder->base.mask, nullptr);
+  tag_chain_mask_dirty(*folder);
+
+  const float eff = effective(*layer);
+  ASSERT_GT(eff, 0.0f) << "a layer the composite skips outright would pass this test vacuously";
+
+  const Array<float3> base(totelem, float3(0.0f));
+  Array<float3> result(totelem);
+
+  /* Two masks: the dense block takes the mixed pair branch, the uniform tail the uniform pair. */
+  combine_layers_mesh(base, layers(*mesh), result);
+  expect_composite_weights_match_authority(*layer, result, eff);
+
+  /* The inverse is the same fold with a negated weight and must cancel bit for bit, which is what
+   * keeps the base from creeping on every flush. */
+  Array<float3> derived(totelem);
+  derive_base_mesh(result, layers(*mesh), derived);
+  for (const int64_t i : derived.index_range()) {
+    EXPECT_EQ(derived[i].z, base[i].z) << "element " << i;
+  }
+
+  /* One mask: dropping the folder's mask leaves the layer's own, which exercises the single-mask
+   * branches over the very same blocks. */
+  mask_free(folder->base.mask);
+  folder->base.mask = nullptr;
+  tag_chain_mask_dirty(*folder);
+  combine_layers_mesh(base, layers(*mesh), result);
+  expect_composite_weights_match_authority(*layer, result, eff);
+}
+
 }  // namespace blender::bke::sculpt_layers::tests

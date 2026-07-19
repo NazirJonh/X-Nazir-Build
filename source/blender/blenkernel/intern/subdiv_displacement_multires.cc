@@ -152,9 +152,32 @@ BLI_INLINE void add_sculpt_layer_displacement(const MultiresDisplacementData &da
   const int grid_index = int(displacement_grid - data.mdisps);
   const int x = roundf(grid_u * (grid_size - 1));
   const int y = roundf(grid_v * (grid_size - 1));
-  const int elem = grid_index * grid_size * grid_size + y * grid_size + x;
+  const int local = y * grid_size + x;
+  const int elem = grid_index * grid_size * grid_size + local;
   for (const MultiresGridSculptLayer &layer : data.layers) {
-    r_tangent_D += layer.data[elem] * layer.influence;
+    /* Unlike the other directions this one cannot hoist the fold out of the element loop: there is
+     * no per-grid caller to hoist to. This helper is entered per evaluated element, and for a
+     * *neighbouring* grid when averaging across grid boundaries (see
+     * #average_read_displacement_tangent), so the grid is only known here.
+     *
+     * The unmasked case is therefore answered right here rather than inside the fold. Both
+     * #BKE_multires_grid_sculpt_layer_weight and #mask_block_weight are ordinary out-of-line
+     * functions returning a 32-byte struct, and this project does not enable LTO, so routing the
+     * common no-mask case through them would put two non-inlinable calls on every evaluated
+     * element of every layer — on meshes that carry no masks at all. Nothing is duplicated by
+     * doing so: with no primary mask the fold has no arithmetic to spell, it just hands back the
+     * influence unchanged (`1.0f * influence`, exact). Masked layers still go through the single
+     * shared authority below. */
+    if (layer.masks.primary == nullptr) {
+      r_tangent_D += layer.data[elem] * layer.influence;
+      continue;
+    }
+    const bke::sculpt_layers::MaskBlockWeight weight = BKE_multires_grid_sculpt_layer_weight(
+        layer, grid_index);
+    if (weight.skip) {
+      continue;
+    }
+    r_tangent_D += layer.data[elem] * bke::sculpt_layers::mask_elem_weight(weight, local);
   }
 }
 

@@ -533,8 +533,9 @@ struct ActiveElementInfo {
   ActiveVert vert = {};
   int active_face_idx = -1;
   int active_grid_idx = -1;
-  /* World-space surface hit position of the raycast, used by callers that need an
-   * occlusion/depth reference without mutating the session's active elements. */
+  /* Object-space surface hit position of the raycast (#raycast_init transforms the ray
+   * into object space), used by callers that need an occlusion/depth reference without
+   * mutating the session's active elements. */
   float3 location = float3(0.0f);
 };
 

@@ -528,7 +528,7 @@ void extrude_commit(bContext &C, wmOperator *op, ExtractSharedData &shared, Extr
 /** \name New Object Extraction
  * \{ */
 
-static BMesh *create_source_bmesh_for_new_object(const Mesh &mesh)
+BMesh *create_source_bmesh_for_new_object(const Mesh &mesh)
 {
   const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(&mesh);
   BMeshCreateParams bm_create_params{};
@@ -545,7 +545,7 @@ static BMesh *create_source_bmesh_for_new_object(const Mesh &mesh)
   return bm;
 }
 
-static void update_bmesh_positions_from_preview(ExtractSharedData &shared)
+void update_bmesh_positions_from_preview(ExtractSharedData &shared)
 {
   if (shared.pbvh_type == bke::pbvh::Type::BMesh || shared.preview_positions.is_empty()) {
     return;

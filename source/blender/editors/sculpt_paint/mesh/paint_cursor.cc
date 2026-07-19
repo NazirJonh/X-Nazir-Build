@@ -302,9 +302,9 @@ void mesh_cursor_update_and_init(PaintCursorContext &pcontext)
     }
   }
 
-  if (idle_extract_loop_hover && extract_loop::extract_loop_hover_is_enabled() &&
-      pcontext.is_cursor_over_mesh)
-  {
+  /* Deliberately not gated on #is_cursor_over_mesh: boundary-first seed picking targets the
+   * silhouette, where the raycast misses the surface but a boundary edge is still in range. */
+  if (idle_extract_loop_hover && extract_loop::extract_loop_hover_is_enabled()) {
     extract_loop::extract_loop_hover_update(
         ctx, mval_fl, extract_loop_tool_mode(ctx), extract_loop_tool_loop_orientation(ctx));
   }

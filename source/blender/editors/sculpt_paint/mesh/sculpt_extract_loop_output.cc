@@ -294,39 +294,6 @@ static void duplicate_geometry_in_object(bContext &C, wmOperator *op, ExtractLoo
 /** \name New Object Extraction
  * \{ */
 
-static BMesh *create_source_bmesh_for_new_object(const Mesh &mesh)
-{
-  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(&mesh);
-  BMeshCreateParams bm_create_params{};
-  bm_create_params.use_toolflags = true;
-  BMesh *bm = BM_mesh_create(&allocsize, &bm_create_params);
-
-  BMeshFromMeshParams from_mesh_params{};
-  from_mesh_params.calc_face_normal = true;
-  from_mesh_params.calc_vert_normal = true;
-  BM_mesh_bm_from_me(bm, &mesh, &from_mesh_params);
-
-  BM_mesh_elem_index_ensure(bm, BM_VERT | BM_EDGE | BM_FACE);
-  BM_mesh_elem_table_ensure(bm, BM_VERT | BM_EDGE | BM_FACE);
-  return bm;
-}
-
-static void update_bmesh_positions_from_preview(ExtractLoopSharedData &shared)
-{
-  if (shared.base.pbvh_type == bke::pbvh::Type::BMesh || shared.base.preview_positions.is_empty()) {
-    return;
-  }
-
-  BMVert *v;
-  BMIter iter;
-  BM_ITER_MESH (v, &iter, shared.base.bm, BM_VERTS_OF_MESH) {
-    const int idx = BM_elem_index_get(v);
-    if (idx >= 0 && idx < shared.base.preview_positions.size()) {
-      copy_v3_v3(v->co, shared.base.preview_positions[idx]);
-    }
-  }
-}
-
 static void isolate_extraction_geometry_in_bmesh(ExtractLoopSharedData &shared)
 {
   BMesh *bm = shared.base.bm;
@@ -384,7 +351,7 @@ static Mesh *build_extracted_mesh_for_new_object(bContext &C, ExtractLoopModalDa
 
   Mesh *src_mesh = id_cast<Mesh *>(obact->data);
 
-  BMesh *bm = create_source_bmesh_for_new_object(*src_mesh);
+  BMesh *bm = extract::create_source_bmesh_for_new_object(*src_mesh);
   ExtractLoopSharedData work = rewalk_on_bmesh(data.shared, bm, data.use_boundary_walker);
 
   if (!extract_preview_is_valid(work)) {
@@ -393,7 +360,7 @@ static Mesh *build_extracted_mesh_for_new_object(bContext &C, ExtractLoopModalDa
   }
 
   isolate_extraction_geometry_in_bmesh(work);
-  update_bmesh_positions_from_preview(work);
+  extract::update_bmesh_positions_from_preview(work.base);
   BM_mesh_normals_update(bm);
 
   BMeshToMeshParams bm_to_mesh_params{};

@@ -115,6 +115,12 @@ void extrude_commit(bContext &C, wmOperator *op, ExtractSharedData &shared, Extr
 void extrude_update_status_text(bContext *C, const ExtrudeState &ex);
 
 /* --- Face region -> new mesh object (_shared.cc). --- */
+/* Build a fresh tool-flagged BMesh from \a mesh, with index and element tables ensured so
+ * callers can map preview data onto it by index. */
+BMesh *create_source_bmesh_for_new_object(const Mesh &mesh);
+/* Copy #preview_positions onto the vertices of #shared.bm, matched by vertex index.
+ * A no-op for BMesh PBVH, where #BMVert.co already holds the live positions. */
+void update_bmesh_positions_from_preview(ExtractSharedData &shared);
 Mesh *build_extracted_mesh_from_faces(bContext &C, ExtractSharedData &shared);
 void create_mesh_in_new_object(bContext &C, ExtractSharedData &shared);
 

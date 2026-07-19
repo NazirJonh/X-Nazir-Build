@@ -17,6 +17,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_string_utf8.h"
 #include "BLI_threads.h"
@@ -60,6 +61,8 @@
 #include "BLO_read_write.hh"
 
 #include "DRW_engine.hh"
+
+#include "GPU_matrix.hh"
 
 #include "image_intern.hh"
 
@@ -793,10 +796,26 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
     rcti render_region;
     BLI_rcti_init(
         &render_region, center_x, render_size_x + center_x, center_y, render_size_y + center_y);
-    ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &x, &y);
+    /* Find window pixel coordinates of origin. Navigation frame: the zoom scaling inside
+     * #ED_region_render_region_draw is relative to the un-rotated origin; the rotation is
+     * applied around it below instead. */
+    float anchor[2];
+    ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+    x = int(anchor[0]);
+    y = int(anchor[1]);
 
+    GPU_matrix_push();
+    if (region->v2d.rotation != 0.0f) {
+      /* The canvas rotation is a screen-space rotation about the pivot's pixel position. */
+      float pivot_px[2];
+      ui::view2d_rotation_pivot_region(&region->v2d, pivot_px);
+      GPU_matrix_translate_2f(pivot_px[0], pivot_px[1]);
+      GPU_matrix_rotate_2d(-RAD2DEGF(region->v2d.rotation));
+      GPU_matrix_translate_2f(-pivot_px[0], -pivot_px[1]);
+    }
     ED_region_render_region_draw(
         x, y, &render_region, zoomx, zoomy, sima->overlay.passepartout_alpha);
+    GPU_matrix_pop();
   }
 
   draw_image_main_helpers(C, region);
@@ -814,8 +833,25 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
       int x, y;
       rctf frame;
       BLI_rctf_init(&frame, 0.0f, ibuf->x, 0.0f, ibuf->y);
-      ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &x, &y);
+      /* Find window pixel coordinates of origin. Navigation frame: the zoom scaling inside
+       * #ED_region_image_metadata_draw is relative to the un-rotated origin; the rotation is
+       * applied around it below instead. */
+      float anchor[2];
+      ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+      x = int(anchor[0]);
+      y = int(anchor[1]);
+
+      GPU_matrix_push();
+      if (region->v2d.rotation != 0.0f) {
+        /* The canvas rotation is a screen-space rotation about the pivot's pixel position. */
+        float pivot_px[2];
+        ui::view2d_rotation_pivot_region(&region->v2d, pivot_px);
+        GPU_matrix_translate_2f(pivot_px[0], pivot_px[1]);
+        GPU_matrix_rotate_2d(-RAD2DEGF(region->v2d.rotation));
+        GPU_matrix_translate_2f(-pivot_px[0], -pivot_px[1]);
+      }
       ED_region_image_metadata_draw(x, y, ibuf, &frame, zoomx, zoomy);
+      GPU_matrix_pop();
     }
     ED_space_image_release_buffer(sima, ibuf, lock);
   }

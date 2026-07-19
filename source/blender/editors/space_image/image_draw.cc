@@ -16,6 +16,7 @@
 #include "DNA_space_types.h"
 #include "DNA_view2d_types.h"
 
+#include "BLI_math_rotation.h"
 #include "BLI_rect.h"
 #include "BLI_string_utf8.h"
 #include "BLI_threads.h"
@@ -79,11 +80,23 @@ static void draw_render_info(
     const rcti *tiles = RE_engine_get_current_tiles(re, &total_tiles);
 
     if (total_tiles) {
-      /* find window pixel coordinates of origin */
-      int x, y;
-      ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &x, &y);
+      /* Find window pixel coordinates of origin. Navigation frame: the zoom scaling below is
+       * expressed relative to the un-rotated origin; the rotation is applied to the matrix
+       * instead. */
+      float anchor[2];
+      ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+      const int x = int(anchor[0]);
+      const int y = int(anchor[1]);
 
       GPU_matrix_push();
+      if (region->v2d.rotation != 0.0f) {
+        /* The canvas rotation is a screen-space rotation about the pivot's pixel position. */
+        float pivot_px[2];
+        ui::view2d_rotation_pivot_region(&region->v2d, pivot_px);
+        GPU_matrix_translate_2f(pivot_px[0], pivot_px[1]);
+        GPU_matrix_rotate_2d(-RAD2DEGF(region->v2d.rotation));
+        GPU_matrix_translate_2f(-pivot_px[0], -pivot_px[1]);
+      }
       GPU_matrix_translate_2f(x, y);
       GPU_matrix_scale_2f(zoomx, zoomy);
 

@@ -1695,18 +1695,50 @@ void view2d_region_to_view(const View2D *v2d, float x, float y, float *r_view_x,
 
 void view2d_region_to_view_rctf(const View2D *v2d, const rctf *rect_src, rctf *rect_dst)
 {
-  const float cur_size[2] = {BLI_rctf_size_x(&v2d->cur), BLI_rctf_size_y(&v2d->cur)};
-  const float mask_size[2] = {float(BLI_rcti_size_x(&v2d->mask)),
-                              float(BLI_rcti_size_y(&v2d->mask))};
+  if (v2d->rotation == 0.0f) {
+    const float cur_size[2] = {BLI_rctf_size_x(&v2d->cur), BLI_rctf_size_y(&v2d->cur)};
+    const float mask_size[2] = {float(BLI_rcti_size_x(&v2d->mask)),
+                                float(BLI_rcti_size_y(&v2d->mask))};
 
-  rect_dst->xmin = (v2d->cur.xmin +
-                    (cur_size[0] * (rect_src->xmin - v2d->mask.xmin) / mask_size[0]));
-  rect_dst->xmax = (v2d->cur.xmin +
-                    (cur_size[0] * (rect_src->xmax - v2d->mask.xmin) / mask_size[0]));
-  rect_dst->ymin = (v2d->cur.ymin +
-                    (cur_size[1] * (rect_src->ymin - v2d->mask.ymin) / mask_size[1]));
-  rect_dst->ymax = (v2d->cur.ymin +
-                    (cur_size[1] * (rect_src->ymax - v2d->mask.ymin) / mask_size[1]));
+    rect_dst->xmin = (v2d->cur.xmin +
+                      (cur_size[0] * (rect_src->xmin - v2d->mask.xmin) / mask_size[0]));
+    rect_dst->xmax = (v2d->cur.xmin +
+                      (cur_size[0] * (rect_src->xmax - v2d->mask.xmin) / mask_size[0]));
+    rect_dst->ymin = (v2d->cur.ymin +
+                      (cur_size[1] * (rect_src->ymin - v2d->mask.ymin) / mask_size[1]));
+    rect_dst->ymax = (v2d->cur.ymin +
+                      (cur_size[1] * (rect_src->ymax - v2d->mask.ymin) / mask_size[1]));
+    return;
+  }
+
+  /* A rect cannot represent a rotation, so return the bounding box of the rotated quad. Callers
+   * that need the exact shape must use #view2d_region_to_view_quad. */
+  const float corners_px[4][2] = {
+      {rect_src->xmin, rect_src->ymin},
+      {rect_src->xmax, rect_src->ymin},
+      {rect_src->xmax, rect_src->ymax},
+      {rect_src->xmin, rect_src->ymax},
+  };
+  BLI_rctf_init_minmax(rect_dst);
+  for (int i = 0; i < 4; i++) {
+    float view_xy[2];
+    view2d_region_to_view(v2d, corners_px[i][0], corners_px[i][1], &view_xy[0], &view_xy[1]);
+    BLI_rctf_do_minmax_v(rect_dst, view_xy);
+  }
+}
+
+void view2d_region_to_view_quad(const View2D *v2d, const rcti *rect_src, float r_corners[4][2])
+{
+  const float corners_px[4][2] = {
+      {float(rect_src->xmin), float(rect_src->ymin)},
+      {float(rect_src->xmax), float(rect_src->ymin)},
+      {float(rect_src->xmax), float(rect_src->ymax)},
+      {float(rect_src->xmin), float(rect_src->ymax)},
+  };
+  for (int i = 0; i < 4; i++) {
+    view2d_region_to_view(
+        v2d, corners_px[i][0], corners_px[i][1], &r_corners[i][0], &r_corners[i][1]);
+  }
 }
 
 float view2d_view_to_region_x(const View2D *v2d, float x)

@@ -10,6 +10,7 @@
 
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_utildefines.h"
@@ -675,8 +676,12 @@ void ED_mask_draw_region(
   float maxdim;
   float xofs, yofs;
 
-  /* find window pixel coordinates of origin */
-  ui::view2d_view_to_region(&region->v2d, 0.0f, 0.0f, &x, &y);
+  /* Find window pixel coordinates of origin. Navigation frame: the zoom scaling below is
+   * expressed relative to the un-rotated origin; the rotation is applied to the matrix instead. */
+  float anchor[2];
+  ui::view2d_view_to_region_navigation_fl(&region->v2d, 0.0f, 0.0f, &anchor[0], &anchor[1]);
+  x = int(anchor[0]);
+  y = int(anchor[1]);
 
   // w = BLI_rctf_size_x(&v2d->tot);
   // h = BLI_rctf_size_y(&v2d->tot);
@@ -718,6 +723,14 @@ void ED_mask_draw_region(
     }
 
     GPU_matrix_push();
+    if (region->v2d.rotation != 0.0f) {
+      /* The canvas rotation is a screen-space rotation about the pivot's pixel position. */
+      float pivot_px[2];
+      ui::view2d_rotation_pivot_region(&region->v2d, pivot_px);
+      GPU_matrix_translate_2f(pivot_px[0], pivot_px[1]);
+      GPU_matrix_rotate_2d(-RAD2DEGF(region->v2d.rotation));
+      GPU_matrix_translate_2f(-pivot_px[0], -pivot_px[1]);
+    }
     GPU_matrix_translate_2f(x, y);
     GPU_matrix_scale_2f(zoomx, zoomy);
     if (stabmat) {
@@ -768,6 +781,14 @@ void ED_mask_draw_region(
   /* apply transformation so mask editing tools will assume drawing from the
    * origin in normalized space */
   GPU_matrix_push();
+  if (region->v2d.rotation != 0.0f) {
+    /* The canvas rotation is a screen-space rotation about the pivot's pixel position. */
+    float pivot_px[2];
+    ui::view2d_rotation_pivot_region(&region->v2d, pivot_px);
+    GPU_matrix_translate_2f(pivot_px[0], pivot_px[1]);
+    GPU_matrix_rotate_2d(-RAD2DEGF(region->v2d.rotation));
+    GPU_matrix_translate_2f(-pivot_px[0], -pivot_px[1]);
+  }
   GPU_matrix_translate_2f(x + xofs, y + yofs);
   GPU_matrix_scale_2f(zoomx, zoomy);
   if (stabmat) {

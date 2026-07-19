@@ -7,6 +7,7 @@
  */
 
 #include <cerrno>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -311,6 +312,18 @@ static void image_view_all(SpaceImage *sima, ARegion *region, wmOperator *op)
     yof = 0.5f * (y_tiles - 1.0f) * h;
     w *= x_tiles;
     h *= y_tiles;
+  }
+
+  /* Under canvas rotation the content's screen-space bounds are the bounding box of the rotated
+   * rect, which is larger than the axis-aligned one. Fit to that instead, or the corners overflow
+   * the region. */
+  if (sima->rotation != 0.0f) {
+    const float c = fabsf(cosf(sima->rotation));
+    const float s = fabsf(sinf(sima->rotation));
+    const float w_rot = w * c + h * s;
+    const float h_rot = w * s + h * c;
+    w = w_rot;
+    h = h_rot;
   }
 
   /* check if the image will fit in the image with (zoom == 1) */
@@ -1066,6 +1079,17 @@ static wmOperatorStatus image_view_selected_exec(bContext *C, wmOperator * /*op*
 
   /* add some margin */
   BLI_rctf_scale(&bounds, 1.4f);
+
+  /* Under canvas rotation the content's screen-space bounds are the bounding box of the rotated
+   * rect, which is larger than the axis-aligned one. Fit to that instead, or the corners overflow
+   * the region. */
+  if (sima->rotation != 0.0f) {
+    const float c = fabsf(cosf(sima->rotation));
+    const float s = fabsf(sinf(sima->rotation));
+    const float w = BLI_rctf_size_x(&bounds);
+    const float h = BLI_rctf_size_y(&bounds);
+    BLI_rctf_resize(&bounds, w * c + h * s, w * s + h * c);
+  }
 
   sima_zoom_set_from_bounds(sima, region, &bounds);
 

@@ -348,6 +348,16 @@ void view2d_region_to_view_rctf(const View2D *v2d, const rctf *rect_src, rctf *r
     ATTR_NONNULL();
 
 /**
+ * Map the four corners of a region-space rect into view space, counter-clockwise from min.
+ *
+ * \note Display frame. Under canvas rotation a screen-aligned drag is a rotated quad in view
+ * space, which #view2d_region_to_view_rctf can only bound, not represent. Gesture consumers that
+ * must match what the user actually dragged want this.
+ */
+void view2d_region_to_view_quad(const View2D *v2d, const rcti *rect_src, float r_corners[4][2])
+    ATTR_NONNULL();
+
+/**
  * Convert a region point to the view point that a zoom operation must keep fixed on screen.
  *
  * \note This is the **navigation frame**: the axis-aligned `mask -> cur` map, *without* the

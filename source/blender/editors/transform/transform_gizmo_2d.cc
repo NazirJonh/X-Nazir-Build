@@ -638,8 +638,10 @@ static void gizmo2d_xform_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
   /* Define the bounding box of the gizmo in the offset transform matrix. */
   unit_m4(ggd->cage->matrix_offset);
   const float min_gizmo_pixel_size = 0.001f; /* Draw Gizmo larger than this many pixels. */
-  const float min_scale_axis_x = min_gizmo_pixel_size / ggd->cage->matrix_space[0][0];
-  const float min_scale_axis_y = min_gizmo_pixel_size / ggd->cage->matrix_space[1][1];
+  /* Read the scale from the column lengths: with the canvas rotation composed into the matrix,
+   * the diagonal is no longer the scale. */
+  const float min_scale_axis_x = min_gizmo_pixel_size / len_v2(ggd->cage->matrix_space[0]);
+  const float min_scale_axis_y = min_gizmo_pixel_size / len_v2(ggd->cage->matrix_space[1]);
   ggd->cage->matrix_offset[0][0] = max_ff(min_scale_axis_x, ggd->max[0] - ggd->min[0]);
   ggd->cage->matrix_offset[1][1] = max_ff(min_scale_axis_y, ggd->max[1] - ggd->min[1]);
 

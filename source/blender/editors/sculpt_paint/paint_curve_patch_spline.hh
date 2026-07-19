@@ -15,11 +15,28 @@
  * live stroke.
  */
 
+#include "BLI_math_base.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
 namespace blender::ed::sculpt_paint {
+
+/**
+ * How far a single stamp can reach from its own center, for a patch of the given brush radius.
+ *
+ * A stamp is a SQUARE free to rotate by its own `angle`, so its farthest corner sits
+ * `half_extent * sqrt(2)` away, and `half_extent` never exceeds the brush radius because the size
+ * randomization only ever shrinks. Every consumer that has to cover a stamp's full footprint --
+ * the per-vertex search window, the ribbon's end extension and the cyclic seam wrap -- must use
+ * THIS one bound: they were three separate copies of the same expression, and a stamp reaching
+ * past any one of them is silently clipped, which is exactly the class of defect that produced
+ * two rounds of visible clipping already.
+ */
+inline float curve_patch_stamp_reach(const float radius)
+{
+  return radius * float(M_SQRT2);
+}
 
 struct CurvePatchSpline {
   Vector<float3> poly_3d;
@@ -133,5 +150,79 @@ float curve_patch_texture_tile_span(int length_mode,
                                     float total_length,
                                     float radius_at_s,
                                     bool cyclic = false);
+
+/** One texture stamp placed along the control curve in the ribbon's UV space, where `v` is arc
+ * length along the curve and `u` is the signed lateral offset from it (both in world units). Used
+ * by the Curve Patch Stamps mode (#MTEX_CURVE_PATCH_STAMP_STAMPS) in place of the single stretched
+ * texture sheet Ribbon mode projects. */
+struct CurvePatchStamp {
+  /** Arc length of the stamp's center, after jitter. The stamp list is sorted by this. */
+  float center_v = 0.0f;
+  /** Lateral offset of the stamp's center from the curve, after jitter. */
+  float center_u = 0.0f;
+  /** Half the stamp's side length in UV space: the brush radius after the per-stamp size
+   * randomization. Stamps are square, so one value covers both axes. */
+  float half_extent = 0.0f;
+  /** Texture rotation inside the stamp, in radians (base rotation plus the random offset). */
+  float angle = 0.0f;
+  /** Per-stamp relief strength multiplier in `(0, 1]`. */
+  float strength = 1.0f;
+};
+
+/**
+ * Lay stamps out along `spline`, one every `spacing_frac * 2 * radius` of arc length, and derive
+ * each stamp's jittered position, size, rotation and strength.
+ *
+ * Every random quantity is a pure function of `(stamp index, seed, channel)` -- deliberately NOT a
+ * stateful RNG. The Curve Patch relief is recomputed from scratch on every interactive event and
+ * evaluated in parallel across Paint BVH nodes, so a stateful generator would both flicker between
+ * re-stamps and race across threads.
+ *
+ * `spacing_frac` is the brush's Spacing as a fraction (Blender's percent / 100), floored so a
+ * degenerate value cannot produce an unbounded stamp count. `jitter_amount`, `size_random` and
+ * `strength_random` are all fractions; size and strength randomization only ever REDUCE, which is
+ * what lets the caller widen the ribbon for jitter alone.
+ *
+ * With `spline.cyclic`, the step is snapped so a whole number of stamps fits the loop and the final
+ * stamp does not land on top of the first at the seam.
+ *
+ * `r_stamps` is cleared first and comes back sorted by `center_v`.
+ */
+void curve_patch_stamps_build(const CurvePatchSpline &spline,
+                              float radius,
+                              float spacing_frac,
+                              float jitter_amount,
+                              float size_random,
+                              float strength_random,
+                              float base_angle,
+                              float random_angle,
+                              uint32_t seed,
+                              Vector<CurvePatchStamp> &r_stamps);
+
+/**
+ * Append wrap-around ghost copies of the stamps that straddle a closed curve's join, so the stamp
+ * sitting at the seam is drawn whole.
+ *
+ * An open curve solves this by extending the ribbon past its ends, but a loop has no ends to
+ * extend: its ribbon spans `v` in `[0, total_length]` exactly, and the half of a seam stamp that
+ * reaches into `v < 0` is not outside the curve at all -- it is the stretch just before the join,
+ * at `v` near `total_length`. The LUT has no negative `v`, so that half would simply be dropped.
+ *
+ * Every stamp whose center lies within `max_extent` of either end therefore gains a copy displaced
+ * by `+total_length` (near the start) or `-total_length` (near the end), carrying the original's
+ * `half_extent`, `angle`, `strength` and `center_u` unchanged -- the two are the same stamp seen
+ * from the two sides of the join, which is what makes the texture meet itself exactly.
+ *
+ * `max_extent` must be the same conservative bound the relief's per-vertex search window uses on
+ * `v`, or a ghost could sit outside every window and never be found. The ghosts are a coverage
+ * device, not stamps, which is why this is separate from #curve_patch_stamps_build, whose contract
+ * stays "one entry per real stamp, a whole number of them around the loop".
+ *
+ * `stamps` comes back re-sorted by `center_v`, since the relief binary-searches it. Call only for a
+ * cyclic spline; a no-op for a degenerate `total_length` or `max_extent`.
+ */
+void curve_patch_stamps_add_cyclic_wrap(Vector<CurvePatchStamp> &stamps,
+                                        float total_length,
+                                        float max_extent);
 
 }  // namespace blender::ed::sculpt_paint

@@ -310,6 +310,12 @@ enum eMTex_CurvePatchEndFalloff : char {
   MTEX_CURVE_PATCH_END_SMOOTH = 1,
 };
 
+/** #MTex::curve_patch_stamp_mode — whether the patch is one stretched sheet or discrete stamps. */
+enum eMTex_CurvePatchStampMode : char {
+  MTEX_CURVE_PATCH_STAMP_RIBBON = 0,
+  MTEX_CURVE_PATCH_STAMP_STAMPS = 1,
+};
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -355,7 +361,17 @@ struct MTex {
    * `check_member_alignment()` in `makesdna.cc`), growing #MTex by 8 bytes for precision this
    * setting does not need. */
   char curve_patch_end_falloff_percent = 10;
-  char _pad2[3] = {};
+  /** For the Curve Patch stroke (#BRUSH_STROKE_CURVE_PATCH): whether the texture is projected as one
+   * continuous stretched sheet along the curve (Ribbon, the original behavior) or as discrete
+   * randomized stamps spaced along it. See #eMTex_CurvePatchStampMode. */
+  char curve_patch_stamp_mode = MTEX_CURVE_PATCH_STAMP_RIBBON;
+  /** Curve Patch Stamps mode: per-stamp size randomization as a percentage (RNA-clamped 0..100).
+   * Stamps only ever shrink from the brush radius, never grow past it, so the ribbon does not have to
+   * widen for this setting (only for jitter). */
+  char curve_patch_stamp_size_random = 0;
+  /** Curve Patch Stamps mode: per-stamp relief strength randomization as a percentage (RNA-clamped
+   * 0..100). Like the size, it only ever reduces. */
+  char curve_patch_stamp_strength_random = 0;
   struct Object *object = nullptr;
   struct Tex *tex = nullptr;
   char uvname[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";

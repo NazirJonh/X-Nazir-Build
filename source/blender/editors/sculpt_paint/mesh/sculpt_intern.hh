@@ -1035,6 +1035,7 @@ void SCULPT_OT_curve_patch_edit(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_handle_type_set(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_delete_point(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_toggle_cyclic(wmOperatorType *ot);
+void SCULPT_OT_curve_patch_stamp_reseed(wmOperatorType *ot);
 
 }
 

@@ -48,6 +48,7 @@
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
+#include "BLI_rand.hh"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
@@ -145,6 +146,33 @@ struct CurvePatchEditOpData {
    * Falloff Length slider fades the strip's ends in real time. Seeded at invoke. */
   int last_synced_end_falloff_mode = -1;
   int last_synced_end_falloff_percent = -1;
+  /* Last brush Size this modal re-stamped with. Unlike every other frozen param, the radius used to
+   * be captured once and never revisited, so dragging the Size slider mid-patch did nothing. It is
+   * watched here and converted back to a world radius through `frozen_params.radius_per_size`. The
+   * radius is part of `ribbon_source_hash()`, so the ribbon and its LUT rebuild on change; the
+   * untouched `orig_positions` still restores the surface correctly first. Seeded at invoke. */
+  int last_synced_brush_size = -1;
+  /* Last Stamps-mode state this modal re-stamped with: the mode itself, the two randomization
+   * amounts, and the brush Spacing/Jitter the layout reads. Handled exactly like the length values
+   * above -- read live, copied into `frozen_params` and re-stamped on change. Seeded at invoke. */
+  int last_synced_stamp_mode = -1;
+  int last_synced_stamp_size_random = -1;
+  int last_synced_stamp_strength_random = -1;
+  int last_synced_spacing = -1;
+  float last_synced_jitter = -1.0f;
+  /* `last_synced_jitter` above stores whichever of `Brush::jitter` / `jitter_absolute` is currently
+   * active, so the `BRUSH_ABSOLUTE_JITTER` flag has to be watched on its own: with the two fields
+   * numerically equal, toggling the flag changes the world-space jitter (a fraction of the radius
+   * versus a pixel count scaled by `radius_per_size`) without moving the stored value. Seeded at
+   * invoke. */
+  bool last_synced_jitter_absolute = false;
+  /* Last stamp ROTATION state this modal re-stamped with: `MTex::rot` (the fixed texture angle) and
+   * `MTex::random_angle` (the Random Rotation slider the Stamps panel exposes). Both are read live
+   * off the brush by `curve_patch_stamps_build()` on every re-stamp, so like the texture watch above
+   * they only need a re-stamp TRIGGER here -- without one, dragging Random Rotation would appear
+   * dead until some unrelated edit happened to fire a re-stamp. Seeded at invoke. */
+  float last_synced_stamp_rot = -1.0f;
+  float last_synced_stamp_random_angle = -1.0f;
   /* Last texture and texture-mapping state this modal re-stamped with. The relief already reads
    * `brush.mtex` live on every re-stamp (size/offset/`tex`), so these only need a re-stamp TRIGGER:
    * when the assigned texture, its mapping size/offset, or the swap-axis flag changes, re-project.
@@ -326,6 +354,7 @@ static void curve_patch_undo_push(CurvePatchCache &patch)
   CurvePatchEditStep step;
   step.curve = patch.control_curve;
   step.swap_axis = patch.frozen_params.swap_axis;
+  step.stamp_seed = patch.frozen_params.stamp_seed;
   patch.undo_steps.append(std::move(step));
 
   if (patch.undo_steps.size() > CURVE_PATCH_UNDO_STEPS_MAX) {
@@ -339,6 +368,7 @@ static void curve_patch_undo_restore(bContext &C, Object &ob, CurvePatchCache &p
   const CurvePatchEditStep &step = patch.undo_steps[patch.undo_step_current];
   patch.control_curve = step.curve;
   patch.frozen_params.swap_axis = step.swap_axis;
+  patch.frozen_params.stamp_seed = step.stamp_seed;
   /* The restored curve may hold fewer points than the one just replaced. */
   patch.active_point = -1;
 
@@ -456,6 +486,24 @@ static bool curve_patch_toggle_cyclic(bContext &C, Object &ob, CurvePatchCache &
   return true;
 }
 
+/* Roll a new random layout for the Stamps-mode relief. Returns false in Ribbon mode, which has no
+ * randomization for a seed to drive. */
+static bool curve_patch_reseed_stamps(bContext &C, Object &ob, CurvePatchCache &patch)
+{
+  if (patch.frozen_params.stamp_mode != MTEX_CURVE_PATCH_STAMP_STAMPS) {
+    return false;
+  }
+  /* Alongside `curve_patch_begin_editing()` the only place a stateful RNG is touched: every
+   * per-stamp offset downstream is a pure hash of this seed, so re-rolling it here is what makes
+   * the whole layout change while every other input stays put. */
+  patch.frozen_params.stamp_seed = RandomNumberGenerator::from_random_seed().get_uint32();
+
+  curve_patch_undo_push(patch);
+  curve_patch_restore_and_restamp(C, ob, patch);
+  ED_region_tag_redraw(CTX_wm_region(&C));
+  return true;
+}
+
 static bool curve_patch_is_cyclic(const CurvePatchCache &patch)
 {
   const bke::CurvesGeometry &geom = patch.control_curve;
@@ -474,11 +522,18 @@ static void curve_patch_edit_context_menu_open(bContext *C)
   layout.op_menu_enum(
       C, "SCULPT_OT_curve_patch_handle_type_set", "type", IFACE_("Handle Type"), ICON_NONE);
 
-  const bool is_cyclic = curve_patch_is_cyclic(patch_cache_of(C));
+  const CurvePatchCache &patch = patch_cache_of(C);
+  const bool is_cyclic = curve_patch_is_cyclic(patch);
   layout.separator();
   layout.op("SCULPT_OT_curve_patch_toggle_cyclic",
             is_cyclic ? IFACE_("Open Curve") : IFACE_("Close Curve"),
             ICON_NONE);
+
+  /* Ribbon mode has no randomization, so the entry would poll false and only ever show greyed
+   * out -- leave it out entirely there. */
+  if (patch.frozen_params.stamp_mode == MTEX_CURVE_PATCH_STAMP_STAMPS) {
+    layout.op("SCULPT_OT_curve_patch_stamp_reseed", std::nullopt, ICON_NONE);
+  }
 
   const ToolSettings *tool_settings = CTX_data_tool_settings(C);
   Brush *brush = (tool_settings && tool_settings->sculpt) ?
@@ -521,11 +576,16 @@ static void curve_patch_edit_context_menu_open(bContext *C)
 
 static void curve_patch_edit_status_set(bContext *C, const CurvePatchCache &patch)
 {
-  const std::string msg = fmt::format(
+  std::string msg = fmt::format(
       "Enter: Commit | Esc: Cancel | Ctrl+Z: Undo | Tab/S: Swap Texture Axis (currently {}) | C: {} "
       "Curve",
       patch.frozen_params.swap_axis ? "U" : "V",
       curve_patch_is_cyclic(patch) ? "Open" : "Close");
+  /* Reseed has no shortcut -- this modal has no free key left -- so advertise the route that does
+   * reach it. Meaningless in Ribbon mode, which has nothing random to re-roll. */
+  if (patch.frozen_params.stamp_mode == MTEX_CURVE_PATCH_STAMP_STAMPS) {
+    msg += " | RMB Menu: Reseed Stamps";
+  }
   ED_workspace_status_text(C, msg.c_str());
 }
 
@@ -546,6 +606,16 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
       data->last_synced_length_repeat = brush->mtex.curve_patch_length_repeat;
       data->last_synced_end_falloff_mode = brush->mtex.curve_patch_end_falloff;
       data->last_synced_end_falloff_percent = brush->mtex.curve_patch_end_falloff_percent;
+      data->last_synced_brush_size = BKE_brush_size_get(&sd.paint, brush);
+      data->last_synced_stamp_mode = brush->mtex.curve_patch_stamp_mode;
+      data->last_synced_stamp_size_random = brush->mtex.curve_patch_stamp_size_random;
+      data->last_synced_stamp_strength_random = brush->mtex.curve_patch_stamp_strength_random;
+      data->last_synced_spacing = brush->spacing;
+      data->last_synced_jitter = (brush->flag & BRUSH_ABSOLUTE_JITTER) ? brush->jitter_absolute :
+                                                                          brush->jitter;
+      data->last_synced_jitter_absolute = (brush->flag & BRUSH_ABSOLUTE_JITTER) != 0;
+      data->last_synced_stamp_rot = brush->mtex.rot;
+      data->last_synced_stamp_random_angle = brush->mtex.random_angle;
       data->last_synced_swap_axis = brush->mtex.use_curve_patch_swap_axis != 0;
       data->last_synced_tex_size[0] = brush->mtex.size[0];
       data->last_synced_tex_size[1] = brush->mtex.size[1];
@@ -634,6 +704,25 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       const int length_repeat = brush->mtex.curve_patch_length_repeat;
       const int end_falloff_mode = brush->mtex.curve_patch_end_falloff;
       const int end_falloff_percent = brush->mtex.curve_patch_end_falloff_percent;
+      /* Stamps-mode state and the brush Spacing/Jitter the stamp layout reads (see
+       * `curve_patch_stamp_layout_build()`, `paint_curve_patch_cache.cc`) are watched the same way:
+       * read live, copied into `frozen_params` (bar Spacing/Jitter, which the layout already reads
+       * straight off the live brush) and used only as a re-stamp trigger here. */
+      const int brush_size = BKE_brush_size_get(&sd.paint, brush);
+      const int stamp_mode = brush->mtex.curve_patch_stamp_mode;
+      const int stamp_size_random = brush->mtex.curve_patch_stamp_size_random;
+      const int stamp_strength_random = brush->mtex.curve_patch_stamp_strength_random;
+      const int spacing = brush->spacing;
+      const float jitter = (brush->flag & BRUSH_ABSOLUTE_JITTER) ? brush->jitter_absolute :
+                                                                     brush->jitter;
+      /* Watched separately from `jitter` above, which only ever holds the ACTIVE one of the two
+       * fields: with equal values, the toggle alone still changes the world-space jitter. */
+      const bool jitter_absolute = (brush->flag & BRUSH_ABSOLUTE_JITTER) != 0;
+      /* Fixed texture angle and Random Rotation amount. `curve_patch_stamps_build()` reads both
+       * live off the brush, so these are pure re-stamp triggers -- nothing to copy into
+       * `frozen_params`. */
+      const float stamp_rot = brush->mtex.rot;
+      const float stamp_random_angle = brush->mtex.random_angle;
       const int symm = mesh_symmetry_xyz_get(ob);
       /* Texture + mapping watch (see `CurvePatchEditOpData`): the relief re-reads `brush.mtex` live,
        * so these just need to trigger a re-stamp when they change. */
@@ -665,7 +754,15 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           symm != data.last_synced_symm ||
           swap_axis != data.last_synced_swap_axis || tex_changed ||
           falloff_preset != data.last_synced_falloff_preset ||
-          falloff_curve_ts != data.last_synced_falloff_curve_ts)
+          falloff_curve_ts != data.last_synced_falloff_curve_ts ||
+          brush_size != data.last_synced_brush_size ||
+          stamp_mode != data.last_synced_stamp_mode ||
+          stamp_size_random != data.last_synced_stamp_size_random ||
+          stamp_strength_random != data.last_synced_stamp_strength_random ||
+          spacing != data.last_synced_spacing || jitter != data.last_synced_jitter ||
+          jitter_absolute != data.last_synced_jitter_absolute ||
+          stamp_rot != data.last_synced_stamp_rot ||
+          stamp_random_angle != data.last_synced_stamp_random_angle)
       {
         data.last_synced_alpha = alpha;
         data.last_synced_dir_in = dir_in;
@@ -688,6 +785,23 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         patch.frozen_params.end_falloff_mode = end_falloff_mode;
         patch.frozen_params.end_falloff_percent = end_falloff_percent;
         patch.frozen_params.swap_axis = swap_axis;
+        data.last_synced_brush_size = brush_size;
+        data.last_synced_stamp_mode = stamp_mode;
+        data.last_synced_stamp_size_random = stamp_size_random;
+        data.last_synced_stamp_strength_random = stamp_strength_random;
+        data.last_synced_spacing = spacing;
+        data.last_synced_jitter = jitter;
+        data.last_synced_jitter_absolute = jitter_absolute;
+        data.last_synced_stamp_rot = stamp_rot;
+        data.last_synced_stamp_random_angle = stamp_random_angle;
+        patch.frozen_params.stamp_mode = stamp_mode;
+        patch.frozen_params.stamp_size_random = float(stamp_size_random) / 100.0f;
+        patch.frozen_params.stamp_strength_random = float(stamp_strength_random) / 100.0f;
+        /* A zero ratio means the patch started with a zero brush size, which cannot happen through
+         * the UI; guard anyway rather than collapse the patch to nothing. */
+        if (patch.frozen_params.radius_per_size > 0.0f) {
+          patch.frozen_params.radius = patch.frozen_params.radius_per_size * float(brush_size);
+        }
         /* The relief samples the texture through `ss.tex_pool`, an `ImagePool` that caches ImBuf
          * handles for the whole sculpt session (`brush_init_tex`, `sculpt.cc`). A changed image --
          * a different Image datablock on the texture, or edited pixels -- would otherwise keep
@@ -701,6 +815,9 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           }
           tex_pool = BKE_image_pool_new();
         }
+        /* `swap_axis` and `stamp_mode` both feed the status text, so it has to be rebuilt here and
+         * not only where the modal's own hotkeys change them. */
+        curve_patch_edit_status_set(C, patch);
         curve_patch_restore_and_restamp(*C, ob, patch);
         ED_region_tag_redraw(CTX_wm_region(C));
       }
@@ -1291,12 +1408,12 @@ void SCULPT_OT_curve_patch_edit(wmOperatorType *ot)
 /* -------------------------------------------------------------------- */
 /** \name Context-Menu Operators
  *
- * The only two Curve Patch actions that exist as real `wmOperatorType`s (see this file's header
- * comment for why everything else is a plain call inside the modal): a popup menu can invoke
- * operators and nothing else. They act on `CurvePatchCache::active_point`, which the modal sets
- * from the right-click hit test just before opening the menu.
+ * The Curve Patch actions that exist as real `wmOperatorType`s (see this file's header comment for
+ * why everything else is a plain call inside the modal): a popup menu can invoke operators and
+ * nothing else. The two point actions act on `CurvePatchCache::active_point`, which the modal sets
+ * from the right-click hit test just before opening the menu; the rest act on the whole patch.
  *
- * Neither carries `OPTYPE_UNDO`: they mutate the live patch inside the session-wide undo step the
+ * None carries `OPTYPE_UNDO`: they mutate the live patch inside the session-wide undo step the
  * modal operator opened, exactly like the modal's own hotkeys do.
  * \{ */
 
@@ -1377,6 +1494,31 @@ void SCULPT_OT_curve_patch_toggle_cyclic(wmOperatorType *ot)
 
   ot->exec = curve_patch_toggle_cyclic_exec;
   /* Unlike the two point operators this one acts on the whole curve, so it needs no active point. */
+  ot->poll = curve_patch_edit_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
+}
+
+static wmOperatorStatus curve_patch_stamp_reseed_exec(bContext *C, wmOperator * /*op*/)
+{
+  Object &ob = *CTX_data_active_object(C);
+  CurvePatchCache &patch = patch_cache_of(C);
+  if (!curve_patch_reseed_stamps(*C, ob, patch)) {
+    return OPERATOR_CANCELLED;
+  }
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_curve_patch_stamp_reseed(wmOperatorType *ot)
+{
+  ot->name = "Reseed Curve Patch Stamps";
+  ot->description = "Roll a new random layout for the Curve Patch stamps";
+  ot->idname = "SCULPT_OT_curve_patch_stamp_reseed";
+
+  ot->exec = curve_patch_stamp_reseed_exec;
+  /* Acts on the whole patch rather than a point, like #SCULPT_OT_curve_patch_toggle_cyclic. The
+   * Ribbon-mode refusal lives in the exec, not here: a poll that fails would grey the menu entry
+   * out, and the entry is simply omitted in that mode instead. */
   ot->poll = curve_patch_edit_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;

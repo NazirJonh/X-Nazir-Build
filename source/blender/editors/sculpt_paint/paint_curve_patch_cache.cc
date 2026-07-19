@@ -36,6 +36,7 @@
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
+#include "BLI_rand.hh"
 #include "BLI_task.h"
 #include "BLI_task.hh"
 #include "BLI_time.h"
@@ -233,7 +234,11 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
   for (const float r : patch.spline.radii) {
     max_radius = std::max(max_radius, r);
   }
-  max_radius *= patch.frozen_params.radius;
+  /* Scaled by the RIBBON's radius, not the (unwidened) frozen one: in Stamps mode a jittered stamp
+   * legitimately reaches `jitter_amount` further out than the frozen radius, and a node culled here
+   * never gets to run the per-vertex test that would have claimed it. Identical to the frozen radius
+   * in Ribbon mode, where the two values are equal. */
+  max_radius *= patch.ribbon_radius;
 
   /* Displaced target position for `idx`, or nullopt if it is rejected. Pure/read-only so it is safe
    * to run concurrently: it never writes `positions` nor mutates the snapshot map. `thread_id`
@@ -305,10 +310,21 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
        * ever turned into a SCREEN-PIXEL handle length, never a world-space distance. Scale it by
        * the frozen brush radius (the same world-space value the old dab-based re-stamp used
        * globally) to get an actual world-space falloff radius comparable to `lateral`/`s` below. */
-      const float radius_at_s = patch.spline.radius_at(s) * patch.frozen_params.radius;
-      if (radius_at_s <= 0.0f) {
+      const float falloff_radius_at_s = patch.spline.radius_at(s) * patch.frozen_params.radius;
+      if (falloff_radius_at_s <= 0.0f) {
         return std::nullopt;
       }
+
+      /* The ribbon's `u` is normalized across the half-width the LUT was BUILT with, which in Stamps
+       * mode is widened by the jitter amount (`CurvePatchCache::ribbon_radius`). So turning `u` back
+       * into a world-space lateral offset must use that widened scale, while the falloff radius above
+       * must stay UNWIDENED -- the widening only exists to give jittered stamps room inside the strip
+       * and must not enlarge the brush's actual reach. Using one value for both would simultaneously
+       * under-report `lateral` (widening the visible relief band as Jitter rises) and compress the
+       * stamp-space `du` below, squashing stamps toward the curve and clipping the very edge stamps
+       * the widening was meant to admit. The two are equal in Ribbon mode, where jitter never
+       * applies. */
+      const float lateral_scale_at_s = patch.spline.radius_at(s) * patch.ribbon_radius;
 
       /* `normal_dist` is the vertex's signed offset along the anchor plane's normal from the
        * closest point on the curve -- how far it "lifts off" that plane. On a flat surface it is
@@ -324,25 +340,27 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
        * farther off-plane than the strip is wide is definitely not part of the target face, while
        * near-edge vertices on the intended face (small `normal_dist` from slight surface curvature)
        * still pass. */
-      if (std::abs(normal_dist) > 2.0f * radius_at_s) {
+      if (std::abs(normal_dist) > 2.0f * falloff_radius_at_s) {
         return std::nullopt;
       }
       /* In-plane offset reconstructed from the ribbon's normalized across-strip coordinate; the
        * falloff formula below is unchanged. */
-      const float lateral = ribbon_uv.x * radius_at_s;
+      const float lateral = ribbon_uv.x * lateral_scale_at_s;
       const float radial_dist = std::sqrt(lateral * lateral + normal_dist * normal_dist);
-      const float lateral_falloff = BKE_brush_curve_strength(&brush, radial_dist, radius_at_s);
+      const float lateral_falloff = BKE_brush_curve_strength(
+          &brush, radial_dist, falloff_radius_at_s);
       if (lateral_falloff <= 0.0f) {
         return std::nullopt;
       }
 
-      /* The ribbon's first/last rows sit exactly at the curve's ends, so `s` from the LUT is already
-       * confined to `[0, total_length]` and vertices past the ends fail `sample()` above -- by design
-       * the strip stops at the curve's own ends with no rounded "cap" past them. This guard only
-       * backstops interpolation slack at the LUT's edge pixels. On a closed curve the two "ends"
-       * are the same place, so the range is still the right one -- there is simply nothing outside
-       * it. */
-      if (s < 0.0f || s > total_length) {
+      /* The ribbon's first/last rows sit at the curve's ends, extended outward by
+       * `ribbon_end_margin` in Stamps mode (0 in Ribbon mode, where the strip stops dead at the
+       * ends), so `s` from the LUT is already confined to that range and vertices past it fail
+       * `sample()` above. This guard only backstops interpolation slack at the LUT's edge pixels;
+       * it must admit the extension, or the overhanging halves of the end stamps would be rejected
+       * here and clipped exactly as before. On a closed curve the two "ends" are the same place and
+       * the margin is 0, so the range is unchanged -- there is simply nothing outside it. */
+      if (s < -patch.ribbon_end_margin || s > total_length + patch.ribbon_end_margin) {
         return std::nullopt;
       }
 
@@ -357,7 +375,10 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
       {
         const float zone = float(patch.frozen_params.end_falloff_percent) * 0.01f * total_length;
         if (zone > 1e-8f) {
-          const float t = std::min(std::min(s, total_length - s) / zone, 1.0f);
+          /* Clamped at BOTH ends. `s` now runs slightly outside `[0, total_length]` on an extended
+           * strip, and a negative `t` would make `t * t * (3 - 2t)` return a small POSITIVE value
+           * -- a ghost of relief past the curve's end rather than the intended fade to nothing. */
+          const float t = std::clamp(std::min(s, total_length - s) / zone, 0.0f, 1.0f);
           end_falloff = t * t * (3.0f - 2.0f * t);
         }
       }
@@ -373,10 +394,93 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
        *
        * The ribbon's `u` is already normalized to [-1, 1] across the strip, with its sign chosen at
        * grid construction (`curve_patch_ribbon_build()`: the `cross(tangent, plane_normal)` side
-       * carries +1) to match what `-lateral / radius_at_s` produced before -- the orientation the
-       * paint-cursor overlay previews. */
+       * carries +1) to match what `-lateral / lateral_scale_at_s` produced before -- the
+       * orientation the paint-cursor overlay previews. */
       const float u = ribbon_uv.x;
 
+      /* Both modes end up here with an intensity and a per-stamp amplitude multiplier, so the
+       * height formula below stays common to them. Ribbon mode has no per-stamp amplitude and
+       * leaves `stamp_strength` at 1.0, which keeps its result bit-for-bit what it was. */
+      float tex_value = 1.0f;
+      float stamp_strength = 1.0f;
+      if (patch.frozen_params.stamp_mode == MTEX_CURVE_PATCH_STAMP_STAMPS) {
+        /* Find the stamps whose square could cover this vertex. The list is sorted by `center_v`,
+         * so a lower-bound on `s - max_extent` opens a window that closes as soon as a stamp starts
+         * past `s`; with the default spacing that window holds one to three stamps.
+         *
+         * The window is the radius scaled by sqrt(2), not the radius itself: a stamp is a SQUARE
+         * rotated by its own `angle`, so its farthest corner sits `half_extent * sqrt(2)` from its
+         * center. Sizing the window to the radius alone would drop a rotated stamp whose corner
+         * still covers this vertex, clipping the stamp's corners once Random Rotation is non-zero.
+         * The per-stamp test below is done in the stamp's own frame and stays exact; this bound
+         * only has to be conservative. */
+        const float max_extent = curve_patch_stamp_reach(patch.frozen_params.radius);
+        auto lower = std::lower_bound(patch.stamps.begin(),
+                                      patch.stamps.end(),
+                                      s - max_extent,
+                                      [](const CurvePatchStamp &stamp, const float value) {
+                                        return stamp.center_v < value;
+                                      });
+        bool hit = false;
+        float best_abs = 0.0f;
+        for (auto it = lower; it != patch.stamps.end() && it->center_v <= s + max_extent; ++it) {
+          const float dv = s - it->center_v;
+          /* `u` is the ribbon's normalized lateral coordinate while the stamp centers are in world
+           * units, so scale it by the same widened `lateral_scale_at_s` the `lateral` reconstruction
+           * above uses -- the scale the ribbon was actually built with, which is what makes a stamp
+           * jittered all the way out to `|center_u| == jitter_amount` reachable at all. */
+          const float du = u * lateral_scale_at_s - it->center_u;
+          /* Rotate the offset INTO the stamp's own frame, hence the negated angle. */
+          const float cos_a = std::cos(-it->angle);
+          const float sin_a = std::sin(-it->angle);
+          const float local_v = dv * cos_a - du * sin_a;
+          const float local_u = dv * sin_a + du * cos_a;
+          if (std::abs(local_v) > it->half_extent || std::abs(local_u) > it->half_extent) {
+            continue;
+          }
+          /* Map into the texture's [-1, 1] domain, matching what Ribbon mode feeds
+           * `paint_get_tex_pixel()`, then apply the same mapping size/offset. */
+          float stamp_u = local_u / it->half_extent;
+          float stamp_v = local_v / it->half_extent;
+          if (patch.frozen_params.swap_axis) {
+            std::swap(stamp_u, stamp_v);
+          }
+          stamp_u = stamp_u * mtex_size.x + mtex_ofs.x;
+          stamp_v = stamp_v * mtex_size.y + mtex_ofs.y;
+
+          float sample = 1.0f;
+          float sample_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+          if (mtex->tex != nullptr) {
+            paint_get_tex_pixel(mtex, stamp_u, stamp_v, ss.tex_pool, thread_id, &sample, sample_rgba);
+          }
+          /* The brush's own falloff curve fades the stamp toward its rim, so overlapping stamps
+           * meet along a smooth seam instead of showing the square's hard edge. */
+          const float dist = std::sqrt(local_u * local_u + local_v * local_v);
+          const float stamp_falloff = BKE_brush_curve_strength(&brush, dist, it->half_extent);
+          /* A square's corners reach `sqrt(2) * half_extent`, past the falloff's own length, and a
+           * CUSTOM brush curve is free to return a negative value out there -- which would invert
+           * the relief in the corners instead of fading it out. The Ribbon path guards its own
+           * falloff the same way. */
+          if (stamp_falloff <= 0.0f) {
+            continue;
+          }
+          const float candidate = sample * stamp_falloff * it->strength;
+          /* Overlapping stamps merge by the strongest absolute displacement -- the same rule
+           * `relief_at()` uses where the curve runs alongside itself. Summing would pile up into
+           * spikes wherever the spacing puts stamps on top of each other. */
+          if (!hit || std::abs(candidate) > best_abs) {
+            hit = true;
+            best_abs = std::abs(candidate);
+            tex_value = sample;
+            stamp_strength = stamp_falloff * it->strength;
+          }
+        }
+        if (!hit) {
+          /* Between stamps the surface is simply untouched. */
+          return std::nullopt;
+        }
+      }
+      else {
       /* `v` (along the strip) maps `s` onto the texture's [-1, 1] domain, centered on the curve's
        * midpoint so the pattern stays symmetric. `tile_span` is the world-space length of one tile,
        * selected by the frozen length mode (Default hybrid / Repeat N / Stretch) -- see
@@ -385,7 +489,7 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
       const float tile_span = curve_patch_texture_tile_span(patch.frozen_params.length_mode,
                                                             patch.frozen_params.length_repeat,
                                                             total_length,
-                                                            radius_at_s,
+                                                            falloff_radius_at_s,
                                                             patch.spline.cyclic);
       /* Centering on the curve's midpoint keeps an OPEN strip's pattern symmetric between its two
        * ends. A closed curve has no midpoint to be symmetric about; its anchor is the join at
@@ -423,13 +527,14 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
        * to the old, now-removed Curve Patch map-mode branch: `RE_texture_evaluate()` returns
        * `false` without writing its intensity output when `mtex->tex` is null, so calling
        * `paint_get_tex_pixel()` unconditionally read an uninitialized `tex_value`. */
-      float tex_value = 1.0f;
       float tex_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
       if (mtex->tex != nullptr) {
         paint_get_tex_pixel(mtex, tex_u, tex_v, ss.tex_pool, thread_id, &tex_value, tex_rgba);
       }
+      }
 
-      const float height = tex_value * lateral_falloff * end_falloff * mask_factor * cache.bstrength;
+      const float height = tex_value * stamp_strength * lateral_falloff * end_falloff * mask_factor *
+                           cache.bstrength;
       /* `end_falloff` scales the claim WEIGHT as well as the height. Not for the branch merge just
        * above -- `relief_at()` picks the branch with the largest `|height|` and never reads the
        * weight -- but for the cross-pass blend in PHASE 2 (`pass_weight_accum`), which averages
@@ -478,12 +583,16 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
    * surface that sphere holds many nodes whose (up-facing) vertices each pay for `closest_point()`
    * only to be rejected by the lateral falloff. Drop any node whose bounds fall entirely outside the
    * falloff tube before the per-vertex walk. Conservative and result-identical: a displaced vertex
-   * must have `radial_dist < radius_at_s` for a non-zero falloff (`compute_vertex()`), i.e. it sits
-   * within `max_radius` of the polyline; the `2.5x` factor is generous margin for the bounding-sphere
-   * approximation and for slightly-stale node bounds, and at the tube boundary the relief tapers to
-   * ~0 anyway, so nothing visible is ever culled. Node centres are mapped into the same canonical
-   * space `compute_vertex()` uses, so symmetry passes cull correctly. */
-  const float tube_radius = 2.5f * max_radius;
+   * must have `radial_dist < falloff_radius_at_s` for a non-zero falloff (`compute_vertex()`), i.e.
+   * it sits within `max_radius` of the polyline; the `2.5x` factor is generous margin for the
+   * bounding-sphere approximation and for slightly-stale node bounds, and at the tube boundary the
+   * relief tapers to ~0 anyway, so nothing visible is ever culled. Node centres are mapped into the
+   * same canonical space `compute_vertex()` uses, so symmetry passes cull correctly.
+   *
+   * The tube is measured from the curve's own polyline, which the ribbon's end extension reaches
+   * `ribbon_end_margin` beyond, so that margin is added here -- a node holding only the overhang of
+   * an end stamp is otherwise dropped before the per-vertex test can claim it. */
+  const float tube_radius = 2.5f * max_radius + patch.ribbon_end_margin;
   BitVector<> keep(pbvh.nodes_num(), false);
   auto cull_nodes = [&](const auto nodes) {
     cursor_sample_result.node_mask.foreach_index([&](const int i) {
@@ -851,11 +960,86 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
     return;
   }
 
+  /* Hoisted ahead of its previous spot (just below the ribbon build) so the stamps block below can
+   * reach the brush through `cache.paint` without a second, redundant `CTX_data_tool_settings()`
+   * fetch. Both are side-effect-free reference binds and nothing between the two positions can
+   * leave `ss.cache` null, so the guards they now sit above were never protecting them. */
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  StrokeCache &cache = *ss.cache;
+
+  /* Stamps mode lays its stamps out here, on the main thread, right after the spline: PHASE 1's
+   * parallel per-vertex walk only reads the result. Ribbon mode leaves the list empty. */
+  patch.stamps.clear();
+  /* Recorded on the cache (not a local) because the relief action needs it too -- see
+   * `CurvePatchCache::ribbon_radius`. Set unconditionally here, so Ribbon mode and the
+   * no-brush fall-back below both leave it at the unwidened frozen radius. */
+  patch.ribbon_radius = patch.frozen_params.radius;
+  /* Likewise unconditional, so Ribbon mode and the no-brush fall-back leave the strip unextended
+   * and therefore bit-for-bit what it was before Stamps mode existed. */
+  patch.ribbon_end_margin = 0.0f;
+  if (patch.frozen_params.stamp_mode == MTEX_CURVE_PATCH_STAMP_STAMPS) {
+    const Brush *stamp_brush = BKE_paint_brush_for_read(cache.paint);
+    if (stamp_brush != nullptr) {
+      /* Blender stores Spacing as a percentage of the brush DIAMETER, the same convention a normal
+       * dab stroke uses, so the stamps land at the same density a freehand stroke of this brush
+       * would produce. */
+      const float spacing_frac = float(stamp_brush->spacing) / 100.0f;
+      /* Relative jitter is already a fraction of the radius, so it converts to world units for
+       * free. Absolute jitter is in screen pixels and needs the ratio captured at patch start --
+       * `paint_stroke_jitter_pos()` cannot be reused here because it works in screen space while
+       * the ribbon's UV is world-space. `brush.curve_jitter`, which modulates jitter over stroke
+       * time, has no meaning for a patch: a patch has no stroke timeline. */
+      const float jitter_amount = (stamp_brush->flag & BRUSH_ABSOLUTE_JITTER) ?
+                                      stamp_brush->jitter_absolute *
+                                          patch.frozen_params.radius_per_size :
+                                      stamp_brush->jitter * patch.frozen_params.radius;
+      curve_patch_stamps_build(patch.spline,
+                               patch.frozen_params.radius,
+                               spacing_frac,
+                               jitter_amount,
+                               patch.frozen_params.stamp_size_random,
+                               patch.frozen_params.stamp_strength_random,
+                               stamp_brush->mtex.rot,
+                               stamp_brush->mtex.random_angle,
+                               patch.frozen_params.stamp_seed,
+                               patch.stamps);
+      /* A closed curve has no ends to extend (see `ribbon_end_margin` below), so the stamp at the
+       * join would lose the half that reaches into `v < 0` -- which on a loop is not outside the
+       * curve but the stretch just before the join. Wrap those stamps around instead, so both
+       * halves are present and meet exactly at the seam. The bound must be the same one the
+       * per-vertex search window uses, hence the shared #curve_patch_stamp_reach. */
+      if (patch.spline.cyclic) {
+        curve_patch_stamps_add_cyclic_wrap(patch.stamps,
+                                           patch.spline.total_length(),
+                                           curve_patch_stamp_reach(patch.frozen_params.radius));
+      }
+      /* Stamps pushed sideways by jitter would fall outside the ribbon and be clipped by the LUT's
+       * edge, so the strip has to cover the widest possible excursion. Only jitter needs this: the
+       * size randomization shrinks stamps and never grows them. The widened value flows into
+       * `ribbon_source_hash()` as the `brush_radius` argument, so the cached LUT invalidates
+       * correctly with no extra hashing. */
+      patch.ribbon_radius += jitter_amount;
+      /* The layout puts the first stamp's center exactly at `s == 0` and the last one at the last
+       * whole step before `total_length`, so an end stamp reaches past the curve's end by its own
+       * half-extent -- and the strip, which used to stop dead at that end, gave the overhanging
+       * half no UV at all and clipped it along a hard straight edge. Extend the strip by the
+       * farthest such reach instead of insetting the stamps, which would leave the ends of the
+       * curve visibly bare.
+       *
+       * #curve_patch_stamp_reach is a stamp's corner reach; `jitter_amount` covers a center jittered
+       * further along the curve. The same shared bound the per-vertex search window uses on `v`. */
+      patch.ribbon_end_margin = curve_patch_stamp_reach(patch.frozen_params.radius) + jitter_amount;
+    }
+  }
+
   /* Rebuild the ribbon UV LUT the relief action samples in place of
    * `CurvePatchSpline::closest_point()` (see `paint_curve_patch_ribbon.hh`). Built once per
    * restamp on the main thread; PHASE 1's parallel `compute_vertex()` walk only reads it. */
-  curve_patch_ribbon_build(
-      patch.spline, patch.frozen_params.radius, patch.ribbon, patch.final_quality);
+  curve_patch_ribbon_build(patch.spline,
+                           patch.ribbon_radius,
+                           patch.ribbon,
+                           patch.final_quality,
+                           patch.ribbon_end_margin);
 #if CURVE_PATCH_PROFILING
   const double prof_t_ribbon = BLI_time_now_seconds(); /* DEBUG-cpatch */
 #endif
@@ -868,9 +1052,6 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   PaintModeSettings &paint_mode_settings = tool_settings->paint_mode;
   Scene *scene = CTX_data_scene(&C);
   const Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(&C);
-
-  SculptSession &ss = *ob.runtime->sculpt_session;
-  StrokeCache &cache = *ss.cache;
 
   /* A normal interactive stroke keeps the vertex-normals #SharedCache fresh via the Paint BVH
    * draw engine between dabs; this recompute runs synchronously with no redraw in between, so it
@@ -889,7 +1070,7 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
    * `cache.location_symm`/`cache.radius`, set below via `cache.location`/`cache.radius` and
    * transformed per pass by `cache_calc_brushdata_symm()`) cover the WHOLE curve for the relief
    * action above, instead of one small per-dab circle. Conservative bound: any point within
-   * `radius_at_s` of any point on the curve is within `(bbox half-diagonal + max_radius)` of the
+   * `max_radius` of any point on the curve is within `(bbox half-diagonal + max_radius)` of the
    * bbox center, by the triangle inequality. */
   float3 bbox_min = patch.spline.poly_3d[0];
   float3 bbox_max = patch.spline.poly_3d[0];
@@ -899,15 +1080,21 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   }
   const float3 bbox_center = (bbox_min + bbox_max) * 0.5f;
   /* `evaluated_radii` entries are the unitless per-point UI scalar (see the matching comment in
-   * `curve_patch_apply_relief_action()`); scale by `frozen_params.radius` here too so this search
-   * sphere stays a genuine superset of the world-space falloff radius actually used below. */
+   * `curve_patch_apply_relief_action()`); scale by `ribbon_radius` here too so this search sphere
+   * stays a genuine superset of the world-space reach actually used below -- including the extra
+   * `jitter_amount` a Stamps-mode stamp can be pushed out to. Equals `frozen_params.radius` in
+   * Ribbon mode. */
   float max_radius = 0.0f;
   for (const float r : evaluated_radii) {
     max_radius = std::max(max_radius, r);
   }
-  max_radius *= patch.frozen_params.radius;
+  max_radius *= patch.ribbon_radius;
   cache.location = bbox_center;
-  cache.radius = math::distance(bbox_max, bbox_center) + max_radius;
+  /* `ribbon_end_margin` extends the strip along the end tangents, i.e. up to that far outside the
+   * bbox built from the curve's own points, so the sphere has to grow by it as well -- it feeds the
+   * node-mask query the cull tube above then narrows, and a node missing from it is never offered
+   * to the cull at all. 0 in Ribbon mode, leaving the sphere exactly as it was. */
+  cache.radius = math::distance(bbox_max, bbox_center) + max_radius + patch.ribbon_end_margin;
   cache.radius_squared = cache.radius * cache.radius;
 
   /* Reset the touched-node accumulator for THIS restamp. `curve_patch_restore_only()` above already
@@ -1008,6 +1195,23 @@ static void curve_patch_begin_editing(Object &ob,
   patch->frozen_params.length_repeat = brush.mtex.curve_patch_length_repeat;
   patch->frozen_params.end_falloff_mode = brush.mtex.curve_patch_end_falloff;
   patch->frozen_params.end_falloff_percent = brush.mtex.curve_patch_end_falloff_percent;
+  patch->frozen_params.stamp_mode = brush.mtex.curve_patch_stamp_mode;
+  patch->frozen_params.stamp_size_random = float(brush.mtex.curve_patch_stamp_size_random) / 100.0f;
+  patch->frozen_params.stamp_strength_random = float(brush.mtex.curve_patch_stamp_strength_random) /
+                                               100.0f;
+  /* Rolled once, then frozen -- see `CurvePatchFrozenBrushParams::stamp_seed`. This is the only
+   * place a real RNG is touched; everything downstream hashes this seed. */
+  patch->frozen_params.stamp_seed = RandomNumberGenerator::from_random_seed().get_uint32();
+  /* `frozen_radius` is the world-space radius the anchor (or roll) stroke measured; the Size slider
+   * that produced it is in pixels. Record the ratio so a later Size change converts back to world
+   * units, and so absolute brush jitter (also pixels) can be converted the same way. `cache.paint`
+   * is the same `Paint *` the stroke's own init (`SculptPaintStroke::stroke_cache_init()`, via
+   * `sd.paint`) resolved for this stroke -- the accessor the rest of the curve-patch modal uses for
+   * `BKE_brush_alpha_get()`/`brush_strength()` (see `paint_curve_patch_edit.cc`) is `sd.paint`
+   * reached through `CTX_data_tool_settings()`, which is not in scope here; `cache.paint` is the
+   * equivalent already sitting on the `StrokeCache` this function has. */
+  const int brush_size = BKE_brush_size_get(cache.paint, &brush);
+  patch->frozen_params.radius_per_size = brush_size > 0 ? frozen_radius / float(brush_size) : 0.0f;
   patch->plane_normal = plane_normal;
   /* A fresh session starts with nothing active; the cache may be reused from a previous patch. */
   patch->active_point = -1;

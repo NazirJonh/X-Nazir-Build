@@ -4,7 +4,11 @@
 
 #include "testing/testing.h"
 
+#include <cmath>
+
 #include "DNA_texture_types.h"
+
+#include "BLI_math_base.h"
 
 #include "paint_curve_patch_spline.hh"
 
@@ -239,6 +243,204 @@ TEST(paint_curve_patch_spline, tile_span_cyclic_snaps_to_whole_tiles)
   EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(
                       MTEX_CURVE_PATCH_LENGTH_STRETCH, 1, 10.0f, 2.0f, /*cyclic=*/true),
                   10.0f);
+}
+
+/* A 10-unit straight line, radius 1, spacing 0.5 (i.e. 1.0 world units between stamps) and no
+ * randomization: stamps land on an exact 1-unit grid. */
+TEST(paint_curve_patch_stamps, spacing_controls_count_and_positions)
+{
+  CurvePatchSpline spline;
+  const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(10.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 2));
+
+  Vector<CurvePatchStamp> stamps;
+  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1u, stamps);
+
+  EXPECT_EQ(stamps.size(), 11);
+  EXPECT_NEAR(stamps[0].center_v, 0.0f, 1e-5f);
+  EXPECT_NEAR(stamps[1].center_v, 1.0f, 1e-5f);
+  EXPECT_NEAR(stamps.last().center_v, 10.0f, 1e-5f);
+  for (const CurvePatchStamp &stamp : stamps) {
+    EXPECT_NEAR(stamp.center_u, 0.0f, 1e-6f);
+    EXPECT_NEAR(stamp.half_extent, 1.0f, 1e-6f);
+    EXPECT_NEAR(stamp.strength, 1.0f, 1e-6f);
+  }
+}
+
+/* The same seed must reproduce the same layout -- the relief is recomputed from scratch on every
+ * interactive event, so any drift would make the patch flicker. */
+TEST(paint_curve_patch_stamps, same_seed_is_reproducible_different_seed_is_not)
+{
+  CurvePatchSpline spline;
+  const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(10.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 2));
+
+  Vector<CurvePatchStamp> a, b, c;
+  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 1.0f, 7u, a);
+  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 1.0f, 7u, b);
+  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 1.0f, 8u, c);
+
+  ASSERT_EQ(a.size(), b.size());
+  ASSERT_EQ(a.size(), c.size());
+  bool c_differs = false;
+  for (const int i : a.index_range()) {
+    EXPECT_FLOAT_EQ(a[i].center_v, b[i].center_v);
+    EXPECT_FLOAT_EQ(a[i].center_u, b[i].center_u);
+    EXPECT_FLOAT_EQ(a[i].half_extent, b[i].half_extent);
+    EXPECT_FLOAT_EQ(a[i].angle, b[i].angle);
+    EXPECT_FLOAT_EQ(a[i].strength, b[i].strength);
+    c_differs |= (a[i].center_u != c[i].center_u);
+  }
+  EXPECT_TRUE(c_differs);
+}
+
+/* Randomization only ever reduces: a stamp never exceeds the brush radius or full strength, and
+ * never drops to zero or below. Jitter stays inside the requested amount. */
+TEST(paint_curve_patch_stamps, randomization_stays_in_range)
+{
+  CurvePatchSpline spline;
+  const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(20.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 2));
+
+  for (const uint32_t seed : {1u, 42u, 12345u}) {
+    Vector<CurvePatchStamp> stamps;
+    curve_patch_stamps_build(spline, 2.0f, 0.25f, 0.75f, 1.0f, 1.0f, 0.0f, float(M_PI), seed, stamps);
+    ASSERT_FALSE(stamps.is_empty());
+    for (const CurvePatchStamp &stamp : stamps) {
+      EXPECT_GT(stamp.half_extent, 0.0f);
+      EXPECT_LE(stamp.half_extent, 2.0f + 1e-6f);
+      EXPECT_GT(stamp.strength, 0.0f);
+      EXPECT_LE(stamp.strength, 1.0f + 1e-6f);
+      EXPECT_LE(std::abs(stamp.center_u), 0.75f + 1e-6f);
+    }
+  }
+}
+
+/* Stamps must come out sorted by arc length even after jitter displaces them, because the relief
+ * binary-searches this list by `center_v`. */
+TEST(paint_curve_patch_stamps, sorted_by_arc_length_after_jitter)
+{
+  CurvePatchSpline spline;
+  const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(20.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 2));
+
+  Vector<CurvePatchStamp> stamps;
+  curve_patch_stamps_build(spline, 2.0f, 0.25f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 3u, stamps);
+  for (const int i : IndexRange(1, stamps.size() - 1)) {
+    EXPECT_GE(stamps[i].center_v, stamps[i - 1].center_v);
+  }
+}
+
+/* A closed loop gets a whole number of stamps so the seam does not carry two overlapping stamps,
+ * mirroring what `curve_patch_texture_tile_span()` does for cyclic tiling. */
+TEST(paint_curve_patch_stamps, cyclic_holds_a_whole_number_of_stamps)
+{
+  CurvePatchSpline spline;
+  /* Square loop, perimeter 12: `build_from_positions` appends the closing edge itself. */
+  const float3 points[4] = {float3(0.0f, 0.0f, 0.0f),
+                            float3(3.0f, 0.0f, 0.0f),
+                            float3(3.0f, 3.0f, 0.0f),
+                            float3(0.0f, 3.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 4), {}, true);
+  EXPECT_NEAR(spline.total_length(), 12.0f, 1e-5f);
+
+  Vector<CurvePatchStamp> stamps;
+  /* Requested step 2.5 does not divide 12; it is snapped to 2.4 (5 stamps) so the last stamp does
+   * not land on top of the first. */
+  curve_patch_stamps_build(spline, 1.0f, 1.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1u, stamps);
+  EXPECT_EQ(stamps.size(), 5);
+  EXPECT_NEAR(stamps[0].center_v, 0.0f, 1e-5f);
+  EXPECT_NEAR(stamps.last().center_v, 9.6f, 1e-5f);
+}
+
+/* The stamp sitting at a loop's join reaches into `v < 0`, which the ribbon LUT -- spanning
+ * `[0, L]` exactly on a cyclic curve -- cannot represent. A ghost copy at `+L` supplies that half
+ * from the far side of the join. */
+TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_a_stamp_near_the_start)
+{
+  Vector<CurvePatchStamp> stamps;
+  CurvePatchStamp stamp;
+  stamp.center_v = 0.1f;
+  stamp.center_u = 0.3f;
+  stamp.half_extent = 0.9f;
+  stamp.angle = 0.7f;
+  stamp.strength = 0.4f;
+  stamps.append(stamp);
+
+  curve_patch_stamps_add_cyclic_wrap(stamps, 12.0f, 1.0f);
+
+  ASSERT_EQ(stamps.size(), 2);
+  EXPECT_NEAR(stamps[0].center_v, 0.1f, 1e-5f);
+  EXPECT_NEAR(stamps[1].center_v, 12.1f, 1e-5f);
+  /* The ghost is the same stamp seen from the other side of the join, so everything but its arc
+   * length must be identical -- that is what makes the texture meet itself. */
+  EXPECT_FLOAT_EQ(stamps[1].center_u, 0.3f);
+  EXPECT_FLOAT_EQ(stamps[1].half_extent, 0.9f);
+  EXPECT_FLOAT_EQ(stamps[1].angle, 0.7f);
+  EXPECT_FLOAT_EQ(stamps[1].strength, 0.4f);
+}
+
+/* The mirror case: a stamp just before the join needs its ghost at `-L`, since a vertex at a small
+ * `s` searches a window that opens below zero. */
+TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_a_stamp_near_the_end)
+{
+  Vector<CurvePatchStamp> stamps;
+  CurvePatchStamp stamp;
+  stamp.center_v = 11.7f;
+  stamp.center_u = -0.2f;
+  stamp.half_extent = 1.0f;
+  stamp.angle = -0.5f;
+  stamp.strength = 0.8f;
+  stamps.append(stamp);
+
+  curve_patch_stamps_add_cyclic_wrap(stamps, 12.0f, 1.0f);
+
+  ASSERT_EQ(stamps.size(), 2);
+  EXPECT_NEAR(stamps[0].center_v, -0.3f, 1e-5f);
+  EXPECT_NEAR(stamps[1].center_v, 11.7f, 1e-5f);
+  EXPECT_FLOAT_EQ(stamps[0].center_u, -0.2f);
+  EXPECT_FLOAT_EQ(stamps[0].half_extent, 1.0f);
+  EXPECT_FLOAT_EQ(stamps[0].angle, -0.5f);
+  EXPECT_FLOAT_EQ(stamps[0].strength, 0.8f);
+}
+
+/* A stamp far from the join is already fully covered by the LUT and must not be duplicated --
+ * a ghost there would be a second stamp in the middle of the loop. */
+TEST(paint_curve_patch_stamps, cyclic_wrap_leaves_interior_stamps_alone)
+{
+  Vector<CurvePatchStamp> stamps;
+  CurvePatchStamp stamp;
+  stamp.center_v = 6.0f;
+  stamps.append(stamp);
+
+  curve_patch_stamps_add_cyclic_wrap(stamps, 12.0f, 1.0f);
+
+  ASSERT_EQ(stamps.size(), 1);
+  EXPECT_NEAR(stamps[0].center_v, 6.0f, 1e-5f);
+}
+
+/* The relief binary-searches the list by `center_v`, so the ghosts -- which land outside `[0, L]`
+ * on both sides -- must leave it sorted. */
+TEST(paint_curve_patch_stamps, cyclic_wrap_keeps_the_list_sorted)
+{
+  CurvePatchSpline spline;
+  const float3 points[4] = {float3(0.0f, 0.0f, 0.0f),
+                            float3(3.0f, 0.0f, 0.0f),
+                            float3(3.0f, 3.0f, 0.0f),
+                            float3(0.0f, 3.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 4), {}, true);
+
+  Vector<CurvePatchStamp> stamps;
+  curve_patch_stamps_build(spline, 1.0f, 0.5f, 0.3f, 0.5f, 0.5f, 0.0f, 1.0f, 11u, stamps);
+  const int real_num = stamps.size();
+  ASSERT_GT(real_num, 2);
+
+  curve_patch_stamps_add_cyclic_wrap(stamps, spline.total_length(), float(M_SQRT2));
+
+  EXPECT_GT(stamps.size(), real_num);
+  for (const int i : IndexRange(1, stamps.size() - 1)) {
+    EXPECT_GE(stamps[i].center_v, stamps[i - 1].center_v);
+  }
 }
 
 }  // namespace blender::ed::sculpt_paint::tests

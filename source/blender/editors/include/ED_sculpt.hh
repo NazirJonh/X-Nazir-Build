@@ -169,6 +169,19 @@ bool flush_pending_multires_base_for_mesh(Main &bmain, Mesh &mesh);
  */
 bool destructive_edit_check(const Mesh &mesh, ReportList *reports);
 
+/**
+ * Re-derive which layer, if any, carries the REC exemption on \a object, returning true when the
+ * answer changed.
+ *
+ * Exported for the RNA setter of the active sculpt layer. Every operator that moves the active layer
+ * re-derives the exemption (usually through #commit_layers_change), but assigning
+ * `Mesh.sculpt_layers.active` from `bpy` reaches none of them, and a stale exemption means an armed
+ * REC records into a layer whose weight mask is not exempt.
+ *
+ * Idempotent and one uid lookup, so calling it when nothing moved costs nothing.
+ */
+bool rec_exemption_refresh(Object &object);
+
 }  // namespace layers
 
 }  // namespace ed::sculpt_paint

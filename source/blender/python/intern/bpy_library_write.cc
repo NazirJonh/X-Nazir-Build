@@ -20,6 +20,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_report.hh"
+#include "BKE_sculpt_layers.hh"
 
 #include "BLO_writefile.hh"
 
@@ -134,6 +135,14 @@ static PyObject *bpy_lib_write(BPy_PropertyRNA *self, PyObject *args, PyObject *
      * doesn't turn normal relative paths into absolute ones, so that still has to happen. */
     BLI_path_abs_from_cwd(filepath_abs, sizeof(filepath_abs));
   }
+
+  /* Park any open sculpt layer weight-mask editing session for the duration, exactly as the regular
+   * save paths do (see #wm_file_write). A session keeps the layer's weights in the mesh's own
+   * `.sculpt_mask` with the user's mask set aside, and #PartialWriteContext::id_add below copies the
+   * mesh verbatim — so without this the written file would carry a sculpt layer's weight map
+   * masquerading as the user's sculpt mask, silently. Scoped over #id_add as well as the write: the
+   * copies are taken there, not at write time. */
+  const bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard{*bmain_src};
 
   PartialWriteContext partial_write_ctx{*bmain_src};
   const PartialWriteContext::IDAddOptions add_options{

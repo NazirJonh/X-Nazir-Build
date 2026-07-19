@@ -778,6 +778,31 @@ static bool mask_op_refuse_during_session(wmOperator *op,
   return true;
 }
 
+bool mask_edit_refuse_deform_op(wmOperator *op, const Object &object)
+{
+  if (mask_edit_active_uid(object) == 0) {
+    return false;
+  }
+  BKE_report(op->reports, RPT_ERROR, "Close the sculpt layer mask session to sculpt geometry");
+  return true;
+}
+
+bool mask_edit_refuse_ccg_rebuild(wmOperator *op, const Object &object)
+{
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (ss == nullptr || ss->layers.mask_edit.node_uid == 0 || !ss->layers.mask_edit.on_grids) {
+    return false;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  const SculptLayerTreeNode *open_node = bke::sculpt_layers::node_find_by_uid(
+      mesh, ss->layers.mask_edit.node_uid);
+  BKE_reportf(op->reports,
+              RPT_ERROR,
+              "A weight mask is being edited on '%s'; finish that edit first",
+              open_node ? open_node->name : "");
+  return true;
+}
+
 /** True when \a node's mask can be read as it stands over \a layout. */
 static bool mask_is_usable(const SculptLayerTreeNode &node, const MaskLayout &layout)
 {

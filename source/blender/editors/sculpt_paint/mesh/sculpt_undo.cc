@@ -1722,6 +1722,14 @@ void push_sculpt_layer_list_change(Object & /*object*/,
   }
   step_data->type = Type::SculptLayer;
   step_data->sculpt_layer_op.removed = std::move(removed);
+  /* Charged after the move, so the payloads counted are the ones the step now owns. Only the mask is
+   * added here: #SculptLayerUndoPayload::data is the layer's own buffer, whose accounting is not
+   * this change's to introduce. */
+  for (const SculptLayerUndoPayload &payload : step_data->sculpt_layer_op.removed) {
+    if (payload.mask != nullptr) {
+      step_data->undo_size += size_t(bke::sculpt_layers::mask_size_in_bytes(*payload.mask));
+    }
+  }
   step_data->sculpt_layer_op.added.clear();
   for (const int uid : added_uids) {
     SculptLayerUndoPayload payload;
@@ -1891,9 +1899,20 @@ void push_sculpt_layer_mask(Object &object, const SculptLayerTreeNode &node)
   /* A copy rather than the node's own pointer: the operator goes on to edit or replace the live
    * mask, and taking it here would leave the node unmasked in the state the user is looking at.
    * #SculptLayerUndoPayload takes the pointer instead because there the node is going away. */
+  if (step_data->sculpt_layer_op.mask_swap != nullptr) {
+    /* Uncharged again before being replaced, so a step that captures twice is not billed twice. */
+    step_data->undo_size -= size_t(
+        bke::sculpt_layers::mask_size_in_bytes(*step_data->sculpt_layer_op.mask_swap));
+  }
   bke::sculpt_layers::mask_free(step_data->sculpt_layer_op.mask_swap);
   step_data->sculpt_layer_op.mask_swap = node.mask ? bke::sculpt_layers::mask_copy(*node.mask) :
                                                      nullptr;
+  /* Charged against the undo memory limit: without this a run of mask edits on a dense mesh reads
+   * as free and the stack is never trimmed for it. */
+  if (step_data->sculpt_layer_op.mask_swap != nullptr) {
+    step_data->undo_size += size_t(
+        bke::sculpt_layers::mask_size_in_bytes(*step_data->sculpt_layer_op.mask_swap));
+  }
 }
 
 void push_sculpt_layer_mask_session(Object & /*object*/, const int node_uid, const bool entering)

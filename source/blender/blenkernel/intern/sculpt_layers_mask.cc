@@ -121,6 +121,16 @@ SculptLayerMask *mask_copy(const SculptLayerMask &src)
   return dst;
 }
 
+int64_t mask_size_in_bytes(const SculptLayerMask &mask)
+{
+  /* Mirrors what #mask_copy allocates, which is what an undo capture actually costs. A neutralized
+   * mask has null tables under `blocks_num == 0`, so the per-block term vanishes on its own. */
+  return int64_t(sizeof(SculptLayerMask)) +
+         int64_t(mask.blocks_num) *
+             int64_t(sizeof(int8_t) + sizeof(uint8_t) + sizeof(int)) +
+         int64_t(mask.data_num) * int64_t(sizeof(uint8_t));
+}
+
 uint8_t mask_value_at(const SculptLayerMask &mask, const int elem)
 {
   BLI_assert(elem >= 0 && elem < mask.totelem);
@@ -131,11 +141,16 @@ uint8_t mask_value_at(const SculptLayerMask &mask, const int elem)
   return mask.data[mask.block_offset[block] + (elem % mask.block_size)];
 }
 
-/* Elements this block actually covers; the tail block is short. */
+/* Elements this block actually covers; the tail block is short.
+ *
+ * Widened to `int64_t` for the multiplication alone: `blocks_num * block_size` can exceed the
+ * element count by up to one block, so a #totelem near the `int` ceiling would overflow the product
+ * — signed overflow being undefined rather than merely wrong. The result always fits, being bounded
+ * by #block_size. */
 static int mask_block_extent(const SculptLayerMask &mask, const int block)
 {
-  const int start = block * mask.block_size;
-  return std::min(mask.block_size, mask.totelem - start);
+  const int64_t start = int64_t(block) * mask.block_size;
+  return int(std::min(int64_t(mask.block_size), int64_t(mask.totelem) - start));
 }
 
 MaskBlock mask_block(const SculptLayerMask &mask, const int block)
@@ -196,7 +211,7 @@ void mask_expand(const SculptLayerMask &mask, MutableSpan<float> r_dense)
   BLI_assert(r_dense.size() == mask.totelem);
   threading::parallel_for(IndexRange(mask.blocks_num), 32, [&](const IndexRange range) {
     for (const int64_t block : range) {
-      const int start = int(block) * mask.block_size;
+      const int64_t start = block * mask.block_size;
       const int extent = mask_block_extent(mask, int(block));
       const MaskBlock src = mask_block(mask, int(block));
       if (src.uniform) {
@@ -226,7 +241,12 @@ SculptLayerMask *mask_compress(const Span<float> dense, const int block_size)
   Vector<uint8_t> quantized(totelem);
   threading::parallel_for(IndexRange(totelem), 8192, [&](const IndexRange range) {
     for (const int64_t i : range) {
-      quantized[i] = uint8_t(std::clamp(dense[i], 0.0f, 1.0f) * 255.0f + 0.5f);
+      /* The lower bound is an ordered test rather than #std::clamp so that NaN maps to 0. Every
+       * comparison against NaN is false, so #std::clamp returns it unchanged (neither bound
+       * compares true) and the conversion to `uint8_t` would then be undefined. NaN reaches here
+       * from the standard mask storage, which a script can write freely. */
+      const float value = dense[i];
+      quantized[i] = value > 0.0f ? uint8_t(std::min(value, 1.0f) * 255.0f + 0.5f) : 0;
     }
   });
 
@@ -235,7 +255,7 @@ SculptLayerMask *mask_compress(const Span<float> dense, const int block_size)
    * mask that covers a large region. */
   int data_num = 0;
   for (const int block : IndexRange(mask->blocks_num)) {
-    const int start = block * block_size;
+    const int64_t start = int64_t(block) * block_size;
     const int extent = mask_block_extent(*mask, block);
     const uint8_t first = quantized[start];
     bool uniform = true;
@@ -264,7 +284,7 @@ SculptLayerMask *mask_compress(const Span<float> dense, const int block_size)
       if (mask->block_kind[block] != SCULPT_LAYER_MASK_BLOCK_DENSE) {
         continue;
       }
-      const int start = block * block_size;
+      const int64_t start = int64_t(block) * block_size;
       const int extent = mask_block_extent(*mask, block);
       memcpy(mask->data + mask->block_offset[block],
              quantized.data() + start,
@@ -342,6 +362,7 @@ SculptLayerMask *mask_multiply(const SculptLayerMask &a, const SculptLayerMask &
     /* #Vector::resize keeps what is already there, so the blocks written on earlier iterations
      * survive into the single allocation below. */
     scratch.resize(data_num + extent);
+    bool uniform = true;
     for (const int i : IndexRange(extent)) {
       const int va = block_a.uniform ? int(block_a.value) : int(block_a.data[i]);
       const int vb = block_b.uniform ? int(block_b.value) : int(block_b.data[i]);
@@ -351,7 +372,22 @@ SculptLayerMask *mask_multiply(const SculptLayerMask &a, const SculptLayerMask &
        * 255 by 255 land on 255 without overflowing the byte, and a factor of 0 stays 0. Plain
        * `va * vb / 255` would lose a step off every value it touches and would make a fully opaque
        * folder darken its subtree. */
-      scratch[data_num + i] = uint8_t((va * vb + 127) / 255);
+      const uint8_t value = uint8_t((va * vb + 127) / 255);
+      scratch[data_num + i] = value;
+      uniform &= (value == scratch[data_num]);
+    }
+    /* A product of two dense blocks is often constant even though neither input was — a smooth edge
+     * against a zeroed region is the everyday case. Without this the block would stay dense, and
+     * since #chain_mask folds one product per folder level, a subtree under nested folders would
+     * degrade monotonically towards dense storage and never recover: exactly the growth
+     * #mask_compress exists to avoid. The scratch is rewound, so the collapsed block costs nothing
+     * in #data either. */
+    if (uniform) {
+      result->block_kind[block] = SCULPT_LAYER_MASK_BLOCK_UNIFORM;
+      result->block_value[block] = scratch[data_num];
+      result->block_offset[block] = -1;
+      scratch.resize(data_num);
+      continue;
     }
     data_num += extent;
   }
@@ -409,12 +445,21 @@ void mask_blend_read(BlendDataReader *reader, SculptLayerMask *mask)
             mask->blocks_num == mask_blocks_num(mask->totelem, mask->block_size);
   }
   /* Every dense block must name a range that lies inside #data. A uniform block is self-contained,
-   * so its offset is not consulted here. */
+   * so its offset is not consulted here.
+   *
+   * Tested as "not uniform" rather than "is dense", which is the predicate #mask_block and
+   * #mask_value_at read the table with. Spelled the other way round, a kind that is neither value —
+   * anything a truncated or hand-edited file can put in an `int8_t` — would skip validation here and
+   * still be dereferenced as dense there, indexing #data by an offset nobody checked (and #data is
+   * null outright when `data_num == 0`). The two spellings must not drift apart. */
   if (valid) {
     for (const int block : IndexRange(mask->blocks_num)) {
-      if (mask->block_kind[block] != SCULPT_LAYER_MASK_BLOCK_DENSE) {
+      if (mask->block_kind[block] == SCULPT_LAYER_MASK_BLOCK_UNIFORM) {
         continue;
       }
+      /* Normalized so an out-of-enum value read from the file does not survive into the tree, where
+       * every later reader would have to keep making the same allowance. */
+      mask->block_kind[block] = SCULPT_LAYER_MASK_BLOCK_DENSE;
       const int offset = mask->block_offset[block];
       const int extent = mask_block_extent(*mask, block);
       if (offset < 0 || extent <= 0 || int64_t(offset) + int64_t(extent) > int64_t(mask->data_num))

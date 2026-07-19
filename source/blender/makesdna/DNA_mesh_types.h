@@ -247,8 +247,7 @@ typedef struct SculptLayerMask {
   int block_size;
   int blocks_num;
   int data_num;
-  int flag;
-  char _pad[4];
+  char _pad[8];
   /** `blocks_num` entries of #eSculptLayerMaskBlockKind. */
   int8_t *block_kind;
   /** `blocks_num` entries: the value of a uniform block. Meaningless for a dense block. */

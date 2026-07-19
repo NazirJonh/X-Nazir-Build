@@ -152,8 +152,9 @@ bool node_is_descendant_of(const SculptLayerTreeNode &node, const SculptLayerGro
  * cursor was.
  *
  * \a after must be a child of \a dst, or null. Moving a folder into its own subtree would detach
- * that subtree from the root: the caller must reject that first (see #node_is_descendant_of), which
- * is asserted here rather than handled.
+ * that subtree from the root, so the call is refused and logged. Callers are still expected to
+ * reject it first (see #node_is_descendant_of) — the refusal here is a backstop, not the place to
+ * tell the user.
  */
 void node_move_into(Mesh &mesh,
                     SculptLayerTreeNode &node,
@@ -655,6 +656,15 @@ void mask_free(SculptLayerMask *mask);
 /** Deep copy. The shallow DNA struct copy done by #tree_copy must never be relied on. */
 SculptLayerMask *mask_copy(const SculptLayerMask &src);
 
+/**
+ * Heap bytes this mask owns: the struct plus its four arrays.
+ *
+ * Exists for undo accounting. An undo step that captures masks and does not report them is charged
+ * as free against the memory limit in the user preferences, so the stack is never trimmed for them
+ * — a long run of mask edits on a dense mesh would then hold far more than the limit allows.
+ */
+int64_t mask_size_in_bytes(const SculptLayerMask &mask);
+
 /** Value at a single element. Intended for tests and UI, not for hot loops — those go per block. */
 uint8_t mask_value_at(const SculptLayerMask &mask, int elem);
 
@@ -744,7 +754,11 @@ class MaskEditSuspendGuard {
 
  public:
   explicit MaskEditSuspendGuard(Main &bmain);
-  explicit MaskEditSuspendGuard(Object &object, MaskEditDomains domains = MaskEditDomains::All);
+  /* \a domains is deliberately not defaulted. Both current callers want #MaskEditDomains::GridsOnly,
+   * and the wider value is actively harmful to them (see the note above): a default would let a new
+   * call site park the mesh domain by omission, adding and removing `.sculpt_mask` on every
+   * evaluation. Spelling it out is one word at each site and removes the failure mode. */
+  explicit MaskEditSuspendGuard(Object &object, MaskEditDomains domains);
   ~MaskEditSuspendGuard();
 
   MaskEditSuspendGuard(const MaskEditSuspendGuard &) = delete;

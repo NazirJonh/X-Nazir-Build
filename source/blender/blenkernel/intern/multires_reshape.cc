@@ -247,8 +247,10 @@ void BKE_multires_sculpt_layer_apply_to_mdisps(Mesh &mesh, const SculptLayer &la
   if (!sculpt_grid_layers_applicable(mdisps, mesh.corners_num, grid_area)) {
     return;
   }
-  /* The bake writes the layer's *masked* contribution into the base, and the matching undo passes
-   * a negated \a factor through this same path — so the two cancel exactly. */
+  /* The bake writes the layer's *masked* contribution into the base, and the matching undo passes a
+   * negated \a factor through this same path, so both directions weigh every element identically.
+   * The recovery is not bit-exact — see the note on #accumulate_layer — but its error is bounded by
+   * one rounding step rather than growing with each bake / undo pair. */
   const MultiresGridSculptLayer scaled = {
       static_cast<const float3 *>(layer.data),
       factor,

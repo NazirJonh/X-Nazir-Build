@@ -302,6 +302,20 @@ static void rna_Mesh_sculpt_layers_active_set(PointerRNA *ptr,
 {
   Mesh *mesh = rna_mesh(ptr);
   bke::sculpt_layers::active_set(*mesh, static_cast<SculptLayer *>(value.data));
+  /* The REC exemption tracks the active layer, and every operator that changes the active layer
+   * re-derives it (through #commit_layers_change, or directly). Assigning through `bpy` reaches
+   * neither, so without this the exemption would stay on the previously active layer: an armed REC
+   * would then record into a layer whose mask is *not* exempt, which the exemption exists to
+   * prevent. The object has to be found rather than passed, exactly as
+   * #rna_sculpt_layer_node_mask_edit_active does, and for the same reasons. */
+  if (G_MAIN == nullptr) {
+    return;
+  }
+  for (Object &object : G_MAIN->objects) {
+    if (object.data == &mesh->id && (object.mode & OB_MODE_SCULPT)) {
+      ed::sculpt_paint::layers::rec_exemption_refresh(object);
+    }
+  }
 }
 
 static bool rna_Mesh_sculpt_layers_solo_active_get(PointerRNA *ptr)

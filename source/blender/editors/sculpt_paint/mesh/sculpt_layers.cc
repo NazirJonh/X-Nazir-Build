@@ -691,6 +691,13 @@ bool sync_multires_for_rna(Main &bmain, Scene * /*scene*/, Mesh &mesh, SculptLay
     return false; /* No live grid session; caller falls back to ID_RECALC_GEOMETRY. */
   }
 
+  /* Settle an open weight-mask session before the rebuild below discards it. The layer operators
+   * refuse outright instead (#mask_edit_refuse_ccg_rebuild), but an RNA update callback runs *after*
+   * the value has already changed, so there is nothing left to refuse — closing keeps the painted
+   * weights (compressed onto the node) instead of letting the rebuilt CCG drop them. The closed
+   * session is visible in the UI: the row's mask icon reverts. */
+  mask_edit_end(*object);
+
   /* Honest re-evaluation: the depsgraph rebuilds the CCG from `MDisps + sum(enabled layers)`,
    * which already reflects the just-changed influence/visibility. MDisps are not touched (the
    * base never contains layer contributions). Undo is handled by the layer operators — an RNA
@@ -1714,6 +1721,12 @@ static wmOperatorStatus layer_add_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
+  /* Commits below without closing an open session first, so the multires rebuild would discard it.
+   * See #mask_edit_refuse_ccg_rebuild; the operators that instead *close* the session (removal,
+   * validate, select, the group removals, the bakes) call #mask_edit_end and are not refused. */
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
   SculptLayer *layer = nullptr;
@@ -1955,6 +1968,9 @@ static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   Mesh &mesh = *ctx.mesh;
 
   const int anchor_uid = RNA_int_get(op->ptr, "anchor_uid");
@@ -2118,6 +2134,9 @@ static wmOperatorStatus layer_duplicate_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   SculptLayer *src = bke::sculpt_layers::active_get(*ctx.mesh);
   if (!src) {
     return OPERATOR_CANCELLED;
@@ -2188,13 +2207,12 @@ static bool node_chain_carries_mask(const SculptLayerTreeNode &node)
   if (node.mask != nullptr) {
     return true;
   }
-  /* Terminates at the root, whose #SculptLayerTreeNode::parent is null. */
-  for (const SculptLayerGroup *group = node.parent; group != nullptr; group = group->base.parent) {
-    if (group->base.mask != nullptr) {
-      return true;
-    }
-  }
-  return false;
+  /* Routed through #find_ancestor rather than walking `parent` by hand: that is the module's single
+   * cycle-safe ancestor walk, and a chain that closes on itself — a corrupt file, a future editing
+   * bug — would otherwise hang this operator instead of merely refusing it. */
+  return bke::sculpt_layers::find_ancestor(node.parent, [](const SculptLayerGroup &group) {
+           return group.base.mask != nullptr;
+         }) != nullptr;
 }
 
 static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
@@ -2263,6 +2281,12 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
       *ctx.mesh, active->base, undo::PayloadCapture::NodeRemoved));
   bke::sculpt_layers::remove(*ctx.mesh, *active);
   bke::sculpt_layers::active_set(*ctx.mesh, below);
+  /* The active layer changed, and the exemption bit died with the layer that carried it. Left
+   * unrefreshed, an armed REC would record into `below` with no layer exempt at all, which is the
+   * one state the exemption exists to prevent. Cheap enough to call unconditionally, and it cannot
+   * move the surface here: the masked participants this operator refuses above are exactly the ones
+   * whose composite the exemption would change, which is why no #commit_layers_change follows. */
+  rec_exemption_refresh(*ctx.object);
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
   undo::push_end(*ctx.object);
 
@@ -2432,7 +2456,23 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
    *   #bke::sculpt_layers::bake_vert_layers_into_new_shape_key), which keeps the surface as it is
    *   while leaving the baked result mutable / dial-able like any other key. Absolute keys have no
    *   such dial, so there the contribution is folded into every block instead. */
+  /* Read before the close below, which clears it. Zero when no session is open, which is the common
+   * case. */
+  const SculptSession *bake_ss = session_of(*ctx.object);
+  const int session_uid = bake_ss ? bake_ss->layers.mask_edit.node_uid : 0;
+  /* A bake drops every layer, so it closes an open weight-mask editing session for the same reason
+   * #layer_remove_exec does: left open across the deletion of its own node the session becomes
+   * unreachable — the row and its mask icon are gone with the layer — while the node's weights stay
+   * in the standard mask storage with the user's own mask parked, silently masking every subsequent
+   * brush by a layer that no longer exists. Closed *before* the fold below so the bake applies the
+   * mask the user is currently painting: the fold reads the mask off the node
+   * (#node_mask_for_composite / #grid_masks_for_composite), and during a session the node still
+   * holds the pre-session snapshot while the live edits sit in the standard mask storage. */
+  mask_edit_end(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  if (session_uid != 0) {
+    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
+  }
   const KeyBlock *bake_key = ctx.grids ?
                                  nullptr :
                                  bke::sculpt_layers::bake_vert_layers_into_new_shape_key(*ctx.mesh);
@@ -2552,8 +2592,18 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
         C, "SCULPT_OT_layer_bake", wm::OpCallContext::ExecDefault, nullptr, nullptr);
   }
 
+  /* Only the bootstrap path reaches here; the delegating branch above closes the session inside
+   * #layer_bake_exec. Same reasoning as there: the layers this drops include the session's own node,
+   * and the fold below has to see the mask the user is currently painting. */
+  const SculptSession *bake_ss = session_of(*ctx.object);
+  const int session_uid = bake_ss ? bake_ss->layers.mask_edit.node_uid : 0;
+  mask_edit_end(*ctx.object);
+
   const short pre_bake_shapenr = ctx.object->shapenr;
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  if (session_uid != 0) {
+    undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
+  }
 
   /* Bootstrap the Key: mirrors #insert_meshkey (object.cc). #BKE_key_add's ID_ME case already
    * strips the layer contribution out of `vert_positions` (see
@@ -2725,6 +2775,9 @@ static wmOperatorStatus layer_clear_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
   if (!layer) {
     return OPERATOR_CANCELLED;
@@ -2753,6 +2806,9 @@ static wmOperatorStatus layer_invert_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
   if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
@@ -3039,6 +3095,9 @@ static wmOperatorStatus layer_mask_isolate_exec(bContext *C, wmOperator *op)
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
   if (!layer || !layer->data) {
     return OPERATOR_CANCELLED;
@@ -3119,6 +3178,9 @@ static wmOperatorStatus layer_set_influence_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
   if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
@@ -3570,6 +3632,9 @@ static wmOperatorStatus layer_toggle_visibility_exec(bContext *C, wmOperator *op
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
+    return OPERATOR_CANCELLED;
+  }
   SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
   if (!layer) {
     return OPERATOR_CANCELLED;
@@ -3603,6 +3668,9 @@ static wmOperatorStatus layer_solo_base_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
   if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   Mesh &mesh = *ctx.mesh;
@@ -3673,6 +3741,9 @@ static wmOperatorStatus layer_group_toggle_visibility_exec(bContext *C, wmOperat
 {
   OpContext ctx;
   if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   const int group_uid = RNA_int_get(op->ptr, "group_uid");
@@ -3773,6 +3844,9 @@ static wmOperatorStatus layer_group_add_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
   if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   Mesh &mesh = *ctx.mesh;
@@ -4033,6 +4107,9 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
   if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   Mesh &mesh = *ctx.mesh;
@@ -4414,6 +4491,9 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
   if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
   SculptSession *ss = session_of(*ctx.object);

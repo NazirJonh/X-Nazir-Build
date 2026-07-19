@@ -1156,4 +1156,88 @@ TEST_F(sculpt_layers_tree, composite_weights_match_the_shared_mask_authority)
   expect_composite_weights_match_authority(*layer, result, eff);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Corrupt tree guards
+ * \{ */
+
+/**
+ * Point \a group's child list at \a node without touching \a node's own links.
+ *
+ * This is the one way to reproduce what a damaged `.blend` produces: \a node stays a member of the
+ * list it really belongs to — its #SculptLayerTreeNode::next and #SculptLayerTreeNode::prev are left
+ * alone — while a second #ListBase claims it as well. A walk from the root then reaches \a node
+ * twice, which is the only shape a cycle can take in an intrusive list.
+ *
+ * #node_move_into cannot express this: it maintains both ends, so a folder moved below itself leaves
+ * the root's reach entirely and no descendant walk ever sees it. That is a different failure (lost
+ * subtree, covered by #move_into_own_subtree_is_refused) and would not exercise these guards.
+ */
+static void graft_child_raw(SculptLayerGroup &group, SculptLayerTreeNode &node)
+{
+  group.children.first = &node;
+  group.children.last = &node;
+}
+
+/** Builds `root -> [Outer -> [Inner], Tail]`, then makes `Inner`'s list claim `Outer` as well. */
+static void build_interleaved_mesh(Mesh &mesh)
+{
+  SculptLayerGroup *outer = group_add(mesh, "Outer", 0);
+  SculptLayerGroup *inner = group_add(mesh, "Inner", 0);
+  add(mesh, "Tail", SCULPT_LAYER_DOMAIN_VERT, 0);
+  node_move_into(mesh, inner->base, *outer, nullptr);
+  graft_child_raw(*inner, outer->base);
+}
+
+TEST_F(sculpt_layers_tree, free_terminates_on_interleaved_child_lists)
+{
+  /* Without the visited set #group_gather_owned descends Outer -> Inner -> Outer until the stack
+   * runs out; with it, every node is collected — and so released — exactly once. Reaching the end of
+   * this test at all is the assertion; a second release of the same node, or a link read after the
+   * node holding it was freed, is what the address sanitizer catches. */
+  build_interleaved_mesh(*mesh);
+
+  tree_free(*mesh);
+
+  EXPECT_EQ(mesh->sculpt_layer_root, nullptr);
+}
+
+TEST_F(sculpt_layers_tree, copy_terminates_on_interleaved_child_lists)
+{
+  /* The same corruption through the copy path: the node claimed by two lists is copied once, so the
+   * copy is a finite tree rather than an unbounded expansion of the repeated branch. */
+  build_interleaved_mesh(*mesh);
+
+  Mesh *copy = BKE_mesh_new_nomain(0, 0, 0, 0);
+  tree_copy(*copy, *mesh);
+
+  ASSERT_NE(root_group(*copy), nullptr);
+  Vector<SculptLayerTreeNode *> nodes;
+  gather_nodes(*root_group(*copy), nodes);
+  EXPECT_LE(nodes.size(), 3) << "the repeated branch was copied more than once";
+
+  BKE_id_free(nullptr, copy);
+}
+
+TEST_F(sculpt_layers_tree, move_into_own_subtree_is_refused)
+{
+  /* Moving a folder below itself takes the whole subtree out of the root's reach: the node leaves
+   * the list the root can walk and joins one only the subtree can. Every descendant walk starts at
+   * the root, so nothing would notice — the layers would simply be gone, and leak in #tree_free.
+   * Release builds have to refuse this, not merely assert it. */
+  SculptLayerGroup *outer = group_add(*mesh, "Outer", 0);
+  SculptLayerGroup *inner = group_add(*mesh, "Inner", 0);
+  node_move_into(*mesh, inner->base, *outer, nullptr);
+
+  ASSERT_NE(root_group(*mesh), nullptr);
+  SculptLayerGroup &root = *root_group(*mesh);
+
+  node_move_into(*mesh, outer->base, *inner, nullptr);
+
+  EXPECT_EQ(outer->base.parent, &root) << "the folder was moved into its own subtree";
+  EXPECT_EQ(children_of(root).size(), 1);
+  EXPECT_EQ(children_of(*outer).size(), 1);
+}
+
+/** \} */
+
 }  // namespace blender::bke::sculpt_layers::tests

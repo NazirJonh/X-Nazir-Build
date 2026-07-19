@@ -23,6 +23,7 @@
 
 #include "BLI_array.hh"
 #include "BLI_listbase.h"
+#include "BLI_set.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
 #include "BLI_task.hh"
@@ -484,10 +485,22 @@ void node_move_into(Mesh &mesh,
   BLI_assert(after == nullptr || after->parent == &dst);
   BLI_assert(after != &node);
   if (const SculptLayerGroup *moved = node_as_group(&node)) {
-    /* Either would detach the moved subtree from the root; the caller rejects it (see
-     * #node_is_descendant_of), which is asserted rather than handled. */
+    /* Either would detach the moved subtree from the root: the node leaves the list the root can
+     * reach and joins one only the subtree itself can. Nothing downstream would notice, because
+     * every descendant walk in this module starts at the root — so the failure is a silent loss of
+     * the folder and everything under it, plus a leak in #tree_free, rather than the runaway
+     * recursion an interleaved child list produces. The callers reject this first (see
+     * #node_is_descendant_of), which is why it is still asserted; the early return is what a release
+     * build has in place of that assert. */
     BLI_assert(&dst != moved);
     BLI_assert(!node_is_descendant_of(dst.base, *moved));
+    if (&dst == moved || node_is_descendant_of(dst.base, *moved)) {
+      CLOG_WARN(&LOG,
+                "Sculpt layer folder '%s' was not moved: the destination '%s' is inside it.",
+                node.name,
+                dst.base.name);
+      return;
+    }
   }
 
   SculptLayerGroup *src_parent = node.parent;
@@ -932,8 +945,14 @@ CompositeMask grid_masks_for_composite(const SculptLayer &layer,
  * The single spelling of a layer's weighted contribution, and deliberately so: #combine_layers_mesh
  * adds it and #derive_base_mesh subtracts it back off to recover the un-layered base, so a forward
  * and an inverse written separately would drift the base a little on every flush — silently and
- * cumulatively. Here the inverse is the *same* code with a negated \a weight, and negation is exact
- * in binary floating point, so the two cancel bit for bit.
+ * cumulatively. Here the inverse is the *same* code with a negated \a weight.
+ *
+ * That makes the two agree on the weight *exactly* — negation is exact in binary floating point, and
+ * every factor #mask_elem_weight applies is shared — but it does not make the round trip exact:
+ * `fl(fl(b + x) - x)` differs from `b` by up to a rounding step, and with several layers both
+ * directions walk the list in the same order rather than in opposite ones. The residual is bounded
+ * by the addition's rounding and does not accumulate the way a mismatched pair of formulas would,
+ * which is the property being bought here — not bit-for-bit recovery of the base.
  *
  * The arithmetic itself is not spelled here but delegated to #mask_block_weight / #mask_elem_weight,
  * which the multires grid composite folds through as well. That indirection is the point: with the
@@ -1450,12 +1469,21 @@ void derive_base_mesh(const Span<float3> positions,
  * \{ */
 
 /* Copy \a src's children into \a dst, recursively, rebuilding the parent back-pointers as it goes.
- * \a dst is already a copy of \a src's own fields; only the subtree below it is filled in here. */
-static void group_copy_children(SculptLayerGroup &dst, const SculptLayerGroup &src)
+ * \a dst is already a copy of \a src's own fields; only the subtree below it is filled in here.
+ *
+ * \a visited serves the same purpose as in #group_gather_owned, from the other side: a source node
+ * claimed by two child lists is copied once, so the copy is a finite tree rather than an unbounded
+ * expansion of the repeated branch — and cannot itself be freed twice. */
+static void group_copy_children(SculptLayerGroup &dst,
+                                const SculptLayerGroup &src,
+                                Set<const SculptLayerTreeNode *> &visited)
 {
   /* The shallow copy of \a src brought its child links along, which point into the *source* tree. */
   dst.children.clear_no_delete();
   for (SculptLayerTreeNode &node : src.children) {
+    if (!visited.add(&node)) {
+      continue;
+    }
     SculptLayerTreeNode *copy = nullptr;
     if (const SculptLayerGroup *src_group = node_as_group(&node)) {
       SculptLayerGroup *group = MEM_new<SculptLayerGroup>(__func__, *src_group);
@@ -1469,7 +1497,7 @@ static void group_copy_children(SculptLayerGroup &dst, const SculptLayerGroup &s
         group->base.mask = mask_copy(*src_group->base.mask);
       }
       group_runtime_ensure(*group);
-      group_copy_children(*group, *src_group);
+      group_copy_children(*group, *src_group, visited);
       copy = &group->base;
     }
     else {
@@ -1497,29 +1525,57 @@ void tree_copy(Mesh &dst, const Mesh &src)
   root->base.mask = (src_root.base.mask != nullptr) ? mask_copy(*src_root.base.mask) : nullptr;
   group_runtime_ensure(*root);
   dst.sculpt_layer_root = root;
-  group_copy_children(*root, src_root);
+  Set<const SculptLayerTreeNode *> visited;
+  visited.add(&src_root.base);
+  group_copy_children(*root, src_root, visited);
 }
 
-/* Free every child of \a group, recursively; \a group itself is left to the caller. */
-static void group_free_children(SculptLayerGroup &group)
+/* Collect every node \a group owns, recursively; \a group itself is left to the caller.
+ *
+ * Split from the freeing below rather than releasing as it walks, which is what the recursion used
+ * to do. Two reasons, both of which only appear once a tree is corrupt:
+ *
+ * - \a visited keeps a node claimed by two child lists from being released twice.
+ * - Nothing may be freed while the walk is still reading #SculptLayerTreeNode::next. Interleaved
+ *   lists let this walk leave the list it started on and continue through a *parent's* remaining
+ *   children; freeing as it went would then leave the outer loop stepping onto a node it had already
+ *   released, since #ListBaseT::items_mutable only caches one link ahead. Gathering first means
+ *   every link is read before any node is gone.
+ *
+ * The order is parents before children, and deliberately not reversed by the caller: nothing in the
+ * release below follows a link between nodes, so no order is safer than another. */
+static void group_gather_owned(SculptLayerGroup &group,
+                               Set<const SculptLayerTreeNode *> &visited,
+                               Vector<SculptLayerTreeNode *> &r_owned)
 {
-  for (SculptLayerTreeNode &node : group.children.items_mutable()) {
+  for (SculptLayerTreeNode &node : group.children) {
+    if (!visited.add(&node)) {
+      continue;
+    }
+    r_owned.append(&node);
     if (SculptLayerGroup *child = node_as_group(&node)) {
-      group_free_children(*child);
-      group_runtime_free(*child);
+      group_gather_owned(*child, visited, r_owned);
     }
-    else if (SculptLayer *layer = node_as_layer(&node)) {
-      if (layer->data) {
-        MEM_delete_void(layer->data);
-      }
-    }
-    /* Tolerates null, so folders and layers without a mask need no branch here. */
-    mask_free(node.mask);
-    /* #MEM_delete_void rather than #MEM_delete: the blend-file reader allocates its nodes C-style
-     * and this one call accepts both origins. See the allocation notes in `BKE_sculpt_layers.hh`. */
-    MEM_delete_void(static_cast<void *>(&node));
   }
   group.children.clear_no_delete();
+}
+
+/* Release one node and everything hanging off it. The node's links are never read. */
+static void node_free(SculptLayerTreeNode &node)
+{
+  if (SculptLayerGroup *group = node_as_group(&node)) {
+    group_runtime_free(*group);
+  }
+  else if (SculptLayer *layer = node_as_layer(&node)) {
+    if (layer->data) {
+      MEM_delete_void(layer->data);
+    }
+  }
+  /* Tolerates null, so folders and layers without a mask need no branch here. */
+  mask_free(node.mask);
+  /* #MEM_delete_void rather than #MEM_delete: the blend-file reader allocates its nodes C-style
+   * and this one call accepts both origins. See the allocation notes in `BKE_sculpt_layers.hh`. */
+  MEM_delete_void(static_cast<void *>(&node));
 }
 
 void tree_free(Mesh &mesh)
@@ -1527,12 +1583,20 @@ void tree_free(Mesh &mesh)
   if (mesh.sculpt_layer_root == nullptr) {
     return;
   }
-  group_free_children(*mesh.sculpt_layer_root);
-  /* The root is the one group #group_free_children never reaches — it only walks children — so its
+  /* Seeded with the root for the same reason as in #tree_blend_read: a corrupt list naming the root
+   * as a child is then just another repeat visit rather than a special case. */
+  Set<const SculptLayerTreeNode *> visited;
+  visited.add(&mesh.sculpt_layer_root->base);
+  Vector<SculptLayerTreeNode *> owned;
+  group_gather_owned(*mesh.sculpt_layer_root, visited, owned);
+  for (SculptLayerTreeNode *node : owned) {
+    node_free(*node);
+  }
+  /* The root is the one group #group_gather_owned never reaches — it only walks children — so its
    * runtime is released here. No span is left stale by the loop above: every group it frees has its
    * runtime freed with it, and the root's goes now. */
   group_runtime_free(*mesh.sculpt_layer_root);
-  /* The root is the one node #group_free_children never reaches, as with its runtime above. */
+  /* The root is the one node #group_gather_owned never reaches, as with its runtime above. */
   mask_free(mesh.sculpt_layer_root->base.mask);
   MEM_delete_void(static_cast<void *>(mesh.sculpt_layer_root));
   mesh.sculpt_layer_root = nullptr;
@@ -1598,7 +1662,10 @@ void tree_blend_write(BlendWriter *writer, Mesh &mesh)
   group_blend_write_recursive(writer, *mesh.sculpt_layer_root);
 }
 
-static void group_blend_read_children(BlendDataReader *reader, SculptLayerGroup &group)
+static void group_blend_read_children(BlendDataReader *reader,
+                                      SculptLayerGroup &group,
+                                      Set<const SculptLayerGroup *> &visited,
+                                      bool &r_corrupt)
 {
   BLO_read_struct_list(reader, SculptLayerTreeNode, &group.children);
   for (SculptLayerTreeNode &node : group.children) {
@@ -1612,12 +1679,25 @@ static void group_blend_read_children(BlendDataReader *reader, SculptLayerGroup 
       mask_blend_read(reader, node.mask);
     }
     if (SculptLayerGroup *child = node_as_group(&node)) {
+      /* A group reached a second time means the file's child lists are interleaved: a
+       * #ListBase::first pointing at a node that belongs, by its own #SculptLayerTreeNode::next and
+       * #SculptLayerTreeNode::prev, to another list. That is the only shape a cycle can take here —
+       * a node honestly moved into its own subtree leaves the root's reach entirely and is never
+       * walked into — and descending again would recurse until the stack runs out.
+       *
+       * The node is left exactly where it was read. The two lists cannot both be right, and nothing
+       * available here can tell which one is, so re-linking would be a guess written into the user's
+       * file. Its runtime and its own children were already resolved by the visit that added it. */
+      if (!visited.add(child)) {
+        r_corrupt = true;
+        continue;
+      }
       /* Runtime state is never persisted, and a reader-allocated group has had no constructor run on
        * it. Nulled before the ensure so that anything the file happens to hold in that slot is
        * dropped rather than taken for a live runtime. */
       child->runtime = nullptr;
       group_runtime_ensure(*child);
-      group_blend_read_children(reader, *child);
+      group_blend_read_children(reader, *child, visited, r_corrupt);
     }
     else if (SculptLayer *layer = node_as_layer(&node)) {
       /* Defense in depth, not a versioning step. #group_blend_write_recursive already strips this
@@ -1660,7 +1740,22 @@ void tree_blend_read(BlendDataReader *reader, Mesh &mesh)
   /* Idempotent, and a no-op on the branch where #root_group_ensure just built the root. */
   group_runtime_ensure(*mesh.sculpt_layer_root);
   mesh.sculpt_layer_root->base.parent = nullptr;
-  group_blend_read_children(reader, *mesh.sculpt_layer_root);
+  /* Seeded with the root, so a file in which the root itself appears as somebody's child is caught
+   * by the same test rather than by a special case. */
+  Set<const SculptLayerGroup *> visited;
+  visited.add(mesh.sculpt_layer_root);
+  bool corrupt = false;
+  group_blend_read_children(reader, *mesh.sculpt_layer_root, visited, corrupt);
+  if (corrupt) {
+    /* #CLOG_ERROR rather than #CLOG_WARN: this is the only place the user is told the file is
+     * damaged, and the only thing separating "this mesh had no sculpt layers" from "this mesh lost
+     * some". Reported before the refresh below so the log order matches the order things were read
+     * in. */
+    CLOG_ERROR(&LOG,
+               "Sculpt layer tree of mesh '%s' is corrupt: its folder lists reference each other, "
+               "so part of the tree was not read. The affected folders are missing their contents.",
+               mesh.id.name + 2);
+  }
   /* #group_influence_cached is derived state: the value read from the file is stale (or 0 from a file
    * predating the field), so rebuild it from the reconstructed tree. Float-only, since the flags read
    * from the file are authoritative and must not be touched here. */

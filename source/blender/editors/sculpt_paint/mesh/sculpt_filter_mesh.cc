@@ -2514,6 +2514,12 @@ static wmOperatorStatus sculpt_mesh_filter_start(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  /* Placed after #BKE_sculpt_update_object_for_edit so the session queried below is the live one.
+   * Both the modal (invoke) and the scripted (exec) paths funnel through here. */
+  if (layers::mask_edit_refuse_deform_op(op, ob)) {
+    return OPERATOR_CANCELLED;
+  }
+
   SculptSession &ss = *ob.runtime->sculpt_session;
 
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);

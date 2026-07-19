@@ -67,6 +67,7 @@ struct SculptLayerTreeNode;
 struct ReportList;
 struct wmKeyConfig;
 struct wmKeyMap;
+struct wmOperator;
 struct wmOperatorType;
 
 /* -------------------------------------------------------------------- */
@@ -1351,6 +1352,42 @@ inline bool mask_edit_blocks_brush(const int mask_edit_uid, const int sculpt_bru
 {
   return mask_edit_uid != 0 && !brush_type_is_attribute_only(sculpt_brush_type);
 }
+
+/**
+ * Refuse (reporting) an operator that moves vertices outside the brush stroke path while a
+ * weight-mask editing session is open. True when it was refused.
+ *
+ * The reasoning is #mask_edit_blocks_brush's, applied to the operators that reach the surface
+ * without going through a #PaintStroke: the mesh and cloth filters, the trim and line-project
+ * gestures, symmetrize, the dyntopo operators. With the user's own mask parked, every one of them
+ * reads the *layer's* weights wherever it consults the mask, so the result would be shaped by a mask
+ * the user cannot see and did not paint — and unlike a refused brush, a filter has already been
+ * applied by the time anything could notice.
+ *
+ * The topology-changing members are worse still: a changed element count sends #mask_edit_end down
+ * its destructive branch, which loses the user's parked mask outright.
+ *
+ * Refused rather than closing the session, for the reason #mask_edit_blocks_brush is: ending it
+ * silently would throw away an in-progress mask edit as a side effect of an unrelated action.
+ */
+bool mask_edit_refuse_deform_op(wmOperator *op, const Object &object);
+
+/**
+ * Refuse (reporting) a layer-tree operator whose commit rebuilds the multires CCG while a weight-mask
+ * editing session is open on the grid domain. True when it was refused.
+ *
+ * #commit_layers_change reaches `DEG_id_tag_update(..., ID_RECALC_GEOMETRY)` on the multires path,
+ * which *rebuilds* the CCG rather than flushing it. A grid session keeps its live weights in
+ * #SubdivCCG::masks while #SculptLayerTreeNode::mask still holds the pre-session snapshot, so the
+ * rebuild regenerates the array from `CD_GRID_PAINT_MASK`, #SculptLayerMaskEdit::ccg_id stops
+ * matching, and the close then refuses to compress — the edit is gone with nothing said. Refusing up
+ * front is what turns that silent loss into a message.
+ *
+ * Scoped to the grid domain deliberately: the mesh path recomposes in place
+ * (#recompute_mesh_canonical) and leaves the session's expanded weights untouched, so refusing there
+ * would restrict the UI for nothing.
+ */
+bool mask_edit_refuse_ccg_rebuild(wmOperator *op, const Object &object);
 
 /** \} */
 

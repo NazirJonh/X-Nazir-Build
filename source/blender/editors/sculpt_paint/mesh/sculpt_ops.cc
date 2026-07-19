@@ -236,6 +236,15 @@ static wmOperatorStatus symmetrize_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  /* Mirroring changes the element count, which leaves every sculpt layer describing a domain that no
+   * longer exists — the same reason trim, dyntopo and the remesh operators refuse. Covers an open
+   * weight-mask editing session as a consequence: a session cannot exist without a layer to hold it.
+   * Conditioned on `!ss.bm` exactly as #sculpt_dyntopo.cc's own check is: under dyntopo the live
+   * geometry is the BMesh and the stored layers do not describe it. */
+  if (!ss.bm && !layers::destructive_edit_check(*id_cast<const Mesh *>(ob.data), op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
+
   switch (pbvh->type()) {
     case bke::pbvh::Type::BMesh: {
       /* Dyntopo Symmetrize. */

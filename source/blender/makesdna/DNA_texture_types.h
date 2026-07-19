@@ -316,6 +316,16 @@ enum eMTex_CurvePatchStampMode : char {
   MTEX_CURVE_PATCH_STAMP_STAMPS = 1,
 };
 
+/** #MTex::curve_patch_stamp_projection — how a stamp's texture frame is built.
+ *
+ * CURVE keeps the stamp in the ribbon's curvilinear `(s, u)` space, so the texture bends with the
+ * control curve. PLANAR freezes a rigid world frame per stamp, so the texture keeps its shape
+ * through arbitrarily sharp turns and along a varying per-point radius. */
+enum eMTex_CurvePatchStampProjection : char {
+  MTEX_CURVE_PATCH_STAMP_PROJ_CURVE = 0,
+  MTEX_CURVE_PATCH_STAMP_PROJ_PLANAR = 1,
+};
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -372,6 +382,14 @@ struct MTex {
   /** Curve Patch Stamps mode: per-stamp relief strength randomization as a percentage (RNA-clamped
    * 0..100). Like the size, it only ever reduces. */
   char curve_patch_stamp_strength_random = 0;
+  /** Curve Patch Stamps mode: which coordinate frame a stamp's texture is sampled in. See
+   * #eMTex_CurvePatchStampProjection. Default 0 (CURVE) reproduces the original behavior, so no
+   * versioning code is needed for files written before this field existed. */
+  char curve_patch_stamp_projection = MTEX_CURVE_PATCH_STAMP_PROJ_CURVE;
+  /** The ten `char` fields above exactly filled what used to be `_pad2`, so this eleventh one
+   * leaves `object` below misaligned. makesdna does NOT insert alignment padding on its own (see
+   * `check_member_alignment()` in `makesdna.cc`) -- it must be declared. */
+  char _pad2[7] = {};
   struct Object *object = nullptr;
   struct Tex *tex = nullptr;
   char uvname[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";

@@ -413,8 +413,12 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
          * center. Sizing the window to the radius alone would drop a rotated stamp whose corner
          * still covers this vertex, clipping the stamp's corners once Random Rotation is non-zero.
          * The per-stamp test below is done in the stamp's own frame and stays exact; this bound
-         * only has to be conservative. */
-        const float max_extent = curve_patch_stamp_reach(patch.frozen_params.radius);
+         * only has to be conservative.
+         *
+         * The bound itself is resolved once per restamp into `CurvePatchCache::stamp_search_reach`
+         * and shared with the seam wrap and the ribbon's end extension -- see that field's own
+         * comment for why the three must not be allowed to drift apart. */
+        const float max_extent = patch.stamp_search_reach;
         auto lower = std::lower_bound(patch.stamps.begin(),
                                       patch.stamps.end(),
                                       s - max_extent,
@@ -424,17 +428,37 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
         bool hit = false;
         float best_abs = 0.0f;
         for (auto it = lower; it != patch.stamps.end() && it->center_v <= s + max_extent; ++it) {
-          const float dv = s - it->center_v;
-          /* `u` is the ribbon's normalized lateral coordinate while the stamp centers are in world
-           * units, so scale it by the same widened `lateral_scale_at_s` the `lateral` reconstruction
-           * above uses -- the scale the ribbon was actually built with, which is what makes a stamp
-           * jittered all the way out to `|center_u| == jitter_amount` reachable at all. */
-          const float du = u * lateral_scale_at_s - it->center_u;
-          /* Rotate the offset INTO the stamp's own frame, hence the negated angle. */
-          const float cos_a = std::cos(-it->angle);
-          const float sin_a = std::sin(-it->angle);
-          const float local_v = dv * cos_a - du * sin_a;
-          const float local_u = dv * sin_a + du * cos_a;
+          float local_v;
+          float local_u;
+          if (patch.frozen_params.stamp_projection == MTEX_CURVE_PATCH_STAMP_PROJ_PLANAR) {
+            /* Rigid frame: the stamp's square is a square in the WORLD, so a vertex's stamp-local
+             * coordinates are plain projections onto the frozen axes. The component along
+             * `plane_normal` is simply dropped, which is what makes this a planar projection --
+             * off-plane vertices were already rejected above by `normal_dist` and the surface
+             * orientation test, so nothing new leaks onto perpendicular faces here.
+             *
+             * This is the whole point of the mode: the curvilinear branch below measures `dv` in
+             * arc length along the centerline, and on a bend the lines of constant `u` fan out, so
+             * the same world distance spans different `dv` on the inside and the outside of the
+             * turn. That shear is what bends the texture. A dot product cannot shear. */
+            const float3 d = sample_co - it->origin;
+            local_v = math::dot(d, it->axis_v);
+            local_u = math::dot(d, it->axis_u);
+          }
+          else {
+            const float dv = s - it->center_v;
+            /* `u` is the ribbon's normalized lateral coordinate while the stamp centers are in world
+             * units, so scale it by the same widened `lateral_scale_at_s` the `lateral`
+             * reconstruction above uses -- the scale the ribbon was actually built with, which is
+             * what makes a stamp jittered all the way out to `|center_u| == jitter_amount`
+             * reachable at all. */
+            const float du = u * lateral_scale_at_s - it->center_u;
+            /* Rotate the offset INTO the stamp's own frame, hence the negated angle. */
+            const float cos_a = std::cos(-it->angle);
+            const float sin_a = std::sin(-it->angle);
+            local_v = dv * cos_a - du * sin_a;
+            local_u = dv * sin_a + du * cos_a;
+          }
           if (std::abs(local_v) > it->half_extent || std::abs(local_u) > it->half_extent) {
             continue;
           }
@@ -977,6 +1001,10 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   /* Likewise unconditional, so Ribbon mode and the no-brush fall-back leave the strip unextended
    * and therefore bit-for-bit what it was before Stamps mode existed. */
   patch.ribbon_end_margin = 0.0f;
+  /* Likewise unconditional: `stamp_mode` is live-synced per restamp, so without this a Stamps ->
+   * Ribbon toggle mid-edit would leave the bound holding a stale value from the last Stamps-mode
+   * restamp instead of the "no stamps to bound" state Ribbon mode actually has. */
+  patch.stamp_search_reach = 0.0f;
   if (patch.frozen_params.stamp_mode == MTEX_CURVE_PATCH_STAMP_STAMPS) {
     const Brush *stamp_brush = BKE_paint_brush_for_read(cache.paint);
     if (stamp_brush != nullptr) {
@@ -1003,15 +1031,31 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
                                stamp_brush->mtex.random_angle,
                                patch.frozen_params.stamp_seed,
                                patch.stamps);
+      /* PLANAR tests candidate vertices against a rigid WORLD-space frame, but this reach is still
+       * an ARC-LENGTH window. On a bend the chord is shorter than the arc, so a vertex inside a
+       * stamp's world square can have an `s` outside this window and get silently clipped. The
+       * arc/chord ratio for a circular bend of turn angle theta across the stamp's reach is
+       * `sin(theta/2) / (theta/2)`, which peaks at `PI / 2 ~= 1.571` for a 180-degree hairpin -- the
+       * worst turn a single stamp's span can encounter. 1.6 rounds that up. The bound only has to
+       * be conservative: the per-stamp test in the candidate loop below is exact, so an over-wide
+       * window just costs a few extra candidates, while a too-narrow one silently clips stamps. */
+      constexpr float PLANAR_BEND_SLACK = 1.6f;
+      /* Resolve the one bound every consumer below shares. On top of the bend slack above, PLANAR
+       * also adds `jitter_amount`: a stamp pushed sideways off the curve keeps a rigid frame, so
+       * its square spans more arc length than its own corner reach accounts for. CURVE takes
+       * neither term and keeps the historical value, so that projection is unaffected. */
+      patch.stamp_search_reach = curve_patch_stamp_reach(patch.frozen_params.radius);
+      if (patch.frozen_params.stamp_projection == MTEX_CURVE_PATCH_STAMP_PROJ_PLANAR) {
+        patch.stamp_search_reach = patch.stamp_search_reach * PLANAR_BEND_SLACK + jitter_amount;
+      }
       /* A closed curve has no ends to extend (see `ribbon_end_margin` below), so the stamp at the
        * join would lose the half that reaches into `v < 0` -- which on a loop is not outside the
        * curve but the stretch just before the join. Wrap those stamps around instead, so both
        * halves are present and meet exactly at the seam. The bound must be the same one the
-       * per-vertex search window uses, hence the shared #curve_patch_stamp_reach. */
+       * per-vertex search window uses, hence the shared `stamp_search_reach`. */
       if (patch.spline.cyclic) {
-        curve_patch_stamps_add_cyclic_wrap(patch.stamps,
-                                           patch.spline.total_length(),
-                                           curve_patch_stamp_reach(patch.frozen_params.radius));
+        curve_patch_stamps_add_cyclic_wrap(
+            patch.stamps, patch.spline.total_length(), patch.stamp_search_reach);
       }
       /* Stamps pushed sideways by jitter would fall outside the ribbon and be clipped by the LUT's
        * edge, so the strip has to cover the widest possible excursion. Only jitter needs this: the
@@ -1027,8 +1071,15 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
        * curve visibly bare.
        *
        * #curve_patch_stamp_reach is a stamp's corner reach; `jitter_amount` covers a center jittered
-       * further along the curve. The same shared bound the per-vertex search window uses on `v`. */
-      patch.ribbon_end_margin = curve_patch_stamp_reach(patch.frozen_params.radius) + jitter_amount;
+       * further along the curve. The same shared bound the per-vertex search window uses on `v`.
+       *
+       * `stamp_search_reach` already carries `jitter_amount` under PLANAR, so adding it again there
+       * would double-count. Take the larger of the two instead: the margin must cover BOTH a
+       * stamp's corner reach past the end and a center jittered further along, under either
+       * projection. */
+      patch.ribbon_end_margin = std::max(
+          patch.stamp_search_reach,
+          curve_patch_stamp_reach(patch.frozen_params.radius) + jitter_amount);
     }
   }
 
@@ -1196,6 +1247,7 @@ static void curve_patch_begin_editing(Object &ob,
   patch->frozen_params.end_falloff_mode = brush.mtex.curve_patch_end_falloff;
   patch->frozen_params.end_falloff_percent = brush.mtex.curve_patch_end_falloff_percent;
   patch->frozen_params.stamp_mode = brush.mtex.curve_patch_stamp_mode;
+  patch->frozen_params.stamp_projection = brush.mtex.curve_patch_stamp_projection;
   patch->frozen_params.stamp_size_random = float(brush.mtex.curve_patch_stamp_size_random) / 100.0f;
   patch->frozen_params.stamp_strength_random = float(brush.mtex.curve_patch_stamp_strength_random) /
                                                100.0f;

@@ -579,6 +579,7 @@ class StrokePanel(BrushPanel):
                 col.prop(tex_slot, "curve_patch_stamp_size_random", text="Random Size", slider=True)
                 col.prop(tex_slot, "curve_patch_stamp_strength_random", text="Random Strength", slider=True)
                 col.prop(tex_slot, "random_angle", text="Random Rotation")
+                col.row().prop(tex_slot, "curve_patch_stamp_projection", text="Projection", expand=True)
             else:
                 col.row().prop(tex_slot, "curve_patch_length_mode", text="Curve Patch Length", expand=True)
                 if tex_slot.curve_patch_length_mode == 'REPEAT':

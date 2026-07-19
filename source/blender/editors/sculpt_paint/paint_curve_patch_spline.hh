@@ -154,7 +154,10 @@ float curve_patch_texture_tile_span(int length_mode,
 /** One texture stamp placed along the control curve in the ribbon's UV space, where `v` is arc
  * length along the curve and `u` is the signed lateral offset from it (both in world units). Used
  * by the Curve Patch Stamps mode (#MTEX_CURVE_PATCH_STAMP_STAMPS) in place of the single stretched
- * texture sheet Ribbon mode projects. */
+ * texture sheet Ribbon mode projects.
+ *
+ * `center_v`/`center_u` locate the stamp for BOTH projections; the world frame below is what the
+ * PLANAR projection samples in instead of that UV space. */
 struct CurvePatchStamp {
   /** Arc length of the stamp's center, after jitter. The stamp list is sorted by this. */
   float center_v = 0.0f;
@@ -167,6 +170,20 @@ struct CurvePatchStamp {
   float angle = 0.0f;
   /** Per-stamp relief strength multiplier in `(0, 1]`. */
   float strength = 1.0f;
+  /** World-space frame of the stamp, frozen at layout time and used only by the PLANAR projection
+   * (#MTEX_CURVE_PATCH_STAMP_PROJ_PLANAR), which reads a vertex's stamp-local coordinates as
+   * `dot(co - origin, axis_*)` instead of going through the ribbon's curvilinear `(s, u)`. That is
+   * what keeps the texture's shape through a sharp turn: the frame is rigid, so the stamp's square
+   * stays square no matter how the curve bends underneath it.
+   *
+   * Filled for EVERY stamp regardless of the active projection, so neither the layout nor
+   * #curve_patch_stamps_add_cyclic_wrap has to branch on the mode. Derivable on the fly from
+   * `center_v`/`center_u`/`angle`; cached for simplicity, not for speed. */
+  float3 origin = float3(0.0f);
+  /** Unit axis along the curve at `center_v`, already rotated by `angle`. */
+  float3 axis_v = float3(1.0f, 0.0f, 0.0f);
+  /** Unit axis across the curve, orthogonal to `axis_v` and lying in the patch's anchor plane. */
+  float3 axis_u = float3(0.0f, 1.0f, 0.0f);
 };
 
 /**

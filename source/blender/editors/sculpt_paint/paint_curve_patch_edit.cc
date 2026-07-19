@@ -156,6 +156,7 @@ struct CurvePatchEditOpData {
    * amounts, and the brush Spacing/Jitter the layout reads. Handled exactly like the length values
    * above -- read live, copied into `frozen_params` and re-stamped on change. Seeded at invoke. */
   int last_synced_stamp_mode = -1;
+  int last_synced_stamp_projection = -1;
   int last_synced_stamp_size_random = -1;
   int last_synced_stamp_strength_random = -1;
   int last_synced_spacing = -1;
@@ -608,6 +609,7 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
       data->last_synced_end_falloff_percent = brush->mtex.curve_patch_end_falloff_percent;
       data->last_synced_brush_size = BKE_brush_size_get(&sd.paint, brush);
       data->last_synced_stamp_mode = brush->mtex.curve_patch_stamp_mode;
+      data->last_synced_stamp_projection = brush->mtex.curve_patch_stamp_projection;
       data->last_synced_stamp_size_random = brush->mtex.curve_patch_stamp_size_random;
       data->last_synced_stamp_strength_random = brush->mtex.curve_patch_stamp_strength_random;
       data->last_synced_spacing = brush->spacing;
@@ -710,6 +712,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
        * straight off the live brush) and used only as a re-stamp trigger here. */
       const int brush_size = BKE_brush_size_get(&sd.paint, brush);
       const int stamp_mode = brush->mtex.curve_patch_stamp_mode;
+      const int stamp_projection = brush->mtex.curve_patch_stamp_projection;
       const int stamp_size_random = brush->mtex.curve_patch_stamp_size_random;
       const int stamp_strength_random = brush->mtex.curve_patch_stamp_strength_random;
       const int spacing = brush->spacing;
@@ -757,6 +760,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           falloff_curve_ts != data.last_synced_falloff_curve_ts ||
           brush_size != data.last_synced_brush_size ||
           stamp_mode != data.last_synced_stamp_mode ||
+          stamp_projection != data.last_synced_stamp_projection ||
           stamp_size_random != data.last_synced_stamp_size_random ||
           stamp_strength_random != data.last_synced_stamp_strength_random ||
           spacing != data.last_synced_spacing || jitter != data.last_synced_jitter ||
@@ -787,6 +791,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         patch.frozen_params.swap_axis = swap_axis;
         data.last_synced_brush_size = brush_size;
         data.last_synced_stamp_mode = stamp_mode;
+        data.last_synced_stamp_projection = stamp_projection;
         data.last_synced_stamp_size_random = stamp_size_random;
         data.last_synced_stamp_strength_random = stamp_strength_random;
         data.last_synced_spacing = spacing;
@@ -795,6 +800,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         data.last_synced_stamp_rot = stamp_rot;
         data.last_synced_stamp_random_angle = stamp_random_angle;
         patch.frozen_params.stamp_mode = stamp_mode;
+        patch.frozen_params.stamp_projection = stamp_projection;
         patch.frozen_params.stamp_size_random = float(stamp_size_random) / 100.0f;
         patch.frozen_params.stamp_strength_random = float(stamp_strength_random) / 100.0f;
         /* A zero ratio means the patch started with a zero brush size, which cannot happen through

@@ -400,11 +400,32 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
                                   strength_random * stamp_random(i, seed, STAMP_HASH_STRENGTH);
     stamp.strength = std::max(strength_factor, 0.05f);
 
+    /* `center_v` is jittered and routinely lands outside `[0, total_length]` -- the first stamp goes
+     * negative about half the time, the last overshoots. `evaluate()`/`tangent_at()` CLAMP, which
+     * would collapse those stamps' frames -- both position AND orientation -- onto the curve's
+     * endpoints instead of leaving them overhanging where the ribbon's `end_margin` extension renders
+     * them. Resolve a single `frame_s` first and sample both position and tangent from it, so the
+     * frame that ends up rotated is the same one that ends up placed. A loop has no ends, so wrap; an
+     * open curve clamps to the end and keeps that end's tangent for both the extrapolated position and
+     * the orientation, matching how the ribbon extends its own strip as a rigid straight continuation. */
+    float frame_s = stamp.center_v;
+    float3 frame_base;
+    float3 tangent;
+    if (spline.cyclic) {
+      frame_s -= std::floor(frame_s / total_length) * total_length;
+      frame_base = spline.evaluate(frame_s);
+      tangent = spline.tangent_at(frame_s);
+    }
+    else {
+      frame_s = std::clamp(frame_s, 0.0f, total_length);
+      tangent = spline.tangent_at(frame_s);
+      frame_base = spline.evaluate(frame_s) + tangent * (stamp.center_v - frame_s);
+    }
+
     /* Freeze the stamp's rigid world frame. `side` uses `cross(T, plane_normal)`, matching the
      * ribbon's own convention (`curve_patch_ribbon_build()`: the `+B` side carries `u = +1`), so a
      * stamp's `center_u` means the same direction in both projections. Getting this backwards would
      * mirror every PLANAR stamp against its CURVE counterpart. */
-    const float3 tangent = spline.tangent_at(stamp.center_v);
     float3 side = math::cross(tangent, spline.plane_normal);
     const float side_len = math::length(side);
     if (side_len > 1e-7f) {
@@ -413,7 +434,9 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
     else {
       /* The tangent is parallel to the plane normal, so the cross product carries no direction.
        * Any in-plane axis will do: the stamp is degenerate here either way, and a finite frame
-       * keeps the relief from producing NaNs. Mirrors the ribbon's own fallback. */
+       * keeps the relief from producing NaNs. Mirrors the ribbon's `axis_x` construction
+       * (`curve_patch_ribbon_build()`), not its degenerate-`B` border fallback -- both are simply
+       * some vector perpendicular to `plane_normal`, which is all that is required here. */
       float3 fallback = math::cross(spline.plane_normal, float3(0.0f, 0.0f, 1.0f));
       if (math::length_squared(fallback) < 1e-6f) {
         fallback = math::cross(spline.plane_normal, float3(1.0f, 0.0f, 0.0f));
@@ -426,7 +449,7 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
     const float3 tangent_in_plane = math::cross(spline.plane_normal, side);
     const float cos_a = std::cos(stamp.angle);
     const float sin_a = std::sin(stamp.angle);
-    stamp.origin = spline.evaluate(stamp.center_v) + side * stamp.center_u;
+    stamp.origin = frame_base + side * stamp.center_u;
     stamp.axis_v = tangent_in_plane * cos_a + side * sin_a;
     stamp.axis_u = -tangent_in_plane * sin_a + side * cos_a;
 

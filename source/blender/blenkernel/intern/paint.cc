@@ -35,6 +35,7 @@
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_noise.hh"
+#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
@@ -2855,7 +2856,10 @@ void BKE_paint_face_set_overlay_color_get(const int face_set,
                                           uchar r_color[4],
                                           const Mesh *mesh)
 {
-  /* Face Set 0 is the default/unassigned set. Render it as grey. */
+  /* Face Set 0 is the default/unassigned set. Render it as grey rather than giving it a random
+   * hue, so that "no Face Set" reads as neutral next to the custom-colored ones. NOTE: this is a
+   * deliberate change from the previous random color, and so also changes the overlay of Face Set
+   * 0 in files authored before custom Face Set colors existed. */
   if (face_set == 0) {
     r_color[0] = 128;
     r_color[1] = 128;
@@ -2867,6 +2871,51 @@ void BKE_paint_face_set_overlay_color_get(const int face_set,
   if (const int i = face_set_color_index(mesh, face_set); i != -1) {
     rgb_float_to_uchar(r_color, mesh->face_set_colors[i].color);
     r_color[3] = 255;
+    return;
+  }
+  face_set_overlay_color_random(face_set, seed, r_color);
+}
+
+Map<int, uchar4> BKE_paint_face_set_custom_colors_map(const Mesh *mesh)
+{
+  Map<int, uchar4> map;
+  if (!mesh) {
+    return map;
+  }
+  const Span<FaceSetColor> colors(mesh->face_set_colors, mesh->face_set_colors_num);
+  map.reserve(colors.size());
+  for (const FaceSetColor &entry : colors) {
+    if (entry.face_set_id <= 0) {
+      continue;
+    }
+    uchar4 color(255);
+    rgb_float_to_uchar(color, entry.color);
+    /* Later entries win, matching the first-match-wins scan of #face_set_color_index only when
+     * IDs are unique; duplicates are not expected but must not make the lookup ambiguous. */
+    map.add_overwrite(entry.face_set_id, color);
+  }
+  return map;
+}
+
+void BKE_paint_face_set_overlay_color_get(const int face_set,
+                                          const int seed,
+                                          uchar r_color[4],
+                                          const Map<int, uchar4> &custom_colors)
+{
+  /* Face Set 0 is the default/unassigned set. Render it as grey rather than giving it a random
+   * hue, so that "no Face Set" reads as neutral next to the custom-colored ones. NOTE: this is a
+   * deliberate change from the previous random color, and so also changes the overlay of Face Set
+   * 0 in files authored before custom Face Set colors existed. */
+  if (face_set == 0) {
+    r_color[0] = 128;
+    r_color[1] = 128;
+    r_color[2] = 128;
+    r_color[3] = 255;
+    return;
+  }
+
+  if (const uchar4 *color = custom_colors.lookup_ptr(face_set)) {
+    copy_v4_v4_uchar(r_color, *color);
     return;
   }
   face_set_overlay_color_random(face_set, seed, r_color);
@@ -2941,6 +2990,63 @@ void BKE_paint_face_set_custom_colors_clear(Mesh *mesh)
 
   MEM_SAFE_DELETE(mesh->face_set_colors);
   mesh->face_set_colors_num = 0;
+}
+
+Span<FaceSetColor> BKE_paint_face_set_custom_colors_get_all(const Mesh *mesh)
+{
+  if (!mesh) {
+    return {};
+  }
+  return Span<FaceSetColor>(mesh->face_set_colors, mesh->face_set_colors_num);
+}
+
+void BKE_paint_face_set_custom_colors_set_all(Mesh *mesh, const Span<FaceSetColor> colors)
+{
+  if (!mesh) {
+    return;
+  }
+  MEM_SAFE_DELETE(mesh->face_set_colors);
+  mesh->face_set_colors_num = colors.size();
+  if (colors.is_empty()) {
+    return;
+  }
+  mesh->face_set_colors = MEM_new_array_uninitialized<FaceSetColor>(colors.size(), __func__);
+  for (const int i : colors.index_range()) {
+    mesh->face_set_colors[i] = colors[i];
+  }
+}
+
+void BKE_paint_face_set_custom_colors_remove_unused(Mesh *mesh)
+{
+  if (!mesh || mesh->face_set_colors_num == 0) {
+    return;
+  }
+
+  const bke::AttributeAccessor attributes = mesh->attributes();
+  const VArraySpan face_sets = *attributes.lookup<int>(".sculpt_face_set", bke::AttrDomain::Face);
+  if (face_sets.is_empty()) {
+    /* Without the attribute no Face Set is in use, so every entry is stale. */
+    BKE_paint_face_set_custom_colors_clear(mesh);
+    return;
+  }
+
+  Set<int> used_ids;
+  for (const int face_set : face_sets) {
+    used_ids.add(face_set);
+  }
+
+  const Span<FaceSetColor> colors(mesh->face_set_colors, mesh->face_set_colors_num);
+  Vector<FaceSetColor> kept;
+  kept.reserve(colors.size());
+  for (const FaceSetColor &entry : colors) {
+    if (used_ids.contains(entry.face_set_id)) {
+      kept.append(entry);
+    }
+  }
+  if (kept.size() == colors.size()) {
+    return;
+  }
+  BKE_paint_face_set_custom_colors_set_all(mesh, kept);
 }
 
 void BKE_paint_face_set_quantize_color(const float color[3], float r_quant[3])

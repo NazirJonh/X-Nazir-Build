@@ -1338,31 +1338,33 @@ static wmOperatorStatus clear_all_custom_colors_exec(bContext *C, wmOperator *op
     return OPERATOR_CANCELLED;
   }
 
-  /* TODO: custom color data (#face_set_colors) and #face_sets_color_default are not captured
-   * by the PBVH-based sculpt undo system. Undoing this operator restores face set IDs but
-   * leaves the color table cleared. A proper fix requires a dedicated sculpt undo node type
-   * that snapshots the full color table, or an ID-level undo fallback. */
-
-  /* Clear custom colors and reset the default color before entering the undo block.
-   * These fields are not covered by sculpt undo, so their modification is intentionally
-   * outside push_begin/push_end rather than creating a misleading partial undo. */
-  BKE_paint_face_set_custom_colors_clear(mesh);
-  mesh->face_sets_color_default = 1;
+  const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(C);
+  IndexMaskMemory memory;
+  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
   undo::push_begin(scene, ob, op);
 
-  /* Assign default Face Set ID to all faces. */
+  /* Pushing the nodes is what actually records the Face Set IDs; without it the step is empty and
+   * undo restores nothing. #NodeDataFlag::FaceSet also snapshots the custom color table and
+   * #Mesh.face_sets_color_default, so the whole operator is covered by a single step. */
+  undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::FaceSet);
+
+  BKE_paint_face_set_custom_colors_clear(mesh);
+  mesh->face_sets_color_default = 1;
+
+  /* Assign the default Face Set ID to all faces. This must be #Mesh.face_sets_color_default and
+   * not #face_set_none_id: the overlay only renders a face neutrally when its ID equals the
+   * default, and #face_set_none_id is a #StrokeCache sentinel, not a value meshes ever store.
+   * Matches the ID that #ensure_face_sets_mesh assigns when creating the attribute. */
   bke::SpanAttributeWriter<int> face_sets = attributes.lookup_or_add_for_write_span<int>(
       ".sculpt_face_set", bke::AttrDomain::Face);
-  face_sets.span.fill(face_set_none_id);
+  face_sets.span.fill(mesh->face_sets_color_default);
   face_sets.finish();
 
   undo::push_end(ob);
 
   DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY);
 
-  IndexMaskMemory memory;
-  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
   pbvh.tag_face_sets_changed(node_mask);
 
   tag_update_overlays(C);
@@ -2944,6 +2946,71 @@ static bool sample_face_color_for_face(SculptSession &ss,
   return true;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Color attribute writing for the texture-as-data modes
+ *
+ * All four sampling paths (Mesh/Grids x alpha/color) resolve their sample to a single RGB value
+ * and route it through #texture_data_write_vert_color, so channel and mode handling exists in one
+ * place. \{ */
+
+/** Color written for a scalar (alpha) texture sample, honoring #Brush.vcol_mode. */
+static float3 texture_data_color_from_value(const Brush &brush, const float texture_value)
+{
+  if (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) {
+    return float3((texture_value > brush.texture_threshold) ? 1.0f : 0.0f);
+  }
+  return float3(clamp_f(texture_value, 0.0f, 1.0f));
+}
+
+/** Color written for an RGB (color map) texture sample, honoring #Brush.vcol_mode. */
+static float3 texture_data_color_from_rgb(const Brush &brush, const float rgb[3])
+{
+  if (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) {
+    const float luma = (rgb[0] + rgb[1] + rgb[2]) / 3.0f;
+    return float3((luma > brush.texture_threshold) ? 1.0f : 0.0f);
+  }
+  return float3(rgb);
+}
+
+/**
+ * Write \a rgb into the channels selected by #Brush.vcol_channel, leaving alpha untouched.
+ *
+ * Single-channel modes take the matching component of \a rgb, which is why the scalar paths
+ * broadcast their value across all three components before calling this.
+ */
+static void texture_data_write_vert_color(const Brush &brush,
+                                          const OffsetIndices<int> faces,
+                                          const Span<int> corner_verts,
+                                          const GroupedSpan<int> vert_to_face_map,
+                                          const int vert_index,
+                                          const float3 &rgb,
+                                          bke::GSpanAttributeWriter &color_attribute)
+{
+  float4 col = color::color_vert_get(faces,
+                                     corner_verts,
+                                     vert_to_face_map,
+                                     color_attribute.span,
+                                     color_attribute.domain,
+                                     vert_index);
+  if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
+    col.x = rgb.x;
+    col.y = rgb.y;
+    col.z = rgb.z;
+  }
+  else {
+    col[brush.vcol_channel] = rgb[brush.vcol_channel];
+  }
+  color::color_vert_set(faces,
+                        corner_verts,
+                        vert_to_face_map,
+                        color_attribute.domain,
+                        vert_index,
+                        col,
+                        color_attribute.span);
+}
+
+/** \} */
+
 static float sample_face_texture_avg(SculptSession &ss,
                                      const Brush &brush,
                                      const Span<float3> positions_eval,
@@ -2973,30 +3040,13 @@ static float sample_face_texture_avg(SculptSession &ss,
     num_verts++;
 
     if (color_attribute) {
-      const float value = (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) ?
-                              ((texture_value > brush.texture_threshold) ? 1.0f : 0.0f) :
-                              clamp_f(texture_value, 0.0f, 1.0f);
-      float4 col = color::color_vert_get(faces,
-                                         corner_verts,
-                                         vert_to_face_map,
-                                         color_attribute->span,
-                                         color_attribute->domain,
-                                         vert_index);
-      if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
-        col.x = value;
-        col.y = value;
-        col.z = value;
-      }
-      else {
-        col[brush.vcol_channel] = value;
-      }
-      color::color_vert_set(faces,
-                            corner_verts,
-                            vert_to_face_map,
-                            color_attribute->domain,
-                            vert_index,
-                            col,
-                            color_attribute->span);
+      texture_data_write_vert_color(brush,
+                                    faces,
+                                    corner_verts,
+                                    vert_to_face_map,
+                                    vert_index,
+                                    texture_data_color_from_value(brush, texture_value),
+                                    *color_attribute);
     }
   }
   return (num_verts > 0) ? (sum / float(num_verts)) : 0.0f;
@@ -3026,41 +3076,13 @@ static void write_face_color_map_to_vertex_colors(SculptSession &ss,
       {
         continue;
       }
-      float4 col = color::color_vert_get(faces,
-                                         corner_verts,
-                                         vert_to_face_map,
-                                         color_attribute.span,
-                                         color_attribute.domain,
-                                         vert_index);
-      if (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) {
-        const float luma = (rgb[0] + rgb[1] + rgb[2]) / 3.0f;
-        const float value = (luma > brush.texture_threshold) ? 1.0f : 0.0f;
-        if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
-          col.x = value;
-          col.y = value;
-          col.z = value;
-        }
-        else {
-          col[brush.vcol_channel] = value;
-        }
-      }
-      else {
-        if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
-          col.x = rgb[0];
-          col.y = rgb[1];
-          col.z = rgb[2];
-        }
-        else {
-          col[brush.vcol_channel] = rgb[brush.vcol_channel];
-        }
-      }
-      color::color_vert_set(faces,
-                            corner_verts,
-                            vert_to_face_map,
-                            color_attribute.domain,
-                            vert_index,
-                            col,
-                            color_attribute.span);
+      texture_data_write_vert_color(brush,
+                                    faces,
+                                    corner_verts,
+                                    vert_to_face_map,
+                                    vert_index,
+                                    texture_data_color_from_rgb(brush, rgb),
+                                    color_attribute);
     }
   }
 }
@@ -3352,31 +3374,14 @@ static void apply_from_texture_grids(const Depsgraph &depsgraph,
                     BKE_subdiv_ccg_coarse_mesh_adjacency_info_get(
                         subdiv_ccg, coord, corner_verts, faces, v1, v2);
                 if (adjacency == SubdivCCGAdjacencyType::Vertex) {
-                  const float value = (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) ?
-                                           ((texture_value > brush.texture_threshold) ? 1.0f :
-                                                                                        0.0f) :
-                                           clamp_f(texture_value, 0.0f, 1.0f);
-                  float4 col = color::color_vert_get(faces,
-                                                     corner_verts,
-                                                     vert_to_face_map,
-                                                     col_attr_ptr->span,
-                                                     col_attr_ptr->domain,
-                                                     v1);
-                  if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
-                    col.x = value;
-                    col.y = value;
-                    col.z = value;
-                  }
-                  else {
-                    col[brush.vcol_channel] = value;
-                  }
-                  color::color_vert_set(faces,
-                                        corner_verts,
-                                        vert_to_face_map,
-                                        col_attr_ptr->domain,
-                                        v1,
-                                        col,
-                                        col_attr_ptr->span);
+                  texture_data_write_vert_color(brush,
+                                                faces,
+                                                corner_verts,
+                                                vert_to_face_map,
+                                                v1,
+                                                texture_data_color_from_value(brush,
+                                                                              texture_value),
+                                                *col_attr_ptr);
                 }
               }
             }
@@ -3634,41 +3639,13 @@ static void apply_from_color_texture_grids(const Depsgraph &depsgraph,
                     BKE_subdiv_ccg_coarse_mesh_adjacency_info_get(
                         subdiv_ccg, coord, corner_verts, faces, v1, v2);
                 if (adjacency == SubdivCCGAdjacencyType::Vertex) {
-                  float4 col = color::color_vert_get(faces,
-                                                     corner_verts,
-                                                     vert_to_face_map,
-                                                     col_attr_ptr->span,
-                                                     col_attr_ptr->domain,
-                                                     v1);
-                  if (brush.vcol_mode == BRUSH_VCOL_MODE_BINARY) {
-                    const float luma = (rgb[0] + rgb[1] + rgb[2]) / 3.0f;
-                    const float value = (luma > brush.texture_threshold) ? 1.0f : 0.0f;
-                    if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
-                      col.x = value;
-                      col.y = value;
-                      col.z = value;
-                    }
-                    else {
-                      col[brush.vcol_channel] = value;
-                    }
-                  }
-                  else {
-                    if (brush.vcol_channel == BRUSH_VCOL_CHANNEL_RGB) {
-                      col.x = rgb[0];
-                      col.y = rgb[1];
-                      col.z = rgb[2];
-                    }
-                    else {
-                      col[brush.vcol_channel] = rgb[brush.vcol_channel];
-                    }
-                  }
-                  color::color_vert_set(faces,
-                                        corner_verts,
-                                        vert_to_face_map,
-                                        col_attr_ptr->domain,
-                                        v1,
-                                        col,
-                                        col_attr_ptr->span);
+                  texture_data_write_vert_color(brush,
+                                                faces,
+                                                corner_verts,
+                                                vert_to_face_map,
+                                                v1,
+                                                texture_data_color_from_rgb(brush, rgb),
+                                                *col_attr_ptr);
                 }
               }
             }

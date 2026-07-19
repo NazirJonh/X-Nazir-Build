@@ -1052,7 +1052,7 @@ class VIEW3D_PT_tools_brush_face_set_texture(Panel, View3DPaintPanel):
 
             col = tex_panel.column()
             col.active = is_alpha
-            col.prop(brush, "texture_invert_alpha", text="Invert Alpha")
+            col.prop(brush, "use_invert_texture_alpha", text="Invert Alpha")
             col.prop(brush, "texture_threshold", text="Threshold", slider=True)
 
             tex_panel.separator()
@@ -1074,11 +1074,11 @@ class VIEW3D_PT_tools_brush_face_set_texture(Panel, View3DPaintPanel):
 
             col_write = tex_panel.column()
             col_write.label(text="Write Color Data to:")
-            col_write.prop(brush, "write_face_sets", text="Face Sets")
-            col_write.prop(brush, "write_vcol", text="Vertex Color")
-            if brush.write_vcol:
-                col_write.prop(brush, "vcol_channel", text="Channel")
-                col_write.prop(brush, "vcol_mode", text="Mode")
+            col_write.prop(brush, "use_write_face_sets", text="Face Sets")
+            col_write.prop(brush, "use_write_color_attribute", text="Color Attribute")
+            if brush.use_write_color_attribute:
+                col_write.prop(brush, "write_color_channel", text="Channel")
+                col_write.prop(brush, "write_color_mode", text="Mode")
 
 
 class VIEW3D_PT_sculpt_dyntopo(Panel, View3DPaintPanel):
@@ -2506,7 +2506,7 @@ def _brush_face_set_color_texture_get(self):
 def _brush_face_set_color_texture_set(self, value):
     if value:
         self.texture_data_mode = 'FACE_SETS_COLOR_FROM_TEXTURE'
-        self.vcol_channel = 'RGB'
+        self.write_color_channel = 'RGB'
         src = self.texture_slot
         dst = self.face_set_color_texture_slot
         # Match main brush texture mapping (view / stencil / area plane) for stroke projection.

@@ -13,6 +13,7 @@
 #include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
 #include "BLI_enum_flags.hh"
+#include "BLI_map.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_offset_indices.hh"
@@ -41,6 +42,7 @@ struct BrushColorJitterSettings;
 struct CurveMapping;
 struct Depsgraph;
 struct EnumPropertyItem;
+struct FaceSetColor;
 namespace bke {
 enum class AttrDomain : int8_t;
 namespace pbvh {
@@ -309,12 +311,37 @@ void BKE_paint_face_set_overlay_color_get(int face_set,
                                           uchar r_color[4],
                                           const Mesh *mesh);
 
+/**
+ * Build a Face Set ID to custom overlay color lookup for \a mesh.
+ *
+ * Drawing code covers every face of a batch, so it must build this once and reuse it rather than
+ * calling the #Mesh overload above per face, which scans #Mesh.face_set_colors linearly.
+ */
+Map<int, uchar4> BKE_paint_face_set_custom_colors_map(const Mesh *mesh);
+
+/** Variant of #BKE_paint_face_set_overlay_color_get using a prebuilt custom color lookup. */
+void BKE_paint_face_set_overlay_color_get(int face_set,
+                                          int seed,
+                                          uchar r_color[4],
+                                          const Map<int, uchar4> &custom_colors);
+
 /* Face Set Custom Colors */
 void BKE_paint_face_set_custom_color_set(Mesh *mesh, int face_set_id, const float color[3]);
 void BKE_paint_face_set_custom_color_get(const Mesh *mesh, int face_set_id, float r_color[3]);
 bool BKE_paint_face_set_custom_color_exists(const Mesh *mesh, int face_set_id);
 void BKE_paint_face_set_custom_color_remove(Mesh *mesh, int face_set_id);
 void BKE_paint_face_set_custom_colors_clear(Mesh *mesh);
+/** Read-only view of the custom color table, for callers that need to snapshot or remap it. */
+Span<FaceSetColor> BKE_paint_face_set_custom_colors_get_all(const Mesh *mesh);
+/** Replace the whole custom color table, freeing the previous one. */
+void BKE_paint_face_set_custom_colors_set_all(Mesh *mesh, Span<FaceSetColor> colors);
+/**
+ * Drop entries whose Face Set ID is no longer used by any face.
+ *
+ * Entries for unused Face Sets are harmless while sculpting - they let a re-painted color map back
+ * to the same ID - so this is only meant for session boundaries, not for use after every edit.
+ */
+void BKE_paint_face_set_custom_colors_remove_unused(Mesh *mesh);
 /**
  * Find the Face Set ID whose custom color matches \a color within a tolerance of 1/255 per
  * channel. Returns 0 if no match is found.

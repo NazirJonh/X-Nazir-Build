@@ -42,6 +42,7 @@
 #include "BLI_vector.hh"
 
 #include "DNA_key_types.h"
+#include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
@@ -196,6 +197,15 @@ struct NodeGeometry {
 struct Node;
 struct PositionUndoStorage;
 
+/**
+ * The custom Face Set colors and the default Face Set ID live on the #Mesh, not per pbvh::Tree
+ * node, so they cannot be stored in #Node like the rest of the Face Set data.
+ */
+struct FaceSetColorsSnapshot {
+  Vector<FaceSetColor> colors;
+  int color_default;
+};
+
 struct StepData {
  private:
   bool applied_ = true;
@@ -256,6 +266,13 @@ struct StepData {
   NodeGeometry geometry_original;
   /* Modified geometry is stored after the modification and is restored from when redoing. */
   NodeGeometry geometry_modified;
+
+  /**
+   * State of the mesh's custom Face Set colors before this step, captured the first time
+   * #NodeDataFlag::FaceSet data is pushed. Swapped with the mesh on both undo and redo, so a
+   * single snapshot covers both directions. Empty when the step touches no Face Sets.
+   */
+  std::optional<FaceSetColorsSnapshot> face_set_colors;
 
   Mutex nodes_mutex;
 
@@ -1079,6 +1096,10 @@ static void restore_block_positions(bContext *C,
                                     IndexMaskMemory &memory,
                                     const bool tag_update)
 {
+  /* Guaranteed by #push_end_ex, which builds the storage whenever #NodeDataFlag::Position is set,
+   * in any flag combination. */
+  BLI_assert(step_data.position_step_storage);
+
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
   if (use_multires_undo(step_data, ss)) {
@@ -1131,6 +1152,40 @@ static void restore_block_positions(bContext *C,
   bke::pbvh::store_bounds_orig(pbvh);
 }
 
+/**
+ * Exchange the stored Face Set color state with the mesh, so undo and redo both work.
+ * Returns true when the mesh state actually changed, meaning the overlay must be rebuilt.
+ */
+static bool restore_face_set_colors(StepData &step_data, Mesh &mesh)
+{
+  if (!step_data.face_set_colors.has_value()) {
+    return false;
+  }
+  FaceSetColorsSnapshot &snapshot = *step_data.face_set_colors;
+
+  Vector<FaceSetColor> current(BKE_paint_face_set_custom_colors_get_all(&mesh));
+  const int current_default = mesh.face_sets_color_default;
+
+  bool changed = current_default != snapshot.color_default ||
+                 current.size() != snapshot.colors.size();
+  for (const int i : current.index_range()) {
+    if (changed) {
+      break;
+    }
+    const FaceSetColor &a = current[i];
+    const FaceSetColor &b = snapshot.colors[i];
+    changed = a.face_set_id != b.face_set_id || a.color[0] != b.color[0] ||
+              a.color[1] != b.color[1] || a.color[2] != b.color[2];
+  }
+
+  BKE_paint_face_set_custom_colors_set_all(&mesh, snapshot.colors);
+  mesh.face_sets_color_default = snapshot.color_default;
+
+  snapshot.colors = std::move(current);
+  snapshot.color_default = current_default;
+  return changed;
+}
+
 static void restore_block_face_sets(Object &object,
                                     SculptSession &ss,
                                     bke::pbvh::Tree &pbvh,
@@ -1138,7 +1193,15 @@ static void restore_block_face_sets(Object &object,
                                     IndexMaskMemory &memory)
 {
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
-  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+
+  /* The color table is mesh-wide, so it is restored once here rather than per node. When only the
+   * colors changed, no face is in #modified_faces and the per-node tagging below would leave the
+   * overlay showing the previous colors, so tag everything in that case. */
+  if (restore_face_set_colors(step_data, mesh)) {
+    pbvh.tag_face_sets_changed(node_mask);
+  }
+
   Array<bool> modified_faces(mesh.faces_num, false);
   for (std::unique_ptr<Node> &unode : step_data.nodes) {
     restore_face_sets(object, *unode, modified_faces);
@@ -1626,6 +1689,22 @@ static void ensure_face_sets_attribute(Mesh &mesh)
   face_sets.finish();
 }
 
+/**
+ * Capture the mesh-level Face Set color state once per step. Called from both #push_node, which
+ * may run concurrently, and #push_nodes, so it takes the step's lock.
+ */
+static void ensure_face_set_colors_snapshot(StepData &step_data, const Mesh &mesh)
+{
+  std::scoped_lock lock(step_data.nodes_mutex);
+  if (step_data.face_set_colors.has_value()) {
+    return;
+  }
+  FaceSetColorsSnapshot snapshot;
+  snapshot.colors = Vector<FaceSetColor>(BKE_paint_face_set_custom_colors_get_all(&mesh));
+  snapshot.color_default = mesh.face_sets_color_default;
+  step_data.face_set_colors = std::move(snapshot);
+}
+
 static void fill_node_data_mesh(const Depsgraph &depsgraph,
                                 const Object &object,
                                 const bke::pbvh::MeshNode &node,
@@ -1720,7 +1799,11 @@ static void fill_node_data_grids(const Object &object,
     unode.face_hidden.resize(unode.face_indices.size());
     store_face_visibility(base_mesh, unode);
   }
-  /* NOTE: Color is not supported for Grids geometry. */
+
+  /* Color attributes live on the base mesh, not on the grids, so there is nothing to snapshot
+   * per grid node. Callers must not request it: silently dropping the flag would mark the step as
+   * containing color data that #restore_block_color would then fail to find. */
+  BLI_assert(!bool(flags & NodeDataFlag::Color));
 }
 
 /**
@@ -1782,9 +1865,15 @@ BLI_NOINLINE static void bmesh_push(const Object &object,
  * Add an undo node for the bke::pbvh::Tree node to the step's storage. If the node was
  * newly created and needs to be filled with data, set \a r_new to true.
  */
-static Node *ensure_node(StepData &step_data, const bke::pbvh::Node &node, bool &r_new)
+static Node *ensure_node(StepData &step_data,
+                         const bke::pbvh::Node &node,
+                         const NodeDataFlag flags,
+                         bool &r_new)
 {
   std::scoped_lock lock(step_data.nodes_mutex);
+  /* Accumulated under the same lock that guards the node map, because #push_node may be called
+   * concurrently for different nodes and a read-modify-write of the flags is not atomic. */
+  step_data.node_flags |= flags;
   r_new = false;
   std::unique_ptr<Node> &unode = step_data.undo_nodes_by_pbvh_node.lookup_or_add_cb(&node, [&]() {
     std::unique_ptr<Node> new_unode = std::make_unique<Node>();
@@ -1860,20 +1949,25 @@ void push_node(const Depsgraph &depsgraph,
 
   StepData *step_data = get_step_data();
   BLI_assert(step_data->special_type == Type::None);
-  step_data->node_flags |= flags;
+
+  /* The Face Sets attribute must already exist: this function runs concurrently for different
+   * nodes, so creating an attribute here would reallocate mesh data under other threads. Callers
+   * pushing #NodeDataFlag::FaceSet are expected to call #ensure_face_sets_mesh beforehand. */
+  BLI_assert(!bool(flags & NodeDataFlag::FaceSet) ||
+             id_cast<const Mesh *>(object.data)->attributes().contains(".sculpt_face_set"));
+
+  if (bool(flags & NodeDataFlag::FaceSet)) {
+    ensure_face_set_colors_snapshot(*step_data, *id_cast<const Mesh *>(object.data));
+  }
 
   bool newly_added;
-  Node *unode = ensure_node(*step_data, *node, newly_added);
+  Node *unode = ensure_node(*step_data, *node, flags, newly_added);
   if (!newly_added) {
     /* The node was already filled with data for this undo step. */
     return;
   }
 
   ss.needs_flush_to_id = true;
-
-  if (bool(flags & NodeDataFlag::FaceSet)) {
-    ensure_face_sets_attribute(*const_cast<Mesh *>(id_cast<const Mesh *>(object.data)));
-  }
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh:
@@ -1913,6 +2007,7 @@ void push_nodes(const Depsgraph &depsgraph,
 
   if (bool(flags & NodeDataFlag::FaceSet)) {
     ensure_face_sets_attribute(*id_cast<Mesh *>(object.data));
+    ensure_face_set_colors_snapshot(*step_data, *id_cast<const Mesh *>(object.data));
   }
 
   switch (pbvh.type()) {
@@ -1921,7 +2016,7 @@ void push_nodes(const Depsgraph &depsgraph,
       Vector<std::pair<const bke::pbvh::MeshNode *, Node *>, 32> nodes_to_fill;
       node_mask.foreach_index([&](const int i) {
         bool newly_added;
-        Node *unode = ensure_node(*step_data, nodes[i], newly_added);
+        Node *unode = ensure_node(*step_data, nodes[i], flags, newly_added);
         if (newly_added) {
           nodes_to_fill.append({&nodes[i], unode});
         }
@@ -1938,7 +2033,7 @@ void push_nodes(const Depsgraph &depsgraph,
       Vector<std::pair<const bke::pbvh::GridsNode *, Node *>, 32> nodes_to_fill;
       node_mask.foreach_index([&](const int i) {
         bool newly_added;
-        Node *unode = ensure_node(*step_data, nodes[i], newly_added);
+        Node *unode = ensure_node(*step_data, nodes[i], flags, newly_added);
         if (newly_added) {
           nodes_to_fill.append({&nodes[i], unode});
         }
@@ -2107,50 +2202,66 @@ void push_end_ex(Object &ob, const bool use_nested_undo)
    * just one positions array that has a different semantic meaning depending on whether there are
    * deform modifiers. */
 
-  if (bool(step_data->node_flags & NodeDataFlag::Position) &&
-      bool(step_data->node_flags & (NodeDataFlag::FaceSet | NodeDataFlag::Color)))
-  {
-    /* Position data is compressed in #PositionUndoStorage, but other data must remain in
-     * #StepData::nodes for undo/redo (see #restore_list). */
+  const NodeDataFlag flags = step_data->node_flags;
+  /* Everything except positions stays in #StepData::nodes; positions get their own compressed
+   * storage. Both can be present in a single step, so these are handled independently rather than
+   * as mutually exclusive cases. */
+  const NodeDataFlag non_position_flags = flags & ~NodeDataFlag::Position;
+  const bool has_positions = bool(flags & NodeDataFlag::Position);
+  const bool has_other_data = non_position_flags != NodeDataFlag{};
+
+  if (has_positions && has_other_data) {
+    /* Move every non-position data kind into fresh nodes before #PositionUndoStorage consumes the
+     * originals, so undo/redo of the other kinds still works (see #restore_list). */
     Vector<std::unique_ptr<Node>> remaining_nodes;
     remaining_nodes.reserve(step_data->nodes.size());
     for (std::unique_ptr<Node> &unode : step_data->nodes) {
       std::unique_ptr<Node> r_node = std::make_unique<Node>();
-      if (bool(step_data->node_flags & NodeDataFlag::FaceSet)) {
-        r_node->face_indices = std::move(unode->face_indices);
-        r_node->face_sets = std::move(unode->face_sets);
-      }
-      if (bool(step_data->node_flags & NodeDataFlag::Color)) {
-        /* Copy (don't move) the vertex indices: when the step also stores positions, the
-         * #PositionUndoStorage built below reads #Node.vert_indices from these same nodes to know
-         * which vertices each compressed block maps to. Moving the indices out here would leave
-         * the position storage with empty indices and crash #restore_position_mesh. */
+      /* Copy (don't move) the index arrays needed by the remaining data kinds: the
+       * #PositionUndoStorage built below reads #Node.vert_indices and #Node.grids from these same
+       * nodes to know which vertices each compressed block maps to. Moving them out here would
+       * leave the position storage with empty indices and crash #restore_position_mesh. */
+      if (bool(non_position_flags &
+               (NodeDataFlag::Color | NodeDataFlag::Mask | NodeDataFlag::HideVert)))
+      {
         r_node->vert_indices = unode->vert_indices;
         r_node->unique_verts_num = unode->unique_verts_num;
+      }
+      if (bool(non_position_flags & (NodeDataFlag::Mask | NodeDataFlag::HideVert))) {
+        r_node->grids = unode->grids;
+      }
+
+      if (bool(non_position_flags & (NodeDataFlag::FaceSet | NodeDataFlag::HideFace))) {
+        r_node->face_indices = std::move(unode->face_indices);
+      }
+      if (bool(non_position_flags & NodeDataFlag::FaceSet)) {
+        r_node->face_sets = std::move(unode->face_sets);
+      }
+      if (bool(non_position_flags & NodeDataFlag::Color)) {
         r_node->corner_indices = std::move(unode->corner_indices);
         r_node->col = std::move(unode->col);
         r_node->loop_col = std::move(unode->loop_col);
+      }
+      if (bool(non_position_flags & NodeDataFlag::Mask)) {
+        r_node->mask = std::move(unode->mask);
+      }
+      if (bool(non_position_flags & NodeDataFlag::HideVert)) {
+        r_node->vert_hidden = std::move(unode->vert_hidden);
+        r_node->grid_hidden = std::move(unode->grid_hidden);
+      }
+      if (bool(non_position_flags & NodeDataFlag::HideFace)) {
+        r_node->face_hidden = std::move(unode->face_hidden);
       }
       remaining_nodes.append(std::move(r_node));
     }
     step_data->position_step_storage = std::make_unique<PositionUndoStorage>(*step_data);
     step_data->nodes = std::move(remaining_nodes);
-    step_data->undo_size = threading::parallel_reduce(
-        step_data->nodes.index_range(),
-        16,
-        0,
-        [&](const IndexRange range, size_t size) {
-          for (const int i : range) {
-            size += node_size_in_bytes(*step_data->nodes[i]);
-          }
-          return size;
-        },
-        std::plus<size_t>());
   }
-  else if (step_data->node_flags == NodeDataFlag::Position) {
+  else if (has_positions) {
     step_data->position_step_storage = std::make_unique<PositionUndoStorage>(*step_data);
   }
-  else {
+
+  if (has_other_data || !has_positions) {
     step_data->undo_size = threading::parallel_reduce(
         step_data->nodes.index_range(),
         16,
@@ -2162,6 +2273,10 @@ void push_end_ex(Object &ob, const bool use_nested_undo)
           return size;
         },
         std::plus<size_t>());
+  }
+
+  if (step_data->face_set_colors.has_value()) {
+    step_data->undo_size += sizeof(FaceSetColor) * step_data->face_set_colors->colors.size();
   }
 
   /* We could remove this and enforce all callers run in an operator using 'OPTYPE_UNDO'. */

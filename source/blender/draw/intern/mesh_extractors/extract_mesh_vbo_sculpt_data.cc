@@ -43,6 +43,7 @@ gpu::VertBufPtr extract_sculpt_data(const MeshRenderData &mr)
 
   const int default_face_set = mr.mesh->face_sets_color_default;
   const int face_set_seed = mr.mesh->face_sets_color_seed;
+  const Map<int, uchar4> custom_colors = BKE_paint_face_set_custom_colors_map(mr.mesh);
   if (mr.extract_type == MeshExtractType::BMesh) {
     const BMesh &bm = *mr.bm;
     const int mask_offset = CustomData_get_offset_named(
@@ -59,7 +60,7 @@ gpu::VertBufPtr extract_sculpt_data(const MeshRenderData &mr)
           const int face_set_id = BM_ELEM_CD_GET_INT(&face, face_set_offset);
           if (face_set_id != default_face_set) {
             BKE_paint_face_set_overlay_color_get(
-                face_set_id, face_set_seed, face_set_color, mr.mesh);
+                face_set_id, face_set_seed, face_set_color, custom_colors);
           }
         }
         vbo_data.slice(face_range).fill(gpuSculptData{face_set_color, 0.0f});
@@ -89,7 +90,7 @@ gpu::VertBufPtr extract_sculpt_data(const MeshRenderData &mr)
           const int face_set_id = face_set[face_index];
           if (face_set_id != default_face_set) {
             BKE_paint_face_set_overlay_color_get(
-                face_set_id, face_set_seed, face_set_color, mr.mesh);
+                face_set_id, face_set_seed, face_set_color, custom_colors);
           }
         }
         vbo_data.slice(face).fill(gpuSculptData{face_set_color, 0.0f});
@@ -156,6 +157,7 @@ gpu::VertBufPtr extract_sculpt_data_subdiv(const MeshRenderData &mr,
                                            subdiv_corners_num);
     const int default_face_set = coarse_mesh.face_sets_color_default;
     const int face_set_seed = coarse_mesh.face_sets_color_seed;
+    const Map<int, uchar4> custom_colors = BKE_paint_face_set_custom_colors_map(&coarse_mesh);
     threading::parallel_for(IndexRange(subdiv_corners_num), 4096, [&](const IndexRange range) {
       for (const int i : range) {
         const int face_index = subdiv_loop_face_index[i];
@@ -165,7 +167,7 @@ gpu::VertBufPtr extract_sculpt_data_subdiv(const MeshRenderData &mr,
         /* Skip for the default color face set to render it white. */
         if (face_set_id != default_face_set) {
           BKE_paint_face_set_overlay_color_get(
-              face_set_id, face_set_seed, face_set_color, &coarse_mesh);
+              face_set_id, face_set_seed, face_set_color, custom_colors);
         }
 
         copy_v3_v3_uchar(face_set_vbo_data[i].color, face_set_color);

@@ -526,6 +526,12 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
     mesh->flag |= ME_SCULPT_DYNAMIC_TOPOLOGY;
   }
 
+  /* Custom Face Set colors for Face Sets that no longer exist are kept while sculpting, so that
+   * re-painting the same color maps back to the same ID across undo. Leaving sculpt mode is a
+   * natural session boundary at which to drop them, keeping saved files from accumulating
+   * unreachable entries. */
+  BKE_paint_face_set_custom_colors_remove_unused(mesh);
+
   /* Leave sculpt mode. */
   ob.mode &= ~mode_flag;
 

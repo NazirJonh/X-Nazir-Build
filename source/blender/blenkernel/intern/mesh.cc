@@ -101,8 +101,6 @@ static void mesh_init_data(ID *id)
   mesh->runtime = new bke::MeshRuntime();
 
   mesh->face_sets_color_seed = BLI_hash_int(BLI_time_now_seconds_i() & UINT_MAX);
-  mesh->face_set_colors = nullptr;
-  mesh->face_set_colors_num = 0;
 }
 
 static void mesh_copy_data(Main *bmain,

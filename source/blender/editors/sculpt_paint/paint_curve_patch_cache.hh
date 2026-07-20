@@ -160,10 +160,9 @@ struct CurvePatchCache {
    * (see #undo::Type) and has no slot for the control curve, so an official step would restore
    * vertex positions and leave the curve untouched; and the paint-curve undo system refuses Sculpt
    * Mode outright (`paintcurve_undosys_poll`) and wants a real `PaintCurve` ID, which this runtime
-   * curve is not. On top of that the whole session lives inside ONE open sculpt transaction, so
-   * per-edit official steps would mean closing and reopening it on every drag. A modal that owns
-   * runtime state no undo type describes keeps its own stack -- exactly what the knife tool does
-   * with `KnifeUndoFrame` / `kcd->undostack` (`editmesh_knife.cc`).
+   * curve is not. A modal that owns runtime state no undo type describes keeps its own stack --
+   * exactly what the knife tool does with `KnifeUndoFrame` / `kcd->undostack`
+   * (`editmesh_knife.cc`).
    *
    * Holds STATES, not deltas, with `undo_step_current` as the cursor: entry 0 is the state the
    * anchor stroke produced, and a new snapshot truncates any redo branch above the cursor. */
@@ -184,6 +183,21 @@ struct CurvePatchCache {
    * that position array before re-stamping. Dynamic Topology (`Type::BMesh`) has no such stable
    * index and is refused outright by `curve_patch_start_from_anchor()`. */
   Map<int, float3> orig_positions;
+
+  /** Number of elements the keys of #orig_positions index into, sampled once when the patch
+   * starts: `Mesh::verts_num` for `Type::Mesh`, `SubdivCCG::positions.size()` for `Type::Grids`.
+   *
+   * The modal passes events through whenever the cursor leaves its region, so an unrelated
+   * operator can retopologize the object while a patch is live. Every key in #orig_positions
+   * would then name a different element or none at all, and both restoring and committing would
+   * write against the wrong surface -- or past the end of the array. Comparing this count is the
+   * cheap detection for that. */
+  int64_t element_num = 0;
+
+  /** Set when the check above fails. The patch is then unusable: its snapshot describes a mesh
+   * that no longer exists, so it must be abandoned WITHOUT restoring (which would write stale
+   * positions) and without pushing anything to the undo stack. */
+  bool invalidated = false;
 
   /** Rebuilt every call to `curve_patch_restore_and_restamp()` from `control_curve`; kept here so
    * later calls (dynamic growth) can compare against the previous footprint if needed. */
@@ -258,6 +272,19 @@ struct CurvePatchCache {
    * O(whole mesh) on every interactive drag event -- see `paint_curve_patch_cache.cc`. */
   BitVector<> last_restamp_nodes;
 
+  /** Union of EVERY restamp's node mask over the patch's whole life (one bit per
+   * `bke::pbvh::Tree` node), as opposed to #last_restamp_nodes which describes only the latest
+   * one. Sized alongside it but never cleared.
+   *
+   * This is the mask the commit-time undo step is built from, and the wider set is required, not a
+   * safety margin: `curve_patch_smooth_relief()` writes to every key of #orig_positions, which
+   * accumulates across the patch's whole life. A vertex touched by an early restamp and left alone
+   * by the final one sits in that map holding a zero displacement, and smoothing averages it with
+   * its displaced neighbors into a non-zero one -- so it moves at commit time even though its
+   * node is absent from #last_restamp_nodes. Every such key was written by SOME restamp, whose
+   * node mask this set contains, so the coverage holds by construction. */
+  BitVector<> all_touched_nodes;
+
   /** Owned copy of the anchor stroke's `ViewContext`, set once in `curve_patch_start_from_anchor`.
    * `StrokeCache::vc` is a non-owning pointer that normally points into the interactive stroke's
    * own (stack-lifetime) `ViewContext`; since Curve Patch takes over `SculptSession::cache` after
@@ -291,8 +318,10 @@ void curve_patch_restore_only(Object &ob, const CurvePatchCache &patch);
  * Closing the undo step belongs here rather than in the caller because HOW it must be closed
  * depends on whether a face set follows: an undo step carries exactly one `undo::Type`, so the face
  * set needs a second step, and opening one would destroy the position step unless that step was
- * force-pushed first (see the implementation). That is only knowable after the raised faces have
- * been computed.
+ * force-pushed first (see the implementation). When no face set follows, the position step must be
+ * left parked instead, so that the operator's own `OPTYPE_UNDO` push is the one that files it and
+ * the edit costs exactly one Ctrl+Z. That is only knowable after the raised faces have been
+ * computed, which is why the implementation computes them before closing the step.
  *
  * "Raised" is measured as displacement from `patch.orig_positions`, thresholded at a fraction of
  * this patch's own maximum displacement -- relative rather than absolute, because displacement is
@@ -303,9 +332,15 @@ void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &p
 /**
  * Start the Curve Patch modal editor (`SCULPT_OT_curve_patch_edit`) right after a
  * `BRUSH_STROKE_CURVE_PATCH` anchor stroke finishes. Takes over ownership of the just-finished
- * stroke's `SculptSession::cache` and the undo transaction opened by `stroke_undo_begin()` for
- * that stroke; the caller must not tear either down itself when this is invoked. See
- * `paint_curve_patch_edit.cc` (Stage 04) for the modal editor implementation.
+ * stroke's `SculptSession::cache`; the caller must not tear that down itself when this is invoked.
+ *
+ * It does NOT take over the undo transaction `stroke_undo_begin()` opened for that stroke. This
+ * function restores the mesh to its pre-stroke state before anything else touches it, so by the
+ * time it returns that transaction describes no net change, and the caller discards it
+ * (`SculptPaintStroke::done()`, `mesh/sculpt.cc`). The editor records its own single undo step
+ * when the patch is committed. Leaving a transaction open for the modal's whole lifetime is what
+ * let any unrelated undo push in the application adopt or free it. See `paint_curve_patch_edit.cc`
+ * (Stage 04) for the modal editor implementation.
  */
 void curve_patch_start_from_anchor(const Depsgraph &depsgraph,
                                     Object &ob,
@@ -318,8 +353,9 @@ void curve_patch_start_from_anchor(const Depsgraph &depsgraph,
  * curve from the stroke's resampled contour (`control_positions`, object space, with a per-point
  * `control_radii`), after undoing the live roll relief back to a pristine baseline. From there the
  * handoff is identical to #curve_patch_start_from_anchor: it takes over ownership of
- * `SculptSession::cache` and the open undo transaction (the caller must not tear either down), and
- * on any early bail (Dynamic Topology, degenerate input) it frees `ss.cache` itself.
+ * `SculptSession::cache` but NOT the stroke's undo transaction, which the caller discards once the
+ * modal has started; and on any early bail (Dynamic Topology, degenerate input) it frees
+ * `ss.cache` itself.
  * `control_positions.size()` must equal `control_radii.size()`. `plane_normal` is the roll's frozen
  * projection normal, used as the patch's projection plane.
  */

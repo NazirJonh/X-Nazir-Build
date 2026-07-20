@@ -426,16 +426,23 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
     /* Relief one stretch of the curve contributes at `sample_co`, or nullopt when that stretch does
      * not actually reach it. */
     auto branch_relief = [&](const float3 &sample_co,
-                             const float2 ribbon_uv,
-                             const float3 &frame_normal) -> std::optional<VertexRelief> {
+                             const float2 ribbon_uv) -> std::optional<VertexRelief> {
       const float s = ribbon_uv.y;
-      /* Signed offset from the ribbon plane, measured against the curve point the ribbon mapped this
+      /* Signed offset from the surface, measured against the curve point the ribbon mapped this
        * sample to (NOT the globally-closest point -- consistent with the ribbon's own branch
-       * choice). The plane is the one of the WINDOW that served this branch: measuring against the
-       * frozen global plane would reject exactly the vertices past a sharp edge, whose offset from
-       * it is large by construction. On the single-window path `frame_normal` equals
-       * `patch.plane_normal` and the formula collapses to the previous one. */
-      const float normal_dist = math::dot(sample_co - patch.spline.evaluate(s), frame_normal);
+       * choice).
+       *
+       * Measured along the SMOOTHED surface normal at `s`, never along the window's own projection
+       * plane. `normal_dist` feeds `radial_dist` below and therefore the relief's amplitude, while a
+       * window normal is sharp by design and flips ~90 degrees the moment the winning window
+       * changes -- which put a hard step in the amplitude right across the strip at every window
+       * join, visible as a crisp stair-stepped line far outside the strip's bright core (the
+       * falloff there is tiny but non-zero, and a step in it is still a normal discontinuity).
+       * `normal_at()` is continuous by construction, so the depth runs through the join smoothly
+       * just as the ribbon's own `(u, s)` does. Falls back to `plane_normal` when there is no
+       * smoothed field (Grids, failed snapshot), collapsing to the previous formula exactly. */
+      const float normal_dist = math::dot(sample_co - patch.spline.evaluate(s),
+                                          patch.spline.normal_at(s));
 
       /* `CurvePatchSpline::radii` stores the control curve's per-point `radius` attribute
        * verbatim, which is a unitless UI scalar (default 1.0 = "full brush size", see
@@ -730,6 +737,10 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
      * overlap. */
     auto relief_at = [&](const float3 &sample_co) -> std::optional<VertexRelief> {
       float2 branch_uv[2];
+      /* Which window served each branch. Deliberately NOT fed into `branch_relief()`: the relief's
+       * own depth measurement has to stay continuous across a window join, and this value does not
+       * (see the `normal_at()` note there). Kept because it is the one observable that says which
+       * plane a branch came from, which is what the frames tests assert on. */
       float3 branch_normal[2] = {patch.plane_normal, patch.plane_normal};
       const int branch_num = patch.frames.ready ?
                                  patch.frames.sample(
@@ -737,8 +748,7 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
                                  patch.ribbon.sample(sample_co, branch_uv);
       std::optional<VertexRelief> merged;
       for (const int b : IndexRange(branch_num)) {
-        const std::optional<VertexRelief> relief = branch_relief(
-            sample_co, branch_uv[b], branch_normal[b]);
+        const std::optional<VertexRelief> relief = branch_relief(sample_co, branch_uv[b]);
         if (!relief) {
           continue;
         }

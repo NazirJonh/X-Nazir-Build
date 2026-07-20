@@ -155,6 +155,19 @@ float3 CurvePatchSpline::tangent_at(const float s) const
   return len > 1e-8f ? blended / len : tangents_3d[i];
 }
 
+float3 CurvePatchSpline::normal_at(const float s) const
+{
+  if (is_empty() || normals_smooth_3d.size() != poly_3d.size()) {
+    return math::normalize(plane_normal);
+  }
+  int i;
+  float t;
+  find_segment(lengths_3d, s, i, t);
+  const float3 blended = math::interpolate(normals_smooth_3d[i], normals_smooth_3d[i + 1], t);
+  const float len = math::length(blended);
+  return len > 1e-8f ? blended / len : normals_smooth_3d[i];
+}
+
 float CurvePatchSpline::radius_at(const float s) const
 {
   BLI_assert(!radii.is_empty());

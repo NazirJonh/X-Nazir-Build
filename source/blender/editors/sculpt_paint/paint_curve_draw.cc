@@ -21,6 +21,7 @@
 #include "DNA_space_types.h"
 #include "DNA_workspace_types.h"
 
+#include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
 #include "BKE_curves.hh"
@@ -266,7 +267,12 @@ bool ED_paint_curve_overlay_is_relevant(const Brush *brush,
   if (brush == nullptr) {
     return false;
   }
-  if (ELEM(brush->stroke_method, BRUSH_STROKE_CURVE, BRUSH_STROKE_CURVE_PATCH, BRUSH_STROKE_ROLL)) {
+  if (brush->stroke_method == BRUSH_STROKE_CURVE) {
+    return true;
+  }
+  if (ELEM(brush->stroke_method, BRUSH_STROKE_CURVE_PATCH, BRUSH_STROKE_ROLL) &&
+      bke::brush::supports_curve_patch(*brush))
+  {
     return true;
   }
   return ED_paint_curve_is_curves_edit_tool(active_tool_idname);

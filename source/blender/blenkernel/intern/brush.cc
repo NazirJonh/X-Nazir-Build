@@ -1953,6 +1953,28 @@ bool supports_color(const Brush &brush)
 {
   return ELEM(brush.sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT);
 }
+bool supports_curve_patch(const Brush &brush)
+{
+  /* Stamping brushes: relief along the surface normal is what they do anyway. Planar brushes are
+   * included because carving a groove along a curve is a natural reach for Scrape and already
+   * works. `LAYER` is deliberately absent: its persistent-base semantics are never reached, so
+   * listing it would advertise support that does not exist. `SCENE_PROJECT` is absent because it
+   * projects onto other scene geometry and has no standalone meaning here. */
+  return ELEM(brush.sculpt_brush_type,
+              SCULPT_BRUSH_TYPE_DRAW,
+              SCULPT_BRUSH_TYPE_DRAW_SHARP,
+              SCULPT_BRUSH_TYPE_CLAY,
+              SCULPT_BRUSH_TYPE_CLAY_STRIPS,
+              SCULPT_BRUSH_TYPE_CLAY_THUMB,
+              SCULPT_BRUSH_TYPE_INFLATE,
+              SCULPT_BRUSH_TYPE_BLOB,
+              SCULPT_BRUSH_TYPE_CREASE,
+              SCULPT_BRUSH_TYPE_FLATTEN,
+              SCULPT_BRUSH_TYPE_FILL,
+              SCULPT_BRUSH_TYPE_SCRAPE,
+              SCULPT_BRUSH_TYPE_MULTIPLANE_SCRAPE,
+              SCULPT_BRUSH_TYPE_PLANE);
+}
 bool supports_secondary_cursor_color(const Brush &brush)
 {
   return ELEM(brush.sculpt_brush_type,

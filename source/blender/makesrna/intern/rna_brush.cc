@@ -1040,9 +1040,9 @@ static const EnumPropertyItem *rna_Brush_direction_itemf(bContext *C,
 }
 
 static const EnumPropertyItem *rna_Brush_stroke_itemf(bContext *C,
-                                                      PointerRNA * /*ptr*/,
+                                                      PointerRNA *ptr,
                                                       PropertyRNA * /*prop*/,
-                                                      bool * /*r_free*/)
+                                                      bool *r_free)
 {
   PaintMode mode = (C) ? BKE_paintmode_get_active_from_context(C) : PaintMode::Invalid;
 
@@ -1071,11 +1071,67 @@ static const EnumPropertyItem *rna_Brush_stroke_itemf(bContext *C,
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  /* Texture Paint historically shared the sculpt list, which also advertises the sculpt-only
+   * Curve Patch and Roll methods. It keeps Drag Dot and Anchored, which do work there. */
+  static const EnumPropertyItem texture_paint_stroke_method_items[] = {
+      {BRUSH_STROKE_DOTS, "DOTS", 0, "Dots", "Apply paint on each mouse move step"},
+      {BRUSH_STROKE_DRAG_DOT,
+       "DRAG_DOT",
+       0,
+       "Drag Dot",
+       "Allows a single dot to be carefully positioned"},
+      {BRUSH_STROKE_SPACE,
+       "SPACE",
+       0,
+       "Space",
+       "Limit brush application to the distance specified by spacing"},
+      {BRUSH_STROKE_AIRBRUSH,
+       "AIRBRUSH",
+       0,
+       "Airbrush",
+       "Keep applying paint effect while holding mouse (spray)"},
+      {BRUSH_STROKE_ANCHORED,
+       "ANCHORED",
+       0,
+       "Anchored",
+       "Keep the brush anchored to the initial location"},
+      {BRUSH_STROKE_LINE,
+       "LINE",
+       0,
+       "Line",
+       "Draw a line with dabs separated according to spacing"},
+      {BRUSH_STROKE_CURVE,
+       "CURVE",
+       0,
+       "Curve",
+       "Define the stroke curve with a Bézier curve. Dabs are separated according to spacing."},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   switch (mode) {
-    case PaintMode::Sculpt:
+    case PaintMode::Sculpt: {
+      const Brush *brush = static_cast<const Brush *>(ptr->data);
+      if (brush == nullptr || bke::brush::supports_curve_patch(*brush)) {
+        return sculpt_stroke_method_items;
+      }
+      /* Curve Patch has no meaning for this brush type (see #supports_curve_patch), so drop just
+       * that item and keep the rest of the sculpt list intact. */
+      EnumPropertyItem *item = nullptr;
+      int totitem = 0;
+      for (const EnumPropertyItem *it = sculpt_stroke_method_items; it->identifier; it++) {
+        if (it->value == BRUSH_STROKE_CURVE_PATCH) {
+          continue;
+        }
+        RNA_enum_item_add(&item, &totitem, it);
+      }
+      RNA_enum_item_end(&item, &totitem);
+      *r_free = true;
+      return item;
+    }
+
     case PaintMode::Texture2D:
     case PaintMode::Texture3D:
-      return sculpt_stroke_method_items;
+      return texture_paint_stroke_method_items;
 
     default:
       return brush_stroke_method_items;

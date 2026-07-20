@@ -360,6 +360,51 @@ static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &s
   ob.runtime->sculpt_session = MEM_new<SculptSession>(__func__);
   ob.runtime->sculpt_session->mode_type = OB_MODE_SCULPT;
 
+  /* REC is restored from the mesh before the refresh below, and this is the only site that reads
+   * #SCULPT_LAYER_REC_ARMED. The session is the authority for as long as it exists, but it was just
+   * created with REC off, so the bit the previous session left behind is the only thing that knows
+   * the user was recording when they stepped out into object mode.
+   *
+   * Strictly before #rec_exemption_refresh: that call mirrors the session onto the mesh, so running
+   * it first would read "no REC" out of the fresh session and erase the very bit being read here.
+   *
+   * The question asked is "was REC on", not "was REC on *this* layer": the bit is looked for anywhere
+   * in the tree and REC is then re-armed on whatever layer is active now. That is what makes changing
+   * the active layer in object mode (#SCULPT_OT_layer_select is polled there) behave exactly as it
+   * does inside sculpt mode, where #SculptSession::layers::rec_active is not tied to a layer at all
+   * and #layer_select_exec simply lets the exemption follow the new active layer. Anything narrower
+   * would make a trip through object mode silently switch recording off, which is the bug this whole
+   * mirror exists to prevent.
+   *
+   * Restored only if the layer can still receive a stroke — the same refusal #layer_toggle_rec_exec
+   * makes against arming REC on a folder-hidden layer, plus the lock, since both can be set from the
+   * mesh properties UI while the object sits in object mode. When it cannot, REC simply stays off and
+   * the refresh below clears the stale bit; the user sees an unpressed REC button rather than a
+   * stroke silently landing in the base.
+   *
+   * Deliberately not routed through #rec_active_set: that call captures the runtime base, measures
+   * the layer's mask, flushes multires and recomposes, none of which can run here (there is no PBVH
+   * and no runtime base yet). It also pins the layer to enabled / influence 1.0, which must *not* be
+   * repeated — the pin happened when REC was first armed, and an influence the user changed in the
+   * meantime is an edit to respect, not to overwrite. The full geometry re-evaluation a few lines
+   * below composes the surface from scratch under the answer the refresh settles. */
+  if (ob.type == OB_MESH && ob.data != nullptr) {
+    const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+    bool was_armed = false;
+    for (const SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
+      if (layer->base.flag & SCULPT_LAYER_REC_ARMED) {
+        was_armed = true;
+        break;
+      }
+    }
+    const SculptLayer *active = bke::sculpt_layers::active_get(mesh);
+    if (was_armed && active != nullptr &&
+        !(active->base.flag & (SCULPT_LAYER_GROUP_HIDDEN | SCULPT_LAYER_LOCKED)))
+    {
+      ob.runtime->sculpt_session->layers.rec_active = true;
+    }
+  }
+
   /* Every entry, not just the skipped-exit case above. #SCULPT_LAYER_REC_EXEMPT lives on the mesh's
    * own layer nodes, so it is not lost when the #SculptSession is, and any path that armed REC and
    * never reached #object_sculpt_mode_exit — a mode switch that bypassed the exit, a script
@@ -610,8 +655,8 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
 
   BKE_sculptsession_free(&ob);
 
-  /* After the session is gone, which is what makes this a *clear*: REC is session state, so the
-   * refresh reads "no session, no REC" and drops the exemption. It has to be dropped, because
+  /* After the session is gone, which is what makes this a *clear*: with no session to mirror, the
+   * refresh drops the exemption. It has to be dropped, because
    * #SCULPT_LAYER_REC_EXEMPT lives on the mesh's layer nodes rather than on the session and would
    * otherwise outlive the mode — leaving this mesh rendering, and every later operator composing,
    * with a layer whose weight map is silently absent.
@@ -619,7 +664,12 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
    * This is the one caller that *cannot* recompose on the result even in principle: the session it
    * would need is already freed above, so there is no runtime base to recompose from. It does not
    * have to. The mode exit tears the sculpt PBVH down and tags the object for a full re-evaluation
-   * below, so the next composed surface is built from stored data under the settled answer. */
+   * below, so the next composed surface is built from stored data under the settled answer.
+   *
+   * #SCULPT_LAYER_REC_ARMED goes the other way and is left exactly as it stands. It composes nothing,
+   * so it is harmless outside the mode, and it is the only surviving record that REC was on —
+   * #init_sculpt_mode_session reads it back, which is what stops a trip through object mode from
+   * silently switching recording off. */
   layers::rec_exemption_refresh(ob);
 
   paint_cursor_delete_textures();

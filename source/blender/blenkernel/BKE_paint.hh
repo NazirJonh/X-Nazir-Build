@@ -639,8 +639,25 @@ struct SculptSession : NonCopyable, NonMovable {
     bool recording = false;
     /* True while REC (record) mode is on: brush strokes are recorded into the active layer (pinned
      * to influence 1.0). When false, strokes edit the base geometry instead. Transient editing
-     * state, not saved to the blend file. */
+     * state, not saved to the blend file.
+     *
+     * Mirrored onto the mesh as #SCULPT_LAYER_REC_ARMED so that it survives this session being
+     * destroyed on the way out of sculpt mode; the session stays the authority while it exists, and
+     * the mirror is read back exactly once, by #init_sculpt_mode_session. */
     bool rec_active = false;
+    /* #SculptLayerTreeNode::uid of the layer whose recording has already been reported to the user
+     * in this session, or 0 if nothing has been. Strokes report once rather than every time, and a
+     * change of active layer reports again — both fall out of comparing against this.
+     *
+     * Session-scoped on purpose, and that is the whole implementation of "once per entry into sculpt
+     * mode": a new session starts silent with no reset to run. Now that REC survives object mode, the
+     * user can return to a mode that records without having touched the REC button, which is what
+     * these two fields exist to say out loud. */
+    int rec_notified_uid = 0;
+    /* Whether the "REC is armed but the stroke cannot be recorded" warning has already been given in
+     * this session. Cleared again by a stroke that does record, so that a cause the user fixes and
+     * then re-introduces is reported anew. */
+    bool rec_notified_blocked = false;
     /* For the mesh (vertex) domain: the vertex positions with every layer's contribution removed
      * (the un-layered base). Captured lazily on sculpt-mode enter; kept current by non-REC strokes.
      * Empty for the grid domain. */

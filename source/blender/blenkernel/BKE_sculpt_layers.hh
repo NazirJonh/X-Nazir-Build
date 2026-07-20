@@ -984,6 +984,23 @@ void mask_enabled_set(SculptLayerTreeNode &node, bool enable);
 bool rec_exempt_set(const Mesh &mesh, const SculptLayer *layer);
 
 /**
+ * Mark \a layer as the one REC is armed on for #SCULPT_LAYER_REC_ARMED, clearing the bit from every
+ * other layer of \a mesh. Passing null clears it throughout.
+ *
+ * The shape of #rec_exempt_set and, in sculpt mode, always called with the same argument — both bits
+ * mirror #SculptSession::layers::rec_active onto the active layer, from the single writer
+ * #ed::sculpt_paint::layers::rec_exemption_refresh. What separates them is the mode exit: the
+ * exemption is cleared there because nothing outside sculpt mode may compose a layer with its weight
+ * map dropped, while this bit is deliberately left standing, which is what lets REC survive a trip
+ * through object mode. See #SCULPT_LAYER_REC_ARMED.
+ *
+ * Nothing composes from this bit, so — unlike #rec_exempt_set — moving it never invalidates a
+ * composed surface. The return value is therefore informational rather than load-bearing, and no
+ * caller has to recompose on it.
+ */
+bool rec_armed_set(const Mesh &mesh, const SculptLayer *layer);
+
+/**
  * #node_mask_for_composite for a #SCULPT_LAYER_DOMAIN_GRID layer, additionally requiring that the
  * masks are cut one block per grid (`block_size == grid_area`) — the contract the multires paths
  * rely on when they use a grid index as a block index. Masks cut any other way are dropped and the

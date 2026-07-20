@@ -78,6 +78,7 @@
 
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
+#include "ED_undo.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -1242,10 +1243,20 @@ bool rec_exemption_refresh(Object &object)
   }
   const Mesh &mesh = *id_cast<const Mesh *>(object.data);
   const SculptSession *ss = object.runtime->sculpt_session;
-  if (ss == nullptr || !ss->layers.rec_active) {
+  if (ss == nullptr) {
+    /* No session to mirror, which for the sculpt-mode exit is not "REC is off" but "REC has nowhere
+     * left to live". #SCULPT_LAYER_REC_ARMED is deliberately left exactly as it stands: it is the
+     * only record that REC was armed, and reading it back is what makes the next entry restore the
+     * mode the user left. #SCULPT_LAYER_REC_EXEMPT still has to go — see #object_sculpt_mode_exit
+     * for why a composite outside sculpt mode may never drop a layer's weight map. */
     return bke::sculpt_layers::rec_exempt_set(mesh, nullptr);
   }
-  return bke::sculpt_layers::rec_exempt_set(mesh, bke::sculpt_layers::active_get(mesh));
+  const SculptLayer *armed_layer = ss->layers.rec_active ? bke::sculpt_layers::active_get(mesh) :
+                                                           nullptr;
+  /* Both bits mirror the same answer while a session exists. Ordered exemption-last only so that the
+   * returned value keeps naming the bit callers recompose on; neither call reads the other's bit. */
+  bke::sculpt_layers::rec_armed_set(mesh, armed_layer);
+  return bke::sculpt_layers::rec_exempt_set(mesh, armed_layer);
 }
 
 void rec_active_set(Object &object, const bool armed)
@@ -1317,6 +1328,110 @@ void rec_active_set(Object &object, const bool armed)
   }
 }
 
+/* Create the layer REC needs when the mesh has none, and make it active.
+ *
+ * REC can be armed on a mesh with an empty layer tree — nothing refuses it — and every stroke then
+ * silently edits the base while the button says otherwise. Rather than refuse the arming (which
+ * would make the user's first act "press +, then press REC" every time), the layer is created for
+ * them. Named apart from the "+" button's "Layer" so the tree shows at a glance which layers the
+ * user made and which appeared on their behalf.
+ *
+ * Only creates and names. The caller owns the undo bracket and is responsible for recording the
+ * creation into it, because the two call sites bracket their work very differently: the REC toggle
+ * opens its own sculpt undo step, while the stroke start is already inside one it does not own.
+ *
+ * Requires no PBVH of its own — #bke::sculpt_layers::add is pure tree work — but the grid branch
+ * reads the subdivision level off the session, so a session must exist. The new layer carries zero
+ * displacement, so no recompose is owed: the composed surface is unchanged by construction. */
+static SculptLayer *auto_layer_create(Object &object)
+{
+  Mesh &mesh = mesh_of(object);
+  const SculptSession *ss = session_of(object);
+  BLI_assert(ss != nullptr);
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
+  if (pbvh != nullptr && pbvh->type() == bke::pbvh::Type::Grids) {
+    /* Grid layers store data canonically at the max subdivision level, and are sized lazily by
+     * #data_ensure at first use — the same arguments #layer_add_exec passes. */
+    const short totlvl = ss->multires_modifier ? ss->multires_modifier->totlvl :
+                                                 short(ss->subdiv_ccg ? ss->subdiv_ccg->level : 0);
+    return bke::sculpt_layers::add(
+        mesh, DATA_("Auto Layer"), SCULPT_LAYER_DOMAIN_GRID, 0, totlvl);
+  }
+  return bke::sculpt_layers::add(
+      mesh, DATA_("Auto Layer"), domain_for(object), element_count(object));
+}
+
+void stroke_ensure_rec_layer(const Scene &scene, Object &object)
+{
+  SculptSession *ss = session_of(object);
+  if (ss == nullptr || !ss->layers.rec_active) {
+    return;
+  }
+  if (object.type != OB_MESH || object.data == nullptr) {
+    return;
+  }
+  Mesh &mesh = mesh_of(object);
+  if (bke::sculpt_layers::active_get(mesh) != nullptr) {
+    return;
+  }
+  /* The armed-but-empty state the REC toggle now prevents at the source (#layer_toggle_rec_exec
+   * creates the layer as it arms). What is left for this fallback is everything that empties the
+   * tree afterwards without disarming REC — removing the last layer, an undo that restores a
+   * layer-less tree — where the alternative is a stroke that silently edits the base under a lit
+   * REC button.
+   *
+   * Deliberately a *separate* undo step, pushed before the stroke's own step opens rather than
+   * inside it. #push_sculpt_layer_list_change sets #StepData::type to #Type::SculptLayer, while the
+   * stroke's first dab sets it to #Type::Position; the field is one scalar, so sharing a step would
+   * trip `BLI_assert(ELEM(step_data->type, Type::None, type))` in #push_node and, in a release
+   * build, silently drop one of the two restores. Two steps cost the user a second Ctrl+Z and keep
+   * both restores honest.
+   *
+   * #session_state_ensure before the bracket, mirroring #layer_add_exec: it inverts the composite to
+   * recover the runtime base and has to measure the pre-change state. */
+  session_state_ensure(object);
+  undo::push_begin_ex(scene, object, "Auto Layer");
+  SculptLayer *layer = auto_layer_create(object);
+  undo::push_sculpt_layer_list_change(object, {}, Vector<int>({layer->base.uid}), false);
+  /* The new layer is active now, so the exemption has to follow it — the same reason
+   * #layer_add_exec refreshes. No recompose is owed: the layer carries zero displacement, and the
+   * refresh only moves a bit that composes nothing while REC is armed on it. */
+  rec_exemption_refresh(object);
+  undo::push_end(object);
+}
+
+/* Which surface the stroke that is starting will actually land on, said once rather than on every
+ * dab. #WM_global_reportf rather than #BKE_report because a stroke start has no #bContext and no
+ * #wmOperator in scope; the status bar and the info log are reached all the same.
+ *
+ * Both halves exist because REC now outlives sculpt mode (see #SCULPT_LAYER_REC_ARMED). Before that,
+ * a user who was recording had pressed the button moments earlier and in the same mode; now they can
+ * re-enter a mode that records without having touched anything, so the state has to announce itself.
+ */
+static void rec_report_recording(SculptSession &ss, const SculptLayer &layer)
+{
+  /* Keyed on the layer rather than on a bare "already reported" bool, so that changing the active
+   * layer mid-session reports the new target — the one change of target the user can make without
+   * touching REC at all. */
+  if (ss.layers.rec_notified_uid == layer.base.uid) {
+    return;
+  }
+  ss.layers.rec_notified_uid = layer.base.uid;
+  /* Cleared here rather than where the warning is given: a cause the user fixes, and then
+   * re-introduces, is worth reporting a second time. */
+  ss.layers.rec_notified_blocked = false;
+  WM_global_reportf(RPT_INFO, "Sculpting into layer \"%s\"", layer.base.name);
+}
+
+static void rec_report_blocked(SculptSession &ss, const char *reason)
+{
+  if (ss.layers.rec_notified_blocked) {
+    return;
+  }
+  ss.layers.rec_notified_blocked = true;
+  WM_global_reportf(RPT_INFO, "REC is on, but the stroke edits the base shape: %s", reason);
+}
+
 void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
 {
   SculptSession *ss = session_of(object);
@@ -1372,6 +1487,14 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
      * brush inputs (falloff, area normal, smoothing / plane targets) can be evaluated against the
      * un-layered base; see the Base view section above. */
     base_view_ensure(depsgraph, object);
+    /* Only when REC is armed: an ordinary non-REC stroke editing the base is the plain case and has
+     * nothing to announce. Reported after the base view is built, so a report can never change what
+     * the stroke does. */
+    if (ss->layers.rec_active) {
+      rec_report_blocked(*ss,
+                         rec_blocked ? "the layer's group is disabled" :
+                                       "Solo Base is isolating the base shape");
+    }
     return;
   }
 
@@ -1384,10 +1507,15 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
    * is not re-derived from base + layers at evaluation, so the recorded delta would have nowhere to
    * be reproduced. */
   if (ss->deform_modifiers_active && !ss->shapekey_active) {
+    rec_report_blocked(*ss, "a deforming modifier is active");
     return;
   }
 
   if (!layer || layer->domain != domain_for(object) || (layer->base.flag & SCULPT_LAYER_LOCKED)) {
+    rec_report_blocked(*ss,
+                       layer && (layer->base.flag & SCULPT_LAYER_LOCKED) ?
+                           "the layer is locked" :
+                           "no sculpt layer can receive this stroke");
     return;
   }
   if (grids) {
@@ -1427,6 +1555,7 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
   ss->layers.base_view_node_offset_bounds = {};
 
   ss->layers.recording = true;
+  rec_report_recording(*ss, *layer);
 
   if (!grids) {
     debug_validate_mesh_invariant(object, "stroke_begin");
@@ -1744,6 +1873,27 @@ static bool layers_poll(bContext *C)
 {
   const Object *ob = CTX_data_active_object(C);
   return ob && (ob->mode & OB_MODE_SCULPT);
+}
+
+/* The layer operators the mesh properties panel must also offer outside sculpt mode: selecting the
+ * active layer, and toggling a folder's visibility. Both act on state the panel shows in object mode
+ * and neither needs anything sculpt mode provides — one writes a uid, the other flips a flag and
+ * re-bakes the cascade. Each carries a separate object-mode exec; see #layer_select_object_mode_exec
+ * for why the sculpt-mode path cannot simply be run with a null session.
+ *
+ * Everything else stays sculpt-mode only (#layers_poll): it changes the tree, or moves the surface
+ * through the runtime base, and both need the session and the PBVH that only sculpt mode has.
+ *
+ * Edit mode is deliberately not included. The tree is drawn there too, but the live positions cannot
+ * be updated (see the influence slider's note in `properties_data_mesh.py`), and nothing has asked
+ * for it. */
+static bool layers_object_mode_poll(bContext *C)
+{
+  const Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr || ob->type != OB_MESH) {
+    return false;
+  }
+  return (ob->mode & OB_MODE_SCULPT) || ob->mode == OB_MODE_OBJECT;
 }
 
 /* UI-only refresh for operations that do not change the combined surface (add / move / select).
@@ -4328,8 +4478,80 @@ void SCULPT_OT_layer_solo_base(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER;
 }
 
+/* The object-mode half of #layer_group_toggle_visibility_exec.
+ *
+ * The mutation itself is identical and mode-independent: flip #SCULPT_LAYER_GROUP_ENABLED, then let
+ * #resync_group_state re-bake #SCULPT_LAYER_GROUP_HIDDEN and #group_influence_cached onto every
+ * descendant. What cannot come along is everything around it — #op_context_get dereferences the
+ * PBVH, and #undo::push_begin dereferences both the session and the PBVH — so this path is written
+ * out separately rather than guarded, exactly as #layer_select_object_mode_exec is.
+ *
+ * The surface is brought in line the way the RNA setters already do it outside sculpt mode
+ * (#rna_SculptLayerGroup_influence_set): per descendant, apply the difference between its effective
+ * weight before and after. #commit_layers_change is not usable here — it recomposes from the runtime
+ * base, which only exists inside a session. */
+static wmOperatorStatus layer_group_toggle_visibility_object_mode_exec(bContext *C,
+                                                                      wmOperator *op,
+                                                                      Object &object)
+{
+  Mesh &mesh = mesh_of(object);
+  const int group_uid = RNA_int_get(op->ptr, "group_uid");
+  SculptLayerGroup *group = group_row_lookup(mesh, group_uid);
+  if (!group) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
+    return OPERATOR_CANCELLED;
+  }
+
+  const Span<SculptLayer *> descendants = bke::sculpt_layers::layers(*group);
+  Vector<float> old_effective(descendants.size());
+  for (const int64_t i : descendants.index_range()) {
+    old_effective[i] = bke::sculpt_layers::effective(*descendants[i]);
+  }
+
+  group->base.flag ^= SCULPT_LAYER_GROUP_ENABLED;
+  bke::sculpt_layers::resync_group_state(mesh);
+
+  /* Skipped wholesale for the cases where the stored positions are not what the surface is composed
+   * from, and where writing a delta into them would corrupt the basis rather than update it: an edit
+   * mesh owns the live positions, and under a shape key the layers are an evaluation-time overlay
+   * over an untouched basis (#apply_vert_layers_eval). Both are covered by the re-evaluation tagged
+   * below instead. Grid-domain descendants are skipped per layer for the same reason, inside the
+   * loop. */
+  const bool positions_writable = mesh.verts_num > 0 && mesh.runtime->edit_mesh == nullptr &&
+                                  mesh.key == nullptr;
+  if (positions_writable) {
+    MutableSpan<float3> positions = mesh.vert_positions_for_write();
+    bool moved = false;
+    for (const int64_t i : descendants.index_range()) {
+      SculptLayer &layer = *descendants[i];
+      const float delta = bke::sculpt_layers::effective(layer) - old_effective[i];
+      if (delta == 0.0f || layer.domain != SCULPT_LAYER_DOMAIN_VERT) {
+        continue;
+      }
+      bke::sculpt_layers::apply_delta_mesh(layer, delta, positions);
+      moved = true;
+    }
+    if (moved) {
+      mesh.tag_positions_changed();
+    }
+  }
+
+  /* A plain memfile step, for the reason given in #layer_select_object_mode_exec. */
+  ED_undo_push(C, "Toggle Sculpt Layer Group Visibility");
+  /* Unconditional, and the only thing that updates the shape-key and multires cases: there the
+   * incremental write above is deliberately skipped and the composite is rebuilt from stored data at
+   * evaluation. */
+  DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+  layers_ui_notify(C, object);
+  return OPERATOR_FINISHED;
+}
+
 static wmOperatorStatus layer_group_toggle_visibility_exec(bContext *C, wmOperator *op)
 {
+  Object *object_poll = CTX_data_active_object(C);
+  if (object_poll != nullptr && !(object_poll->mode & OB_MODE_SCULPT)) {
+    return layer_group_toggle_visibility_object_mode_exec(C, op, *object_poll);
+  }
   OpContext ctx;
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
@@ -4364,7 +4586,7 @@ void SCULPT_OT_layer_group_toggle_visibility(wmOperatorType *ot)
   ot->idname = "SCULPT_OT_layer_group_toggle_visibility";
   ot->description = "Toggle visibility of a sculpt layer group and everything inside it";
   ot->exec = layer_group_toggle_visibility_exec;
-  ot->poll = layers_poll;
+  ot->poll = layers_object_mode_poll;
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
@@ -5069,8 +5291,44 @@ void SCULPT_OT_layer_group_delete(wmOperatorType *ot)
               INT_MAX);
 }
 
+/* The object-mode half of #layer_select_exec, which shares none of its machinery.
+ *
+ * #Mesh::sculpt_layers_active_uid is plain persistent DNA, and outside sculpt mode nothing derives
+ * from it: no composite consults it (#SCULPT_LAYER_REC_EXEMPT is cleared on the way out of the mode),
+ * there is no session to keep in step and no surface to bring back in line. So this writes the field,
+ * pushes a global undo step and stops — where the sculpt-mode path closes a mask session, settles the
+ * runtime base, moves the REC exemption and recomposes on the result.
+ *
+ * Split rather than guarded inside the main path on purpose: #op_context_get dereferences the PBVH
+ * (`bke::object::pbvh_get(object)->type()`), and the sculpt undo bracket around the selection has no
+ * meaning without a sculpt undo stack to bracket. Neither exists here. */
+static wmOperatorStatus layer_select_object_mode_exec(bContext *C, wmOperator *op, Object &object)
+{
+  Mesh &mesh = mesh_of(object);
+  const int uid = RNA_int_get(op->ptr, "uid");
+  if (bke::sculpt_layers::node_as_layer(bke::sculpt_layers::node_find_by_uid(mesh, uid)) == nullptr)
+  {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layer with that id");
+    return OPERATOR_CANCELLED;
+  }
+  if (mesh.sculpt_layers_active_uid == uid) {
+    return OPERATOR_FINISHED;
+  }
+  mesh.sculpt_layers_active_uid = uid;
+  /* A plain memfile step, which is the right kind here and the wrong kind in sculpt mode — the
+   * reason #SCULPT_OT_layer_select carries no #OPTYPE_UNDO and pushes its own sculpt step instead.
+   * Outside the mode there are no delta-based sculpt steps for a memfile step to sit between. */
+  ED_undo_push(C, "Select Sculpt Layer");
+  layers_ui_notify(C, object);
+  return OPERATOR_FINISHED;
+}
+
 static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
 {
+  Object *object_poll = CTX_data_active_object(C);
+  if (object_poll != nullptr && !(object_poll->mode & OB_MODE_SCULPT)) {
+    return layer_select_object_mode_exec(C, op, *object_poll);
+  }
   OpContext ctx;
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
@@ -5154,7 +5412,7 @@ void SCULPT_OT_layer_select(wmOperatorType *ot)
   ot->idname = "SCULPT_OT_layer_select";
   ot->description = "Set the active sculpt layer";
   ot->exec = layer_select_exec;
-  ot->poll = layers_poll;
+  ot->poll = layers_object_mode_poll;
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
@@ -5201,13 +5459,36 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  /* Arming REC on a mesh with no layers creates one, rather than leaving the button on with nothing
+   * behind it — the state where every stroke edits the base while the UI says it is recording. Done
+   * here rather than at stroke start because this is where the user expresses the intent, so the
+   * layer appears in the tree the moment they press the button. #stroke_record_begin carries the same
+   * creation as a fallback, for the ways this state can be reached without passing through here (the
+   * last layer removed while REC stays armed).
+   *
+   * Before the undo bracket opens, mirroring #layer_add_exec: #session_state_ensure inverts the
+   * composite to recover the runtime base and must measure the pre-change state. */
+  const bool create_layer = !ss->layers.rec_active && layer == nullptr;
+  if (create_layer) {
+    session_state_ensure(*ctx.object);
+  }
+
   /* Captured before the flip so Ctrl+Z can revert the enabled/influence normalization that
    * #rec_active_set applies when arming. Everything else that call does ahead of the normalization
    * — measuring whether the layer is masked, and the protective multires flush that measurement
    * gates — reads and writes nothing this push touches, so pushing first cannot change their
    * outcome; only the normalization has to land after the capture, and it does. */
-  if (layer) {
+  if (layer || create_layer) {
     undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  }
+  if (create_layer) {
+    layer = auto_layer_create(*ctx.object);
+    /* Recorded as a list change, exactly as #layer_add_exec does, so undoing the REC toggle also
+     * removes the layer it brought into being. #bke::sculpt_layers::add already made it active. */
+    undo::push_sculpt_layer_list_change(
+        *ctx.object, {}, Vector<int>({layer->base.uid}), false);
+  }
+  else if (layer) {
     undo::push_sculpt_layer_metadata(*ctx.object, layer->base);
   }
   /* The whole state change lives there, shared with the mask-editing entry so that both go through

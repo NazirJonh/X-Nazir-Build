@@ -1128,6 +1128,23 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object);
 void stroke_record_cancel(const Depsgraph &depsgraph, Object &object);
 
 /**
+ * Give an armed REC a layer to record into when the mesh has none, so the stroke about to start does
+ * not silently edit the base under a lit REC button. A no-op whenever REC is off or a layer is
+ * already active, which is every ordinary stroke.
+ *
+ * Must be called BEFORE the stroke's own undo step is opened, and is the reason it is a separate
+ * entry point rather than part of #stroke_record_begin: the layer creation is recorded with
+ * #undo::push_sculpt_layer_list_change, which claims #StepData::type for the layer machinery, while
+ * the stroke's dabs claim the same field for positions. Sharing one step would drop one of the two
+ * restores; the creation therefore gets its own step, pushed first.
+ *
+ * The common source of the armed-but-empty state is handled at the source instead — arming REC
+ * creates the layer (see #SCULPT_OT_layer_toggle_rec). This covers what happens afterwards: the last
+ * layer removed, or an undo restoring a layer-less tree, while REC stays armed.
+ */
+void stroke_ensure_rec_layer(const Scene &scene, Object &object);
+
+/**
  * The active mesh-domain recording layer's per-vertex offset buffer, or an empty span when no mesh
  * layer is currently being recorded. Used by #PositionDeformData to accumulate a stroke per dab.
  */

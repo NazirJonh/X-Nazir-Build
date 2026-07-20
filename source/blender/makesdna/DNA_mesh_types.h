@@ -211,6 +211,31 @@ enum eSculptLayerFlag : int {
    * "the mask is in force" — the behavior every existing file was saved with.
    */
   SCULPT_LAYER_MASK_DISABLED = 1 << 6,
+  /**
+   * REC is armed on this layer. A mirror of #SculptSession::layers::rec_active kept on the mesh, and
+   * it exists for exactly one reason: the session is destroyed on the way out of sculpt mode (see
+   * #object_sculpt_mode_exit), so a flag living only there cannot survive a trip through object mode.
+   * The entry path reads this bit back to restore REC; everything inside the mode keeps reading the
+   * session, which stays the authority for as long as it exists.
+   *
+   * Written only by #bke::sculpt_layers::rec_armed_set, driven from
+   * #ed::sculpt_paint::layers::rec_exemption_refresh alongside #SCULPT_LAYER_REC_EXEMPT. Both bits
+   * follow the same "at most one layer carries it" invariant, and the refresh is called from every
+   * path that can change either answer, so a bit dropped by an undo restore repairs itself.
+   *
+   * The one place the two part ways is the mode exit, where there is no session left to mirror:
+   * #SCULPT_LAYER_REC_EXEMPT must be cleared there (a composite outside sculpt mode would otherwise
+   * silently drop the layer's weight map), while this bit must be left standing — that is the whole
+   * feature.
+   *
+   * Never persisted: stripped on write and cleared again on read, like #SCULPT_LAYER_REC_EXEMPT but
+   * for a different reason. Not "the surface would be wrong" — nothing composes from this bit — but
+   * "a file must not open with strokes silently recording into a layer the user did not arm in this
+   * session". Recording state is scoped to a Blender run, deliberately.
+   *
+   * Never versioned: a new bit in an existing #flag reads as unset from old files.
+   */
+  SCULPT_LAYER_REC_ARMED = 1 << 7,
 };
 ENUM_OPERATORS(eSculptLayerFlag)
 

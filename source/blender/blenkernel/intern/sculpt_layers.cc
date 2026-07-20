@@ -855,6 +855,20 @@ bool rec_exempt_set(const Mesh &mesh, const SculptLayer *layer)
   return changed;
 }
 
+bool rec_armed_set(const Mesh &mesh, const SculptLayer *layer)
+{
+  /* Every layer visited, for the reason #rec_exempt_set gives: it is what makes the tree hold one
+   * armed node whatever state it was in on entry, so this doubles as the repair for a bit a memfile
+   * undo restore dropped (the writer strips it, so the encoder never sees it). */
+  bool changed = false;
+  for (SculptLayer *tree_layer : layers(mesh)) {
+    const int flag_before = tree_layer->base.flag;
+    SET_FLAG_FROM_TEST(tree_layer->base.flag, tree_layer == layer, SCULPT_LAYER_REC_ARMED);
+    changed |= tree_layer->base.flag != flag_before;
+  }
+  return changed;
+}
+
 /* The one place the two spellings of the bit are required to agree. Checked here rather than in
  * `DNA_mesh_types.h` because that header is parsed by makesdna, which does not accept a static
  * assert. */
@@ -1666,21 +1680,26 @@ static void group_blend_write_recursive(BlendWriter *writer, SculptLayerGroup &g
       group_blend_write_recursive(writer, *child);
     }
     else if (SculptLayer *layer = node_as_layer(&node)) {
-      /* #SCULPT_LAYER_REC_EXEMPT is session state that happens to live in a DNA field, so it is
-       * stripped here the same way the group's runtime pointer is above: from a sanitized shallow
-       * copy recorded *at the real layer's address*, which is what keeps the sibling links and the
-       * children's #SculptLayerTreeNode::parent pointers resolving on read.
+      /* #SCULPT_LAYER_REC_EXEMPT and #SCULPT_LAYER_REC_ARMED are session state that happens to live
+       * in a DNA field, so they are stripped here the same way the group's runtime pointer is above:
+       * from a sanitized shallow copy recorded *at the real layer's address*, which is what keeps
+       * the sibling links and the children's #SculptLayerTreeNode::parent pointers resolving on
+       * read.
        *
-       * A `.blend` carrying this bit would open with that layer's weight map silently absent from
-       * the composite, permanently, with nothing in the UI naming the cause. Clearing it here also
-       * keeps two otherwise identical trees comparing equal in the memfile undo encoder whether or
-       * not REC happened to be armed. The cost is that a memfile undo restore drops the bit —
-       * repaired by #ed::sculpt_paint::layers::rec_exemption_refresh, which every commit and every
-       * stroke start already calls. Erring that way round is deliberate: a dropped bit is a
-       * composite that looks masked until the next commit, a leaked bit is a wrong surface with no
+       * Both are dropped, for different failures. A `.blend` carrying the exemption would open with
+       * that layer's weight map silently absent from the composite, permanently, with nothing in the
+       * UI naming the cause. One carrying the armed bit would open recording every stroke into a
+       * layer the user did not arm in this session — visible in the REC button, but only to someone
+       * who thinks to look. Recording state is scoped to a Blender run by design.
+       *
+       * Clearing them here also keeps two otherwise identical trees comparing equal in the memfile
+       * undo encoder whether or not REC happened to be armed. The cost is that a memfile undo
+       * restore drops both — repaired by #ed::sculpt_paint::layers::rec_exemption_refresh, which
+       * every commit and every stroke start already calls. Erring that way round is deliberate: a
+       * dropped bit is repaired within one operator, a leaked exemption is a wrong surface with no
        * way back. */
       SculptLayer layer_for_write = *layer;
-      layer_for_write.base.flag &= ~SCULPT_LAYER_REC_EXEMPT;
+      layer_for_write.base.flag &= ~(SCULPT_LAYER_REC_EXEMPT | SCULPT_LAYER_REC_ARMED);
       writer->write_struct_at_address(layer, &layer_for_write);
       if (layer->base.mask != nullptr) {
         mask_blend_write(writer, *layer->base.mask);
@@ -1738,14 +1757,16 @@ static void group_blend_read_children(BlendDataReader *reader,
       group_blend_read_children(reader, *child, visited, r_corrupt);
     }
     else if (SculptLayer *layer = node_as_layer(&node)) {
-      /* Defense in depth, not a versioning step. #group_blend_write_recursive already strips this
-       * bit, so no file this build writes can carry it, and official builds predating the bit left
-       * it unset. What this covers is everything else that can reach the reader: a file written by
+      /* Defense in depth, not a versioning step. #group_blend_write_recursive already strips these
+       * bits, so no file this build writes can carry them, and official builds predating them left
+       * them unset. What this covers is everything else that can reach the reader: a file written by
        * an intermediate build of this branch, a hand-edited or truncated one, or a future build
-       * that repurposes the bit. The failure it prevents is the worst kind this subsystem has —
-       * silent and sticky, a layer whose weight map is gone from the composite with no operator
-       * that restores it — and the cost is one AND on a path that already visits every node. */
-      layer->base.flag &= ~SCULPT_LAYER_REC_EXEMPT;
+       * that repurposes a bit. The failure it prevents for #SCULPT_LAYER_REC_EXEMPT is the worst
+       * kind this subsystem has — silent and sticky, a layer whose weight map is gone from the
+       * composite with no operator that restores it — and for #SCULPT_LAYER_REC_ARMED it is a file
+       * that opens recording into a layer nobody armed. The cost is one AND on a path that already
+       * visits every node. */
+      layer->base.flag &= ~(SCULPT_LAYER_REC_EXEMPT | SCULPT_LAYER_REC_ARMED);
       float3 *data = static_cast<float3 *>(layer->data);
       BLO_read_array_and_validate_size(reader, &data, &layer->totelem);
       layer->data = data;

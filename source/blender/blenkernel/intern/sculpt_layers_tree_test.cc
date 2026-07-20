@@ -1408,6 +1408,74 @@ TEST_F(sculpt_layers_tree, rec_exempt_set_repairs_a_tree_with_several_exempt_lay
   EXPECT_FALSE(rec_exempt_set(*mesh, b));
 }
 
+static bool is_rec_armed(const SculptLayer &layer)
+{
+  return (layer.base.flag & SCULPT_LAYER_REC_ARMED) != 0;
+}
+
+TEST_F(sculpt_layers_tree, rec_armed_set_moves_a_single_bit_independent_of_the_exemption)
+{
+  /* #SCULPT_LAYER_REC_ARMED follows the same "at most one layer carries it" rule as the exemption,
+   * and the two are set from one place with one argument — but they are separate bits, because the
+   * sculpt-mode exit clears the exemption and deliberately leaves this one standing. That is the
+   * whole reason REC survives a trip through object mode, so the two are pinned as independent here:
+   * a repurposed or shared bit would take the feature out silently. */
+  SculptLayer *a = add(*mesh, "A", SCULPT_LAYER_DOMAIN_VERT, 0);
+  SculptLayerGroup *folder = group_add(*mesh, "Folder", 0);
+  ASSERT_NE(folder, nullptr);
+  SculptLayer *nested = add(*mesh, "Nested", SCULPT_LAYER_DOMAIN_VERT, 0);
+  node_move_into(*mesh, nested->base, *folder, nullptr);
+
+  /* Armed inside a folder, which a walk over the root's own children would never reach. */
+  EXPECT_TRUE(rec_armed_set(*mesh, nested));
+  EXPECT_TRUE(is_rec_armed(*nested));
+  EXPECT_FALSE(is_rec_armed(*a));
+  /* The exemption is a different bit and this setter does not touch it. */
+  EXPECT_FALSE(is_rec_exempt(*nested));
+
+  EXPECT_FALSE(rec_armed_set(*mesh, nested)) << "the setter is not idempotent";
+
+  /* Moving the armed layer clears the old one rather than adding a second: the entry path reads the
+   * bit back off the *active* layer, so two armed layers would make the restored answer depend on
+   * which layer happened to be active. */
+  EXPECT_TRUE(rec_armed_set(*mesh, a));
+  EXPECT_TRUE(is_rec_armed(*a));
+  EXPECT_FALSE(is_rec_armed(*nested)) << "the bit was left behind on a layer inside a folder";
+
+  /* Clearing the exemption throughout — what the sculpt-mode exit does — must leave the armed bit
+   * exactly where it is. This is the assertion the feature rests on. */
+  EXPECT_TRUE(rec_exempt_set(*mesh, a));
+  EXPECT_TRUE(rec_exempt_set(*mesh, nullptr));
+  EXPECT_TRUE(is_rec_armed(*a)) << "the mode exit's exemption clear also disarmed REC";
+
+  EXPECT_TRUE(rec_armed_set(*mesh, nullptr));
+  EXPECT_FALSE(is_rec_armed(*a));
+  EXPECT_FALSE(rec_armed_set(*mesh, nullptr));
+}
+
+TEST_F(sculpt_layers_tree, rec_armed_set_repairs_a_tree_with_several_armed_layers)
+{
+  /* The state the setter exists to repair, for the reason its exemption counterpart gives: a memfile
+   * undo restore writes flags straight back into the nodes, and the writer strips this bit, so the
+   * tree can arrive with the bit on several layers or on none. */
+  SculptLayer *a = add(*mesh, "A", SCULPT_LAYER_DOMAIN_VERT, 0);
+  SculptLayer *b = add(*mesh, "B", SCULPT_LAYER_DOMAIN_VERT, 0);
+  SculptLayerGroup *folder = group_add(*mesh, "Folder", 0);
+  ASSERT_NE(folder, nullptr);
+  SculptLayer *nested = add(*mesh, "Nested", SCULPT_LAYER_DOMAIN_VERT, 0);
+  node_move_into(*mesh, nested->base, *folder, nullptr);
+
+  a->base.flag |= SCULPT_LAYER_REC_ARMED;
+  b->base.flag |= SCULPT_LAYER_REC_ARMED;
+  nested->base.flag |= SCULPT_LAYER_REC_ARMED;
+
+  EXPECT_TRUE(rec_armed_set(*mesh, b));
+  EXPECT_TRUE(is_rec_armed(*b));
+  EXPECT_FALSE(is_rec_armed(*a));
+  EXPECT_FALSE(is_rec_armed(*nested));
+  EXPECT_FALSE(rec_armed_set(*mesh, b));
+}
+
 TEST_F(sculpt_layers_tree, composite_ignores_every_mask_of_an_armed_rec_layer)
 {
   /* The invariant BKE_sculpt_layers.hh:911-916 states and nothing pinned: while REC is armed on a

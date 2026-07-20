@@ -6004,13 +6004,22 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mouse[2])
 
     cursor_geometry_info_update(*this->depsgraph, *paint, sculpt_, this->vc, base_, mouse, false);
 
+    /* Sculpt layers: position brushes (not the paint brushes, not Mask) are the ones that record. */
+    const bool records_into_layer = brush && !brush_type_is_paint(brush->sculpt_brush_type) &&
+                                    brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK;
+
+    /* Before the stroke's undo step opens, and that ordering is required rather than tidy: the layer
+     * this may create is recorded in a step of its own, because a layer-list record and the stroke's
+     * position records cannot share one step's type field. See #layers::stroke_ensure_rec_layer. */
+    if (records_into_layer) {
+      layers::stroke_ensure_rec_layer(*this->scene, ob);
+    }
+
     stroke_undo_begin(*this->scene, this->brush, *this->paint_mode_settings_, *this->object, op);
 
-    /* Sculpt layers: start recording this stroke into the active layer (position brushes only).
-     * Undo data is recorded at stroke end (explicit deltas for both domains). */
-    if (brush && !brush_type_is_paint(brush->sculpt_brush_type) &&
-        brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK)
-    {
+    /* Start recording this stroke into the active layer. Undo data is recorded at stroke end
+     * (explicit deltas for both domains). */
+    if (records_into_layer) {
       layers::stroke_record_begin(*this->depsgraph, ob);
     }
 

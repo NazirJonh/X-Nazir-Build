@@ -119,6 +119,10 @@ static void mask_buffer_refresh_pbvh(Object &object)
       return;
   }
   pbvh->tag_masks_changed(node_mask);
+  /* The session boundary swaps which buffer feeds each overlay attribute (the live mask buffer
+   * switches between the user's mask and the layer's weights), so both attributes go stale on every
+   * leaf even though only one was painted. */
+  pbvh->tag_layer_masks_changed(node_mask);
 }
 
 /**
@@ -1062,6 +1066,7 @@ static wmOperatorStatus layer_mask_add_exec(bContext *C, wmOperator *op)
    * invisible — every consumer was already ignoring it. Hence no #commit_layers_change here. */
   ctx.node->mask = bke::sculpt_layers::mask_new(ctx.layout.totelem, ctx.layout.block_size, 255);
   tag_masked_chains_dirty(*ctx.node);
+  tag_layer_mask_overlay_dirty(*ctx.object);
 
   /* Adding a mask and then editing it is one intention, so the session opens here rather than
    * making the user find "Edit Mask" as a second step. The session marker rides the same undo step
@@ -1135,6 +1140,7 @@ static wmOperatorStatus layer_mask_remove_exec(bContext *C, wmOperator *op)
   bke::sculpt_layers::mask_free(ctx.node->mask);
   ctx.node->mask = nullptr;
   tag_masked_chains_dirty(*ctx.node);
+  tag_layer_mask_overlay_dirty(*ctx.object);
   /* The node's full contribution comes back wherever the mask was attenuating it, so the composed
    * surface moves. Recomputed canonically rather than nudged, as everywhere in this module. */
   commit_layers_change(*ctx.depsgraph, *ctx.object);
@@ -1199,6 +1205,7 @@ static wmOperatorStatus mask_uniform_exec(bContext *C,
    * cut for the other domain is repaired by the same call that fills it. */
   ctx.node->mask = bke::sculpt_layers::mask_new(ctx.layout.totelem, ctx.layout.block_size, fill);
   tag_masked_chains_dirty(*ctx.node);
+  tag_layer_mask_overlay_dirty(*ctx.object);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
   mask_ui_notify(C, *ctx.object);
@@ -1281,6 +1288,7 @@ static wmOperatorStatus layer_mask_invert_exec(bContext *C, wmOperator *op)
   bke::sculpt_layers::mask_free(ctx.node->mask);
   ctx.node->mask = bke::sculpt_layers::mask_compress(dense.as_span(), ctx.layout.block_size);
   tag_masked_chains_dirty(*ctx.node);
+  tag_layer_mask_overlay_dirty(*ctx.object);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
   mask_ui_notify(C, *ctx.object);
@@ -1340,6 +1348,9 @@ static wmOperatorStatus layer_mask_toggle_exec(bContext *C, wmOperator *op)
   /* A no-op for a layer, whose mask caches nowhere; for a folder this is what makes the change
    * visible, since #chain_mask would otherwise keep serving the product built a moment ago. */
   tag_masked_chains_dirty(*ctx.node);
+  /* The overlay gates on the same bit (a disabled mask hides nothing), so the toggle changes what
+   * it has to draw even though no weight moved. */
+  tag_layer_mask_overlay_dirty(*ctx.object);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
   /* Two spellings rather than one format string chosen by a ternary, so both remain extractable for

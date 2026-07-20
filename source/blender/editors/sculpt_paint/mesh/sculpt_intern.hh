@@ -1412,6 +1412,20 @@ inline bool mask_edit_blocks_brush(const int mask_edit_uid, const int sculpt_bru
   return mask_edit_uid != 0 && !brush_type_is_attribute_only(sculpt_brush_type);
 }
 
+/**
+ * Refill the whole sculpt layer mask overlay attribute. Which node the overlay shows has changed
+ * (active layer switched, a mask was added/removed/filled/inverted), so no node keeps a valid
+ * value — unlike a brush stroke, where only the touched nodes go stale.
+ *
+ * Defined in `sculpt_layers.cc` because that file already shares the PBVH/object helpers the
+ * #active_set call sites need; `sculpt_layer_mask_edit.cc` calls it for its out-of-session mask
+ * operators through this declaration.
+ *
+ * Mirrored in `ED_sculpt.hh` for the RNA setter of the active layer, exactly as
+ * #rec_exemption_refresh is and for the same reason.
+ */
+void tag_layer_mask_overlay_dirty(Object &object);
+
 /* #mask_edit_refuse_deform lives in `ED_sculpt.hh`: the transform system calls it from
  * `editors/transform/`, which cannot see this module-internal header. */
 

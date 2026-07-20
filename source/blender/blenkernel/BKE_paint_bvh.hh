@@ -224,6 +224,7 @@ class DrawCache {
   virtual void tag_topology_changed(const IndexMask &node_mask) = 0;
   virtual void tag_face_sets_changed(const IndexMask &node_mask) = 0;
   virtual void tag_masks_changed(const IndexMask &node_mask) = 0;
+  virtual void tag_layer_masks_changed(const IndexMask &node_mask) = 0;
   virtual void tag_attribute_changed(const IndexMask &node_mask, StringRef attribute_name) = 0;
 
   /**
@@ -358,6 +359,9 @@ class Tree {
 
   /** Tag nodes where mask values have changed, causing refresh of derived data. */
   void tag_masks_changed(const IndexMask &node_mask);
+
+  /** Tag nodes where sculpt layer mask weights have changed, causing refresh of derived data. */
+  void tag_layer_masks_changed(const IndexMask &node_mask);
 
   /**
    * Tag nodes where generic attribute data has changed (not positions, masks, or face sets).

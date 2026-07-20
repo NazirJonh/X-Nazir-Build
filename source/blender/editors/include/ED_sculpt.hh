@@ -183,6 +183,17 @@ bool destructive_edit_check(const Mesh &mesh, ReportList *reports);
 bool rec_exemption_refresh(Object &object);
 
 /**
+ * Tag every node of \a object so the sculpt layer mask overlay refills.
+ *
+ * Exported alongside #rec_exemption_refresh and for the same reason: assigning
+ * `Mesh.sculpt_layers.active` from `bpy` changes which node the overlay draws without going through
+ * any of the operators that tag it.
+ *
+ * A no-op when the object has no PBVH, so callers need not check.
+ */
+void tag_layer_mask_overlay_dirty(Object &object);
+
+/**
  * Refuse (reporting) an action that moves vertices outside the brush stroke path while a weight-mask
  * editing session is open on \a object. True when it was refused.
  *

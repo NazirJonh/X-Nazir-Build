@@ -314,6 +314,8 @@ static void rna_Mesh_sculpt_layers_active_set(PointerRNA *ptr,
   for (Object &object : G_MAIN->objects) {
     if (object.data == &mesh->id && (object.mode & OB_MODE_SCULPT)) {
       ed::sculpt_paint::layers::rec_exemption_refresh(object);
+      /* The overlay draws the active node's weight mask, so the assignment changed what it shows. */
+      ed::sculpt_paint::layers::tag_layer_mask_overlay_dirty(object);
     }
   }
 }

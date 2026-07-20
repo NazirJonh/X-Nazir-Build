@@ -2160,6 +2160,9 @@ static void restore_list(bContext *C,
      * selection never pays a canonical position recompute. */
     if (op.has_active_change) {
       mesh.sculpt_layers_active_uid = is_undo ? op.active_uid_from : op.active_uid_to;
+      /* The overlay shows the active node's weight mask, so a different node is now on screen and
+       * no node of the draw cache holds a valid value. */
+      layers::tag_layer_mask_overlay_dirty(object);
       WM_event_add_notifier(C, NC_GEOM | ND_DATA, &mesh.id);
       return;
     }

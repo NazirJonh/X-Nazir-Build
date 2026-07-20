@@ -180,6 +180,16 @@ static SculptSession *session_of(Object &object)
   return object.runtime->sculpt_session;
 }
 
+void tag_layer_mask_overlay_dirty(Object &object)
+{
+  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
+  if (pbvh == nullptr) {
+    return;
+  }
+  IndexMaskMemory memory;
+  pbvh->tag_layer_masks_changed(bke::pbvh::all_leaf_nodes(*pbvh, memory));
+}
+
 void invalidate_runtime(Object &object)
 {
   SculptSession *ss = session_of(object);
@@ -1981,6 +1991,7 @@ static wmOperatorStatus layer_move_exec(bContext *C, wmOperator *op)
   bke::sculpt_layers::node_move_into(*ctx.mesh, node, parent, after);
 
   bke::sculpt_layers::active_set(*ctx.mesh, layer);
+  tag_layer_mask_overlay_dirty(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
   /* Move Up/Down never leaves the layer's folder, so both group fields carry the same uid. */
   const int parent_uid = parent.base.uid;
@@ -2379,6 +2390,7 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
       *ctx.mesh, active->base, undo::PayloadCapture::NodeRemoved));
   bke::sculpt_layers::remove(*ctx.mesh, *active);
   bke::sculpt_layers::active_set(*ctx.mesh, below);
+  tag_layer_mask_overlay_dirty(*ctx.object);
   /* The active layer changed, and the exemption bit died with the layer that carried it. Left
    * unrefreshed, an armed REC would record into `below` with no layer exempt at all, which is the
    * one state the exemption exists to prevent. Cheap enough to call unconditionally, and it cannot
@@ -2509,6 +2521,7 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
     bke::sculpt_layers::remove(*ctx.mesh, *source);
   }
   bke::sculpt_layers::active_set(*ctx.mesh, active);
+  tag_layer_mask_overlay_dirty(*ctx.object);
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
   undo::push_end(*ctx.object);
 
@@ -4361,6 +4374,7 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
   bke::sculpt_layers::node_name_ensure_unique(survivor->base);
 
   bke::sculpt_layers::active_set(mesh, survivor);
+  tag_layer_mask_overlay_dirty(*ctx.object);
   group_cascade_resync_with_undo(*ctx.object, mesh);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
@@ -4565,6 +4579,9 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
   }
   undo::push_sculpt_layer_active(*ctx.object, uid_from, uid);
   ctx.mesh->sculpt_layers_active_uid = uid;
+  /* Written straight to the field rather than through #active_set, so the tag the other selection
+   * paths get from their #active_set neighbors has to be placed by hand here. */
+  tag_layer_mask_overlay_dirty(*ctx.object);
   /* REC stays armed across a change of active layer, so the exemption has to follow the new active
    * layer rather than stay on the old one.
    *

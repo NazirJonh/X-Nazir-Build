@@ -302,6 +302,7 @@ enum eView3DOverlay_Flag : int {
   V3D_OVERLAY_SHOW_LIGHT_COLORS = (1 << 17),
   V3D_OVERLAY_VIEWER_ATTRIBUTE_TEXT = (1 << 18),
   V3D_OVERLAY_PERFORMANCE = (1 << 19),
+  V3D_OVERLAY_SCULPT_SHOW_LAYER_MASK = (1 << 20),
 };
 ENUM_OPERATORS(eView3DOverlay_Flag)
 
@@ -640,7 +641,8 @@ struct View3DShading {
 /** 3D Viewport Overlay settings. */
 struct View3DOverlay {
   eView3DOverlay_Flag flag = V3D_OVERLAY_VIEWER_ATTRIBUTE | V3D_OVERLAY_SCULPT_SHOW_MASK |
-                             V3D_OVERLAY_SCULPT_SHOW_FACE_SETS;
+                             V3D_OVERLAY_SCULPT_SHOW_FACE_SETS |
+                             V3D_OVERLAY_SCULPT_SHOW_LAYER_MASK;
 
   /** Edit mode settings. */
   eView3DOverlay_EditFlag edit_flag = V3D_OVERLAY_EDIT_FACES | V3D_OVERLAY_EDIT_SEAMS |
@@ -662,6 +664,7 @@ struct View3DOverlay {
   float weight_paint_mode_opacity = 1.0f;
   float sculpt_mode_mask_opacity = 0.75f;
   float sculpt_mode_face_sets_opacity = 1.0f;
+  float sculpt_mode_layer_mask_opacity = 0.75f;
   float viewer_attribute_opacity = 1.0f;
 
   /** Armature edit/pose mode settings. */
@@ -694,6 +697,10 @@ struct View3DOverlay {
 
   /** Curves sculpt mode settings. */
   float sculpt_curves_cage_opacity = 0;
+
+  /* Keeps the struct size a multiple of 8: #View3D embeds this one directly ahead of
+   * #ViewerPath, whose members must start 8-byte aligned. */
+  char _pad[4] = {};
 };
 
 struct View3D_Runtime {

@@ -699,6 +699,13 @@ void Tree::tag_masks_changed(const IndexMask &node_mask)
   }
 }
 
+void Tree::tag_layer_masks_changed(const IndexMask &node_mask)
+{
+  if (this->draw_data) {
+    this->draw_data->tag_layer_masks_changed(node_mask);
+  }
+}
+
 void Tree::tag_attribute_changed(const IndexMask &node_mask, const StringRef attribute_name)
 {
   if (this->draw_data) {

@@ -7590,6 +7590,16 @@ class VIEW3D_PT_overlay_sculpt(Panel):
         sub.active = overlay.show_sculpt_face_sets
         row.prop(overlay, "sculpt_mode_face_sets_opacity", text="Face Sets")
 
+        ob = context.object
+        mesh = ob.data if ob is not None else None
+        has_layers = mesh is not None and len(mesh.sculpt_layers) > 0
+
+        row = layout.row(align=True)
+        row.prop(overlay, "show_sculpt_layer_mask", text="")
+        sub = row.row()
+        sub.active = overlay.show_sculpt_layer_mask and has_layers
+        sub.prop(overlay, "sculpt_mode_layer_mask_opacity", text="Sculpt Layers")
+
         use_debug = prefs.experimental.use_paint_debug and prefs.view.show_developer_ui
         if use_debug:
             row = layout.row(align=True)

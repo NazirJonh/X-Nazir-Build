@@ -10,6 +10,9 @@
 #include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
+#include "DNA_space_types.h"
+#include "DNA_view3d_types.h"
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_set.hh"
@@ -85,6 +88,24 @@ void blo_do_versions_530(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
   }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 503, 6)) {
+    /* The sculpt layer mask overlay is on by default, and its bit is new: every file predating it
+     * stored a zero there, which would otherwise read as "the user turned it off". Set once, so a
+     * later deliberate toggle survives. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            v3d->overlay.flag |= V3D_OVERLAY_SCULPT_SHOW_LAYER_MASK;
+            v3d->overlay.sculpt_mode_layer_mask_opacity = 0.75f;
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

@@ -43,6 +43,7 @@ class Sculpts : Overlay {
   bool show_curves_cage_ = false;
   bool show_face_set_ = false;
   bool show_mask_ = false;
+  bool show_layer_mask_ = false;
 
  public:
   void begin_sync(Resources &res, const State &state) final
@@ -50,11 +51,12 @@ class Sculpts : Overlay {
     show_curves_cage_ = state.show_sculpt_curves_cage();
     show_face_set_ = state.show_sculpt_face_sets();
     show_mask_ = state.show_sculpt_mask();
+    show_layer_mask_ = state.show_sculpt_layer_mask();
 
     enabled_ = state.is_space_v3d() && !state.is_wire() && !res.is_selection() &&
                !state.is_depth_only_drawing &&
                ELEM(state.object_mode, OB_MODE_SCULPT_CURVES, OB_MODE_SCULPT) &&
-               (show_curves_cage_ || show_face_set_ || show_mask_);
+               (show_curves_cage_ || show_face_set_ || show_mask_ || show_layer_mask_);
 
     if (!enabled_) {
       /* Not used. But release the data. */
@@ -66,41 +68,15 @@ class Sculpts : Overlay {
     float curve_cage_opacity = show_curves_cage_ ? state.overlay.sculpt_curves_cage_opacity : 0.0f;
     float face_set_opacity = show_face_set_ ? state.overlay.sculpt_mode_face_sets_opacity : 0.0f;
     float mask_opacity = show_mask_ ? state.overlay.sculpt_mode_mask_opacity : 0.0f;
-
-    /* Black reproduces the previous look exactly: `mix(float3(1), float3(0), a)` is `1 - a`, which
-     * is the formula this overlay used before the tint existed. So the ordinary sculpt mask is
-     * unchanged and no blend state had to move. */
-    float3 mask_tint = float3(0.0f);
-    if (state.object_active != nullptr && state.object_active->runtime != nullptr) {
-      /* #Object::runtime and #bke::ObjectRuntime::sculpt_session are both plain pointers in this
-       * fork (see `BKE_object_types.hh`), so no `.get()` here. `state.object_active` is the
-       * original object (`BKE_view_layer_active_object_get()` returns `base->object`), but the
-       * depsgraph copies the session pointer verbatim onto the evaluated object during eval
-       * (`deg_eval_copy_on_write.cc`), so both objects share the exact same #SculptSession and
-       * reading it here sees the same `mask_edit` state that #mesh_sync reads from the evaluated
-       * object. */
-      const SculptSession *ss = state.object_active->runtime->sculpt_session;
-      if (ss != nullptr && ss->layers.mask_edit.node_uid != 0 &&
-          ss->layers.mask_edit.suspend_depth == 0)
-      {
-        /* A layer weight mask is being edited, and the buffer this overlay is reading holds that
-         * layer's weights rather than the user's own mask. Cool tint so the two modes cannot be
-         * mistaken for each other. Multiplicative blending can only darken, so this reads as a
-         * blue darkening rather than as a blue glow.
-         *
-         * No channel is left at 1.0. A channel at full strength is never darkened at all, so a
-         * tint of pure blue would go invisible on a blue surface — exactly where the mask still
-         * has to be read. Holding blue just below 1.0 keeps a floor of darkening on every
-         * material while the hue stays unmistakably cool.
-         *
-         * #suspend_depth is what makes the second sentence true rather than merely likely: a
-         * suspended session has the *user's* mask back in the live buffer with its own weights
-         * parked, so tinting on #node_uid alone would color the user's mask blue. Not reachable
-         * today — every suspend bracket is a synchronous RAII scope that closes before the redraw
-         * — which is precisely why it is a condition here and not a comment. */
-        mask_tint = float3(0.12f, 0.45f, 0.95f);
-      }
-    }
+    /* Only the sculpt-mesh path knows how to source a layer mask (the PBVH attribute filler does);
+     * the curves sub-pass keeps its own selection shader and never references the third member, so
+     * the constant is always pushed and only the opacity gates it. The tint is the same value the
+     * old #mask_tint used: it is the same indicator, relocated onto the area it should have
+     * described all along. */
+    float layer_mask_opacity = show_layer_mask_ ?
+                                   state.overlay.sculpt_mode_layer_mask_opacity :
+                                   0.0f;
+    const float3 layer_mask_tint = float3(0.12f, 0.45f, 0.95f);
 
     {
       sculpt_mask_.init();
@@ -113,7 +89,8 @@ class Sculpts : Overlay {
         sub.shader_set(res.shaders->sculpt_mesh.get());
         sub.push_constant("mask_opacity", mask_opacity);
         sub.push_constant("face_sets_opacity", face_set_opacity);
-        sub.push_constant("mask_tint", mask_tint);
+        sub.push_constant("layer_mask_opacity", layer_mask_opacity);
+        sub.push_constant("layer_mask_tint", layer_mask_tint);
         mesh_ps_ = &sub;
       }
       {
@@ -196,7 +173,7 @@ class Sculpts : Overlay {
 
   void mesh_sync(Manager &manager, const ObjectRef &ob_ref, const State &state)
   {
-    if (!show_face_set_ && !show_mask_) {
+    if (!show_face_set_ && !show_mask_ && !show_layer_mask_) {
       /* Nothing to display. */
       return;
     }
@@ -222,32 +199,41 @@ class Sculpts : Overlay {
       return;
     }
 
-    switch (pbvh->type()) {
-      case bke::pbvh::Type::Mesh: {
-        const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*object_orig);
-        if (!mesh.attributes().contains(".sculpt_face_set") &&
-            !mesh.attributes().contains(".sculpt_mask"))
-        {
-          return;
+    /* The layer mask lives in DNA (#SculptLayerTreeNode::mask), not in the .sculpt_face_set /
+     * .sculpt_mask attributes this switch checks. A mesh with layers but no ordinary mask would be
+     * silently dropped by the early returns below, so the whole check is skipped when the layer
+     * overlay is on. That includes the BMesh branch, which has no layers to show at all (dyntopo
+     * carries none): its filler writes the neutral weight, which costs one pass over the buffer and
+     * keeps the branch structure uniform. */
+    if (!show_layer_mask_) {
+      switch (pbvh->type()) {
+        case bke::pbvh::Type::Mesh: {
+          const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*object_orig);
+          if (!mesh.attributes().contains(".sculpt_face_set") &&
+              !mesh.attributes().contains(".sculpt_mask"))
+          {
+            return;
+          }
+          break;
         }
-        break;
-      }
-      case bke::pbvh::Type::Grids: {
-        const SubdivCCG &subdiv_ccg = *sculpt_session->subdiv_ccg;
-        const Mesh &base_mesh = DRW_object_get_data_for_drawing<Mesh>(*object_orig);
-        if (subdiv_ccg.masks.is_empty() && !base_mesh.attributes().contains(".sculpt_face_set")) {
-          return;
+        case bke::pbvh::Type::Grids: {
+          const SubdivCCG &subdiv_ccg = *sculpt_session->subdiv_ccg;
+          const Mesh &base_mesh = DRW_object_get_data_for_drawing<Mesh>(*object_orig);
+          if (subdiv_ccg.masks.is_empty() &&
+              !base_mesh.attributes().contains(".sculpt_face_set")) {
+            return;
+          }
+          break;
         }
-        break;
-      }
-      case bke::pbvh::Type::BMesh: {
-        const BMesh &bm = *sculpt_session->bm;
-        if (!CustomData_has_layer_named(&bm.pdata, CD_PROP_FLOAT, ".sculpt_face_set") &&
-            !CustomData_has_layer_named(&bm.vdata, CD_PROP_FLOAT, ".sculpt_mask"))
-        {
-          return;
+        case bke::pbvh::Type::BMesh: {
+          const BMesh &bm = *sculpt_session->bm;
+          if (!CustomData_has_layer_named(&bm.pdata, CD_PROP_FLOAT, ".sculpt_face_set") &&
+              !CustomData_has_layer_named(&bm.vdata, CD_PROP_FLOAT, ".sculpt_mask"))
+          {
+            return;
+          }
+          break;
         }
-        break;
       }
     }
 
@@ -255,10 +241,10 @@ class Sculpts : Overlay {
     if (use_pbvh) {
       ResourceHandleRange handle = manager.unique_handle_for_sculpt(ob_ref);
 
-      SculptBatchFeature sculpt_batch_features_ = (show_face_set_ ? SCULPT_BATCH_FACE_SET :
-                                                                    SCULPT_BATCH_DEFAULT) |
-                                                  (show_mask_ ? SCULPT_BATCH_MASK :
-                                                                SCULPT_BATCH_DEFAULT);
+      SculptBatchFeature sculpt_batch_features_ =
+          (show_face_set_ ? SCULPT_BATCH_FACE_SET : SCULPT_BATCH_DEFAULT) |
+          (show_mask_ ? SCULPT_BATCH_MASK : SCULPT_BATCH_DEFAULT) |
+          (show_layer_mask_ ? SCULPT_BATCH_LAYER_MASK : SCULPT_BATCH_DEFAULT);
 
       for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, sculpt_batch_features_)) {
         mesh_ps_->draw(batch.batch, handle);

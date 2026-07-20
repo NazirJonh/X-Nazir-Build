@@ -274,6 +274,10 @@ struct State {
   {
     return (this->overlay.flag & V3D_OVERLAY_SCULPT_SHOW_FACE_SETS);
   }
+  bool show_sculpt_layer_mask() const
+  {
+    return (this->overlay.flag & V3D_OVERLAY_SCULPT_SHOW_LAYER_MASK);
+  }
   bool show_sculpt_curves_cage() const
   {
     return (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_CAGE);

@@ -87,6 +87,10 @@ struct OrigMeshData {
   int face_set_default;
   int face_set_seed;
   bke::AttributeAccessor attributes;
+  /* Kept alongside the #attributes accessor so the sculpt-layer mask fillers can read the tree
+   * (DNA, lives on the mesh) without re-deriving the original mesh each call. Null only when the
+   * PBVH is not mesh-backed, which is exactly the case the fillers refuse anyway. */
+  const Mesh *mesh = nullptr;
   OrigMeshData(const Mesh &mesh)
       : active_color(mesh.active_color_attribute),
         default_color(mesh.default_color_attribute),
@@ -94,7 +98,8 @@ struct OrigMeshData {
         default_uv_map(mesh.default_uv_map_name()),
         face_set_default(mesh.face_sets_color_default),
         face_set_seed(mesh.face_sets_color_seed),
-        attributes(mesh.attributes())
+        attributes(mesh.attributes()),
+        mesh(&mesh)
   {
   }
 };
@@ -184,6 +189,7 @@ class DrawCacheImpl : public DrawCache {
   void tag_topology_changed(const IndexMask &node_mask) override;
   void tag_face_sets_changed(const IndexMask &node_mask) override;
   void tag_masks_changed(const IndexMask &node_mask) override;
+  void tag_layer_masks_changed(const IndexMask &node_mask) override;
   void tag_attribute_changed(const IndexMask &node_mask, StringRef attribute_name) override;
 
   bool begin_influence_drag(int layer_uid) override;
@@ -292,6 +298,19 @@ void DrawCacheImpl::tag_masks_changed(const IndexMask &node_mask)
   if (DrawCacheImpl::AttributeData *data = attribute_vbos_.lookup_ptr(CustomRequest::Mask)) {
     data->tag_dirty(node_mask);
   }
+  /* The sculpt mask buffer feeds either attribute depending on whether a layer mask editing
+   * session is open, and this cache has no way to ask. Tagging both is always correct and merely
+   * redundant: when the layer overlay is off the lookup misses and the second tag costs nothing. */
+  if (DrawCacheImpl::AttributeData *data = attribute_vbos_.lookup_ptr(CustomRequest::LayerMask)) {
+    data->tag_dirty(node_mask);
+  }
+}
+
+void DrawCacheImpl::tag_layer_masks_changed(const IndexMask &node_mask)
+{
+  if (DrawCacheImpl::AttributeData *data = attribute_vbos_.lookup_ptr(CustomRequest::LayerMask)) {
+    data->tag_dirty(node_mask);
+  }
 }
 
 void DrawCacheImpl::tag_attribute_changed(const IndexMask &node_mask, StringRef attribute_name)
@@ -354,6 +373,13 @@ static const GPUVertFormat &normal_format()
 static const GPUVertFormat &mask_format()
 {
   static const GPUVertFormat format = GPU_vertformat_from_attribute("msk",
+                                                                    gpu::VertAttrType::SFLOAT_32);
+  return format;
+}
+
+static const GPUVertFormat &layer_mask_format()
+{
+  static const GPUVertFormat format = GPU_vertformat_from_attribute("layer_weight",
                                                                     gpu::VertAttrType::SFLOAT_32);
   return format;
 }
@@ -700,26 +726,178 @@ BLI_NOINLINE static void update_masks_mesh(const Object &object,
   const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(object);
   const OffsetIndices<int> faces = mesh.faces();
   const Span<int> corner_verts = mesh.corner_verts();
-  const VArraySpan mask = *orig_mesh_data.attributes.lookup<float>(".sculpt_mask",
-                                                                   bke::AttrDomain::Point);
+
+  /* While a layer mask editing session is open the live `.sculpt_mask` buffer holds the layer's
+   * weights rather than the user's own mask. The user's mask is parked in the session and must
+   * still be drawn: the two are independent and can cover different parts of the mesh. */
+  const SculptSession *ss = object.runtime->sculpt_session;
+  const bool session_live = ss != nullptr && ss->layers.mask_edit.node_uid != 0 &&
+                            ss->layers.mask_edit.suspend_depth == 0;
+
+  /* Held at function scope rather than inside the branch below: #VArraySpan owns a materialized
+   * buffer whenever the attribute is not a plain span, so a #Span pointing into it must not outlive
+   * it. Not looked up at all during a session, where the live buffer holds the wrong data. */
+  const VArraySpan<float> live = session_live ?
+                                     VArraySpan<float>() :
+                                     VArraySpan<float>(*orig_mesh_data.attributes.lookup<float>(
+                                         ".sculpt_mask", bke::AttrDomain::Point));
+
+  /* A parked copy whose length no longer matches the mesh cannot be indexed by vertex; the same
+   * guard gates every other reader of it (see #sculpt_layers_mask.cc). Missing either way means the
+   * user has no mask, which draws as zero rather than as nothing. */
+  const Span<float> parked = session_live ? ss->layers.mask_edit.saved_vert_mask.as_span() :
+                                            Span<float>(live);
+  const bool parked_usable = !parked.is_empty() && parked.size() == mesh.verts_num;
+
   ensure_vbos_allocated_mesh(object, mask_format(), node_mask, vbos);
-  if (!mask.is_empty()) {
+  if (!parked_usable) {
+    node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(0.0f); },
+                            exec_mode::grain_size(64));
+    return;
+  }
+  node_mask.foreach_index(
+      [&](const int i) {
+        float *data = vbos[i]->data<float>().data();
+        for (const int face : nodes[i].faces()) {
+          for (const int vert : corner_verts.slice(faces[face])) {
+            *data = parked[vert];
+            data++;
+          }
+        }
+      },
+      exec_mode::grain_size(1));
+}
+
+/**
+ * Resolve which layer node the overlay draws, and where its weights currently live.
+ *
+ * While a mask editing session is open the node's own #SculptLayerMask is stale: the weights are
+ * expanded into the live sculpt mask buffer and only compressed back on session end (see task 6).
+ * The session's node also need not be the active one — a folder mask can be edited while a layer
+ * inside it stays active — so the session wins over the active node rather than being checked
+ * against it.
+ *
+ * #orig_mesh_data carries the original mesh (sculpt mode skips depsgraph updates), and the session
+ * is read off the evaluated object's runtime, which shares the same #SculptSession as the original
+ * (the depsgraph copies the pointer verbatim during eval).
+ */
+static const SculptLayerTreeNode *layer_mask_node_for_draw(const Object &object,
+                                                           const OrigMeshData &orig_mesh_data,
+                                                           bool &r_session_live)
+{
+  r_session_live = false;
+  if (orig_mesh_data.mesh == nullptr) {
+    return nullptr;
+  }
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (ss != nullptr && ss->layers.mask_edit.node_uid != 0 &&
+      ss->layers.mask_edit.suspend_depth == 0)
+  {
+    r_session_live = true;
+    return bke::sculpt_layers::node_find_by_uid(*orig_mesh_data.mesh,
+                                                ss->layers.mask_edit.node_uid);
+  }
+  const SculptLayer *active = bke::sculpt_layers::active_get(*orig_mesh_data.mesh);
+  return active != nullptr ? &active->base : nullptr;
+}
+
+/**
+ * The overlay deliberately re-checks what #node_mask_for_composite checks rather than calling it:
+ * the composer folds parent folder masks in, while the overlay shows the weights of one node.
+ * Both must fail open the same way — an unusable mask means "nothing hidden", not "all hidden".
+ */
+static bool layer_mask_is_drawable(const SculptLayerTreeNode &node,
+                                   const int64_t elem_num,
+                                   const int grid_area)
+{
+  if (node.mask == nullptr) {
+    return false;
+  }
+  if (node.flag & SCULPT_LAYER_REC_EXEMPT) {
+    return false;
+  }
+  if (!bke::sculpt_layers::mask_enabled(node)) {
+    return false;
+  }
+  if (bke::sculpt_layers::is_stale_mask(*node.mask, elem_num)) {
+    return false;
+  }
+  /* A grid mask is stored one block per grid; a mismatched block_size is silently dropped by the
+   * composer, so the overlay agrees and renders the layer at full weight instead of reading
+   * mismatched blocks. `grid_area == 0` means the vertex domain, where block_size is free. */
+  if (grid_area != 0 && node.mask->block_size != grid_area) {
+    return false;
+  }
+  return true;
+}
+
+BLI_NOINLINE static void update_layer_masks_mesh(const Object &object,
+                                                 const OrigMeshData &orig_mesh_data,
+                                                 const IndexMask &node_mask,
+                                                 MutableSpan<gpu::VertBufPtr> vbos)
+{
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+  /* The same mesh the neighboring fillers walk: node face indices address the drawn mesh, while
+   * #OrigMeshData only supplies the per-vertex values. */
+  const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(object);
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  ensure_vbos_allocated_mesh(object, layer_mask_format(), node_mask, vbos);
+
+  bool session_live = false;
+  const SculptLayerTreeNode *node = layer_mask_node_for_draw(object, orig_mesh_data, session_live);
+
+  /* While a session is open the live sculpt mask buffer holds the layer's expanded weights, not the
+   * DNA mask on the node (which is parked and stale until #mask_edit_end compresses it back). The
+   * overlay therefore reads the same source #update_masks_mesh reads outside a session.
+   *
+   * Held at function scope for the reason spelled out in #update_masks_mesh: #VArraySpan can own
+   * the buffer it exposes. */
+  const VArraySpan<float> live = session_live ?
+                                     VArraySpan<float>(*orig_mesh_data.attributes.lookup<float>(
+                                         ".sculpt_mask", bke::AttrDomain::Point)) :
+                                     VArraySpan<float>();
+  if (session_live) {
+    if (live.size() != mesh.verts_num) {
+      node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(1.0f); },
+                              exec_mode::grain_size(64));
+      return;
+    }
     node_mask.foreach_index(
         [&](const int i) {
           float *data = vbos[i]->data<float>().data();
           for (const int face : nodes[i].faces()) {
             for (const int vert : corner_verts.slice(faces[face])) {
-              *data = mask[vert];
+              *data = live[vert];
               data++;
             }
           }
         },
         exec_mode::grain_size(1));
+    return;
   }
-  else {
-    node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(0.0f); },
+
+  if (node == nullptr || !layer_mask_is_drawable(*node, mesh.verts_num, 0)) {
+    /* A missing or undrawable node means "nothing hidden": the layer contributes fully, so the
+     * overlay has no blue to paint and a neutral weight is correct. */
+    node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(1.0f); },
                             exec_mode::grain_size(64));
+    return;
   }
+
+  const SculptLayerMask &layer_mask = *node->mask;
+  node_mask.foreach_index(
+      [&](const int i) {
+        float *data = vbos[i]->data<float>().data();
+        for (const int face : nodes[i].faces()) {
+          for (const int vert : corner_verts.slice(faces[face])) {
+            *data = float(bke::sculpt_layers::mask_value_at(layer_mask, vert)) / 255.0f;
+            data++;
+          }
+        }
+      },
+      exec_mode::grain_size(1));
 }
 
 BLI_NOINLINE static void update_face_sets_mesh(const Object &object,
@@ -925,16 +1103,105 @@ BLI_NOINLINE static void fill_masks_grids(const Object &object,
   const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
   const SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
-  const Span<float> masks = subdiv_ccg.masks;
+
+  /* While a layer mask editing session is open the live #subdiv_ccg.masks buffer holds the layer's
+   * weights rather than the user's own mask. The user's mask is parked in the session and must
+   * still be drawn: the two are independent and can cover different parts of the mesh. */
+  const SculptSession *ss = object.runtime->sculpt_session;
+  const bool session_live = ss != nullptr && ss->layers.mask_edit.node_uid != 0 &&
+                            ss->layers.mask_edit.suspend_depth == 0;
+  /* A parked copy whose length no longer matches the grids cannot be sliced per grid; the same
+   * guard gates every other reader of it (see #sculpt_layers_mask.cc). Missing either way means the
+   * user has no mask, which draws as zero rather than as nothing. */
+  const Span<float> masks = session_live ? ss->layers.mask_edit.saved_grid_mask.as_span() :
+                                           subdiv_ccg.masks.as_span();
+  const int64_t elem_num = int64_t(subdiv_ccg.grids_num) * subdiv_ccg.grid_area;
+
   ensure_vbos_allocated_grids(object, mask_format(), use_flat_layout, node_mask, vbos);
-  if (!masks.is_empty()) {
+  if (masks.size() != elem_num) {
+    node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(0.0f); },
+                            exec_mode::grain_size(64));
+    return;
+  }
+  node_mask.foreach_index(
+      [&](const int i) {
+        float *data = vbos[i]->data<float>().data();
+        if (use_flat_layout[i]) {
+          const int grid_size_1 = key.grid_size - 1;
+          for (const int grid : nodes[i].grids()) {
+            const Span<float> grid_masks = masks.slice(bke::ccg::grid_range(key, grid));
+            for (int y = 0; y < grid_size_1; y++) {
+              for (int x = 0; x < grid_size_1; x++) {
+                *data = grid_masks[CCG_grid_xy_to_index(key.grid_size, x, y)];
+                data++;
+                *data = grid_masks[CCG_grid_xy_to_index(key.grid_size, x + 1, y)];
+                data++;
+                *data = grid_masks[CCG_grid_xy_to_index(key.grid_size, x + 1, y + 1)];
+                data++;
+                *data = grid_masks[CCG_grid_xy_to_index(key.grid_size, x, y + 1)];
+                data++;
+              }
+            }
+          }
+        }
+        else {
+          for (const int grid : nodes[i].grids()) {
+            const Span<float> grid_masks = masks.slice(bke::ccg::grid_range(key, grid));
+            std::copy_n(grid_masks.data(), grid_masks.size(), data);
+            data += grid_masks.size();
+          }
+        }
+      },
+      exec_mode::grain_size(1));
+}
+
+/**
+ * Read one grid element from a layer mask as a normalized float. The mask is stored one block per
+ * grid (block_size == grid_area), so its element indexing matches #subdiv_ccg.masks one-to-one and
+ * only the grid-local offset needs translating to a global element index.
+ */
+static float layer_weight_at(const SculptLayerMask &mask,
+                             const IndexRange &grid_range,
+                             const int offset_in_grid)
+{
+  /* The element index is narrowed explicitly: #mask_value_at takes an `int`, and the caller has
+   * already established that the mask covers every grid element, so the sum fits by construction. */
+  const int elem = int(grid_range.start()) + offset_in_grid;
+  return float(bke::sculpt_layers::mask_value_at(mask, elem)) / 255.0f;
+}
+
+BLI_NOINLINE static void fill_layer_masks_grids(const Object &object,
+                                                const OrigMeshData &orig_mesh_data,
+                                                const BitSpan use_flat_layout,
+                                                const IndexMask &node_mask,
+                                                MutableSpan<gpu::VertBufPtr> vbos)
+{
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+  const SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  ensure_vbos_allocated_grids(object, layer_mask_format(), use_flat_layout, node_mask, vbos);
+
+  bool session_live = false;
+  const SculptLayerTreeNode *node = layer_mask_node_for_draw(object, orig_mesh_data, session_live);
+  const int64_t elem_num = int64_t(subdiv_ccg.grids_num) * subdiv_ccg.grid_area;
+
+  /* While a session is open the live sculpt mask buffer holds the layer's expanded weights, so the
+   * overlay reads #subdiv_ccg.masks — the same source #fill_masks_grids reads outside a session. */
+  if (session_live) {
+    const Span<float> live = subdiv_ccg.masks;
+    if (live.size() != elem_num) {
+      node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(1.0f); },
+                              exec_mode::grain_size(64));
+      return;
+    }
     node_mask.foreach_index(
         [&](const int i) {
           float *data = vbos[i]->data<float>().data();
           if (use_flat_layout[i]) {
             const int grid_size_1 = key.grid_size - 1;
             for (const int grid : nodes[i].grids()) {
-              const Span<float> grid_masks = masks.slice(bke::ccg::grid_range(key, grid));
+              const Span<float> grid_masks = live.slice(bke::ccg::grid_range(key, grid));
               for (int y = 0; y < grid_size_1; y++) {
                 for (int x = 0; x < grid_size_1; x++) {
                   *data = grid_masks[CCG_grid_xy_to_index(key.grid_size, x, y)];
@@ -951,18 +1218,60 @@ BLI_NOINLINE static void fill_masks_grids(const Object &object,
           }
           else {
             for (const int grid : nodes[i].grids()) {
-              const Span<float> grid_masks = masks.slice(bke::ccg::grid_range(key, grid));
+              const Span<float> grid_masks = live.slice(bke::ccg::grid_range(key, grid));
               std::copy_n(grid_masks.data(), grid_masks.size(), data);
               data += grid_masks.size();
             }
           }
         },
         exec_mode::grain_size(1));
+    return;
   }
-  else {
-    node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(0.0f); },
+
+  if (node == nullptr || !layer_mask_is_drawable(*node, elem_num, subdiv_ccg.grid_area)) {
+    /* A missing or undrawable node means "nothing hidden": the layer contributes fully, so the
+     * overlay has no blue to paint and a neutral weight is correct. */
+    node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(1.0f); },
                             exec_mode::grain_size(64));
+    return;
   }
+
+  const SculptLayerMask &layer_mask = *node->mask;
+  node_mask.foreach_index(
+      [&](const int i) {
+        float *data = vbos[i]->data<float>().data();
+        if (use_flat_layout[i]) {
+          const int grid_size_1 = key.grid_size - 1;
+          for (const int grid : nodes[i].grids()) {
+            const IndexRange range = bke::ccg::grid_range(key, grid);
+            for (int y = 0; y < grid_size_1; y++) {
+              for (int x = 0; x < grid_size_1; x++) {
+                *data = layer_weight_at(layer_mask, range, CCG_grid_xy_to_index(key.grid_size, x, y));
+                data++;
+                *data = layer_weight_at(
+                    layer_mask, range, CCG_grid_xy_to_index(key.grid_size, x + 1, y));
+                data++;
+                *data = layer_weight_at(
+                    layer_mask, range, CCG_grid_xy_to_index(key.grid_size, x + 1, y + 1));
+                data++;
+                *data = layer_weight_at(
+                    layer_mask, range, CCG_grid_xy_to_index(key.grid_size, x, y + 1));
+                data++;
+              }
+            }
+          }
+        }
+        else {
+          for (const int grid : nodes[i].grids()) {
+            const IndexRange range = bke::ccg::grid_range(key, grid);
+            for (const int offset : IndexRange(range.size())) {
+              *data = layer_weight_at(layer_mask, range, offset);
+              data++;
+            }
+          }
+        }
+      },
+      exec_mode::grain_size(1));
 }
 
 BLI_NOINLINE static void fill_face_sets_grids(const Object &object,
@@ -1105,6 +1414,17 @@ BLI_NOINLINE static void update_masks_bmesh(const Object &object,
     node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(0.0f); },
                             exec_mode::grain_size(64));
   }
+}
+
+BLI_NOINLINE static void update_layer_masks_bmesh(const Object &object,
+                                                  const IndexMask &node_mask,
+                                                  const MutableSpan<gpu::VertBufPtr> vbos)
+{
+  /* Sculpt layers do not exist on the BMesh (dyntopo) domain, so the overlay has nothing to show
+   * here. The attribute still has to be filled: it is part of the batch either way. */
+  ensure_vbos_allocated_bmesh(object, layer_mask_format(), node_mask, vbos);
+  node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(1.0f); },
+                          exec_mode::grain_size(64));
 }
 
 BLI_NOINLINE static void update_face_sets_bmesh(const Object &object,
@@ -1808,6 +2128,9 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
           case CustomRequest::FaceSet:
             update_face_sets_mesh(object, orig_mesh_data, mask, vbos);
             break;
+          case CustomRequest::LayerMask:
+            update_layer_masks_mesh(object, orig_mesh_data, mask, vbos);
+            break;
         }
       }
       else {
@@ -1830,6 +2153,9 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
             break;
           case CustomRequest::FaceSet:
             fill_face_sets_grids(object, orig_mesh_data, use_flat_layout_, mask, vbos);
+            break;
+          case CustomRequest::LayerMask:
+            fill_layer_masks_grids(object, orig_mesh_data, use_flat_layout_, mask, vbos);
             break;
         }
       }
@@ -1860,6 +2186,9 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
           case CustomRequest::FaceSet:
             update_face_sets_bmesh(object, orig_mesh_data, mask, vbos);
             break;
+          case CustomRequest::LayerMask:
+            update_layer_masks_bmesh(object, mask, vbos);
+            break;
         }
       }
       else {
@@ -1888,6 +2217,9 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
         break;
       case CustomRequest::FaceSet:
         pdp_attr_name = "FaceSet";
+        break;
+      case CustomRequest::LayerMask:
+        pdp_attr_name = "LayerMask";
         break;
     }
   }

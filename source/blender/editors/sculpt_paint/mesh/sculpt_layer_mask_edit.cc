@@ -20,6 +20,7 @@
  * existing mask toolset either way.
  */
 
+#include <algorithm>
 #include <climits>
 #include <limits>
 #include <string>
@@ -755,8 +756,7 @@ static void mask_ui_notify(bContext *C, Object &object)
   WM_event_add_notifier(C, NC_GEOM | ND_DATA, &mesh_of(object).id);
 }
 
-/** The layout every mask on \a object must be cut at, or a zeroed one when it carries no elements. */
-static MaskLayout mask_layout_for_object(Object &object)
+MaskLayout mask_layout_for_object(Object &object)
 {
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
   if (pbvh == nullptr) {
@@ -1394,6 +1394,117 @@ void SCULPT_OT_layer_mask_invert(wmOperatorType *ot)
   ot->description = "Invert every weight of this sculpt layer or folder's mask";
   ot->exec = layer_mask_invert_exec;
   ot->poll = mask_ops_poll;
+  ot->flag = OPTYPE_REGISTER;
+  mask_op_properties(ot);
+}
+
+static wmOperatorStatus layer_mask_apply_exec(bContext *C, wmOperator *op)
+{
+  MaskOpContext ctx;
+  if (!mask_op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* A folder has no data of its own to fold the weights into; its mask attenuates a whole subtree.
+   * Refused rather than pushed down into the descendants: that is a different operation with a
+   * different undo shape, and doing it here would rewrite layers the user did not name. */
+  SculptLayer *layer = bke::sculpt_layers::node_as_layer(ctx.node);
+  if (layer == nullptr) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "A folder's weight mask cannot be applied; apply the masks of the layers inside");
+    return OPERATOR_CANCELLED;
+  }
+  /* A session holds this node's weights in the standard mask storage, so the mask on the node is
+   * stale by construction and folding it in would bake the pre-session weights. */
+  if (mask_op_refuse_during_session(op, *ctx.object, *ctx.node)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (ctx.node->mask == nullptr) {
+    BKE_reportf(op->reports, RPT_INFO, "'%s' carries no weight mask", ctx.node->name);
+    return OPERATOR_CANCELLED;
+  }
+  /* An armed REC makes the composite ignore this layer's mask (#node_mask_for_composite returns no
+   * masks for an exempt layer). Folding it in would therefore move the surface right now, against
+   * this operator's whole promise. Refused rather than silently deferred: disarming REC is one
+   * click, and a mask quietly baked at a moment the user cannot see is not recoverable by eye. */
+  if (ctx.node->flag & SCULPT_LAYER_REC_EXEMPT) {
+    BKE_report(op->reports, RPT_ERROR, "Disarm REC before applying the weight mask");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* A mask switched off is not in force, so there is nothing to fold in and the data must not be
+   * touched — folding it would move the surface by exactly the amount the user switched off. The
+   * mask itself still goes, because that is what "apply" means for a mask the user is done with. */
+  const bool mask_in_force = bke::sculpt_layers::mask_enabled(*ctx.node);
+  Array<float> weights;
+  const bool usable = mask_in_force &&
+                      gather_node_weight_mask(*ctx.node, ctx.layout.totelem, weights);
+  if (mask_in_force && !usable) {
+    /* Stale: it describes a topology this layer no longer has and cannot be indexed by it. Refused
+     * before the undo push, so nothing has to be unwound. */
+    BKE_reportf(op->reports,
+                RPT_ERROR,
+                "The weight mask of '%s' does not match the mesh and cannot be applied",
+                ctx.node->name);
+    return OPERATOR_CANCELLED;
+  }
+
+  session_state_ensure(*ctx.object);
+  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_sculpt_layer_mask(*ctx.object, *ctx.node);
+
+  if (usable) {
+    /* Captures #SculptLayerTreeNode::flag alongside the buffer, which is what puts the disabled bit
+     * cleared below back where it was. */
+    undo::push_sculpt_layer_data(*ctx.object, *layer);
+    MutableSpan<float3> data = bke::sculpt_layers::data_get(*layer);
+    const int64_t count = std::min<int64_t>(data.size(), weights.size());
+    for (const int64_t i : IndexRange(count)) {
+      data[i] *= weights[i];
+    }
+  }
+  else {
+    /* Nothing is folded on this path, so no data is captured — but the disabled bit still moves, and
+     * #push_sculpt_layer_data is the only other capture of the flag it lives in. */
+    undo::push_sculpt_layer_metadata(*ctx.object, *ctx.node);
+  }
+
+  bke::sculpt_layers::mask_free(ctx.node->mask);
+  ctx.node->mask = nullptr;
+  /* The disabled bit lives on the node, not on the mask, so freeing the mask leaves it behind and
+   * the *next* mask the user adds would be born switched off. */
+  bke::sculpt_layers::mask_enabled_set(*ctx.node, true);
+  tag_masked_chains_dirty(*ctx.node);
+  /* Recomposes and, through it, refills the overlay. The surface is unchanged by construction, but
+   * the commit is what re-derives the runtime base from the new layer state. */
+  commit_layers_change(*ctx.depsgraph, *ctx.object);
+  undo::push_end(*ctx.object);
+
+  /* Two spellings rather than one format string chosen by a ternary, so both remain extractable for
+   * translation — as #layer_mask_toggle_exec does for the same reason. */
+  if (usable) {
+    BKE_reportf(op->reports, RPT_INFO, "Applied the weight mask of '%s'", ctx.node->name);
+  }
+  else {
+    BKE_reportf(
+        op->reports, RPT_INFO, "Removed the switched-off weight mask of '%s'", ctx.node->name);
+  }
+  mask_ui_notify(C, *ctx.object);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_mask_apply(wmOperatorType *ot)
+{
+  ot->name = "Apply Sculpt Layer Mask";
+  ot->idname = "SCULPT_OT_layer_mask_apply";
+  /* "Baked into" rather than "removed": Remove Mask also ends with no mask, and the two read alike
+   * in a menu. The shape is the thing that distinguishes them. */
+  ot->description =
+      "Bake this sculpt layer's weight mask into its shape and remove the mask, leaving the surface "
+      "unchanged";
+  ot->exec = layer_mask_apply_exec;
+  ot->poll = mask_ops_poll;
+  /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step, as everywhere in this module. */
   ot->flag = OPTYPE_REGISTER;
   mask_op_properties(ot);
 }

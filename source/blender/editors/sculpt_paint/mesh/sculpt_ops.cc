@@ -1652,6 +1652,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_add);
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_remove);
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_invert);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_apply);
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_clear);
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_fill);
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_edit_toggle);

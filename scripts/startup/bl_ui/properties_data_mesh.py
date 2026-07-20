@@ -302,6 +302,9 @@ class MESH_MT_sculpt_layer_context_menu(Menu):
             layout.operator("sculpt.layer_mask_invert", text="Invert Mask")
             layout.operator("sculpt.layer_mask_clear", text="Clear Mask")
             layout.operator("sculpt.layer_mask_fill", text="Fill Mask")
+            # Layers only, so it is absent from the folder menu drawn in C++: a folder has no data
+            # of its own to fold the weights into, and the operator refuses one.
+            layout.operator("sculpt.layer_mask_apply", text="Apply Mask")
             layout.operator("sculpt.layer_mask_remove", text="Remove Mask")
         else:
             col = layout.column()

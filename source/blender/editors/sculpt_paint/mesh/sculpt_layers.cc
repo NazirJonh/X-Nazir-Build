@@ -29,6 +29,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <climits>
 #include <cstdio>
@@ -2306,19 +2307,235 @@ static SculptLayer *layer_below(SculptLayer &layer)
 /* True when \a node's contribution is attenuated by a weight mask — its own, or one carried by any
  * folder above it (the chain #bke::sculpt_layers::chain_mask folds).
  *
- * The merge operators refuse on this. A merge sums `data[i] * effective` into one surviving layer,
- * and that layer can carry only one mask, so a merge of participants whose masks differ has no
- * result that is both correct and reversible: some attenuation would have to be baked into the
- * data and the rest discarded. Worse, a source's *folder chain* cannot be baked at all — the
- * survivor sits under its own chain, so a source's attenuation folded into the survivor's data
- * would then be multiplied by the survivor's chain as well, and the folder merge dissolves the very
- * folder whose mask attenuated the subtree. Refusing loses nothing silently; folding would.
+ * The merge operators no longer refuse on this — #MergeMaskPolicy says what becomes of the masks —
+ * but they still ask, because every mask-aware step of a merge (the fold, the combined mask, the
+ * policy report) is skipped outright when the answer is false, which is the overwhelmingly common
+ * case.
  *
  * Presence is tested rather than #bke::sculpt_layers::node_mask_for_composite, deliberately: that
  * resolver needs the domain's element count and drops any mask that does not describe it, so a mask
  * gone stale behind a topology change — still the user's data, still destroyed by the merge — would
- * answer "unmasked" here and be lost without a word. Fails closed, which is the point.
+ * answer "unmasked" here. #find_stale_mask_in_fold is what turns that into a refusal; answering
+ * "masked" here is what makes sure the question is asked at all. Fails closed, which is the point.
  */
+/**
+ * What a merge does with the weight masks of the layers and folders it dissolves.
+ *
+ * Every option preserves the composed surface; #Combine does so up to the `uint8` quantization of
+ * the mask it builds, the other two exactly. They differ in what the merged layer keeps as an
+ * editable mask afterwards.
+ */
+enum class MergeMaskPolicy : int8_t {
+  /** Fold every mask into the merged data. The result carries no mask. */
+  Bake = 0,
+  /** One mask on the result: the per-element maximum of the participants' folded mask factors. */
+  Combine = 1,
+  /** Keep the merged folder's own mask; fold the layers' and nested folders' masks into the data. */
+  KeepGroup = 2,
+};
+
+static const EnumPropertyItem merge_mask_policy_items[] = {
+    {int(MergeMaskPolicy::Bake),
+     "BAKE",
+     0,
+     "Apply Masks",
+     "Bake every mask into the merged shape; the result carries no mask"},
+    {int(MergeMaskPolicy::Combine),
+     "COMBINE",
+     0,
+     "Combine Masks",
+     "Keep one mask on the result, covering wherever any participant was in force"},
+    {int(MergeMaskPolicy::KeepGroup),
+     "KEEP_GROUP",
+     0,
+     "Keep Group Mask",
+     "Keep the folder's own mask on the result; bake the layers' own masks into the shape"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static void merge_mask_policy_prop(wmOperatorType *ot)
+{
+  RNA_def_enum(ot->srna,
+               "mask_policy",
+               merge_mask_policy_items,
+               int(MergeMaskPolicy::Bake),
+               "Masks",
+               "What to do with the weight masks of the merged layers and folders");
+}
+
+static MergeMaskPolicy merge_mask_policy_get(wmOperator *op)
+{
+  return MergeMaskPolicy(RNA_enum_get(op->ptr, "mask_policy"));
+}
+
+/** Tell the user what became of the weight masks a merge just dissolved. */
+static void merge_report_mask_policy(wmOperator *op, const MergeMaskPolicy policy)
+{
+  /* Three spellings rather than one format string chosen by a ternary, so each stays extractable for
+   * translation. The layer merges pass the *applied* policy, not the one picked in the list, so the
+   * message never names an option that collapsed to another. */
+  switch (policy) {
+    case MergeMaskPolicy::Bake:
+      BKE_report(op->reports, RPT_INFO, "Weight masks were baked into the merged shape");
+      break;
+    case MergeMaskPolicy::Combine:
+      BKE_report(op->reports, RPT_INFO, "Weight masks were combined into one on the result");
+      break;
+    case MergeMaskPolicy::KeepGroup:
+      BKE_report(op->reports, RPT_INFO, "The folder's weight mask was kept on the result");
+      break;
+  }
+}
+
+/**
+ * Per-element maximum of \a participants' folded mask factors, cut to \a elem_num — the mask
+ * #MergeMaskPolicy::Combine keeps on the merged layer.
+ *
+ * The maximum specifically, and not a product or an average: it is the only combination for which a
+ * zero implies every term was zero, which is what makes the division in #merge_settle_mask well
+ * defined. A product would reach zero as soon as any single participant did, leaving a non-zero sum
+ * with nothing to divide by.
+ *
+ * Participants with no data are skipped, \a survivor excepted — its buffer exists by the time this
+ * runs. They contribute nothing to the sum, so letting an unmasked empty one pin the maximum to 1
+ * would degenerate the result into #MergeMaskPolicy::Bake for no reason.
+ */
+static Array<float> merge_combined_mask(const Span<SculptLayer *> participants,
+                                        const SculptLayer &survivor,
+                                        const SculptLayerGroup *stop_above,
+                                        const int64_t elem_num)
+{
+  Array<float> combined(elem_num);
+  combined.as_mutable_span().fill(0.0f);
+  Array<float> scratch;
+  for (const SculptLayer *layer : participants) {
+    if (layer != &survivor && !layer->data) {
+      continue;
+    }
+    if (!gather_fold_mask(layer->base, stop_above, elem_num, scratch)) {
+      /* Unmasked participant: it acts everywhere, so no attenuation of the result can be correct. */
+      combined.as_mutable_span().fill(1.0f);
+      break;
+    }
+    for (const int64_t i : combined.index_range()) {
+      combined[i] = std::max(combined[i], scratch[i]);
+    }
+  }
+  return combined;
+}
+
+/**
+ * Leave the merged layer with the mask \a policy asks for, dividing the already-accumulated
+ * \a survivor_data by it wherever one is kept so the composed surface does not move.
+ *
+ * \a combined is what #merge_combined_mask returned, empty when no combined mask is wanted.
+ * \a keep_group is the dissolving folder whose mask #MergeMaskPolicy::KeepGroup preserves, null for
+ * the merges that dissolve no folder.
+ *
+ * Must run after the accumulation and before anything frees \a keep_group.
+ */
+static void merge_settle_mask(Object &object,
+                              SculptLayer &survivor,
+                              MutableSpan<float3> survivor_data,
+                              const MergeMaskPolicy policy,
+                              const Span<float> combined,
+                              const int block_size,
+                              const SculptLayerGroup *keep_group)
+{
+  /* Nothing to record and nothing to change when no mask is in play, which is the common merge. Kept
+   * here rather than at the three call sites so that none can forget it: the push below would
+   * otherwise name the survivor in the step's mask slot for a merge that never touched a mask. */
+  if (survivor.base.mask == nullptr && combined.is_empty() &&
+      (keep_group == nullptr || keep_group->base.mask == nullptr))
+  {
+    return;
+  }
+  /* The survivor's own mask has been folded into its data under every policy, so it must not stay on
+   * the node. Captured before it is freed; the masks of the *other* participants ride out in their
+   * own removal payloads. */
+  undo::push_sculpt_layer_mask(object, survivor.base);
+  bke::sculpt_layers::mask_free(survivor.base.mask);
+  survivor.base.mask = nullptr;
+  switch (policy) {
+    case MergeMaskPolicy::Bake:
+      break;
+    case MergeMaskPolicy::Combine: {
+      if (combined.is_empty()) {
+        break;
+      }
+      /* Compressed and then expanded again *before* the division, not after: the mask is stored as
+       * `uint8`, so dividing by the unquantized value and storing the quantized one would leave
+       * `data * mask` off by the rounding error at every element. Dividing by exactly what gets
+       * stored keeps the product right to float rounding instead. */
+      SculptLayerMask *combined_mask = bke::sculpt_layers::mask_compress(combined, block_size);
+      if (combined_mask == nullptr) {
+        break;
+      }
+      Array<float> quantized(combined.size());
+      bke::sculpt_layers::mask_expand(*combined_mask, quantized.as_mutable_span());
+      for (const int64_t i : survivor_data.index_range()) {
+        /* `quantized` is cut to the domain while the data buffer can be longer on grids. */
+        if (i >= quantized.size()) {
+          break;
+        }
+        /* Zero means every participant was zero here, so the sum is zero too — not an indeterminate
+         * form. The one lossy case is a small non-zero maximum quantizing to zero, which drops a
+         * contribution of at most 1/255 of its weight. */
+        survivor_data[i] = (quantized[i] > 0.0f) ? survivor_data[i] / quantized[i] : float3(0.0f);
+      }
+      survivor.base.mask = combined_mask;
+      break;
+    }
+    case MergeMaskPolicy::KeepGroup:
+      if (keep_group != nullptr && keep_group->base.mask != nullptr) {
+        /* Copied, not moved. #remove_folder_subtree_with_undo captures the folder as
+         * #PayloadCapture::NodeRemoved, and moving the mask out first would put a *maskless* folder
+         * into that payload — undo would then restore an empty folder and the mask would be gone for
+         * good. Capturing the folder's mask separately instead would name one node in two payloads,
+         * which this module's undo ordering rules exist to avoid. A copy sidesteps both. */
+        survivor.base.mask = bke::sculpt_layers::mask_copy(*keep_group->base.mask);
+      }
+      break;
+  }
+}
+
+/**
+ * Refuse a merge whose participants do not share the survivor's surviving folder chain while that
+ * chain carries a mask. True when refused (and reported).
+ *
+ * Nothing dissolves in the layer merges, so the survivor's chain goes on attenuating the result. If a
+ * participant did not sit under that chain, its content would have to be divided by it to come out
+ * right — and where the chain reads zero no value can, since the result is silenced there while the
+ * participant's contribution is not. Unrepresentable rather than merely imprecise, hence a refusal.
+ *
+ * Narrow on purpose: same-folder merges always pass (identical chains cancel), and cross-folder ones
+ * pass whenever the survivor's chain is unmasked — which is what lets the fold simply walk to the
+ * root for the sources.
+ */
+static bool merge_refuse_foreign_chain(wmOperator *op,
+                                       const SculptLayer &survivor,
+                                       const Span<SculptLayer *> participants)
+{
+  const bool survivor_chain_masked = bke::sculpt_layers::find_ancestor(
+                                         survivor.base.parent,
+                                         [](const SculptLayerGroup &group) {
+                                           return group.base.mask != nullptr;
+                                         }) != nullptr;
+  if (!survivor_chain_masked) {
+    return false;
+  }
+  for (const SculptLayer *participant : participants) {
+    if (participant->base.parent != survivor.base.parent) {
+      BKE_report(op->reports,
+                 RPT_ERROR,
+                 "Cannot merge layers from different folders while the target layer's folder "
+                 "carries a weight mask; merge them inside one folder, or remove that mask");
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool node_chain_carries_mask(const SculptLayerTreeNode &node)
 {
   if (node.mask != nullptr) {
@@ -2354,16 +2571,60 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
     BKE_report(op->reports, RPT_ERROR, "Cannot merge sculpt layers inside a disabled group");
     return OPERATOR_CANCELLED;
   }
-  /* See #node_chain_carries_mask: the merged layer carries one mask, so no accumulation of masked
-   * participants preserves the surface. Refused rather than folded, in the same shape as the
-   * disabled-group refusal above. */
-  if (node_chain_carries_mask(active->base) || node_chain_carries_mask(below->base)) {
-    BKE_report(op->reports,
-               RPT_ERROR,
-               "Cannot merge sculpt layers with a weight mask; remove the masks on the layers and "
-               "their folders first");
+  /* Neither guard was needed while a masked participant was refused outright — a session implies a
+   * mask, so it could not be reached. Now that masks are folded, an open session has to be settled
+   * back onto its node first (it parks the weights in the standard mask storage and leaves
+   * #SculptLayerTreeNode::mask holding the pre-session snapshot), and a grid session is refused
+   * rather than closed, as everywhere else in this module. */
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
+  mask_edit_end(*ctx.object);
+
+  const MergeMaskPolicy policy_raw = merge_mask_policy_get(op);
+  /* No folder dissolves here, so there is no group mask to keep and the option collapses to the one
+   * that keeps a mask at all. Silently, because the enum is shared with the folder merge and a
+   * refusal would be a dead end the user cannot act on. */
+  const MergeMaskPolicy policy = (policy_raw == MergeMaskPolicy::KeepGroup) ?
+                                     MergeMaskPolicy::Combine :
+                                     policy_raw;
+  /* #std::array and not a raw C array: #Span converts from the former (see its constructors) and not
+   * from the latter. Non-const elements, because #Span<SculptLayer *> will not bind to an array of
+   * `const SculptLayer *` either. */
+  const std::array<SculptLayer *, 2> participants = {active, below};
+  /* #layer_below walks `base.next`, the sibling chain, so these two are always in one folder and this
+   * can never fire. Called anyway: it is the same code path as Merge Selected, and a future change to
+   * how the neighbour is found must not quietly lose the guard. */
+  if (merge_refuse_foreign_chain(op, *below, participants)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Nothing dissolves, so only the participants' own masks stop acting on the result; the folder
+   * chain they share survives to attenuate it exactly as before. */
+  const SculptLayerGroup *stop_above = below->base.parent;
+  const MaskLayout layout = mask_layout_for_object(*ctx.object);
+  const int64_t mask_elem_num = layout.totelem;
+  for (const SculptLayer *participant : participants) {
+    if (const SculptLayerTreeNode *stale = find_stale_mask_in_fold(
+            participant->base, stop_above, mask_elem_num))
+    {
+      BKE_reportf(op->reports,
+                  RPT_ERROR,
+                  "The weight mask of '%s' does not match the mesh; fix or remove it before merging",
+                  stale->name);
+      return OPERATOR_CANCELLED;
+    }
+  }
+  const bool any_masked = node_chain_carries_mask(active->base) ||
+                          node_chain_carries_mask(below->base);
+  /* See #layer_group_merge_exec: an armed REC makes the composite ignore the layer's masks, so
+   * folding them in would move the surface right now. */
+  if (any_masked && ((active->base.flag | below->base.flag) & SCULPT_LAYER_REC_EXEMPT)) {
+    BKE_report(
+        op->reports, RPT_ERROR, "Disarm REC before merging sculpt layers that carry a weight mask");
+    return OPERATOR_CANCELLED;
+  }
+
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
   /* Snapshot the surviving layer's pre-merge metadata and data for undo. */
@@ -2376,22 +2637,39 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
   if (ctx.grids && active->data && below->level != active->level) {
     below->level = active->level;
   }
+  /* Built before the accumulation overwrites the buffer, since it reads the masks as they stand. */
+  const Array<float> combined = (policy == MergeMaskPolicy::Combine && any_masked) ?
+                                    merge_combined_mask(
+                                        participants, *below, stop_above, mask_elem_num) :
+                                    Array<float>();
+
   const float active_eff = effective(*active);
   const float below_eff = effective(*below);
+  /* The survivor is scaled over its whole buffer while the source is only added over the part the
+   * two share, which is why the two passes are not one loop. */
+  Array<float> fold;
+  const bool below_masked = any_masked &&
+                            gather_fold_mask(below->base, stop_above, mask_elem_num, fold);
+  for (const int64_t i : below_data.index_range()) {
+    below_data[i] *= below_eff * (below_masked && i < fold.size() ? fold[i] : 1.0f);
+  }
   if (active->data) {
+    Array<float> active_fold;
+    const bool active_masked = any_masked && gather_fold_mask(
+                                                 active->base, stop_above, mask_elem_num, active_fold);
     const Span<float3> active_data(static_cast<const float3 *>(active->data), active->totelem);
     const int64_t count = std::min<int64_t>(below_data.size(), active_data.size());
     for (int64_t i = 0; i < count; i++) {
-      below_data[i] = below_data[i] * below_eff + active_data[i] * active_eff;
-    }
-  }
-  else {
-    for (float3 &v : below_data) {
-      v *= below_eff;
+      below_data[i] += active_data[i] * active_eff *
+                       (active_masked && i < active_fold.size() ? active_fold[i] : 1.0f);
     }
   }
   below->influence = 1.0f;
   below->base.flag |= SCULPT_LAYER_ENABLED;
+
+  /* No folder dissolves here, so there is no group mask to keep and the last argument is null. */
+  merge_settle_mask(
+      *ctx.object, *below, below_data, policy, combined, layout.block_size, nullptr);
 
   Vector<undo::SculptLayerUndoPayload> removed;
   removed.append(undo::sculpt_layer_payload_capture(
@@ -2402,18 +2680,23 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
   /* The active layer changed, and the exemption bit died with the layer that carried it. Left
    * unrefreshed, an armed REC would record into `below` with no layer exempt at all, which is the
    * one state the exemption exists to prevent. Cheap enough to call unconditionally, and it cannot
-   * move the surface here: the masked participants this operator refuses above are exactly the ones
-   * whose composite the exemption would change, which is why no #commit_layers_change follows. */
+   * move the surface here: the exemption only ever changes the composite of a *masked* layer, and a
+   * masked participant with REC armed was refused above — which is why no #commit_layers_change
+   * follows. */
   rec_exemption_refresh(*ctx.object);
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
   undo::push_end(*ctx.object);
 
-  /* `below * below_eff + active * active_eff` at influence 1 equals the previous combination
-   * exactly, so the combined surface (and the live positions) are unchanged — and therefore no
-   * #commit_layers_change is needed. This identity holds only because a masked participant was
-   * refused above: with a mask in play the merged layer would attenuate the sum differently than
-   * the parts were attenuated, the live positions would no longer match the composite, and the
-   * next #derive_base_mesh would absorb the difference into the base permanently. */
+  /* `Σ(data · effective · folded mask)` at influence 1 equals the previous combination, so the
+   * combined surface (and the live positions) are unchanged — and therefore no
+   * #commit_layers_change is needed. The masks that stopped acting on the result are exactly the
+   * ones folded into the data, and the folder chain both participants share was left alone because
+   * it goes on acting; that is what keeps the two sides equal. Under Combine the equality is up to
+   * the mask's `uint8` quantization rather than exact, which #merge_settle_mask divides by the
+   * quantized value to keep within float rounding. */
+  if (any_masked) {
+    merge_report_mask_policy(op, policy);
+  }
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -2423,10 +2706,11 @@ void SCULPT_OT_layer_merge_down(wmOperatorType *ot)
   ot->name = "Merge Sculpt Layer Down";
   ot->idname = "SCULPT_OT_layer_merge_down";
   ot->description =
-      "Merge the active sculpt layer into the one below it. Weight masks are not preserved, so a "
-      "layer that carries one, or that sits in a folder that does, cannot be merged";
+      "Merge the active sculpt layer into the one below it. Weight masks are handled as the Masks "
+      "option says, and the combined surface is unchanged";
   ot->exec = layer_merge_down_exec;
   ot->poll = layers_poll;
+  merge_mask_policy_prop(ot);
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
@@ -2465,19 +2749,56 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
     BKE_report(op->reports, RPT_ERROR, "Cannot merge sculpt layers inside a disabled group");
     return OPERATOR_CANCELLED;
   }
-  /* See #node_chain_carries_mask. Sources may sit in other folders than the active layer, so even
-   * folding a source's own mask into the sum would leave it under the *survivor's* folder chain
-   * rather than its own. */
-  bool any_masked = node_chain_carries_mask(active->base);
-  for (const SculptLayer *source : sources) {
-    any_masked |= node_chain_carries_mask(source->base);
-  }
-  if (any_masked) {
-    BKE_report(op->reports,
-               RPT_ERROR,
-               "Cannot merge sculpt layers with a weight mask; remove the masks on the layers and "
-               "their folders first");
+  /* See #layer_merge_down_exec for why both guards are needed only now. */
+  if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
+  }
+  mask_edit_end(*ctx.object);
+
+  const MergeMaskPolicy policy_raw = merge_mask_policy_get(op);
+  /* No folder dissolves here, so KeepGroup has no group mask to keep and collapses to Combine, as in
+   * #layer_merge_down_exec. */
+  const MergeMaskPolicy policy = (policy_raw == MergeMaskPolicy::KeepGroup) ?
+                                     MergeMaskPolicy::Combine :
+                                     policy_raw;
+  /* The survivor first, so #merge_combined_mask and the accumulation walk one list. */
+  Vector<SculptLayer *> participants;
+  participants.append(active);
+  participants.extend(sources);
+  /* This is where the guard really works: sources may sit in folders the active layer does not, and
+   * a masked chain over the survivor cannot be divided out of their content. */
+  if (merge_refuse_foreign_chain(op, *active, participants)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const SculptLayerGroup *stop_above = active->base.parent;
+  const MaskLayout layout = mask_layout_for_object(*ctx.object);
+  const int64_t mask_elem_num = layout.totelem;
+  for (const SculptLayer *participant : participants) {
+    if (const SculptLayerTreeNode *stale = find_stale_mask_in_fold(
+            participant->base, stop_above, mask_elem_num))
+    {
+      BKE_reportf(op->reports,
+                  RPT_ERROR,
+                  "The weight mask of '%s' does not match the mesh; fix or remove it before merging",
+                  stale->name);
+      return OPERATOR_CANCELLED;
+    }
+  }
+  bool any_masked = false;
+  for (const SculptLayer *participant : participants) {
+    any_masked |= node_chain_carries_mask(participant->base);
+  }
+  /* See #layer_group_merge_exec: an armed REC makes the composite ignore that layer's masks. */
+  if (any_masked) {
+    for (const SculptLayer *participant : participants) {
+      if (participant->base.flag & SCULPT_LAYER_REC_EXEMPT) {
+        BKE_report(op->reports,
+                   RPT_ERROR,
+                   "Disarm REC before merging sculpt layers that carry a weight mask");
+        return OPERATOR_CANCELLED;
+      }
+    }
   }
 
   session_state_ensure(*ctx.object);
@@ -2494,9 +2815,19 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
     }
   }
   MutableSpan<float3> active_data = bke::sculpt_layers::data_ensure(*active, n);
+
+  /* Built before the accumulation overwrites the buffer, since it reads the masks as they stand. */
+  const Array<float> combined = (policy == MergeMaskPolicy::Combine && any_masked) ?
+                                    merge_combined_mask(
+                                        participants, *active, stop_above, mask_elem_num) :
+                                    Array<float>();
+
+  Array<float> fold;
   const float active_eff = effective(*active);
-  for (float3 &v : active_data) {
-    v *= active_eff;
+  const bool active_masked = any_masked &&
+                             gather_fold_mask(active->base, stop_above, mask_elem_num, fold);
+  for (const int64_t i : active_data.index_range()) {
+    active_data[i] *= active_eff * (active_masked && i < fold.size() ? fold[i] : 1.0f);
   }
   for (const SculptLayer *source : sources) {
     if (ctx.grids && source->data && active->level != source->level) {
@@ -2506,14 +2837,22 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
       continue;
     }
     const float source_eff = effective(*source);
+    const bool source_masked = any_masked &&
+                               gather_fold_mask(source->base, stop_above, mask_elem_num, fold);
     const Span<float3> source_data(static_cast<const float3 *>(source->data), source->totelem);
     const int64_t count = std::min<int64_t>(active_data.size(), source_data.size());
     for (int64_t i = 0; i < count; i++) {
-      active_data[i] += source_data[i] * source_eff;
+      /* `fold` is cut to the domain while the data buffers can be longer on grids. */
+      active_data[i] += source_data[i] * source_eff *
+                        (source_masked && i < fold.size() ? fold[i] : 1.0f);
     }
   }
   active->influence = 1.0f;
   active->base.flag |= SCULPT_LAYER_ENABLED;
+
+  /* No folder dissolves here, so there is no group mask to keep and the last argument is null. */
+  merge_settle_mask(
+      *ctx.object, *active, active_data, policy, combined, layout.block_size, nullptr);
 
   /* Every payload is captured while the list is still intact, so each records the neighbour it
    * really followed; undo then re-inserts them in capture order and rebuilds the original stack.
@@ -2533,12 +2872,13 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
   undo::push_end(*ctx.object);
 
-  /* `active * active_eff + Σ(source * source_eff)` at influence 1 equals the previous combination
-   * exactly, so the combined surface (and the live positions) are unchanged — and therefore no
-   * #commit_layers_change is needed. This identity holds only because a masked participant was
-   * refused above: with a mask in play the merged layer would attenuate the sum differently than
-   * the parts were attenuated, the live positions would no longer match the composite, and the
-   * next #derive_base_mesh would absorb the difference into the base permanently. */
+  /* `Σ(data · effective · folded mask)` at influence 1 equals the previous combination, so the
+   * combined surface (and the live positions) are unchanged — and therefore no
+   * #commit_layers_change is needed. See #layer_merge_down_exec for why the equality holds and for
+   * the one way Combine departs from it. */
+  if (any_masked) {
+    merge_report_mask_policy(op, policy);
+  }
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -2548,10 +2888,11 @@ void SCULPT_OT_layer_merge_selected(wmOperatorType *ot)
   ot->name = "Merge Selected Sculpt Layers";
   ot->idname = "SCULPT_OT_layer_merge_selected";
   ot->description =
-      "Merge the selected sculpt layers into the active one. Weight masks are not preserved, so a "
-      "layer that carries one, or that sits in a folder that does, cannot be merged";
+      "Merge the selected sculpt layers into the active one. Weight masks are handled as the Masks "
+      "option says, and the combined surface is unchanged";
   ot->exec = layer_merge_selected_exec;
   ot->poll = layers_poll;
+  merge_mask_policy_prop(ot);
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
@@ -3145,6 +3486,119 @@ void SCULPT_OT_layer_validate(wmOperatorType *ot)
                int(ValidateAction::Clear),
                "Action",
                "What to do with the stale layers");
+}
+
+/**
+ * Dense per-element weights of \a node's own weight mask, or false when it has none usable.
+ *
+ * The sibling #gather_layer_mask resolves the *user's* paint mask; this one resolves the layer or
+ * folder's own #SculptLayerMask. The two are unrelated buffers with confusingly similar names, which
+ * is why they sit together.
+ *
+ * A switched-off mask answers false, matching the composite exactly: #mask_enabled gates both
+ * #node_mask_for_composite and the #chain_mask rebuild, so such a mask attenuates nothing and folding
+ * its weights into the data would move the surface by precisely the amount the user switched off.
+ *
+ * Answers false for a stale mask as well as for a missing one, and the callers must not read that as
+ * "unmasked": #find_stale_mask_in_fold exists to separate the two *before* anything is folded, and
+ * every caller runs it first.
+ */
+bool gather_node_weight_mask(const SculptLayerTreeNode &node,
+                             const int64_t elem_num,
+                             Array<float> &r_dense)
+{
+  if (node.mask == nullptr || !bke::sculpt_layers::mask_enabled(node) ||
+      bke::sculpt_layers::is_stale_mask(*node.mask, elem_num))
+  {
+    return false;
+  }
+  r_dense.reinitialize(elem_num);
+  bke::sculpt_layers::mask_expand(*node.mask, r_dense.as_mutable_span());
+  return true;
+}
+
+/**
+ * Dense product of \a node's own mask and the masks of every folder strictly below \a stop_above.
+ *
+ * \a stop_above is *exclusive*, and that is the whole design: a mask must be folded into the merged
+ * data exactly when its carrier stops acting on the result, and every caller expresses that as "the
+ * folders that dissolve end here". Passing \a node's own parent therefore folds nothing but its own
+ * mask; passing null folds the whole chain up to the root. Returns false when nothing in that range
+ * carries a mask, which callers read as a factor of 1.
+ *
+ * The ancestor walk goes through #find_ancestor and not by hand. That helper is the module's single
+ * cycle-safe ancestor walk (Floyd, see its doc), and a parent chain that closes on itself — a corrupt
+ * file, a future editing bug — must not hang a merge. Its return value is discarded on purpose: the
+ * predicate accumulates as a side effect and reports true only at the exclusive bound, so the walk
+ * stops there and the "found" node is never wanted.
+ */
+bool gather_fold_mask(const SculptLayerTreeNode &node,
+                      const SculptLayerGroup *stop_above,
+                      const int64_t elem_num,
+                      Array<float> &r_dense)
+{
+  bool any = false;
+  Array<float> scratch;
+  auto fold = [&](const SculptLayerTreeNode &folded) {
+    if (!gather_node_weight_mask(folded, elem_num, scratch)) {
+      return;
+    }
+    if (!any) {
+      r_dense = std::move(scratch);
+      any = true;
+      return;
+    }
+    for (const int64_t i : r_dense.index_range()) {
+      r_dense[i] *= scratch[i];
+    }
+  };
+
+  fold(node);
+  bke::sculpt_layers::find_ancestor(node.parent, [&](const SculptLayerGroup &group) {
+    if (&group == stop_above) {
+      return true;
+    }
+    fold(group.base);
+    return false;
+  });
+  return any;
+}
+
+/**
+ * The first node in the same range #gather_fold_mask folds that carries a mask which does not
+ * describe \a elem_num elements, or null when every mask in range is usable.
+ *
+ * Split from the fold rather than folded into it because the two answers must not be confused: the
+ * fold reports "no factor", and a stale mask would ride out as a factor of 1 — silently dropping the
+ * user's weights and moving the surface. #node_chain_carries_mask fails closed on exactly this case
+ * today (see its comment), and the merges must go on doing so.
+ *
+ * A switched-off mask is skipped, in step with #gather_node_weight_mask: it attenuates nothing in the
+ * composite either, so however it is cut it cannot make the folded shape disagree with the composed
+ * one — and that disagreement is the only thing this refusal protects.
+ */
+const SculptLayerTreeNode *find_stale_mask_in_fold(const SculptLayerTreeNode &node,
+                                                   const SculptLayerGroup *stop_above,
+                                                   const int64_t elem_num)
+{
+  const SculptLayerTreeNode *stale = nullptr;
+  auto check = [&](const SculptLayerTreeNode &checked) {
+    if (stale == nullptr && checked.mask != nullptr && bke::sculpt_layers::mask_enabled(checked) &&
+        bke::sculpt_layers::is_stale_mask(*checked.mask, elem_num))
+    {
+      stale = &checked;
+    }
+  };
+
+  check(node);
+  bke::sculpt_layers::find_ancestor(node.parent, [&](const SculptLayerGroup &group) {
+    if (&group == stop_above) {
+      return true;
+    }
+    check(group.base);
+    return false;
+  });
+  return stale;
 }
 
 /* Resolves the paint mask into an array indexed exactly like `layer.data`. Vertex layers read
@@ -4284,6 +4738,42 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
       return OPERATOR_CANCELLED;
     }
   }
+  /* Settle an open session's weights back onto their node before any mask below is read, for the
+   * reason #layer_bake_exec closes one: during a session #SculptLayerTreeNode::mask holds the
+   * pre-session snapshot while the live weights sit in the standard mask storage, so folding the
+   * node's mask would bake weights the user has since painted over. The grid domain never reaches
+   * here — #mask_edit_refuse_ccg_rebuild above refused it. */
+  mask_edit_end(*ctx.object);
+
+  const MergeMaskPolicy policy = merge_mask_policy_get(op);
+  /* Exclusive upper bound of the fold. Under KeepGroup the folder's own mask survives on the result
+   * and must not also go into the data, so the fold stops *at* the folder; otherwise the folder
+   * dissolves with the rest and is folded in. */
+  const SculptLayerGroup *stop_above = (policy == MergeMaskPolicy::KeepGroup) ? group :
+                                                                               group->base.parent;
+
+  const MaskLayout layout = mask_layout_for_object(*ctx.object);
+  /* Sized from the domain, never from the survivor's buffer: on grids that buffer is the maximum of
+   * the participants' element counts, which is not what the masks are cut to. A mismatch would make
+   * every mask read stale and be silently dropped. */
+  const int64_t mask_elem_num = layout.totelem;
+
+  /* Fails closed on a stale mask, exactly as #node_chain_carries_mask does today: a mask that does
+   * not describe this domain is still the user's data, and folding "no factor" for it would drop it
+   * without a word and move the surface. The subtree is non-empty, so a walk from any layer reaches
+   * the folder itself and its mask is covered too. */
+  for (const SculptLayer *layer : subtree_layers) {
+    if (const SculptLayerTreeNode *stale = find_stale_mask_in_fold(
+            layer->base, stop_above, mask_elem_num))
+    {
+      BKE_reportf(op->reports,
+                  RPT_ERROR,
+                  "The weight mask of '%s' does not match the mesh; fix or remove it before merging",
+                  stale->name);
+      return OPERATOR_CANCELLED;
+    }
+  }
+
   /* See #node_chain_carries_mask. Acute here: the folder being dissolved may itself carry the mask
    * that attenuated the whole subtree, and it does not survive the merge to carry it afterwards.
    * The folder's own node is tested explicitly as well, so an empty-of-masks subtree under a masked
@@ -4293,12 +4783,19 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
   for (const SculptLayer *layer : subtree_layers) {
     any_masked |= node_chain_carries_mask(layer->base);
   }
+  /* While REC is armed on a layer every composite ignores that layer's masks and its folders'
+   * (#node_mask_for_composite), so the layer is *not* attenuated right now and folding its mask in
+   * would move the surface. Refused for the reason #SCULPT_OT_layer_mask_apply refuses it: disarming
+   * REC is one click, and a mask baked at a moment the user cannot see is not recoverable by eye. */
   if (any_masked) {
-    BKE_report(op->reports,
-               RPT_ERROR,
-               "Cannot merge a sculpt layer group with a weight mask; remove the masks on the "
-               "group and its layers first");
-    return OPERATOR_CANCELLED;
+    for (const SculptLayer *layer : subtree_layers) {
+      if (layer->base.flag & SCULPT_LAYER_REC_EXEMPT) {
+        BKE_report(op->reports,
+                   RPT_ERROR,
+                   "Disarm REC before merging sculpt layers that carry a weight mask");
+        return OPERATOR_CANCELLED;
+      }
+    }
   }
 
   SculptLayer *survivor = subtree_layers.first();
@@ -4306,10 +4803,11 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
   session_state_ensure(*ctx.object);
   undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
 
-  /* Accumulate `data[i] * effective` of every subtree layer into the survivor at influence 1. The
-   * sum equals the folder's prior combined contribution, so the visible surface is unchanged —
-   * which holds only because a masked participant, or a masked folder, was refused above. Buffer
-   * sizing mirrors #layer_merge_selected_exec: grid buffers all sit at the canonical (top) level. */
+  /* Accumulate `data[i] * effective * folded mask` of every subtree layer into the survivor at
+   * influence 1. The sum equals the folder's prior combined contribution, so the visible surface is
+   * unchanged: every mask that stops acting once the folder dissolves is folded into the data, and
+   * the ones above `stop_above` are left alone because they go on acting. Buffer sizing mirrors
+   * #layer_merge_selected_exec: grid buffers all sit at the canonical (top) level. */
   int n = ctx.grids ? survivor->totelem : element_count(*ctx.object);
   if (ctx.grids) {
     for (const SculptLayer *layer : subtree_layers) {
@@ -4326,9 +4824,19 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
    * the accumulation and the rename below; undo restores both from this one payload. */
   undo::push_sculpt_layer_data(*ctx.object, *survivor);
 
+  /* Built before the accumulation overwrites the survivor's buffer, since it reads the participants'
+   * masks as they still stand. Left empty under the other two policies, which keep no mask. */
+  const Array<float> combined = (policy == MergeMaskPolicy::Combine && any_masked) ?
+                                    merge_combined_mask(
+                                        subtree_layers, *survivor, stop_above, mask_elem_num) :
+                                    Array<float>();
+
+  Array<float> fold;
   const float survivor_eff = effective(*survivor);
-  for (float3 &v : survivor_data) {
-    v *= survivor_eff;
+  const bool survivor_masked = any_masked &&
+                               gather_fold_mask(survivor->base, stop_above, mask_elem_num, fold);
+  for (const int64_t i : survivor_data.index_range()) {
+    survivor_data[i] *= survivor_eff * (survivor_masked && i < fold.size() ? fold[i] : 1.0f);
   }
   for (const SculptLayer *layer : subtree_layers) {
     if (layer == survivor) {
@@ -4346,14 +4854,33 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
       continue;
     }
     const float layer_eff = effective(*layer);
+    const bool layer_masked = any_masked &&
+                              gather_fold_mask(layer->base, stop_above, mask_elem_num, fold);
     const Span<float3> layer_data(static_cast<const float3 *>(layer->data), layer->totelem);
     const int64_t count = std::min<int64_t>(survivor_data.size(), layer_data.size());
     for (int64_t i = 0; i < count; i++) {
-      survivor_data[i] += layer_data[i] * layer_eff;
+      /* The bound test is not decorative: `fold` is cut to the domain (\a mask_elem_num) while
+       * `survivor_data` can be longer on grids. */
+      survivor_data[i] += layer_data[i] * layer_eff *
+                          (layer_masked && i < fold.size() ? fold[i] : 1.0f);
     }
   }
   survivor->influence = 1.0f;
   survivor->base.flag |= SCULPT_LAYER_ENABLED;
+
+  /* Runs while the folder is still alive: #remove_folder_subtree_with_undo below frees its mask, and
+   * KeepGroup copies that mask onto the result. */
+  merge_settle_mask(*ctx.object,
+                    *survivor,
+                    survivor_data,
+                    policy,
+                    combined,
+                    layout.block_size,
+                    group);
+  /* Defensive: every folder whose chain changed shape here is itself dissolved a few lines below, so
+   * nothing should be left holding a cached product. #chain_mask hands out a pointer into that cache
+   * and the next rebuild frees what it replaces, which is why this is not left to inference. */
+  bke::sculpt_layers::tag_chain_mask_dirty(*group);
 
   /* Capture the merged-away layers at their *original* positions, before the lift below moves them,
    * so undo re-inserts them where they really sat. Capturing transfers each buffer to the payload;
@@ -4392,8 +4919,11 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
   group_cascade_resync_with_undo(*ctx.object, mesh);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
-  /* `Σ(data · effective)` at influence 1 equals the folder's prior combined contribution, so the
-   * combined surface (and the live positions) are unchanged. */
+  /* `Σ(data · effective · folded mask)` at influence 1 equals the folder's prior combined
+   * contribution, so the combined surface (and the live positions) are unchanged. */
+  if (any_masked) {
+    merge_report_mask_policy(op, policy);
+  }
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -4404,10 +4934,11 @@ void SCULPT_OT_layer_group_merge(wmOperatorType *ot)
   ot->idname = "SCULPT_OT_layer_group_merge";
   ot->description =
       "Merge every sculpt layer inside a folder into a single layer named after the folder, "
-      "removing the folder and any nested folders. Weight masks are not preserved, so a folder or "
-      "layer that carries one cannot be merged";
+      "removing the folder and any nested folders. Weight masks are handled as the Masks option "
+      "says, and the combined surface is unchanged";
   ot->exec = layer_group_merge_exec;
   ot->poll = layers_poll;
+  merge_mask_policy_prop(ot);
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;

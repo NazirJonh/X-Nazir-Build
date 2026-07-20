@@ -63,6 +63,7 @@ struct KeyBlock;
 struct Object;
 struct PaintModeSettings;
 struct SculptLayer;
+struct SculptLayerGroup;
 struct SculptLayerTreeNode;
 struct ReportList;
 struct wmKeyConfig;
@@ -1382,6 +1383,39 @@ struct MaskLayout {
 MaskLayout mask_layout_for(bool on_grids, int verts_num, int grids_num, int grid_area);
 
 /**
+ * The layout every mask on \a object must be cut at, or a zeroed #MaskLayout when the object carries
+ * no elements to mask (which every caller must treat as a refusal).
+ *
+ * Defined in `sculpt_layer_mask_edit.cc`. Exported because the merges in `sculpt_layers.cc` size and
+ * cut masks too, and a second derivation of the block size there would be free to drift: a grid mask
+ * cut at any other size is *silently* dropped by #bke::sculpt_layers::grid_masks_for_composite, so
+ * the two would disagree with no crash and no warning.
+ */
+MaskLayout mask_layout_for_object(Object &object);
+
+/**
+ * Dense per-element weights of \a node's own weight mask, or false when it has none usable.
+ *
+ * Defined in `sculpt_layers.cc`; declared here because the mask operators
+ * (`sculpt_layer_mask_edit.cc`) and the merges both fold masks into layer data and must do it from
+ * one implementation.
+ */
+bool gather_node_weight_mask(const SculptLayerTreeNode &node,
+                             int64_t elem_num,
+                             Array<float> &r_dense);
+
+/** Dense product of \a node's mask and every folder mask strictly below \a stop_above (exclusive). */
+bool gather_fold_mask(const SculptLayerTreeNode &node,
+                      const SculptLayerGroup *stop_above,
+                      int64_t elem_num,
+                      Array<float> &r_dense);
+
+/** The first stale mask in the range #gather_fold_mask folds, or null when all are usable. */
+const SculptLayerTreeNode *find_stale_mask_in_fold(const SculptLayerTreeNode &node,
+                                                   const SculptLayerGroup *stop_above,
+                                                   int64_t elem_num);
+
+/**
  * True when \a sculpt_brush_type must be refused because a weight-mask editing session is open.
  *
  * Pure, so the decision is testable without a #bContext or a live session: pass
@@ -1474,6 +1508,7 @@ void SCULPT_OT_layer_mask_isolate(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_add(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_remove(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_invert(wmOperatorType *ot);
+void SCULPT_OT_layer_mask_apply(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_clear(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_fill(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_edit_toggle(wmOperatorType *ot);

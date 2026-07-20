@@ -262,6 +262,43 @@ class DATA_PT_vertex_groups(MeshButtonsPanel, Panel):
         draw_attribute_warnings(context, layout, None)
 
 
+class MESH_MT_sculpt_layer_mask_menu(Menu):
+    bl_label = "Mask Sculpt Layer"
+
+    def draw(self, context):
+        layout = self.layout
+        # Weight mask of the active layer. Folders get the same entries from their own row's context
+        # menu, which is drawn in C++: nothing in the data names an "active" folder, so a folder can
+        # only ever be addressed by the uid its row knows.
+        active = context.object.data.sculpt_layers_active
+
+        if active is None or not active.has_mask:
+            col = layout.column()
+            col.enabled = active is not None
+            col.operator("sculpt.layer_mask_add", text="Add Mask", icon='MOD_MASK')
+            return
+
+        if active.mask_edit_active:
+            layout.operator("sculpt.layer_mask_edit_toggle", text="Finish Mask Edit",
+                            icon='CLIPUV_DEHLT')
+        else:
+            layout.operator("sculpt.layer_mask_edit_toggle", text="Edit Mask", icon='CLIPUV_HLT')
+        # Same checkbox pair the layer row's own toggle uses, so both read as one state.
+        if active.mask_enabled:
+            layout.operator("sculpt.layer_mask_toggle", text="Disable Mask", icon='CHECKBOX_HLT')
+        else:
+            layout.operator("sculpt.layer_mask_toggle", text="Enable Mask", icon='CHECKBOX_DEHLT')
+        layout.separator()
+        layout.operator("sculpt.layer_mask_invert", text="Invert Mask", icon='ARROW_LEFTRIGHT')
+        layout.operator("sculpt.layer_mask_clear", text="Clear Mask")
+        layout.operator("sculpt.layer_mask_fill", text="Fill Mask")
+        layout.separator()
+        # Layers only, so it is absent from the folder menu drawn in C++: a folder has no data
+        # of its own to fold the weights into, and the operator refuses one.
+        layout.operator("sculpt.layer_mask_apply", text="Apply Mask", icon='CHECKMARK')
+        layout.operator("sculpt.layer_mask_remove", text="Remove Mask", icon='X')
+
+
 class MESH_MT_sculpt_layer_context_menu(Menu):
     bl_label = "Sculpt Layer Specials"
 
@@ -287,38 +324,19 @@ class MESH_MT_sculpt_layer_context_menu(Menu):
         layout.separator()
         layout.operator("sculpt.layer_mask_isolate", text="Isolate by Mask")
         layout.separator()
-        # Weight mask of the active layer. Folders get the same entries from their own row's context
-        # menu, which is drawn in C++: nothing in the data names an "active" folder, so a folder can
-        # only ever be addressed by the uid its row knows.
-        if active is not None and active.has_mask:
-            if active.mask_edit_active:
-                layout.operator("sculpt.layer_mask_edit_toggle", text="Finish Mask Edit")
-            else:
-                layout.operator("sculpt.layer_mask_edit_toggle", text="Edit Mask")
-            if active.mask_enabled:
-                layout.operator("sculpt.layer_mask_toggle", text="Disable Mask")
-            else:
-                layout.operator("sculpt.layer_mask_toggle", text="Enable Mask")
-            layout.operator("sculpt.layer_mask_invert", text="Invert Mask")
-            layout.operator("sculpt.layer_mask_clear", text="Clear Mask")
-            layout.operator("sculpt.layer_mask_fill", text="Fill Mask")
-            # Layers only, so it is absent from the folder menu drawn in C++: a folder has no data
-            # of its own to fold the weights into, and the operator refuses one.
-            layout.operator("sculpt.layer_mask_apply", text="Apply Mask")
-            layout.operator("sculpt.layer_mask_remove", text="Remove Mask")
-        else:
-            col = layout.column()
-            col.enabled = active is not None
-            col.operator("sculpt.layer_mask_add", text="Add Mask")
-        layout.separator()
+        col = layout.column()
+        col.enabled = active is not None
+        col.menu("MESH_MT_sculpt_layer_mask_menu", text="Mask Sculpt Layer", icon='MOD_MASK')
         # Only reachable when the topology changed behind the layers' back; the stored displacement
         # is unmappable either way, so both entries only choose whether the layer itself survives.
-        col = layout.column()
-        col.enabled = any(not layer.is_valid for layer in mesh.sculpt_layers)
-        props = col.operator("sculpt.layer_validate", text="Reset Stale Layers", icon='ERROR')
-        props.action = 'CLEAR'
-        props = col.operator("sculpt.layer_validate", text="Remove Stale Layers", icon='ERROR')
-        props.action = 'REMOVE'
+        # Hidden rather than greyed out: with valid data they are not a choice the user has, and
+        # their appearance is itself the warning that something went stale.
+        if any(not layer.is_valid for layer in mesh.sculpt_layers):
+            layout.separator()
+            props = layout.operator("sculpt.layer_validate", text="Reset Stale Layers", icon='ERROR')
+            props.action = 'CLEAR'
+            props = layout.operator("sculpt.layer_validate", text="Remove Stale Layers", icon='ERROR')
+            props.action = 'REMOVE'
         layout.separator()
         # Dial-able, non-destructive: no keys yet bootstraps Basis + Sculpt Layers, an existing key
         # gets one more dial-able block (the operator delegates to sculpt.layer_bake). Meaningless
@@ -403,9 +421,21 @@ class DATA_PT_sculpt_layers(MeshButtonsPanel, Panel):
         col = row.column(align=True)
         col.operator("sculpt.layer_add", icon='ADD', text="")
         col.operator("sculpt.layer_group_add", icon='NEWFOLDER', text="")
+        col.separator()
         col.operator("sculpt.layer_remove", icon='REMOVE', text="")
         col.separator()
         col.menu("MESH_MT_sculpt_layer_context_menu", icon='DOWNARROW_HLT', text="")
+        col.separator()
+
+        active = mesh.sculpt_layers_active
+        # Move acts on the active layer alone, so it stays disabled while a multi-layer selection
+        # is being built for the merge entries: only one row can be reordered at a time.
+        sub = col.column(align=True)
+        sub.enabled = active is not None and not any(
+            layer != active and layer.select for layer in mesh.sculpt_layers
+        )
+        sub.operator("sculpt.layer_move", icon='TRIA_UP', text="").direction = 'UP'
+        sub.operator("sculpt.layer_move", icon='TRIA_DOWN', text="").direction = 'DOWN'
         col.separator()
         col.operator("sculpt.layer_merge_down", icon='TRIA_DOWN_BAR', text="")
         col.separator()
@@ -414,7 +444,6 @@ class DATA_PT_sculpt_layers(MeshButtonsPanel, Panel):
         # the Specials dropdown instead.
         col.operator("sculpt.layer_bake", icon='CHECKMARK', text="")
 
-        active = mesh.sculpt_layers_active
         if active:
             sub = layout.column()
             sub.use_property_split = True
@@ -924,6 +953,7 @@ classes = (
     MESH_MT_shape_key_tree_context_menu,
     MESH_MT_color_attribute_context_menu,
     MESH_MT_attribute_context_menu,
+    MESH_MT_sculpt_layer_mask_menu,
     MESH_MT_sculpt_layer_context_menu,
     SCULPT_PT_layer_editmode_confirm,
     MESH_UL_vgroups,

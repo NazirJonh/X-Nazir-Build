@@ -832,7 +832,10 @@ void template_layer_tree(ui::Layout *layout, bContext *C)
   ui::AbstractTreeView *tree_view = block_add_view(
       *block, "Sculpt Layer Tree View", std::make_unique<SculptLayerTreeView>(*ob));
   tree_view->set_context_menu_title("Sculpt Layer");
-  tree_view->set_default_rows(5);
+  /* Layers are read as a stack: too few rows and the folder above (or the layer below) the active
+   * one falls out of view, which is exactly the context this list is consulted for. */
+  tree_view->set_min_rows(8);
+  tree_view->set_default_rows(8);
   tree_view->allow_multiselect_items();
 
   ui::TreeViewBuilder::build_tree_view(*C, *tree_view, *layout);

@@ -64,6 +64,7 @@
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_subdiv_ccg.hh"
+#include "BKE_undo_system.hh"
 #include "BLI_math_rotation_legacy.hh"
 #include "BLI_math_vector.hh"
 
@@ -82,6 +83,7 @@
 #include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
+#include "ED_undo.hh"
 #include "ED_view3d.hh"
 
 #include "../paint_curve_patch_cache.hh"
@@ -6118,9 +6120,24 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     }
     else {
       /* Hand off to the Curve Patch modal editor: keep `ss.cache` alive (re-stamp needs it, see
-       * Stage 03) and keep the undo transaction opened by `stroke_undo_begin()` open (the
-       * editor's own commit/cancel closes or discards it — see `curve_patch_start_from_anchor()`). */
+       * Stage 03). */
       curve_patch_start_from_anchor(*this->depsgraph, ob, sd, *brush, this->vc);
+      if (ss.curve_patch_cache) {
+        /* The editor owns the session now. It also starts from a mesh restored to its pre-stroke
+         * state (`restore_from_undo_step_if_necessary()` inside the call above), so the
+         * transaction `stroke_undo_begin()` opened describes no net change at all. Discard it
+         * rather than leaving it open: while an initialized step exists, ANY undo push elsewhere
+         * in the application adopts it (`undo_system.cc:581-588`) or frees it (`:491-494`) -- and
+         * the modal deliberately passes events through, so editing a brush property in a panel is
+         * enough to trigger that. The editor builds its own single step when the patch is
+         * committed. */
+        BKE_undosys_step_push_init_abort(ED_undo_stack_get());
+        return;
+      }
+      /* The start refused (see its own guards) and already freed `ss.cache`. Close the
+       * transaction the ordinary way so whatever the stroke did stays undoable, and return -- the
+       * teardown below would double-free the cache this path has already released. */
+      stroke_undo_end(*paint_mode_settings_, *this->object, brush);
       return;
     }
   }
@@ -6128,8 +6145,9 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   /* Roll stroke method with "Edit After Stroke": hand the drawn contour off to the Curve Patch
    * editor as an editable control curve (the bridge undoes the live roll relief first and re-stamps
    * via the curve). Skipped for Dynamic Topology (no stable vertex index for the patch's
-   * `orig_positions`). Like the Curve Patch branch above, this keeps `ss.cache` and the open undo
-   * transaction alive for the editor to own -- so it returns before the teardown below. */
+   * `orig_positions`). Like the Curve Patch branch above, this keeps `ss.cache` alive for the
+   * editor to own and discards the open undo transaction -- the editor builds its own step on
+   * commit -- so it returns before the teardown below. */
   if (!is_cancel && stroke_started && brush->stroke_method == BRUSH_STROKE_ROLL &&
       brush->mtex.roll_edit_after && !ss.bm)
   {
@@ -6145,6 +6163,13 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
                                          roll_positions.as_span(),
                                          roll_radii.as_span(),
                                          this->roll_plane_normal());
+      if (ss.curve_patch_cache) {
+        /* Same reasoning as the Curve Patch branch above: the bridge undoes the live roll relief
+         * back to pristine before handing over, so the open transaction describes nothing. */
+        BKE_undosys_step_push_init_abort(ED_undo_stack_get());
+        return;
+      }
+      stroke_undo_end(*paint_mode_settings_, *this->object, brush);
       return;
     }
   }

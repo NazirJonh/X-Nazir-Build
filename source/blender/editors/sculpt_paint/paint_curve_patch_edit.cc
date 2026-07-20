@@ -89,7 +89,6 @@
 #include "WM_types.hh"
 
 #include "mesh/sculpt_intern.hh"
-#include "mesh/sculpt_undo.hh"
 #include "paint_curve_intern.hh"
 #include "paint_curve_patch_cache.hh"
 
@@ -707,7 +706,10 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
   return OPERATOR_RUNNING_MODAL;
 }
 
-static void curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_cancel);
+/* Returns true when the patch was actually committed. A commit request can still end up writing
+ * nothing -- see the `CurvePatchCache::invalidated` branch inside -- and the modal reports that as
+ * `OPERATOR_CANCELLED`. */
+static bool curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_cancel);
 
 static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
@@ -929,6 +931,26 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     }
   }
 
+  /* A foreign operator changed the mesh's element count (see `CurvePatchCache::element_num`). The
+   * patch cannot be committed or even restored, so end the modal as soon as the flag is seen.
+   *
+   * Deliberately ABOVE the pass-through gate below rather than after the event switch. The
+   * live-sync block just above is one of the places that raises the flag, and it runs on events
+   * whose cursor sits outside this patch's viewport -- exactly where the cursor is while the user
+   * drags a brush slider in the N-panel, the interaction that block exists for. The gate returns
+   * early for those events, so a check placed after the switch would never see them.
+   *
+   * This is not the only place the flag can be raised: the commit key bypasses the gate, and its
+   * re-stamp runs inside `curve_patch_edit_finish()`, which reports back whether a commit actually
+   * happened so that path can answer `OPERATOR_CANCELLED` on its own.
+   *
+   * `curve_patch_restore_only()` is a no-op in this state, so the cancel path leaves the mesh
+   * exactly as the foreign operator left it. */
+  if (patch.invalidated) {
+    curve_patch_edit_finish(C, op, true);
+    return OPERATOR_CANCELLED;
+  }
+
   /* #WM_event_add_modal_handler() (called from `curve_patch_edit_invoke()`) registers this
    * operator as a WINDOW-level modal handler (`win->runtime->modalhandlers`), not an area/region
    * one -- so it receives every mouse/keyboard event in the entire window, for whichever area
@@ -961,12 +983,14 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
                            data.dragging_segment;
   const ScrArea *area = CTX_wm_area(C);
   const ARegion *region = CTX_wm_region(C);
-  /* The undo chord is ours no matter where the cursor is. `EVT_ZKEY`'s case below deliberately
-   * swallows it -- letting it reach the global keymap lets `ED_OT_undo` pop a previously committed
-   * stroke out from under this patch's `orig_positions` snapshot -- but that case sits BEHIND this
-   * gate, so with the cursor over a panel or the header the chord escaped anyway and did exactly
-   * what it was written to prevent. Plain Z is deliberately not exempt: it belongs to Sculpt Mode's
-   * shading pie, and the case below passes it through on its own. */
+  /* The undo chord is ours no matter where the cursor is, and `EVT_ZKEY`'s case below swallows it.
+   * Global undo while a patch is live would pop a previously committed step and move mesh vertices
+   * out from under this patch's `orig_positions` snapshot, leaving every later restore and the
+   * commit itself writing against a surface that no longer matches what was recorded. That case
+   * sits BEHIND this gate, so without lifting the chord above it the chord escaped to the global
+   * keymap whenever the cursor sat over a panel or the header -- doing exactly what it exists to
+   * prevent. Plain Z is deliberately not exempt: it belongs to Sculpt Mode's shading pie, and the
+   * case below passes it through on its own. */
   const bool is_undo_chord = (event->type == EVT_ZKEY) &&
                              (event->modifier & (KM_CTRL | KM_OSKEY)) != 0;
   const bool is_commit_key = ELEM(event->type, EVT_RETKEY, EVT_PADENTER, EVT_ESCKEY) ||
@@ -1351,9 +1375,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       break;
     case EVT_ZKEY:
       /* Ctrl+Z / Ctrl+Shift+Z (Cmd on macOS) drive the SESSION undo stack, and are swallowed
-       * whatever the outcome. Letting them reach the global keymap is what caused the bug this
-       * exists for: the session's own sculpt transaction is still open, so `ED_OT_undo` would pop
-       * the PREVIOUS committed stroke -- moving mesh vertices out from under this patch's
+       * whatever the outcome. Letting them reach the global keymap lets `ED_OT_undo` pop the
+       * PREVIOUS committed step -- moving mesh vertices out from under this patch's
        * `orig_positions` snapshot and leaving the session inconsistent. */
       if ((event->modifier & (KM_CTRL | KM_OSKEY)) == 0) {
         /* Plain Z belongs to Sculpt Mode's shading pie menu; only the undo chord is ours. */
@@ -1402,8 +1425,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     case EVT_RETKEY:
     case EVT_PADENTER:
       if (event->val == KM_PRESS) {
-        curve_patch_edit_finish(C, op, false);
-        return OPERATOR_FINISHED;
+        return curve_patch_edit_finish(C, op, false) ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
       }
       break;
     case EVT_ESCKEY:
@@ -1440,7 +1462,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   return OPERATOR_RUNNING_MODAL;
 }
 
-static void curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_cancel)
+static bool curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_cancel)
 {
   ED_workspace_status_text(C, nullptr);
 
@@ -1448,42 +1470,42 @@ static void curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
   SculptSession &ss = *ob.runtime->sculpt_session;
   CurvePatchCache *patch = ss.curve_patch_cache;
 
+  bool committed = false;
   if (patch) {
     if (is_cancel) {
+      /* No undo bookkeeping at all: the modal never opened a transaction (the one the anchor
+       * stroke opened is discarded the moment the editor starts, see `SculptPaintStroke::done()`
+       * in `mesh/sculpt.cc`) and never pushed a node, so a cancelled patch leaves the undo history
+       * exactly as it found it. The restore is what puts the mesh back. */
       curve_patch_restore_only(ob, *patch);
-      /* Close the transaction even on cancel, AFTER the restore above has put the mesh back.
-       *
-       * This deliberately departs from the cancelled-stroke idiom at
-       * `mesh/sculpt.cc:SculptPaintStroke::done()`, which leaves `push_begin_ex` unclosed on the
-       * assumption that the transaction is then discarded. That holds for a stroke that never
-       * painted, but not here: every interactive re-stamp calls `undo::push_nodes()`, so by the time
-       * the user presses Esc the step is already full of nodes. Leaving it unclosed puts a step on
-       * the stack whose `type` is `Type::Position` but whose `position_step_storage` was never
-       * built -- that allocation happens only in `undo::push_end()` (`sculpt_undo.cc`) -- and
-       * `restore_list()` dereferences that pointer unconditionally, so undoing onto such a step
-       * crashes on a null read.
-       *
-       * Closing it here is safe precisely because the restore ran first: the nodes were pushed
-       * carrying their pristine positions and the mesh now matches them, so the resulting step is a
-       * no-op to undo or redo through. */
-      undo::push_end(ob);
     }
     else {
-      /* Re-stamp once at final quality before closing the undo step, so the mesh (and the undo
-       * history) keeps the smoothed profile rather than the harder interactive preview. See
+      /* Re-stamp once at final quality BEFORE the undo step is built, so the mesh (and with it the
+       * undo history) keeps the smoothed profile rather than the harder interactive preview. The
+       * order also decides which nodes the step covers, since this pass is the last one to widen
+       * `CurvePatchCache::all_touched_nodes`. See
        * `docs/superpowers/specs/2026-07-18-curve-patch-final-quality-design.md`. */
       patch->final_quality = true;
       curve_patch_restore_and_restamp(*C, ob, *patch);
       patch->final_quality = false;
-      /* Closes the position undo step itself -- see `curve_patch_finish_commit()` for why closing
-       * it here would be wrong. */
-      curve_patch_finish_commit(*C, ob, *patch);
 
-      /* The re-stamp ends in `flush_update_step()`, which only arms the fast paint-redraw path; that
-       * is torn down the instant this operator finishes. Issue the full finished-stroke redraw so
-       * the committed positions actually reach the screen -- same reasoning as the initial preview
-       * stamp in `curve_patch_publish_and_launch_modal()`. */
-      flush_update_done(C, ob, UpdateType::Position);
+      /* That re-stamp is the last chance to notice that a foreign operator changed the mesh's
+       * element count (see `CurvePatchCache::element_num`), and the commit key reaches this
+       * function without passing the modal's own check for it. A patch in that state writes
+       * nothing: the commit below and the restore above are both no-ops, so report it as
+       * canceled rather than finished. */
+      if (!patch->invalidated) {
+        /* Builds and closes the patch's single position undo step, then optionally writes the face
+         * set as a second one -- see `curve_patch_finish_commit()`. */
+        curve_patch_finish_commit(*C, ob, *patch);
+
+        /* The re-stamp ends in `flush_update_step()`, which only arms the fast paint-redraw path;
+         * that is torn down the instant this operator finishes. Issue the full finished-stroke
+         * redraw so the committed positions actually reach the screen -- same reasoning as the
+         * initial preview stamp in `curve_patch_publish_and_launch_modal()`. */
+        flush_update_done(C, ob, UpdateType::Position);
+        committed = true;
+      }
     }
     MEM_delete(ss.cache);
     ss.cache = nullptr;
@@ -1500,6 +1522,7 @@ static void curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
   }
   MEM_delete(op_data);
   op->customdata = nullptr;
+  return committed;
 }
 
 static void curve_patch_edit_cancel(bContext *C, wmOperator *op)
@@ -1529,8 +1552,11 @@ void SCULPT_OT_curve_patch_edit(wmOperatorType *ot)
  * nothing else. The two point actions act on `CurvePatchCache::active_point`, which the modal sets
  * from the right-click hit test just before opening the menu; the rest act on the whole patch.
  *
- * None carries `OPTYPE_UNDO`: they mutate the live patch inside the session-wide undo step the
- * modal operator opened, exactly like the modal's own hotkeys do.
+ * None carries `OPTYPE_UNDO`: like the modal's own hotkeys they only mutate the live patch and its
+ * session-local history (`CurvePatchCache::undo_steps`), which is not Blender's undo stack. The
+ * modal touches that stack at no point in its life -- the patch's single step is built when it
+ * commits, in `curve_patch_finish_commit()`. An `OPTYPE_UNDO` here would push a step for an edit
+ * that is not part of the mesh yet.
  * \{ */
 
 static bool curve_patch_active_point_poll(bContext *C)

@@ -29,7 +29,6 @@
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_subdiv_ccg.hh"
-#include "BKE_undo_system.hh"
 
 #include "BLI_array.hh"
 #include "BLI_assert.h"
@@ -51,7 +50,6 @@
 #include "WM_api.hh"
 
 #include "ED_sculpt.hh"
-#include "ED_undo.hh"
 #include "ED_view3d.hh"
 
 #include "paint_curve_intern.hh"
@@ -79,8 +77,29 @@ const bke::CurvesGeometry *ED_paint_curve_patch_active_control_curve(const Objec
   return &ob->runtime->sculpt_session->curve_patch_cache->control_curve;
 }
 
+/** Number of elements the patch's `orig_positions` keys index into, for the object's CURRENT pbvh
+ * type. Returns 0 for `Type::BMesh`, which a patch never runs on. */
+static int64_t curve_patch_element_num(Object &ob)
+{
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  switch (pbvh.type()) {
+    case bke::pbvh::Type::Mesh:
+      return id_cast<Mesh *>(ob.data)->verts_num;
+    case bke::pbvh::Type::Grids:
+      return ob.runtime->sculpt_session->subdiv_ccg->positions.size();
+    case bke::pbvh::Type::BMesh:
+      return 0;
+  }
+  return 0;
+}
+
 void curve_patch_restore_only(Object &ob, const CurvePatchCache &patch)
 {
+  if (curve_patch_element_num(ob) != patch.element_num) {
+    /* See `CurvePatchCache::element_num`: writing the snapshot back would corrupt an unrelated
+     * mesh. This also makes the ordinary cancel path safe for an invalidated patch. */
+    return;
+  }
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   /* `patch.orig_positions` is keyed by whichever flat index `curve_patch_apply_relief_action()`
    * used for this pbvh's actual type -- see the matching comment there. */
@@ -823,20 +842,6 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
     tag_mask = IndexMask::from_bits(touched, tag_memory);
   }
 
-  /* Push the nodes into the active undo step BEFORE anything is displaced. Curve Patch bypasses
-   * `do_brush_action()`, which normally handles this for standard strokes; without it, nodes the
-   * patch reaches that the initial stroke (anchor dab or Roll stroke) never touched are absent from
-   * the step and Ctrl+Z cannot restore them.
-   *
-   * The ordering is the point: `undo::push_nodes()` records each node's CURRENT positions as the
-   * state to restore, and only the first push of a node in a step takes effect. Called after PHASE 2
-   * (where it used to sit, contradicting its own comment) it recorded nodes already carrying the
-   * relief, so undoing a committed patch restored those nodes to a displaced state instead of the
-   * original surface. Here the positions are still pristine: `curve_patch_restore_only()` reset them
-   * at the top of this re-stamp, PHASE 1 is read-only, and any node an earlier symmetry pass wrote
-   * to was pushed by that pass. */
-  undo::push_nodes(depsgraph, ob, tag_mask, undo::Type::Position);
-
   for (LocalData &local : all_tls) {
     for (const ReliefWrite &write : local.writes) {
       /* On a regular mesh this is the sole snapshot of `idx`; on Multires it was already recorded by
@@ -891,6 +896,10 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
    * Deliberately replaces the former `mesh->tag_positions_changed()` here, whose whole-mesh
    * normals-cache invalidation was the dominant cost of the interactive-edit slowdown. */
   tag_mask.set_bits(patch.last_restamp_nodes);
+
+  /* The same bits also accumulate into the patch's lifetime union, which is never cleared and is
+   * what the commit-time undo step is pushed over -- see `CurvePatchCache::all_touched_nodes`. */
+  tag_mask.set_bits(patch.all_touched_nodes);
 }
 
 /**
@@ -968,7 +977,11 @@ static void curve_patch_smooth_relief(Object &ob, const CurvePatchCache &patch)
   }
 
   IndexMaskMemory memory;
-  pbvh.tag_positions_changed(IndexMask::from_bits(patch.last_restamp_nodes, memory));
+  /* The wide mask, not `last_restamp_nodes`: this function writes every key of `orig_positions`,
+   * including ones whose nodes the last restamp never touched -- the same reason
+   * `CurvePatchCache::all_touched_nodes` exists. A narrower tag leaves a fringe node drawing its
+   * pre-smoothing positions. */
+  pbvh.tag_positions_changed(IndexMask::from_bits(patch.all_touched_nodes, memory));
   mesh.tag_positions_changed_no_normals();
 }
 
@@ -984,39 +997,97 @@ static float curve_patch_max_displacement(const Span<float3> positions,
   return max_disp;
 }
 
-}  // namespace
-
-void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &patch)
+/**
+ * Record the patch's whole footprint as ONE position undo step.
+ *
+ * `undo::push_nodes()` stores each node's CURRENT positions as the state to restore, but by the
+ * time a patch commits the mesh already carries the finished relief. Recomputing the pristine
+ * surface would mean a second final-quality re-stamp, which is expensive on a dense mesh and shows
+ * up as a stall on Enter. Instead the snapshot the patch has kept all along is written back, the
+ * nodes are pushed against it, and the relief is restored from a saved copy -- two passes over the
+ * touched elements and no relief evaluation at all.
+ */
+static void curve_patch_push_position_step(bContext &C,
+                                           Object &ob,
+                                           const CurvePatchCache &patch,
+                                           const bool force_push)
 {
-  /* Every early exit below still has to close the patch's position undo step, just without forcing
-   * it into the stack -- `wm_operator_finished()` picks it up from `ustack->step_init` afterwards,
-   * which is what the plain `undo::push_end()` this function replaced always relied on. */
+  const Scene &scene = *CTX_data_scene(&C);
+  const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(&C);
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
 
+  /* The array `orig_positions` is keyed into, and the same one `curve_patch_apply_relief_action()`
+   * writes the relief to -- there is no intermediate buffer on either path. */
+  MutableSpan<float3> positions;
+  if (pbvh.type() == bke::pbvh::Type::Grids) {
+    positions = ob.runtime->sculpt_session->subdiv_ccg->positions;
+  }
+  else {
+    positions = id_cast<Mesh *>(ob.data)->vert_positions_for_write();
+  }
+
+  /* Saved in the map's own iteration order. The write-back loop below walks it the same way, which
+   * is well-defined precisely because nothing between the two loops mutates the map. */
+  Vector<float3> relief;
+  relief.reserve(patch.orig_positions.size());
+  for (const auto item : patch.orig_positions.items()) {
+    relief.append(positions[item.key]);
+    positions[item.key] = item.value;
+  }
+
+  IndexMaskMemory memory;
+  undo::push_begin_ex(scene, ob, "Curve Patch");
+  undo::push_nodes(depsgraph,
+                   ob,
+                   IndexMask::from_bits(patch.all_touched_nodes, memory),
+                   undo::Type::Position);
+
+  int i = 0;
+  for (const auto item : patch.orig_positions.items()) {
+    positions[item.key] = relief[i++];
+  }
+
+  /* Forced into the stack only when a face-set step follows: that step's `push_begin_ex()` would
+   * free this one out of `ustack->step_init` (this operator carries `OPTYPE_UNDO`, so
+   * `wm->op_undo_depth` is non-zero here and a plain `push_end()` parks rather than pushes).
+   * Forcing is safe because the step was opened a few lines above and no foreign code runs in
+   * between, so it is always ours -- that is why the old `patch_step_is_ours` test is gone.
+   * Precedent for the forced form: `mesh/sculpt_dyntopo.cc`.
+   *
+   * When no face-set step follows, the step MUST stay parked instead: `wm_operator_finished()`
+   * pushes it for us, whereas an already-pushed step leaves `step_init` empty and makes that call
+   * allocate an EXTRA, empty step -- one dead Ctrl+Z press before the relief is undone. */
+  undo::push_end_ex(ob, force_push);
+}
+
+/**
+ * Decide whether the commit will really burn a face set, and if so hand back the masks it needs.
+ *
+ * Runs BEFORE the position step is closed, because whether that step may be forced into the stack
+ * depends on whether a second step follows it -- see `curve_patch_push_position_step()`. Every
+ * "no face set after all" outcome is reported as `false` rather than by an early return from the
+ * commit, so the position step is still built on those paths.
+ *
+ * `memory` must outlive both returned masks.
+ */
+static bool curve_patch_face_set_masks(Object &ob,
+                                       const CurvePatchCache &patch,
+                                       IndexMaskMemory &memory,
+                                       IndexMask &r_face_mask,
+                                       IndexMask &r_node_mask)
+{
   const SculptSession &ss = *ob.runtime->sculpt_session;
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+
   /* Read the LIVE brush rather than `patch.frozen_params`: this toggle is a commit-time behavior
    * switch, not a relief parameter, so the user may flip it while the patch is being edited. Same
    * live-sync pattern the texture-source toggles use in `curve_patch_restore_and_restamp()`. */
   const Brush *brush = ss.cache ? BKE_paint_brush_for_read(ss.cache->paint) : nullptr;
   if (brush == nullptr || brush->curve_patch_face_set == 0) {
-    undo::push_end(ob);
-    return;
-  }
-  if (patch.orig_positions.is_empty()) {
-    undo::push_end(ob);
-    return;
+    return false;
   }
 
-  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
-  /* Dynamic Topology has no stable vertex index, so `orig_positions` cannot exist for it; the patch
-   * is refused outright at `curve_patch_start_from_anchor()`. Guarded anyway so this stays correct
-   * if that ever changes. */
-  if (pbvh.type() == bke::pbvh::Type::BMesh) {
-    undo::push_end(ob);
-    return;
-  }
-
-  Mesh &mesh = *id_cast<Mesh *>(ob.data);
-  IndexMaskMemory memory;
+  const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
   BitVector<> raised_faces(mesh.faces_num, false);
 
   if (pbvh.type() == bke::pbvh::Type::Grids) {
@@ -1026,8 +1097,7 @@ void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &p
     const float max_disp = curve_patch_max_displacement(positions, patch.orig_positions);
     if (max_disp <= 0.0f) {
       /* Exactly zero rather than an epsilon, for the same reason as the Mesh branch below. */
-      undo::push_end(ob);
-      return;
+      return false;
     }
     const float threshold = max_disp * 0.005f;
 
@@ -1051,8 +1121,7 @@ void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &p
        * face set ID. Compared against exactly zero rather than an epsilon: an absolute epsilon in
        * scene units would false-trigger on a heavily scaled-down object, and the relative threshold
        * derived from `max_disp` below already handles anything that did move but only barely. */
-      undo::push_end(ob);
-      return;
+      return false;
     }
     const float threshold = max_disp * 0.005f;
 
@@ -1092,14 +1161,13 @@ void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &p
         });
   }
 
-  const IndexMask face_mask = IndexMask::from_bits(raised_faces, memory);
-  if (face_mask.is_empty()) {
-    undo::push_end(ob);
-    return;
+  r_face_mask = IndexMask::from_bits(raised_faces, memory);
+  if (r_face_mask.is_empty()) {
+    return false;
   }
 
   /* Derived from the faces actually being written, NOT from `patch.last_restamp_nodes`. A node
-   * enters that set only when one of its OWN unique vertices moved, but a face joins `face_mask`
+   * enters that set only when one of its OWN unique vertices moved, but a face joins the face mask
    * when any of its corners moved -- and the faces around a vertex are spread across neighboring
    * nodes. A node owning such a face would otherwise be missing here, leaving that face's previous
    * face set unsaved (so Ctrl+Z could not restore it) and its draw buffers untagged. On the Mesh
@@ -1107,14 +1175,13 @@ void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &p
    * `curve_patch_smooth_relief()`, which widens the displaced set without widening
    * `last_restamp_nodes`. Deriving the node mask from the face mask makes them agree by
    * construction, on both paths. */
-  IndexMask node_mask;
   if (pbvh.type() == bke::pbvh::Type::Grids) {
     const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
     const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
     /* A `GridsNode` carries grids, not faces, and one face's grids can straddle two nodes -- so
      * every node holding ANY grid of a raised face is included, which is what keeps the undo record
      * and the redraw tag complete on both sides of such a split. */
-    node_mask = IndexMask::from_predicate(
+    r_node_mask = IndexMask::from_predicate(
         nodes.index_range(),
         memory,
         [&](const int i) {
@@ -1129,7 +1196,7 @@ void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &p
   }
   else {
     const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
-    node_mask = IndexMask::from_predicate(
+    r_node_mask = IndexMask::from_predicate(
         nodes.index_range(),
         memory,
         [&](const int i) {
@@ -1143,39 +1210,49 @@ void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &p
         exec_mode::grain_size(64));
   }
 
-  /* Force the patch's position step into the undo stack before opening a second one. This operator
-   * carries `OPTYPE_UNDO`, so `wm->op_undo_depth` is non-zero here and a plain `push_end()` would
-   * leave that step parked in `ustack->step_init` -- where `push_begin_ex()` below would free it
-   * (`undo_system.cc`), losing the ability to undo the relief at all. Precedent for the forced
-   * form: `mesh/sculpt_dyntopo.cc`.
-   *
-   * Forced ONLY when that step is still there AND still ours. The patch does not open its own
-   * transaction: it inherits the one `stroke_undo_begin()` opened for the anchor stroke, which
-   * survives because `SCULPT_OT_brush_stroke` carries no `OPTYPE_UNDO` and the Curve Patch branch
-   * of its `done()` returns before `stroke_undo_end()` (see this file's header comment on taking
-   * over the transaction). But it is not safe from everything: the modal deliberately passes events
-   * through whenever the cursor leaves its region, so the user can invoke an unrelated `OPTYPE_UNDO`
-   * operator -- Mask Flood Fill, say -- while the patch is live, and that operator's own
-   * `push_begin()` frees our `step_init` out from under us. The patch then reaches this point owning
-   * a transaction that no longer exists.
-   *
-   * Forcing in that state CRASHES rather than misbehaving: `push_end_ex()`'s forced branch calls
-   * `BKE_undosys_step_push()` with a NULL context, which is safe only while `step_init` is set,
-   * because the undo type is then read from that step. Otherwise it falls back to
-   * `BKE_undosys_type_from_context(nullptr)`, which polls every registered undo type with the null
-   * context until one dereferences it -- `armature_undosys_poll()` reaches `CTX_data_main()` and
-   * reads through null. The type test matters for the same reason: a foreign `step_init` would be
-   * pushed under a foreign type.
-   *
-   * Skipping the force when the step is gone costs nothing here -- its only purpose is to protect an
-   * open step from the `push_begin_ex()` below, and there is none left to protect. What the relief's
-   * own undo does in that case is a pre-existing question this function does not answer: the
-   * re-stamps' `undo::push_nodes()` never required an open step either, because
-   * `BKE_undosys_stack_init_or_active_with_type()` silently falls back to the ACTIVE step. */
-  const UndoStack *undo_stack = ED_undo_stack_get();
-  const bool patch_step_is_ours = undo_stack && undo_stack->step_init &&
-                                  undo_stack->step_init->type == BKE_UNDOSYS_TYPE_SCULPT;
-  undo::push_end_ex(ob, patch_step_is_ours);
+  return true;
+}
+
+}  // namespace
+
+void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &patch)
+{
+  /* See `CurvePatchCache::element_num`. Nothing is pushed: an undo step built from a stale
+   * snapshot would be worse than no step at all. */
+  if (curve_patch_element_num(ob) != patch.element_num) {
+    return;
+  }
+
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+
+  /* Nothing was ever displaced: there is no state to record and no face set to burn. */
+  if (patch.orig_positions.is_empty()) {
+    return;
+  }
+  /* Dynamic Topology has no stable element index, so `orig_positions` cannot describe it and the
+   * write-back in `curve_patch_push_position_step()` would index into an unrelated array. The
+   * patch is refused outright at `curve_patch_start_from_anchor()`; guarded anyway so this stays
+   * correct if that ever changes. */
+  if (pbvh.type() == bke::pbvh::Type::BMesh) {
+    return;
+  }
+
+  /* Computed FIRST, because how the position step below has to be closed depends on whether a
+   * face-set step follows it. `memory` is declared out here so it outlives both masks. */
+  IndexMaskMemory memory;
+  IndexMask face_mask;
+  IndexMask node_mask;
+  const bool write_face_set = curve_patch_face_set_masks(ob, patch, memory, face_mask, node_mask);
+
+  /* The patch's own undo step, built and closed before anything else can open one. Built on every
+   * path that displaced something, including the ones that burn no face set. */
+  curve_patch_push_position_step(C, ob, patch, write_face_set);
+
+  if (!write_face_set) {
+    return;
+  }
+
+  Mesh &mesh = *id_cast<Mesh *>(ob.data);
 
   /* A Face Set write cannot share the patch's step: a step carries exactly one `undo::Type`, and
    * appending `FaceSet` to a `Position` step would retype it, silently stripping the position
@@ -1213,6 +1290,17 @@ void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &p
 
 void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &patch)
 {
+  if (curve_patch_element_num(ob) != patch.element_num) {
+    /* Something retopologized the object while the patch was live -- see
+     * `CurvePatchCache::element_num`. Bail before touching positions: the snapshot's keys no
+     * longer name the elements they were taken from. */
+    patch.invalidated = true;
+    BKE_report(CTX_wm_reports(&C),
+               RPT_WARNING,
+               "Curve Patch canceled: the mesh changed while it was being edited");
+    return;
+  }
+
 #if CURVE_PATCH_PROFILING
   const double prof_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch */
 #endif
@@ -1472,6 +1560,9 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   patch.last_restamp_nodes.resize(pbvh.nodes_num());
   patch.last_restamp_nodes.fill(false);
 
+  /* Resized but deliberately NOT filled: this one accumulates across restamps. */
+  patch.all_touched_nodes.resize(pbvh.nodes_num());
+
   /* Reset the cross-pass blend accumulator for THIS restamp too -- see `pass_weight_accum`'s doc
    * comment. Unlike `orig_positions`, it must not persist across restamps: each restamp's passes
    * blend only against each other, not against a previous drag frame's weights. */
@@ -1592,6 +1683,8 @@ static void curve_patch_begin_editing(Object &ob,
   cache.vc = &patch->view_context;
 
   ss.curve_patch_cache = patch;
+
+  patch->element_num = curve_patch_element_num(ob);
 
   /* Stamp the initial curve right away: neither `curve_patch_edit_invoke()` nor
    * `curve_patch_edit_modal()` re-stamps on its own until the user performs a first edit, so without

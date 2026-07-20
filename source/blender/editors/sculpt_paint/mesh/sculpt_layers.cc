@@ -3402,8 +3402,14 @@ static wmOperatorStatus layer_bake_and_editmode_enter_exec(bContext *C, wmOperat
         C, "SCULPT_OT_sculptmode_toggle", wm::OpCallContext::ExecDefault, nullptr, nullptr);
   }
 
-  WM_operator_name_call(
+  /* Only claim the layers are baked if the bake actually ran. #SCULPT_OT_layer_bake cancels when
+   * the object has no usable PBVH (or a dyntopo one), and entering Edit Mode anyway would bypass
+   * the warning with the layers still unbaked, silently dropping them on the way out. */
+  const wmOperatorStatus bake_status = WM_operator_name_call(
       C, "SCULPT_OT_layer_bake", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+  if (!(bake_status & OPERATOR_FINISHED)) {
+    return OPERATOR_CANCELLED;
+  }
 
   PointerRNA props = WM_operator_properties_create("OBJECT_OT_editmode_toggle");
   RNA_boolean_set(&props, "sculpt_layers_bake_confirmed", true);

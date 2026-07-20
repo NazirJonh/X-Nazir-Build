@@ -1180,7 +1180,13 @@ void BKE_mesh_nomain_to_mesh(Mesh *mesh_src, Mesh *mesh_dst, Object *ob, bool pr
   /* Sculpt layers store per-element displacement bound to the current topology; a geometry
    * replacement that changes the vertex count (remesh, voxel remesh, applying a topology-changing
    * modifier) leaves them unmappable. Free them instead of silently applying stale deltas to the
-   * first vertices of the new topology (mirrors the shape-key handling above). */
+   * first vertices of the new topology.
+   *
+   * NOTE: this is deliberately *not* gated by `process_shape_keys`, so it is stricter than the
+   * shape-key handling above. Callers that pass `process_shape_keys = false` because they migrate
+   * shape keys themselves (the mesh join operator, via its own #join_shape_keys) keep them but
+   * still lose the layers here. Giving sculpt layers an equivalent join-time remapping, or at least
+   * a user-visible report from the join operator, is left as a TODO. */
   if (verts_num_changed && !blender::bke::sculpt_layers::layers(*mesh_dst).is_empty()) {
     CLOG_WARN(&LOG, "Sculpt layer data lost when replacing mesh '%s' in Main", mesh_src->id.name);
     /* The whole tree goes, not just the layers: the folders only exist to organize them, so keeping

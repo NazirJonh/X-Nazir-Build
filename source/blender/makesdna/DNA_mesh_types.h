@@ -413,6 +413,17 @@ struct SculptLayer {
    */
   float group_influence_cached = 1.0f;
   char _pad[4] = {};
+  /**
+   * Padding, and specifically a *pointer* rather than more bytes.
+   *
+   * Widening #totelem raised this struct's alignment to 8 on 32-bit builds too, so its size must be
+   * a multiple of 8 there as well as on 64-bit. Counting #SculptLayerTreeNode's four, the struct
+   * held five pointers — an odd number, so the 32-bit and 64-bit sizes differ by an odd multiple of
+   * 4 and cannot both be a multiple of 8. Only a sixth pointer fixes both at once (124 -> 128 and
+   * 144 -> 152); padding bytes would shift them together and keep the mismatch. This is the case
+   * #makesdna reports as "add padding pointer".
+   */
+  void *_pad0 = nullptr;
   /** `float3[totelem]` array of per-element displacement deltas. May be null (treated as zeros). */
   void *data = nullptr;
 };

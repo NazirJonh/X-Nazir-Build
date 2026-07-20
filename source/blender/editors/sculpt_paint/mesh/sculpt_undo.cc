@@ -638,9 +638,19 @@ size_t step_memory_size_get(UndoStep *step)
   return sculpt_step->data.undo_size;
 }
 
+/**
+ * The step currently being written, i.e. the one opened by #push_begin.
+ *
+ * Only valid between #push_begin and #push_end. Outside that window
+ * #BKE_undosys_stack_init_or_active_with_type falls back to the *active* step, so this would
+ * silently hand out an already-committed (possibly just-undone) step rather than returning null,
+ * and the null checks on the callers of #get_step_data would not catch the misuse. The assert
+ * pins that invariant down, since every caller today is inside the window.
+ */
 static SculptUndoStep *get_active_step()
 {
   UndoStack *ustack = ED_undo_stack_get();
+  BLI_assert(ustack->step_init != nullptr);
   UndoStep *us = BKE_undosys_stack_init_or_active_with_type(ustack, BKE_UNDOSYS_TYPE_SCULPT);
   return reinterpret_cast<SculptUndoStep *>(us);
 }
@@ -3716,6 +3726,9 @@ void push_end_ex(Object &ob, const bool use_nested_undo)
     WM_file_tag_modified();
   }
 
+  /* Deliberately not #get_active_step: the push above already closed the write window, so this
+   * wants the *committed* step, which is exactly the fallback that #get_active_step asserts
+   * against. Keep this call inline. */
   UndoStack *ustack = ED_undo_stack_get();
   SculptUndoStep *us = reinterpret_cast<SculptUndoStep *>(
       BKE_undosys_stack_init_or_active_with_type(ustack, BKE_UNDOSYS_TYPE_SCULPT));

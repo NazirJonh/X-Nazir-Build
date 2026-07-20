@@ -175,6 +175,14 @@ class DrawCacheImpl : public DrawCache {
   bool influence_drag_active_ = false;
   bool influence_drag_rebuild_delta_ = false;
   int influence_drag_layer_uid_ = -1;
+  /**
+   * TODO: this accumulator is per-object, but #ensure_influence_drag only dispatches over the node
+   * mask of the viewport that happens to draw first, and #influence_drag_delta_vbos_ below is only
+   * allocated for the mask of the first rebuild. With two viewports drawing the same PBVH, nodes
+   * outside that mask silently miss the tick and the viewports drift apart for the duration of the
+   * drag (#influence_drag_finish re-extracts every leaf from the CPU, so nothing persists).
+   * The fix is the per-node model #AttributeData::dirty_nodes already uses for the same reason.
+   */
   float influence_drag_pending_scale_ = 0.0f;
   /** Corner-expanded active-layer delta, one VBO per node, parallel to the position VBOs. */
   Vector<gpu::VertBufPtr> influence_drag_delta_vbos_;
@@ -2430,15 +2438,19 @@ void DrawCacheImpl::ensure_influence_drag(const Object &object, const IndexMask 
   if (influence_drag_pending_scale_ == 0.0f || influence_drag_delta_vbos_.is_empty()) {
     return;
   }
-  const float scale = influence_drag_pending_scale_;
-  influence_drag_pending_scale_ = 0.0f;
-
   if (!influence_drag_shader_) {
     influence_drag_shader_ = GPU_shader_create_from_info_name("pbvh_layer_drag");
   }
   if (!influence_drag_shader_) {
+    /* Keep the accumulator so a later frame can still apply it: consuming it here would drop the
+     * drag delta outright, whereas leaving it lets the total land once the shader compiles. */
     return;
   }
+
+  /* Consumed only once the dispatch below is guaranteed to run. */
+  const float scale = influence_drag_pending_scale_;
+  influence_drag_pending_scale_ = 0.0f;
+
   GPU_shader_bind(influence_drag_shader_);
   GPU_shader_uniform_1f(influence_drag_shader_, "scale", scale);
 

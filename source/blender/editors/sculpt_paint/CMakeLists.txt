@@ -27,8 +27,10 @@ set(SRC
   paint_curve_geometry.cc
   paint_curve_patch_cache.cc
   paint_curve_patch_edit.cc
+  paint_curve_patch_effect_relief.cc
   paint_curve_patch_frames.cc
   paint_curve_patch_ribbon.cc
+  paint_curve_patch_sampler.cc
   paint_curve_patch_spline.cc
   paint_curve_patch_surface.cc
   paint_curve_topology.cc
@@ -131,8 +133,10 @@ set(SRC
   paint_cursor.hh
   paint_curve_intern.hh
   paint_curve_patch_cache.hh
+  paint_curve_patch_effect.hh
   paint_curve_patch_frames.hh
   paint_curve_patch_ribbon.hh
+  paint_curve_patch_sampler.hh
   paint_curve_patch_spline.hh
   paint_curve_patch_surface.hh
   paint_intern.hh

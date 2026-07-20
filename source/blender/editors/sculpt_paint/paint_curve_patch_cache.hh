@@ -15,6 +15,7 @@
  */
 
 #include <array>
+#include <memory>
 
 #include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
@@ -29,6 +30,7 @@
 
 #include "ED_view3d.hh"
 
+#include "paint_curve_patch_effect.hh"
 #include "paint_curve_patch_frames.hh"
 #include "paint_curve_patch_ribbon.hh"
 #include "paint_curve_patch_spline.hh"
@@ -175,22 +177,20 @@ struct CurvePatchCache {
    * `CurvePatchSpline::plane_normal` on every rebuild. */
   float3 plane_normal = float3(0.0f, 0.0f, 1.0f);
 
-  /** Lazily-grown snapshot of original (pre-patch) vertex positions, keyed by a flat index into
-   * whichever position array is authoritative for the object's current `bke::pbvh::Type` -- a
-   * mesh vertex index into `Mesh::vert_positions()` for `Type::Mesh`, or a flat CCG element index
-   * into `SubdivCCG::positions` (`grid * grid_area + in-grid offset`) for `Type::Grids`. Never
-   * both at once: an object's pbvh type does not change while a patch is alive. A vertex is
-   * inserted the first time it is about to be touched by a re-stamp, never removed until the
-   * whole patch is destroyed. Restoring the patch = writing every entry in this map back into
-   * that position array before re-stamping. Dynamic Topology (`Type::BMesh`) has no such stable
-   * index and is refused outright by `curve_patch_start_from_anchor()`. */
-  Map<int, float3> orig_positions;
+  /** What this session writes, and how it takes it back: the pre-patch snapshot, both application
+   * phases, the restore, the commit-time undo step. Chosen once at session start from the active
+   * brush (see #curve_patch_effect_create); never null on a published cache, because
+   * `curve_patch_begin_editing()` refuses to publish one without it.
+   *
+   * The target-agnostic half of a re-stamp -- where the patch reaches and how strongly -- lives in
+   * `paint_curve_patch_sampler.hh` instead and is shared by every effect. */
+  std::unique_ptr<CurvePatchEffect> effect;
 
-  /** Number of elements the keys of #orig_positions index into, sampled once when the patch
+  /** Number of elements the keys of the effect's snapshot index into, sampled once when the patch
    * starts: `Mesh::verts_num` for `Type::Mesh`, `SubdivCCG::positions.size()` for `Type::Grids`.
    *
    * The modal passes events through whenever the cursor leaves its region, so an unrelated
-   * operator can retopologize the object while a patch is live. Every key in #orig_positions
+   * operator can retopologize the object while a patch is live. Every key in the effect's snapshot
    * would then name a different element or none at all, and both restoring and committing would
    * write against the wrong surface -- or past the end of the array. Comparing this count is the
    * cheap detection for that. */
@@ -268,11 +268,11 @@ struct CurvePatchCache {
 
   /** Per-restamp accumulator for blending symmetry passes that land on the same real vertex (a
    * patch straddling a mirror/radial symmetry plane can have both the direct and the mirrored
-   * pass claim the same vertex). Keyed like `orig_positions`; `x` is the running sum of each
+   * pass claim the same vertex). Keyed like the effect's snapshot; `x` is the running sum of each
    * claiming pass's falloff weight, `y` the running sum of `weight * height`, so every pass's
    * PHASE 2 can recompute the weighted-average target height so far instead of unconditionally
-   * overwriting an earlier pass's contribution (see `curve_patch_apply_relief_action()`). Unlike
-   * `orig_positions`, this does NOT persist for the patch's whole life -- cleared at the start of
+   * overwriting an earlier pass's contribution (see `ReliefEffect::apply_pass()`). Unlike
+   * the effect's snapshot, this does NOT persist for the patch's whole life -- cleared at the start of
    * every `curve_patch_restore_and_restamp()`, since blending is only meaningful between passes
    * of the SAME restamp. */
   Map<int, float2> pass_weight_accum;
@@ -291,7 +291,7 @@ struct CurvePatchCache {
    * one. Sized alongside it but never cleared.
    *
    * This is the mask the commit-time undo step is built from, and the wider set is required, not a
-   * safety margin: `curve_patch_smooth_relief()` writes to every key of #orig_positions, which
+   * safety margin: `ReliefEffect::smooth_relief()` writes to every key of the effect's snapshot, which
    * accumulates across the patch's whole life. A vertex touched by an early restamp and left alone
    * by the final one sits in that map holding a zero displacement, and smoothing averages it with
    * its displaced neighbors into a non-zero one -- so it moves at commit time even though its
@@ -310,14 +310,14 @@ struct CurvePatchCache {
 };
 
 /**
- * Restore every vertex in `patch.orig_positions` to its snapshotted position, then re-apply the
- * frozen brush along the current `patch.control_curve`, growing `patch.orig_positions` on demand
+ * Restore every vertex in the effect's snapshot to its snapshotted position, then re-apply the
+ * frozen brush along the current `patch.control_curve`, growing the effect's snapshot on demand
  * for any newly-touched vertex not yet snapshotted. Call after every control-curve mutation
  * (move/add/remove point, radius change, axis toggle) and once more right before commit.
  */
 void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &patch);
 
-/** Restores every vertex in `patch.orig_positions` and does *not* re-stamp. Used for Esc-cancel. */
+/** Restores every vertex in the effect's snapshot and does *not* re-stamp. Used for Esc-cancel. */
 void curve_patch_restore_only(Object &ob, const CurvePatchCache &patch);
 
 /**
@@ -374,7 +374,7 @@ void curve_patch_discard_on_session_end(Object &ob);
  * the edit costs exactly one Ctrl+Z. That is only knowable after the raised faces have been
  * computed, which is why the implementation computes them before closing the step.
  *
- * "Raised" is measured as displacement from `patch.orig_positions`, thresholded at a fraction of
+ * "Raised" is measured as displacement from the effect's snapshot, thresholded at a fraction of
  * this patch's own maximum displacement -- relative rather than absolute, because displacement is
  * in scene units and would otherwise behave differently on differently scaled objects.
  */

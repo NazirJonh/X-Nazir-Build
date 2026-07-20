@@ -884,6 +884,12 @@ std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(const Brush &brush, 
   if (pbvh == nullptr || pbvh->type() == bke::pbvh::Type::BMesh) {
     return nullptr;
   }
+  if (bke::brush::supports_color(brush)) {
+    /* `supports_color()` is exactly "is this the Paint brush" (`brush.cc:1949`). The single place
+     * the target is chosen -- Stage 2 removed `is_applicable()` so a second predicate could not
+     * drift from this one. */
+    return curve_patch_effect_color_create(ob);
+  }
   return std::make_unique<ReliefEffect>();
 }
 

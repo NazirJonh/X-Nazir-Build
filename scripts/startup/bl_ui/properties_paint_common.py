@@ -583,7 +583,10 @@ class StrokePanel(BrushPanel):
             # Curve Patch applies its own relief directly and never reaches the brush
             # implementation, so every supported brush gives the same result. Say so, otherwise
             # the allowlist implies a distinction that does not exist.
-            col.label(text="Brush type affects strength, radius and texture only")
+            if brush.sculpt_brush_type == 'PAINT':
+                col.label(text="Paints the active color attribute; direction is ignored")
+            else:
+                col.label(text="Brush type affects strength, radius and texture only")
             tex_slot = brush.texture_slot
             col.row().prop(tex_slot, "curve_patch_stamp_mode", text="Curve Patch", expand=True)
             col.prop(tex_slot, "use_curve_patch_swap_axis", text="Swap Axis")
@@ -637,7 +640,9 @@ class StrokePanel(BrushPanel):
         # The ROLL half only matters when the Roll stroke hands off to a Curve Patch session,
         # which requires "Edit After Stroke". Without that qualifier the option renders dead
         # for every plain Roll stroke.
-        show_face_set = mode == 'SCULPT' and (
+        # Color brushes are excluded: face sets are derived from displacement magnitude and have no
+        # color meaning, and a color patch commits no face-set step.
+        show_face_set = mode == 'SCULPT' and brush.sculpt_brush_type != 'PAINT' and (
             brush.stroke_method == 'CURVE_PATCH' or
             (brush.stroke_method == 'ROLL' and brush.texture_slot.use_roll_edit_after)
         )

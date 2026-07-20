@@ -75,4 +75,8 @@ class CurvePatchEffect {
 /** Null when no effect handles this brush; the caller then refuses to start a session. */
 std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(const Brush &brush, const Object &ob);
 
+/** Builds the vertex-color effect. Called only by #curve_patch_effect_create; returns null when the
+ * mesh has no usable active color attribute. */
+std::unique_ptr<CurvePatchEffect> curve_patch_effect_color_create(const Object &ob);
+
 }  // namespace blender::ed::sculpt_paint

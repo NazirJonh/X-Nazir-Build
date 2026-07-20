@@ -27,6 +27,7 @@ set(SRC
   paint_curve_geometry.cc
   paint_curve_patch_cache.cc
   paint_curve_patch_edit.cc
+  paint_curve_patch_effect_color.cc
   paint_curve_patch_effect_relief.cc
   paint_curve_patch_frames.cc
   paint_curve_patch_ribbon.cc

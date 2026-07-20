@@ -298,10 +298,24 @@ static PointerRNA rna_Mesh_sculpt_layers_active_get(PointerRNA *ptr)
 
 static void rna_Mesh_sculpt_layers_active_set(PointerRNA *ptr,
                                               PointerRNA value,
-                                              ReportList * /*reports*/)
+                                              ReportList *reports)
 {
   Mesh *mesh = rna_mesh(ptr);
-  bke::sculpt_layers::active_set(*mesh, static_cast<SculptLayer *>(value.data));
+  SculptLayer *layer = static_cast<SculptLayer *>(value.data);
+  /* #active_set records a uid, and every mesh hands out uids from its own counter starting at 1, so
+   * a layer belonging to *another* mesh is not rejected downstream — it resolves to whichever local
+   * layer happens to share that uid, silently activating the wrong one. The precondition is stated
+   * on #active_set but nothing enforced it on this path, which is the one a script reaches.
+   * Assigning null stays legal: it clears the active layer. */
+  if (layer != nullptr && !bke::sculpt_layers::layers(*mesh).contains(layer)) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Sculpt layer '%s' does not belong to mesh '%s'",
+                layer->base.name,
+                mesh->id.name + 2);
+    return;
+  }
+  bke::sculpt_layers::active_set(*mesh, layer);
   /* The REC exemption tracks the active layer, and every operator that changes the active layer
    * re-derives it (through #commit_layers_change, or directly). Assigning through `bpy` reaches
    * neither, so without this the exemption would stay on the previously active layer: an armed REC

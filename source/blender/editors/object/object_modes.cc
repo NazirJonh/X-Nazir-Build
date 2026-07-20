@@ -204,6 +204,19 @@ bool mode_set_ex(bContext *C, eObjectMode mode, bool use_undo, ReportList *repor
     return false;
   }
 
+  /* #OBJECT_OT_editmode_toggle asks about un-baked sculpt layers from its #invoke, but nothing that
+   * comes through here ever reaches that: the call below uses #OpCallContext::ExecRegionWin, which
+   * #wm_event_system forces to a null event, and #wm_operator_invoke only runs #invoke when it has
+   * one. So the header Mode menu, the Ctrl+Tab pie and `bpy.ops.object.mode_set()` all entered Edit
+   * Mode on a layered mesh with no question asked — the one thing that confirmation exists to
+   * prevent. Asking here covers them with the same popover; it continues by re-running the toggle
+   * with `sculpt_layers_bake_confirmed` set, which is why this cannot loop. */
+  if (mode == OB_MODE_EDIT && editmode_sculpt_layers_confirm(C, ob, reports)) {
+    /* Handed off to the popover exactly as the #OPERATOR_INTERFACE branch below does: nothing
+     * failed, and the switch completes once the user answers. */
+    return true;
+  }
+
   const char *opstring = object_mode_op_string((mode == OB_MODE_OBJECT) ? ob->mode : mode);
   wmOperatorType *ot = WM_operatortype_find(opstring, false);
 

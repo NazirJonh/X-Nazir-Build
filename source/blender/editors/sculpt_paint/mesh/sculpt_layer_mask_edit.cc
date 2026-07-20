@@ -22,7 +22,6 @@
 
 #include <algorithm>
 #include <climits>
-#include <limits>
 #include <string>
 #include <utility>
 
@@ -200,12 +199,7 @@ MaskLayout mask_layout_for(const bool on_grids,
    * mask the user paints and the composite never reads. See #mask_edit_begin_grids, which derives
    * the same layout from the same two numbers when it opens a session. */
   const int64_t totelem = int64_t(grids_num) * grid_area;
-  if (totelem > int64_t(std::numeric_limits<int>::max())) {
-    /* #SculptLayerMask counts elements in an `int`; a truncated count would silently describe a
-     * smaller domain than the one being painted. Unreachable in practice. */
-    return {};
-  }
-  return {int(totelem), grid_area};
+  return {totelem, grid_area};
 }
 
 /**
@@ -332,11 +326,6 @@ static bool mask_edit_begin_grids(SculptSession &ss, SculptLayerTreeNode &node)
    * basis for cutting the node's mask one block per grid below: block `g` then covers the same
    * elements as grid `g`, which is the contract #grid_masks_for_composite enforces. */
   const int64_t totelem = int64_t(grids_num) * grid_area;
-  if (totelem > int64_t(std::numeric_limits<int>::max())) {
-    /* #SculptLayerMask counts its elements in an `int`. Unreachable in practice — the CCG would be
-     * tens of gigabytes first — but the mask would silently describe a truncated domain. */
-    return false;
-  }
 
   /* The mask is *stored* at the multires top level, next to the layer coefficients it weights (see
    * #resample_grid_masks), but authored on the CCG, which sits at the *sculpt* level. With `Sculpt
@@ -354,9 +343,6 @@ static bool mask_edit_begin_grids(SculptSession &ss, SculptLayerTreeNode &node)
   }
   const int store_grid_area = CCG_grid_size(store_level) * CCG_grid_size(store_level);
   const int64_t store_totelem = int64_t(grids_num) * store_grid_area;
-  if (store_totelem > int64_t(std::numeric_limits<int>::max())) {
-    return false;
-  }
 
   /* Sampled before the array is materialized below, for the same reason the mesh path samples the
    * attribute before adding it: afterwards the answer is always "yes" and the exit path would leave
@@ -389,7 +375,7 @@ static bool mask_edit_begin_grids(SculptSession &ss, SculptLayerTreeNode &node)
                             node.mask->block_size != store_grid_area;
   if (mask_created) {
     bke::sculpt_layers::mask_free(node.mask);
-    node.mask = bke::sculpt_layers::mask_new(int(store_totelem), store_grid_area, 255);
+    node.mask = bke::sculpt_layers::mask_new(store_totelem, store_grid_area, 255);
   }
   /* #mask_new only returns null for an empty domain, which the grid count check above ruled out. */
   BLI_assert(node.mask != nullptr);
@@ -555,11 +541,12 @@ bool mask_edit_enter(Depsgraph &depsgraph, Main &bmain, Object &object, SculptLa
  * Close a session that was opened on the mesh (vertex) domain. \a node is null when it was deleted
  * while its mask was being edited.
  */
-static void mask_edit_end_mesh(Object &object,
+static bool mask_edit_end_mesh(Object &object,
                                SculptSession &ss,
                                SculptLayerTreeNode *node,
                                const bool store_weights)
 {
+  bool stored = false;
   Mesh &mesh = mesh_of(object);
   bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
   /* Scoped so the writer is finished and destroyed before the attribute can be removed below. */
@@ -576,6 +563,9 @@ static void mask_edit_end_mesh(Object &object,
          * below overwrites this buffer outright — with the parked mask, or by removing it. */
         session_buffer_flip(mask.span);
         node->mask = bke::sculpt_layers::mask_compress(mask.span, vert_block_size);
+        /* #mask_compress answers null for a domain it cannot address, so the store is only real
+         * once there is a mask on the node to show for it. */
+        stored = node->mask != nullptr;
       }
       else if (node != nullptr && ss.layers.mask_edit.mask_created) {
         /* Discarded, and the node had nothing usable before the session: leaving the opaque mask the
@@ -610,6 +600,7 @@ static void mask_edit_end_mesh(Object &object,
   if (!ss.layers.mask_edit.had_vert_mask) {
     attributes.remove(".sculpt_mask");
   }
+  return stored;
 }
 
 /**
@@ -620,15 +611,16 @@ static void mask_edit_end_mesh(Object &object,
  * same block size it was expanded at, then either put the user's own grid mask back byte for byte or
  * return the array to the empty state it was found in.
  */
-static void mask_edit_end_grids(SculptSession &ss,
+static bool mask_edit_end_grids(SculptSession &ss,
                                 SculptLayerTreeNode *node,
                                 const bool store_weights)
 {
+  bool stored = false;
   SubdivCCG *subdiv_ccg = ss.subdiv_ccg;
   if (subdiv_ccg == nullptr) {
     /* The CCG is gone, and with it both the authored weights and the buffer the parked mask would be
      * restored into. Nothing can be salvaged; the caller still clears the session state. */
-    return;
+    return false;
   }
 
   MutableSpan<float> masks = subdiv_ccg->masks.as_mutable_span();
@@ -678,6 +670,9 @@ static void mask_edit_end_grids(SculptSession &ss,
     else {
       node->mask = bke::sculpt_layers::mask_compress(masks, subdiv_ccg->grid_area);
     }
+    /* #mask_compress answers null for a domain it cannot address, so the store is only real once
+     * there is a mask on the node to show for it. */
+    stored = node->mask != nullptr;
   }
   else if (!store_weights && node != nullptr && ss.layers.mask_edit.mask_created) {
     /* Discarded, and the node had nothing usable before the session; see the mesh path for why the
@@ -702,6 +697,7 @@ static void mask_edit_end_grids(SculptSession &ss,
      * empty array is the state every reader already treats as "no mask" (see #gather_mask_grids). */
     subdiv_ccg->masks.reinitialize(0);
   }
+  return stored;
 }
 
 /**
@@ -712,11 +708,11 @@ static void mask_edit_end_grids(SculptSession &ss,
  * and must stay that way: a cancel that skipped any of it would leave the layer's weights sitting in
  * the user's mask storage, which is the one outcome both directions exist to prevent.
  */
-static void mask_edit_close(Object &object, const bool store_weights)
+static bool mask_edit_close(Object &object, const bool store_weights)
 {
   SculptSession *ss = session_of(object);
   if (ss == nullptr || ss->layers.mask_edit.node_uid == 0) {
-    return;
+    return false;
   }
   /* Consumed here rather than left to the re-evaluation #commit_layers_change triggers at the end of
    * this function, and while the node still carries the mask the live CCG was composed with. Mask
@@ -753,12 +749,9 @@ static void mask_edit_close(Object &object, const bool store_weights)
   /* Dispatched on what the session was *opened* on, not on the live PBVH type. Removing the multires
    * modifier mid-session would otherwise send a grid session down the mesh path, which ends by
    * removing a `.sculpt_mask` attribute that session never created. */
-  if (ss->layers.mask_edit.on_grids) {
-    mask_edit_end_grids(*ss, node, store_weights);
-  }
-  else {
-    mask_edit_end_mesh(object, *ss, node, store_weights);
-  }
+  const bool stored = ss->layers.mask_edit.on_grids ?
+                          mask_edit_end_grids(*ss, node, store_weights) :
+                          mask_edit_end_mesh(object, *ss, node, store_weights);
 
   /* REC is deliberately *not* re-armed here, even though entering the session disarmed it. Arming is
    * not a flag assignment: #layer_toggle_rec_exec pins the active layer to enabled with
@@ -783,11 +776,12 @@ static void mask_edit_close(Object &object, const bool store_weights)
    * and the close above can have dropped that replacement, so the effective mask of the node is not
    * guaranteed to be what it was before the session even when nothing was stored. */
   commit_layers_change(object);
+  return stored;
 }
 
-void mask_edit_end(Object &object)
+bool mask_edit_end(Object &object)
 {
-  mask_edit_close(object, true);
+  return mask_edit_close(object, true);
 }
 
 /**
@@ -1692,20 +1686,32 @@ static void mask_edit_close_with_undo(bContext *C,
   mask_edit_exit_ui(C, object);
   /* Puts the user's own sculpt mask back and recomposes the surface itself, so nothing more is
    * needed here. */
+  bool stored = false;
   if (store_weights) {
-    mask_edit_end(object);
+    stored = mask_edit_end(object);
   }
   else {
     mask_edit_cancel(object);
   }
   undo::push_end(object);
-  /* Two spellings rather than one format string chosen by a ternary, so both remain extractable for
-   * translation — as #layer_mask_toggle_exec does for the same reason. */
-  if (store_weights) {
+  /* Reported from what the close actually did, not from the direction it was asked for: storing can
+   * still come to nothing when the domain the session opened on is gone by the time it closes (the
+   * multires modifier removed under it, the CCG rebuilt), and #mask_edit_end then salvages nothing.
+   * Saying "applied" there would tell the user their weights were kept when they were discarded.
+   *
+   * Separate spellings rather than one format string chosen by a ternary, so each remains
+   * extractable for translation — as #layer_mask_toggle_exec does for the same reason. */
+  if (!store_weights) {
+    BKE_reportf(op->reports, RPT_INFO, "Discarded the weight mask edit of '%s'", node.name);
+  }
+  else if (stored) {
     BKE_reportf(op->reports, RPT_INFO, "Applied the weight mask of '%s'", node.name);
   }
   else {
-    BKE_reportf(op->reports, RPT_INFO, "Discarded the weight mask edit of '%s'", node.name);
+    BKE_reportf(op->reports,
+                RPT_WARNING,
+                "Could not apply the weight mask of '%s': the elements it was painted on are gone",
+                node.name);
   }
   mask_ui_notify(C, object);
 }

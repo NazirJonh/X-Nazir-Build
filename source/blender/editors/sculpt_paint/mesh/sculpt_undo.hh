@@ -198,7 +198,8 @@ struct SculptLayerUndoPayload {
 
   /* Layer-only, see #is_layer. Left at their defaults by a folder capture. */
   float influence = 1.0f;
-  int totelem = 0;
+  /** Matches #SculptLayer::totelem, which the restore path swaps this with directly. */
+  int64_t totelem = 0;
   short domain = 0;
   short level = 0;
   /** Owned while stored in the undo step; freed with the step. Always null for a folder payload. */

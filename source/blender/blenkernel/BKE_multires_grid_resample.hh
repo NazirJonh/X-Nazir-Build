@@ -17,11 +17,18 @@
 #include "BLI_array.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
+#include "BLI_sys_types.h"
 
 namespace blender::bke {
 
-/** Element count of a per-grid `float3` field at \a level: `grids_num * grid_size(level)^2`. */
-int grid_totelem(int grids_num, int level);
+/**
+ * Element count of a per-grid `float3` field at \a level: `grids_num * grid_size(level)^2`.
+ *
+ * 64-bit: the product crosses 2^31 at resolutions multires already allows (a 200k-corner base mesh
+ * at level 7 reaches 3.3e9), and truncating it here fed a wrapped length to the layer allocator
+ * while the callers kept indexing with the untruncated one.
+ */
+int64_t grid_totelem(int grids_num, int level);
 
 /**
  * Downsample \a src (a per-grid field at \a src_level) to \a dst_level (<= src_level) by exact

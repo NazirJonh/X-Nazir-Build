@@ -1172,9 +1172,7 @@ static float layer_weight_at(const SculptLayerMask &mask,
                              const IndexRange &grid_range,
                              const int offset_in_grid)
 {
-  /* The element index is narrowed explicitly: #mask_value_at takes an `int`, and the caller has
-   * already established that the mask covers every grid element, so the sum fits by construction. */
-  const int elem = int(grid_range.start()) + offset_in_grid;
+  const int64_t elem = grid_range.start() + offset_in_grid;
   return float(bke::sculpt_layers::mask_value_at(mask, elem)) / 255.0f;
 }
 
@@ -2403,12 +2401,14 @@ void DrawCacheImpl::ensure_influence_drag(const Object &object, const IndexMask 
     if (!layer || !layer->data || layer->totelem < mesh_eval.verts_num) {
       /* Topology mismatch or missing data: abandon the GPU path; the operator's release still does
        * a full CPU reconcile. */
-      PDP_PERF("[DEBUG-perf] influence_drag: rebuild bail (uid=%d layer=%p data=%p totelem=%d verts=%d)\n",
-               influence_drag_layer_uid_,
-               (void *)layer,
-               layer ? layer->data : nullptr,
-               layer ? layer->totelem : -1,
-               mesh_eval.verts_num);
+      PDP_PERF(
+          "[DEBUG-perf] influence_drag: rebuild bail (uid=%d layer=%p data=%p totelem=%lld "
+          "verts=%d)\n",
+          influence_drag_layer_uid_,
+          (void *)layer,
+          layer ? layer->data : nullptr,
+          layer ? (long long)layer->totelem : -1LL,
+          mesh_eval.verts_num);
       influence_drag_active_ = false;
       return;
     }

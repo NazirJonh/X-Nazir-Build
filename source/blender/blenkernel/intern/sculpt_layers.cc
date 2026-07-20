@@ -596,7 +596,7 @@ static SculptLayer *sibling_layer(SculptLayerTreeNode &node)
 SculptLayer *add(Mesh &mesh,
                  const char *name,
                  const short domain,
-                 const int totelem,
+                 const int64_t totelem,
                  const short level)
 {
   SculptLayer *layer = MEM_new<SculptLayer>(__func__);
@@ -757,12 +757,12 @@ void group_remove(Mesh &mesh, SculptLayerGroup &group)
   UNUSED_VARS_NDEBUG(mesh);
 }
 
-bool is_stale(const SculptLayer &layer, const int elem_num)
+bool is_stale(const SculptLayer &layer, const int64_t elem_num)
 {
   return layer.data != nullptr && layer.totelem != elem_num;
 }
 
-int element_count(const Mesh &mesh, const SculptLayer &layer)
+int64_t element_count(const Mesh &mesh, const SculptLayer &layer)
 {
   if (layer.domain == SCULPT_LAYER_DOMAIN_GRID) {
     return grid_totelem(mesh.corners_num, layer.level);
@@ -791,7 +791,7 @@ bool is_stale_mask(const SculptLayerMask &mask, const int64_t elem_num)
   return mask.totelem != elem_num || mask.blocks_num <= 0 || mask.block_size <= 0;
 }
 
-MutableSpan<float3> data_ensure(SculptLayer &layer, const int totelem)
+MutableSpan<float3> data_ensure(SculptLayer &layer, const int64_t totelem)
 {
   if (layer.data != nullptr && layer.totelem == totelem) {
     /* Fast path: data already allocated and correctly sized. Kept allocation-free and
@@ -799,10 +799,18 @@ MutableSpan<float3> data_ensure(SculptLayer &layer, const int totelem)
      * #SCULPT_LAYERS_DEBUG_LOG is enabled. */
     return {static_cast<float3 *>(layer.data), layer.totelem};
   }
+  /* A negative count can only come from a caller that computed it wrongly, and #size_t below would
+   * turn it into an allocation request of nearly the whole address space. Refusing leaves the layer
+   * exactly as it was, which every consumer already reads as "no deltas". */
+  if (totelem < 0) {
+    BLI_assert_unreachable();
+    return {};
+  }
 #if SCULPT_LAYERS_DEBUG_LOG
   const auto func_start = std::chrono::high_resolution_clock::now();
-  printf("[DEBUG-perf] data_ensure: realloc needed, old_totelem=%d, new_totelem=%d\n",
-         layer.totelem, totelem);
+  printf("[DEBUG-perf] data_ensure: realloc needed, old_totelem=%lld, new_totelem=%lld\n",
+         (long long)layer.totelem,
+         (long long)totelem);
 #endif
   if (layer.data) {
     MEM_delete_void(layer.data);
@@ -1040,7 +1048,9 @@ static void accumulate_layer(const Span<float3> data,
   const int64_t grain = std::max<int64_t>(1, 8192 / primary.block_size);
   threading::parallel_for(IndexRange(primary.blocks_num), grain, [&](const IndexRange range) {
     for (const int64_t block : range) {
-      const int start = int(block) * primary.block_size;
+      /* 64-bit: on the grid domain this is `grid_index * grid_area`, which passes 2^31 at multires
+       * levels the UI already offers. */
+      const int64_t start = block * primary.block_size;
       /* The extent comes from the position span, not from the block size: the tail block is short,
        * and a full-width loop over it would run off the end of both the data and the mask table. */
       const int64_t extent = std::min(int64_t(primary.block_size), r_positions.size() - start);
@@ -1339,7 +1349,7 @@ void resample_grid_layers(Mesh &mesh, const int grids_num, const int new_level)
     MEM_delete_void(layer.data);
     layer.data = nullptr;
     layer.totelem = 0;
-    data_ensure(layer, int(resampled.size()));
+    data_ensure(layer, resampled.size());
     data_get(layer).copy_from(resampled);
     layer.level = short(new_level);
   }
@@ -1580,6 +1590,13 @@ void tree_copy(Mesh &dst, const Mesh &src)
   Set<const SculptLayerTreeNode *> visited;
   visited.add(&src_root.base);
   group_copy_children(*root, src_root, visited);
+}
+
+void rec_session_flags_clear(Mesh &mesh)
+{
+  for (SculptLayer *layer : layers(mesh)) {
+    layer->base.flag &= ~(SCULPT_LAYER_REC_EXEMPT | SCULPT_LAYER_REC_ARMED);
+  }
 }
 
 /* Collect every node \a group owns, recursively; \a group itself is left to the caller.

@@ -1101,6 +1101,35 @@ static bool editmode_toggle_poll(bContext *C)
   return OB_TYPE_SUPPORT_EDITMODE(ob->type);
 }
 
+bool editmode_sculpt_layers_confirm(bContext *C, const Object *obact, ReportList *reports)
+{
+  if (obact == nullptr || obact->type != OB_MESH || (obact->mode & OB_MODE_EDIT) != 0) {
+    return false;
+  }
+  /* Needs a window to put a popover in. A background or headless caller has none; it falls through
+   * to the mode switch, where #editmode_toggle_exec logs the same condition for scripts to see. */
+  if (CTX_wm_window(C) == nullptr) {
+    return false;
+  }
+  /* "Don't Show This Again This Session" checkbox in the popup below: a session-only (not saved
+   * to the .blend file) WindowManager property registered from Python, see
+   * SCULPT_PT_layer_editmode_confirm.draw() in properties_data_mesh.py. */
+  wmWindowManager *wm = CTX_wm_manager(C);
+  PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
+  if (RNA_boolean_get(&wm_ptr, "sculpt_layers_hide_editmode_warning")) {
+    return false;
+  }
+  const Mesh *mesh = id_cast<const Mesh *>(obact->data);
+  if (mesh == nullptr || blender::bke::sculpt_layers::layers(*mesh).is_empty()) {
+    return false;
+  }
+  /* A popover (not a plain popup menu): #SCULPT_PT_layer_editmode_confirm's "Don't Show This
+   * Again" checkbox must stay interactive without closing the popup on click, which only a
+   * #BLOCK_KEEP_OPEN popover supports (see that panel's draw() for details). */
+  ui::popover_panel_invoke(C, "SCULPT_PT_layer_editmode_confirm", true, reports);
+  return true;
+}
+
 static wmOperatorStatus editmode_toggle_invoke(bContext *C,
                                                wmOperator *op,
                                                const wmEvent * /*event*/)
@@ -1110,32 +1139,18 @@ static wmOperatorStatus editmode_toggle_invoke(bContext *C,
   ViewLayer *view_layer = CTX_data_view_layer(C);
   BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
   const Object *obact = BKE_view_layer_active_object_get(view_layer);
-  const bool is_mode_set = obact && (obact->mode & OB_MODE_EDIT) != 0;
 
-  /* Sculpt layers cannot survive an Edit Mode topology change, so warn before entering and offer
-   * to bake them into the base first instead of silently orphaning the layer data. This lives in
-   * #invoke (interactive entry) only: #exec is used by scripts and #ed::object::mode_set, and must
-   * switch the mode outright rather than hand off to a popup that a non-interactive caller cannot
-   * answer. The "Bake All Layers" choice itself takes care of entering Sculpt Mode first if the
-   * object is not already in it (see #layer_bake_and_editmode_enter_exec). */
-  if (!is_mode_set && obact && obact->type == OB_MESH &&
-      !RNA_boolean_get(op->ptr, "sculpt_layers_bake_confirmed"))
+  /* Sculpt layers cannot survive an Edit Mode topology change, so ask before entering and offer to
+   * bake them into the base first instead of silently orphaning the layer data. The "Bake All
+   * Layers" choice takes care of entering Sculpt Mode first if the object is not already in it
+   * (see #layer_bake_and_editmode_enter_exec).
+   *
+   * Also asked from #ed::object::mode_set_ex, which reaches this operator's #exec and would
+   * otherwise walk straight past the question — see the note there. */
+  if (!RNA_boolean_get(op->ptr, "sculpt_layers_bake_confirmed") &&
+      editmode_sculpt_layers_confirm(C, obact, op->reports))
   {
-    /* "Don't Show This Again This Session" checkbox in the popup below: a session-only (not saved
-     * to the .blend file) WindowManager property registered from Python, see
-     * SCULPT_PT_layer_editmode_confirm.draw() in properties_data_mesh.py. */
-    wmWindowManager *wm = CTX_wm_manager(C);
-    PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
-    if (!RNA_boolean_get(&wm_ptr, "sculpt_layers_hide_editmode_warning")) {
-      const Mesh *mesh = id_cast<const Mesh *>(obact->data);
-      if (mesh && !blender::bke::sculpt_layers::layers(*mesh).is_empty()) {
-        /* A popover (not a plain popup menu): #SCULPT_PT_layer_editmode_confirm's "Don't Show This
-         * Again" checkbox must stay interactive without closing the popup on click, which only a
-         * #BLOCK_KEEP_OPEN popover supports (see that panel's draw() for details). */
-        ui::popover_panel_invoke(C, "SCULPT_PT_layer_editmode_confirm", true, op->reports);
-        return OPERATOR_INTERFACE;
-      }
-    }
+    return OPERATOR_INTERFACE;
   }
 
   return editmode_toggle_exec(C, op);

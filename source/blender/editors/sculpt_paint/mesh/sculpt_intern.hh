@@ -1056,8 +1056,13 @@ bool is_supported(const Object &object);
 bool in_use(const Object &object);
 /** Element domain (#SCULPT_LAYER_DOMAIN_VERT / #SCULPT_LAYER_DOMAIN_GRID) for the sculpt target. */
 short domain_for(const Object &object);
-/** Number of layer elements for the object (mesh vertices, or total multires grid points). */
-int element_count(const Object &object);
+/**
+ * Number of layer elements for the object (mesh vertices, or total multires grid points).
+ *
+ * 64-bit for the grid case, which counts `grids_num * grid_size(level)^2` — see
+ * #bke::sculpt_layers::data_ensure.
+ */
+int64_t element_count(const Object &object);
 
 /** Initialize per-session layer state. Call when entering sculpt mode. */
 void session_state_ensure(Object &object);
@@ -1339,8 +1344,13 @@ bool mask_edit_enter(Depsgraph &depsgraph, Main &bmain, Object &object, SculptLa
  * Deliberately takes no #bContext: the paths that must not leave a session open
  * (#BKE_sculptsession_free, a mode or object switch) have none to give. As with #mask_edit_begin
  * the notifier is the caller's to send.
+ *
+ * Returns whether the painted weights actually reached the node. False means they were salvaged
+ * from nothing — the domain the session opened on is gone (the multires modifier removed under it,
+ * the CCG rebuilt at another level), so there was nothing left to compress. Callers that tell the
+ * user the edit was applied must check this; the session is closed and cleared either way.
  */
-void mask_edit_end(Object &object);
+bool mask_edit_end(Object &object);
 
 /**
  * Put back the viewport tool a mask editing session replaced with the Mask brush, when the user has
@@ -1379,7 +1389,8 @@ int mask_edit_active_uid(const Object &object);
  * the choice lives in one pure function rather than at each producer.
  */
 struct MaskLayout {
-  int totelem = 0;
+  /** 64-bit to match #SculptLayerMask::totelem; a grid layout counts `grids_num * grid_area`. */
+  int64_t totelem = 0;
   int block_size = 0;
 };
 

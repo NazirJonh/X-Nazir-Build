@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 #include "BKE_sculpt_layers.hh"
@@ -49,13 +50,20 @@ static CLG_LogRef LOG = {"bke.sculpt_layers"};
 
 namespace blender::bke::sculpt_layers {
 
-int mask_blocks_num(const int totelem, const int block_size)
+int mask_blocks_num(const int64_t totelem, const int block_size)
 {
   BLI_assert(block_size > 0);
-  return int(divide_ceil_u(uint(totelem), uint(block_size)));
+  BLI_assert(totelem >= 0);
+  const int64_t blocks = int64_t(
+      divide_ceil_ul(uint64_t(std::max<int64_t>(totelem, 0)), uint64_t(block_size)));
+  /* The count itself stays 32-bit: a grid mask is cut one block per grid, and a vertex mask one per
+   * 4096 vertices, so this is bounded by the mesh's grid or vertex count either way — both of which
+   * are 32-bit themselves. Only the *element* count needed widening. */
+  BLI_assert(blocks <= std::numeric_limits<int>::max());
+  return int(blocks);
 }
 
-SculptLayerMask *mask_new(const int totelem, const int block_size, const uint8_t fill)
+SculptLayerMask *mask_new(const int64_t totelem, const int block_size, const uint8_t fill)
 {
   if (totelem <= 0) {
     return nullptr;
@@ -131,26 +139,24 @@ int64_t mask_size_in_bytes(const SculptLayerMask &mask)
          int64_t(mask.data_num) * int64_t(sizeof(uint8_t));
 }
 
-uint8_t mask_value_at(const SculptLayerMask &mask, const int elem)
+uint8_t mask_value_at(const SculptLayerMask &mask, const int64_t elem)
 {
   BLI_assert(elem >= 0 && elem < mask.totelem);
-  const int block = elem / mask.block_size;
+  /* The element index is 64-bit (a grid domain counts `grids_num * grid_area`), but the block index
+   * it divides down to is bounded by #blocks_num, which is 32-bit — see #mask_blocks_num. */
+  const int64_t block = elem / mask.block_size;
   if (mask.block_kind[block] == SCULPT_LAYER_MASK_BLOCK_UNIFORM) {
     return mask.block_value[block];
   }
   return mask.data[mask.block_offset[block] + (elem % mask.block_size)];
 }
 
-/* Elements this block actually covers; the tail block is short.
- *
- * Widened to `int64_t` for the multiplication alone: `blocks_num * block_size` can exceed the
- * element count by up to one block, so a #totelem near the `int` ceiling would overflow the product
- * — signed overflow being undefined rather than merely wrong. The result always fits, being bounded
- * by #block_size. */
+/* Elements this block actually covers; the tail block is short. The result always fits in an `int`,
+ * being bounded by #block_size, even though the element count it subtracts from does not. */
 static int mask_block_extent(const SculptLayerMask &mask, const int block)
 {
   const int64_t start = int64_t(block) * mask.block_size;
-  return int(std::min(int64_t(mask.block_size), int64_t(mask.totelem) - start));
+  return int(std::min(int64_t(mask.block_size), mask.totelem - start));
 }
 
 MaskBlock mask_block(const SculptLayerMask &mask, const int block)
@@ -229,7 +235,7 @@ void mask_expand(const SculptLayerMask &mask, MutableSpan<float> r_dense)
 
 SculptLayerMask *mask_compress(const Span<float> dense, const int block_size)
 {
-  const int totelem = int(dense.size());
+  const int64_t totelem = dense.size();
   SculptLayerMask *mask = mask_new(totelem, block_size, 0);
   if (mask == nullptr) {
     return nullptr;
@@ -253,7 +259,10 @@ SculptLayerMask *mask_compress(const Span<float> dense, const int block_size)
   /* First pass decides each block's kind and how much room the dense ones need; the second pass
    * fills a single allocation. Growing one buffer per dense block would fragment the heap on a
    * mask that covers a large region. */
-  int data_num = 0;
+  /* Accumulated in 64-bit because the element count feeding it is: #data_num and #block_offset are
+   * both 32-bit in DNA, so the total is *refused* below rather than silently wrapped into an offset
+   * that would index #data out of bounds. */
+  int64_t data_num = 0;
   for (const int block : IndexRange(mask->blocks_num)) {
     const int64_t start = int64_t(block) * block_size;
     const int extent = mask_block_extent(*mask, block);
@@ -272,12 +281,20 @@ SculptLayerMask *mask_compress(const Span<float> dense, const int block_size)
     }
     else {
       mask->block_kind[block] = SCULPT_LAYER_MASK_BLOCK_DENSE;
-      mask->block_offset[block] = data_num;
+      mask->block_offset[block] = int(data_num);
       data_num += extent;
     }
   }
 
-  mask->data_num = data_num;
+  if (data_num > std::numeric_limits<int>::max()) {
+    /* Fails open, as every other unusable-mask path does (see #is_stale_mask): no mask means the
+     * node composites at full strength, which is the safe reading of a weight map too large to
+     * address. The partly-filled block table is discarded with it, so the truncated offsets written
+     * above are never read. */
+    mask_free(mask);
+    return nullptr;
+  }
+  mask->data_num = int(data_num);
   if (data_num > 0) {
     mask->data = MEM_new_array_zeroed<uint8_t>(size_t(data_num), __func__);
     for (const int block : IndexRange(mask->blocks_num)) {

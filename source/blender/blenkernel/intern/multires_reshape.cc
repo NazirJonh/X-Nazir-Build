@@ -567,8 +567,11 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
     return false;
   }
 
-  /* Make sure the target layer buffer exists at the top level (zero-filled on first use). */
-  bke::sculpt_layers::data_ensure(layer, int(total_elems));
+  /* Make sure the target layer buffer exists at the top level (zero-filled on first use). Passed
+   * as the 64-bit count it was computed as: narrowing here wrapped on dense meshes (a 200k-corner
+   * base at level 7 reaches 3.3e9) and sized the buffer from the wrapped value while the loops
+   * below kept indexing with `grid_index * grid_area` derived from the true one. */
+  bke::sculpt_layers::data_ensure(layer, total_elems);
   layer.level = short(tot_level);
   MutableSpan<float3> layer_data = bke::sculpt_layers::data_get(layer);
 

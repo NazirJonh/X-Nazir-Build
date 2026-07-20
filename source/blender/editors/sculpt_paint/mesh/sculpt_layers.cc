@@ -241,7 +241,23 @@ bool in_use(const Object &object)
 
 bool destructive_edit_check(const Mesh &mesh, ReportList *reports)
 {
-  if (bke::sculpt_layers::layers(mesh).is_empty()) {
+  /* Layers are not the only per-element carrier the tree holds: a *folder* has its own weight mask
+   * (#SculptLayerTreeNode::mask lives on the shared base), and it can outlive every layer under it —
+   * paint a folder mask, then remove or move out its layers. Counting layers alone let such a mesh
+   * through, and since #Type::Geometry undo neither captures nor restores #Mesh::sculpt_layer_root,
+   * the mask kept a `totelem` describing the pre-edit topology. #is_stale_mask then fails open, so
+   * it stopped contributing silently — no crash, no report, just a weight map that quietly does
+   * nothing. */
+  bool has_element_data = !bke::sculpt_layers::layers(mesh).is_empty();
+  if (!has_element_data) {
+    for (const SculptLayerGroup *group : bke::sculpt_layers::groups(mesh)) {
+      if (group->base.mask != nullptr) {
+        has_element_data = true;
+        break;
+      }
+    }
+  }
+  if (!has_element_data) {
     return true;
   }
   if (reports) {
@@ -259,12 +275,12 @@ short domain_for(const Object &object)
                                                             SCULPT_LAYER_DOMAIN_VERT;
 }
 
-int element_count(const Object &object)
+int64_t element_count(const Object &object)
 {
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
   if (pbvh && pbvh->type() == bke::pbvh::Type::Grids) {
     const SculptSession *ss = object.runtime->sculpt_session;
-    return (ss && ss->subdiv_ccg) ? int(ss->subdiv_ccg->positions.size()) : 0;
+    return (ss && ss->subdiv_ccg) ? ss->subdiv_ccg->positions.size() : 0;
   }
   return id_cast<const Mesh *>(object.data)->verts_num;
 }
@@ -284,7 +300,7 @@ static void validate_grid_layers(Object &object)
     return;
   }
   const int totlvl = ss->multires_modifier->totlvl;
-  const int expected = bke::grid_totelem(mesh.corners_num, totlvl);
+  const int64_t expected = bke::grid_totelem(mesh.corners_num, totlvl);
 
   const auto needs_repair = [&](const SculptLayer &layer) {
     if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {
@@ -2817,7 +2833,8 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
 
   /* Merging with the grid domain requires both buffers at the canonical size (the layers are
    * validated to the top level, so a missing buffer just means zero displacement). */
-  const int n = ctx.grids ? std::max(active->totelem, below->totelem) : element_count(*ctx.object);
+  const int64_t n = ctx.grids ? std::max(active->totelem, below->totelem) :
+                                element_count(*ctx.object);
   MutableSpan<float3> below_data = bke::sculpt_layers::data_ensure(*below, n);
   if (ctx.grids && active->data && below->level != active->level) {
     below->level = active->level;
@@ -2993,7 +3010,7 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
 
   /* Merging with the grid domain requires every buffer at the canonical size (the layers are
    * validated to the top level, so a missing buffer just means zero displacement). */
-  int n = ctx.grids ? active->totelem : element_count(*ctx.object);
+  int64_t n = ctx.grids ? active->totelem : element_count(*ctx.object);
   if (ctx.grids) {
     for (const SculptLayer *source : sources) {
       n = std::max(n, source->totelem);
@@ -3568,7 +3585,7 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
        * domain, which says nothing about a vertex layer sitting under a multires modifier).
        * #data_ensure allocates zeroed, which is exactly the wanted result: an empty but usable
        * layer on the new topology rather than a buffer that cannot be indexed. */
-      const int new_count = bke::sculpt_layers::element_count(*ctx.mesh, *layer);
+      const int64_t new_count = bke::sculpt_layers::element_count(*ctx.mesh, *layer);
       bke::sculpt_layers::data_ensure(*layer, new_count);
       /* The weight mask is the layer's second per-element carrier and has to be re-fitted with the
        * first, or it keeps its old `totelem` forever: #is_stale_mask then rejects it and the layer
@@ -5065,7 +5082,7 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
    * unchanged: every mask that stops acting once the folder dissolves is folded into the data, and
    * the ones above `stop_above` are left alone because they go on acting. Buffer sizing mirrors
    * #layer_merge_selected_exec: grid buffers all sit at the canonical (top) level. */
-  int n = ctx.grids ? survivor->totelem : element_count(*ctx.object);
+  int64_t n = ctx.grids ? survivor->totelem : element_count(*ctx.object);
   if (ctx.grids) {
     for (const SculptLayer *layer : subtree_layers) {
       n = std::max(n, layer->totelem);

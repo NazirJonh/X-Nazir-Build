@@ -2274,10 +2274,10 @@ static void restore_list(bContext *C,
         else {
           CLOG_WARN(&LOG,
                     "Sculpt layer mask domain changed since the undo step was captured "
-                    "(%d elements at %d vs %d at %d); skipping the mask restore",
-                    node->mask->totelem,
+                    "(%lld elements at %d vs %lld at %d); skipping the mask restore",
+                    (long long)node->mask->totelem,
                     node->mask->block_size,
-                    op.mask_swap->totelem,
+                    (long long)op.mask_swap->totelem,
                     op.mask_swap->block_size);
         }
       }

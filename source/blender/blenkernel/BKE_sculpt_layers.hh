@@ -298,7 +298,7 @@ Vector<SculptLayerGroup *> groups(const Mesh &mesh);
  * active. The data buffer is zero-initialized to \a totelem elements. \a level is the grid storage
  * level for grid-domain layers (ignored for the vertex domain).
  */
-SculptLayer *add(Mesh &mesh, const char *name, short domain, int totelem, short level = 0);
+SculptLayer *add(Mesh &mesh, const char *name, short domain, int64_t totelem, short level = 0);
 
 /**
  * Remove \a layer from the mesh and free it (does not touch mesh geometry). When it was the active
@@ -386,7 +386,7 @@ void node_name_ensure_unique(SculptLayerTreeNode &node);
  * grid point count for #SCULPT_LAYER_DOMAIN_GRID ones (see #bke::grid_totelem); the editor module's
  * `element_count` resolves it from an object.
  */
-bool is_stale(const SculptLayer &layer, int elem_num);
+bool is_stale(const SculptLayer &layer, int64_t elem_num);
 
 /**
  * Live element count of \a layer's own domain, resolved from mesh data alone, so it is usable where
@@ -400,13 +400,19 @@ bool is_stale(const SculptLayer &layer, int elem_num);
  * top level: a grid layer sitting at a different level is not stale, it is resampled to it
  * (#resample_grid_layers), whereas a count contradicting its own level cannot be mapped at all.
  */
-int element_count(const Mesh &mesh, const SculptLayer &layer);
+int64_t element_count(const Mesh &mesh, const SculptLayer &layer);
 
 /** #is_stale against #element_count, i.e. staleness judged on the layer's own domain. */
 bool is_stale(const Mesh &mesh, const SculptLayer &layer);
 
-/** Ensure \a layer.data holds \a totelem `float3` elements, zero-filling on (re)allocation. */
-MutableSpan<float3> data_ensure(SculptLayer &layer, int totelem);
+/**
+ * Ensure \a layer.data holds \a totelem `float3` elements, zero-filling on (re)allocation.
+ *
+ * \a totelem is 64-bit because a grid-domain count is `corners_num * grid_size(level)^2`, which
+ * passes 2^31 at resolutions multires already permits. A negative count is refused (empty span,
+ * layer untouched) rather than passed to the allocator as a huge unsigned size.
+ */
+MutableSpan<float3> data_ensure(SculptLayer &layer, int64_t totelem);
 /** View of the layer data, empty when not allocated. */
 MutableSpan<float3> data_get(SculptLayer &layer);
 Span<float3> data_get(const SculptLayer &layer);
@@ -639,7 +645,7 @@ Array<float> resample_grid_mask_values(Span<float> dense,
  */
 
 /** Number of blocks needed to cover \a totelem elements. */
-int mask_blocks_num(int totelem, int block_size);
+int mask_blocks_num(int64_t totelem, int block_size);
 
 /**
  * True when \a mask cannot be indexed over a domain of \a elem_num elements, so every consumer must
@@ -664,7 +670,7 @@ bool is_stale_mask(const SculptLayerMask &mask, int64_t elem_num);
  * Allocate a mask covering \a totelem elements, every block uniform at \a fill.
  * Returns null for `totelem == 0` — an empty domain carries no mask.
  */
-SculptLayerMask *mask_new(int totelem, int block_size, uint8_t fill);
+SculptLayerMask *mask_new(int64_t totelem, int block_size, uint8_t fill);
 
 void mask_free(SculptLayerMask *mask);
 
@@ -681,7 +687,7 @@ SculptLayerMask *mask_copy(const SculptLayerMask &src);
 int64_t mask_size_in_bytes(const SculptLayerMask &mask);
 
 /** Value at a single element. Intended for tests and UI, not for hot loops — those go per block. */
-uint8_t mask_value_at(const SculptLayerMask &mask, int elem);
+uint8_t mask_value_at(const SculptLayerMask &mask, int64_t elem);
 
 /** A single block as the composite loops see it. */
 struct MaskBlock {
@@ -1126,6 +1132,25 @@ void mask_blend_read(BlendDataReader *reader, SculptLayerMask *mask);
  * #tree_free would then release twice.
  */
 void tree_copy(Mesh &dst, const Mesh &src);
+
+/**
+ * Clear #SCULPT_LAYER_REC_EXEMPT and #SCULPT_LAYER_REC_ARMED from every layer of \a mesh.
+ *
+ * Both bits are scoped to one Blender run and to the object the user armed REC on — they are not
+ * authored state. #group_blend_write_recursive strips them for the same reason before writing, and
+ * #group_blend_read_children strips them again on the way in.
+ *
+ * The path that needs this is ID duplication into Main (Shift+D, duplicating the mesh datablock):
+ * #tree_copy is a verbatim deep copy, so a duplicate made while REC was armed inherits the
+ * exemption, and nothing clears it until the object enters or leaves Sculpt Mode. Until then that
+ * layer's own mask *and* its folder chain's are absent from every composite, with nothing in the UI
+ * naming the cause.
+ *
+ * Deliberately *not* applied to evaluation copies: #apply_vert_layers_eval and the multires
+ * composite read the flag off the evaluated mesh, so an eval copy that lost it would apply a mask
+ * the recording layer must ignore (see #rec_exempt_set for why REC and masks cannot coexist).
+ */
+void rec_session_flags_clear(Mesh &mesh);
 
 /**
  * Free \a mesh's whole tree, including the root group itself, and null #Mesh::sculpt_layer_root.

@@ -209,6 +209,13 @@ static void mesh_copy_data(Main *bmain,
    * two meshes would share the tree. */
   mesh_dst->sculpt_layer_root = nullptr;
   blender::bke::sculpt_layers::tree_copy(*mesh_dst, *mesh_src);
+  /* REC is armed on one layer of one object for the duration of a Blender run, so a *new datablock*
+   * must not inherit it — see #rec_session_flags_clear, which the blend writer's own scrub mirrors.
+   * Restricted to copies that land in Main: an evaluation copy is the same layer being drawn, and
+   * the composite reads the exemption off it. */
+  if (!(flag & LIB_ID_CREATE_NO_MAIN)) {
+    blender::bke::sculpt_layers::rec_session_flags_clear(*mesh_dst);
+  }
   /* The copied layers keep their uids, so the active one carries over by identity. */
   mesh_dst->sculpt_layers_active_uid = mesh_src->sculpt_layers_active_uid;
   mesh_dst->active_color_attribute = static_cast<char *>(

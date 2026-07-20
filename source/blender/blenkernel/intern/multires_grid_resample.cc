@@ -12,10 +12,10 @@
 
 namespace blender::bke {
 
-int grid_totelem(const int grids_num, const int level)
+int64_t grid_totelem(const int grids_num, const int level)
 {
   const int64_t gs = CCG_grid_size(level);
-  return int(int64_t(grids_num) * gs * gs);
+  return int64_t(grids_num) * gs * gs;
 }
 
 Array<float3> grid_subsample(const Span<float3> src,

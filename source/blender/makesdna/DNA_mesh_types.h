@@ -285,13 +285,23 @@ struct SculptLayerGroup;
  * byte width is what keeps the composite loop from becoming bandwidth-bound.
  */
 typedef struct SculptLayerMask {
-  /** Domain element count this mask describes. Used to detect a stale mask, as #SculptLayer::totelem does. */
-  int totelem;
+  /**
+   * Domain element count this mask describes. Used to detect a stale mask, as
+   * #SculptLayer::totelem does, and 64-bit for the same reason — it counts the same grid domain.
+   * Taken out of the padding below, so the struct size is unchanged.
+   */
+  int64_t totelem;
   /** Elements per block. Grids use `grid_area`; meshes use #SCULPT_LAYER_MASK_VERT_BLOCK. */
   int block_size;
   int blocks_num;
+  /**
+   * Total bytes across every dense block, and the range #block_offset indexes. Stays 32-bit: a mask
+   * only turns a block dense where it was painted, so reaching 2^31 dense bytes would mean a layer
+   * buffer twelve times that size. #mask_compress accumulates it in 64-bit and refuses to build a
+   * mask that would exceed the field rather than wrapping an offset into #data.
+   */
   int data_num;
-  char _pad[8];
+  char _pad[4];
   /** `blocks_num` entries of #eSculptLayerMaskBlockKind. */
   int8_t *block_kind;
   /** `blocks_num` entries: the value of a uniform block. Meaningless for a dense block. */
@@ -372,10 +382,20 @@ struct SculptLayerTreeNode {
 struct SculptLayer {
   /** Must stay first: the list links live here, see #SculptLayerTreeNode. */
   SculptLayerTreeNode base;
+  /**
+   * Number of elements in #data (mesh vertices, or multires grid points).
+   *
+   * 64-bit because a grid-domain layer counts `corners_num * grid_size(level)^2` elements, which
+   * crosses 2^31 well inside the range multires already allows — a 200k-corner base mesh at level 7
+   * needs 3.3e9. A 32-bit count wrapped there and handed a truncated length to the allocator while
+   * the writers kept indexing with the untruncated one.
+   *
+   * Placed first after #base so it lands on an 8-byte boundary with no padding. Widening needs no
+   * versioning: DNA matches members by name and casts #SDNA_TYPE_INT to #SDNA_TYPE_INT64 on read.
+   */
+  int64_t totelem = 0;
   /** Influence factor (soft UI range `0..1` shown as 0..100%, hard range `-10..10`). */
   float influence = 1.0f;
-  /** Number of elements in #data (mesh vertices, or multires grid points). */
-  int totelem = 0;
   /** #eSculptLayerDomain. */
   short domain = 0;
   /**
@@ -392,6 +412,7 @@ struct SculptLayer {
    * multiply. Written to blend files like any member, but its stored value is ignored on read.
    */
   float group_influence_cached = 1.0f;
+  char _pad[4] = {};
   /** `float3[totelem]` array of per-element displacement deltas. May be null (treated as zeros). */
   void *data = nullptr;
 };

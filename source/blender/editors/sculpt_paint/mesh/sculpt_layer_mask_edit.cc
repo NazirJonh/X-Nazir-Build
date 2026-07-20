@@ -35,6 +35,8 @@
 #include "BLI_index_mask.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_span.hh"
+#include "BLI_string.h"
+#include "BLI_task.hh"
 
 #include "BKE_attribute.hh"
 #include "BKE_context.hh"
@@ -79,6 +81,29 @@ static SculptSession *session_of(Object &object)
 static Mesh &mesh_of(Object &object)
 {
   return *id_cast<Mesh *>(object.data);
+}
+
+/**
+ * Flip between the two conventions a session straddles, in place.
+ *
+ * A #SculptLayerMask stores *weight*: 255 means the layer applies in full, and the overlay paints
+ * blue where that weight is low. The live buffer, though, is painted with the ordinary mask tools,
+ * where painting means masking *out* — Add darkens, Ctrl inverts, Fill covers everything. Handing
+ * the weight over verbatim gives the user a Mask brush whose Add *strengthens* the layer, backwards
+ * from every other mask in Blender, and one whose Add makes the overlay recede rather than grow.
+ *
+ * So the session holds the complement, and these two lines are the only place that knows it. Every
+ * mask tool then works unchanged and in the direction it reads: Add hides the layer, Subtract brings
+ * it back, and the blue follows the brush. Applied on both boundaries it cancels exactly — a session
+ * opened and closed without a stroke stores the weights it started from.
+ */
+static void session_buffer_flip(MutableSpan<float> buffer)
+{
+  threading::parallel_for(buffer.index_range(), 4096, [&](const IndexRange range) {
+    for (float &value : buffer.slice(range)) {
+      value = 1.0f - value;
+    }
+  });
 }
 
 /**
@@ -220,17 +245,21 @@ static bool mask_edit_begin_mesh(Object &object, SculptSession &ss, SculptLayerT
    * different topology, so there is no meaningful way to expand it over this one; every consumer
    * already ignores it (#is_stale_mask fails open), which means an opaque mask reproduces exactly
    * the surface the user is looking at right now. */
-  if (node.mask == nullptr || bke::sculpt_layers::is_stale_mask(*node.mask, totelem)) {
+  const bool mask_created = node.mask == nullptr ||
+                            bke::sculpt_layers::is_stale_mask(*node.mask, totelem);
+  if (mask_created) {
     bke::sculpt_layers::mask_free(node.mask);
     node.mask = bke::sculpt_layers::mask_new(totelem, vert_block_size, 255);
   }
   /* #mask_new only returns null for an empty domain, which the vertex count check above ruled out. */
   BLI_assert(node.mask != nullptr);
   bke::sculpt_layers::mask_expand(*node.mask, mask.span);
+  session_buffer_flip(mask.span);
   mask.finish();
 
   ss.layers.mask_edit.node_uid = node.uid;
   ss.layers.mask_edit.on_grids = false;
+  ss.layers.mask_edit.mask_created = mask_created;
   ss.layers.mask_edit.had_vert_mask = had_vert_mask;
   ss.layers.mask_edit.saved_vert_mask = std::move(saved_vert_mask);
   /* Set explicitly rather than relied on as the leftover of a previous close: all three fields are
@@ -333,18 +362,21 @@ static bool mask_edit_begin_grids(SculptSession &ss, SculptLayerTreeNode &node)
    * the layer simply contributing fully. Note that this test cannot stand in for #is_stale_mask and
    * must follow it: #mask_blend_read neutralizes an unusable mask by resetting its block size to
    * #SCULPT_LAYER_MASK_VERT_BLOCK, so `block_size` alone never identifies the domain. */
-  if (node.mask == nullptr || bke::sculpt_layers::is_stale_mask(*node.mask, totelem) ||
-      node.mask->block_size != grid_area)
-  {
+  const bool mask_created = node.mask == nullptr ||
+                            bke::sculpt_layers::is_stale_mask(*node.mask, totelem) ||
+                            node.mask->block_size != grid_area;
+  if (mask_created) {
     bke::sculpt_layers::mask_free(node.mask);
     node.mask = bke::sculpt_layers::mask_new(int(totelem), grid_area, 255);
   }
   /* #mask_new only returns null for an empty domain, which the grid count check above ruled out. */
   BLI_assert(node.mask != nullptr);
   bke::sculpt_layers::mask_expand(*node.mask, subdiv_ccg->masks.as_mutable_span());
+  session_buffer_flip(subdiv_ccg->masks.as_mutable_span());
 
   ss.layers.mask_edit.node_uid = node.uid;
   ss.layers.mask_edit.on_grids = true;
+  ss.layers.mask_edit.mask_created = mask_created;
   ss.layers.mask_edit.had_grid_mask = had_grid_mask;
   ss.layers.mask_edit.saved_grid_mask = std::move(saved_grid_mask);
   ss.layers.mask_edit.grid_area = grid_area;
@@ -481,7 +513,10 @@ bool mask_edit_enter(Depsgraph &depsgraph, Main &bmain, Object &object, SculptLa
  * Close a session that was opened on the mesh (vertex) domain. \a node is null when it was deleted
  * while its mask was being edited.
  */
-static void mask_edit_end_mesh(Object &object, SculptSession &ss, SculptLayerTreeNode *node)
+static void mask_edit_end_mesh(Object &object,
+                               SculptSession &ss,
+                               SculptLayerTreeNode *node,
+                               const bool store_weights)
 {
   Mesh &mesh = mesh_of(object);
   bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
@@ -493,9 +528,20 @@ static void mask_edit_end_mesh(Object &object, SculptSession &ss, SculptLayerTre
       /* The node can be gone: nothing stops the user from deleting the layer or folder while its
        * mask is being edited. The parked mask is still restored below — the session's job of putting
        * the user's own mask back does not depend on the node surviving. */
-      if (node != nullptr) {
+      if (node != nullptr && store_weights) {
         bke::sculpt_layers::mask_free(node->mask);
+        /* Flipped back to the weight convention before it is stored. In place, because every path
+         * below overwrites this buffer outright — with the parked mask, or by removing it. */
+        session_buffer_flip(mask.span);
         node->mask = bke::sculpt_layers::mask_compress(mask.span, vert_block_size);
+      }
+      else if (node != nullptr && ss.layers.mask_edit.mask_created) {
+        /* Discarded, and the node had nothing usable before the session: leaving the opaque mask the
+         * open synthesized would hand back a mask the user never authored, which is not what
+         * cancelling an edit means. The node keeps its untouched mask in every other case, because
+         * nothing between open and close writes to it. */
+        bke::sculpt_layers::mask_free(node->mask);
+        node->mask = nullptr;
       }
       /* The vertex count can have changed under the session (an Edit Mode round trip, a script). The
        * parked buffer then describes a topology this mesh no longer has, so it is dropped rather
@@ -532,7 +578,9 @@ static void mask_edit_end_mesh(Object &object, SculptSession &ss, SculptLayerTre
  * same block size it was expanded at, then either put the user's own grid mask back byte for byte or
  * return the array to the empty state it was found in.
  */
-static void mask_edit_end_grids(SculptSession &ss, SculptLayerTreeNode *node)
+static void mask_edit_end_grids(SculptSession &ss,
+                                SculptLayerTreeNode *node,
+                                const bool store_weights)
 {
   SubdivCCG *subdiv_ccg = ss.subdiv_ccg;
   if (subdiv_ccg == nullptr) {
@@ -568,11 +616,22 @@ static void mask_edit_end_grids(SculptSession &ss, SculptLayerTreeNode *node)
   /* The node can be gone: nothing stops the user from deleting the layer or folder while its mask is
    * being edited. The parked mask is still restored below — the session's job of putting the user's
    * own mask back does not depend on the node surviving. */
-  if (domain_intact && node != nullptr) {
+  if (domain_intact && node != nullptr && store_weights) {
     bke::sculpt_layers::mask_free(node->mask);
+    /* Flipped back to the weight convention before it is stored. In place, because every path below
+     * overwrites this buffer outright — with the parked mask, or by emptying it. */
+    session_buffer_flip(masks);
     /* One block per grid, which is what makes a grid index a block index for every multires path
      * that reads this mask (#grid_masks_for_composite rejects any other cut, silently). */
     node->mask = bke::sculpt_layers::mask_compress(masks, subdiv_ccg->grid_area);
+  }
+  else if (!store_weights && node != nullptr && ss.layers.mask_edit.mask_created) {
+    /* Discarded, and the node had nothing usable before the session; see the mesh path for why the
+     * synthesized mask must not survive a cancel. Deliberately not gated on #domain_intact: the
+     * synthesized mask describes a domain that has since been rebuilt either way, so it is exactly
+     * as unusable as what it replaced. */
+    bke::sculpt_layers::mask_free(node->mask);
+    node->mask = nullptr;
   }
 
   /* The grid count can have changed under the session, exactly as the vertex count can on the mesh
@@ -591,7 +650,15 @@ static void mask_edit_end_grids(SculptSession &ss, SculptLayerTreeNode *node)
   }
 }
 
-void mask_edit_end(Object &object)
+/**
+ * Leave the session, either storing the painted weights onto the node or discarding them.
+ *
+ * The two directions differ in one step out of six. Everything else — resuming a suspend, putting
+ * the user's own mask back, clearing the session, refreshing the PBVH and recomposing — is identical
+ * and must stay that way: a cancel that skipped any of it would leave the layer's weights sitting in
+ * the user's mask storage, which is the one outcome both directions exist to prevent.
+ */
+static void mask_edit_close(Object &object, const bool store_weights)
 {
   SculptSession *ss = session_of(object);
   if (ss == nullptr || ss->layers.mask_edit.node_uid == 0) {
@@ -613,10 +680,10 @@ void mask_edit_end(Object &object)
    * modifier mid-session would otherwise send a grid session down the mesh path, which ends by
    * removing a `.sculpt_mask` attribute that session never created. */
   if (ss->layers.mask_edit.on_grids) {
-    mask_edit_end_grids(*ss, node);
+    mask_edit_end_grids(*ss, node, store_weights);
   }
   else {
-    mask_edit_end_mesh(object, *ss, node);
+    mask_edit_end_mesh(object, *ss, node, store_weights);
   }
 
   /* REC is deliberately *not* re-armed here, even though entering the session disarmed it. Arming is
@@ -636,8 +703,27 @@ void mask_edit_end(Object &object)
 
   /* The node's weights are only in force once the session has stored them, so the composed surface
    * changes here and nowhere else. Recomputed canonically from `base + layers` rather than nudged,
-   * which is what keeps the base from drifting across repeated sessions. */
+   * which is what keeps the base from drifting across repeated sessions.
+   *
+   * Run on the cancel path too, and not as a formality: the open can have replaced an unusable mask,
+   * and the close above can have dropped that replacement, so the effective mask of the node is not
+   * guaranteed to be what it was before the session even when nothing was stored. */
   commit_layers_change(object);
+}
+
+void mask_edit_end(Object &object)
+{
+  mask_edit_close(object, true);
+}
+
+/**
+ * Leave the session discarding what it painted. File-local: unlike #mask_edit_end, which every path
+ * that must not strand a session calls (a layer selection, leaving sculpt mode, undo), discarding is
+ * only ever something the user asks for.
+ */
+static void mask_edit_cancel(Object &object)
+{
+  mask_edit_close(object, false);
 }
 
 /* -------------------------------------------------------------------- */
@@ -871,7 +957,16 @@ static wmOperatorStatus mask_flood_fill_delegate(bContext *C, const char *mode, 
 {
   PointerRNA props = WM_operator_properties_create("PAINT_OT_mask_flood_fill");
   RNA_enum_set_identifier(C, &props, "mode", mode);
-  RNA_float_set(&props, "value", value);
+  /* \a value is a weight, the convention every caller here and the out-of-session branch beside it
+   * speak. The buffer this writes into holds the complement while a session is open (see
+   * #session_buffer_flip), so the value is flipped to match — otherwise Fill and Clear would mean
+   * opposite things depending on whether a session happened to be open.
+   *
+   * `INVERT` needs no such treatment and gets none: it complements the whole buffer, and a
+   * complement is its own mirror image under the flip. Its callers pass a dummy value the operator
+   * ignores, which is the second reason not to touch it blindly. */
+  const bool writes_value = STREQ(mode, "VALUE");
+  RNA_float_set(&props, "value", writes_value ? 1.0f - value : value);
   const wmOperatorStatus status = WM_operator_name_call(
       C, "PAINT_OT_mask_flood_fill", wm::OpCallContext::ExecDefault, &props, nullptr);
   WM_operator_properties_free(&props);
@@ -1140,7 +1235,6 @@ static wmOperatorStatus layer_mask_remove_exec(bContext *C, wmOperator *op)
   bke::sculpt_layers::mask_free(ctx.node->mask);
   ctx.node->mask = nullptr;
   tag_masked_chains_dirty(*ctx.node);
-  tag_layer_mask_overlay_dirty(*ctx.object);
   /* The node's full contribution comes back wherever the mask was attenuating it, so the composed
    * surface moves. Recomputed canonically rather than nudged, as everywhere in this module. */
   commit_layers_change(*ctx.depsgraph, *ctx.object);
@@ -1205,7 +1299,6 @@ static wmOperatorStatus mask_uniform_exec(bContext *C,
    * cut for the other domain is repaired by the same call that fills it. */
   ctx.node->mask = bke::sculpt_layers::mask_new(ctx.layout.totelem, ctx.layout.block_size, fill);
   tag_masked_chains_dirty(*ctx.node);
-  tag_layer_mask_overlay_dirty(*ctx.object);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
   mask_ui_notify(C, *ctx.object);
@@ -1288,7 +1381,6 @@ static wmOperatorStatus layer_mask_invert_exec(bContext *C, wmOperator *op)
   bke::sculpt_layers::mask_free(ctx.node->mask);
   ctx.node->mask = bke::sculpt_layers::mask_compress(dense.as_span(), ctx.layout.block_size);
   tag_masked_chains_dirty(*ctx.node);
-  tag_layer_mask_overlay_dirty(*ctx.object);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
   mask_ui_notify(C, *ctx.object);
@@ -1348,9 +1440,6 @@ static wmOperatorStatus layer_mask_toggle_exec(bContext *C, wmOperator *op)
   /* A no-op for a layer, whose mask caches nowhere; for a folder this is what makes the change
    * visible, since #chain_mask would otherwise keep serving the product built a moment ago. */
   tag_masked_chains_dirty(*ctx.node);
-  /* The overlay gates on the same bit (a disabled mask hides nothing), so the toggle changes what
-   * it has to draw even though no weight moved. */
-  tag_layer_mask_overlay_dirty(*ctx.object);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);
   /* Two spellings rather than one format string chosen by a ternary, so both remain extractable for
@@ -1386,6 +1475,56 @@ void SCULPT_OT_layer_mask_toggle(wmOperatorType *ot)
 /** \name Edit session toggle
  * \{ */
 
+/**
+ * Leave the session on \a node, keeping or discarding the painted weights, as one undo step.
+ *
+ * \a node must be the node the session was opened on, which need not be the active layer: a folder's
+ * mask can be edited while a layer inside it stays active.
+ */
+static void mask_edit_close_with_undo(bContext *C,
+                                      wmOperator *op,
+                                      Object &object,
+                                      SculptLayerTreeNode &node,
+                                      const bool store_weights)
+{
+  undo::push_begin(*CTX_data_scene(C), object, op);
+  /* No #push_sculpt_layer_mask on either path: the capture is refused while the session is open, and
+   * it is not wanted either. Undoing a close reopens the session (see #mask_session_boundary) and
+   * expands the node's mask as it stands — which after an apply is the mask just stored, and after a
+   * cancel is the mask the session started from. Both are the state the user left. */
+  undo::push_sculpt_layer_mask_session(object, node.uid, false);
+  /* Before the close, which clears the session struct the parked UI state lives on. */
+  mask_edit_exit_ui(C, object);
+  /* Puts the user's own sculpt mask back and recomposes the surface itself, so nothing more is
+   * needed here. */
+  if (store_weights) {
+    mask_edit_end(object);
+  }
+  else {
+    mask_edit_cancel(object);
+  }
+  undo::push_end(object);
+  /* Two spellings rather than one format string chosen by a ternary, so both remain extractable for
+   * translation — as #layer_mask_toggle_exec does for the same reason. */
+  if (store_weights) {
+    BKE_reportf(op->reports, RPT_INFO, "Applied the weight mask of '%s'", node.name);
+  }
+  else {
+    BKE_reportf(op->reports, RPT_INFO, "Discarded the weight mask edit of '%s'", node.name);
+  }
+  mask_ui_notify(C, object);
+}
+
+/** The node an open session is editing, or null when no session is open on \a object. */
+static SculptLayerTreeNode *mask_edit_open_node(Object &object)
+{
+  const int open_uid = mask_edit_active_uid(object);
+  if (open_uid == 0) {
+    return nullptr;
+  }
+  return bke::sculpt_layers::node_find_by_uid(mesh_of(object), open_uid);
+}
+
 static wmOperatorStatus layer_mask_edit_toggle_exec(bContext *C, wmOperator *op)
 {
   MaskOpContext ctx;
@@ -1399,19 +1538,7 @@ static wmOperatorStatus layer_mask_edit_toggle_exec(bContext *C, wmOperator *op)
   }
 
   if (mask_session_open_on(*ctx.object, *ctx.node)) {
-    undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
-    /* No #push_sculpt_layer_mask on this half: the capture is refused while the session is open,
-     * and it is not wanted either. Undoing a close reopens the session (see #mask_session_boundary)
-     * and expands the very mask this close just stored, which is the state the user left. */
-    undo::push_sculpt_layer_mask_session(*ctx.object, ctx.node->uid, false);
-    /* Before #mask_edit_end, which clears the session struct the parked UI state lives on. */
-    mask_edit_exit_ui(C, *ctx.object);
-    /* Compresses the painted weights onto the node, puts the user's own sculpt mask back and
-     * recomposes the surface itself, so nothing more is needed here. */
-    mask_edit_end(*ctx.object);
-    undo::push_end(*ctx.object);
-    BKE_reportf(op->reports, RPT_INFO, "Applied the weight mask of '%s'", ctx.node->name);
-    mask_ui_notify(C, *ctx.object);
+    mask_edit_close_with_undo(C, op, *ctx.object, *ctx.node, true);
     return OPERATOR_FINISHED;
   }
 
@@ -1470,8 +1597,8 @@ static wmOperatorStatus layer_mask_edit_toggle_exec(bContext *C, wmOperator *op)
    * layer, with nothing having said so. */
   BKE_reportf(op->reports,
               RPT_INFO,
-              "Editing the weight mask of '%s'. Paint it with the mask tools; the layer's shape "
-              "updates when you finish the mask edit%s%s",
+              "Editing the weight mask of '%s'. Paint it with the mask tools; press Enter to apply "
+              "it, and the layer's shape updates then%s%s",
               ctx.node->name,
               rec_was_armed ? ". " : "",
               rec_was_armed ? rec_disarmed_note : "");
@@ -1490,6 +1617,82 @@ void SCULPT_OT_layer_mask_edit_toggle(wmOperatorType *ot)
   ot->poll = mask_ops_poll;
   ot->flag = OPTYPE_REGISTER;
   mask_op_properties(ot);
+}
+
+/**
+ * True only while a weight mask edit is in progress.
+ *
+ * This gates a bare Enter, so it has to be exact: any frame where it answers true and the operator
+ * then does nothing would swallow the key from whatever else wants it. #mask_edit_active_uid is
+ * therefore consulted rather than the mode alone, and the node it names is resolved here so the
+ * execution below cannot fail on a uid this poll accepted.
+ */
+static bool mask_edit_finish_poll(bContext *C)
+{
+  Object *object = CTX_data_active_object(C);
+  if (object == nullptr || !(object->mode & OB_MODE_SCULPT)) {
+    return false;
+  }
+  return mask_edit_open_node(*object) != nullptr;
+}
+
+static wmOperatorStatus layer_mask_edit_finish_exec(bContext *C, wmOperator *op)
+{
+  Object &object = *CTX_data_active_object(C);
+  /* Resolved again rather than carried from the poll: a poll's answer is not a reservation, and
+   * the session can be closed between the two by anything that runs in between (a layer selection, a
+   * mode switch, a script). Refused quietly on that path — the user pressed a key for a state that
+   * no longer exists, which is not an error worth a report. */
+  SculptLayerTreeNode *node = mask_edit_open_node(object);
+  if (node == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  mask_edit_close_with_undo(C, op, object, *node, true);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_mask_edit_finish(wmOperatorType *ot)
+{
+  ot->name = "Finish Sculpt Layer Mask Edit";
+  ot->idname = "SCULPT_OT_layer_mask_edit_finish";
+  /* Deliberately not a second spelling of the toggle: this one is addressed at the open session
+   * rather than at a tree row, which is what lets a single key finish an edit started on a folder
+   * while some layer inside it is active. */
+  ot->description =
+      "Apply the weight mask being painted to its sculpt layer or folder and return to sculpting";
+  ot->exec = layer_mask_edit_finish_exec;
+  ot->poll = mask_edit_finish_poll;
+  /* No #OPTYPE_UNDO, as everywhere in this module: the operator pushes its own sculpt undo step. */
+  ot->flag = OPTYPE_REGISTER;
+}
+
+static wmOperatorStatus layer_mask_edit_cancel_exec(bContext *C, wmOperator *op)
+{
+  Object &object = *CTX_data_active_object(C);
+  /* Resolved again rather than carried from the poll, for the reason #layer_mask_edit_finish_exec
+   * spells out. */
+  SculptLayerTreeNode *node = mask_edit_open_node(object);
+  if (node == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  mask_edit_close_with_undo(C, op, object, *node, false);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_mask_edit_cancel(wmOperatorType *ot)
+{
+  ot->name = "Cancel Sculpt Layer Mask Edit";
+  ot->idname = "SCULPT_OT_layer_mask_edit_cancel";
+  /* "Since it was started" and not "the mask": a cancel drops what this session painted, and the
+   * node keeps whatever mask it carried before — the two read alike otherwise. */
+  ot->description =
+      "Discard the weight mask painted since this edit was started and return to sculpting";
+  ot->exec = layer_mask_edit_cancel_exec;
+  /* The same gate as Finish: the two are the two ways out of one state. */
+  ot->poll = mask_edit_finish_poll;
+  ot->flag = OPTYPE_REGISTER;
 }
 
 /** \} */

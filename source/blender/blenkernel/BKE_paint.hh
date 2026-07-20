@@ -463,6 +463,17 @@ struct SculptLayerMaskEdit {
    */
   uint64_t ccg_id = 0;
   /**
+   * True when the session synthesized the node's mask on open rather than finding a usable one.
+   *
+   * Only the cancel path reads it, and it is what lets that path be faithful: a node that carried no
+   * mask before the edit must carry none after a discarded one, or "cancel" would leave behind an
+   * opaque mask the user never asked for. The open path replaces an unusable mask (missing, stale,
+   * or cut for the other domain) with an opaque one, and all three cases collapse to the same
+   * restoration — every consumer already ignores an unusable mask, so "no mask" is the state the
+   * user was in.
+   */
+  bool mask_created = false;
+  /**
    * Number of #bke::sculpt_layers::MaskEditSuspendGuard instances currently holding this session
    * parked. Non-zero means the session's dense weights are in #suspended_dense and the standard
    * mask storage holds the user's own mask again.

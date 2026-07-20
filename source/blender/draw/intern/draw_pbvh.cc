@@ -803,17 +803,20 @@ static const SculptLayerTreeNode *layer_mask_node_for_draw(const Object &object,
 
 /**
  * The overlay deliberately re-checks what #node_mask_for_composite checks rather than calling it:
- * the composer folds parent folder masks in, while the overlay shows the weights of one node.
- * Both must fail open the same way — an unusable mask means "nothing hidden", not "all hidden".
+ * the composer folds parent folder masks in, while the overlay shows the weights of one node. Both
+ * fail open the same way — an unusable mask means "nothing hidden", not "all hidden".
+ *
+ * With one deliberate disagreement: #SCULPT_LAYER_REC_EXEMPT is *not* consulted. The composer drops
+ * an exempt node's mask because an armed REC must record unattenuated, but the mask itself is intact
+ * and applies again the moment REC is disarmed. Hiding it would black out the overlay for exactly
+ * the layer the user is working on, at exactly the moment they armed recording on it — the mask is
+ * information about the layer, not about what the surface is doing this instant.
  */
 static bool layer_mask_is_drawable(const SculptLayerTreeNode &node,
                                    const int64_t elem_num,
                                    const int grid_area)
 {
   if (node.mask == nullptr) {
-    return false;
-  }
-  if (node.flag & SCULPT_LAYER_REC_EXEMPT) {
     return false;
   }
   if (!bke::sculpt_layers::mask_enabled(node)) {
@@ -869,7 +872,10 @@ BLI_NOINLINE static void update_layer_masks_mesh(const Object &object,
           float *data = vbos[i]->data<float>().data();
           for (const int face : nodes[i].faces()) {
             for (const int vert : corner_verts.slice(faces[face])) {
-              *data = live[vert];
+              /* Complemented back to a weight: the session buffer holds how much the layer is
+               * hidden (see #session_buffer_flip), while this attribute carries the weight the
+               * shader then inverts for the tint. */
+              *data = 1.0f - live[vert];
               data++;
             }
           }
@@ -1195,6 +1201,10 @@ BLI_NOINLINE static void fill_layer_masks_grids(const Object &object,
                               exec_mode::grain_size(64));
       return;
     }
+    /* Complemented back to a weight: the session buffer holds how much the layer is hidden (see
+     * #session_buffer_flip), while this attribute carries the weight the shader then inverts for
+     * the tint. That complement is also why the compact layout copies element by element here,
+     * where #fill_masks_grids can memcpy a whole grid. */
     node_mask.foreach_index(
         [&](const int i) {
           float *data = vbos[i]->data<float>().data();
@@ -1204,13 +1214,13 @@ BLI_NOINLINE static void fill_layer_masks_grids(const Object &object,
               const Span<float> grid_masks = live.slice(bke::ccg::grid_range(key, grid));
               for (int y = 0; y < grid_size_1; y++) {
                 for (int x = 0; x < grid_size_1; x++) {
-                  *data = grid_masks[CCG_grid_xy_to_index(key.grid_size, x, y)];
+                  *data = 1.0f - grid_masks[CCG_grid_xy_to_index(key.grid_size, x, y)];
                   data++;
-                  *data = grid_masks[CCG_grid_xy_to_index(key.grid_size, x + 1, y)];
+                  *data = 1.0f - grid_masks[CCG_grid_xy_to_index(key.grid_size, x + 1, y)];
                   data++;
-                  *data = grid_masks[CCG_grid_xy_to_index(key.grid_size, x + 1, y + 1)];
+                  *data = 1.0f - grid_masks[CCG_grid_xy_to_index(key.grid_size, x + 1, y + 1)];
                   data++;
-                  *data = grid_masks[CCG_grid_xy_to_index(key.grid_size, x, y + 1)];
+                  *data = 1.0f - grid_masks[CCG_grid_xy_to_index(key.grid_size, x, y + 1)];
                   data++;
                 }
               }
@@ -1219,8 +1229,10 @@ BLI_NOINLINE static void fill_layer_masks_grids(const Object &object,
           else {
             for (const int grid : nodes[i].grids()) {
               const Span<float> grid_masks = live.slice(bke::ccg::grid_range(key, grid));
-              std::copy_n(grid_masks.data(), grid_masks.size(), data);
-              data += grid_masks.size();
+              for (const float mask_value : grid_masks) {
+                *data = 1.0f - mask_value;
+                data++;
+              }
             }
           }
         },

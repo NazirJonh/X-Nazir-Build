@@ -603,6 +603,14 @@ void commit_layers_change(Object &object)
    * The result is deliberately not consulted: this function recomposes unconditionally on both
    * paths below, so there is no stale surface left for a caller to act on. */
   rec_exemption_refresh(object);
+  /* Placed here, ahead of the branch, because the two paths below both return: the sculpt layer mask
+   * overlay draws one node's weights, and a node can have been added, removed, reparented or had its
+   * mask replaced by whatever called this. The comment above already establishes that every such
+   * operation passes through here, which makes this the one place that does not have to be
+   * remembered at each call site — the overlay stayed stale after a layer delete for precisely that
+   * reason. The paths that deliberately skip recomposition (the bakes, which leave the surface
+   * unchanged on purpose) do not reach this and tag for themselves. */
+  tag_layer_mask_overlay_dirty(object);
   if (mesh_path) {
     recompute_mesh_canonical(object);
     debug_validate_mesh_invariant(object, "commit_layers_change");
@@ -2618,6 +2626,10 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
   if (bake_key) {
     undo::push_sculpt_layer_bake_shape_key(*ctx.object, bake_key->uid);
   }
+  /* Tagged by hand because this operator does not recompose — #commit_layers_change, which tags for
+   * everything else, is deliberately not called here. The surface is unchanged, but every layer just
+   * went away, and with them whatever mask the overlay was drawing. */
+  tag_layer_mask_overlay_dirty(*ctx.object);
   /* The combined surface is unchanged; the runtime mesh base now equals the live positions. */
   invalidate_runtime(*ctx.object);
   session_state_ensure(*ctx.object);
@@ -2745,6 +2757,9 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
   }
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(baked_layers), {}, true);
   undo::push_sculpt_layer_bake_to_shape_key(*ctx.object, pre_bake_shapenr);
+  /* Tagged by hand for the reason #layer_bake_exec gives: baking does not recompose, so nothing else
+   * clears the overlay of the masks that just left with their layers. */
+  tag_layer_mask_overlay_dirty(*ctx.object);
 
   /* Select the usable key as active (matching the pattern #object_shape_key_add uses,
    * object_shapekey.cc): the baked block when it has data, the Basis otherwise (degenerate
@@ -4374,7 +4389,6 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
   bke::sculpt_layers::node_name_ensure_unique(survivor->base);
 
   bke::sculpt_layers::active_set(mesh, survivor);
-  tag_layer_mask_overlay_dirty(*ctx.object);
   group_cascade_resync_with_undo(*ctx.object, mesh);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
   undo::push_end(*ctx.object);

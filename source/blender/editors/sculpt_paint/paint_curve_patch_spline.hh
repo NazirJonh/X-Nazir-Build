@@ -98,6 +98,18 @@ struct CurvePatchSpline {
    * `is_empty()`. */
   float3 tangent_at(float s) const;
 
+  /** Smoothed surface normal at arc-length `s` (linear interpolation between the two bracketing
+   * `normals_smooth_3d` entries, re-normalized), clamped to `[0, total_length()]`.
+   *
+   * Returns `plane_normal` when `normals_smooth_3d` is not populated, which is what makes every
+   * consumer degrade to the pre-surface-wrap behavior on Grids and on a failed snapshot.
+   *
+   * This -- NOT a window's projection normal -- is what any measurement of "how far the vertex has
+   * lifted off the surface" must use. A window normal is SHARP by design and jumps where the
+   * winning window changes, so a depth measured against it steps discontinuously across the join
+   * even though the ribbon's own `(u, s)` runs through it smoothly. */
+  float3 normal_at(float s) const;
+
   /** Interpolated width at arc-length `s` (linear interpolation between the two bracketing
    * `radii` entries), clamped to `[0, total_length()]`. Requires `build_from_positions()` to have
    * been called with a non-empty `radii` matching `poly_3d` in size. */

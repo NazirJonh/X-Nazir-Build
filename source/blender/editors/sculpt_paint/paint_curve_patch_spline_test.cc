@@ -989,4 +989,42 @@ TEST(paint_curve_patch_spline, smooth_normals_box_filter)
   EXPECT_V3_NEAR(spline.normals_smooth_3d.last(), float3(0.0f, 1.0f, 0.0f), 1e-4f);
 }
 
+TEST(paint_curve_patch_spline, normal_at_is_continuous_over_a_break)
+{
+  CurvePatchSpline spline;
+  Vector<float3> points, normals;
+  /* The same 90-degree break as above. Sampled through it, the relief's depth reference must not
+   * step: a step here lands straight in `radial_dist` and shows as a hard seam across the strip. */
+  for (const int i : IndexRange(21)) {
+    points.append(float3(float(i) * 0.1f, 0.0f, 0.0f));
+    normals.append(i < 10 ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f));
+  }
+  spline.build_from_positions(points.as_span(), {}, false, normals.as_span());
+  curve_patch_spline_smooth_normals(spline, 0.4f);
+
+  float3 prev = spline.normal_at(0.0f);
+  for (const int i : IndexRange(1, 200)) {
+    const float3 current = spline.normal_at(spline.total_length() * float(i) / 200.0f);
+    EXPECT_NEAR(math::length(current), 1.0f, 1e-4f) << "step " << i;
+    /* Two neighbouring samples are 1/200 of the curve apart; anything past a few degrees between
+     * them is a discontinuity, not a turn. */
+    EXPECT_GT(math::dot(current, prev), 0.99f) << "step " << i;
+    prev = current;
+  }
+}
+
+TEST(paint_curve_patch_spline, normal_at_falls_back_to_plane_normal)
+{
+  CurvePatchSpline spline;
+  const float3 points[3] = {
+      float3(0.0f, 0.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), float3(2.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 3));
+  spline.plane_normal = float3(0.0f, 0.0f, 2.0f);
+
+  /* No smoothed field (Grids, or a failed snapshot): every consumer has to see the frozen plane, so
+   * the single-window path reproduces its previous behavior exactly. Normalized, since callers
+   * project onto it. */
+  EXPECT_V3_NEAR(spline.normal_at(1.0f), float3(0.0f, 0.0f, 1.0f), 1e-6f);
+}
+
 }  // namespace blender::ed::sculpt_paint::tests

@@ -1970,7 +1970,11 @@ bool supports_curve_patch(const Brush &brush)
               SCULPT_BRUSH_TYPE_FILL,
               SCULPT_BRUSH_TYPE_SCRAPE,
               SCULPT_BRUSH_TYPE_MULTIPLANE_SCRAPE,
-              SCULPT_BRUSH_TYPE_PLANE);
+              SCULPT_BRUSH_TYPE_PLANE,
+              /* Paints the active color attribute instead of displacing; see
+               * `curve_patch_effect_color_create()`. `SMEAR` and `BLUR` stay out -- both are
+               * iterative, and Curve Patch recomputes from the original on every curve edit. */
+              SCULPT_BRUSH_TYPE_PAINT);
 }
 bool supports_secondary_cursor_color(const Brush &brush)
 {

@@ -51,6 +51,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_rand.hh"
+#include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
@@ -67,7 +68,9 @@
 #include "DNA_curves_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_texture_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BLT_translation.hh"
 
@@ -247,6 +250,21 @@ struct CurvePatchEditOpData {
    * re-project until the next stray event reached this modal. This timer makes the poll tick
    * regardless, so such changes update the relief promptly. */
   wmTimer *sync_timer = nullptr;
+  /* The brush datablock this patch was built from, captured at invoke. Compared against the live
+   * `Sculpt::paint.brush` on every modal tick to notice that the user reached for another tool or
+   * brush -- see the check at the top of `curve_patch_edit_modal()` for why that has to end the
+   * session, and why the commit it performs has to put this pointer back first. Compared for
+   * IDENTITY only; never dereferenced while stale. */
+  Brush *brush_at_invoke = nullptr;
+  /* `bToolRef::idname` of the tool active in this patch's viewport at invoke, watched alongside
+   * `brush_at_invoke` for the same reason. Needed on its own because the tools that carry no brush
+   * -- Move/Rotate/Scale/Transform, the filters, Trim, Line Project -- leave `Paint::brush`
+   * untouched, so the brush comparison alone cannot see a switch to one of them.
+   *
+   * Compared as a STRING, not by `bToolRef` identity: #WM_toolsystem_ref_set_from_runtime reuses
+   * the same `bToolRef` and overwrites `idname` in place (`wm_toolsystem.cc`), so the pointer is
+   * unchanged across a switch. Empty when no tool was active at invoke, which disables the check. */
+  char tool_idname_at_invoke[64] = "";
   /* Snap context reused for the duration of a point drag, mirroring `PointSlideData::snap_ctx`
    * (paint_curve.cc). Only the scene-snap-element level of #paintcurve_surface_place needs it, so
    * it is created lazily on the first MOUSEMOVE that reaches that level and freed when the drag
@@ -624,7 +642,7 @@ static void curve_patch_edit_context_menu_open(bContext *C)
 static void curve_patch_edit_status_set(bContext *C, const CurvePatchCache &patch)
 {
   std::string msg = fmt::format(
-      "Enter: Commit | Esc: Cancel | Ctrl+Z: Undo | Tab/S: Swap Texture Axis (currently {}) | C: {} "
+      "Enter: Commit | Esc: Cancel | Ctrl+Z: Undo | S: Swap Texture Axis (currently {}) | C: {} "
       "Curve",
       patch.frozen_params.swap_axis ? "U" : "V",
       curve_patch_is_cyclic(patch) ? "Open" : "Close");
@@ -643,10 +661,13 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
   /* Seed the live-strength watchdog with the current slider value so the first modal event does
    * not read a "change" against the default and re-stamp needlessly (see
    * `CurvePatchEditOpData::last_synced_alpha`). */
-  const ToolSettings *tool_settings = CTX_data_tool_settings(C);
+  ToolSettings *tool_settings = CTX_data_tool_settings(C);
   if (tool_settings && tool_settings->sculpt) {
-    const Sculpt &sd = *tool_settings->sculpt;
-    if (const Brush *brush = BKE_paint_brush_for_read(&sd.paint)) {
+    Sculpt &sd = *tool_settings->sculpt;
+    /* Non-const so `brush_at_invoke` can be handed straight back to `Paint::brush` when the modal
+     * commits after a tool switch (see `curve_patch_edit_modal()`). */
+    if (Brush *brush = BKE_paint_brush(&sd.paint)) {
+      data->brush_at_invoke = brush;
       data->last_synced_alpha = BKE_brush_alpha_get(&sd.paint, brush);
       data->last_synced_dir_in = (brush->flag & BRUSH_DIR_IN) != 0;
       data->last_synced_length_mode = brush->mtex.curve_patch_length_mode;
@@ -689,6 +710,14 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
   if (const Object *ob = CTX_data_active_object(C)) {
     data->last_synced_symm = mesh_symmetry_xyz_get(*ob);
   }
+  /* Snapshot the active tool of the viewport this patch belongs to (see
+   * `CurvePatchEditOpData::tool_idname_at_invoke`). `CTX_wm_area()` is that viewport both here and
+   * in the modal, which reads the frozen area captured at this moment. */
+  if (const ScrArea *area = CTX_wm_area(C)) {
+    if (const bToolRef *tref = area->runtime.tool) {
+      STRNCPY(data->tool_idname_at_invoke, tref->idname);
+    }
+  }
   WM_event_add_modal_handler(C, op);
   /* Drive the live-sync poll at a steady cadence (see `CurvePatchEditOpData::sync_timer`). 20 Hz:
    * fast enough that a panel change feels immediate, light enough that idle ticks -- which only
@@ -710,6 +739,48 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
  * nothing -- see the `CurvePatchCache::invalidated` branch inside -- and the modal reports that as
  * `OPERATOR_CANCELLED`. */
 static bool curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_cancel);
+
+/**
+ * True once the tool or the brush this patch was started with is no longer the active one, which
+ * means the session has been superseded and must end (see the caller for why it commits).
+ *
+ * Two independent axes, because neither subsumes the other:
+ *
+ * - The BRUSH. Switching to another brush-based tool, the asset shelf, `brush.asset_activate` (V)
+ *   and Python all reassign `Sculpt::paint.brush`
+ *   (`toolsystem_brush_activate_from_toolref_for_object_paint()` -> #BKE_paint_brush_set,
+ *   `wm_toolsystem.cc`). Catching this matters beyond ending the session: the incoming brush has
+ *   never been through a paint stroke, so its pressure CurveMappings are still uninitialized
+ *   (#bke::brush::common_pressure_curves_init runs from `PaintStroke`'s constructor only), and the
+ *   next re-stamp dereferenced a null `CurveMap::table` inside #BKE_curvemapping_evaluateF
+ *   (`mesh/sculpt.cc`'s `brush_strength()`).
+ *
+ * - The TOOL. Sculpt Mode's non-brush tools -- Move/Rotate/Scale/Transform, the Mesh/Cloth/Color
+ *   filters, Trim, Line Project -- carry no brush at all, so switching to one leaves
+ *   `Paint::brush` exactly as it was and the brush axis above stays blind to it.
+ *
+ * Both are polled rather than observed: the tool system publishes no notifier, only an RNA
+ * message-bus message, and modal handlers receive neither.
+ */
+static bool curve_patch_edit_session_superseded(const bContext *C, const CurvePatchEditOpData &data)
+{
+  const ToolSettings *tool_settings = CTX_data_tool_settings(C);
+  if (tool_settings && tool_settings->sculpt && data.brush_at_invoke &&
+      BKE_paint_brush_for_read(&tool_settings->sculpt->paint) != data.brush_at_invoke)
+  {
+    return true;
+  }
+  if (data.tool_idname_at_invoke[0] != '\0') {
+    const ScrArea *area = CTX_wm_area(C);
+    const bToolRef *tref = area ? area->runtime.tool : nullptr;
+    /* A null `tref` is not treated as a change: it only appears while
+     * `toolsystem_refresh_screen_from_active_tool()` is mid-rebuild, which dispatches no events. */
+    if (tref && !STREQ(tref->idname, data.tool_idname_at_invoke)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
@@ -735,6 +806,37 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     MEM_delete(&data);
     op->customdata = nullptr;
     return OPERATOR_CANCELLED;
+  }
+
+  /* Commit and end the session once another tool or brush has taken over (see
+   * #curve_patch_edit_session_superseded for how that is detected and why it has to be polled).
+   * Committing rather than cancelling matches the intent behind reaching for another tool: the
+   * patch the user built is kept, not silently discarded.
+   *
+   * Deliberately ABOVE the live-sync block below, which would otherwise read an incoming brush's
+   * parameters and re-stamp with them before the switch is ever noticed.
+   *
+   * The commit re-stamps one final time inside #curve_patch_edit_finish, and that pass reads the
+   * live brush -- so when the brush is what changed, the ORIGINAL one has to be restored for the
+   * duration, or the commit would crash on its uninitialized pressure curves exactly the way an
+   * unguarded switch does. A direct assignment is used rather than #BKE_paint_brush_set because
+   * this is a temporary, exactly-symmetric restore that must not touch
+   * `Paint::brush_asset_reference` (which still describes the brush the user just picked); the
+   * assignment is all #BKE_paint_brush_set does to `Paint::brush` anyway, and it carries no user
+   * counting. The patch must in any case be finalized with the brush it was built from. */
+  if (curve_patch_edit_session_superseded(C, data)) {
+    ToolSettings *ts = CTX_data_tool_settings(C);
+    Paint *paint = (ts && ts->sculpt) ? &ts->sculpt->paint : nullptr;
+    const bool swap_brush = paint && data.brush_at_invoke;
+    Brush *brush_incoming = swap_brush ? BKE_paint_brush(paint) : nullptr;
+    if (swap_brush) {
+      paint->brush = data.brush_at_invoke;
+    }
+    const bool committed = curve_patch_edit_finish(C, op, false);
+    if (swap_brush) {
+      paint->brush = brush_incoming;
+    }
+    return committed ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
   }
 
   CurvePatchCache &patch = patch_cache_of(C);
@@ -1004,10 +1106,12 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     return OPERATOR_PASS_THROUGH;
   }
 
-  /* By design, this modal operator only ever ends via an explicit Enter (commit) or Esc
-   * (cancel) -- no click, mouse-leaving-the-viewport, or tool switch implicitly ends it. Events
-   * that don't match anything below are simply consumed like any other event while the patch is
-   * live; the user must press Enter/Esc first. */
+  /* Below this point the modal only ever ends via an explicit Enter (commit) or Esc (cancel) -- no
+   * click and no mouse-leaving-the-viewport implicitly ends it. Events that don't match anything
+   * below are simply consumed like any other event while the patch is live; the user must press
+   * Enter/Esc first. A tool or brush switch is the one exception, and it is handled by the poll at
+   * the top of this function rather than here: it arrives as a click on the toolbar, which the
+   * pass-through gate above hands to the toolbar before any case here could see it. */
 
   switch (event->type) {
     case LEFTMOUSE:
@@ -1400,8 +1504,11 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         curve_patch_toggle_cyclic(*C, ob, patch);
       }
       break;
-    case EVT_TABKEY:
     case EVT_SKEY:
+      /* Deliberately NOT Tab, which this used to answer to as well: Tab belongs to the mode toggle,
+       * and swallowing it left no way to leave Sculpt Mode for the whole session. X is not an
+       * option either -- it deletes the active point (see `EVT_XKEY` above), per Blender
+       * convention. */
       if (event->val == KM_PRESS) {
         patch.frozen_params.swap_axis = !patch.frozen_params.swap_axis;
         curve_patch_undo_push(patch);
@@ -1409,18 +1516,6 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         curve_patch_restore_and_restamp(*C, ob, patch);
         ED_region_tag_redraw(CTX_wm_region(C));
       }
-      break;
-    case EVT_VKEY:
-      /* Sculpt Mode's default keymap binds plain V to `brush.asset_activate` (switches the
-       * active `Brush` datablock, see `blender_default.py`). Unlike the navigation-only events
-       * the `default:` case below lets through, that operator mutates `Sculpt::paint.brush` --
-       * exactly the live brush this modal re-reads on every restamp (`curve_patch_edit_modal`'s
-       * live-strength-sync block above, and `do_symmetrical_brush_actions()` ->
-       * `brush_strength()`, `mesh/sculpt.cc`). Letting a brush swap slip through here crashed the
-       * very next restamp on a freshly-activated brush whose `curve_strength` CurveMapping had
-       * never been initialized (`BKE_curvemapping_evaluateF()` dereferencing a null `curve_strength`,
-       * `mesh/sculpt.cc:2340`). Swallow it unconditionally rather than acting on it -- Curve Patch
-       * has no V-bound action of its own. */
       break;
     case EVT_RETKEY:
     case EVT_PADENTER:

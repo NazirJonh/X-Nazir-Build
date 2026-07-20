@@ -47,6 +47,8 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DEG_depsgraph.hh"
+
 #include "WM_api.hh"
 
 #include "ED_sculpt.hh"
@@ -153,6 +155,95 @@ void curve_patch_restore_only(Object &ob, const CurvePatchCache &patch)
   IndexMaskMemory memory;
   pbvh.tag_positions_changed(IndexMask::from_bits(patch.last_restamp_nodes, memory));
   mesh.tag_positions_changed_no_normals();
+}
+
+bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
+{
+  SculptSession *ss = ob.runtime->sculpt_session;
+  if (!ss || !ss->curve_patch_cache) {
+    return false;
+  }
+  CurvePatchCache *patch = ss->curve_patch_cache;
+
+  /* Mirrors the commit branch of `curve_patch_edit_finish()` (`paint_curve_patch_edit.cc`), which
+   * cannot be reused directly because it is tied to the modal operator's `customdata`. The modal is
+   * left running; it notices the freed cache on its next event and tears its own state down through
+   * its liveness guard. Keep the two in step when either changes. */
+  patch->final_quality = true;
+  curve_patch_restore_and_restamp(C, ob, *patch);
+  patch->final_quality = false;
+
+  bool committed = false;
+  if (patch->invalidated) {
+    /* A foreign operator changed the element count, so nothing can be written -- and
+     * `curve_patch_restore_only()` is a no-op in this state, leaving the mesh as that operator left
+     * it. Same outcome the modal reports as canceled. */
+    curve_patch_restore_only(ob, *patch);
+  }
+  else {
+    curve_patch_finish_commit(C, ob, *patch);
+    flush_update_done(&C, ob, UpdateType::Position);
+    committed = true;
+  }
+
+  MEM_delete(ss->cache);
+  ss->cache = nullptr;
+  MEM_delete(patch);
+  ss->curve_patch_cache = nullptr;
+
+  /* Republish the relief to the EVALUATED mesh, which is what Object Mode draws. Without this the
+   * mode exit left the original mesh correct -- the .blend saves and reloads with the relief, and a
+   * sculpt-mode re-entry rebuilds the PBVH from it -- while Object Mode kept drawing the surface
+   * without it.
+   *
+   * The cause is implicit sharing. `curve_patch_restore_and_restamp()` restores the pre-relief
+   * positions and only then calls `CTX_data_ensure_evaluated_depsgraph()`, which is a full scene
+   * evaluation rather than a getter: the evaluated mesh ends up SHARING that flat position array.
+   * The re-stamp that follows writes through `Mesh::vert_positions_for_write()`, and with the array
+   * shared that hands the original a freshly allocated buffer (`attribute_storage_access.cc`),
+   * stranding the evaluated mesh on the old flat one. This is the failure #34473 documents, and the
+   * remedy is the one `BKE_sculptsession_bm_to_me()` uses for it (`blenkernel/intern/paint.cc`).
+   *
+   * Tagging alone is not enough here, which is why the evaluation is forced: the interactive commit
+   * path gets its republish for free from the ordinary redraw that follows it, but this one runs
+   * inside the mode-exit operator and the session is torn down before any redraw can happen.
+   *
+   * Order matters twice over. This has to run AFTER the frees above: with `ss->cache` still alive
+   * `BKE_sculpt_update_object_before_eval()` takes its keep-PBVH branch and re-copies nothing,
+   * whereas a null `cache` makes it free the PBVH so the mesh is genuinely re-copied from the
+   * original. And the tag has to precede the evaluation, or there is nothing for it to act on. */
+  Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  BKE_mesh_batch_cache_dirty_tag(&mesh, BKE_MESH_BATCH_DIRTY_ALL);
+  DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+  CTX_data_ensure_evaluated_depsgraph(&C);
+
+  return committed;
+}
+
+void curve_patch_discard_on_session_end(Object &ob)
+{
+  SculptSession *ss = ob.runtime->sculpt_session;
+  if (!ss || !ss->curve_patch_cache) {
+    return;
+  }
+  /* Same order as the cancel branch of `curve_patch_edit_finish()`: put the surface back before
+   * anything the restore reads is torn down. Safe even for an invalidated patch -- the element-count
+   * guard at the top of `curve_patch_restore_only()` turns it into a no-op. */
+  curve_patch_restore_only(ob, *ss->curve_patch_cache);
+  /* Republish the restored surface for the same reason the commit path does -- see the long comment
+   * in #curve_patch_commit_on_session_end -- or the discarded relief keeps being drawn in Object
+   * Mode. No forced evaluation is needed here, and none is possible without a `bContext`: unlike the
+   * commit, nothing evaluates the graph between the restore and the mode exit's own tag, so there is
+   * no flat/stale snapshot to undo -- only the tag to place. */
+  Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  BKE_mesh_batch_cache_dirty_tag(&mesh, BKE_MESH_BATCH_DIRTY_ALL);
+  DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+  /* The patch took ownership of the anchor stroke's `StrokeCache` (see
+   * `curve_patch_publish_and_launch_modal()`), so it dies with the patch here too. */
+  MEM_delete(ss->cache);
+  ss->cache = nullptr;
+  MEM_delete(ss->curve_patch_cache);
+  ss->curve_patch_cache = nullptr;
 }
 
 namespace {
@@ -1506,7 +1597,20 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   Sculpt &sd = *tool_settings->sculpt;
   PaintModeSettings &paint_mode_settings = tool_settings->paint_mode;
   Scene *scene = CTX_data_scene(&C);
-  const Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(&C);
+  /* Deliberately the plain pointer, NOT `CTX_data_ensure_evaluated_depsgraph()`, which is a full
+   * `BKE_scene_graph_update_tagged()` rather than a getter. The two consumers below are the same
+   * ones an ordinary sculpt dab feeds, and `SculptPaintStroke::update_step()` (`mesh/sculpt.cc`)
+   * hands them a depsgraph captured once at stroke start -- sculpt's only `ensure_evaluated` is the
+   * one-off at stroke START. Running a scene evaluation per re-stamp is both needless and costly
+   * here: `flush_update_step()` at the end of every re-stamp tags `ID_RECALC_SHADING`
+   * unconditionally, so the next re-stamp's `ensure` always found pending work and paid for a full
+   * evaluation on every frame of a point drag.
+   *
+   * It was also actively harmful. That evaluation ran between `curve_patch_restore_only()` above and
+   * the re-stamp below -- with the mesh at its pre-relief positions -- leaving the evaluated mesh
+   * sharing the flat position array, which the re-stamp's `vert_positions_for_write()` then stranded
+   * (see the long comment in #curve_patch_commit_on_session_end). */
+  const Depsgraph &depsgraph = *CTX_data_depsgraph_pointer(&C);
 
   /* A normal interactive stroke keeps the vertex-normals #SharedCache fresh via the Paint BVH
    * draw engine between dabs; this recompute runs synchronously with no redraw in between, so it

@@ -307,6 +307,43 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
 void curve_patch_restore_only(Object &ob, const CurvePatchCache &patch);
 
 /**
+ * Commit a live patch, as an Enter-commit would, because the `SculptSession` holding it is about to
+ * be destroyed. Returns true when the patch was actually written; no-op returning false when no
+ * patch is live. Frees the patch and the `SculptSession::cache` it took over.
+ *
+ * Call from a mode-exit path that still has a `bContext` and has not torn anything down yet -- the
+ * final re-stamp needs an evaluated depsgraph, and the undo step this pushes is left parked for the
+ * calling operator's `OPTYPE_UNDO` exactly as `curve_patch_finish_commit()` requires.
+ *
+ * The modal that owns the patch (`SCULPT_OT_curve_patch_edit`) is deliberately left running: it
+ * sees the freed cache on its next event and releases its own operator state through the liveness
+ * guard at the top of `curve_patch_edit_modal()`.
+ */
+bool curve_patch_commit_on_session_end(bContext &C, Object &ob);
+
+/**
+ * Discard a live patch, as an Esc-cancel would, because the `SculptSession` holding it is about to
+ * be destroyed. No-op when no patch is live.
+ *
+ * The last-resort counterpart to #curve_patch_commit_on_session_end, for the teardown paths that
+ * have no `bContext` to commit through. Deliberately still called on the paths that DO commit
+ * first, where it is a no-op -- it is what guarantees the cache can never outlive the session.
+ *
+ * `SculptSession::curve_patch_cache` is owned by `SCULPT_OT_curve_patch_edit` and freed when that
+ * modal commits or cancels, but leaving sculpt mode frees the session without consulting the modal
+ * -- so without this the cache (and the `SculptSession::cache` the patch took over) leaked, and the
+ * mesh kept the uncommitted relief. #SculptSession's destructor cannot do it: `CurvePatchCache` is
+ * an editor type that blenkernel only forward-declares.
+ *
+ * Cancel rather than commit is deliberate. Committing needs a `bContext` to re-stamp and push an
+ * undo step, and the session is also freed from paths that have none -- object deletion
+ * (#BKE_object_free) among them -- so committing here would make the outcome depend on HOW the
+ * session ended. The modal itself is left to notice the freed session on its next event and tear
+ * its own operator state down (see the liveness guard in `curve_patch_edit_modal()`).
+ */
+void curve_patch_discard_on_session_end(Object &ob);
+
+/**
  * Finish a committed Curve Patch edit: close the patch's position undo step, and -- if the brush's
  * `curve_patch_face_set` flag is set and the relief actually raised anything -- assign a fresh face
  * set to the raised faces in an undo step of its own.

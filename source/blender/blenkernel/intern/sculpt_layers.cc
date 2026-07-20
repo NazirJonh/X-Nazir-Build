@@ -14,6 +14,10 @@
 #include <cstdio>
 #include <type_traits>
 
+#if SCULPT_LAYERS_DEBUG_COPY
+#  include <atomic>
+#endif
+
 #include "CLG_log.h"
 
 #include "MEM_guardedalloc.h"
@@ -1591,6 +1595,57 @@ void tree_copy(Mesh &dst, const Mesh &src)
   visited.add(&src_root.base);
   group_copy_children(*root, src_root, visited);
 }
+
+#if SCULPT_LAYERS_DEBUG_COPY
+void copy_profile_note(const Mesh &copied, const bool to_main, const double copy_ms)
+{
+  int64_t bytes = 0;
+  int layers_num = 0;
+  for (const SculptLayer *layer : layers(copied)) {
+    layers_num++;
+    /* Mirrors what #layer_copy actually duplicates: the offset buffer plus the layer's own mask. */
+    bytes += int64_t(sizeof(float[3])) * layer->totelem;
+    if (layer->base.mask != nullptr) {
+      bytes += mask_size_in_bytes(*layer->base.mask);
+    }
+  }
+  for (const SculptLayerGroup *group : groups(copied)) {
+    if (group->base.mask != nullptr) {
+      bytes += mask_size_in_bytes(*group->base.mask);
+    }
+  }
+  if (layers_num == 0 && bytes == 0) {
+    /* An empty tree still allocates the root group, but that is noise for this measurement. */
+    return;
+  }
+
+  static std::atomic<int64_t> total_copies = 0;
+  static std::atomic<int64_t> total_eval_copies = 0;
+  static std::atomic<int64_t> total_bytes = 0;
+  const int64_t copies = total_copies.fetch_add(1, std::memory_order_relaxed) + 1;
+  const int64_t eval_copies = to_main ?
+                                  total_eval_copies.load(std::memory_order_relaxed) :
+                                  total_eval_copies.fetch_add(1, std::memory_order_relaxed) + 1;
+  const int64_t bytes_so_far = total_bytes.fetch_add(bytes, std::memory_order_relaxed) + bytes;
+
+  static std::atomic<int64_t> total_us = 0;
+  const int64_t us_so_far = total_us.fetch_add(int64_t(copy_ms * 1000.0),
+                                               std::memory_order_relaxed) +
+                            int64_t(copy_ms * 1000.0);
+
+  printf(
+      "[DEBUG-copy] tree_copy: dest=%s layers=%d bytes=%.1f MB took=%.2f ms | session: %lld copies "
+      "(%lld eval), %.1f MB, %.1f ms\n",
+      to_main ? "main" : "eval",
+      layers_num,
+      double(bytes) / (1024.0 * 1024.0),
+      copy_ms,
+      (long long)copies,
+      (long long)eval_copies,
+      double(bytes_so_far) / (1024.0 * 1024.0),
+      double(us_so_far) / 1000.0);
+}
+#endif
 
 void rec_session_flags_clear(Mesh &mesh)
 {

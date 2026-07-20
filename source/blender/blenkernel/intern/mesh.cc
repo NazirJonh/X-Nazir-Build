@@ -208,7 +208,16 @@ static void mesh_copy_data(Main *bmain,
    * group; cleared first, or the deep copy would be asserted against a root it does not own and the
    * two meshes would share the tree. */
   mesh_dst->sculpt_layer_root = nullptr;
+#if SCULPT_LAYERS_DEBUG_COPY
+  const double copy_start = BLI_time_now_seconds();
+#endif
   blender::bke::sculpt_layers::tree_copy(*mesh_dst, *mesh_src);
+#if SCULPT_LAYERS_DEBUG_COPY
+  blender::bke::sculpt_layers::copy_profile_note(
+      *mesh_dst,
+      !(flag & LIB_ID_CREATE_NO_MAIN),
+      (BLI_time_now_seconds() - copy_start) * 1000.0);
+#endif
   /* REC is armed on one layer of one object for the duration of a Blender run, so a *new datablock*
    * must not inherit it — see #rec_session_flags_clear, which the blend writer's own scrub mirrors.
    * Restricted to copies that land in Main: an evaluation copy is the same layer being drawn, and

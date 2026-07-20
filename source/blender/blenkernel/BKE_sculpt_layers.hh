@@ -42,6 +42,19 @@
 #  define SCULPT_LAYERS_DEBUG_LOG 0
 #endif
 
+/**
+ * Probe for the cost of #tree_copy, which #mesh_copy_data runs unconditionally on every mesh copy,
+ * evaluation copies included (see #copy_profile_note for why that is not simply gated away).
+ *
+ * Split from #SCULPT_LAYERS_DEBUG_LOG rather than tied to it like the other probes: answering "how
+ * many copies does one stroke pay for, and how many bytes" needs a console that is not also
+ * carrying the stroke timing and base-flush traces. Set this to 1 on its own to measure, and put
+ * it back to 0 — the probe prints from inside a hot path.
+ */
+#ifndef SCULPT_LAYERS_DEBUG_COPY
+#  define SCULPT_LAYERS_DEBUG_COPY 0
+#endif
+
 namespace blender {
 struct BlendDataReader;
 struct BlendWriter;
@@ -1132,6 +1145,24 @@ void mask_blend_read(BlendDataReader *reader, SculptLayerMask *mask);
  * #tree_free would then release twice.
  */
 void tree_copy(Mesh &dst, const Mesh &src);
+
+#if SCULPT_LAYERS_DEBUG_COPY
+/**
+ * Report one #tree_copy that just ran, for #SCULPT_LAYERS_DEBUG_COPY.
+ *
+ * \a to_main tells the two cases apart: a copy that lands in Main is authored data the user asked
+ * for, a copy that does not is an evaluation copy the depsgraph made and will throw away. Only the
+ * latter is a candidate for sharing the layer buffers instead of duplicating them, and only the
+ * count of those per stroke says whether that is worth doing.
+ *
+ * \a copy_ms is the wall time #tree_copy itself took, which is the number that decides whether the
+ * duplication is worth engineering away: the byte count alone cannot tell a stall from bookkeeping
+ * the allocator absorbs.
+ *
+ * Both numbers are cumulative for the session; take the difference across one stroke.
+ */
+void copy_profile_note(const Mesh &copied, bool to_main, double copy_ms);
+#endif
 
 /**
  * Clear #SCULPT_LAYER_REC_EXEMPT and #SCULPT_LAYER_REC_ARMED from every layer of \a mesh.

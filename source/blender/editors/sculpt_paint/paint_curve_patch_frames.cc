@@ -90,6 +90,31 @@ bool curve_patch_frames_partition(const CurvePatchSpline &spline,
                                break_cos;
     begin = broke_on_edge ? end : std::max(begin + 1, (begin + end) / 2);
   }
+
+  /* Grow every window past its boundaries so neighbours share a stretch to cross-fade over. Done as
+   * a separate pass AFTER `dominant_normal` has already run on the cut-out (core) ranges: the grown
+   * part of a window that crosses a break lies on the OTHER face, and letting it vote would drag a
+   * short window's projection plane toward the very average this design exists to avoid. */
+  if (have_lengths && params.overlap_length > 0.0f) {
+    for (CurvePatchFrameRange &range : r_ranges) {
+      int grown_begin = range.begin;
+      while (grown_begin > 0 &&
+             spline.lengths_3d[range.begin] - spline.lengths_3d[grown_begin - 1] <
+                 params.overlap_length)
+      {
+        grown_begin--;
+      }
+      int grown_end = range.end;
+      while (grown_end < count - 1 &&
+             spline.lengths_3d[grown_end + 1] - spline.lengths_3d[range.end] <
+                 params.overlap_length)
+      {
+        grown_end++;
+      }
+      range.begin = grown_begin;
+      range.end = grown_end;
+    }
+  }
   return !r_ranges.is_empty();
 }
 
@@ -157,7 +182,12 @@ void curve_patch_frames_build(const CurvePatchSpline &spline,
     sub.plane_normal = range.normal;
 
     frame.s_offset = spline.lengths_3d[range.begin];
+    frame.s_end = spline.lengths_3d[range.end];
     frame.s_center = spline.lengths_3d[(range.begin + range.end) / 2];
+    /* Ramp only where this window hands over to a neighbour. At a real end of the curve there is
+     * nobody to hand over to, so the weight stays 1 and the relief keeps full strength to the tip. */
+    frame.fade_start = (range.begin == 0) ? 0.0f : params.overlap_length;
+    frame.fade_end = (range.end == last_index) ? 0.0f : params.overlap_length;
 
     /* The margin applies only where the window borders a real end of the curve: extending an
      * interior join would push the strip outside the window that serves it. */
@@ -196,6 +226,48 @@ void curve_patch_frames_build(const CurvePatchSpline &spline,
   r_frames.ready = !r_frames.frames.is_empty() && r_frames.frames.first().lut.ready;
 }
 
+/* Hermite ramp on `[0, 1]`, flat at both ends. Used for every blend weight below so a window's
+ * contribution reaches zero with zero slope -- a linear ramp still leaves a visible crease where it
+ * meets the flat region, which is the whole class of defect this blending exists to remove. */
+static float smoothstep01(const float t)
+{
+  if (!(t > 0.0f)) {
+    return 0.0f;
+  }
+  if (t >= 1.0f) {
+    return 1.0f;
+  }
+  return t * t * (3.0f - 2.0f * t);
+}
+
+/* How much this window's opinion counts at global arc length `s`: full inside its own span, ramping
+ * to nothing across each of its interior boundaries. */
+static float frame_span_weight(const CurvePatchFrame &frame, const float s)
+{
+  float weight = 1.0f;
+  if (frame.fade_start > 0.0f) {
+    weight *= smoothstep01((s - frame.s_offset) / frame.fade_start);
+  }
+  if (frame.fade_end > 0.0f) {
+    weight *= smoothstep01((frame.s_end - s) / frame.fade_end);
+  }
+  return weight;
+}
+
+/* How much this window's opinion counts for a vertex whose surface normal is `vertex_normal`.
+ *
+ * This replaces a hard `dot <= 0.3` rejection. The rejection was correct in intent -- a vertex on
+ * the side face has no business being projected through the top face's plane -- but being binary it
+ * put a step exactly where the two windows hand over, on top of the handover the span weight was
+ * already smoothing. Both have to ramp or neither helps. */
+static float frame_orientation_weight(const float3 &vertex_normal, const float3 &frame_normal)
+{
+  constexpr float reject_below = 0.3f;
+  constexpr float accept_above = 0.6f;
+  const float alignment = math::dot(vertex_normal, frame_normal);
+  return smoothstep01((alignment - reject_below) / (accept_above - reject_below));
+}
+
 int CurvePatchFrameSet::sample(const float3 &co,
                                const float3 &vertex_normal,
                                float2 r_uv[2],
@@ -207,7 +279,7 @@ int CurvePatchFrameSet::sample(const float3 &co,
   struct Candidate {
     float2 uv;
     float3 normal;
-    float score;
+    float weight;
   };
   Vector<Candidate, 8> candidates;
   for (const CurvePatchFrame &frame : frames) {
@@ -216,51 +288,72 @@ int CurvePatchFrameSet::sample(const float3 &co,
     {
       continue;
     }
-    /* The orientation culling is PER WINDOW -- that is the whole point: a vertex on the side face
-     * drops out of the top face's window and passes in the side face's own, instead of being
-     * rejected globally. */
-    if (math::dot(vertex_normal, frame.normal) <= 0.3f) {
+    /* Weighed PER WINDOW -- that is the whole point: a vertex on the side face weighs nothing in
+     * the top face's window and full in the side face's own, instead of being rejected globally. */
+    const float orientation_weight = frame_orientation_weight(vertex_normal, frame.normal);
+    if (!(orientation_weight > 0.0f)) {
       continue;
     }
     float2 local[2];
     const int num = frame.lut.sample(co, local);
     for (const int b : IndexRange(num)) {
       const float2 global_uv(local[b].x, local[b].y + frame.s_offset);
-      candidates.append({global_uv, frame.normal, std::abs(global_uv.y - frame.s_center)});
+      const float weight = orientation_weight * frame_span_weight(frame, global_uv.y);
+      if (!(weight > 0.0f)) {
+        continue;
+      }
+      candidates.append({global_uv, frame.normal, weight});
     }
   }
   if (candidates.is_empty()) {
     return 0;
   }
-  /* The best candidate within a group is the one with the smallest `score`. Sorting by it before
-   * grouping makes the winner independent of the order the windows were walked in. */
+  /* Heaviest first, so the first candidate to open a group anchors it and supplies its reported
+   * normal. `uv.y` breaks ties, which keeps the result independent of the order the windows were
+   * walked in (`std::sort` is not stable). */
   std::sort(candidates.begin(), candidates.end(), [](const Candidate &a, const Candidate &b) {
-    return a.score < b.score;
+    return a.weight != b.weight ? a.weight > b.weight : a.uv.y < b.uv.y;
   });
+
   /* Grouping by `s`: two distant stretches of a self-crossing curve are separate branches and must
-   * not be collapsed. Within a group the window whose center the vertex sits deepest in wins, since
-   * the projection distortion is smallest there. `u` does not depend on that choice, so a change of
-   * winner does not move it. */
+   * not be collapsed -- the caller resolves those by max `|height|`. Windows covering the SAME
+   * stretch land in one group and are averaged, which is what carries `u` continuously through a
+   * window join instead of stepping from one window's parameterization to the next. */
+  struct Group {
+    float2 uv_sum;
+    float3 normal;
+    float weight_sum;
+    float anchor_s;
+  };
   const float v_threshold = frames.first().lut.v_threshold;
-  int found = 0;
+  Vector<Group, 2> groups;
   for (const Candidate &candidate : candidates) {
     int group = -1;
-    for (const int g : IndexRange(found)) {
-      if (std::abs(r_uv[g].y - candidate.uv.y) <= v_threshold) {
+    for (const int g : groups.index_range()) {
+      if (std::abs(groups[g].anchor_s - candidate.uv.y) <= v_threshold) {
         group = g;
         break;
       }
     }
     if (group < 0) {
-      if (found >= 2) {
+      if (groups.size() >= 2) {
         continue;
       }
-      r_uv[found] = candidate.uv;
-      r_frame_normal[found] = candidate.normal;
-      found++;
+      groups.append({candidate.uv * candidate.weight,
+                     candidate.normal,
+                     candidate.weight,
+                     candidate.uv.y});
+    }
+    else {
+      groups[group].uv_sum += candidate.uv * candidate.weight;
+      groups[group].weight_sum += candidate.weight;
     }
   }
-  return found;
+  for (const int g : groups.index_range()) {
+    r_uv[g] = groups[g].uv_sum / groups[g].weight_sum;
+    r_frame_normal[g] = groups[g].normal;
+  }
+  return int(groups.size());
 }
 
 void CurvePatchFrameSet::clear()

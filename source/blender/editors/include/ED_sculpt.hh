@@ -160,6 +160,30 @@ void invalidate_runtime(Object &object);
 bool flush_pending_multires_base_for_mesh(Main &bmain, Mesh &mesh);
 
 /**
+ * Close an open sculpt-layer weight-mask editing session on \a object, storing the painted weights
+ * onto the node exactly as finishing the edit by hand would.
+ *
+ * Must run BEFORE anything that rebuilds the #SubdivCCG at a different subdivision level (the
+ * Subdivide and Delete Higher operators, the viewport / sculpt level sliders). A grid session keeps
+ * its weights in #SubdivCCG::masks and identifies the buffer it opened on by level, grid count and
+ * #SubdivCCG::id; a rebuild invalidates all three, so a session left open across one has its
+ * painted weights silently discarded on close. Storing them first is what keeps the user's work,
+ * and the mask itself survives the change — it is stored at the multires top level and
+ * #multires_set_tot_level resamples it along with the layer coefficients.
+ *
+ * Returns true when a session was actually open, so the caller can say so; false is the common case
+ * and costs one field test.
+ */
+bool finish_mask_edit(Object &object);
+
+/**
+ * #finish_mask_edit for callers that hold a mesh rather than an object (the RNA level setters).
+ * Acts on the first sculpt-mode object using \a mesh, matching
+ * #flush_pending_multires_base_for_mesh.
+ */
+bool finish_mask_edit_for_mesh(Main &bmain, Mesh &mesh);
+
+/**
  * Reports an info message and returns false when \a mesh still carries sculpt layers that have
  * not been baked into the base geometry. A topology-destroying edit (Trim, Mask Slice, Remesh,
  * ...) cannot preserve their per-element data, so callers must cancel the operator when this

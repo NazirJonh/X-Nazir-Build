@@ -657,6 +657,34 @@ bool flush_pending_multires_base_for_mesh(Main &bmain, Mesh &mesh)
   return false;
 }
 
+bool finish_mask_edit(Object &object)
+{
+  const SculptSession *ss = session_of(object);
+  if (ss == nullptr || ss->layers.mask_edit.node_uid == 0) {
+    return false;
+  }
+  /* Stored rather than discarded, and rather than refusing the level change: the weights are the
+   * user's hand work, and #mask_edit_end is the very same close the Finish operator performs — it
+   * consumes the pending base edits, puts the user's own sculpt mask back and recomposes. What it
+   * deliberately does not do is push an undo step of its own; the callers here are all global-undo
+   * operators or RNA setters whose own step captures the mesh, mask included. */
+  mask_edit_end(object);
+  return true;
+}
+
+bool finish_mask_edit_for_mesh(Main &bmain, Mesh &mesh)
+{
+  /* Sculpt mode owns a single active object, so the first object using this mesh in sculpt mode
+   * with a live session is the relevant one — as in #flush_pending_multires_base_for_mesh. */
+  for (Object &ob : bmain.objects) {
+    if (ob.data != &mesh.id || !(ob.mode & OB_MODE_SCULPT) || !ob.runtime->sculpt_session) {
+      continue;
+    }
+    return finish_mask_edit(ob);
+  }
+  return false;
+}
+
 bool flush_interactive_update(Main &bmain, Mesh &mesh)
 {
   const auto t_start = slp_perf_now();

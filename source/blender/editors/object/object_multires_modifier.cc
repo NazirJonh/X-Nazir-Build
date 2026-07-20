@@ -80,6 +80,24 @@ static bool multires_sculpt_layers_abort(wmOperator *op, Object *ob)
   return true;
 }
 
+/* Store an open sculpt-layer weight-mask edit before the subdivision level moves under it. Unlike
+ * the two aborts above this does not refuse: the level change is a legitimate thing to do with
+ * layers present (#multires_set_tot_level resamples both the layer coefficients and their masks),
+ * and only the *session* cannot survive it — its weights live in the #SubdivCCG the change rebuilds.
+ * Reported because the user did not ask for the edit to end. */
+static void multires_finish_mask_edit(wmOperator *op, Object *ob)
+{
+  if (!ob || ob->type != OB_MESH || !ob->data) {
+    return;
+  }
+  if (blender::ed::sculpt_paint::layers::finish_mask_edit(*ob)) {
+    BKE_report(op->reports,
+               RPT_INFO,
+               "Applied the sculpt layer weight mask being edited: changing the subdivision level "
+               "cannot preserve an open edit");
+  }
+}
+
 static wmOperatorStatus multires_higher_levels_delete_exec(bContext *C, wmOperator *op)
 {
   Scene *scene = CTX_data_scene(C);
@@ -93,6 +111,8 @@ static wmOperatorStatus multires_higher_levels_delete_exec(bContext *C, wmOperat
   if (multires_stroke_in_progress_abort(op, ob)) {
     return OPERATOR_CANCELLED;
   }
+  /* After the refusals, so a cancelled operator never ends an edit the user is still working on. */
+  multires_finish_mask_edit(op, ob);
 
   multiresModifier_del_levels(mmd, scene, ob, 1);
 
@@ -165,6 +185,8 @@ static wmOperatorStatus multires_subdivide_exec(bContext *C, wmOperator *op)
   if (multires_stroke_in_progress_abort(op, object)) {
     return OPERATOR_CANCELLED;
   }
+  /* After the refusals, so a cancelled operator never ends an edit the user is still working on. */
+  multires_finish_mask_edit(op, object);
 
   const MultiresSubdivideModeType subdivide_mode = MultiresSubdivideModeType(
       RNA_enum_get(op->ptr, "mode"));

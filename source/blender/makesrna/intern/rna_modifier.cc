@@ -1347,6 +1347,12 @@ static void rna_MultiresModifier_subdiv_level_set_ex(PointerRNA *ptr,
     }
     if (G_MAIN != nullptr && ob->type == OB_MESH && ob->data != nullptr) {
       Mesh *mesh = id_cast<Mesh *>(ob->data);
+      /* Before the flush, and before the level moves: a weight-mask editing session keeps its
+       * painted weights in #SubdivCCG::masks and recognizes that buffer by the level it opened at,
+       * so the rebuild this setter triggers would discard them without a word. Closing it stores
+       * them, which is also what settles the base — hence the flush below is then a no-op, kept for
+       * the case where no session was open at all. */
+      blender::ed::sculpt_paint::layers::finish_mask_edit_for_mesh(*G_MAIN, *mesh);
       blender::ed::sculpt_paint::layers::flush_pending_multires_base_for_mesh(*G_MAIN, *mesh);
     }
   }

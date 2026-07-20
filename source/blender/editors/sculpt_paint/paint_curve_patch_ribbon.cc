@@ -584,7 +584,9 @@ static void ribbon_laplacian_smooth(Vector<float3> &grid_pos,
 static uint64_t ribbon_source_hash(const CurvePatchSpline &spline,
                                    const float brush_radius,
                                    const bool high_quality,
-                                   const float end_margin)
+                                   const float end_margin_start,
+                                   const float end_margin_end,
+                                   const Span<float3> binormals)
 {
   uint64_t hash = 1469598103934665603ull; /* FNV-1a offset basis. */
   auto mix = [&hash](const float value) {
@@ -614,7 +616,17 @@ static uint64_t ribbon_source_hash(const CurvePatchSpline &spline,
   /* The end extension changes the strip's geometry without touching any of the spline data hashed
    * above, so a margin change would otherwise be served from the stale table -- switching between
    * Ribbon and Stamps mode, or moving the Jitter slider, would leave the ends unextended. */
-  mix(end_margin);
+  mix(end_margin_start);
+  mix(end_margin_end);
+  /* The binormals arrive from outside and change independently of everything hashed above (the
+   * smoothed normal field follows the surface snapshot, not the polyline), so without them a
+   * changed field would be served from a stale table. */
+  hash ^= uint64_t(binormals.size()) * 1099511628211ull;
+  for (const float3 &b : binormals) {
+    mix(b.x);
+    mix(b.y);
+    mix(b.z);
+  }
   return hash;
 }
 
@@ -622,12 +634,15 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                               const float brush_radius,
                               CurvePatchRibbonLut &r_lut,
                               const bool high_quality,
-                              const float end_margin)
+                              const float end_margin_start,
+                              const float end_margin_end,
+                              const Span<float3> binormals)
 {
   /* Nothing the ribbon depends on has changed, so the existing LUT is still exact. The modal editor
    * re-stamps on events that never touch the curve (strength slider, Length mode, Repeats count),
    * and those otherwise paid for a full rebuild each time. */
-  const uint64_t source_hash = ribbon_source_hash(spline, brush_radius, high_quality, end_margin);
+  const uint64_t source_hash = ribbon_source_hash(
+      spline, brush_radius, high_quality, end_margin_start, end_margin_end, binormals);
   if (r_lut.ready && r_lut.source_hash == source_hash) {
     return;
   }
@@ -653,7 +668,8 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
    * A cyclic curve is never extended -- it has no ends, and appending a sample past the join would
    * make the strip overlap itself there and re-introduce the false self-intersection the `cyclic`
    * flag exists to suppress. */
-  const bool extend = end_margin > 0.0f && !spline.cyclic && spline.poly_3d.size() >= 2 &&
+  const bool extend = (end_margin_start > 0.0f || end_margin_end > 0.0f) && !spline.cyclic &&
+                      spline.poly_3d.size() >= 2 &&
                       spline.lengths_3d.size() == spline.poly_3d.size();
   Vector<float3> poly_ext, tangents_ext;
   Vector<float> lengths_ext, radii_ext;
@@ -662,24 +678,34 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
     poly_ext.reserve(n + 2);
     tangents_ext.reserve(n + 2);
     lengths_ext.reserve(n + 2);
+    if (have_radii) {
+      radii_ext.reserve(n + 2);
+    }
     /* The extrapolated positions follow the END TANGENTS, so the extension continues the curve's
      * direction instead of the last segment's chord. Its radius is copied from the end sample so
      * the strip keeps its width all the way out, and its arc length simply continues past the ends
      * -- negative at the start, which is why `v` may no longer be assumed non-negative. */
-    poly_ext.append(spline.poly_3d.first() - spline.tangents_3d.first() * end_margin);
-    tangents_ext.append(spline.tangents_3d.first());
-    lengths_ext.append(-end_margin);
+    if (end_margin_start > 0.0f) {
+      poly_ext.append(spline.poly_3d.first() - spline.tangents_3d.first() * end_margin_start);
+      tangents_ext.append(spline.tangents_3d.first());
+      lengths_ext.append(-end_margin_start);
+      if (have_radii) {
+        radii_ext.append(spline.radii.first());
+      }
+    }
     poly_ext.extend(spline.poly_3d.as_span());
     tangents_ext.extend(spline.tangents_3d.as_span());
     lengths_ext.extend(spline.lengths_3d.as_span());
-    poly_ext.append(spline.poly_3d.last() + spline.tangents_3d.last() * end_margin);
-    tangents_ext.append(spline.tangents_3d.last());
-    lengths_ext.append(spline.lengths_3d.last() + end_margin);
     if (have_radii) {
-      radii_ext.reserve(n + 2);
-      radii_ext.append(spline.radii.first());
       radii_ext.extend(spline.radii.as_span());
-      radii_ext.append(spline.radii.last());
+    }
+    if (end_margin_end > 0.0f) {
+      poly_ext.append(spline.poly_3d.last() + spline.tangents_3d.last() * end_margin_end);
+      tangents_ext.append(spline.tangents_3d.last());
+      lengths_ext.append(spline.lengths_3d.last() + end_margin_end);
+      if (have_radii) {
+        radii_ext.append(spline.radii.last());
+      }
     }
   }
 
@@ -689,6 +715,24 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
   const Span<float> radii = extend ? radii_ext.as_span() : spline.radii.as_span();
   const int count = int(poly.size());
   const float3 plane_normal = math::normalize(spline.plane_normal);
+
+  /* The binormals live in the same index space as the polyline, so extending the ends has to extend
+   * them too -- by copying the outermost value, exactly as the radii do. */
+  Vector<float3> binormals_ext;
+  if (!binormals.is_empty() && extend) {
+    binormals_ext.reserve(count);
+    if (end_margin_start > 0.0f) {
+      binormals_ext.append(binormals.first());
+    }
+    binormals_ext.extend(binormals);
+    if (end_margin_end > 0.0f) {
+      binormals_ext.append(binormals.last());
+    }
+  }
+  const Span<float3> binormals_use = binormals.is_empty() ?
+                                         Span<float3>() :
+                                         (extend ? binormals_ext.as_span() : binormals);
+  const bool have_binormals = binormals_use.size() == count;
 
   /* Per-vertex world half-width; `R_max` drives the collapse validation and the LUT resolution. */
   float R_max = 0.0f;
@@ -719,18 +763,26 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
   Vector<float3> border_right(count); /* -B side, U = -1. */
   for (int i = 0; i < count; i++) {
     const float3 &T = tangents[i];
-    float3 B = math::cross(T, plane_normal);
-    const float blen = math::length(B);
-    if (blen > 1e-7f) {
-      B /= blen;
+    float3 B;
+    if (have_binormals) {
+      B = binormals_use[i];
+      const float blen = math::length(B);
+      B = blen > 1e-7f ? B / blen : math::cross(T, plane_normal);
     }
     else {
-      /* Degenerate: tangent parallel to the plane normal. */
-      B = math::cross(T, float3(0.0f, 0.0f, 1.0f));
-      if (math::length_squared(B) < 1e-12f) {
-        B = math::cross(T, float3(1.0f, 0.0f, 0.0f));
+      B = math::cross(T, plane_normal);
+      const float blen = math::length(B);
+      if (blen > 1e-7f) {
+        B /= blen;
       }
-      B = math::normalize(B);
+      else {
+        /* Degenerate: tangent parallel to the plane normal. */
+        B = math::cross(T, float3(0.0f, 0.0f, 1.0f));
+        if (math::length_squared(B) < 1e-12f) {
+          B = math::cross(T, float3(1.0f, 0.0f, 0.0f));
+        }
+        B = math::normalize(B);
+      }
     }
     border_left[i] = poly[i] + B * halfwidths[i];
     border_right[i] = poly[i] - B * halfwidths[i];

@@ -23,6 +23,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_mesh.hh"
+#include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
@@ -387,11 +388,22 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
      * than ~72 degrees from `plane_normal` cannot be part of the intended face, regardless of
      * how close it measures in raw 3D distance. Mirrors `symm_co` above so the comparison stays
      * in the same canonical space `plane_normal` was frozen in. */
-    float3 symm_normal = symmetry_flip(normals[idx], cache.mirror_symmetry_pass);
+    /* The normal comes from the SNAPSHOT when there is one: the shrinkwrap and the window planes
+     * were built against the pristine surface, whereas the live `normals[idx]` already carries the
+     * relief this patch applied -- the culling would end up depending on its own result. On the
+     * single-window path and on Grids (where there is no snapshot) the live normal stays, as
+     * before. */
+    const float3 raw_normal = (patch.surface.ready && idx < int(patch.surface.vert_normals.size())) ?
+                                  patch.surface.vert_normals[idx] :
+                                  normals[idx];
+    float3 symm_normal = symmetry_flip(raw_normal, cache.mirror_symmetry_pass);
     if (cache.radial_symmetry_pass) {
       symm_normal = math::transform_point(cache.symm_rot_mat_inv, symm_normal);
     }
-    if (math::dot(symm_normal, patch.plane_normal) <= 0.3f) {
+    /* On the single-window path the culling stays here and compares against the frozen plane. On the
+     * windowed path it moves into `frames.sample()`, where the normal of the SPECIFIC window is
+     * known -- which is exactly what removes the break in the relief on a face turned 90 degrees. */
+    if (!patch.frames.ready && math::dot(symm_normal, patch.plane_normal) <= 0.3f) {
       return std::nullopt;
     }
 
@@ -414,12 +426,16 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
     /* Relief one stretch of the curve contributes at `sample_co`, or nullopt when that stretch does
      * not actually reach it. */
     auto branch_relief = [&](const float3 &sample_co,
-                             const float2 ribbon_uv) -> std::optional<VertexRelief> {
+                             const float2 ribbon_uv,
+                             const float3 &frame_normal) -> std::optional<VertexRelief> {
       const float s = ribbon_uv.y;
       /* Signed offset from the ribbon plane, measured against the curve point the ribbon mapped this
        * sample to (NOT the globally-closest point -- consistent with the ribbon's own branch
-       * choice). */
-      const float normal_dist = math::dot(sample_co - patch.spline.evaluate(s), patch.plane_normal);
+       * choice). The plane is the one of the WINDOW that served this branch: measuring against the
+       * frozen global plane would reject exactly the vertices past a sharp edge, whose offset from
+       * it is large by construction. On the single-window path `frame_normal` equals
+       * `patch.plane_normal` and the formula collapses to the previous one. */
+      const float normal_dist = math::dot(sample_co - patch.spline.evaluate(s), frame_normal);
 
       /* `CurvePatchSpline::radii` stores the control curve's per-point `radius` attribute
        * verbatim, which is a unitless UI scalar (default 1.0 = "full brush size", see
@@ -714,10 +730,15 @@ void curve_patch_apply_relief_action(const Depsgraph &depsgraph,
      * overlap. */
     auto relief_at = [&](const float3 &sample_co) -> std::optional<VertexRelief> {
       float2 branch_uv[2];
-      const int branch_num = patch.ribbon.sample(sample_co, branch_uv);
+      float3 branch_normal[2] = {patch.plane_normal, patch.plane_normal};
+      const int branch_num = patch.frames.ready ?
+                                 patch.frames.sample(
+                                     sample_co, symm_normal, branch_uv, branch_normal) :
+                                 patch.ribbon.sample(sample_co, branch_uv);
       std::optional<VertexRelief> merged;
       for (const int b : IndexRange(branch_num)) {
-        const std::optional<VertexRelief> relief = branch_relief(sample_co, branch_uv[b]);
+        const std::optional<VertexRelief> relief = branch_relief(
+            sample_co, branch_uv[b], branch_normal[b]);
         if (!relief) {
           continue;
         }
@@ -1379,6 +1400,14 @@ void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchCache &p
   undo::push_end(ob);
 }
 
+/* Width of the normal-field smoothing. It arbitrates "`u` stays continuous" against "the strip hugs
+ * the edge": wider means a smoother texture on an oblique crossing and a looser fit. A fraction of
+ * the radius rather than a world-space constant, so the behavior does not depend on scene scale. */
+static float curve_patch_smooth_length(const CurvePatchCache &patch)
+{
+  return patch.frozen_params.radius * (patch.final_quality ? 0.5f : 0.8f);
+}
+
 void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &patch)
 {
   if (curve_patch_element_num(ob) != patch.element_num) {
@@ -1412,8 +1441,25 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   /* `control_curve` is always a single spline (see `paintcurve_geometry_init_bezier()`), so curve 0
    * carries the whole patch's cyclic state. */
   const bool cyclic = geom.curves_num() > 0 && geom.cyclic()[0];
-  patch.spline.build_from_positions(
-      geom.evaluated_positions(), evaluated_radii.as_span(), cyclic);
+
+  /* The polyline is pulled onto the pristine surface BEFORE the spline is built: arc lengths and
+   * tangents are computed inside `build_from_positions`, so shifting the points afterwards would
+   * leave them describing the previous curve, the one still hovering above the mesh. */
+  Array<float3> evaluated_positions(geom.evaluated_positions());
+  Array<float3> evaluated_normals(evaluated_positions.size(), float3(0.0f));
+  if (patch.surface.ready) {
+    curve_patch_surface_shrinkwrap(patch.surface,
+                                   patch.frozen_params.radius,
+                                   evaluated_positions.as_mutable_span(),
+                                   evaluated_normals.as_mutable_span());
+    curve_patch_surface_fill_invalid_normals(evaluated_normals.as_mutable_span(),
+                                             patch.plane_normal);
+  }
+  patch.spline.build_from_positions(evaluated_positions.as_span(),
+                                    evaluated_radii.as_span(),
+                                    cyclic,
+                                    patch.surface.ready ? evaluated_normals.as_span() :
+                                                          Span<float3>());
 
   if (patch.spline.is_empty()) {
     return;
@@ -1581,15 +1627,42 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
   /* Rebuild the ribbon UV LUT the relief action samples in place of
    * `CurvePatchSpline::closest_point()` (see `paint_curve_patch_ribbon.hh`). Built once per
    * restamp on the main thread; PHASE 1's parallel `compute_vertex()` walk only reads it. */
-  curve_patch_ribbon_build(patch.spline,
-                           patch.ribbon_radius,
-                           patch.ribbon,
-                           patch.final_quality,
-                           patch.ribbon_end_margin);
+  if (patch.surface.ready) {
+    curve_patch_spline_smooth_normals(patch.spline, curve_patch_smooth_length(patch));
+    CurvePatchFramesParams frame_params;
+    frame_params.min_window_length = 2.0f * patch.frozen_params.radius;
+    frame_params.turn_threshold_rad = patch.final_quality ? float(M_PI) * 12.0f / 180.0f :
+                                                            float(M_PI) * 25.0f / 180.0f;
+    frame_params.break_threshold_rad = float(M_PI) * 60.0f / 180.0f;
+    frame_params.max_frames = CURVE_PATCH_MAX_FRAMES;
+    curve_patch_frames_build(patch.spline,
+                             patch.ribbon_radius,
+                             frame_params,
+                             patch.final_quality,
+                             patch.ribbon_end_margin,
+                             patch.frames);
+    /* A separate channel, NOT `CURVE_PATCH_PROFILING`: that one is marked in its own comment as
+     * temporary instrumentation and would take the visibility of a quality degradation with it on
+     * the first cleanup. */
+    if (patch.frames.capped && !patch.reported_frame_cap) {
+      patch.reported_frame_cap = true;
+      BKE_report(CTX_wm_reports(&C),
+                 RPT_WARNING,
+                 "Curve Patch: curve too complex for full surface wrap, quality reduced");
+    }
+  }
+  else {
+    curve_patch_ribbon_build(patch.spline,
+                             patch.ribbon_radius,
+                             patch.ribbon,
+                             patch.final_quality,
+                             patch.ribbon_end_margin,
+                             patch.ribbon_end_margin);
+  }
 #if CURVE_PATCH_PROFILING
   const double prof_t_ribbon = BLI_time_now_seconds(); /* DEBUG-cpatch */
 #endif
-  if (!patch.ribbon.ready) {
+  if (patch.surface.ready ? !patch.frames.ready : !patch.ribbon.ready) {
     return;
   }
 
@@ -1720,7 +1793,8 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
    * geometry, which is the open question behind the doubled pattern on commit. */
   printf(
       "[DEBUG-cpatch] total=%.2fms | restore=%.2f ribbon=%.2f normals=%.2f relief=%.2f flush=%.2f | "
-      "nodes=%lld displaced=%lld snapshot=%lld quality=%d lut=%d interval=%.2fms\n",
+      "nodes=%lld displaced=%lld snapshot=%lld quality=%d lut=%d frames=%d capped=%d "
+      "interval=%.2fms\n",
       (prof_t_end - prof_t0) * 1000.0,
       (prof_t_restore - prof_t0) * 1000.0,
       (prof_t_ribbon - prof_t_restore) * 1000.0,
@@ -1732,6 +1806,8 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
       (long long)patch.orig_positions.size(),
       patch.final_quality ? 1 : 0,
       patch.ribbon.res,
+      int(patch.frames.frames.size()),
+      patch.frames.capped ? 1 : 0,
       prof_interval_ms);
   fflush(stdout);
 #endif
@@ -1778,6 +1854,22 @@ static void curve_patch_begin_editing(Object &ob,
   patch->plane_normal = plane_normal;
   /* A fresh session starts with nothing active; the cache may be reused from a previous patch. */
   patch->active_point = -1;
+  patch->reported_frame_cap = false;
+
+  /* Mesh only: the snapshot and `bvhtree_from_mesh_corner_tris_ex` are tied to mesh topology
+   * (faces / corner_verts / corner_tris), which CCG does not have. On Grids `surface.ready` stays
+   * false and the relief takes the previous single-window path. */
+  /* Cleared rather than assumed empty: this cache may be reused from a previous patch, and a stale
+   * window set left over from a Mesh object would otherwise still be sampled on a Grids one. The
+   * snapshot holds a copy of every vertex position plus a BVH, so it is also worth tens of
+   * megabytes on a dense object. */
+  patch->frames.clear();
+  patch->surface.clear();
+  if (bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Mesh) {
+    if (const Mesh *mesh = BKE_object_get_original_mesh(&ob)) {
+      curve_patch_surface_snapshot_build(*mesh, patch->surface);
+    }
+  }
 
   /* `cache.vc` otherwise still points at the just-finished stroke's own `ViewContext`, torn down
    * together with that stroke's operator. Repoint it at this patch's owned copy so every re-stamp's

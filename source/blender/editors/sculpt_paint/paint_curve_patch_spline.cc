@@ -26,6 +26,8 @@ void CurvePatchSpline::clear()
   lengths_3d.clear();
   tangents_3d.clear();
   radii.clear();
+  normals_3d.clear();
+  normals_smooth_3d.clear();
   cyclic = false;
 }
 
@@ -41,7 +43,8 @@ float CurvePatchSpline::total_length() const
 
 void CurvePatchSpline::build_from_positions(const Span<float3> positions,
                                             const Span<float> radii_in,
-                                            const bool cyclic_in)
+                                            const bool cyclic_in,
+                                            const Span<float3> normals_in)
 {
   clear();
   if (positions.size() < 2) {
@@ -92,6 +95,15 @@ void CurvePatchSpline::build_from_positions(const Span<float3> positions,
     radii.extend(radii_in);
     if (cyclic) {
       radii.append(radii_in[0]);
+    }
+  }
+
+  if (!normals_in.is_empty()) {
+    BLI_assert(normals_in.size() == positions.size());
+    normals_3d.reserve(poly_3d.size());
+    normals_3d.extend(normals_in);
+    if (cyclic) {
+      normals_3d.append(normals_in[0]);
     }
   }
 }
@@ -620,6 +632,46 @@ void curve_patch_stamps_add_cyclic_wrap(Vector<CurvePatchStamp> &stamps,
   std::sort(stamps.begin(), stamps.end(), [](const CurvePatchStamp &a, const CurvePatchStamp &b) {
     return a.center_v < b.center_v;
   });
+}
+
+void curve_patch_spline_smooth_normals(CurvePatchSpline &spline, const float smooth_length)
+{
+  spline.normals_smooth_3d.clear();
+  if (spline.normals_3d.is_empty()) {
+    return;
+  }
+  const int count = int(spline.normals_3d.size());
+  spline.normals_smooth_3d.resize(count);
+  if (!(smooth_length > 0.0f) || spline.lengths_3d.size() != count) {
+    spline.normals_smooth_3d.as_mutable_span().copy_from(spline.normals_3d.as_span());
+    return;
+  }
+  const float half = smooth_length * 0.5f;
+
+  /* `lengths_3d` is monotonically increasing, so the window bounds only ever move forward: the two
+   * cursors below visit each sample once instead of rescanning the whole curve per sample. The
+   * summed terms and their order are unchanged, so the result is identical to the naive scan. */
+  int lo = 0;
+  int hi = 0;
+  for (const int i : IndexRange(count)) {
+    const float s = spline.lengths_3d[i];
+    while (lo < count && spline.lengths_3d[lo] < s - half) {
+      lo++;
+    }
+    hi = std::max(hi, lo);
+    while (hi < count && spline.lengths_3d[hi] - s <= half) {
+      hi++;
+    }
+    float3 accum(0.0f);
+    for (const int j : IndexRange(lo, hi - lo)) {
+      accum += spline.normals_3d[j];
+    }
+    const float len = math::length(accum);
+    /* A window whose normals cancelled out (a turn of exactly 180 degrees) leaves the sample
+     * unsmoothed: every direction is equally arbitrary there, and the original at least agrees with
+     * its neighbours. */
+    spline.normals_smooth_3d[i] = len > 1e-6f ? accum / len : spline.normals_3d[i];
+  }
 }
 
 }  // namespace blender::ed::sculpt_paint

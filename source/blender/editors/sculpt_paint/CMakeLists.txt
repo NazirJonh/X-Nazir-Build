@@ -27,8 +27,10 @@ set(SRC
   paint_curve_geometry.cc
   paint_curve_patch_cache.cc
   paint_curve_patch_edit.cc
+  paint_curve_patch_frames.cc
   paint_curve_patch_ribbon.cc
   paint_curve_patch_spline.cc
+  paint_curve_patch_surface.cc
   paint_curve_topology.cc
   paint_curve_draw.cc
   paint_curve_sync.cc
@@ -129,8 +131,10 @@ set(SRC
   paint_cursor.hh
   paint_curve_intern.hh
   paint_curve_patch_cache.hh
+  paint_curve_patch_frames.hh
   paint_curve_patch_ribbon.hh
   paint_curve_patch_spline.hh
+  paint_curve_patch_surface.hh
   paint_intern.hh
 
   curves/sculpt_intern.hh
@@ -228,6 +232,7 @@ if(WITH_GTESTS)
     mesh/sculpt_detail_test.cc
     mesh/sculpt_undo_test.cc
     paint_curve_geometry_test.cc
+    paint_curve_patch_frames_test.cc
     paint_curve_patch_ribbon_test.cc
     paint_curve_patch_spline_test.cc
     roll_spline_test.cc

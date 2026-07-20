@@ -33,6 +33,7 @@
 #include <cstdint>
 
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
 #include "BLI_vector.hh"
 
 namespace blender::ed::sculpt_paint {
@@ -115,19 +116,30 @@ struct CurvePatchRibbonLut {
  * its samples a fraction of a strip-width apart, which the interactive resolution cannot resolve.
  * Interactive re-stamps pass false and keep the cheaper table.
  *
- * \param end_margin: world-space distance to extend the strip PAST each of a non-cyclic curve's two
- * ends, along the end tangents. Stamps mode needs it because a stamp centered on the very first or
- * last point reaches half its own size beyond the curve, and the part outside the rasterized strip
- * would get no UV and be clipped by a hard straight edge. The extension carries the end radius, so
- * the strip keeps its width through it, and the arc length it reports runs from `-end_margin` to
- * `total_length + end_margin` -- `v` is raw arc length and is deliberately allowed outside
- * `[0, total_length]` there. A cyclic curve has no ends and is never extended. 0 (the default)
- * reproduces the unextended strip exactly.
+ * \param end_margin_start, end_margin_end: world-space distances to extend the strip PAST the
+ * corresponding end of a non-cyclic curve, along that end's tangent. Stamps mode needs this because
+ * a stamp centered on the very first or last point reaches half its own size beyond the curve, and
+ * the part outside the rasterized strip would get no UV and be clipped by a hard straight edge. The
+ * extension carries the end radius, so the strip keeps its width through it, and the arc length it
+ * reports runs from `-end_margin_start` to `total_length + end_margin_end` -- `v` is raw arc length
+ * and is deliberately allowed outside `[0, total_length]` there. A cyclic curve has no ends and is
+ * never extended. Both zero (the default) reproduces the unextended strip exactly.
+ *
+ * The two are separate because a window of a multi-window build borders the curve's real end on one
+ * side only -- extending the interior join would push the strip outside the window that serves it.
+ *
+ * \param binormals: the across-curve direction for each `poly_3d` sample. An empty span means
+ * "derive them as `cross(T, plane_normal)`" -- the default, bit-for-bit the previous behavior. A
+ * non-empty span must match `spline.poly_3d` in size; it is what allows building the strip over a
+ * CONTINUOUS binormal field, whereas deriving from a single `plane_normal` breaks `u` wherever the
+ * curve crosses an edge at an angle.
  */
 void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                               float brush_radius,
                               CurvePatchRibbonLut &r_lut,
                               bool high_quality = false,
-                              float end_margin = 0.0f);
+                              float end_margin_start = 0.0f,
+                              float end_margin_end = 0.0f,
+                              Span<float3> binormals = {});
 
 }  // namespace blender::ed::sculpt_paint

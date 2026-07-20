@@ -68,6 +68,13 @@
  * disable; grep `DEBUG-cpatch` to remove every touch point once measured. */
 #define CURVE_PATCH_PROFILING 1
 
+/* TEMPORARY diagnostic for the seam at a surface fold. Forces the wrap to a SINGLE window while
+ * leaving the shrinkwrap, the smoothed normal field and the smoothed-binormal ribbon fully active,
+ * so the window join is the only variable removed. Seam gone -> the join produces it; seam still
+ * there -> it comes from the shrinkwrap or the ribbon, and the join is innocent. Set back to 0
+ * once measured; grep `FORCE_SINGLE_FRAME` to remove every touch point. */
+#define CURVE_PATCH_FORCE_SINGLE_FRAME 0
+
 namespace blender::ed::sculpt_paint {
 
 const bke::CurvesGeometry *ED_paint_curve_patch_active_control_curve(const Object *ob)
@@ -1644,7 +1651,17 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchCache &p
     frame_params.turn_threshold_rad = patch.final_quality ? float(M_PI) * 12.0f / 180.0f :
                                                             float(M_PI) * 25.0f / 180.0f;
     frame_params.break_threshold_rad = float(M_PI) * 60.0f / 180.0f;
+    /* Half a brush radius of shared stretch on each side of an interior join. Enough that the
+     * handover happens well inside both windows' tables rather than on their outermost rows, and
+     * short enough that a window crossing a break does not rasterize a long stretch of the other
+     * face nearly edge-on. */
+    frame_params.overlap_length = 0.5f * patch.frozen_params.radius;
+#if CURVE_PATCH_FORCE_SINGLE_FRAME
+    /* FORCE_SINGLE_FRAME: see the note at the top of this file. */
+    frame_params.max_frames = 1;
+#else
     frame_params.max_frames = CURVE_PATCH_MAX_FRAMES;
+#endif
     curve_patch_frames_build(patch.spline,
                              patch.ribbon_radius,
                              frame_params,

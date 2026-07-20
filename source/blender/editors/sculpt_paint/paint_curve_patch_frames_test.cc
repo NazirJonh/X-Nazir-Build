@@ -36,7 +36,19 @@ static CurvePatchFramesParams default_params()
   params.min_window_length = 1.0f;
   params.turn_threshold_rad = float(M_PI) * 25.0f / 180.0f;
   params.break_threshold_rad = float(M_PI) * 60.0f / 180.0f;
+  /* Non-zero on purpose: overlapping windows are the production configuration, so the cases below
+   * exercise the blended handover rather than the edge-to-edge cut it replaced. */
+  params.overlap_length = 0.2f;
   params.max_frames = 32;
+  return params;
+}
+
+/** The pre-overlap configuration, kept so the cut points themselves stay under test independently
+ * of how far the windows are then grown. */
+static CurvePatchFramesParams no_overlap_params()
+{
+  CurvePatchFramesParams params = default_params();
+  params.overlap_length = 0.0f;
   return params;
 }
 
@@ -81,6 +93,31 @@ TEST(paint_curve_patch_frames, sharp_edge_splits_despite_min_length)
   const float last_side = math::dot(ranges.last().normal, float3(1.0f, 0.0f, 0.0f));
   EXPECT_GT(first_top, 0.9f);
   EXPECT_GT(last_side, 0.9f);
+}
+
+TEST(paint_curve_patch_frames, overlap_grows_windows_past_the_break)
+{
+  CurvePatchSpline spline;
+  build_edge_crossing(spline);
+
+  Vector<CurvePatchFrameRange> tight, grown;
+  bool capped = false;
+  ASSERT_TRUE(curve_patch_frames_partition(spline, no_overlap_params(), tight, capped));
+  ASSERT_TRUE(curve_patch_frames_partition(spline, default_params(), grown, capped));
+  ASSERT_EQ(tight.size(), grown.size());
+  ASSERT_GE(tight.size(), 2);
+
+  /* Without overlap two windows share a single sample, so there is no stretch to cross-fade over
+   * and the handover between them is a step by construction. With overlap they genuinely share
+   * one. */
+  EXPECT_EQ(tight[0].end, tight[1].begin);
+  EXPECT_GT(grown[0].end, grown[1].begin);
+
+  /* Growing must not move a window's projection plane: the grown part lies on the OTHER face, and
+   * letting it vote is exactly the averaging this design exists to avoid. */
+  for (const int i : tight.index_range()) {
+    EXPECT_V3_NEAR(grown[i].normal, tight[i].normal, 1e-5f);
+  }
 }
 
 TEST(paint_curve_patch_frames, noisy_normals_do_not_shatter)

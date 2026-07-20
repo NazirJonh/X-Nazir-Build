@@ -60,6 +60,15 @@ struct CurvePatchFramesParams {
   float turn_threshold_rad = 0.0f;
   /** A break: tears the window open REGARDLESS of `min_window_length`. */
   float break_threshold_rad = 0.0f;
+  /** Arc length by which every window is grown past each of its INTERIOR boundaries, so two
+   * neighbours share a stretch to cross-fade over.
+   *
+   * Windows used to meet edge to edge across a break, on the argument that each face's vertices are
+   * rejected by orientation in the other's window anyway. That turned out to be what produced the
+   * visible seam: with no shared stretch there is nothing to blend, so the handover from one window
+   * to the next is a step by construction -- and it lands exactly where BOTH LUTs sit on their
+   * outermost row, the worst place either can be sampled. 0 reproduces the old edge-to-edge cut. */
+  float overlap_length = 0.0f;
   int max_frames = CURVE_PATCH_MAX_FRAMES;
 };
 
@@ -81,11 +90,18 @@ struct CurvePatchFrame {
   float3 normal = float3(0.0f, 0.0f, 1.0f);
   /** The local LUT numbers arc length from zero at its own slice; adding this offset puts `s` back
    * into the curve's global arc length, which is the same for every window. That is precisely why
-   * a change of winning window does not shift the texture along the length. */
+   * a change of winning window does not shift the texture along the length. Also the window's
+   * global start. */
   float s_offset = 0.0f;
-  /** Global arc length at the window's midpoint; the tie-break when several windows cover a
-   * vertex. */
+  /** Global arc length at the window's end. */
+  float s_end = 0.0f;
+  /** Global arc length at the window's midpoint. */
   float s_center = 0.0f;
+  /** Arc length over which this window's blend weight ramps in at its start / out at its end. Zero
+   * at a REAL end of the curve: fading there would thin the relief out at the curve's own tips
+   * instead of handing it over to a neighbour that does not exist. */
+  float fade_start = 0.0f;
+  float fade_end = 0.0f;
   float3 bb_min = float3(0.0f);
   float3 bb_max = float3(0.0f);
 };
@@ -99,13 +115,23 @@ struct CurvePatchFrameSet {
   /**
    * Up to two global `(u, s)` branches for `co`.
    *
-   * Only the ORIENTATION culling happens in here: the depth culling needs `falloff_radius_at_s` and
-   * is applied by the caller per branch, after the relief has been evaluated -- moving it in here
-   * would change how many branches survive to the merge by max `|height|`.
+   * Windows covering the same stretch are BLENDED, not picked between: their `(u, s)` are averaged
+   * with weights that fade both with distance from the window's own span and with how far the
+   * vertex normal has turned from the window's plane. Picking one winner put a step wherever the
+   * winner changed -- a hard seam right across the strip at every window join -- because neither
+   * the parameterization nor the rasterization of two windows agrees exactly.
    *
-   * `r_frame_normal` reports the plane of the window that served each branch. Without it the caller
-   * would measure `normal_dist` against the frozen global plane, and the depth cut-off would reject
-   * exactly the vertices past the edge that this whole mechanism exists to reach.
+   * Two branches survive only when they are genuinely DIFFERENT stretches of a self-crossing curve
+   * (their `s` differ by more than the LUT's `v_threshold`); those must not be merged, since the
+   * caller resolves them by max `|height|`.
+   *
+   * The depth culling is deliberately NOT done here: it needs `falloff_radius_at_s` and is applied
+   * by the caller per branch, after the relief has been evaluated -- moving it in here would change
+   * how many branches survive to that merge.
+   *
+   * `r_frame_normal` reports the plane of the heaviest-weighted window behind each branch. It is an
+   * observable for tests and diagnostics only -- feeding it into the relief's own depth measurement
+   * is what produced the first version of the seam (see `CurvePatchSpline::normal_at`).
    */
   int sample(const float3 &co,
              const float3 &vertex_normal,

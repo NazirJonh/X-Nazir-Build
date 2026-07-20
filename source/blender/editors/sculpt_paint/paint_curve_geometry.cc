@@ -832,9 +832,10 @@ static void paintcurve_separate_split_curve_endpoints(bke::CurvesGeometry &geom,
     const std::optional<Span<float3>> handles_left = geom.handle_positions_left();
     const std::optional<Span<float3>> handles_right = geom.handle_positions_right();
     if (handles_left && handles_right) {
-      ref_len = max_fff(ref_len,
-                        math::distance(positions[left_end], handles_left.value()[left_end]),
-                        math::distance(handles_right.value()[right_start], positions[right_start]));
+      ref_len = math::max(
+          ref_len,
+          math::max(math::distance(positions[left_end], handles_left.value()[left_end]),
+                    math::distance(handles_right.value()[right_start], positions[right_start])));
     }
   }
   if (left_points.size() >= 2) {

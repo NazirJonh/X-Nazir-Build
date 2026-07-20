@@ -718,6 +718,26 @@ static void mask_edit_close(Object &object, const bool store_weights)
   if (ss == nullptr || ss->layers.mask_edit.node_uid == 0) {
     return;
   }
+  /* Consumed here rather than left to the re-evaluation #commit_layers_change triggers at the end of
+   * this function, and while the node still carries the mask the live CCG was composed with. Mask
+   * painting sets `SubdivCCG::dirty.coords` on every dab (#flush_update_step tags multires before it
+   * branches on the update type), so the flags are set at every close that follows an edit; the
+   * deferred flush then runs from #object_update_from_subsurf_ccg during that re-evaluation and
+   * subtracts the layer's contribution at the *new* weights from positions composed at the old ones.
+   * The difference lands in the base MDisps, which cancels the mask change exactly — the surface does
+   * not move at all — and bakes the attenuated part of the layer into the base for good.
+   *
+   * Placed here rather than in the operators so that every path that closes a session is covered
+   * (a layer selection, a merge, leaving sculpt mode, undo), not only the two that route through
+   * #mask_op_context_get. Idempotent: the flush primitive returns immediately once the flags are
+   * clear, so the operators that already flushed on entry pay nothing.
+   *
+   * Ahead of the resume below, matching the order every other layer operator uses: the flush
+   * primitive parks the session's weights itself (#bke::sculpt_layers::MaskEditSuspendGuard), so it
+   * reshapes from the user's own mask either way. */
+  if (ss->layers.mask_edit.on_grids) {
+    flush_pending_multires_base(object);
+  }
   /* A suspended session has the *user's* mask in the standard storage and its own weights parked, so
    * compressing from here would store the user's sculpt mask onto the node — the precise corruption
    * the suspend exists to prevent, with the two buffers swapped. Resumed first rather than asserted

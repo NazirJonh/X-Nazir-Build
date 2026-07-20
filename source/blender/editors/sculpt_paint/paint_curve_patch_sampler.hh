@@ -79,11 +79,12 @@ struct CurvePatchSample {
    * the brush has no texture (`brush.mtex.tex == nullptr`), matching the initializer the sampler
    * already used for its local `tex_rgba`/`sample_rgba` buffers before the null-texture guard.
    *
-   * `ColorEffect` reads the RGB as its paint color (replacing `BKE_brush_color_get` when a texture
-   * is assigned) and uses the alpha to modulate the mix; `ReliefEffect` ignores this field, so its
-   * existing aggregate initializers (`{orig, height, weight}`) keep working via the default here.
-   * The alpha is the texture's own alpha (an image texture with transparency reports < 1), not a
-   * mix weight by itself. */
+   * `ColorEffect` and `ImageColorEffect` use only the ALPHA, to modulate their mix -- both paint
+   * the brush's primary color, so the RGB is carried but not yet read, reserved for real
+   * RGBA-texture support. `ReliefEffect` ignores the field entirely, so its existing aggregate
+   * initializers (`{orig, height, weight}`) keep working via the default here. The alpha is the
+   * texture's own alpha (an image texture with transparency reports < 1), not a mix weight by
+   * itself. */
   float4 tex_color{1.0f, 1.0f, 1.0f, 1.0f};
 };
 

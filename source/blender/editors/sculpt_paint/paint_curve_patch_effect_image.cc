@@ -5,9 +5,8 @@
 /** \file
  * \ingroup edsculpt
  *
- * Image-canvas target for a Curve Patch session: mixes the brush color (or, when the brush carries
- * a texture, the texture's own RGB) into the active Sculpt Mode image canvas by the magnitude
- * `CurvePatchSampler` reports.
+ * Image-canvas target for a Curve Patch session: mixes the brush's primary color into the active
+ * Sculpt Mode image canvas by the magnitude `CurvePatchSampler` reports.
  *
  * Reuses `curve_patch_cull_nodes()` verbatim -- texpaint `PixelNode`s are index-parallel to
  * ordinary PBVH mesh nodes -- and reuses `CurvePatchSampler::sample()` verbatim. Unlike
@@ -956,7 +955,7 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   /* PHASE 2 (serial): the sole writer of the snapshot, of `patch.pass_weight_accum` and of the
    * image buffers. Follows `ColorEffect::apply_pass()`'s PHASE 2 step for step -- lazy per-slot
    * snapshot capture, mix FROM the snapshot rather than from the live value, cross-pass blend,
-   * clamp, texture-vs-solid color source.
+   * clamp, texture-alpha attenuation.
    *
    * Two things differ, both forced by the target rather than chosen. The snapshot is keyed by
    * `tile_size` x `tile_size` tile plus an in-tile offset instead of by a domain element index,
@@ -968,6 +967,10 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * (`paint::image::write_image_pixels()` below). */
   const Paint &paint_settings = *cache.paint;
   const float3 brush_color = BKE_brush_color_get(&paint_settings, &brush);
+  /* The RGB the patch paints is ALWAYS the brush's primary color; a brush texture contributes only
+   * its intensity (already folded into `CurvePatchSample::value` by the sampler) and its alpha,
+   * which attenuates the mix below. `CurvePatchSample::tex_color`'s RGB is deliberately left unread
+   * until the color path grows real RGBA-texture support. */
   const bool has_texture = brush.mtex.tex != nullptr;
 
   BitVector<> touched(pbvh.nodes_num(), false);
@@ -1033,12 +1036,10 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
          * attenuates the factor, so a partially-transparent texel paints at partial strength. */
         const float source_alpha = has_texture ? pixel.tex_color.w : 1.0f;
         const float factor = std::clamp(blended, 0.0f, 1.0f) * source_alpha;
-        const float3 source_rgb = has_texture ? float3(pixel.tex_color) : brush_color;
-        const float dest_alpha = has_texture ?
-                                     math::interpolate(orig.w, pixel.tex_color.w, factor) :
-                                     orig.w;
-        chunk.values[pixel.local] = float4(
-            math::interpolate(float3(orig), source_rgb, factor), dest_alpha);
+        /* The destination alpha is carried through untouched: `BKE_brush_color_get()` returns a
+         * `float3`, so writing anything else would invent data the brush never specified. */
+        chunk.values[pixel.local] = float4(math::interpolate(float3(orig), brush_color, factor),
+                                           orig.w);
       }
 
       /* Write the chunk back WHOLE. The unaccepted pixels still hold the originals read in PHASE 1,

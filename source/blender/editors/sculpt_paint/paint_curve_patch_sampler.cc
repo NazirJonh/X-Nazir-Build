@@ -366,10 +366,10 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
           best_abs = std::abs(candidate);
           tex_value = sample;
           stamp_strength = stamp_falloff * it->strength;
-          /* Carry the winner's RGBA alongside its intensity, so a color patch paints the color of
-           * the stamp that actually won the merge rather than whichever happened to be sampled
-           * last. Mirrors how `tex_value`/`stamp_strength` are kept in sync with the winning
-           * candidate above. */
+          /* Carry the winner's RGBA alongside its intensity, so a color patch is attenuated by the
+           * alpha of the stamp that actually won the merge rather than by whichever happened to be
+           * sampled last. Mirrors how `tex_value`/`stamp_strength` are kept in sync with the
+           * winning candidate above. */
           copy_v4_v4(tex_rgba, sample_rgba);
         }
       }

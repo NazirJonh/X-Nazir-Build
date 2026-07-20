@@ -1674,7 +1674,14 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
       /* The stroke is now fully captured in the layer and the base MDisps are unchanged. Clear
        * the dirty flag so a later flush does not bake the composed surface into the base, and
        * skip any depsgraph tag: the live CCG already equals base + layers, so a re-evaluation
-       * would only rebuild the PBVH (the per-stroke freeze this system explicitly avoids). */
+       * would only rebuild the PBVH (the per-stroke freeze this system explicitly avoids).
+       *
+       * This assumes `subdiv_ccg` (from `ss->subdiv_ccg`) is the same #SubdivCCG that a later
+       * depsgraph-driven flush reads off `mesh_eval`, which only holds while
+       * #BKE_mesh_wrapper_ensure_subdivision resolves to a no-op (see the load-bearing-identity
+       * comment on that assumption in object.cc, object_update_from_subsurf_ccg). If the two ever
+       * diverge, this clear is silently lost and the next flush bakes the composed surface into
+       * the base MDisps. */
       subdiv_ccg.dirty.coords = false;
       SLP_PERF("[DEBUG-perf] stroke_record_end: REC=on multires reshape %d touched grids in %lld us\n",
                touched_num,

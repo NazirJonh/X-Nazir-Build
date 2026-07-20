@@ -1286,8 +1286,14 @@ static bool can_restore_active_sculpt_layer_mesh(const StepData &step_data, Obje
 /**
  * Sculpt layers: revert or re-apply the explicit per-element deltas recorded for the active
  * layer. The delta is constant, so undo subtracts and redo adds it (no swap needed).
+ *
+ * \a is_undo is threaded down from #restore_list rather than read off #StepData::needs_undo:
+ * that flag is flipped only by the dyntopo and geometry restore helpers, and a #Type::Position
+ * step recorded into a layer reaches none of them, so it would read a constant `true` and repeat
+ * the undo subtraction on every redo (see the identical reasoning at #restore_list's is_undo
+ * parameter comment).
  */
-static void restore_active_sculpt_layer(StepData &step_data, Object &object)
+static void restore_active_sculpt_layer(StepData &step_data, Object &object, const bool is_undo)
 {
   if (step_data.sculpt_layer_uid == 0 || step_data.sculpt_layer_data.is_empty()) {
     return;
@@ -1308,7 +1314,7 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object)
       return;
     }
     const int64_t grid_area = stored.size() / grids.size();
-    const bool undo_grids = step_data.needs_undo();
+    const bool undo_grids = is_undo;
     for (const int64_t t : grids.index_range()) {
       const int64_t start = int64_t(grids[t]) * grid_area;
       if (start < 0 || start + grid_area > live.size()) {
@@ -1337,7 +1343,7 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object)
   if (verts.size() != stored.size()) {
     return;
   }
-  const bool undo = step_data.needs_undo();
+  const bool undo = is_undo;
   /* Deliberately the CURRENT effective influence, not the one in force when the stroke was
    * recorded: every influence change keeps `positions == base + sum(data * effective)` (canonical
    * recompute or the incremental RNA delta), so the positions embed the recorded delta scaled by
@@ -1396,6 +1402,7 @@ void store_active_sculpt_layer_grids(Object &object, Vector<int> &&grids, Vector
   }
   step_data->sculpt_layer_uid = layer->base.uid;
   step_data->sculpt_layer_grids = true;
+  step_data->undo_size += grids.as_span().size_in_bytes() + deltas.as_span().size_in_bytes();
   step_data->sculpt_layer_verts = std::move(grids);
   step_data->sculpt_layer_data = std::move(deltas);
 }
@@ -1418,6 +1425,8 @@ void store_active_sculpt_layer_verts(Object &object,
     return;
   }
   step_data->sculpt_layer_uid = layer->base.uid;
+  step_data->undo_size += verts.as_span().size_in_bytes() + deltas.as_span().size_in_bytes() +
+                          seg_start.as_span().size_in_bytes() + seg_count.as_span().size_in_bytes();
   step_data->sculpt_layer_verts = std::move(verts);
   step_data->sculpt_layer_data = std::move(deltas);
   step_data->sculpt_layer_seg_start = std::move(seg_start);
@@ -2655,7 +2664,7 @@ static void restore_list(bContext *C,
            * base-stroke step): the layer data is about to change, and a later flush against the
            * changed layer set would leak the delta into the base. */
           layers::flush_pending_multires_base(object);
-          restore_active_sculpt_layer(step_data, object);
+          restore_active_sculpt_layer(step_data, object, is_undo);
           Mesh &mesh = *id_cast<Mesh *>(object.data);
           DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
           break;
@@ -2705,7 +2714,7 @@ static void restore_list(bContext *C,
          * #bounds_orig_ (and #store_bounds_orig clears the dirty accumulator, so nothing catches up
          * later), and the next stroke would drop nodes whose geometry moved back under the cursor
          * while deforming their neighbors — the mesh tears along leaf-node borders. */
-        restore_active_sculpt_layer(step_data, object);
+        restore_active_sculpt_layer(step_data, object, is_undo);
 
         const IndexMask changed_nodes = IndexMask::from_predicate(
             node_mask,

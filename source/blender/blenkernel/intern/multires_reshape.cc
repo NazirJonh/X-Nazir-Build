@@ -172,9 +172,6 @@ static bool subtract_sculpt_layers_from_ccg_positions(Mesh &mesh,
   if (!BKE_multires_mesh_has_grid_sculpt_layers(mesh)) {
     return true;
   }
-  Array<float3> total(subdiv_ccg.positions.size(), float3(0.0f));
-  Array<float3> contribution(subdiv_ccg.positions.size());
-  bool any_enabled_layer = false;
   /* Select the exact same layer set the displacement evaluator composed onto the CCG (it validates
    * against the top-level MDisps layout, see #BKE_multires_grid_sculpt_layers_collect). A layer at
    * a mismatching size the evaluator skipped must be skipped here too: subtracting a contribution
@@ -182,6 +179,31 @@ static bool subtract_sculpt_layers_from_ccg_positions(Mesh &mesh,
   const int top_grid_size = bke::subdiv::grid_size_from_level(top_level);
   const int64_t expected_totelem = int64_t(mesh.corners_num) * top_grid_size * top_grid_size;
 
+  /* Same bail-out as above, extended to the layers that would actually contribute: a mesh whose
+   * grid layers are all disabled (zero effective influence) or size-mismatched still has nothing
+   * to subtract, so skip the O(N) allocations below for that case too. */
+  bool any_contributing_layer = false;
+  for (const SculptLayer *layer_ptr : bke::sculpt_layers::layers(mesh)) {
+    const SculptLayer &layer = *layer_ptr;
+    if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {
+      continue;
+    }
+    if (bke::sculpt_layers::effective(layer) == 0.0f) {
+      continue;
+    }
+    if (int64_t(layer.totelem) != expected_totelem) {
+      continue;
+    }
+    any_contributing_layer = true;
+    break;
+  }
+  if (!any_contributing_layer) {
+    return true;
+  }
+
+  Array<float3> total(subdiv_ccg.positions.size(), float3(0.0f));
+  Array<float3> contribution(subdiv_ccg.positions.size());
+  bool any_enabled_layer = false;
   for (const SculptLayer *layer_ptr : bke::sculpt_layers::layers(mesh)) {
     const SculptLayer &layer = *layer_ptr;
     if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr) {

@@ -22,6 +22,7 @@ namespace blender {
 struct Brush;
 struct Depsgraph;
 struct Object;
+struct PaintModeSettings;
 struct bContext;
 }  // namespace blender
 
@@ -32,6 +33,22 @@ struct CurvePatchCache;
 class CurvePatchEffect {
  public:
   virtual ~CurvePatchEffect() = default;
+
+  /**
+   * Open whatever undo transaction this effect needs for the whole session. No-op by default;
+   * only a target with its own undo system (the image canvas) overrides it.
+   *
+   * The timing is load-bearing and is why this is a separate hook rather than constructor work.
+   * The stroke that spawns a session leaves its own transaction open (`stroke_undo_begin()`,
+   * `mesh/sculpt.cc:5696-5712`), and the handoff discards that transaction with
+   * `BKE_undosys_step_push_init_abort()` only AFTER the session has been published and its initial
+   * preview stamped (`mesh/sculpt.cc:6130-6140`, and the roll bridge at `:6172-6183`). A
+   * transaction opened any earlier -- in the constructor, or lazily on the first `apply_pass()`,
+   * which still runs inside that handoff -- is therefore destroyed by that abort before the modal
+   * ever starts. Callers must invoke this immediately after the abort; do NOT move the work back
+   * into the constructor.
+   */
+  virtual void session_undo_begin() {}
 
   /** Count the snapshot keys index into, compared against `CurvePatchCache::element_num` every
    * restamp to detect a mesh that changed underneath the session. */
@@ -73,10 +90,20 @@ class CurvePatchEffect {
 };
 
 /** Null when no effect handles this brush; the caller then refuses to start a session. */
-std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(const Brush &brush, const Object &ob);
+std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(
+    const Brush &brush,
+    Object &ob,
+    PaintModeSettings &paint_mode_settings);
 
 /** Builds the vertex-color effect. Called only by #curve_patch_effect_create; returns null when the
  * mesh has no usable active color attribute. */
 std::unique_ptr<CurvePatchEffect> curve_patch_effect_color_create(const Object &ob);
+
+/** Builds the image-canvas effect. Called only by #curve_patch_effect_create; returns null when the
+ * brush's Paint Mode canvas cannot be resolved (`SCULPT_use_image_paint_brush()` already gates the
+ * call, so this is a defensive re-check, not the primary guard). */
+std::unique_ptr<CurvePatchEffect> curve_patch_effect_image_create(
+    Object &ob,
+    PaintModeSettings &paint_mode_settings);
 
 }  // namespace blender::ed::sculpt_paint

@@ -873,7 +873,10 @@ int64_t ReliefEffect::snapshot_size() const
 
 }  // namespace
 
-std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(const Brush &brush, const Object &ob)
+std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(
+    const Brush &brush,
+    Object &ob,
+    PaintModeSettings &paint_mode_settings)
 {
   if (!bke::brush::supports_curve_patch(brush)) {
     return nullptr;
@@ -888,6 +891,11 @@ std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(const Brush &brush, 
     /* `supports_color()` is exactly "is this the Paint brush" (`brush.cc:1949`). The single place
      * the target is chosen -- Stage 2 removed `is_applicable()` so a second predicate could not
      * drift from this one. */
+    if (SCULPT_use_image_paint_brush(paint_mode_settings, ob)) {
+      /* Checked before the attribute branch below: an image-canvas-configured Paint brush must
+       * not fall through to `ColorEffect` merely because the mesh also has a color attribute. */
+      return curve_patch_effect_image_create(ob, paint_mode_settings);
+    }
     return curve_patch_effect_color_create(ob);
   }
   return std::make_unique<ReliefEffect>();

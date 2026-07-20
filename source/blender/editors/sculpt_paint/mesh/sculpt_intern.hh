@@ -15,6 +15,7 @@
 #include "BKE_image_wrappers.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_paint_bvh_pixels.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "BLI_array.hh"
@@ -180,6 +181,64 @@ struct ImageData : NonCopyable {
   static std::unique_ptr<ImageData> init_active_image(Object &ob,
                                                       PaintModeSettings &paint_mode_settings);
 };
+
+/* The following were `static` in `sculpt_paint_image.cc` before Curve Patch Stage 5. Declared
+ * here, unchanged, so `paint_curve_patch_effect_image.cc` can reuse the existing barycentric/UV
+ * math and tile plumbing instead of duplicating it -- see the Stage 5 design doc. */
+
+float3 calc_pixel_position(Span<float3> vert_positions,
+                           Span<int3> vert_tris,
+                           int tri_index,
+                           const float2 &barycentric_weight);
+
+void calc_pixel_row_positions(Span<float3> vert_positions,
+                              Span<int3> vert_tris,
+                              Span<int> tri_indices,
+                              Span<float2> delta_barycentric_coords,
+                              const bke::pbvh::pixels::PackedPixelRow &pixel_row,
+                              IndexRange range,
+                              MutableSpan<float3> positions);
+
+MutableSpan<float4> read_image_pixels(MutableSpan<float4> image_pixels,
+                                      const TileColorspaceProcessor &processors,
+                                      const bke::pbvh::pixels::PackedPixelRow &pixel_row,
+                                      IndexRange range,
+                                      int width);
+
+MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
+                                      const TileColorspaceProcessor &processors,
+                                      const bke::pbvh::pixels::PackedPixelRow &pixel_row,
+                                      IndexRange range,
+                                      int width,
+                                      Vector<float4> &storage);
+
+void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
+                        MutableSpan<uchar4> image_pixels,
+                        const TileColorspaceProcessor &processors,
+                        const bke::pbvh::pixels::PackedPixelRow &pixel_row,
+                        IndexRange range,
+                        int width);
+
+void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
+                        MutableSpan<float4> image_pixels,
+                        const TileColorspaceProcessor &processors,
+                        const bke::pbvh::pixels::PackedPixelRow &pixel_row,
+                        IndexRange range,
+                        int width);
+
+void fetch_image_buffers(ImageData &image_data,
+                         bke::pbvh::Node &node,
+                         bke::pbvh::pixels::PixelNode &pixel_node);
+
+void do_push_undo_tile(ImageData &image_data,
+                       bke::pbvh::Node &node,
+                       bke::pbvh::pixels::PixelNode &pixel_node);
+
+void fix_non_manifold_seam_bleeding(Object &ob,
+                                    ImageData &image_data,
+                                    MutableSpan<bke::pbvh::MeshNode> nodes,
+                                    MutableSpan<bke::pbvh::pixels::PixelNode> pixel_nodes,
+                                    const IndexMask &node_mask);
 
 }  // namespace paint::image
 

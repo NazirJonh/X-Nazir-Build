@@ -51,6 +51,14 @@ struct CurvePatchSpline {
    * `bke::CurvesGeometry::interpolate_to_evaluated()`). Empty unless `build_from_positions()` was
    * called with a non-empty `radii` -- `radius_at()` requires this to be populated. */
   Vector<float> radii;
+  /** Surface normal under each `poly_3d` sample, as returned by the shrinkwrap. An empty vector
+   * means "no normals" -- consumers then fall back to `plane_normal`. Sharp: it changes abruptly
+   * across an edge, which is exactly what selecting a window's projection plane needs. */
+  Vector<float3> normals_3d;
+  /** `normals_3d` smoothed along the curve. The ribbon's binormals are built from THESE: a
+   * discontinuous field would break the across-strip coordinate `u` wherever the curve crosses an
+   * edge at an angle. */
+  Vector<float3> normals_smooth_3d;
   /** Frozen projection normal for the whole patch (defines "left"/"right" of the curve for
    * `closest_point()`'s signed lateral offset). Caller sets this before calling `closest_point`. */
   float3 plane_normal = float3(0.0f, 0.0f, 1.0f);
@@ -71,8 +79,15 @@ struct CurvePatchSpline {
    *
    * With `cyclic`, `positions` is taken to be a closed curve's evaluated points, which do NOT
    * repeat the first point at the end: the closing edge back to `positions[0]` is appended here,
-   * and the tangents at the join are made continuous through it. */
-  void build_from_positions(Span<float3> positions, Span<float> radii = {}, bool cyclic = false);
+   * and the tangents at the join are made continuous through it.
+   *
+   * `normals`, when non-empty, must match `positions` in size and populates `normals_3d`; the
+   * closing sample of a cyclic curve repeats the first normal, so the two arrays stay index-aligned
+   * with `poly_3d`. */
+  void build_from_positions(Span<float3> positions,
+                            Span<float> radii = {},
+                            bool cyclic = false,
+                            Span<float3> normals = {});
 
   /** Position on the spline at arc-length `s`, clamped to `[0, total_length()]`. Returns
    * `float3(0)` when `is_empty()`. */
@@ -316,5 +331,17 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
 void curve_patch_stamps_add_cyclic_wrap(Vector<CurvePatchStamp> &stamps,
                                         float total_length,
                                         float max_extent);
+
+/**
+ * Smooths `spline.normals_3d` with a box filter over arc length in a `+/- smooth_length / 2` window
+ * and writes the normalized result into `spline.normals_smooth_3d`.
+ *
+ * A box rather than N Laplacian iterations: the smoothing width is then stated in world units and
+ * depends neither on the tessellation density nor on an iteration count, so the result is
+ * reproducible and can be pinned down by a test.
+ *
+ * `smooth_length <= 0` or an empty `normals_3d` copies the input through unchanged.
+ */
+void curve_patch_spline_smooth_normals(CurvePatchSpline &spline, float smooth_length);
 
 }  // namespace blender::ed::sculpt_paint

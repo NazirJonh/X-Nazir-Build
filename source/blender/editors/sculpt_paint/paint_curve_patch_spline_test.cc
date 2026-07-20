@@ -10,7 +10,9 @@
 
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_vector.hh"
 #include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 #include "paint_curve_patch_spline.hh"
 
@@ -946,6 +948,45 @@ TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_inherit_texture_index)
     ASSERT_NE(source_tex_index, -2) << "no source stamp found for center_v=" << stamp.center_v;
     EXPECT_EQ(stamp.tex_index, source_tex_index);
   }
+}
+
+TEST(paint_curve_patch_spline, normals_cyclic_closing_sample)
+{
+  CurvePatchSpline spline;
+  Vector<float3> points, normals;
+  for (const int i : IndexRange(4)) {
+    const float a = float(M_PI) * 0.5f * float(i);
+    points.append(float3(std::cos(a), std::sin(a), 0.0f));
+    normals.append(float3(0.0f, 0.0f, 1.0f));
+  }
+  spline.build_from_positions(points.as_span(), {}, true, normals.as_span());
+
+  /* The closing sample is appended inside `build_from_positions`, and the normal has to follow it,
+   * otherwise the `poly_3d` and `normals_3d` indices drift apart on that last sample. */
+  EXPECT_EQ(spline.normals_3d.size(), spline.poly_3d.size());
+  EXPECT_V3_NEAR(spline.normals_3d.last(), float3(0.0f, 0.0f, 1.0f), 1e-6f);
+}
+
+TEST(paint_curve_patch_spline, smooth_normals_box_filter)
+{
+  CurvePatchSpline spline;
+  Vector<float3> points, normals;
+  /* A straight line along X of length 1.0, whose normal turns by 90 degrees exactly at the middle. */
+  for (const int i : IndexRange(11)) {
+    points.append(float3(float(i) * 0.1f, 0.0f, 0.0f));
+    normals.append(i < 5 ? float3(0.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f));
+  }
+  spline.build_from_positions(points.as_span(), {}, false, normals.as_span());
+  curve_patch_spline_smooth_normals(spline, 0.4f);
+
+  /* At the break the smoothed normal has to sit between the two inputs, not on either of them. */
+  const float3 mid = spline.normals_smooth_3d[5];
+  EXPECT_GT(mid.y, 0.2f);
+  EXPECT_GT(mid.z, 0.2f);
+  EXPECT_NEAR(math::length(mid), 1.0f, 1e-5f);
+  /* Far from the break the field must not drift. */
+  EXPECT_V3_NEAR(spline.normals_smooth_3d.first(), float3(0.0f, 0.0f, 1.0f), 1e-4f);
+  EXPECT_V3_NEAR(spline.normals_smooth_3d.last(), float3(0.0f, 1.0f, 0.0f), 1e-4f);
 }
 
 }  // namespace blender::ed::sculpt_paint::tests

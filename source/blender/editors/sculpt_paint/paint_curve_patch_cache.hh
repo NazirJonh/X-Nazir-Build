@@ -29,8 +29,10 @@
 
 #include "ED_view3d.hh"
 
+#include "paint_curve_patch_frames.hh"
 #include "paint_curve_patch_ribbon.hh"
 #include "paint_curve_patch_spline.hh"
+#include "paint_curve_patch_surface.hh"
 
 struct Brush;
 struct Depsgraph;
@@ -213,6 +215,18 @@ struct CurvePatchCache {
    * action samples this instead of `CurvePatchSpline::closest_point()` so the parameterization
    * stays single-valued through sharp turns (see `paint_curve_patch_ribbon.hh`). */
   CurvePatchRibbonLut ribbon;
+
+  /** Set of local tangent windows replacing the single `ribbon` above on Mesh. Reused between
+   * re-stamps. Empty on `Type::Grids`, which stays on the single-window path. */
+  CurvePatchFrameSet frames;
+
+  /** Snapshot of the pristine surface, built once per session in `curve_patch_begin_editing()`.
+   * `ready == false` on Grids and on a failed build -- the old path then runs. */
+  CurvePatchSurfaceSnapshot surface;
+
+  /** Suppresses repeating the window-cap warning: `curve_patch_restore_and_restamp()` runs on EVERY
+   * mouse event, so an unguarded message would flood the info line. */
+  bool reported_frame_cap = false;
 
   /** World-space brush radius the `ribbon` above was actually built from, recorded by
    * `curve_patch_restore_and_restamp()` on every restamp right before the build.

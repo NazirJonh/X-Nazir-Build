@@ -6,6 +6,7 @@
 
 #include <cmath>
 
+#include "BLI_index_range.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
 
@@ -272,6 +273,58 @@ TEST(paint_curve_patch_ribbon, closed_loop_strip_survives_the_join)
 
   /* The loop's interior is not part of the strip. */
   EXPECT_EQ(lut.sample(float3(0.0f, 0.0f, 0.0f), uv), 0);
+}
+
+TEST(paint_curve_patch_ribbon, external_binormals_match_default)
+{
+  CurvePatchSpline spline;
+  Vector<float3> points;
+  for (const int i : IndexRange(21)) {
+    points.append(float3(float(i) * 0.1f, 0.0f, 0.0f));
+  }
+  spline.build_from_positions(points.as_span());
+  spline.plane_normal = float3(0.0f, 0.0f, 1.0f);
+
+  CurvePatchRibbonLut lut_default;
+  curve_patch_ribbon_build(spline, 0.5f, lut_default);
+  ASSERT_TRUE(lut_default.ready);
+
+  /* Binormals handed in explicitly, equal to the ones the function would derive itself, have to
+   * produce the same LUT -- otherwise the new path is not a generalization of the old one. */
+  Vector<float3> binormals;
+  for (const int i : IndexRange(spline.poly_3d.size())) {
+    binormals.append(math::normalize(math::cross(spline.tangents_3d[i], spline.plane_normal)));
+  }
+  CurvePatchRibbonLut lut_external;
+  curve_patch_ribbon_build(spline, 0.5f, lut_external, false, 0.0f, 0.0f, binormals.as_span());
+  ASSERT_TRUE(lut_external.ready);
+
+  float2 uv_a[2], uv_b[2];
+  const float3 probe(1.0f, -0.25f, 0.0f);
+  ASSERT_EQ(lut_default.sample(probe, uv_a), lut_external.sample(probe, uv_b));
+  EXPECT_NEAR(uv_a[0].x, uv_b[0].x, 1e-4f);
+  EXPECT_NEAR(uv_a[0].y, uv_b[0].y, 1e-4f);
+}
+
+TEST(paint_curve_patch_ribbon, end_margin_one_sided)
+{
+  CurvePatchSpline spline;
+  Vector<float3> points;
+  for (const int i : IndexRange(21)) {
+    points.append(float3(float(i) * 0.1f, 0.0f, 0.0f));
+  }
+  spline.build_from_positions(points.as_span());
+  spline.plane_normal = float3(0.0f, 0.0f, 1.0f);
+
+  CurvePatchRibbonLut lut;
+  curve_patch_ribbon_build(spline, 0.5f, lut, false, 0.3f, 0.0f);
+  ASSERT_TRUE(lut.ready);
+
+  /* Only the start is extended: a point before the curve begins gets a UV, one past the end
+   * does not. */
+  float2 uv[2];
+  EXPECT_GE(lut.sample(float3(-0.15f, 0.0f, 0.0f), uv), 1);
+  EXPECT_EQ(lut.sample(float3(2.15f, 0.0f, 0.0f), uv), 0);
 }
 
 }  // namespace blender::ed::sculpt_paint::tests

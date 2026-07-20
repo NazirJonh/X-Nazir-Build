@@ -1568,10 +1568,17 @@ static bool curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
   bool committed = false;
   if (patch) {
     if (is_cancel) {
-      /* No undo bookkeeping at all: the modal never opened a transaction (the one the anchor
-       * stroke opened is discarded the moment the editor starts, see `SculptPaintStroke::done()`
-       * in `mesh/sculpt.cc`) and never pushed a node, so a cancelled patch leaves the undo history
-       * exactly as it found it. The restore is what puts the mesh back. */
+      /* No undo bookkeeping HERE: the modal never opened a transaction (the one the anchor stroke
+       * opened is discarded the moment the editor starts, see `SculptPaintStroke::done()` in
+       * `mesh/sculpt.cc`) and never pushed a node. The restore is what puts the mesh back.
+       *
+       * A cancelled patch still leaves the undo history exactly as it found it, but for the relief
+       * and vertex-color targets only that is because nothing was ever opened. A target whose data
+       * has its own undo system does open one -- the image canvas holds an `ImageUndoStep` for the
+       * whole session, because that is the only way its per-tile "before" data can be captured as
+       * it is painted -- and it is that effect's own destructor, reached through `MEM_delete(patch)`
+       * below, that discards the step instead of committing it once this restore has put the pixels
+       * back. See #ImageColorEffect's destructor. */
       curve_patch_restore_only(ob, *patch);
     }
     else {

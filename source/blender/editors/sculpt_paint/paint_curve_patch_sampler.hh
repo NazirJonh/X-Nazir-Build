@@ -50,6 +50,18 @@ struct CurvePatchSourceGeometry {
   Span<float3> normals;
   /** Snapshot consulted before #positions, or null when the target does not move geometry. */
   const Map<int, float3> *orig_positions = nullptr;
+  /**
+   * Whether the index the sampler is called with is a mesh vertex index. True for every target
+   * whose elements ARE mesh vertices (relief, color); false when the spans above describe
+   * something else entirely -- an image target derives one entry per PIXEL, so its indices run
+   * `[0, chunk_size)` and name nothing in mesh-vertex space.
+   *
+   * Defaults to true so that the mesh-vertex targets keep their existing behavior; only a source
+   * that knows its indices are foreign has to say so. See #CurvePatchSampler::sample, which uses
+   * this to decide whether `CurvePatchCache::surface.vert_normals` -- a per-mesh-vertex array --
+   * may be indexed at all.
+   */
+  bool indices_are_mesh_verts = true;
 };
 
 /** What the curve contributes at one element. */
@@ -63,6 +75,16 @@ struct CurvePatchSample {
   float value;
   /** Claim weight for the cross-symmetry-pass blend. */
   float weight;
+  /** RGBA of the brush texture sampled at the same `(u, s)` as #value. Stays `{1, 1, 1, 1}` when
+   * the brush has no texture (`brush.mtex.tex == nullptr`), matching the initializer the sampler
+   * already used for its local `tex_rgba`/`sample_rgba` buffers before the null-texture guard.
+   *
+   * `ColorEffect` reads the RGB as its paint color (replacing `BKE_brush_color_get` when a texture
+   * is assigned) and uses the alpha to modulate the mix; `ReliefEffect` ignores this field, so its
+   * existing aggregate initializers (`{orig, height, weight}`) keep working via the default here.
+   * The alpha is the texture's own alpha (an image texture with transparency reports < 1), not a
+   * mix weight by itself. */
+  float4 tex_color{1.0f, 1.0f, 1.0f, 1.0f};
 };
 
 class CurvePatchSampler {

@@ -616,7 +616,8 @@ static void curve_patch_begin_editing(Object &ob,
                                       const ViewContext &vc,
                                       CurvePatchCache *patch,
                                       const float3 &plane_normal,
-                                      const float frozen_radius)
+                                      const float frozen_radius,
+                                      PaintModeSettings &paint_mode_settings)
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
@@ -676,7 +677,7 @@ static void curve_patch_begin_editing(Object &ob,
    * entry point would dereference a null effect. Both callers hand this function ownership of
    * `ss.cache` (see their doc comments), so the bail frees it the same way their own Dynamic
    * Topology refusals do. */
-  patch->effect = curve_patch_effect_create(brush, ob);
+  patch->effect = curve_patch_effect_create(brush, ob, paint_mode_settings);
   if (!patch->effect) {
     /* Stage 1's brush gate should have refused this brush long before a session was started;
      * refuse defensively rather than publishing a cache with no effect. */
@@ -812,7 +813,9 @@ void curve_patch_start_from_anchor(const Depsgraph &depsgraph,
    * the real, just-set positions rather than the freshly-constructed curve's stale/default cache. */
   patch->control_curve.tag_positions_changed();
 
-  curve_patch_begin_editing(ob, brush, vc, patch, cache.sculpt_normal, cache.initial_radius);
+  ToolSettings *tool_settings = CTX_data_tool_settings(vc.C);
+  curve_patch_begin_editing(
+      ob, brush, vc, patch, cache.sculpt_normal, cache.initial_radius, tool_settings->paint_mode);
 }
 
 void roll_start_curve_patch_from_stroke(const Depsgraph &depsgraph,
@@ -885,7 +888,14 @@ void roll_start_curve_patch_from_stroke(const Depsgraph &depsgraph,
     plane = (math::length_squared(cache.sculpt_normal) > 1e-8f) ? cache.sculpt_normal :
                                                                   cache.view_normal;
   }
-  curve_patch_begin_editing(ob, brush, vc, patch, math::normalize(plane), cache.initial_radius);
+  ToolSettings *tool_settings = CTX_data_tool_settings(vc.C);
+  curve_patch_begin_editing(ob,
+                            brush,
+                            vc,
+                            patch,
+                            math::normalize(plane),
+                            cache.initial_radius,
+                            tool_settings->paint_mode);
 }
 
 }  // namespace blender::ed::sculpt_paint

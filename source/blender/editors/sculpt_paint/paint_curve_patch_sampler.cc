@@ -90,8 +90,15 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
    * were built against the pristine surface, whereas the live `normals[idx]` already carries the
    * relief this patch applied -- the culling would end up depending on its own result. On the
    * single-window path and on Grids (where there is no snapshot) the live normal stays, as
-   * before. */
-  const float3 raw_normal = (patch.surface.ready &&
+   * before.
+   *
+   * `surface.vert_normals` is indexed by MESH VERTEX, so it may only be consulted when `idx` is
+   * one. A pixel source (see `CurvePatchSourceGeometry::indices_are_mesh_verts`) numbers its
+   * entries per pixel within one chunk, and indexing the snapshot with such an index would return
+   * the normal of an arbitrary unrelated vertex. That source is also exempt on the merits: color
+   * never displaces geometry, so its live `normals[idx]` IS the pristine normal the snapshot
+   * exists to recover -- the lookup would be both wrong and pointless. */
+  const float3 raw_normal = (source_.indices_are_mesh_verts && patch.surface.ready &&
                              idx < int(patch.surface.vert_normals.size())) ?
                                 patch.surface.vert_normals[idx] :
                                 source_.normals[idx];
@@ -245,6 +252,13 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * leaves `stamp_strength` at 1.0, which keeps its result bit-for-bit what it was. */
     float tex_value = 1.0f;
     float stamp_strength = 1.0f;
+    /* RGBA of whichever stamp/zone texture actually won the intensity selection below. Declared in
+     * the `branch_relief` scope (not inside either branch) because the final `CurvePatchSample`
+     * construction at the bottom reads it regardless of which branch produced it. Stays `{1,1,1,1}`
+     * when no texture is assigned -- the same default `paint_get_tex_pixel`'s callers below pre-
+     * initialize their local buffers to before the null-texture guard, so threading it through
+     * changes nothing for the no-texture case. */
+    float tex_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     if (patch.frozen_params.stamp_mode == MTEX_CURVE_PATCH_STAMP_STAMPS) {
       /* Find the stamps whose square could cover this vertex. The list is sorted by `center_v`,
        * so a lower-bound on `s - max_extent` opens a window that closes as soon as a stamp starts
@@ -352,6 +366,11 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
           best_abs = std::abs(candidate);
           tex_value = sample;
           stamp_strength = stamp_falloff * it->strength;
+          /* Carry the winner's RGBA alongside its intensity, so a color patch paints the color of
+           * the stamp that actually won the merge rather than whichever happened to be sampled
+           * last. Mirrors how `tex_value`/`stamp_strength` are kept in sync with the winning
+           * candidate above. */
+          copy_v4_v4(tex_rgba, sample_rgba);
         }
       }
       if (!hit) {
@@ -401,8 +420,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
 
     /* Mirrors the null-texture guard `sculpt_apply_texture()` used to apply: `RE_texture_evaluate()`
      * returns `false` without writing its intensity output when `tex` is null, so calling
-     * `paint_get_tex_pixel()` unconditionally read an uninitialized `tex_value`. */
-    float tex_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+     * `paint_get_tex_pixel()` unconditionally read an uninitialized `tex_value`. The RGBA buffer is
+     * the outer-scope `tex_rgba` (initialized to `{1,1,1,1}` above), so the null-texture case leaves
+     * a usable identity color for `ColorEffect` exactly as the no-texture branch intends. */
     if (zone_mtex.tex != nullptr) {
       paint_get_tex_pixel(&zone_mtex, tex_u, tex_v, tex_pool_, thread_id, &tex_value, tex_rgba);
     }
@@ -416,7 +436,10 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * every symmetry pass claiming this vertex as `sum(weight * height) / sum(weight)`. A faded
      * end that kept its full weight would enter that average with the same authority as a
      * mirrored pass at full amplitude and dent the relief along the symmetry plane. */
-    return CurvePatchSample{orig, height, lateral_falloff * end_falloff};
+    return CurvePatchSample{orig,
+                            height,
+                            lateral_falloff * end_falloff,
+                            float4(tex_rgba[0], tex_rgba[1], tex_rgba[2], tex_rgba[3])};
   };
 
   /* Relief at one sample position: the stretches covering it merged by keeping the strongest

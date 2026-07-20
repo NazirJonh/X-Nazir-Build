@@ -253,10 +253,11 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
    * writes happen here, so the reads inside `compute_vertex()` are race-free across threads
    * (texture sampling uses the per-thread pool slot `thread_id`). */
   struct ColorWrite {
-    int idx;      /* Domain element index. */
-    float4 orig;  /* Pre-patch color of that element. */
-    float value;  /* Mix magnitude from the sampler. */
-    float weight; /* Cross-pass claim weight. */
+    int idx;        /* Domain element index. */
+    float4 orig;    /* Pre-patch color of that element. */
+    float4 tex_color; /* Brush-texture RGBA at this sample (`{1,1,1,1}` when no texture). */
+    float value;    /* Mix magnitude from the sampler. */
+    float weight;   /* Cross-pass claim weight. */
   };
   struct LocalData {
     Vector<ColorWrite> writes;
@@ -288,7 +289,7 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
                 color::gather_colors(
                     colors.span, Span<int>(&elem, 1), MutableSpan<float4>(&orig, 1));
               }
-              local.writes.append({elem, orig, sample->value, sample->weight});
+              local.writes.append({elem, orig, sample->tex_color, sample->value, sample->weight});
             });
           }
           if (local.writes.size() > before) {
@@ -314,6 +315,14 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
   /* PHASE 2 (serial): the sole writer of the color attribute and of `orig_colors_`. */
   const Paint &paint = *cache.paint;
   const float3 brush_color = BKE_brush_color_get(&paint, &brush);
+  /* When the brush carries a texture, its RGB -- threaded through `CurvePatchSample::tex_color` --
+   * fully replaces the solid brush color as the paint source, and its alpha modulates the mix
+   * strength (an image texture with transparent regions presses through weaker). Without a texture
+   * `tex_color` stays `{1,1,1,1}` (see the sampler), so the fallback below paints with the solid
+   * brush color exactly as Stage 3 did -- `has_texture` is the single switch that separates the two
+   * paths, since the texture field alone cannot tell "color sampled" from "value sampled"
+   * (`paint_get_tex_pixel`'s return value was verified not to encode that). */
+  const bool has_texture = brush.mtex.tex != nullptr;
 
   for (LocalData &local : all_tls) {
     for (const ColorWrite &write : local.writes) {
@@ -331,11 +340,25 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
       /* Relief has no `abs()` anywhere -- a negative `bstrength` (Subtract direction, or a CUSTOM
        * falloff curve dipping below zero) legitimately carves inward. A negative mix factor has no
        * such meaning, so clamp instead of preserving the sign. This is also why the brush's
-       * Add/Subtract toggle has no visible effect on a color patch. */
-      const float factor = std::clamp(blended, 0.0f, 1.0f);
-      /* Alpha is carried through untouched: `BKE_brush_color_get()` returns a `float3`, so writing
-       * one would invent data the brush never specified. */
-      float4 mixed(math::interpolate(float3(write.orig), brush_color, factor), write.orig.w);
+       * Add/Subtract toggle has no visible effect on a color patch. The texture's own alpha further
+       * attenuates the factor, so a partially-transparent texel paints at partial strength -- the
+       * same outcome a per-dab brush gets by multiplying the dab's alpha by the texture's. */
+      const float source_alpha = has_texture ? write.tex_color.w : 1.0f;
+      const float factor = std::clamp(blended, 0.0f, 1.0f) * source_alpha;
+
+      /* Color source: texture RGB (when assigned) overrides the solid brush color; otherwise the
+       * solid brush color paints alone, alpha 1, exactly as Stage 3. */
+      const float3 source_rgb = has_texture ? float3(write.tex_color) : brush_color;
+
+      /* Destination alpha: a textured patch blends the texture's alpha into the original's; without
+       * a texture the original alpha is carried through untouched, since `BKE_brush_color_get()`
+       * returns a `float3` and writing an alpha would invent data the brush never specified (the
+       * Stage 3 invariant). */
+      const float dest_alpha = has_texture ?
+                                   math::interpolate(write.orig.w, write.tex_color.w, factor) :
+                                   write.orig.w;
+
+      float4 mixed(math::interpolate(float3(write.orig), source_rgb, factor), dest_alpha);
       /* `swap_gathered_colors()` is the generic writer as well as the reader: it exchanges the
        * element with `mixed`, leaving the previous value in `mixed`, which this path discards.
        * Using it keeps the byte-color conversion symmetric with the read in PHASE 1. */

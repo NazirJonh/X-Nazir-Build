@@ -6138,6 +6138,14 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
          * enough to trigger that. The editor builds its own single step when the patch is
          * committed. */
         BKE_undosys_step_push_init_abort(ED_undo_stack_get());
+        /* Strictly AFTER the abort: an effect whose target has its own undo system (the image
+         * canvas) opens its session transaction here, and anything opened earlier -- in the
+         * effect's constructor, or lazily during the initial preview stamp the call above performs
+         * -- would be the transaction that abort just destroyed. See
+         * #CurvePatchEffect::session_undo_begin. */
+        if (ss.curve_patch_cache->effect) {
+          ss.curve_patch_cache->effect->session_undo_begin();
+        }
         return;
       }
       /* The start refused (see its own guards) and already freed `ss.cache`. Close the
@@ -6173,6 +6181,12 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
         /* Same reasoning as the Curve Patch branch above: the bridge undoes the live roll relief
          * back to pristine before handing over, so the open transaction describes nothing. */
         BKE_undosys_step_push_init_abort(ED_undo_stack_get());
+        /* And for the same reason as there, strictly after the abort -- this bridge reaches
+         * `curve_patch_begin_editing()` too, so an image-canvas effect started this way needs its
+         * session transaction opened at the same point in the sequence. */
+        if (ss.curve_patch_cache->effect) {
+          ss.curve_patch_cache->effect->session_undo_begin();
+        }
         return;
       }
       stroke_undo_end(*paint_mode_settings_, *this->object, brush);

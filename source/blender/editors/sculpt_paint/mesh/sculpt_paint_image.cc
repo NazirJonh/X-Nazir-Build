@@ -70,9 +70,9 @@ std::unique_ptr<ImageData> ImageData::init_active_image(Object &ob,
   return image_data;
 }
 
-static void fetch_image_buffers(ImageData &image_data,
-                                bke::pbvh::Node & /*node*/,
-                                PixelNode &pixel_node)
+void fetch_image_buffers(ImageData &image_data,
+                         bke::pbvh::Node & /*node*/,
+                         PixelNode &pixel_node)
 {
   for (const UDIMTilePixels &tile : pixel_node.tiles) {
     const ImBuf *buffer = image_data.buffers.lookup_or_add_cb(tile.tile_number, [&]() {
@@ -112,10 +112,10 @@ static void fetch_image_buffers(ImageData &image_data,
   }
 }
 
-static float3 calc_pixel_position(const Span<float3> vert_positions,
-                                  const Span<int3> vert_tris,
-                                  const int tri_index,
-                                  const float2 &barycentric_weight)
+float3 calc_pixel_position(const Span<float3> vert_positions,
+                           const Span<int3> vert_tris,
+                           const int tri_index,
+                           const float2 &barycentric_weight)
 {
   const int3 &verts = vert_tris[tri_index];
   const float3 weights(barycentric_weight.x,
@@ -130,13 +130,13 @@ static float3 calc_pixel_position(const Span<float3> vert_positions,
   return result;
 }
 
-static void calc_pixel_row_positions(const Span<float3> vert_positions,
-                                     const Span<int3> vert_tris,
-                                     const Span<int> tri_indices,
-                                     const Span<float2> delta_barycentric_coords,
-                                     const PackedPixelRow &pixel_row,
-                                     const IndexRange range,
-                                     const MutableSpan<float3> positions)
+void calc_pixel_row_positions(const Span<float3> vert_positions,
+                              const Span<int3> vert_tris,
+                              const Span<int> tri_indices,
+                              const Span<float2> delta_barycentric_coords,
+                              const PackedPixelRow &pixel_row,
+                              const IndexRange range,
+                              const MutableSpan<float3> positions)
 {
   BLI_assert(positions.size() == range.size());
   const float3 first = calc_pixel_position(vert_positions,
@@ -192,11 +192,11 @@ static void calc_brush_colors(MutableSpan<float4> buffer_colors,
   }
 }
 
-static MutableSpan<float4> read_image_pixels(MutableSpan<float4> image_pixels,
-                                             const TileColorspaceProcessor &processors,
-                                             const PackedPixelRow &pixel_row,
-                                             const IndexRange range,
-                                             const int width)
+MutableSpan<float4> read_image_pixels(MutableSpan<float4> image_pixels,
+                                      const TileColorspaceProcessor &processors,
+                                      const PackedPixelRow &pixel_row,
+                                      const IndexRange range,
+                                      const int width)
 {
   const int start_offset = int(pixel_row.start_image_coordinate.y) * width +
                            int(pixel_row.start_image_coordinate.x) + range.start();
@@ -212,12 +212,12 @@ static MutableSpan<float4> read_image_pixels(MutableSpan<float4> image_pixels,
   return scene_linear_pixels;
 }
 
-static MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
-                                             const TileColorspaceProcessor &processors,
-                                             const PackedPixelRow &pixel_row,
-                                             const IndexRange range,
-                                             const int width,
-                                             Vector<float4> &storage)
+MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
+                                      const TileColorspaceProcessor &processors,
+                                      const PackedPixelRow &pixel_row,
+                                      const IndexRange range,
+                                      const int width,
+                                      Vector<float4> &storage)
 {
   storage.resize(range.size());
   const int start_offset = int(pixel_row.start_image_coordinate.y) * width +
@@ -237,12 +237,12 @@ static MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
   return storage;
 }
 
-static void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
-                               MutableSpan<uchar4> image_pixels,
-                               const TileColorspaceProcessor &processors,
-                               const PackedPixelRow &pixel_row,
-                               const IndexRange range,
-                               const int width)
+void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
+                        MutableSpan<uchar4> image_pixels,
+                        const TileColorspaceProcessor &processors,
+                        const PackedPixelRow &pixel_row,
+                        const IndexRange range,
+                        const int width)
 {
   if (!processors.is_noop) {
     processors.linear_to_buffer_processor.apply(
@@ -257,12 +257,12 @@ static void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
   }
 }
 
-static void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
-                               MutableSpan<float4> image_pixels,
-                               const TileColorspaceProcessor &processors,
-                               const PackedPixelRow &pixel_row,
-                               const IndexRange range,
-                               const int width)
+void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
+                        MutableSpan<float4> image_pixels,
+                        const TileColorspaceProcessor &processors,
+                        const PackedPixelRow &pixel_row,
+                        const IndexRange range,
+                        const int width)
 {
   if (!processors.is_noop) {
     processors.linear_to_buffer_processor.apply(
@@ -530,9 +530,9 @@ static void push_undo(const PixelNode &node_data,
   }
 }
 
-static void do_push_undo_tile(ImageData &image_data,
-                              bke::pbvh::Node & /*node*/,
-                              PixelNode &pixel_node)
+void do_push_undo_tile(ImageData &image_data,
+                       bke::pbvh::Node & /*node*/,
+                       PixelNode &pixel_node)
 {
   for (const UDIMTilePixels &tile : pixel_node.tiles) {
     ImBuf *buffer = image_data.buffers.lookup_default(tile.tile_number, nullptr);
@@ -566,11 +566,11 @@ static void fix_non_manifold_seam_bleeding(bke::pbvh::Tree &pbvh,
   }
 }
 
-static void fix_non_manifold_seam_bleeding(Object &ob,
-                                           ImageData &image_data,
-                                           MutableSpan<bke::pbvh::MeshNode> /*nodes*/,
-                                           MutableSpan<PixelNode> pixel_nodes,
-                                           const IndexMask &node_mask)
+void fix_non_manifold_seam_bleeding(Object &ob,
+                                    ImageData &image_data,
+                                    MutableSpan<bke::pbvh::MeshNode> /*nodes*/,
+                                    MutableSpan<PixelNode> pixel_nodes,
+                                    const IndexMask &node_mask)
 {
   Vector<image::TileNumber> dirty_tiles = collect_dirty_tiles(pixel_nodes, node_mask);
   fix_non_manifold_seam_bleeding(*bke::object::pbvh_get(ob), image_data.buffers, dirty_tiles);

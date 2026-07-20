@@ -13,6 +13,7 @@
 
 #include "ED_paint_curve_draw.hh"
 
+#include "BKE_brush.hh"
 #include "BKE_paint.hh"
 #include "DEG_depsgraph_query.hh"
 #include "DNA_brush_types.h"
@@ -146,8 +147,12 @@ class PaintCurveCursor : Overlay {
     const bool is_curve_patch_active =
         ed::sculpt_paint::ED_paint_curve_patch_active_control_curve(vc.obact) != nullptr;
 
-    const bool is_curve_stroke = ELEM(
-        brush->stroke_method, BRUSH_STROKE_CURVE, BRUSH_STROKE_CURVE_PATCH) || is_curve_patch_active;
+    /* An already-active session keeps its overlay regardless: the gate applies at session entry,
+     * not inside a session that was legitimately started. */
+    const bool is_curve_patch_stroke = brush->stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+                                       bke::brush::supports_curve_patch(*brush);
+    const bool is_curve_stroke = brush->stroke_method == BRUSH_STROKE_CURVE ||
+                                 is_curve_patch_stroke || is_curve_patch_active;
     const bool compute_hover = state.cursor_mval_valid && (is_curves_edit || is_curve_stroke) &&
                                state.is_space_v3d() &&
                                !ed::sculpt_paint::ED_paint_curve_slide_is_active();
@@ -170,7 +175,7 @@ class PaintCurveCursor : Overlay {
                                                                             handles_);
       }
     }
-    else if (ELEM(brush->stroke_method, BRUSH_STROKE_CURVE, BRUSH_STROKE_CURVE_PATCH)) {
+    else if (brush->stroke_method == BRUSH_STROKE_CURVE || is_curve_patch_stroke) {
       ed::sculpt_paint::ED_paint_curve_screen_handles_build(
           vc, *brush, sculpt, mval_region, compute_hover, show_insert_preview, handles_);
     }

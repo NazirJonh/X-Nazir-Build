@@ -29,6 +29,7 @@
 
 #include "BKE_animsys.h"
 #include "BKE_attribute.hh"
+#include "BKE_brush.hh"
 #include "BKE_colortools.hh"
 #include "BKE_curves.hh"
 #include "BKE_idprop.hh"
@@ -811,6 +812,23 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       if (Sculpt *sculpt = scene.toolsettings->sculpt) {
         sculpt->paint_curve_show_radius_handles = defaults.paint_curve_show_radius_handles;
         sculpt->paint_curve_radius_display_mode = defaults.paint_curve_radius_display_mode;
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 41)) {
+    /* Curve Patch and Roll are sculpt-only, and Curve Patch is further restricted to the brushes
+     * #supports_curve_patch allows. A brush that stored either outside those bounds would show a
+     * blank stroke method in the UI, since the enum item is no longer offered. */
+    for (Brush &brush : bmain->brushes) {
+      if (!ELEM(brush.stroke_method, BRUSH_STROKE_CURVE_PATCH, BRUSH_STROKE_ROLL)) {
+        continue;
+      }
+      const bool is_sculpt_brush = (brush.ob_mode & OB_MODE_SCULPT) != 0;
+      const bool keep = is_sculpt_brush && (brush.stroke_method == BRUSH_STROKE_ROLL ||
+                                            bke::brush::supports_curve_patch(brush));
+      if (!keep) {
+        brush.stroke_method = BRUSH_STROKE_SPACE;
       }
     }
   }

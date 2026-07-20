@@ -5271,7 +5271,8 @@ void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
    * drives its own dabs along the whole curve and must NOT be restored per-dab here, so this only
    * applies while the patch has not started yet. */
   if (ELEM(brush->stroke_method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT) ||
-      (brush->stroke_method == BRUSH_STROKE_CURVE_PATCH && !ss.curve_patch_cache))
+      (brush->stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+       bke::brush::supports_curve_patch(*brush) && !ss.curve_patch_cache))
   {
 
     undo::restore_from_undo_step(depsgraph, sd, ob);
@@ -5822,7 +5823,10 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
   /* Make copies of the mesh vertex locations and normals for some brushes. Curve Patch's
    * anchor-drag phase needs the same "read original coordinates" behavior as Anchored, since it
    * is likewise recomputed from scratch every step (see `restore_from_undo_step_if_necessary()`). */
-  if (ELEM(brush->stroke_method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_CURVE_PATCH)) {
+  if (brush->stroke_method == BRUSH_STROKE_ANCHORED ||
+      (brush->stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+       bke::brush::supports_curve_patch(*brush)))
+  {
     cache->accum = false;
   }
 
@@ -6107,7 +6111,9 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     brush = BKE_paint_brush(&sd.paint);
   }
 
-  if (!is_cancel && stroke_started && brush->stroke_method == BRUSH_STROKE_CURVE_PATCH) {
+  if (!is_cancel && stroke_started && brush->stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+      bke::brush::supports_curve_patch(*brush))
+  {
     if (ss.bm) {
       /* Dynamic Topology is explicitly out of scope for Stage 1 (see design doc): live re-stamp
        * relies on stable vertex indices for `CurvePatchCache::orig_positions`, which dyntopo's
@@ -6149,7 +6155,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
    * editor to own and discards the open undo transaction -- the editor builds its own step on
    * commit -- so it returns before the teardown below. */
   if (!is_cancel && stroke_started && brush->stroke_method == BRUSH_STROKE_ROLL &&
-      brush->mtex.roll_edit_after && !ss.bm)
+      brush->mtex.roll_edit_after && bke::brush::supports_curve_patch(*brush) && !ss.bm)
   {
     Vector<float3> roll_positions;
     Vector<float> roll_radii;

@@ -580,6 +580,10 @@ class StrokePanel(BrushPanel):
         col.separator()
 
         if mode == 'SCULPT' and brush.stroke_method == 'CURVE_PATCH':
+            # Curve Patch applies its own relief directly and never reaches the brush
+            # implementation, so every supported brush gives the same result. Say so, otherwise
+            # the allowlist implies a distinction that does not exist.
+            col.label(text="Brush type affects strength, radius and texture only")
             tex_slot = brush.texture_slot
             col.row().prop(tex_slot, "curve_patch_stamp_mode", text="Curve Patch", expand=True)
             col.prop(tex_slot, "use_curve_patch_swap_axis", text="Swap Axis")
@@ -630,7 +634,14 @@ class StrokePanel(BrushPanel):
             sub.prop(tex_slot, "curve_patch_end_falloff_length", text="Falloff Length", slider=True)
             col.separator()
 
-        if mode == 'SCULPT' and brush.stroke_method in {'CURVE_PATCH', 'ROLL'}:
+        # The ROLL half only matters when the Roll stroke hands off to a Curve Patch session,
+        # which requires "Edit After Stroke". Without that qualifier the option renders dead
+        # for every plain Roll stroke.
+        show_face_set = mode == 'SCULPT' and (
+            brush.stroke_method == 'CURVE_PATCH' or
+            (brush.stroke_method == 'ROLL' and brush.texture_slot.use_roll_edit_after)
+        )
+        if show_face_set:
             col.prop(brush, "use_curve_patch_face_set", text="Create Face Set")
             col.separator()
 
@@ -1656,7 +1667,10 @@ def brush_texture_settings(layout, brush, sculpt):
     # map_mode
     layout.prop(tex_slot, "map_mode", text="Mapping")
 
-    if brush.stroke_method == 'ROLL':
+    # Roll is sculpt-only. `sculpt` is this function's third parameter and is truthy only in a
+    # sculpt context: callers pass `context.sculpt_object` (space_view3d_toolbar.py:797,
+    # properties_texture.py:729) or a literal 0 from the image editor (space_image.py:1362).
+    if sculpt and brush.stroke_method == 'ROLL':
         row = layout.row()
         row.active = brush.use_pressure_size
         row.prop(tex_slot, "use_roll_pressure_scale", text="Pressure Scale")

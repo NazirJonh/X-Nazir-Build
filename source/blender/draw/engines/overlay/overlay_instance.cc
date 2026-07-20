@@ -468,6 +468,7 @@ void Instance::begin_sync()
   image_prepass.begin_sync(resources, state);
   motion_paths.begin_sync(resources, state);
   origins.begin_sync(resources, state);
+  sculpt_lattice_cage.begin_sync(resources, state);
   outline.begin_sync(resources, state);
 
   auto begin_sync_layer = [&](OverlayLayer &layer) {
@@ -670,6 +671,7 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
 
     motion_paths.object_sync(manager, ob_ref, resources, state);
     origins.object_sync(manager, ob_ref, resources, state);
+    sculpt_lattice_cage.object_sync(manager, ob_ref, resources, state);
 
     if (object_is_selected(ob_ref) && !in_edit_paint_mode) {
       outline.object_sync(manager, ob_ref, resources, state);
@@ -680,6 +682,7 @@ void Instance::object_sync(ObjectRef &ob_ref, Manager &manager)
 void Instance::end_sync()
 {
   origins.end_sync(resources, state);
+  sculpt_lattice_cage.end_sync(resources, state);
   resources.end_sync();
 
   auto end_sync_layer = [&](OverlayLayer &layer) {
@@ -950,6 +953,7 @@ void Instance::draw_v3d(Manager &manager, View &view)
     /* Overlay (+Line) pass. */
     draw(regular, resources.overlay_fb);
     draw_line(regular, resources.overlay_line_fb);
+    sculpt_lattice_cage.draw_line(resources.overlay_line_fb, manager, view);
 
     /* Here as it does depth+blending, and should draw after most overlay line passes.. */
     if (!state.is_depth_only_drawing) {

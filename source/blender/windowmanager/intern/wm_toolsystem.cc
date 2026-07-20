@@ -193,6 +193,22 @@ static void toolsystem_unlink_ref(bContext *C, WorkSpace * /*workspace*/, bToolR
 {
   bToolRef_Runtime *tref_rt = tref->runtime;
 
+  /* The Sculpt Lattice tool keeps a session on the sculpt object that outlives its operators, so
+   * nothing else would drop it when the user simply picks another tool. A stale session is not
+   * merely leaked memory until mode-exit: #ed::sculpt_paint::lattice::placement_active still
+   * reports true, which makes the transform system retarget G/R/S onto the now-invisible cage
+   * instead of the mesh, and the cage overlay keeps drawing. Its own operators all poll on the
+   * tool being active, so the user could not even confirm or cancel it from here.
+   *
+   * `tref->idname` is still the outgoing tool at this point (#WM_toolsystem_ref_set_from_runtime
+   * overwrites it only after this call), so this matches exactly "the lattice tool is going away".
+   * Keep the identifier in sync with #sculpt_lattice_tool_active_poll. */
+  if (STREQ(tref->idname, "builtin.sculpt_lattice") && BKE_sculpt_lattice_state_free_cb) {
+    /* The sculpt session only ever exists on the active object, which is the one that can hold a
+     * lattice session; the hook is idempotent and null-safe for every other case. */
+    BKE_sculpt_lattice_state_free_cb(CTX_data_active_object(C));
+  }
+
   if (tref_rt->gizmo_group[0]) {
     wmGizmoGroupType *gzgt = WM_gizmogrouptype_find(tref_rt->gizmo_group, false);
     if (gzgt != nullptr) {

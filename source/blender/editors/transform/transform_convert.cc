@@ -34,6 +34,7 @@
 #include "ED_particle.hh"
 #include "ED_screen.hh"
 #include "ED_screen_types.hh"
+#include "ED_sculpt_lattice.hh"
 
 #include "ANIM_keyframing.hh"
 #include "ANIM_nla.hh"
@@ -903,6 +904,14 @@ static TransConvertTypeInfo *convert_type_get(const TransInfo *t, Object **r_obj
     }
 
     return &TransConvertType_Cursor3D;
+  }
+  /* Must be tested before the general sculpt branch below, which would otherwise always win and
+   * make the cage untransformable. */
+  if (!(t->options & CTX_PAINT_CURVE) && (t->spacetype == SPACE_VIEW3D) && ob &&
+      (ob->mode == OB_MODE_SCULPT) && ob->runtime->sculpt_session &&
+      sculpt_paint::lattice::placement_active(t->context, *ob))
+  {
+    return &TransConvertType_SculptLattice;
   }
   if (!(t->options & CTX_PAINT_CURVE) && (t->spacetype == SPACE_VIEW3D) && ob &&
       (ob->mode == OB_MODE_SCULPT) && ob->runtime->sculpt_session)

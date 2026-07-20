@@ -73,6 +73,7 @@ set(SRC
   ../include/ED_screen.hh
   ../include/ED_screen_types.hh
   ../include/ED_sculpt.hh
+  ../include/ED_sculpt_lattice_draw.hh
   ../include/ED_select_utils.hh
   ../include/ED_sequencer.hh
   ../include/ED_sound.hh

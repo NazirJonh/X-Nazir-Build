@@ -104,6 +104,10 @@ set(SRC
   mesh/sculpt_geodesic.cc
   mesh/sculpt_gesture.cc
   mesh/sculpt_hide.cc
+  mesh/sculpt_lattice.cc
+  mesh/sculpt_lattice_deform.cc
+  mesh/sculpt_lattice_draw.cc
+  mesh/sculpt_lattice_place.cc
   mesh/sculpt_mask_extract.cc
   mesh/sculpt_mask_init.cc
   mesh/sculpt_ops.cc
@@ -142,6 +146,8 @@ set(SRC
   mesh/sculpt_hide.hh
   mesh/sculpt_intern.hh
   mesh/sculpt_islands.hh
+  mesh/sculpt_lattice.hh
+  mesh/sculpt_lattice_intern.hh
   mesh/sculpt_pose.hh
   mesh/sculpt_smooth.hh
   mesh/sculpt_undo.hh
@@ -211,6 +217,7 @@ if(WITH_GTESTS)
     mesh/paint_test.cc
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc
+    mesh/sculpt_lattice_box_test.cc
     mesh/sculpt_undo_test.cc
   )
   set(TEST_INC

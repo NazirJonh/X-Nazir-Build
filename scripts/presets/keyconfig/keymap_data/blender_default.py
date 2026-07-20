@@ -8391,6 +8391,26 @@ def km_3d_view_tool_sculpt_mesh_filter(params):
     )
 
 
+def km_3d_view_tool_sculpt_lattice(params):
+    return (
+        "3D View Tool: Sculpt, Lattice",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("sculpt.lattice_pick", {"type": params.tool_mouse, "value": 'PRESS'}, None),
+            ("sculpt.lattice_phase_toggle", {"type": 'C', "value": 'PRESS'}, None),
+            ("sculpt.lattice_confirm", {"type": 'RET', "value": 'PRESS'}, None),
+            ("sculpt.lattice_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
+            ("sculpt.lattice_transform", {"type": 'G', "value": 'PRESS'},
+             {"properties": [("mode", 'TRANSLATE')]}),
+            ("sculpt.lattice_transform", {"type": 'R', "value": 'PRESS'},
+             {"properties": [("mode", 'ROTATE')]}),
+            ("sculpt.lattice_transform", {"type": 'S', "value": 'PRESS'},
+             {"properties": [("mode", 'RESIZE')]}),
+            ("sculpt.lattice_fit", {"type": 'F', "value": 'PRESS'}, None),
+        ]},
+    )
+
+
 def km_3d_view_tool_sculpt_cloth_filter(params):
     return (
         "3D View Tool: Sculpt, Cloth Filter",
@@ -9227,6 +9247,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_polyline_trim(params),
         km_3d_view_tool_sculpt_line_project(params),
         km_3d_view_tool_sculpt_mesh_filter(params),
+        km_3d_view_tool_sculpt_lattice(params),
         km_3d_view_tool_sculpt_cloth_filter(params),
         km_3d_view_tool_sculpt_color_filter(params),
         km_3d_view_tool_sculpt_mask_by_color(params),

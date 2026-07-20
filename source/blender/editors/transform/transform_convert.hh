@@ -413,6 +413,10 @@ extern TransConvertTypeInfo TransConvertType_Particle;
 
 extern TransConvertTypeInfo TransConvertType_Sculpt;
 
+/* `transform_convert_sculpt_lattice.cc` */
+
+extern TransConvertTypeInfo TransConvertType_SculptLattice;
+
 /* `transform_convert_sequencer.cc` */
 
 extern TransConvertTypeInfo TransConvertType_Sequencer;

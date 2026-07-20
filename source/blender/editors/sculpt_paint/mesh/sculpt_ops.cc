@@ -62,6 +62,7 @@
 #include "sculpt_dyntopo.hh"
 #include "sculpt_flood_fill.hh"
 #include "sculpt_intern.hh"
+#include "sculpt_lattice.hh"
 #include "sculpt_undo.hh"
 
 #include "RNA_access.hh"
@@ -1539,6 +1540,18 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_mask_extract);
   WM_operatortype_append(SCULPT_OT_face_set_extract);
   WM_operatortype_append(SCULPT_OT_paint_mask_slice);
+
+  /* Sculpt Lattice Tool (ADR-1 standalone tool). */
+  lattice::sculpt_lattice_register();
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_tool);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_pick);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_phase_toggle);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_slide);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_confirm);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_cancel);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_transform);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_fit);
+  WM_operatortype_append(lattice::SCULPT_OT_lattice_box_define);
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

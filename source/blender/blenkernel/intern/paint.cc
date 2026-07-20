@@ -2119,6 +2119,12 @@ void BKE_sculptsession_free(Object *ob)
   if (ob && ob->runtime->sculpt_session) {
     SculptSession *ss = ob->runtime->sculpt_session;
 
+    /* Lattice Tool cleanup hook: full type lives in editors (ADR-13). The hook
+     * frees the temp OB_LATTICE and the LatticeToolData via MEM_delete. */
+    if (ss->lattice_tool_state && BKE_sculpt_lattice_state_free_cb) {
+      BKE_sculpt_lattice_state_free_cb(ob);
+    }
+
     if (ss->bm) {
       BKE_sculptsession_bm_to_me(ob);
       BM_mesh_free(ss->bm);
@@ -2131,6 +2137,10 @@ void BKE_sculptsession_free(Object *ob)
     ob->runtime->sculpt_session = nullptr;
   }
 }
+
+/* Defined in editors/sculpt_paint/mesh/sculpt_lattice.cc via ED registration.
+ * Nullptr when the editor module is not loaded (e.g. headless tests). */
+void (*BKE_sculpt_lattice_state_free_cb)(Object *ob) = nullptr;
 
 SculptSession::SculptSession() = default;
 
@@ -2479,7 +2489,7 @@ void BKE_sculpt_update_object_before_eval(Object *ob_eval)
 
   bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*ob_orig);
 
-  if (!ss->cache && !ss->filter_cache && !ss->expand_cache) {
+  if (!ss->cache && !ss->filter_cache && !ss->expand_cache && !ss->lattice_slide_active) {
     /* Avoid performing the following normal update for Multires, as it causes race conditions
      * and other intermittent crashes with shared meshes.
      * See !125268 and #125157 for more information. */

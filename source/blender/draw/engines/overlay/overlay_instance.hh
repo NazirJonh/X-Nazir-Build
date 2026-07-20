@@ -43,6 +43,7 @@
 #include "overlay_prepass.hh"
 #include "overlay_relation.hh"
 #include "overlay_sculpt.hh"
+#include "overlay_sculpt_lattice_cage.hh"
 #include "overlay_speaker.hh"
 #include "overlay_text.hh"
 #include "overlay_wireframe.hh"
@@ -72,6 +73,7 @@ class Instance : public DrawEngine {
   Outline outline;
   MotionPath motion_paths;
   Cursor cursor;
+  SculptLatticeCage sculpt_lattice_cage = {selection_type_};
 
   struct OverlayLayer {
     const SelectionType selection_type_;

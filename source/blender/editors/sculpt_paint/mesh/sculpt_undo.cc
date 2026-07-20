@@ -2698,6 +2698,15 @@ static void restore_list(bContext *C,
         restore_position_mesh(
             object, *step_data.position_step_storage, modified_verts, skip_positions_swap);
 
+        /* Keep the active sculpt layer in sync with the restored positions. This has to run before
+         * the bounds are recomputed below: with `skip_positions_swap` set #restore_position_mesh
+         * deliberately leaves the positions alone, so this call is what actually moves them.
+         * Recomputing first would copy boxes describing the still-deformed surface into
+         * #bounds_orig_ (and #store_bounds_orig clears the dirty accumulator, so nothing catches up
+         * later), and the next stroke would drop nodes whose geometry moved back under the cursor
+         * while deforming their neighbors — the mesh tears along leaf-node borders. */
+        restore_active_sculpt_layer(step_data, object);
+
         const IndexMask changed_nodes = IndexMask::from_predicate(
             node_mask,
             memory,
@@ -2722,9 +2731,6 @@ static void restore_list(bContext *C,
       }
       pbvh.update_bounds(*depsgraph, object);
       bke::pbvh::store_bounds_orig(pbvh);
-
-      /* Keep the active sculpt layer in sync with the restored positions. */
-      restore_active_sculpt_layer(step_data, object);
 
       /* A base-editing stroke (not recorded into a layer) folds itself into the runtime layer base
        * at stroke end; undoing it restores the positions but leaves that cached base advanced by

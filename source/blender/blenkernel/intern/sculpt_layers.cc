@@ -1366,22 +1366,18 @@ static int grid_mask_level(const SculptLayerMask &mask, const int grids_num)
   return -1;
 }
 
-/* Resample one node's mask from \a old_level to \a new_level, in place. */
-static void resample_one_grid_mask(SculptLayerTreeNode &node,
-                                   const int grids_num,
-                                   const int old_level,
-                                   const int new_level)
+Array<float> resample_grid_mask_values(const Span<float> dense,
+                                       const int grids_num,
+                                       const int old_level,
+                                       const int new_level)
 {
-  SculptLayerMask &mask = *node.mask;
   /* Ride the mask through the *same* resamplers the layer data uses, one weight per `x` channel.
    * The point is not to save code but to make it impossible for a mask to land on a different grid
    * point than the coefficient it weights: the two would drift apart the moment the two mappings
    * were spelled separately, and the symptom — a mask sliding across the surface on a level change
    * — would be blamed on anything but the resampler. */
-  Array<float> dense(mask.totelem);
-  mask_expand(mask, dense);
-  Array<float3> packed(mask.totelem);
-  threading::parallel_for(IndexRange(mask.totelem), 8192, [&](const IndexRange range) {
+  Array<float3> packed(dense.size());
+  threading::parallel_for(dense.index_range(), 8192, [&](const IndexRange range) {
     for (const int64_t i : range) {
       packed[i] = float3(dense[i], 0.0f, 0.0f);
     }
@@ -1399,6 +1395,20 @@ static void resample_one_grid_mask(SculptLayerTreeNode &node,
       out[i] = std::clamp(resampled[i].x, 0.0f, 1.0f);
     }
   });
+  return out;
+}
+
+/* Resample one node's mask from \a old_level to \a new_level, in place. */
+static void resample_one_grid_mask(SculptLayerTreeNode &node,
+                                   const int grids_num,
+                                   const int old_level,
+                                   const int new_level)
+{
+  SculptLayerMask &mask = *node.mask;
+  Array<float> dense(mask.totelem);
+  mask_expand(mask, dense);
+
+  const Array<float> out = resample_grid_mask_values(dense, grids_num, old_level, new_level);
 
   const int new_gs = CCG_grid_size(new_level);
   SculptLayerMask *replacement = mask_compress(out, new_gs * new_gs);

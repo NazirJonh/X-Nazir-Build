@@ -446,6 +446,17 @@ struct SculptLayerMaskEdit {
    */
   int grids_num = 0;
   /**
+   * Multires top level, i.e. the level the node's mask is *stored* at. Zero for a vertex-domain
+   * session.
+   *
+   * The session authors on #SubdivCCG::masks, which sits at the *sculpt* level, while grid masks
+   * are stored at the top level alongside the layer data they weight (see #resample_grid_masks).
+   * With `Sculpt Levels < Levels` the two differ and the weights are resampled at both session
+   * boundaries. Recorded rather than re-read from the modifier on exit, so the buffer is always
+   * mapped back out of the level it was mapped into.
+   */
+  int store_level = 0;
+  /**
    * `SubdivCCG::id` as it was when the session opened. Zero for a vertex-domain session, and never
    * a valid id (#subdiv_ccg_next_id starts at one).
    *

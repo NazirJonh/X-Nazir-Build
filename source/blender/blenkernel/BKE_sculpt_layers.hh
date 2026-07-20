@@ -24,6 +24,7 @@
 
 #include "DNA_listBase.h"
 
+#include "BLI_array.hh"
 #include "BLI_cache_mutex.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_math_vector_types.hh"
@@ -617,6 +618,20 @@ void resample_grid_layers(Mesh &mesh, int grids_num, int new_level);
  * entirely, there being no grid domain left for them to describe.
  */
 void resample_grid_masks(Mesh &mesh, int grids_num, int new_level);
+
+/**
+ * Resample a dense grid-domain weight buffer from \a old_level to \a new_level, returning a buffer
+ * of `grid_totelem(grids_num, new_level)` weights clamped to 0..1.
+ *
+ * The shared core of #resample_grid_masks and of the weight-mask edit session, which authors on the
+ * CCG at the *sculpt* level while the mask is stored at the multires *top* level. Both must map a
+ * weight onto the grid point of the coefficient it weights, so both go through this one mapping
+ * rather than spelling it twice.
+ */
+Array<float> resample_grid_mask_values(Span<float> dense,
+                                       int grids_num,
+                                       int old_level,
+                                       int new_level);
 
 /* -------------------------------------------------------------------------------------------------
  * Weight masks (#SculptLayerMask). Attached to a #SculptLayerTreeNode through its `mask` pointer;

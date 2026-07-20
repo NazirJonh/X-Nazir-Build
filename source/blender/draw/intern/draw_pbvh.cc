@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdio>
 
+#include "BLI_array.hh"
 #include "BLI_map.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector_types.hh"
@@ -26,6 +27,7 @@
 #  define PDP_PERF(...) ((void)0)
 #endif
 
+#include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 
 #include "BKE_attribute.hh"
@@ -1240,7 +1242,16 @@ BLI_NOINLINE static void fill_layer_masks_grids(const Object &object,
     return;
   }
 
-  if (node == nullptr || !layer_mask_is_drawable(*node, elem_num, subdiv_ccg.grid_area)) {
+  /* Grid masks are stored at the multires top level, next to the layer coefficients they weight,
+   * while the CCG this overlay draws sits at the sculpt level. With `Sculpt Levels < Levels` the
+   * mask must be measured — and read — at its own level, or #layer_mask_is_drawable rejects it and
+   * the user loses the tint for a mask that is in force. */
+  const MultiresModifierData *mmd = object.runtime->sculpt_session->multires_modifier;
+  const int store_level = mmd ? mmd->totlvl : subdiv_ccg.level;
+  const int store_grid_area = CCG_grid_size(store_level) * CCG_grid_size(store_level);
+  const int64_t store_elem_num = int64_t(subdiv_ccg.grids_num) * store_grid_area;
+
+  if (node == nullptr || !layer_mask_is_drawable(*node, store_elem_num, store_grid_area)) {
     /* A missing or undrawable node means "nothing hidden": the layer contributes fully, so the
      * overlay has no blue to paint and a neutral weight is correct. */
     node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(1.0f); },
@@ -1249,6 +1260,28 @@ BLI_NOINLINE static void fill_layer_masks_grids(const Object &object,
   }
 
   const SculptLayerMask &layer_mask = *node->mask;
+
+  /* Only materialized when the two levels differ: at equal levels the block-indexed read below is
+   * both exact and allocation-free, which is the common case and the one on the redraw path. */
+  Array<float> resampled;
+  if (store_level != subdiv_ccg.level) {
+    Array<float> dense(layer_mask.totelem);
+    bke::sculpt_layers::mask_expand(layer_mask, dense);
+    resampled = bke::sculpt_layers::resample_grid_mask_values(
+        dense, subdiv_ccg.grids_num, store_level, subdiv_ccg.level);
+    if (resampled.size() != elem_num) {
+      node_mask.foreach_index([&](const int i) { vbos[i]->data<float>().fill(1.0f); },
+                              exec_mode::grain_size(64));
+      return;
+    }
+  }
+  const Span<float> resampled_weights = resampled;
+
+  const auto weight_at = [&](const IndexRange range, const int offset) {
+    return resampled_weights.is_empty() ? layer_weight_at(layer_mask, range, offset) :
+                                          resampled_weights[range[offset]];
+  };
+
   node_mask.foreach_index(
       [&](const int i) {
         float *data = vbos[i]->data<float>().data();
@@ -1258,16 +1291,13 @@ BLI_NOINLINE static void fill_layer_masks_grids(const Object &object,
             const IndexRange range = bke::ccg::grid_range(key, grid);
             for (int y = 0; y < grid_size_1; y++) {
               for (int x = 0; x < grid_size_1; x++) {
-                *data = layer_weight_at(layer_mask, range, CCG_grid_xy_to_index(key.grid_size, x, y));
+                *data = weight_at(range, CCG_grid_xy_to_index(key.grid_size, x, y));
                 data++;
-                *data = layer_weight_at(
-                    layer_mask, range, CCG_grid_xy_to_index(key.grid_size, x + 1, y));
+                *data = weight_at(range, CCG_grid_xy_to_index(key.grid_size, x + 1, y));
                 data++;
-                *data = layer_weight_at(
-                    layer_mask, range, CCG_grid_xy_to_index(key.grid_size, x + 1, y + 1));
+                *data = weight_at(range, CCG_grid_xy_to_index(key.grid_size, x + 1, y + 1));
                 data++;
-                *data = layer_weight_at(
-                    layer_mask, range, CCG_grid_xy_to_index(key.grid_size, x, y + 1));
+                *data = weight_at(range, CCG_grid_xy_to_index(key.grid_size, x, y + 1));
                 data++;
               }
             }
@@ -1277,7 +1307,7 @@ BLI_NOINLINE static void fill_layer_masks_grids(const Object &object,
           for (const int grid : nodes[i].grids()) {
             const IndexRange range = bke::ccg::grid_range(key, grid);
             for (const int offset : IndexRange(range.size())) {
-              *data = layer_weight_at(layer_mask, range, offset);
+              *data = weight_at(range, offset);
               data++;
             }
           }

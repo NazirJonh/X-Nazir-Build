@@ -27,6 +27,7 @@
 #include <utility>
 
 #include "DNA_mesh_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
@@ -337,6 +338,26 @@ static bool mask_edit_begin_grids(SculptSession &ss, SculptLayerTreeNode &node)
     return false;
   }
 
+  /* The mask is *stored* at the multires top level, next to the layer coefficients it weights (see
+   * #resample_grid_masks), but authored on the CCG, which sits at the *sculpt* level. With `Sculpt
+   * Levels < Levels` the two differ, and everything below — the staleness test, the block cut, the
+   * buffer handed to #mask_expand — has to speak the storage level, not the CCG's. Sizing the mask
+   * off the CCG instead is what made a mask painted at a reduced sculpt level read as stale to
+   * #grid_masks_for_composite: drawn by the overlay, ignored by the composite. */
+  const int cur_level = subdiv_ccg->level;
+  const int store_level = ss.multires_modifier ? ss.multires_modifier->totlvl : cur_level;
+  if (store_level < cur_level || store_level <= 0) {
+    /* The sculpt level cannot exceed the top level. Refused rather than repaired, as everywhere
+     * else in this function: a CCG that disagrees with its own modifier is not something this
+     * session can reason about. */
+    return false;
+  }
+  const int store_grid_area = CCG_grid_size(store_level) * CCG_grid_size(store_level);
+  const int64_t store_totelem = int64_t(grids_num) * store_grid_area;
+  if (store_totelem > int64_t(std::numeric_limits<int>::max())) {
+    return false;
+  }
+
   /* Sampled before the array is materialized below, for the same reason the mesh path samples the
    * attribute before adding it: afterwards the answer is always "yes" and the exit path would leave
    * a mask on a mesh that never had one. */
@@ -351,8 +372,8 @@ static bool mask_edit_begin_grids(SculptSession &ss, SculptLayerTreeNode &node)
     saved_grid_mask = Array<float>(subdiv_ccg->masks.as_span());
   }
   else {
-    /* Left uninitialized on purpose: #mask_expand writes every one of the `totelem` elements it was
-     * just sized to, so a fill would be overwritten in its entirety. */
+    /* Left uninitialized on purpose: the session buffer is filled outright below, over every one of
+     * the `totelem` elements it was just sized to, so a fill would be overwritten in its entirety. */
     subdiv_ccg->masks.reinitialize(totelem);
   }
 
@@ -364,16 +385,35 @@ static bool mask_edit_begin_grids(SculptSession &ss, SculptLayerTreeNode &node)
    * must follow it: #mask_blend_read neutralizes an unusable mask by resetting its block size to
    * #SCULPT_LAYER_MASK_VERT_BLOCK, so `block_size` alone never identifies the domain. */
   const bool mask_created = node.mask == nullptr ||
-                            bke::sculpt_layers::is_stale_mask(*node.mask, totelem) ||
-                            node.mask->block_size != grid_area;
+                            bke::sculpt_layers::is_stale_mask(*node.mask, store_totelem) ||
+                            node.mask->block_size != store_grid_area;
   if (mask_created) {
     bke::sculpt_layers::mask_free(node.mask);
-    node.mask = bke::sculpt_layers::mask_new(int(totelem), grid_area, 255);
+    node.mask = bke::sculpt_layers::mask_new(int(store_totelem), store_grid_area, 255);
   }
   /* #mask_new only returns null for an empty domain, which the grid count check above ruled out. */
   BLI_assert(node.mask != nullptr);
-  bke::sculpt_layers::mask_expand(*node.mask, subdiv_ccg->masks.as_mutable_span());
-  session_buffer_flip(subdiv_ccg->masks.as_mutable_span());
+
+  /* Expanded at the storage level, then mapped down onto the CCG the user paints on. The round trip
+   * is exact where the two levels agree, and where they do not the stride-subsample here pairs with
+   * the bilinear upsample on the way out — the same mapping the layer coefficients ride, so a weight
+   * cannot land on a different grid point than the coefficient it weights. */
+  Array<float> stored_values(store_totelem);
+  bke::sculpt_layers::mask_expand(*node.mask, stored_values);
+  MutableSpan<float> session_masks = subdiv_ccg->masks.as_mutable_span();
+  if (store_level == cur_level) {
+    session_masks.copy_from(stored_values);
+  }
+  else {
+    const Array<float> resampled = bke::sculpt_layers::resample_grid_mask_values(
+        stored_values, grids_num, store_level, cur_level);
+    /* Both counts are `grids_num * CCG_grid_size(cur_level)^2`, so they agree by construction.
+     * Asserted rather than checked: every exit from here on has already replaced the node's mask,
+     * and bailing out would leave that behind with no session to finish it. */
+    BLI_assert(resampled.size() == session_masks.size());
+    session_masks.copy_from(resampled);
+  }
+  session_buffer_flip(session_masks);
 
   ss.layers.mask_edit.node_uid = node.uid;
   ss.layers.mask_edit.on_grids = true;
@@ -382,6 +422,7 @@ static bool mask_edit_begin_grids(SculptSession &ss, SculptLayerTreeNode &node)
   ss.layers.mask_edit.saved_grid_mask = std::move(saved_grid_mask);
   ss.layers.mask_edit.grid_area = grid_area;
   ss.layers.mask_edit.grids_num = grids_num;
+  ss.layers.mask_edit.store_level = store_level;
   /* The only token that survives a rebuild at the same level over the same base topology, which
    * leaves every geometric number above unchanged. See #SculptLayerMaskEdit::ccg_id. */
   ss.layers.mask_edit.ccg_id = subdiv_ccg->id;
@@ -622,9 +663,21 @@ static void mask_edit_end_grids(SculptSession &ss,
     /* Flipped back to the weight convention before it is stored. In place, because every path below
      * overwrites this buffer outright — with the parked mask, or by emptying it. */
     session_buffer_flip(masks);
-    /* One block per grid, which is what makes a grid index a block index for every multires path
-     * that reads this mask (#grid_masks_for_composite rejects any other cut, silently). */
-    node->mask = bke::sculpt_layers::mask_compress(masks, subdiv_ccg->grid_area);
+    /* Mapped back up to the level the mask is stored at, undoing the subsample #mask_edit_begin_grids
+     * did on the way in. Cut one block per grid *of that level*, which is what makes a grid index a
+     * block index for every multires path that reads this mask (#grid_masks_for_composite rejects
+     * any other cut, silently). */
+    const int cur_level = subdiv_ccg->level;
+    const int store_level = ss.layers.mask_edit.store_level;
+    if (store_level > cur_level) {
+      const Array<float> stored_values = bke::sculpt_layers::resample_grid_mask_values(
+          masks, subdiv_ccg->grids_num, cur_level, store_level);
+      const int store_grid_area = CCG_grid_size(store_level) * CCG_grid_size(store_level);
+      node->mask = bke::sculpt_layers::mask_compress(stored_values, store_grid_area);
+    }
+    else {
+      node->mask = bke::sculpt_layers::mask_compress(masks, subdiv_ccg->grid_area);
+    }
   }
   else if (!store_weights && node != nullptr && ss.layers.mask_edit.mask_created) {
     /* Discarded, and the node had nothing usable before the session; see the mesh path for why the
@@ -770,9 +823,20 @@ MaskLayout mask_layout_for_object(Object &object)
       if (ss == nullptr || ss->subdiv_ccg == nullptr) {
         return {};
       }
-      /* Read off the live CCG rather than derived from the modifier's level: these are the numbers
-       * #SubdivCCG::masks is actually sized by, and so the only ones a block layout may come from. */
-      return mask_layout_for(true, 0, ss->subdiv_ccg->grids_num, ss->subdiv_ccg->grid_area);
+      /* The *storage* layout, so it is taken from the multires top level and not from the live CCG:
+       * a grid mask is stored next to the layer coefficients it weights, which sit at that level
+       * (see #resample_grid_masks), while the CCG sits at the sculpt level. Taking it off the CCG
+       * made every consumer disagree with the author whenever `Sculpt Levels < Levels` — the
+       * composite called the mask stale and ignored it, and #SCULPT_OT_layer_mask_apply multiplied
+       * the layer by weights from a different index space. The edit session maps between the two
+       * levels at its own boundaries; the numbers here are the ones the mask is measured by. */
+      const int level = ss->multires_modifier ? ss->multires_modifier->totlvl :
+                                                ss->subdiv_ccg->level;
+      if (level <= 0) {
+        return {};
+      }
+      const int grid_area = CCG_grid_size(level) * CCG_grid_size(level);
+      return mask_layout_for(true, 0, ss->subdiv_ccg->grids_num, grid_area);
     }
     case bke::pbvh::Type::BMesh:
       /* Dynamic topology carries no sculpt layers, so there is nothing to mask. */

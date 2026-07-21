@@ -11,6 +11,7 @@
 #include "DNA_ID.h"
 #include "DNA_brush_enums.h"
 #include "DNA_curve_types.h"
+#include "DNA_curves_types.h"
 #include "DNA_defs.h"
 #include "DNA_object_enums.h"
 #include "DNA_scene_types.h"
@@ -168,6 +169,91 @@ struct BrushCurvesSculptSettings {
 
 /** Max number of propagation steps for automasking settings. */
 #define AUTOMASKING_BOUNDARY_EDGES_MAX_PROPAGATION_STEPS 20
+
+/** One entry in a brush's Curve Patch texture list (#BrushCurvePatchSettings::texture_slots), used
+ * by the Curve Patch STAMPS mode when its texture source is #BRUSH_CURVE_PATCH_TEX_MULTI.
+ *
+ * Must stay trivially copyable: `brush_copy_data()` duplicates the list with `BLI_duplicatelist()`,
+ * which copies each node's bytes through `MEM_dupallocN` and runs no constructor. Adding a member
+ * with a non-trivial constructor (a `std::string`, a container) would leave that member's bytes
+ * aliased between the two brushes. */
+struct BrushCurvePatchTextureSlot {
+  struct BrushCurvePatchTextureSlot *next = nullptr, *prev = nullptr;
+  /** Sampled through a copy of #Brush::mtex with only this `tex` swapped in, so every mapping
+   * setting stays shared with the brush. A null `tex` makes the stamp that drew this slot skip
+   * itself entirely -- unlike the brush's own null texture, which sculpts flat. */
+  struct Tex *tex = nullptr;
+  /** Relative probability weight in the per-stamp draw. Zero disables the slot without deleting it;
+   * a list whose weights all sum to zero falls back to the brush's own texture. */
+  float weight = 1.0f;
+  char _pad[4] = {};
+};
+
+/**
+ * Curve Patch settings, one set per brush.
+ *
+ * These lived split across #Brush and #MTex until they were gathered here: the #MTex half was
+ * formally per-texture-slot, but nothing ever read it from any slot other than #Brush::mtex, so the
+ * split described nothing real and made the Python API address one feature through two unrelated
+ * paths.
+ *
+ * The member order is chosen so that no explicit padding is needed: makesdna does not insert
+ * alignment padding on its own (see `check_member_alignment()` in `makesdna.cc`), and the twelve
+ * `char` fields sit exactly between the list's `int` and the first pointer.
+ */
+struct BrushCurvePatchSettings {
+  /** STAMPS mode texture list, active only when #stamp_texture_source is
+   * #BRUSH_CURVE_PATCH_TEX_MULTI. Holds ID pointers with user counts, so brush copy, free and
+   * `foreach_id` all have to walk it. */
+  ListBaseT<BrushCurvePatchTextureSlot> texture_slots = {nullptr, nullptr};
+  int texture_active_index = 0;
+
+  /** When set, committing a Curve Patch (or Roll) edit assigns a new face set to the faces its
+   * relief actually raised. */
+  char face_set = 0;
+  /** Swap which texture axis runs along the control curve's arc-length (false = V runs along the
+   * curve, the default; true = U). `char`, not `bool`: makesdna has no builtin size for `bool`. */
+  char swap_axis = false;
+  /** How one texture tile is mapped along the arc-length. See #eBrushCurvePatchLengthMode. */
+  char length_mode = 0;
+  /** REPEAT mode: number of texture repeats along the curve length (RNA-clamped 1..64). */
+  char length_repeat = 1;
+  /** How the relief terminates at the curve's two ends. See #eBrushCurvePatchEndFalloff. */
+  char end_falloff = BRUSH_CURVE_PATCH_END_HARD;
+  /** SMOOTH end falloff: length of the fade at each end, as a percentage of the curve's total
+   * arc-length (RNA-clamped 0..50). The 50 ceiling keeps the two end zones from ever overlapping. */
+  char end_falloff_percent = 10;
+  /** Whether the texture is projected as one continuous stretched sheet along the curve (Ribbon,
+   * the original behavior) or as discrete randomized stamps. See #eBrushCurvePatchStampMode. */
+  char stamp_mode = BRUSH_CURVE_PATCH_STAMP_RIBBON;
+  /** STAMPS mode: which coordinate frame a stamp's texture is sampled in. See
+   * #eBrushCurvePatchStampProjection. */
+  char stamp_projection = BRUSH_CURVE_PATCH_STAMP_PROJ_CURVE;
+  /** STAMPS mode: per-stamp size randomization as a percentage (RNA-clamped 0..100). Stamps only
+   * ever shrink from the brush radius, never grow past it. */
+  char stamp_size_random = 0;
+  /** STAMPS mode: per-stamp relief strength randomization as a percentage (RNA-clamped 0..100).
+   * Like the size, it only ever reduces. */
+  char stamp_strength_random = 0;
+  /** Whether every stamp samples the brush's own texture or draws one at random from
+   * #texture_slots. See #eBrushCurvePatchTexSource. */
+  char stamp_texture_source = BRUSH_CURVE_PATCH_TEX_SINGLE;
+  /** Whether the whole ribbon carries the brush's own texture or splits into the Start / Middle /
+   * End textures below. See #eBrushCurvePatchTexSource. */
+  char ribbon_texture_source = BRUSH_CURVE_PATCH_TEX_SINGLE;
+
+  /** RIBBON mode Start / Middle / End textures, active only when #ribbon_texture_source is
+   * #BRUSH_CURVE_PATCH_TEX_MULTI. A null entry leaves its stretch of the ribbon untouched. */
+  struct Tex *tex_start = nullptr;
+  struct Tex *tex_middle = nullptr;
+  struct Tex *tex_end = nullptr;
+
+  /** Arc length the Start / End textures occupy, in brush DIAMETERS -- 1.0 makes a cap as long as
+   * the ribbon is wide, so its texture is not distorted. Zero means no cap. */
+  float cap_start_length = 1.0f;
+  float cap_end_length = 1.0f;
+};
+
 /**
  * \note Any change to members that is user visible and that may make the brush differ from the one
  * saved in the asset library should be followed by a #BKE_brush_tag_unsaved_changes() call.
@@ -449,6 +535,20 @@ struct Brush {
 
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve = nullptr;
   struct MeshAutomaskingSettings *mesh_automasking_settings = nullptr;
+
+  /** Every Curve Patch setting of this brush. Embedded by value rather than held by pointer (unlike
+   * #gpencil_settings and #curves_sculpt_settings): there is no optional lifetime here -- the
+   * settings either belong to every brush or to none -- and by-value costs no alloc, free or
+   * blend-file read of its own. */
+  BrushCurvePatchSettings curve_patch;
+
+  /** Roll stroke method (#BRUSH_STROKE_ROLL). Scale the rolled texture with the pressure-driven
+   * brush radius so the pattern keeps its aspect ratio under pressure. */
+  char roll_pressure_scale = 1;
+  /** Roll stroke method: after the stroke finishes, hand the drawn contour off to the Curve Patch
+   * editor as an editable control curve. */
+  char roll_edit_after = 0;
+  char _pad5[6] = {};
 };
 
 struct PaletteColor {
@@ -491,11 +591,28 @@ struct PaintCurve {
 #endif
 
   ID id;
-  /** Points of curve. */
-  PaintCurvePoint *points = nullptr;
-  int tot_points = 0;
+  /** Legacy 2D screen-space representation, no longer written or read. */
+  DNA_DEPRECATED PaintCurvePoint *points = nullptr;
+  DNA_DEPRECATED int tot_points = 0;
   /** Index where next point will be added. */
   int add_index = 0;
+
+  /**
+   * Authoritative 3D representation with full attribute support.
+   * One bezier curve with control points stored in object space of the active object.
+   */
+  CurvesGeometry geometry;
+
+  /**
+   * When non-zero, `geometry` is the authoritative representation.
+   * Defaults to 1 so new curves are created in 3D mode.
+   */
+  char use_3d_space = 1;
+  /** When set, draw interactive radius handles at each control point. */
+  char show_radius_handles = 1;
+  char _pad0[2] = {0};
+  /** Active spline index for multi-spline editing (clamped at use). */
+  int active_curve = 0;
 };
 
 }  // namespace blender

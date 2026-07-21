@@ -20,6 +20,7 @@ set(SRC
   transform_convert_armature.cc
   transform_convert_cursor.cc
   transform_convert_curve.cc
+  transform_convert_curve_patch.cc
   transform_convert_curves.cc
   transform_convert_graph.cc
   transform_convert_grease_pencil.cc
@@ -83,6 +84,7 @@ set(SRC
   transform_mode_tosphere.cc
   transform_mode_trackball.cc
   transform_mode_translate.cc
+  paint_curve_snap.cc
   transform_mode_vert_slide.cc
   transform_ops.cc
   transform_orientations.cc
@@ -118,6 +120,7 @@ set(LIB
   PRIVATE bf::depsgraph
   PRIVATE bf::dna
   bf_editor_mask
+  bf_editor_sculpt_paint
   PRIVATE bf::gpu
   PRIVATE bf::imbuf
   PRIVATE bf::intern::guardedalloc

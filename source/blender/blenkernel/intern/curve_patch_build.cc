@@ -1,0 +1,256 @@
+/* SPDX-FileCopyrightText: 2026 Blender Authors
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+/** \file
+ * \ingroup bke
+ *
+ * Assembly of every derived Curve Patch structure from a control curve and its parameters: the
+ * arc-length spline, the stamp layout, and either the whole-curve ribbon LUT or the set of local
+ * tangent windows that replaces it.
+ *
+ * The order of the calls below is load-bearing and is preserved verbatim from the editor-side
+ * re-stamp this was lifted out of -- see the notes on `stamp_search_reach`.
+ */
+
+#include "BLI_math_base.h"
+#include "BLI_math_vector.hh"
+/* `BKE_curves.hh` only forward-declares the virtual array types, and the tessellation below reads
+ * the `radius` and `paintcurve_surface_normal` attributes through a #VArraySpan. */
+#include "BLI_virtual_array.hh"
+
+#include "BKE_attribute.hh"
+#include "BKE_curve_patch.hh"
+
+/* TEMPORARY diagnostic for the seam at a surface fold. Forces the wrap to a SINGLE window while
+ * leaving the shrinkwrap, the smoothed normal field and the smoothed-binormal ribbon fully active,
+ * so the window join is the only variable removed. Seam gone -> the join produces it; seam still
+ * there -> it comes from the shrinkwrap or the ribbon, and the join is innocent. Set back to 0
+ * once measured; grep `FORCE_SINGLE_FRAME` to remove every touch point. */
+#define CURVE_PATCH_FORCE_SINGLE_FRAME 0
+
+namespace blender::bke {
+
+void CurvePatchGeometry::clear()
+{
+  this->spline.clear();
+  this->ribbon.clear();
+  this->frames.clear();
+  this->surface.clear();
+  this->stamps.clear();
+  this->ribbon_radius = 0.0f;
+  this->stamp_search_reach = 0.0f;
+  this->ribbon_end_margin = 0.0f;
+}
+
+/* Width of the normal-field smoothing. It arbitrates "`u` stays continuous" against "the strip hugs
+ * the edge": wider means a smoother texture on an oblique crossing and a looser fit. A fraction of
+ * the radius rather than a world-space constant, so the behavior does not depend on scene scale. */
+static float curve_patch_smooth_length(const CurvePatchParams &params)
+{
+  return params.radius * (params.final_quality ? 0.5f : 0.8f);
+}
+
+/* Lay the stamps out and resolve the three bounds every consumer of them shares. Ribbon mode
+ * leaves the list empty and all three bounds at zero, which is what makes it bit-for-bit what it
+ * was before Stamps mode existed. */
+static void curve_patch_build_stamps(const CurvePatchParams &params,
+                                     const Span<float> stamp_texture_weights_cdf,
+                                     CurvePatchGeometry &r_geometry)
+{
+  curve_patch_stamps_build(r_geometry.spline,
+                           params.radius,
+                           params.spacing_frac,
+                           params.jitter_amount,
+                           params.stamp_size_random,
+                           params.stamp_strength_random,
+                           params.base_angle,
+                           params.random_angle,
+                           params.stamp_seed,
+                           stamp_texture_weights_cdf,
+                           r_geometry.stamps);
+
+  /* PLANAR tests candidate vertices against a rigid WORLD-space frame, but this reach is still an
+   * ARC-LENGTH window. On a bend the chord is shorter than the arc, so a vertex inside a stamp's
+   * world square can have an `s` outside this window and get silently clipped. The arc/chord ratio
+   * for a circular bend of turn angle theta across the stamp's reach is `(theta/2) / sin(theta/2)`;
+   * this bound is sized for turns up to a 180-degree hairpin, where the ratio reaches
+   * `PI / 2 ~= 1.571`, and 1.6 rounds that up. A curve that spirals tighter than a half-turn within
+   * roughly one stamp's reach exceeds what this bound was designed for and is out of scope here.
+   * The bound only has to be conservative within that scope: the per-stamp test in the relief's
+   * candidate loop is exact, so an over-wide window just costs a few extra candidates, while a
+   * too-narrow one silently clips stamps. */
+  constexpr float PLANAR_BEND_SLACK = 1.6f;
+  /* Resolve the one bound every consumer below shares. On top of the bend slack above, PLANAR also
+   * adds `jitter_amount`: a stamp pushed sideways off the curve keeps a rigid frame, so its square
+   * spans more arc length than its own corner reach accounts for. CURVE takes neither term and
+   * keeps the historical value, so that projection is unaffected. */
+  r_geometry.stamp_search_reach = curve_patch_stamp_reach(params.radius);
+  if (params.stamp_projection == CurvePatchStampProjection::Planar) {
+    r_geometry.stamp_search_reach = r_geometry.stamp_search_reach * PLANAR_BEND_SLACK +
+                                    params.jitter_amount;
+  }
+
+  /* A closed curve has no ends to extend (see `ribbon_end_margin` below), so the stamp at the join
+   * would lose the half that reaches into `v < 0` -- which on a loop is not outside the curve but
+   * the stretch just before the join. Wrap those stamps around instead, so both halves are present
+   * and meet exactly at the seam. The bound must be the same one the per-vertex search window uses,
+   * hence the shared `stamp_search_reach`. */
+  if (r_geometry.spline.cyclic) {
+    curve_patch_stamps_add_cyclic_wrap(
+        r_geometry.stamps, r_geometry.spline.total_length(), r_geometry.stamp_search_reach);
+  }
+
+  /* Stamps pushed sideways by jitter would fall outside the ribbon and be clipped by the LUT's
+   * edge, so the strip has to cover the widest possible excursion. Only jitter needs this: the size
+   * randomization shrinks stamps and never grows them. The widened value flows into
+   * `ribbon_source_hash()` as the `brush_radius` argument, so the cached LUT invalidates correctly
+   * with no extra hashing. */
+  r_geometry.ribbon_radius += params.jitter_amount;
+
+  /* The layout puts the first stamp's center exactly at `s == 0` and the last one at the last whole
+   * step before `total_length`, so an end stamp reaches past the curve's end by its own
+   * half-extent -- and the strip, which used to stop dead at that end, gave the overhanging half no
+   * UV at all and clipped it along a hard straight edge. Extend the strip by the farthest such
+   * reach instead of insetting the stamps, which would leave the ends of the curve visibly bare.
+   *
+   * #curve_patch_stamp_reach is a stamp's corner reach; `jitter_amount` covers a center jittered
+   * further along the curve. Deliberately NOT `stamp_search_reach`: that bound also carries
+   * `PLANAR_BEND_SLACK`, which exists to cover a stamp's arc/chord gap on a BEND -- but an end
+   * stamp's overhang is not tested against a bend, it is rendered by the ribbon's own straight
+   * extrapolation along the end tangent (see #curve_patch_stamps_build's PLANAR frame
+   * extrapolation). Slack bought there would only inflate the strip, the PBVH cull tube, and the
+   * whole-curve search sphere for no correctness gain, and it would force a full LUT rebuild on
+   * every CURVE<->PLANAR toggle since `end_margin` feeds the ribbon's source hash. */
+  r_geometry.ribbon_end_margin = curve_patch_stamp_reach(params.radius) + params.jitter_amount;
+}
+
+void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
+                                          const CurvePatchParams &params,
+                                          const Span<float> stamp_texture_weights_cdf,
+                                          CurvePatchGeometry &r_geometry)
+{
+  control_curve.ensure_can_interpolate_to_evaluated();
+  Array<float> evaluated_radii(control_curve.evaluated_points_num());
+  control_curve.interpolate_to_evaluated(VArraySpan(control_curve.radius()),
+                                         evaluated_radii.as_mutable_span());
+  /* A control curve is always a single spline, so curve 0 carries the whole patch's cyclic state. */
+  const bool cyclic = control_curve.curves_num() > 0 && control_curve.cyclic()[0];
+
+  /* The polyline is pulled onto the pristine surface BEFORE the spline is built: arc lengths and
+   * tangents are computed inside the build, so shifting the points afterwards would leave them
+   * describing the previous curve, the one still hovering above the mesh. */
+  Array<float3> evaluated_positions(control_curve.evaluated_positions());
+
+  /* Seeded from the control curve's OWN per-point normal (set by the editor at each point's
+   * placement -- works identically on Mesh and Grids/CCG, unlike the shrinkwrap below which only
+   * exists for Mesh). This is what lets windowed frames build on Multires: without it,
+   * `evaluated_normals` used to stay entirely empty off Mesh, `CurvePatchSpline::normals_3d`
+   * followed suit, and #curve_patch_frames_partition refused to run -- silently collapsing every
+   * Multires patch onto the single-window path with its one frozen `plane_normal`, which clips
+   * anything more than ~72 degrees off the direction the patch happened to be drawn from. */
+  const AttributeAccessor control_attrs = control_curve.attributes();
+  const VArray<float3> control_normals = *control_attrs.lookup_or_default<float3>(
+      CURVE_PATCH_ATTR_SURFACE_NORMAL, AttrDomain::Point, float3(0.0f, 0.0f, 1.0f));
+  Array<float3> evaluated_normals(evaluated_positions.size(), float3(0.0f));
+  control_curve.interpolate_to_evaluated(VArraySpan(control_normals),
+                                         evaluated_normals.as_mutable_span());
+  for (float3 &normal : evaluated_normals) {
+    /* Interpolation between two unit vectors is not itself unit length; renormalize, falling
+     * back to the frozen plane like the shrinkwrap path already does for a degenerate result. */
+    const float len = math::length(normal);
+    normal = len > 1e-6f ? normal / len : params.plane_normal;
+  }
+
+  /* Mesh only: refines both position and normal against the actual surface via the BVH snapshot.
+   * Grids/CCG has no snapshot (see #curve_patch_session_publish), so the curve keeps the positions
+   * and normals it already has from the control points above. */
+  if (r_geometry.surface.ready) {
+    curve_patch_surface_shrinkwrap(r_geometry.surface,
+                                   params.radius,
+                                   evaluated_positions.as_mutable_span(),
+                                   evaluated_normals.as_mutable_span());
+    curve_patch_surface_fill_invalid_normals(evaluated_normals.as_mutable_span(),
+                                             params.plane_normal);
+  }
+
+  curve_patch_geometry_build(evaluated_positions.as_span(),
+                             evaluated_radii.as_span(),
+                             evaluated_normals.as_span(),
+                             cyclic,
+                             params,
+                             stamp_texture_weights_cdf,
+                             r_geometry);
+}
+
+void curve_patch_geometry_build(const Span<float3> evaluated_positions,
+                                const Span<float> evaluated_radii,
+                                const Span<float3> evaluated_normals,
+                                const bool cyclic,
+                                const CurvePatchParams &params,
+                                const Span<float> stamp_texture_weights_cdf,
+                                CurvePatchGeometry &r_geometry)
+{
+  r_geometry.spline.plane_normal = params.plane_normal;
+  r_geometry.spline.build_from_positions(
+      evaluated_positions, evaluated_radii, cyclic, evaluated_normals);
+
+  if (r_geometry.spline.is_empty()) {
+    return;
+  }
+
+  /* Stamps mode lays its stamps out here, right after the spline: the relief's parallel per-vertex
+   * walk only reads the result. Ribbon mode leaves the list empty. */
+  r_geometry.stamps.clear();
+  /* Set unconditionally, so Ribbon mode leaves the strip at the unwidened radius, unextended, and
+   * with no stamp bound -- `stamp_mode` is re-synced per build, so without this a Stamps -> Ribbon
+   * toggle mid-edit would leave stale values from the last Stamps-mode build. */
+  r_geometry.ribbon_radius = params.radius;
+  r_geometry.ribbon_end_margin = 0.0f;
+  r_geometry.stamp_search_reach = 0.0f;
+
+  if (params.stamp_mode == CurvePatchStampMode::Stamps) {
+    curve_patch_build_stamps(params, stamp_texture_weights_cdf, r_geometry);
+  }
+
+  /* Rebuild the ribbon UV LUT the relief action samples in place of
+   * `CurvePatchSpline::closest_point()`. Gated on the spline actually carrying per-point normals
+   * rather than on `surface.ready`: windowing itself only reads `spline.normals_3d` (see
+   * #curve_patch_frames_build), which now comes from the control curve on every object type, Mesh
+   * or Grids/CCG alike -- the Mesh-only BVH snapshot above only refines it further. */
+  if (!r_geometry.spline.normals_3d.is_empty()) {
+    curve_patch_spline_smooth_normals(r_geometry.spline, curve_patch_smooth_length(params));
+    CurvePatchFramesParams frame_params;
+    frame_params.min_window_length = 2.0f * params.radius;
+    frame_params.turn_threshold_rad = params.final_quality ? float(M_PI) * 12.0f / 180.0f :
+                                                            float(M_PI) * 25.0f / 180.0f;
+    frame_params.break_threshold_rad = float(M_PI) * 60.0f / 180.0f;
+    /* Half a brush radius of shared stretch on each side of an interior join. Enough that the
+     * handover happens well inside both windows' tables rather than on their outermost rows, and
+     * short enough that a window crossing a break does not rasterize a long stretch of the other
+     * face nearly edge-on. */
+    frame_params.overlap_length = 0.5f * params.radius;
+#if CURVE_PATCH_FORCE_SINGLE_FRAME
+    /* FORCE_SINGLE_FRAME: see the note at the top of this file. */
+    frame_params.max_frames = 1;
+#else
+    frame_params.max_frames = CURVE_PATCH_MAX_FRAMES;
+#endif
+    curve_patch_frames_build(r_geometry.spline,
+                             r_geometry.ribbon_radius,
+                             frame_params,
+                             params.final_quality,
+                             r_geometry.ribbon_end_margin,
+                             r_geometry.frames);
+  }
+  else {
+    curve_patch_ribbon_build(r_geometry.spline,
+                             r_geometry.ribbon_radius,
+                             r_geometry.ribbon,
+                             params.final_quality,
+                             r_geometry.ribbon_end_margin,
+                             r_geometry.ribbon_end_margin);
+  }
+}
+
+}  // namespace blender::bke

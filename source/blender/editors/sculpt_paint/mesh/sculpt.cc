@@ -41,6 +41,7 @@
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
@@ -65,6 +66,7 @@
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_subdiv_ccg.hh"
+#include "BKE_undo_system.hh"
 
 #include "BLT_translation.hh"
 
@@ -80,10 +82,13 @@
 #include "WM_types.hh"
 
 #include "ED_paint.hh"
+#include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
+#include "ED_undo.hh"
 #include "ED_view3d.hh"
 
+#include "../paint_curve_patch_session.hh"
 #include "../paint_intern.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_boundary.hh"
@@ -2497,7 +2502,7 @@ void sculpt_apply_texture(const SculptSession &ss,
 
   if (mtex->brush_map_mode == MTEX_MAP_MODE_3D) {
     /* Get strength by feeding the vertex location directly into a texture. */
-    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, mtex, point, r_rgba, 0, ss.tex_pool);
+    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, mtex, point, r_rgba, 0, ss.tex_pool());
   }
   else {
     /* If the active area is being applied for symmetry, flip it
@@ -2526,17 +2531,74 @@ void sculpt_apply_texture(const SculptSession &ss,
       x += mtex->ofs[0];
       y += mtex->ofs[1];
 
-      paint_get_tex_pixel(mtex, x, y, ss.tex_pool, thread_id, r_value, r_rgba);
+      paint_get_tex_pixel(mtex, x, y, ss.tex_pool(), thread_id, r_value, r_rgba);
 
       add_v3_fl(r_rgba, brush.texture_sample_bias);  // v3 -> Ignore alpha
       *r_value -= brush.texture_sample_bias;
+    }
+    else if (ss.cache && ss.cache->stroke && ss.cache->stroke->need_roll_mapping()) {
+      float3 point_3d;
+      point_3d[2] = 0.0f;
+
+      float3 tan;
+      float3 point_3d2;
+
+      float3 tile_point = float3(brush_point);
+
+      /* Undo the tile offset added by do_tiled(). cache.plane_offset is the pure tile shift (zero
+       * for the principal tile), without any mirror/radial transform mixed in. */
+      tile_point -= cache.plane_offset;
+
+      /* Undo radial symmetry rotation. */
+      if (cache.radial_symmetry_pass > 0) {
+        mul_m4_v3(cache.symm_rot_mat_inv.ptr(), tile_point);
+      }
+
+      /* Try each mirror-symmetry flip of the vertex and keep the result closest to the strip
+       * center. For mirror_pass=0 (no mirror) the only iteration is i=0 (identity). For
+       * mirror_pass=X, i=1 flips X and maps the mirrored vertex back near the spline. Points
+       * outside the LUT bbox return FLT_MAX U and never win. */
+      point_3d[0] = FLT_MAX;
+      for (int i = 0; i < 8; i++) {
+        if ((int(cache.mirror_symmetry_pass) & i) != i) {
+          continue;
+        }
+
+        float3 symm_pt = tile_point;
+
+        for (int j = 0; j < 3; j++) {
+          if ((i & (1 << j)) && (i & int(cache.mirror_symmetry_pass))) {
+            symm_pt[j] = -symm_pt[j];
+          }
+        }
+
+        cache.stroke->spline_uv(cache, symm_pt, point_3d2, tan);
+
+        if (std::abs(point_3d2[0]) < std::abs(point_3d[0])) {
+          copy_v3_v3(point_3d, point_3d2);
+        }
+      }
+
+      /* U is already normalized to +/-1 at the strip borders. V is pre-normalized in the grid when
+       * pressure-scale is active, otherwise divide by initial_radius for standard tiling. */
+      if (!(brush.roll_pressure_scale && BKE_brush_use_size_pressure(&brush))) {
+        point_3d[1] /= cache.initial_radius;
+      }
+      float angle = mtex->rot;
+
+      float3 final_pt;
+      rotate_v2_v2fl(final_pt, point_3d, angle);
+
+      paint_get_tex_pixel(
+          mtex, final_pt[0], -final_pt[1], ss.tex_pool(), thread_id, r_value, r_rgba);
+      *r_value += brush.texture_sample_bias;
     }
     else {
       const float2 point_2d = ED_view3d_project_float_v2_m4(
           cache.vc->region, symm_point, cache.projection_mat);
       const float point_3d[3] = {point_2d[0], point_2d[1], 0.0f};
       *r_value = BKE_brush_sample_tex_3d(
-          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool);
+          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool());
     }
   }
 }
@@ -2894,9 +2956,7 @@ static void update_brush_local_mat(const Sculpt &sd, Object &ob)
 
 static bool sculpt_needs_pbvh_pixels(const Brush &brush, const Object &ob)
 {
-  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-      USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint))
-  {
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
     return ob.runtime->sculpt_session->cache->image_data.get();
   }
 
@@ -3254,10 +3314,10 @@ static bool brush_type_needs_all_pbvh_nodes(const Brush &brush)
 }
 
 /** Calculates the nodes that a brush will influence. */
-static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
-                                                        Object &ob,
-                                                        const Brush &brush,
-                                                        IndexMaskMemory &memory)
+brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
+                                                 Object &ob,
+                                                 const Brush &brush,
+                                                 IndexMaskMemory &memory)
 {
   PRF_scope(ProfileCategory::Editor);
   const SculptSession &ss = *ob.runtime->sculpt_session;
@@ -3402,12 +3462,12 @@ static const char *sculpt_brush_type_name(const Brush &brush)
   return "Sculpting";
 }
 
-static void do_brush_action(const Depsgraph &depsgraph,
-                            const Scene & /*scene*/,
-                            Sculpt &sd,
-                            Object &ob,
-                            const Brush &brush,
-                            PaintModeSettings &paint_mode_settings)
+void do_brush_action(const Depsgraph &depsgraph,
+                     const Scene & /*scene*/,
+                     Sculpt &sd,
+                     Object &ob,
+                     const Brush &brush,
+                     PaintModeSettings &paint_mode_settings)
 {
   PRF_scope(ProfileCategory::Editor);
   PRF_scope_set_dynamic_name("%s", sculpt_brush_type_name(brush));
@@ -3480,6 +3540,21 @@ static void do_brush_action(const Depsgraph &depsgraph,
                                     *ss.cache->cloth_sim,
                                     ss.cache->location_symm,
                                     std::numeric_limits<float>::max());
+  }
+
+  /* Curve Patch's anchor-drag phase normally stamps an ordinary preview dab and lets
+   * `restore_from_undo_step_if_necessary()` take it back before the next one. The image canvas has
+   * no such restore: its pixels live in the image undo system, not the sculpt one, so
+   * `restore_color_from_undo_step()` finds no node to write back and the round dab stays baked into
+   * the texture -- and the handoff's `BKE_undosys_step_push_init_abort()` then discards the very
+   * image undo step that could have taken it back, leaving it not even undoable. Write nothing at
+   * all for that target instead; everything the patch handoff reads from this call
+   * (#update_sculpt_normal, #update_brush_local_mat) has already run above. The other targets keep
+   * their preview, which their own restore still cleans up. */
+  if (use_pixels && brush.stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+      bke::brush::supports_curve_patch(brush) && !ss.curve_patch_session)
+  {
+    return;
   }
 
   /* Apply one type of brush action. */
@@ -3841,12 +3916,13 @@ static void sculpt_fix_noise_tear(const Sculpt &sd, Object &ob)
   }
 }
 
-static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
-                                         const Scene &scene,
-                                         Sculpt &sd,
-                                         Object &ob,
-                                         const BrushActionFunc action,
-                                         PaintModeSettings &paint_mode_settings)
+void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
+                                  const Scene &scene,
+                                  Sculpt &sd,
+                                  Object &ob,
+                                  const BrushActionFunc action,
+                                  PaintModeSettings &paint_mode_settings,
+                                  std::optional<float> forced_bstrength)
 {
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   const Mesh &mesh = *id_cast<Mesh *>(ob.data);
@@ -3856,7 +3932,8 @@ static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
 
   float feather = calc_symmetry_feather(sd, symm, mesh, *ss.cache);
 
-  cache.bstrength = brush_strength(sd, cache, feather, paint_mode_settings);
+  cache.bstrength = forced_bstrength.value_or(
+      brush_strength(sd, cache, feather, paint_mode_settings));
 
   /* `symm` is a bit combination of XYZ -
    * 1 is mirror X; 2 is Y; 3 is XY; 4 is Z; 5 is XZ; 6 is YZ; 7 is XYZ */
@@ -3893,7 +3970,20 @@ bool sculpt_mode_poll_view3d(bContext *C)
 
 bool sculpt_mode_and_brush_poll(bContext *C)
 {
-  return sculpt_mode_poll(C) && paint_brush_tool_poll(C);
+  if (!sculpt_mode_poll(C)) {
+    return false;
+  }
+  const Object *ob = CTX_data_active_object(C);
+  if (ob && ob->runtime->sculpt_session &&
+      ob->runtime->sculpt_session->curve_patch_session)
+  {
+    ED_paint_curve_patch_modal_handlers_ensure(C);
+    return false;
+  }
+  if (ED_paint_curve_slide_is_active()) {
+    return false;
+  }
+  return paint_brush_tool_poll(C);
 }
 
 /**
@@ -3935,9 +4025,27 @@ static bool is_brush_related_tool(bContext *C)
   return false;
 }
 
+static bool is_curve_edit_tool_active(bContext *C)
+{
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  return tref && ed::sculpt_paint::ED_paint_curve_is_curves_edit_tool(tref->idname);
+}
+
 bool brush_cursor_poll(bContext *C)
 {
-  return sculpt_mode_poll(C) && (paint_brush_cursor_poll(C) || is_brush_related_tool(C));
+  if (!sculpt_mode_poll(C)) {
+    return false;
+  }
+  const Object *ob = CTX_data_active_object(C);
+  if (ob && ob->runtime->sculpt_session && ob->runtime->sculpt_session->curve_patch_session) {
+    ED_paint_curve_patch_modal_handlers_ensure(C);
+  }
+  if (paint_brush_cursor_poll(C) || is_brush_related_tool(C)) {
+    return true;
+  }
+  /* Also draw the paint cursor for the standalone Curve Edit tool so control
+   * points remain visible regardless of the active brush stroke method. */
+  return is_curve_edit_tool_active(C);
 }
 
 StrokeCache::StrokeCache() = default;
@@ -5103,9 +5211,7 @@ static void brush_init_tex(const Sculpt &sd, SculptSession &ss)
     ntreeTexBeginExecTree(mask_tex->tex->nodetree);
   }
 
-  if (ss.tex_pool == nullptr) {
-    ss.tex_pool = BKE_image_pool_new();
-  }
+  ss.tex_pool_ensure();
 }
 
 /** Creates stroke-level toggle settings, modifies the current active brush if needed */
@@ -5166,9 +5272,9 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   ED_paint_brush_type_update_sticky_shading_color(C, &ob);
 }
 
-static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
-                                                const Sculpt &sd,
-                                                Object &ob)
+void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
+                                         const Sculpt &sd,
+                                         Object &ob)
 {
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *ob.runtime->sculpt_session;
@@ -5198,8 +5304,16 @@ static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
     return;
   }
 
-  /* Restore the mesh before continuing with anchored stroke. */
-  if (ELEM(brush->stroke_method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT)) {
+  /* Restore the mesh before continuing with anchored stroke. Curve Patch's own anchor-drag phase
+   * (before `ss.curve_patch_session` exists) needs the same treatment: it must behave as a single,
+   * continuously-recomputed dab like #BRUSH_STROKE_ANCHORED, not an accumulating multi-dab
+   * stroke. Once the patch cache exists, the re-stamp in `curve_patch_restore_and_restamp()`
+   * drives its own dabs along the whole curve and must NOT be restored per-dab here, so this only
+   * applies while the patch has not started yet. */
+  if (ELEM(brush->stroke_method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT) ||
+      (brush->stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+       bke::brush::supports_curve_patch(*brush) && !ss.curve_patch_session))
+  {
 
     undo::restore_from_undo_step(depsgraph, sd, ob);
 
@@ -5747,8 +5861,13 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
 
   cache->accum = true;
 
-  /* Make copies of the mesh vertex locations and normals for some brushes. */
-  if (brush->stroke_method == BRUSH_STROKE_ANCHORED) {
+  /* Make copies of the mesh vertex locations and normals for some brushes. Curve Patch's
+   * anchor-drag phase needs the same "read original coordinates" behavior as Anchored, since it
+   * is likewise recomputed from scratch every step (see `restore_from_undo_step_if_necessary()`). */
+  if (brush->stroke_method == BRUSH_STROKE_ANCHORED ||
+      (brush->stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+       bke::brush::supports_curve_patch(*brush)))
+  {
     cache->accum = false;
   }
 
@@ -5798,7 +5917,7 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     Brush *brush = this->brush;
 
     /* NOTE: This should be removed when paint mode is available. Paint mode can force based on the
-     * canvas it is painting on. (ref. use_sculpt_texture_paint). */
+     * canvas it is painting on. */
     if (brush && brush_type_is_paint(brush->sculpt_brush_type) &&
         !SCULPT_use_image_paint_brush(*paint_mode_settings_, ob))
     {
@@ -5865,7 +5984,11 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
   cache.tilt = {RNA_float_get(ptr, "x_tilt"), RNA_float_get(ptr, "y_tilt")};
 
   /* Truly temporary data that isn't stored in properties. */
-  if (stroke_is_first_brush_step_of_symmetry_pass(*ss.cache)) {
+  if (brush.stroke_method == BRUSH_STROKE_CURVE) {
+    const float pixel_radius = RNA_float_get(ptr, "size");
+    cache.initial_radius = paint_calc_object_space_radius(*cache.vc, cache.location, pixel_radius);
+  }
+  else if (stroke_is_first_brush_step_of_symmetry_pass(*ss.cache)) {
     cache.initial_radius = object_space_radius_get(*cache.vc, paint, brush, cache.location);
 
     if (!BKE_brush_use_locked_size(&paint, &brush)) {
@@ -5891,7 +6014,12 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
     }
   }
 
-  if (BKE_brush_use_size_pressure(&brush) && paint_supports_dynamic_size(brush, PaintMode::Sculpt))
+  if (brush.stroke_method == BRUSH_STROKE_CURVE) {
+    cache.radius = cache.initial_radius;
+    cache.dyntopo_pixel_radius = RNA_float_get(ptr, "size");
+  }
+  else if (BKE_brush_use_size_pressure(&brush) &&
+           paint_supports_dynamic_size(brush, PaintMode::Sculpt))
   {
     cache.radius = brush_dynamic_size_get(brush, cache, cache.initial_radius);
     cache.dyntopo_pixel_radius = brush_dynamic_size_get(
@@ -5942,10 +6070,17 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   StrokeCache *cache = ss.cache;
   cache->stroke_distance = this->stroke_distance();
+  cache->stroke = this;
 
   stroke_modifiers_check(depsgraph, this->vc.rv3d, sd, ob, &brush);
   stroke_cache_update(itemptr);
   restore_from_undo_step_if_necessary(depsgraph, sd, ob);
+
+  /* Precompute roll-mapping center data once per dab (single-threaded) so the per-vertex parallel
+   * loop in sculpt_apply_texture() can use the fast LUT path. */
+  if (cache->stroke && cache->stroke->need_roll_mapping()) {
+    cache->stroke->compute_roll_center(*cache);
+  }
 
   if (dyntopo::stroke_is_dyntopo(ob, brush)) {
     do_symmetrical_brush_actions(
@@ -5976,6 +6111,8 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   else {
     flush_update_step(this->vc, *this->object, UpdateType::Position);
   }
+
+  ed::sculpt_paint::ED_paint_curve_overlay_tag_redraw_all(this->evil_C);
 }
 
 static void brush_exit_tex(Sculpt &sd)
@@ -6016,6 +6153,103 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     mask_brush_toggle_off(&sd.paint, ss.cache);
     /* Refresh the brush pointer in case we switched brush in the toggle function. */
     brush = BKE_paint_brush(&sd.paint);
+  }
+
+  if (!is_cancel && stroke_started && brush->stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+      bke::brush::supports_curve_patch(*brush))
+  {
+    if (ss.bm) {
+      /* Dynamic Topology is explicitly out of scope for Stage 1 (see design doc): live re-stamp
+       * relies on stable vertex indices for `ReliefEffect::orig_positions_`, which dyntopo's
+       * BMesh remeshing can invalidate mid-edit. Fall through to the normal teardown below instead
+       * of starting the modal editor — the anchor stroke's own dab still applied normally, it
+       * just isn't editable afterward. */
+      BKE_report(CTX_wm_reports(this->evil_C),
+                 RPT_WARNING,
+                 "Curve Patch is not supported with Dynamic Topology");
+    }
+    else {
+      /* Hand off to the Curve Patch modal editor: keep `ss.cache` alive (re-stamp needs it, see
+       * Stage 03). */
+      if (curve_patch_start_from_anchor(*this->depsgraph, ob, sd, *brush, this->vc)) {
+        /* The editor owns the session now. It also starts from a mesh restored to its pre-stroke
+         * state (`restore_from_undo_step_if_necessary()` inside the call above), so the
+         * transaction `stroke_undo_begin()` opened describes no net change at all. Discard it
+         * rather than leaving it open: while an initialized step exists, ANY undo push elsewhere
+         * in the application adopts it (`undo_system.cc:581-588`) or frees it (`:491-494`) -- and
+         * the modal deliberately passes events through, so editing a brush property in a panel is
+         * enough to trigger that. The editor builds its own single step when the patch is
+         * committed. */
+        BKE_undosys_step_push_init_abort(ED_undo_stack_get());
+        /* Strictly AFTER the abort: an effect whose target has its own undo system (the image
+         * canvas) opens its session transaction here, and anything opened earlier -- in the
+         * effect's constructor, or lazily during the initial preview stamp the call above performs
+         * -- would be the transaction that abort just destroyed. See
+         * #CurvePatchEffect::session_undo_begin. */
+        if (ss.curve_patch_session->effect) {
+          ss.curve_patch_session->effect->session_undo_begin();
+        }
+        /* Launching the interactive editor is the CALLER's job: the session-publishing layer
+         * cannot know whether its caller wants one at all, and starting a modal from there is what
+         * made a headless apply path impossible. `this->vc.C` is the real `bContext` the stroke was
+         * invoked with, required so the editor's `invoke()` can register its modal handler. */
+        WM_operator_name_call(this->vc.C,
+                              "SCULPT_OT_curve_patch_edit",
+                              wm::OpCallContext::InvokeDefault,
+                              nullptr,
+                              nullptr);
+        return;
+      }
+      /* The start refused (see its own guards) and already freed `ss.cache`. Close the
+       * transaction the ordinary way so whatever the stroke did stays undoable, and return -- the
+       * teardown below would double-free the cache this path has already released. */
+      stroke_undo_end(*paint_mode_settings_, *this->object, brush);
+      return;
+    }
+  }
+
+  /* Roll stroke method with "Edit After Stroke": hand the drawn contour off to the Curve Patch
+   * editor as an editable control curve (the bridge undoes the live roll relief first and re-stamps
+   * via the curve). Skipped for Dynamic Topology (no stable vertex index for the patch's
+   * `orig_positions`). Like the Curve Patch branch above, this keeps `ss.cache` alive for the
+   * editor to own and discards the open undo transaction -- the editor builds its own step on
+   * commit -- so it returns before the teardown below. */
+  if (!is_cancel && stroke_started && brush->stroke_method == BRUSH_STROKE_ROLL &&
+      brush->roll_edit_after && bke::brush::supports_curve_patch(*brush) && !ss.bm)
+  {
+    Vector<float3> roll_positions;
+    Vector<float> roll_radii;
+    this->extract_roll_control_points(roll_positions, roll_radii);
+    if (roll_positions.size() >= 2) {
+      if (roll_start_curve_patch_from_stroke(*this->depsgraph,
+                                             ob,
+                                             sd,
+                                             *brush,
+                                             this->vc,
+                                             roll_positions.as_span(),
+                                             roll_radii.as_span(),
+                                             this->roll_plane_normal()))
+      {
+        /* Same reasoning as the Curve Patch branch above: the bridge undoes the live roll relief
+         * back to pristine before handing over, so the open transaction describes nothing. */
+        BKE_undosys_step_push_init_abort(ED_undo_stack_get());
+        /* And for the same reason as there, strictly after the abort -- this bridge reaches
+         * `curve_patch_begin_editing()` too, so an image-canvas effect started this way needs its
+         * session transaction opened at the same point in the sequence. */
+        if (ss.curve_patch_session->effect) {
+          ss.curve_patch_session->effect->session_undo_begin();
+        }
+        /* Same reason as the anchor branch above: the launch belongs to the caller. */
+        WM_operator_name_call(this->vc.C,
+                              "SCULPT_OT_curve_patch_edit",
+                              wm::OpCallContext::InvokeDefault,
+                              nullptr,
+                              nullptr);
+        return;
+      }
+      stroke_undo_end(*paint_mode_settings_, *this->object, brush);
+      return;
+    }
   }
 
   MEM_delete(ss.cache);

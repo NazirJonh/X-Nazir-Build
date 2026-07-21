@@ -19,6 +19,7 @@
 #include "overlay_bounds.hh"
 #include "overlay_camera.hh"
 #include "overlay_cursor.hh"
+#include "overlay_paint_curve_cursor.hh"
 #include "overlay_curve.hh"
 #include "overlay_empty.hh"
 #include "overlay_facing.hh"
@@ -72,6 +73,7 @@ class Instance : public DrawEngine {
   Outline outline;
   MotionPath motion_paths;
   Cursor cursor;
+  PaintCurveCursor paint_curve_cursor;
 
   struct OverlayLayer {
     const SelectionType selection_type_;

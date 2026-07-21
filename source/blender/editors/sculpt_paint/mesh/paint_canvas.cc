@@ -121,9 +121,6 @@ eV3DShadingColorType ED_paint_shading_color_override(bContext *C,
                                                      Object &ob,
                                                      eV3DShadingColorType orig_color_type)
 {
-  if (!USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint)) {
-    return orig_color_type;
-  }
   /* NOTE: This early exit is temporarily, until a paint mode has been added.
    * For better integration with the vertex paint in sculpt mode we sticky
    * with the last stoke when using tools like masking.

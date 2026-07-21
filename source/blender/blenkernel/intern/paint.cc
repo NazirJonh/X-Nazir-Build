@@ -30,11 +30,14 @@
 #include "DNA_workspace_types.h"
 
 #include "BLI_hash.h"
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector_types.hh"
 #include "BLI_noise.hh"
+#include "BLI_resource_scope.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
@@ -50,6 +53,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_crazyspace.hh"
+#include "BKE_curves.hh"
 #include "BKE_deform.hh"
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
@@ -184,6 +188,12 @@ IDTypeInfo IDType_ID_PAL = {
     .lib_override_apply_post = nullptr,
 };
 
+static void paint_curve_init_data(ID *id)
+{
+  PaintCurve *paint_curve = id_cast<PaintCurve *>(id);
+  new (&paint_curve->geometry) bke::CurvesGeometry();
+}
+
 static void paint_curve_copy_data(Main * /*bmain*/,
                                   std::optional<Library *> /*owner_library*/,
                                   ID *id_dst,
@@ -193,16 +203,16 @@ static void paint_curve_copy_data(Main * /*bmain*/,
   PaintCurve *paint_curve_dst = id_cast<PaintCurve *>(id_dst);
   const PaintCurve *paint_curve_src = id_cast<const PaintCurve *>(id_src);
 
-  if (paint_curve_src->tot_points != 0) {
-    paint_curve_dst->points = static_cast<PaintCurvePoint *>(
-        MEM_dupalloc(paint_curve_src->points));
-  }
+  new (&paint_curve_dst->geometry) bke::CurvesGeometry(paint_curve_src->geometry.wrap());
+  paint_curve_dst->active_curve = paint_curve_src->active_curve;
 }
 
 static void paint_curve_free_data(ID *id)
 {
   PaintCurve *paint_curve = id_cast<PaintCurve *>(id);
 
+  paint_curve->geometry.wrap().~CurvesGeometry();
+  /* Only ever set between the blend read and the versioning pass that converts it. */
   MEM_SAFE_DELETE(paint_curve->points);
   paint_curve->tot_points = 0;
 }
@@ -211,16 +221,83 @@ static void paint_curve_blend_write(BlendWriter *writer, ID *id, const void *id_
 {
   PaintCurve *pc = id_cast<PaintCurve *>(id);
 
+  ResourceScope scope;
+  bke::CurvesGeometry::BlendWriteData write_data(writer, scope);
+  pc->geometry.wrap().blend_write_prepare(write_data, !BLO_write_is_undo(writer));
+
   writer->write_id_struct(id_address, pc);
   BKE_id_blend_write(writer, &pc->id);
 
-  writer->write_struct_array(pc->tot_points, pc->points);
+  pc->geometry.wrap().blend_write(*writer, pc->id, write_data);
 }
 
 static void paint_curve_blend_read_data(BlendDataReader *reader, ID *id)
 {
   PaintCurve *pc = id_cast<PaintCurve *>(id);
+  pc->geometry.wrap().blend_read(*reader);
+  /* Files written before the 3D representation stored their points here instead. Reading the array
+   * is what lets versioning convert it; a file that has no legacy points leaves this a no-op. */
   BLO_read_array_and_validate_size(reader, &pc->points, &pc->tot_points);
+}
+
+static HandleType paint_curve_handle_type_from_legacy(const uint8_t handle_type_legacy)
+{
+  switch (handle_type_legacy) {
+    case HD_FREE:
+      return BEZIER_HANDLE_FREE;
+    case HD_ALIGN:
+    case HD_ALIGN_DOUBLESIDE:
+      return BEZIER_HANDLE_ALIGN;
+    case HD_VECT:
+      return BEZIER_HANDLE_VECTOR;
+  }
+  return BEZIER_HANDLE_AUTO;
+}
+
+void BKE_paint_curve_legacy_points_convert(PaintCurve &pc)
+{
+  const int point_num = pc.tot_points;
+  if (pc.points == nullptr || point_num <= 0) {
+    return;
+  }
+
+  /* Matches what the editor's own bezier initializer leaves behind: one cyclic-free spline at the
+   * paint-curve resolution, with the handle position attributes present so the auto-handle pass
+   * below has something to write to. */
+  bke::CurvesGeometry &geom = pc.geometry.wrap();
+  geom = bke::CurvesGeometry(point_num, 1);
+  geom.offsets_for_write()[0] = 0;
+  geom.offsets_for_write()[1] = point_num;
+  geom.fill_curve_types(CURVE_TYPE_BEZIER);
+  geom.resolution_for_write().fill(PAINT_CURVE_NUM_SEGMENTS);
+
+  MutableSpan<float3> positions = geom.positions_for_write();
+  MutableSpan<float3> handles_left = geom.handle_positions_left_for_write();
+  MutableSpan<float3> handles_right = geom.handle_positions_right_for_write();
+  MutableSpan<int8_t> types_left = geom.handle_types_left_for_write();
+  MutableSpan<int8_t> types_right = geom.handle_types_right_for_write();
+  MutableSpan<float> radii = geom.radius_for_write();
+
+  for (const int i : IndexRange(point_num)) {
+    const PaintCurvePoint &point = pc.points[i];
+    handles_left[i] = float3(point.bez.vec[0]);
+    positions[i] = float3(point.bez.vec[1]);
+    handles_right[i] = float3(point.bez.vec[2]);
+    types_left[i] = paint_curve_handle_type_from_legacy(point.bez.h1);
+    types_right[i] = paint_curve_handle_type_from_legacy(point.bez.h2);
+    /* The legacy per-point pressure is the same 0..1 factor of the brush size that the radius
+     * attribute now carries. Points the user never touched stored 0, which would read as a
+     * zero-width curve. */
+    radii[i] = point.pressure > 0.0f ? point.pressure : 1.0f;
+  }
+
+  geom.tag_topology_changed();
+  geom.calculate_bezier_auto_handles();
+  geom.tag_positions_changed();
+
+  MEM_SAFE_DELETE(pc.points);
+  pc.tot_points = 0;
+  pc.add_index = point_num;
 }
 
 IDTypeInfo IDType_ID_PC = {
@@ -235,7 +312,7 @@ IDTypeInfo IDType_ID_PC = {
     .flags = IDTYPE_FLAGS_NO_ANIMDATA,
     .asset_type_info = nullptr,
 
-    .init_data = nullptr,
+    .init_data = paint_curve_init_data,
     .copy_data = paint_curve_copy_data,
     .free_data = paint_curve_free_data,
     .make_local = nullptr,
@@ -256,6 +333,13 @@ IDTypeInfo IDType_ID_PC = {
 
 static ePaintOverlayControlFlags overlay_flags = ePaintOverlayControlFlags{};
 
+/* Monotonic companion to `overlay_flags` for any texture the active brush actually samples --
+ * primary `mtex`, plus the Curve Patch's list and three cap textures. The overlay flags are a
+ * shared, reset-on-draw signal (the paint cursor clears them), which makes them unusable for a
+ * poller. This counter only ever increases -- one bump per sampled-texture invalidation -- so a
+ * consumer can detect a change race-free by comparing against a stored value. */
+static uint64_t overlay_texture_edit_count = 0;
+
 void BKE_paint_invalidate_overlay_tex(const Main &bmain,
                                       Scene *scene,
                                       ViewLayer *view_layer,
@@ -273,9 +357,37 @@ void BKE_paint_invalidate_overlay_tex(const Main &bmain,
 
   if (br->mtex.tex == tex) {
     overlay_flags |= PAINT_OVERLAY_INVALID_TEXTURE_PRIMARY;
+    overlay_texture_edit_count++;
   }
   if (br->mask_mtex.tex == tex) {
     overlay_flags |= PAINT_OVERLAY_INVALID_TEXTURE_SECONDARY;
+  }
+
+  /* The Curve Patch stroke samples the brush's multi-texture data -- a list of stamp textures plus
+   * three ribbon cap textures -- through the same `ImagePool` as `mtex`, but none of those pointers
+   * live in `mtex`, so the two checks above never see them. Without this, editing the image on a
+   * list texture leaves the relief sampling a stale `ImBuf` until some unrelated watched setting
+   * happens to change.
+   *
+   * A null `tex` is rejected up front: the cap pointers are null whenever the user has not assigned
+   * them, and a null-vs-null match would bump the counter on every unrelated texture edit.
+   *
+   * Only the edit counter is bumped, NOT `PAINT_OVERLAY_INVALID_TEXTURE_PRIMARY`: that flag drives
+   * the paint cursor's texture preview, which shows `mtex` alone and never these. */
+  if (tex != nullptr) {
+    bool curve_patch_uses_tex = ELEM(
+        tex, br->curve_patch.tex_start, br->curve_patch.tex_middle, br->curve_patch.tex_end);
+    if (!curve_patch_uses_tex) {
+      for (const BrushCurvePatchTextureSlot &slot : br->curve_patch.texture_slots) {
+        if (slot.tex == tex) {
+          curve_patch_uses_tex = true;
+          break;
+        }
+      }
+    }
+    if (curve_patch_uses_tex) {
+      overlay_texture_edit_count++;
+    }
   }
 }
 
@@ -299,11 +411,17 @@ void BKE_paint_invalidate_overlay_all()
 {
   overlay_flags |= (PAINT_OVERLAY_INVALID_TEXTURE_SECONDARY |
                     PAINT_OVERLAY_INVALID_TEXTURE_PRIMARY | PAINT_OVERLAY_INVALID_CURVE);
+  overlay_texture_edit_count++;
 }
 
 ePaintOverlayControlFlags BKE_paint_get_overlay_flags()
 {
   return overlay_flags;
+}
+
+uint64_t BKE_paint_get_overlay_texture_edit_count()
+{
+  return overlay_texture_edit_count;
 }
 
 void BKE_paint_set_overlay_override(eOverlayFlags flags)
@@ -1274,6 +1392,17 @@ std::optional<int> BKE_paint_get_brush_type_from_paintmode(const Brush *brush,
 PaintCurve *BKE_paint_curve_add(Main *bmain, const char *name)
 {
   PaintCurve *pc = BKE_id_new<PaintCurve>(bmain, name);
+  /* MEM_new_zeroed zeros all fields; the C++ default initializer `= 1` is never called.
+   * Set explicitly so new curves start in 3D mode as intended. */
+  pc->use_3d_space = 1;
+  /* Same gotcha: the DNA member initializer is not applied here, so enable the radius handles
+   * explicitly. Otherwise the field stays zeroed and the handles are never drawn or hit-tested. */
+  pc->show_radius_handles = 1;
+  /* Embedded `CurvesGeometry` requires placement-new via `init_data`. Guard against a missing
+   * call (would crash on the first undo snapshot copying uninitialized geometry). */
+  if (UNLIKELY(pc->geometry.wrap().runtime == nullptr)) {
+    new (&pc->geometry) bke::CurvesGeometry();
+  }
   return pc;
 }
 
@@ -1291,10 +1420,6 @@ void BKE_paint_palette_set(Paint *paint, Palette *palette)
   }
 }
 
-void BKE_paint_curve_clamp_endpoint_add_index(PaintCurve *pc, const int add_index)
-{
-  pc->add_index = (add_index || pc->tot_points == 1) ? (add_index + 1) : 0;
-}
 
 void BKE_palette_color_remove(Palette *palette, PaletteColor *color)
 {
@@ -2140,8 +2265,29 @@ SculptSession::~SculptSession()
     BM_log_free(this->bm_log);
   }
 
-  if (this->tex_pool) {
-    BKE_image_pool_free(this->tex_pool);
+  if (this->tex_pool_) {
+    BKE_image_pool_free(this->tex_pool_);
+  }
+}
+
+ImagePool &SculptSession::tex_pool_ensure()
+{
+  if (this->tex_pool_ == nullptr) {
+    this->tex_pool_ = BKE_image_pool_new();
+  }
+  return *this->tex_pool_;
+}
+
+ImagePool *SculptSession::tex_pool() const
+{
+  return this->tex_pool_;
+}
+
+void SculptSession::tex_pool_invalidate()
+{
+  if (this->tex_pool_ != nullptr) {
+    BKE_image_pool_free(this->tex_pool_);
+    this->tex_pool_ = nullptr;
   }
 }
 
@@ -2446,13 +2592,10 @@ static void sculpt_update_object(Depsgraph *depsgraph,
      *
      * The relevant changes are stored/encoded in the paint canvas key.
      * These include the active uv map, and resolutions. */
-    if (USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint)) {
-      std::string paint_canvas_key = BKE_paint_canvas_key_get(&scene->toolsettings->paint_mode,
-                                                              ob);
-      if (!ss.last_paint_canvas_key || paint_canvas_key != ss.last_paint_canvas_key) {
-        ss.last_paint_canvas_key = paint_canvas_key;
-        BKE_pbvh_mark_rebuild_pixels(pbvh);
-      }
+    std::string paint_canvas_key = BKE_paint_canvas_key_get(&scene->toolsettings->paint_mode, ob);
+    if (!ss.last_paint_canvas_key || paint_canvas_key != ss.last_paint_canvas_key) {
+      ss.last_paint_canvas_key = paint_canvas_key;
+      BKE_pbvh_mark_rebuild_pixels(pbvh);
     }
 
     /* We could be more precise when we have access to the active tool. */

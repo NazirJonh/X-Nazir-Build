@@ -1,0 +1,214 @@
+/* SPDX-FileCopyrightText: 2026 Nazir Galimov
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+#pragma once
+
+#include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
+#include "BLI_vector.hh"
+
+#include "DNA_space_enums.h"
+
+namespace blender {
+struct ARegion;
+struct Brush;
+struct Depsgraph;
+struct Object;
+struct Paint;
+struct RegionView3D;
+struct Scene;
+struct Sculpt;
+struct SpaceLink;
+struct View3D;
+struct ViewContext;
+struct ViewLayer;
+namespace bke {
+class CurvesGeometry;
+}
+}  // namespace blender
+
+struct bContext;
+
+namespace blender::ed::sculpt_paint {
+
+struct PaintCurveRadiusHandleDrawData {
+  float2 point;
+  float2 end;
+  float2 perp;
+  float4 color;
+  bool hovered = false;
+};
+
+struct PaintCurveHandleDrawData {
+  float2 position;
+  float2 handle_left;
+  float2 handle_right;
+  float4 color_left;
+  float4 color_right;
+  int8_t h1;
+  int8_t h2;
+  bool selected_left;
+  bool selected_right;
+  bool selected_center;
+  bool hovered_center = false;
+};
+
+struct PaintCurveSegmentDrawData {
+  blender::Vector<float2> polyline;
+  float4 wire_color;
+  float4 outline_color;
+  bool hovered = false;
+};
+
+/** Perpendicular insert marker shown when hovering a segment for point insertion. */
+struct PaintCurveInsertPreviewDrawData {
+  bool valid = false;
+  float2 point = float2(0.0f);
+  float2 tangent = float2(1.0f, 0.0f);
+  float2 perp = float2(0.0f, 1.0f);
+};
+
+struct PaintCurveScreenHandles {
+  blender::Vector<PaintCurveHandleDrawData> points;
+  blender::Vector<PaintCurveRadiusHandleDrawData> radius_handles;
+  blender::Vector<PaintCurveSegmentDrawData> segments;
+  PaintCurveInsertPreviewDrawData insert_preview;
+};
+
+struct PaintCurveCachedObjectSilhouette {
+  const Object *object;
+  blender::Vector<blender::Vector<float2>> polylines;
+};
+
+struct PaintCurveScreenSilhouettes {
+  blender::Vector<PaintCurveCachedObjectSilhouette> faint_objects;
+  blender::Vector<blender::Vector<float2>> hover;
+  const Object *hover_object = nullptr;
+};
+
+/** Screen-space radius of the radius-handle endpoint circle. Single source of truth, shared
+ * between the overlay engine and the internal paint-curve module (re-exported there). */
+constexpr float PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS = 10.0f;
+
+/** Half-length of the white perpendicular insert marker line (pixels). */
+constexpr float PAINT_CURVE_INSERT_PREVIEW_HALF_LEN = 24.0f;
+/** Arrow length along the perpendicular from tip to base (pixels). */
+constexpr float PAINT_CURVE_INSERT_PREVIEW_ARROW_LEN = 7.0f;
+/** Arrow wing half-width along the curve tangent (pixels). */
+constexpr float PAINT_CURVE_INSERT_PREVIEW_ARROW_WING = 4.0f;
+/** Distance from the curve to the arrow tip along the perpendicular (pixels). */
+constexpr float PAINT_CURVE_INSERT_PREVIEW_ARROW_INSET = 2.0f;
+
+bool ED_paint_curve_is_curves_edit_tool(const char *active_tool_idname);
+
+bool ED_paint_curve_overlay_is_relevant(const Brush *brush,
+                                        const char *active_tool_idname,
+                                        bool is_space_v3d,
+                                        bool is_space_image);
+
+bool ED_paint_curve_overlay_wants_redraw(const bContext *C);
+
+/** Tag every 3D View / Image editor region that may show the paint-curve overlay for redraw. */
+void ED_paint_curve_overlay_tag_redraw_all(bContext *C);
+
+/** Register #SCULPT_OT_curve_patch_edit modal handlers on every open window (idempotent). */
+void ED_paint_curve_patch_modal_handlers_ensure(bContext *C);
+
+bool ED_paint_curve_slide_is_active();
+
+/**
+ * World-space position of the snap marker shown during a 3D paint-curve slide.
+ * Returns false when no geometry snap is currently active.
+ * \param r_world_pos: receives the snapped target in world space for per-viewport projection.
+ * \param r_type: receives the active snap elements (#SCE_SNAP_TO_GEOM subset) for marker styling.
+ */
+bool ED_paint_curve_snap_marker_get(float r_world_pos[3], int *r_type);
+
+/** Squared screen-space distance from \a mval to a tessellated curve polyline. */
+float ED_paint_curve_polyline_distance_sq(blender::Span<blender::float2> polyline,
+                                          blender::float2 mval);
+/**
+ * Normalized arc-length parameter in [0, 1] at the closest point on \a polyline to \a mval.
+ * Returns false when \a polyline has fewer than two vertices.
+ */
+bool ED_paint_curve_polyline_param_at_closest_point(blender::Span<blender::float2> polyline,
+                                                    blender::float2 mval,
+                                                    float &r_edge_t);
+
+ViewContext ED_paint_curve_viewcontext_from_state(Depsgraph *depsgraph,
+                                                  Scene *scene,
+                                                  ViewLayer *view_layer,
+                                                  ARegion *region,
+                                                  View3D *v3d,
+                                                  RegionView3D *rv3d);
+
+Paint *ED_paint_curve_resolve_active_paint(Depsgraph *depsgraph,
+                                           Scene *scene,
+                                           ViewLayer *view_layer,
+                                           const SpaceLink *space_data,
+                                           eSpace_Type space_type);
+
+void ED_paint_curve_screen_handles_build(const ViewContext &vc,
+                                         const Brush &brush,
+                                         const Sculpt *sculpt,
+                                         float2 mval_region,
+                                         bool compute_segment_hover,
+                                         bool show_insert_preview,
+                                         PaintCurveScreenHandles &r_out);
+
+/**
+ * Core of #ED_paint_curve_screen_handles_build: operates directly on `geometry` so it can be
+ * reused without a #PaintCurve (e.g. for a Curve Patch's standalone control curve).
+ */
+void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
+                                                        const blender::bke::CurvesGeometry &geometry,
+                                                        bool use_3d_space,
+                                                        const Sculpt *sculpt,
+                                                        bool show_radius_handles,
+                                                        float2 mval_region,
+                                                        bool compute_segment_hover,
+                                                        bool show_insert_preview,
+                                                        PaintCurveScreenHandles &r_out);
+
+/**
+ * Barrier accessor into the ACTIVE patch's control curve for the draw module: `draw/`'s CMake
+ * include path does not reach `editors/sculpt_paint/`, so it cannot see the full
+ * `CurvePatchSession` definition (`paint_curve_patch_session.hh`) -- only the
+ * `bke::CurvesGeometry` it owns is returned. Returns nullptr when `ob` is null, has no live
+ * Curve Patch, or that patch has no active item yet.
+ */
+const blender::bke::CurvesGeometry *ED_paint_curve_patch_active_control_curve(const Object *ob);
+
+/**
+ * Returns the number of patches (splines) in the active Curve Patch session on `ob`.
+ * Returns 0 when there is no live session.
+ */
+int ED_paint_curve_patch_control_curves_num(const Object *ob);
+
+/**
+ * Returns the control curve of patch at `index` in the active Curve Patch session.
+ * Returns nullptr when `ob` has no session or `index` is out of range.
+ */
+const blender::bke::CurvesGeometry *ED_paint_curve_patch_control_curve_at(const Object *ob,
+                                                                           int index);
+
+void ED_paint_curve_screen_silhouettes_build(const ViewContext &vc,
+                                             float2 mval_region,
+                                             const Object *source_object,
+                                             bool compute_hover,
+                                             PaintCurveScreenSilhouettes &r_out);
+
+uint64_t ED_paint_curve_silhouette_cache_key_hash(const ViewContext &vc);
+
+void ED_paint_curve_screen_silhouettes_build_cached(
+    const ViewContext &vc,
+    float2 mval_region,
+    const Object *source_object,
+    bool compute_hover,
+    uint64_t cache_key,
+    blender::Vector<PaintCurveCachedObjectSilhouette> &r_cache_store,
+    uint64_t &r_cache_store_key,
+    PaintCurveScreenSilhouettes &r_out);
+
+}  // namespace blender::ed::sculpt_paint

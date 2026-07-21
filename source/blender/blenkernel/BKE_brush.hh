@@ -24,6 +24,7 @@ namespace blender {
 
 enum class PaintMode : int8_t;
 struct Brush;
+struct BrushCurvePatchTextureSlot;
 struct ImBuf;
 struct ImagePool;
 struct Main;
@@ -92,6 +93,23 @@ void BKE_brush_init_curves_sculpt_settings(Brush *brush);
  * For convenience, null may be passed for \a brush.
  */
 void BKE_brush_tag_unsaved_changes(Brush *brush);
+
+/* Curve Patch texture slots.
+ *
+ * The list owns a user on each slot's texture (registered in `brush_foreach_id`), which is why
+ * adding and removing a slot cannot be open-coded by every caller. Both the operators and the RNA
+ * collection go through here so the two can never drift apart. Neither tags the brush or sends a
+ * notifier -- that belongs to the caller, which knows its own context. */
+
+/** Append a slot with its DNA defaults and make it the active one. */
+BrushCurvePatchTextureSlot *BKE_brush_curve_patch_texture_slot_add(Brush &brush);
+
+/**
+ * Drop a slot, releasing the user it holds on its texture.
+ *
+ * \return false when `slot` is not in this brush's list, in which case nothing is changed.
+ */
+bool BKE_brush_curve_patch_texture_slot_remove(Brush &brush, BrushCurvePatchTextureSlot &slot);
 
 float2 BKE_brush_jitter_pos(const Paint &paint, const Brush &brush, const float2 &pos);
 void BKE_brush_randomize_texture_coords(Paint *paint, bool mask);
@@ -263,6 +281,15 @@ bool supports_plane_offset(const Brush &brush);
 bool supports_random_texture_angle(const Brush &brush);
 bool supports_sculpt_plane(const Brush &brush);
 bool supports_color(const Brush &brush);
+/**
+ * Whether the Curve Patch stroke method is meaningful for this brush.
+ *
+ * Curve Patch never reaches `do_brush_action()` — it applies its own texture-driven relief
+ * directly — so the brush type only supplies strength, radius, texture and falloff. This
+ * allowlist therefore names the brushes whose *result* Curve Patch can stand in for, not
+ * brushes whose implementation it uses.
+ */
+bool supports_curve_patch(const Brush &brush);
 bool supports_secondary_cursor_color(const Brush &brush);
 bool supports_smooth_stroke(const Brush &brush);
 bool supports_space_attenuation(const Brush &brush);

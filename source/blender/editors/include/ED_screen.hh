@@ -18,6 +18,7 @@
 #include "WM_types.hh"
 
 #include "BLI_compiler_attrs.h"
+#include "BLI_span.hh"
 
 namespace blender {
 
@@ -243,6 +244,17 @@ void ED_area_tag_redraw(ScrArea *area);
 void ED_area_tag_redraw_no_rebuild(ScrArea *area);
 void ED_area_tag_redraw_regiontype(ScrArea *area, int regiontype);
 void ED_area_tag_refresh(ScrArea *area);
+/**
+ * Tag every region of type \a region_type for redraw, in every area whose spacetype is in
+ * \a space_types, across every open window. For modal tools whose overlay must refresh in any
+ * viewport regardless of which one currently has input focus. Windows with no active screen are
+ * skipped (same as #ED_screen_areas_iter). Duplicate entries in \a space_types simply cause the
+ * same area to be tagged redundantly (harmless). Sends no notifier of its own -- callers that
+ * need one (because the redraw reflects a specific state change) send it themselves.
+ */
+void ED_screen_tag_redraw_spacetype_all_windows(const wmWindowManager *wm,
+                                                blender::Span<int> space_types,
+                                                int region_type);
 /**
  * For regions that change the region size in their #ARegionType.layout() callback: Mark the area
  * as having a changed region size, requiring refitting of regions within the area.
@@ -779,6 +791,28 @@ bool ED_region_contains_xy(const ARegion *region, const int event_xy[2]);
  * The overlapping region is determined using the #ED_region_contains_xy() query.
  */
 ARegion *ED_area_find_region_xy_visual(const ScrArea *area, int regiontype, const int event_xy[2]);
+
+/** Find the #ScrArea containing \a region within \a screen, or null if not found (e.g. \a region
+ * belongs to a different screen, or no longer exists in this one after a layout change). */
+ScrArea *ED_screen_area_of_region(bScreen *screen, const ARegion *region);
+
+/**
+ * The region of type \a region_type visually under \a event_xy in \a win, within an area of type
+ * \a space_type -- not a region drawn on top of it (N-panel/HUD/header). Mirrors how the window
+ * manager itself routes events (#wm_event_do_handlers_area_regions ->
+ * #ED_area_find_region_xy_visual). Returns null when the cursor is outside any matching area or
+ * over an overlapping region.
+ *
+ * \param win: required (non-null); \a event_xy is interpreted in \a win's own coordinate space.
+ * The screen searched is always \a win's active screen (#WM_window_get_active_screen), never
+ * some other context's screen. Only ordinary windows with a real screen are a supported case --
+ * temporary/popup windows are not a target for this query.
+ */
+ARegion *ED_screen_area_region_under_cursor(wmWindow *win,
+                                            int space_type,
+                                            int region_type,
+                                            const int event_xy[2],
+                                            ScrArea **r_area);
 
 /* `interface_region_hud.cc` */
 

@@ -15,6 +15,7 @@
 #include "BKE_image_wrappers.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_paint_bvh_pixels.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "BLI_array.hh"
@@ -32,9 +33,12 @@
 
 #include "ED_view3d.hh"
 
+#include "editors/sculpt_paint/mesh/brushes/brushes.hh"
+
 namespace blender {
 
 namespace ed::sculpt_paint {
+struct PaintStroke;
 namespace auto_mask {
 struct Cache;
 }
@@ -178,6 +182,64 @@ struct ImageData : NonCopyable {
                                                       PaintModeSettings &paint_mode_settings);
 };
 
+/* The following were `static` in `sculpt_paint_image.cc` before Curve Patch Stage 5. Declared
+ * here, unchanged, so `paint_curve_patch_effect_image.cc` can reuse the existing barycentric/UV
+ * math and tile plumbing instead of duplicating it -- see the Stage 5 design doc. */
+
+float3 calc_pixel_position(Span<float3> vert_positions,
+                           Span<int3> vert_tris,
+                           int tri_index,
+                           const float2 &barycentric_weight);
+
+void calc_pixel_row_positions(Span<float3> vert_positions,
+                              Span<int3> vert_tris,
+                              Span<int> tri_indices,
+                              Span<float2> delta_barycentric_coords,
+                              const bke::pbvh::pixels::PackedPixelRow &pixel_row,
+                              IndexRange range,
+                              MutableSpan<float3> positions);
+
+MutableSpan<float4> read_image_pixels(MutableSpan<float4> image_pixels,
+                                      const TileColorspaceProcessor &processors,
+                                      const bke::pbvh::pixels::PackedPixelRow &pixel_row,
+                                      IndexRange range,
+                                      int width);
+
+MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
+                                      const TileColorspaceProcessor &processors,
+                                      const bke::pbvh::pixels::PackedPixelRow &pixel_row,
+                                      IndexRange range,
+                                      int width,
+                                      Vector<float4> &storage);
+
+void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
+                        MutableSpan<uchar4> image_pixels,
+                        const TileColorspaceProcessor &processors,
+                        const bke::pbvh::pixels::PackedPixelRow &pixel_row,
+                        IndexRange range,
+                        int width);
+
+void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
+                        MutableSpan<float4> image_pixels,
+                        const TileColorspaceProcessor &processors,
+                        const bke::pbvh::pixels::PackedPixelRow &pixel_row,
+                        IndexRange range,
+                        int width);
+
+void fetch_image_buffers(ImageData &image_data,
+                         bke::pbvh::Node &node,
+                         bke::pbvh::pixels::PixelNode &pixel_node);
+
+void do_push_undo_tile(ImageData &image_data,
+                       bke::pbvh::Node &node,
+                       bke::pbvh::pixels::PixelNode &pixel_node);
+
+void fix_non_manifold_seam_bleeding(Object &ob,
+                                    ImageData &image_data,
+                                    MutableSpan<bke::pbvh::MeshNode> nodes,
+                                    MutableSpan<bke::pbvh::pixels::PixelNode> pixel_nodes,
+                                    const IndexMask &node_mask);
+
 }  // namespace paint::image
 
 struct StrokeToggleSettings {
@@ -243,6 +305,52 @@ struct StrokeCache {
   float3 location_symm = float3(0);
   float3 last_location_symm = float3(0);
   float stroke_distance = 0.0f;
+
+  /* Reference to the PaintStroke for roll texture mapping (#BRUSH_STROKE_ROLL). */
+  PaintStroke *stroke = nullptr;
+
+  /* Precomputed per-dab for fast roll texture mapping. Set by PaintStroke::compute_roll_center()
+   * in update_step() before the per-vertex parallel loop. When roll_center_s < 0 the fast path is
+   * disabled and spline_uv() falls back to the full closest_point(). */
+  float roll_center_s = -1.0f; /* Raw arc-length on world spline at brush center. */
+  float3 roll_center_pos = {}; /* Spline position at roll_center_s. */
+  float3 roll_tangent = {};    /* Normalized tangent at roll_center_s. */
+  int roll_seg_lo = 0;         /* Polyline segment search range (precomputed). */
+  int roll_seg_hi = 0;
+  int roll_center_seg = 0; /* Segment index at roll_center_s. */
+
+  /* Surface interpolation: border curves for quad-patch UV mapping. Computed per-dab in
+   * compute_roll_center() when the preference is enabled. Each vector has the same size as the
+   * polyline in [seg_lo, seg_hi+1]. */
+  bool roll_surface_ready = false;
+  Vector<float3> roll_binormals;    /* Binormal at each polyline vertex in search range. */
+  Vector<float3> roll_border_left;  /* center + binormal * radius. */
+  Vector<float3> roll_border_right; /* center - binormal * radius. */
+
+  /** Subdivided poly-strip for smooth UV mapping. A quad strip (right_border, center, left_border)
+   * subdivided with linear column interpolation, stored as a regular grid [rows * cols],
+   * row-major. */
+  int roll_subdiv_rows = 0;
+  int roll_subdiv_cols = 0;
+  Vector<float3> roll_subdiv_pos;    /* 3D object-space grid (for tangent, debug draw). */
+  Vector<float2> roll_subdiv_pos_2d; /* 2D view-plane projection (for UV search). */
+  Vector<float2> roll_subdiv_uv;
+  float3 roll_proj_normal = {}; /* Projection normal (sculpt_normal or view_normal fallback). */
+  float3 roll_view_x = {};      /* Projection-plane X axis for 2D projection. */
+  float3 roll_view_y = {};      /* Projection-plane Y axis for 2D projection. */
+  int roll_eval_row_lo = 0;     /* Grid row range near dab for per-vertex search. */
+  int roll_eval_row_hi = 0;
+
+  /* Pre-rasterized UV lookup table for fast per-vertex evaluation. Built once per dab from the
+   * subdivided grid; per-vertex cost = O(1). */
+  static constexpr int ROLL_LUT_RES = 128;
+  Vector<float2> roll_lut_uv;         /* UV at each LUT pixel. */
+  Vector<float> roll_lut_dist_sq;     /* Best distance^2 (for rasterization). */
+  Vector<float3> roll_lut_tan;        /* Tangent at each LUT pixel. */
+  Vector<int> roll_lut_row;           /* Polyline row that wrote each pixel. */
+  float2 roll_lut_min = {};           /* 2D bounding box min. */
+  float2 roll_lut_inv_extent = {};    /* 1.0 / (max - min) * LUT_RES. */
+  bool roll_lut_ready = false;
 
   /**
    * Used for alternating between deformations in brushes that need to apply different ones to
@@ -831,6 +939,45 @@ void cache_calc_brushdata_symm(ed::sculpt_paint::StrokeCache &cache,
                                char axis,
                                float angle);
 
+/** Calculates the nodes that a brush will influence. */
+brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
+                                                 Object &ob,
+                                                 const Brush &brush,
+                                                 IndexMaskMemory &memory);
+
+/** Applies one brush action (a single symmetry/tile pass), reading brush placement and strength
+ * off `ob.runtime->sculpt_session->cache`. */
+void do_brush_action(const Depsgraph &depsgraph,
+                     const Scene &scene,
+                     Sculpt &sd,
+                     Object &ob,
+                     const Brush &brush,
+                     PaintModeSettings &paint_mode_settings);
+
+/** Applies `action` once per valid symmetry/tile/radial pass for the current stroke step.
+ * \param forced_bstrength: If set, used as `cache.bstrength` instead of the value computed from
+ * the live brush/paint settings. Used by callers (e.g. Curve Patch re-stamp) that need the
+ * strength frozen to a value captured earlier, rather than reactive to live brush-panel edits. */
+void do_symmetrical_brush_actions(
+    const Depsgraph &depsgraph,
+    const Scene &scene,
+    Sculpt &sd,
+    Object &ob,
+    void (*action)(const Depsgraph &depsgraph,
+                   const Scene &scene,
+                   Sculpt &sd,
+                   Object &ob,
+                   const Brush &brush,
+                   PaintModeSettings &paint_mode_settings),
+    PaintModeSettings &paint_mode_settings,
+    std::optional<float> forced_bstrength = std::nullopt);
+
+/** Restores the mesh to its last-undo-step state for brush types that compute their deformation
+ * as an offset from original coordinates (Grab/Elastic Deform/Thumb/Rotate), and for the
+ * anchored/drag-dot stroke methods. Must be called once per stroke step, after the per-dab
+ * `StrokeCache` fields are updated and before `do_symmetrical_brush_actions()`. */
+void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph, const Sculpt &sd, Object &ob);
+
 struct OrigPositionData {
   Span<float3> positions;
   Span<float3> normals;
@@ -939,6 +1086,16 @@ bool SCULPT_use_image_paint_brush(PaintModeSettings &settings, Object &ob);
 namespace ed::sculpt_paint {
 
 void SCULPT_OT_brush_stroke(wmOperatorType *ot);
+/** Defined in `paint_curve_patch_edit.cc`. A single persistent modal operator that owns every
+ * event for a Curve Patch live-edit session (point/handle/segment/radius drag, insert, delete,
+ * texture-axis toggle, commit/cancel) -- see that file's header comment for why this is not
+ * split into a `wmKeyMap` of small operators. */
+void SCULPT_OT_curve_patch_edit(wmOperatorType *ot);
+void SCULPT_OT_curve_patch_handle_type_set(wmOperatorType *ot);
+void SCULPT_OT_curve_patch_delete_point(wmOperatorType *ot);
+void SCULPT_OT_curve_patch_toggle_cyclic(wmOperatorType *ot);
+void SCULPT_OT_curve_patch_switch_direction(wmOperatorType *ot);
+void SCULPT_OT_curve_patch_stamp_reseed(wmOperatorType *ot);
 
 }
 

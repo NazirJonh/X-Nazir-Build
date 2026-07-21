@@ -101,7 +101,9 @@ class ASSET_OT_open_containing_blend_file(Operator):
             )
             return False
         # This could become a built-in query, for now this is good enough.
-        if asset.full_library_path.endswith(".asset.blend"):
+        # Both the stock suffix and the suffix used by this build's asset system files are
+        # checked, since `is_potentially_editable_asset_blend` is not exposed to Python.
+        if asset.full_library_path.endswith((".asset.blend", ".asset.xblend")):
             cls.poll_message_set(
                 "Selected asset is contained in a file managed by the asset system, manual edits should be avoided",
             )

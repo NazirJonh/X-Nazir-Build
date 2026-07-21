@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "BKE_blender.hh"
+#include "BKE_blendfile.hh"
 #include "BKE_preferences.h"
 
 #include "BLI_fileops.h"  // IWYU pragma: keep
@@ -465,9 +466,11 @@ int64_t AssetLibraryService::rfind_blendfile_extension(StringRef path)
   const std::vector<StringRefNull> blendfile_extensions = {".blend" SEP_STR,
                                                            ".blend.gz" SEP_STR,
                                                            ".ble" SEP_STR,
+                                                           XBLEND_FILE_EXTENSION SEP_STR,
                                                            ".blend" ALTSEP_STR,
                                                            ".blend.gz" ALTSEP_STR,
-                                                           ".ble" ALTSEP_STR};
+                                                           ".ble" ALTSEP_STR,
+                                                           XBLEND_FILE_EXTENSION ALTSEP_STR};
   int64_t blendfile_extension_pos = StringRef::not_found;
 
   for (StringRefNull blendfile_ext : blendfile_extensions) {

@@ -307,7 +307,7 @@ bool AssetRepresentation::is_potentially_editable_asset_blend() const
   }
 
   std::string lib_path = this->full_library_path();
-  return StringRef(lib_path).endswith(BLENDER_ASSET_FILE_SUFFIX);
+  return BKE_blendfile_is_asset_file_path(lib_path);
 }
 
 RemoteAssetFileStatus AssetRepresentation::remote_file_status() const

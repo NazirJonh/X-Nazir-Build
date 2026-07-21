@@ -16,10 +16,10 @@
 
 extern HRESULT CBlendThumb_CreateInstance(REFIID riid, void **ppv);
 
-#define SZ_CLSID_BLENDTHUMBHANDLER L"{D45F043D-F17F-4e8a-8435-70971D9FA46D}"
-#define SZ_BLENDTHUMBHANDLER L"Blender Thumbnail Handler"
+#define SZ_CLSID_BLENDTHUMBHANDLER L"{5D4063B8-DD0C-4421-A63C-9BD1C763E4B3}"
+#define SZ_BLENDTHUMBHANDLER L"X-NazirSculpt Thumbnail Handler"
 const CLSID CLSID_BlendThumbHandler = {
-    0xd45f043d, 0xf17f, 0x4e8a, {0x84, 0x35, 0x70, 0x97, 0x1d, 0x9f, 0xa4, 0x6d}};
+    0x5d4063b8, 0xdd0c, 0x4421, {0xa6, 0x3c, 0x9b, 0xd1, 0xc7, 0x63, 0xe4, 0xb3}};
 
 typedef HRESULT (*PFNCREATEINSTANCE)(REFIID riid, void **ppvObject);
 struct CLASS_OBJECT_INIT {
@@ -232,13 +232,13 @@ STDAPI DllRegisterServer()
          REG_SZ,
          L"Apartment"},
         {HKEY_CURRENT_USER,
-         L"Software\\Classes\\.blend\\",
+         L"Software\\Classes\\.xblend\\",
          L"Treatment",
          REG_DWORD,
          0,
          0}, /* This doesn't appear to do anything. */
         {HKEY_CURRENT_USER,
-         L"Software\\Classes\\.blend\\ShellEx\\{e357fccd-a995-4576-b01f-234630154e96}",
+         L"Software\\Classes\\.xblend\\ShellEx\\{e357fccd-a995-4576-b01f-234630154e96}",
          nullptr,
          REG_SZ,
          SZ_CLSID_BLENDTHUMBHANDLER},
@@ -251,7 +251,7 @@ STDAPI DllRegisterServer()
   }
   if (SUCCEEDED(hr)) {
     /* This tells the shell to invalidate the thumbnail cache.
-     * This is important because any `.blend` files viewed before registering this handler
+     * This is important because any `.xblend` files viewed before registering this handler
      * would otherwise show cached blank thumbnails. */
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
   }
@@ -267,7 +267,7 @@ STDAPI DllUnregisterServer()
 
   const PCWSTR rgpszKeys[] = {
       L"Software\\Classes\\CLSID\\" SZ_CLSID_BLENDTHUMBHANDLER,
-      L"Software\\Classes\\.blend\\ShellEx\\{e357fccd-a995-4576-b01f-234630154e96}"};
+      L"Software\\Classes\\.xblend\\ShellEx\\{e357fccd-a995-4576-b01f-234630154e96}"};
 
   /* Delete the registry entries. */
   for (int i = 0; i < ARRAYSIZE(rgpszKeys) && SUCCEEDED(hr); i++) {

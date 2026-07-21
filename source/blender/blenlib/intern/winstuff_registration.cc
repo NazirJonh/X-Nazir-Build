@@ -69,7 +69,27 @@ bool BLI_windows_update_pinned_launcher(const char *launcher_path)
   std::wstring search_path = quick_launch_folder_path;
   CoTaskMemFree(quick_launch_folder_path);
 
-  for (auto const &dir_entry : std::filesystem::recursive_directory_iterator(search_path)) {
+  /* The shortcuts folder does not exist on a profile that has never pinned an
+   * application. That is a benign case, not a registration failure, so report success.
+   * Use the #std::error_code overloads throughout so a missing or unreadable folder
+   * cannot throw #std::filesystem::filesystem_error and take the process down. */
+  std::error_code error_code;
+  if (!std::filesystem::exists(search_path, error_code) || error_code) {
+    return true;
+  }
+
+  std::filesystem::recursive_directory_iterator dir_iter(
+      search_path, std::filesystem::directory_options::none, error_code);
+  if (error_code) {
+    return true;
+  }
+
+  const std::filesystem::recursive_directory_iterator dir_end;
+  for (; dir_iter != dir_end; dir_iter.increment(error_code)) {
+    if (error_code) {
+      break;
+    }
+    const std::filesystem::directory_entry &dir_entry = *dir_iter;
 
     Microsoft::WRL::ComPtr<IShellLinkW> shell_link;
     if (CoCreateInstance(__uuidof(ShellLink), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&shell_link)) !=

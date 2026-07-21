@@ -130,6 +130,24 @@ static char *blender_version_decimal(const int version)
   return version_str;
 }
 
+#define XBLEND_VERSION_SUFFIX "_XBLEND"
+
+/**
+ * Version string used for user directories only.
+ *
+ * The suffix is applied to every version, not just the current one, so that lookups for previous
+ * versions never resolve to a stock Blender configuration. See #PREFERENCES_OT_copy_prev.
+ * Non-re-entrant!
+ */
+static char *blender_user_version_decimal(const int version)
+{
+  /* Holds the version plus the build suffix, which does not fit the plain version buffer. */
+  static char version_str[16];
+  BLI_assert(version < 1000);
+  SNPRINTF(version_str, "%d.%d" XBLEND_VERSION_SUFFIX, version / 100, version % 100);
+  return version_str;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -491,6 +509,10 @@ static Vector<std::string> get_path_environment_multiple(const char *subfolder_n
  * \param subfolder_name: optional name of sub-folder within folder.
  * \param version: Blender version, used to construct a sub-directory name.
  * \param check_is_dir: When false, return true even if the path doesn't exist.
+ * \param use_stock_version_naming: Resolve the version directory of a stock Blender install
+ * (without this build's suffix) instead of this build's own. Only meaningful for the
+ * standard per-version location; portable installs and `BLENDER_USER_RESOURCES` have no
+ * such directory, so those cases fail instead of returning this build's own path.
  * \return true if it was able to construct such a path.
  */
 static bool get_path_user_ex(char *targetpath,
@@ -498,24 +520,33 @@ static bool get_path_user_ex(char *targetpath,
                              const char *folder_name,
                              const char *subfolder_name,
                              const int version,
-                             const bool check_is_dir)
+                             const bool check_is_dir,
+                             const bool use_stock_version_naming = false)
 {
   char user_path[FILE_MAX];
 
   /* Environment variable override. */
   if (test_env_path(user_path, "BLENDER_USER_RESOURCES", check_is_dir)) {
-    /* Pass. */
+    /* There is no per-version layout in this case, so a stock install has no directory here. */
+    if (use_stock_version_naming) {
+      return false;
+    }
   }
   /* Portable install, to store user files next to Blender executable. */
   else if (get_path_local_ex(user_path, sizeof(user_path), "portable", nullptr, 0, true)) {
-    /* Pass. */
+    /* Same reasoning as the environment variable override above. */
+    if (use_stock_version_naming) {
+      return false;
+    }
   }
   else {
     user_path[0] = '\0';
 
     const GHOST_ISystemPaths *ghost_system_paths = GHOST_ISystemPaths::get();
-    const char *user_base_path = ghost_system_paths->getUserDir(version,
-                                                                blender_version_decimal(version));
+    const char *user_base_path = ghost_system_paths->getUserDir(
+        version,
+        use_stock_version_naming ? blender_version_decimal(version) :
+                                   blender_user_version_decimal(version));
     if (user_base_path) {
       STRNCPY(user_path, user_base_path);
     }
@@ -844,15 +875,18 @@ std::optional<std::string> BKE_appdir_folder_id_create(const int folder_id, cons
   return path;
 }
 
-std::optional<std::string> BKE_appdir_resource_path_id_with_version(const int folder_id,
-                                                                    const bool check_is_dir,
-                                                                    const int version)
+std::optional<std::string> BKE_appdir_resource_path_id_with_version(
+    const int folder_id,
+    const bool check_is_dir,
+    const int version,
+    const bool use_stock_version_naming)
 {
   char path[FILE_MAX] = "";
   bool ok;
   switch (folder_id) {
     case BLENDER_RESOURCE_PATH_USER:
-      ok = get_path_user_ex(path, sizeof(path), nullptr, nullptr, version, check_is_dir);
+      ok = get_path_user_ex(
+          path, sizeof(path), nullptr, nullptr, version, check_is_dir, use_stock_version_naming);
       break;
     case BLENDER_RESOURCE_PATH_LOCAL:
       ok = get_path_local_ex(path, sizeof(path), nullptr, nullptr, version, check_is_dir);

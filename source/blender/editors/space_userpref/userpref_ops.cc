@@ -1083,7 +1083,7 @@ static void PREFERENCES_OT_associate_blend(wmOperatorType *ot)
 {
   /* identifiers */
   ot->name = "Register File Association";
-  ot->description = "Use this installation for .blend files and to display thumbnails";
+  ot->description = "Use this installation for .xblend files and to display thumbnails";
   ot->idname = "PREFERENCES_OT_associate_blend";
 
   /* API callbacks. */
@@ -1131,7 +1131,7 @@ static void PREFERENCES_OT_unassociate_blend(wmOperatorType *ot)
 {
   /* identifiers */
   ot->name = "Remove File Association";
-  ot->description = "Remove this installation's associations with .blend files";
+  ot->description = "Remove this installation's associations with .xblend files";
   ot->idname = "PREFERENCES_OT_unassociate_blend";
 
   /* API callbacks. */

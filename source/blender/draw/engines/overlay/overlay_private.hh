@@ -160,6 +160,10 @@ struct State {
   /** Should text draw in this mode? */
   bool show_text = false;
   bool hide_overlays = false;
+  int2 cursor_mval = {0, 0};
+  bool cursor_mval_valid = false;
+  bool cursor_ctrl_pressed = false;
+  const char *active_tool_idname = nullptr;
   bool xray_enabled = false;
   bool xray_enabled_and_not_wire = false;
   /** Can be true even if X-ray Alpha is 1.0. */

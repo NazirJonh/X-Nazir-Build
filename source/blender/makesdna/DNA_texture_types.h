@@ -287,6 +287,7 @@ enum eMTex_BrushMapMode : char {
   MTEX_MAP_MODE_AREA = 3,
   MTEX_MAP_MODE_RANDOM = 4,
   MTEX_MAP_MODE_STENCIL = 5,
+  MTEX_MAP_MODE_ROLL = 6,
 };
 
 /** #MTex::brush_angle_mode. */
@@ -295,6 +296,9 @@ enum eMTex_BrushAngleMode : char {
   MTEX_ANGLE_RAKE = 2,
 };
 ENUM_OPERATORS(eMTex_BrushAngleMode)
+
+/* The Curve Patch enumerations describe #BrushCurvePatchSettings and live in
+ * `DNA_brush_enums.h` alongside the struct they belong to. */
 
 /** \} */
 
@@ -325,7 +329,7 @@ struct MTex {
 
   float ofs[3] = {0.0f, 0.0f, 0.0f};
   float size[3] = {1.0f, 1.0f, 1.0f};
-  float rot = 0, random_angle = 2.0f * float(M_PI);
+  float rot = 0, random_angle = 0;
 
   float r = 1.0, g = 0.0, b = 1.0, k = 1.0;
   float def_var = 1.0;

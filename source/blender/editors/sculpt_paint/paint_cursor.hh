@@ -21,7 +21,6 @@
 
 namespace blender::ed::sculpt_paint {
 enum class PaintCursorDrawingType {
-  Curve,
   Cursor2D,
   Cursor3D,
 };

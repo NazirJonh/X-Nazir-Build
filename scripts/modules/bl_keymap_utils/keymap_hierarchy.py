@@ -114,6 +114,7 @@ _km_hierarchy = [
         ('Bevel Modal Map', 'EMPTY', 'WINDOW', []),
         ('Paint Stroke Modal', 'EMPTY', 'WINDOW', []),
         ('Sculpt Expand Modal', 'EMPTY', 'WINDOW', []),
+        ('Curve Patch Edit Modal Map', 'EMPTY', 'WINDOW', []),
         ('Paint Curve', 'EMPTY', 'WINDOW', []),
         ('Curve Pen Modal Map', 'EMPTY', 'WINDOW', []),
 

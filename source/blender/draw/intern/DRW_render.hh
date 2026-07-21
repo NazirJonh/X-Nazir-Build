@@ -327,6 +327,12 @@ struct DRWContext {
 
   eObjectMode object_mode = OB_MODE_OBJECT;
 
+  /** Mouse position in window pixels. Valid only for interactive viewport draws. */
+  int2 cursor_mval = {0, 0};
+  bool cursor_mval_valid = false;
+  /** `area->runtime.tool->idname` when `evil_C` is set; nullptr otherwise. */
+  const char *active_tool_idname = nullptr;
+
  public:
   /**
    * If `viewport` is not specified, `DRWData` will be considered temporary and discarded on exit.

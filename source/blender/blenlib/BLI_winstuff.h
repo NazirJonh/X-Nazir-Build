@@ -72,8 +72,26 @@ namespace blender {
 /* Windows utility functions. */
 
 bool BLI_windows_is_store_install(void);
-bool BLI_windows_register_blend_extension(bool all_users);
-bool BLI_windows_unregister_blend_extension(bool all_users);
+/**
+ * Associate the given file extension with this build.
+ *
+ * The extension is passed in rather than hard-coded because blenlib must not depend on the
+ * blenkernel header that owns the string.
+ *
+ * \param all_users: Write to `HKEY_LOCAL_MACHINE` instead of `HKEY_CURRENT_USER`.
+ * \param extension: The extension to associate, including the leading dot.
+ */
+bool BLI_windows_register_blend_extension(bool all_users, const char *extension);
+/**
+ * Remove the association of the given file extension with this build.
+ *
+ * Associations owned by another application are left alone, so a stock Blender install is not
+ * affected.
+ *
+ * \param all_users: Write to `HKEY_LOCAL_MACHINE` instead of `HKEY_CURRENT_USER`.
+ * \param extension: The extension to release, including the leading dot.
+ */
+bool BLI_windows_unregister_blend_extension(bool all_users, const char *extension);
 bool BLI_windows_update_pinned_launcher(const char *launcher_path);
 
 /* Gets the version of the currently loaded DirectX driver for the first device that matches

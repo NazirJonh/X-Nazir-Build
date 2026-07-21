@@ -893,7 +893,7 @@ class USERPREF_PT_system_os_settings(SystemPanel, CenterAlignMixIn, Panel):
         if platform[:3] == "win":
             if context.preferences.system.is_microsoft_store_install:
                 layout.label(text="Microsoft Store installation")
-                layout.label(text="Use Windows 'Default Apps' to associate with blend files")
+                layout.label(text="Use Windows 'Default Apps' to associate with xblend files")
                 return False
         else:
             # Linux.
@@ -912,7 +912,7 @@ class USERPREF_PT_system_os_settings(SystemPanel, CenterAlignMixIn, Panel):
 
     def draw_centered(self, context, layout):
         if self._draw_associate_supported_or_label(context, layout):
-            layout.label(text="Open blend files with this Blender version")
+            layout.label(text="Open xblend files with this Blender version")
             split = layout.split(factor=0.5)
             split.alignment = 'LEFT'
             split.operator("preferences.associate_blend", text="Register")
@@ -1988,6 +1988,29 @@ class USERPREF_PT_saveload_file_browser(SaveLoadPanel, CenterAlignMixIn, Panel):
         col = layout.column(heading="Defaults")
         col.prop(paths, "use_filter_files")
         col.prop(paths, "show_hidden_files_datablocks")
+
+
+class USERPREF_PT_saveload_import_settings(SaveLoadPanel, CenterAlignMixIn, Panel):
+    bl_label = "Import Settings"
+
+    def draw_centered(self, _context, layout):
+        operator_cls = bpy.types.PREFERENCES_OT_copy_settings
+
+        col = layout.column()
+        # Greyed out rather than hidden, so it is visible that the feature exists.
+        sub = col.column()
+        sub.enabled = bool(operator_cls.find_versions('XBLEND') or operator_cls.find_versions('STOCK'))
+        sub.operator("preferences.copy_settings", text="Copy Previous Settings")
+
+        sub = col.column()
+        sub.enabled = operator_cls.stock_current_path() is not None
+        props = sub.operator(
+            "preferences.copy_settings",
+            text=iface_("Copy from Official Blender {:d}.{:d}", "Operator").format(*bpy.app.version[:2]),
+            translate=False,
+        )
+        props.lock_source = True
+        props.branch = 'STOCK'
 
 
 # -----------------------------------------------------------------------------
@@ -3392,6 +3415,7 @@ classes = (
     USERPREF_PT_saveload_blend,
     USERPREF_PT_saveload_autorun,
     USERPREF_PT_saveload_file_browser,
+    USERPREF_PT_saveload_import_settings,
 
     USERPREF_MT_keyconfigs,
 

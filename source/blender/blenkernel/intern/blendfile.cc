@@ -28,6 +28,7 @@
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
+#include "BLI_string_ref.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_system.h"
 #include "BLI_time.h"
@@ -87,8 +88,24 @@ using namespace bke;
 
 bool BKE_blendfile_extension_check(const char *str)
 {
-  const char *ext_test[4] = {".blend", ".ble", ".blend.gz", nullptr};
+  const char *ext_test[5] = {XBLEND_FILE_EXTENSION, ".blend", ".ble", ".blend.gz", nullptr};
   return BLI_path_extension_check_array(str, ext_test);
+}
+
+StringRef BKE_blendfile_asset_file_suffix_get(const StringRef path)
+{
+  if (path.endswith(XBLEND_ASSET_FILE_SUFFIX)) {
+    return XBLEND_ASSET_FILE_SUFFIX;
+  }
+  if (path.endswith(BLENDER_ASSET_FILE_SUFFIX)) {
+    return BLENDER_ASSET_FILE_SUFFIX;
+  }
+  return {};
+}
+
+bool BKE_blendfile_is_asset_file_path(const StringRef path)
+{
+  return !BKE_blendfile_asset_file_suffix_get(path).is_empty();
 }
 
 bool BKE_blendfile_library_path_explode(const char *path,

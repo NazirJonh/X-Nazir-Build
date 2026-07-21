@@ -95,10 +95,14 @@ std::optional<std::string> BKE_appdir_folder_id_user_notest(int folder_id, const
 /**
  * Returns the path of the top-level version-specific local, user or system directory.
  * If check_is_dir, then the result will be NULL if the directory doesn't exist.
+ *
+ * \param use_stock_version_naming: For #BLENDER_RESOURCE_PATH_USER, resolve the directory of a
+ * stock Blender install rather than this build's suffixed one. Ignored for other resource types.
+ * Fails when there is no per-version user directory at all (portable install, or
+ * `BLENDER_USER_RESOURCES` override).
  */
-std::optional<std::string> BKE_appdir_resource_path_id_with_version(int folder_id,
-                                                                    bool check_is_dir,
-                                                                    int version);
+std::optional<std::string> BKE_appdir_resource_path_id_with_version(
+    int folder_id, bool check_is_dir, int version, bool use_stock_version_naming = false);
 std::optional<std::string> BKE_appdir_resource_path_id(int folder_id, bool check_is_dir);
 
 /**

@@ -3356,22 +3356,35 @@ class WM_MT_splash_quick_setup(Menu):
 
         layout.operator_context = 'EXEC_DEFAULT'
 
-        old_version = bpy.types.PREFERENCES_OT_copy_prev.previous_version()
-        can_import = bpy.types.PREFERENCES_OT_copy_prev.poll(context) and old_version
+        operator_cls = bpy.types.PREFERENCES_OT_copy_settings
+        can_import = operator_cls.poll(context) and bool(
+            operator_cls.find_versions('XBLEND') or
+            operator_cls.find_versions('STOCK') or
+            operator_cls.stock_current_path()
+        )
 
         if can_import:
-            layout.label(text="Import Preferences From Previous Version")
+            layout.label(text="Import Preferences")
             split = layout.split(factor=0.20)  # Left margin.
             split.label()
 
             split = split.split(factor=0.73)  # Content width.
             col = split.column()
+            # The dialogs must be shown, the menu sets EXEC_DEFAULT for everything else.
+            col.operator_context = 'INVOKE_DEFAULT'
             col.operator(
-                "preferences.copy_prev",
-                text=iface_("Import Blender {:d}.{:d} Preferences", "Operator").format(*old_version),
+                "preferences.copy_settings",
+                text="Copy Previous Settings",
+                icon='NONE',
+            )
+            props = col.operator(
+                "preferences.copy_settings",
+                text=iface_("Copy from Official Blender {:d}.{:d}", "Operator").format(*bpy.app.version[:2]),
                 icon='NONE',
                 translate=False,
             )
+            props.lock_source = True
+            props.branch = 'STOCK'
             layout.separator()
             layout.separator(type='LINE')
 

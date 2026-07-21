@@ -186,6 +186,249 @@ class PREFERENCES_OT_copy_prev(Operator):
         return {'FINISHED'}
 
 
+# Kept alive because Blender does not own the strings returned by a dynamic enum callback.
+_copy_settings_version_items = []
+
+
+def _copy_settings_version_items_cb(self, _context):
+    items = _copy_settings_version_items
+    items.clear()
+    for version in PREFERENCES_OT_copy_settings.find_versions(self.branch):
+        identifier = "{:d}.{:d}".format(*version)
+        items.append((identifier, identifier, PREFERENCES_OT_copy_settings.version_path(version, self.branch)))
+    if not items:
+        items.append(('NONE', "None Found", "No configuration directory was found for this branch"))
+    return items
+
+
+class PREFERENCES_OT_copy_settings(Operator):
+    """Copy settings from another Blender configuration directory"""
+    bl_idname = "preferences.copy_settings"
+    bl_label = "Copy Settings"
+
+    # Mirrors the constant in PREFERENCES_OT_copy_prev, see the reasoning there.
+    MAX_MINOR_VERSION_FOR_PREVIOUS_MAJOR_LOOKUP = 10
+
+    # Property name paired with the sub-directory it controls.
+    _SUBDIRS = (
+        ("use_config", "config"),
+        ("use_extensions", "extensions"),
+        ("use_scripts", "scripts"),
+    )
+
+    branch: EnumProperty(
+        name="Branch",
+        description="Which family of configuration directories to look in",
+        items=(
+            ('STOCK', "Official Blender", "Configuration directories of an official Blender install"),
+            ('XBLEND', "This Build", "Configuration directories of this build"),
+        ),
+        default='STOCK',
+    )
+    source_version: EnumProperty(
+        name="Version",
+        description="Version to copy the settings from",
+        items=_copy_settings_version_items_cb,
+    )
+    use_config: BoolProperty(
+        name="Configuration",
+        description="Preferences, themes, key maps and other files under \"config\"",
+        default=True,
+    )
+    use_extensions: BoolProperty(
+        name="Extensions",
+        description="Installed extensions. Third party extensions may not work with this build",
+        default=False,
+    )
+    use_scripts: BoolProperty(
+        name="Legacy Add-ons",
+        description="Add-ons installed the legacy way, under \"scripts\". "
+        "Third party add-ons may not work with this build",
+        default=False,
+    )
+    # Set by the caller to pin the source to the stock directory of the current version.
+    lock_source: BoolProperty(
+        default=False,
+        options={'HIDDEN', 'SKIP_SAVE'},
+    )
+
+    @classmethod
+    def version_path(cls, version, branch):
+        return bpy.utils.resource_path(
+            'USER', major=version[0], minor=version[1], stock=(branch == 'STOCK'),
+        )
+
+    @classmethod
+    def find_versions(cls, branch):
+        """Every existing configuration directory older than the current version, newest first."""
+        import os
+
+        found = []
+        version_new = bpy.app.version[:2]
+        version_old = [version_new[0], version_new[1] - 1]
+
+        while True:
+            while version_old[1] >= 0:
+                path = cls.version_path(version_old, branch)
+                if path and os.path.isdir(path):
+                    found.append(tuple(version_old))
+                version_old[1] -= 1
+            if version_new[0] == version_old[0]:
+                # Retry with older major version.
+                version_old[0] -= 1
+                version_old[1] = cls.MAX_MINOR_VERSION_FOR_PREVIOUS_MAJOR_LOOKUP
+            else:
+                break
+
+        return found
+
+    @classmethod
+    def stock_current_path(cls):
+        """Stock configuration directory of the running version, or None."""
+        import os
+
+        path = bpy.utils.resource_path('USER', stock=True)
+        return path if path and os.path.isdir(path) else None
+
+    @classmethod
+    def poll(cls, _context):
+        import os
+
+        # No automatic per-version configuration exists when the config path is overridden by an
+        # environment variable or this is a portable install. Unlike PREFERENCES_OT_copy_prev this
+        # stays enabled once a configuration exists: the operator lives in the Preferences editor
+        # and overwriting is guarded by the backup instead.
+        userconfig_path = os.path.normpath(bpy.utils.user_resource('CONFIG'))
+        new_userconfig_path = os.path.normpath(os.path.join(bpy.utils.resource_path('USER'), "config"))
+        return userconfig_path == new_userconfig_path
+
+    def _source_path(self):
+        import os
+
+        if self.lock_source:
+            path = bpy.utils.resource_path('USER', stock=True)
+        elif self.source_version == 'NONE':
+            return None
+        else:
+            major, minor = (int(number) for number in self.source_version.split("."))
+            path = self.version_path((major, minor), self.branch)
+        return path if path and os.path.isdir(path) else None
+
+    def _selected_subdirs(self):
+        return [name for prop_name, name in self._SUBDIRS if getattr(self, prop_name)]
+
+    def _subdirs_to_replace(self):
+        import os
+
+        dest = bpy.utils.resource_path('USER')
+        return [name for name in self._selected_subdirs() if os.path.isdir(os.path.join(dest, name))]
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        if self.lock_source:
+            source = self._source_path()
+            layout.label(text=source if source else "Not found", translate=False)
+        else:
+            layout.prop(self, "branch", expand=True)
+            layout.prop(self, "source_version")
+
+        col = layout.column(heading="Copy")
+        col.prop(self, "use_config")
+        col.prop(self, "use_extensions")
+        col.prop(self, "use_scripts")
+
+        replaced = self._subdirs_to_replace()
+        if replaced:
+            box = layout.box()
+            box.alert = True
+            box.label(text="Existing settings will be replaced", icon='ERROR')
+            box.label(text="A backup copy is created first")
+
+    def execute(self, context):
+        import os
+        import shutil
+        import time
+
+        source = self._source_path()
+        if source is None:
+            self.report({'ERROR'}, "Source configuration directory not found")
+            return {'CANCELLED'}
+
+        dest = bpy.utils.resource_path('USER')
+        if os.path.normcase(os.path.normpath(source)) == os.path.normcase(os.path.normpath(dest)):
+            self.report({'ERROR'}, "Source and destination are the same directory")
+            return {'CANCELLED'}
+
+        names = [name for name in self._selected_subdirs() if os.path.isdir(os.path.join(source, name))]
+        if not names:
+            self.report({'WARNING'}, "Nothing to copy from the selected source")
+            return {'CANCELLED'}
+
+        # The operation reloads preferences immediately and cannot be undone, so move whatever is
+        # about to be overwritten aside first. Only the selected sub-directories are touched.
+        backup_dir = ""
+        for name in names:
+            dest_subdir = os.path.join(dest, name)
+            if not os.path.isdir(dest_subdir):
+                continue
+            if not backup_dir:
+                backup_dir = os.path.join(dest, "backups", time.strftime("%Y-%m-%d_%H%M%S"))
+                os.makedirs(backup_dir, exist_ok=True)
+            try:
+                shutil.move(dest_subdir, os.path.join(backup_dir, name))
+            except OSError as ex:
+                self.report({'ERROR'}, "Unable to back up \"{:s}\": {:s}".format(name, str(ex)))
+                return {'CANCELLED'}
+
+        for name in names:
+            try:
+                shutil.copytree(
+                    os.path.join(source, name), os.path.join(dest, name),
+                    dirs_exist_ok=True, symlinks=True,
+                )
+            except OSError as ex:
+                self.report({'ERROR'}, "Unable to copy \"{:s}\": {:s}".format(name, str(ex)))
+                return {'CANCELLED'}
+
+        bpy.ops.wm.read_userpref()
+
+        disabled = self._disable_missing_addons(context)
+
+        message = "Copied {:s} from {:s}".format(", ".join(names), source)
+        if backup_dir:
+            message += ". Previous settings moved to {:s}".format(backup_dir)
+        if disabled:
+            message += ". Disabled add-ons that are not installed: {:s}".format(", ".join(disabled))
+        self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+    @staticmethod
+    def _disable_missing_addons(context):
+        """Drop add-ons the copied preferences enable but this build does not have."""
+        import addon_utils
+
+        available = {module.__name__ for module in addon_utils.modules()}
+        addons = context.preferences.addons
+        missing = [addon.module for addon in addons if addon.module not in available]
+        if not missing:
+            return []
+
+        for module_name in missing:
+            while module_name in addons:
+                addon = addons.get(module_name)
+                if addon is None:
+                    break
+                addons.remove(addon)
+        bpy.ops.wm.save_userpref()
+        return missing
+
+
 class PREFERENCES_OT_keyconfig_test(Operator):
     """Test key configuration for conflicts"""
     bl_idname = "preferences.keyconfig_test"
@@ -1343,6 +1586,7 @@ classes = (
     PREFERENCES_OT_addon_show,
     PREFERENCES_OT_app_template_install,
     PREFERENCES_OT_copy_prev,
+    PREFERENCES_OT_copy_settings,
     PREFERENCES_OT_keyconfig_activate,
     PREFERENCES_OT_keyconfig_export,
     PREFERENCES_OT_keyconfig_import,

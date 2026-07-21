@@ -1773,32 +1773,30 @@ bool filelist_cache_previews_done(FileList *filelist)
          (cache->previews_todo_count == 0);
 }
 
-/* would recognize .blend as well */
-static bool file_is_blend_backup(const char *str)
+/* Detects the given extension within the tail of the name, so that a numbered backup such as
+ * `.blend1` or `.xblend2` is matched. The trailing characters themselves are not validated. */
+static bool file_is_backup_with_extension(const char *str, const char *extension)
 {
   const size_t a = strlen(str);
-  size_t b = 7;
-  bool retval = false;
+  const size_t extension_len = strlen(extension);
+  size_t b = extension_len + 1;
 
   if (a == 0 || b >= a) {
-    /* pass */
-  }
-  else {
-    const char *loc;
-
-    if (a > b + 1) {
-      b++;
-    }
-
-    /* allow .blend1 .blend2 .blend32 */
-    loc = BLI_strcasestr(str + a - b, ".blend");
-
-    if (loc) {
-      retval = true;
-    }
+    return false;
   }
 
-  return retval;
+  if (a > b + 1) {
+    b++;
+  }
+
+  /* Allow one or two trailing characters, as in `.blend1` or `.blend32`. */
+  return BLI_strcasestr(str + a - b, extension) != nullptr;
+}
+
+static bool file_is_blend_backup(const char *str)
+{
+  return file_is_backup_with_extension(str, ".blend") ||
+         file_is_backup_with_extension(str, XBLEND_FILE_EXTENSION);
 }
 
 int ED_path_extension_type(const char *path)

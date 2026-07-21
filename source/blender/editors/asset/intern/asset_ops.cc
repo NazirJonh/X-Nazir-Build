@@ -1033,7 +1033,8 @@ static void ASSET_OT_bundle_install(wmOperatorType *ot)
  * referenced. */
 static bool could_be_asset_bundle(const Main *bmain)
 {
-  return fnmatch("*_bundle.blend", bmain->filepath, FNM_CASEFOLD) == 0;
+  return fnmatch("*_bundle.blend", bmain->filepath, FNM_CASEFOLD) == 0 ||
+         fnmatch("*_bundle" XBLEND_FILE_EXTENSION, bmain->filepath, FNM_CASEFOLD) == 0;
 }
 
 static const bUserAssetLibrary *selected_asset_library(wmOperator *op)

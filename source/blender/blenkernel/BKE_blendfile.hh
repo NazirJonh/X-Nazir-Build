@@ -12,6 +12,7 @@
 #include "BLI_enum_flags.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_map.hh"
+#include "BLI_string_ref.hh"
 #include "BLI_utility_mixins.hh"
 
 #include <string>
@@ -39,8 +40,40 @@ struct WorkspaceConfigFileData;
 #define BLENDER_ASSET_FILE_SUFFIX ".asset.blend"
 
 /**
+ * The file extension this build saves to by default. Stock `.blend` files stay readable,
+ * only newly written files carry the XBlend extension.
+ */
+#define XBLEND_FILE_EXTENSION ".xblend"
+
+/**
+ * The suffix used for asset-system blend-files written by this build.
+ */
+#define XBLEND_ASSET_FILE_SUFFIX ".asset.xblend"
+
+/**
+ * Return the asset-system suffix the path ends with, or an empty reference when it ends with
+ * neither. Callers that need to strip the suffix must use the returned length: the XBlend and the
+ * stock suffix differ in size.
+ *
+ * \param path: The path to check.
+ * \return The matched suffix, referencing static storage.
+ */
+StringRef BKE_blendfile_asset_file_suffix_get(StringRef path);
+
+/**
+ * Check whether the path names a file managed by the asset system.
+ *
+ * Files written by a stock Blender build are accepted as well, so existing asset libraries stay
+ * editable in this build.
+ *
+ * \param path: The path to check.
+ * \return true when the path ends with a known asset-system suffix.
+ */
+bool BKE_blendfile_is_asset_file_path(StringRef path);
+
+/**
  * Check whether given path ends with a blend file compatible extension
- * (`.blend`, `.ble` or `.blend.gz`).
+ * (`.xblend`, `.blend`, `.ble` or `.blend.gz`).
  *
  * \param str: The path to check.
  * \return true is this path ends with a blender file extension.

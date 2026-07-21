@@ -99,6 +99,7 @@ OPERATOR_IGNORE = (
     "preferences.addon_refresh",
     "preferences.addon_remove",
     "preferences.copy_prev",
+    "preferences.copy_settings",
     "preferences.keyconfig_activate",
     "preferences.keyconfig_export",
     "preferences.keyconfig_import",

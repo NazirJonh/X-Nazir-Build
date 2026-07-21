@@ -147,7 +147,11 @@ class CurvePatchSampler {
                     const Brush &brush,
                     const CurvePatchSourceGeometry &source,
                     Span<float> mask,
-                    ImagePool *tex_pool);
+                    /* A reference rather than a pointer on purpose: a sampler built for a brush
+                     * WITH a texture and no pool dereferenced null here, while a brush without one
+                     * passed -- a defect no ordinary check catches. See
+                     * #SculptSession::tex_pool_ensure. */
+                    ImagePool &tex_pool);
 
   /** Read-only and thread-safe; `thread_id` indexes the texture pool's per-thread slot. */
   std::optional<CurvePatchSample> sample(int idx, int thread_id) const;
@@ -158,7 +162,7 @@ class CurvePatchSampler {
   const Brush &brush_;
   CurvePatchSourceGeometry source_;
   Span<float> mask_;
-  ImagePool *tex_pool_;
+  ImagePool &tex_pool_;
   float total_length_;
   float2 mtex_size_;
   float2 mtex_ofs_;

@@ -49,7 +49,7 @@ CurvePatchSampler::CurvePatchSampler(const CurvePatchSession &patch,
                                      const Brush &brush,
                                      const CurvePatchSourceGeometry &source,
                                      const Span<float> mask,
-                                     ImagePool *tex_pool)
+                                     ImagePool &tex_pool)
     : patch_(patch),
       ctx_(ctx),
       brush_(brush),
@@ -350,7 +350,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         float sample_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         if (stamp_mtex.tex != nullptr) {
           paint_get_tex_pixel(
-              &stamp_mtex, stamp_u, stamp_v, tex_pool_, thread_id, &sample, sample_rgba);
+              &stamp_mtex, stamp_u, stamp_v, &tex_pool_, thread_id, &sample, sample_rgba);
         }
         /* The brush's own falloff curve fades the stamp toward its rim, so overlapping stamps
          * meet along a smooth seam instead of showing the square's hard edge. */
@@ -430,7 +430,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * the outer-scope `tex_rgba` (initialized to `{1,1,1,1}` above), so the null-texture case leaves
      * a usable identity color for `ColorEffect` exactly as the no-texture branch intends. */
     if (zone_mtex.tex != nullptr) {
-      paint_get_tex_pixel(&zone_mtex, tex_u, tex_v, tex_pool_, thread_id, &tex_value, tex_rgba);
+      paint_get_tex_pixel(&zone_mtex, tex_u, tex_v, &tex_pool_, thread_id, &tex_value, tex_rgba);
     }
     }
 

@@ -249,7 +249,7 @@ void ReliefEffect::apply_pass(const Depsgraph &depsgraph,
    * (even rejected ones) into `orig_positions`, which on a dense mesh dominated the edit cost. */
 
   const CurvePatchSourceGeometry source{positions, normals, &orig_positions_};
-  const CurvePatchSampler sampler(patch, ctx, brush, source, mask, ss.tex_pool);
+  const CurvePatchSampler sampler(patch, ctx, brush, source, mask, ss.tex_pool_ensure());
 
   const float max_radius = curve_patch_max_radius(patch.geometry);
 

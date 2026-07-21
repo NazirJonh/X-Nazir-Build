@@ -361,7 +361,13 @@ static void rna_Curves_update_data(Main * /*bmain*/, Scene * /*scene*/, PointerR
  *
  * Recomputing the bezier handles is not optional for a paint curve: its handle types are AUTO, and
  * a control point moved without that recompute leaves the ribbon following the old shape. `Curves`
- * must not get a second, silent recompute -- its own edit code owns that. */
+ * must not get a second, silent recompute -- its own edit code owns that.
+ *
+ * No undo step is pushed here, and none should be. RNA property writes in Blender do not push undo
+ * themselves -- `Curves` does not either -- and a `PaintCurve` is an ID whose geometry is written to
+ * the .blend (`paint_curve_blend_write()`), so the global memfile undo covers a write through this
+ * path like any other ID edit. The dedicated paint-curve undo type (`ED_paintcurve_undo_push_*`)
+ * exists for the modal operators, which need a granularity finer than a whole file state. */
 void rna_curve_geometry_update_data(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   ID *id = ptr->owner_id;

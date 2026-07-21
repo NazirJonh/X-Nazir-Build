@@ -811,6 +811,11 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   };
   threading::EnumerableThreadSpecific<LocalData> all_tls;
 
+  /* Resolved before the parallel region below, not inside it: the samplers are built per chunk, and
+   * letting several worker threads race to lazily create the session's pool would leak all but one
+   * of them. */
+  ImagePool &tex_pool = ss.tex_pool_ensure();
+
   /* PHASE 1 (parallel): derive each candidate pixel's 3D position and normal, sample the patch
    * there, and -- only for chunks that accepted at least one pixel -- read the chunk's current
    * contents into thread-local storage.
@@ -908,7 +913,7 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
               const CurvePatchSourceGeometry source{
                   chunk_positions, chunk_normals, nullptr, /*indices_are_mesh_verts*/ false};
               const CurvePatchSampler sampler(
-                  patch, ctx, brush, source, chunk_mask, ss.tex_pool);
+                  patch, ctx, brush, source, chunk_mask, tex_pool);
 
               Vector<AcceptedPixel> accepted;
               for (const int li : IndexRange(range.size())) {

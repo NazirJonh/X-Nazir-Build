@@ -58,7 +58,6 @@
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
-#include "BKE_image.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
@@ -117,8 +116,8 @@ static uint64_t curve_patch_texture_list_digest(const Brush &brush)
 
 /* Pointer-only counterpart to the digest above, folding in each slot's `tex` pointer but not its
  * weight. A weight-only edit re-stamps (it changes `curve_patch_texture_list_digest()`) but does
- * not change WHICH images are sampled, so it must not by itself invalidate `ss.tex_pool` -- this
- * narrower digest is what the pool-rebuild gate watches instead. Same Horner-style combinator as
+ * not change WHICH images are sampled, so it must not by itself invalidate the session's texture
+ * pool -- this narrower digest is what the pool-rebuild gate watches instead. Same combinator as
  * above, so a pure slot reorder still changes it. */
 static uint64_t curve_patch_texture_pointer_digest(const Brush &brush)
 {
@@ -836,7 +835,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       /* Narrower than `multi_texture_changed` above: true only when the set of sampled IMAGES
        * changed -- a cap texture reassignment or a list slot added/removed/retargeted/reordered --
        * as opposed to a cap-length drag or a slot weight edit, which re-stamp but keep sampling the
-       * same images. Drives the `ss.tex_pool` rebuild gate below; a cap-length or weight-only change
+       * same images. Drives the texture-pool rebuild gate below; a cap-length or weight-only change
        * must not free/reallocate the pool on every tick of a slider drag. */
       const bool texture_identity_changed =
           texture_pointer_digest != data.last_synced_texture_pointer_digest ||
@@ -921,8 +920,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         data.last_synced_cap_tex[0] = cap_tex[0];
         data.last_synced_cap_tex[1] = cap_tex[1];
         data.last_synced_cap_tex[2] = cap_tex[2];
-        /* The relief samples the texture through `ss.tex_pool`, an `ImagePool` that caches ImBuf
-         * handles for the whole sculpt session (`brush_init_tex`, `sculpt.cc`). A changed image --
+        /* The relief samples the texture through the session's `ImagePool`, which caches ImBuf
+         * handles for the whole sculpt session (#SculptSession::tex_pool_ensure). A changed image --
          * a different Image datablock on the texture, or edited pixels -- would otherwise keep
          * sampling the old buffer. Rebuild the pool whenever the set of sampled textures' IDENTITY
          * changes: the brush's own texture (`tex_changed`), or a cap/list texture reassignment
@@ -930,13 +929,12 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
          * gated on the broader `multi_texture_changed`: a cap-length drag or a slot WEIGHT edit
          * re-stamps (see `multi_texture_changed` above) but samples the same images as before, so
          * rebuilding the pool for those would only free and reallocate it needlessly on every tick
-         * of a slider drag. */
+         * of a slider drag.
+         *
+         * Only dropped here, never rebuilt: the re-stamp two lines below reaches the effect, which
+         * creates the pool it needs through `SculptSession::tex_pool_ensure()`. */
         if (tex_changed || texture_identity_changed) {
-          ImagePool *&tex_pool = ob.runtime->sculpt_session->tex_pool;
-          if (tex_pool != nullptr) {
-            BKE_image_pool_free(tex_pool);
-          }
-          tex_pool = BKE_image_pool_new();
+          ob.runtime->sculpt_session->tex_pool_invalidate();
         }
         /* `swap_axis` and `stamp_mode` both feed the status text, so it has to be rebuilt here and
          * not only where the modal's own hotkeys change them. */

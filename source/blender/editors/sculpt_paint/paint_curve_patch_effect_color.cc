@@ -237,7 +237,7 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
   /* Source geometry has no snapshot override: color never moves geometry, so the live positions
    * are already pristine and `CurvePatchSampler` can read them directly. */
   const CurvePatchSourceGeometry source{positions, normals, nullptr};
-  const CurvePatchSampler sampler(patch, ctx, brush, source, mask, ss.tex_pool);
+  const CurvePatchSampler sampler(patch, ctx, brush, source, mask, ss.tex_pool_ensure());
 
   const float max_radius = curve_patch_max_radius(patch.geometry);
 

@@ -2197,8 +2197,29 @@ SculptSession::~SculptSession()
     BM_log_free(this->bm_log);
   }
 
-  if (this->tex_pool) {
-    BKE_image_pool_free(this->tex_pool);
+  if (this->tex_pool_) {
+    BKE_image_pool_free(this->tex_pool_);
+  }
+}
+
+ImagePool &SculptSession::tex_pool_ensure()
+{
+  if (this->tex_pool_ == nullptr) {
+    this->tex_pool_ = BKE_image_pool_new();
+  }
+  return *this->tex_pool_;
+}
+
+ImagePool *SculptSession::tex_pool() const
+{
+  return this->tex_pool_;
+}
+
+void SculptSession::tex_pool_invalidate()
+{
+  if (this->tex_pool_ != nullptr) {
+    BKE_image_pool_free(this->tex_pool_);
+    this->tex_pool_ = nullptr;
   }
 }
 

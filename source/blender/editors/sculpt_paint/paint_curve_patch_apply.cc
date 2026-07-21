@@ -16,12 +16,10 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
-#include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
-#include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
@@ -73,17 +71,13 @@ void curve_patch_prepare_brush_for_headless(Paint &paint, Brush &brush)
   paint.runtime->overlap_factor = paint_stroke_integrate_overlap(brush, 1.0f);
 }
 
-/* Undo the two pieces of session state #curve_patch_apply borrowed from the sculpt session. The
- * texture pool is freed only when this call created it: a pool left over from a live sculpt session
- * belongs to that session (`brush_init_tex()`, `mesh/sculpt.cc`). */
-static void curve_patch_apply_release(SculptSession &ss, const bool owns_tex_pool)
+/* Undo the piece of session state #curve_patch_apply borrows from the sculpt session. The texture
+ * pool is deliberately not touched: it belongs to the session for as long as the session lives
+ * (see #SculptSession::tex_pool_ensure). */
+static void curve_patch_apply_release(SculptSession &ss)
 {
   MEM_delete(ss.cache);
   ss.cache = nullptr;
-  if (owns_tex_pool && ss.tex_pool != nullptr) {
-    BKE_image_pool_free(ss.tex_pool);
-    ss.tex_pool = nullptr;
-  }
 }
 
 /* Stand in for the `StrokeCache` an interactive patch inherits from its anchor stroke. Only the
@@ -196,15 +190,6 @@ bool curve_patch_apply(const Scene &scene,
 
   curve_patch_prepare_brush_for_headless(sd.paint, *brush);
 
-  /* All three effects sample through `SculptSession::tex_pool`, which only `brush_init_tex()`
-   * inside a stroke ever creates. Without one, a brush WITH a texture would dereference null in the
-   * sampler while a brush without a texture passed -- the reason this is not conditional on the
-   * brush actually having a texture. */
-  const bool owns_tex_pool = ss->tex_pool == nullptr;
-  if (owns_tex_pool) {
-    ss->tex_pool = BKE_image_pool_new();
-  }
-
   ss->cache = MEM_new<StrokeCache>(__func__);
   curve_patch_apply_cache_init(
       *ss->cache, ob, sd, *brush, paint_mode_settings, params, effect_type, input);
@@ -219,7 +204,7 @@ bool curve_patch_apply(const Scene &scene,
   if (!curve_patch_session_publish(ob, *session, effect_type, paint_mode_settings)) {
     BKE_report(reports, RPT_ERROR, "Curve Patch: this object cannot carry the requested effect");
     MEM_delete(session);
-    curve_patch_apply_release(*ss, owns_tex_pool);
+    curve_patch_apply_release(*ss);
     return false;
   }
   /* Left default-constructed, so `region` stays null and the re-stamp skips the interactive
@@ -244,7 +229,7 @@ bool curve_patch_apply(const Scene &scene,
 
   /* Cache first, then the session -- the order #curve_patch_commit_on_session_end established, and
    * the one the image effect's destructor (which closes its undo step) was shown to survive. */
-  curve_patch_apply_release(*ss, owns_tex_pool);
+  curve_patch_apply_release(*ss);
   MEM_delete(session);
   ss->curve_patch_session = nullptr;
 
@@ -329,13 +314,10 @@ static const PaintCurve *curve_patch_apply_resolve_paint_curve(bContext *C,
     BKE_report(op->reports, RPT_ERROR, "Curve Patch: no paint curve with at least two points");
     return nullptr;
   }
-  /* A Curve Patch is one strip along one spline (see `CurvePatchEditState::control_curve`), so a
-   * multi-spline paint curve has no single answer here. Refusing keeps the choice with the user
-   * rather than silently applying to whichever spline happens to be first. */
-  if (paint_curve->geometry.wrap().curves_num() != 1) {
-    BKE_report(op->reports, RPT_ERROR, "Curve Patch: the paint curve must hold a single spline");
-    return nullptr;
-  }
+  /* Nothing here about the spline COUNT: a Curve Patch is one strip along one spline (see
+   * `CurvePatchEditState::control_curve`), and which spline that is comes from the operator's
+   * `spline_index` or the curve's own active one -- see #ED_paintcurve_control_curve_for_patch.
+   * The point count of the chosen spline can only be checked once it has been sliced out. */
   return paint_curve;
 }
 
@@ -373,23 +355,13 @@ static wmOperatorStatus curve_patch_apply_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  /* Copied, then walked through the same handle materialization every paint-curve mutation
-   * performs: a curve whose handle POSITION attributes were never created evaluates to a bezier
-   * collapsed at the origin, with no error of any kind (see
-   * #curve_patch_control_curve_from_points). AUTO and ALIGNED handles are recomputed, FREE ones are
-   * left as the user set them. */
-  bke::CurvesGeometry control_curve = paint_curve->geometry.wrap();
-  control_curve.handle_positions_left_for_write();
-  control_curve.handle_positions_right_for_write();
-  control_curve.calculate_bezier_auto_handles();
-  control_curve.calculate_bezier_aligned_handles();
-  control_curve.tag_positions_changed();
-  /* Paint curves carry a per-point radius on this codebase's own convention (1.0 = full brush
-   * size), but a curve that reached `PaintCurve` by some other route may not, and
-   * `bke::CurvesGeometry::radius()` then answers its generic hair-curve default of 0.01 -- a strip a
-   * hundredth of its intended width, with no error. */
-  if (!control_curve.attributes().contains("radius")) {
-    control_curve.radius_for_write().fill(1.0f);
+  /* The point count is only meaningful once the spline is chosen: a multi-spline curve can hold
+   * plenty of points in total and a single one in the spline that was asked for. */
+  const bke::CurvesGeometry control_curve = ED_paintcurve_control_curve_for_patch(
+      *paint_curve, RNA_int_get(op->ptr, "spline_index"));
+  if (control_curve.points_num() < 2) {
+    BKE_report(op->reports, RPT_ERROR, "Curve Patch: the chosen spline needs at least two points");
+    return OPERATOR_CANCELLED;
   }
 
   /* One source for every build parameter a brush implies outside a stroke -- shared with the RNA
@@ -456,6 +428,16 @@ void SCULPT_OT_curve_patch_apply(wmOperatorType *ot)
                  MAX_ID_NAME - 2,
                  "Paint Curve",
                  "Name of the paint curve to stamp along; the active brush's own when empty");
+
+  RNA_def_int(ot->srna,
+              "spline_index",
+              -1,
+              -1,
+              INT_MAX,
+              "Spline",
+              "Index of the spline to stamp along; the curve's active spline when negative",
+              -1,
+              INT_MAX);
 }
 
 /** \} */

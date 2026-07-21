@@ -364,29 +364,42 @@ static int rna_PaintCurve_add_point(PaintCurve *pc, const float position[3], con
   return index;
 }
 
+static void rna_PaintCurve_points_set(PaintCurve *pc,
+                                      ReportList *reports,
+                                      const float *positions,
+                                      const int positions_num,
+                                      const float *radii,
+                                      const int radii_num,
+                                      const bool cyclic)
+{
+  if (positions_num % 3 != 0) {
+    BKE_report(reports, RPT_ERROR, "Positions must be a flat sequence of XYZ triples");
+    return;
+  }
+  const int points_num = positions_num / 3;
+  /* An omitted optional dynamic array arrives as a null pointer, the convention
+   * `rna_indices_to_mask()` (`rna_curves_api.cc`) reads too; that is "no radii", not "zero radii".
+   */
+  const Span<float> radii_span = radii != nullptr ? Span(radii, radii_num) : Span<float>();
+  if (!radii_span.is_empty() && radii_span.size() != points_num) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Expected %d radii to match the positions, got %d",
+                points_num,
+                int(radii_span.size()));
+    return;
+  }
+  ED_paintcurve_geometry_points_set(pc,
+                                    Span(reinterpret_cast<const float3 *>(positions), points_num),
+                                    radii_span,
+                                    cyclic);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
 static void rna_PaintCurve_clear(PaintCurve *pc)
 {
   ED_paintcurve_geometry_clear(pc);
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
-}
-
-/* A paint curve as the Curve Patch build wants it: bezier handle POSITION attributes materialized
- * (a curve that never had them evaluates to a bezier collapsed at the origin, silently), and a
- * radius attribute present -- `bke::CurvesGeometry::radius()` otherwise answers its hair-oriented
- * 0.01 default and the ribbon comes out a hundredth of its intended width. Copied rather than
- * mutated in place: reading a patch must not change the curve it was read from. */
-static bke::CurvesGeometry curve_patch_control_curve_prepare(const PaintCurve &pc)
-{
-  bke::CurvesGeometry curve = pc.geometry.wrap();
-  curve.handle_positions_left_for_write();
-  curve.handle_positions_right_for_write();
-  curve.calculate_bezier_auto_handles();
-  curve.calculate_bezier_aligned_handles();
-  curve.tag_positions_changed();
-  if (!curve.attributes().contains("radius")) {
-    curve.radius_for_write().fill(1.0f);
-  }
-  return curve;
 }
 
 /* Everything both read-back functions do before they differ: resolve the brush's parameters,
@@ -396,6 +409,7 @@ static bool curve_patch_build_for_rna(bContext *C,
                                       const PaintCurve &pc,
                                       const Brush &brush,
                                       Object *target,
+                                      const int spline_index,
                                       ReportList *reports,
                                       bke::CurvePatchParams &r_params,
                                       bke::CurvePatchGeometry &r_geometry)
@@ -406,9 +420,13 @@ static bool curve_patch_build_for_rna(bContext *C,
     return false;
   }
 
-  bke::CurvesGeometry control_curve = curve_patch_control_curve_prepare(pc);
+  /* Sliced out rather than taken whole, and copied rather than mutated in place: a patch is one
+   * strip along ONE spline, and reading one must not change the curve it was read from. Taking the
+   * geometry whole here used to run the tessellation over every spline at once, quietly welding a
+   * multi-spline curve into a single strip. */
+  bke::CurvesGeometry control_curve = ED_paintcurve_control_curve_for_patch(pc, spline_index);
   if (control_curve.points_num() < 2) {
-    BKE_report(reports, RPT_ERROR, "Curve Patch: the curve needs at least two points");
+    BKE_report(reports, RPT_ERROR, "Curve Patch: the chosen spline needs at least two points");
     return false;
   }
 
@@ -461,12 +479,18 @@ static bool curve_patch_build_for_rna(bContext *C,
   return true;
 }
 
-static Mesh *rna_PaintCurve_curve_patch_to_mesh(
-    PaintCurve *pc, bContext *C, ReportList *reports, Brush *brush, Object *target)
+static Mesh *rna_PaintCurve_curve_patch_to_mesh(PaintCurve *pc,
+                                                bContext *C,
+                                                ReportList *reports,
+                                                Brush *brush,
+                                                Object *target,
+                                                const int spline_index)
 {
   bke::CurvePatchParams params;
   bke::CurvePatchGeometry geometry;
-  if (!curve_patch_build_for_rna(C, *pc, *brush, target, reports, params, geometry)) {
+  if (!curve_patch_build_for_rna(
+          C, *pc, *brush, target, spline_index, reports, params, geometry))
+  {
     return nullptr;
   }
 
@@ -493,12 +517,18 @@ static Mesh *rna_PaintCurve_curve_patch_to_mesh(
   return mesh;
 }
 
-static PointCloud *rna_PaintCurve_curve_patch_stamps(
-    PaintCurve *pc, bContext *C, ReportList *reports, Brush *brush, Object *target)
+static PointCloud *rna_PaintCurve_curve_patch_stamps(PaintCurve *pc,
+                                                     bContext *C,
+                                                     ReportList *reports,
+                                                     Brush *brush,
+                                                     Object *target,
+                                                     const int spline_index)
 {
   bke::CurvePatchParams params;
   bke::CurvePatchGeometry geometry;
-  if (!curve_patch_build_for_rna(C, *pc, *brush, target, reports, params, geometry)) {
+  if (!curve_patch_build_for_rna(
+          C, *pc, *brush, target, spline_index, reports, params, geometry))
+  {
     return nullptr;
   }
 
@@ -921,6 +951,30 @@ static void rna_def_paint_curve(BlenderRNA *brna)
                                     nullptr);
   RNA_def_property_ui_text(prop, "Points", "Control points of all splines");
 
+  /* Raw access to the position array, for `foreach_get`/`foreach_set`. `points[i].position` writes
+   * one point at a time and runs the bezier handle recompute after EACH of them, which is O(N^2)
+   * over a whole curve; `pyrna` calls the update of this collection exactly once, at the end of the
+   * `foreach_set` (`bpy_rna.cc`), so the same write costs one recompute in total.
+   *
+   * The trade-off is deliberate: this path writes positions straight into the array and does NOT
+   * carry the bezier handles along with their points the way `CurvePoint.position` does. AUTO and
+   * ALIGNED handles are rebuilt by the update below, FREE ones stay where they were. */
+  prop = RNA_def_property(srna, "position_data", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "FloatVectorAttributeValue");
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Curves_position_data_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_Curves_position_data_length",
+                                    "rna_Curves_position_data_lookup_int",
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop, "Position Data", "Control point positions, for batch access from a script");
+  RNA_def_property_update(prop, 0, "rna_curve_geometry_update_data");
+
   prop = RNA_def_property(srna, "curves", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_struct_type(prop, "CurveSlice");
   RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
@@ -970,6 +1024,38 @@ static void rna_def_paint_curve(BlenderRNA *brna)
       func, "index", 0, -1, INT_MAX, "Index", "Index of the new control point", -1, INT_MAX);
   RNA_def_function_return(func, parm);
 
+  func = RNA_def_function(srna, "points_set", "rna_PaintCurve_points_set");
+  RNA_def_function_ui_description(
+      func,
+      "Replace every spline with a single spline built from the given positions, in one pass. "
+      "Cheaper than calling add_point() in a loop, which recomputes the bezier handles of the "
+      "whole curve on every call");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_float_array(func,
+                             "positions",
+                             1,
+                             nullptr,
+                             -FLT_MAX,
+                             FLT_MAX,
+                             "Positions",
+                             "Flat sequence of XYZ control point positions in object space",
+                             -FLT_MAX,
+                             FLT_MAX);
+  RNA_def_parameter_flags(parm, PROP_DYNAMIC, PARM_REQUIRED);
+  parm = RNA_def_float_array(func,
+                             "radii",
+                             1,
+                             nullptr,
+                             0.0f,
+                             FLT_MAX,
+                             "Radii",
+                             "One radius per point as a fraction of the brush size, where 1.0 is "
+                             "the full size; every point gets 1.0 when omitted",
+                             0.0f,
+                             100.0f);
+  RNA_def_parameter_flags(parm, PROP_DYNAMIC, ParameterFlag(0));
+  RNA_def_boolean(func, "cyclic", false, "Cyclic", "Close the spline into a loop");
+
   func = RNA_def_function(srna, "clear", "rna_PaintCurve_clear");
   RNA_def_function_ui_description(func, "Remove all control points and splines");
 
@@ -990,6 +1076,15 @@ static void rna_def_paint_curve(BlenderRNA *brna)
                          "",
                          "Object whose evaluated surface the ribbon is laid onto; when omitted the "
                          "ribbon stays in the curve's own plane");
+  RNA_def_int(func,
+              "spline_index",
+              -1,
+              -1,
+              INT_MAX,
+              "Spline",
+              "Index of the spline to build from; the curve's active spline when negative",
+              -1,
+              INT_MAX);
   parm = RNA_def_pointer(func, "mesh", "Mesh", "", "The ribbon, or None when the curve is empty");
   RNA_def_function_return(func, parm);
 
@@ -1008,6 +1103,15 @@ static void rna_def_paint_curve(BlenderRNA *brna)
                          "",
                          "Object whose evaluated surface the stamps are laid onto; when omitted "
                          "they stay in the curve's own plane");
+  RNA_def_int(func,
+              "spline_index",
+              -1,
+              -1,
+              INT_MAX,
+              "Spline",
+              "Index of the spline to build from; the curve's active spline when negative",
+              -1,
+              INT_MAX);
   parm = RNA_def_pointer(func,
                          "points",
                          "PointCloud",

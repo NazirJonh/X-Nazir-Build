@@ -990,6 +990,7 @@ def _sync_glyph_mappings_to_wm_impl(force_discovery_merge=False, skip_icon_detec
                 color_val = tag_data.get("color", [0.0, 0.0, 0.0]) if isinstance(tag_data, dict) else [0.0, 0.0, 0.0]
                 # Icon fields
                 icon_key_val = tag_data.get("icon_key", "") if isinstance(tag_data, dict) else ""
+                icon_path_val = tag_data.get("icon_path", "") if isinstance(tag_data, dict) else ""
                 icon_source_val = tag_data.get("icon_source", 0) if isinstance(tag_data, dict) else 0
                 # Handle both int and string formats for backward compatibility
                 if isinstance(icon_source_val, str):
@@ -1012,6 +1013,8 @@ def _sync_glyph_mappings_to_wm_impl(force_discovery_merge=False, skip_icon_detec
 
                 if has_icon_key_attr:
                     tag_item.icon_key = icon_key_val
+                if hasattr(tag_item, "icon_path"):
+                    tag_item.icon_path = icon_path_val
                 if has_icon_source_attr:
                     tag_item.icon_source = icon_source_val
                 # DEBUG: Verify values were set

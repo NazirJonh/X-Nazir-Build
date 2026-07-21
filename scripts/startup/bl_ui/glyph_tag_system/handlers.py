@@ -188,6 +188,8 @@ def _sync_mode_flags_from_wm_to_cache():
                     wm_icon_key_type = type(wm_icon_key).__name__
                     category_debug_print(f"[SYNC_WM_CACHE] tag='{tag_name}' WM icon_key='{wm_icon_key}' (type={wm_icon_key_type})")
                     state.all_tags_cache[tag_name]["icon_key"] = wm_icon_key
+                if hasattr(tag_item, 'icon_path'):
+                    state.all_tags_cache[tag_name]["icon_path"] = tag_item.icon_path
                 if hasattr(tag_item, 'icon_source'):
                     state.all_tags_cache[tag_name]["icon_source"] = tag_item.icon_source
     except Exception as e:

@@ -1195,6 +1195,55 @@ void icon_more_icons_button_cb(bContext *C, void *arg1, void * /*arg2*/)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Tag Dialog Lookup
+ * \{ */
+
+wmOperator *category_tag_dialog_operator_find(bContext *C)
+{
+  /* Deliberately not searching `wm->runtime->operators`: that is the register/redo stack, which an
+   * operator only joins once it has finished (see #wm_operator_register). A dialog that is still
+   * open is never in it, so a lookup there can only ever miss. The popup's UI block, on the other
+   * hand, holds a live pointer to the operator for as long as the dialog is on screen. */
+  auto block_scan = [](ARegion *region) -> wmOperator * {
+    if (region == nullptr || region->runtime == nullptr) {
+      return nullptr;
+    }
+    for (Block &block : region->runtime->uiblocks) {
+      wmOperator *block_op = block.ui_operator;
+      if (block_op == nullptr || block_op->idname[0] == '\0') {
+        continue;
+      }
+      if (STREQ(block_op->idname, "WM_OT_category_tag_create") ||
+          STREQ(block_op->idname, "WM_OT_category_tag_edit"))
+      {
+        return block_op;
+      }
+    }
+    return nullptr;
+  };
+
+  /* The context region is checked first: it is the popup the user is interacting with, so it wins
+   * over any other dialog that might still be on screen. */
+  if (wmOperator *found = block_scan(CTX_wm_region(C))) {
+    return found;
+  }
+
+  bScreen *screen = CTX_wm_screen(C);
+  if (screen == nullptr) {
+    return nullptr;
+  }
+  for (ARegion &region : screen->regionbase) {
+    if (wmOperator *found = block_scan(&region)) {
+      return found;
+    }
+  }
+
+  return nullptr;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Icon Picker Operator
  * \{ */
 

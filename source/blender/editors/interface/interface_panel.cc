@@ -1868,8 +1868,12 @@ Vector<CategoryTagUIRecord> get_tags_for_category_ui(const wmWindowManager *wm,
     }
 
     int icon_id = ICON_NONE;
-    if (tag->icon_source == 1 && tag->icon_key[0] != '\0') {
+    if (tag->icon_source == CATEGORY_TAG_ICON_SOURCE_BLENDER_ICON && tag->icon_key[0] != '\0') {
       icon_id = category_tab_icon_id_resolve_from_key_path(tag->icon_key, nullptr);
+    }
+    else if (tag->icon_source == CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE && tag->icon_path[0] != '\0')
+    {
+      icon_id = category_tab_icon_id_resolve_from_path(tag->icon_path);
     }
 
     CategoryTagUIRecord record{};

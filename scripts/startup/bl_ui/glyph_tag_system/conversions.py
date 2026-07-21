@@ -361,20 +361,65 @@ def _tag_icon_source_from_display_mode(display_mode_ui):
 
 def _tag_display_mode_from_data(tag_data):
     """Determine display_mode_ui from tag data.
-    
+
     Args:
-        tag_data: Dictionary with icon_key, icon_source, etc.
-    
+        tag_data: Dictionary with icon_key, icon_path, icon_source, etc.
+
     Returns:
         'GLYPH' or 'ICON'
     """
     if not isinstance(tag_data, dict):
         return 'GLYPH'
-    
+
     icon_source = tag_data.get("icon_source", "auto")
     icon_key = tag_data.get("icon_key", "")
-    
-    # If icon_source is manual/BLENDER_ICON or has icon_key, use ICON mode
-    if icon_source in ("manual", "BLENDER_ICON") or icon_key:
+    icon_path = tag_data.get("icon_path", "")
+
+    # If icon_source is manual/BLENDER_ICON/CUSTOM or has any icon payload, use ICON mode
+    if icon_source in ("manual", "BLENDER_ICON", "CUSTOM", 1, 2) or icon_key or icon_path:
         return 'ICON'
     return 'GLYPH'
+
+
+def _tag_custom_icon_mode_from_data(tag_data):
+    """Determine custom_icon_mode_ui from tag data.
+
+    Args:
+        tag_data: Dictionary with icon_path and icon_source.
+
+    Returns:
+        'BLENDER' or 'CUSTOM'
+    """
+    if not isinstance(tag_data, dict):
+        return 'BLENDER'
+
+    icon_source = tag_data.get("icon_source", 0)
+    if icon_source in ("CUSTOM", 2):
+        return 'CUSTOM'
+    if tag_data.get("icon_path", "") and not tag_data.get("icon_key", ""):
+        return 'CUSTOM'
+    return 'BLENDER'
+
+
+def _tag_icon_fields_from_display_mode(display_mode_ui, custom_icon_mode_ui, icon_key, icon_path):
+    """Resolve the tag icon fields a dialog should store, from its two UI toggles.
+
+    Exactly one payload survives: a glyph tag keeps neither icon field, a Blender-icon tag keeps
+    only icon_key, a custom tag keeps only icon_path. Clearing the unused one is what lets the
+    C++ side treat icon_source as the single source of truth.
+
+    Args:
+        display_mode_ui: 'GLYPH' or 'ICON'.
+        custom_icon_mode_ui: 'BLENDER' or 'CUSTOM' (only meaningful in ICON mode).
+        icon_key: Blender icon identifier currently held by the dialog.
+        icon_path: Custom icon file path currently held by the dialog.
+
+    Returns:
+        (icon_source, icon_key, icon_path) where icon_source is
+        'GLYPH', 'BLENDER_ICON' or 'CUSTOM'.
+    """
+    if display_mode_ui != 'ICON':
+        return 'GLYPH', "", ""
+    if custom_icon_mode_ui == 'CUSTOM':
+        return 'CUSTOM', "", icon_path
+    return 'BLENDER_ICON', icon_key, ""

@@ -60,7 +60,7 @@ struct TagButton {
   bool is_active;       /**< Whether the filter is active */
   /** Resolved Blender icon ID from icon_key. ICON_NONE if not using icon. */
   int icon_id;
-  /** True if icon_source == 1 and icon_id != ICON_NONE. */
+  /** True when an icon (built-in or custom file) resolved to a usable #icon_id. */
   bool use_builtin_icon;
   /** Icon key from tag definition (e.g., "FUND") - used when icon_id resolution fails */
   char icon_key[128];

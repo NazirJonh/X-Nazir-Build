@@ -180,10 +180,25 @@ typedef struct CategoryTagDef {
   uint32_t mode_flags;
   /** Blender icon identifier (e.g., "OBJECT_DATAMODE"). Matches CategoryGlyphItem::icon_key size. */
   char icon_key[128];
-  /** Icon source: 0=GLYPH (use glyph field), 1=ICON (use icon_key). */
+  /** Custom icon image path, used when #icon_source is #CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE. */
+  char icon_path[1024];
+  /** Icon source, see #eCategoryTagIconSource. */
   int icon_source;
   char _pad1[4]; /* Alignment padding */
 } CategoryTagDef;
+
+/**
+ * Values for #CategoryTagDef.icon_source.
+ *
+ * Kept as an explicit third value rather than deriving "custom" from an empty
+ * `icon_key` plus a non-empty `icon_path`: four separate draw paths read this field, and an
+ * implicit encoding would silently render nothing in any path that forgot the extra check.
+ */
+typedef enum eCategoryTagIconSource {
+  CATEGORY_TAG_ICON_SOURCE_GLYPH = 0,
+  CATEGORY_TAG_ICON_SOURCE_BLENDER_ICON = 1,
+  CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE = 2,
+} eCategoryTagIconSource;
 
 /* -------------------------------------------------------------------- */
 /** \name Category Tag Mode Flags

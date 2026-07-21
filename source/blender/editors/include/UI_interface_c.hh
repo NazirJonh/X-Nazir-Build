@@ -3083,12 +3083,19 @@ void uiTemplateGlyphPreview(Layout *layout,
                             const char *color_propname,
                             float size_multiplier);
 
+/**
+ * Draw a centered preview button for a built-in icon or a custom icon image file.
+ *
+ * \param icon_key: built-in icon identifier, or empty to use \a icon_path.
+ * \param icon_path: path to a custom icon image, used when \a icon_key is empty (may be null).
+ */
 void uiTemplateIconPreview(Layout *layout,
-                            bContext *C,
-                            const char *icon_key,
-                            PointerRNA *ptr,
-                            const char *color_propname,
-                            float size_multiplier);
+                           bContext *C,
+                           const char *icon_key,
+                           const char *icon_path,
+                           PointerRNA *ptr,
+                           const char *color_propname,
+                           float size_multiplier);
 
 void uiTemplateGlyphSearchResults(Layout *layout,
                                   bContext *C,
@@ -3108,6 +3115,24 @@ void uiTemplateGlyphSelector(Layout *layout,
                              bool show_preview,
                              bool show_search,
                              bool show_code);
+
+void tag_icon_live_update_cb(bContext *C, void *arg_op, int event);
+
+/**
+ * Find the Create/Edit Tag dialog operator that is currently on screen.
+ *
+ * Returns null when no tag dialog is open. Operators that need to write into the dialog must use
+ * this rather than an operator address, because an open dialog is not on the register stack.
+ */
+wmOperator *category_tag_dialog_operator_find(bContext *C);
+
+/**
+ * Resolve an image file into a preview icon id, or #ICON_NONE when it cannot be read.
+ *
+ * The result is cached by the preview system, but the first call reads the file, so this belongs
+ * on data-update paths rather than inside a redraw loop.
+ */
+int category_tab_icon_id_resolve_from_path(const char *icon_path);
 }  // namespace ui
 
 namespace ed::object::shapekey {

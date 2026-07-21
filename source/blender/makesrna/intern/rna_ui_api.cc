@@ -1172,6 +1172,11 @@ static int rna_ui_get_rnaptr_icon(bContext *C, PointerRNA *ptr_icon)
   return ui::icon_from_rnaptr(C, ptr_icon, RNA_struct_ui_icon(ptr_icon->type), false);
 }
 
+static int rna_ui_get_icon_from_file(const char *filepath)
+{
+  return ui::category_tab_icon_id_resolve_from_path(filepath);
+}
+
 static const char *rna_ui_get_enum_name(bContext *C,
                                         PointerRNA *ptr,
                                         const char *propname,
@@ -1611,6 +1616,19 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_function_ui_description(func,
                                   "Return the custom icon for this data, "
                                   "use it e.g. to get materials or texture icons.");
+
+  /* Icon id for an image file on disk. */
+  func = RNA_def_function(srna, "icon_from_file", "rna_ui_get_icon_from_file");
+  parm = RNA_def_int(func, "icon_value", ICON_NONE, 0, INT_MAX, "", "Icon identifier", 0, INT_MAX);
+  RNA_def_function_return(func, parm);
+  RNA_def_function_flag(func, FUNC_NO_SELF);
+  parm = RNA_def_string(func, "filepath", nullptr, 0, "", "Path to an image file");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_ui_description(
+      func,
+      "Return an icon id for an image file, or 0 if it cannot be read. Unlike "
+      "template_icon_preview this can be used once per row in a list, since the result is passed "
+      "to icon_value rather than drawn through a per-block callback.");
 
   /* UI name, description and icon of an enum item */
   func = RNA_def_function(srna, "enum_item_name", "rna_ui_get_enum_name");
@@ -2269,6 +2287,8 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_function_ui_description(func, "Creates a centered preview button showing a Blender icon with optional color tint");
   parm = RNA_def_string(func, "icon_key", nullptr, 0, "", "Blender icon identifier (e.g., 'FUND', 'OBJECT_DATAMODE')");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "icon_path", nullptr, 0, "", "Path to a custom icon image file");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), ParameterFlag(0));
   parm = RNA_def_pointer(func, "data", "AnyType", "", "Data from which to take color property");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
   parm = RNA_def_string(func, "color_property", nullptr, 0, "", "Identifier of color property for icon tint");

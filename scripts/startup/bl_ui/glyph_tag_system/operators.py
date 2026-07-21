@@ -31,14 +31,16 @@ from bl_ui.glyph_tag_system._state import (
 from bl_ui.glyph_tag_system.conversions import (
     _glyph_to_hex,
     _hex_to_glyph,
+    _tag_custom_icon_mode_from_data,
     _tag_display_mode_from_data,
-    _tag_icon_source_from_display_mode,
+    _tag_icon_fields_from_display_mode,
 )
 from bl_ui.glyph_tag_system.glyph_cache import (
     mark_all_unassigned_categories_as_without_tag,
 )
 from bl_ui.glyph_tag_system.tags_cache import (
     _generate_unique_tag_name,
+    _validate_custom_icon_path,
     _validate_icon_key,
     add_category_tag,
     create_tag,
@@ -79,6 +81,73 @@ def _get_su():
     """
     import bl_ui.glyph_tag_system.api as _api
     return _api
+
+
+# -----------------------------------------------------------------------------
+# Shared dialog drawing
+# -----------------------------------------------------------------------------
+
+
+def _draw_tag_custom_icon_mode_toggle(layout, dialog):
+    """Draw the Blender/Custom sub-mode toggle shown inside the Icon display mode.
+
+    Returns:
+        True when the dialog should draw its built-in icon picker, False when the custom icon
+        file row applies instead.
+    """
+    mode_row = layout.row(align=True)
+    mode_row.prop(dialog, "custom_icon_mode_ui", expand=True)
+    layout.separator()
+    return dialog.custom_icon_mode_ui == 'BLENDER'
+
+
+def _draw_tag_custom_icon_row(layout, dialog):
+    """Draw the custom icon file path, its file operators and its preview.
+
+    The file operators are told which operator to write into via ``target_operator_ptr``, the
+    decimal address of this dialog - the same channel ``screen.category_tab_icon_picker`` uses.
+
+    Args:
+        layout: Layout to draw into.
+        dialog: The operator holding the ``icon_path`` and ``color`` properties.
+    """
+    target_ptr = str(id(dialog))
+
+    path_split = layout.split(factor=0.38)
+    path_split.alignment = 'RIGHT'
+    path_split.label(text="Custom:")
+    path_row = path_split.row(align=True)
+    path_row.alignment = 'LEFT'
+
+    path_display = path_row.row(align=True)
+    path_display.enabled = False
+    path_display.label(text=dialog.icon_path if dialog.icon_path else "None")
+
+    pick_op = path_row.operator(
+        "screen.category_tab_pick_custom_icon", text="", icon='FILE_FOLDER')
+    pick_op.target_operator_ptr = target_ptr
+    reload_op = path_row.operator(
+        "screen.category_tab_reload_custom_icon", text="", icon='FILE_REFRESH')
+    reload_op.target_operator_ptr = target_ptr
+
+    if not dialog.icon_path:
+        return
+
+    is_valid, error_msg = _validate_custom_icon_path(dialog.icon_path)
+    if not is_valid:
+        layout.label(text=error_msg, icon='ERROR')
+        return
+
+    layout.separator()
+    preview_row = layout.row()
+    preview_row.alignment = 'CENTER'
+    preview_row.template_icon_preview(
+        icon_key="",
+        icon_path=dialog.icon_path,
+        data=dialog,
+        color_property="color",
+        size_multiplier=2.0
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -299,6 +368,20 @@ class USERPREF_OT_category_tag_create(Operator):
         ],
         default='GLYPH'
     )
+    custom_icon_mode_ui: bpy.props.EnumProperty(
+        name="Custom Icon Mode",
+        items=[
+            ('BLENDER', "Blender", "Pick a built-in Blender icon", '', 0),
+            ('CUSTOM', "Custom", "Use a custom icon image file", '', 1),
+        ],
+        default='BLENDER'
+    )
+    icon_path: bpy.props.StringProperty(
+        name="Icon Path",
+        description="Path to a custom icon image file",
+        subtype='FILE_PATH',
+        default=""
+    )
 
     @with_context_check
     def invoke(self, context, event):
@@ -312,6 +395,8 @@ class USERPREF_OT_category_tag_create(Operator):
         # Reset icon fields to defaults
         self.display_mode_ui = 'GLYPH'
         self.icon_key = ""
+        self.custom_icon_mode_ui = 'BLENDER'
+        self.icon_path = ""
 
         # Only set defaults if this is a fresh dialog (not a re-opening after validation failure)
         if not self.validation_attempted:
@@ -382,21 +467,32 @@ class USERPREF_OT_category_tag_create(Operator):
         # This allows users to configure a tag visually and then just accept the default name without losing their work.
         # The name is already unique (generated with random suffix), so no conflict will occur.
 
-        # Determine icon_source from display_mode_ui
-        category_debug_print(f"[TAG EXECUTE] BEFORE: self.icon_key='{self.icon_key}', self.display_mode_ui='{self.display_mode_ui}'")
-        icon_source = _tag_icon_source_from_display_mode(self.display_mode_ui)
+        # Determine icon_source from display_mode_ui and the custom-icon sub-mode
+        category_debug_print(
+            f"[TAG EXECUTE] BEFORE: self.icon_key='{self.icon_key}', "
+            f"self.icon_path='{self.icon_path}', self.display_mode_ui='{self.display_mode_ui}'")
+        icon_source, icon_key, icon_path = _tag_icon_fields_from_display_mode(
+            self.display_mode_ui, self.custom_icon_mode_ui, self.icon_key, self.icon_path)
         category_debug_print(f"[TAG EXECUTE] AFTER: icon_source='{icon_source}'")
 
-        # For GLYPH mode, clear icon_key; for ICON mode, keep glyph as fallback for tag management panel
-        icon_key = self.icon_key if icon_source == 'BLENDER_ICON' else ""
         # Always convert glyph - needed for display in tag management panel even in Icon mode
         glyph = _hex_to_glyph(self.glyph) if self.glyph else ""
-        category_debug_print(f"[TAG EXECUTE] FINAL: icon_key='{icon_key}', glyph='{glyph}', icon_source='{icon_source}'")
+        category_debug_print(
+            f"[TAG EXECUTE] FINAL: icon_key='{icon_key}', icon_path='{icon_path}', "
+            f"glyph='{glyph}', icon_source='{icon_source}'")
 
         # Validate icon_key if using icon mode
         if icon_source == 'BLENDER_ICON' and icon_key:
             is_valid, error_msg = _validate_icon_key(icon_key)
             if not is_valid:
+                self.report({'ERROR'}, error_msg)
+                return {'CANCELLED'}
+
+        if icon_source == 'CUSTOM':
+            is_valid, error_msg = _validate_custom_icon_path(icon_path)
+            if not is_valid:
+                self.error_message = error_msg
+                self.validation_attempted = True
                 self.report({'ERROR'}, error_msg)
                 return {'CANCELLED'}
 
@@ -434,6 +530,7 @@ class USERPREF_OT_category_tag_create(Operator):
             color=list(self.color),
             mode_flags=mode_flags,
             icon_key=icon_key,
+            icon_path=icon_path,
             icon_source=icon_source,
             auto_save=True,
             skip_wm_sync=skip_wm_sync
@@ -533,23 +630,23 @@ class USERPREF_OT_category_tag_create(Operator):
             row = layout.row()
             row.template_color_glyph_presets(self.properties, "color")
         else:
-            # Icon picker - label and button on same row like Display Mode
-            icon_split = layout.split(factor=0.38)
-            icon_split.alignment = 'RIGHT'
-            icon_split.label(text="Icon:")
-            icon_row = icon_split.row(align=True)
-            icon_row.alignment = 'LEFT'
-            # Pass operator pointer to icon picker so it knows which operator to update
-            icon_picker_op = icon_row.operator("screen.category_tab_icon_picker", text="       Choose        ", icon='VIEWZOOM')
-            # Set target_operator_ptr as decimal string of operator memory address
-            icon_picker_op.target_operator_ptr = str(id(self))
-            icon_row.separator()
+            if _draw_tag_custom_icon_mode_toggle(layout, self):
+                # Icon picker - label and button on same row like Display Mode
+                icon_split = layout.split(factor=0.38)
+                icon_split.alignment = 'RIGHT'
+                icon_split.label(text="Icon:")
+                icon_row = icon_split.row(align=True)
+                icon_row.alignment = 'LEFT'
+                # Pass operator pointer to icon picker so it knows which operator to update
+                icon_picker_op = icon_row.operator(
+                    "screen.category_tab_icon_picker", text="       Choose        ", icon='VIEWZOOM')
+                # Set target_operator_ptr as decimal string of operator memory address
+                icon_picker_op.target_operator_ptr = str(id(self))
+                icon_row.separator()
 
-            # Preview - always show (empty button when no icon)
-            preview_row = layout.row()
-            preview_row.alignment = 'CENTER'
-            if self.icon_key:
-                # Show icon preview with template_icon_preview
+                # Preview - always show (empty button when no icon)
+                preview_row = layout.row()
+                preview_row.alignment = 'CENTER'
                 preview_row.template_icon_preview(
                     icon_key=self.icon_key,
                     data=self,
@@ -557,13 +654,7 @@ class USERPREF_OT_category_tag_create(Operator):
                     size_multiplier=2.0
                 )
             else:
-                # Empty preview button when no icon selected
-                preview_row.template_icon_preview(
-                    icon_key="",
-                    data=self,
-                    color_property="color",
-                    size_multiplier=2.0
-                )
+                _draw_tag_custom_icon_row(layout, self)
 
             # Color (for monochrome icons)
             layout.separator()
@@ -701,6 +792,32 @@ class USERPREF_OT_category_tag_edit(Operator):
         default="",
         update=_icon_key_update
     )
+    custom_icon_mode_ui: bpy.props.EnumProperty(
+        name="Custom Icon Mode",
+        items=[
+            ('BLENDER', "Blender", "Pick a built-in Blender icon", '', 0),
+            ('CUSTOM', "Custom", "Use a custom icon image file", '', 1),
+        ],
+        default='BLENDER'
+    )
+    icon_path: bpy.props.StringProperty(
+        name="Icon Path",
+        description="Path to a custom icon image file",
+        subtype='FILE_PATH',
+        default=""
+    )
+    # Read back by the C++ tag_icon_live_update_cb, which expects the same three-value domain
+    # CategoryTagDef.icon_source uses.
+    icon_source: bpy.props.EnumProperty(
+        name="Icon Source",
+        description="Icon source type",
+        items=[
+            ('GLYPH', "Glyph", "Display as glyph", 0),
+            ('BLENDER_ICON', "Blender Icon", "Display as Blender icon", 1),
+            ('CUSTOM', "Custom", "Display as custom icon", 2),
+        ],
+        default='GLYPH'
+    )
 
     def invoke(self, context, event):
         # Save original name so we can restore it if user clears the field
@@ -712,7 +829,9 @@ class USERPREF_OT_category_tag_edit(Operator):
 
         # NEW: Load icon data
         self.icon_key = tag_data.get("icon_key", "")
+        self.icon_path = tag_data.get("icon_path", "")
         self.display_mode_ui = _tag_display_mode_from_data(tag_data)
+        self.custom_icon_mode_ui = _tag_custom_icon_mode_from_data(tag_data)
 
         context.window_manager.category_tag_glyph_hex = ""
         return context.window_manager.invoke_props_dialog(self, width=400)
@@ -761,31 +880,34 @@ class USERPREF_OT_category_tag_edit(Operator):
                     size_multiplier=2.0
                 )
         else:
-            # Icon picker - label and button on same row like Display Mode
-            icon_split = layout.split(factor=0.38)
-            icon_split.alignment = 'RIGHT'
-            icon_split.label(text="Icon:")
-            icon_row = icon_split.row(align=True)
-            icon_row.alignment = 'LEFT'
-            # Pass operator pointer to icon picker so it knows which operator to update
-            icon_picker_op = icon_row.operator("screen.category_tab_icon_picker", text="        Choose        ", icon='VIEWZOOM')
-            # Set target_operator_ptr as decimal string of operator memory address
-            icon_picker_op.target_operator_ptr = str(id(self))
-            icon_row.separator()
+            if _draw_tag_custom_icon_mode_toggle(layout, self):
+                # Icon picker - label and button on same row like Display Mode
+                icon_split = layout.split(factor=0.38)
+                icon_split.alignment = 'RIGHT'
+                icon_split.label(text="Icon:")
+                icon_row = icon_split.row(align=True)
+                icon_row.alignment = 'LEFT'
+                # Pass operator pointer to icon picker so it knows which operator to update
+                icon_picker_op = icon_row.operator("screen.category_tab_icon_picker", text="        Choose        ", icon='VIEWZOOM')
+                # Set target_operator_ptr as decimal string of operator memory address
+                icon_picker_op.target_operator_ptr = str(id(self))
+                icon_row.separator()
 
-            # Preview
-            if self.icon_key:
-                layout.separator()
-                try:
-                    import bl_ui.icon_helper as icon_helper
-                    icon_id = icon_helper.icon_name_to_id(self.icon_key)
-                    if icon_id > 0:
-                        preview_row = layout.row()
-                        preview_row.alignment = 'CENTER'
-                        preview_row.label(text="", icon_value=icon_id)
-                        preview_row.label(text=self.icon_key)
-                except Exception:
-                    layout.label(text=f"Selected: {self.icon_key}")
+                # Preview
+                if self.icon_key:
+                    layout.separator()
+                    try:
+                        import bl_ui.icon_helper as icon_helper
+                        icon_id = icon_helper.icon_name_to_id(self.icon_key)
+                        if icon_id > 0:
+                            preview_row = layout.row()
+                            preview_row.alignment = 'CENTER'
+                            preview_row.label(text="", icon_value=icon_id)
+                            preview_row.label(text=self.icon_key)
+                    except Exception:
+                        layout.label(text=f"Selected: {self.icon_key}")
+            else:
+                _draw_tag_custom_icon_row(layout, self)
 
             # Color (for monochrome icons)
             layout.separator()
@@ -803,19 +925,27 @@ class USERPREF_OT_category_tag_edit(Operator):
 
         new_name = self.name.strip()
 
-        # Determine icon_source from display_mode_ui
-        category_debug_print(f"[TAG EXECUTE] BEFORE: self.icon_key='{self.icon_key}', self.display_mode_ui='{self.display_mode_ui}'")
-        icon_source = _tag_icon_source_from_display_mode(self.display_mode_ui)
+        # Determine icon_source from display_mode_ui and the custom-icon sub-mode
+        category_debug_print(
+            f"[TAG EXECUTE] BEFORE: self.icon_key='{self.icon_key}', "
+            f"self.icon_path='{self.icon_path}', self.display_mode_ui='{self.display_mode_ui}'")
+        icon_source, icon_key, icon_path = _tag_icon_fields_from_display_mode(
+            self.display_mode_ui, self.custom_icon_mode_ui, self.icon_key, self.icon_path)
         category_debug_print(f"[TAG EXECUTE] AFTER: icon_source='{icon_source}'")
 
-        # For GLYPH mode, clear icon_key; for ICON mode, clear glyph
-        icon_key = self.icon_key if icon_source == 'BLENDER_ICON' else ""
         glyph = _hex_to_glyph(self.glyph) if (icon_source == 'GLYPH' and self.glyph) else ""
-        category_debug_print(f"[TAG EXECUTE] FINAL: icon_key='{icon_key}', glyph='{glyph}'")
+        category_debug_print(
+            f"[TAG EXECUTE] FINAL: icon_key='{icon_key}', icon_path='{icon_path}', glyph='{glyph}'")
 
         # Validate icon_key if using icon mode
         if icon_source == 'BLENDER_ICON' and icon_key:
             is_valid, error_msg = _validate_icon_key(icon_key)
+            if not is_valid:
+                self.report({'ERROR'}, error_msg)
+                return {'CANCELLED'}
+
+        if icon_source == 'CUSTOM':
+            is_valid, error_msg = _validate_custom_icon_path(icon_path)
             if not is_valid:
                 self.report({'ERROR'}, error_msg)
                 return {'CANCELLED'}
@@ -835,6 +965,7 @@ class USERPREF_OT_category_tag_edit(Operator):
             glyph=glyph,
             color=list(self.color),
             icon_key=icon_key,
+            icon_path=icon_path,
             icon_source=icon_source,
             auto_save=True
         )

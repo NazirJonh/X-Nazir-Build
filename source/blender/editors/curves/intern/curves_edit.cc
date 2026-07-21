@@ -730,4 +730,177 @@ void reorder_curves(bke::CurvesGeometry &curves, const Span<int> old_by_new_indi
   curves = geometry::reorder_curves_geometry(curves, old_by_new_indices_map, {});
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Make Segment
+ * \{ */
+
+void gather_selected_endpoints(const bke::CurvesGeometry &curves,
+                               Vector<CurveEndpoint> &r_endpoints)
+{
+  const bke::AttributeAccessor attributes = curves.attributes();
+  const VArray<bool> selection = *attributes.lookup_or_default<bool>(
+      ".selection", bke::AttrDomain::Point, true);
+  const VArray<bool> cyclic = curves.cyclic();
+  const OffsetIndices<int> points_by_curve = curves.points_by_curve();
+
+  r_endpoints.clear();
+  for (const int curve : curves.curves_range()) {
+    /* A cyclic curve has no ends, and an empty curve has no points to select. */
+    if (cyclic[curve]) {
+      continue;
+    }
+    const IndexRange points = points_by_curve[curve];
+    if (points.is_empty()) {
+      continue;
+    }
+    if (selection[points.first()]) {
+      r_endpoints.append({curve, CurveEndpoint::Side::Start});
+    }
+    /* Both ends of a single point curve are the same point, so it only contributes one
+     * endpoint. */
+    if (points.size() > 1 && selection[points.last()]) {
+      r_endpoints.append({curve, CurveEndpoint::Side::End});
+    }
+  }
+}
+
+bool make_curve_cyclic(bke::CurvesGeometry &curves, const int curve)
+{
+  if (curves.points_by_curve()[curve].size() < 2) {
+    return false;
+  }
+  if (curves.cyclic()[curve]) {
+    return false;
+  }
+
+  curves.cyclic_for_write()[curve] = true;
+
+  curves.tag_topology_changed();
+  curves.calculate_bezier_auto_handles();
+
+  return true;
+}
+
+bool join_curves_at_endpoints(bke::CurvesGeometry &curves,
+                              const CurveEndpoint a,
+                              const CurveEndpoint b,
+                              const char **r_error)
+{
+  BLI_assert(a.curve != b.curve);
+  BLI_assert(!curves.points_by_curve()[a.curve].is_empty());
+  BLI_assert(!curves.points_by_curve()[b.curve].is_empty());
+
+  {
+    const VArray<bool> curve_cyclic = curves.cyclic();
+    if (curve_cyclic[a.curve] || curve_cyclic[b.curve]) {
+      *r_error = "Cannot join cyclic curves";
+      return false;
+    }
+    const VArray<int8_t> curve_types = curves.curve_types();
+    if (curve_types[a.curve] != curve_types[b.curve]) {
+      *r_error = "Curves must have the same type";
+      return false;
+    }
+  }
+
+  /* Order the two curves and decide which one to reverse so that the two given ends meet at the
+   * seam of the joined curve. The joined curve is `first` followed by `second`, with the given end
+   * of `first` placed last and the given end of `second` placed first. Exactly one of the four
+   * combinations needs no reversal, and none of them needs two. */
+  int first = a.curve;
+  int second = b.curve;
+  int curve_to_reverse = -1;
+  if (a.side == CurveEndpoint::Side::Start) {
+    if (b.side == CurveEndpoint::Side::End) {
+      first = b.curve;
+      second = a.curve;
+    }
+    else {
+      curve_to_reverse = a.curve;
+    }
+  }
+  else if (b.side == CurveEndpoint::Side::End) {
+    curve_to_reverse = b.curve;
+  }
+
+  if (curve_to_reverse != -1) {
+    curves.reverse_curves(IndexRange::from_single(curve_to_reverse));
+  }
+
+  /* Build the destination topology. The joined curve takes the lower of the two slots so that the
+   * curve order does not depend on which end the user selected first, and is composed of two
+   * source point ranges; all other curves are copied as-is. This mirrors the layout consumed by
+   * #copy_data_to_geometry, which also transfers NURBS custom knots for curves that are merged
+   * from multiple source ranges. Its `dst_to_src_curve` entry has to be `first` for those knots to
+   * be indexed correctly. */
+  const int joined_curve = math::min(a.curve, b.curve);
+  const int dropped_curve = math::max(a.curve, b.curve);
+
+  const OffsetIndices<int> points_by_curve = curves.points_by_curve();
+  const VArray<bool> cyclic = curves.cyclic();
+
+  Vector<int> dst_to_src_curve;
+  Vector<int> new_offsets({0});
+  Vector<bool> new_cyclic;
+  Vector<IndexRange> src_ranges;
+  Vector<int> dst_offsets({0});
+  dst_to_src_curve.reserve(curves.curves_num() - 1);
+  new_offsets.reserve(curves.curves_num());
+  new_cyclic.reserve(curves.curves_num() - 1);
+  src_ranges.reserve(curves.curves_num() + 1);
+  dst_offsets.reserve(curves.curves_num() + 2);
+
+  /* Index of the last point of `first` in the joined curve, so the new segment can be selected. */
+  int seam_point = 0;
+
+  for (const int curve : curves.curves_range()) {
+    if (curve == dropped_curve) {
+      continue;
+    }
+    if (curve == joined_curve) {
+      const IndexRange first_points = points_by_curve[first];
+      const IndexRange second_points = points_by_curve[second];
+      const int first_num = int(first_points.size());
+      const int second_num = int(second_points.size());
+      seam_point = new_offsets.last() + first_num - 1;
+      src_ranges.append(first_points);
+      dst_offsets.append(dst_offsets.last() + first_num);
+      src_ranges.append(second_points);
+      dst_offsets.append(dst_offsets.last() + second_num);
+      new_offsets.append(new_offsets.last() + first_num + second_num);
+      dst_to_src_curve.append(first);
+      new_cyclic.append(false);
+    }
+    else {
+      const IndexRange points = points_by_curve[curve];
+      const int points_num = int(points.size());
+      src_ranges.append(points);
+      dst_offsets.append(dst_offsets.last() + points_num);
+      new_offsets.append(new_offsets.last() + points_num);
+      dst_to_src_curve.append(curve);
+      new_cyclic.append(cyclic[curve]);
+    }
+  }
+
+  bke::CurvesGeometry new_curves = copy_data_to_geometry(
+      curves, dst_to_src_curve, new_offsets, new_cyclic, src_ranges, dst_offsets.as_span());
+
+  /* Leave only the two points forming the new segment selected, so that the seam stays visible
+   * after the join. */
+  foreach_selection_attribute_writer(
+      new_curves, bke::AttrDomain::Point, [&](bke::GSpanAttributeWriter &selection) {
+        fill_selection_false(selection.span);
+        fill_selection_true(selection.span.slice(seam_point, 2));
+      });
+
+  new_curves.tag_topology_changed();
+  new_curves.calculate_bezier_auto_handles();
+
+  curves = std::move(new_curves);
+
+  return true;
+}
+
+/** \} */
+
 }  // namespace blender::ed::curves

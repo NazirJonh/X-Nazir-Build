@@ -14,7 +14,12 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
+
+#include "DNA_scene_types.h"
+
 #include "DEG_depsgraph_query.hh"
+
+#include "ED_object.hh"
 
 #include "DRW_render.hh"
 #include "bmesh.hh"
@@ -44,12 +49,30 @@ class Sculpts : Overlay {
   bool show_face_set_ = false;
   bool show_mask_ = false;
 
+  float curves_selection_opacity_ = 0.0f;
+  float curves_cage_opacity_ = 0.0f;
+  /**
+   * True when the edit scope limits sculpting to the active object, so the other objects in the
+   * mode have to read as out-of-scope rather than as equal targets.
+   */
+  bool dim_out_of_scope_curves_ = false;
+  /** Draw unselected curves in the object's viewport color instead of darkening them to black. */
+  bool curves_selection_use_object_color_ = false;
+  /**
+   * Alpha of the running mode transfer flash, keyed by object ID name. The flash draws the very
+   * same cage lines this overlay does, but line passes are submitted after it, so a selected
+   * (white, opaque) cage would paint over the flash entirely. Keep the cage out of the way while
+   * the flash lasts and fade it back in as the flash dies down.
+   */
+  Map<std::string, float, 1> curves_flash_factors_;
+
  public:
   void begin_sync(Resources &res, const State &state) final
   {
     show_curves_cage_ = state.show_sculpt_curves_cage();
     show_face_set_ = state.show_sculpt_face_sets();
     show_mask_ = state.show_sculpt_mask();
+    curves_selection_use_object_color_ = state.show_sculpt_curves_selection_object_color();
 
     enabled_ = state.is_space_v3d() && !state.is_wire() && !res.is_selection() &&
                !state.is_depth_only_drawing &&
@@ -66,6 +89,18 @@ class Sculpts : Overlay {
     float curve_cage_opacity = show_curves_cage_ ? state.overlay.sculpt_curves_cage_opacity : 0.0f;
     float face_set_opacity = show_face_set_ ? state.overlay.sculpt_mode_face_sets_opacity : 0.0f;
     float mask_opacity = show_mask_ ? state.overlay.sculpt_mode_mask_opacity : 0.0f;
+
+    curves_selection_opacity_ = mask_opacity;
+    curves_cage_opacity_ = curve_cage_opacity;
+
+    const CurvesSculpt *curves_sculpt = state.scene ? state.scene->toolsettings->curves_sculpt :
+                                                      nullptr;
+    dim_out_of_scope_curves_ = state.object_mode == OB_MODE_SCULPT_CURVES &&
+                               curves_sculpt != nullptr &&
+                               curves_sculpt->multi_object_edit_scope ==
+                                   CURVES_SCULPT_MULTI_OBJECT_EDIT_ACTIVE;
+
+    curves_flash_factors_ = ed::object::mode_transfer_overlay_current_state();
 
     {
       sculpt_mask_.init();
@@ -86,6 +121,7 @@ class Sculpts : Overlay {
                       state.clipping_plane_count);
         sub.shader_set(res.shaders->sculpt_curves.get());
         sub.push_constant("selection_opacity", mask_opacity);
+        sub.push_constant("use_object_color", curves_selection_use_object_color_);
         curves_ps_ = &sub;
       }
     }
@@ -126,6 +162,19 @@ class Sculpts : Overlay {
   {
     blender::Curves &curves = DRW_object_get_data_for_drawing<blender::Curves>(*ob_ref.object);
 
+    /* Objects the brush will not reach are drawn dimmed: their selection is still meaningful, it
+     * just is not a target right now. */
+    constexpr float out_of_scope_opacity_factor = 0.2f;
+    const float opacity_factor = (dim_out_of_scope_curves_ &&
+                                  !ob_ref.is_active(state.object_active)) ?
+                                     out_of_scope_opacity_factor :
+                                     1.0f;
+
+    /* Object colors are what tells the objects apart, and that matters most for the ones the brush
+     * is not on. Dimming them would defeat the option, so the out-of-scope factor is skipped here.
+     * The cage keeps being dimmed and carries the "what is being edited" signal on its own. */
+    const float selection_factor = curves_selection_use_object_color_ ? 1.0f : opacity_factor;
+
     /* As an optimization, draw nothing if everything is selected. */
     if (show_mask_ && !everything_selected(curves)) {
       /* Retrieve the location of the texture. */
@@ -144,6 +193,8 @@ class Sculpts : Overlay {
           ResourceHandleRange handle = manager.unique_handle(ob_ref);
 
           curves_ps_->push_constant("is_point_domain", is_point_domain);
+          curves_ps_->push_constant("selection_opacity",
+                                    curves_selection_opacity_ * selection_factor);
           curves_ps_->bind_texture("selection_tx", select_attr_buf);
           curves_ps_->draw(geometry, handle);
         }
@@ -153,7 +204,14 @@ class Sculpts : Overlay {
     if (show_curves_cage_) {
       ResourceHandleRange handle = manager.unique_handle(ob_ref);
 
+      /* Fade the cage back in as the mode transfer flash dies down. Both draw the same lines and
+       * the cage is submitted last, so without this a selected cage hides the flash completely. */
+      const float flash_factor = curves_flash_factors_.lookup_default_as(ob_ref.object->id.name,
+                                                                        0.0f);
+      const float cage_factor = opacity_factor * (1.0f - flash_factor);
+
       gpu::Batch *geometry = DRW_curves_batch_cache_get_sculpt_curves_cage(&curves);
+      sculpt_curve_cage_.push_constant("opacity", curves_cage_opacity_ * cage_factor);
       sculpt_curve_cage_.draw(geometry, handle);
     }
   }

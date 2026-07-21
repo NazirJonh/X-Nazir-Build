@@ -1029,12 +1029,15 @@ bool Instance::object_is_paint_mode(const Object *object)
 bool Instance::object_is_sculpt_mode(const ObjectRef &ob_ref)
 {
   if (state.object_mode == OB_MODE_SCULPT_CURVES) {
-    const Object *active_object = state.object_active;
-    const bool is_active_object = ob_ref.object == active_object;
+    /* In multi-object curves sculpt, all sculpt targets should be treated as being in sculpt mode
+     * (e.g. to hide object selection outline on non-active selected objects). */
+    if (ob_ref.object->type == OB_CURVES && (ob_ref.object->mode & OB_MODE_SCULPT_CURVES)) {
+      return true;
+    }
 
     bool is_active_geonode_preview = ob_ref.preview_base_geometry() != nullptr &&
                                      ob_ref.is_active(state.object_active);
-    return is_active_object || is_active_geonode_preview;
+    return is_active_geonode_preview;
   }
 
   if (state.object_mode == OB_MODE_SCULPT) {

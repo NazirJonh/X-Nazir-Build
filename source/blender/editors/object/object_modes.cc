@@ -487,11 +487,16 @@ Map<std::string, float, 1> mode_transfer_overlay_current_state()
   return factors;
 }
 
-static void object_overlay_mode_transfer_animation_start(bContext *C, Object *ob_dst)
+void object_overlay_mode_transfer_animation_start(Object *ob_dst)
+{
+  mode_transfer_overlay_start_times().add_as(ob_dst->id.name, BLI_time_now_seconds());
+}
+
+void object_overlay_mode_transfer_animation_start(bContext *C, Object *ob_dst)
 {
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
   Object *ob_dst_eval = DEG_get_evaluated(depsgraph, ob_dst);
-  mode_transfer_overlay_start_times().add_as(ob_dst_eval->id.name, BLI_time_now_seconds());
+  object_overlay_mode_transfer_animation_start(ob_dst_eval);
 }
 
 static bool object_transfer_mode_to_base(bContext *C,

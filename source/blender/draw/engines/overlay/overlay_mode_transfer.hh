@@ -12,7 +12,12 @@
 
 #include "BKE_paint.hh"
 
+#include "DNA_curves_types.h"
+
+#include "DRW_render.hh"
+
 #include "draw_cache.hh"
+#include "draw_cache_impl.hh"
 #include "draw_sculpt.hh"
 
 #include "overlay_base.hh"
@@ -26,6 +31,8 @@ namespace blender::draw::overlay {
 class ModeTransfer : Overlay {
  private:
   PassSimple ps_ = {"ModeTransfer"};
+  /** Curves have no surface to fill, so their flash is drawn on the sculpt cage lines instead. */
+  PassSimple curves_ps_ = {"ModeTransferCurves"};
 
   Map<std::string, float, 1> object_factors_;
 
@@ -52,6 +59,11 @@ class ModeTransfer : Overlay {
     const bool draw_surface = (ob_ref.object->dt >= OB_WIRE) &&
                               (renderable || (ob_ref.object->dt == OB_WIRE));
     if (!draw_surface) {
+      return;
+    }
+
+    if (ob_ref.object->type == OB_CURVES) {
+      this->curves_sync(manager, ob_ref, *alpha_opt);
       return;
     }
 
@@ -85,9 +97,31 @@ class ModeTransfer : Overlay {
 
     GPU_framebuffer_bind(framebuffer);
     manager.submit(ps_, view);
+    manager.submit(curves_ps_, view);
 
     /* Request redraws until the object fades out (enabled_ will be reset to false). */
     DRW_viewport_request_redraw();
+  }
+
+ private:
+  /**
+   * Curves have no surface batch -- #DRW_cache_object_surface_get returns null for them -- so the
+   * flash is drawn on the sculpt cage lines. Those are thin, so they need a stronger alpha than
+   * the surface fill meshes use to read as a flash at all.
+   */
+  void curves_sync(Manager &manager, const ObjectRef &ob_ref, const float factor)
+  {
+    constexpr float curves_flash_alpha = 0.75f;
+    const float alpha = factor * curves_flash_alpha;
+
+    blender::Curves &curves = DRW_object_get_data_for_drawing<blender::Curves>(*ob_ref.object);
+    /* Requesting the batch here is what gets it filled: #DRW_curves_batch_cache_create_requested
+     * runs after every #object_sync and populates whatever was asked for, so no null check is
+     * possible or needed -- #DRW_batch_request always returns a batch. */
+    gpu::Batch *geometry = DRW_curves_batch_cache_get_sculpt_curves_cage(&curves);
+
+    curves_ps_.push_constant("ucolor", float4(flash_color_.xyz() * alpha, alpha));
+    curves_ps_.draw(geometry, manager.unique_handle(ob_ref));
   }
 };
 

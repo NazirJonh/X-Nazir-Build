@@ -41,7 +41,7 @@ class SelectionPaintOperation : public CurvesSculptStrokeOperation {
   bool use_select_;
   bool clear_selection_;
 
-  CurvesBrush3D brush_3d_;
+  CurvesSculptTargetStates<CurvesBrush3D> brush_3d_by_curves_;
 
   friend struct SelectionPaintOperationExecutor;
 
@@ -76,14 +76,21 @@ struct SelectionPaintOperationExecutor {
 
   CurvesSurfaceTransforms transforms_;
 
-  SelectionPaintOperationExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
+  CurvesBrush3D *brush_3d_ = nullptr;
+
+  /** Only the active target writes the scene-global stroke position, see #is_active. */
+  bool is_active_target_ = false;
+
+  SelectionPaintOperationExecutor(const PaintStroke &stroke, const CurvesSculptTarget &target)
+      : ctx_(stroke), object_(target.object), curves_id_(target.curves_id)
+  {
+  }
 
   void execute(SelectionPaintOperation &self, const StrokeExtension &stroke_extension)
   {
     self_ = &self;
-    object_ = ctx_.object;
-
-    curves_id_ = id_cast<Curves *>(object_->data);
+    is_active_target_ = stroke_extension.targets->is_active(*object_);
+    brush_3d_ = &self_->brush_3d_by_curves_.ensure(*curves_id_);
     curves_ = &curves_id_->geometry.wrap();
     if (curves_->is_empty()) {
       return;
@@ -200,7 +207,7 @@ struct SelectionPaintOperationExecutor {
     ED_view3d_win_to_3d(
         ctx_.v3d,
         ctx_.region,
-        math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu),
+        math::transform_point(transforms_.curves_to_world, brush_3d_->position_cu),
         brush_pos_re_,
         brush_wo);
     const float3 brush_cu = math::transform_point(transforms_.world_to_curves, brush_wo);
@@ -219,7 +226,7 @@ struct SelectionPaintOperationExecutor {
     const bke::crazyspace::GeometryDeformation deformation =
         bke::crazyspace::get_evaluated_curves_deformation(*ctx_.depsgraph, *object_);
 
-    const float brush_radius_cu = self_->brush_3d_.radius_cu;
+    const float brush_radius_cu = brush_3d_->radius_cu;
     const float brush_radius_sq_cu = pow2f(brush_radius_cu);
 
     threading::parallel_for(curves_->points_range(), 1024, [&](const IndexRange point_range) {
@@ -312,7 +319,7 @@ struct SelectionPaintOperationExecutor {
     ED_view3d_win_to_3d(
         ctx_.v3d,
         ctx_.region,
-        math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu),
+        math::transform_point(transforms_.curves_to_world, brush_3d_->position_cu),
         brush_pos_re_,
         brush_wo);
     const float3 brush_cu = math::transform_point(transforms_.world_to_curves, brush_wo);
@@ -332,7 +339,7 @@ struct SelectionPaintOperationExecutor {
         bke::crazyspace::get_evaluated_curves_deformation(*ctx_.depsgraph, *object_);
     const OffsetIndices points_by_curve = curves_->points_by_curve();
 
-    const float brush_radius_cu = self_->brush_3d_.radius_cu;
+    const float brush_radius_cu = brush_3d_->radius_cu;
     const float brush_radius_sq_cu = pow2f(brush_radius_cu);
 
     threading::parallel_for(curves_->curves_range(), 1024, [&](const IndexRange curves_range) {
@@ -375,10 +382,12 @@ struct SelectionPaintOperationExecutor {
                                                                    brush_pos_re_,
                                                                    brush_radius_base_re_);
     if (brush_3d.has_value()) {
-      self_->brush_3d_ = *brush_3d;
-      remember_stroke_position(
-          *curves_sculpt_,
-          math::transform_point(transforms_.curves_to_world, self_->brush_3d_.position_cu));
+      *brush_3d_ = *brush_3d;
+      if (is_active_target_) {
+        remember_stroke_position(
+            *curves_sculpt_,
+            math::transform_point(transforms_.curves_to_world, brush_3d_->position_cu));
+      }
     }
   }
 };
@@ -386,8 +395,10 @@ struct SelectionPaintOperationExecutor {
 void SelectionPaintOperation::on_stroke_extended(const PaintStroke &stroke,
                                                  const StrokeExtension &stroke_extension)
 {
-  SelectionPaintOperationExecutor executor{stroke};
-  executor.execute(*this, stroke_extension);
+  for (const CurvesSculptTarget &target : stroke_extension.targets->deform_targets) {
+    SelectionPaintOperationExecutor executor{stroke, target};
+    executor.execute(*this, stroke_extension);
+  }
 }
 
 std::unique_ptr<CurvesSculptStrokeOperation> new_selection_paint_operation(

@@ -19,11 +19,13 @@
 
 GPU_SHADER_INTERFACE_INFO(overlay_sculpt_curves_selection_iface)
 SMOOTH(float, mask_weight)
+FLAT(float3, tint_color)
 GPU_SHADER_INTERFACE_END()
 
 GPU_SHADER_CREATE_INFO(overlay_sculpt_curves_selection)
 DO_STATIC_COMPILATION()
 PUSH_CONSTANT(bool, is_point_domain)
+PUSH_CONSTANT(bool, use_object_color)
 PUSH_CONSTANT(float, selection_opacity)
 SAMPLER(2, samplerBuffer, selection_tx)
 VERTEX_OUT(overlay_sculpt_curves_selection_iface)
@@ -35,6 +37,7 @@ ADDITIONAL_INFO(draw_modelmat)
 ADDITIONAL_INFO(draw_globals)
 ADDITIONAL_INFO(draw_curves)
 ADDITIONAL_INFO(draw_curves_infos)
+ADDITIONAL_INFO(draw_object_infos)
 GPU_SHADER_CREATE_END()
 
 CREATE_INFO_VARIANT(overlay_sculpt_curves_selection_clipped,

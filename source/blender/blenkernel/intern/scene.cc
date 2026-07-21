@@ -703,8 +703,9 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
 
     /* WARNING: Handling this object pointer is fairly intricated, to support both 'regular'
      * foreach_id processing (in which case both sets of data, current and old, are the same), and
-     * the restore-after-undo cases. It does not have a helper, because so far it is the only case
-     * of having to deal with non-'paint' data in a sub-toolsett struct. */
+     * the restore-after-undo cases. It does not have a helper, because there are only a couple of
+     * cases of having to deal with non-'paint' data in a sub-toolsett struct (see also
+     * #CurvesSculpt.add_curves_object below). */
     Object *gravity_object = toolsett->sculpt ? toolsett->sculpt->gravity_object : nullptr;
     Object *gravity_object_old = toolsett_old->sculpt->gravity_object;
     BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
@@ -762,6 +763,27 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
         data,
         do_undo_restore,
         scene_foreach_paint(data, paint, do_undo_restore, reader, paint_old));
+
+    /* Same intricated handling as #Sculpt.gravity_object above; see the warning there. */
+    Object *add_curves_object = toolsett->curves_sculpt ?
+                                    toolsett->curves_sculpt->add_curves_object :
+                                    nullptr;
+    Object *add_curves_object_old = toolsett_old->curves_sculpt->add_curves_object;
+    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                      &add_curves_object,
+                                                      do_undo_restore,
+                                                      SCENE_FOREACH_UNDO_NO_RESTORE,
+                                                      reader,
+                                                      &add_curves_object_old,
+                                                      IDWALK_CB_NOP);
+    if (toolsett->curves_sculpt) {
+      toolsett->curves_sculpt->add_curves_object = add_curves_object;
+    }
+    /* Do not re-assign `add_curves_object_old` if both current and old data are the same
+     * (foreach_id case), that would nullify the assignment above, making remapping cases fail. */
+    if (toolsett_old != toolsett) {
+      toolsett_old->curves_sculpt->add_curves_object = add_curves_object_old;
+    }
   }
 
   BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(

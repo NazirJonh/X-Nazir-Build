@@ -5455,6 +5455,16 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
       prop, "Sculpt Curves Cage", "Show original curves that are currently being edited");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  prop = RNA_def_property(
+      srna, "show_sculpt_curves_selection_object_color", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "overlay.flag", V3D_OVERLAY_SCULPT_CURVES_SELECTION_OBJECT_COLOR);
+  RNA_def_property_ui_text(prop,
+                           "Use Object Color",
+                           "Tint unselected curves with the object's viewport display color "
+                           "instead of darkening them, to tell objects apart while sculpting");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   prop = RNA_def_property(srna, "sculpt_curves_cage_opacity", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_sdna(prop, nullptr, "overlay.sculpt_curves_cage_opacity");
   RNA_def_property_ui_text(

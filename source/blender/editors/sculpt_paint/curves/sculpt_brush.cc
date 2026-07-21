@@ -410,7 +410,6 @@ CurvesSculptCommonContext::CurvesSculptCommonContext(const PaintStroke &stroke)
   this->region = stroke.vc.region;
   this->v3d = stroke.vc.v3d;
   this->rv3d = stroke.vc.rv3d;
-  this->object = stroke.object;
 }
 
 void report_empty_original_surface(ReportList *reports)

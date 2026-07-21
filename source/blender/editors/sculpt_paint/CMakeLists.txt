@@ -37,6 +37,7 @@ set(SRC
   curves/sculpt_delete.cc
   curves/sculpt_density.cc
   curves/sculpt_grow_shrink.cc
+  curves/sculpt_multi_object.cc
   curves/sculpt_ops.cc
   curves/sculpt_pinch.cc
   curves/sculpt_puff.cc
@@ -120,6 +121,7 @@ set(SRC
   paint_intern.hh
 
   curves/sculpt_intern.hh
+  curves/sculpt_multi_object.hh
 
   grease_pencil/grease_pencil_intern.hh
   grease_pencil/trace_util.hh
@@ -207,6 +209,7 @@ set(LIB
 
 if(WITH_GTESTS)
   set(TEST_SRC
+    curves/sculpt_multi_object_test.cc
     mesh/mesh_brush_common_tests.cc
     mesh/paint_test.cc
     mesh/sculpt_boundary_tests.cc

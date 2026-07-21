@@ -8,8 +8,16 @@
 
 #pragma once
 
+struct bContext;
+
 namespace blender {
 
 void ED_operatortypes_sculpt_curves();
+
+/**
+ * Restart the mode-transfer flash on every Curves object the current multi-object edit scope
+ * covers, so that changing the scope reads as "this is what you are editing now".
+ */
+void ED_curves_sculpt_flash_edit_scope(bContext *C);
 
 }  // namespace blender

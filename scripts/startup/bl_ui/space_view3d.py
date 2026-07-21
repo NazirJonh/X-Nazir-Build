@@ -583,6 +583,10 @@ class _draw_tool_settings_context_mode:
         elif curves_tool == 'ADD':
             layout.prop(brush, "falloff_shape", expand=True)
             layout.prop(brush.curves_sculpt_settings, "add_amount")
+            if len(context.objects_in_mode_unique_data) > 1:
+                layout.prop(paint, "add_curves_target", text="Target")
+                if paint.add_curves_target == 'OBJECT':
+                    layout.prop(paint, "add_curves_object", text="")
             layout.popover("VIEW3D_PT_curves_sculpt_add_shape", text="Curve Shape")
             layout.prop(brush, "use_frontface", text="Front Faces Only")
         elif curves_tool == 'GROW_SHRINK':
@@ -613,6 +617,13 @@ class _draw_tool_settings_context_mode:
             layout.prop(brush, "falloff_shape", expand=True)
             row = layout.row(align=True)
             row.prop(brush.curves_sculpt_settings, "density_mode", text="", expand=True)
+            if len(context.objects_in_mode_unique_data) > 1:
+                # Only the "add" direction picks a target, so the option is dead in Remove mode.
+                col = layout.column()
+                col.enabled = brush.curves_sculpt_settings.density_mode != 'REMOVE'
+                col.prop(paint, "add_curves_target", text="Target")
+                if paint.add_curves_target == 'OBJECT':
+                    col.prop(paint, "add_curves_object", text="")
             row = layout.row(align=True)
             row.prop(brush.curves_sculpt_settings, "minimum_distance", text="Distance Min")
             row.operator_context = 'INVOKE_REGION_WIN'
@@ -876,6 +887,10 @@ class VIEW3D_HT_header(Header):
                     icon='CURVE_PATH',
                     depress=(domain == 'CURVE'),
                 ).domain = 'CURVE'
+
+                if object_mode == 'SCULPT_CURVES' and len(context.objects_in_mode_unique_data) > 1:
+                    row = layout.row(align=True)
+                    row.prop(tool_settings.curves_sculpt, "multi_object_edit_scope", expand=True)
 
         # Grease Pencil
         if obj and obj.type == 'GREASEPENCIL':
@@ -7621,6 +7636,10 @@ class VIEW3D_PT_overlay_sculpt_curves(Panel):
         row = layout.row(align=True)
         row.active = overlay.show_overlays
         row.prop(overlay, "sculpt_mode_mask_opacity", text="Selection Opacity")
+
+        row = layout.row(align=True)
+        row.active = overlay.show_overlays
+        row.prop(overlay, "show_sculpt_curves_selection_object_color", text="Use Object Color")
 
         row = layout.row(align=True)
         row.active = overlay.show_overlays

@@ -278,6 +278,10 @@ struct State {
   {
     return (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_CAGE);
   }
+  bool show_sculpt_curves_selection_object_color() const
+  {
+    return (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_SELECTION_OBJECT_COLOR);
+  }
   bool show_light_colors() const
   {
     return (this->overlay.flag & V3D_OVERLAY_SHOW_LIGHT_COLORS);

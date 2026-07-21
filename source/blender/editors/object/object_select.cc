@@ -130,7 +130,20 @@ void base_activate_with_mode_exit_if_needed(bContext *C, Base *base)
       editmode_exit_multi_ex(bmain, scene, view_layer, EM_FREEDATA);
     }
   }
+
+  /* Read before #base_activate overwrites it. */
+  const bool active_changed = view_layer->basact != base;
   base_activate(C, base);
+
+  /* A sculpt session can span several objects, so which one is active decides what the brush
+   * edits. Flash the new target the same way #OBJECT_OT_transfer_mode does. Deliberately not done
+   * inside #base_activate: that one is the plain "make this the active base" primitive, used by
+   * callers that have nothing to do with modes. */
+  if (active_changed && base != nullptr &&
+      (base->object->mode & (OB_MODE_SCULPT | OB_MODE_SCULPT_CURVES)))
+  {
+    object_overlay_mode_transfer_animation_start(base->object);
+  }
 }
 
 bool base_deselect_all_ex(const Main &bmain,

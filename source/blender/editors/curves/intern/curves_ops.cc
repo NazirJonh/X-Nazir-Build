@@ -95,18 +95,45 @@ bool object_has_editable_curves(const Main &bmain, const Object &object)
   return true;
 }
 
+/**
+ * Curves sculpt mode can be limited to the active object while other objects stay in the mode, so
+ * being in the mode is not on its own a reason for an operator to edit an object.
+ */
+static bool sculpt_mode_limited_to_active_object(const bContext &C, const Object &active_object)
+{
+  if ((active_object.mode & OB_MODE_SCULPT_CURVES) == 0) {
+    return false;
+  }
+  const Scene *scene = CTX_data_scene(&C);
+  if (scene == nullptr || scene->toolsettings->curves_sculpt == nullptr) {
+    return false;
+  }
+  return scene->toolsettings->curves_sculpt->multi_object_edit_scope ==
+         CURVES_SCULPT_MULTI_OBJECT_EDIT_ACTIVE;
+}
+
 VectorSet<Curves *> get_unique_editable_curves(const bContext &C)
 {
   VectorSet<Curves *> unique_curves;
 
   const Main &bmain = *CTX_data_main(&C);
 
-  Object *object = CTX_data_active_object(&C);
-  if (object && object_has_editable_curves(bmain, *object)) {
-    unique_curves.add_new(id_cast<Curves *>(object->data));
+  Object *active_object = CTX_data_active_object(&C);
+  if (active_object && object_has_editable_curves(bmain, *active_object)) {
+    unique_curves.add_new(id_cast<Curves *>(active_object->data));
+  }
+
+  if (active_object && sculpt_mode_limited_to_active_object(C, *active_object)) {
+    return unique_curves;
   }
 
   CTX_DATA_BEGIN (&C, Object *, object, selected_objects) {
+    /* Objects only join the edit when they share the active object's mode. Without the mode check
+     * a selected object sitting in a different editable mode would be pulled into an operator it
+     * has no business being part of. */
+    if (active_object && object->mode != active_object->mode) {
+      continue;
+    }
     if (object_has_editable_curves(bmain, *object)) {
       unique_curves.add(id_cast<Curves *>(object->data));
     }

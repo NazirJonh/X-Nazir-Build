@@ -17,6 +17,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
+#include "BKE_layer.hh"
 #include "BKE_modifier.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
@@ -70,6 +71,9 @@ namespace ed::sculpt_paint {
 
 bool curves_sculpt_poll(bContext *C)
 {
+  /* The active object gates the mode even in multi-object sculpt: the objects a stroke acts on are
+   * gathered by #CurvesMultiObjectStrokeContext::resolve, which starts from the active base and
+   * yields nothing when that base is not in the mode. */
   const Object *ob = CTX_data_active_object(C);
   return ob && ob->mode & OB_MODE_SCULPT_CURVES;
 }
@@ -121,14 +125,8 @@ float brush_strength_get(const Paint &paint,
   return BKE_brush_alpha_get(&paint, &brush) * brush_strength_factor(brush, stroke_extension);
 }
 
-static std::unique_ptr<CurvesSculptStrokeOperation> start_brush_operation(
-    wmOperator &op,
-    Scene &scene,
-    Depsgraph &depsgraph,
-    ARegion &region,
-    View3D &v3d,
-    const Object &object,
-    const StrokeExtension &stroke_start)
+static std::unique_ptr<CurvesSculptStrokeOperation> start_brush_operation(wmOperator &op,
+                                                                          Scene &scene)
 {
   const auto mode = BrushStrokeMode(RNA_enum_get(op.ptr, "mode"));
   const auto brush_switch_mode = BrushSwitchMode(RNA_enum_get(op.ptr, "brush_toggle"));
@@ -166,7 +164,7 @@ static std::unique_ptr<CurvesSculptStrokeOperation> start_brush_operation(
     case CURVES_SCULPT_BRUSH_TYPE_PUFF:
       return new_puff_operation();
     case CURVES_SCULPT_BRUSH_TYPE_DENSITY:
-      return new_density_operation(mode, scene, depsgraph, region, v3d, object, stroke_start);
+      return new_density_operation(mode);
     case CURVES_SCULPT_BRUSH_TYPE_SLIDE:
       return new_slide_operation();
   }
@@ -189,6 +187,8 @@ struct SculptCurvesBrushStroke final : public PaintStroke {
 
  private:
   std::unique_ptr<CurvesSculptStrokeOperation> operation_;
+  /** Resolved once in #test_start; passed to every brush through #StrokeExtension.targets. */
+  CurvesMultiObjectStrokeContext multi_object_;
 };
 
 bool SculptCurvesBrushStroke::get_location(float out[3],
@@ -203,7 +203,10 @@ bool SculptCurvesBrushStroke::get_location(float out[3],
 
 bool SculptCurvesBrushStroke::test_start(wmOperator * /*op*/, const float /*mouse*/[2])
 {
-  return true;
+  /* Objects cannot enter or leave sculpt mode while a stroke is modal, so the targets are resolved
+   * once here rather than re-queried on every step. */
+  multi_object_.resolve(this->vc, this->vc.scene->toolsettings->curves_sculpt);
+  return !multi_object_.mode_targets.is_empty();
 }
 
 void SculptCurvesBrushStroke::update_step(wmOperator *op, PointerRNA *stroke_element)
@@ -212,16 +215,11 @@ void SculptCurvesBrushStroke::update_step(wmOperator *op, PointerRNA *stroke_ele
   RNA_float_get_array(stroke_element, "mouse", stroke_extension.mouse_position);
   stroke_extension.pressure = RNA_float_get(stroke_element, "pressure");
   stroke_extension.reports = op->reports;
+  stroke_extension.targets = &multi_object_;
 
   if (!operation_) {
     stroke_extension.is_first = true;
-    operation_ = start_brush_operation(*op,
-                                       *this->vc.scene,
-                                       *this->vc.depsgraph,
-                                       *this->vc.region,
-                                       *this->vc.v3d,
-                                       *this->object,
-                                       stroke_extension);
+    operation_ = start_brush_operation(*op, *this->vc.scene);
   }
   else {
     stroke_extension.is_first = false;
@@ -313,62 +311,100 @@ static void SCULPT_CURVES_OT_brush_stroke(wmOperatorType *ot)
 /** \name Toggle Sculpt Mode
  * \{ */
 
-static void curves_sculptmode_enter(bContext *C)
+static void curves_sculptmode_enter(bContext *C, const Span<Object *> curves_objects)
 {
+  Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
   wmMsgBus *mbus = CTX_wm_message_bus(C);
 
-  Object *ob = CTX_data_active_object(C);
   BKE_paint_ensure(scene->toolsettings,
                    reinterpret_cast<Paint **>(&scene->toolsettings->curves_sculpt));
   CurvesSculpt *curves_sculpt = scene->toolsettings->curves_sculpt;
 
-  ob->mode = OB_MODE_SCULPT_CURVES;
-
   Paint *paint = BKE_paint_get_active_from_paintmode(scene, PaintMode::SculptCurves);
-
-  BKE_paint_brushes_ensure(CTX_data_main(C), paint);
+  BKE_paint_brushes_ensure(bmain, paint);
 
   ED_paint_cursor_start(&curves_sculpt->paint, curves_sculpt_poll_view3d);
-  paint_init_pivot(ob, scene, paint);
 
-  /* Necessary to change the object mode on the evaluated object. */
-  DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
-  WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
-  WM_event_add_notifier(C, NC_SCENE | ND_MODE, nullptr);
+  for (Object *ob : curves_objects) {
+    if (ob->mode & OB_MODE_SCULPT_CURVES) {
+      /* Extending the mode to a wider selection must not re-initialize the objects that are
+       * already in it, in particular not their sculpt pivot. */
+      continue;
+    }
+    ob->mode = OB_MODE_SCULPT_CURVES;
+    paint_init_pivot(ob, scene, paint);
+
+    /* Necessary to change the object mode on the evaluated object. */
+    DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+    WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
+  }
 }
 
+/**
+ * Leave the mode on every Curves object that is in it, not only on the selected ones: an object
+ * can be deselected while the mode is running, and nothing would ever take it out of the mode
+ * again. This mirrors #editmode_exit_multi_ex.
+ */
 static void curves_sculptmode_exit(bContext *C)
 {
-  Object *ob = CTX_data_active_object(C);
-  ob->mode = OB_MODE_OBJECT;
+  const Main *bmain = CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  wmMsgBus *mbus = CTX_wm_message_bus(C);
+
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  for (Base &base : *BKE_view_layer_object_bases_get(view_layer)) {
+    Object *ob = base.object;
+    if (ob->type != OB_CURVES || (ob->mode & OB_MODE_SCULPT_CURVES) == 0) {
+      continue;
+    }
+    ob->mode = OB_MODE_OBJECT;
+
+    DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+    WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
+  }
 }
 
 static wmOperatorStatus curves_sculptmode_toggle_exec(bContext *C, wmOperator *op)
 {
-  Object *ob = CTX_data_active_object(C);
-  wmMsgBus *mbus = CTX_wm_message_bus(C);
+  const Main *bmain = CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
 
-  const bool is_mode_set = ob->mode == OB_MODE_SCULPT_CURVES;
-
-  if (is_mode_set) {
-    if (!object::mode_compat_set(C, ob, OB_MODE_SCULPT_CURVES, op->reports)) {
-      return OPERATOR_CANCELLED;
-    }
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  Object *active_object = BKE_view_layer_active_object_get(view_layer);
+  if (active_object == nullptr || active_object->type != OB_CURVES) {
+    return OPERATOR_CANCELLED;
   }
 
+  /* The active object decides the direction of the toggle, like #editmode_toggle_exec does. It is
+   * also the object #object::mode_set_ex verifies afterwards and the one #curves_sculpt_poll looks
+   * at, so deriving the direction from the selection instead would leave those two disagreeing
+   * whenever the active object is not selected. */
+  const bool is_mode_set = (active_object->mode & OB_MODE_SCULPT_CURVES) != 0;
+
   if (is_mode_set) {
+    if (!object::mode_compat_set(C, active_object, OB_MODE_SCULPT_CURVES, op->reports)) {
+      return OPERATOR_CANCELLED;
+    }
     curves_sculptmode_exit(C);
   }
   else {
-    curves_sculptmode_enter(C);
+    /* The active object comes first: it is what the mode is anchored to, and what
+     * #CurvesMultiObjectStrokeContext expects at the head of its target list. */
+    Vector<Object *> curves_objects;
+    curves_objects.append(active_object);
+    CTX_DATA_BEGIN (C, Object *, ob, selected_editable_objects) {
+      if (ob != active_object && ob->type == OB_CURVES) {
+        curves_objects.append(ob);
+      }
+    }
+    CTX_DATA_END;
+    curves_sculptmode_enter(C, curves_objects);
   }
 
   WM_toolsystem_update_from_context_view3d(C);
-
-  /* Necessary to change the object mode on the evaluated object. */
-  DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
-  WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
   WM_event_add_notifier(C, NC_SCENE | ND_MODE, nullptr);
   return OPERATOR_FINISHED;
 }
@@ -380,7 +416,7 @@ static void CURVES_OT_sculptmode_toggle(wmOperatorType *ot)
   ot->description = "Enter/Exit sculpt mode for curves";
 
   ot->exec = curves_sculptmode_toggle_exec;
-  ot->poll = curves::curves_poll;
+  ot->poll = curves::editable_curves_poll;
 
   ot->flag = OPTYPE_UNDO | OPTYPE_REGISTER;
 }
@@ -760,7 +796,6 @@ static void select_grow_invoke_per_curve(const Curves &curves_id,
 
 static wmOperatorStatus select_grow_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
-  Object *active_ob = CTX_data_active_object(C);
   ARegion *region = CTX_wm_region(C);
   View3D *v3d = CTX_wm_view3d(C);
   RegionView3D *rv3d = CTX_wm_region_view3d(C);
@@ -770,11 +805,27 @@ static wmOperatorStatus select_grow_invoke(bContext *C, wmOperator *op, const wm
 
   op_data->initial_mouse_x = event->xy[0];
 
-  Curves &curves_id = *id_cast<Curves *>(active_ob->data);
-  auto curve_op_data = std::make_unique<GrowOperatorDataPerCurve>();
-  curve_op_data->curves_id = &curves_id;
-  select_grow_invoke_per_curve(curves_id, *active_ob, *region, *v3d, *rv3d, *curve_op_data);
-  op_data->per_curve.append(std::move(curve_op_data));
+  const Scene *scene = CTX_data_scene(C);
+  const CurvesSculpt *curves_sculpt = scene->toolsettings->curves_sculpt;
+  const eCurvesSculptMultiObjectEditScope edit_scope =
+      curves_sculpt ? eCurvesSculptMultiObjectEditScope(curves_sculpt->multi_object_edit_scope) :
+                      CURVES_SCULPT_MULTI_OBJECT_EDIT_ALL;
+  const Vector<CurvesSculptTarget> mode_targets = curves_sculpt_mode_targets(
+      *CTX_data_main(C), scene, CTX_data_view_layer(C), v3d);
+
+  for (const CurvesSculptTarget &target : curves_sculpt_deform_targets(mode_targets, edit_scope)) {
+    auto curve_op_data = std::make_unique<GrowOperatorDataPerCurve>();
+    curve_op_data->curves_id = target.curves_id;
+    select_grow_invoke_per_curve(
+        *target.curves_id, *target.object, *region, *v3d, *rv3d, *curve_op_data);
+    op_data->per_curve.append(std::move(curve_op_data));
+  }
+
+  if (op_data->per_curve.is_empty()) {
+    MEM_delete(op_data);
+    op->customdata = nullptr;
+    return OPERATOR_CANCELLED;
+  }
 
   WM_event_add_modal_handler(C, op);
   return OPERATOR_RUNNING_MODAL;
@@ -1202,6 +1253,31 @@ static void SCULPT_CURVES_OT_min_distance_edit(wmOperatorType *ot)
 }
 
 }  // namespace ed::sculpt_paint
+
+void ED_curves_sculpt_flash_edit_scope(bContext *C)
+{
+  using namespace blender::ed::sculpt_paint;
+
+  const Scene *scene = CTX_data_scene(C);
+  const CurvesSculpt *curves_sculpt = scene->toolsettings->curves_sculpt;
+  const eCurvesSculptMultiObjectEditScope edit_scope =
+      curves_sculpt ? eCurvesSculptMultiObjectEditScope(curves_sculpt->multi_object_edit_scope) :
+                      CURVES_SCULPT_MULTI_OBJECT_EDIT_ALL;
+
+  /* Reuse the stroke's own target resolution rather than walking the bases here, so the flash
+   * covers exactly the objects a stroke would reach -- same visibility and local-view filtering,
+   * same collapsing of linked duplicates. */
+  const Vector<CurvesSculptTarget> mode_targets = curves_sculpt_mode_targets(
+      *CTX_data_main(C), scene, CTX_data_view_layer(C), CTX_wm_view3d(C));
+
+  for (const CurvesSculptTarget &target : curves_sculpt_deform_targets(mode_targets, edit_scope)) {
+    ed::object::object_overlay_mode_transfer_animation_start(target.object);
+  }
+
+  /* The flash lives in the overlay engine, so the viewport has to redraw at least once for the
+   * animation to start. */
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Registration

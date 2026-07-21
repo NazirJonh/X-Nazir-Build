@@ -19,6 +19,7 @@ void ModeTransfer::begin_sync(Resources &res, const State &state)
   if (!enabled_) {
     /* Not used. But release the data. */
     ps_.init();
+    curves_ps_.init();
     return;
   }
 
@@ -31,6 +32,17 @@ void ModeTransfer::begin_sync(Resources &res, const State &state)
   ps_.shader_set(res.shaders->uniform_color.get());
   ps_.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
   ps_.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+
+  curves_ps_.init();
+  /* Depth testing is skipped on purpose. The cage lines sit inside the strand thickness, and
+   * unlike #overlay_sculpt_curves_cage the uniform color shader applies no depth bias, so a
+   * regular depth test would swallow most of the flash. Showing through occluders for the 0.55
+   * seconds the animation lasts is the cheaper trade. */
+  curves_ps_.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA | DRW_STATE_DEPTH_ALWAYS,
+                       state.clipping_plane_count);
+  curves_ps_.shader_set(res.shaders->uniform_color.get());
+  curves_ps_.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+  curves_ps_.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
 }
 
 }  // namespace blender::draw::overlay

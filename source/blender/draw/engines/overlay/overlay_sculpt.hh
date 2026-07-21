@@ -8,13 +8,14 @@
 
 #pragma once
 
-#include "BKE_attribute.hh"
 #include "BKE_curves.hh"
 #include "BKE_mesh.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
 #include "DEG_depsgraph_query.hh"
+
+#include "DNA_scene_enums.h"
 
 #include "DRW_render.hh"
 #include "bmesh.hh"
@@ -23,15 +24,24 @@
 #include "draw_sculpt.hh"
 
 #include "overlay_base.hh"
+#include "overlay_symmetry_contour.hh"
+#include "overlay_symmetry_plane.hh"
 
 namespace blender::draw::overlay {
 
 /**
- * Display sculpt modes overlays.
- * Covers face sets and mask for meshes.
- * Draw curve cages (curve guides) for curve sculpting.
+ * Display sculpt mode overlays.
+ * Covers face sets and mask for meshes, curve cages for curve sculpting, and the symmetry
+ * plane / contour overlays.
  */
 class Sculpts : Overlay {
+
+ public:
+  Sculpts(SelectionType selection_type, bool in_front)
+      : symmetry_contour_(selection_type, "SculptSymmetryContour", in_front),
+        symmetry_plane_("SculptSymmetryPlane")
+  {
+  }
 
  private:
   PassSimple sculpt_mask_ = {"SculptMaskAndFaceSet"};
@@ -39,10 +49,15 @@ class Sculpts : Overlay {
   PassSimple::Sub *curves_ps_ = nullptr;
 
   PassSimple sculpt_curve_cage_ = {"SculptCage"};
+  SymmetryContourOverlay symmetry_contour_;
+  SymmetryPlaneOverlay symmetry_plane_;
 
   bool show_curves_cage_ = false;
   bool show_face_set_ = false;
   bool show_mask_ = false;
+  bool show_symmetry_plane_ = false;
+  bool show_curves_symmetry_plane_ = false;
+  bool show_symmetry_contour_ = false;
 
  public:
   void begin_sync(Resources &res, const State &state) final
@@ -50,22 +65,29 @@ class Sculpts : Overlay {
     show_curves_cage_ = state.show_sculpt_curves_cage();
     show_face_set_ = state.show_sculpt_face_sets();
     show_mask_ = state.show_sculpt_mask();
+    show_symmetry_plane_ = state.show_sculpt_symmetry_plane();
+    show_curves_symmetry_plane_ = state.show_curves_symmetry_plane();
+    show_symmetry_contour_ = state.show_sculpt_symmetry_contour();
 
     enabled_ = state.is_space_v3d() && !state.is_wire() && !res.is_selection() &&
                !state.is_depth_only_drawing &&
-               ELEM(state.object_mode, OB_MODE_SCULPT_CURVES, OB_MODE_SCULPT) &&
-               (show_curves_cage_ || show_face_set_ || show_mask_);
+               (show_curves_cage_ || show_face_set_ || show_mask_ || show_symmetry_plane_ ||
+                show_curves_symmetry_plane_ || show_symmetry_contour_);
 
     if (!enabled_) {
-      /* Not used. But release the data. */
+      /* Not used, but release the data. */
       sculpt_mask_.init();
       sculpt_curve_cage_.init();
+      symmetry_contour_.begin_sync(res, state, false);
+      symmetry_plane_.begin_sync(res, state, false, 0.0f);
       return;
     }
 
-    float curve_cage_opacity = show_curves_cage_ ? state.overlay.sculpt_curves_cage_opacity : 0.0f;
-    float face_set_opacity = show_face_set_ ? state.overlay.sculpt_mode_face_sets_opacity : 0.0f;
-    float mask_opacity = show_mask_ ? state.overlay.sculpt_mode_mask_opacity : 0.0f;
+    const float curve_cage_opacity = show_curves_cage_ ? state.overlay.sculpt_curves_cage_opacity :
+                                                         0.0f;
+    const float face_set_opacity = show_face_set_ ? state.overlay.sculpt_mode_face_sets_opacity :
+                                                    0.0f;
+    const float mask_opacity = show_mask_ ? state.overlay.sculpt_mode_mask_opacity : 0.0f;
 
     {
       sculpt_mask_.init();
@@ -99,11 +121,17 @@ class Sculpts : Overlay {
       pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
       pass.push_constant("opacity", curve_cage_opacity);
     }
+
+    symmetry_contour_.begin_sync(res, state, show_symmetry_contour_);
+    symmetry_plane_.begin_sync(res,
+                               state,
+                               show_symmetry_plane_ || show_curves_symmetry_plane_,
+                               state.overlay.sculpt_symmetry_plane_opacity);
   }
 
   void object_sync(Manager &manager,
                    const ObjectRef &ob_ref,
-                   Resources & /*res*/,
+                   Resources &res,
                    const State &state) final
   {
     if (!enabled_) {
@@ -111,15 +139,52 @@ class Sculpts : Overlay {
     }
 
     switch (ob_ref.object->type) {
-      case OB_MESH:
+      case OB_MESH: {
         mesh_sync(manager, ob_ref, state);
+        if (ob_ref.object->mode == OB_MODE_SCULPT &&
+            (show_symmetry_contour_ || show_symmetry_plane_))
+        {
+          /* The contour/plane must track the same axis the brush actually mirrors strokes
+           * across, which is #Mesh.symmetry (Object Data Properties > Symmetry) -
+           * #do_symmetrical_brush_actions never reads the Sculpt tool settings' own
+           * symmetry_flags to choose mirrored dabs, so reading it here would show an overlay
+           * that disagrees with the real stroke mirroring. Read from the original object, not
+           * the evaluated copy: like `use_mirror_x` toggling, a #Mesh.symmetry change only sends
+           * a redraw notifier and never tags the mesh for depsgraph re-evaluation (see the
+           * identical pattern in #edit_object_sync in overlay_mesh.hh). */
+          const Object *ob_orig = DEG_get_original(ob_ref.object);
+          const Mesh &mesh_orig = DRW_object_get_data_for_drawing<Mesh>(*ob_orig);
+          const int symmetry_flags = symmetry_flags_from_mesh_symmetry(mesh_orig.symmetry);
+          if (show_symmetry_contour_) {
+            symmetry_contour_.object_sync(ob_ref.object, symmetry_flags, state);
+          }
+          if (show_symmetry_plane_) {
+            symmetry_plane_.object_sync(manager, ob_ref, symmetry_flags, res);
+          }
+        }
         break;
-      case OB_CURVES:
+      }
+      case OB_CURVES: {
         curves_sync(manager, ob_ref, state);
+        if (show_curves_symmetry_plane_) {
+          const blender::Curves &curves_id = DRW_object_get_data_for_drawing<blender::Curves>(
+              *ob_ref.object);
+          symmetry_plane_.object_sync(
+              manager, ob_ref, symmetry_flags_from_curves_symmetry(curves_id.symmetry), res);
+        }
         break;
+      }
       default:
         break;
     }
+  }
+
+  void end_sync(Resources & /*res*/, const State & /*state*/) final
+  {
+    if (!enabled_) {
+      return;
+    }
+    symmetry_contour_.end_sync();
   }
 
   void curves_sync(Manager &manager, const ObjectRef &ob_ref, const State &state)
@@ -246,13 +311,33 @@ class Sculpts : Overlay {
     manager.submit(sculpt_curve_cage_, view);
   }
 
-  void draw_on_render(gpu::FrameBuffer *framebuffer, Manager &manager, View &view) final
+  /**
+   * The symmetry contour is drawn into the depth-less line frame-buffer so it feeds post-AA, and
+   * is therefore not depth tested against the passes that follow. It is kept out of #draw_line and
+   * submitted by #Instance::draw_v3d after the grid and the mesh line overlays, which share the
+   * same `line_tx` and would otherwise draw over it.
+   */
+  void draw_symmetry_contour(Framebuffer &framebuffer, Manager &manager, View &view)
+  {
+    if (!enabled_) {
+      return;
+    }
+    symmetry_contour_.draw_line(framebuffer, manager, view);
+  }
+
+  virtual void draw_on_render(gpu::FrameBuffer *framebuffer,
+                              Manager &manager,
+                              View &view,
+                              const State & /*state*/) final
   {
     if (!enabled_) {
       return;
     }
     GPU_framebuffer_bind(framebuffer);
     manager.submit(sculpt_mask_, view);
+
+    /* Translucent symmetry plane, blended over the rendered surface. */
+    symmetry_plane_.draw_on_render(framebuffer, manager, view);
   }
 
  private:

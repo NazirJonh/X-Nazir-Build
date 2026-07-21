@@ -168,6 +168,27 @@ static void do_versions_theme(const UserDef *userdef, bTheme *btheme)
     FROM_DEFAULT_V4_UCHAR(tui.icon_autokey);
   }
 
+  if (!USER_VERSION_ATLEAST(404, 1)) {
+    FROM_DEFAULT_V4_UCHAR(space_view3d.sculpt_symmetry_contour);
+  }
+
+  if (!USER_VERSION_ATLEAST(405, 15)) {
+    if (btheme->space_view3d.sculpt_symmetry_contour[0] == 0 &&
+        btheme->space_view3d.sculpt_symmetry_contour[1] == 0 &&
+        btheme->space_view3d.sculpt_symmetry_contour[2] == 0 &&
+        btheme->space_view3d.sculpt_symmetry_contour[3] == 0)
+    {
+      FROM_DEFAULT_V4_UCHAR(space_view3d.sculpt_symmetry_contour);
+    }
+  }
+
+  if (!USER_VERSION_ATLEAST(405, 20)) {
+    /* Ensure symmetry contour color is not fully transparent (was black with alpha 0). */
+    if (btheme->space_view3d.sculpt_symmetry_contour[3] == 0) {
+      FROM_DEFAULT_V4_UCHAR(space_view3d.sculpt_symmetry_contour);
+    }
+  }
+
   if (!USER_VERSION_ATLEAST(403, 25)) {
     FROM_DEFAULT_V4_UCHAR(space_node.node_zone_foreach_geometry_element);
   }

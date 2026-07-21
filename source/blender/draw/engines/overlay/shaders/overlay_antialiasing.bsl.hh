@@ -26,14 +26,27 @@ struct Line {
   float2 dir;
   float dist;
   float dist_raw;
+  float width;
 
-  static Line decode(float3 data)
+  static Line decode(float4 data)
   {
     return {
         .dir = data.xy * 2.0f - 1.0f,
         .dist = (data.z - 0.1f) * 4.0f - 2.0f,
         .dist_raw = data.z,
+        /* Overwritten by #Resources::fetch_texel when the width-carrying variant is compiled. */
+        .width = 1.0f,
     };
+  }
+
+  /**
+   * Overlays that need a line wider than one pixel store it in the alpha channel as `width / 255`
+   * (see the symmetry contour fragment shader). Everything else writes 1.0 there, which decodes
+   * back to the default single-pixel width.
+   */
+  static float decode_width(float4 data)
+  {
+    return (data.a >= 0.999f) ? 1.0f : max(data.a * 255.0f, 1.0f);
   }
 
   bool is_valid() const
@@ -49,6 +62,13 @@ struct TexelData {
 };
 
 struct Resources {
+  /**
+   * Whether any overlay in this frame encodes a line width in `line_tx.a`. Compiled out in the
+   * default variant so the resolve, which runs full-screen every frame in every mode, pays nothing
+   * for a feature almost no frame uses.
+   */
+  [[compilation_constant]] const bool use_line_width;
+
   [[legacy_info]] ShaderCreateInfo draw_globals;
 
   [[sampler(0)]] const sampler2DDepth depth_tx;
@@ -60,10 +80,15 @@ struct Resources {
   TexelData fetch_texel(int2 texel, int2 offset)
   {
     int2 texel_actual = texel + offset;
+    float4 line_data = texelFetch(line_tx, texel_actual, 0);
+    Line line = Line::decode(line_data);
+    if (use_line_width) [[static_branch]] {
+      line.width = Line::decode_width(line_data);
+    }
     return {
         .color = texelFetch(color_tx, texel_actual, 0),
         .depth = texelFetch(depth_tx, texel_actual, 0).r,
-        .line = Line::decode(texelFetch(line_tx, texel_actual, 0).rgb),
+        .line = line,
     };
   }
 };
@@ -72,8 +97,7 @@ struct Resources {
  * Coverage of a line onto a sample that is `distance_to_Line` pixels from the line.
  * Here, `line_kernel_size` is the inner size of the line with 100% coverage.
  */
-template<typename T>
-T line_coverage(T distance_to_line, float line_kernel_size, bool do_smooth_lines)
+template<typename T> T line_coverage(T distance_to_line, T line_kernel_size, bool do_smooth_lines)
 {
   if (do_smooth_lines) {
     return smoothstep(
@@ -83,7 +107,7 @@ T line_coverage(T distance_to_line, float line_kernel_size, bool do_smooth_lines
 }
 
 template float line_coverage<float>(float, float, bool);
-template float4 line_coverage<float4>(float4, float, bool);
+template float4 line_coverage<float4>(float4, float4, bool);
 
 /**
  * Compute distance-to-line for one of the neighboring crosshair pixels, dependent
@@ -160,14 +184,30 @@ struct FragOut {
                                  neighbor_dist(neighbors[2], int2(0, 1)),
                                  neighbor_dist(neighbors[3], int2(0, -1)));
 
-  /* Compute per-neighbor line coverage */
-  float line_kernel = theme.sizes.pixel * 0.5f - 0.5f;
-  float4 coverage = line_coverage(neighbor_dists, line_kernel, srt.do_smooth_lines);
+  /* Compute per-neighbor line coverage. With no encoded width every line is one pixel wide, so a
+   * single scalar kernel covers the whole cross; only the width-carrying variant has to build it
+   * per neighbor. Either way it resolves in one vectorized call. */
+  float4 neighbor_kernels;
+  float center_kernel;
+  if (srt.use_line_width) [[static_branch]] {
+    neighbor_kernels = theme.sizes.pixel * 0.5f *
+                           float4(neighbors[0].line.width,
+                                  neighbors[1].line.width,
+                                  neighbors[2].line.width,
+                                  neighbors[3].line.width) -
+                       0.5f;
+    center_kernel = theme.sizes.pixel * 0.5f * center.line.width - 0.5f;
+  }
+  else {
+    center_kernel = theme.sizes.pixel * 0.5f - 0.5f;
+    neighbor_kernels = float4(center_kernel);
+  }
+
+  float4 coverage = line_coverage(neighbor_dists, neighbor_kernels, srt.do_smooth_lines);
 
   /* Multiply current output color by center pixel's line coverage. */
   if (center.line.is_valid()) {
-    float coverage = line_coverage(center.line.dist, line_kernel, srt.do_smooth_lines);
-    center.color *= coverage;
+    center.color *= line_coverage(center.line.dist, center_kernel, srt.do_smooth_lines);
   }
 
   /* We don't order fragments; instead, we blend using alpha-over/alpha-under
@@ -180,7 +220,7 @@ struct FragOut {
 
 #if 1
   /* Fix aliasing issue with really dense meshes and 1 pixel sized lines. */
-  if (!original_center_has_alpha && center.line.is_valid() && line_kernel < 0.45f) {
+  if (!original_center_has_alpha && center.line.is_valid() && center_kernel < 0.45f) {
     float4 lines_raw = float4(neighbors[0].line.dist_raw,
                               neighbors[1].line.dist_raw,
                               neighbors[2].line.dist_raw,
@@ -196,6 +236,7 @@ struct FragOut {
   frag.color = center.color;
 }
 
-PipelineGraphic pipeline(vert_main, frag_main);
+PipelineGraphic pipeline(vert_main, frag_main, Resources{.use_line_width = false});
+PipelineGraphic pipeline_line_width(vert_main, frag_main, Resources{.use_line_width = true});
 
 }  // namespace overlay::antialiasing

@@ -493,13 +493,21 @@ void update_cache_variants(const Depsgraph &depsgraph, VPaint &vp, Object &ob, P
   }
 
   /* Truly temporary data that isn't stored in properties */
-  if (cache->first_time) {
+  if (brush.stroke_method == BRUSH_STROKE_CURVE) {
+    const float pixel_radius = RNA_float_get(ptr, "size");
+    cache->initial_radius = paint_calc_object_space_radius(
+        *cache->vc, cache->location, pixel_radius);
+  }
+  else if (cache->first_time) {
     cache->initial_radius = paint_calc_object_space_radius(
         *cache->vc, cache->location, BKE_brush_radius_get(&vp.paint, &brush));
     BKE_brush_unprojected_size_set(&vp.paint, &brush, cache->initial_radius * 2.0f);
   }
 
-  if (BKE_brush_use_size_pressure(&brush) && paint_supports_dynamic_size(brush, paint_mode)) {
+  if (brush.stroke_method == BRUSH_STROKE_CURVE) {
+    cache->radius = cache->initial_radius;
+  }
+  else if (BKE_brush_use_size_pressure(&brush) && paint_supports_dynamic_size(brush, paint_mode)) {
     cache->radius = cache->initial_radius *
                     BKE_curvemapping_evaluateF(brush.curve_size, 0, cache->pressure);
   }

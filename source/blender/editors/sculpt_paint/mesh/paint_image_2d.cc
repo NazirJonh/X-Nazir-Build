@@ -79,6 +79,15 @@ struct BrushPainterCache {
   // int image_size[2]; /* UNUSED. */
 };
 
+/* Affine mapping from brush-buffer pixels to texture coordinates: `texco = origin + x * basis_x
+ * + y * basis_y`. An axis-aligned `rctf` mapping (translation + per-axis scale) is a special
+ * case; Roll mappings carry a full oriented 2D frame. */
+struct BrushPainterMapping2D {
+  float2 origin = float2(0.0f, 0.0f);
+  float2 basis_x = float2(1.0f, 0.0f);
+  float2 basis_y = float2(0.0f, 1.0f);
+};
+
 struct BrushPainter {
   Scene *scene;
   const Paint *paint;
@@ -90,9 +99,9 @@ struct BrushPainter {
 
   bool firsttouch; /* first paint op */
 
-  ImagePool *pool;   /* image pool */
-  rctf tex_mapping;  /* texture coordinate mapping */
-  rctf mask_mapping; /* mask texture coordinate mapping */
+  ImagePool *pool;                    /* image pool */
+  BrushPainterMapping2D tex_mapping;  /* texture coordinate mapping */
+  BrushPainterMapping2D mask_mapping; /* mask texture coordinate mapping */
 
   bool cache_invert;
 };
@@ -219,10 +228,10 @@ static void brush_painter_cache_2d_free(BrushPainterCache *cache)
   }
 }
 
-static void brush_imbuf_tex_co(const rctf *mapping, int x, int y, float texco[3])
+static void brush_imbuf_tex_co(const BrushPainterMapping2D &mapping, int x, int y, float texco[3])
 {
-  texco[0] = mapping->xmin + x * mapping->xmax;
-  texco[1] = mapping->ymin + y * mapping->ymax;
+  texco[0] = mapping.origin[0] + x * mapping.basis_x[0] + y * mapping.basis_y[0];
+  texco[1] = mapping.origin[1] + x * mapping.basis_x[1] + y * mapping.basis_y[1];
   texco[2] = 0.0f;
 }
 
@@ -230,7 +239,7 @@ static void brush_imbuf_tex_co(const rctf *mapping, int x, int y, float texco[3]
 static ushort *brush_painter_mask_ibuf_new(BrushPainter *painter, const int size)
 {
   Brush *brush = painter->brush;
-  rctf mask_mapping = painter->mask_mapping;
+  BrushPainterMapping2D mask_mapping = painter->mask_mapping;
   ImagePool *pool = painter->pool;
 
   float texco[3];
@@ -243,7 +252,7 @@ static ushort *brush_painter_mask_ibuf_new(BrushPainter *painter, const int size
   for (y = 0; y < size; y++) {
     for (x = 0; x < size; x++, m++) {
       float res;
-      brush_imbuf_tex_co(&mask_mapping, x, y, texco);
+      brush_imbuf_tex_co(mask_mapping, x, y, texco);
       res = BKE_brush_sample_masktex(painter->paint, brush, texco, thread, pool);
       *m = ushort(65535.0f * res);
     }
@@ -266,7 +275,7 @@ static void brush_painter_mask_imbuf_update(BrushPainter *painter,
 {
   Brush *brush = painter->brush;
   BrushPainterCache *cache = &tile->cache;
-  rctf tex_mapping = painter->mask_mapping;
+  BrushPainterMapping2D tex_mapping = painter->mask_mapping;
   ImagePool *pool = painter->pool;
   ushort res;
 
@@ -288,7 +297,7 @@ static void brush_painter_mask_imbuf_update(BrushPainter *painter,
       ushort *t = tex_mask_cur + (y * diameter + x);
 
       if (!use_texture_old) {
-        brush_imbuf_tex_co(&tex_mapping, x, y, texco);
+        brush_imbuf_tex_co(tex_mapping, x, y, texco);
         res = ushort(65535.0f *
                      BKE_brush_sample_masktex(painter->paint, brush, texco, thread, pool));
       }
@@ -395,7 +404,7 @@ static ImBuf *brush_painter_imbuf_new(
   Brush *brush = painter->brush;
   BrushPainterCache *cache = &tile->cache;
 
-  rctf tex_mapping = painter->tex_mapping;
+  BrushPainterMapping2D tex_mapping = painter->tex_mapping;
   ImagePool *pool = painter->pool;
 
   const bool is_float = cache->is_float;
@@ -436,7 +445,7 @@ static ImBuf *brush_painter_imbuf_new(
       float4 rgba;
 
       if (is_texbrush) {
-        brush_imbuf_tex_co(&tex_mapping, x, y, texco);
+        brush_imbuf_tex_co(tex_mapping, x, y, texco);
         const MTex *mtex = &brush->mtex;
         BKE_brush_sample_tex_3d(painter->paint, brush, mtex, texco, rgba, thread, pool);
         if (cache->is_srgb) {
@@ -488,7 +497,7 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
   const MTex *mtex = &brush->mtex;
   BrushPainterCache *cache = &tile->cache;
 
-  rctf tex_mapping = painter->tex_mapping;
+  BrushPainterMapping2D tex_mapping = painter->tex_mapping;
   ImagePool *pool = painter->pool;
 
   const bool is_float = cache->is_float;
@@ -534,7 +543,7 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
 
       if (!use_texture_old) {
         if (is_texbrush) {
-          brush_imbuf_tex_co(&tex_mapping, x, y, texco);
+          brush_imbuf_tex_co(tex_mapping, x, y, texco);
           BKE_brush_sample_tex_3d(painter->paint, brush, mtex, texco, rgba, thread, pool);
           if (cache->is_srgb) {
             IMB_colormanagement_scene_linear_to_srgb_v3(rgba, rgba);
@@ -679,7 +688,8 @@ static void brush_painter_2d_tex_mapping(ImagePaintState *s,
                                          const float pos[2],
                                          const float mouse[2],
                                          int mapmode,
-                                         rctf *r_mapping)
+                                         const ed::sculpt_paint::ImagePaintRollDab *roll_dab,
+                                         BrushPainterMapping2D *r_mapping)
 {
   float invw = 1.0f / float(tile->canvas->x);
   float invh = 1.0f / float(tile->canvas->y);
@@ -689,6 +699,28 @@ static void brush_painter_2d_tex_mapping(ImagePaintState *s,
   start[0] = pos[0] - diameter / 2.0f;
   start[1] = pos[1] - diameter / 2.0f;
 
+  if (mapmode == MTEX_MAP_MODE_ROLL) {
+    /* Roll mapping: orient the brush buffer along the current trajectory. The Roll frame's
+     * tangent is the texture x-axis and the perpendicular is the y-axis; the frame is centered
+     * on the dab, so the texture repeats once per brush diameter along the path. Sampling
+     * normalizes the coordinates by `start_pixel_radius` later (`BKE_brush_sample_tex_3d()`),
+     * hence the `* start_pixel_radius` here. A dab without a valid frame (e.g. the very first
+     * dab of the stroke) falls back to a stable axis-aligned frame. */
+    float2 tangent(1.0f, 0.0f);
+    if (roll_dab != nullptr && roll_dab->frame_valid) {
+      tangent = roll_dab->tangent;
+    }
+    const float2 perp = float2(-tangent.y, tangent.x);
+    const float scale = 2.0f * s->paint->runtime->start_pixel_radius / float(diameter);
+    const float2 half_extent = (tangent + perp) * (0.5f * float(diameter) * scale);
+    r_mapping->origin = -half_extent;
+    r_mapping->basis_x = tangent * scale;
+    r_mapping->basis_y = perp * scale;
+    return;
+  }
+
+  rctf mapping;
+
   if (mapmode == MTEX_MAP_MODE_STENCIL) {
     /* map from view coordinates of brush to region coordinates */
     float xmin, ymin, xmax, ymax;
@@ -697,33 +729,38 @@ static void brush_painter_2d_tex_mapping(ImagePaintState *s,
         s->v2d, (start[0] + diameter) * invw, (start[1] + diameter) * invh, &xmax, &ymax);
 
     /* output r_mapping from brush ibuf x/y to region coordinates */
-    r_mapping->xmax = (xmax - xmin) / float(diameter);
-    r_mapping->ymax = (ymax - ymin) / float(diameter);
-    r_mapping->xmin = xmin + (tile->uv_origin[0] * tile->size[0] * r_mapping->xmax);
-    r_mapping->ymin = ymin + (tile->uv_origin[1] * tile->size[1] * r_mapping->ymax);
+    mapping.xmax = (xmax - xmin) / float(diameter);
+    mapping.ymax = (ymax - ymin) / float(diameter);
+    mapping.xmin = xmin + (tile->uv_origin[0] * tile->size[0] * mapping.xmax);
+    mapping.ymin = ymin + (tile->uv_origin[1] * tile->size[1] * mapping.ymax);
   }
   else if (mapmode == MTEX_MAP_MODE_3D) {
     /* 3D mapping, just mapping to canvas 0..1. */
-    r_mapping->xmin = 2.0f * (start[0] * invw - 0.5f);
-    r_mapping->ymin = 2.0f * (start[1] * invh - 0.5f);
-    r_mapping->xmax = 2.0f * invw;
-    r_mapping->ymax = 2.0f * invh;
+    mapping.xmin = 2.0f * (start[0] * invw - 0.5f);
+    mapping.ymin = 2.0f * (start[1] * invh - 0.5f);
+    mapping.xmax = 2.0f * invw;
+    mapping.ymax = 2.0f * invh;
   }
   else if (ELEM(mapmode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_RANDOM)) {
     /* view mapping */
-    r_mapping->xmin = mouse[0] - diameter * 0.5f + 0.5f;
-    r_mapping->ymin = mouse[1] - diameter * 0.5f + 0.5f;
-    r_mapping->xmax = 1.0f;
-    r_mapping->ymax = 1.0f;
+    mapping.xmin = mouse[0] - diameter * 0.5f + 0.5f;
+    mapping.ymin = mouse[1] - diameter * 0.5f + 0.5f;
+    mapping.xmax = 1.0f;
+    mapping.ymax = 1.0f;
   }
   else /* if (mapmode == MTEX_MAP_MODE_TILED) */ {
-    r_mapping->xmin = int(-diameter * 0.5) + int(floorf(pos[0])) -
-                      int(floorf(tile->start_paintpos[0]));
-    r_mapping->ymin = int(-diameter * 0.5) + int(floorf(pos[1])) -
-                      int(floorf(tile->start_paintpos[1]));
-    r_mapping->xmax = 1.0f;
-    r_mapping->ymax = 1.0f;
+    mapping.xmin = int(-diameter * 0.5) + int(floorf(pos[0])) -
+                   int(floorf(tile->start_paintpos[0]));
+    mapping.ymin = int(-diameter * 0.5) + int(floorf(pos[1])) -
+                   int(floorf(tile->start_paintpos[1]));
+    mapping.xmax = 1.0f;
+    mapping.ymax = 1.0f;
   }
+
+  /* Axis-aligned `rctf` mapping (translation + per-axis scale) as an affine frame. */
+  r_mapping->origin = float2(mapping.xmin, mapping.ymin);
+  r_mapping->basis_x = float2(mapping.xmax, 0.0f);
+  r_mapping->basis_y = float2(0.0f, mapping.ymax);
 }
 
 static void brush_painter_2d_refresh_cache(ImagePaintState *s,
@@ -733,7 +770,8 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
                                            const float mouse[2],
                                            float pressure,
                                            float distance,
-                                           float size)
+                                           float size,
+                                           const ed::sculpt_paint::ImagePaintRollDab *roll_dab)
 {
   const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
   Brush *brush = painter->brush;
@@ -751,6 +789,11 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
                       BKE_brush_color_jitter_get_settings(painter->paint, brush);
   float tex_rotation = -brush->mtex.rot;
   float mask_rotation = -brush->mask_mtex.rot;
+  /* Roll frames change with every dab: the affine mapping is rebuilt per dab, so the brush
+   * buffer must be regenerated instead of reusing cached pixels (the partial-update shift only
+   * understands translation-only mappings). */
+  const bool roll_mode = (brush->mtex.brush_map_mode == MTEX_MAP_MODE_ROLL);
+  const bool mask_roll_mode = (brush->mask_mtex.brush_map_mode == MTEX_MAP_MODE_ROLL);
 
   painter->pool = BKE_image_pool_new();
 
@@ -762,12 +805,18 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     else if (brush->mtex.brush_map_mode == MTEX_MAP_MODE_RANDOM) {
       do_random = true;
     }
-    else if (!((brush->stroke_method == BRUSH_STROKE_ANCHORED) || update_color)) {
+    else if (!((brush->stroke_method == BRUSH_STROKE_ANCHORED) || update_color || roll_mode)) {
       do_partial_update = true;
     }
 
-    brush_painter_2d_tex_mapping(
-        s, tile, diameter, pos, mouse, brush->mtex.brush_map_mode, &painter->tex_mapping);
+    brush_painter_2d_tex_mapping(s,
+                                 tile,
+                                 diameter,
+                                 pos,
+                                 mouse,
+                                 brush->mtex.brush_map_mode,
+                                 roll_dab,
+                                 &painter->tex_mapping);
   }
 
   if (cache->is_maskbrush) {
@@ -780,7 +829,7 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     else if (brush->mask_mtex.brush_map_mode == MTEX_MAP_MODE_RANDOM) {
       renew_maxmask = true;
     }
-    else if (!(brush->stroke_method == BRUSH_STROKE_ANCHORED)) {
+    else if (!(brush->stroke_method == BRUSH_STROKE_ANCHORED) && !mask_roll_mode) {
       do_partial_update_mask = true;
       renew_maxmask = true;
     }
@@ -791,12 +840,18 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     }
 
     if (diameter != cache->lastdiameter || (mask_rotation != cache->last_mask_rotation) ||
-        renew_maxmask)
+        renew_maxmask || mask_roll_mode)
     {
       MEM_SAFE_DELETE(cache->tex_mask);
 
-      brush_painter_2d_tex_mapping(
-          s, tile, diameter, pos, mouse, brush->mask_mtex.brush_map_mode, &painter->mask_mapping);
+      brush_painter_2d_tex_mapping(s,
+                                   tile,
+                                   diameter,
+                                   pos,
+                                   mouse,
+                                   brush->mask_mtex.brush_map_mode,
+                                   roll_dab,
+                                   &painter->mask_mapping);
 
       if (do_partial_update_mask) {
         brush_painter_mask_imbuf_partial_update(painter, tile, pos, diameter);
@@ -813,7 +868,7 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
   /* detect if we need to recreate image brush buffer */
   if (diameter != cache->lastdiameter || (tex_rotation != cache->last_tex_rotation) || do_random ||
-      update_color)
+      update_color || roll_mode)
   {
     if (cache->ibuf) {
       IMB_freeImBuf(cache->ibuf);
@@ -1513,7 +1568,8 @@ void paint_2d_stroke(void *ps,
                      const bool eraser,
                      float pressure,
                      float distance,
-                     float base_size)
+                     float base_size,
+                     const ed::sculpt_paint::ImagePaintRollDab *roll_dab)
 {
   float new_uv[2], old_uv[2];
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
@@ -1600,7 +1656,8 @@ void paint_2d_stroke(void *ps,
                                    byte_colorspace,
                                    painter->cache_invert);
 
-    brush_painter_2d_refresh_cache(s, painter, tile, new_coord, mval, pressure, distance, size);
+    brush_painter_2d_refresh_cache(
+        s, painter, tile, new_coord, mval, pressure, distance, size, roll_dab);
 
     if (paint_2d_op(s, tile, old_coord, new_coord)) {
       tile->need_redraw = true;

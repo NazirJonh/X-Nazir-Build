@@ -855,7 +855,9 @@ struct UserDef_Experimental {
    * when the release cycle is not alpha. */
   char use_new_curves_tools = 0;
   char use_extended_asset_browser = 0;
-  char use_sculpt_texture_paint = 0;
+  /* Sculpt Texture Paint is no longer gated: the flag it used to hide behind was only reachable in
+   * alpha builds, where the experimental preferences panel is shown at all. */
+  char _pad_former_sculpt_texture_paint = 0;
   char use_shader_node_previews = 0;
   /* As a temporary exception to the above sanitation rules, this flag is always ON. The work to
    * actually remove this flag is tracked in #158903. */

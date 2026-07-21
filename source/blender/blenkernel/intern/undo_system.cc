@@ -522,6 +522,16 @@ UndoStep *BKE_undosys_step_push_init(UndoStack *ustack, bContext *C, const char 
   return BKE_undosys_step_push_init_with_type(ustack, C, name, ut);
 }
 
+void BKE_undosys_step_push_init_abort(UndoStack *ustack)
+{
+  UNDO_NESTED_ASSERT(false);
+  if (UndoStep *us = ustack->step_init) {
+    undosys_step_free_and_unlink(ustack, us);
+    ustack->step_init = nullptr;
+    undosys_stack_validate(ustack, false);
+  }
+}
+
 eUndoPushReturn BKE_undosys_step_push_with_type(UndoStack *ustack,
                                                 bContext *C,
                                                 const char *name,

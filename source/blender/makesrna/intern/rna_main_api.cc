@@ -777,6 +777,21 @@ static LightProbe *rna_Main_lightprobe_new(Main *bmain, const char *name, int ty
   return probe;
 }
 
+static PaintCurve *rna_Main_paintcurves_new(Main *bmain, const char *name)
+{
+  char safe_name[MAX_ID_NAME - 2];
+  rna_idname_validate(name, safe_name);
+
+  /* `BKE_paint_curve_add()` rather than a bare `BKE_id_new`: the embedded `CurvesGeometry` needs
+   * placement-new, and two flags whose DNA member initializers a zeroed allocation never runs. */
+  PaintCurve *pc = BKE_paint_curve_add(bmain, safe_name);
+  id_us_min(&pc->id);
+
+  WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
+
+  return pc;
+}
+
 static bGPdata *rna_Main_annotations_new(Main *bmain, const char *name)
 {
   char safe_name[MAX_ID_NAME - 2];
@@ -2074,6 +2089,30 @@ void RNA_def_main_paintcurves(BlenderRNA *brna, PropertyRNA *cprop)
   func = RNA_def_function(srna, "tag", "rna_Main_paintcurves_tag");
   parm = RNA_def_boolean(func, "value", false, "Value", "");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "new", "rna_Main_paintcurves_new");
+  RNA_def_function_ui_description(func, "Add a new paint curve to the main database");
+  parm = RNA_def_string(func, "name", "PaintCurve", 0, "", "New name for the data-block");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  /* return type */
+  parm = RNA_def_pointer(func, "paint_curve", "PaintCurve", "", "New paint curve data-block");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_Main_ID_remove");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(func, "Remove a paint curve from the current blendfile");
+  parm = RNA_def_pointer(func, "paint_curve", "PaintCurve", "", "Paint curve to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  RNA_def_boolean(
+      func, "do_unlink", true, "", "Unlink all usages of this paint curve before deleting it");
+  RNA_def_boolean(func,
+                  "do_id_user",
+                  true,
+                  "",
+                  "Decrement user counter of all data-blocks used by this paint curve");
+  RNA_def_boolean(
+      func, "do_ui_user", true, "", "Make sure interface does not reference this paint curve");
 }
 void RNA_def_main_annotations(BlenderRNA *brna, PropertyRNA *cprop)
 {

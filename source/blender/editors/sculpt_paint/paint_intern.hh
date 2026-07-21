@@ -12,6 +12,9 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_rand.hh"
 #include "BLI_span.hh"
+#include "BLI_vector.hh"
+
+#include "BKE_curve_patch.hh"
 
 #include "DNA_object_enums.h"
 #include "DNA_scene_enums.h"
@@ -21,6 +24,7 @@
 
 #include "ED_view3d.hh"
 
+#include <memory>
 #include <optional>
 
 namespace blender {
@@ -96,6 +100,232 @@ using StrokeDone = void (*)(PaintStroke *stroke, bool is_cancel);
 struct PaintSample {
   float2 mouse = float2(0.0f, 0.0f);
   float pressure = 0.0f;
+};
+
+/**
+ * Per-dab record for the Roll stroke method's ring buffer. Distinct from #PaintSample (the raw
+ * per-event input-averaging sample): this carries the richer state a rolled dab needs -- the 3D
+ * hit location, the frozen surface normal, tilt, size and pen flip.
+ */
+struct PaintStrokePoint {
+  float2 mouse_in = float2(0.0f, 0.0f);
+  float2 mouse_out = float2(0.0f, 0.0f);
+  float3 location = float3(0.0f);
+  float3 surface_normal = float3(0.0f, 0.0f, 1.0f); /* sculpt_normal at recording time. */
+  float pressure = 0.0f;
+  float x_tilt = 0.0f;
+  float y_tilt = 0.0f;
+  bool pen_flip = false;
+  float size = 0.0f;
+};
+
+/**
+ * Per-dab input contract for 2D Roll mapping in the Image Editor (SPACE_IMAGE + SI_MODE_PAINT,
+ * `PaintMode::Texture2D`).
+ *
+ * Canonical units: `center_uv` is authoritative in image UV space (unbounded, so UDIM tiles are
+ * supported), and `radius`/`arc_length` are expressed in the same UV units that were in effect
+ * when the dab was fixed -- a finished patch must not depend on the later view zoom. The
+ * concrete dab is rasterized in tile-local canvas pixels; the UV -> tile pixel conversion is
+ * the existing `paint_2d_uv_to_coord()` (`paint_image_2d.cc`).
+ *
+ * Deliberately carries no `float3` location, surface normal or #StrokeCache: the 2D mapping
+ * path is flat by contract and never touches 3D Roll state.
+ */
+struct ImagePaintRollDab {
+  float2 center_uv = float2(0.0f, 0.0f); /* dab center in canonical image UV space. */
+  float2 tangent = float2(1.0f, 0.0f);   /* unit-length path tangent in the image plane. */
+  float arc_length = 0.0f;               /* along-path arc length in UV units. */
+  float radius = 0.0f;                   /* brush radius in UV units at dab time. */
+  bool frame_valid = false;              /* false when no stable tangent exists (first dab). */
+};
+
+/**
+ * Live 2D trajectory for the Image Editor Roll mapping path
+ * (`SPACE_IMAGE + SI_MODE_PAINT + PaintMode::Texture2D`).
+ *
+ * Records one canonical UV sample per dab: `uv_traj[i]` is the dab center converted through the
+ * active `View2D` at the time of the dab, and `arc_lengths[i]` is the cumulative distance in
+ * UV units up to and including sample i. The struct owns no extra state beyond these two
+ * parallel vectors: tangent / frame_valid for the *current* dab are derived on demand in
+ * #compute_roll_dab() at the point of dispatch to `paint_2d_stroke()`, because the BrushPainter
+ * mapping consumes them per dab and we cannot move the path origin forward without recording
+ * every input sample (3D Roll's deferred dab is the opposite trade-off; 2D Roll does not need
+ * it).
+ *
+ * Lifetime is bound to a single 2D stroke: created empty inside the `PaintOperation`, grown by
+ * exactly one entry per `ImagePaintStroke::update_step()` call when `enabled` is true, and
+ * cleared at `done()` / on cancel. Independent of #RollSpline (3D) and of any tooling.
+ */
+struct ImagePaintRollTraj2D {
+  /* Per-dab UV centers (image plane, unbounded so UDIM tiles fit). */
+  Vector<float2> uv_traj;
+  /* Cumulative arc length up to and including `uv_traj[i]`. First entry is always 0. */
+  Vector<float> arc_lengths;
+
+  /* True when the active stroke method requires Roll mapping (BRUSH_STROKE_ROLL, or
+   * BRUSH_STROKE_CURVE with MTEX_MAP_MODE_ROLL on mtex/mask_mtex). The 2D path is opt-in: a
+   * Space/Anchored/Curve brush that does not use Roll mapping leaves `enabled = false` and
+   * never touches `uv_traj`. */
+  bool enabled = false;
+
+  /* Reset trajectory buffers; `enabled` is left unchanged. */
+  void clear()
+  {
+    uv_traj.clear();
+    arc_lengths.clear();
+  }
+
+  /* Append the dab at UV `uv`. The new sample is always accepted here; degenerate duplicates
+   * (zero-length segments) are still kept so that exact same-position dabs -- typical of
+   * BRUSH_STROKE_SPACE on stationary input -- retain a frame_valid=false fallback until motion
+   * resumes. */
+  void append(const float2 &uv)
+  {
+    uv_traj.append(uv);
+    if (uv_traj.size() == 1) {
+      arc_lengths.append(0.0f);
+    }
+    else {
+      const float2 prev_uv = uv_traj[uv_traj.size() - 2];
+      arc_lengths.append(arc_lengths.last() + math::length(uv - prev_uv));
+    }
+  }
+
+  /* True when at least one sample has been appended. */
+  bool is_empty() const
+  {
+    return uv_traj.is_empty();
+  }
+
+  /* True when `enabled` and non-empty. */
+  bool has_active_dab() const
+  {
+    return enabled && !uv_traj.is_empty();
+  }
+
+  /* Compute the #ImagePaintRollDab for the last appended sample. Tangent is a forward
+   * difference from the previous sample, normalized; when the segment is shorter than
+   * `1e-6f` UV units or no previous sample exists, tangent falls back to unit (1, 0) and
+   * `frame_valid = false`. The output extends the Stage 3 brush_painter_2d_tex_mapping
+   * contract unchanged.
+   *
+   * `radius_uv` is the brush radius in canonical UV units, used for future consumers; the
+   * current Stage 3 mapping reads `start_pixel_radius` directly, so the caller may pass
+   * any conversion it computed (typically `pixel_radius / tile_size[uidx]`). */
+  void compute_roll_dab(const float radius_uv, ImagePaintRollDab &r_dab) const
+  {
+    BLI_assert(!uv_traj.is_empty());
+    const int idx = uv_traj.size() - 1;
+    r_dab.center_uv = uv_traj[idx];
+    r_dab.arc_length = arc_lengths[idx];
+    r_dab.radius = radius_uv;
+
+    /* Stable fallback for the first sample and any zero-length segment: tangent is unit (1, 0)
+     * and the frame is flagged invalid so consumers can distinguish "first dab" from "moving
+     * along the path". */
+    r_dab.tangent = float2(1.0f, 0.0f);
+    r_dab.frame_valid = false;
+    if (idx >= 1) {
+      const float2 prev_uv = uv_traj[idx - 1];
+      const float2 delta = uv_traj[idx] - prev_uv;
+      const float len = math::length(delta);
+      /* `1e-6f` UV units is well below a single pixel even at the worst zoom and is the
+       * threshold `BrushPainterMapping2D` recognizes as "no motion" when scaling the basis. */
+      if (len > 1e-6f) {
+        r_dab.tangent = delta / len;
+        r_dab.frame_valid = true;
+      }
+    }
+  }
+};
+
+/**
+ * Live, arc-length-parameterized polyline for the Roll stroke method. Owns the recorded knots
+ * (3D `poly_3d`, screen `poly_2d`, per-knot `pressures`/`normals`) and delegates all 3D
+ * arc-length/closest-point math to a contained #CurvePatchSpline (`core`), rebuilt by
+ * #update_lengths(). Roll-only smoothing (virtual extension, CC grid, LUT) lives in
+ * `paint_stroke_roll.cc`.
+ */
+struct RollSpline {
+  /** Geometric core used only for #closest_point_3d and #evaluate_3d. Its internal
+   * `lengths_3d`/`tangents_3d` use CurvePatchSpline's leading-zero convention and are NOT read by
+   * the roll code directly -- the roll grid/LUT math relies on the #length_parameterize convention
+   * below (no leading zero, one entry per segment). */
+  bke::CurvePatchSpline core;
+  Vector<float3> poly_3d; /* Recorded 3D knots (authoritative). */
+  Vector<float2> poly_2d; /* Recorded screen-space knots. */
+  /** Cumulative arc lengths in #length_parameterize convention: one entry per segment (size ==
+   * knots - 1), `lengths_3d.last() == total`. NOT the leading-zero convention `core` uses. */
+  Vector<float> lengths_2d;
+  Vector<float> lengths_3d;
+  Vector<float3> tangents_3d; /* Central-difference tangent at each knot (size == knots). */
+  Vector<float> pressures;    /* Per-knot pen pressure (0..1). */
+  Vector<float3> normals;     /* Per-knot frozen surface normal. */
+
+  void clear();
+  bool is_empty() const;
+  float total_length_3d() const; /* -> core.total_length(). */
+  float total_length_2d() const;
+
+  /** Rebuild `core` from `poly_3d` and recompute `lengths_2d`. Call after mutating the knots. */
+  void update_lengths();
+
+  /** Length of 3D segment `seg_idx` (difference of consecutive `core.lengths_3d`). */
+  float segment_length_3d(int seg_idx) const;
+
+  float3 evaluate_3d(float s) const;              /* -> core.evaluate(s). */
+  float2 tangent_2d_at_index(int poly_idx) const; /* 2D direction from `poly_2d`. */
+
+  /** Closest point on the 3D polyline: arc-length, tangent, distance. -> core.closest_point_dist.
+   */
+  void closest_point_3d(const float3 &query, float &r_s, float3 &r_tan, float &r_dis) const;
+};
+
+/**
+ * Everything `BRUSH_STROKE_ROLL` needs for the life of one stroke, and nothing any other stroke
+ * method reads.
+ *
+ * Held by #PaintStroke as a `std::unique_ptr` that stays null for every other stroke method, so
+ * an ordinary Draw stroke no longer carries a #RollSpline and two `Vector`s it never touches.
+ * Its presence IS the "roll mapping is active" flag -- see #PaintStroke::need_roll_mapping.
+ *
+ * The implementation lives in `paint_stroke_roll.cc` as #PaintStroke methods rather than as
+ * methods here, deliberately: they read the general stroke's own dab ring buffer (`points_`,
+ * `num_points_`, `cur_point_`) and its cached brush/view context throughout. Only the state that
+ * is exclusively Roll's moved out; the code that drives it stays where it can still see the
+ * stroke it belongs to.
+ */
+struct RollStrokeState {
+  /** Raw arc length of stroke knots dropped from the head of the ring buffer, subtracted in
+   * `spline_uv()` so the texture V coordinate stays continuous as the polyline shrinks. */
+  float stroke_distance_world = 0.0f;
+  /** True after virtual backward segments are prepended. */
+  bool roll_virtual_prepended = false;
+  /** Polyline points in virtual backward extension. */
+  int n_virtual_poly_points = 0;
+  /** Arc length of virtual extension (subtracted from V). */
+  float roll_virtual_length = 0.0f;
+  /** `cache.initial_radius`, captured on first dab. */
+  float roll_initial_radius = 0.0f;
+  /** Projection normal, frozen on first dab. */
+  float3 roll_proj_normal = float3(0.0f);
+  /** Pressure-normalized V offset for consumed knots. */
+  float stroke_distance_normalized = 0.0f;
+  /** Normalized arc length of virtual extension. */
+  float roll_virtual_length_normalized = 0.0f;
+  /** `backward_ext` knot count at creation, for budget. */
+  int initial_backward_ext_count = 0;
+  /** Always-on preview of unflushed spline portion. */
+  void *roll_cursor = nullptr;
+  void *debug_cursor = nullptr;
+  /** Ring buffer index of the last deferred dab placed. */
+  int last_painted_roll_idx = -1;
+  RollSpline roll_spline;
+  /** Virtual backward extension knots (screen space). */
+  Vector<float2> backward_ext_2d;
+  /** Virtual backward extension knots (world space). */
+  Vector<float3> backward_ext_3d;
 };
 
 /**
@@ -178,6 +408,27 @@ struct PaintStroke : NonCopyable, NonMovable {
 
   bool original_ = false; /* Ray-cast original mesh at start of stroke. */
 
+  /* last smoothed mouse position (for stabilize stroke finalization) */
+  float2 last_smoothed_mouse_ = float2(0.0f, 0.0f);
+
+  /* Index of the current input sample within the stroke, counted from 0. */
+  int stroke_sample_index_ = 0;
+  /* `Brush::spacing` as a fraction. Recomputed for every brush, not only for Roll. */
+  float spacing_raw_ = 0.0f;
+
+  /* Recorded dabs, oldest to newest within the ring. EVERY stroke method uses this, not just
+   * Roll: an ordinary stroke takes the point just recorded, while Roll defers by
+   * `roll_half_points()` so its spline has forward context (see #add_step). These three sat under
+   * a "Roll stroke method" heading that did not describe them. */
+  PaintStrokePoint points_[PAINT_MAX_INPUT_SAMPLES];
+  int num_points_ = 0;
+  int cur_point_ = 0;
+
+  /* --- Roll stroke method (BRUSH_STROKE_ROLL) --- */
+  /* Null for every other stroke method; its presence is what #need_roll_mapping reports. Created
+   * by #stroke_init when the brush asks for roll mapping, and never afterwards. */
+  std::unique_ptr<RollStrokeState> roll_ = nullptr;
+
  public:
   PaintStroke() = delete;
 
@@ -225,6 +476,53 @@ struct PaintStroke : NonCopyable, NonMovable {
   float stroke_distance() const
   {
     return stroke_distance_;
+  }
+
+  /**
+   * Compute roll-mapping UV coordinates for a 3D point along the stroke spline.
+   * \param cache: The sculpt stroke cache (for the roll LUT/view axes).
+   * \param co: Object-space position to project.
+   * \param r_out: Output `[U, V, 0]` (U negated to match texture orientation).
+   * \param r_tan: Output tangent at the sampled spline point.
+   */
+  void spline_uv(const StrokeCache &cache,
+                 const float co[3],
+                 float r_out[3],
+                 float r_tan[3]) const;
+
+  float spline_length() const;
+
+  /** Returns true when roll texture mapping is active for this stroke. */
+  bool need_roll_mapping() const
+  {
+    return roll_ != nullptr;
+  }
+
+  /**
+   * Precompute the arc length, position, tangent, surface grid and UV LUT for the brush center.
+   * Call once per dab (single-threaded) before the per-vertex parallel loop; results are stored on
+   * `cache` for #spline_uv() to read.
+   */
+  void compute_roll_center(StrokeCache &cache);
+
+  /** Debug: draw the roll spline overlay in the viewport (developer Paint Debug option). */
+  void draw_debug_roll(bContext *C) const;
+
+  /** Draw the unflushed portion of the roll spline as an always-on preview. */
+  void draw_roll_preview(bContext *C) const;
+
+  /** Resample the recorded real roll knots (excluding virtual extensions) to ~14 object-space
+   * control points with a per-point radius derived from pen pressure, for the Curve Patch handoff.
+   * Fills `r_positions`/`r_radii` (always the same length). Emits nothing when fewer than 2 knots
+   * exist. */
+  void extract_roll_control_points(Vector<float3> &r_positions, Vector<float> &r_radii) const;
+
+  /** The projection normal frozen on the first roll dab, used as the Curve Patch plane normal in
+   * the handoff. Zero for a stroke that never rolled, which the handoff already treats as "no
+   * frozen normal" and replaces with the stroke's own surface normal. */
+  float3 roll_plane_normal() const
+  {
+    return roll_ ? roll_->roll_proj_normal : float3(0.0f);
   }
 
  protected:
@@ -281,8 +579,31 @@ struct PaintStroke : NonCopyable, NonMovable {
               bool *r_location_is_set);
 
  private:
+  int roll_max_points() const;
+  int roll_half_points() const
+  {
+    return (roll_max_points() * 3) / 5 + 2;
+  }
+  void add_roll_point(const float2 &mouse_in,
+                      const float2 &mouse_out,
+                      const float3 &loc,
+                      const float3 &surface_normal,
+                      float size,
+                      float pressure,
+                      bool pen_flip,
+                      float x_tilt,
+                      float y_tilt);
+  void prepend_virtual_roll_points();
+  void make_roll_spline(bContext *C);
+  void finish_roll_stroke(bContext *C, wmOperator *op, const float2 &mouse_up, float pressure);
+  void init_roll_cursors();
+
   void done(bContext *C, bool is_cancel);
-  void add_step(bContext *C, wmOperator *op, float2 mval, float pressure);
+  void add_step(bContext *C,
+                wmOperator *op,
+                float2 mval,
+                float pressure,
+                std::optional<float> curve_point_radius = std::nullopt);
 
   void add_sample(int input_samples, float x, float y, float pressure);
   void calc_average_sample(PaintSample *average);
@@ -292,7 +613,9 @@ struct PaintStroke : NonCopyable, NonMovable {
                      float spacing,
                      float *length_residue,
                      float2 old_pos,
-                     float2 new_pos);
+                     float2 new_pos,
+                     std::optional<float> old_curve_radius = std::nullopt,
+                     std::optional<float> new_curve_radius = std::nullopt);
   int space_stroke(bContext *C, wmOperator *op, float2 final_mouse, float final_pressure);
 
   void line_end(bContext *C, wmOperator *op, float2 mouse);
@@ -311,6 +634,13 @@ float2 paint_stroke_jitter_pos(Paint *paint,
  * Returns zero if the stroke dots should not be spaced, non-zero otherwise.
  */
 bool paint_space_stroke_enabled(const Brush &br, PaintMode mode);
+/**
+ * Computes the overlap-compensation factor used to scale brush strength so that closely spaced
+ * dabs don't over-apply relative to widely spaced ones. Callers store the result in
+ * `Paint::runtime->overlap_factor`, which `brush_strength()` reads for every dab. `factor` scales
+ * `Brush::spacing` before the integration (e.g. `1.0f` for a normal stroke).
+ */
+float paint_stroke_integrate_overlap(const Brush &br, const float factor);
 /**
  * Return true if the brush size can change during paint (normally used for pressure).
  */
@@ -468,7 +798,8 @@ void paint_2d_stroke(void *ps,
                      bool eraser,
                      float pressure,
                      float distance,
-                     float base_size);
+                     float base_size,
+                     const ed::sculpt_paint::ImagePaintRollDab *roll_dab = nullptr);
 /**
  * This function expects sRGB space color values.
  */
@@ -662,16 +993,6 @@ inline float3 symmetry_flip(const float3 &src, const ePaintSymmetryFlags symm)
 
 }  // namespace ed::sculpt_paint
 
-/* `paint_curve.cc` */
-
-void PAINTCURVE_OT_new(wmOperatorType *ot);
-void PAINTCURVE_OT_add_point(wmOperatorType *ot);
-void PAINTCURVE_OT_delete_point(wmOperatorType *ot);
-void PAINTCURVE_OT_select(wmOperatorType *ot);
-void PAINTCURVE_OT_slide(wmOperatorType *ot);
-void PAINTCURVE_OT_draw(wmOperatorType *ot);
-void PAINTCURVE_OT_cursor(wmOperatorType *ot);
-
 /* image painting blur kernel */
 struct BlurKernel {
   float *wdata;     /* actual kernel */
@@ -689,9 +1010,6 @@ void paint_delete_blur_kernel(BlurKernel *);
 
 /** Initialize viewport pivot from evaluated bounding box center of `ob`. */
 void paint_init_pivot(Object *ob, Scene *scene, Paint *paint);
-
-/* paint curve defines */
-#define PAINT_CURVE_NUM_SEGMENTS 40
 
 /* palette.cc */
 

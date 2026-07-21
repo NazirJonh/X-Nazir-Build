@@ -28,6 +28,7 @@ class Curves : Overlay {
  private:
   PassSimple edit_curves_ps_ = {"Curve Edit"};
   PassSimple::Sub *edit_curves_lines_ = nullptr;
+  PassSimple::Sub *edit_curves_normals_ = nullptr;
 
   PassSimple edit_curves_handles_ps_ = {"Curve Edit Handles"};
   PassSimple::Sub *edit_curves_points_ = nullptr;
@@ -62,6 +63,10 @@ class Curves : Overlay {
 
     offset_data_ = state.offset_data_get();
 
+    const bool show_normals = (state.overlay.edit_flag & V3D_OVERLAY_EDIT_CU_NORMALS);
+    const bool use_hq_normals = (state.scene->r.perf_flag & SCE_PERF_HQ_NORMALS) ||
+                                GPU_use_hq_normals_workaround();
+
     {
       auto &pass = edit_curves_ps_;
       pass.init();
@@ -77,6 +82,19 @@ class Curves : Overlay {
         sub.push_constant("use_weight", false);
         sub.push_constant("use_grease_pencil", false);
         edit_curves_lines_ = &sub;
+      }
+      if (show_normals) {
+        auto &sub = pass.sub("Normals");
+        sub.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS_EQUAL | DRW_STATE_WRITE_DEPTH,
+                      state.clipping_plane_count);
+        /* Shared with legacy curves: the normals overlay is identical for both curve types. */
+        sub.shader_set(res.shaders->legacy_curve_edit_normals.get());
+        sub.push_constant("normal_size", state.overlay.normals_length);
+        sub.push_constant("use_hq_normals", use_hq_normals);
+        edit_curves_normals_ = &sub;
+      }
+      else {
+        edit_curves_normals_ = nullptr;
       }
     }
 
@@ -106,10 +124,6 @@ class Curves : Overlay {
         edit_curves_points_ = &sub;
       }
     }
-
-    const bool show_normals = (state.overlay.edit_flag & V3D_OVERLAY_EDIT_CU_NORMALS);
-    const bool use_hq_normals = (state.scene->r.perf_flag & SCE_PERF_HQ_NORMALS) ||
-                                GPU_use_hq_normals_workaround();
 
     {
       auto &pass = edit_legacy_curve_ps_;
@@ -215,6 +229,10 @@ class Curves : Overlay {
     {
       gpu::Batch *geom = DRW_curves_batch_cache_get_edit_curves_lines(&curves);
       edit_curves_lines_->draw(geom, manager.unique_handle(ob_ref));
+    }
+    if (edit_curves_normals_) {
+      gpu::Batch *geom = DRW_curves_batch_cache_get_edit_normals(&curves);
+      edit_curves_normals_->draw_expand(geom, GPU_PRIM_LINES, 2, 1, manager.unique_handle(ob_ref));
     }
   }
 

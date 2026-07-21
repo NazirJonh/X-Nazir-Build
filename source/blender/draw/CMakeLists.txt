@@ -648,7 +648,7 @@ set(GLSL_SRC
   engines/overlay/shaders/overlay_depth_only_pointcloud_vert.glsl
   engines/overlay/shaders/overlay_depth_only_vert.glsl
   engines/overlay/shaders/overlay_edit_curve_handle_vert.glsl
-  engines/overlay/shaders/overlay_edit_curve_normals_vert.glsl
+  engines/overlay/shaders/overlay_edit_curve_normals.bsl.hh
   engines/overlay/shaders/overlay_edit_curve_point_vert.glsl
   engines/overlay/shaders/overlay_edit_curve_wire_vert.glsl
   engines/overlay/shaders/overlay_edit_curves_handle_vert.glsl

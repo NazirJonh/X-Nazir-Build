@@ -152,8 +152,9 @@ gpu::Batch *DRW_curves_batch_cache_get_edit_points(Curves *curves);
 gpu::Batch *DRW_curves_batch_cache_get_sculpt_curves_cage(Curves *curves);
 gpu::Batch *DRW_curves_batch_cache_get_edit_curves_handles(Curves *curves);
 gpu::Batch *DRW_curves_batch_cache_get_edit_curves_lines(Curves *curves);
+gpu::Batch *DRW_curves_batch_cache_get_edit_normals(Curves *curves);
 
-void DRW_curves_batch_cache_create_requested(Object *ob);
+void DRW_curves_batch_cache_create_requested(Object *ob, const Scene *scene);
 
 /** \} */
 

@@ -790,6 +790,7 @@ enum eUserPref_Section : char {
   USER_SECTION_ASSETS = 19,
   USER_SECTION_TAGS = 20,
   USER_SECTION_BUILD_FEATURES = 21,
+  USER_SECTION_SYNC_SETTINGS = 22,
 };
 
 /** #UserDef_SpaceData.flag (State of the user preferences UI). */
@@ -1152,6 +1153,9 @@ struct UserDef {
   ListBaseT<bUserAssetLibrary> asset_libraries = {nullptr, nullptr};
   ListBaseT<bUserExtensionRepo> extension_repos = {nullptr, nullptr};
   ListBaseT<bUserAssetShelfSettings> asset_shelves_settings = {nullptr, nullptr};
+
+  /** Last official Blender version selected for preferences synchronization. */
+  char sync_source_version[16] = "";
 
   char keyconfigstr[64] = "Blender";
 

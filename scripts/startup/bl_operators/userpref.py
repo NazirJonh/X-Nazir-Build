@@ -6,6 +6,7 @@ import bpy
 from bpy.types import (
     Operator,
     OperatorFileListElement,
+    PropertyGroup,
 )
 from bpy.props import (
     BoolProperty,
@@ -13,6 +14,7 @@ from bpy.props import (
     IntProperty,
     StringProperty,
     CollectionProperty,
+    PointerProperty,
 )
 from bpy.app.translations import (
     pgettext_iface as iface_,
@@ -186,6 +188,45 @@ class PREFERENCES_OT_copy_prev(Operator):
         return {'FINISHED'}
 
 
+def _userconfig_path_is_default():
+    """True when the configuration directory is the automatic per-version one."""
+    import os
+
+    # No automatic per-version configuration exists when the config path is overridden by an
+    # environment variable or this is a portable install, and writing to it would go elsewhere
+    # than the version directories these operators scan.
+    userconfig_path = os.path.normpath(bpy.utils.user_resource('CONFIG'))
+    new_userconfig_path = os.path.normpath(os.path.join(bpy.utils.resource_path('USER'), "config"))
+    return userconfig_path == new_userconfig_path
+
+
+def _disable_missing_addons(context):
+    """Drop add-ons the imported preferences enable but this build does not have.
+
+    The caller is responsible for saving the preferences afterwards.
+    """
+    import addon_utils
+
+    addon_utils.extensions_refresh()
+    available = {module.__name__ for module in addon_utils.modules()}
+    addons = context.preferences.addons
+    missing = []
+    for addon in addons:
+        module_name = addon.module
+        if addon_utils.check_extension(module_name):
+            continue
+        if module_name not in available:
+            missing.append(module_name)
+
+    for module_name in missing:
+        while module_name in addons:
+            addon = addons.get(module_name)
+            if addon is None:
+                break
+            addons.remove(addon)
+    return missing
+
+
 # Kept alive because Blender does not own the strings returned by a dynamic enum callback.
 _copy_settings_version_items = []
 
@@ -208,6 +249,8 @@ class PREFERENCES_OT_copy_settings(Operator):
 
     # Mirrors the constant in PREFERENCES_OT_copy_prev, see the reasoning there.
     MAX_MINOR_VERSION_FOR_PREVIOUS_MAJOR_LOOKUP = 10
+    # Upper bound when scanning forward, an installation newer than this is not looked for.
+    MAX_MINOR_VERSION_FOR_NEWER_LOOKUP = 10
 
     # Property name paired with the sub-directory it controls.
     _SUBDIRS = (
@@ -259,12 +302,29 @@ class PREFERENCES_OT_copy_settings(Operator):
         )
 
     @classmethod
-    def find_versions(cls, branch):
-        """Every existing configuration directory older than the current version, newest first."""
+    def find_versions(cls, branch, *, include_current_and_newer=False):
+        """Existing configuration directories, newest first.
+
+        Only versions older than the running one are scanned unless include_current_and_newer is
+        set, which the synchronize operator needs: an official Blender of the same or a newer
+        version is the usual source there.
+        """
         import os
 
         found = []
         version_new = bpy.app.version[:2]
+
+        if include_current_and_newer:
+            # Newest first, so scan forward before scanning backward.
+            newer = []
+            for major in (version_new[0], version_new[0] + 1):
+                minor_min = version_new[1] if major == version_new[0] else 0
+                for minor in range(minor_min, cls.MAX_MINOR_VERSION_FOR_NEWER_LOOKUP + 1):
+                    path = cls.version_path((major, minor), branch)
+                    if path and os.path.isdir(path):
+                        newer.append((major, minor))
+            found.extend(reversed(newer))
+
         version_old = [version_new[0], version_new[1] - 1]
 
         while True:
@@ -283,6 +343,19 @@ class PREFERENCES_OT_copy_settings(Operator):
         return found
 
     @classmethod
+    def find_versions_for_sync(cls, branch):
+        """Configuration directories offered as a sync source: this version (if present) and older."""
+        import os
+
+        versions = cls.find_versions(branch, include_current_and_newer=False)
+        current = tuple(bpy.app.version[:2])
+        if current not in versions:
+            path = cls.version_path(current, branch)
+            if path and os.path.isdir(path):
+                versions.insert(0, current)
+        return versions
+
+    @classmethod
     def stock_current_path(cls):
         """Stock configuration directory of the running version, or None."""
         import os
@@ -292,15 +365,9 @@ class PREFERENCES_OT_copy_settings(Operator):
 
     @classmethod
     def poll(cls, _context):
-        import os
-
-        # No automatic per-version configuration exists when the config path is overridden by an
-        # environment variable or this is a portable install. Unlike PREFERENCES_OT_copy_prev this
-        # stays enabled once a configuration exists: the operator lives in the Preferences editor
-        # and overwriting is guarded by the backup instead.
-        userconfig_path = os.path.normpath(bpy.utils.user_resource('CONFIG'))
-        new_userconfig_path = os.path.normpath(os.path.join(bpy.utils.resource_path('USER'), "config"))
-        return userconfig_path == new_userconfig_path
+        # Unlike PREFERENCES_OT_copy_prev this stays enabled once a configuration exists: the
+        # operator lives in the Preferences editor and overwriting is guarded by the backup.
+        return _userconfig_path_is_default()
 
     def _source_path(self):
         import os
@@ -398,7 +465,10 @@ class PREFERENCES_OT_copy_settings(Operator):
 
         bpy.ops.wm.read_userpref()
 
-        disabled = self._disable_missing_addons(context)
+        # Saving moved here from the helper, the synchronize operator saves unconditionally.
+        disabled = _disable_missing_addons(context)
+        if disabled:
+            bpy.ops.wm.save_userpref()
 
         message = "Copied {:s} from {:s}".format(", ".join(names), source)
         if backup_dir:
@@ -408,25 +478,7 @@ class PREFERENCES_OT_copy_settings(Operator):
         self.report({'INFO'}, message)
         return {'FINISHED'}
 
-    @staticmethod
-    def _disable_missing_addons(context):
-        """Drop add-ons the copied preferences enable but this build does not have."""
-        import addon_utils
 
-        available = {module.__name__ for module in addon_utils.modules()}
-        addons = context.preferences.addons
-        missing = [addon.module for addon in addons if addon.module not in available]
-        if not missing:
-            return []
-
-        for module_name in missing:
-            while module_name in addons:
-                addon = addons.get(module_name)
-                if addon is None:
-                    break
-                addons.remove(addon)
-        bpy.ops.wm.save_userpref()
-        return missing
 
 
 class PREFERENCES_OT_keyconfig_test(Operator):

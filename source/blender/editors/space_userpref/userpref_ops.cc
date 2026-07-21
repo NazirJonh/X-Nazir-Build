@@ -7,12 +7,17 @@
  */
 
 #include <cstring>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include <fmt/format.h>
 
 #include "AS_remote_library.hh"
 
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
+#include "DNA_theme_types.h"
 
 #include "BLI_listbase.h"
 #ifdef WIN32
@@ -23,6 +28,9 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 
+#include "BKE_blender.hh"
+#include "BKE_blendfile.hh"
+#include "BKE_addon.h"
 #include "BKE_callbacks.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
@@ -1351,6 +1359,8 @@ void PREFERENCES_OT_clear_filter(wmOperatorType *ot)
 
 void ED_operatortypes_userpref()
 {
+  ED_operatortypes_userpref_sync();
+
   WM_operatortype_append(PREFERENCES_OT_reset_default_theme);
 
   WM_operatortype_append(PREFERENCES_OT_autoexec_path_add);
@@ -1365,6 +1375,7 @@ void ED_operatortypes_userpref()
 
   WM_operatortype_append(PREFERENCES_OT_associate_blend);
   WM_operatortype_append(PREFERENCES_OT_unassociate_blend);
+
 
   WM_operatortype_append(PREFERENCES_OT_start_filter);
   WM_operatortype_append(PREFERENCES_OT_clear_filter);

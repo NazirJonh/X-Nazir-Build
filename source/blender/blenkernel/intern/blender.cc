@@ -8,6 +8,7 @@
  * Application level startup/shutdown functionality.
  */
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +16,8 @@
 #include "DNA_windowmanager_types.h"
 
 #include "MEM_guardedalloc.h"
+
+#include "DNA_theme_types.h"
 
 #include "BLI_listbase.h"
 #include "BLI_string.h"
@@ -38,6 +41,7 @@
 #include "BKE_idprop.hh"
 #include "BKE_main.hh"
 #include "BKE_node.hh"
+#include "BKE_preferences.h"
 #include "BKE_screen.hh"
 #include "BKE_studiolight.h"
 
@@ -343,6 +347,7 @@ static void userdef_free_user_menus(UserDef *userdef)
     BKE_blender_user_menu_item_free_list(&um->items);
     MEM_delete(um);
   }
+  userdef->user_menus.clear_no_delete();
 }
 
 static void userdef_free_addons(UserDef *userdef)
@@ -471,6 +476,171 @@ void BKE_blender_userdef_app_template_data_set_and_free(UserDef *userdef)
 {
   BKE_blender_userdef_app_template_data_set(userdef);
   MEM_delete(userdef);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Blender Preferences (Sync From Another Configuration)
+ * \{ */
+
+/**
+ * Move the whole list over, leaving \a list_src empty.
+ * The previous contents of \a list_dst must already have been freed by the caller.
+ */
+template<typename T>
+static void userdef_sync_list_move(ListBaseT<T> &list_dst, ListBaseT<T> &list_src)
+{
+  list_dst = list_src;
+  list_src.clear_no_delete();
+}
+
+static void userdef_sync_addons(UserDef *userdef_dst, UserDef *userdef_src)
+{
+  for (bAddon &addon_src : userdef_src->addons.items_mutable()) {
+    BLI_remlink(&userdef_src->addons, &addon_src);
+
+    bAddon *addon_dst = BKE_addon_find(&userdef_dst->addons, addon_src.module);
+    if (addon_dst == nullptr) {
+      BLI_addtail(&userdef_dst->addons, &addon_src);
+      continue;
+    }
+
+    /* Keep the existing entry so its position in the list is stable. The source only replaces the
+     * destination's preferences when it actually has some: stock Blender frequently ships an
+     * add-on enabled but never configured, and an empty source `prop` must not wipe out the
+     * user's own configured preferences for the same add-on. */
+    if (addon_src.prop != nullptr) {
+      if (addon_dst->prop) {
+        IDP_FreeProperty(addon_dst->prop);
+      }
+      addon_dst->prop = addon_src.prop;
+      addon_src.prop = nullptr;
+    }
+    BKE_addon_free(&addon_src);
+  }
+}
+
+static void userdef_sync_extension_repos(UserDef *userdef_dst, UserDef *userdef_src)
+{
+  for (bUserExtensionRepo &repo_src : userdef_src->extension_repos.items_mutable()) {
+    BLI_remlink(&userdef_src->extension_repos, &repo_src);
+
+    /* An existing repository is left alone: its directory and flags belong to this build. */
+    if (BKE_preferences_extension_repo_find_by_module(userdef_dst, repo_src.module)) {
+      MEM_SAFE_DELETE(repo_src.access_token);
+      MEM_delete(&repo_src);
+      continue;
+    }
+    BLI_addtail(&userdef_dst->extension_repos, &repo_src);
+  }
+}
+
+static void userdef_sync_asset_libraries(UserDef *userdef_dst, UserDef *userdef_src)
+{
+  for (bUserAssetLibrary &library_src : userdef_src->asset_libraries.items_mutable()) {
+    BLI_remlink(&userdef_src->asset_libraries, &library_src);
+
+    if (BKE_preferences_asset_library_find_by_name(userdef_dst, library_src.name)) {
+      MEM_delete(&library_src);
+      continue;
+    }
+    BLI_addtail(&userdef_dst->asset_libraries, &library_src);
+  }
+}
+
+void BKE_blender_userdef_sync_themes_selective(UserDef *userdef_dst, UserDef *userdef_src)
+{
+  for (bTheme &theme_src : userdef_src->themes.items_mutable()) {
+    BLI_remlink(&userdef_src->themes, &theme_src);
+
+    bTheme *theme_dst = static_cast<bTheme *>(
+        BLI_findstring(&userdef_dst->themes, theme_src.name, offsetof(bTheme, name)));
+    if (theme_dst != nullptr) {
+      BLI_remlink(&userdef_dst->themes, theme_dst);
+      MEM_delete(theme_dst);
+    }
+    BLI_addtail(&userdef_dst->themes, &theme_src);
+  }
+}
+
+static void userdef_sync_script_directories(UserDef *userdef_dst, UserDef *userdef_src)
+{
+  for (bUserScriptDirectory &dir_src : userdef_src->script_directories.items_mutable()) {
+    BLI_remlink(&userdef_src->script_directories, &dir_src);
+
+    /* The name is required to be unique, so a clash on either field rules the entry out. */
+    const bool exists = BLI_findstring(&userdef_dst->script_directories,
+                                       dir_src.name,
+                                       offsetof(bUserScriptDirectory, name)) ||
+                        BLI_findstring(&userdef_dst->script_directories,
+                                       dir_src.dir_path,
+                                       offsetof(bUserScriptDirectory, dir_path));
+    if (exists) {
+      MEM_delete(&dir_src);
+      continue;
+    }
+    BLI_addtail(&userdef_dst->script_directories, &dir_src);
+  }
+}
+
+static void userdef_sync_autoexec_paths(UserDef *userdef_dst, UserDef *userdef_src)
+{
+  for (bPathCompare &path_src : userdef_src->autoexec_paths.items_mutable()) {
+    BLI_remlink(&userdef_src->autoexec_paths, &path_src);
+
+    if (BLI_findstring(&userdef_dst->autoexec_paths, path_src.path, offsetof(bPathCompare, path))) {
+      MEM_delete(&path_src);
+      continue;
+    }
+    BLI_addtail(&userdef_dst->autoexec_paths, &path_src);
+  }
+}
+
+void BKE_blender_userdef_sync_from(UserDef *userdef_dst, UserDef *userdef_src, const int flags)
+{
+  if (flags & USER_SYNC_ADDONS) {
+    userdef_sync_addons(userdef_dst, userdef_src);
+  }
+
+  if (flags & USER_SYNC_REPOS) {
+    userdef_sync_extension_repos(userdef_dst, userdef_src);
+  }
+
+  if ((flags & USER_SYNC_THEME) && !userdef_src->themes.is_empty()) {
+    /* Only the themes: #uiFont::blf_id is a handle of the running process, taking it over from
+     * another configuration would leave it dangling. Also require a non-empty source list: a
+     * truncated or hand-edited `userpref.blend` would otherwise leave the running Blender with no
+     * theme at all, since versioning does not synthesize one and
+     * #blender::ui::theme::theme_get() is dereferenced without a null check in many places. */
+    userdef_dst->themes.free_no_destruct();
+    userdef_sync_list_move(userdef_dst->themes, userdef_src->themes);
+  }
+
+  if (flags & USER_SYNC_KEYMAP) {
+    /* A key map is a set of differences against the built-in one, merging parts of it would give
+     * a configuration neither side ever had. */
+    userdef_free_keymaps(userdef_dst);
+    userdef_free_keyconfig_prefs(userdef_dst);
+    userdef_sync_list_move(userdef_dst->user_keymaps, userdef_src->user_keymaps);
+    userdef_sync_list_move(userdef_dst->user_keyconfig_prefs, userdef_src->user_keyconfig_prefs);
+    STRNCPY(userdef_dst->keyconfigstr, userdef_src->keyconfigstr);
+  }
+
+  if (flags & USER_SYNC_FAVORITES) {
+    userdef_free_user_menus(userdef_dst);
+    userdef_sync_list_move(userdef_dst->user_menus, userdef_src->user_menus);
+  }
+
+  if (flags & USER_SYNC_PATHS) {
+    userdef_sync_asset_libraries(userdef_dst, userdef_src);
+    /* NOTE: a merged #bUserScriptDirectory only takes full effect after a restart.
+     * #DNA_userdef_types.h documents that changing `script_directories` is not fully supported at
+     * run time; it is only partially covered by `sys.path` being refreshed when preferences are
+     * loaded from a file, which this in-memory merge does not do. */
+    userdef_sync_script_directories(userdef_dst, userdef_src);
+    userdef_sync_autoexec_paths(userdef_dst, userdef_src);
+  }
 }
 
 /** \} */

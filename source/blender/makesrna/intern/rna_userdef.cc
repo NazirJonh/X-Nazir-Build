@@ -65,6 +65,7 @@ const EnumPropertyItem rna_enum_preference_section_items[] = {
 #endif
     RNA_ENUM_ITEM_SEPR,
     {USER_SECTION_ASSETS, "ASSETS", 0, "Asset Libraries", ""},
+    {USER_SECTION_SYNC_SETTINGS, "SYNC_SETTINGS", 0, "Sync Settings", "Copy and synchronize settings from another Blender version"},
     RNA_ENUM_ITEM_SEPR,
     {USER_SECTION_INPUT, "INPUT", 0, "Input", ""},
     {USER_SECTION_NAVIGATION, "NAVIGATION", 0, "Navigation", ""},
@@ -7719,6 +7720,14 @@ static void rna_def_userdef_filepaths(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Active Asset Library",
                            "Index of the asset library being edited in the Preferences UI");
+
+  prop = RNA_def_property(srna, "sync_source_version", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "sync_source_version");
+  RNA_def_property_string_maxlength(prop, 15);
+  RNA_def_property_ui_text(prop,
+                           "Sync Source Version",
+                           "Last official Blender version selected for preferences synchronization");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
 }
 
 static void rna_def_userdef_asset_libraries(BlenderRNA *brna)

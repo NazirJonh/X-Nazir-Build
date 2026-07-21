@@ -49,6 +49,8 @@ std::optional<int> userpref_ui_asset_libraries_index_from_user_library(
 void PREFERENCES_OT_start_filter(wmOperatorType *ot);
 void PREFERENCES_OT_clear_filter(wmOperatorType *ot);
 
+void ED_operatortypes_userpref_sync();
+
 struct SpaceUserPref_Runtime {
   /** For filtering properties displayed in the space. */
   std::string search_string;

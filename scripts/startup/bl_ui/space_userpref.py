@@ -1996,13 +1996,13 @@ class USERPREF_PT_saveload_import_settings(SaveLoadPanel, CenterAlignMixIn, Pane
     def draw_centered(self, _context, layout):
         operator_cls = bpy.types.PREFERENCES_OT_copy_settings
 
-        col = layout.column()
+        row = layout.row(align=True)
         # Greyed out rather than hidden, so it is visible that the feature exists.
-        sub = col.column()
+        sub = row.row()
         sub.enabled = bool(operator_cls.find_versions('XBLEND') or operator_cls.find_versions('STOCK'))
         sub.operator("preferences.copy_settings", text="Copy Previous Settings")
 
-        sub = col.column()
+        sub = row.row()
         sub.enabled = operator_cls.stock_current_path() is not None
         props = sub.operator(
             "preferences.copy_settings",
@@ -2011,6 +2011,143 @@ class USERPREF_PT_saveload_import_settings(SaveLoadPanel, CenterAlignMixIn, Pane
         )
         props.lock_source = True
         props.branch = 'STOCK'
+
+        # Unlike the buttons above this one is meant to be used repeatedly, to pick up settings
+        # made in the official Blender after this build was set up.
+        sub = row.row()
+        sub.enabled = bool(operator_cls.find_versions('STOCK', include_current_and_newer=True))
+        sub.operator("preferences.sync_settings_open", text="Sync from Official Blender")
+
+
+class SyncSettingsPanel:
+    bl_space_type = 'PREFERENCES'
+    bl_region_type = 'WINDOW'
+    bl_context = "sync_settings"
+
+
+class USERPREF_PT_sync_settings(SyncSettingsPanel, CenterAlignMixIn, Panel):
+    bl_label = "Synchronize Settings"
+
+    @staticmethod
+    def _category_toggle_attr(category):
+        return {
+            "Add-ons": "show_addons",
+            "Extensions": "show_extensions",
+            "Asset Libraries": "show_asset_libraries",
+            "Themes": "show_themes",
+        }.get(category)
+
+    @staticmethod
+    def _category_toggle_label(category):
+        return {
+            "Add-ons": "Add-ons",
+            "Extensions": "Extensions",
+            "Asset Libraries": "Asset Libraries",
+            "Themes": "Themes",
+        }.get(category, category)
+
+    def draw_centered(self, context, layout):
+        from bl_operators.userpref_sync import (
+            _ensure_sync_settings_source_version,
+            sync_change_display_name,
+            sync_settings_draw_group_select,
+        )
+
+        _ensure_sync_settings_source_version(context)
+        settings = context.window_manager.sync_settings
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(settings, "source_version")
+
+        split = layout.split(factor=0.5, align=True)
+        col = split.column()
+        box = col.box()
+        box.label(text="Merge", icon='IMPORT')
+        box.prop(settings, "use_addons")
+        box.prop(settings, "use_repos")
+        box.prop(settings, "use_files")
+        box.prop(settings, "use_paths")
+        box.prop(settings, "use_theme")
+
+        col = split.column()
+        box = col.box()
+        box.label(text="Replace", icon='FILE_REFRESH')
+        box.prop(settings, "use_keymap")
+        box.prop(settings, "use_favorites")
+
+        row = layout.row(align=True)
+        row.operator("preferences.sync_settings_read", text="Read State", icon='FILE_REFRESH')
+        row.operator("preferences.sync_settings", text="Synchronize Settings", icon='CHECKMARK')
+
+        if settings.changes:
+            layout.label(text="Changes", icon='INFO')
+            table = layout.box()
+            header = table.row(align=True)
+            header.label(text="Category")
+            header.separator(factor=0.3)
+            header.label(text="Name")
+            header.separator(factor=0.3)
+            header.label(text="Action")
+            header.separator(factor=0.3)
+            header.label(text="Update")
+            previous_category = None
+            previous_extension_repo = None
+            category_box = None
+            extension_repo_box = None
+            for change in settings.changes:
+                if change.category != previous_category:
+                    if previous_category is not None:
+                        table.separator(factor=0.7)
+                    category_box = table.box()
+                    row = category_box.row(align=True)
+                    attr = self._category_toggle_attr(change.category)
+                    if attr is not None:
+                        row.prop(settings, attr, text="", emboss=False, icon='DOWNARROW_HLT')
+                    else:
+                        row.label(text="", icon='DOT')
+                    row.label(text=self._category_toggle_label(change.category))
+                    if change.category in {'Add-ons', 'Extensions'}:
+                        row.separator(factor=0.5)
+                        action = row.row(align=True)
+                        action.label(text="")
+                        sync_settings_draw_group_select(row, settings, change.category)
+                    previous_category = change.category
+                    previous_extension_repo = None
+                    extension_repo_box = None
+                attr = self._category_toggle_attr(change.category)
+                if attr is not None and not getattr(settings, attr):
+                    continue
+                parent_box = category_box
+                if change.category == 'Extensions' and change.extension_repo:
+                    if change.extension_repo != previous_extension_repo:
+                        extension_repo_box = category_box.box()
+                        repo_row = extension_repo_box.row(align=True)
+                        repo_row.label(text="", icon='FILE_FOLDER')
+                        repo_row.label(text=change.extension_repo)
+                        repo_row.separator(factor=0.5)
+                        repo_action = repo_row.row(align=True)
+                        repo_action.label(text="")
+                        sync_settings_draw_group_select(
+                            repo_row, settings, 'Extensions', change.extension_repo)
+                        previous_extension_repo = change.extension_repo
+                    parent_box = extension_repo_box
+                row = parent_box.row(align=True)
+                if change.status == 'ADD':
+                    icon = 'ADD'
+                elif change.status == 'UPDATE':
+                    icon = 'FILE_REFRESH'
+                elif change.status == 'DISABLE':
+                    icon = 'X'
+                else:
+                    icon = 'QUESTION'
+                row.label(text="", icon=icon)
+                row.label(text=sync_change_display_name(change))
+                row.separator(factor=0.5)
+                action = row.row(align=True)
+                action.alert = change.status == 'UPDATE'
+                action.label(text=change.status.title())
+                row.prop(change, "selected", text="")
+                parent_box.separator(factor=0.35)
 
 
 # -----------------------------------------------------------------------------
@@ -3416,6 +3553,7 @@ classes = (
     USERPREF_PT_saveload_autorun,
     USERPREF_PT_saveload_file_browser,
     USERPREF_PT_saveload_import_settings,
+    USERPREF_PT_sync_settings,
 
     USERPREF_MT_keyconfigs,
 
@@ -3522,5 +3660,3 @@ if __name__ == "__main__":  # only for live edit.
     from bpy.utils import register_class
     for cls in classes:
         register_class(cls)
-
-

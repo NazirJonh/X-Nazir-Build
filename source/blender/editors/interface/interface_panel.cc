@@ -2851,7 +2851,10 @@ static int ui_handle_panel_category_cycling(bContext *C,
 
           if (next_index >= 0 && next_index < ordered_categories.size()) {
             PanelCategoryDyn *next = ordered_categories[next_index];
-            ui::panel_category_active_set_safe(C, region, next->idname);
+            /* Activate directly: the tab already exists, so there is no extension install to wait
+             * for. Deferring here would leave the active category unchanged, so the next wheel
+             * step would resolve to the same neighbor and cycling would appear stuck. */
+            ui::panel_category_active_set_safe(C, region, next->idname, false);
 
             /* Save to tag category memory. */
             using namespace blender::ui;

@@ -156,7 +156,23 @@ void BKE_palette_color_sync_legacy(PaletteColor *color);
 
 /* Paint curves. */
 
+/**
+ * Number of segments a paint-curve bezier segment is tessellated into. Stored as the geometry's
+ * `resolution`, so building a #PaintCurve outside the editor (versioning, the Python API) has to
+ * know it too.
+ */
+constexpr int PAINT_CURVE_NUM_SEGMENTS = 40;
+
 PaintCurve *BKE_paint_curve_add(Main *bmain, const char *name);
+
+/**
+ * Rebuild #PaintCurve::geometry from the legacy screen-space #PaintCurve::points array, then free
+ * it. The positions stay in screen space, which is what #PaintCurve::use_3d_space false means --
+ * moving them into object space needs a viewport and is left to the user.
+ *
+ * No-op when there is nothing to convert, so it is safe to call on every paint curve.
+ */
+void BKE_paint_curve_legacy_points_convert(PaintCurve &pc);
 
 /**
  * Call when entering each respective paint mode.

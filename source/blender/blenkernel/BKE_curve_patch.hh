@@ -21,11 +21,12 @@
 
 #include "BKE_bvhutils.hh"
 
-struct Mesh;
-
 namespace blender {
 /* The two geometry data-blocks a built patch can be read back out as; see
- * #blender::bke::curve_patch_geometry_to_mesh and #blender::bke::curve_patch_geometry_to_stamp_points. */
+ * #blender::bke::curve_patch_geometry_to_mesh and
+ * #blender::bke::curve_patch_geometry_to_stamp_points. Both live in `namespace blender`, so
+ * declaring #Mesh at global scope would name an unrelated type. */
+struct Mesh;
 struct PointCloud;
 }  // namespace blender
 

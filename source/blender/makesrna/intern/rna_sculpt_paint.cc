@@ -404,7 +404,13 @@ static void rna_PaintCurve_clear(PaintCurve *pc)
 
 /* Everything both read-back functions do before they differ: resolve the brush's parameters,
  * tessellate the curve, optionally snapshot a target surface, and run the core build. No undo step
- * is opened anywhere in here -- neither function writes to the scene. */
+ * is opened anywhere in here -- neither function writes to the scene.
+ *
+ * Two kinds of failure are deliberately told apart. MISUSE (no sculpt settings, a target that has
+ * no evaluated mesh) reports an error, which the Python layer turns into a `RuntimeError`. A curve
+ * that simply has nothing to build from is NOT an error: it returns false silently, the caller
+ * returns null, and the script sees `None` -- the same contract `curve_patch_stamps` already has
+ * for Ribbon mode, where laying out no stamps is a legitimate answer. */
 static bool curve_patch_build_for_rna(bContext *C,
                                       const PaintCurve &pc,
                                       const Brush &brush,
@@ -426,7 +432,7 @@ static bool curve_patch_build_for_rna(bContext *C,
    * multi-spline curve into a single strip. */
   bke::CurvesGeometry control_curve = ED_paintcurve_control_curve_for_patch(pc, spline_index);
   if (control_curve.points_num() < 2) {
-    BKE_report(reports, RPT_ERROR, "Curve Patch: the chosen spline needs at least two points");
+    /* A spline that short describes no strip. Silent: see the note on failure kinds above. */
     return false;
   }
 
@@ -473,7 +479,7 @@ static bool curve_patch_build_for_rna(bContext *C,
                                   {},
                                   r_geometry);
   if (r_geometry.spline.is_empty()) {
-    BKE_report(reports, RPT_ERROR, "Curve Patch: the curve is degenerate");
+    /* Degenerate input (all points coincident, zero radius). Silent, as above. */
     return false;
   }
   return true;
@@ -497,7 +503,7 @@ static Mesh *rna_PaintCurve_curve_patch_to_mesh(PaintCurve *pc,
   /* The UI stores cap lengths in brush DIAMETERS; the core takes world units. Same conversion as
    * `curve_patch_texture_binding_from_brush()`. */
   const BrushCurvePatchSettings &settings = brush->curve_patch;
-  const bool caps_enabled = settings.ribbon_texture_source == MTEX_CURVE_PATCH_TEX_MULTI;
+  const bool caps_enabled = settings.ribbon_texture_source == BRUSH_CURVE_PATCH_TEX_MULTI;
   Mesh *mesh_nomain = bke::curve_patch_geometry_to_mesh(
       geometry,
       params,
@@ -505,7 +511,7 @@ static Mesh *rna_PaintCurve_curve_patch_to_mesh(PaintCurve *pc,
       settings.cap_start_length * 2.0f * params.radius,
       settings.cap_end_length * 2.0f * params.radius);
   if (mesh_nomain == nullptr) {
-    BKE_report(reports, RPT_ERROR, "Curve Patch: the ribbon came out empty");
+    /* Nothing to hand back rather than something wrong -- same silent contract as the build. */
     return nullptr;
   }
 
@@ -1061,7 +1067,10 @@ static void rna_def_paint_curve(BlenderRNA *brna)
 
   /* Reading a Curve Patch back out. Neither call stamps anything or opens an undo step; both need
    * the context only to reach the sculpt settings the brush's size is unified through, and the
-   * depsgraph a target object is evaluated in. */
+   * depsgraph a target object is evaluated in.
+   *
+   * Both answer None when the curve describes nothing to build, and raise only on misuse -- a scene
+   * without sculpt settings, or a target that has no evaluated mesh. */
 
   func = RNA_def_function(srna, "curve_patch_to_mesh", "rna_PaintCurve_curve_patch_to_mesh");
   RNA_def_function_ui_description(
@@ -1085,7 +1094,12 @@ static void rna_def_paint_curve(BlenderRNA *brna)
               "Index of the spline to build from; the curve's active spline when negative",
               -1,
               INT_MAX);
-  parm = RNA_def_pointer(func, "mesh", "Mesh", "", "The ribbon, or None when the curve is empty");
+  parm = RNA_def_pointer(func,
+                         "mesh",
+                         "Mesh",
+                         "",
+                         "The ribbon, or None when the spline has fewer than two points or is "
+                         "otherwise degenerate");
   RNA_def_function_return(func, parm);
 
   func = RNA_def_function(srna, "curve_patch_stamps", "rna_PaintCurve_curve_patch_stamps");

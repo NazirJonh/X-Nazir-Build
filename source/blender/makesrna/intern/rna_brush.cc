@@ -8,11 +8,14 @@
 
 #include <cstdlib>
 
+#include <fmt/format.h>
+
 #include "DNA_brush_types.h"
 #include "DNA_gpencil_legacy_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
 
+#include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8_symbols.h"
@@ -90,51 +93,55 @@ static const EnumPropertyItem rna_enum_brush_texture_slot_map_all_mode_items[] =
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_length_mode_items[] = {
-    {MTEX_CURVE_PATCH_LENGTH_DEFAULT, "DEFAULT", 0, "Default",
+    {BRUSH_CURVE_PATCH_LENGTH_DEFAULT, "DEFAULT", 0, "Default",
      "Fit one texture tile on short curves and tile by brush radius on longer ones"},
-    {MTEX_CURVE_PATCH_LENGTH_REPEAT, "REPEAT", 0, "Repeat",
+    {BRUSH_CURVE_PATCH_LENGTH_REPEAT, "REPEAT", 0, "Repeat",
      "Repeat the texture a fixed number of times along the curve length"},
-    {MTEX_CURVE_PATCH_LENGTH_STRETCH, "STRETCH", 0, "Stretch",
+    {BRUSH_CURVE_PATCH_LENGTH_STRETCH, "STRETCH", 0, "Stretch",
      "Stretch a single texture tile across the whole curve length"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_end_falloff_items[] = {
-    {MTEX_CURVE_PATCH_END_HARD, "HARD", 0, "Hard",
+    {BRUSH_CURVE_PATCH_END_HARD, "HARD", 0, "Hard",
      "Start and end the relief abruptly at the curve's endpoints"},
-    {MTEX_CURVE_PATCH_END_SMOOTH, "SMOOTH", 0, "Smooth",
+    {BRUSH_CURVE_PATCH_END_SMOOTH, "SMOOTH", 0, "Smooth",
      "Fade the relief in and out over a length at each end of the curve"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_mode_items[] = {
-    {MTEX_CURVE_PATCH_STAMP_RIBBON, "RIBBON", 0, "Ribbon",
+    {BRUSH_CURVE_PATCH_STAMP_RIBBON, "RIBBON", 0, "Ribbon",
      "Project one continuous texture stretched along the whole curve"},
-    {MTEX_CURVE_PATCH_STAMP_STAMPS, "STAMPS", 0, "Stamps",
+    {BRUSH_CURVE_PATCH_STAMP_STAMPS, "STAMPS", 0, "Stamps",
      "Place separate randomized texture stamps spaced along the curve"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_projection_items[] = {
-    {MTEX_CURVE_PATCH_STAMP_PROJ_CURVE, "CURVE", 0, "Curve-Following",
+    {BRUSH_CURVE_PATCH_STAMP_PROJ_CURVE, "CURVE", 0, "Curve-Following",
      "Sample the stamp in the curve's own space, so the texture bends along the curve"},
-    {MTEX_CURVE_PATCH_STAMP_PROJ_PLANAR, "PLANAR", 0, "Planar",
+    {BRUSH_CURVE_PATCH_STAMP_PROJ_PLANAR, "PLANAR", 0, "Planar",
      "Sample the stamp on a rigid frame, so the texture keeps its shape through sharp turns"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_texture_source_items[] = {
-    {MTEX_CURVE_PATCH_TEX_SINGLE, "SINGLE", 0, "Single",
+    {BRUSH_CURVE_PATCH_TEX_SINGLE, "SINGLE", 0, "Single",
      "Stamp the brush's own texture everywhere along the curve"},
-    {MTEX_CURVE_PATCH_TEX_MULTI, "LIST", 0, "List",
+    /* Same identifier as the ribbon enum's second item on purpose: both surface the one
+     * #BRUSH_CURVE_PATCH_TEX_MULTI value, so a script that copies the setting between the two
+     * properties must not hit a `TypeError`. Only the UI name and description differ. */
+    {BRUSH_CURVE_PATCH_TEX_MULTI, "MULTI", 0, "List",
      "Draw each stamp's texture at random from the brush's texture list"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 static const EnumPropertyItem rna_enum_brush_curve_patch_ribbon_texture_source_items[] = {
-    {MTEX_CURVE_PATCH_TEX_SINGLE, "SINGLE", 0, "Single",
+    {BRUSH_CURVE_PATCH_TEX_SINGLE, "SINGLE", 0, "Single",
      "Stretch the brush's own texture along the whole curve"},
-    {MTEX_CURVE_PATCH_TEX_MULTI, "CAPS", 0, "Start/Middle/End",
+    /* "MULTI" here too -- see the note on the stamp enum above. */
+    {BRUSH_CURVE_PATCH_TEX_MULTI, "MULTI", 0, "Start/Middle/End",
      "Use separate textures for the curve's start and end, repeating the middle one between them"},
     {0, nullptr, 0, nullptr, nullptr},
 };
@@ -459,10 +466,12 @@ static EnumPropertyItem rna_enum_gpencil_brush_modes_items[] = {
 #  include "BKE_gpencil_legacy.h"
 #  include "BKE_icons.hh"
 #  include "BKE_layer.hh"
+#  include "BKE_library.hh"
 #  include "BKE_material.hh"
 #  include "BKE_paint.hh"
 #  include "BKE_paint_types.hh"
 #  include "BKE_preview_image.hh"
+#  include "BKE_report.hh"
 
 #  include "WM_api.hh"
 
@@ -1305,6 +1314,82 @@ static void rna_BrushCurvePatchTextureSlot_update(Main * /*bmain*/,
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
 }
 
+static std::optional<std::string> rna_BrushCurvePatchTextureSlot_path(const PointerRNA *ptr)
+{
+  const Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  const BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(ptr->data);
+  const int index = BLI_findindex(&br->curve_patch.texture_slots, slot);
+  if (index == -1) {
+    return std::nullopt;
+  }
+  return fmt::format("curve_patch.texture_slots[{}]", index);
+}
+
+/* `self` is the settings block the collection lives on, but everything below needs the owning
+ * brush: the user count on a slot's texture and the unsaved-changes tag both belong to it. */
+static BrushCurvePatchTextureSlot *rna_BrushCurvePatchSettings_texture_slot_new(
+    ID *id, BrushCurvePatchSettings * /*settings*/)
+{
+  Brush *br = reinterpret_cast<Brush *>(id);
+  if (!ID_IS_EDITABLE(br) || ID_IS_OVERRIDE_LIBRARY(br)) {
+    return nullptr;
+  }
+
+  BrushCurvePatchTextureSlot *slot = BKE_brush_curve_patch_texture_slot_add(*br);
+  BKE_brush_tag_unsaved_changes(br);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
+  return slot;
+}
+
+static void rna_BrushCurvePatchSettings_texture_slot_remove(ID *id,
+                                                            BrushCurvePatchSettings * /*settings*/,
+                                                            ReportList *reports,
+                                                            PointerRNA *slot_ptr)
+{
+  Brush *br = reinterpret_cast<Brush *>(id);
+  if (!ID_IS_EDITABLE(br) || ID_IS_OVERRIDE_LIBRARY(br)) {
+    return;
+  }
+
+  BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(slot_ptr->data);
+  if (!BKE_brush_curve_patch_texture_slot_remove(*br, *slot)) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Brush '%s' does not contain the given Curve Patch texture slot",
+                br->id.name + 2);
+    return;
+  }
+
+  slot_ptr->invalidate();
+  BKE_brush_tag_unsaved_changes(br);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
+}
+
+static PointerRNA rna_BrushCurvePatchSettings_texture_active_get(PointerRNA *ptr)
+{
+  BrushCurvePatchSettings *settings = static_cast<BrushCurvePatchSettings *>(ptr->data);
+  BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(
+      BLI_findlink(&settings->texture_slots, settings->texture_active_index));
+  if (slot == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_BrushCurvePatchTextureSlot, slot);
+}
+
+static void rna_BrushCurvePatchSettings_texture_active_set(PointerRNA *ptr,
+                                                           PointerRNA value,
+                                                           ReportList * /*reports*/)
+{
+  BrushCurvePatchSettings *settings = static_cast<BrushCurvePatchSettings *>(ptr->data);
+  const BrushCurvePatchTextureSlot *slot = static_cast<const BrushCurvePatchTextureSlot *>(
+      value.data);
+  /* Unlike #Palette::active_color, the index is a UIList index and never negative, so an unset
+   * pointer falls back to the first slot rather than to "none". */
+  settings->texture_active_index = slot == nullptr ?
+                                       0 :
+                                       BLI_findindex(&settings->texture_slots, slot);
+}
+
 static void rna_BrushCurvePatchTextureSlot_name_get(PointerRNA *ptr, char *value)
 {
   const BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(ptr->data);
@@ -1329,6 +1414,7 @@ static void rna_def_brush_curve_patch_texture_slot(BlenderRNA *brna)
 
   srna = RNA_def_struct(brna, "BrushCurvePatchTextureSlot", nullptr);
   RNA_def_struct_sdna(srna, "BrushCurvePatchTextureSlot");
+  RNA_def_struct_path_func(srna, "rna_BrushCurvePatchTextureSlot_path");
   RNA_def_struct_ui_text(
       srna, "Curve Patch Texture Slot", "One texture in a brush's Curve Patch texture list");
 
@@ -1355,6 +1441,51 @@ static void rna_def_brush_curve_patch_texture_slot(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Name", "Name of the slot's texture");
   RNA_def_struct_name_property(srna, prop);
+}
+
+/* `brush.curve_patch.texture_slots` -- modelled on `rna_def_palettecolors()`. Without this an
+ * add-on can only reach the list through the operators, which act on the brush the CONTEXT makes
+ * active and are therefore useless headless or against any other brush. */
+static void rna_def_brush_curve_patch_texture_slots(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "BrushCurvePatchTextureSlots");
+  srna = RNA_def_struct(brna, "BrushCurvePatchTextureSlots", nullptr);
+  /* The functions take the owning #Brush rather than the settings block, because both the user
+   * count on a slot's texture and the unsaved-changes tag live on the brush. */
+  RNA_def_struct_sdna(srna, "BrushCurvePatchSettings");
+  RNA_def_struct_ui_text(
+      srna, "Curve Patch Texture Slots", "Collection of Curve Patch texture slots");
+
+  func = RNA_def_function(srna, "new", "rna_BrushCurvePatchSettings_texture_slot_new");
+  RNA_def_function_ui_description(func, "Add a texture slot to the Curve Patch texture list");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID);
+  parm = RNA_def_pointer(
+      func, "slot", "BrushCurvePatchTextureSlot", "", "The newly created texture slot");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_BrushCurvePatchSettings_texture_slot_remove");
+  RNA_def_function_ui_description(func, "Remove a texture slot from the Curve Patch texture list");
+  RNA_def_function_flag(func, FUNC_USE_SELF_ID | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "slot", "BrushCurvePatchTextureSlot", "", "The texture slot to remove");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  prop = RNA_def_property(srna, "active", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "BrushCurvePatchTextureSlot");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_BrushCurvePatchSettings_texture_active_get",
+                                 "rna_BrushCurvePatchSettings_texture_active_set",
+                                 nullptr,
+                                 nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Active Texture Slot", "");
 }
 
 static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
@@ -1461,6 +1592,7 @@ static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Curve Patch Textures",
                            "Textures the Curve Patch Stamps mode picks from at random");
+  rna_def_brush_curve_patch_texture_slots(brna, prop);
 
   /* Bounded against the list it indexes: without a range, a value set from Python would send the
    * UI list and every reader looking for a slot that is not there. */

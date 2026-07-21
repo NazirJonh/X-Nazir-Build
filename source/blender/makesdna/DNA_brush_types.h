@@ -171,7 +171,7 @@ struct BrushCurvesSculptSettings {
 #define AUTOMASKING_BOUNDARY_EDGES_MAX_PROPAGATION_STEPS 20
 
 /** One entry in a brush's Curve Patch texture list (#BrushCurvePatchSettings::texture_slots), used
- * by the Curve Patch STAMPS mode when its texture source is #MTEX_CURVE_PATCH_TEX_MULTI.
+ * by the Curve Patch STAMPS mode when its texture source is #BRUSH_CURVE_PATCH_TEX_MULTI.
  *
  * Must stay trivially copyable: `brush_copy_data()` duplicates the list with `BLI_duplicatelist()`,
  * which copies each node's bytes through `MEM_dupallocN` and runs no constructor. Adding a member
@@ -203,7 +203,7 @@ struct BrushCurvePatchTextureSlot {
  */
 struct BrushCurvePatchSettings {
   /** STAMPS mode texture list, active only when #stamp_texture_source is
-   * #MTEX_CURVE_PATCH_TEX_MULTI. Holds ID pointers with user counts, so brush copy, free and
+   * #BRUSH_CURVE_PATCH_TEX_MULTI. Holds ID pointers with user counts, so brush copy, free and
    * `foreach_id` all have to walk it. */
   ListBaseT<BrushCurvePatchTextureSlot> texture_slots = {nullptr, nullptr};
   int texture_active_index = 0;
@@ -214,21 +214,21 @@ struct BrushCurvePatchSettings {
   /** Swap which texture axis runs along the control curve's arc-length (false = V runs along the
    * curve, the default; true = U). `char`, not `bool`: makesdna has no builtin size for `bool`. */
   char swap_axis = false;
-  /** How one texture tile is mapped along the arc-length. See #eMTex_CurvePatchLengthMode. */
+  /** How one texture tile is mapped along the arc-length. See #eBrushCurvePatchLengthMode. */
   char length_mode = 0;
   /** REPEAT mode: number of texture repeats along the curve length (RNA-clamped 1..64). */
   char length_repeat = 1;
-  /** How the relief terminates at the curve's two ends. See #eMTex_CurvePatchEndFalloff. */
-  char end_falloff = MTEX_CURVE_PATCH_END_HARD;
+  /** How the relief terminates at the curve's two ends. See #eBrushCurvePatchEndFalloff. */
+  char end_falloff = BRUSH_CURVE_PATCH_END_HARD;
   /** SMOOTH end falloff: length of the fade at each end, as a percentage of the curve's total
    * arc-length (RNA-clamped 0..50). The 50 ceiling keeps the two end zones from ever overlapping. */
   char end_falloff_percent = 10;
   /** Whether the texture is projected as one continuous stretched sheet along the curve (Ribbon,
-   * the original behavior) or as discrete randomized stamps. See #eMTex_CurvePatchStampMode. */
-  char stamp_mode = MTEX_CURVE_PATCH_STAMP_RIBBON;
+   * the original behavior) or as discrete randomized stamps. See #eBrushCurvePatchStampMode. */
+  char stamp_mode = BRUSH_CURVE_PATCH_STAMP_RIBBON;
   /** STAMPS mode: which coordinate frame a stamp's texture is sampled in. See
-   * #eMTex_CurvePatchStampProjection. */
-  char stamp_projection = MTEX_CURVE_PATCH_STAMP_PROJ_CURVE;
+   * #eBrushCurvePatchStampProjection. */
+  char stamp_projection = BRUSH_CURVE_PATCH_STAMP_PROJ_CURVE;
   /** STAMPS mode: per-stamp size randomization as a percentage (RNA-clamped 0..100). Stamps only
    * ever shrink from the brush radius, never grow past it. */
   char stamp_size_random = 0;
@@ -236,14 +236,14 @@ struct BrushCurvePatchSettings {
    * Like the size, it only ever reduces. */
   char stamp_strength_random = 0;
   /** Whether every stamp samples the brush's own texture or draws one at random from
-   * #texture_slots. See #eMTex_CurvePatchTexSource. */
-  char stamp_texture_source = MTEX_CURVE_PATCH_TEX_SINGLE;
+   * #texture_slots. See #eBrushCurvePatchTexSource. */
+  char stamp_texture_source = BRUSH_CURVE_PATCH_TEX_SINGLE;
   /** Whether the whole ribbon carries the brush's own texture or splits into the Start / Middle /
-   * End textures below. See #eMTex_CurvePatchTexSource. */
-  char ribbon_texture_source = MTEX_CURVE_PATCH_TEX_SINGLE;
+   * End textures below. See #eBrushCurvePatchTexSource. */
+  char ribbon_texture_source = BRUSH_CURVE_PATCH_TEX_SINGLE;
 
   /** RIBBON mode Start / Middle / End textures, active only when #ribbon_texture_source is
-   * #MTEX_CURVE_PATCH_TEX_MULTI. A null entry leaves its stretch of the ribbon untouched. */
+   * #BRUSH_CURVE_PATCH_TEX_MULTI. A null entry leaves its stretch of the ribbon untouched. */
   struct Tex *tex_start = nullptr;
   struct Tex *tex_middle = nullptr;
   struct Tex *tex_end = nullptr;

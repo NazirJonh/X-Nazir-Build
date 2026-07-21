@@ -44,6 +44,7 @@
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_paint.hh"
 #include "BKE_report.hh"
 
 #include "SEQ_effects.hh"
@@ -938,6 +939,38 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       if (!keep) {
         brush.stroke_method = BRUSH_STROKE_SPACE;
       }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 47)) {
+    /* The Curve Patch brush settings were added with non-zero defaults, which a file written before
+     * they existed cannot carry -- every member reads back as zero. `length_repeat` doubles as the
+     * sentinel for "this brush predates the feature": the UI clamps it to 1..64, so no file that
+     * knew about the settings can store 0. */
+    const Brush defaults = {};
+    for (Brush &brush : bmain->brushes) {
+      if (brush.curve_patch.length_repeat != 0) {
+        continue;
+      }
+      brush.curve_patch.length_repeat = defaults.curve_patch.length_repeat;
+      brush.curve_patch.end_falloff_percent = defaults.curve_patch.end_falloff_percent;
+      brush.curve_patch.cap_start_length = defaults.curve_patch.cap_start_length;
+      brush.curve_patch.cap_end_length = defaults.curve_patch.cap_end_length;
+      brush.roll_pressure_scale = defaults.roll_pressure_scale;
+    }
+
+    /* Paint curves used to keep their control points in a screen-space array of their own. The
+     * bezier geometry is authoritative now, so convert what the reader loaded and drop the legacy
+     * array. */
+    for (PaintCurve &paint_curve : bmain->paintcurves) {
+      const bool had_legacy_points = paint_curve.points != nullptr && paint_curve.tot_points > 0;
+      BKE_paint_curve_legacy_points_convert(paint_curve);
+      /* Converted points stay in screen space, which is what a false #PaintCurve::use_3d_space
+       * means -- promoting them needs a viewport, so it is left to the user. A curve that had
+       * nothing to convert is empty and gets the modern default instead. Both flags default to 1
+       * and would otherwise load as 0. */
+      paint_curve.use_3d_space = had_legacy_points ? 0 : 1;
+      paint_curve.show_radius_handles = 1;
     }
   }
 

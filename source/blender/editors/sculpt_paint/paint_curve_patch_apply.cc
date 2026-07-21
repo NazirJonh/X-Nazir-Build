@@ -321,9 +321,58 @@ static const PaintCurve *curve_patch_apply_resolve_paint_curve(bContext *C,
   return paint_curve;
 }
 
+/* AUTO is -1 rather than an extra #CurvePatchEffectType value: the enumeration names what an effect
+ * IS, and "work it out from the brush" is not one of those. The remaining items mirror it exactly,
+ * so the cast in the exec below is the whole conversion. */
+static const EnumPropertyItem curve_patch_apply_effect_items[] = {
+    {-1, "AUTO", 0, "Automatic", "Choose the target the way the interactive tool does"},
+    {int(CurvePatchEffectType::Relief), "RELIEF", 0, "Relief", "Displace the mesh"},
+    {int(CurvePatchEffectType::Color), "COLOR", 0, "Color", "Write the mesh color attribute"},
+    {int(CurvePatchEffectType::Image), "IMAGE", 0, "Image", "Write the image canvas"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* The object this apply writes to, named by the operator's `object` property or, when that is
+ * empty, the active one. Null with a report when it cannot carry a patch.
+ *
+ * The mesh and mode checks are here rather than left to `curve_patch_apply()` so the message names
+ * the object a script asked for; the deeper checks (sculpt session, PBVH type, dyntopo) stay where
+ * they are and still apply. */
+static Object *curve_patch_apply_resolve_object(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+
+  char name[MAX_ID_NAME - 2];
+  RNA_string_get(op->ptr, "object", name);
+  if (name[0] != '\0') {
+    ob = reinterpret_cast<Object *>(BKE_libblock_find_name(CTX_data_main(C), ID_OB, name));
+    if (ob == nullptr) {
+      BKE_reportf(op->reports, RPT_ERROR, "Object '%s' not found", name);
+      return nullptr;
+    }
+  }
+
+  if (ob == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Curve Patch: no object to apply to");
+    return nullptr;
+  }
+  if (ob->type != OB_MESH || (ob->mode & OB_MODE_SCULPT) == 0) {
+    BKE_reportf(op->reports,
+                RPT_ERROR,
+                "Curve Patch: object '%s' is not a mesh in Sculpt Mode",
+                ob->id.name + 2);
+    return nullptr;
+  }
+  return ob;
+}
+
 static wmOperatorStatus curve_patch_apply_exec(bContext *C, wmOperator *op)
 {
-  Object &ob = *CTX_data_active_object(C);
+  Object *ob_ptr = curve_patch_apply_resolve_object(C, op);
+  if (ob_ptr == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  Object &ob = *ob_ptr;
   ToolSettings &tool_settings = *CTX_data_tool_settings(C);
   Sculpt &sd = *tool_settings.sculpt;
 
@@ -348,11 +397,20 @@ static wmOperatorStatus curve_patch_apply_exec(bContext *C, wmOperator *op)
   Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
   BKE_sculpt_update_object_for_edit(&depsgraph, &ob, is_paint_brush);
 
-  const std::optional<CurvePatchEffectType> effect_type = curve_patch_effect_type_for_brush(
-      *brush, ob, tool_settings.paint_mode);
-  if (!effect_type) {
-    BKE_report(op->reports, RPT_ERROR, "Curve Patch: this brush does not support Curve Patch");
-    return OPERATOR_CANCELLED;
+  /* A negative value is the AUTO item: infer the target from the brush exactly as the interactive
+   * tool does. Anything else is the caller stating it outright, which `curve_patch_session_publish()`
+   * below still refuses if this object cannot carry it. */
+  const int effect_choice = RNA_enum_get(op->ptr, "effect");
+  std::optional<CurvePatchEffectType> effect_type;
+  if (effect_choice < 0) {
+    effect_type = curve_patch_effect_type_for_brush(*brush, ob, tool_settings.paint_mode);
+    if (!effect_type) {
+      BKE_report(op->reports, RPT_ERROR, "Curve Patch: this brush does not support Curve Patch");
+      return OPERATOR_CANCELLED;
+    }
+  }
+  else {
+    effect_type = CurvePatchEffectType(effect_choice);
   }
 
   /* The point count is only meaningful once the spline is chosen: a multi-spline curve can hold
@@ -428,6 +486,20 @@ void SCULPT_OT_curve_patch_apply(wmOperatorType *ot)
                  MAX_ID_NAME - 2,
                  "Paint Curve",
                  "Name of the paint curve to stamp along; the active brush's own when empty");
+
+  RNA_def_string(ot->srna,
+                 "object",
+                 nullptr,
+                 MAX_ID_NAME - 2,
+                 "Object",
+                 "Name of the sculpt-mode mesh to stamp onto; the active object when empty");
+
+  RNA_def_enum(ot->srna,
+               "effect",
+               curve_patch_apply_effect_items,
+               -1,
+               "Effect",
+               "What the patch writes; inferred from the brush when Automatic");
 
   RNA_def_int(ot->srna,
               "spline_index",

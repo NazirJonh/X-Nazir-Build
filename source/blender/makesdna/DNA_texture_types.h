@@ -297,44 +297,8 @@ enum eMTex_BrushAngleMode : char {
 };
 ENUM_OPERATORS(eMTex_BrushAngleMode)
 
-/** #BrushCurvePatchSettings::length_mode — how the texture is mapped along the curve's length. */
-enum eMTex_CurvePatchLengthMode : char {
-  MTEX_CURVE_PATCH_LENGTH_DEFAULT = 0,
-  MTEX_CURVE_PATCH_LENGTH_REPEAT = 1,
-  MTEX_CURVE_PATCH_LENGTH_STRETCH = 2,
-};
-
-/** #BrushCurvePatchSettings::end_falloff — how the relief terminates at the curve's two ends. */
-enum eMTex_CurvePatchEndFalloff : char {
-  MTEX_CURVE_PATCH_END_HARD = 0,
-  MTEX_CURVE_PATCH_END_SMOOTH = 1,
-};
-
-/** #BrushCurvePatchSettings::stamp_mode — one stretched sheet or discrete stamps. */
-enum eMTex_CurvePatchStampMode : char {
-  MTEX_CURVE_PATCH_STAMP_RIBBON = 0,
-  MTEX_CURVE_PATCH_STAMP_STAMPS = 1,
-};
-
-/** #BrushCurvePatchSettings::stamp_projection — how a stamp's texture frame is built.
- *
- * CURVE keeps the stamp in the ribbon's curvilinear `(s, u)` space, so the texture bends with the
- * control curve. PLANAR freezes a rigid world frame per stamp, so the texture keeps its shape
- * through arbitrarily sharp turns and along a varying per-point radius. */
-enum eMTex_CurvePatchStampProjection : char {
-  MTEX_CURVE_PATCH_STAMP_PROJ_CURVE = 0,
-  MTEX_CURVE_PATCH_STAMP_PROJ_PLANAR = 1,
-};
-
-/** #BrushCurvePatchSettings::stamp_texture_source / #BrushCurvePatchSettings::ribbon_texture_source
- * — whether the Curve Patch samples the brush's own texture or the brush's multi-texture data.
- *
- * SINGLE is 0 so a file written before these fields existed reads back as today's behavior and no
- * versioning code is needed. */
-enum eMTex_CurvePatchTexSource : char {
-  MTEX_CURVE_PATCH_TEX_SINGLE = 0,
-  MTEX_CURVE_PATCH_TEX_MULTI = 1,
-};
+/* The Curve Patch enumerations describe #BrushCurvePatchSettings and live in
+ * `DNA_brush_enums.h` alongside the struct they belong to. */
 
 /** \} */
 
@@ -347,12 +311,7 @@ struct MTex {
 
   short texco = TEXCO_UV, mapto = MAP_COL;
   eMTex_BlendType blendtype = MTEX_BLEND;
-  /** The Curve Patch and Roll settings that used to live here are on #BrushCurvePatchSettings and
-   * #Brush now: they were formally per-texture-slot, but nothing ever read them from any slot other
-   * than #Brush::mtex. makesdna does NOT insert alignment padding on its own (see
-   * `check_member_alignment()` in `makesdna.cc`), so this padding must cover all of them for
-   * `object` below to stay aligned. */
-  char _pad2[18] = {};
+  char _pad2[2] = {};
   struct Object *object = nullptr;
   struct Tex *tex = nullptr;
   char uvname[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";

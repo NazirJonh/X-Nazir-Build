@@ -51,10 +51,10 @@
 #include "mesh/sculpt_intern.hh"
 #include "mesh/sculpt_undo.hh"
 
-/* Temporary performance instrumentation (see previous measurement pass). Times each
- * `curve_patch_restore_and_restamp()` to confirm the C3 node-cull's effect on `relief`. Set to 0 to
- * disable; grep `DEBUG-cpatch` to remove every touch point once measured. */
-#define CURVE_PATCH_PROFILING 1
+/* Opt-in performance instrumentation. Times each `curve_patch_restore_and_restamp()` to confirm the
+ * node-cull's effect on `relief`. Must stay 0 outside a measurement pass: the report writes to
+ * stdout and flushes on every interactive re-stamp. Grep `DEBUG-cpatch` for every touch point. */
+#define CURVE_PATCH_PROFILING 0
 
 namespace blender::ed::sculpt_paint {
 

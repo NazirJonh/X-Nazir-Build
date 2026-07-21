@@ -35,12 +35,12 @@ namespace blender::ed::sculpt_paint {
 
 static bke::CurvePatchLengthMode length_mode_from_dna(const int dna_value)
 {
-  switch (eMTex_CurvePatchLengthMode(dna_value)) {
-    case MTEX_CURVE_PATCH_LENGTH_DEFAULT:
+  switch (eBrushCurvePatchLengthMode(dna_value)) {
+    case BRUSH_CURVE_PATCH_LENGTH_DEFAULT:
       return bke::CurvePatchLengthMode::Default;
-    case MTEX_CURVE_PATCH_LENGTH_REPEAT:
+    case BRUSH_CURVE_PATCH_LENGTH_REPEAT:
       return bke::CurvePatchLengthMode::Repeat;
-    case MTEX_CURVE_PATCH_LENGTH_STRETCH:
+    case BRUSH_CURVE_PATCH_LENGTH_STRETCH:
       return bke::CurvePatchLengthMode::Stretch;
   }
   BLI_assert_unreachable();
@@ -49,10 +49,10 @@ static bke::CurvePatchLengthMode length_mode_from_dna(const int dna_value)
 
 static bke::CurvePatchEndFalloff end_falloff_from_dna(const int dna_value)
 {
-  switch (eMTex_CurvePatchEndFalloff(dna_value)) {
-    case MTEX_CURVE_PATCH_END_HARD:
+  switch (eBrushCurvePatchEndFalloff(dna_value)) {
+    case BRUSH_CURVE_PATCH_END_HARD:
       return bke::CurvePatchEndFalloff::None;
-    case MTEX_CURVE_PATCH_END_SMOOTH:
+    case BRUSH_CURVE_PATCH_END_SMOOTH:
       return bke::CurvePatchEndFalloff::Smooth;
   }
   BLI_assert_unreachable();
@@ -61,10 +61,10 @@ static bke::CurvePatchEndFalloff end_falloff_from_dna(const int dna_value)
 
 static bke::CurvePatchStampMode stamp_mode_from_dna(const int dna_value)
 {
-  switch (eMTex_CurvePatchStampMode(dna_value)) {
-    case MTEX_CURVE_PATCH_STAMP_RIBBON:
+  switch (eBrushCurvePatchStampMode(dna_value)) {
+    case BRUSH_CURVE_PATCH_STAMP_RIBBON:
       return bke::CurvePatchStampMode::Ribbon;
-    case MTEX_CURVE_PATCH_STAMP_STAMPS:
+    case BRUSH_CURVE_PATCH_STAMP_STAMPS:
       return bke::CurvePatchStampMode::Stamps;
   }
   BLI_assert_unreachable();
@@ -73,10 +73,10 @@ static bke::CurvePatchStampMode stamp_mode_from_dna(const int dna_value)
 
 static bke::CurvePatchStampProjection stamp_projection_from_dna(const int dna_value)
 {
-  switch (eMTex_CurvePatchStampProjection(dna_value)) {
-    case MTEX_CURVE_PATCH_STAMP_PROJ_CURVE:
+  switch (eBrushCurvePatchStampProjection(dna_value)) {
+    case BRUSH_CURVE_PATCH_STAMP_PROJ_CURVE:
       return bke::CurvePatchStampProjection::Curve;
-    case MTEX_CURVE_PATCH_STAMP_PROJ_PLANAR:
+    case BRUSH_CURVE_PATCH_STAMP_PROJ_PLANAR:
       return bke::CurvePatchStampProjection::Planar;
   }
   BLI_assert_unreachable();
@@ -158,7 +158,7 @@ void curve_patch_texture_binding_from_brush(const Brush &brush,
 
   curve_patch_texture_binding_clear(r_binding);
 
-  if (settings.stamp_texture_source == MTEX_CURVE_PATCH_TEX_MULTI) {
+  if (settings.stamp_texture_source == BRUSH_CURVE_PATCH_TEX_MULTI) {
     /* Sized up front because `Array` cannot grow -- the container is fixed-size precisely because
      * `MTex` has no move constructor for a growing one to relocate through. */
     const int slot_num = settings.texture_slots.count();
@@ -184,7 +184,7 @@ void curve_patch_texture_binding_from_brush(const Brush &brush,
     }
   }
 
-  if (settings.ribbon_texture_source == MTEX_CURVE_PATCH_TEX_MULTI) {
+  if (settings.ribbon_texture_source == BRUSH_CURVE_PATCH_TEX_MULTI) {
     r_binding.caps_enabled = true;
     const Tex *zone_textures[3] = {
         settings.tex_start, settings.tex_middle, settings.tex_end};

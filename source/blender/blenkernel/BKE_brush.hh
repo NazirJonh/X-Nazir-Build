@@ -24,6 +24,7 @@ namespace blender {
 
 enum class PaintMode : int8_t;
 struct Brush;
+struct BrushCurvePatchTextureSlot;
 struct ImBuf;
 struct ImagePool;
 struct Main;
@@ -92,6 +93,23 @@ void BKE_brush_init_curves_sculpt_settings(Brush *brush);
  * For convenience, null may be passed for \a brush.
  */
 void BKE_brush_tag_unsaved_changes(Brush *brush);
+
+/* Curve Patch texture slots.
+ *
+ * The list owns a user on each slot's texture (registered in `brush_foreach_id`), which is why
+ * adding and removing a slot cannot be open-coded by every caller. Both the operators and the RNA
+ * collection go through here so the two can never drift apart. Neither tags the brush or sends a
+ * notifier -- that belongs to the caller, which knows its own context. */
+
+/** Append a slot with its DNA defaults and make it the active one. */
+BrushCurvePatchTextureSlot *BKE_brush_curve_patch_texture_slot_add(Brush &brush);
+
+/**
+ * Drop a slot, releasing the user it holds on its texture.
+ *
+ * \return false when `slot` is not in this brush's list, in which case nothing is changed.
+ */
+bool BKE_brush_curve_patch_texture_slot_remove(Brush &brush, BrushCurvePatchTextureSlot &slot);
 
 float2 BKE_brush_jitter_pos(const Paint &paint, const Brush &brush, const float2 &pos);
 void BKE_brush_randomize_texture_coords(Paint *paint, bool mask);

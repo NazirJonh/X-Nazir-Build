@@ -611,6 +611,45 @@ enum eBrushColorJitterSettings_Flag : int {
 };
 ENUM_OPERATORS(eBrushColorJitterSettings_Flag)
 
+/** #BrushCurvePatchSettings::length_mode — how the texture is mapped along the curve's length. */
+enum eBrushCurvePatchLengthMode : char {
+  BRUSH_CURVE_PATCH_LENGTH_DEFAULT = 0,
+  BRUSH_CURVE_PATCH_LENGTH_REPEAT = 1,
+  BRUSH_CURVE_PATCH_LENGTH_STRETCH = 2,
+};
+
+/** #BrushCurvePatchSettings::end_falloff — how the relief terminates at the curve's two ends. */
+enum eBrushCurvePatchEndFalloff : char {
+  BRUSH_CURVE_PATCH_END_HARD = 0,
+  BRUSH_CURVE_PATCH_END_SMOOTH = 1,
+};
+
+/** #BrushCurvePatchSettings::stamp_mode — one stretched sheet or discrete stamps. */
+enum eBrushCurvePatchStampMode : char {
+  BRUSH_CURVE_PATCH_STAMP_RIBBON = 0,
+  BRUSH_CURVE_PATCH_STAMP_STAMPS = 1,
+};
+
+/** #BrushCurvePatchSettings::stamp_projection — how a stamp's texture frame is built.
+ *
+ * CURVE keeps the stamp in the ribbon's curvilinear `(s, u)` space, so the texture bends with the
+ * control curve. PLANAR freezes a rigid world frame per stamp, so the texture keeps its shape
+ * through arbitrarily sharp turns and along a varying per-point radius. */
+enum eBrushCurvePatchStampProjection : char {
+  BRUSH_CURVE_PATCH_STAMP_PROJ_CURVE = 0,
+  BRUSH_CURVE_PATCH_STAMP_PROJ_PLANAR = 1,
+};
+
+/** #BrushCurvePatchSettings::stamp_texture_source / #BrushCurvePatchSettings::ribbon_texture_source
+ * — whether the Curve Patch samples the brush's own texture or the brush's multi-texture data.
+ *
+ * SINGLE is 0 so a file written before these fields existed reads back as today's behavior and no
+ * versioning code is needed. */
+enum eBrushCurvePatchTexSource : char {
+  BRUSH_CURVE_PATCH_TEX_SINGLE = 0,
+  BRUSH_CURVE_PATCH_TEX_MULTI = 1,
+};
+
 #define MAX_BRUSH_PIXEL_RADIUS 500
 #define MAX_BRUSH_PIXEL_DIAMETER 1000
 

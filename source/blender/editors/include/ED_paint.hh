@@ -147,9 +147,10 @@ bool ED_paintcurve_import_from_source_object(bContext *C, ReportList *reports, b
 void ED_paintcurve_refresh_on_sculpt_mode_enter(bContext *C);
 
 /**
- * Clear the intermediate paint-curve geometry and detach from the source object.
- * Called when the user explicitly removes the source via the UI clear button so that
- * the Curve Edit tool starts fresh with an empty canvas.
+ * Stop syncing the intermediate paint curve back to the source object.
+ *
+ * Does NOT touch the curve itself: this runs from an RNA property assignment, where destroying user
+ * data as a side effect is invisible from Python. Clearing the canvas is #PAINTCURVE_OT_clear.
  */
 void ED_paintcurve_detach_source(bContext *C);
 

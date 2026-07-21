@@ -696,11 +696,10 @@ void ED_paintcurve_detach_source(bContext *C)
   }
   Sculpt *sculpt = scene->toolsettings->sculpt;
 
-  Paint *paint = BKE_paint_get_active_from_context(C);
-  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
-  if (brush && brush->paint_curve) {
-    brush->paint_curve->geometry.wrap() = bke::CurvesGeometry();
-  }
+  /* Deliberately leaves the paint curve alone. This runs from an RNA property assignment, and
+   * clearing the source there used to destroy the user's curve as a side effect -- invisible from
+   * Python, and reachable from any generic property copy or preset. Wiping the canvas is
+   * #PAINTCURVE_OT_clear's job now. */
   sculpt->paint_curve_sync_to_source = 0;
 
   /* Force the paint-cursor overlay to repaint so the control-point display clears immediately.

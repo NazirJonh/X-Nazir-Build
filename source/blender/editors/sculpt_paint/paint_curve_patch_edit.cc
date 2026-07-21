@@ -39,8 +39,6 @@
 #include <optional>
 #include <utility>
 
-#include <fmt/format.h>
-
 #include "MEM_guardedalloc.h"
 
 #include "BLI_index_mask.hh"
@@ -589,7 +587,7 @@ static void curve_patch_edit_context_menu_open(bContext *C)
     if (!is_cyclic) {
       layout.prop(
           &settings_ptr, "end_falloff", UI_ITEM_NONE, IFACE_("End Falloff"), ICON_NONE);
-      if (brush->curve_patch.end_falloff == MTEX_CURVE_PATCH_END_SMOOTH) {
+      if (brush->curve_patch.end_falloff == BRUSH_CURVE_PATCH_END_SMOOTH) {
         layout.prop(&settings_ptr,
                     "end_falloff_percent",
                     UI_ITEM_NONE,
@@ -608,19 +606,28 @@ static void curve_patch_edit_context_menu_open(bContext *C)
 
 /** \} */
 
+/* The keys are still matched by name in the modal below rather than through a modal keymap, so
+ * #WorkspaceStatus::opmodal (which reads one) cannot be used -- each entry names its key icon
+ * directly. The gain over the raw status string this replaced is the key ICONS and the translation
+ * of every label. */
 static void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &patch)
 {
-  std::string msg = fmt::format(
-      "Enter: Commit | Esc: Cancel | Ctrl+Z: Undo | S: Swap Texture Axis (currently {}) | C: {} "
-      "Curve",
-      patch.params.swap_axis ? "U" : "V",
-      curve_patch_is_cyclic(patch) ? "Open" : "Close");
+  WorkspaceStatus status(C);
+  status.item(IFACE_("Commit"), ICON_EVENT_RETURN);
+  status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
+  status.item(IFACE_("Undo"), ICON_EVENT_CTRL, ICON_EVENT_Z);
+  /* Two whole strings rather than one with a substituted axis letter: a translator needs the
+   * sentence, and neither half reads as a sentence on its own. */
+  status.item(patch.params.swap_axis ? IFACE_("Swap Texture Axis (now U)") :
+                                       IFACE_("Swap Texture Axis (now V)"),
+              ICON_EVENT_S);
+  status.item(curve_patch_is_cyclic(patch) ? IFACE_("Open Curve") : IFACE_("Close Curve"),
+              ICON_EVENT_C);
   /* Reseed has no shortcut -- this modal has no free key left -- so advertise the route that does
    * reach it. Meaningless in Ribbon mode, which has nothing random to re-roll. */
   if (patch.params.stamp_mode == CurvePatchStampMode::Stamps) {
-    msg += " | RMB Menu: Reseed Stamps";
+    status.item(IFACE_("Reseed Stamps"), ICON_MOUSE_RMB);
   }
-  ED_workspace_status_text(C, msg.c_str());
 }
 
 static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)

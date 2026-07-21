@@ -23,6 +23,8 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 
+#include "BKE_blender.hh"
+#include "BKE_blendfile.hh"
 #include "BKE_callbacks.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
@@ -1349,6 +1351,121 @@ void PREFERENCES_OT_clear_filter(wmOperatorType *ot)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Merge Preferences Operator
+ * \{ */
+
+static wmOperatorStatus preferences_userdef_merge_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+
+  char filepath[FILE_MAX];
+  RNA_string_get(op->ptr, "filepath", filepath);
+
+  /* #BKE_blendfile_userdef_read already reports the failure into op->reports. */
+  UserDef *userdef_src = BKE_blendfile_userdef_read(filepath, op->reports);
+  if (userdef_src == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  int flags = 0;
+  if (RNA_boolean_get(op->ptr, "use_addons")) {
+    flags |= USER_SYNC_ADDONS;
+  }
+  if (RNA_boolean_get(op->ptr, "use_repos")) {
+    flags |= USER_SYNC_REPOS;
+  }
+  if (RNA_boolean_get(op->ptr, "use_theme")) {
+    flags |= USER_SYNC_THEME;
+  }
+  if (RNA_boolean_get(op->ptr, "use_keymap")) {
+    flags |= USER_SYNC_KEYMAP;
+  }
+  if (RNA_boolean_get(op->ptr, "use_favorites")) {
+    flags |= USER_SYNC_FAVORITES;
+  }
+  if (RNA_boolean_get(op->ptr, "use_paths")) {
+    flags |= USER_SYNC_PATHS;
+  }
+
+  /* A repository pointing inside the source installation would resolve to a directory the file
+   * sync never populates, since only the modules it does not have yet are copied there. Rather
+   * than merging it with a rewritten directory that was never filled, drop it entirely so the
+   * merge does not leave behind a repository whose extensions silently fail to load. */
+  char source_root[FILE_MAX];
+  RNA_string_get(op->ptr, "source_root", source_root);
+  if (source_root[0] != '\0') {
+    for (bUserExtensionRepo &repo : userdef_src->extension_repos.items_mutable()) {
+      if (repo.custom_dirpath[0] != '\0' && BLI_path_contains(source_root, repo.custom_dirpath)) {
+        BLI_remlink(&userdef_src->extension_repos, &repo);
+        MEM_SAFE_DELETE(repo.access_token);
+        MEM_delete(&repo);
+      }
+    }
+  }
+
+  BKE_callback_exec_null(bmain, BKE_CB_EVT_EXTENSION_REPOS_UPDATE_PRE);
+
+  BKE_blender_userdef_sync_from(&U, userdef_src, flags);
+
+  if (flags & USER_SYNC_THEME) {
+    /* #blender::ui::theme caches a raw #bTheme pointer that is only refreshed at region-draw
+     * time. Refresh it now so a stale pointer is never live between the merge above and the next
+     * redraw. Deliberately not `init_default()`: that would overwrite the freshly merged colors
+     * with the built-in defaults. */
+    ui::theme::theme_set(0, 0);
+  }
+
+  /* The source fonts were never loaded into BLF, so they must not be unloaded from it. */
+  BKE_blender_userdef_data_free(userdef_src, false);
+  MEM_delete(userdef_src);
+
+  BKE_callback_exec_null(bmain, BKE_CB_EVT_EXTENSION_REPOS_UPDATE_POST);
+
+  WM_reinit_gizmomap_all(bmain);
+  WM_keyconfig_reload(C);
+
+  U.runtime.is_dirty = true;
+  WM_event_add_notifier(C, NC_WINDOW, nullptr);
+  WM_event_add_notifier(C, NC_UI | ND_UI_FONT, nullptr);
+
+  return OPERATOR_FINISHED;
+}
+
+static void PREFERENCES_OT_userdef_merge(wmOperatorType *ot)
+{
+  /* identifiers */
+  ot->name = "Merge Preferences";
+  ot->idname = "PREFERENCES_OT_userdef_merge";
+  ot->description = "Merge selected categories of another preferences file into the current ones";
+
+  /* callbacks */
+  ot->exec = preferences_userdef_merge_exec;
+
+  /* flags */
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_string_file_path(
+      ot->srna, "filepath", nullptr, FILE_MAX, "File Path", "Preferences file to merge from");
+  RNA_def_string_dir_path(ot->srna,
+                          "source_root",
+                          nullptr,
+                          FILE_MAX,
+                          "Source Root",
+                          "Configuration directory the file belongs to, used to reject extension "
+                          "repositories that point back into it");
+
+  RNA_def_boolean(ot->srna, "use_addons", false, "Add-ons", "Merge add-ons and their preferences");
+  RNA_def_boolean(ot->srna, "use_repos", false, "Repositories", "Merge extension repositories");
+  RNA_def_boolean(ot->srna, "use_theme", false, "Theme", "Replace the theme");
+  RNA_def_boolean(ot->srna, "use_keymap", false, "Keymap", "Replace the key map");
+  RNA_def_boolean(ot->srna, "use_favorites", false, "Quick Favorites", "Replace quick favorites");
+  RNA_def_boolean(
+      ot->srna, "use_paths", false, "Paths", "Merge asset libraries, script and auto-run paths");
+}
+
+/** \} */
+
 void ED_operatortypes_userpref()
 {
   WM_operatortype_append(PREFERENCES_OT_reset_default_theme);
@@ -1365,6 +1482,8 @@ void ED_operatortypes_userpref()
 
   WM_operatortype_append(PREFERENCES_OT_associate_blend);
   WM_operatortype_append(PREFERENCES_OT_unassociate_blend);
+
+  WM_operatortype_append(PREFERENCES_OT_userdef_merge);
 
   WM_operatortype_append(PREFERENCES_OT_start_filter);
   WM_operatortype_append(PREFERENCES_OT_clear_filter);

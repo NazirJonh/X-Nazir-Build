@@ -2012,6 +2012,12 @@ class USERPREF_PT_saveload_import_settings(SaveLoadPanel, CenterAlignMixIn, Pane
         props.lock_source = True
         props.branch = 'STOCK'
 
+        # Unlike the buttons above this one is meant to be used repeatedly, to pick up settings
+        # made in the official Blender after this build was set up.
+        sub = col.column()
+        sub.enabled = bool(operator_cls.find_versions('STOCK', include_current_and_newer=True))
+        sub.operator("preferences.sync_settings", text="Sync from Official Blender")
+
 
 # -----------------------------------------------------------------------------
 # Input Panels

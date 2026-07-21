@@ -186,6 +186,38 @@ class PREFERENCES_OT_copy_prev(Operator):
         return {'FINISHED'}
 
 
+def _userconfig_path_is_default():
+    """True when the configuration directory is the automatic per-version one."""
+    import os
+
+    # No automatic per-version configuration exists when the config path is overridden by an
+    # environment variable or this is a portable install, and writing to it would go elsewhere
+    # than the version directories these operators scan.
+    userconfig_path = os.path.normpath(bpy.utils.user_resource('CONFIG'))
+    new_userconfig_path = os.path.normpath(os.path.join(bpy.utils.resource_path('USER'), "config"))
+    return userconfig_path == new_userconfig_path
+
+
+def _disable_missing_addons(context):
+    """Drop add-ons the imported preferences enable but this build does not have.
+
+    The caller is responsible for saving the preferences afterwards.
+    """
+    import addon_utils
+
+    available = {module.__name__ for module in addon_utils.modules()}
+    addons = context.preferences.addons
+    missing = [addon.module for addon in addons if addon.module not in available]
+
+    for module_name in missing:
+        while module_name in addons:
+            addon = addons.get(module_name)
+            if addon is None:
+                break
+            addons.remove(addon)
+    return missing
+
+
 # Kept alive because Blender does not own the strings returned by a dynamic enum callback.
 _copy_settings_version_items = []
 
@@ -208,6 +240,8 @@ class PREFERENCES_OT_copy_settings(Operator):
 
     # Mirrors the constant in PREFERENCES_OT_copy_prev, see the reasoning there.
     MAX_MINOR_VERSION_FOR_PREVIOUS_MAJOR_LOOKUP = 10
+    # Upper bound when scanning forward, an installation newer than this is not looked for.
+    MAX_MINOR_VERSION_FOR_NEWER_LOOKUP = 10
 
     # Property name paired with the sub-directory it controls.
     _SUBDIRS = (
@@ -259,12 +293,29 @@ class PREFERENCES_OT_copy_settings(Operator):
         )
 
     @classmethod
-    def find_versions(cls, branch):
-        """Every existing configuration directory older than the current version, newest first."""
+    def find_versions(cls, branch, *, include_current_and_newer=False):
+        """Existing configuration directories, newest first.
+
+        Only versions older than the running one are scanned unless include_current_and_newer is
+        set, which the synchronize operator needs: an official Blender of the same or a newer
+        version is the usual source there.
+        """
         import os
 
         found = []
         version_new = bpy.app.version[:2]
+
+        if include_current_and_newer:
+            # Newest first, so scan forward before scanning backward.
+            newer = []
+            for major in (version_new[0], version_new[0] + 1):
+                minor_min = version_new[1] if major == version_new[0] else 0
+                for minor in range(minor_min, cls.MAX_MINOR_VERSION_FOR_NEWER_LOOKUP + 1):
+                    path = cls.version_path((major, minor), branch)
+                    if path and os.path.isdir(path):
+                        newer.append((major, minor))
+            found.extend(reversed(newer))
+
         version_old = [version_new[0], version_new[1] - 1]
 
         while True:
@@ -292,15 +343,9 @@ class PREFERENCES_OT_copy_settings(Operator):
 
     @classmethod
     def poll(cls, _context):
-        import os
-
-        # No automatic per-version configuration exists when the config path is overridden by an
-        # environment variable or this is a portable install. Unlike PREFERENCES_OT_copy_prev this
-        # stays enabled once a configuration exists: the operator lives in the Preferences editor
-        # and overwriting is guarded by the backup instead.
-        userconfig_path = os.path.normpath(bpy.utils.user_resource('CONFIG'))
-        new_userconfig_path = os.path.normpath(os.path.join(bpy.utils.resource_path('USER'), "config"))
-        return userconfig_path == new_userconfig_path
+        # Unlike PREFERENCES_OT_copy_prev this stays enabled once a configuration exists: the
+        # operator lives in the Preferences editor and overwriting is guarded by the backup.
+        return _userconfig_path_is_default()
 
     def _source_path(self):
         import os
@@ -398,7 +443,10 @@ class PREFERENCES_OT_copy_settings(Operator):
 
         bpy.ops.wm.read_userpref()
 
-        disabled = self._disable_missing_addons(context)
+        # Saving moved here from the helper, the synchronize operator saves unconditionally.
+        disabled = _disable_missing_addons(context)
+        if disabled:
+            bpy.ops.wm.save_userpref()
 
         message = "Copied {:s} from {:s}".format(", ".join(names), source)
         if backup_dir:
@@ -408,25 +456,263 @@ class PREFERENCES_OT_copy_settings(Operator):
         self.report({'INFO'}, message)
         return {'FINISHED'}
 
+
+# Kept alive because Blender does not own the strings returned by a dynamic enum callback.
+_sync_settings_version_items = []
+
+
+def _sync_settings_version_items_cb(_self, _context):
+    items = _sync_settings_version_items
+    items.clear()
+    versions = PREFERENCES_OT_copy_settings.find_versions('STOCK', include_current_and_newer=True)
+    for version in versions:
+        identifier = "{:d}.{:d}".format(*version)
+        items.append((identifier, identifier, PREFERENCES_OT_copy_settings.version_path(version, 'STOCK')))
+    if not items:
+        items.append(('NONE', "None Found", "No official Blender configuration directory was found"))
+    return items
+
+
+class PREFERENCES_OT_sync_settings(Operator):
+    """Merge settings from an official Blender installation into this build"""
+    bl_idname = "preferences.sync_settings"
+    bl_label = "Sync Settings"
+
+    source_version: EnumProperty(
+        name="Version",
+        description="Official Blender version to take the settings from",
+        items=_sync_settings_version_items_cb,
+    )
+    use_addons: BoolProperty(
+        name="Add-ons",
+        description="Enabled add-ons and their preferences. Add-ons of this build that the source "
+        "does not know about are kept",
+        default=True,
+    )
+    use_repos: BoolProperty(
+        name="Extension Repositories",
+        description="Repositories that are not set up in this build yet. Existing ones are kept",
+        default=True,
+    )
+    use_files: BoolProperty(
+        name="Add-on Files",
+        description="Copy extensions and legacy add-ons that are not installed in this build. "
+        "Already installed ones are never overwritten",
+        default=True,
+    )
+    use_theme: BoolProperty(
+        name="Theme",
+        description="Replace the theme. Colors this build adds on top of the standard theme are "
+        "reset to their defaults",
+        default=False,
+    )
+    use_keymap: BoolProperty(
+        name="Keymap",
+        description="Replace the key map and its preferences",
+        default=False,
+    )
+    use_favorites: BoolProperty(
+        name="Quick Favorites",
+        description="Replace the quick favorites menu",
+        default=False,
+    )
+    use_paths: BoolProperty(
+        name="Paths",
+        description="Asset libraries, script directories and auto-execution paths that are not "
+        "set up in this build yet",
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, _context):
+        return _userconfig_path_is_default()
+
+    def _source_path(self):
+        import os
+
+        if self.source_version == 'NONE':
+            return None
+        major, minor = (int(number) for number in self.source_version.split("."))
+        path = PREFERENCES_OT_copy_settings.version_path((major, minor), 'STOCK')
+        return path if path and os.path.isdir(path) else None
+
+    def _source_is_newer(self):
+        if self.source_version == 'NONE':
+            return False
+        major, minor = (int(number) for number in self.source_version.split("."))
+        return (major, minor) > bpy.app.version[:2]
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        layout.prop(self, "source_version")
+
+        col = layout.column(heading="Merge")
+        col.prop(self, "use_addons")
+        col.prop(self, "use_repos")
+        col.prop(self, "use_files")
+        col.prop(self, "use_paths")
+
+        col = layout.column(heading="Replace")
+        col.prop(self, "use_theme")
+        col.prop(self, "use_keymap")
+        col.prop(self, "use_favorites")
+
+        if self.use_theme or self.use_keymap or self.use_favorites:
+            box = layout.box()
+            box.alert = True
+            box.label(text="Replaced settings are overwritten entirely", icon='ERROR')
+            box.label(text="A backup of the preferences file is created first")
+
+        if self._source_is_newer():
+            box = layout.box()
+            box.alert = True
+            box.label(text="The source is newer than this build", icon='ERROR')
+            box.label(text="Settings it does not share with this version are ignored")
+
+    def execute(self, context):
+        import os
+        import shutil
+        import time
+
+        source = self._source_path()
+        if source is None:
+            self.report({'ERROR'}, "Official Blender configuration directory not found")
+            return {'CANCELLED'}
+
+        dest = bpy.utils.resource_path('USER')
+        if os.path.normcase(os.path.normpath(source)) == os.path.normcase(os.path.normpath(dest)):
+            self.report({'ERROR'}, "Source and destination are the same directory")
+            return {'CANCELLED'}
+
+        source_userpref = os.path.join(source, "config", "userpref.blend")
+        if not os.path.isfile(source_userpref):
+            self.report({'ERROR'}, "No preferences file at \"{:s}\"".format(source_userpref))
+            return {'CANCELLED'}
+
+        # Preferences have no undo, so keep a copy of the file the merge is about to change.
+        backup_dir = ""
+        dest_userpref = os.path.join(dest, "config", "userpref.blend")
+        if os.path.isfile(dest_userpref):
+            backup_dir = os.path.join(dest, "backups", time.strftime("%Y-%m-%d_%H%M%S"))
+            try:
+                os.makedirs(backup_dir, exist_ok=True)
+                shutil.copy2(dest_userpref, os.path.join(backup_dir, "userpref.blend"))
+            except OSError as ex:
+                self.report({'ERROR'}, "Unable to back up the preferences: {:s}".format(str(ex)))
+                return {'CANCELLED'}
+
+        copied = []
+        if self.use_files:
+            try:
+                copied = self._copy_missing_modules(source, dest)
+            except OSError as ex:
+                self.report({'ERROR'}, "Unable to copy add-on files: {:s}".format(str(ex)))
+                return {'CANCELLED'}
+
+        bpy.ops.preferences.userdef_merge(
+            filepath=source_userpref,
+            source_root=source,
+            use_addons=self.use_addons,
+            use_repos=self.use_repos,
+            use_theme=self.use_theme,
+            use_keymap=self.use_keymap,
+            use_favorites=self.use_favorites,
+            use_paths=self.use_paths,
+        )
+
+        disabled = _disable_missing_addons(context)
+        failed_enable = self._enable_merged_addons(context)
+        bpy.ops.wm.save_userpref()
+
+        message = "Synchronized settings from {:s}".format(source)
+        if copied:
+            message += ". Added {:d} add-on(s)".format(len(copied))
+        if backup_dir:
+            message += ". Previous preferences copied to {:s}".format(backup_dir)
+        if disabled:
+            message += ". Disabled add-ons that are not installed: {:s}".format(", ".join(disabled))
+        if failed_enable:
+            message += ". Could not load add-on(s): {:s}".format(", ".join(failed_enable))
+        self.report({'INFO'}, message)
+        return {'FINISHED'}
+
     @staticmethod
-    def _disable_missing_addons(context):
-        """Drop add-ons the copied preferences enable but this build does not have."""
+    def _enable_merged_addons(context):
+        """Enable add-ons the merge brought in that are not loaded yet.
+
+        Without this, a merged add-on shows up enabled in the preferences but never actually
+        registers, since merging only touches `UserDef.addons`, not the running Python session.
+
+        :return: module names that could not be enabled.
+        :rtype: list[str]
+        """
         import addon_utils
 
-        available = {module.__name__ for module in addon_utils.modules()}
-        addons = context.preferences.addons
-        missing = [addon.module for addon in addons if addon.module not in available]
-        if not missing:
-            return []
+        failed = []
+        for addon in context.preferences.addons:
+            module_name = addon.module
+            _loaded_default, loaded_state = addon_utils.check(module_name)
+            if loaded_state:
+                continue
+            if addon_utils.enable(module_name, default_set=False, persistent=True) is None:
+                failed.append(module_name)
+        return failed
 
-        for module_name in missing:
-            while module_name in addons:
-                addon = addons.get(module_name)
-                if addon is None:
-                    break
-                addons.remove(addon)
-        bpy.ops.wm.save_userpref()
-        return missing
+    @staticmethod
+    def _copy_missing_modules(source, dest):
+        """Copy extension and legacy add-on directories this build does not have yet.
+
+        Never overwrites: an existing module may carry local fixes, and updating it is the job of
+        the extension repository rather than of this operator.
+        """
+        import os
+        import shutil
+
+        copied = []
+
+        # Extensions are grouped per repository: "extensions/<repo>/<module>".
+        source_extensions = os.path.join(source, "extensions")
+        if os.path.isdir(source_extensions):
+            for repo in os.listdir(source_extensions):
+                source_repo = os.path.join(source_extensions, repo)
+                if repo.startswith(".") or not os.path.isdir(source_repo):
+                    continue
+                for module in os.listdir(source_repo):
+                    source_module = os.path.join(source_repo, module)
+                    if module.startswith(".") or not os.path.isdir(source_module):
+                        continue
+                    dest_module = os.path.join(dest, "extensions", repo, module)
+                    if os.path.exists(dest_module):
+                        continue
+                    os.makedirs(os.path.dirname(dest_module), exist_ok=True)
+                    shutil.copytree(source_module, dest_module, symlinks=True)
+                    copied.append("{:s}/{:s}".format(repo, module))
+
+        # Legacy add-ons are flat: "scripts/addons/<module>", either a package or a single file.
+        source_addons = os.path.join(source, "scripts", "addons")
+        if os.path.isdir(source_addons):
+            for module in os.listdir(source_addons):
+                source_module = os.path.join(source_addons, module)
+                is_package = os.path.isdir(source_module)
+                if module.startswith(".") or not (is_package or module.endswith(".py")):
+                    continue
+                dest_module = os.path.join(dest, "scripts", "addons", module)
+                if os.path.exists(dest_module):
+                    continue
+                os.makedirs(os.path.dirname(dest_module), exist_ok=True)
+                if is_package:
+                    shutil.copytree(source_module, dest_module, symlinks=True)
+                else:
+                    shutil.copy2(source_module, dest_module)
+                copied.append(module)
+
+        return copied
 
 
 class PREFERENCES_OT_keyconfig_test(Operator):
@@ -1603,4 +1889,5 @@ classes = (
     PREFERENCES_OT_studiolight_copy_settings,
     PREFERENCES_OT_script_directory_new,
     PREFERENCES_OT_script_directory_remove,
+    PREFERENCES_OT_sync_settings,
 )

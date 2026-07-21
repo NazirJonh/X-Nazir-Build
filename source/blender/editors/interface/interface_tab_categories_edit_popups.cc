@@ -171,8 +171,17 @@ blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
 /** \name Glyph Cache
  * \{ */
 
-/* Static cache for glyphs - persists until explicitly cleared or Blender exits */
-static blender::Vector<std::pair<std::string, std::string>> g_glyph_cache;
+/* Static cache for glyphs - persists until explicitly cleared or Blender exits.
+ *
+ * Construct on first use: #blender::Vector allocates through guardedalloc, and a namespace-scope
+ * static would be destructed after the memory leak detector has run (statics are destructed in
+ * reverse order of construction, and this one would be constructed before
+ * #MEM_init_memleak_detection). Freeing at that point crashes on exit. */
+static blender::Vector<std::pair<std::string, std::string>> &glyph_cache()
+{
+  static blender::Vector<std::pair<std::string, std::string>> cache;
+  return cache;
+}
 static bool g_glyph_cache_valid = false;
 
 /**
@@ -180,7 +189,7 @@ static bool g_glyph_cache_valid = false;
  */
 static void glyph_cache_clear()
 {
-  g_glyph_cache.clear();
+  glyph_cache().clear();
   g_glyph_cache_valid = false;
 }
 
@@ -191,10 +200,10 @@ static void glyph_cache_clear()
 static const blender::Vector<std::pair<std::string, std::string>>& glyph_cache_get(bContext *C)
 {
   if (!g_glyph_cache_valid) {
-    g_glyph_cache = glyph_search_call_python(C, "", "", GLYPH_SEARCH_MAX_RESULTS);
+    glyph_cache() = glyph_search_call_python(C, "", "", GLYPH_SEARCH_MAX_RESULTS);
     g_glyph_cache_valid = true;
   }
-  return g_glyph_cache;
+  return glyph_cache();
 }
 
 /** \} */

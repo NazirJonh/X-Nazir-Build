@@ -2325,7 +2325,7 @@ void deferred_category_activation_execute(const bContext *C, ARegion *region)
         g_deferred_category_activation.discover_new_category = false;
         g_deferred_category_activation.discover_retry_count = 0;
         g_deferred_category_activation.tag_name_to_assign.clear();
-        g_known_categories_before_extension_drop.clear();
+        known_categories_before_extension_drop().clear();
         return;
       }
       else {
@@ -2348,10 +2348,10 @@ void deferred_category_activation_execute(const bContext *C, ARegion *region)
   if (g_deferred_category_activation.wait_for_extension_signal) {
     if (!g_deferred_category_activation.extension_signal_received) {
       bool discovered_without_signal = false;
-      if (region && region->runtime && !g_known_categories_before_extension_drop.is_empty()) {
+      if (region && region->runtime && !known_categories_before_extension_drop().is_empty()) {
         for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
           if (pc_dyn.idname && pc_dyn.idname[0] &&
-              !g_known_categories_before_extension_drop.contains(pc_dyn.idname))
+              !known_categories_before_extension_drop().contains(pc_dyn.idname))
           {
             discovered_without_signal = true;
             break;
@@ -2404,7 +2404,7 @@ void deferred_category_activation_execute(const bContext *C, ARegion *region)
                BLI_listbase_count(&region->runtime->panels_category));
       }
       printf("[CATEGORY ACTIVATE]   known categories before drop: %zu\n",
-             g_known_categories_before_extension_drop.size());
+             known_categories_before_extension_drop().size());
     }
 
     /* IMPORTANT: Search directly in region->runtime->panels_category, NOT through get_ordered_categories()!
@@ -2418,9 +2418,9 @@ void deferred_category_activation_execute(const bContext *C, ARegion *region)
           if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
             printf("[CATEGORY ACTIVATE]   Checking category: '%s', known=%d\n",
                    pc_dyn.idname,
-                   g_known_categories_before_extension_drop.contains(pc_dyn.idname) ? 1 : 0);
+                   known_categories_before_extension_drop().contains(pc_dyn.idname) ? 1 : 0);
           }
-          if (!g_known_categories_before_extension_drop.contains(pc_dyn.idname)) {
+          if (!known_categories_before_extension_drop().contains(pc_dyn.idname)) {
             new_category_id = pc_dyn.idname;
             if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
               printf("[CATEGORY ACTIVATE]   Found new category: '%s'\n", new_category_id.c_str());
@@ -2455,7 +2455,7 @@ void deferred_category_activation_execute(const bContext *C, ARegion *region)
       g_deferred_category_activation.discover_new_category = false;
       g_deferred_category_activation.discover_retry_count = 0;
       g_deferred_category_activation.tag_name_to_assign.clear();
-      g_known_categories_before_extension_drop.clear();
+      known_categories_before_extension_drop().clear();
       return;
     }
 
@@ -2553,7 +2553,7 @@ void deferred_category_activation_execute(const bContext *C, ARegion *region)
       g_deferred_category_activation.discover_new_category = false;
       g_deferred_category_activation.discover_retry_count = 0;
       g_deferred_category_activation.tag_name_to_assign.clear();
-      g_known_categories_before_extension_drop.clear();
+      known_categories_before_extension_drop().clear();
       return;
     }
   }
@@ -2594,7 +2594,7 @@ if (!category_exists) {
   g_deferred_category_activation.discover_new_category = false;
   g_deferred_category_activation.discover_retry_count = 0;
   g_deferred_category_activation.tag_name_to_assign.clear();
-  g_known_categories_before_extension_drop.clear();
+  known_categories_before_extension_drop().clear();
   return;
 }
 
@@ -2608,7 +2608,7 @@ if (current_active && STREQ(category_id.c_str(), current_active)) {
   g_deferred_category_activation.discover_new_category = false;
   g_deferred_category_activation.discover_retry_count = 0;
   g_deferred_category_activation.tag_name_to_assign.clear();
-  g_known_categories_before_extension_drop.clear();
+  known_categories_before_extension_drop().clear();
   return;
 }
 
@@ -2699,7 +2699,7 @@ if (!g_deferred_category_activation.tag_key.empty()) {
    * This ensures the new category is inserted at the correct position (between anchors)
    * rather than being appended to the end.
    *
-   * Note: g_pending_category_insert.tag_key has format "VIEW3D:AAA" while
+   * Note: pending_category_insert().tag_key has format "VIEW3D:AAA" while
    * g_deferred_category_activation.tag_key has format "AAA", so we check if
    * the pending key ends with the deferred key (after a colon separator). */
   bool tag_keys_match = false;
@@ -2830,7 +2830,7 @@ if (!g_deferred_category_activation.tag_key.empty()) {
   g_deferred_category_activation.discover_retry_count = 0;
   g_deferred_category_activation.tag_name_to_assign.clear();
   g_deferred_category_activation.pending_insert_valid = false;
-  g_known_categories_before_extension_drop.clear();
+  known_categories_before_extension_drop().clear();
   if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     printf("[CATEGORY ACTIVATE] Deferred activation completed\n");
   }

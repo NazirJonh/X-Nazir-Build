@@ -594,6 +594,16 @@ add_blender_test(
 )
 
 add_blender_test(
+  curve_patch_apply
+  --python ${CMAKE_CURRENT_LIST_DIR}/bl_curve_patch_apply.py
+)
+
+add_blender_test(
+  paint_curve_rna
+  --python ${CMAKE_CURRENT_LIST_DIR}/bl_paint_curve_rna.py
+)
+
+add_blender_test(
   geo_node_file_reporting
   --python ${CMAKE_CURRENT_LIST_DIR}/bl_geo_node_file_reporting.py
   --

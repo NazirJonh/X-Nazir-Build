@@ -340,6 +340,7 @@ const EnumPropertyItem rna_enum_object_axis_flip_items[] = {
 #  include "ED_lattice.hh"
 #  include "ED_mesh.hh"
 #  include "ED_object.hh"
+#  include "ED_paint.hh"
 #  include "ED_particle.hh"
 
 #  include "DEG_depsgraph_query.hh"
@@ -349,6 +350,64 @@ namespace blender {
 static void rna_Object_internal_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   DEG_id_tag_update(ptr->owner_id, ID_RECALC_TRANSFORM);
+}
+
+/* Live Curve Patch session. Read-only throughout: this is running modal state, not object data.
+ * `ptr->data` of the returned pointer is the opaque session handle -- see `ED_paint.hh`. */
+
+static PointerRNA rna_Object_curve_patch_session_get(PointerRNA *ptr)
+{
+  const Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  const void *session = ED_curve_patch_session_get(*ob);
+  if (session == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_CurvePatchSession, const_cast<void *>(session));
+}
+
+static int rna_CurvePatchSession_point_count_get(PointerRNA *ptr)
+{
+  return ED_curve_patch_session_point_num(ptr->data);
+}
+
+static int rna_CurvePatchSession_active_point_get(PointerRNA *ptr)
+{
+  return ED_curve_patch_session_active_point(ptr->data);
+}
+
+static bool rna_CurvePatchSession_is_cyclic_get(PointerRNA *ptr)
+{
+  return ED_curve_patch_session_is_cyclic(ptr->data);
+}
+
+static float rna_CurvePatchSession_radius_get(PointerRNA *ptr)
+{
+  return ED_curve_patch_session_radius(ptr->data);
+}
+
+static int rna_CurvePatchSession_stamp_count_get(PointerRNA *ptr)
+{
+  return ED_curve_patch_session_stamp_num(ptr->data);
+}
+
+static void rna_CurvePatchSession_positions_begin(CollectionPropertyIterator *iter,
+                                                  PointerRNA *ptr)
+{
+  /* The span points into the session, which outlives this call: the modal that owns it only
+   * rebuilds the curve in response to events, and RNA iteration is not one. */
+  const Span<float3> positions = ED_curve_patch_session_positions(ptr->data);
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           const_cast<float3 *>(positions.data()),
+                           sizeof(float3),
+                           positions.size(),
+                           false,
+                           nullptr);
+}
+
+static int rna_CurvePatchSession_positions_length(PointerRNA *ptr)
+{
+  return int(ED_curve_patch_session_positions(ptr->data).size());
 }
 
 static void rna_Object_internal_update_draw(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
@@ -2047,6 +2106,12 @@ bool rna_Curve_object_poll(PointerRNA * /*ptr*/, PointerRNA value)
   return (reinterpret_cast<Object *>(value.owner_id))->type == OB_CURVES_LEGACY;
 }
 
+bool rna_PaintCurve_source_object_poll(PointerRNA * /*ptr*/, PointerRNA value)
+{
+  const Object *ob = reinterpret_cast<Object *>(value.owner_id);
+  return ELEM(ob->type, OB_CURVES, OB_CURVES_LEGACY);
+}
+
 bool rna_Armature_object_poll(PointerRNA * /*ptr*/, PointerRNA value)
 {
   return (reinterpret_cast<Object *>(value.owner_id))->type == OB_ARMATURE;
@@ -3720,6 +3785,15 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "ObjectLineArt");
   RNA_def_property_ui_text(prop, "Line Art", "Line Art settings for the object");
 
+  prop = RNA_def_property(srna, "curve_patch_session", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "CurvePatchSession");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_pointer_funcs(
+      prop, "rna_Object_curve_patch_session_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Curve Patch Session",
+                           "Curve Patch edit currently running on this object, or None");
+
   /* Mesh Symmetry Settings */
 
   prop = RNA_def_property(srna, "use_mesh_mirror_x", PROP_BOOLEAN, PROP_NONE);
@@ -3806,6 +3880,65 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_api_object(srna);
 }
 
+/* Observable state of a running Curve Patch edit.
+ *
+ * Deliberately not `sdna`-backed: the session type lives in a private editor header, so the struct
+ * carries the opaque handle in `ptr->data` and every property reads it through `ED_paint.hh`. Also
+ * deliberately read-only -- a script watching a modal must not be able to steer it. */
+static void rna_def_curve_patch_session(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "CurvePatchSession", nullptr);
+  RNA_def_struct_ui_text(
+      srna, "Curve Patch Session", "State of the Curve Patch edit running on an object");
+
+  prop = RNA_def_property(srna, "point_count", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_int_funcs(prop, "rna_CurvePatchSession_point_count_get", nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Points", "Control points of the curve being edited");
+
+  prop = RNA_def_property(srna, "active_point", PROP_INT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_int_funcs(prop, "rna_CurvePatchSession_active_point_get", nullptr, nullptr);
+  RNA_def_property_ui_text(
+      prop, "Active Point", "Index of the control point last acted on, or -1");
+
+  prop = RNA_def_property(srna, "is_cyclic", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_boolean_funcs(prop, "rna_CurvePatchSession_is_cyclic_get", nullptr);
+  RNA_def_property_ui_text(prop, "Cyclic", "Whether the curve being edited closes on itself");
+
+  prop = RNA_def_property(srna, "radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_float_funcs(prop, "rna_CurvePatchSession_radius_get", nullptr, nullptr);
+  RNA_def_property_ui_text(
+      prop, "Radius", "World-space brush radius frozen when the patch started");
+
+  prop = RNA_def_property(srna, "stamp_count", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_int_funcs(prop, "rna_CurvePatchSession_stamp_count_get", nullptr, nullptr);
+  RNA_def_property_ui_text(
+      prop, "Stamps", "Stamps in the last build; zero in Ribbon mode, which lays out none");
+
+  prop = RNA_def_property(srna, "positions", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "FloatVectorValueReadOnly");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_CurvePatchSession_positions_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_CurvePatchSession_positions_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop, "Positions", "Control point positions of the curve being edited, in object space");
+}
+
 static void rna_def_object_light_linking(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3858,6 +3991,7 @@ void RNA_def_object(BlenderRNA *brna)
   rna_def_object_display(brna);
   rna_def_object_lineart(brna);
   rna_def_object_light_linking(brna);
+  rna_def_curve_patch_session(brna);
   RNA_define_animate_sdna(true);
 }
 

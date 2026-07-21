@@ -36,6 +36,7 @@ struct PointCloud;
 struct Curves;
 struct GreasePencil;
 struct GreasePencilDrawing;
+struct PaintCurve;
 
 enum AttrDomainMask : uint8_t {
   ATTR_DOMAIN_MASK_POINT = (1 << 0),
@@ -54,6 +55,7 @@ enum class AttributeOwnerType {
   Curves,
   GreasePencil,
   GreasePencilDrawing,
+  PaintCurve,
 };
 
 class AttributeOwner {
@@ -77,6 +79,7 @@ class AttributeOwner {
   Curves *get_curves() const;
   GreasePencil *get_grease_pencil() const;
   GreasePencilDrawing *get_grease_pencil_drawing() const;
+  PaintCurve *get_paint_curve() const;
 };
 
 #define ATTR_DOMAIN_AS_MASK(domain) ((AttrDomainMask)((1 << int(domain))))

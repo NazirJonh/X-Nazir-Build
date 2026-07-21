@@ -95,6 +95,14 @@ set(SRC
   intern/curve_legacy_convert.cc
   intern/curve_nurbs.cc
   intern/curve_poly.cc
+  intern/curve_patch_build.cc
+  intern/curve_patch_frames.cc
+  intern/curve_patch_ribbon.cc
+  intern/curve_patch_spline.cc
+  intern/curve_patch_stamps.cc
+  intern/curve_patch_surface.cc
+  intern/curve_patch_texture_map.cc
+  intern/curve_patch_to_geometry.cc
   intern/curve_to_mesh_convert.cc
   intern/curveprofile.cc
   intern/curves.cc
@@ -377,6 +385,7 @@ set(SRC
   BKE_cryptomatte.hh
   BKE_curve.hh
   BKE_curve_legacy_convert.hh
+  BKE_curve_patch.hh
   BKE_curve_to_mesh.hh
   BKE_curveprofile.h
   BKE_curves.h
@@ -758,6 +767,9 @@ if(WITH_GTESTS)
     intern/bpath_test.cc
     intern/brush_test.cc
     intern/cryptomatte_test.cc
+    intern/curve_patch_frames_test.cc
+    intern/curve_patch_ribbon_test.cc
+    intern/curve_patch_spline_test.cc
     intern/curves_geometry_test.cc
     intern/deform_test.cc
     intern/fcurve_test.cc

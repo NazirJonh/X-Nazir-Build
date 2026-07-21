@@ -20,6 +20,7 @@
 #include "DNA_brush_types.h"
 #include "DNA_scene_types.h"
 
+#include "BKE_attribute.h"
 #include "BKE_paint.hh"
 
 #include "WM_api.hh"
@@ -105,10 +106,17 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 #ifdef RNA_RUNTIME
 #  include "MEM_guardedalloc.h"
 
+#  include "DNA_mesh_types.h"
+#  include "DNA_pointcloud_types.h"
+
 #  include "BKE_brush.hh"
 #  include "BKE_collection.hh"
 #  include "BKE_colortools.hh"
 #  include "BKE_context.hh"
+#  include "BKE_curve_patch.hh"
+#  include "BKE_curves.hh"
+#  include "BKE_mesh.h"
+#  include "BKE_mesh.hh"
 #  include "BKE_gpencil_legacy.h"
 #  include "BKE_layer.hh"
 #  include "BKE_material.hh"
@@ -117,8 +125,10 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 #  include "BKE_paint_types.hh"
 #  include "BKE_particle.h"
 #  include "BKE_pointcache.h"
+#  include "BKE_pointcloud.hh"
 
 #  include "DEG_depsgraph.hh"
+#  include "DEG_depsgraph_query.hh"
 
 #  include "ED_gpencil_legacy.hh"
 #  include "ED_image.hh"
@@ -304,6 +314,206 @@ static void rna_Sculpt_update(bContext *C, PointerRNA * /*ptr*/)
     DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
     WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ob);
   }
+}
+
+static void rna_Sculpt_paint_curve_source_object_update(bContext *C, PointerRNA *ptr)
+{
+  const Sculpt *sculpt = static_cast<const Sculpt *>(ptr->data);
+  if (sculpt->paint_curve_source_object == nullptr) {
+    /* User explicitly clicked the clear button: detach from the source and wipe the intermediate
+     * paint curve so the Curve Edit tool starts with an empty canvas. */
+    ED_paintcurve_detach_source(C);
+    return;
+  }
+  /* ED_paintcurve_import_from_source_object already checks whether the active brush uses the
+   * Curve stroke method OR the Curve Edit tool is active, so no additional gate is needed here.
+   * The previous check (brush->stroke_method == BRUSH_STROKE_CURVE) wrongly blocked import
+   * when using the Curve Edit tool, leaving the picker without an immediate effect. */
+  ED_paintcurve_import_from_source_object(C, nullptr, true);
+}
+
+static void rna_PaintCurve_use_3d_space_update(bContext *C, PointerRNA *ptr)
+{
+  PaintCurve *pc = static_cast<PaintCurve *>(ptr->data);
+  if (pc == nullptr) {
+    return;
+  }
+
+  const char use_3d_old = !pc->use_3d_space;
+
+  if (!ED_paintcurve_convert_space_on_toggle(C, pc)) {
+    pc->use_3d_space = use_3d_old;
+    return;
+  }
+
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
+static void rna_PaintCurve_active_curve_range(
+    PointerRNA *ptr, int *min, int *max, int * /*softmin*/, int * /*softmax*/)
+{
+  const PaintCurve *pc = static_cast<PaintCurve *>(ptr->data);
+  *min = 0;
+  *max = max_ii(0, pc->geometry.wrap().curves_num() - 1);
+}
+
+static int rna_PaintCurve_add_point(PaintCurve *pc, const float position[3], const float radius)
+{
+  const int index = ED_paintcurve_geometry_add_point(pc, position, radius);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  return index;
+}
+
+static void rna_PaintCurve_clear(PaintCurve *pc)
+{
+  ED_paintcurve_geometry_clear(pc);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
+/* A paint curve as the Curve Patch build wants it: bezier handle POSITION attributes materialized
+ * (a curve that never had them evaluates to a bezier collapsed at the origin, silently), and a
+ * radius attribute present -- `bke::CurvesGeometry::radius()` otherwise answers its hair-oriented
+ * 0.01 default and the ribbon comes out a hundredth of its intended width. Copied rather than
+ * mutated in place: reading a patch must not change the curve it was read from. */
+static bke::CurvesGeometry curve_patch_control_curve_prepare(const PaintCurve &pc)
+{
+  bke::CurvesGeometry curve = pc.geometry.wrap();
+  curve.handle_positions_left_for_write();
+  curve.handle_positions_right_for_write();
+  curve.calculate_bezier_auto_handles();
+  curve.calculate_bezier_aligned_handles();
+  curve.tag_positions_changed();
+  if (!curve.attributes().contains("radius")) {
+    curve.radius_for_write().fill(1.0f);
+  }
+  return curve;
+}
+
+/* Everything both read-back functions do before they differ: resolve the brush's parameters,
+ * tessellate the curve, optionally snapshot a target surface, and run the core build. No undo step
+ * is opened anywhere in here -- neither function writes to the scene. */
+static bool curve_patch_build_for_rna(bContext *C,
+                                      const PaintCurve &pc,
+                                      const Brush &brush,
+                                      Object *target,
+                                      ReportList *reports,
+                                      bke::CurvePatchParams &r_params,
+                                      bke::CurvePatchGeometry &r_geometry)
+{
+  const ToolSettings *tool_settings = CTX_data_tool_settings(C);
+  if (tool_settings == nullptr || tool_settings->sculpt == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Curve Patch: the scene has no sculpt settings");
+    return false;
+  }
+
+  bke::CurvesGeometry control_curve = curve_patch_control_curve_prepare(pc);
+  if (control_curve.points_num() < 2) {
+    BKE_report(reports, RPT_ERROR, "Curve Patch: the curve needs at least two points");
+    return false;
+  }
+
+  r_params = ED_curve_patch_params_from_brush(tool_settings->sculpt->paint, brush, control_curve);
+
+  control_curve.ensure_can_interpolate_to_evaluated();
+  Array<float> evaluated_radii(control_curve.evaluated_points_num());
+  control_curve.interpolate_to_evaluated(VArraySpan(control_curve.radius()),
+                                         evaluated_radii.as_mutable_span());
+  const bool cyclic = control_curve.curves_num() > 0 && control_curve.cyclic()[0];
+  Array<float3> evaluated_positions(control_curve.evaluated_positions());
+  Array<float3> evaluated_normals(evaluated_positions.size(), float3(0.0f));
+
+  /* With a target the strip follows that surface, exactly as it does inside a sculpt session; with
+   * none it stays in the curve's own plane. Both branches already exist in the core build and are
+   * selected by whether the snapshot came out ready. */
+  if (target != nullptr) {
+    Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+    const Object *target_eval = DEG_get_evaluated(depsgraph, target);
+    const Mesh *mesh = target_eval != nullptr ? BKE_object_get_evaluated_mesh(target_eval) :
+                                                nullptr;
+    if (mesh == nullptr) {
+      BKE_report(reports, RPT_ERROR, "Curve Patch: the target object has no evaluated mesh");
+      return false;
+    }
+    if (bke::curve_patch_surface_snapshot_build(*mesh, r_geometry.surface)) {
+      bke::curve_patch_surface_shrinkwrap(r_geometry.surface,
+                                          r_params.radius,
+                                          evaluated_positions.as_mutable_span(),
+                                          evaluated_normals.as_mutable_span());
+      bke::curve_patch_surface_fill_invalid_normals(evaluated_normals.as_mutable_span(),
+                                                    r_params.plane_normal);
+    }
+  }
+
+  /* An empty weight table means "single texture": which slot a stamp would draw changes what the
+   * relief SAMPLES, never where the strip runs or where the stamps land. */
+  bke::curve_patch_geometry_build(evaluated_positions.as_span(),
+                                  evaluated_radii.as_span(),
+                                  r_geometry.surface.ready ? evaluated_normals.as_span() :
+                                                             Span<float3>(),
+                                  cyclic,
+                                  r_params,
+                                  {},
+                                  r_geometry);
+  if (r_geometry.spline.is_empty()) {
+    BKE_report(reports, RPT_ERROR, "Curve Patch: the curve is degenerate");
+    return false;
+  }
+  return true;
+}
+
+static Mesh *rna_PaintCurve_curve_patch_to_mesh(
+    PaintCurve *pc, bContext *C, ReportList *reports, Brush *brush, Object *target)
+{
+  bke::CurvePatchParams params;
+  bke::CurvePatchGeometry geometry;
+  if (!curve_patch_build_for_rna(C, *pc, *brush, target, reports, params, geometry)) {
+    return nullptr;
+  }
+
+  /* The UI stores cap lengths in brush DIAMETERS; the core takes world units. Same conversion as
+   * `curve_patch_texture_binding_from_brush()`. */
+  const BrushCurvePatchSettings &settings = brush->curve_patch;
+  const bool caps_enabled = settings.ribbon_texture_source == MTEX_CURVE_PATCH_TEX_MULTI;
+  Mesh *mesh_nomain = bke::curve_patch_geometry_to_mesh(
+      geometry,
+      params,
+      caps_enabled,
+      settings.cap_start_length * 2.0f * params.radius,
+      settings.cap_end_length * 2.0f * params.radius);
+  if (mesh_nomain == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Curve Patch: the ribbon came out empty");
+    return nullptr;
+  }
+
+  Mesh *mesh = BKE_mesh_add(CTX_data_main(C), "CurvePatch");
+  BKE_mesh_nomain_to_mesh(mesh_nomain, mesh, nullptr);
+  /* Zero users, like every other `bpy.data.*.new()`: the caller decides what links it. */
+  id_us_min(&mesh->id);
+  WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
+  return mesh;
+}
+
+static PointCloud *rna_PaintCurve_curve_patch_stamps(
+    PaintCurve *pc, bContext *C, ReportList *reports, Brush *brush, Object *target)
+{
+  bke::CurvePatchParams params;
+  bke::CurvePatchGeometry geometry;
+  if (!curve_patch_build_for_rna(C, *pc, *brush, target, reports, params, geometry)) {
+    return nullptr;
+  }
+
+  PointCloud *points_nomain = bke::curve_patch_geometry_to_stamp_points(geometry);
+  if (points_nomain == nullptr) {
+    /* Ribbon mode lays out no stamps. Not an error -- the caller asked a question with a legitimate
+     * empty answer. */
+    return nullptr;
+  }
+
+  PointCloud *points = BKE_pointcloud_add(CTX_data_main(C), "CurvePatchStamps");
+  BKE_pointcloud_nomain_to_pointcloud(points_nomain, points);
+  id_us_min(&points->id);
+  WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
+  return points;
 }
 
 static void rna_Paint_update(bContext *C, PointerRNA * /*ptr*/)
@@ -672,10 +882,140 @@ namespace blender {
 static void rna_def_paint_curve(BlenderRNA *brna)
 {
   StructRNA *srna;
+  PropertyRNA *prop;
+  FunctionRNA *func;
+  PropertyRNA *parm;
 
   srna = RNA_def_struct(brna, "PaintCurve", "ID");
   RNA_def_struct_ui_text(srna, "Paint Curve", "");
   RNA_def_struct_ui_icon(srna, ICON_CURVE_BEZCURVE);
+
+  prop = RNA_def_property(srna, "use_3d_space", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_3d_space", 1);
+  RNA_def_property_ui_text(
+      prop, "3D Space", "Store and edit curve in 3D object space instead of 2D screen space");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintCurve_use_3d_space_update");
+
+  prop = RNA_def_property(srna, "show_radius_handles", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "show_radius_handles", 1);
+  RNA_def_property_ui_text(
+      prop, "Radius Handles", "Show draggable radius handles at each control point");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* Control points and splines. The collection callbacks are the ones `Curves` uses: both ID types
+   * embed a #blender::bke::CurvesGeometry, and the callbacks resolve it from the owner ID rather
+   * than assuming one of the two. */
+
+  prop = RNA_def_property(srna, "points", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "CurvePoint");
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Curves_position_data_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_Curves_position_data_length",
+                                    "rna_Curves_points_lookup_int",
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(prop, "Points", "Control points of all splines");
+
+  prop = RNA_def_property(srna, "curves", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "CurveSlice");
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_IGNORE);
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Curves_curves_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_Curves_curves_length",
+                                    "rna_Curves_curves_lookup_int",
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(prop, "Splines", "All splines of this paint curve");
+
+  prop = RNA_def_property(srna, "active_curve", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "active_curve");
+  RNA_def_property_int_funcs(prop, nullptr, nullptr, "rna_PaintCurve_active_curve_range");
+  RNA_def_property_ui_text(prop, "Active Spline", "Index of the spline edit operations act on");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* Building a curve from scratch. The paint curve operators cannot stand in for these: they need a
+   * region and a mouse position, so they are unavailable in background mode. */
+
+  func = RNA_def_function(srna, "add_point", "rna_PaintCurve_add_point");
+  RNA_def_function_ui_description(func, "Append a control point to the active spline");
+  parm = RNA_def_float_vector(func,
+                              "position",
+                              3,
+                              nullptr,
+                              -FLT_MAX,
+                              FLT_MAX,
+                              "Position",
+                              "Control point position in object space",
+                              -FLT_MAX,
+                              FLT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_float(func,
+                "radius",
+                1.0f,
+                0.0f,
+                FLT_MAX,
+                "Radius",
+                "Radius as a fraction of the brush size, where 1.0 is the full size",
+                0.0f,
+                100.0f);
+  parm = RNA_def_int(
+      func, "index", 0, -1, INT_MAX, "Index", "Index of the new control point", -1, INT_MAX);
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "clear", "rna_PaintCurve_clear");
+  RNA_def_function_ui_description(func, "Remove all control points and splines");
+
+  /* Reading a Curve Patch back out. Neither call stamps anything or opens an undo step; both need
+   * the context only to reach the sculpt settings the brush's size is unified through, and the
+   * depsgraph a target object is evaluated in. */
+
+  func = RNA_def_function(srna, "curve_patch_to_mesh", "rna_PaintCurve_curve_patch_to_mesh");
+  RNA_def_function_ui_description(
+      func, "Build the Curve Patch ribbon this curve describes as a new mesh with UVs");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "brush", "Brush", "", "Brush supplying the Curve Patch settings and size");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_pointer(func,
+                         "target",
+                         "Object",
+                         "",
+                         "Object whose evaluated surface the ribbon is laid onto; when omitted the "
+                         "ribbon stays in the curve's own plane");
+  parm = RNA_def_pointer(func, "mesh", "Mesh", "", "The ribbon, or None when the curve is empty");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "curve_patch_stamps", "rna_PaintCurve_curve_patch_stamps");
+  RNA_def_function_ui_description(
+      func,
+      "Build the Curve Patch stamp layout this curve describes as a new point cloud, one point "
+      "per stamp");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "brush", "Brush", "", "Brush supplying the Curve Patch settings and size");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_pointer(func,
+                         "target",
+                         "Object",
+                         "",
+                         "Object whose evaluated surface the stamps are laid onto; when omitted "
+                         "they stay in the curve's own plane");
+  parm = RNA_def_pointer(func,
+                         "points",
+                         "PointCloud",
+                         "",
+                         "The stamps, or None in Ribbon mode, which lays out none");
+  RNA_def_function_return(func, parm);
+
+  rna_def_attributes_common(srna, AttributeOwnerType::PaintCurve);
 }
 
 static void rna_def_paint_curve_visibility_flag(StructRNA *srna,
@@ -1288,6 +1628,57 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Orientation", "Object whose Z axis defines orientation of gravity");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "paint_curve_source_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, nullptr, nullptr, "rna_PaintCurve_source_object_poll");
+  RNA_def_property_ui_text(
+      prop, "Source Curve", "Curves or Curve object to import into the active paint curve");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Sculpt_paint_curve_source_object_update");
+
+  prop = RNA_def_property(srna, "paint_curve_sync_to_source", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "paint_curve_sync_to_source", 0);
+  RNA_def_property_ui_text(
+      prop,
+      "Sync to Source Curve",
+      "Live update of the picked source object while editing the paint curve");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "paint_curve_show_radius_handles", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "paint_curve_show_radius_handles", 1);
+  RNA_def_property_ui_text(
+      prop, "Show Radius Handles", "Display radius handles for paint curve points");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  static const EnumPropertyItem radius_display_items[] = {
+      {SCULPT_PAINT_CURVE_RADIUS_ALL,
+       "ALL",
+       0,
+       "All",
+       "Show radius handles for all points"},
+      {SCULPT_PAINT_CURVE_RADIUS_SELECT,
+       "SELECT",
+       0,
+       "Selected",
+       "Show radius handles only for curves with selected points"},
+      {SCULPT_PAINT_CURVE_RADIUS_TIPS,
+       "TIPS",
+       0,
+       "Tips",
+       "Show radius handles only at start and end points"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "paint_curve_radius_display_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "paint_curve_radius_display_mode");
+  RNA_def_property_enum_items(prop, radius_display_items);
+  RNA_def_property_ui_text(
+      prop, "Radius Display Mode", "Which radius handles to display");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 }
 
 static void rna_def_uv_sculpt(BlenderRNA *brna)

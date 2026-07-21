@@ -51,9 +51,12 @@
 
 #include "ED_image.hh"
 #include "ED_object.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
 
+#include "../paint_curve_patch_apply.hh"
+#include "../paint_curve_patch_session.hh"
 #include "../paint_intern.hh"
 #include "mesh_brush_common.hh"
 #include "paint_mask.hh"
@@ -410,9 +413,8 @@ void object_sculpt_mode_enter(Main &bmain,
     BKE_report(reports, RPT_WARNING, "Object has negative scale, sculpting may be unpredictable");
   }
 
-  if (USER_EXPERIMENTAL_TEST(&U, use_sculpt_texture_paint)) {
-    BKE_texpaint_slots_refresh_object(&scene, &ob);
-
+  BKE_texpaint_slots_refresh_object(&scene, &ob);
+  {
     PaintModeSettings *paint_settings = &scene.toolsettings->paint_mode;
     Image *image;
     ImageUser *image_user;
@@ -492,12 +494,22 @@ void object_sculpt_mode_enter(bContext *C, Depsgraph &depsgraph, ReportList *rep
   BKE_view_layer_synced_ensure(bmain, &scene, &view_layer);
   Object &ob = *BKE_view_layer_active_object_get(&view_layer);
   object_sculpt_mode_enter(bmain, depsgraph, scene, ob, false, reports);
+  ED_paintcurve_refresh_on_sculpt_mode_enter(C);
 }
 
 void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Object &ob)
 {
   const eObjectMode mode_flag = OB_MODE_SCULPT;
   Mesh *mesh = BKE_mesh_from_object(&ob);
+
+  /* Last resort for a live Curve Patch: `SCULPT_OT_curve_patch_edit` owns it but is never consulted
+   * when the mode exits, so without this the cache would outlive the session that owns it. A no-op
+   * on the paths that already committed through #curve_patch_commit_on_session_end (Tab and the
+   * mode dropdown, see `sculpt_mode_toggle_exec()`); this only ever fires for the teardown paths
+   * that have no `bContext` to commit through -- `ed_object_mode_generic_exit_ex()`
+   * (`object_modes.cc`), reached by clicking another object in the viewport or Outliner. Placed
+   * BEFORE the flushes below, while the session it restores through is still intact. */
+  curve_patch_discard_on_session_end(ob);
 
   mesh->runtime->corner_tris_cache.unfreeze();
 
@@ -570,6 +582,14 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
   }
 
   if (is_mode_set) {
+    /* Commit a live Curve Patch instead of losing it, while the session, an evaluated depsgraph and
+     * this operator's `bContext` are all still intact -- `object_sculpt_mode_exit()` has none of
+     * those to offer, and its own `curve_patch_discard_on_session_end()` can only discard. Both Tab
+     * and the header's mode dropdown reach sculpt-mode exit through this operator
+     * (`object_mode_op_string()`, `object_modes.cc`), so every deliberate way out of the mode
+     * commits. The step this pushes is left parked for this operator's own `OPTYPE_UNDO`, which is
+     * the contract `curve_patch_finish_commit()` expects. */
+    curve_patch_commit_on_session_end(*C, ob);
     object_sculpt_mode_exit(bmain, *depsgraph, scene, ob);
   }
   else {
@@ -577,6 +597,7 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
       depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
     }
     object_sculpt_mode_enter(bmain, *depsgraph, scene, ob, false, op->reports);
+    ED_paintcurve_refresh_on_sculpt_mode_enter(C);
     BKE_paint_brushes_validate(&bmain, &ts.sculpt->paint);
 
     if (ob.mode & mode_flag) {
@@ -1539,6 +1560,12 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_mask_extract);
   WM_operatortype_append(SCULPT_OT_face_set_extract);
   WM_operatortype_append(SCULPT_OT_paint_mask_slice);
+  WM_operatortype_append(SCULPT_OT_curve_patch_apply);
+  WM_operatortype_append(SCULPT_OT_curve_patch_edit);
+  WM_operatortype_append(SCULPT_OT_curve_patch_handle_type_set);
+  WM_operatortype_append(SCULPT_OT_curve_patch_delete_point);
+  WM_operatortype_append(SCULPT_OT_curve_patch_toggle_cyclic);
+  WM_operatortype_append(SCULPT_OT_curve_patch_stamp_reseed);
 }
 
 void keymap_sculpt(wmKeyConfig *keyconf)

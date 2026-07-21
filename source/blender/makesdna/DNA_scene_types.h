@@ -1125,7 +1125,7 @@ struct UnifiedPaintSettings {
 /** \name Paint Mode/Tool Data
  * \{ */
 
-#define PAINT_MAX_INPUT_SAMPLES 64
+#define PAINT_MAX_INPUT_SAMPLES 256
 
 struct NamedBrushAssetReference {
   struct NamedBrushAssetReference *next = nullptr, *prev = nullptr;
@@ -1476,6 +1476,16 @@ enum eSculptTransformMode : int {
   SCULPT_TRANSFORM_MODE_RADIUS_ELASTIC = 1,
 };
 
+/** #Sculpt::paint_curve_radius_display_mode */
+enum eSculptPaintCurveRadiusDisplayMode : int8_t {
+  /** Show radius handles for all points. */
+  SCULPT_PAINT_CURVE_RADIUS_ALL = 0,
+  /** Show radius handles only for curves with selected points. */
+  SCULPT_PAINT_CURVE_RADIUS_SELECT = 1,
+  /** Show radius handles only at tips (start and end points). */
+  SCULPT_PAINT_CURVE_RADIUS_TIPS = 2,
+};
+
 /** Sculpt. */
 struct Sculpt {
   DNA_DEFINE_CXX_METHODS(Sculpt)
@@ -1520,6 +1530,15 @@ struct Sculpt {
   /** For use by operators. */
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve_op = nullptr;
   struct Object *gravity_object = nullptr;
+  /** Source Curves/Curve object for paint-curve import (`PAINTCURVE_OT_from_curve_object`). */
+  struct Object *paint_curve_source_object = nullptr;
+  /** Enable live sync of edited paint curve back to the picked source object. */
+  char paint_curve_sync_to_source = 0;
+  /** Show radius handles for paint curves. */
+  char paint_curve_show_radius_handles = 1;
+  /** Radius handles display mode. \see eSculptPaintCurveRadiusDisplayMode. */
+  int8_t paint_curve_radius_display_mode = SCULPT_PAINT_CURVE_RADIUS_ALL;
+  char _pad1[5] = {};
 };
 
 struct CurvesSculpt {

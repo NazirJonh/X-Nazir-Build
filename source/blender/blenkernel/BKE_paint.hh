@@ -55,6 +55,7 @@ namespace filter {
 struct Cache;
 }
 struct StrokeCache;
+struct CurvePatchSession;
 }  // namespace ed::sculpt_paint
 struct GHash;
 struct GridPaintMask;
@@ -127,6 +128,15 @@ void BKE_paint_invalidate_cursor_overlay(const Main &bmain,
                                          CurveMapping *curve);
 void BKE_paint_invalidate_overlay_all();
 ePaintOverlayControlFlags BKE_paint_get_overlay_flags();
+/**
+ * Monotonic counter bumped whenever the active brush's primary texture is invalidated -- assigned,
+ * cleared, its mapping edited, or the texture datablock itself edited -- via
+ * #BKE_paint_invalidate_overlay_tex / #BKE_paint_invalidate_overlay_all. Unlike the reset-on-draw
+ * overlay flags (which the paint cursor consumes), this only ever increases, so a poller can detect
+ * "the brush texture changed" race-free by comparing against a previously stored value. Used by the
+ * Curve Patch live editor to re-project the relief when the texture is edited mid-session.
+ */
+uint64_t BKE_paint_get_overlay_texture_edit_count();
 void BKE_paint_reset_overlay_invalid(ePaintOverlayControlFlags flag);
 void BKE_paint_set_overlay_override(eOverlayFlags flag);
 
@@ -259,8 +269,6 @@ bool BKE_paint_eraser_brush_set_essentials(Main *bmain, Paint *paint, const char
 
 Palette *BKE_paint_palette(Paint *paint);
 void BKE_paint_palette_set(Paint *paint, Palette *palette);
-void BKE_paint_curve_clamp_endpoint_add_index(PaintCurve *pc, int add_index);
-
 /**
  * Return true when in vertex/weight/texture paint + face-select mode?
  */
@@ -425,6 +433,7 @@ struct SculptSession : NonCopyable, NonMovable {
   ed::sculpt_paint::StrokeCache *cache = nullptr;
   ed::sculpt_paint::filter::Cache *filter_cache = nullptr;
   ed::sculpt_paint::expand::Cache *expand_cache = nullptr;
+  ed::sculpt_paint::CurvePatchSession *curve_patch_session = nullptr;
 
   /* Cursor data and active vertex for tools */
   std::optional<int> active_face_index;

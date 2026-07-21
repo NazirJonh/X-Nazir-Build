@@ -263,6 +263,15 @@ bool supports_plane_offset(const Brush &brush);
 bool supports_random_texture_angle(const Brush &brush);
 bool supports_sculpt_plane(const Brush &brush);
 bool supports_color(const Brush &brush);
+/**
+ * Whether the Curve Patch stroke method is meaningful for this brush.
+ *
+ * Curve Patch never reaches `do_brush_action()` — it applies its own texture-driven relief
+ * directly — so the brush type only supplies strength, radius, texture and falloff. This
+ * allowlist therefore names the brushes whose *result* Curve Patch can stand in for, not
+ * brushes whose implementation it uses.
+ */
+bool supports_curve_patch(const Brush &brush);
 bool supports_secondary_cursor_color(const Brush &brush);
 bool supports_smooth_stroke(const Brush &brush);
 bool supports_space_attenuation(const Brush &brush);

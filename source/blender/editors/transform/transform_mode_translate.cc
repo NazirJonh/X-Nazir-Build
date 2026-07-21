@@ -337,13 +337,15 @@ static void ApplySnapTranslation(TransInfo *t, float vec[3])
     }
   }
   else {
-    if (t->spacetype == SPACE_VIEW3D) {
-      if (t->options & CTX_PAINT_CURVE) {
-        if (ED_view3d_project_float_global(t->region, point, point, V3D_PROJ_TEST_NOP) !=
-            V3D_PROJ_RET_OK)
-        {
-          zero_v3(point); /* No good answer here... */
-        }
+    /* 3D paint curves store positions in object space but translate via world-space deltas
+     * (#flushTransPaintCurve). Screen-space snap math is only valid for 2D paint curves. */
+    if (t->spacetype == SPACE_VIEW3D && (t->options & CTX_PAINT_CURVE) &&
+        !paintcurve_transform_use_3d_viewport(t))
+    {
+      if (ED_view3d_project_float_global(t->region, point, point, V3D_PROJ_TEST_NOP) !=
+          V3D_PROJ_RET_OK)
+      {
+        zero_v3(point); /* No good answer here... */
       }
     }
 
@@ -539,7 +541,12 @@ static void applyTranslation(TransInfo *t)
 
     float incr_dir[3];
     copy_v3_v3(incr_dir, global_dir);
-    if (!(transform_snap_is_active(t) && validSnap(t)) && translate_snap_increment(t, incr_dir)) {
+    const bool paint_curve_geom_snap = (t->options & CTX_PAINT_CURVE) &&
+                                       (t->tsnap.mode & SCE_SNAP_TO_GEOM);
+    if (!paint_curve_geom_snap &&
+        !(transform_snap_is_active(t) && validSnap(t)) &&
+        translate_snap_increment(t, incr_dir))
+    {
 
       /* Test for mixed snap with grid. */
       float snap_dist_sq = FLT_MAX;
@@ -593,7 +600,11 @@ static void initTranslation(TransInfo *t, wmOperator * /*op*/)
 
   initMouseInputMode(t, &t->mouse, INPUT_VECTOR);
 
-  t->idx_max = (t->flag & T_2D_EDIT) ? 1 : 2;
+  /* 3D paint curves in the viewport use true 3D axis constraints, so all three axes must be
+   * available even though T_2D_EDIT is set (the flag is kept for other 2D-mode behaviour). */
+  const bool is_3d_paint_curve_translation = (t->options & CTX_PAINT_CURVE) &&
+                                              (t->spacetype == SPACE_VIEW3D);
+  t->idx_max = ((t->flag & T_2D_EDIT) && !is_3d_paint_curve_translation) ? 1 : 2;
   t->num.flag = 0;
   t->num.idx_max = t->idx_max;
 

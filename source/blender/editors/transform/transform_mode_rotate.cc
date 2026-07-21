@@ -415,7 +415,11 @@ static void initRotation(TransInfo *t, wmOperator * /*op*/)
   t->num.unit_type[0] = B_UNIT_ROTATION;
 
   if (t->flag & T_2D_EDIT) {
-    t->flag |= T_NO_CONSTRAINT;
+    /* Paint curves in the 3D viewport store positions in 3D and support axis constraints.
+     * Other 2D-edit contexts have no depth axis. */
+    if (!((t->options & CTX_PAINT_CURVE) && t->spacetype == SPACE_VIEW3D)) {
+      t->flag |= T_NO_CONSTRAINT;
+    }
   }
 
   transform_mode_default_modal_orientation_set(t, V3D_ORIENT_VIEW);

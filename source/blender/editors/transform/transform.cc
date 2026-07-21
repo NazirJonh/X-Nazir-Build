@@ -23,6 +23,7 @@
 
 #include "ED_clip.hh"
 #include "ED_image.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_uvedit.hh"
@@ -186,8 +187,11 @@ void convertViewVec(TransInfo *t, float r_vec[3], double dx, double dy)
 {
   if ((t->spacetype == SPACE_VIEW3D) && (t->region->regiontype == RGN_TYPE_WINDOW)) {
     if (t->options & CTX_PAINT_CURVE) {
-      r_vec[0] = dx;
-      r_vec[1] = dy;
+      /* 3D paint curves use world-space delta (same as regular 3D objects) so that
+       * the axis constraint system (`axisProjection`) can correctly map mouse movement
+       * onto world-space constraint axes, including axes perpendicular to the view (Z). */
+      const float xy_delta[2] = {float(dx), float(dy)};
+      ED_view3d_win_to_delta(t->region, xy_delta, t->zfac, r_vec);
     }
     else {
       const float xy_delta[2] = {float(dx), float(dy)};
@@ -424,7 +428,12 @@ void projectFloatViewEx(TransInfo *t, const float vec[3], float adr[2], const eV
 {
   switch (t->spacetype) {
     case SPACE_VIEW3D: {
-      if (t->options & CTX_PAINT_CURVE) {
+      /* Paint curves with 3D geometry use true 3D→2D projection for rotation and translation
+       * so that t->center_global (stored in world space) maps correctly to t->center2d. */
+      const bool is_3d_paint_curve_3d_transform = (t->options & CTX_PAINT_CURVE) &&
+                                                   (t->spacetype == SPACE_VIEW3D) &&
+                                                   ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION);
+      if ((t->options & CTX_PAINT_CURVE) && !is_3d_paint_curve_3d_transform) {
         adr[0] = vec[0];
         adr[1] = vec[1];
       }
@@ -679,7 +688,15 @@ static bool transform_modal_item_poll(const wmOperator *op, int value)
     case TFM_MODAL_PLANE_Z:
     case TFM_MODAL_AUTOCONSTRAINTPLANE:
       if (t->flag & T_2D_EDIT) {
-        return false;
+        /* Paint curves in the 3D viewport support full axis constraints during rotation and
+         * translation. For rotation only Z is allowed; for translation all axes and planes are. */
+        const bool is_3d_paint_curve = (t->options & CTX_PAINT_CURVE) &&
+                                       t->spacetype == SPACE_VIEW3D;
+        if (!((is_3d_paint_curve && t->mode == TFM_ROTATION && value == TFM_MODAL_AXIS_Z) ||
+              (is_3d_paint_curve && t->mode == TFM_TRANSLATION)))
+        {
+          return false;
+        }
       }
       [[fallthrough]];
     case TFM_MODAL_AXIS_X:
@@ -952,7 +969,15 @@ static bool transform_event_modal_constraint(TransInfo *t, short modal_type)
     return false;
   }
 
-  if (t->flag & T_2D_EDIT && ELEM(modal_type, TFM_MODAL_AXIS_Z, TFM_MODAL_PLANE_Z)) {
+  /* Paint curves in the 3D viewport support full 3D axis constraints during rotation and
+   * translation. */
+  const bool is_3d_paint_curve_3d_transform = (t->options & CTX_PAINT_CURVE) &&
+                                               (t->spacetype == SPACE_VIEW3D) &&
+                                               ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION);
+
+  if ((t->flag & T_2D_EDIT) && !is_3d_paint_curve_3d_transform &&
+      ELEM(modal_type, TFM_MODAL_AXIS_Z, TFM_MODAL_PLANE_Z))
+  {
     return false;
   }
 
@@ -1005,7 +1030,7 @@ static bool transform_event_modal_constraint(TransInfo *t, short modal_type)
       return false;
   }
 
-  if (t->flag & T_2D_EDIT) {
+  if ((t->flag & T_2D_EDIT) && !is_3d_paint_curve_3d_transform) {
     BLI_assert(modal_type < TFM_MODAL_PLANE_X);
     if (constraint_new == CON_AXIS2) {
       return false;
@@ -2029,6 +2054,26 @@ bool initTransform(bContext *C, TransInfo *t, wmOperator *op, const wmEvent *eve
   unit_m3(t->spacemtx);
 
   initTransInfo(C, t, op, event);
+
+  /* Paint-curve CLICK_DRAG (from the global 3D View / Paint Curve keymaps) must not move
+   * selected control points unless the drag started on a selected handle. Without this,
+   * paintcurve.slide can correctly pass-through a press away from handles while transform
+   * still grabs the selection on the generated CLICK_DRAG event. */
+  if ((t->options & CTX_PAINT_CURVE) && t->is_launch_event_drag &&
+      ELEM(t->mode, TFM_TRANSLATION, TFM_ROTATION, TFM_RESIZE, TFM_CURVE_SHRINKFATTEN))
+  {
+    float hit_mval[2];
+    if (event && t->region) {
+      WM_event_drag_start_mval_fl(event, t->region, hit_mval);
+    }
+    else {
+      copy_v2_v2(hit_mval, t->mval);
+    }
+    if (!ED_paintcurve_cursor_on_selected_handle(C, hit_mval)) {
+      postTrans(C, t);
+      return false;
+    }
+  }
 
   if (!G.background) {
     if (t->spacetype == SPACE_VIEW3D) {

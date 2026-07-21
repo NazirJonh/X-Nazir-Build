@@ -5,6 +5,7 @@
 import bpy
 from bpy.types import (
     Menu,
+    UIList,
 )
 from bpy.app.translations import (
     contexts as i18n_contexts,
@@ -550,6 +551,15 @@ class TextureMaskPanel(BrushPanel):
         col.prop(mask_tex_slot, "scale")
 
 
+class SCULPT_UL_curve_patch_textures(UIList):
+    def draw_item(self, _context, layout, _data, item, _icon, _active_data, _active_propname, _index):
+        if item.texture:
+            layout.prop(item.texture, "name", text="", emboss=False, icon_value=layout.icon(item.texture))
+        else:
+            layout.label(text="Empty", icon='TEXTURE_DATA')
+        layout.prop(item, "weight", text="", emboss=False)
+
+
 class StrokePanel(BrushPanel):
     bl_label = "Stroke"
     bl_options = {'DEFAULT_CLOSED'}
@@ -568,6 +578,78 @@ class StrokePanel(BrushPanel):
 
         col.prop(brush, "stroke_method")
         col.separator()
+
+        if mode == 'SCULPT' and brush.stroke_method == 'CURVE_PATCH':
+            # Curve Patch applies its own relief directly and never reaches the brush
+            # implementation, so every supported brush gives the same result. Say so, otherwise
+            # the allowlist implies a distinction that does not exist.
+            if brush.sculpt_brush_type == 'PAINT':
+                col.label(text="Paints the active color attribute; direction is ignored")
+            else:
+                col.label(text="Brush type affects strength, radius and texture only")
+            tex_slot = brush.texture_slot
+            cp = brush.curve_patch
+            col.row().prop(cp, "stamp_mode", text="Curve Patch", expand=True)
+            col.prop(cp, "use_swap_axis", text="Swap Axis")
+            if cp.stamp_mode == 'STAMPS':
+                col.prop(brush, "spacing", text="Spacing", slider=True)
+                col.prop(brush, "jitter", text="Jitter", slider=True)
+                col.prop(cp, "stamp_size_random", text="Random Size", slider=True)
+                col.prop(cp, "stamp_strength_random", text="Random Strength", slider=True)
+                col.prop(tex_slot, "random_angle", text="Random Rotation")
+                col.row().prop(cp, "stamp_projection", text="Projection", expand=True)
+                col.separator()
+                col.row().prop(cp, "stamp_texture_source", text="Textures", expand=True)
+                if cp.stamp_texture_source == 'LIST':
+                    row = col.row()
+                    row.template_list(
+                        "SCULPT_UL_curve_patch_textures", "",
+                        cp, "texture_slots",
+                        cp, "texture_active_index",
+                        rows=3,
+                    )
+                    sub = row.column(align=True)
+                    sub.operator("brush.curve_patch_texture_slot_add", icon='ADD', text="")
+                    sub.operator("brush.curve_patch_texture_slot_remove", icon='REMOVE', text="")
+                    sub.separator()
+                    sub.operator("brush.curve_patch_texture_slot_move", icon='TRIA_UP', text="").type = 'UP'
+                    sub.operator("brush.curve_patch_texture_slot_move", icon='TRIA_DOWN', text="").type = 'DOWN'
+                    slots = cp.texture_slots
+                    index = cp.texture_active_index
+                    if 0 <= index < len(slots):
+                        active_slot = slots[index]
+                        col.template_ID(active_slot, "texture", new="texture.new")
+                        col.prop(active_slot, "weight", text="Weight")
+            else:
+                col.row().prop(cp, "ribbon_texture_source", text="Textures", expand=True)
+                if cp.ribbon_texture_source == 'CAPS':
+                    col.template_ID(cp, "texture_start", new="texture.new")
+                    col.prop(cp, "cap_start_length", text="Start Length")
+                    col.template_ID(cp, "texture_middle", new="texture.new")
+                    col.template_ID(cp, "texture_end", new="texture.new")
+                    col.prop(cp, "cap_end_length", text="End Length")
+                    col.separator()
+                col.row().prop(cp, "length_mode", text="Curve Patch Length", expand=True)
+                if cp.length_mode == 'REPEAT':
+                    col.prop(cp, "length_repeat", text="Repeats")
+            col.row().prop(cp, "end_falloff", text="End Falloff", expand=True)
+            sub = col.row()
+            sub.enabled = cp.end_falloff == 'SMOOTH'
+            sub.prop(cp, "end_falloff_percent", text="Falloff Length", slider=True)
+            col.separator()
+
+        # The ROLL half only matters when the Roll stroke hands off to a Curve Patch session,
+        # which requires "Edit After Stroke". Without that qualifier the option renders dead
+        # for every plain Roll stroke.
+        # Color brushes are excluded: face sets are derived from displacement magnitude and have no
+        # color meaning, and a color patch commits no face-set step.
+        show_face_set = mode == 'SCULPT' and brush.sculpt_brush_type != 'PAINT' and (
+            brush.stroke_method == 'CURVE_PATCH' or
+            (brush.stroke_method == 'ROLL' and brush.use_roll_edit_after)
+        )
+        if show_face_set:
+            col.prop(brush.curve_patch, "use_face_set", text="Create Face Set")
+            col.separator()
 
         if brush.stroke_method == 'ANCHORED':
             col.prop(brush, "use_edge_to_edge", text="Edge to Edge")
@@ -594,7 +676,27 @@ class StrokePanel(BrushPanel):
         if brush.stroke_method == 'CURVE':
             col.separator()
             col.template_ID(brush, "paint_curve", new="paintcurve.new")
+            if brush.paint_curve:
+                col.prop(brush.paint_curve, "use_3d_space", text="3D Curve")
+                if mode == 'SCULPT':
+                    sculpt = context.tool_settings.sculpt
+                    if sculpt:
+                        col.prop(sculpt, "paint_curve_source_object", text="Source Curve")
+                        col.prop(sculpt, "paint_curve_sync_to_source", text="Sync to Source")
+                        row = col.row(align=True)
+                        row.operator(
+                            "paintcurve.from_curve_object",
+                            text="Re-import from Source",
+                            icon='IMPORT',
+                        )
+                        row.operator(
+                            "paintcurve.to_curve_object",
+                            text="Export to Scene Curve",
+                            icon='OUTLINER_OB_CURVE',
+                        )
             col.operator("paintcurve.draw")
+            if brush.paint_curve:
+                col.prop(brush.paint_curve, "show_radius_handles", text="Radius Handles")
             col.separator()
 
         if brush.stroke_method in {'SPACE', 'LINE', 'CURVE'}:
@@ -1580,6 +1682,15 @@ def brush_texture_settings(layout, brush, sculpt):
     # map_mode
     layout.prop(tex_slot, "map_mode", text="Mapping")
 
+    # Roll is sculpt-only. `sculpt` is this function's third parameter and is truthy only in a
+    # sculpt context: callers pass `context.sculpt_object` (space_view3d_toolbar.py:797,
+    # properties_texture.py:729) or a literal 0 from the image editor (space_image.py:1362).
+    if sculpt and brush.stroke_method == 'ROLL':
+        row = layout.row()
+        row.active = brush.use_pressure_size
+        row.prop(brush, "use_roll_pressure_scale", text="Pressure Scale")
+        layout.prop(brush, "use_roll_edit_after", text="Edit After Stroke")
+
     layout.separator()
 
     if tex_slot.map_mode == 'STENCIL':
@@ -1967,6 +2078,7 @@ def brush_basic_grease_pencil_vertex_settings(layout, context, brush, *, compact
 
 
 classes = (
+    SCULPT_UL_curve_patch_textures,
     VIEW3D_MT_tools_projectpaint_clone,
 )
 

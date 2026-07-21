@@ -15,6 +15,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "DNA_ID.h"
+#include "DNA_brush_types.h" /* For #PaintCurve, whose geometry carries attributes too. */
 #include "DNA_curves_types.h"
 #include "DNA_customdata_types.h"
 #include "DNA_mesh_types.h"
@@ -57,6 +58,8 @@ AttributeOwner AttributeOwner::from_id(ID *id)
       return AttributeOwner(AttributeOwnerType::Curves, id);
     case ID_GP:
       return AttributeOwner(AttributeOwnerType::GreasePencil, id);
+    case ID_PC:
+      return AttributeOwner(AttributeOwnerType::PaintCurve, id);
     default:
       return {};
   }
@@ -107,6 +110,13 @@ GreasePencilDrawing *AttributeOwner::get_grease_pencil_drawing() const
   return reinterpret_cast<GreasePencilDrawing *>(ptr_);
 }
 
+PaintCurve *AttributeOwner::get_paint_curve() const
+{
+  BLI_assert(this->is_valid());
+  BLI_assert(type_ == AttributeOwnerType::PaintCurve);
+  return reinterpret_cast<PaintCurve *>(ptr_);
+}
+
 bke::AttributeStorage *AttributeOwner::get_storage() const
 {
   switch (type_) {
@@ -120,6 +130,8 @@ bke::AttributeStorage *AttributeOwner::get_storage() const
       return &this->get_grease_pencil()->attribute_storage.wrap();
     case AttributeOwnerType::GreasePencilDrawing:
       return &this->get_grease_pencil_drawing()->geometry.attribute_storage.wrap();
+    case AttributeOwnerType::PaintCurve:
+      return &this->get_paint_curve()->geometry.attribute_storage.wrap();
   }
   BLI_assert(false);
   return nullptr;
@@ -140,6 +152,8 @@ std::optional<bke::MutableAttributeAccessor> AttributeOwner::get_accessor() cons
       return this->get_grease_pencil()->attributes_for_write();
     case AttributeOwnerType::GreasePencilDrawing:
       return this->get_grease_pencil_drawing()->geometry.wrap().attributes_for_write();
+    case AttributeOwnerType::PaintCurve:
+      return this->get_paint_curve()->geometry.wrap().attributes_for_write();
   }
   BLI_assert(false);
   return std::nullopt;
@@ -678,6 +692,10 @@ bool BKE_attribute_required(const AttributeOwner &owner, const StringRef name)
       return false;
     case AttributeOwnerType::GreasePencilDrawing:
       return BKE_grease_pencil_drawing_attribute_required(owner.get_grease_pencil_drawing(), name);
+    case AttributeOwnerType::PaintCurve:
+      /* Same requirement as #Curves: everything that draws or samples a paint curve reads the
+       * positions, so removing them would leave an unusable data-block rather than an empty one. */
+      return name == "position";
   }
   return false;
 }
@@ -765,6 +783,9 @@ int *BKE_attributes_active_index_p(AttributeOwner &owner)
     }
     case AttributeOwnerType::GreasePencilDrawing: {
       return &owner.get_grease_pencil_drawing()->geometry.attributes_active_index;
+    }
+    case AttributeOwnerType::PaintCurve: {
+      return &owner.get_paint_curve()->geometry.attributes_active_index;
     }
   }
   return nullptr;

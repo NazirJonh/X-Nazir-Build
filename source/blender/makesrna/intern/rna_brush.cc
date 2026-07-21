@@ -14,6 +14,7 @@
 #include "DNA_texture_types.h"
 
 #include "BLI_math_base.h"
+#include "BLI_string.h"
 #include "BLI_string_utf8_symbols.h"
 
 #include "BLT_translation.hh"
@@ -63,6 +64,17 @@ static const EnumPropertyItem sculpt_stroke_method_items[] = {
      0,
      "Curve",
      "Define the stroke curve with a Bézier curve (dabs are separated according to spacing)"},
+    {BRUSH_STROKE_CURVE_PATCH,
+     "CURVE_PATCH",
+     0,
+     "Curve Patch",
+     "Anchor-drag a stroke, then edit an explicit control curve with live preview before "
+     "committing to the mesh"},
+    {BRUSH_STROKE_ROLL,
+     "ROLL",
+     0,
+     "Roll",
+     "Roll the texture along the freehand stroke path"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -73,6 +85,57 @@ static const EnumPropertyItem rna_enum_brush_texture_slot_map_all_mode_items[] =
     {MTEX_MAP_MODE_3D, "3D", 0, "3D", ""},
     {MTEX_MAP_MODE_RANDOM, "RANDOM", 0, "Random", ""},
     {MTEX_MAP_MODE_STENCIL, "STENCIL", 0, "Stencil", ""},
+    {MTEX_MAP_MODE_ROLL, "ROLL", 0, "Roll", "Roll texture along the stroke path"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_brush_curve_patch_length_mode_items[] = {
+    {MTEX_CURVE_PATCH_LENGTH_DEFAULT, "DEFAULT", 0, "Default",
+     "Fit one texture tile on short curves and tile by brush radius on longer ones"},
+    {MTEX_CURVE_PATCH_LENGTH_REPEAT, "REPEAT", 0, "Repeat",
+     "Repeat the texture a fixed number of times along the curve length"},
+    {MTEX_CURVE_PATCH_LENGTH_STRETCH, "STRETCH", 0, "Stretch",
+     "Stretch a single texture tile across the whole curve length"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_brush_curve_patch_end_falloff_items[] = {
+    {MTEX_CURVE_PATCH_END_HARD, "HARD", 0, "Hard",
+     "Start and end the relief abruptly at the curve's endpoints"},
+    {MTEX_CURVE_PATCH_END_SMOOTH, "SMOOTH", 0, "Smooth",
+     "Fade the relief in and out over a length at each end of the curve"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_mode_items[] = {
+    {MTEX_CURVE_PATCH_STAMP_RIBBON, "RIBBON", 0, "Ribbon",
+     "Project one continuous texture stretched along the whole curve"},
+    {MTEX_CURVE_PATCH_STAMP_STAMPS, "STAMPS", 0, "Stamps",
+     "Place separate randomized texture stamps spaced along the curve"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_projection_items[] = {
+    {MTEX_CURVE_PATCH_STAMP_PROJ_CURVE, "CURVE", 0, "Curve-Following",
+     "Sample the stamp in the curve's own space, so the texture bends along the curve"},
+    {MTEX_CURVE_PATCH_STAMP_PROJ_PLANAR, "PLANAR", 0, "Planar",
+     "Sample the stamp on a rigid frame, so the texture keeps its shape through sharp turns"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_brush_curve_patch_stamp_texture_source_items[] = {
+    {MTEX_CURVE_PATCH_TEX_SINGLE, "SINGLE", 0, "Single",
+     "Stamp the brush's own texture everywhere along the curve"},
+    {MTEX_CURVE_PATCH_TEX_MULTI, "LIST", 0, "List",
+     "Draw each stamp's texture at random from the brush's texture list"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_brush_curve_patch_ribbon_texture_source_items[] = {
+    {MTEX_CURVE_PATCH_TEX_SINGLE, "SINGLE", 0, "Single",
+     "Stretch the brush's own texture along the whole curve"},
+    {MTEX_CURVE_PATCH_TEX_MULTI, "CAPS", 0, "Start/Middle/End",
+     "Use separate textures for the curve's start and end, repeating the middle one between them"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -977,9 +1040,9 @@ static const EnumPropertyItem *rna_Brush_direction_itemf(bContext *C,
 }
 
 static const EnumPropertyItem *rna_Brush_stroke_itemf(bContext *C,
-                                                      PointerRNA * /*ptr*/,
+                                                      PointerRNA *ptr,
                                                       PropertyRNA * /*prop*/,
-                                                      bool * /*r_free*/)
+                                                      bool *r_free)
 {
   PaintMode mode = (C) ? BKE_paintmode_get_active_from_context(C) : PaintMode::Invalid;
 
@@ -1008,11 +1071,67 @@ static const EnumPropertyItem *rna_Brush_stroke_itemf(bContext *C,
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  /* Texture Paint historically shared the sculpt list, which also advertises the sculpt-only
+   * Curve Patch and Roll methods. It keeps Drag Dot and Anchored, which do work there. */
+  static const EnumPropertyItem texture_paint_stroke_method_items[] = {
+      {BRUSH_STROKE_DOTS, "DOTS", 0, "Dots", "Apply paint on each mouse move step"},
+      {BRUSH_STROKE_DRAG_DOT,
+       "DRAG_DOT",
+       0,
+       "Drag Dot",
+       "Allows a single dot to be carefully positioned"},
+      {BRUSH_STROKE_SPACE,
+       "SPACE",
+       0,
+       "Space",
+       "Limit brush application to the distance specified by spacing"},
+      {BRUSH_STROKE_AIRBRUSH,
+       "AIRBRUSH",
+       0,
+       "Airbrush",
+       "Keep applying paint effect while holding mouse (spray)"},
+      {BRUSH_STROKE_ANCHORED,
+       "ANCHORED",
+       0,
+       "Anchored",
+       "Keep the brush anchored to the initial location"},
+      {BRUSH_STROKE_LINE,
+       "LINE",
+       0,
+       "Line",
+       "Draw a line with dabs separated according to spacing"},
+      {BRUSH_STROKE_CURVE,
+       "CURVE",
+       0,
+       "Curve",
+       "Define the stroke curve with a Bézier curve. Dabs are separated according to spacing."},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   switch (mode) {
-    case PaintMode::Sculpt:
+    case PaintMode::Sculpt: {
+      const Brush *brush = static_cast<const Brush *>(ptr->data);
+      if (brush == nullptr || bke::brush::supports_curve_patch(*brush)) {
+        return sculpt_stroke_method_items;
+      }
+      /* Curve Patch has no meaning for this brush type (see #supports_curve_patch), so drop just
+       * that item and keep the rest of the sculpt list intact. */
+      EnumPropertyItem *item = nullptr;
+      int totitem = 0;
+      for (const EnumPropertyItem *it = sculpt_stroke_method_items; it->identifier; it++) {
+        if (it->value == BRUSH_STROKE_CURVE_PATCH) {
+          continue;
+        }
+        RNA_enum_item_add(&item, &totitem, it);
+      }
+      RNA_enum_item_end(&item, &totitem);
+      *r_free = true;
+      return item;
+    }
+
     case PaintMode::Texture2D:
     case PaintMode::Texture3D:
-      return sculpt_stroke_method_items;
+      return texture_paint_stroke_method_items;
 
     default:
       return brush_stroke_method_items;
@@ -1143,11 +1262,263 @@ static std::optional<std::string> rna_BrushCurvesSculptSettings_path(const Point
   return "curves_sculpt_settings";
 }
 
+static std::optional<std::string> rna_BrushCurvePatchSettings_path(const PointerRNA * /*ptr*/)
+{
+  return "curve_patch";
+}
+
+/* The brush comes from `owner_id`, NOT `ptr->data`: for a property on this sub-struct `ptr->data`
+ * is the settings block, and a cast of it to `Brush` would reinterpret unrelated bytes. Mirrors
+ * #rna_BrushCurvePatchTextureSlot_update. */
+static void rna_BrushCurvePatchSettings_update(Main * /*bmain*/,
+                                               Scene * /*scene*/,
+                                               PointerRNA *ptr)
+{
+  Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  BKE_brush_tag_unsaved_changes(br);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
+}
+
+static void rna_BrushCurvePatchSettings_texture_active_index_range(
+    PointerRNA *ptr, int *min, int *max, int * /*softmin*/, int * /*softmax*/)
+{
+  const Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  *min = 0;
+  *max = max_ii(0, br->curve_patch.texture_slots.count() - 1);
+}
+
+static int rna_BrushCurvePatchTextureSlot_name_length(PointerRNA *ptr)
+{
+  const BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(ptr->data);
+  return slot->tex ? strlen(slot->tex->id.name + 2) : 0;
+}
+
+static void rna_BrushCurvePatchTextureSlot_update(Main * /*bmain*/,
+                                                  Scene * /*scene*/,
+                                                  PointerRNA *ptr)
+{
+  /* The brush comes from `owner_id`, NOT `ptr->data`: for a property on this sub-struct `ptr->data`
+   * is the slot itself, and `rna_Brush_update()`'s cast would reinterpret 32 bytes of slot as a
+   * `Brush`. Mirrors #rna_BrushCurvesSculptSettings_update. */
+  Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  BKE_brush_tag_unsaved_changes(br);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
+}
+
+static void rna_BrushCurvePatchTextureSlot_name_get(PointerRNA *ptr, char *value)
+{
+  const BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(ptr->data);
+  if (slot->tex) {
+    BLI_strncpy(value, slot->tex->id.name + 2, strlen(slot->tex->id.name + 2) + 1);
+  }
+  else {
+    value[0] = '\0';
+  }
+}
+
 }  // namespace blender
 
 #else
 
 namespace blender {
+
+static void rna_def_brush_curve_patch_texture_slot(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "BrushCurvePatchTextureSlot", nullptr);
+  RNA_def_struct_sdna(srna, "BrushCurvePatchTextureSlot");
+  RNA_def_struct_ui_text(
+      srna, "Curve Patch Texture Slot", "One texture in a brush's Curve Patch texture list");
+
+  prop = RNA_def_property(srna, "texture", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "tex");
+  RNA_def_property_struct_type(prop, "Texture");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Texture", "Texture stamped for this slot");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushCurvePatchTextureSlot_update");
+
+  prop = RNA_def_property(srna, "weight", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "weight");
+  RNA_def_property_range(prop, 0.0f, 1000.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 0.1f, 3);
+  RNA_def_property_ui_text(
+      prop, "Weight", "How often this texture is picked, relative to the other slots");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchTextureSlot_update");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_BrushCurvePatchTextureSlot_name_get",
+                                "rna_BrushCurvePatchTextureSlot_name_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Name", "Name of the slot's texture");
+  RNA_def_struct_name_property(srna, prop);
+}
+
+static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "BrushCurvePatchSettings", nullptr);
+  RNA_def_struct_sdna(srna, "BrushCurvePatchSettings");
+  RNA_def_struct_path_func(srna, "rna_BrushCurvePatchSettings_path");
+  RNA_def_struct_ui_text(srna, "Curve Patch Settings", "Curve Patch settings of a brush");
+
+  prop = RNA_def_property(srna, "stamp_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stamp_mode");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_stamp_mode_items);
+  RNA_def_property_ui_text(
+      prop, "Stamp Mode", "Whether the patch is one stretched texture or discrete stamps");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "use_swap_axis", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "swap_axis", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Swap Axis",
+      "Run the texture's U axis along the control curve's length instead of V");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "stamp_size_random", PROP_INT, PROP_PERCENTAGE);
+  RNA_def_property_int_sdna(prop, nullptr, "stamp_size_random");
+  RNA_def_property_range(prop, 0, 100);
+  RNA_def_property_ui_range(prop, 0, 100, 1, -1);
+  RNA_def_property_ui_text(
+      prop, "Random Size", "Randomly shrink each stamp by up to this fraction of the brush size");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "stamp_strength_random", PROP_INT, PROP_PERCENTAGE);
+  RNA_def_property_int_sdna(prop, nullptr, "stamp_strength_random");
+  RNA_def_property_range(prop, 0, 100);
+  RNA_def_property_ui_range(prop, 0, 100, 1, -1);
+  RNA_def_property_ui_text(
+      prop,
+      "Random Strength",
+      "Randomly reduce each stamp's relief strength by up to this fraction");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "stamp_projection", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stamp_projection");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_stamp_projection_items);
+  RNA_def_property_ui_text(
+      prop, "Projection", "How each stamp's texture frame is built along the curve");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "stamp_texture_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stamp_texture_source");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_stamp_texture_source_items);
+  RNA_def_property_ui_text(
+      prop, "Stamp Textures", "Where the Curve Patch Stamps mode takes its textures from");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "ribbon_texture_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "ribbon_texture_source");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_ribbon_texture_source_items);
+  RNA_def_property_ui_text(
+      prop, "Ribbon Textures", "Where the Curve Patch Ribbon mode takes its textures from");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "length_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "length_mode");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_length_mode_items);
+  RNA_def_property_ui_text(
+      prop, "Length Mode", "How the texture is mapped along the control curve's length");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "length_repeat", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "length_repeat");
+  RNA_def_property_range(prop, 1, 64);
+  RNA_def_property_ui_range(prop, 1, 64, 1, -1);
+  RNA_def_property_ui_text(
+      prop, "Repeats", "Number of times the texture repeats along the curve length");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "end_falloff", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "end_falloff");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_end_falloff_items);
+  RNA_def_property_ui_text(
+      prop, "End Falloff", "How the relief terminates at the control curve's two ends");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  /* Named for what it measures. The DNA field, the core parameter and the UI all call this a
+   * percentage; only the RNA identifier used to call it a length. */
+  prop = RNA_def_property(srna, "end_falloff_percent", PROP_INT, PROP_PERCENTAGE);
+  RNA_def_property_int_sdna(prop, nullptr, "end_falloff_percent");
+  RNA_def_property_range(prop, 0, 50);
+  RNA_def_property_ui_range(prop, 0, 50, 1, -1);
+  RNA_def_property_ui_text(prop,
+                           "Falloff Length",
+                           "Length of the fade at each end of the curve, as a percentage of the "
+                           "curve's total length");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "texture_slots", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "texture_slots", nullptr);
+  RNA_def_property_struct_type(prop, "BrushCurvePatchTextureSlot");
+  RNA_def_property_ui_text(prop,
+                           "Curve Patch Textures",
+                           "Textures the Curve Patch Stamps mode picks from at random");
+
+  /* Bounded against the list it indexes: without a range, a value set from Python would send the
+   * UI list and every reader looking for a slot that is not there. */
+  prop = RNA_def_property(srna, "texture_active_index", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "texture_active_index");
+  RNA_def_property_int_funcs(
+      prop, nullptr, nullptr, "rna_BrushCurvePatchSettings_texture_active_index_range");
+  RNA_def_property_ui_text(prop, "Active Curve Patch Texture", "Index of the active texture slot");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "use_face_set", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "face_set", 1);
+  RNA_def_property_ui_text(prop,
+                           "Create Face Set",
+                           "Assign a new face set to the geometry raised by each Curve Patch or "
+                           "Roll stroke");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "texture_start", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "tex_start");
+  RNA_def_property_struct_type(prop, "Texture");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Start Texture", "Texture projected at the start of the control curve");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "texture_middle", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "tex_middle");
+  RNA_def_property_struct_type(prop, "Texture");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Middle Texture", "Texture repeated between the start and end textures");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "texture_end", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "tex_end");
+  RNA_def_property_struct_type(prop, "Texture");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "End Texture", "Texture projected at the end of the control curve");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "cap_start_length", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "cap_start_length");
+  RNA_def_property_range(prop, 0.0f, 100.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 4.0f, 0.1f, 2);
+  RNA_def_property_ui_text(
+      prop, "Start Length", "Arc length the start texture occupies, in brush diameters");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "cap_end_length", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "cap_end_length");
+  RNA_def_property_range(prop, 0.0f, 100.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 4.0f, 0.1f, 2);
+  RNA_def_property_ui_text(
+      prop, "End Length", "Arc length the end texture occupies, in brush diameters");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+}
 
 static void rna_def_brush_texture_slot(BlenderRNA *brna)
 {
@@ -3919,6 +4290,28 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Use Sculpt", "Use this brush in sculpt curves mode");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  prop = RNA_def_property(srna, "curve_patch", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "BrushCurvePatchSettings");
+  RNA_def_property_pointer_sdna(prop, nullptr, "curve_patch");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Curve Patch", "Curve Patch settings");
+
+  /* Roll stroke method. Kept flat rather than nested in a struct of its own: two booleans do not
+   * describe a settings block. */
+  prop = RNA_def_property(srna, "use_roll_pressure_scale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "roll_pressure_scale", 1);
+  RNA_def_property_ui_text(
+      prop, "Pressure Scale", "Scale roll texture with pressure-driven brush radius");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_roll_edit_after", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "roll_edit_after", 1);
+  RNA_def_property_ui_text(prop,
+                           "Edit After Stroke",
+                           "After a roll stroke, edit the drawn contour as a Curve Patch control "
+                           "curve before committing to the mesh");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   /* texture */
   prop = RNA_def_property(srna, "texture_slot", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "BrushTextureSlot");
@@ -4106,6 +4499,8 @@ void RNA_def_brush(BlenderRNA *brna)
   rna_def_weight_paint_capabilities(brna);
   rna_def_gpencil_options(brna);
   rna_def_curves_sculpt_options(brna);
+  rna_def_brush_curve_patch_texture_slot(brna);
+  rna_def_brush_curve_patch_settings(brna);
   rna_def_brush_texture_slot(brna);
   rna_def_operator_stroke_element(brna);
 }

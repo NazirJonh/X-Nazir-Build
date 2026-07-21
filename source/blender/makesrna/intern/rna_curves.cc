@@ -83,7 +83,10 @@ const EnumPropertyItem rna_enum_curve_normal_mode_items[] = {
 #  include <fmt/format.h>
 
 #  include "BLI_math_vector.h"
+#  include "BLI_math_vector_types.hh"
 #  include "BLI_offset_indices.hh"
+
+#  include "DNA_brush_types.h"
 
 #  include "BKE_attribute.hh"
 #  include "BKE_curves.hh"
@@ -92,120 +95,132 @@ const EnumPropertyItem rna_enum_curve_normal_mode_items[] = {
 #  include "DEG_depsgraph.hh"
 
 #  include "ED_curves.hh"
+#  include "ED_paint.hh"
 
 #  include "WM_api.hh"
 #  include "WM_types.hh"
 
 namespace blender {
 
-static Curves *rna_curves(const PointerRNA *ptr)
+/* `CurvePoint` and `CurveSlice` are pointers into a geometry's own arrays and own nothing
+ * themselves, so their owner is resolved from the ID. Two ID types embed a #CurvesGeometry:
+ * #Curves and #PaintCurve. Everything below reaches the geometry through this function and never
+ * through `Curves`, which is what lets both types share the same two RNA structs. */
+static bke::CurvesGeometry &curves_geometry_from_owner(const PointerRNA *ptr)
 {
-  return reinterpret_cast<Curves *>(ptr->owner_id);
+  ID *id = ptr->owner_id;
+  switch (GS(id->name)) {
+    case ID_PC:
+      return reinterpret_cast<PaintCurve *>(id)->geometry.wrap();
+    default:
+      BLI_assert(GS(id->name) == ID_CV);
+      return reinterpret_cast<Curves *>(id)->geometry.wrap();
+  }
 }
 
 static int rna_Curves_curve_offset_data_length(PointerRNA *ptr)
 {
-  const Curves *curves = rna_curves(ptr);
-  return curves->geometry.curve_num + 1;
+  const bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
+  return geom.curves_num() + 1;
 }
 
 static void rna_Curves_curve_offset_data_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
 {
-  Curves *curves = rna_curves(ptr);
+  bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
   rna_iterator_array_begin(iter,
                            ptr,
-                           curves->geometry.wrap().offsets_for_write().data(),
+                           geom.offsets_for_write().data(),
                            sizeof(int),
-                           curves->geometry.curve_num + 1,
+                           geom.curves_num() + 1,
                            false,
                            nullptr);
 }
 
 static bool rna_Curves_curve_offset_data_lookup_int(PointerRNA *ptr, int index, PointerRNA *r_ptr)
 {
-  Curves *curves = rna_curves(ptr);
-  if (index < 0 || index >= curves->geometry.curve_num + 1) {
+  bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
+  if (index < 0 || index >= geom.curves_num() + 1) {
     return false;
   }
   rna_pointer_create_with_ancestors(
-      *ptr, RNA_IntAttributeValue, &curves->geometry.wrap().offsets_for_write()[index], *r_ptr);
+      *ptr, RNA_IntAttributeValue, &geom.offsets_for_write()[index], *r_ptr);
   return true;
 }
 
-static float (*get_curves_positions_for_write(Curves &curves))[3]
+static float (*geometry_positions_for_write(bke::CurvesGeometry &geom))[3]
 {
-  return reinterpret_cast<float (*)[3]>(curves.geometry.wrap().positions_for_write().data());
+  return reinterpret_cast<float (*)[3]>(geom.positions_for_write().data());
 }
 
-static const float (*get_curves_positions(const Curves &curves))[3]
+static const float (*geometry_positions(const bke::CurvesGeometry &geom))[3]
 {
-  return reinterpret_cast<const float (*)[3]>(curves.geometry.wrap().positions().data());
+  return reinterpret_cast<const float (*)[3]>(geom.positions().data());
 }
 
 static int rna_CurvePoint_index_get_const(const PointerRNA *ptr)
 {
-  const Curves *curves = rna_curves(ptr);
+  const bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
   const float (*co)[3] = static_cast<float (*)[3]>(ptr->data);
-  const float (*positions)[3] = get_curves_positions(*curves);
+  const float (*positions)[3] = geometry_positions(geom);
   return int(co - positions);
 }
 
-static void rna_Curves_curves_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+void rna_Curves_curves_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
 {
-  Curves *curves = rna_curves(ptr);
+  bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
   rna_iterator_array_begin(iter,
                            ptr,
-                           curves->geometry.wrap().offsets_for_write().data(),
+                           geom.offsets_for_write().data(),
                            sizeof(int),
-                           curves->geometry.curve_num,
+                           geom.curves_num(),
                            false,
                            nullptr);
 }
 
-static int rna_Curves_curves_length(PointerRNA *ptr)
+int rna_Curves_curves_length(PointerRNA *ptr)
 {
-  const Curves *curves = rna_curves(ptr);
-  return curves->geometry.curve_num;
+  const bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
+  return geom.curves_num();
 }
 
-static bool rna_Curves_curves_lookup_int(PointerRNA *ptr, int index, PointerRNA *r_ptr)
+bool rna_Curves_curves_lookup_int(PointerRNA *ptr, int index, PointerRNA *r_ptr)
 {
-  Curves *curves = rna_curves(ptr);
-  if (index < 0 || index >= curves->geometry.curve_num) {
+  bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
+  if (index < 0 || index >= geom.curves_num()) {
     return false;
   }
   rna_pointer_create_with_ancestors(
-      *ptr, RNA_CurveSlice, &curves->geometry.wrap().offsets_for_write()[index], *r_ptr);
+      *ptr, RNA_CurveSlice, &geom.offsets_for_write()[index], *r_ptr);
   return true;
 }
 
-static int rna_Curves_position_data_length(PointerRNA *ptr)
+int rna_Curves_position_data_length(PointerRNA *ptr)
 {
-  const Curves *curves = rna_curves(ptr);
-  return curves->geometry.point_num;
+  const bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
+  return geom.points_num();
 }
 
 bool rna_Curves_position_data_lookup_int(PointerRNA *ptr, int index, PointerRNA *r_ptr)
 {
-  Curves *curves = rna_curves(ptr);
-  if (index < 0 || index >= curves->geometry.point_num) {
+  bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
+  if (index < 0 || index >= geom.points_num()) {
     return false;
   }
   rna_pointer_create_with_ancestors(*ptr,
                                     RNA_FloatVectorAttributeValue,
-                                    &get_curves_positions_for_write(*curves)[index],
+                                    &geometry_positions_for_write(geom)[index],
                                     *r_ptr);
   return true;
 }
 
-static void rna_Curves_position_data_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+void rna_Curves_position_data_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
 {
-  Curves *curves = rna_curves(ptr);
+  bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
   rna_iterator_array_begin(iter,
                            ptr,
-                           get_curves_positions_for_write(*curves),
+                           geometry_positions_for_write(geom),
                            sizeof(float[3]),
-                           curves->geometry.point_num,
+                           geom.points_num(),
                            false,
                            nullptr);
 }
@@ -222,13 +237,31 @@ static void rna_CurvePoint_location_get(PointerRNA *ptr, float value[3])
 
 static void rna_CurvePoint_location_set(PointerRNA *ptr, const float value[3])
 {
-  copy_v3_v3(static_cast<float *>(ptr->data), value);
+  float *co = static_cast<float *>(ptr->data);
+
+  /* Bezier handle positions are ABSOLUTE, so a moved control point has to carry its own handles
+   * with it or the curve bends around handles left behind at the old location. `Curves` does this
+   * in its edit code, which owns the whole gesture; a paint curve written through RNA has no such
+   * code above it, so the move happens here. */
+  if (GS(ptr->owner_id->name) == ID_PC) {
+    bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
+    /* Both are `std::nullopt` on a geometry with no bezier handle attributes, and the `_for_write`
+     * counterparts would create them -- so nothing is moved when there is nothing to move. */
+    if (geom.handle_positions_left() && geom.handle_positions_right()) {
+      const float3 delta = float3(value) - float3(co);
+      const int index = rna_CurvePoint_index_get_const(ptr);
+      geom.handle_positions_left_for_write()[index] += delta;
+      geom.handle_positions_right_for_write()[index] += delta;
+    }
+  }
+
+  copy_v3_v3(co, value);
 }
 
 static float rna_CurvePoint_radius_get(PointerRNA *ptr)
 {
-  const Curves *curves = rna_curves(ptr);
-  const bke::AttributeAccessor attributes = curves->geometry.wrap().attributes();
+  const bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
+  const bke::AttributeAccessor attributes = geom.attributes();
   const VArray radii = *attributes.lookup_or_default<float>(
       "radius", bke::AttrDomain::Point, 0.0f);
   return radii[rna_CurvePoint_index_get_const(ptr)];
@@ -236,14 +269,17 @@ static float rna_CurvePoint_radius_get(PointerRNA *ptr)
 
 static void rna_CurvePoint_radius_set(PointerRNA *ptr, float value)
 {
-  Curves *curves = rna_curves(ptr);
-  bke::MutableAttributeAccessor attributes = curves->geometry.wrap().attributes_for_write();
+  bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
+  bke::MutableAttributeAccessor attributes = geom.attributes_for_write();
   bke::AttributeWriter radii = attributes.lookup_or_add_for_write<float>("radius",
                                                                          bke::AttrDomain::Point);
   if (!radii) {
     return;
   }
   radii.varray.set(rna_CurvePoint_index_get_const(ptr), value);
+  /* Not optional: a writer destroyed without it asserts in debug builds (#FinishCallChecker) and
+   * leaves the attribute's change tagging undone in release ones. */
+  radii.finish();
 }
 
 static std::optional<std::string> rna_CurvePoint_path(const PointerRNA *ptr)
@@ -253,19 +289,19 @@ static std::optional<std::string> rna_CurvePoint_path(const PointerRNA *ptr)
 
 bool rna_Curves_points_lookup_int(PointerRNA *ptr, int index, PointerRNA *r_ptr)
 {
-  Curves *curves = rna_curves(ptr);
-  if (index < 0 || index >= curves->geometry.point_num) {
+  bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
+  if (index < 0 || index >= geom.points_num()) {
     return false;
   }
   rna_pointer_create_with_ancestors(
-      *ptr, RNA_CurvePoint, &get_curves_positions_for_write(*curves)[index], *r_ptr);
+      *ptr, RNA_CurvePoint, &geometry_positions_for_write(geom)[index], *r_ptr);
   return true;
 }
 
 static int rna_CurveSlice_index_get_const(const PointerRNA *ptr)
 {
-  Curves *curves = rna_curves(ptr);
-  return int(static_cast<int *>(ptr->data) - curves->geometry.curve_offsets);
+  bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
+  return int(static_cast<int *>(ptr->data) - geom.offsets_for_write().data());
 }
 
 static int rna_CurveSlice_index_get(PointerRNA *ptr)
@@ -293,17 +329,19 @@ static int rna_CurveSlice_points_length_get(PointerRNA *ptr)
 
 static void rna_CurveSlice_points_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
 {
-  Curves *curves = rna_curves(ptr);
+  bke::CurvesGeometry &geom = curves_geometry_from_owner(ptr);
   const int offset = rna_CurveSlice_first_point_index_get(ptr);
   const int size = rna_CurveSlice_points_length_get(ptr);
-  float (*positions)[3] = get_curves_positions_for_write(*curves);
+  float (*positions)[3] = geometry_positions_for_write(geom);
   float (*co)[3] = positions + offset;
   rna_iterator_array_begin(iter, ptr, co, sizeof(float[3]), size, 0, nullptr);
 }
 
 static void rna_Curves_normals_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
 {
-  Curves *curves = rna_curves(ptr);
+  /* Not generalized to `PaintCurve`: `point_normals_array_create()` takes a `Curves *`, and the
+   * `normals` property stays a `Curves` property. */
+  Curves *curves = reinterpret_cast<Curves *>(ptr->owner_id);
   float (*positions)[3] = ed::curves::point_normals_array_create(curves);
   const int size = curves->geometry.point_num;
   rna_iterator_array_begin(iter, ptr, positions, sizeof(float[3]), size, true, nullptr);
@@ -317,6 +355,22 @@ static void rna_Curves_update_data(Main * /*bmain*/, Scene * /*scene*/, PointerR
     DEG_id_tag_update(id, 0);
     WM_main_add_notifier(NC_GEOM | ND_DATA, id);
   }
+}
+
+/* Update for the two structs whose owner may be either ID type.
+ *
+ * Recomputing the bezier handles is not optional for a paint curve: its handle types are AUTO, and
+ * a control point moved without that recompute leaves the ribbon following the old shape. `Curves`
+ * must not get a second, silent recompute -- its own edit code owns that. */
+void rna_curve_geometry_update_data(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  ID *id = ptr->owner_id;
+  if (GS(id->name) == ID_PC) {
+    ED_paintcurve_geometry_update_after_edit(reinterpret_cast<PaintCurve *>(id));
+    WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+    return;
+  }
+  rna_Curves_update_data(bmain, scene, ptr);
 }
 
 void rna_Curves_update_draw(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
@@ -348,13 +402,13 @@ static void rna_def_curves_point(BlenderRNA *brna)
   RNA_def_property_float_funcs(
       prop, "rna_CurvePoint_location_get", "rna_CurvePoint_location_set", nullptr);
   RNA_def_property_ui_text(prop, "Position", "");
-  RNA_def_property_update(prop, 0, "rna_Curves_update_data");
+  RNA_def_property_update(prop, 0, "rna_curve_geometry_update_data");
 
   prop = RNA_def_property(srna, "radius", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_funcs(
       prop, "rna_CurvePoint_radius_get", "rna_CurvePoint_radius_set", nullptr);
   RNA_def_property_ui_text(prop, "Radius", "");
-  RNA_def_property_update(prop, 0, "rna_Curves_update_data");
+  RNA_def_property_update(prop, 0, "rna_curve_geometry_update_data");
 
   prop = RNA_def_property(srna, "index", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);

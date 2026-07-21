@@ -143,6 +143,11 @@ static void brush_copy_data(Main * /*bmain*/,
 
   /* enable fake user by default */
   id_fake_user_set(&brush_dst->id);
+
+  /* Deep-copy the Curve Patch texture list. The `Tex` user counts inside it are handled generically
+   * by `brush_foreach_id()` during the copy, so nothing here calls `id_us_plus()`. */
+  BLI_duplicatelist(&brush_dst->curve_patch.texture_slots,
+                    &brush_src->curve_patch.texture_slots);
 }
 
 static void brush_free_data(ID *id)
@@ -185,6 +190,8 @@ static void brush_free_data(ID *id)
   MEM_SAFE_DELETE(brush->gradient);
 
   BKE_previewimg_id_free(&brush->id);
+
+  BLI_freelistN(&brush->curve_patch.texture_slots);
 }
 
 static void brush_make_local(Main *bmain, ID *id, const int flags)
@@ -233,6 +240,16 @@ static void brush_foreach_id(ID *id, LibraryForeachIDData *data)
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->gpencil_settings->material, IDWALK_CB_USER);
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->gpencil_settings->material_alt, IDWALK_CB_USER);
   }
+  /* Registered directly rather than through `BKE_texture_mtex_foreach_id()`: that wrapper exists for
+   * the shared `MTex` struct, while these are plain `Tex` pointers owned by the brush. This is what
+   * gives them user counts, library override and ID remapping -- brush copy and free rely on it. */
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->curve_patch.tex_start, IDWALK_CB_USER);
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->curve_patch.tex_middle, IDWALK_CB_USER);
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->curve_patch.tex_end, IDWALK_CB_USER);
+  for (BrushCurvePatchTextureSlot &slot : brush->curve_patch.texture_slots) {
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, slot.tex, IDWALK_CB_USER);
+  }
+
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, BKE_texture_mtex_foreach_id(data, &brush->mtex));
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data,
                                           BKE_texture_mtex_foreach_id(data, &brush->mask_mtex));
@@ -331,6 +348,8 @@ static void brush_blend_write(BlendWriter *writer, ID *id, const void *id_addres
   }
 
   BKE_previewimg_blend_write(writer, brush->preview);
+
+  writer->write_struct_list(&brush->curve_patch.texture_slots);
 }
 
 static void brush_blend_read_data(BlendDataReader *reader, ID *id)
@@ -479,6 +498,10 @@ static void brush_blend_read_data(BlendDataReader *reader, ID *id)
   BKE_previewimg_blend_read(reader, brush->preview);
 
   brush->has_unsaved_changes = false;
+
+  /* The `Tex` pointers inside are resolved automatically through `brush_foreach_id()`, so there is
+   * nothing for `brush_blend_read_after_liblink()` to do here. */
+  BLO_read_struct_list(reader, BrushCurvePatchTextureSlot, &brush->curve_patch.texture_slots);
 }
 
 static void brush_blend_read_after_liblink(BlendLibReader * /*reader*/, ID *id)
@@ -642,6 +665,8 @@ static void brush_defaults(Brush *brush)
   FROM_DEFAULT(falloff_shape);
   FROM_DEFAULT(tip_scale_x);
   FROM_DEFAULT(tip_roundness);
+  FROM_DEFAULT(curve_patch.cap_start_length);
+  FROM_DEFAULT(curve_patch.cap_end_length);
 
 #undef FROM_DEFAULT
 #undef FROM_DEFAULT_PTR
@@ -1927,6 +1952,32 @@ bool supports_sculpt_plane(const Brush &brush)
 bool supports_color(const Brush &brush)
 {
   return ELEM(brush.sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT);
+}
+bool supports_curve_patch(const Brush &brush)
+{
+  /* Stamping brushes: relief along the surface normal is what they do anyway. Planar brushes are
+   * included because carving a groove along a curve is a natural reach for Scrape and already
+   * works. `LAYER` is deliberately absent: its persistent-base semantics are never reached, so
+   * listing it would advertise support that does not exist. `SCENE_PROJECT` is absent because it
+   * projects onto other scene geometry and has no standalone meaning here. */
+  return ELEM(brush.sculpt_brush_type,
+              SCULPT_BRUSH_TYPE_DRAW,
+              SCULPT_BRUSH_TYPE_DRAW_SHARP,
+              SCULPT_BRUSH_TYPE_CLAY,
+              SCULPT_BRUSH_TYPE_CLAY_STRIPS,
+              SCULPT_BRUSH_TYPE_CLAY_THUMB,
+              SCULPT_BRUSH_TYPE_INFLATE,
+              SCULPT_BRUSH_TYPE_BLOB,
+              SCULPT_BRUSH_TYPE_CREASE,
+              SCULPT_BRUSH_TYPE_FLATTEN,
+              SCULPT_BRUSH_TYPE_FILL,
+              SCULPT_BRUSH_TYPE_SCRAPE,
+              SCULPT_BRUSH_TYPE_MULTIPLANE_SCRAPE,
+              SCULPT_BRUSH_TYPE_PLANE,
+              /* Paints the active color attribute instead of displacing; see
+               * `curve_patch_effect_color_create()`. `SMEAR` and `BLUR` stay out -- both are
+               * iterative, and Curve Patch recomputes from the original on every curve edit. */
+              SCULPT_BRUSH_TYPE_PAINT);
 }
 bool supports_secondary_cursor_color(const Brush &brush)
 {

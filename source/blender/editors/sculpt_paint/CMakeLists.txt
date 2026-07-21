@@ -23,10 +23,24 @@ set(SRC
   brush_asset_ops.cc
   paint_cursor.cc
   paint_curve.cc
+  paint_curve_convert.cc
+  paint_curve_geometry.cc
+  paint_curve_patch_apply.cc
+  paint_curve_patch_edit.cc
+  paint_curve_patch_effect_color.cc
+  paint_curve_patch_effect_image.cc
+  paint_curve_patch_effect_relief.cc
+  paint_curve_patch_params.cc
+  paint_curve_patch_sampler.cc
+  paint_curve_patch_session.cc
+  paint_curve_topology.cc
+  paint_curve_draw.cc
+  paint_curve_sync.cc
   paint_curve_undo.cc
   paint_ops.cc
   paint_sample_color.cc
   paint_stroke.cc
+  paint_stroke_roll.cc
   paint_utils.cc
   palette.cc
   sculpt_uv.cc
@@ -117,6 +131,12 @@ set(SRC
   mesh/sculpt_undo.cc
 
   paint_cursor.hh
+  paint_curve_intern.hh
+  paint_curve_patch_apply.hh
+  paint_curve_patch_effect.hh
+  paint_curve_patch_effect_common.hh
+  paint_curve_patch_sampler.hh
+  paint_curve_patch_session.hh
   paint_intern.hh
 
   curves/sculpt_intern.hh
@@ -203,6 +223,7 @@ set(LIB
   PRIVATE bf::windowmanager
   PRIVATE bf::dependencies::zstd
   PRIVATE bf::dependencies::optional::potrace
+  bf_editor_curves
 )
 
 if(WITH_GTESTS)
@@ -212,6 +233,9 @@ if(WITH_GTESTS)
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc
     mesh/sculpt_undo_test.cc
+    paint_curve_geometry_test.cc
+    paint_curve_patch_sampler_test.cc
+    roll_spline_test.cc
   )
   set(TEST_INC
   )

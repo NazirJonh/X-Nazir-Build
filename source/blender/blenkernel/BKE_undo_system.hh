@@ -235,6 +235,15 @@ UndoStep *BKE_undosys_step_push_init_with_type(UndoStack *ustack,
                                                const char *name,
                                                const UndoType *ut);
 UndoStep *BKE_undosys_step_push_init(UndoStack *ustack, bContext *C, const char *name);
+/**
+ * Discard the step created by #BKE_undosys_step_push_init_with_type without pushing it.
+ *
+ * Needed by long-lived modal operators that open a transaction they may end up not using: without
+ * this the initialized step can only be pushed or silently adopted by the next unrelated undo push
+ * (see #BKE_undosys_step_push_with_type), which is not the same thing as never having existed.
+ * No-op when no step is initialized.
+ */
+void BKE_undosys_step_push_init_abort(UndoStack *ustack);
 
 /**
  * \param C: Can be nullptr from some callers if their encoding function doesn't need it

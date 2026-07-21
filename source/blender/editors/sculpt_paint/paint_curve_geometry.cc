@@ -1176,6 +1176,80 @@ void ED_paintcurve_geometry_clear(PaintCurve *pc)
   pc->add_index = 0;
 }
 
+void ED_paintcurve_geometry_points_set(PaintCurve *pc,
+                                       const Span<float3> positions,
+                                       const Span<float> radii,
+                                       const bool cyclic)
+{
+  if (pc == nullptr) {
+    return;
+  }
+  bke::CurvesGeometry &geom = pc->geometry.wrap();
+  /* Leaves exactly the state the paint curve operators expect of a fresh curve: one bezier spline,
+   * the paint-curve resolution and AUTO handle types. It reassigns the geometry outright, which is
+   * what makes this a rebuild rather than an edit -- every previous attribute goes with it. */
+  paintcurve_geometry_init_bezier(geom, int(positions.size()));
+  pc->active_curve = 0;
+  pc->add_index = int(positions.size());
+  if (positions.is_empty()) {
+    return;
+  }
+
+  geom.positions_for_write().copy_from(positions);
+  MutableSpan<float> dst_radii = geom.radius_for_write();
+  if (radii.is_empty()) {
+    dst_radii.fill(1.0f);
+  }
+  else {
+    dst_radii.copy_from(radii);
+  }
+  if (cyclic) {
+    geom.cyclic_for_write().fill(true);
+  }
+
+  /* The same order #ED_paintcurve_control_curve_for_patch relies on: the handle position attributes
+   * have to exist before the recompute, which otherwise returns silently. One call for the whole
+   * curve is the entire point of this function. */
+  geom.handle_positions_left_for_write();
+  geom.handle_positions_right_for_write();
+  geom.calculate_bezier_auto_handles();
+  geom.tag_positions_changed();
+}
+
+bke::CurvesGeometry ED_paintcurve_control_curve_for_patch(const PaintCurve &pc,
+                                                          const int spline_index)
+{
+  const bke::CurvesGeometry &src = pc.geometry.wrap();
+  if (!paintcurve_geometry_is_valid(src) || src.curves_num() == 0) {
+    return {};
+  }
+  const int index = spline_index < 0 ? paintcurve_active_curve_get(&pc) :
+                                       std::clamp(spline_index, 0, src.curves_num() - 1);
+
+  /* The same call the Separate Geometry node's curve branch makes
+   * (`geometry/intern/separate_geometry.cc`): it carries both domains over whole -- radius, handle
+   * positions and types, `.selection`, `.cyclic`, resolution, and whatever attribute a script
+   * added -- which is what a hand-written gather would have to be kept in sync with forever. */
+  bke::CurvesGeometry curve = bke::curves_copy_curve_selection(
+      src, IndexMask(IndexRange(index, 1)), {});
+
+  /* Order matters: the handle position attributes have to exist before the two recomputes, which
+   * otherwise return silently and leave the bezier collapsed at the origin. AUTO and ALIGNED
+   * handles are derived, FREE ones are left as the user set them. */
+  curve.handle_positions_left_for_write();
+  curve.handle_positions_right_for_write();
+  curve.calculate_bezier_auto_handles();
+  curve.calculate_bezier_aligned_handles();
+  curve.tag_positions_changed();
+  /* Paint curves carry a per-point radius on this codebase's own convention (1.0 = full brush
+   * size), but a curve that reached #PaintCurve by some other route may not, and
+   * #blender::bke::CurvesGeometry::radius() then answers its generic hair-curve default of 0.01. */
+  if (!curve.attributes().contains("radius")) {
+    curve.radius_for_write().fill(1.0f);
+  }
+  return curve;
+}
+
 /** \} */
 
 }  // namespace blender

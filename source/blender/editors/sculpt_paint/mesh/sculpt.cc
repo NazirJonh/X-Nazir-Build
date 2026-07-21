@@ -2502,7 +2502,7 @@ void sculpt_apply_texture(const SculptSession &ss,
 
   if (mtex->brush_map_mode == MTEX_MAP_MODE_3D) {
     /* Get strength by feeding the vertex location directly into a texture. */
-    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, mtex, point, r_rgba, 0, ss.tex_pool);
+    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, mtex, point, r_rgba, 0, ss.tex_pool());
   }
   else {
     /* If the active area is being applied for symmetry, flip it
@@ -2531,7 +2531,7 @@ void sculpt_apply_texture(const SculptSession &ss,
       x += mtex->ofs[0];
       y += mtex->ofs[1];
 
-      paint_get_tex_pixel(mtex, x, y, ss.tex_pool, thread_id, r_value, r_rgba);
+      paint_get_tex_pixel(mtex, x, y, ss.tex_pool(), thread_id, r_value, r_rgba);
 
       add_v3_fl(r_rgba, brush.texture_sample_bias);  // v3 -> Ignore alpha
       *r_value -= brush.texture_sample_bias;
@@ -2589,7 +2589,8 @@ void sculpt_apply_texture(const SculptSession &ss,
       float3 final_pt;
       rotate_v2_v2fl(final_pt, point_3d, angle);
 
-      paint_get_tex_pixel(mtex, final_pt[0], -final_pt[1], ss.tex_pool, thread_id, r_value, r_rgba);
+      paint_get_tex_pixel(
+          mtex, final_pt[0], -final_pt[1], ss.tex_pool(), thread_id, r_value, r_rgba);
       *r_value += brush.texture_sample_bias;
     }
     else {
@@ -2597,7 +2598,7 @@ void sculpt_apply_texture(const SculptSession &ss,
           cache.vc->region, symm_point, cache.projection_mat);
       const float point_3d[3] = {point_2d[0], point_2d[1], 0.0f};
       *r_value = BKE_brush_sample_tex_3d(
-          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool);
+          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool());
     }
   }
 }
@@ -3539,6 +3540,21 @@ void do_brush_action(const Depsgraph &depsgraph,
                                     *ss.cache->cloth_sim,
                                     ss.cache->location_symm,
                                     std::numeric_limits<float>::max());
+  }
+
+  /* Curve Patch's anchor-drag phase normally stamps an ordinary preview dab and lets
+   * `restore_from_undo_step_if_necessary()` take it back before the next one. The image canvas has
+   * no such restore: its pixels live in the image undo system, not the sculpt one, so
+   * `restore_color_from_undo_step()` finds no node to write back and the round dab stays baked into
+   * the texture -- and the handoff's `BKE_undosys_step_push_init_abort()` then discards the very
+   * image undo step that could have taken it back, leaving it not even undoable. Write nothing at
+   * all for that target instead; everything the patch handoff reads from this call
+   * (#update_sculpt_normal, #update_brush_local_mat) has already run above. The other targets keep
+   * their preview, which their own restore still cleans up. */
+  if (use_pixels && brush.stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+      bke::brush::supports_curve_patch(brush) && !ss.curve_patch_session)
+  {
+    return;
   }
 
   /* Apply one type of brush action. */
@@ -5178,9 +5194,7 @@ static void brush_init_tex(const Sculpt &sd, SculptSession &ss)
     ntreeTexBeginExecTree(mask_tex->tex->nodetree);
   }
 
-  if (ss.tex_pool == nullptr) {
-    ss.tex_pool = BKE_image_pool_new();
-  }
+  ss.tex_pool_ensure();
 }
 
 /** Creates stroke-level toggle settings, modifies the current active brush if needed */

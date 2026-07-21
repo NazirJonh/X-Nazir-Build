@@ -36,18 +36,23 @@ def object_mode_ensure():
         bpy.ops.object.mode_set(mode='OBJECT')
 
 
-def source_curve_object_add():
-    """A three-point bezier lying in the grid's own plane, to be imported as the paint curve."""
-    curve = bpy.data.curves.new("CurvePatchSource", 'CURVE')
-    curve.dimensions = '3D'
-    spline = curve.splines.new('BEZIER')
-    spline.bezier_points.add(2)
-    for point, x in zip(spline.bezier_points, (-1.0, 0.0, 1.0)):
-        point.co = (x, 0.0, 0.0)
-        point.handle_left_type = 'AUTO'
-        point.handle_right_type = 'AUTO'
+def source_curve_object_add(name="CurvePatchSource", y_offsets=(0.0,)):
+    """One three-point bezier per entry in `y_offsets`, laid out in the grid's own plane.
 
-    ob = bpy.data.objects.new("CurvePatchSource", curve)
+    Each spline runs along X at its own Y, so a patch stamped along one of them is told apart from
+    a patch stamped along another by where the displaced vertices sit.
+    """
+    curve = bpy.data.curves.new(name, 'CURVE')
+    curve.dimensions = '3D'
+    for y in y_offsets:
+        spline = curve.splines.new('BEZIER')
+        spline.bezier_points.add(2)
+        for point, x in zip(spline.bezier_points, (-1.0, 0.0, 1.0)):
+            point.co = (x, y, 0.0)
+            point.handle_left_type = 'AUTO'
+            point.handle_right_type = 'AUTO'
+
+    ob = bpy.data.objects.new(name, curve)
     bpy.context.scene.collection.objects.link(ob)
     return ob
 
@@ -70,6 +75,9 @@ class TestCurvePatchApply(unittest.TestCase):
         bpy.ops.ed.undo_push()
 
         object_mode_ensure()
+
+        # Sources a single test builds for itself, removed alongside the fixture's own.
+        self.extra_names = []
 
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=48, y_subdivisions=48, size=4.0)
         self.mesh_ob = active_object_get()
@@ -121,7 +129,7 @@ class TestCurvePatchApply(unittest.TestCase):
             pass
 
         object_mode_ensure()
-        for name in (self.mesh_name, self.source_name):
+        for name in [self.mesh_name, self.source_name] + self.extra_names:
             ob = bpy.data.objects.get(name)
             if ob is None:
                 continue
@@ -131,6 +139,182 @@ class TestCurvePatchApply(unittest.TestCase):
                 bpy.data.meshes.remove(data)
             else:
                 bpy.data.curves.remove(data)
+
+    def use_two_spline_source(self):
+        """Re-import the paint curve from a source holding two splines, at Y = -1 and Y = +1.
+
+        There is no RNA path that adds a spline to a `PaintCurve` -- `add_point()` always appends to
+        the active one -- so a multi-spline curve can only come from a source object, the same route
+        the fixture uses for its single-spline one.
+        """
+        ob = source_curve_object_add("CurvePatchSourceMulti", (-1.0, 1.0))
+        self.extra_names.append(ob.name)
+        # The import refuses any stroke method other than Curve; see `setUp`.
+        self.brush.stroke_method = 'CURVE'
+        bpy.context.scene.tool_settings.sculpt.paint_curve_source_object = ob
+        self.brush.stroke_method = 'CURVE_PATCH'
+
+        paint_curve = self.brush.paint_curve
+        self.assertEqual(2, len(paint_curve.curves), "the two-spline source imported as one spline")
+        # The state `apply_and_measure_y()`'s undo returns to: re-imported, nothing stamped yet.
+        bpy.ops.ed.undo_push()
+        return paint_curve
+
+    def use_two_identical_splines_source(self):
+        """Two splines lying exactly on top of each other, at Y = 0.
+
+        Stamping both must not double the relief: overlapping patches meet in the same cross-pass
+        accumulator two symmetry passes do, which averages rather than stacks.
+        """
+        ob = source_curve_object_add("CurvePatchSourceTwin", (0.0, 0.0))
+        self.extra_names.append(ob.name)
+        self.brush.stroke_method = 'CURVE'
+        bpy.context.scene.tool_settings.sculpt.paint_curve_source_object = ob
+        self.brush.stroke_method = 'CURVE_PATCH'
+
+        paint_curve = self.brush.paint_curve
+        self.assertEqual(2, len(paint_curve.curves), "the twin-spline source imported as one spline")
+        bpy.ops.ed.undo_push()
+        return paint_curve
+
+    def use_one_good_and_one_single_point_spline_source(self):
+        """A usable three-point spline next to a stray single point.
+
+        Built directly rather than through `source_curve_object_add()`, which only makes three-point
+        splines. The degenerate one must be skipped, not turn the whole call into a failure.
+        """
+        curve = bpy.data.curves.new("CurvePatchSourceStray", 'CURVE')
+        curve.dimensions = '3D'
+        good = curve.splines.new('BEZIER')
+        good.bezier_points.add(2)
+        for point, x in zip(good.bezier_points, (-1.0, 0.0, 1.0)):
+            point.co = (x, 0.0, 0.0)
+            point.handle_left_type = 'AUTO'
+            point.handle_right_type = 'AUTO'
+        # `.new()` already provides the first point, so no `.add()` call: this spline holds one.
+        stray = curve.splines.new('BEZIER')
+        stray.bezier_points[0].co = (0.0, 1.5, 0.0)
+
+        ob = bpy.data.objects.new("CurvePatchSourceStray", curve)
+        bpy.context.scene.collection.objects.link(ob)
+        self.extra_names.append(ob.name)
+        self.brush.stroke_method = 'CURVE'
+        bpy.context.scene.tool_settings.sculpt.paint_curve_source_object = ob
+        self.brush.stroke_method = 'CURVE_PATCH'
+        bpy.ops.ed.undo_push()
+        return self.brush.paint_curve
+
+    def apply_and_measure(self, **kwargs):
+        """Stamp, describe what moved, then undo.
+
+        Reports three things, because the questions asked of a patch differ: WHERE it landed (the
+        centroid along Y names which spline was used, since the fixture's splines sit a unit apart),
+        HOW MUCH of the mesh it claimed, and HOW FAR the furthest vertex went.
+        """
+        before = vertex_positions(self.mesh_ob)
+        self.assertEqual({'FINISHED'}, bpy.ops.sculpt.curve_patch_apply(**kwargs))
+        after = vertex_positions(self.mesh_ob)
+        moved = [(a, b) for a, b in zip(before, after) if (a - b).length > 1e-6]
+        self.assertGreater(len(moved), 0, "the patch displaced nothing")
+
+        bpy.ops.ed.undo()
+        # A memfile undo reallocates every ID, so the held reference may be stale from here on.
+        self.mesh_ob = bpy.data.objects[self.mesh_name]
+        return {
+            "mean_y": sum(b.y for _, b in moved) / len(moved),
+            "moved_num": len(moved),
+            "max_displacement": max((a - b).length for a, b in moved),
+        }
+
+    def apply_and_measure_y(self, **kwargs):
+        """Where the displaced vertices sit along Y. See `apply_and_measure()`."""
+        return self.apply_and_measure(**kwargs)["mean_y"]
+
+    def test_multi_spline_curve_is_accepted(self):
+        """Used to be refused outright with "the paint curve must hold a single spline"."""
+        self.use_two_spline_source()
+        self.assertEqual({'FINISHED'}, bpy.ops.sculpt.curve_patch_apply())
+
+    def test_spline_index_selects_which_spline_is_stamped(self):
+        self.use_two_spline_source()
+        first = self.apply_and_measure_y(spline_index=0)
+        second = self.apply_and_measure_y(spline_index=1)
+        self.assertLess(first, second, "both spline indices stamped the same spline")
+
+    def test_spline_index_is_clamped_rather_than_refused(self):
+        self.use_two_spline_source()
+        last = self.apply_and_measure_y(spline_index=1)
+        clamped = self.apply_and_measure_y(spline_index=99)
+        self.assertAlmostEqual(last, clamped, places=5)
+
+    def test_active_curve_chooses_the_spline_by_default(self):
+        paint_curve = self.use_two_spline_source()
+        paint_curve.active_curve = 1
+        bpy.ops.ed.undo_push()
+
+        default = self.apply_and_measure_y()
+        explicit = self.apply_and_measure_y(spline_index=1)
+        self.assertAlmostEqual(default, explicit, places=5)
+
+    def test_all_splines_stamps_every_spline(self):
+        self.use_two_spline_source()
+        one = self.apply_and_measure(spline_index=0)
+        every = self.apply_and_measure(use_all_splines=True)
+        self.assertGreater(
+            every["moved_num"], one["moved_num"],
+            "all_splines claimed no more vertices than a single spline did",
+        )
+
+    def test_all_splines_still_costs_exactly_one_undo_step(self):
+        """Same failure mode as `test_apply_costs_exactly_one_undo_step`, but with N patches: they
+        share one session and must therefore still share one undo step."""
+        self.use_two_spline_source()
+        before = vertex_positions(self.mesh_ob)
+
+        self.assertEqual({'FINISHED'}, bpy.ops.sculpt.curve_patch_apply(use_all_splines=True))
+        self.assertNotEqual(before, vertex_positions(self.mesh_ob))
+
+        bpy.ops.ed.undo()
+
+        restored = vertex_positions(bpy.data.objects[self.mesh_name])
+        self.assertEqual(len(before), len(restored))
+        for original, current in zip(before, restored):
+            self.assertAlmostEqual((original - current).length, 0.0, places=5)
+
+    def test_overlapping_splines_average_rather_than_stack(self):
+        """Relief folds overlapping patches through the same accumulator symmetry passes use."""
+        self.use_two_identical_splines_source()
+        single = self.apply_and_measure(spline_index=0)
+        both = self.apply_and_measure(use_all_splines=True)
+        self.assertAlmostEqual(
+            single["max_displacement"], both["max_displacement"], places=4,
+            msg="two coincident patches stacked instead of averaging",
+        )
+
+    def test_a_degenerate_spline_is_skipped_not_fatal(self):
+        self.use_one_good_and_one_single_point_spline_source()
+        self.assertEqual({'FINISHED'}, bpy.ops.sculpt.curve_patch_apply(use_all_splines=True))
+
+    def test_to_mesh_builds_one_spline_not_the_weld_of_both(self):
+        """The read-back path never refused a multi-spline curve -- it tessellated the whole
+        geometry at once, silently welding the splines into a single strip."""
+        paint_curve = self.use_two_spline_source()
+        first = paint_curve.curve_patch_to_mesh(self.brush, spline_index=0)
+        second = paint_curve.curve_patch_to_mesh(self.brush, spline_index=1)
+        try:
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertEqual(len(first.vertices), len(second.vertices))
+
+            def mean_y(mesh):
+                return sum(v.co.y for v in mesh.vertices) / len(mesh.vertices)
+
+            # A ribbon welded from both splines would sit halfway between them, so both calls would
+            # report the same centroid instead of one per spline.
+            self.assertLess(mean_y(first), mean_y(second))
+        finally:
+            bpy.data.meshes.remove(first)
+            bpy.data.meshes.remove(second)
 
     def test_apply_displaces_vertices(self):
         before = vertex_positions(self.mesh_ob)
@@ -160,9 +344,10 @@ class TestCurvePatchApply(unittest.TestCase):
 
     def test_apply_with_an_image_texture(self):
         """Guards the one blocker that is invisible without a texture: the sampler reads image
-        texels through `SculptSession::tex_pool`, which only a live stroke ever creates, so a brush
-        WITHOUT a texture passes either way and a brush with one dereferences null. Asserts that the
-        call completes rather than what it painted -- the failure mode is a crash, not a magnitude.
+        texels through the session's `ImagePool` (`SculptSession::tex_pool_ensure`), which a brush
+        WITHOUT a texture never touches, so only a brush with one can expose a missing pool. Asserts
+        that the call completes rather than what it painted -- the failure mode is a crash, not a
+        magnitude.
         """
         image = bpy.data.images.new("CurvePatchTestImage", 32, 32)
         texture = bpy.data.textures.new("CurvePatchTestTexture", 'IMAGE')

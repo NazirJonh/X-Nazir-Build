@@ -305,4 +305,32 @@ TEST(paint_curve_patch_frames, single_window_matches_ribbon)
   EXPECT_NEAR(uv_frames[0].y, uv_lut[0].y, 1e-4f);
 }
 
+TEST(paint_curve_patch_frames, full_cyclic_frame_retains_closed_ribbon)
+{
+  /* Surface snapshots use CurvePatchFrameSet rather than the single ribbon LUT. The full frame of
+   * a cyclic spline must retain that topology; rebuilding its already-closed positions as open
+   * disables the ribbon's cyclic inward cap and lets opposite sides fight over the loop interior. */
+  constexpr float loop_radius = 2.0f;
+  Vector<float3> points, normals;
+  for (const int i : IndexRange(64)) {
+    const float angle = 2.0f * float(M_PI) * float(i) / 64.0f;
+    points.append(float3(loop_radius * std::cos(angle), loop_radius * std::sin(angle), 0.0f));
+    normals.append(float3(0.0f, 0.0f, 1.0f));
+  }
+
+  CurvePatchSpline spline;
+  spline.build_from_positions(points.as_span(), {}, true, normals.as_span());
+  spline.plane_normal = float3(0.0f, 0.0f, 1.0f);
+  curve_patch_spline_smooth_normals(spline, 0.4f);
+
+  CurvePatchFrameSet frames;
+  curve_patch_frames_build(spline, 2.5f, default_params(), false, 0.0f, frames);
+  ASSERT_TRUE(frames.ready);
+  ASSERT_EQ(frames.frames.size(), 1);
+
+  float2 uv[2];
+  float3 frame_normal[2];
+  EXPECT_EQ(frames.sample(float3(0.0f), float3(0.0f, 0.0f, 1.0f), uv, frame_normal), 0);
+}
+
 }  // namespace blender::bke::tests

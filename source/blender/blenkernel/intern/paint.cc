@@ -30,10 +30,12 @@
 #include "DNA_workspace_types.h"
 
 #include "BLI_hash.h"
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector_types.hh"
 #include "BLI_noise.hh"
 #include "BLI_resource_scope.hh"
 #include "BLI_string.h"
@@ -210,6 +212,9 @@ static void paint_curve_free_data(ID *id)
   PaintCurve *paint_curve = id_cast<PaintCurve *>(id);
 
   paint_curve->geometry.wrap().~CurvesGeometry();
+  /* Only ever set between the blend read and the versioning pass that converts it. */
+  MEM_SAFE_DELETE(paint_curve->points);
+  paint_curve->tot_points = 0;
 }
 
 static void paint_curve_blend_write(BlendWriter *writer, ID *id, const void *id_address)
@@ -230,6 +235,69 @@ static void paint_curve_blend_read_data(BlendDataReader *reader, ID *id)
 {
   PaintCurve *pc = id_cast<PaintCurve *>(id);
   pc->geometry.wrap().blend_read(*reader);
+  /* Files written before the 3D representation stored their points here instead. Reading the array
+   * is what lets versioning convert it; a file that has no legacy points leaves this a no-op. */
+  BLO_read_array_and_validate_size(reader, &pc->points, &pc->tot_points);
+}
+
+static HandleType paint_curve_handle_type_from_legacy(const uint8_t handle_type_legacy)
+{
+  switch (handle_type_legacy) {
+    case HD_FREE:
+      return BEZIER_HANDLE_FREE;
+    case HD_ALIGN:
+    case HD_ALIGN_DOUBLESIDE:
+      return BEZIER_HANDLE_ALIGN;
+    case HD_VECT:
+      return BEZIER_HANDLE_VECTOR;
+  }
+  return BEZIER_HANDLE_AUTO;
+}
+
+void BKE_paint_curve_legacy_points_convert(PaintCurve &pc)
+{
+  const int point_num = pc.tot_points;
+  if (pc.points == nullptr || point_num <= 0) {
+    return;
+  }
+
+  /* Matches what the editor's own bezier initializer leaves behind: one cyclic-free spline at the
+   * paint-curve resolution, with the handle position attributes present so the auto-handle pass
+   * below has something to write to. */
+  bke::CurvesGeometry &geom = pc.geometry.wrap();
+  geom = bke::CurvesGeometry(point_num, 1);
+  geom.offsets_for_write()[0] = 0;
+  geom.offsets_for_write()[1] = point_num;
+  geom.fill_curve_types(CURVE_TYPE_BEZIER);
+  geom.resolution_for_write().fill(PAINT_CURVE_NUM_SEGMENTS);
+
+  MutableSpan<float3> positions = geom.positions_for_write();
+  MutableSpan<float3> handles_left = geom.handle_positions_left_for_write();
+  MutableSpan<float3> handles_right = geom.handle_positions_right_for_write();
+  MutableSpan<int8_t> types_left = geom.handle_types_left_for_write();
+  MutableSpan<int8_t> types_right = geom.handle_types_right_for_write();
+  MutableSpan<float> radii = geom.radius_for_write();
+
+  for (const int i : IndexRange(point_num)) {
+    const PaintCurvePoint &point = pc.points[i];
+    handles_left[i] = float3(point.bez.vec[0]);
+    positions[i] = float3(point.bez.vec[1]);
+    handles_right[i] = float3(point.bez.vec[2]);
+    types_left[i] = paint_curve_handle_type_from_legacy(point.bez.h1);
+    types_right[i] = paint_curve_handle_type_from_legacy(point.bez.h2);
+    /* The legacy per-point pressure is the same 0..1 factor of the brush size that the radius
+     * attribute now carries. Points the user never touched stored 0, which would read as a
+     * zero-width curve. */
+    radii[i] = point.pressure > 0.0f ? point.pressure : 1.0f;
+  }
+
+  geom.tag_topology_changed();
+  geom.calculate_bezier_auto_handles();
+  geom.tag_positions_changed();
+
+  MEM_SAFE_DELETE(pc.points);
+  pc.tot_points = 0;
+  pc.add_index = point_num;
 }
 
 IDTypeInfo IDType_ID_PC = {
@@ -2197,8 +2265,29 @@ SculptSession::~SculptSession()
     BM_log_free(this->bm_log);
   }
 
-  if (this->tex_pool) {
-    BKE_image_pool_free(this->tex_pool);
+  if (this->tex_pool_) {
+    BKE_image_pool_free(this->tex_pool_);
+  }
+}
+
+ImagePool &SculptSession::tex_pool_ensure()
+{
+  if (this->tex_pool_ == nullptr) {
+    this->tex_pool_ = BKE_image_pool_new();
+  }
+  return *this->tex_pool_;
+}
+
+ImagePool *SculptSession::tex_pool() const
+{
+  return this->tex_pool_;
+}
+
+void SculptSession::tex_pool_invalidate()
+{
+  if (this->tex_pool_ != nullptr) {
+    BKE_image_pool_free(this->tex_pool_);
+    this->tex_pool_ = nullptr;
   }
 }
 

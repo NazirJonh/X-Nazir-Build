@@ -162,11 +162,11 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
                                                         PaintCurveScreenHandles &r_out);
 
 /**
- * Barrier accessor into `Object::runtime->sculpt_session->curve_patch_session->edit.control_curve`
- * for the draw module: `draw/`'s CMake include path does not reach `editors/sculpt_paint/`, so it
- * cannot see the full `CurvePatchSession` definition (`paint_curve_patch_session.hh`) -- only the
- * `bke::CurvesGeometry` it owns is returned. Returns nullptr when `ob` is null or has no live
- * Curve Patch.
+ * Barrier accessor into the ACTIVE patch's control curve for the draw module: `draw/`'s CMake
+ * include path does not reach `editors/sculpt_paint/`, so it cannot see the full
+ * `CurvePatchSession` definition (`paint_curve_patch_session.hh`) -- only the
+ * `bke::CurvesGeometry` it owns is returned. Returns nullptr when `ob` is null, has no live
+ * Curve Patch, or that patch has no active item yet.
  */
 const blender::bke::CurvesGeometry *ED_paint_curve_patch_active_control_curve(const Object *ob);
 

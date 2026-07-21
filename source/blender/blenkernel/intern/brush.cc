@@ -829,6 +829,35 @@ void BKE_brush_tag_unsaved_changes(Brush *brush)
   }
 }
 
+BrushCurvePatchTextureSlot *BKE_brush_curve_patch_texture_slot_add(Brush &brush)
+{
+  /* `MEM_new` runs the struct's default constructor, so the `weight = 1.0f` DNA member initializer
+   * already applies -- unlike a C-style zeroing allocation. */
+  BrushCurvePatchTextureSlot *slot = MEM_new<BrushCurvePatchTextureSlot>(__func__);
+  BLI_addtail(&brush.curve_patch.texture_slots, slot);
+  brush.curve_patch.texture_active_index = brush.curve_patch.texture_slots.count() - 1;
+  return slot;
+}
+
+bool BKE_brush_curve_patch_texture_slot_remove(Brush &brush, BrushCurvePatchTextureSlot &slot)
+{
+  if (BLI_findindex(&brush.curve_patch.texture_slots, &slot) == -1) {
+    return false;
+  }
+
+  /* The list holds a user on its texture, so dropping the slot must drop that user too --
+   * `BLI_freelinkN` knows nothing about ID reference counts. Cleared as well as decremented so the
+   * slot never sits in the list holding a pointer it no longer owns a user on. */
+  if (slot.tex != nullptr) {
+    id_us_min(&slot.tex->id);
+    slot.tex = nullptr;
+  }
+  BLI_freelinkN(&brush.curve_patch.texture_slots, &slot);
+  brush.curve_patch.texture_active_index = math::max(
+      0, brush.curve_patch.texture_active_index - 1);
+  return true;
+}
+
 void BKE_brush_debug_print_state(Brush *br)
 {
   /* create a fake brush and set it to the defaults */

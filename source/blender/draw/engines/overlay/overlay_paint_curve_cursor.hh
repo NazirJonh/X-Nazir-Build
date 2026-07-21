@@ -35,6 +35,18 @@
 
 #include "overlay_base.hh"
 
+/* Opt-in measurement for the per-frame batch churn. Handle, point and radius-handle batches are
+ * rebuilt on every sync (only the scene-curve silhouettes are cached, keyed on
+ * #silhouette_batches_key_), so this reports what one redraw costs and how many batches it built.
+ * Must stay 0 outside a measurement pass: the report writes to stdout on every overlay redraw.
+ * Grep `DEBUG-pccursor` to find every touch point. */
+#define PAINT_CURVE_CURSOR_PROFILING 0
+
+#if PAINT_CURVE_CURSOR_PROFILING
+#  include "BLI_time.h"
+#  include <cstdio>
+#endif
+
 namespace blender::draw::overlay {
 
 /**
@@ -81,6 +93,9 @@ class PaintCurveCursor : Overlay {
 
   void begin_sync(Resources &res, const State &state) final
   {
+#if PAINT_CURVE_CURSOR_PROFILING
+    const double prof_t0 = BLI_time_now_seconds(); /* DEBUG-pccursor */
+#endif
     free_batches();
     handles_ = {};
     silhouettes_ = {};
@@ -220,7 +235,25 @@ class PaintCurveCursor : Overlay {
       }
     }
 
+#if PAINT_CURVE_CURSOR_PROFILING
+    const double prof_t_build = BLI_time_now_seconds(); /* DEBUG-pccursor */
+#endif
+
     fill_pass_from_pod(res, state);
+
+#if PAINT_CURVE_CURSOR_PROFILING
+    /* DEBUG-pccursor: `screen` is the CPU-side projection of the curve into region space,
+     * `batches` is the GPU upload this measurement exists to judge. `n` is what the count scales
+     * with; a cache would only pay off if `batches` dominates and `n` is large. */
+    const double prof_t_end = BLI_time_now_seconds();
+    printf("[DEBUG-pccursor] total=%.3fms | screen=%.3f batches=%.3f | points=%d batches=%d\n",
+           (prof_t_end - prof_t0) * 1000.0,
+           (prof_t_build - prof_t0) * 1000.0,
+           (prof_t_end - prof_t_build) * 1000.0,
+           int(handles_.points.size()),
+           int(batches_.size()));
+    fflush(stdout);
+#endif
   }
 
   void draw_output(Framebuffer &framebuffer, Manager &manager, View & /*view*/) final

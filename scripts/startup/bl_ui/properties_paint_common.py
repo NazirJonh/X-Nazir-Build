@@ -600,7 +600,7 @@ class StrokePanel(BrushPanel):
                 col.row().prop(cp, "stamp_projection", text="Projection", expand=True)
                 col.separator()
                 col.row().prop(cp, "stamp_texture_source", text="Textures", expand=True)
-                if cp.stamp_texture_source == 'LIST':
+                if cp.stamp_texture_source == 'MULTI':
                     row = col.row()
                     row.template_list(
                         "SCULPT_UL_curve_patch_textures", "",
@@ -622,7 +622,7 @@ class StrokePanel(BrushPanel):
                         col.prop(active_slot, "weight", text="Weight")
             else:
                 col.row().prop(cp, "ribbon_texture_source", text="Textures", expand=True)
-                if cp.ribbon_texture_source == 'CAPS':
+                if cp.ribbon_texture_source == 'MULTI':
                     col.template_ID(cp, "texture_start", new="texture.new")
                     col.prop(cp, "cap_start_length", text="Start Length")
                     col.template_ID(cp, "texture_middle", new="texture.new")
@@ -694,6 +694,7 @@ class StrokePanel(BrushPanel):
                             text="Export to Scene Curve",
                             icon='OUTLINER_OB_CURVE',
                         )
+                col.operator("paintcurve.clear", text="Clear Curve", icon='X')
             col.operator("paintcurve.draw")
             if brush.paint_curve:
                 col.prop(brush.paint_curve, "show_radius_handles", text="Radius Handles")

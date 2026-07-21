@@ -700,6 +700,27 @@ bool curve_patch_ribbon_grid_build(const CurvePatchSpline &spline,
    * lateral), and the texture orientation must not flip with this rework. */
   Vector<float3> border_left(count);  /* +B side, U = +1. */
   Vector<float3> border_right(count); /* -B side, U = -1. */
+  /* World half-widths actually used on each side after the cyclic inward cap. Seed the grid's `u`
+   * from these so `u * ribbon_radius` still reconstructs the true lateral distance when the two
+   * sides differ. */
+  Vector<float> half_pos(count);
+  Vector<float> half_neg(count);
+
+  /* Closed-curve centroid, used to cap the INWARD half-width so a brush thicker than the loop
+   * cannot push the inner border past the medial axis. Without that, opposite legs of the strip
+   * overlap in the interior, write conflicting `(u, s)` into the same LUT cells, and the relief
+   * turns into pixel-scale spikes (Close Curve with a large radius). The outward side keeps the
+   * full brush radius. For cyclic polylines the last sample repeats the first -- skip it so the
+   * join is not double-counted. */
+  float3 loop_centroid(0.0f);
+  if (spline.cyclic && count >= 3) {
+    const int unique_count = count - 1;
+    for (int i = 0; i < unique_count; i++) {
+      loop_centroid += poly[i];
+    }
+    loop_centroid /= float(unique_count);
+  }
+
   for (int i = 0; i < count; i++) {
     const float3 &T = tangents[i];
     float3 B;
@@ -723,27 +744,48 @@ bool curve_patch_ribbon_grid_build(const CurvePatchSpline &spline,
         B = math::normalize(B);
       }
     }
-    border_left[i] = poly[i] + B * halfwidths[i];
-    border_right[i] = poly[i] - B * halfwidths[i];
+    half_pos[i] = halfwidths[i];
+    half_neg[i] = halfwidths[i];
+    if (spline.cyclic && count >= 3) {
+      const float3 to_centroid = loop_centroid - poly[i];
+      const float dist_in = math::length(to_centroid);
+      if (dist_in > 1e-8f) {
+        /* Leave a small hole so opposite legs never meet; 5% is well below LUT pixel size for
+         * typical brush radii and keeps the max-|height| merge from having to arbitrate a
+         * near-tie across the whole interior. */
+        const float max_inward = dist_in * 0.95f;
+        if (math::dot(B, to_centroid) > 0.0f) {
+          half_pos[i] = std::min(half_pos[i], max_inward);
+        }
+        else {
+          half_neg[i] = std::min(half_neg[i], max_inward);
+        }
+      }
+    }
+    border_left[i] = poly[i] + B * half_pos[i];
+    border_right[i] = poly[i] - B * half_neg[i];
   }
 
   ribbon_fix_border_self_intersections(poly, axis_x, axis_y, R_max, border_left, spline.cyclic);
   ribbon_fix_border_self_intersections(poly, axis_x, axis_y, R_max, border_right, spline.cyclic);
 
   /* Seed grid: one row per polyline vertex, columns = {right, center, left}. V = raw arc
-   * length. */
+   * length. `u` is normalized by the *nominal* half-width (`halfwidths`), not the possibly
+   * capped side length, so a capped inward border sits at `|u| < 1` and the sampler's
+   * `u * ribbon_radius` reconstruction stays in world units. */
   int rows = count;
   int cols = 3;
   Vector<float3> grid_pos(rows * cols);
   Vector<float2> grid_uv(rows * cols);
   for (int k = 0; k < count; k++) {
     const float v = lengths[k];
+    const float inv_w = halfwidths[k] > 1e-8f ? 1.0f / halfwidths[k] : 0.0f;
     grid_pos[k * 3 + 0] = border_right[k];
     grid_pos[k * 3 + 1] = poly[k];
     grid_pos[k * 3 + 2] = border_left[k];
-    grid_uv[k * 3 + 0] = float2(-1.0f, v);
+    grid_uv[k * 3 + 0] = float2(-half_neg[k] * inv_w, v);
     grid_uv[k * 3 + 1] = float2(0.0f, v);
-    grid_uv[k * 3 + 2] = float2(1.0f, v);
+    grid_uv[k * 3 + 2] = float2(half_pos[k] * inv_w, v);
   }
 
   ribbon_subdivide(grid_pos, grid_uv, rows, cols, /*pin_border_columns=*/true);
@@ -982,10 +1024,26 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
              * varies smoothly too, rather than following a pixel-quantized age boundary, and
              * neither leg can steal pixels it only barely reaches.
              *
-             * The loser is not discarded: it is kept as the SECONDARY branch so the relief can
-             * merge both legs where they overlap instead of switching hard along the ranking
-             * boundary. */
-            if (std::abs(cand_uv.x) < std::abs(r_lut.uv[li].x)) {
+             * Near-ties need hysteresis: on a thick closed loop opposite legs meet with almost
+             * equal |u|, and a bare `<` flip-flops primary per LUT pixel -- neighboring mesh
+             * vertices then sample wildly different `s` and the relief explodes into spikes.
+             * Require a clear centrality win; when still tied, prefer the smaller arc length as a
+             * stable deterministic break. The loser is kept as SECONDARY so the relief can still
+             * merge both legs by max |height|. */
+            constexpr float u_hysteresis = 0.05f;
+            auto beats = [&](const float2 &incumbent_uv, const float incumbent_dsq) {
+              const float cand_abs_u = std::abs(cand_uv.x);
+              const float inc_abs_u = std::abs(incumbent_uv.x);
+              if (cand_abs_u < inc_abs_u - u_hysteresis) {
+                return true;
+              }
+              if (std::abs(cand_abs_u - inc_abs_u) <= u_hysteresis) {
+                return cand_uv.y < incumbent_uv.y ||
+                       (cand_uv.y == incumbent_uv.y && dsq < incumbent_dsq);
+              }
+              return false;
+            };
+            if (beats(r_lut.uv[li], r_lut.dist_sq[li])) {
               /* Candidate is the more central leg: demote the incumbent, promote the candidate. */
               r_lut.dist_sq2[li] = r_lut.dist_sq[li];
               r_lut.row2[li] = r_lut.row[li];
@@ -1000,7 +1058,7 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                 store_secondary();
               }
             }
-            else if (std::abs(cand_uv.x) < std::abs(r_lut.uv2[li].x)) {
+            else if (beats(r_lut.uv2[li], r_lut.dist_sq2[li])) {
               /* A third leg reaches this pixel: keep the two most central ones. */
               store_secondary();
             }

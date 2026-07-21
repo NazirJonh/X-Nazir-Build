@@ -274,6 +274,88 @@ TEST(paint_curve_patch_ribbon, closed_loop_strip_survives_the_join)
   EXPECT_EQ(lut.sample(float3(0.0f, 0.0f, 0.0f), uv), 0);
 }
 
+TEST(paint_curve_patch_ribbon, thick_closed_loop_keeps_stable_arc_length)
+{
+  /* Regression for Close Curve with a brush thicker than the loop radius: without an inward
+   * half-width cap the opposite legs of the strip overlap through the interior, LUT primary
+   * flip-flops per pixel on near-equal |u|, and neighboring samples report wildly different `s`
+   * -- the sculpted relief turns into spikes. */
+  const float loop_radius = 2.0f;
+  const float brush_radius = 2.5f;
+  const int segments = 64;
+  Vector<float3> points;
+  for (int i = 0; i < segments; i++) {
+    const float a = 2.0f * float(M_PI) * float(i) / float(segments);
+    points.append(float3(loop_radius * std::cos(a), loop_radius * std::sin(a), 0.0f));
+  }
+
+  CurvePatchSpline spline;
+  spline.build_from_positions(points.as_span(), {}, /*cyclic=*/true);
+  spline.plane_normal = float3(0.0f, 0.0f, 1.0f);
+
+  CurvePatchRibbonLut lut;
+  curve_patch_ribbon_build(spline, brush_radius, lut);
+  ASSERT_TRUE(lut.ready);
+
+  float2 uv[2];
+  /* Inward cap must leave the centroid uncovered -- otherwise opposite legs are still fighting
+   * over the whole disk. */
+  EXPECT_EQ(lut.sample(float3(0.0f, 0.0f, 0.0f), uv), 0);
+
+  /* Walk a ring on the curve itself: primary `s` must advance monotonically (modulo the join),
+   * never jump by a large fraction of the loop between neighboring samples. */
+  const float total = spline.total_length();
+  const int probes = 36;
+  float prev_s = -1.0f;
+  int wrap_count = 0;
+  for (int i = 0; i < probes; i++) {
+    const float a = 2.0f * float(M_PI) * float(i) / float(probes);
+    const float3 probe(loop_radius * std::cos(a), loop_radius * std::sin(a), 0.0f);
+    ASSERT_GE(lut.sample(probe, uv), 1) << "probe " << i;
+    EXPECT_NEAR(uv[0].x, 0.0f, 0.2f) << "probe " << i;
+    const float s = uv[0].y;
+    if (prev_s >= 0.0f) {
+      const float delta = s - prev_s;
+      /* A single step around the ring is ~total/probes; allow a few steps of slack for LUT
+       * quantization, but reject a jump to the opposite side of the loop. */
+      if (delta < -total * 0.5f) {
+        wrap_count++;
+        EXPECT_NEAR(prev_s, total, total * 0.15f) << "wrap at probe " << i;
+        EXPECT_NEAR(s, 0.0f, total * 0.15f) << "wrap at probe " << i;
+      }
+      else {
+        EXPECT_GE(delta, -total * 0.05f) << "probe " << i;
+        EXPECT_LE(delta, total * 0.25f) << "probe " << i;
+      }
+    }
+    prev_s = s;
+  }
+  EXPECT_LE(wrap_count, 1);
+
+  /* Neighboring samples just inside the strip (toward the center) must also agree on `s` -- this
+   * is where the opposite-leg overlap used to checkerboard the LUT. */
+  const float inner_r = loop_radius - brush_radius * 0.35f;
+  ASSERT_GT(inner_r, 0.1f);
+  prev_s = -1.0f;
+  for (int i = 0; i < probes; i++) {
+    const float a = 2.0f * float(M_PI) * float(i) / float(probes);
+    const float3 probe(inner_r * std::cos(a), inner_r * std::sin(a), 0.0f);
+    const int n = lut.sample(probe, uv);
+    if (n < 1) {
+      continue;
+    }
+    const float s = uv[0].y;
+    if (prev_s >= 0.0f) {
+      float delta = s - prev_s;
+      if (delta < -total * 0.5f) {
+        delta += total;
+      }
+      EXPECT_LE(std::abs(delta), total * 0.3f) << "inner probe " << i;
+    }
+    prev_s = s;
+  }
+}
+
 TEST(paint_curve_patch_ribbon, external_binormals_match_default)
 {
   CurvePatchSpline spline;

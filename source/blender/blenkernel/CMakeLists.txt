@@ -767,6 +767,7 @@ if(WITH_GTESTS)
     intern/bpath_test.cc
     intern/brush_test.cc
     intern/cryptomatte_test.cc
+    intern/curve_patch_build_test.cc
     intern/curve_patch_frames_test.cc
     intern/curve_patch_ribbon_test.cc
     intern/curve_patch_spline_test.cc

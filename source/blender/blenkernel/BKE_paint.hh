@@ -156,7 +156,23 @@ void BKE_palette_color_sync_legacy(PaletteColor *color);
 
 /* Paint curves. */
 
+/**
+ * Number of segments a paint-curve bezier segment is tessellated into. Stored as the geometry's
+ * `resolution`, so building a #PaintCurve outside the editor (versioning, the Python API) has to
+ * know it too.
+ */
+constexpr int PAINT_CURVE_NUM_SEGMENTS = 40;
+
 PaintCurve *BKE_paint_curve_add(Main *bmain, const char *name);
+
+/**
+ * Rebuild #PaintCurve::geometry from the legacy screen-space #PaintCurve::points array, then free
+ * it. The positions stay in screen space, which is what #PaintCurve::use_3d_space false means --
+ * moving them into object space needs a viewport and is left to the user.
+ *
+ * No-op when there is nothing to convert, so it is safe to call on every paint curve.
+ */
+void BKE_paint_curve_legacy_points_convert(PaintCurve &pc);
 
 /**
  * Call when entering each respective paint mode.
@@ -427,9 +443,6 @@ struct SculptSession : NonCopyable, NonMovable {
   SharedCache<Vector<float3>> vert_normals_deform;
   SharedCache<Vector<float3>> face_normals_deform;
 
-  /* Pool for texture evaluations. */
-  ImagePool *tex_pool = nullptr;
-
   ed::sculpt_paint::StrokeCache *cache = nullptr;
   ed::sculpt_paint::filter::Cache *filter_cache = nullptr;
   ed::sculpt_paint::expand::Cache *expand_cache = nullptr;
@@ -532,6 +545,9 @@ struct SculptSession : NonCopyable, NonMovable {
    * to a value that can be correctly interpreted */
   ActiveVert last_active_vert_ = {};
 
+  /* Pool for texture evaluations. See #tex_pool_ensure. */
+  ImagePool *tex_pool_ = nullptr;
+
  public:
   SculptSession();
   ~SculptSession();
@@ -574,6 +590,31 @@ struct SculptSession : NonCopyable, NonMovable {
    * \returns an empty optional if the current data cannot be used
    */
   std::optional<PersistentMultiresData> persistent_multires_data();
+
+  /**
+   * The pool caching the #ImBuf handles every texture sample goes through, created on first use and
+   * living until the session ends.
+   *
+   * Ownership is the session's alone. A caller that samples a texture outside a stroke -- the Curve
+   * Patch apply, Expand -- calls this and frees nothing. While this was a plain field, every such
+   * caller had to create the pool for itself, and forgetting to do so dereferenced null in the
+   * sampler for a brush WITH a texture while a brush without one passed unharmed.
+   */
+  ImagePool &tex_pool_ensure();
+
+  /**
+   * The pool as it stands, null when nothing has needed one yet.
+   *
+   * For the sampling paths inside a stroke, which ran #tex_pool_ensure at their start.
+   */
+  ImagePool *tex_pool() const;
+
+  /**
+   * Drop the cached #ImBuf handles so the next #tex_pool_ensure samples the images afresh.
+   *
+   * For when WHICH images are sampled changes, not when their parameters do.
+   */
+  void tex_pool_invalidate();
 };
 
 void BKE_sculptsession_free(Object *ob);

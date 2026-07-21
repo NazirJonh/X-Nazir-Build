@@ -90,7 +90,8 @@ class ColorEffect : public CurvePatchEffect {
   void apply_pass(const Depsgraph &depsgraph,
                   Object &ob,
                   const Brush &brush,
-                  CurvePatchSession &patch) override;
+                  CurvePatchSession &patch,
+                  const CurvePatchItem &item) override;
   UpdateType update_type() const override
   {
     return UpdateType::Color;
@@ -209,7 +210,8 @@ void ColorEffect::begin_restamp(const Depsgraph & /*depsgraph*/,
 void ColorEffect::apply_pass(const Depsgraph &depsgraph,
                              Object &ob,
                              const Brush &brush,
-                             CurvePatchSession &patch)
+                             CurvePatchSession &patch,
+                             const CurvePatchItem &item)
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
@@ -237,13 +239,14 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
   /* Source geometry has no snapshot override: color never moves geometry, so the live positions
    * are already pristine and `CurvePatchSampler` can read them directly. */
   const CurvePatchSourceGeometry source{positions, normals, nullptr};
-  const CurvePatchSampler sampler(patch, ctx, brush, source, mask, ss.tex_pool);
+  const CurvePatchSampler sampler(
+      item, patch.texture, ctx, brush, source, mask, ss.tex_pool_ensure());
 
-  const float max_radius = curve_patch_max_radius(patch.geometry);
+  const float max_radius = curve_patch_max_radius(item.geometry);
 
   IndexMaskMemory culled_memory;
   const IndexMask node_mask = curve_patch_effect_node_mask(
-      depsgraph, ob, brush, patch, ctx, pbvh, max_radius, culled_memory);
+      depsgraph, ob, brush, item, ctx, pbvh, max_radius, culled_memory);
 
   /* PHASE 1 (parallel, read-only): each pbvh node is processed on a worker thread; surviving
    * vertices are expanded into their domain elements and the pre-patch color of each is gathered,
@@ -322,6 +325,10 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
    * alone cannot tell "color sampled" from "value sampled" (`paint_get_tex_pixel`'s return value
    * was verified not to encode that). */
   const bool has_texture = brush.mtex.tex != nullptr;
+  /* The Strength slider, applied as a separate factor exactly as the ordinary paint pipeline does --
+   * `brush_strength()` leaves it out of `bstrength` for a Paint brush. See
+   * #curve_patch_color_mix_factor. */
+  const float strength = BKE_brush_alpha_get(&paint, &brush);
 
   for (LocalData &local : all_tls) {
     for (const ColorWrite &write : local.writes) {
@@ -329,7 +336,8 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
 
       const float blended = curve_patch_blend_across_passes(
           patch.apply, write.idx, write.weight, write.value);
-      const float factor = curve_patch_color_mix_factor(blended, write.tex_color, has_texture);
+      const float factor = curve_patch_color_mix_factor(
+          blended, write.tex_color, has_texture, strength);
 
       /* The original alpha is carried through untouched, textured or not: `BKE_brush_color_get()`
        * returns a `float3`, so writing an alpha would invent data the brush never specified (the

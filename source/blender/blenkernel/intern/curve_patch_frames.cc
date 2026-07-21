@@ -153,7 +153,12 @@ void curve_patch_frames_build(const CurvePatchSpline &spline,
     CurvePatchFrame &frame = r_frames.frames[fi];
     frame.normal = range.normal;
 
-    const int n = range.end - range.begin + 1;
+    /* A full cyclic frame includes the spline's duplicated closing sample. Rebuild it from the
+     * unique samples and retain `cyclic`, otherwise the LUT sees a geometrically closed but
+     * topologically open strip: the cyclic join rules and inward cap are silently disabled. A
+     * partial frame remains open because it is bounded by a surface-normal handover. */
+    const bool full_cyclic_frame = spline.cyclic && range.begin == 0 && range.end == last_index;
+    const int n = range.end - range.begin + 1 - int(full_cyclic_frame);
     Vector<float3> sub_pos(n), sub_binormals(n);
     Vector<float> sub_radii;
     if (have_radii) {
@@ -174,9 +179,12 @@ void curve_patch_frames_build(const CurvePatchSpline &spline,
         sub_radii[k] = spline.radii[i];
       }
     }
+    if (full_cyclic_frame) {
+      sub_binormals.append(sub_binormals.first());
+    }
 
     CurvePatchSpline sub;
-    sub.build_from_positions(sub_pos.as_span(), sub_radii.as_span(), false);
+    sub.build_from_positions(sub_pos.as_span(), sub_radii.as_span(), full_cyclic_frame);
     sub.plane_normal = range.normal;
 
     frame.s_offset = spline.lengths_3d[range.begin];

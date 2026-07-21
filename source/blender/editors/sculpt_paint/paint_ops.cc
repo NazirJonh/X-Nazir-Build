@@ -552,7 +552,14 @@ static void BRUSH_OT_stencil_reset_transform(wmOperatorType *ot)
 static bool curve_patch_texture_slot_poll(bContext *C)
 {
   const Paint *paint = BKE_paint_get_active_from_context(C);
-  return paint != nullptr && BKE_paint_brush_for_read(paint) != nullptr;
+  if (paint == nullptr) {
+    return false;
+  }
+  const Brush *brush = BKE_paint_brush_for_read(paint);
+  /* Curve Patch is sculpt-only, so the slots it draws from are meaningless anywhere else. Without
+   * this the operators run in vertex, weight and texture paint, editing a list nothing reads. */
+  return brush != nullptr && (brush->ob_mode & OB_MODE_SCULPT) != 0 &&
+         bke::brush::supports_curve_patch(*brush);
 }
 
 static wmOperatorStatus curve_patch_texture_slot_add_exec(bContext *C, wmOperator * /*op*/)
@@ -560,13 +567,11 @@ static wmOperatorStatus curve_patch_texture_slot_add_exec(bContext *C, wmOperato
   Paint *paint = BKE_paint_get_active_from_context(C);
   Brush *brush = BKE_paint_brush(paint);
 
-  /* `MEM_new` runs the struct's default constructor, so the `weight = 1.0f` DNA member
-   * initializer already applies here -- unlike a C-style zeroing allocation, no explicit
-   * assignment is needed. */
-  BrushCurvePatchTextureSlot *slot = MEM_new<BrushCurvePatchTextureSlot>(__func__);
-  BLI_addtail(&brush->curve_patch.texture_slots, slot);
-  brush->curve_patch.texture_active_index = brush->curve_patch.texture_slots.count() - 1;
+  BKE_brush_curve_patch_texture_slot_add(*brush);
 
+  /* Brushes are assets: without this the edit looks saved and is lost on reload. Every RNA setter
+   * on this same sub-struct tags it, so the operators have to as well. */
+  BKE_brush_tag_unsaved_changes(brush);
   WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
   return OPERATOR_FINISHED;
 }
@@ -590,23 +595,11 @@ static wmOperatorStatus curve_patch_texture_slot_remove_exec(bContext *C, wmOper
 
   BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(
       BLI_findlink(&brush->curve_patch.texture_slots, brush->curve_patch.texture_active_index));
-  if (slot == nullptr) {
+  if (slot == nullptr || !BKE_brush_curve_patch_texture_slot_remove(*brush, *slot)) {
     return OPERATOR_CANCELLED;
   }
 
-  /* The list holds a user on its texture (registered in `brush_foreach_id`), so dropping the slot
-   * must drop that user too -- `BLI_freelinkN` knows nothing about ID reference counts. */
-  if (slot->tex != nullptr) {
-    id_us_min(&slot->tex->id);
-    /* Cleared as well as decremented so the slot never sits in the list holding a pointer it no
-     * longer owns a user on, however briefly. Nothing reads it between here and the free today, but
-     * a future edit that adds a step in between would otherwise inherit a dangling reference. */
-    slot->tex = nullptr;
-  }
-  BLI_freelinkN(&brush->curve_patch.texture_slots, slot);
-  brush->curve_patch.texture_active_index = std::max(
-      0, brush->curve_patch.texture_active_index - 1);
-
+  BKE_brush_tag_unsaved_changes(brush);
   WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
   return OPERATOR_FINISHED;
 }
@@ -642,6 +635,7 @@ static wmOperatorStatus curve_patch_texture_slot_move_exec(bContext *C, wmOperat
   BLI_assert(ELEM(direction, -1, 0, 1));
   if (BLI_listbase_link_move(&brush->curve_patch.texture_slots, slot, direction)) {
     brush->curve_patch.texture_active_index += direction;
+    BKE_brush_tag_unsaved_changes(brush);
     WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
   }
 
@@ -716,6 +710,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINTCURVE_OT_insert_or_add_point);
   WM_operatortype_append(PAINTCURVE_OT_new_spline);
   WM_operatortype_append(PAINTCURVE_OT_delete_point);
+  WM_operatortype_append(PAINTCURVE_OT_clear);
   WM_operatortype_append(PAINTCURVE_OT_duplicate);
   WM_operatortype_append(PAINTCURVE_OT_select);
   WM_operatortype_append(PAINTCURVE_OT_slide);

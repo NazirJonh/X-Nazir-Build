@@ -57,6 +57,7 @@ void PAINTCURVE_OT_add_point(wmOperatorType *ot);
 void PAINTCURVE_OT_insert_or_add_point(wmOperatorType *ot);
 void PAINTCURVE_OT_new_spline(wmOperatorType *ot);
 void PAINTCURVE_OT_delete_point(wmOperatorType *ot);
+void PAINTCURVE_OT_clear(wmOperatorType *ot);
 void PAINTCURVE_OT_duplicate(wmOperatorType *ot);
 void PAINTCURVE_OT_select(wmOperatorType *ot);
 void PAINTCURVE_OT_slide(wmOperatorType *ot);
@@ -457,8 +458,9 @@ float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScree
 /** \name Constants
  * \{ */
 
-/** Number of segments used to tessellate a paint-curve bezier segment for drawing/stroking. */
-constexpr int PAINT_CURVE_NUM_SEGMENTS = 40;
+/* #PAINT_CURVE_NUM_SEGMENTS lives in `BKE_paint.hh`: the geometry stores it as its `resolution`, so
+ * builders outside this module need it as well. */
+
 /** Screen-space handle length at paint-curve radius factor 1.0. */
 constexpr float PAINT_CURVE_RADIUS_HANDLE_BASE_LEN = 40.0f;
 /** Minimum screen-space offset of the radius-handle endpoint from the pivot. Keeps the handle a

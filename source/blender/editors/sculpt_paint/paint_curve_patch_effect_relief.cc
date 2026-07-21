@@ -68,7 +68,8 @@ class ReliefEffect : public CurvePatchEffect {
   void apply_pass(const Depsgraph &depsgraph,
                   Object &ob,
                   const Brush &brush,
-                  CurvePatchSession &patch) override;
+                  CurvePatchSession &patch,
+                  const CurvePatchItem &item) override;
   void end_restamp(Object &ob, CurvePatchSession &patch) override;
   void commit(const Scene &scene,
               const Depsgraph &depsgraph,
@@ -190,7 +191,8 @@ void ReliefEffect::restore(Object &ob, const CurvePatchSession &patch)
 void ReliefEffect::apply_pass(const Depsgraph &depsgraph,
                               Object &ob,
                               const Brush &brush,
-                              CurvePatchSession &patch)
+                              CurvePatchSession &patch,
+                              const CurvePatchItem &item)
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
   /* Snapshotted per PASS, not per re-stamp: `do_symmetrical_brush_actions()` rewrites every field
@@ -249,18 +251,19 @@ void ReliefEffect::apply_pass(const Depsgraph &depsgraph,
    * (even rejected ones) into `orig_positions`, which on a dense mesh dominated the edit cost. */
 
   const CurvePatchSourceGeometry source{positions, normals, &orig_positions_};
-  const CurvePatchSampler sampler(patch, ctx, brush, source, mask, ss.tex_pool);
+  const CurvePatchSampler sampler(
+      item, patch.texture, ctx, brush, source, mask, ss.tex_pool_ensure());
 
-  const float max_radius = curve_patch_max_radius(patch.geometry);
+  const float max_radius = curve_patch_max_radius(item.geometry);
 
   IndexMaskMemory culled_memory;
   const IndexMask node_mask = curve_patch_effect_node_mask(
-      depsgraph, ob, brush, patch, ctx, pbvh, max_radius, culled_memory);
+      depsgraph, ob, brush, item, ctx, pbvh, max_radius, culled_memory);
 
   BitVector<> grid_keep;
   if (subdiv_ccg) {
     grid_keep = curve_patch_cull_grids(
-        patch, ctx, pbvh, *subdiv_ccg, key, positions, node_mask, max_radius);
+        item, ctx, pbvh, *subdiv_ccg, key, positions, node_mask, max_radius);
   }
 
   /* PHASE 1 (parallel, read-only): each pbvh node is processed on a worker thread; surviving
@@ -615,7 +618,7 @@ bool ReliefEffect::face_set_masks(Object &ob,
   const SculptSession &ss = *ob.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
 
-  /* Read the LIVE brush rather than `patch.params`: this toggle is a commit-time behavior
+  /* Read the LIVE brush rather than the patch's frozen params: this toggle is a commit-time behavior
    * switch, not a relief parameter, so the user may flip it while the patch is being edited. Same
    * live-sync pattern the texture-source toggles use in `curve_patch_restore_and_restamp()`. */
   const Brush *brush = ss.cache ? BKE_paint_brush_for_read(ss.cache->paint) : nullptr;
@@ -837,7 +840,7 @@ void ReliefEffect::end_restamp(Object &ob, CurvePatchSession &patch)
    *
    * The `flush_update_step()` that used to close this function is issued by the session now, from
    * #update_type -- all three effects wanted it, differing only in the kind. */
-  if (patch.params.final_quality) {
+  if (patch.active_item().params.final_quality) {
     this->smooth_relief(ob, patch);
   }
 }

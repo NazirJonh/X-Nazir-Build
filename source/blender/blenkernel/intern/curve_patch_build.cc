@@ -14,6 +14,9 @@
  */
 
 #include "BLI_math_base.h"
+/* `BKE_curves.hh` only forward-declares the virtual array types, and the tessellation below reads
+ * the `radius` attribute through a #VArraySpan. */
+#include "BLI_virtual_array.hh"
 
 #include "BKE_curve_patch.hh"
 
@@ -118,6 +121,42 @@ static void curve_patch_build_stamps(const CurvePatchParams &params,
    * whole-curve search sphere for no correctness gain, and it would force a full LUT rebuild on
    * every CURVE<->PLANAR toggle since `end_margin` feeds the ribbon's source hash. */
   r_geometry.ribbon_end_margin = curve_patch_stamp_reach(params.radius) + params.jitter_amount;
+}
+
+void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
+                                          const CurvePatchParams &params,
+                                          const Span<float> stamp_texture_weights_cdf,
+                                          CurvePatchGeometry &r_geometry)
+{
+  control_curve.ensure_can_interpolate_to_evaluated();
+  Array<float> evaluated_radii(control_curve.evaluated_points_num());
+  control_curve.interpolate_to_evaluated(VArraySpan(control_curve.radius()),
+                                         evaluated_radii.as_mutable_span());
+  /* A control curve is always a single spline, so curve 0 carries the whole patch's cyclic state. */
+  const bool cyclic = control_curve.curves_num() > 0 && control_curve.cyclic()[0];
+
+  /* The polyline is pulled onto the pristine surface BEFORE the spline is built: arc lengths and
+   * tangents are computed inside the build, so shifting the points afterwards would leave them
+   * describing the previous curve, the one still hovering above the mesh. */
+  Array<float3> evaluated_positions(control_curve.evaluated_positions());
+  Array<float3> evaluated_normals(evaluated_positions.size(), float3(0.0f));
+  if (r_geometry.surface.ready) {
+    curve_patch_surface_shrinkwrap(r_geometry.surface,
+                                   params.radius,
+                                   evaluated_positions.as_mutable_span(),
+                                   evaluated_normals.as_mutable_span());
+    curve_patch_surface_fill_invalid_normals(evaluated_normals.as_mutable_span(),
+                                             params.plane_normal);
+  }
+
+  curve_patch_geometry_build(evaluated_positions.as_span(),
+                             evaluated_radii.as_span(),
+                             r_geometry.surface.ready ? evaluated_normals.as_span() :
+                                                        Span<float3>(),
+                             cyclic,
+                             params,
+                             stamp_texture_weights_cdf,
+                             r_geometry);
 }
 
 void curve_patch_geometry_build(const Span<float3> evaluated_positions,

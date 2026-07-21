@@ -24,6 +24,8 @@
 
 #include "DNA_scene_enums.h"
 
+#include "paint_curve_patch_effect.hh" /* CURVE_PATCH_PROFILING */
+
 namespace blender {
 struct Brush;
 struct CCGKey;
@@ -42,7 +44,8 @@ class Tree;
 
 namespace blender::ed::sculpt_paint {
 
-struct CurvePatchSession;
+struct CurvePatchItem;
+struct CurvePatchTextureBinding;
 
 /**
  * The four values the sampler needs from a stroke, as data rather than as a live `StrokeCache`.
@@ -142,26 +145,54 @@ struct CurvePatchSample {
 
 class CurvePatchSampler {
  public:
-  CurvePatchSampler(const CurvePatchSession &patch,
+  CurvePatchSampler(const CurvePatchItem &item,
+                    const CurvePatchTextureBinding &texture,
                     const CurvePatchStrokeContext &ctx,
                     const Brush &brush,
                     const CurvePatchSourceGeometry &source,
                     Span<float> mask,
-                    ImagePool *tex_pool);
+                    /* A reference rather than a pointer on purpose: a sampler built for a brush
+                     * WITH a texture and no pool dereferenced null here, while a brush without one
+                     * passed -- a defect no ordinary check catches. See
+                     * #SculptSession::tex_pool_ensure. */
+                    ImagePool &tex_pool);
 
   /** Read-only and thread-safe; `thread_id` indexes the texture pool's per-thread slot. */
   std::optional<CurvePatchSample> sample(int idx, int thread_id) const;
 
+#if CURVE_PATCH_PROFILING
+  int64_t dbg_reached_lut() const
+  {
+    return dbg_reached_lut_;
+  }
+  int64_t dbg_reached_relief() const
+  {
+    return dbg_reached_relief_;
+  }
+  int64_t dbg_tex_evals() const
+  {
+    return dbg_tex_evals_;
+  }
+#endif
+
  private:
-  const CurvePatchSession &patch_;
+  const CurvePatchItem &item_;
+  const CurvePatchTextureBinding &texture_;
   const CurvePatchStrokeContext &ctx_;
   const Brush &brush_;
   CurvePatchSourceGeometry source_;
   Span<float> mask_;
-  ImagePool *tex_pool_;
+  ImagePool &tex_pool_;
   float total_length_;
   float2 mtex_size_;
   float2 mtex_ofs_;
+#if CURVE_PATCH_PROFILING
+  /* DEBUG-cpatch-image funnel counters. `mutable` because `sample()` is `const`; no atomics needed
+   * because a sampler is constructed per chunk and a chunk is processed by a single thread. */
+  mutable int64_t dbg_reached_lut_ = 0;
+  mutable int64_t dbg_reached_relief_ = 0;
+  mutable int64_t dbg_tex_evals_ = 0;
+#endif
 };
 
 /** Largest world-space half-width anywhere on the curve, scaled by the ribbon radius. Takes the
@@ -170,7 +201,7 @@ float curve_patch_max_radius(const bke::CurvePatchGeometry &geometry);
 
 /** Drop nodes whose bounds fall entirely outside the falloff tube. `query_mask` is the caller's
  * `calc_brush_node_mask()` result. */
-IndexMask curve_patch_cull_nodes(const CurvePatchSession &patch,
+IndexMask curve_patch_cull_nodes(const CurvePatchItem &item,
                                  const CurvePatchStrokeContext &ctx,
                                  const bke::pbvh::Tree &pbvh,
                                  const IndexMask &query_mask,
@@ -178,7 +209,7 @@ IndexMask curve_patch_cull_nodes(const CurvePatchSession &patch,
                                  IndexMaskMemory &memory);
 
 /** Multires only: cull individual grids within the surviving nodes the same way. */
-BitVector<> curve_patch_cull_grids(const CurvePatchSession &patch,
+BitVector<> curve_patch_cull_grids(const CurvePatchItem &item,
                                    const CurvePatchStrokeContext &ctx,
                                    const bke::pbvh::Tree &pbvh,
                                    const SubdivCCG &subdiv_ccg,

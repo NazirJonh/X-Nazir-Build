@@ -1074,6 +1074,47 @@ void PAINTCURVE_OT_new_spline(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER;
 }
 
+static wmOperatorStatus paintcurve_clear_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *br = BKE_paint_brush(paint);
+  PaintCurve *pc = br ? br->paint_curve : nullptr;
+
+  if (pc == nullptr || !paintcurve_geometry_is_valid(pc->geometry.wrap())) {
+    return OPERATOR_CANCELLED;
+  }
+  if (pc->geometry.wrap().points_num() == 0) {
+    /* Nothing to clear: refuse rather than push an undo step that changes nothing. */
+    return OPERATOR_CANCELLED;
+  }
+
+  ED_paintcurve_undo_push_begin(C, op->type->name);
+  ED_paintcurve_geometry_clear(pc);
+  if (pc->use_3d_space) {
+    paintcurve_sync_to_source_if_3d(C, pc);
+  }
+  ED_paintcurve_undo_push_end(C);
+
+  BKE_brush_tag_unsaved_changes(br);
+  WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+  return OPERATOR_FINISHED;
+}
+
+void PAINTCURVE_OT_clear(wmOperatorType *ot)
+{
+  /* identifiers */
+  ot->name = "Clear Paint Curve";
+  ot->description = "Remove every control point, leaving the paint curve empty";
+  ot->idname = "PAINTCURVE_OT_clear";
+
+  /* API callbacks. */
+  ot->exec = paintcurve_clear_exec;
+  ot->poll = paint_curve_poll;
+
+  /* flags */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
 static wmOperatorStatus paintcurve_delete_point_exec(bContext *C, wmOperator *op)
 {
   Paint *paint = BKE_paint_get_active_from_context(C);

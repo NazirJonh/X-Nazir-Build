@@ -11,6 +11,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_view3d_enums.h"
 
+#include "BLI_array.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 
@@ -147,9 +148,10 @@ bool ED_paintcurve_import_from_source_object(bContext *C, ReportList *reports, b
 void ED_paintcurve_refresh_on_sculpt_mode_enter(bContext *C);
 
 /**
- * Clear the intermediate paint-curve geometry and detach from the source object.
- * Called when the user explicitly removes the source via the UI clear button so that
- * the Curve Edit tool starts fresh with an empty canvas.
+ * Stop syncing the intermediate paint curve back to the source object.
+ *
+ * Does NOT touch the curve itself: this runs from an RNA property assignment, where destroying user
+ * data as a side effect is invisible from Python. Clearing the canvas is #PAINTCURVE_OT_clear.
  */
 void ED_paintcurve_detach_source(bContext *C);
 
@@ -165,6 +167,9 @@ void ED_paintcurve_flush_radius_transform(bContext *C, struct PaintCurve *pc);
  * A no-op on an uninitialized or empty geometry, and on one whose handle position attributes were
  * never created. Call after changing point positions from outside the paint-curve operators; those
  * recompute for themselves.
+ *
+ * Pushes no undo step. A caller reached through RNA is covered by the global memfile undo, which is
+ * how comparable RNA edits behave; #ED_paintcurve_undo_push_begin serves the modal operators.
  */
 void ED_paintcurve_geometry_update_after_edit(struct PaintCurve *pc);
 
@@ -186,6 +191,48 @@ int ED_paintcurve_geometry_add_point(struct PaintCurve *pc,
 /** Drop every point and spline, leaving an empty but initialized geometry. */
 void ED_paintcurve_geometry_clear(struct PaintCurve *pc);
 
+/**
+ * Replace the whole geometry with a single bezier spline built from `positions`.
+ *
+ * The batch counterpart of #ED_paintcurve_geometry_add_point, which recomputes the auto handles of
+ * the whole curve on every call -- building an N-point curve with it costs N full recomputes. This
+ * one recomputes once.
+ *
+ * `radii` is either empty, in which case every point gets 1.0, or the same length as `positions`.
+ * The value follows this codebase's paint-curve convention, where 1.0 means "full brush size" and
+ * NOT #blender::bke::CurvesGeometry::radius()'s hair-oriented 0.01 default.
+ *
+ * Points get AUTO handles, for the reason #ED_paintcurve_geometry_add_point gives: a caller that
+ * supplies positions and nothing else has no handles to place, and ALIGNED ones sitting on top of
+ * their points would make the curve a polyline.
+ *
+ * Replaces EVERYTHING, splines and point attributes alike -- a paint curve holding several splines
+ * cannot be rebuilt spline by spline through this call.
+ */
+void ED_paintcurve_geometry_points_set(struct PaintCurve *pc,
+                                       Span<float3> positions,
+                                       Span<float> radii,
+                                       bool cyclic);
+
+/**
+ * One spline of a paint curve, as the Curve Patch build wants it: a standalone single-spline
+ * geometry carrying every attribute of the original, with the bezier handle POSITION attributes
+ * materialized, the auto/aligned handles recomputed, and a `radius` attribute guaranteed present.
+ *
+ * `spline_index` selects the spline; a negative one means the curve's own #PaintCurve.active_curve.
+ * The index is clamped, so an out-of-range one yields the nearest existing spline rather than
+ * nothing.
+ *
+ * Neither materialization step is optional, and both fail silently when skipped. A curve whose
+ * handle position attributes were never created evaluates to a bezier collapsed at the origin. A
+ * curve with no `radius` attribute answers #blender::bke::CurvesGeometry::radius()'s hair-oriented
+ * 0.01 default, and the strip comes out a hundredth of its intended width.
+ *
+ * Returns an empty geometry when the paint curve holds no splines.
+ */
+bke::CurvesGeometry ED_paintcurve_control_curve_for_patch(const struct PaintCurve &pc,
+                                                          int spline_index);
+
 /* `paint_curve_patch_apply.cc`, for callers outside this module -- the RNA layer. */
 
 /**
@@ -204,6 +251,18 @@ void ED_paintcurve_geometry_clear(struct PaintCurve *pc);
 bke::CurvePatchParams ED_curve_patch_params_from_brush(const Paint &paint,
                                                        const Brush &brush,
                                                        const bke::CurvesGeometry &control_curve);
+
+/**
+ * The cumulative weight table a Stamps-mode build draws its texture slot from, or an empty array
+ * when the brush is in single-texture mode. `radius` is the patch's base world radius.
+ *
+ * Exists so the RNA read-back can produce the same stamp-to-slot assignment a live session does.
+ * The binding itself stays private to the editor module: only the weights cross the boundary,
+ * because only they reach the core build.
+ *
+ * Defined in `paint_curve_patch_params.cc`.
+ */
+Array<float> ED_curve_patch_stamp_texture_weights_from_brush(const Brush &brush, float radius);
 
 /* `paint_curve_patch_session.cc`: read-only view of a RUNNING Curve Patch edit, for the RNA layer.
  *

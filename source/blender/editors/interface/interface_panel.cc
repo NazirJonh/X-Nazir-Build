@@ -2756,9 +2756,28 @@ static bool panel_categories_tab_is_mouse_over(ARegion *region, const wmEvent *e
   const View2D *v2d = &region->v2d;
   int ymin = region->overlap ? region->v2d.mask.ymax : region->v2d.mask.ymin;
   if (region->overlap) {
-    if (const Block *block = region->runtime->block_name_map.lookup_as(
-            panel_category_tabs_block_name);
-        block && !block->buttons_ptrs.is_empty())
+    /* Tabs are drawn directly (see #panel_category_tabs_draw_all) rather than as layout buttons,
+     * so the per-tab rects are the authoritative source for the bottom of the tab strip. The list
+     * order does not match the on-screen order (categories can be reordered), hence the search for
+     * the lowest rect instead of taking the last item. */
+    const rcti *lowest_tab_rect = nullptr;
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (BLI_rcti_is_empty(&pc_dyn.rect)) {
+        continue;
+      }
+      if (lowest_tab_rect == nullptr || pc_dyn.rect.ymin < lowest_tab_rect->ymin) {
+        lowest_tab_rect = &pc_dyn.rect;
+      }
+    }
+
+    if (lowest_tab_rect != nullptr) {
+      ymin = std::max(region->v2d.mask.ymin, lowest_tab_rect->ymin);
+    }
+    /* Fallback for the upstream layout-button based tabs. #Map::lookup_default_as is required
+     * here: #Map::lookup_as dereferences a null pointer when the key is missing. */
+    else if (const Block *block = region->runtime->block_name_map.lookup_default_as(
+                 panel_category_tabs_block_name, nullptr);
+             block && !block->buttons_ptrs.is_empty())
     {
       ymin = std::max(region->v2d.mask.ymin, int(block->buttons_ptrs.last()->rect.ymin));
     }

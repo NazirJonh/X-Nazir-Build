@@ -1868,8 +1868,12 @@ Vector<CategoryTagUIRecord> get_tags_for_category_ui(const wmWindowManager *wm,
     }
 
     int icon_id = ICON_NONE;
-    if (tag->icon_source == 1 && tag->icon_key[0] != '\0') {
+    if (tag->icon_source == CATEGORY_TAG_ICON_SOURCE_BLENDER_ICON && tag->icon_key[0] != '\0') {
       icon_id = category_tab_icon_id_resolve_from_key_path(tag->icon_key, nullptr);
+    }
+    else if (tag->icon_source == CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE && tag->icon_path[0] != '\0')
+    {
+      icon_id = category_tab_icon_id_resolve_from_path(tag->icon_path);
     }
 
     CategoryTagUIRecord record{};
@@ -2756,9 +2760,28 @@ static bool panel_categories_tab_is_mouse_over(ARegion *region, const wmEvent *e
   const View2D *v2d = &region->v2d;
   int ymin = region->overlap ? region->v2d.mask.ymax : region->v2d.mask.ymin;
   if (region->overlap) {
-    if (const Block *block = region->runtime->block_name_map.lookup_as(
-            panel_category_tabs_block_name);
-        block && !block->buttons_ptrs.is_empty())
+    /* Tabs are drawn directly (see #panel_category_tabs_draw_all) rather than as layout buttons,
+     * so the per-tab rects are the authoritative source for the bottom of the tab strip. The list
+     * order does not match the on-screen order (categories can be reordered), hence the search for
+     * the lowest rect instead of taking the last item. */
+    const rcti *lowest_tab_rect = nullptr;
+    for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
+      if (BLI_rcti_is_empty(&pc_dyn.rect)) {
+        continue;
+      }
+      if (lowest_tab_rect == nullptr || pc_dyn.rect.ymin < lowest_tab_rect->ymin) {
+        lowest_tab_rect = &pc_dyn.rect;
+      }
+    }
+
+    if (lowest_tab_rect != nullptr) {
+      ymin = std::max(region->v2d.mask.ymin, lowest_tab_rect->ymin);
+    }
+    /* Fallback for the upstream layout-button based tabs. #Map::lookup_default_as is required
+     * here: #Map::lookup_as dereferences a null pointer when the key is missing. */
+    else if (const Block *block = region->runtime->block_name_map.lookup_default_as(
+                 panel_category_tabs_block_name, nullptr);
+             block && !block->buttons_ptrs.is_empty())
     {
       ymin = std::max(region->v2d.mask.ymin, int(block->buttons_ptrs.last()->rect.ymin));
     }
@@ -2832,7 +2855,10 @@ static int ui_handle_panel_category_cycling(bContext *C,
 
           if (next_index >= 0 && next_index < ordered_categories.size()) {
             PanelCategoryDyn *next = ordered_categories[next_index];
-            ui::panel_category_active_set_safe(C, region, next->idname);
+            /* Activate directly: the tab already exists, so there is no extension install to wait
+             * for. Deferring here would leave the active category unchanged, so the next wheel
+             * step would resolve to the same neighbor and cycling would appear stuck. */
+            ui::panel_category_active_set_safe(C, region, next->idname, false);
 
             /* Save to tag category memory. */
             using namespace blender::ui;

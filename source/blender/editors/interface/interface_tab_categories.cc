@@ -1,4 +1,4 @@
-﻿/* SPDX-FileCopyrightText: 2026 Nazir Galimov
+/* SPDX-FileCopyrightText: 2026 Nazir Galimov
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -479,7 +479,11 @@ int category_tabs_vertical_padding_calc(float zoom)
  * \{ */
 
 
-PendingCategoryInsert g_pending_category_insert;
+PendingCategoryInsert &pending_category_insert()
+{
+  static PendingCategoryInsert value;
+  return value;
+}
 
 /* Deferred category activation - used to activate a category outside of layout phase.
  * This prevents crashes when extensions load previews in background threads during
@@ -488,7 +492,11 @@ PendingCategoryInsert g_pending_category_insert;
 DeferredCategoryActivation g_deferred_category_activation;
 
 /* Known categories before extension drop - used to detect new categories */
-Set<std::string> g_known_categories_before_extension_drop;
+Set<std::string> &known_categories_before_extension_drop()
+{
+  static Set<std::string> value;
+  return value;
+}
 
 struct DeferredActivationExtensionCallbackState {
   bCallbackFuncStore callback_store = {};
@@ -593,15 +601,15 @@ static void pending_category_insert_set(const std::string &tag_key,
     return;
   }
 
-  g_pending_category_insert.tag_key = tag_key;
-  g_pending_category_insert.target_category = target_category;
-  g_pending_category_insert.anchor_before.clear();
-  g_pending_category_insert.anchor_after.clear();
-  g_pending_category_insert.insert_above = insert_above;
-  g_pending_category_insert.valid = true;
-  g_pending_category_insert.timestamp = BLI_time_now_seconds();
-  g_pending_category_insert.existing_categories.clear();
-  g_pending_category_insert.pre_order = json_order;
+  pending_category_insert().tag_key = tag_key;
+  pending_category_insert().target_category = target_category;
+  pending_category_insert().anchor_before.clear();
+  pending_category_insert().anchor_after.clear();
+  pending_category_insert().insert_above = insert_above;
+  pending_category_insert().valid = true;
+  pending_category_insert().timestamp = BLI_time_now_seconds();
+  pending_category_insert().existing_categories.clear();
+  pending_category_insert().pre_order = json_order;
 
   int target_index = -1;
   for (int i = 0; i < ordered_categories.size(); i++) {
@@ -614,20 +622,20 @@ static void pending_category_insert_set(const std::string &tag_key,
 
   if (target_index != -1) {
     if (insert_above) {
-      g_pending_category_insert.anchor_after = target_category;
+      pending_category_insert().anchor_after = target_category;
       if (target_index > 0) {
         const PanelCategoryDyn *prev = ordered_categories[target_index - 1];
         if (prev && prev->idname[0] != '\0') {
-          g_pending_category_insert.anchor_before = prev->idname;
+          pending_category_insert().anchor_before = prev->idname;
         }
       }
     }
     else {
-      g_pending_category_insert.anchor_before = target_category;
+      pending_category_insert().anchor_before = target_category;
       if (target_index + 1 < ordered_categories.size()) {
         const PanelCategoryDyn *next = ordered_categories[target_index + 1];
         if (next && next->idname[0] != '\0') {
-          g_pending_category_insert.anchor_after = next->idname;
+          pending_category_insert().anchor_after = next->idname;
         }
       }
     }
@@ -635,7 +643,7 @@ static void pending_category_insert_set(const std::string &tag_key,
 
   for (const PanelCategoryDyn *pc_dyn : ordered_categories) {
     if (pc_dyn && pc_dyn->idname[0] != '\0') {
-      g_pending_category_insert.existing_categories.add(std::string(pc_dyn->idname));
+      pending_category_insert().existing_categories.add(std::string(pc_dyn->idname));
     }
   }
 }
@@ -838,21 +846,21 @@ static void handle_extension_drop_on_tabs(const bContext *C,
      * extension installs. */
     ARegion *region = CTX_wm_region(C);
     if (region && region->runtime) {
-      g_known_categories_before_extension_drop.clear();
-      g_pending_category_insert.all_existing_categories.clear();
+      known_categories_before_extension_drop().clear();
+      pending_category_insert().all_existing_categories.clear();
       for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
         if (pc_dyn.idname && pc_dyn.idname[0]) {
-          g_known_categories_before_extension_drop.add(pc_dyn.idname);
-          g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+          known_categories_before_extension_drop().add(pc_dyn.idname);
+          pending_category_insert().all_existing_categories.add(pc_dyn.idname);
         }
       }
       if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
         printf("[KNOWN_CATS] Saving known categories before viewport extension drop:\n");
-        for (const std::string &known_category : g_known_categories_before_extension_drop) {
+        for (const std::string &known_category : known_categories_before_extension_drop()) {
           printf("[KNOWN_CATS]   + '%s'\n", known_category.c_str());
         }
         printf("[KNOWN_CATS] Total: %zu categories saved\n",
-               g_known_categories_before_extension_drop.size());
+               known_categories_before_extension_drop().size());
         fflush(stdout);
       }
     }
@@ -982,26 +990,26 @@ void category_tabs_setup_viewport_drop_deferred(const bContext *C,
     }
   }
   
-  g_known_categories_before_extension_drop.clear();
-  g_pending_category_insert.all_existing_categories.clear();
+  known_categories_before_extension_drop().clear();
+  pending_category_insert().all_existing_categories.clear();
   if (region && region->runtime) {
     for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
       if (pc_dyn.idname && pc_dyn.idname[0]) {
-        g_known_categories_before_extension_drop.add(pc_dyn.idname);
-        g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+        known_categories_before_extension_drop().add(pc_dyn.idname);
+        pending_category_insert().all_existing_categories.add(pc_dyn.idname);
       }
     }
   }
   if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     printf("[VIEWPORT DROP DEFERRED] Saving known categories from region=%p:\n", (void*)region);
-    if (g_known_categories_before_extension_drop.is_empty()) {
+    if (known_categories_before_extension_drop().is_empty()) {
       printf("[VIEWPORT DROP DEFERRED]   (no categories found - region may not have panels_category yet)\n");
     }
-    for (const std::string &known_category : g_known_categories_before_extension_drop) {
+    for (const std::string &known_category : known_categories_before_extension_drop()) {
       printf("[VIEWPORT DROP DEFERRED]   + '%s'\n", known_category.c_str());
     }
     printf("[VIEWPORT DROP DEFERRED] Total: %zu categories saved\n",
-           g_known_categories_before_extension_drop.size());
+           known_categories_before_extension_drop().size());
     fflush(stdout);
   }
 
@@ -1898,14 +1906,14 @@ Vector<PanelCategoryDyn *> get_ordered_categories(const bContext *C, ARegion *re
 
 static void category_order_pending_insert_expired_clear_if_needed(const std::string &tag_key)
 {
-  if (!(g_pending_category_insert.valid && g_pending_category_insert.tag_key == tag_key)) {
+  if (!(pending_category_insert().valid && pending_category_insert().tag_key == tag_key)) {
     return;
   }
 
-  const double time_since_pending = BLI_time_now_seconds() - g_pending_category_insert.timestamp;
+  const double time_since_pending = BLI_time_now_seconds() - pending_category_insert().timestamp;
   if (time_since_pending > 120.0) {
-    g_pending_category_insert.valid = false;
-    g_pending_category_insert.all_existing_categories.clear();
+    pending_category_insert().valid = false;
+    pending_category_insert().all_existing_categories.clear();
   }
 }
 
@@ -2082,26 +2090,26 @@ static Vector<PanelCategoryDyn *> collect_appeared_categories(const bContext *C,
 {
   Vector<PanelCategoryDyn *> appeared_categories;
   if (g_tag_filter_debug_enabled) {
-    printf("[GET_ORDERED] all_existing_categories.size()=%zu, existing_categories.size()=%zu, g_known_categories_before_extension_drop.size()=%zu\n",
-           g_pending_category_insert.all_existing_categories.size(),
-           g_pending_category_insert.existing_categories.size(),
-           g_known_categories_before_extension_drop.size());
+    printf("[GET_ORDERED] all_existing_categories.size()=%zu, existing_categories.size()=%zu, known_categories_before_extension_drop().size()=%zu\n",
+           pending_category_insert().all_existing_categories.size(),
+           pending_category_insert().existing_categories.size(),
+           known_categories_before_extension_drop().size());
   }
   for (PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
-    /* Use g_pending_category_insert.all_existing_categories when available (extension drop case),
+    /* Use pending_category_insert().all_existing_categories when available (extension drop case),
      * as it contains ALL categories from the region, not just filtered ones. This prevents existing
      * categories without the active tag from being incorrectly detected as "new" when an extension
-     * is dropped with an active tag filter. Fallback to g_known_categories_before_extension_drop for
+     * is dropped with an active tag filter. Fallback to known_categories_before_extension_drop() for
      * backwards compatibility, and finally to existing_categories (filtered) if neither is set. */
-    const bool use_full_category_list = !g_pending_category_insert.all_existing_categories.is_empty() ||
-                                        !g_known_categories_before_extension_drop.is_empty();
-    const bool is_new_category = !g_pending_category_insert.all_existing_categories.is_empty() ?
-                                     !g_pending_category_insert.all_existing_categories.contains(
+    const bool use_full_category_list = !pending_category_insert().all_existing_categories.is_empty() ||
+                                        !known_categories_before_extension_drop().is_empty();
+    const bool is_new_category = !pending_category_insert().all_existing_categories.is_empty() ?
+                                     !pending_category_insert().all_existing_categories.contains(
                                          std::string(pc_dyn.idname)) :
-                                     (!g_known_categories_before_extension_drop.is_empty() ?
-                                          !g_known_categories_before_extension_drop.contains(
+                                     (!known_categories_before_extension_drop().is_empty() ?
+                                          !known_categories_before_extension_drop().contains(
                                               std::string(pc_dyn.idname)) :
-                                          !g_pending_category_insert.existing_categories.contains(
+                                          !pending_category_insert().existing_categories.contains(
                                               std::string(pc_dyn.idname)));
     if (g_tag_filter_debug_enabled) {
       printf("[GET_ORDERED]   cat='%s' use_full=%d is_new=%d\n",
@@ -2127,21 +2135,21 @@ static Vector<PanelCategoryDyn *> collect_appeared_categories(const bContext *C,
 static int compute_pending_insert_index(const Vector<PanelCategoryDyn *> &r_result)
 {
   int insert_index = -1;
-  if (!g_pending_category_insert.anchor_after.empty()) {
-    insert_index = find_index_in_categories(r_result, g_pending_category_insert.anchor_after);
+  if (!pending_category_insert().anchor_after.empty()) {
+    insert_index = find_index_in_categories(r_result, pending_category_insert().anchor_after);
   }
-  if (insert_index == -1 && !g_pending_category_insert.anchor_before.empty()) {
+  if (insert_index == -1 && !pending_category_insert().anchor_before.empty()) {
     const int before_index = find_index_in_categories(r_result,
-                                                      g_pending_category_insert.anchor_before);
+                                                      pending_category_insert().anchor_before);
     if (before_index != -1) {
       insert_index = before_index + 1;
     }
   }
   if (insert_index == -1) {
     const int target_index = find_index_in_categories(r_result,
-                                                      g_pending_category_insert.target_category);
+                                                      pending_category_insert().target_category);
     if (target_index != -1) {
-      insert_index = g_pending_category_insert.insert_above ? target_index : (target_index + 1);
+      insert_index = pending_category_insert().insert_above ? target_index : (target_index + 1);
     }
   }
   if (insert_index == -1) {
@@ -2162,7 +2170,7 @@ static void apply_pending_insert(const bContext *C,
                                  bool &r_pending_applied,
                                  Vector<std::string> &r_pending_inserted_ids)
 {
-  if (!(g_pending_category_insert.valid && g_pending_category_insert.tag_key == tag_key)) {
+  if (!(pending_category_insert().valid && pending_category_insert().tag_key == tag_key)) {
     return;
   }
 
@@ -2277,7 +2285,7 @@ static Vector<std::string> build_pending_order_after_insert(const bContext *C,
 {
   Vector<std::string> pending_order = json_order;
   if (pending_order.is_empty()) {
-    pending_order = g_pending_category_insert.pre_order;
+    pending_order = pending_category_insert().pre_order;
   }
 
   if (pending_order.is_empty()) {
@@ -2313,19 +2321,19 @@ static Vector<std::string> build_pending_order_after_insert(const bContext *C,
   };
 
   int order_insert_index = -1;
-  if (!g_pending_category_insert.anchor_after.empty()) {
-    order_insert_index = find_index_in_order(g_pending_category_insert.anchor_after);
+  if (!pending_category_insert().anchor_after.empty()) {
+    order_insert_index = find_index_in_order(pending_category_insert().anchor_after);
   }
-  if (order_insert_index == -1 && !g_pending_category_insert.anchor_before.empty()) {
-    const int before_index = find_index_in_order(g_pending_category_insert.anchor_before);
+  if (order_insert_index == -1 && !pending_category_insert().anchor_before.empty()) {
+    const int before_index = find_index_in_order(pending_category_insert().anchor_before);
     if (before_index != -1) {
       order_insert_index = before_index + 1;
     }
   }
   if (order_insert_index == -1) {
-    const int target_index = find_index_in_order(g_pending_category_insert.target_category);
+    const int target_index = find_index_in_order(pending_category_insert().target_category);
     if (target_index != -1) {
-      order_insert_index = g_pending_category_insert.insert_above ? target_index : (target_index + 1);
+      order_insert_index = pending_category_insert().insert_above ? target_index : (target_index + 1);
     }
   }
   if (order_insert_index == -1) {
@@ -2400,33 +2408,33 @@ static void pending_insert_state_transfer_to_deferred_activation()
 {
   /* Copy pending insert position to deferred activation BEFORE clearing it.
    * This ensures the insert position is preserved for deferred_category_activation_execute. */
-  if (g_pending_category_insert.valid) {
+  if (pending_category_insert().valid) {
     g_deferred_category_activation.pending_insert_valid = true;
-    g_deferred_category_activation.pending_insert_tag_key = g_pending_category_insert.tag_key;
-    g_deferred_category_activation.pending_insert_anchor_before = g_pending_category_insert.anchor_before;
-    g_deferred_category_activation.pending_insert_anchor_after = g_pending_category_insert.anchor_after;
+    g_deferred_category_activation.pending_insert_tag_key = pending_category_insert().tag_key;
+    g_deferred_category_activation.pending_insert_anchor_before = pending_category_insert().anchor_before;
+    g_deferred_category_activation.pending_insert_anchor_after = pending_category_insert().anchor_after;
     g_deferred_category_activation.pending_insert_target_category =
-        g_pending_category_insert.target_category;
+        pending_category_insert().target_category;
     g_deferred_category_activation.pending_insert_insert_above =
-        g_pending_category_insert.insert_above;
+        pending_category_insert().insert_above;
     if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
       printf("[CATEGORY ORDER] Copied pending insert to deferred activation: tag_key='%s', anchor_before='%s', anchor_after='%s'\n",
-             g_pending_category_insert.tag_key.c_str(),
-             g_pending_category_insert.anchor_before.c_str(),
-             g_pending_category_insert.anchor_after.c_str());
+             pending_category_insert().tag_key.c_str(),
+             pending_category_insert().anchor_before.c_str(),
+             pending_category_insert().anchor_after.c_str());
     }
   }
   else {
     if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-      printf("[CATEGORY ORDER] g_pending_category_insert.valid is FALSE - no position to copy!\n");
+      printf("[CATEGORY ORDER] pending_category_insert().valid is FALSE - no position to copy!\n");
     }
   }
   if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     fflush(stdout);
   }
 
-  g_pending_category_insert.valid = false;
-  g_pending_category_insert.all_existing_categories.clear();
+  pending_category_insert().valid = false;
+  pending_category_insert().all_existing_categories.clear();
 }
 
 static void schedule_activation_for_pending_inserted_categories(
@@ -2461,7 +2469,7 @@ static void schedule_activation_for_pending_inserted_categories(
 
     register_new_extension_category(C,
                                     category_id.c_str(),
-                                    g_pending_category_insert.source_extension_id.c_str(),
+                                    pending_category_insert().source_extension_id.c_str(),
                                     area ? area->spacetype : -1,
                                     get_current_tag_mode_flag(C),
                                     tag_already_assigned);
@@ -3518,21 +3526,21 @@ void category_tabs_apply_drop_insert(bContext *C,
    * get_ordered_categories() applies tag filtering, which would exclude categories without
    * the active tag. This would cause them to be incorrectly detected as "new" when the
    * extension installs. */
-  g_known_categories_before_extension_drop.clear();
-  g_pending_category_insert.all_existing_categories.clear();
+  known_categories_before_extension_drop().clear();
+  pending_category_insert().all_existing_categories.clear();
   for (const PanelCategoryDyn &pc_dyn : region->runtime->panels_category) {
     if (pc_dyn.idname && pc_dyn.idname[0]) {
-      g_known_categories_before_extension_drop.add(pc_dyn.idname);
-      g_pending_category_insert.all_existing_categories.add(pc_dyn.idname);
+      known_categories_before_extension_drop().add(pc_dyn.idname);
+      pending_category_insert().all_existing_categories.add(pc_dyn.idname);
     }
   }
   if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
     printf("[KNOWN_CATS] Saving known categories before extension drop:\n");
-    for (const std::string &known_category : g_known_categories_before_extension_drop) {
+    for (const std::string &known_category : known_categories_before_extension_drop()) {
       printf("[KNOWN_CATS]   + '%s'\n", known_category.c_str());
     }
     printf("[KNOWN_CATS] Total: %zu categories (also saved to pending_insert)\n",
-           g_known_categories_before_extension_drop.size());
+           known_categories_before_extension_drop().size());
   }
 
   Vector<std::string> json_order = load_category_order_from_json(C, tag_key.c_str());

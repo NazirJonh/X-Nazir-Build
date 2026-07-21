@@ -3431,11 +3431,20 @@ static void rna_def_category_tag_def(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");
 
-  /* Icon source: 0=GLYPH, 1=ICON */
+  /* Custom icon image path, used when icon_source is CUSTOM_FILE. */
+  prop = RNA_def_property(srna, "icon_path", PROP_STRING, PROP_FILEPATH);
+  RNA_def_property_string_sdna(prop, nullptr, "icon_path");
+  RNA_def_property_string_maxlength(prop, sizeof(CategoryTagDef::icon_path) - 1);
+  RNA_def_property_ui_text(prop, "Icon Path", "Path to a custom icon image file");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");
+
+  /* Icon source: 0=GLYPH, 1=BLENDER_ICON, 2=CUSTOM_FILE. */
   prop = RNA_def_property(srna, "icon_source", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "icon_source");
-  RNA_def_property_range(prop, 0, 1);
-  RNA_def_property_ui_text(prop, "Icon Source", "Display mode: 0=Glyph, 1=Blender Icon");
+  RNA_def_property_range(prop, 0, 2);
+  RNA_def_property_ui_text(
+      prop, "Icon Source", "Display mode: 0=Glyph, 1=Blender Icon, 2=Custom Icon File");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, NC_WM | ND_CATEGORY_GLYPHS, "rna_CategoryTagDef_update");
 }

@@ -36,6 +36,7 @@ from bl_ui.glyph_tag_system.log import category_debug_print
 from bl_ui.glyph_tag_system._state import state
 from bl_ui.glyph_tag_system.tags_cache import (
     _get_mode_flags_for_tag,
+    _validate_custom_icon_path,
 )
 from bl_ui.glyph_tag_system.glyph_cache import (
     get_categories_for_tag,
@@ -191,11 +192,19 @@ class USERPREF_UL_category_tags(UIList):
         # DEBUG: Log tag properties
         icon_source_val = getattr(tag, "icon_source", 0)
         icon_key_val = getattr(tag, "icon_key", "")
+        icon_path_val = getattr(tag, "icon_path", "")
         glyph_val = getattr(tag, "glyph", "")
-        category_debug_print(f"[UI_LIST draw_item] tag='{tag.name}' icon_source={icon_source_val} icon_key='{icon_key_val}' glyph='{glyph_val}'")
+        category_debug_print(
+            f"[UI_LIST draw_item] tag='{tag.name}' icon_source={icon_source_val} "
+            f"icon_key='{icon_key_val}' icon_path='{icon_path_val}' glyph='{glyph_val}'")
 
-        # Check if tag uses icon (icon_source == 1) or glyph
-        use_icon = (icon_source_val == 1 and icon_key_val)
+        # A custom icon must resolve to a preview id to count as an icon; 0 means the file is
+        # missing or unreadable, and the tag falls back to its glyph like the tag bar does.
+        # template_icon_preview cannot be used here: it draws through a per-block callback, and a
+        # UIList shares one block across all rows, so every row would overwrite the previous one.
+        custom_icon_id = (layout.icon_from_file(icon_path_val)
+                          if (icon_source_val == 2 and icon_path_val) else 0)
+        use_icon = (icon_source_val == 1 and icon_key_val) or custom_icon_id != 0
         use_glyph = (not use_icon and glyph_val)
 
         category_debug_print(f"[UI_LIST draw_item] tag='{tag.name}' use_icon={use_icon} use_glyph={use_glyph}")
@@ -210,15 +219,18 @@ class USERPREF_UL_category_tags(UIList):
             col_glyph.ui_units_x = 4  # Keep some width reserved so glyph never disappears first
 
             if use_icon:
-                # Display Blender icon with tag color tint
-                icon_key = getattr(tag, "icon_key", "")
-                col_glyph.colored_label(
-                    text="",
-                    icon=icon_key,
-                    color_r=tag.color[0],
-                    color_g=tag.color[1],
-                    color_b=tag.color[2]
-                )
+                if custom_icon_id:
+                    # Custom images keep their own colors, so no tint is applied.
+                    col_glyph.label(text="", icon_value=custom_icon_id)
+                else:
+                    # Display Blender icon with tag color tint
+                    col_glyph.colored_label(
+                        text="",
+                        icon=icon_key_val,
+                        color_r=tag.color[0],
+                        color_g=tag.color[1],
+                        color_b=tag.color[2]
+                    )
             elif use_glyph:
                 # Display colored glyph
                 glyph_char = _hex_to_glyph(tag.glyph)
@@ -239,15 +251,17 @@ class USERPREF_UL_category_tags(UIList):
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
             if use_icon:
-                # Display Blender icon with tag color tint
-                icon_key = getattr(tag, "icon_key", "")
-                layout.colored_label(
-                    text="",
-                    icon=icon_key,
-                    color_r=tag.color[0],
-                    color_g=tag.color[1],
-                    color_b=tag.color[2]
-                )
+                if custom_icon_id:
+                    layout.label(text="", icon_value=custom_icon_id)
+                else:
+                    # Display Blender icon with tag color tint
+                    layout.colored_label(
+                        text="",
+                        icon=icon_key_val,
+                        color_r=tag.color[0],
+                        color_g=tag.color[1],
+                        color_b=tag.color[2]
+                    )
             elif use_glyph:
                 glyph_char = _hex_to_glyph(tag.glyph)
                 layout.colored_label(
@@ -397,7 +411,11 @@ class USERPREF_OT_category_tag_set_display_mode(Operator):
         name="Mode",
         items=[
             ('GLYPH', "Glyph", "Display as glyph character"),
-            ('ICON', "Icon", "Display as Blender icon"),
+            # 'ICON' keeps whichever icon kind the tag already uses; the two explicit values below
+            # are for the Blender/Custom sub-toggle.
+            ('ICON', "Icon", "Display as an icon"),
+            ('BLENDER_ICON', "Blender Icon", "Display as a built-in Blender icon"),
+            ('CUSTOM', "Custom", "Display as a custom icon image file"),
         ],
         default='GLYPH'
     )
@@ -417,8 +435,20 @@ class USERPREF_OT_category_tag_set_display_mode(Operator):
         if tag_name not in state.all_tags_cache:
             return {'CANCELLED'}
 
-        # Set icon_source: 0=GLYPH, 1=ICON
-        icon_source = 0 if self.mode == 'GLYPH' else 1
+        # Set icon_source: 0=GLYPH, 1=BLENDER_ICON, 2=CUSTOM_FILE.
+        current_icon_source = getattr(wm.category_tags[idx], "icon_source", 0)
+        if self.mode == 'GLYPH':
+            icon_source = 0
+        elif self.mode == 'BLENDER_ICON':
+            icon_source = 1
+        elif self.mode == 'CUSTOM':
+            icon_source = 2
+        elif current_icon_source == 2:
+            # Plain 'ICON' only chooses Glyph vs Icon, so a tag already on a custom file stays
+            # there instead of being downgraded to a Blender icon it has no key for.
+            icon_source = 2
+        else:
+            icon_source = 1
 
         # Update WM immediately for visual feedback
         wm.category_tags[idx].icon_source = icon_source
@@ -556,22 +586,25 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
             preview_row = preview_box.row()
             preview_row.alignment = 'CENTER'
 
-            # Check if tag uses icon (icon_source == 1) or glyph
+            # Check if tag uses a built-in icon (1), a custom icon file (2), or a glyph
             icon_source_val = getattr(tag, "icon_source", 0)
             icon_key_val = getattr(tag, "icon_key", "")
+            icon_path_val = getattr(tag, "icon_path", "")
             glyph_val = tag.glyph
-            category_debug_print(f"[PREVIEW] tag='{tag.name}' icon_source={icon_source_val} icon_key='{icon_key_val}' glyph='{glyph_val}'")
+            category_debug_print(
+                f"[PREVIEW] tag='{tag.name}' icon_source={icon_source_val} "
+                f"icon_key='{icon_key_val}' icon_path='{icon_path_val}' glyph='{glyph_val}'")
 
-            use_icon = (icon_source_val == 1 and icon_key_val)
+            use_icon = (icon_source_val == 1 and icon_key_val) or (icon_source_val == 2 and icon_path_val)
             use_glyph = (not use_icon and glyph_val)
 
             category_debug_print(f"[PREVIEW] tag='{tag.name}' use_icon={use_icon} use_glyph={use_glyph}")
 
             if use_icon:
-                # Display Blender icon with tag color tint
-                icon_key = getattr(tag, "icon_key", "")
+                # Display Blender icon or custom image with tag color tint
                 preview_row.template_icon_preview(
-                    icon_key=icon_key,
+                    icon_key=icon_key_val,
+                    icon_path=icon_path_val,
                     data=tag,
                     color_property="color",
                     size_multiplier=2.0
@@ -608,8 +641,9 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
             display_row = display_split.row(align=True)
             display_row.alignment = 'LEFT'
 
-            # Get current icon_source value (0=GLYPH, 1=ICON)
+            # Get current icon_source value (0=GLYPH, 1=BLENDER_ICON, 2=CUSTOM_FILE)
             icon_source_val = getattr(tag, "icon_source", 0)
+            uses_icon_mode = icon_source_val in {1, 2}
 
             # Toggle buttons for display mode (always enabled for visual feedback)
             glyph_row = display_row.row(align=True)
@@ -619,13 +653,68 @@ class USERPREF_PT_tag_management(TagsPanel, Panel):
             op_glyph.mode = 'GLYPH'
 
             icon_row = display_row.row(align=True)
-            icon_row.active = (icon_source_val == 1)
+            icon_row.active = uses_icon_mode
             op_icon = icon_row.operator("wm.category_tag_set_display_mode", text="Icon",
-                                        depress=(icon_source_val == 1))
+                                        depress=uses_icon_mode)
             op_icon.mode = 'ICON'
 
             # Conditional UI based on display mode
-            if icon_source_val == 1:
+            if uses_icon_mode:
+                # Blender icon vs custom image file, mirroring the Create/Edit Tag dialogs
+                box.separator()
+                sub_split = box.split(factor=0.38)
+                sub_split.alignment = 'RIGHT'
+                sub_split.label(text="Icon Source:")
+                sub_row = sub_split.row(align=True)
+                sub_row.alignment = 'LEFT'
+
+                blender_row = sub_row.row(align=True)
+                blender_row.active = (icon_source_val == 1)
+                op_blender = blender_row.operator("wm.category_tag_set_display_mode", text="Blender",
+                                                  depress=(icon_source_val == 1))
+                op_blender.mode = 'BLENDER_ICON'
+
+                custom_row = sub_row.row(align=True)
+                custom_row.active = (icon_source_val == 2)
+                op_custom = custom_row.operator("wm.category_tag_set_display_mode", text="Custom",
+                                                depress=(icon_source_val == 2))
+                op_custom.mode = 'CUSTOM'
+
+            if icon_source_val == 2:
+                # Custom icon file. This panel is not an operator, so the file operators are told
+                # which tag to write into by name instead of by dialog address.
+                box.separator()
+                icon_path_val = getattr(tag, "icon_path", "")
+                path_split = box.split(factor=0.38)
+                path_split.alignment = 'RIGHT'
+                path_split.label(text="Custom:")
+                path_row = path_split.row(align=True)
+                path_row.alignment = 'LEFT'
+
+                path_display = path_row.row(align=True)
+                path_display.enabled = False
+                path_display.label(text=icon_path_val if icon_path_val else "None")
+
+                pick_op = path_row.operator(
+                    "screen.category_tab_pick_custom_icon", text="", icon='FILE_FOLDER')
+                pick_op.target_tag = tag.name
+                reload_op = path_row.operator(
+                    "screen.category_tab_reload_custom_icon", text="", icon='FILE_REFRESH')
+                reload_op.target_tag = tag.name
+
+                if icon_path_val:
+                    is_valid, error_msg = _validate_custom_icon_path(icon_path_val)
+                    if not is_valid:
+                        box.label(text=error_msg, icon='ERROR')
+                    else:
+                        # Not template_icon_preview: this panel already draws one above, and that
+                        # template installs a per-block draw callback, so a second one would
+                        # replace the first.
+                        box.separator()
+                        preview_row = box.row()
+                        preview_row.alignment = 'CENTER'
+                        preview_row.label(text="", icon_value=box.icon_from_file(icon_path_val))
+            elif icon_source_val == 1:
                 # Icon mode - show icon picker (similar layout to Glyph mode)
                 box.separator()
                 icon_key_val = getattr(tag, "icon_key", "")

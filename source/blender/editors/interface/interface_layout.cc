@@ -3394,9 +3394,16 @@ PointerRNA uiItemTagButtonWithOperator(Layout *layout,
            tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
       {
         if (STREQ(tag_def->name, tag_name)) {
-          if (tag_def->icon_source == 1 && tag_def->icon_key[0] != '\0') {
+          if (tag_def->icon_source == CATEGORY_TAG_ICON_SOURCE_BLENDER_ICON &&
+              tag_def->icon_key[0] != '\0')
+          {
             /* Use our specialized resolver to handle FUND and other special icons. */
             icon_id = category_tab_icon_id_resolve_from_key_path(tag_def->icon_key, nullptr);
+          }
+          else if (tag_def->icon_source == CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE &&
+                   tag_def->icon_path[0] != '\0')
+          {
+            icon_id = category_tab_icon_id_resolve_from_path(tag_def->icon_path);
           }
           break;
         }

@@ -75,7 +75,9 @@ from .conversions import (
     flags_to_spaces,
     modes_to_flags,
     spaces_to_flags,
+    _tag_custom_icon_mode_from_data,
     _tag_display_mode_from_data,
+    _tag_icon_fields_from_display_mode,
     _tag_icon_source_from_display_mode,
     get_reserved_category_priority,
 )

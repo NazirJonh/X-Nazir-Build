@@ -41,6 +41,7 @@ from bl_ui.glyph_tag_system.schema_keys import (
     KEY_COLOR,
     KEY_GLYPH,
     KEY_ICON_KEY,
+    KEY_ICON_PATH,
     KEY_ICON_SOURCE,
     KEY_MODE_FLAGS,
 )
@@ -115,7 +116,8 @@ def _tag_name_reserved_char_error(name):
     return None
 
 
-def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", icon_source='GLYPH', auto_save=True, skip_wm_sync=False):
+def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", icon_path="",
+               icon_source='GLYPH', auto_save=True, skip_wm_sync=False):
     """
     Create a new tag.
 
@@ -125,6 +127,7 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", ico
         color: RGB color tuple (0.0-1.0)
         mode_flags: Bitmask of modes where tag is active (None = use default)
         icon_key: Blender icon identifier (e.g., "OBJECT_DATAMODE")
+        icon_path: Path to a custom icon image file (used when icon_source is 'CUSTOM')
         icon_source: 'GLYPH', 'BLENDER_ICON', or 'CUSTOM' (will be converted to int for storage)
         auto_save: Save to JSON immediately
         skip_wm_sync: If True, skip WM sync (optimization for Edit Category Tab dialog)
@@ -164,6 +167,7 @@ def create_tag(tag_name, glyph="", color=None, mode_flags=None, icon_key="", ico
         KEY_COLOR: list(color) if color else [0.0, 0.0, 0.0],
         KEY_MODE_FLAGS: mode_flags if mode_flags is not None else _CATEGORY_TAG_DEFAULT_MODE_FLAGS,
         KEY_ICON_KEY: icon_key if icon_source_int == TAG_ICON_SOURCE_BLENDER_ICON else "",
+        KEY_ICON_PATH: icon_path if icon_source_int == TAG_ICON_SOURCE_CUSTOM else "",
         KEY_ICON_SOURCE: icon_source_int,
     })
 
@@ -210,6 +214,7 @@ def _sync_single_tag_to_wm(tag_name):
         mode_flags_val = tag_data.get("mode_flags", _CATEGORY_TAG_DEFAULT_MODE_FLAGS) if isinstance(tag_data, dict) else _CATEGORY_TAG_DEFAULT_MODE_FLAGS
         # Icon fields - icon_source is now stored as int (0=GLYPH, 1=BLENDER_ICON, 2=CUSTOM)
         icon_key_val = tag_data.get("icon_key", "") if isinstance(tag_data, dict) else ""
+        icon_path_val = tag_data.get("icon_path", "") if isinstance(tag_data, dict) else ""
         icon_source_val = tag_data.get("icon_source", 0) if isinstance(tag_data, dict) else 0
         # Handle both int and string formats for backward compatibility
         if isinstance(icon_source_val, str):
@@ -235,6 +240,8 @@ def _sync_single_tag_to_wm(tag_name):
             existing_tag.mode_flags = mode_flags_val
             # NEW: Icon fields
             existing_tag.icon_key = icon_key_val
+            if hasattr(existing_tag, "icon_path"):
+                existing_tag.icon_path = icon_path_val
             existing_tag.icon_source = icon_source_val
             category_debug_print(f"[SYNC_SINGLE_TAG] Updated existing tag '{tag_name}' in WM")
         else:
@@ -245,6 +252,8 @@ def _sync_single_tag_to_wm(tag_name):
             tag_item.mode_flags = mode_flags_val
             # NEW: Icon fields
             tag_item.icon_key = icon_key_val
+            if hasattr(tag_item, "icon_path"):
+                tag_item.icon_path = icon_path_val
             tag_item.icon_source = icon_source_val
             category_debug_print(f"[SYNC_SINGLE_TAG] Created new tag '{tag_name}' in WM with glyph='{glyph_hex}'")
 
@@ -255,8 +264,9 @@ def _sync_single_tag_to_wm(tag_name):
         return False
 
 
-def update_tag(tag_name, glyph=None, color=None, icon_key=None, icon_source=None, auto_save=True):
-    """Update an existing tag's glyph, color, icon_key, and/or icon_source."""
+def update_tag(tag_name, glyph=None, color=None, icon_key=None, icon_path=None,
+               icon_source=None, auto_save=True):
+    """Update an existing tag's glyph, color, icon_key, icon_path and/or icon_source."""
     if tag_name not in state.all_tags_cache:
         return False, f"Tag '{tag_name}' not found"
 
@@ -270,6 +280,9 @@ def update_tag(tag_name, glyph=None, color=None, icon_key=None, icon_source=None
         state.all_tags_cache[tag_name][KEY_COLOR] = coerce_tag_field_value(KEY_COLOR, list(color))
     if icon_key is not None:
         state.all_tags_cache[tag_name][KEY_ICON_KEY] = coerce_tag_field_value(KEY_ICON_KEY, icon_key)
+    if icon_path is not None:
+        state.all_tags_cache[tag_name][KEY_ICON_PATH] = coerce_tag_field_value(
+            KEY_ICON_PATH, icon_path)
     if icon_source is not None:
         # Accepts the same 'GLYPH'/'BLENDER_ICON'/'CUSTOM' convenience string create_tag does
         # (operators.py's Edit Tag dialog passes this form). Without the conversion, the
@@ -581,6 +594,34 @@ def _set_mode_flags_for_tag(tag_name, mode_flags):
     """Set mode flags for a tag in state.all_tags_cache."""
     if tag_name in state.all_tags_cache and isinstance(state.all_tags_cache[tag_name], dict):
         state.all_tags_cache[tag_name]["mode_flags"] = mode_flags
+
+
+# Kept in sync with category_tab_icon_filepath_is_supported_image() in
+# source/blender/editors/screen/screen_category_tabs_ops.cc: the file browser already filters on
+# these, this is the second gate for paths typed or restored from disk.
+_CUSTOM_ICON_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff')
+
+
+def _validate_custom_icon_path(icon_path):
+    """Validate that a custom icon path points at a readable static image.
+
+    Args:
+        icon_path: Path to an image file, possibly Blender-relative ('//foo.png').
+
+    Returns:
+        Tuple of (is_valid: bool, error_message: str)
+    """
+    if not icon_path:
+        return False, "No custom icon file selected"
+
+    import os
+
+    abs_path = bpy.path.abspath(icon_path)
+    if not abs_path.lower().endswith(_CUSTOM_ICON_EXTENSIONS):
+        return False, "Only png, jpg, jpeg, webp, bmp, tif, tiff are supported"
+    if not os.path.exists(abs_path):
+        return False, "Custom icon file not found"
+    return True, ""
 
 
 def _validate_icon_key(icon_key):

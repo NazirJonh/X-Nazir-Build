@@ -625,9 +625,16 @@ void tag_icon_live_update_cb(bContext *C, void *arg_op, int /*event*/)
   int icon_source = RNA_enum_get(op->ptr, "icon_source");
   const int display_mode_ui = RNA_enum_get(op->ptr, "display_mode_ui");
 
+  /* `icon_path` only exists on dialogs that support custom icon files; read defensively so this
+   * callback keeps working for any caller that lacks the property. */
+  char icon_path[1024] = "";
+  if (PropertyRNA *icon_path_prop = RNA_struct_find_property(op->ptr, "icon_path")) {
+    RNA_property_string_get(op->ptr, icon_path_prop, icon_path);
+  }
+
   if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-    printf("[TAG_ICON_LIVE_UPDATE] icon_key='%s', icon_source=%d, display_mode_ui=%d\n",
-           icon_key, icon_source, display_mode_ui);
+    printf("[TAG_ICON_LIVE_UPDATE] icon_key='%s', icon_path='%s', icon_source=%d, display_mode_ui=%d\n",
+           icon_key, icon_path, icon_source, display_mode_ui);
   }
 
   /* Get color */
@@ -636,6 +643,9 @@ void tag_icon_live_update_cb(bContext *C, void *arg_op, int /*event*/)
 
   /* Update operator properties first - this is critical for template_icon_preview to update */
   RNA_string_set(op->ptr, "icon_key", icon_key);
+  if (PropertyRNA *icon_path_prop = RNA_struct_find_property(op->ptr, "icon_path")) {
+    RNA_property_string_set(op->ptr, icon_path_prop, icon_path);
+  }
   RNA_enum_set(op->ptr, "icon_source", icon_source);
   RNA_enum_set(op->ptr, "display_mode_ui", display_mode_ui);
   RNA_float_set_array(op->ptr, "color", color);
@@ -663,14 +673,19 @@ void tag_icon_live_update_cb(bContext *C, void *arg_op, int /*event*/)
 
     /* Update existing tag */
     STRNCPY(tag_item->icon_key, icon_key);
+    STRNCPY(tag_item->icon_path, icon_path);
     tag_item->icon_source = icon_source;
     copy_v3_v3(tag_item->color, color);
 
     if constexpr (CATEGORY_TAB_DEBUG_ENABLED) {
-      printf("[TAG ICON LIVE UPDATE] Updated tag '%s': icon_key='%s', icon_source=%d, display_mode_ui=%d\n",
-             tag_name, icon_key, icon_source, display_mode_ui);
+      printf("[TAG ICON LIVE UPDATE] Updated tag '%s': icon_key='%s', icon_path='%s', icon_source=%d, display_mode_ui=%d\n",
+             tag_name, icon_key, icon_path, icon_source, display_mode_ui);
     }
   }
+
+  /* The tag bar caches resolved icon ids per button; without this the custom icon would only
+   * appear after some unrelated event invalidated the cache. */
+  tag_bar_mark_all_dirty();
 
   /* Trigger redraw for live preview - notify area to update template_icon_preview */
   WM_main_add_notifier(NC_WINDOW, nullptr);

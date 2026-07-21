@@ -321,6 +321,7 @@ def _sync_wm_to_glyph_cache_impl():
                     # Keep icon fields when syncing WM -> cache.
                     # Without this, save path drops icon data back to defaults ("", 0).
                     icon_key = getattr(tag_item, "icon_key", "") or ""
+                    icon_path = getattr(tag_item, "icon_path", "") or ""
                     icon_source_raw = getattr(tag_item, "icon_source", 0)
                     if isinstance(icon_source_raw, str):
                         icon_source_map = {'GLYPH': 0, 'BLENDER_ICON': 1, 'CUSTOM': 2}
@@ -333,6 +334,7 @@ def _sync_wm_to_glyph_cache_impl():
                         "color": color,
                         "mode_flags": mode_flags,
                         "icon_key": icon_key,
+                        "icon_path": icon_path,
                         "icon_source": icon_source,
                     }
 

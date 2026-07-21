@@ -998,12 +998,102 @@ static void SCREEN_OT_category_tab_paste_glyph(wmOperatorType *ot)
 /** \name Category Tab Pick Custom Icon Operator
  * \{ */
 
+/**
+ * Resolve which operator the custom-icon file operators should write into.
+ *
+ * A non-empty `target_operator_ptr` is the tag dialogs' way of saying "write into me". The address
+ * itself is only a marker and is never dereferenced: the live operator is looked up by
+ * #ui::category_tag_dialog_operator_find, which walks the popup's UI block. An address cannot be
+ * validated against `wm->runtime->operators` because an open dialog has not been registered there
+ * yet, so that lookup would always miss.
+ */
+static wmOperator *category_tab_custom_icon_target_op_get(bContext *C, wmOperator *op)
+{
+  char target_op_ptr_str[64] = "";
+  if (PropertyRNA *prop = RNA_struct_find_property(op->ptr, "target_operator_ptr")) {
+    RNA_property_string_get(op->ptr, prop, target_op_ptr_str);
+  }
+
+  if (target_op_ptr_str[0] != '\0') {
+    return ui::category_tag_dialog_operator_find(C);
+  }
+
+  return category_tab_current_dialog_op;
+}
+
+/** True when the resolved target is a tag dialog rather than the category tab dialog. */
+static bool category_tab_custom_icon_target_is_tag(const wmOperator *target_op)
+{
+  return target_op != nullptr && target_op != category_tab_current_dialog_op;
+}
+
+/**
+ * Resolve the tag named by the `target_tag` property, if any.
+ *
+ * This is the Tag Management panel's route: that panel is plain UI with no operator behind it, so
+ * it names the tag it is editing instead of pointing at a dialog.
+ */
+static CategoryTagDef *category_tab_custom_icon_target_tag_get(bContext *C, wmOperator *op)
+{
+  char tag_name[64] = "";
+  if (PropertyRNA *prop = RNA_struct_find_property(op->ptr, "target_tag")) {
+    RNA_property_string_get(op->ptr, prop, tag_name);
+  }
+  if (tag_name[0] == '\0') {
+    return nullptr;
+  }
+
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm == nullptr) {
+    return nullptr;
+  }
+  for (CategoryTagDef *tag = static_cast<CategoryTagDef *>(wm->category_tags.first); tag;
+       tag = tag->next)
+  {
+    if (STREQ(tag->name, tag_name)) {
+      return tag;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * Write the custom icon fields into a tag and persist them.
+ *
+ * The write goes through RNA rather than straight into the struct so that
+ * #rna_CategoryTagDef_update runs, which is what syncs the change back into the Python cache and
+ * on to disk.
+ */
+static void category_tab_custom_icon_apply_to_tag(bContext *C,
+                                                  CategoryTagDef *tag,
+                                                  const char *filepath)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  PointerRNA tag_ptr = RNA_pointer_create_discrete(&wm->id, RNA_CategoryTagDef, tag);
+
+  if (filepath != nullptr) {
+    PropertyRNA *path_prop = RNA_struct_find_property(&tag_ptr, "icon_path");
+    RNA_property_string_set(&tag_ptr, path_prop, filepath);
+
+    PropertyRNA *key_prop = RNA_struct_find_property(&tag_ptr, "icon_key");
+    RNA_property_string_set(&tag_ptr, key_prop, "");
+  }
+
+  PropertyRNA *source_prop = RNA_struct_find_property(&tag_ptr, "icon_source");
+  RNA_property_int_set(&tag_ptr, source_prop, CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE);
+
+  /* One update call is enough: the callback re-syncs the whole tag, not a single property. Its
+   * NC_WM|ND_CATEGORY_GLYPHS notifier is also what invalidates the tag bar's icon cache, so no
+   * explicit dirty call is needed here. */
+  RNA_property_update(C, &tag_ptr, source_prop);
+}
+
 static bool category_tab_pick_custom_icon_poll(bContext *C)
 {
-  if (!category_tab_current_dialog_op || !category_tab_popup_block) {
-    return false;
-  }
-  return category_tab_edit_poll(C);
+  /* Deliberately not checking #category_tab_current_dialog_op: the tag dialogs are Python
+   * operators that pass their own target instead, so the C++ dialog globals are empty for them.
+   * The real target is resolved and validated in invoke/exec. */
+  return CTX_wm_manager(C) != nullptr;
 }
 
 static bool category_tab_icon_filepath_is_supported_image(const char *filepath)
@@ -1024,7 +1114,10 @@ static wmOperatorStatus category_tab_pick_custom_icon_invoke(bContext *C,
                                                              wmOperator *op,
                                                              const wmEvent * /*event*/)
 {
-  if (category_tab_current_dialog_op == nullptr) {
+  const CategoryTagDef *target_tag = category_tab_custom_icon_target_tag_get(C, op);
+  wmOperator *target_op = target_tag ? nullptr : category_tab_custom_icon_target_op_get(C, op);
+  if (target_tag == nullptr && target_op == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No icon editor is active");
     return OPERATOR_CANCELLED;
   }
 
@@ -1033,7 +1126,12 @@ static wmOperatorStatus category_tab_pick_custom_icon_invoke(bContext *C,
   }
   else {
     char current_icon_path[1024] = "";
-    RNA_string_get(category_tab_current_dialog_op->ptr, "icon_path", current_icon_path);
+    if (target_tag != nullptr) {
+      STRNCPY(current_icon_path, target_tag->icon_path);
+    }
+    else if (PropertyRNA *prop = RNA_struct_find_property(target_op->ptr, "icon_path")) {
+      RNA_property_string_get(target_op->ptr, prop, current_icon_path);
+    }
     if (current_icon_path[0] != '\0') {
       RNA_string_set(op->ptr, "filepath", current_icon_path);
     }
@@ -1045,8 +1143,10 @@ static wmOperatorStatus category_tab_pick_custom_icon_invoke(bContext *C,
 
 static wmOperatorStatus category_tab_pick_custom_icon_exec(bContext *C, wmOperator *op)
 {
-  if (category_tab_current_dialog_op == nullptr) {
-    BKE_report(op->reports, RPT_ERROR, "Edit Category Tab dialog is not active");
+  CategoryTagDef *target_tag = category_tab_custom_icon_target_tag_get(C, op);
+  wmOperator *target_op = target_tag ? nullptr : category_tab_custom_icon_target_op_get(C, op);
+  if (target_tag == nullptr && target_op == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No icon editor is active");
     return OPERATOR_CANCELLED;
   }
 
@@ -1065,17 +1165,40 @@ static wmOperatorStatus category_tab_pick_custom_icon_exec(bContext *C, wmOperat
     return OPERATOR_CANCELLED;
   }
 
-  wmOperator *dialog_op = category_tab_current_dialog_op;
-  RNA_enum_set(dialog_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON);
-  RNA_enum_set(dialog_op->ptr, "custom_icon_mode_ui", CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM);
-  RNA_string_set(dialog_op->ptr, "icon_path", filepath);
-  RNA_string_set(dialog_op->ptr, "icon_key", "");
-  RNA_string_set(dialog_op->ptr, "icon_provider", "");
-
   /* Force refresh preview cache for the selected path to avoid stale thumbnail when file changed. */
   BKE_previewimg_cached_release(filepath);
 
-  category_tab_edit_live_update_cb(C, dialog_op, 0);
+  if (target_tag != nullptr) {
+    category_tab_custom_icon_apply_to_tag(C, target_tag, filepath);
+    WM_main_add_notifier(NC_WINDOW, nullptr);
+    BKE_report(op->reports, RPT_INFO, "Custom icon file selected");
+    return OPERATOR_FINISHED;
+  }
+
+  const bool is_tag = category_tab_custom_icon_target_is_tag(target_op);
+
+  RNA_enum_set(target_op->ptr, "display_mode_ui", CATEGORY_TAB_EDIT_MODE_CUSTOM_ICON);
+  /* Looked up rather than set blindly: not every dialog that owns an `icon_path` also offers the
+   * Blender/Custom sub-mode toggle. */
+  if (RNA_struct_find_property(target_op->ptr, "custom_icon_mode_ui") != nullptr) {
+    RNA_enum_set(target_op->ptr, "custom_icon_mode_ui", CATEGORY_TAB_CUSTOM_ICON_MODE_CUSTOM);
+  }
+  RNA_string_set(target_op->ptr, "icon_path", filepath);
+  RNA_string_set(target_op->ptr, "icon_key", "");
+  if (is_tag) {
+    /* Tags have no icon provider; their icon_source enum carries the custom-file value. */
+    RNA_enum_set(target_op->ptr, "icon_source", CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE);
+  }
+  else {
+    RNA_string_set(target_op->ptr, "icon_provider", "");
+  }
+
+  if (is_tag) {
+    ui::tag_icon_live_update_cb(C, target_op, 0);
+  }
+  else {
+    category_tab_edit_live_update_cb(C, target_op, 0);
+  }
   WM_main_add_notifier(NC_WINDOW, nullptr);
 
   BKE_report(op->reports, RPT_INFO, "Custom icon file selected");
@@ -1109,6 +1232,23 @@ static void SCREEN_OT_category_tab_pick_custom_icon(wmOperatorType *ot)
                                      "Extension Filter",
                                      "");
   RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  PropertyRNA *target_prop = RNA_def_string(ot->srna,
+                                            "target_operator_ptr",
+                                            nullptr,
+                                            64,
+                                            "Target Operator Pointer",
+                                            "Internal: address of the dialog operator to write into");
+  RNA_def_property_flag(target_prop, PROP_HIDDEN);
+
+  PropertyRNA *target_tag_prop = RNA_def_string(
+      ot->srna,
+      "target_tag",
+      nullptr,
+      64,
+      "Target Tag",
+      "Internal: name of the tag to write into, used when no dialog is open");
+  RNA_def_property_flag(target_tag_prop, PROP_HIDDEN);
 }
 
 /** \} */
@@ -1119,21 +1259,26 @@ static void SCREEN_OT_category_tab_pick_custom_icon(wmOperatorType *ot)
 
 static bool category_tab_reload_custom_icon_poll(bContext *C)
 {
-  if (!category_tab_current_dialog_op || !category_tab_popup_block) {
-    return false;
-  }
-  return category_tab_edit_poll(C);
+  /* See #category_tab_pick_custom_icon_poll for why the dialog globals are not checked here. */
+  return CTX_wm_manager(C) != nullptr;
 }
 
 static wmOperatorStatus category_tab_reload_custom_icon_exec(bContext *C, wmOperator *op)
 {
-  if (category_tab_current_dialog_op == nullptr) {
-    BKE_report(op->reports, RPT_ERROR, "Edit Category Tab dialog is not active");
+  CategoryTagDef *target_tag = category_tab_custom_icon_target_tag_get(C, op);
+  wmOperator *target_op = target_tag ? nullptr : category_tab_custom_icon_target_op_get(C, op);
+  if (target_tag == nullptr && target_op == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No icon editor is active");
     return OPERATOR_CANCELLED;
   }
 
   char icon_path[1024] = "";
-  RNA_string_get(category_tab_current_dialog_op->ptr, "icon_path", icon_path);
+  if (target_tag != nullptr) {
+    STRNCPY(icon_path, target_tag->icon_path);
+  }
+  else if (PropertyRNA *prop = RNA_struct_find_property(target_op->ptr, "icon_path")) {
+    RNA_property_string_get(target_op->ptr, prop, icon_path);
+  }
   if (icon_path[0] == '\0') {
     BKE_report(op->reports, RPT_WARNING, "No custom icon path set");
     return OPERATOR_CANCELLED;
@@ -1151,8 +1296,21 @@ static wmOperatorStatus category_tab_reload_custom_icon_exec(bContext *C, wmOper
 
   BKE_previewimg_cached_release(icon_path);
 
-  wmOperator *dialog_op = category_tab_current_dialog_op;
-  category_tab_edit_live_update_cb(C, dialog_op, 0);
+  if (target_tag != nullptr) {
+    /* Path is unchanged, so only the cache had to be dropped above; the update call re-resolves
+     * it and repaints everything showing this tag. */
+    category_tab_custom_icon_apply_to_tag(C, target_tag, nullptr);
+    WM_main_add_notifier(NC_WINDOW, nullptr);
+    BKE_report(op->reports, RPT_INFO, "Custom icon reloaded");
+    return OPERATOR_FINISHED;
+  }
+
+  if (category_tab_custom_icon_target_is_tag(target_op)) {
+    ui::tag_icon_live_update_cb(C, target_op, 0);
+  }
+  else {
+    category_tab_edit_live_update_cb(C, target_op, 0);
+  }
   WM_main_add_notifier(NC_WINDOW, nullptr);
 
   BKE_report(op->reports, RPT_INFO, "Custom icon reloaded");
@@ -1169,6 +1327,23 @@ static void SCREEN_OT_category_tab_reload_custom_icon(wmOperatorType *ot)
   ot->poll = category_tab_reload_custom_icon_poll;
 
   ot->flag = OPTYPE_REGISTER;
+
+  PropertyRNA *target_prop = RNA_def_string(ot->srna,
+                                            "target_operator_ptr",
+                                            nullptr,
+                                            64,
+                                            "Target Operator Pointer",
+                                            "Internal: address of the dialog operator to write into");
+  RNA_def_property_flag(target_prop, PROP_HIDDEN);
+
+  PropertyRNA *target_tag_prop = RNA_def_string(
+      ot->srna,
+      "target_tag",
+      nullptr,
+      64,
+      "Target Tag",
+      "Internal: name of the tag to write into, used when no dialog is open");
+  RNA_def_property_flag(target_tag_prop, PROP_HIDDEN);
 }
 
 /** \} */

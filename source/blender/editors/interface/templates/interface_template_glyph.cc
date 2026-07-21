@@ -602,28 +602,40 @@ void uiTemplateGlyphPreview(Layout *layout,
 }
 
 void uiTemplateIconPreview(Layout *layout,
-                            bContext * /*C*/,
-                            const char *icon_key,
-                            PointerRNA *ptr,
-                            const char *color_propname,
-                            float size_multiplier)
+                           bContext * /*C*/,
+                           const char *icon_key,
+                           const char *icon_path,
+                           PointerRNA *ptr,
+                           const char *color_propname,
+                           float size_multiplier)
 {
-  if (!layout || !icon_key || icon_key[0] == '\0') {
+  const bool has_key = (icon_key && icon_key[0] != '\0');
+  const bool has_path = (icon_path && icon_path[0] != '\0');
+  if (!layout || (!has_key && !has_path)) {
     return;
   }
 
   /* Resolve icon_key to icon_id */
   int icon_id = ICON_NONE;
-  if (!RNA_enum_value_from_identifier(rna_enum_icon_items, icon_key, &icon_id) || icon_id <= 0) {
-    /* Try special icons not in standard enum */
-    if (STREQ(icon_key, "FUND")) {
-      icon_id = ICON_FUND;
+  if (has_key) {
+    if (!RNA_enum_value_from_identifier(rna_enum_icon_items, icon_key, &icon_id) || icon_id <= 0) {
+      /* Try special icons not in standard enum */
+      if (STREQ(icon_key, "FUND")) {
+        icon_id = ICON_FUND;
+      }
+      else if (STREQ(icon_key, "BLENDER")) {
+        icon_id = ICON_BLENDER;
+      }
+      else {
+        return; /* Icon not found */
+      }
     }
-    else if (STREQ(icon_key, "BLENDER")) {
-      icon_id = ICON_BLENDER;
-    }
-    else {
-      return;  /* Icon not found */
+  }
+  else {
+    /* Custom icon image file. Same resolver the category tab preview uses. */
+    icon_id = category_tab_icon_id_resolve_from_key_path("", icon_path);
+    if (icon_id == ICON_NONE) {
+      return;
     }
   }
 
@@ -639,7 +651,7 @@ void uiTemplateIconPreview(Layout *layout,
   const int preview_size = int(style->widget.points * UI_SCALE_FAC * 2.0f * size_multiplier);
 
   /* Copy callback data to keep it valid across redraws while popup stays open. */
-  const std::string icon_key_copy = icon_key;
+  const std::string icon_key_copy = has_key ? icon_key : (icon_path ? icon_path : "");
   const std::string color_propname_copy = color_propname ? color_propname : "";
   const PointerRNA preview_ptr = ptr ? *ptr : PointerRNA_NULL;
   const bool has_preview_ptr = ptr != nullptr;
@@ -647,16 +659,16 @@ void uiTemplateIconPreview(Layout *layout,
 
   /* Create preview button using Extra type with custom draw callback */
   Button *preview_but = uiDefBut(preview_block,
-                                       ButtonType::Extra,
-                                      "",
-                                      0,
-                                       0,
-                                       preview_size,
-                                       preview_size,
-                                       nullptr,
-                                       0.0f,
-                                       0.0f,
-                                       std::nullopt);
+                                 ButtonType::Extra,
+                                 "",
+                                 0,
+                                 0,
+                                 preview_size,
+                                 preview_size,
+                                 nullptr,
+                                 0.0f,
+                                 0.0f,
+                                 std::nullopt);
 
   /* Read color from RNA on every redraw for live-update preview in dialogs/popups. */
   button_func_drawextra_set(preview_block,

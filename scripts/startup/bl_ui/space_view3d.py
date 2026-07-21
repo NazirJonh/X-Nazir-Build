@@ -1461,11 +1461,14 @@ class VIEW3D_OT_tag_order_reset(Operator):
 
 def _is_tag_visible_in_mode(tag, context):
     """Check if tag is visible (has a valid glyph OR icon) and is active for current editor mode."""
-    # Check if tag has glyph OR icon (icon_source == 1 and icon_key not empty)
+    # Check if tag has a glyph OR an icon: a built-in one (icon_source 1 with an icon_key) or a
+    # custom image file (icon_source 2 with an icon_path).
     icon_source_val = getattr(tag, "icon_source", 0)
     icon_key_val = getattr(tag, "icon_key", "")
+    icon_path_val = getattr(tag, "icon_path", "")
     has_glyph = bool(tag.glyph)
-    has_icon = (icon_source_val == 1 and bool(icon_key_val))
+    has_icon = ((icon_source_val == 1 and bool(icon_key_val)) or
+                (icon_source_val == 2 and bool(icon_path_val)))
 
     if not has_glyph and not has_icon:
         return False
@@ -1551,13 +1554,20 @@ class VIEW3D_UL_tag_order_list(UIList):
         # Determine icon source like in USERPREF_UL_category_tags
         icon_source_val = getattr(item, "icon_source", 0)
         icon_key_val = getattr(item, "icon_key", "")
+        icon_path_val = getattr(item, "icon_path", "")
         glyph_val = getattr(item, "glyph", "")
 
         # DEBUG
         if TAG_DEBUG:
-            print(f"[VIEW3D_UL_tag_order_list] tag='{item.name}' icon_source={icon_source_val} icon_key='{icon_key_val}' glyph='{glyph_val}'")
+            print(f"[VIEW3D_UL_tag_order_list] tag='{item.name}' icon_source={icon_source_val} icon_key='{icon_key_val}' icon_path='{icon_path_val}' glyph='{glyph_val}'")
 
-        use_icon = (icon_source_val == 1 and icon_key_val)
+        # 1 = built-in Blender icon, 2 = custom icon image file. A custom icon must resolve to a
+        # preview id to count; 0 means the file is unreadable and the tag falls back to its glyph.
+        # template_icon_preview cannot be used here: it draws through a per-block callback, and a
+        # UIList shares one block across all rows, so every row would overwrite the previous one.
+        custom_icon_id = (layout.icon_from_file(icon_path_val)
+                          if (icon_source_val == 2 and icon_path_val) else 0)
+        use_icon = (icon_source_val == 1 and icon_key_val) or custom_icon_id != 0
         use_glyph = (not use_icon and glyph_val)
 
         # Use split layout like in Preferences for consistent appearance
@@ -1568,14 +1578,18 @@ class VIEW3D_UL_tag_order_list(UIList):
         col_glyph.ui_units_x = 4
 
         if use_icon:
-            # Display Blender icon with tag color tint
-            col_glyph.colored_label(
-                text="",
-                icon=icon_key_val,
-                color_r=item.color[0],
-                color_g=item.color[1],
-                color_b=item.color[2]
-            )
+            if custom_icon_id:
+                # Custom images keep their own colors, so no tint is applied.
+                col_glyph.label(text="", icon_value=custom_icon_id)
+            else:
+                # Display Blender icon with tag color tint
+                col_glyph.colored_label(
+                    text="",
+                    icon=icon_key_val,
+                    color_r=item.color[0],
+                    color_g=item.color[1],
+                    color_b=item.color[2]
+                )
         elif use_glyph:
             try:
                 # Convert hex string to glyph character
@@ -1888,7 +1902,9 @@ class VIEW3D_HT_tag_bar_tags(Header):
         # Filter tag list to only include those with glyphs or icons and active for current mode
         mode_string = context.mode
         tags_to_show = [t for t in tags_sorted
-                       if (glyph_display(t.glyph) or (t.icon_source == 1 and t.icon_key))
+                       if (glyph_display(t.glyph)
+                           or (t.icon_source == 1 and t.icon_key)
+                           or (t.icon_source == 2 and getattr(t, "icon_path", "")))
                        and self.is_tag_active_for_mode(t, mode_string)]
 
         # Show message if no visible tags exist

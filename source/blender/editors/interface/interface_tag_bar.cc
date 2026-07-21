@@ -13,9 +13,10 @@
 #include "interface_intern.hh"
 #include "interface_category_py_bridge.hh"
 
-#include "DNA_userdef_types.h"
 #include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
@@ -640,32 +641,51 @@ static TagButton tag_button_from_def(const wmWindowManager *wm,
   /* Store icon_key for fallback rendering. */
   STRNCPY(btn.icon_key, tag_def->icon_key);
 
-  /* Resolve icon from icon_key. */
+  /* Resolve icon from icon_key (built-in) or icon_path (custom image file). */
   btn.icon_id = ICON_NONE;
   btn.use_builtin_icon = false;
 
   if (g_tag_bar_debug_enabled) {
-    printf("[TAG_BAR] tag='%s' icon_source=%d icon_key='%s' glyph='%s'\n",
-           tag_def->name, tag_def->icon_source, tag_def->icon_key, tag_def->glyph);
+    printf("[TAG_BAR] tag='%s' icon_source=%d icon_key='%s' icon_path='%s' glyph='%s'\n",
+           tag_def->name,
+           tag_def->icon_source,
+           tag_def->icon_key,
+           tag_def->icon_path,
+           tag_def->glyph);
   }
 
-  if (tag_def->icon_source == 1 && tag_def->icon_key[0] != '\0') {
-    /* icon_source == 1 means use Blender icon. */
+  if (tag_def->icon_source == CATEGORY_TAG_ICON_SOURCE_BLENDER_ICON &&
+      tag_def->icon_key[0] != '\0')
+  {
     btn.icon_id = category_tab_icon_id_resolve_from_key_path(tag_def->icon_key, nullptr);
     btn.use_builtin_icon = (btn.icon_id != ICON_NONE);
-    if (g_tag_bar_debug_enabled) {
-      printf("[TAG_BAR] tag='%s' resolved icon_id=%d use_builtin_icon=%d\n",
-             tag_def->name, btn.icon_id, btn.use_builtin_icon);
-    }
+  }
+  else if (tag_def->icon_source == CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE &&
+           tag_def->icon_path[0] != '\0')
+  {
+    /* Reading the image file happens only here, on the data-update path. The draw path
+     * (#draw_tag_icon_with_tint) must never touch the file system, it runs on every redraw. */
+    btn.icon_id = category_tab_icon_id_resolve_from_path(tag_def->icon_path);
+    btn.use_builtin_icon = (btn.icon_id != ICON_NONE);
+  }
+
+  if (g_tag_bar_debug_enabled) {
+    printf("[TAG_BAR] tag='%s' resolved icon_id=%d use_builtin_icon=%d\n",
+           tag_def->name, btn.icon_id, btn.use_builtin_icon);
   }
 
   /* Visibility:
    * 1. Must have a glyph (not empty) OR icon (if using icon mode).
    * 2. Must be active for current mode (mode_flags check). */
   const bool has_glyph = (tag_def->glyph[0] != '\0');
-  /* has_icon is based on icon_key presence, not icon_id resolution success: icon_id may be
-   * ICON_NONE if resolution fails, but the tag should still show. */
-  const bool has_icon = (tag_def->icon_source == 1 && tag_def->icon_key[0] != '\0');
+  /* For built-in icons `has_icon` deliberately keys off `icon_key`, not off a successful
+   * resolve: an unresolved key should still show the tag. A custom file is different — if the
+   * file is gone there is nothing to show, so the tag falls back to its glyph, and is hidden
+   * only when it has no glyph either. */
+  const bool has_icon = (tag_def->icon_source == CATEGORY_TAG_ICON_SOURCE_BLENDER_ICON &&
+                         tag_def->icon_key[0] != '\0') ||
+                        (tag_def->icon_source == CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE &&
+                         btn.icon_id != ICON_NONE);
 
   if (g_tag_bar_debug_enabled) {
     printf("[TAG_BAR] tag='%s' has_glyph=%d has_icon=%d mode_flags=%u current_mode_flag=%u\n",
@@ -2013,9 +2033,12 @@ static void tag_bar_filter_popover_panel_draw(const bContext *C, Panel *panel)
        tag_def;
        tag_def = static_cast<const CategoryTagDef *>(tag_def->next))
   {
-    /* Check if tag has glyph OR icon (icon_source == 1 and icon_key not empty) */
+    /* Check if tag has glyph OR icon (built-in key, or a custom image file). */
     const bool has_glyph = (tag_def->glyph[0] != '\0');
-    const bool has_icon = (tag_def->icon_source == 1 && tag_def->icon_key[0] != '\0');
+    const bool has_icon = (tag_def->icon_source == CATEGORY_TAG_ICON_SOURCE_BLENDER_ICON &&
+                           tag_def->icon_key[0] != '\0') ||
+                          (tag_def->icon_source == CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE &&
+                           tag_def->icon_path[0] != '\0');
     if (!has_glyph && !has_icon) {
       continue;
     }

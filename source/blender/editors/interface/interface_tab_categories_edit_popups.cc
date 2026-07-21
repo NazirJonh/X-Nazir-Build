@@ -171,8 +171,17 @@ blender::Vector<std::pair<std::string, std::string>> glyph_search_call_python(
 /** \name Glyph Cache
  * \{ */
 
-/* Static cache for glyphs - persists until explicitly cleared or Blender exits */
-static blender::Vector<std::pair<std::string, std::string>> g_glyph_cache;
+/* Static cache for glyphs - persists until explicitly cleared or Blender exits.
+ *
+ * Construct on first use: #blender::Vector allocates through guardedalloc, and a namespace-scope
+ * static would be destructed after the memory leak detector has run (statics are destructed in
+ * reverse order of construction, and this one would be constructed before
+ * #MEM_init_memleak_detection). Freeing at that point crashes on exit. */
+static blender::Vector<std::pair<std::string, std::string>> &glyph_cache()
+{
+  static blender::Vector<std::pair<std::string, std::string>> cache;
+  return cache;
+}
 static bool g_glyph_cache_valid = false;
 
 /**
@@ -180,7 +189,7 @@ static bool g_glyph_cache_valid = false;
  */
 static void glyph_cache_clear()
 {
-  g_glyph_cache.clear();
+  glyph_cache().clear();
   g_glyph_cache_valid = false;
 }
 
@@ -191,10 +200,10 @@ static void glyph_cache_clear()
 static const blender::Vector<std::pair<std::string, std::string>>& glyph_cache_get(bContext *C)
 {
   if (!g_glyph_cache_valid) {
-    g_glyph_cache = glyph_search_call_python(C, "", "", GLYPH_SEARCH_MAX_RESULTS);
+    glyph_cache() = glyph_search_call_python(C, "", "", GLYPH_SEARCH_MAX_RESULTS);
     g_glyph_cache_valid = true;
   }
-  return g_glyph_cache;
+  return glyph_cache();
 }
 
 /** \} */
@@ -1181,6 +1190,55 @@ void icon_more_icons_button_cb(bContext *C, void *arg1, void * /*arg2*/)
   wmWindow *window = CTX_wm_window(C);
   popup_handlers_add(C, &window->runtime->modalhandlers, handle, 0);
   WM_event_add_mousemove(window);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Tag Dialog Lookup
+ * \{ */
+
+wmOperator *category_tag_dialog_operator_find(bContext *C)
+{
+  /* Deliberately not searching `wm->runtime->operators`: that is the register/redo stack, which an
+   * operator only joins once it has finished (see #wm_operator_register). A dialog that is still
+   * open is never in it, so a lookup there can only ever miss. The popup's UI block, on the other
+   * hand, holds a live pointer to the operator for as long as the dialog is on screen. */
+  auto block_scan = [](ARegion *region) -> wmOperator * {
+    if (region == nullptr || region->runtime == nullptr) {
+      return nullptr;
+    }
+    for (Block &block : region->runtime->uiblocks) {
+      wmOperator *block_op = block.ui_operator;
+      if (block_op == nullptr || block_op->idname[0] == '\0') {
+        continue;
+      }
+      if (STREQ(block_op->idname, "WM_OT_category_tag_create") ||
+          STREQ(block_op->idname, "WM_OT_category_tag_edit"))
+      {
+        return block_op;
+      }
+    }
+    return nullptr;
+  };
+
+  /* The context region is checked first: it is the popup the user is interacting with, so it wins
+   * over any other dialog that might still be on screen. */
+  if (wmOperator *found = block_scan(CTX_wm_region(C))) {
+    return found;
+  }
+
+  bScreen *screen = CTX_wm_screen(C);
+  if (screen == nullptr) {
+    return nullptr;
+  }
+  for (ARegion &region : screen->regionbase) {
+    if (wmOperator *found = block_scan(&region)) {
+      return found;
+    }
+  }
+
+  return nullptr;
 }
 
 /** \} */

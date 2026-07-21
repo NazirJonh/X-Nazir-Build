@@ -1757,12 +1757,17 @@ Block *category_tab_edit_block_create(bContext *C, ARegion *region, void *user_d
         for (const CategoryTagUIRecord &tag : tags_data_header) {
           /* Only show colored glyph for active tags */
           if (tag.name[0] != '\0' && tag.is_active && tag.glyph[0] != '\0') {
-            /* Determine what to display: icon takes priority over glyph if icon_source is ICON (1).
-             * This ensures that when a tag is switched to 'Icon' mode, it renders correctly
-             * in the Tags List header (using standard Label icon rendering). */
+            /* Determine what to display: an icon takes priority over the glyph, whether it is a
+             * built-in icon (icon_source 1) or a custom image file (icon_source 2). This ensures
+             * that when a tag is switched to 'Icon' mode, it renders correctly in the Tags List
+             * header (using standard Label icon rendering). */
             int draw_icon_id = ICON_NONE;
             const char *draw_text = tag.glyph;
-            if (tag.icon_source == 1 && tag.icon_id > 0) {
+            if (ELEM(tag.icon_source,
+                     CATEGORY_TAG_ICON_SOURCE_BLENDER_ICON,
+                     CATEGORY_TAG_ICON_SOURCE_CUSTOM_FILE) &&
+                tag.icon_id > 0)
+            {
               draw_icon_id = tag.icon_id;
               draw_text = ""; /* Don't show glyph if icon is set. */
             }

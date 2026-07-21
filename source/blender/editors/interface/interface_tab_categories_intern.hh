@@ -94,7 +94,7 @@ struct DeferredCategoryActivation {
   uint32_t activation_mode_flag = 0; /* Mode flags where the extension was activated */
   bool tag_already_assigned = false; /* True if a tag was already assigned via drag & drop */
   std::string tag_name_to_assign;   /* Tag name to assign when category appears (for deferred tag assignment) */
-  /* Pending insert position - copied from g_pending_category_insert before it's cleared */
+  /* Pending insert position - copied from pending_category_insert() before it's cleared */
   bool pending_insert_valid = false;
   std::string pending_insert_tag_key;      /* Full key like "VIEW3D:AAA" for JSON order */
   std::string pending_insert_anchor_before;
@@ -110,10 +110,14 @@ struct CategoryTabIconResolved {
   const char *provider = nullptr;
 };
 
-/* Shared mutable state. Defined in interface_tab_categories.cc. */
-extern PendingCategoryInsert g_pending_category_insert;
+/* Shared mutable state. Defined in interface_tab_categories.cc.
+ *
+ * The two accessors below use the construct-on-first-use idiom: they own guardedalloc-backed
+ * containers (#Set, #Vector), and a namespace-scope static would be destructed after the memory
+ * leak detector has run (see #MEM_init_memleak_detection), which crashes on exit. */
+PendingCategoryInsert &pending_category_insert();
 extern DeferredCategoryActivation g_deferred_category_activation;
-extern Set<std::string> g_known_categories_before_extension_drop;
+Set<std::string> &known_categories_before_extension_drop();
 
 /* Defined in interface_tab_categories.cc, used by interface_tab_categories_draw.cc. */
 void apply_category_order(bContext *C, ARegion *region, CategoryDragState *state);

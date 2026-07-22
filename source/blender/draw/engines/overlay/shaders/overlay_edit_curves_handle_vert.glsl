@@ -142,6 +142,11 @@ void geometry_main(VertOut geom_in[2],
   float4 v1 = geom_in[0].gpu_position;
   float4 v2 = geom_in[1].gpu_position;
 
+  /* Skip drawing when either endpoint is hidden. */
+  if (((geom_in[0].flag | geom_in[1].flag) & EDIT_CURVES_HIDDEN) != 0u) {
+    return;
+  }
+
   bool is_active = (geom_in[0].flag & EDIT_CURVES_ACTIVE_HANDLE) != 0u;
   uint color_id = (geom_in[0].flag >> EDIT_CURVES_HANDLE_TYPES_SHIFT) & 7u;
 

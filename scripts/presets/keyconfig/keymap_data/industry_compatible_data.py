@@ -3417,6 +3417,10 @@ def km_curves(params):
         ("curves.select_less", {"type": 'PAGE_DOWN', "value": 'PRESS', "repeat": True}, None),
         # Delete
         ("curves.delete", {"type": 'DEL', "value": 'PRESS'}, None),
+        # Hide/Reveal
+        ("curves.reveal", {"type": 'H', "value": 'PRESS', "alt": True}, None),
+        ("curves.hide", {"type": 'H', "value": 'PRESS'}, {"properties": [("unselected", False)]}),
+        ("curves.hide", {"type": 'H', "value": 'PRESS', "shift": True}, {"properties": [("unselected", True)]}),
         # Proportional Editing
         ("wm.context_toggle", {"type": 'B', "value": 'PRESS'},
          {"properties": [("data_path", "tool_settings.use_proportional_edit")]}),
@@ -3459,6 +3463,10 @@ def km_sculpt_curves(params):
          "ctrl": True}, {"properties": [("action", 'DESELECT')]}),
         ("curves.select_all", {"type": 'I', "value": 'PRESS', "ctrl": True}, {"properties": [("action", 'INVERT')]}),
         ("sculpt_curves.select_grow", {"type": 'A', "value": 'PRESS', "shift": True}, {}),
+        # Hide/Reveal
+        ("sculpt_curves.reveal", {"type": 'H', "value": 'PRESS', "alt": True}, None),
+        ("sculpt_curves.hide", {"type": 'H', "value": 'PRESS'}, {"properties": [("unselected", False)]}),
+        ("sculpt_curves.hide", {"type": 'H', "value": 'PRESS', "shift": True}, {"properties": [("unselected", True)]}),
         # Density
         ("sculpt_curves.min_distance_edit", {"type": 'D', "value": 'PRESS', "ctrl": True}, {}),
         # Tools

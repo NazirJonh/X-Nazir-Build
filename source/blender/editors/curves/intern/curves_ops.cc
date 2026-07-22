@@ -29,6 +29,7 @@
 #include "BKE_bvhutils.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
+#include "BKE_curves_hide.hh"
 #include "BKE_customdata.hh"
 #include "BKE_geometry_set.hh"
 #include "BKE_layer.hh"
@@ -1460,6 +1461,147 @@ static void CURVES_OT_duplicate(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Hide and Reveal
+ * \{ */
+
+/** \return The elements of \a domain that are hidden. */
+static IndexMask hidden_mask(const bke::CurvesGeometry &curves,
+                             const bke::AttrDomain domain,
+                             IndexMaskMemory &memory)
+{
+  const IndexRange domain_range(curves.attributes().domain_size(domain));
+  const IndexMask visible = bke::curves::visible_mask(curves, domain, memory);
+  return IndexMask::from_difference(domain_range, visible, memory);
+}
+
+bool hide_selected(Curves &curves_id, const bool unselected)
+{
+  bke::CurvesGeometry &curves = curves_id.geometry.wrap();
+  const bke::AttrDomain domain = bke::AttrDomain(curves_id.selection_domain);
+
+  IndexMaskMemory memory;
+  const IndexMask selected = domain == bke::AttrDomain::Point ?
+                                 retrieve_selected_points(curves_id, memory) :
+                                 retrieve_selected_curves(curves_id, memory);
+  const IndexRange domain_range(curves.attributes().domain_size(domain));
+  const IndexMask to_hide = unselected ?
+                                IndexMask::from_difference(domain_range, selected, memory) :
+                                selected;
+  if (to_hide.is_empty()) {
+    return false;
+  }
+
+  if (domain == bke::AttrDomain::Point) {
+    bke::curves::hide_points(curves, to_hide, true);
+  }
+  else {
+    bke::curves::hide_curves(curves, to_hide, true);
+  }
+
+  /* Hidden elements must never stay selected, otherwise later operators would still act on them.
+   * Bezier handle selection lives on the point domain too, so it is covered by the same writers.
+   */
+  foreach_selection_attribute_writer(curves, domain, [&](bke::GSpanAttributeWriter &selection) {
+    fill_selection_false(selection.span, to_hide);
+  });
+
+  return true;
+}
+
+bool reveal_all(Curves &curves_id, const bool select)
+{
+  bke::CurvesGeometry &curves = curves_id.geometry.wrap();
+  const bke::AttrDomain domain = bke::AttrDomain(curves_id.selection_domain);
+
+  IndexMaskMemory memory;
+  const IndexMask hidden = hidden_mask(curves, domain, memory);
+  if (!bke::curves::show_all(curves)) {
+    return false;
+  }
+
+  if (select && !hidden.is_empty()) {
+    foreach_selection_attribute_writer(curves, domain, [&](bke::GSpanAttributeWriter &selection) {
+      fill_selection_true(selection.span, hidden);
+    });
+  }
+
+  return true;
+}
+
+namespace hide {
+
+static wmOperatorStatus exec(bContext *C, wmOperator *op)
+{
+  const bool unselected = RNA_boolean_get(op->ptr, "unselected");
+
+  bool changed = false;
+  for (Curves *curves_id : get_unique_editable_curves(*C)) {
+    if (!hide_selected(*curves_id, unselected)) {
+      continue;
+    }
+    changed = true;
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_GEOM | ND_DATA, curves_id);
+  }
+
+  return changed ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+}  // namespace hide
+
+static void CURVES_OT_hide(wmOperatorType *ot)
+{
+  ot->name = "Hide Selected";
+  ot->idname = __func__;
+  ot->description = "Hide selected control points or curves";
+
+  ot->exec = hide::exec;
+  ot->poll = editable_curves_in_edit_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_boolean(
+      ot->srna, "unselected", false, "Unselected", "Hide unselected rather than selected");
+}
+
+namespace reveal {
+
+static wmOperatorStatus exec(bContext *C, wmOperator *op)
+{
+  const bool select = RNA_boolean_get(op->ptr, "select");
+
+  bool changed = false;
+  for (Curves *curves_id : get_unique_editable_curves(*C)) {
+    if (!reveal_all(*curves_id, select)) {
+      continue;
+    }
+    changed = true;
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_GEOM | ND_DATA, curves_id);
+  }
+
+  return changed ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+}  // namespace reveal
+
+static void CURVES_OT_reveal(wmOperatorType *ot)
+{
+  ot->name = "Reveal Hidden";
+  ot->idname = __func__;
+  ot->description = "Reveal all hidden control points and curves";
+
+  ot->exec = reveal::exec;
+  ot->poll = editable_curves_in_edit_mode_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_boolean(ot->srna, "select", true, "Select", "");
+}
+
+/** \} */
+
 namespace clear_tilt {
 
 static wmOperatorStatus exec(bContext *C, wmOperator * /*op*/)
@@ -1992,6 +2134,8 @@ void operatortypes_curves()
   WM_operatortype_append(CURVES_OT_surface_set);
   WM_operatortype_append(CURVES_OT_delete);
   WM_operatortype_append(CURVES_OT_duplicate);
+  WM_operatortype_append(CURVES_OT_hide);
+  WM_operatortype_append(CURVES_OT_reveal);
   WM_operatortype_append(CURVES_OT_tilt_clear);
   WM_operatortype_append(CURVES_OT_cyclic_toggle);
   WM_operatortype_append(CURVES_OT_curve_type_set);

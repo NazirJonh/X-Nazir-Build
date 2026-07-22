@@ -1254,11 +1254,17 @@ static bool curves_select_lasso(const ViewContext &vc,
   const bke::AttrDomain selection_domain = bke::AttrDomain(curves_id.selection_domain);
   const float4x4 projection = ED_view3d_ob_project_mat_get(vc.rv3d, object);
   IndexMaskMemory mask_memory;
-  const IndexMask visible_mask = bke::curves::hide::get_visible_mask(
-      curves, selection_domain, mask_memory);
+  const IndexMask visible_mask = bke::curves::visible_mask(curves, selection_domain, mask_memory);
 
-  return ed::curves::select_lasso(
-      vc, curves, deformation, projection, visible_mask, visible_mask, selection_domain, mcoords, sel_op);
+  return ed::curves::select_lasso(vc,
+                                  curves,
+                                  deformation,
+                                  projection,
+                                  visible_mask,
+                                  visible_mask,
+                                  selection_domain,
+                                  mcoords,
+                                  sel_op);
 }
 
 static bool do_curves_sculpt_lasso_select(const ViewContext &vc,
@@ -3240,7 +3246,7 @@ static bool ed_curves_select_pick(bContext &C, const int mval[2], const SelectPi
           const bke::CurvesGeometry &curves = curves_id.geometry.wrap();
           const float4x4 projection = ED_view3d_ob_project_mat_get(vc.rv3d, &curves_ob);
           IndexMaskMemory mask_memory;
-          const IndexMask visible_mask = bke::curves::hide::get_visible_mask(
+          const IndexMask visible_mask = bke::curves::visible_mask(
               curves, selection_domain, mask_memory);
           const auto range_consumer =
               [&](IndexRange range, Span<float3> positions, StringRef selection_attribute_name) {
@@ -4527,11 +4533,17 @@ static bool do_curves_select_box(const ViewContext &vc,
   const bke::AttrDomain selection_domain = bke::AttrDomain(curves_id.selection_domain);
   const float4x4 projection = ED_view3d_ob_project_mat_get(vc.rv3d, object);
   IndexMaskMemory mask_memory;
-  const IndexMask visible_mask = bke::curves::hide::get_visible_mask(
-      curves, selection_domain, mask_memory);
+  const IndexMask visible_mask = bke::curves::visible_mask(curves, selection_domain, mask_memory);
 
-  return ed::curves::select_box(
-      vc, curves, deformation, projection, visible_mask, visible_mask, selection_domain, *rect, sel_op);
+  return ed::curves::select_box(vc,
+                                curves,
+                                deformation,
+                                projection,
+                                visible_mask,
+                                visible_mask,
+                                selection_domain,
+                                *rect,
+                                sel_op);
 }
 
 static bool do_curves_sculpt_box_select(const ViewContext &vc,

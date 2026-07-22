@@ -14,7 +14,6 @@
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
-#include "BKE_curves_hide.hh"
 #include "BKE_paint.hh"
 
 #include "DEG_depsgraph.hh"
@@ -78,6 +77,16 @@ struct SelectionPaintOperationExecutor {
   CurvesSurfaceTransforms transforms_;
 
   SelectionPaintOperationExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
+
+  /* Visibility is looked up once per brush step, an empty span means nothing is hidden. */
+  VArraySpan<bool> hide_point() const
+  {
+    return *curves_->attributes().lookup<bool>(".hide_point", bke::AttrDomain::Point);
+  }
+  VArraySpan<bool> hide_curve() const
+  {
+    return *curves_->attributes().lookup<bool>(".hide_curve", bke::AttrDomain::Curve);
+  }
 
   void execute(SelectionPaintOperation &self, const StrokeExtension &stroke_extension)
   {
@@ -169,14 +178,11 @@ struct SelectionPaintOperationExecutor {
     const float brush_radius_re = brush_radius_base_re_ * brush_radius_factor_;
     const float brush_radius_sq_re = pow2f(brush_radius_re);
 
+    const VArraySpan<bool> hide_point = this->hide_point();
+
     threading::parallel_for(curves_->points_range(), 1024, [&](const IndexRange point_range) {
       for (const int point_i : point_range) {
-        if (bke::curves::hide::point_is_hidden(*curves_, point_i)) {
-          continue;
-        }
-
-        const int curve_i = curves_->point_to_curve_map()[point_i];
-        if (bke::curves::hide::curve_is_hidden(*curves_, curve_i)) {
+        if (!hide_point.is_empty() && hide_point[point_i]) {
           continue;
         }
 
@@ -232,14 +238,11 @@ struct SelectionPaintOperationExecutor {
     const float brush_radius_cu = self_->brush_3d_.radius_cu;
     const float brush_radius_sq_cu = pow2f(brush_radius_cu);
 
+    const VArraySpan<bool> hide_point = this->hide_point();
+
     threading::parallel_for(curves_->points_range(), 1024, [&](const IndexRange point_range) {
       for (const int i : point_range) {
-        if (bke::curves::hide::point_is_hidden(*curves_, i)) {
-          continue;
-        }
-
-        const int curve_i = curves_->point_to_curve_map()[i];
-        if (bke::curves::hide::curve_is_hidden(*curves_, curve_i)) {
+        if (!hide_point.is_empty() && hide_point[i]) {
           continue;
         }
 
@@ -288,9 +291,11 @@ struct SelectionPaintOperationExecutor {
     const float brush_radius_re = brush_radius_base_re_ * brush_radius_factor_;
     const float brush_radius_sq_re = pow2f(brush_radius_re);
 
+    const VArraySpan<bool> hide_curve = this->hide_curve();
+
     threading::parallel_for(curves_->curves_range(), 1024, [&](const IndexRange curves_range) {
       for (const int curve_i : curves_range) {
-        if (bke::curves::hide::curve_is_hidden(*curves_, curve_i)) {
+        if (!hide_curve.is_empty() && hide_curve[curve_i]) {
           continue;
         }
 
@@ -358,9 +363,11 @@ struct SelectionPaintOperationExecutor {
     const float brush_radius_cu = self_->brush_3d_.radius_cu;
     const float brush_radius_sq_cu = pow2f(brush_radius_cu);
 
+    const VArraySpan<bool> hide_curve = this->hide_curve();
+
     threading::parallel_for(curves_->curves_range(), 1024, [&](const IndexRange curves_range) {
       for (const int curve_i : curves_range) {
-        if (bke::curves::hide::curve_is_hidden(*curves_, curve_i)) {
+        if (!hide_curve.is_empty() && hide_curve[curve_i]) {
           continue;
         }
 

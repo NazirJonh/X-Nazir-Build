@@ -17,7 +17,6 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
-#include "BKE_curves_hide.hh"
 #include "BKE_modifier.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
@@ -333,28 +332,6 @@ static void curves_sculptmode_enter(bContext *C)
   ED_paint_cursor_start(&curves_sculpt->paint, curves_sculpt_poll_view3d);
   paint_init_pivot(ob, scene, paint);
 
-  /* Prepare hide/selection system: ensure float selection attribute exists.
-   * Check for visible selected elements (ignoring hidden ones).
-   * This will be used by hide/reveal operators in future PR. */
-  if (ob->type == OB_CURVES) {
-    Curves *curves_id = reinterpret_cast<Curves *>(ob->data);
-    bke::CurvesGeometry &curves = curves_id->geometry.wrap();
-
-    const bool was_anything_selected = ed::curves::has_anything_selected_visible(
-        curves, bke::AttrDomain(curves_id->selection_domain));
-
-    /* If nothing was selected before, select everything to make the tools work. */
-
-    if (!was_anything_selected) {
-      bke::SpanAttributeWriter<float> attribute = float_selection_ensure(*curves_id);
-      attribute.finish();
-    }
-    else {
-      bke::SpanAttributeWriter<float> attribute = float_selection_ensure(*curves_id);
-      attribute.finish();
-    }
-  }
-
   /* Necessary to change the object mode on the evaluated object. */
   DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
   WM_msg_publish_rna_prop(mbus, &ob->id, ob, Object, mode);
@@ -364,7 +341,6 @@ static void curves_sculptmode_enter(bContext *C)
 static void curves_sculptmode_exit(bContext *C)
 {
   Object *ob = CTX_data_active_object(C);
-
   ob->mode = OB_MODE_OBJECT;
 }
 
@@ -1232,90 +1208,33 @@ static void SCULPT_CURVES_OT_min_distance_edit(wmOperatorType *ot)
 
 namespace hide {
 
-static wmOperatorStatus hide_exec(bContext *C, wmOperator *op)
+static wmOperatorStatus exec(bContext *C, wmOperator *op)
 {
   const bool unselected = RNA_boolean_get(op->ptr, "unselected");
 
+  bool changed = false;
   for (Curves *curves_id : curves::get_unique_editable_curves(*C)) {
-    Object *object = nullptr;
-    CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
-      if (ob->type == OB_CURVES && id_cast<Curves *>(ob->data) == curves_id) {
-        object = ob;
-        break;
-      }
-    }
-    CTX_DATA_END;
-
-    if (!object) {
+    if (!curves::hide_selected(*curves_id, unselected)) {
       continue;
     }
-
-    bke::CurvesGeometry &curves = curves_id->geometry.wrap();
-    IndexMaskMemory memory;
-
-    switch (bke::AttrDomain(curves_id->selection_domain)) {
-      case bke::AttrDomain::Point: {
-        const IndexMask selection = curves::retrieve_selected_points(*curves_id, memory);
-        if (selection.is_empty()) {
-          continue;
-        }
-
-        if (unselected) {
-          IndexMaskMemory unselected_memory;
-          IndexMask unselected_mask = IndexMask::from_difference(
-              IndexRange(curves.points_num()), selection, unselected_memory);
-          bke::curves::hide::hide_points(*object, unselected_mask, bke::curves::VisAction::Hide);
-        }
-        else {
-          bke::curves::hide::hide_points(*object, selection, bke::curves::VisAction::Hide);
-        }
-        break;
-      }
-      case bke::AttrDomain::Curve: {
-        const IndexMask selection = curves::retrieve_selected_curves(*curves_id, memory);
-        if (selection.is_empty()) {
-          continue;
-        }
-
-        if (unselected) {
-          IndexMaskMemory unselected_memory;
-          IndexMask unselected_mask = IndexMask::from_difference(
-              IndexRange(curves.curves_num()), selection, unselected_memory);
-          bke::curves::hide::hide_curves(*object, unselected_mask, bke::curves::VisAction::Hide);
-        }
-        else {
-          bke::curves::hide::hide_curves(*object, selection, bke::curves::VisAction::Hide);
-        }
-        break;
-      }
-      default:
-        break;
-    }
-
+    changed = true;
     DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
     WM_event_add_notifier(C, NC_GEOM | ND_DATA, curves_id);
   }
 
-  return OPERATOR_FINISHED;
-}
-
-static void hide_ui(bContext * /*C*/, wmOperator *op)
-{
-  ui::Layout &layout = *op->layout;
-  layout.prop(op->ptr, "unselected", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  return changed ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
 }
 
 }  // namespace hide
 
 static void SCULPT_CURVES_OT_hide(wmOperatorType *ot)
 {
-  ot->name = "Hide";
+  ot->name = "Hide Selected";
   ot->idname = __func__;
-  ot->description = "Hide selected or unselected points or curves";
+  ot->description = "Hide selected points or curves";
 
-  ot->exec = hide::hide_exec;
+  ot->exec = hide::exec;
   ot->poll = curves::editable_curves_poll;
-  ot->ui = hide::hide_ui;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
@@ -1323,40 +1242,34 @@ static void SCULPT_CURVES_OT_hide(wmOperatorType *ot)
       ot->srna, "unselected", false, "Unselected", "Hide unselected rather than selected");
 }
 
-static wmOperatorStatus reveal_exec(bContext *C, wmOperator *op)
+namespace reveal {
+
+static wmOperatorStatus exec(bContext *C, wmOperator *op)
 {
   const bool select = RNA_boolean_get(op->ptr, "select");
 
+  bool changed = false;
   for (Curves *curves_id : curves::get_unique_editable_curves(*C)) {
-    Object *object = nullptr;
-    CTX_DATA_BEGIN (C, Object *, ob, selected_objects) {
-      if (ob->type == OB_CURVES && id_cast<Curves *>(ob->data) == curves_id) {
-        object = ob;
-        break;
-      }
-    }
-    CTX_DATA_END;
-
-    if (!object) {
+    if (!curves::reveal_all(*curves_id, select)) {
       continue;
     }
-
-    bke::curves::hide::show_all(*object, select);
-
+    changed = true;
     DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
     WM_event_add_notifier(C, NC_GEOM | ND_DATA, curves_id);
   }
 
-  return OPERATOR_FINISHED;
+  return changed ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
 }
+
+}  // namespace reveal
 
 static void SCULPT_CURVES_OT_reveal(wmOperatorType *ot)
 {
-  ot->name = "Reveal";
+  ot->name = "Reveal Hidden";
   ot->idname = __func__;
   ot->description = "Reveal all hidden points and curves";
 
-  ot->exec = reveal_exec;
+  ot->exec = reveal::exec;
   ot->poll = curves::editable_curves_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
@@ -1365,82 +1278,6 @@ static void SCULPT_CURVES_OT_reveal(wmOperatorType *ot)
 }
 
 /** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Select All Operator
- * \{ */
-
-namespace select_all {
-
-static bool has_anything_selected(const Span<Curves *> curves_ids)
-{
-  return std::any_of(curves_ids.begin(), curves_ids.end(), [](const Curves *curves_id) {
-    return ed::curves::has_anything_selected_visible(
-        curves_id->geometry.wrap(), bke::AttrDomain(curves_id->selection_domain));
-  });
-}
-
-static wmOperatorStatus select_all_exec(bContext *C, wmOperator *op)
-{
-  int action = RNA_enum_get(op->ptr, "action");
-
-  VectorSet<Curves *> unique_curves = curves::get_unique_editable_curves(*C);
-
-  if (action == SEL_TOGGLE) {
-    bool has_selected = has_anything_selected(unique_curves);
-    action = has_selected ? SEL_DESELECT : SEL_SELECT;
-  }
-
-  for (Curves *curves_id : unique_curves) {
-    bke::CurvesGeometry &curves = curves_id->geometry.wrap();
-    const bke::AttrDomain selection_domain = bke::AttrDomain(curves_id->selection_domain);
-
-    IndexMaskMemory mask_memory;
-    const IndexMask visible_mask = bke::curves::hide::get_visible_mask(
-        curves, selection_domain, mask_memory);
-
-    bke::SpanAttributeWriter<float> attribute = float_selection_ensure(*curves_id);
-    MutableSpan<float> selection = attribute.span;
-
-    visible_mask.foreach_index([&](const int element_i) {
-      if (action == SEL_SELECT) {
-        selection[element_i] = 1.0f;
-      }
-      else if (action == SEL_DESELECT) {
-        selection[element_i] = 0.0f;
-      }
-      else if (action == SEL_INVERT) {
-        selection[element_i] = 1.0f - selection[element_i];
-      }
-    });
-
-    attribute.finish();
-
-    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
-    WM_event_add_notifier(C, NC_GEOM | ND_DATA, curves_id);
-  }
-
-  return OPERATOR_FINISHED;
-}
-
-static void SCULPT_CURVES_OT_select_all(wmOperatorType *ot)
-{
-  ot->name = "(De)select All";
-  ot->idname = __func__;
-  ot->description = "(De)select all control points";
-
-  ot->exec = select_all_exec;
-  ot->poll = curves::editable_curves_poll;
-
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-
-  WM_operator_properties_select_all(ot);
-}
-
-/** \} */
-
-}  // namespace select_all
-
 
 }  // namespace ed::sculpt_paint
 
@@ -1456,7 +1293,6 @@ void ED_operatortypes_sculpt_curves()
   WM_operatortype_append(SCULPT_CURVES_OT_select_random);
   WM_operatortype_append(SCULPT_CURVES_OT_select_grow);
   WM_operatortype_append(SCULPT_CURVES_OT_min_distance_edit);
-  WM_operatortype_append(select_all::SCULPT_CURVES_OT_select_all);
   WM_operatortype_append(SCULPT_CURVES_OT_hide);
   WM_operatortype_append(SCULPT_CURVES_OT_reveal);
 }

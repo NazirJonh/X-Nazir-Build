@@ -153,6 +153,7 @@ struct [[host_shared]] OVERLAY_GridData {
 #  define EDIT_CURVES_ACTIVE_HANDLE (1u << 2)
 #  define EDIT_CURVES_BEZIER_KNOT (1u << 3)
 #  define EDIT_CURVES_HANDLE_TYPES_SHIFT (4u)
+#  define EDIT_CURVES_HIDDEN (1u << 8)
 /* Keep the same values as in `draw_cache_imp_curve.c` */
 #  define ACTIVE_NURB (1u << 2)
 #  define BEZIER_HANDLE (1u << 3)

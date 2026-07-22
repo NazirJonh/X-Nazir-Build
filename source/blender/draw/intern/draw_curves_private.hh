@@ -197,15 +197,6 @@ struct CurvesEvalCache {
   /* If attribute is point domain, use evaluated_attributes_buf. Otherwise curve_attributes_buf. */
   std::array<bool, GPU_MAX_ATTR> attributes_point_domain;
 
-  /* --- Hide Attributes. --- */
-
-  /** Hide state per point. Nullptr if no hide attribute exists. */
-  gpu::VertBufPtr hide_point_buf;
-  /** Hide state per curve. Nullptr if no hide attribute exists. */
-  gpu::VertBufPtr hide_curve_buf;
-  /** Flag to enable hide filtering in shaders. */
-  bool use_hide_filtering = false;
-
   /* --- Procedural Drawcalls. --- */
   std::array<gpu::Batch *, MAX_FACE_PER_SEGMENT> batch;
 
@@ -220,8 +211,6 @@ struct CurvesEvalCache {
   void ensure_common(const bke::CurvesGeometry &curves);
   void ensure_bezier(const bke::CurvesGeometry &curves);
   void ensure_nurbs(const bke::CurvesGeometry &curves);
-
-  void ensure_hide_attributes(const bke::CurvesGeometry &curves);
 
   void ensure_positions(CurvesModule &module, const bke::CurvesGeometry &curves);
 

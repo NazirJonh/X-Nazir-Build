@@ -66,8 +66,6 @@ DEFINE("CURVES_SHADER")
 DEFINE("DRW_HAIR_INFO")
 SAMPLER_FREQ(0, samplerBuffer, curves_pos_rad_buf, BATCH)
 SAMPLER_FREQ(1, isamplerBuffer, curves_indirection_buf, BATCH)
-SAMPLER_FREQ(2, samplerBuffer, curves_hide_point_buf, BATCH)
-SAMPLER_FREQ(3, samplerBuffer, curves_hide_curve_buf, BATCH)
 GPU_SHADER_CREATE_END()
 
 GPU_SHADER_CREATE_INFO(draw_pointcloud)

@@ -34,16 +34,16 @@ float3 weight_to_rgb(float t)
 void main()
 {
 #ifdef CURVES_POINT
+  if ((data & EDIT_CURVES_HIDDEN) != 0u) {
+    DISCARD_VERTEX
+  }
+
   bool is_active = (data & EDIT_CURVES_ACTIVE_HANDLE) != 0u;
   bool is_bezier_handle = (data & EDIT_CURVES_BEZIER_HANDLE) != 0u;
 
   if (is_bezier_handle && ((uint(curve_handle_display) == CURVE_HANDLE_NONE) ||
                            (uint(curve_handle_display) == CURVE_HANDLE_SELECTED) && !is_active))
   {
-    DISCARD_VERTEX
-  }
-
-  if (hide > 0.5) {
     DISCARD_VERTEX
   }
 #endif

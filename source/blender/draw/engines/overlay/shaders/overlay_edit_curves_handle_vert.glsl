@@ -25,7 +25,6 @@ struct VertIn {
   /* Edit Flags and Data. */
   uint e_data;
   float sel;
-  float hide;
 };
 
 VertIn input_assembly(uint in_vertex_id)
@@ -37,7 +36,6 @@ VertIn input_assembly(uint in_vertex_id)
   vert_in.radius = rad[gpu_attr_load_index(v_i, gpu_attr_1)];
   vert_in.e_data = data[gpu_attr_load_index(v_i, gpu_attr_2)];
   vert_in.sel = selection[gpu_attr_load_index(v_i, gpu_attr_3)];
-  vert_in.hide = hide[gpu_attr_load_index(v_i, gpu_attr_4)];
   return vert_in;
 }
 
@@ -46,7 +44,6 @@ struct VertOut {
   float4 gpu_position;
   uint flag;
   float sel;
-  float hide;
 };
 
 VertOut vertex_main(VertIn vert_in)
@@ -69,7 +66,6 @@ VertOut vertex_main(VertIn vert_in)
   }
   vert.gpu_position = drw_point_world_to_homogenous(vert.ws_P);
   vert.sel = vert_in.sel;
-  vert.hide = vert_in.hide;
   return vert;
 }
 
@@ -146,8 +142,8 @@ void geometry_main(VertOut geom_in[2],
   float4 v1 = geom_in[0].gpu_position;
   float4 v2 = geom_in[1].gpu_position;
 
-  /* Skip drawing if either endpoint is hidden. */
-  if (geom_in[0].hide > 0.5f || geom_in[1].hide > 0.5f) {
+  /* Skip drawing when either endpoint is hidden. */
+  if (((geom_in[0].flag | geom_in[1].flag) & EDIT_CURVES_HIDDEN) != 0u) {
     return;
   }
 

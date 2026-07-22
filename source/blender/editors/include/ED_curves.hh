@@ -224,6 +224,22 @@ VectorSet<Curves *> get_unique_editable_curves(const bContext &C);
 void ensure_surface_deformation_node_exists(bContext &C, Object &curves_ob);
 
 /**
+ * Hide the selected elements of the active selection domain, or the unselected ones instead.
+ * Hidden elements are always deselected, so that operators only ever act on visible geometry.
+ *
+ * \return True when the visibility changed.
+ */
+bool hide_selected(Curves &curves_id, bool unselected);
+
+/**
+ * Show every hidden element again.
+ *
+ * \param select: Select the elements that were hidden.
+ * \return True when the visibility changed.
+ */
+bool reveal_all(Curves &curves_id, bool select);
+
+/**
  * Allocate an array of #TransVert for cursor/selection snapping (See
  * #ED_transverts_create_from_obedit in `view3d_snap.cc`).
  * \note The #TransVert elements in \a tvs are expected to write to the positions of \a curves.

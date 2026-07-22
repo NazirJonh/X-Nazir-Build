@@ -19,6 +19,7 @@
 #include "DNA_brush_types.h"
 #include "DNA_texture_types.h"
 
+#include "BLI_array.hh"
 #include "BLI_assert.h"
 #include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
@@ -201,3 +202,16 @@ void curve_patch_texture_binding_from_brush(const Brush &brush,
 }
 
 }  // namespace blender::ed::sculpt_paint
+
+namespace blender {
+
+/* Declared in `ED_paint.hh`, which puts the `ED_*` API in `blender` rather than in this file's own
+ * `blender::ed::sculpt_paint` -- hence the separate namespace block. */
+Array<float> ED_curve_patch_stamp_texture_weights_from_brush(const Brush &brush, const float radius)
+{
+  ed::sculpt_paint::CurvePatchTextureBinding binding;
+  ed::sculpt_paint::curve_patch_texture_binding_from_brush(brush, radius, binding);
+  return Array<float>(binding.stamp_texture_weights_cdf.as_span());
+}
+
+}  // namespace blender

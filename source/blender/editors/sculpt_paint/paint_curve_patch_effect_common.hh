@@ -77,7 +77,7 @@ inline void curve_patch_effect_ensure_falloff_curve(const Brush &brush)
 inline IndexMask curve_patch_effect_node_mask(const Depsgraph &depsgraph,
                                               Object &ob,
                                               const Brush &brush,
-                                              const CurvePatchSession &patch,
+                                              const CurvePatchItem &item,
                                               const CurvePatchStrokeContext &ctx,
                                               const bke::pbvh::Tree &pbvh,
                                               const float max_radius,
@@ -89,7 +89,7 @@ inline IndexMask curve_patch_effect_node_mask(const Depsgraph &depsgraph,
   const brushes::CursorSampleResult cursor_sample_result = calc_brush_node_mask(
       depsgraph, ob, brush, query_memory);
   return curve_patch_cull_nodes(
-      patch, ctx, pbvh, cursor_sample_result.node_mask, max_radius, memory);
+      item, ctx, pbvh, cursor_sample_result.node_mask, max_radius, memory);
 }
 
 /**

@@ -42,7 +42,8 @@ class Tree;
 
 namespace blender::ed::sculpt_paint {
 
-struct CurvePatchSession;
+struct CurvePatchItem;
+struct CurvePatchTextureBinding;
 
 /**
  * The four values the sampler needs from a stroke, as data rather than as a live `StrokeCache`.
@@ -142,7 +143,8 @@ struct CurvePatchSample {
 
 class CurvePatchSampler {
  public:
-  CurvePatchSampler(const CurvePatchSession &patch,
+  CurvePatchSampler(const CurvePatchItem &item,
+                    const CurvePatchTextureBinding &texture,
                     const CurvePatchStrokeContext &ctx,
                     const Brush &brush,
                     const CurvePatchSourceGeometry &source,
@@ -157,7 +159,8 @@ class CurvePatchSampler {
   std::optional<CurvePatchSample> sample(int idx, int thread_id) const;
 
  private:
-  const CurvePatchSession &patch_;
+  const CurvePatchItem &item_;
+  const CurvePatchTextureBinding &texture_;
   const CurvePatchStrokeContext &ctx_;
   const Brush &brush_;
   CurvePatchSourceGeometry source_;
@@ -174,7 +177,7 @@ float curve_patch_max_radius(const bke::CurvePatchGeometry &geometry);
 
 /** Drop nodes whose bounds fall entirely outside the falloff tube. `query_mask` is the caller's
  * `calc_brush_node_mask()` result. */
-IndexMask curve_patch_cull_nodes(const CurvePatchSession &patch,
+IndexMask curve_patch_cull_nodes(const CurvePatchItem &item,
                                  const CurvePatchStrokeContext &ctx,
                                  const bke::pbvh::Tree &pbvh,
                                  const IndexMask &query_mask,
@@ -182,7 +185,7 @@ IndexMask curve_patch_cull_nodes(const CurvePatchSession &patch,
                                  IndexMaskMemory &memory);
 
 /** Multires only: cull individual grids within the surviving nodes the same way. */
-BitVector<> curve_patch_cull_grids(const CurvePatchSession &patch,
+BitVector<> curve_patch_cull_grids(const CurvePatchItem &item,
                                    const CurvePatchStrokeContext &ctx,
                                    const bke::pbvh::Tree &pbvh,
                                    const SubdivCCG &subdiv_ccg,

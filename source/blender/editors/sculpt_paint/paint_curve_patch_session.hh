@@ -23,6 +23,7 @@
 #include <memory>
 
 #include "BLI_array.hh"
+#include "BLI_assert.h"
 #include "BLI_bit_vector.hh"
 #include "BLI_map.hh"
 #include "BLI_math_vector_types.hh"
@@ -70,15 +71,25 @@ using bke::CurvePatchSurfaceSnapshot;
 using bke::CurvePatchTextureZone;
 using bke::CurvePatchTextureZoneSample;
 
-/** One snapshot of the session-local undo stack: everything the user edits inside a live Curve
- * Patch that the relief is derived from. The control curve carries positions, handles, handle
- * types, radii and `cyclic` internally, so nothing else about it needs storing. */
-struct CurvePatchEditStep {
+/** One patch's contribution to an undo snapshot. */
+struct CurvePatchEditStepItem {
   bke::CurvesGeometry curve;
   bool swap_axis = false;
   /* Snapshotted for the same reason as `swap_axis`: the Reseed action changes the visible relief
    * without touching `curve`, so without this Ctrl+Z could not walk back over a reseed. */
   uint32_t stamp_seed = 0;
+};
+
+/** One snapshot of the session-local undo stack: everything the user edits inside a live Curve
+ * Patch that the relief is derived from. The control curve carries positions, handles, handle
+ * types, radii and `cyclic` internally, so nothing else about it needs storing.
+ *
+ * Every patch is snapshotted, not just the active one: `swap_axis` and `stamp_seed` are per-patch
+ * (they are `CurvePatchParams` fields), and an undo that restored one curve while leaving its
+ * neighbors at their current state would be unpredictable the moment curves can be switched. */
+struct CurvePatchEditStep {
+  Vector<CurvePatchEditStepItem> items;
+  int active_patch = 0;
 };
 
 /** Resolved texture slots for one build. Stays in the editor layer because `MTex` is DNA and the
@@ -125,18 +136,16 @@ struct CurvePatchTextureBinding {
   float world_cap_end = 0.0f;
 };
 
-/** The document the user edits: the control curve, the point last interacted with, and the
- * session-local undo stack. */
+/** The document the user edits: the point last interacted with and the session-local undo stack.
+ * The control curves themselves live one per #CurvePatchItem. */
 struct CurvePatchEditState {
-  /** The user-editable control curve. Not attached to any `Brush`/datablock — a standalone
-   * runtime `CurvesGeometry`, built fresh via `paintcurve_geometry_init_bezier()` (see
-   * `paint_curve_geometry.cc:546`) at Curve Patch start. */
-  bke::CurvesGeometry control_curve;
-
-  /** Index into `control_curve` of the point the user last interacted with, or -1 for none. Owned
-   * conceptually by the live-edit modal (`SCULPT_OT_curve_patch_edit`), but stored here rather than
-   * in its `op->customdata` so the small operators the modal's context menu invokes -- which cannot
-   * reach a running modal's customdata -- can act on the clicked point. Because this session
+  /** Index into `patches[active_patch].control_curve` of the point the user last interacted with,
+   * or -1 for none. The patch it belongs to is `CurvePatchSession::active_patch`: the pair is what
+   * identifies a point, because two patches index their points independently.
+   *
+   * Owned conceptually by the live-edit modal (`SCULPT_OT_curve_patch_edit`), but stored here rather
+   * than in its `op->customdata` so the small operators the modal's context menu invokes -- which
+   * cannot reach a running modal's customdata -- can act on the clicked point. Because this session
    * outlives the modal, the index is reset to -1 whenever an edit session ends or a new control
    * curve is built; consumers must still validate it against `control_curve.points_num()`. */
   int active_point = -1;
@@ -208,11 +217,24 @@ struct CurvePatchApplyState {
   BitVector<> all_touched_nodes;
 };
 
-/** A live Curve Patch editing session. Published on `SculptSession::curve_patch_session`. */
-struct CurvePatchSession {
-  /** Brush/texture parameter values frozen at the moment the anchor stroke started. Re-stamp reads
-   * these instead of the live `Brush`/`MTex`, so a mid-edit change to the brush panel's sliders
-   * cannot alter an already-started Curve Patch.
+/**
+ * One patch: a curve the user drew, the brush values frozen when it started, and everything built
+ * from the two.
+ *
+ * `params` is per-item rather than per-session because a curve started later can have been drawn
+ * with a different brush size: `radius`, `plane_normal`, `stamp_seed` and `swap_axis` are frozen at
+ * the moment that curve begins. What is NOT per-item is anything describing the TARGET -- the
+ * effect, the texture binding and `CurvePatchApplyState` all describe the mesh, which is shared.
+ */
+struct CurvePatchItem {
+  /** The user-editable control curve. Not attached to any `Brush`/datablock -- a standalone
+   * runtime `CurvesGeometry`, built fresh via `paintcurve_geometry_init_bezier()` (see
+   * `paint_curve_geometry.cc:546`) at Curve Patch start. */
+  bke::CurvesGeometry control_curve;
+
+  /** Brush/texture parameter values frozen at the moment this patch's stroke started. Re-stamp
+   * reads these instead of the live `Brush`/`MTex`, so a mid-edit change to the brush panel's
+   * sliders cannot alter an already-started Curve Patch.
    *
    * NOTE: brush *strength* is deliberately NOT frozen here -- it is read live from the brush on
    * every re-stamp (see `curve_patch_restore_and_restamp()`, which passes `std::nullopt` as
@@ -222,7 +244,24 @@ struct CurvePatchSession {
    * is re-synced LIVE from the brush by `curve_patch_edit_modal()`'s poll, so changing e.g. the
    * Length mode or the Stamps randomization re-projects the texture immediately. */
   bke::CurvePatchParams params;
+
   bke::CurvePatchGeometry geometry;
+};
+
+/** A live Curve Patch editing session. Published on `SculptSession::curve_patch_session`. */
+struct CurvePatchSession {
+  /** Every patch this session applies, in creation order. Applied one after another within each
+   * symmetry pass; see `curve_patch_apply_effect_action()`.
+   *
+   * The interactive editor currently publishes exactly one. The plural exists because the headless
+   * apply path can be asked for every spline of a paint curve at once, and because switching
+   * between curves in the modal is the next step. */
+  Vector<CurvePatchItem> patches;
+
+  /** Index into #patches the modal editor is acting on. Consumers must validate it against
+   * `patches.size()`: the session outlives the modal. */
+  int active_patch = 0;
+
   CurvePatchTextureBinding texture;
   CurvePatchEditState edit;
   CurvePatchApplyState apply;
@@ -248,7 +287,40 @@ struct CurvePatchSession {
   /** Suppresses repeating the window-cap warning: `curve_patch_restore_and_restamp()` runs on EVERY
    * mouse event, so an unguarded message would flood the info line. */
   bool reported_frame_cap = false;
+
+  /** Whether #active_item may be dereferenced. False only on a half-built session: every publish
+   * path appends a patch before publishing. */
+  bool has_active_item() const
+  {
+    return this->patches.index_range().contains(this->active_patch);
+  }
+
+  /** The patch the modal editor acts on. */
+  CurvePatchItem &active_item()
+  {
+    BLI_assert(this->has_active_item());
+    return this->patches[this->active_patch];
+  }
+  const CurvePatchItem &active_item() const
+  {
+    BLI_assert(this->has_active_item());
+    return this->patches[this->active_patch];
+  }
 };
+
+/**
+ * Set the build-quality switch on every patch.
+ *
+ * `final_quality` describes the BUILD, not one curve -- every patch of a session is always
+ * rebuilt at the same quality -- but it lives in the per-patch #bke::CurvePatchParams because that
+ * is what the core build takes. Readers take it off #CurvePatchSession::active_item.
+ */
+inline void curve_patch_set_final_quality(CurvePatchSession &session, const bool value)
+{
+  for (CurvePatchItem &item : session.patches) {
+    item.params.final_quality = value;
+  }
+}
 
 /**
  * Build a Curve Patch control curve from explicit positions and radii.
@@ -291,10 +363,10 @@ bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,
  * build the pristine surface snapshot, create the effect of `effect_type` and publish the session
  * on `ob`.
  *
- * `session->params` must already be filled (the surface snapshot ignores it, but every later
- * consumer does not), and `session->edit.control_curve` must already be built. Nothing is stamped
- * here and no viewport is touched, which is what lets the headless apply path share it with the two
- * interactive entry points.
+ * `session->patches` must already hold at least one fully built item -- curve and `params` both
+ * (the surface snapshot ignores the parameters, but every later consumer does not). Nothing is
+ * stamped here and no viewport is touched, which is what lets the headless apply path share it with
+ * the two interactive entry points.
  *
  * Frees NOTHING on failure -- returning false leaves `session` unpublished and still owned by the
  * caller, whose cleanup differs: the interactive entry points also own the anchor stroke's

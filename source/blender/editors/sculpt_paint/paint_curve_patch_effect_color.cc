@@ -90,7 +90,8 @@ class ColorEffect : public CurvePatchEffect {
   void apply_pass(const Depsgraph &depsgraph,
                   Object &ob,
                   const Brush &brush,
-                  CurvePatchSession &patch) override;
+                  CurvePatchSession &patch,
+                  const CurvePatchItem &item) override;
   UpdateType update_type() const override
   {
     return UpdateType::Color;
@@ -209,7 +210,8 @@ void ColorEffect::begin_restamp(const Depsgraph & /*depsgraph*/,
 void ColorEffect::apply_pass(const Depsgraph &depsgraph,
                              Object &ob,
                              const Brush &brush,
-                             CurvePatchSession &patch)
+                             CurvePatchSession &patch,
+                             const CurvePatchItem &item)
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
@@ -237,13 +239,14 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
   /* Source geometry has no snapshot override: color never moves geometry, so the live positions
    * are already pristine and `CurvePatchSampler` can read them directly. */
   const CurvePatchSourceGeometry source{positions, normals, nullptr};
-  const CurvePatchSampler sampler(patch, ctx, brush, source, mask, ss.tex_pool_ensure());
+  const CurvePatchSampler sampler(
+      item, patch.texture, ctx, brush, source, mask, ss.tex_pool_ensure());
 
-  const float max_radius = curve_patch_max_radius(patch.geometry);
+  const float max_radius = curve_patch_max_radius(item.geometry);
 
   IndexMaskMemory culled_memory;
   const IndexMask node_mask = curve_patch_effect_node_mask(
-      depsgraph, ob, brush, patch, ctx, pbvh, max_radius, culled_memory);
+      depsgraph, ob, brush, item, ctx, pbvh, max_radius, culled_memory);
 
   /* PHASE 1 (parallel, read-only): each pbvh node is processed on a worker thread; surviving
    * vertices are expanded into their domain elements and the pre-patch color of each is gathered,

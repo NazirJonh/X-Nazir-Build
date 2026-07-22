@@ -416,6 +416,7 @@ static bool curve_patch_build_for_rna(bContext *C,
                                       const Brush &brush,
                                       Object *target,
                                       const int spline_index,
+                                      const bool use_evaluated,
                                       ReportList *reports,
                                       bke::CurvePatchParams &r_params,
                                       bke::CurvePatchGeometry &r_geometry)
@@ -430,7 +431,8 @@ static bool curve_patch_build_for_rna(bContext *C,
    * strip along ONE spline, and reading one must not change the curve it was read from. Taking the
    * geometry whole here used to run the tessellation over every spline at once, quietly welding a
    * multi-spline curve into a single strip. */
-  bke::CurvesGeometry control_curve = ED_paintcurve_control_curve_for_patch(pc, spline_index);
+  const bke::CurvesGeometry control_curve = ED_paintcurve_control_curve_for_patch(pc,
+                                                                                  spline_index);
   if (control_curve.points_num() < 2) {
     /* A spline that short describes no strip. Silent: see the note on failure kinds above. */
     return false;
@@ -438,46 +440,33 @@ static bool curve_patch_build_for_rna(bContext *C,
 
   r_params = ED_curve_patch_params_from_brush(tool_settings->sculpt->paint, brush, control_curve);
 
-  control_curve.ensure_can_interpolate_to_evaluated();
-  Array<float> evaluated_radii(control_curve.evaluated_points_num());
-  control_curve.interpolate_to_evaluated(VArraySpan(control_curve.radius()),
-                                         evaluated_radii.as_mutable_span());
-  const bool cyclic = control_curve.curves_num() > 0 && control_curve.cyclic()[0];
-  Array<float3> evaluated_positions(control_curve.evaluated_positions());
-  Array<float3> evaluated_normals(evaluated_positions.size(), float3(0.0f));
-
   /* With a target the strip follows that surface, exactly as it does inside a sculpt session; with
-   * none it stays in the curve's own plane. Both branches already exist in the core build and are
-   * selected by whether the snapshot came out ready. */
+   * none it stays in the curve's own plane. The snapshot is built here rather than inside the core
+   * build because only this layer knows which mesh the script asked for. */
   if (target != nullptr) {
-    Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
-    const Object *target_eval = DEG_get_evaluated(depsgraph, target);
-    const Mesh *mesh = target_eval != nullptr ? BKE_object_get_evaluated_mesh(target_eval) :
-                                                nullptr;
+    const Mesh *mesh = nullptr;
+    if (use_evaluated) {
+      Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+      const Object *target_eval = DEG_get_evaluated(depsgraph, target);
+      mesh = target_eval != nullptr ? BKE_object_get_evaluated_mesh(target_eval) : nullptr;
+    }
+    else {
+      mesh = BKE_object_get_original_mesh(target);
+    }
     if (mesh == nullptr) {
-      BKE_report(reports, RPT_ERROR, "Curve Patch: the target object has no evaluated mesh");
+      BKE_report(reports, RPT_ERROR, "Curve Patch: the target object has no mesh to follow");
       return false;
     }
-    if (bke::curve_patch_surface_snapshot_build(*mesh, r_geometry.surface)) {
-      bke::curve_patch_surface_shrinkwrap(r_geometry.surface,
-                                          r_params.radius,
-                                          evaluated_positions.as_mutable_span(),
-                                          evaluated_normals.as_mutable_span());
-      bke::curve_patch_surface_fill_invalid_normals(evaluated_normals.as_mutable_span(),
-                                                    r_params.plane_normal);
-    }
+    bke::curve_patch_surface_snapshot_build(*mesh, r_geometry.surface);
   }
 
   /* An empty weight table means "single texture": which slot a stamp would draw changes what the
-   * relief SAMPLES, never where the strip runs or where the stamps land. */
-  bke::curve_patch_geometry_build(evaluated_positions.as_span(),
-                                  evaluated_radii.as_span(),
-                                  r_geometry.surface.ready ? evaluated_normals.as_span() :
-                                                             Span<float3>(),
-                                  cyclic,
-                                  r_params,
-                                  {},
-                                  r_geometry);
+   * relief SAMPLES, never where the strip runs or where the stamps land. Resolved here so that a
+   * read-back reproduces the stamp-to-slot assignment a live session would produce. */
+  const Array<float> weights_cdf = ED_curve_patch_stamp_texture_weights_from_brush(brush,
+                                                                                   r_params.radius);
+  bke::curve_patch_build_from_control_curve(
+      control_curve, r_params, weights_cdf.as_span(), r_geometry);
   if (r_geometry.spline.is_empty()) {
     /* Degenerate input (all points coincident, zero radius). Silent, as above. */
     return false;
@@ -490,12 +479,13 @@ static Mesh *rna_PaintCurve_curve_patch_to_mesh(PaintCurve *pc,
                                                 ReportList *reports,
                                                 Brush *brush,
                                                 Object *target,
-                                                const int spline_index)
+                                                const int spline_index,
+                                                const bool use_evaluated)
 {
   bke::CurvePatchParams params;
   bke::CurvePatchGeometry geometry;
   if (!curve_patch_build_for_rna(
-          C, *pc, *brush, target, spline_index, reports, params, geometry))
+          C, *pc, *brush, target, spline_index, use_evaluated, reports, params, geometry))
   {
     return nullptr;
   }
@@ -528,12 +518,13 @@ static PointCloud *rna_PaintCurve_curve_patch_stamps(PaintCurve *pc,
                                                      ReportList *reports,
                                                      Brush *brush,
                                                      Object *target,
-                                                     const int spline_index)
+                                                     const int spline_index,
+                                                     const bool use_evaluated)
 {
   bke::CurvePatchParams params;
   bke::CurvePatchGeometry geometry;
   if (!curve_patch_build_for_rna(
-          C, *pc, *brush, target, spline_index, reports, params, geometry))
+          C, *pc, *brush, target, spline_index, use_evaluated, reports, params, geometry))
   {
     return nullptr;
   }
@@ -1091,9 +1082,20 @@ static void rna_def_paint_curve(BlenderRNA *brna)
               -1,
               INT_MAX,
               "Spline",
-              "Index of the spline to build from; the curve's active spline when negative",
+              "Which spline of the curve to build, or -1 for the curve's active spline. Reading "
+              "is always single-spline: a patch is one strip along one spline, and welding "
+              "several into a single mesh is exactly what this call avoids. Use "
+              "sculpt.curve_patch_apply(use_all_splines=True) to stamp every spline at once",
               -1,
               INT_MAX);
+  RNA_def_boolean(func,
+                  "use_evaluated",
+                  true,
+                  "Use Evaluated",
+                  "Follow the target's evaluated surface, with modifiers applied. Disable to "
+                  "follow the original mesh, which is what a sculpt session stamps onto -- note "
+                  "that on Multires a session applies no surface snapshot at all, so the two "
+                  "cannot be made to agree there");
   parm = RNA_def_pointer(func,
                          "mesh",
                          "Mesh",
@@ -1123,9 +1125,20 @@ static void rna_def_paint_curve(BlenderRNA *brna)
               -1,
               INT_MAX,
               "Spline",
-              "Index of the spline to build from; the curve's active spline when negative",
+              "Which spline of the curve to build, or -1 for the curve's active spline. Reading "
+              "is always single-spline: a patch is one strip along one spline, and welding "
+              "several into a single layout is exactly what this call avoids. Use "
+              "sculpt.curve_patch_apply(use_all_splines=True) to stamp every spline at once",
               -1,
               INT_MAX);
+  RNA_def_boolean(func,
+                  "use_evaluated",
+                  true,
+                  "Use Evaluated",
+                  "Follow the target's evaluated surface, with modifiers applied. Disable to "
+                  "follow the original mesh, which is what a sculpt session stamps onto -- note "
+                  "that on Multires a session applies no surface snapshot at all, so the two "
+                  "cannot be made to agree there");
   parm = RNA_def_pointer(func,
                          "points",
                          "PointCloud",

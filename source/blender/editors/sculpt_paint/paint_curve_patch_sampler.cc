@@ -44,19 +44,21 @@ float curve_patch_cull_tube_radius(const bke::CurvePatchGeometry &geometry, cons
   return 2.5f * max_radius + geometry.ribbon_end_margin;
 }
 
-CurvePatchSampler::CurvePatchSampler(const CurvePatchSession &patch,
+CurvePatchSampler::CurvePatchSampler(const CurvePatchItem &item,
+                                     const CurvePatchTextureBinding &texture,
                                      const CurvePatchStrokeContext &ctx,
                                      const Brush &brush,
                                      const CurvePatchSourceGeometry &source,
                                      const Span<float> mask,
                                      ImagePool &tex_pool)
-    : patch_(patch),
+    : item_(item),
+      texture_(texture),
       ctx_(ctx),
       brush_(brush),
       source_(source),
       mask_(mask),
       tex_pool_(tex_pool),
-      total_length_(patch.geometry.spline.total_length()),
+      total_length_(item.geometry.spline.total_length()),
       mtex_size_(brush.mtex.size[0], brush.mtex.size[1]),
       mtex_ofs_(brush.mtex.ofs[0], brush.mtex.ofs[1])
 {
@@ -64,7 +66,8 @@ CurvePatchSampler::CurvePatchSampler(const CurvePatchSession &patch,
 
 std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const int thread_id) const
 {
-  const CurvePatchSession &patch = patch_;
+  const CurvePatchItem &item = item_;
+  const CurvePatchTextureBinding &texture = texture_;
   const CurvePatchStrokeContext &ctx = ctx_;
   const Brush &brush = brush_;
   const MTex *mtex = &brush.mtex;
@@ -107,15 +110,15 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
    * the normal of an arbitrary unrelated vertex. That source is also exempt on the merits: color
    * never displaces geometry, so its live `normals[idx]` IS the pristine normal the snapshot
    * exists to recover -- the lookup would be both wrong and pointless. */
-  const float3 raw_normal = (source_.indices_are_mesh_verts && patch.geometry.surface.ready &&
-                             idx < int(patch.geometry.surface.vert_normals.size())) ?
-                                patch.geometry.surface.vert_normals[idx] :
+  const float3 raw_normal = (source_.indices_are_mesh_verts && item.geometry.surface.ready &&
+                             idx < int(item.geometry.surface.vert_normals.size())) ?
+                                item.geometry.surface.vert_normals[idx] :
                                 source_.normals[idx];
   const float3 symm_normal = curve_patch_canonicalize(ctx, raw_normal);
   /* On the single-window path the culling stays here and compares against the frozen plane. On the
    * windowed path it moves into `frames.sample()`, where the normal of the SPECIFIC window is
    * known -- which is exactly what removes the break in the relief on a face turned 90 degrees. */
-  if (!patch.geometry.frames.ready && math::dot(symm_normal, patch.params.plane_normal) <= 0.3f) {
+  if (!item.geometry.frames.ready && math::dot(symm_normal, item.params.plane_normal) <= 0.3f) {
     return std::nullopt;
   }
 
@@ -153,8 +156,8 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * `normal_at()` is continuous by construction, so the depth runs through the join smoothly
      * just as the ribbon's own `(u, s)` does. Falls back to `plane_normal` when there is no
      * smoothed field (Grids, failed snapshot), collapsing to the previous formula exactly. */
-    const float normal_dist = math::dot(sample_co - patch.geometry.spline.evaluate(s),
-                                        patch.geometry.spline.normal_at(s));
+    const float normal_dist = math::dot(sample_co - item.geometry.spline.evaluate(s),
+                                        item.geometry.spline.normal_at(s));
 
     /* `CurvePatchSpline::radii` stores the control curve's per-point `radius` attribute
      * verbatim, which is a unitless UI scalar (default 1.0 = "full brush size", see
@@ -163,7 +166,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * ever turned into a SCREEN-PIXEL handle length, never a world-space distance. Scale it by
      * the frozen brush radius (the same world-space value the old dab-based re-stamp used
      * globally) to get an actual world-space falloff radius comparable to `lateral`/`s` below. */
-    const float falloff_radius_at_s = patch.geometry.spline.radius_at(s) * patch.params.radius;
+    const float falloff_radius_at_s = item.geometry.spline.radius_at(s) * item.params.radius;
     if (falloff_radius_at_s <= 0.0f) {
       return std::nullopt;
     }
@@ -177,7 +180,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * stamp-space `du` below, squashing stamps toward the curve and clipping the very edge stamps
      * the widening was meant to admit. The two are equal in Ribbon mode, where jitter never
      * applies. */
-    const float lateral_scale_at_s = patch.geometry.spline.radius_at(s) * patch.geometry.ribbon_radius;
+    const float lateral_scale_at_s = item.geometry.spline.radius_at(s) * item.geometry.ribbon_radius;
 
     /* `normal_dist` is the vertex's signed offset along the anchor plane's normal from the
      * closest point on the curve -- how far it "lifts off" that plane. On a flat surface it is
@@ -215,7 +218,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * on an open one (Stamps mode assigns it unconditionally), so the guard is technically looser
      * there too -- but a cyclic LUT never reports an `s` outside `[0, total_length]` in the first
      * place, so the extra slack never admits anything the sampler would otherwise have rejected. */
-    if (s < -patch.geometry.ribbon_end_margin || s > total_length + patch.geometry.ribbon_end_margin) {
+    if (s < -item.geometry.ribbon_end_margin || s > total_length + item.geometry.ribbon_end_margin) {
       return std::nullopt;
     }
 
@@ -225,10 +228,10 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * interior crossing sits at a mid-range `s` and keeps full amplitude -- only the curve's two
      * true ends fade. The percentage is RNA-clamped to 50, so the two zones can never overlap. */
     float end_falloff = 1.0f;
-    if (!patch.geometry.spline.cyclic &&
-        patch.params.end_falloff_mode == CurvePatchEndFalloff::Smooth)
+    if (!item.geometry.spline.cyclic &&
+        item.params.end_falloff_mode == CurvePatchEndFalloff::Smooth)
     {
-      const float zone = float(patch.params.end_falloff_percent) * 0.01f * total_length;
+      const float zone = float(item.params.end_falloff_percent) * 0.01f * total_length;
       if (zone > 1e-8f) {
         /* Clamped at BOTH ends. `s` now runs slightly outside `[0, total_length]` on an extended
          * strip, and a negative `t` would make `t * t * (3 - 2t)` return a small POSITIVE value
@@ -265,7 +268,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * initialize their local buffers to before the null-texture guard, so threading it through
      * changes nothing for the no-texture case. */
     float tex_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    if (patch.params.stamp_mode == CurvePatchStampMode::Stamps) {
+    if (item.params.stamp_mode == CurvePatchStampMode::Stamps) {
       /* Find the stamps whose square could cover this vertex. The list is sorted by `center_v`,
        * so a lower-bound on `s - max_extent` opens a window that closes as soon as a stamp starts
        * past `s`; with the default spacing that window holds one to three stamps.
@@ -280,19 +283,19 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
        * The bound itself is resolved once per restamp into `CurvePatchGeometry::stamp_search_reach`
        * and shared with the seam wrap and the ribbon's end extension -- see that field's own
        * comment for why the three must not be allowed to drift apart. */
-      const float max_extent = patch.geometry.stamp_search_reach;
-      auto lower = std::lower_bound(patch.geometry.stamps.begin(),
-                                    patch.geometry.stamps.end(),
+      const float max_extent = item.geometry.stamp_search_reach;
+      auto lower = std::lower_bound(item.geometry.stamps.begin(),
+                                    item.geometry.stamps.end(),
                                     s - max_extent,
                                     [](const CurvePatchStamp &stamp, const float value) {
                                       return stamp.center_v < value;
                                     });
       bool hit = false;
       float best_abs = 0.0f;
-      for (auto it = lower; it != patch.geometry.stamps.end() && it->center_v <= s + max_extent; ++it) {
+      for (auto it = lower; it != item.geometry.stamps.end() && it->center_v <= s + max_extent; ++it) {
         float local_v;
         float local_u;
-        if (patch.params.stamp_projection == CurvePatchStampProjection::Planar) {
+        if (item.params.stamp_projection == CurvePatchStampProjection::Planar) {
           /* Rigid frame: the stamp's square is a square in the WORLD, so a vertex's stamp-local
            * coordinates are plain projections onto the frozen axes. The component along
            * `plane_normal` is simply dropped, which is what makes this a planar projection --
@@ -328,7 +331,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
          * `paint_get_tex_pixel()`, then apply the same mapping size/offset. */
         float stamp_u = local_u / it->half_extent;
         float stamp_v = local_v / it->half_extent;
-        if (patch.params.swap_axis) {
+        if (item.params.swap_axis) {
           std::swap(stamp_u, stamp_v);
         }
         stamp_u = stamp_u * mtex_size.x + mtex_ofs.x;
@@ -336,8 +339,8 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
 
         /* A LIST-mode stamp samples its own variant; SINGLE keeps the brush's texture. */
         const MTex &stamp_mtex = it->tex_index >= 0 &&
-                                         it->tex_index < patch.texture.stamp_texture_variants.size() ?
-                                     patch.texture.stamp_texture_variants[it->tex_index] :
+                                         it->tex_index < texture.stamp_texture_variants.size() ?
+                                     texture.stamp_texture_variants[it->tex_index] :
                                      *mtex;
         /* An empty slot in the LIST is an unconfigured slot, not a request to sculpt flat -- skip
          * the stamp entirely BEFORE it can win the merge below with the default `sample` of 1.0.
@@ -396,21 +399,21 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         s,
         total_length,
         falloff_radius_at_s,
-        patch.texture.caps_enabled,
-        patch.texture.world_cap_start,
-        patch.texture.world_cap_end,
-        patch.params.length_mode,
-        patch.params.length_repeat,
-        patch.geometry.spline.cyclic);
+        texture.caps_enabled,
+        texture.world_cap_start,
+        texture.world_cap_end,
+        item.params.length_mode,
+        item.params.length_repeat,
+        item.geometry.spline.cyclic);
     if (!zone_sample.valid) {
       /* Two oversized caps squeezed the middle to nothing; leave that stretch untouched. */
       return std::nullopt;
     }
 
-    const MTex &zone_mtex = patch.texture.caps_enabled ?
-                                patch.texture.ribbon_zone_variants[int(zone_sample.zone)] :
+    const MTex &zone_mtex = texture.caps_enabled ?
+                                texture.ribbon_zone_variants[int(zone_sample.zone)] :
                                 *mtex;
-    if (patch.texture.caps_enabled && zone_mtex.tex == nullptr) {
+    if (texture.caps_enabled && zone_mtex.tex == nullptr) {
       /* An unassigned zone leaves its stretch of the ribbon alone, which is what makes a
        * caps-only ribbon (no Middle texture) possible. */
       return std::nullopt;
@@ -418,7 +421,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
 
     float tex_u = u;
     float tex_v = zone_sample.v;
-    if (patch.params.swap_axis) {
+    if (item.params.swap_axis) {
       std::swap(tex_u, tex_v);
     }
     tex_u = tex_u * mtex_size.x + mtex_ofs.x;
@@ -469,11 +472,11 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * own depth measurement has to stay continuous across a window join, and this value does not
      * (see the `normal_at()` note there). Kept because it is the one observable that says which
      * plane a branch came from, which is what the frames tests assert on. */
-    float3 branch_normal[2] = {patch.params.plane_normal, patch.params.plane_normal};
-    const int branch_num = patch.geometry.frames.ready ?
-                               patch.geometry.frames.sample(
+    float3 branch_normal[2] = {item.params.plane_normal, item.params.plane_normal};
+    const int branch_num = item.geometry.frames.ready ?
+                               item.geometry.frames.sample(
                                    sample_co, symm_normal, branch_uv, branch_normal) :
-                               patch.geometry.ribbon.sample(sample_co, branch_uv);
+                               item.geometry.ribbon.sample(sample_co, branch_uv);
     std::optional<CurvePatchSample> merged;
     for (const int b : IndexRange(branch_num)) {
       const std::optional<CurvePatchSample> relief = branch_relief(sample_co, branch_uv[b]);
@@ -507,7 +510,7 @@ float curve_patch_max_radius(const bke::CurvePatchGeometry &geometry)
   return max_radius;
 }
 
-IndexMask curve_patch_cull_nodes(const CurvePatchSession &patch,
+IndexMask curve_patch_cull_nodes(const CurvePatchItem &item,
                                  const CurvePatchStrokeContext &ctx,
                                  const bke::pbvh::Tree &pbvh,
                                  const IndexMask &query_mask,
@@ -523,7 +526,7 @@ IndexMask curve_patch_cull_nodes(const CurvePatchSession &patch,
    * it sits within `max_radius` of the polyline. Node centres are mapped into the same canonical
    * space the sampler uses, so symmetry passes cull correctly. See #curve_patch_cull_tube_radius
    * for where the margin comes from. */
-  const float tube_radius = curve_patch_cull_tube_radius(patch.geometry, max_radius);
+  const float tube_radius = curve_patch_cull_tube_radius(item.geometry, max_radius);
   BitVector<> keep(pbvh.nodes_num(), false);
   auto cull_nodes = [&](const auto nodes) {
     query_mask.foreach_index([&](const int i) {
@@ -532,7 +535,7 @@ IndexMask curve_patch_cull_nodes(const CurvePatchSession &patch,
       const float node_radius = math::distance(center, bounds.max);
       const float3 canonical = curve_patch_canonicalize(ctx, center);
       const float reach = tube_radius + node_radius;
-      if (patch.geometry.spline.distance_sq_to(canonical) <= reach * reach) {
+      if (item.geometry.spline.distance_sq_to(canonical) <= reach * reach) {
         keep[i].set();
       }
     });
@@ -546,7 +549,7 @@ IndexMask curve_patch_cull_nodes(const CurvePatchSession &patch,
   return IndexMask::from_bits(keep, memory);
 }
 
-BitVector<> curve_patch_cull_grids(const CurvePatchSession &patch,
+BitVector<> curve_patch_cull_grids(const CurvePatchItem &item,
                                    const CurvePatchStrokeContext &ctx,
                                    const bke::pbvh::Tree &pbvh,
                                    const SubdivCCG &subdiv_ccg,
@@ -567,7 +570,7 @@ BitVector<> curve_patch_cull_grids(const CurvePatchSession &patch,
    * comparisons per vertex, versus `compute_vertex()`'s closest-point search, curve-falloff lookup,
    * and texture sample -- culling a whole far-away grid this way is strictly cheaper than walking it
    * with the real relief formula only to have every vertex rejected. */
-  const float tube_radius = curve_patch_cull_tube_radius(patch.geometry, max_radius);
+  const float tube_radius = curve_patch_cull_tube_radius(item.geometry, max_radius);
   BitVector<> grid_keep;
   grid_keep.resize(subdiv_ccg.grids_num, false);
   const Span<bke::pbvh::GridsNode> grids_nodes = pbvh.nodes<bke::pbvh::GridsNode>();
@@ -584,7 +587,7 @@ BitVector<> curve_patch_cull_grids(const CurvePatchSession &patch,
       const float grid_radius = math::distance(center, grid_max);
       const float3 canonical = curve_patch_canonicalize(ctx, center);
       const float reach = tube_radius + grid_radius;
-      if (patch.geometry.spline.distance_sq_to(canonical) <= reach * reach) {
+      if (item.geometry.spline.distance_sq_to(canonical) <= reach * reach) {
         grid_keep[grid].set();
       }
     }

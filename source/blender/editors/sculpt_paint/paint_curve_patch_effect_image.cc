@@ -161,7 +161,8 @@ class ImageColorEffect : public CurvePatchEffect {
   void apply_pass(const Depsgraph &depsgraph,
                   Object &ob,
                   const Brush &brush,
-                  CurvePatchSession &patch) override;
+                  CurvePatchSession &patch,
+                  const CurvePatchItem &item) override;
   UpdateType update_type() const override
   {
     return UpdateType::Image;
@@ -710,7 +711,8 @@ struct ChunkWrite {
 void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                   Object &ob,
                                   const Brush &brush,
-                                  CurvePatchSession &patch)
+                                  CurvePatchSession &patch,
+                                  const CurvePatchItem &item)
 {
   /* Guarded the same way `restore()`, `begin_restamp()` and `end_restamp()` are: nothing about the
    * effect interface promises a live session and stroke cache on every call. */
@@ -747,10 +749,10 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
 
   curve_patch_effect_ensure_falloff_curve(brush);
 
-  const float max_radius = curve_patch_max_radius(patch.geometry);
+  const float max_radius = curve_patch_max_radius(item.geometry);
   IndexMaskMemory culled_memory;
   const IndexMask node_mask = curve_patch_effect_node_mask(
-      depsgraph, ob, brush, patch, ctx, pbvh, max_radius, culled_memory);
+      depsgraph, ob, brush, item, ctx, pbvh, max_radius, culled_memory);
 
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
   MutableSpan<bke::pbvh::pixels::PixelNode> pixel_nodes = pixel_data.nodes;
@@ -913,7 +915,7 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
               const CurvePatchSourceGeometry source{
                   chunk_positions, chunk_normals, nullptr, /*indices_are_mesh_verts*/ false};
               const CurvePatchSampler sampler(
-                  patch, ctx, brush, source, chunk_mask, tex_pool);
+                  item, patch.texture, ctx, brush, source, chunk_mask, tex_pool);
 
               Vector<AcceptedPixel> accepted;
               for (const int li : IndexRange(range.size())) {

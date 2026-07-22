@@ -20,6 +20,7 @@
 #include "BLI_vector.hh"
 
 #include "BKE_bvhutils.hh"
+#include "BKE_curves.hh"
 
 namespace blender {
 /* The two geometry data-blocks a built patch can be read back out as; see
@@ -891,6 +892,26 @@ struct CurvePatchGeometry {
  * Returns with an empty `r_geometry.spline` when the input polyline is degenerate; callers must
  * check that, and the readiness of `frames`/`ribbon`, before consuming the result.
  */
+/**
+ * Tessellate a single-spline control curve and build every derived structure from it.
+ *
+ * Wraps #curve_patch_geometry_build with the tessellation that every caller performed identically:
+ * evaluating the curve, interpolating the per-point `radius` to the evaluated resolution, reading
+ * `cyclic` off curve 0, and -- when the snapshot is ready -- pulling the polyline onto it.
+ *
+ * `r_geometry.surface` is an INPUT. When it is ready the polyline is projected onto it before the
+ * spline is built; otherwise the strip stays in the curve's own plane. WHICH mesh the snapshot was
+ * taken from is deliberately the caller's decision: a sculpt session snapshots the original mesh,
+ * while a script reading a patch back may ask for the evaluated one.
+ *
+ * `control_curve` must hold a single spline. Slicing one spline out of a multi-spline paint curve
+ * is the editor's job, because only it knows about `PaintCurve`.
+ */
+void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
+                                          const CurvePatchParams &params,
+                                          Span<float> stamp_texture_weights_cdf,
+                                          CurvePatchGeometry &r_geometry);
+
 void curve_patch_geometry_build(Span<float3> evaluated_positions,
                                 Span<float> evaluated_radii,
                                 Span<float3> evaluated_normals,

@@ -29,6 +29,7 @@ struct Scene;
 
 namespace blender::ed::sculpt_paint {
 
+struct CurvePatchItem;
 struct CurvePatchSession;
 /* Opaque: defined in `mesh/sculpt_intern.hh`, which this header deliberately does not pull in --
  * only the enumeration's identity is needed here. */
@@ -87,14 +88,22 @@ class CurvePatchEffect {
   virtual void begin_restamp(const Depsgraph &depsgraph, Object &ob, CurvePatchSession &patch) = 0;
 
   /**
-   * Both phases for one symmetry pass: gather in parallel, then apply serially. Called by
-   * `do_symmetrical_brush_actions()` once per enabled pass; the serial half is the sole writer of
+   * Both phases for one symmetry pass of ONE patch: gather in parallel, then apply serially.
+   * Called by `do_symmetrical_brush_actions()` once per enabled pass, and by the session once per
+   * patch within that pass; the serial half is the sole writer of
    * `CurvePatchApplyState::pass_weight_accum` and of the target data.
+   *
+   * `patch` carries what is shared with the whole session (texture binding, apply state); `item`
+   * is the one patch this call writes. Two overlapping items reach the same vertex through
+   * `pass_weight_accum`, exactly as two symmetry passes do -- so Relief and Image AVERAGE their
+   * contributions rather than stacking them, while Color, which does not use the accumulator,
+   * lets the last item win.
    */
   virtual void apply_pass(const Depsgraph &depsgraph,
                           Object &ob,
                           const Brush &brush,
-                          CurvePatchSession &patch) = 0;
+                          CurvePatchSession &patch,
+                          const CurvePatchItem &item) = 0;
 
   /** After all passes: whatever finishing work this target needs (relief smooths its profile).
    * The viewport flush that used to live here is issued by the session instead -- see

@@ -6,6 +6,8 @@
  * \ingroup edsculpt
  */
 
+#include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <optional>
@@ -65,7 +67,11 @@ const bke::CurvesGeometry *ED_paint_curve_patch_active_control_curve(const Objec
   {
     return nullptr;
   }
-  return &ob->runtime->sculpt_session->curve_patch_session->edit.control_curve;
+  const CurvePatchSession &session = *ob->runtime->sculpt_session->curve_patch_session;
+  if (!session.has_active_item()) {
+    return nullptr;
+  }
+  return &session.active_item().control_curve;
 }
 
 void curve_patch_restore_only(Object &ob, const CurvePatchSession &session)
@@ -142,6 +148,19 @@ bke::CurvesGeometry curve_patch_control_curve_from_points(const Span<float3> pos
  * `do_symmetrical_brush_actions()`) to the whole curve's encompassing sphere in that pass's
  * transformed space. Unlike a normal brush dab, this forwards straight to the session's effect --
  * no `sculpt_brush_type` dispatch, no `do_brush_action()` call. */
+/* Whether a patch describes a strip at all: the build can leave the spline empty on a degenerate
+ * curve, and the structure the sampler reads -- the window set on the surface path, the whole-curve
+ * LUT otherwise -- can fail to rasterize even when it does not. Both were separate early returns in
+ * `curve_patch_restore_and_restamp()`; with N patches they become a per-patch predicate, because one
+ * unbuildable curve must not silence the others. */
+static bool session_item_is_buildable(const CurvePatchItem &item)
+{
+  if (item.geometry.spline.is_empty()) {
+    return false;
+  }
+  return item.geometry.surface.ready ? item.geometry.frames.ready : item.geometry.ribbon.ready;
+}
+
 static void curve_patch_apply_effect_action(const Depsgraph &depsgraph,
                                             const Scene & /*scene*/,
                                             Sculpt & /*sd*/,
@@ -150,47 +169,30 @@ static void curve_patch_apply_effect_action(const Depsgraph &depsgraph,
                                             PaintModeSettings & /*paint_mode_settings*/)
 {
   CurvePatchSession &session = *ob.runtime->sculpt_session->curve_patch_session;
-  session.effect->apply_pass(depsgraph, ob, brush, session);
+  /* One pass per patch, inside this symmetry pass. Overlapping patches meet in
+   * `CurvePatchApplyState::pass_weight_accum` exactly as two symmetry passes do -- which is why
+   * this is a plain loop and not a restore between patches: restoring would erase the previous
+   * patch's contribution. */
+  for (const CurvePatchItem &item : session.patches) {
+    if (!session_item_is_buildable(item)) {
+      /* Skipped rather than refused: asking for every spline of a curve must not fail because one
+       * of them is a stray single point. */
+      continue;
+    }
+    session.effect->apply_pass(depsgraph, ob, brush, session, item);
+  }
 }
 
-/* Tessellate the control curve, project it onto the surface snapshot, and rebuild every derived
- * structure. No mesh writes, no PBVH, no reports. */
+/* Tessellate every patch's control curve, project it onto the shared surface snapshot, and rebuild
+ * the structures derived from it. No mesh writes, no PBVH, no reports. */
 static void session_rebuild_geometry(CurvePatchSession &session)
 {
-  /* Tessellate the control curve the same way `PaintStroke::curve_end()` does for its own
-   * bezier-curve tessellation -- now also carrying the per-point `radius` attribute, interpolated
-   * to the same evaluated resolution. */
-  const bke::CurvesGeometry &geom = session.edit.control_curve;
-
-  geom.ensure_can_interpolate_to_evaluated();
-  Array<float> evaluated_radii(geom.evaluated_points_num());
-  geom.interpolate_to_evaluated(VArraySpan(geom.radius()), evaluated_radii.as_mutable_span());
-  /* `control_curve` is always a single spline (see `paintcurve_geometry_init_bezier()`), so curve 0
-   * carries the whole patch's cyclic state. */
-  const bool cyclic = geom.curves_num() > 0 && geom.cyclic()[0];
-
-  /* The polyline is pulled onto the pristine surface BEFORE the spline is built: arc lengths and
-   * tangents are computed inside the build, so shifting the points afterwards would leave them
-   * describing the previous curve, the one still hovering above the mesh. */
-  Array<float3> evaluated_positions(geom.evaluated_positions());
-  Array<float3> evaluated_normals(evaluated_positions.size(), float3(0.0f));
-  if (session.geometry.surface.ready) {
-    bke::curve_patch_surface_shrinkwrap(session.geometry.surface,
-                                        session.params.radius,
-                                        evaluated_positions.as_mutable_span(),
-                                        evaluated_normals.as_mutable_span());
-    bke::curve_patch_surface_fill_invalid_normals(evaluated_normals.as_mutable_span(),
-                                                  session.params.plane_normal);
+  for (CurvePatchItem &item : session.patches) {
+    bke::curve_patch_build_from_control_curve(item.control_curve,
+                                              item.params,
+                                              session.texture.stamp_texture_weights_cdf,
+                                              item.geometry);
   }
-
-  bke::curve_patch_geometry_build(evaluated_positions.as_span(),
-                                  evaluated_radii.as_span(),
-                                  session.geometry.surface.ready ? evaluated_normals.as_span() :
-                                                                   Span<float3>(),
-                                  cyclic,
-                                  session.params,
-                                  session.texture.stamp_texture_weights_cdf,
-                                  session.geometry);
 }
 
 /* Restore the effect's snapshot, then re-apply the patch through every symmetry pass. */
@@ -223,31 +225,46 @@ static void session_apply(const Scene &scene,
    * the vertex normals here; see `ReliefEffect::begin_restamp()` for why that is needed at all. */
   session.effect->begin_restamp(depsgraph, ob, session);
 
-  /* Whole-curve encompassing sphere, in canonical (non-mirrored) object space -- lets
+  /* Whole-session encompassing sphere, in canonical (non-mirrored) object space -- lets
    * `do_symmetrical_brush_actions()`'s existing per-pass node-mask query (driven by
    * `cache.location_symm`/`cache.radius`, set below via `cache.location`/`cache.radius` and
-   * transformed per pass by `cache_calc_brushdata_symm()`) cover the WHOLE curve for the effect
+   * transformed per pass by `cache_calc_brushdata_symm()`) cover EVERY patch for the effect
    * action above, instead of one small per-dab circle. Conservative bound: any point within
-   * `max_radius` of any point on the curve is within `(bbox half-diagonal + max_radius)` of the
-   * bbox center, by the triangle inequality. */
-  float3 bbox_min = session.geometry.spline.poly_3d[0];
-  float3 bbox_max = session.geometry.spline.poly_3d[0];
-  for (const float3 &p : session.geometry.spline.poly_3d) {
-    bbox_min = math::min(bbox_min, p);
-    bbox_max = math::max(bbox_max, p);
+   * `max_radius` of any point on a curve is within `(bbox half-diagonal + max_radius)` of the
+   * bbox center, by the triangle inequality.
+   *
+   * Patches with no strip are skipped: they contribute nothing, and their `poly_3d` can be empty,
+   * so reading a first element would be out of bounds. */
+  float3 bbox_min(FLT_MAX);
+  float3 bbox_max(-FLT_MAX);
+  float max_radius = 0.0f;
+  float ribbon_end_margin = 0.0f;
+  bool any_patch = false;
+  for (const CurvePatchItem &item : session.patches) {
+    if (!session_item_is_buildable(item)) {
+      continue;
+    }
+    any_patch = true;
+    for (const float3 &p : item.geometry.spline.poly_3d) {
+      bbox_min = math::min(bbox_min, p);
+      bbox_max = math::max(bbox_max, p);
+    }
+    /* The same bound the per-node cull uses, so this search sphere stays a genuine superset of the
+     * world-space reach actually used below -- including the extra `jitter_amount` a Stamps-mode
+     * stamp can be pushed out to. Equals `params.radius` in Ribbon mode. */
+    max_radius = math::max(max_radius, curve_patch_max_radius(item.geometry));
+    ribbon_end_margin = math::max(ribbon_end_margin, item.geometry.ribbon_end_margin);
+  }
+  if (!any_patch) {
+    return;
   }
   const float3 bbox_center = (bbox_min + bbox_max) * 0.5f;
-  /* The same bound the per-node cull uses, so this search sphere stays a genuine superset of the
-   * world-space reach actually used below -- including the extra `jitter_amount` a Stamps-mode
-   * stamp can be pushed out to. Equals `params.radius` in Ribbon mode. */
-  const float max_radius = curve_patch_max_radius(session.geometry);
   cache.location = bbox_center;
   /* `ribbon_end_margin` extends the strip along the end tangents, i.e. up to that far outside the
    * bbox built from the curve's own points, so the sphere has to grow by it as well -- it feeds the
    * node-mask query the cull tube above then narrows, and a node missing from it is never offered
    * to the cull at all. 0 in Ribbon mode, leaving the sphere exactly as it was. */
-  cache.radius = math::distance(bbox_max, bbox_center) + max_radius +
-                 session.geometry.ribbon_end_margin;
+  cache.radius = math::distance(bbox_max, bbox_center) + max_radius + ribbon_end_margin;
   cache.radius_squared = cache.radius * cache.radius;
 
   /* Reset the touched-node accumulator for THIS restamp. `curve_patch_restore_only()` already
@@ -303,7 +320,17 @@ static void session_apply(const Scene &scene,
  * first cleanup. Kept ahead of the readiness bail, where it has always been. */
 static void session_report_frame_cap(ReportList *reports, CurvePatchSession &session)
 {
-  if (session.geometry.frames.capped && !session.reported_frame_cap) {
+  if (session.reported_frame_cap) {
+    return;
+  }
+  /* One warning for the session, not one per patch: the message names the quality of the result,
+   * and which of several curves ran out of windows is not something the user can act on. */
+  const bool any_capped = std::any_of(session.patches.begin(),
+                                      session.patches.end(),
+                                      [](const CurvePatchItem &item) {
+                                        return item.geometry.frames.capped;
+                                      });
+  if (any_capped) {
     session.reported_frame_cap = true;
     BKE_report(reports,
                RPT_WARNING,
@@ -350,10 +377,10 @@ static void session_report_diagnostics(const CurvePatchSession &session,
       (long long)prof_nodes,
       (long long)session.apply.pass_weight_accum.size(),
       (long long)session.effect->snapshot_size(),
-      session.params.final_quality ? 1 : 0,
-      session.geometry.ribbon.res,
-      int(session.geometry.frames.frames.size()),
-      session.geometry.frames.capped ? 1 : 0,
+      session.active_item().params.final_quality ? 1 : 0,
+      session.active_item().geometry.ribbon.res,
+      int(session.active_item().geometry.frames.frames.size()),
+      session.active_item().geometry.frames.capped ? 1 : 0,
       prof_interval_ms);
   fflush(stdout);
 }
@@ -392,23 +419,30 @@ void curve_patch_restore_and_restamp(const Scene &scene,
    * stamp layout draws each stamp's slot from the weight table resolved here. */
   StrokeCache &cache = *ob.runtime->sculpt_session->cache;
   if (const Brush *tex_brush = BKE_paint_brush_for_read(cache.paint)) {
-    curve_patch_texture_binding_from_brush(*tex_brush, session.params.radius, session.texture);
+    /* The binding is shared by every patch, so it is resolved from the active patch's radius --
+     * the only one whose brush the user is currently looking at. */
+    curve_patch_texture_binding_from_brush(
+        *tex_brush, session.active_item().params.radius, session.texture);
   }
   else {
     curve_patch_texture_binding_clear(session.texture);
   }
 
   session_rebuild_geometry(session);
-  if (session.geometry.spline.is_empty()) {
-    return;
-  }
   session_report_frame_cap(reports, session);
 #if CURVE_PATCH_PROFILING
   const double prof_t_geometry = BLI_time_now_seconds(); /* DEBUG-cpatch */
 #endif
-  if (session.geometry.surface.ready ? !session.geometry.frames.ready :
-                                       !session.geometry.ribbon.ready)
-  {
+  const bool any_buildable = std::any_of(
+      session.patches.begin(), session.patches.end(), session_item_is_buildable);
+  if (!any_buildable) {
+    /* The mesh has already been restored above; flush so the viewport shows that, rather than the
+     * relief from the previous re-stamp, until the next event arrives. Guarded exactly as the
+     * normal end-of-restamp flush is: a headless session has no region to redraw, and
+     * `flush_update_step()` dereferences `vc.region` unconditionally. */
+    if (session.view_context.region != nullptr) {
+      flush_update_step(session.view_context, ob, session.effect->update_type());
+    }
     return;
   }
 
@@ -449,9 +483,9 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
    * cannot be reused directly because it is tied to the modal operator's `customdata`. The modal is
    * left running; it notices the freed session on its next event and tears its own state down
    * through its liveness guard. Keep the two in step when either changes. */
-  session->params.final_quality = true;
+  curve_patch_set_final_quality(*session, true);
   curve_patch_restore_and_restamp(C, ob, *session);
-  session->params.final_quality = false;
+  curve_patch_set_final_quality(*session, false);
 
   bool committed = false;
   if (session->apply.invalidated) {
@@ -585,12 +619,20 @@ bool curve_patch_session_publish(Object &ob,
   /* Cleared rather than assumed empty: this session object may be reused from a previous patch, and
    * a stale window set left over from a Mesh object would otherwise still be sampled on a Grids one.
    * The snapshot holds a copy of every vertex position plus a BVH, so it is also worth tens of
-   * megabytes on a dense object. */
-  session.geometry.frames.clear();
-  session.geometry.surface.clear();
-  if (bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Mesh) {
-    if (const Mesh *mesh = BKE_object_get_original_mesh(&ob)) {
-      bke::curve_patch_surface_snapshot_build(*mesh, session.geometry.surface);
+   * megabytes on a dense object.
+   *
+   * One snapshot PER PATCH, because the core build reads it off `CurvePatchGeometry` and the
+   * sampler reads its normals back the same way. They all describe the same pristine mesh, so this
+   * is redundant work -- bounded by the fact that the interactive editor publishes exactly one
+   * patch, and only the headless every-spline path pays for more than one. */
+  const Mesh *mesh = bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Mesh ?
+                         BKE_object_get_original_mesh(&ob) :
+                         nullptr;
+  for (CurvePatchItem &item : session.patches) {
+    item.geometry.frames.clear();
+    item.geometry.surface.clear();
+    if (mesh != nullptr) {
+      bke::curve_patch_surface_snapshot_build(*mesh, item.geometry.surface);
     }
   }
 
@@ -608,7 +650,8 @@ bool curve_patch_session_publish(Object &ob,
 
 /* Shared tail of the Curve Patch handoff: freeze brush params, repoint the ViewContext at the
  * session's owned copy, publish the session and stamp the initial preview.
- * `session->edit.control_curve` must already be fully built (positions, radii, handles). Used by
+ * `session->patches` must already hold the active item with its control curve fully built
+ * (positions, radii, handles); this fills that item's `params`. Used by
  * both the anchor-drag path and the roll-stroke bridge.
  *
  * Returns true when a session was published on the object. The caller is responsible for launching
@@ -639,12 +682,12 @@ static bool curve_patch_begin_editing(Object &ob,
   /* Rolled once, then frozen -- see `CurvePatchParams::stamp_seed`. This is the only place a real
    * RNG is touched; everything downstream hashes this seed. */
   const uint32_t stamp_seed = RandomNumberGenerator::from_random_seed().get_uint32();
-  session->params = curve_patch_params_from_brush(brush,
-                                                  frozen_radius,
-                                                  radius_per_size,
-                                                  plane_normal,
-                                                  stamp_seed,
-                                                  brush.curve_patch.swap_axis != 0);
+  session->active_item().params = curve_patch_params_from_brush(brush,
+                                                                frozen_radius,
+                                                                radius_per_size,
+                                                                plane_normal,
+                                                                stamp_seed,
+                                                                brush.curve_patch.swap_axis != 0);
 
   /* `cache.vc` otherwise still points at the just-finished stroke's own `ViewContext`, torn down
    * together with that stroke's operator. Repoint it at this session's owned copy so every
@@ -760,7 +803,9 @@ bool curve_patch_start_from_anchor(const Depsgraph &depsgraph,
       cache.initial_location - direction * cache.initial_radius,
       cache.initial_location + direction * cache.initial_radius};
   const std::array<float, 2> anchor_radii = {1.0f, 1.0f};
-  session->edit.control_curve = curve_patch_control_curve_from_points(
+  session->patches.resize(1);
+  session->active_patch = 0;
+  session->patches[0].control_curve = curve_patch_control_curve_from_points(
       anchor_positions, anchor_radii, /*cyclic=*/false);
 
   ToolSettings *tool_settings = CTX_data_tool_settings(vc.C);
@@ -808,7 +853,9 @@ bool roll_start_curve_patch_from_stroke(const Depsgraph &depsgraph,
   bke::pbvh::update_normals(depsgraph, ob, *bke::object::pbvh_get(ob));
 
   auto *session = MEM_new<CurvePatchSession>(__func__);
-  session->edit.control_curve = curve_patch_control_curve_from_points(
+  session->patches.resize(1);
+  session->active_patch = 0;
+  session->patches[0].control_curve = curve_patch_control_curve_from_points(
       control_positions, control_radii, /*cyclic=*/false);
 
   const StrokeCache &cache = *ss.cache;
@@ -857,49 +904,62 @@ const void *ED_curve_patch_session_get(const Object &ob)
   return ss != nullptr ? ss->curve_patch_session : nullptr;
 }
 
-int ED_curve_patch_session_point_num(const void *session)
+/* Every accessor below reports the ACTIVE patch, which is what a script asking "the running Curve
+ * Patch" means: the one the modal editor is acting on. Null when the session is half-built and has
+ * no active patch yet. */
+static const ed::sculpt_paint::CurvePatchItem *active_item_from_handle(const void *session)
 {
   const ed::sculpt_paint::CurvePatchSession *patch = session_from_handle(session);
-  return patch != nullptr ? patch->edit.control_curve.points_num() : 0;
+  if (patch == nullptr || !patch->has_active_item()) {
+    return nullptr;
+  }
+  return &patch->active_item();
+}
+
+int ED_curve_patch_session_point_num(const void *session)
+{
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  return item != nullptr ? item->control_curve.points_num() : 0;
 }
 
 int ED_curve_patch_session_active_point(const void *session)
 {
   const ed::sculpt_paint::CurvePatchSession *patch = session_from_handle(session);
-  if (patch == nullptr) {
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  if (item == nullptr) {
     return -1;
   }
   /* Validated here rather than trusted: the index outlives the modal that set it, and is only
    * reset when a session ends or a new control curve is built. */
-  const int point_num = patch->edit.control_curve.points_num();
+  const int point_num = item->control_curve.points_num();
   return patch->edit.active_point < point_num ? patch->edit.active_point : -1;
 }
 
 bool ED_curve_patch_session_is_cyclic(const void *session)
 {
-  const ed::sculpt_paint::CurvePatchSession *patch = session_from_handle(session);
-  if (patch == nullptr || patch->edit.control_curve.curves_num() == 0) {
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  if (item == nullptr || item->control_curve.curves_num() == 0) {
     return false;
   }
-  return patch->edit.control_curve.cyclic()[0];
+  return item->control_curve.cyclic()[0];
 }
 
 float ED_curve_patch_session_radius(const void *session)
 {
-  const ed::sculpt_paint::CurvePatchSession *patch = session_from_handle(session);
-  return patch != nullptr ? patch->params.radius : 0.0f;
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  return item != nullptr ? item->params.radius : 0.0f;
 }
 
 int ED_curve_patch_session_stamp_num(const void *session)
 {
-  const ed::sculpt_paint::CurvePatchSession *patch = session_from_handle(session);
-  return patch != nullptr ? int(patch->geometry.stamps.size()) : 0;
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  return item != nullptr ? int(item->geometry.stamps.size()) : 0;
 }
 
 Span<float3> ED_curve_patch_session_positions(const void *session)
 {
-  const ed::sculpt_paint::CurvePatchSession *patch = session_from_handle(session);
-  return patch != nullptr ? patch->edit.control_curve.positions() : Span<float3>();
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  return item != nullptr ? item->control_curve.positions() : Span<float3>();
 }
 
 /** \} */

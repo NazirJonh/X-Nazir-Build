@@ -17,6 +17,7 @@
  */
 
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
 
 #include "paint_curve_patch_effect.hh"
 
@@ -78,8 +79,12 @@ struct CurvePatchApplyInput {
  * caller (see `paint_curve_patch_effect_relief.cc`), and a transaction opened here would collide
  * with it.
  *
- * `control_curve` is copied, in the active object's space, and must already carry its bezier handle
- * positions -- build it with #curve_patch_control_curve_from_points when starting from raw points.
+ * Each of `control_curves` is copied, in the active object's space, and must already carry its
+ * bezier handle positions -- build them with #curve_patch_control_curve_from_points when starting
+ * from raw points. `params` runs parallel to it, one entry per curve, because a patch freezes the
+ * brush values its own curve was drawn with. Several curves are stamped one after another within
+ * each symmetry pass and blend through the same accumulator the passes themselves use, so
+ * overlapping patches average rather than stack.
  * The brush the patch is stamped with is the active one of `sd.paint`, because that is the one the
  * symmetry machinery (`do_symmetrical_brush_actions()`) reads regardless of what a caller passes.
  *
@@ -92,8 +97,8 @@ bool curve_patch_apply(const Scene &scene,
                        Object &ob,
                        Sculpt &sd,
                        PaintModeSettings &paint_mode_settings,
-                       const bke::CurvesGeometry &control_curve,
-                       const bke::CurvePatchParams &params,
+                       Span<bke::CurvesGeometry> control_curves,
+                       Span<bke::CurvePatchParams> params,
                        CurvePatchEffectType effect_type,
                        const CurvePatchApplyInput &input,
                        ReportList *reports);

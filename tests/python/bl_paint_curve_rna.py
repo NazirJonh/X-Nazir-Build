@@ -241,7 +241,11 @@ class CurvePatchResultTest(unittest.TestCase):
             ),
         )
         self.brush = bpy.context.tool_settings.sculpt.brush
+        # Properties of a shared brush ASSET, not of this fixture: restored in tearDown so one test
+        # cannot leak a Curve Patch setting into the next.
         self.stamp_mode_orig = self.brush.curve_patch.stamp_mode
+        self.stamp_texture_source_orig = self.brush.curve_patch.stamp_texture_source
+        self.texture_slot_num_orig = len(self.brush.curve_patch.texture_slots)
 
         self.pc = bpy.data.paint_curves.new("ResultCurve")
         for x in (-1.0, 0.0, 1.0):
@@ -250,6 +254,11 @@ class CurvePatchResultTest(unittest.TestCase):
     def tearDown(self):
         try:
             self.brush.curve_patch.stamp_mode = self.stamp_mode_orig
+            self.brush.curve_patch.stamp_texture_source = self.stamp_texture_source_orig
+            # Only the slots a test added, so a brush that shipped with its own keeps them.
+            slots = self.brush.curve_patch.texture_slots
+            while len(slots) > self.texture_slot_num_orig:
+                slots.remove(slots[-1])
         except (ReferenceError, AttributeError):
             pass
         if bpy.context.view_layer.objects.active is not None:
@@ -334,6 +343,55 @@ class CurvePatchResultTest(unittest.TestCase):
         self.pc.curve_patch_to_mesh(self.brush)
         after = [tuple(p.position) for p in self.pc.points]
         self.assertEqual(before, after)
+
+    def test_use_evaluated_false_follows_the_original_mesh(self):
+        # The displace pushes the evaluated surface off Z = 0 while the original stays flat, so the
+        # two snapshots the ribbon is shrinkwrapped onto no longer agree.
+        self.target.modifiers.new("Displace", 'DISPLACE')
+        bpy.context.view_layer.update()
+
+        evaluated = self.pc.curve_patch_to_mesh(self.brush, target=self.target)
+        original = self.pc.curve_patch_to_mesh(
+            self.brush, target=self.target, use_evaluated=False)
+        try:
+            self.assertIsNotNone(evaluated)
+            self.assertIsNotNone(original)
+            evaluated_z = [v.co.z for v in evaluated.vertices]
+            original_z = [v.co.z for v in original.vertices]
+            self.assertNotEqual(evaluated_z, original_z,
+                                "use_evaluated made no difference under a Displace modifier")
+        finally:
+            for mesh in (evaluated, original):
+                if mesh is not None:
+                    bpy.data.meshes.remove(mesh)
+
+    def test_multi_texture_slots_reach_the_stamp_layout(self):
+        # The weight table is resolved from the brush's slot list and handed to the core build. Read
+        # back without it, every stamp reports -1 ("the brush's own texture"); the slots need no
+        # actual texture for that, since only the weights decide which index a stamp draws.
+        #
+        # Sampled over several reads rather than one: the stamp seed is rolled fresh on every call
+        # and a short curve lays out few stamps, so one read can legitimately draw the same slot
+        # throughout. A lost weight table shows up in EVERY read, which is what this separates.
+        self.brush.curve_patch.stamp_mode = 'STAMPS'
+        self.brush.curve_patch.stamp_texture_source = 'MULTI'
+        for _ in range(2):
+            self.brush.curve_patch.texture_slots.new()
+
+        indices = set()
+        for _ in range(12):
+            points = self.pc.curve_patch_stamps(self.brush)
+            self.assertIsNotNone(points)
+            try:
+                indices.update(p.value for p in points.attributes["texture_index"].data)
+            finally:
+                bpy.data.pointclouds.remove(points)
+            if len(indices) > 1:
+                break
+
+        self.assertNotIn(-1, indices, "the stamps fell back to the brush's own texture")
+        self.assertGreater(len(indices), 1,
+                           "every stamp drew the same slot: the weight table was lost")
 
 
 def main():

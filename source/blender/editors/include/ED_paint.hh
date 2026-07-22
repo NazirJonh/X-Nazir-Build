@@ -11,6 +11,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_view3d_enums.h"
 
+#include "BLI_array.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 
@@ -250,6 +251,18 @@ bke::CurvesGeometry ED_paintcurve_control_curve_for_patch(const struct PaintCurv
 bke::CurvePatchParams ED_curve_patch_params_from_brush(const Paint &paint,
                                                        const Brush &brush,
                                                        const bke::CurvesGeometry &control_curve);
+
+/**
+ * The cumulative weight table a Stamps-mode build draws its texture slot from, or an empty array
+ * when the brush is in single-texture mode. `radius` is the patch's base world radius.
+ *
+ * Exists so the RNA read-back can produce the same stamp-to-slot assignment a live session does.
+ * The binding itself stays private to the editor module: only the weights cross the boundary,
+ * because only they reach the core build.
+ *
+ * Defined in `paint_curve_patch_params.cc`.
+ */
+Array<float> ED_curve_patch_stamp_texture_weights_from_brush(const Brush &brush, float radius);
 
 /* `paint_curve_patch_session.cc`: read-only view of a RUNNING Curve Patch edit, for the RNA layer.
  *

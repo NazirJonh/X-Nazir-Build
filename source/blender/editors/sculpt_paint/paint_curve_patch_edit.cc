@@ -35,6 +35,7 @@
  * `paint_curve_draw.cc`).
  */
 
+#include <algorithm>
 #include <cstring>
 #include <optional>
 #include <utility>
@@ -388,9 +389,11 @@ static void curve_patch_undo_push(CurvePatchSession &patch)
   patch.edit.undo_steps.resize(patch.edit.undo_step_current + 1);
 
   CurvePatchEditStep step;
-  step.curve = patch.edit.control_curve;
-  step.swap_axis = patch.params.swap_axis;
-  step.stamp_seed = patch.params.stamp_seed;
+  step.items.reserve(patch.patches.size());
+  for (const CurvePatchItem &item : patch.patches) {
+    step.items.append({item.control_curve, item.params.swap_axis, item.params.stamp_seed});
+  }
+  step.active_patch = patch.active_patch;
   patch.edit.undo_steps.append(std::move(step));
 
   if (patch.edit.undo_steps.size() > CURVE_PATCH_UNDO_STEPS_MAX) {
@@ -402,9 +405,16 @@ static void curve_patch_undo_push(CurvePatchSession &patch)
 static void curve_patch_undo_restore(bContext &C, Object &ob, CurvePatchSession &patch)
 {
   const CurvePatchEditStep &step = patch.edit.undo_steps[patch.edit.undo_step_current];
-  patch.edit.control_curve = step.curve;
-  patch.params.swap_axis = step.swap_axis;
-  patch.params.stamp_seed = step.stamp_seed;
+  /* Resized rather than rebuilt: only the three snapshotted fields are restored, so each patch
+   * keeps its surface snapshot and its derived geometry, which the next re-stamp overwrites
+   * anyway. A step can hold fewer patches than the session currently has. */
+  patch.patches.resize(step.items.size());
+  for (const int i : step.items.index_range()) {
+    patch.patches[i].control_curve = step.items[i].curve;
+    patch.patches[i].params.swap_axis = step.items[i].swap_axis;
+    patch.patches[i].params.stamp_seed = step.items[i].stamp_seed;
+  }
+  patch.active_patch = std::min(step.active_patch, int(patch.patches.size()) - 1);
   /* The restored curve may hold fewer points than the one just replaced. */
   patch.edit.active_point = -1;
 
@@ -438,8 +448,9 @@ static void curve_patch_undo_step_forward(bContext &C, Object &ob, CurvePatchSes
 
 static bool curve_patch_active_point_is_valid(const CurvePatchSession &patch)
 {
-  return patch.edit.active_point >= 0 && paintcurve_geometry_is_valid(patch.edit.control_curve) &&
-         patch.edit.active_point < patch.edit.control_curve.points_num();
+  const bke::CurvesGeometry &geom = patch.active_item().control_curve;
+  return patch.edit.active_point >= 0 && paintcurve_geometry_is_valid(geom) &&
+         patch.edit.active_point < geom.points_num();
 }
 
 /* Returns false (having reported why) when the point cannot be removed. */
@@ -451,7 +462,7 @@ static bool curve_patch_delete_active_point(bContext &C,
   if (!curve_patch_active_point_is_valid(patch)) {
     return false;
   }
-  bke::CurvesGeometry &geom = patch.edit.control_curve;
+  bke::CurvesGeometry &geom = patch.active_item().control_curve;
   /* Two points is the floor whether the curve is open or closed -- a 2-point cyclic Bezier is a
    * perfectly good loop (see #curve_patch_toggle_cyclic). */
   if (geom.points_num() - 1 < 2) {
@@ -480,7 +491,7 @@ static void curve_patch_set_active_handle_type(bContext &C,
                                                CurvePatchSession &patch,
                                                const ed::curves::SetHandleType dst_type)
 {
-  bke::CurvesGeometry &geom = patch.edit.control_curve;
+  bke::CurvesGeometry &geom = patch.active_item().control_curve;
   MutableSpan<int8_t> types_left = geom.handle_types_left_for_write();
   MutableSpan<int8_t> types_right = geom.handle_types_right_for_write();
   types_left[patch.edit.active_point] = paintcurve_resolve_handle_type(types_left[patch.edit.active_point],
@@ -499,7 +510,7 @@ static void curve_patch_set_active_handle_type(bContext &C,
 /* Close or re-open the control curve. Returns false only when there is no usable curve at all. */
 static bool curve_patch_toggle_cyclic(bContext &C, Object &ob, CurvePatchSession &patch)
 {
-  bke::CurvesGeometry &geom = patch.edit.control_curve;
+  bke::CurvesGeometry &geom = patch.active_item().control_curve;
   if (!paintcurve_geometry_is_valid(geom) || geom.curves_num() == 0) {
     return false;
   }
@@ -526,13 +537,13 @@ static bool curve_patch_toggle_cyclic(bContext &C, Object &ob, CurvePatchSession
  * randomization for a seed to drive. */
 static bool curve_patch_reseed_stamps(bContext &C, Object &ob, CurvePatchSession &patch)
 {
-  if (patch.params.stamp_mode != CurvePatchStampMode::Stamps) {
+  if (patch.active_item().params.stamp_mode != CurvePatchStampMode::Stamps) {
     return false;
   }
   /* Alongside `curve_patch_begin_editing()` the only place a stateful RNG is touched: every
    * per-stamp offset downstream is a pure hash of this seed, so re-rolling it here is what makes
    * the whole layout change while every other input stays put. */
-  patch.params.stamp_seed = RandomNumberGenerator::from_random_seed().get_uint32();
+  patch.active_item().params.stamp_seed = RandomNumberGenerator::from_random_seed().get_uint32();
 
   curve_patch_undo_push(patch);
   curve_patch_restore_and_restamp(C, ob, patch);
@@ -542,7 +553,7 @@ static bool curve_patch_reseed_stamps(bContext &C, Object &ob, CurvePatchSession
 
 static bool curve_patch_is_cyclic(const CurvePatchSession &patch)
 {
-  const bke::CurvesGeometry &geom = patch.edit.control_curve;
+  const bke::CurvesGeometry &geom = patch.active_item().control_curve;
   return paintcurve_geometry_is_valid(geom) && geom.curves_num() > 0 && geom.cyclic()[0];
 }
 
@@ -567,7 +578,7 @@ static void curve_patch_edit_context_menu_open(bContext *C)
 
   /* Ribbon mode has no randomization, so the entry would poll false and only ever show greyed
    * out -- leave it out entirely there. */
-  if (patch.params.stamp_mode == CurvePatchStampMode::Stamps) {
+  if (patch.active_item().params.stamp_mode == CurvePatchStampMode::Stamps) {
     layout.op("SCULPT_OT_curve_patch_stamp_reseed", std::nullopt, ICON_NONE);
   }
 
@@ -618,14 +629,14 @@ static void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &pa
   status.item(IFACE_("Undo"), ICON_EVENT_CTRL, ICON_EVENT_Z);
   /* Two whole strings rather than one with a substituted axis letter: a translator needs the
    * sentence, and neither half reads as a sentence on its own. */
-  status.item(patch.params.swap_axis ? IFACE_("Swap Texture Axis (now U)") :
+  status.item(patch.active_item().params.swap_axis ? IFACE_("Swap Texture Axis (now U)") :
                                        IFACE_("Swap Texture Axis (now V)"),
               ICON_EVENT_S);
   status.item(curve_patch_is_cyclic(patch) ? IFACE_("Open Curve") : IFACE_("Close Curve"),
               ICON_EVENT_C);
   /* Reseed has no shortcut -- this modal has no free key left -- so advertise the route that does
    * reach it. Meaningless in Ribbon mode, which has nothing random to re-roll. */
-  if (patch.params.stamp_mode == CurvePatchStampMode::Stamps) {
+  if (patch.active_item().params.stamp_mode == CurvePatchStampMode::Stamps) {
     status.item(IFACE_("Reseed Stamps"), ICON_MOUSE_RMB);
   }
 }
@@ -887,26 +898,29 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
        * A zero `radius_per_size` means the patch started with a zero brush size, which cannot happen
        * through the UI; guard anyway rather than collapse the patch to nothing. */
       const int brush_size = BKE_brush_size_get(&sd.paint, brush);
-      const float radius = patch.params.radius_per_size > 0.0f ?
-                               patch.params.radius_per_size * float(brush_size) :
-                               patch.params.radius;
+      /* Only the ACTIVE patch follows the brush. A patch the user is not editing keeps the values
+       * frozen when its own curve started -- which is the whole reason `params` is per-item. */
+      CurvePatchItem &item = patch.active_item();
+      const float radius = item.params.radius_per_size > 0.0f ?
+                               item.params.radius_per_size * float(brush_size) :
+                               item.params.radius;
       bke::CurvePatchParams live = curve_patch_params_from_brush(
           *brush,
           radius,
-          patch.params.radius_per_size,
-          patch.params.plane_normal,
-          patch.params.stamp_seed,
-          brush_swap_axis_changed ? swap_axis : patch.params.swap_axis);
+          item.params.radius_per_size,
+          item.params.plane_normal,
+          item.params.stamp_seed,
+          brush_swap_axis_changed ? swap_axis : item.params.swap_axis);
       /* Carried across rather than defaulted: this poll never runs inside the commit's
        * final-quality build, but making the compare depend on that would be a trap. */
-      live.final_quality = patch.params.final_quality;
+      live.final_quality = item.params.final_quality;
 
-      if (live != patch.params || alpha != data.last_synced_alpha ||
+      if (live != item.params || alpha != data.last_synced_alpha ||
           dir_in != data.last_synced_dir_in || symm != data.last_synced_symm || tex_changed ||
           falloff_preset != data.last_synced_falloff_preset ||
           falloff_curve_ts != data.last_synced_falloff_curve_ts || multi_texture_changed)
       {
-        patch.params = live;
+        item.params = live;
         data.last_synced_alpha = alpha;
         data.last_synced_dir_in = dir_in;
         data.last_synced_symm = symm;
@@ -1035,7 +1049,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   switch (event->type) {
     case LEFTMOUSE:
       if (event->val == KM_PRESS) {
-        bke::CurvesGeometry &geom = patch.edit.control_curve;
+        bke::CurvesGeometry &geom = patch.active_item().control_curve;
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
         Vector<PaintCurvePoint> screen_points;
@@ -1120,7 +1134,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       break;
     case MOUSEMOVE:
       if (data.dragging_point) {
-        bke::CurvesGeometry &geom = patch.edit.control_curve;
+        bke::CurvesGeometry &geom = patch.active_item().control_curve;
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
         float ob_to_world[4][4];
@@ -1189,14 +1203,14 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         const float mval_fl[2] = {float(event->mval[0]), float(event->mval[1])};
         const float new_radius = paintcurve_radius_from_handle_screen_pos(&data.radius_handle,
                                                                           mval_fl);
-        patch.edit.control_curve.radius_for_write()[patch.edit.active_point] = new_radius;
-        patch.edit.control_curve.tag_positions_changed();
+        patch.active_item().control_curve.radius_for_write()[patch.edit.active_point] = new_radius;
+        patch.active_item().control_curve.tag_positions_changed();
 
         curve_patch_restore_and_restamp(*C, ob, patch);
         ED_region_tag_redraw(CTX_wm_region(C));
       }
       else if (data.dragging_handle) {
-        bke::CurvesGeometry &geom = patch.edit.control_curve;
+        bke::CurvesGeometry &geom = patch.active_item().control_curve;
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
         float ob_to_world[4][4];
@@ -1243,7 +1257,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         ED_region_tag_redraw(CTX_wm_region(C));
       }
       else if (data.dragging_segment) {
-        bke::CurvesGeometry &geom = patch.edit.control_curve;
+        bke::CurvesGeometry &geom = patch.active_item().control_curve;
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
         float ob_to_world[4][4];
@@ -1280,7 +1294,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
        * control curve is a standalone `CurvesGeometry`. Ctrl+RMB keeps its insert/append meaning
        * below; plain RMB away from a point stays the no-op it has always been. */
       if (event->val == KM_PRESS && (event->modifier & KM_CTRL) == 0) {
-        const bke::CurvesGeometry &geom = patch.edit.control_curve;
+        const bke::CurvesGeometry &geom = patch.active_item().control_curve;
         if (paintcurve_geometry_is_valid(geom)) {
           Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
           ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
@@ -1304,7 +1318,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         break;
       }
       if (event->val == KM_PRESS && (event->modifier & KM_CTRL)) {
-        bke::CurvesGeometry &geom = patch.edit.control_curve;
+        bke::CurvesGeometry &geom = patch.active_item().control_curve;
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
         const float loc_fl[2] = {float(event->mval[0]), float(event->mval[1])};
@@ -1357,7 +1371,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         if (!did_insert) {
           /* Append: extend the single spline at its end (or start it, if empty). Uses the same
            * placement chain as #paintcurve_point_add so points land on the surface here too;
-           * `patch.params.plane_normal` only stands in when no real surface was hit. */
+           * `patch.active_item().params.plane_normal` only stands in when no real surface was hit. */
           float obj_co[3];
           float obj_no[3];
           const bool placed = paintcurve_surface_place(
@@ -1370,7 +1384,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
                               0;
           paintcurve_geometry_add_point(geom,
                                         float3(obj_co),
-                                        placed ? float3(obj_no) : patch.params.plane_normal,
+                                        placed ? float3(obj_no) : patch.active_item().params.plane_normal,
                                         create_new_spline,
                                         active_curve,
                                         add_index);
@@ -1429,7 +1443,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
        * option either -- it deletes the active point (see `EVT_XKEY` above), per Blender
        * convention. */
       if (event->val == KM_PRESS) {
-        patch.params.swap_axis = !patch.params.swap_axis;
+        bke::CurvePatchParams &params = patch.active_item().params;
+        params.swap_axis = !params.swap_axis;
         curve_patch_undo_push(patch);
         curve_patch_edit_status_set(C, patch);
         curve_patch_restore_and_restamp(*C, ob, patch);
@@ -1506,9 +1521,9 @@ static bool curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
        * order also decides which nodes the step covers, since this pass is the last one to widen
        * `CurvePatchApplyState::all_touched_nodes`. See
        * `docs/superpowers/specs/2026-07-18-curve-patch-final-quality-design.md`. */
-      patch->params.final_quality = true;
+      curve_patch_set_final_quality(*patch, true);
       curve_patch_restore_and_restamp(*C, ob, *patch);
-      patch->params.final_quality = false;
+      curve_patch_set_final_quality(*patch, false);
 
       /* That re-stamp is the last chance to notice that a foreign operator changed the mesh's
        * element count (see `CurvePatchApplyState::element_num`), and the commit key reaches this

@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <optional>
+#include <utility>
 
 #include "paint_curve_patch_apply.hh"
 
@@ -29,9 +30,11 @@
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
+#include "BLI_index_range.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_rand.hh"
 #include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -136,12 +139,13 @@ bool curve_patch_apply(const Scene &scene,
                        Object &ob,
                        Sculpt &sd,
                        PaintModeSettings &paint_mode_settings,
-                       const bke::CurvesGeometry &control_curve,
-                       const bke::CurvePatchParams &params,
+                       const Span<bke::CurvesGeometry> control_curves,
+                       const Span<bke::CurvePatchParams> params,
                        const CurvePatchEffectType effect_type,
                        const CurvePatchApplyInput &input,
                        ReportList *reports)
 {
+  BLI_assert(control_curves.size() == params.size());
   SculptSession *ss = ob.runtime->sculpt_session;
   if (ss == nullptr) {
     BKE_report(reports, RPT_ERROR, "Curve Patch: the object is not in Sculpt Mode");
@@ -164,9 +168,17 @@ bool curve_patch_apply(const Scene &scene,
     BKE_report(reports, RPT_WARNING, "Curve Patch does not support Dynamic Topology");
     return false;
   }
-  if (control_curve.points_num() < 2) {
-    BKE_report(reports, RPT_ERROR, "Curve Patch: the control curve needs at least two points");
+  if (control_curves.is_empty()) {
+    BKE_report(reports, RPT_ERROR, "Curve Patch: no control curve to stamp");
     return false;
+  }
+  /* Every curve is checked, not just the first: a caller that assembled the list itself must not be
+   * able to smuggle a degenerate one past the build and into an empty patch. */
+  for (const bke::CurvesGeometry &curve : control_curves) {
+    if (curve.points_num() < 2) {
+      BKE_report(reports, RPT_ERROR, "Curve Patch: the control curve needs at least two points");
+      return false;
+    }
   }
   /* `--background` leaves `wmWindowManager::undo_stack` null (`wm_files.cc`, guarded by
    * `!G.background`), and every undo push this call reaches -- the relief's position step, the
@@ -191,15 +203,22 @@ bool curve_patch_apply(const Scene &scene,
   curve_patch_prepare_brush_for_headless(sd.paint, *brush);
 
   ss->cache = MEM_new<StrokeCache>(__func__);
+  /* The first patch stands for all of them here: every field this seeds is either overwritten by
+   * the re-stamp with the whole session's encompassing sphere, or -- like `sculpt_normal` -- only
+   * read by the symmetry setup that runs before any patch is sampled. */
   curve_patch_apply_cache_init(
-      *ss->cache, ob, sd, *brush, paint_mode_settings, params, effect_type, input);
+      *ss->cache, ob, sd, *brush, paint_mode_settings, params[0], effect_type, input);
 
   auto *session = MEM_new<CurvePatchSession>(__func__);
-  session->params = params;
+  session->patches.resize(control_curves.size());
+  session->active_patch = 0;
+  for (const int i : control_curves.index_range()) {
+    session->patches[i].control_curve = control_curves[i];
+    session->patches[i].params = params[i];
+  }
   /* One shot: there is no interactive preview for a cheaper build to serve, and the commit below
    * expects the smoothed profile a final-quality re-stamp produces. */
-  session->params.final_quality = true;
-  session->edit.control_curve = control_curve;
+  curve_patch_set_final_quality(*session, true);
 
   if (!curve_patch_session_publish(ob, *session, effect_type, paint_mode_settings)) {
     BKE_report(reports, RPT_ERROR, "Curve Patch: this object cannot carry the requested effect");
@@ -415,30 +434,54 @@ static wmOperatorStatus curve_patch_apply_exec(bContext *C, wmOperator *op)
 
   /* The point count is only meaningful once the spline is chosen: a multi-spline curve can hold
    * plenty of points in total and a single one in the spline that was asked for. */
-  const bke::CurvesGeometry control_curve = ED_paintcurve_control_curve_for_patch(
-      *paint_curve, RNA_int_get(op->ptr, "spline_index"));
-  if (control_curve.points_num() < 2) {
-    BKE_report(op->reports, RPT_ERROR, "Curve Patch: the chosen spline needs at least two points");
-    return OPERATOR_CANCELLED;
+  Vector<bke::CurvesGeometry> control_curves;
+  if (RNA_boolean_get(op->ptr, "use_all_splines")) {
+    /* A short spline is skipped rather than fatal here: asking for every spline of a curve must not
+     * fail because one of them is a stray single point. The single-spline branch below still
+     * refuses, because there the caller named exactly which spline it wanted. */
+    for (const int i : IndexRange(paint_curve->geometry.wrap().curves_num())) {
+      bke::CurvesGeometry curve = ED_paintcurve_control_curve_for_patch(*paint_curve, i);
+      if (curve.points_num() >= 2) {
+        control_curves.append(std::move(curve));
+      }
+    }
+    if (control_curves.is_empty()) {
+      BKE_report(op->reports, RPT_ERROR, "Curve Patch: no spline has at least two points");
+      return OPERATOR_CANCELLED;
+    }
+  }
+  else {
+    bke::CurvesGeometry curve = ED_paintcurve_control_curve_for_patch(
+        *paint_curve, RNA_int_get(op->ptr, "spline_index"));
+    if (curve.points_num() < 2) {
+      BKE_report(op->reports, RPT_ERROR, "Curve Patch: the chosen spline needs at least two points");
+      return OPERATOR_CANCELLED;
+    }
+    control_curves.append(std::move(curve));
   }
 
   /* One source for every build parameter a brush implies outside a stroke -- shared with the RNA
-   * functions that read a patch back out without applying it. */
-  const bke::CurvePatchParams params = ED_curve_patch_params_from_brush(
-      sd.paint, *brush, control_curve);
+   * functions that read a patch back out without applying it. Resolved PER CURVE: the projection
+   * plane is fitted to the curve itself, so two splines lying on different faces get the plane each
+   * of them actually needs. */
+  Vector<bke::CurvePatchParams> params;
+  params.reserve(control_curves.size());
+  for (const bke::CurvesGeometry &curve : control_curves) {
+    params.append(ED_curve_patch_params_from_brush(sd.paint, *brush, curve));
+  }
 
   CurvePatchApplyInput input;
-  input.location = curve_patch_curve_center(control_curve);
+  input.location = curve_patch_curve_center(control_curves[0]);
   /* No view to read: the projection plane doubles as the view direction, which only a TUBE-falloff
    * brush's node query consults. */
-  input.view_normal = params.plane_normal;
+  input.view_normal = params[0].plane_normal;
 
   if (!curve_patch_apply(*CTX_data_scene(C),
                          depsgraph,
                          ob,
                          sd,
                          tool_settings.paint_mode,
-                         control_curve,
+                         control_curves,
                          params,
                          *effect_type,
                          input,
@@ -510,6 +553,14 @@ void SCULPT_OT_curve_patch_apply(wmOperatorType *ot)
               "Index of the spline to stamp along; the curve's active spline when negative",
               -1,
               INT_MAX);
+
+  RNA_def_boolean(ot->srna,
+                  "use_all_splines",
+                  false,
+                  "All Splines",
+                  "Stamp a patch along every spline of the paint curve instead of a single one. "
+                  "Overlapping patches blend through the same accumulator symmetry passes use, so "
+                  "they average rather than stack");
 }
 
 /** \} */

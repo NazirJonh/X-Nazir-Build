@@ -3905,6 +3905,14 @@ class VIEW3D_MT_sculpt_curves(Menu):
 
         layout.template_node_operator_asset_menu_items(catalog_path="Curves")
 
+        layout.separator()
+
+        layout.menu("VIEW3D_MT_sculpt_curves_showhide", text="Show/Hide")
+
+
+class VIEW3D_MT_sculpt_curves_showhide(ShowHideMenu, Menu):
+    _operator_name = "sculpt_curves"
+
 
 class VIEW3D_MT_mask(Menu):
     bl_label = "Mask"
@@ -5995,6 +6003,7 @@ class VIEW3D_MT_edit_curves(Menu):
 
         layout.separator()
 
+        layout.menu("VIEW3D_MT_edit_curves_showhide")
         layout.operator("curves.separate")
         layout.operator("curves.delete")
 
@@ -6017,6 +6026,10 @@ class VIEW3D_MT_edit_curves_segments(Menu):
 
         layout.operator("curves.subdivide")
         layout.operator("curves.switch_direction")
+
+
+class VIEW3D_MT_edit_curves_showhide(ShowHideMenu, Menu):
+    _operator_name = "curves"
 
 
 class VIEW3D_MT_edit_curves_context_menu(Menu):
@@ -9309,6 +9322,7 @@ classes = (
     VIEW3D_MT_edit_curves_select_more_less,
     VIEW3D_MT_select_edit_curves,
     VIEW3D_MT_select_sculpt_curves,
+    VIEW3D_MT_sculpt_curves_showhide,
     VIEW3D_MT_mesh_add,
     VIEW3D_MT_curve_add,
     VIEW3D_MT_surface_add,
@@ -9440,6 +9454,7 @@ classes = (
     VIEW3D_MT_edit_curves_add,
     VIEW3D_MT_edit_curves_segments,
     VIEW3D_MT_edit_curves_control_points,
+    VIEW3D_MT_edit_curves_showhide,
     VIEW3D_MT_edit_curves_context_menu,
     VIEW3D_MT_edit_pointcloud,
     VIEW3D_MT_object_mode_pie,

@@ -78,6 +78,16 @@ struct SelectionPaintOperationExecutor {
 
   SelectionPaintOperationExecutor(const PaintStroke &stroke) : ctx_(stroke) {}
 
+  /* Visibility is looked up once per brush step, an empty span means nothing is hidden. */
+  VArraySpan<bool> hide_point() const
+  {
+    return *curves_->attributes().lookup<bool>(".hide_point", bke::AttrDomain::Point);
+  }
+  VArraySpan<bool> hide_curve() const
+  {
+    return *curves_->attributes().lookup<bool>(".hide_curve", bke::AttrDomain::Curve);
+  }
+
   void execute(SelectionPaintOperation &self, const StrokeExtension &stroke_extension)
   {
     self_ = &self;
@@ -168,8 +178,14 @@ struct SelectionPaintOperationExecutor {
     const float brush_radius_re = brush_radius_base_re_ * brush_radius_factor_;
     const float brush_radius_sq_re = pow2f(brush_radius_re);
 
+    const VArraySpan<bool> hide_point = this->hide_point();
+
     threading::parallel_for(curves_->points_range(), 1024, [&](const IndexRange point_range) {
       for (const int point_i : point_range) {
+        if (!hide_point.is_empty() && hide_point[point_i]) {
+          continue;
+        }
+
         const float3 pos_cu = math::transform_point(brush_transform_inv,
                                                     deformation.positions[point_i]);
 
@@ -222,8 +238,14 @@ struct SelectionPaintOperationExecutor {
     const float brush_radius_cu = self_->brush_3d_.radius_cu;
     const float brush_radius_sq_cu = pow2f(brush_radius_cu);
 
+    const VArraySpan<bool> hide_point = this->hide_point();
+
     threading::parallel_for(curves_->points_range(), 1024, [&](const IndexRange point_range) {
       for (const int i : point_range) {
+        if (!hide_point.is_empty() && hide_point[i]) {
+          continue;
+        }
+
         const float3 pos_old_cu = deformation.positions[i];
 
         /* Compute distance to the brush. */
@@ -269,8 +291,14 @@ struct SelectionPaintOperationExecutor {
     const float brush_radius_re = brush_radius_base_re_ * brush_radius_factor_;
     const float brush_radius_sq_re = pow2f(brush_radius_re);
 
+    const VArraySpan<bool> hide_curve = this->hide_curve();
+
     threading::parallel_for(curves_->curves_range(), 1024, [&](const IndexRange curves_range) {
       for (const int curve_i : curves_range) {
+        if (!hide_curve.is_empty() && hide_curve[curve_i]) {
+          continue;
+        }
+
         const float max_weight = threading::parallel_reduce(
             points_by_curve[curve_i].drop_back(1),
             1024,
@@ -335,8 +363,14 @@ struct SelectionPaintOperationExecutor {
     const float brush_radius_cu = self_->brush_3d_.radius_cu;
     const float brush_radius_sq_cu = pow2f(brush_radius_cu);
 
+    const VArraySpan<bool> hide_curve = this->hide_curve();
+
     threading::parallel_for(curves_->curves_range(), 1024, [&](const IndexRange curves_range) {
       for (const int curve_i : curves_range) {
+        if (!hide_curve.is_empty() && hide_curve[curve_i]) {
+          continue;
+        }
+
         const float max_weight = threading::parallel_reduce(
             points_by_curve[curve_i].drop_back(1),
             1024,

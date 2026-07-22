@@ -407,7 +407,8 @@ static wmOperatorStatus select_random_exec(bContext *C, wmOperator *op)
 
   for (Curves *curves_id : unique_curves) {
     CurvesGeometry &curves = curves_id->geometry.wrap();
-    const bool was_anything_selected = curves::has_anything_selected(curves);
+    const bool was_anything_selected = ed::curves::has_anything_selected_visible(
+        curves, bke::AttrDomain(curves_id->selection_domain));
 
     bke::SpanAttributeWriter<float> attribute = float_selection_ensure(*curves_id);
     MutableSpan<float> selection = attribute.span;
@@ -1201,6 +1202,83 @@ static void SCULPT_CURVES_OT_min_distance_edit(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Hide/Show Operations
+ * \{ */
+
+namespace hide {
+
+static wmOperatorStatus exec(bContext *C, wmOperator *op)
+{
+  const bool unselected = RNA_boolean_get(op->ptr, "unselected");
+
+  bool changed = false;
+  for (Curves *curves_id : curves::get_unique_editable_curves(*C)) {
+    if (!curves::hide_selected(*curves_id, unselected)) {
+      continue;
+    }
+    changed = true;
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_GEOM | ND_DATA, curves_id);
+  }
+
+  return changed ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+}  // namespace hide
+
+static void SCULPT_CURVES_OT_hide(wmOperatorType *ot)
+{
+  ot->name = "Hide Selected";
+  ot->idname = __func__;
+  ot->description = "Hide selected points or curves";
+
+  ot->exec = hide::exec;
+  ot->poll = curves::editable_curves_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_boolean(
+      ot->srna, "unselected", false, "Unselected", "Hide unselected rather than selected");
+}
+
+namespace reveal {
+
+static wmOperatorStatus exec(bContext *C, wmOperator *op)
+{
+  const bool select = RNA_boolean_get(op->ptr, "select");
+
+  bool changed = false;
+  for (Curves *curves_id : curves::get_unique_editable_curves(*C)) {
+    if (!curves::reveal_all(*curves_id, select)) {
+      continue;
+    }
+    changed = true;
+    DEG_id_tag_update(&curves_id->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_GEOM | ND_DATA, curves_id);
+  }
+
+  return changed ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+}  // namespace reveal
+
+static void SCULPT_CURVES_OT_reveal(wmOperatorType *ot)
+{
+  ot->name = "Reveal Hidden";
+  ot->idname = __func__;
+  ot->description = "Reveal all hidden points and curves";
+
+  ot->exec = reveal::exec;
+  ot->poll = curves::editable_curves_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_boolean(ot->srna, "select", true, "Select", "");
+}
+
+/** \} */
+
 }  // namespace ed::sculpt_paint
 
 /* -------------------------------------------------------------------- */
@@ -1215,6 +1293,8 @@ void ED_operatortypes_sculpt_curves()
   WM_operatortype_append(SCULPT_CURVES_OT_select_random);
   WM_operatortype_append(SCULPT_CURVES_OT_select_grow);
   WM_operatortype_append(SCULPT_CURVES_OT_min_distance_edit);
+  WM_operatortype_append(SCULPT_CURVES_OT_hide);
+  WM_operatortype_append(SCULPT_CURVES_OT_reveal);
 }
 
 /** \} */

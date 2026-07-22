@@ -16,6 +16,7 @@
 #include "BKE_attribute.hh"
 #include "BKE_crazyspace.hh"
 #include "BKE_curves.hh"
+#include "BKE_curves_hide.hh"
 #include "BKE_curves_utils.hh"
 
 #include "ED_curves.hh"
@@ -416,6 +417,14 @@ bool has_anything_selected(const bke::CurvesGeometry &curves, bke::AttrDomain se
       curves, selection_domain, IndexRange(curves.attributes().domain_size(selection_domain)));
 }
 
+bool has_anything_selected_visible(const bke::CurvesGeometry &curves,
+                                   bke::AttrDomain selection_domain)
+{
+  IndexMaskMemory memory;
+  const IndexMask visible_mask = bke::curves::visible_mask(curves, selection_domain, memory);
+  return has_anything_selected(curves, selection_domain, visible_mask);
+}
+
 bool has_anything_selected(const bke::CurvesGeometry &curves,
                            bke::AttrDomain selection_domain,
                            const IndexMask &mask)
@@ -498,8 +507,18 @@ void select_all(bke::CurvesGeometry &curves,
 
 void select_all(bke::CurvesGeometry &curves, const bke::AttrDomain selection_domain, int action)
 {
-  const IndexRange selection(curves.attributes().domain_size(selection_domain));
-  select_all(curves, selection, selection_domain, action);
+  const IndexRange domain_range(curves.attributes().domain_size(selection_domain));
+
+  /* Deselecting affects hidden elements too, so that the invariant "hidden implies unselected"
+   * also holds for geometry that was hidden before this code existed. */
+  if (action == SEL_DESELECT) {
+    select_all(curves, IndexMask(domain_range), selection_domain, action);
+    return;
+  }
+
+  IndexMaskMemory memory;
+  const IndexMask visible_mask = bke::curves::visible_mask(curves, selection_domain, memory);
+  select_all(curves, visible_mask, selection_domain, action);
 }
 
 void select_linked(bke::CurvesGeometry &curves, const IndexMask &curves_mask, const bool unselect)
@@ -550,7 +569,9 @@ void select_linked(bke::CurvesGeometry &curves, const IndexMask &curves_mask, co
 
 void select_linked(bke::CurvesGeometry &curves, const bool unselect)
 {
-  select_linked(curves, curves.curves_range(), unselect);
+  IndexMaskMemory memory;
+  const IndexMask visible_mask = bke::curves::visible_mask(curves, bke::AttrDomain::Curve, memory);
+  select_linked(curves, visible_mask, unselect);
 }
 
 void select_alternate(bke::CurvesGeometry &curves,

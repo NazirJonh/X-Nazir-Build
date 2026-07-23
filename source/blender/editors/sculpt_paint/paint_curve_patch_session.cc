@@ -53,10 +53,9 @@
 #include "mesh/sculpt_intern.hh"
 #include "mesh/sculpt_undo.hh"
 
-/* Opt-in performance instrumentation. Times each `curve_patch_restore_and_restamp()` to confirm the
- * node-cull's effect on `relief`. Must stay 0 outside a measurement pass: the report writes to
- * stdout and flushes on every interactive re-stamp. Grep `DEBUG-cpatch` for every touch point. */
-#define CURVE_PATCH_PROFILING 0
+/* `CURVE_PATCH_PROFILING` (the `DEBUG-cpatch` timing below) is defined in
+ * `paint_curve_patch_effect.hh`, pulled in via `paint_curve_patch_session.hh`, so one toggle also
+ * drives the Image-effect's `DEBUG-cpatch-image` sub-phase breakdown. */
 
 namespace blender::ed::sculpt_paint {
 

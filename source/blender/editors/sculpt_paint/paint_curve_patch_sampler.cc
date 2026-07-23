@@ -130,6 +130,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
   if (mask_factor <= 0.0f) {
     return std::nullopt;
   }
+#if CURVE_PATCH_PROFILING
+  dbg_reached_lut_++;
+#endif
 
   /* Ribbon LUT instead of `CurvePatchSpline::closest_point()`: the old global nearest-segment
    * search was multi-valued on the concave side of sharp turns (several segments near-equidistant
@@ -352,6 +355,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         float sample = 1.0f;
         float sample_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         if (stamp_mtex.tex != nullptr) {
+#if CURVE_PATCH_PROFILING
+          dbg_tex_evals_++;
+#endif
           paint_get_tex_pixel(
               &stamp_mtex, stamp_u, stamp_v, &tex_pool_, thread_id, &sample, sample_rgba);
         }
@@ -433,6 +439,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * the outer-scope `tex_rgba` (initialized to `{1,1,1,1}` above), so the null-texture case leaves
      * a usable identity color for `ColorEffect` exactly as the no-texture branch intends. */
     if (zone_mtex.tex != nullptr) {
+#if CURVE_PATCH_PROFILING
+      dbg_tex_evals_++;
+#endif
       paint_get_tex_pixel(&zone_mtex, tex_u, tex_v, &tex_pool_, thread_id, &tex_value, tex_rgba);
     }
     }
@@ -477,6 +486,11 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
                                item.geometry.frames.sample(
                                    sample_co, symm_normal, branch_uv, branch_normal) :
                                item.geometry.ribbon.sample(sample_co, branch_uv);
+#if CURVE_PATCH_PROFILING
+    if (branch_num > 0) {
+      dbg_reached_relief_++;
+    }
+#endif
     std::optional<CurvePatchSample> merged;
     for (const int b : IndexRange(branch_num)) {
       const std::optional<CurvePatchSample> relief = branch_relief(sample_co, branch_uv[b]);

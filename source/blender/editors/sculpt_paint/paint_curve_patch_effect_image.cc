@@ -25,6 +25,7 @@
  */
 
 #include <algorithm>
+#include <cstdio> /* `printf`/`fflush` for `CURVE_PATCH_PROFILING`. */
 #include <optional>
 #include <string>
 
@@ -65,6 +66,7 @@
 #include "BLI_set.hh"
 #include "BLI_task.h"
 #include "BLI_task.hh"
+#include "BLI_time.h" /* `BLI_time_now_seconds()` for `CURVE_PATCH_PROFILING`. */
 #include "BLI_vector.hh"
 
 #include "IMB_colormanagement.hh"
@@ -211,6 +213,27 @@ class ImageColorEffect : public CurvePatchEffect {
    * or a cancel?" signal -- the effect is destroyed on both and is told neither. See the destructor
    * for the four teardown paths and what this reads as on each. */
   bool patch_pixels_on_canvas_ = false;
+
+#if CURVE_PATCH_PROFILING
+  /* DEBUG-cpatch-image: per-restamp wall-clock accumulators (seconds), reset at the top of
+   * `begin_restamp()` and reported as one line at the end of `end_restamp()`. Every restamp calls
+   * `apply_pass()` once per symmetry pass x patch, so these SUM those calls; `prof_pass_count_`
+   * records how many actually ran past the guards. */
+  double prof_build_pixels_ = 0.0; /* `bke::pbvh::build_pixels()` in `begin_restamp()`. */
+  double prof_cull_ = 0.0;         /* `curve_patch_effect_node_mask()`. */
+  double prof_fetch_undo_ = 0.0;   /* Buffer fetch + `do_push_undo_tile()` wave. */
+  double prof_phase1_ = 0.0;       /* Parallel sample + read-pixels (wall-clock elapsed). */
+  double prof_phase2_ = 0.0;       /* Serial snapshot + mix + write-back. */
+  /* PHASE 1 split, summed across threads (CPU-time; sums exceed `prof_phase1_`). */
+  double prof_p1_sample_ = 0.0;    /* Interpolation + patch sampling. */
+  double prof_p1_read_ = 0.0;      /* `read_image_pixels()` on accepted chunks. */
+  int64_t prof_candidates_ = 0;    /* Pixels sampled (vs the accepted `pixels` count). */
+  int64_t prof_culled_ = 0;        /* Pixels in chunks skipped by the broad-phase cull. */
+  int64_t prof_reached_lut_ = 0;   /* Passed cheap culls, reached the ribbon/frames LUT. */
+  int64_t prof_reached_relief_ = 0; /* LUT returned >=1 branch. */
+  int64_t prof_tex_evals_ = 0;     /* paint_get_tex_pixel calls. */
+  int prof_pass_count_ = 0;
+#endif
 };
 
 ImageColorEffect::ImageColorEffect(PaintModeSettings &paint_mode_settings, std::string canvas_key)
@@ -670,6 +693,23 @@ void ImageColorEffect::begin_restamp(const Depsgraph &depsgraph,
    * Curve Patch stroke. `bke::pbvh::build_pixels()` is cheap to call every restamp once the tables
    * exist -- it only rebuilds nodes flagged `rebuild`, the same lazy behavior an ordinary stroke's
    * own per-dab call already relies on. */
+#if CURVE_PATCH_PROFILING
+  /* Reset every per-restamp accumulator here, at the head of the single hook the orchestrator calls
+   * once before the passes, so a restamp that later bails still starts each column clean. */
+  prof_build_pixels_ = 0.0;
+  prof_cull_ = 0.0;
+  prof_fetch_undo_ = 0.0;
+  prof_phase1_ = 0.0;
+  prof_phase2_ = 0.0;
+  prof_p1_sample_ = 0.0;
+  prof_p1_read_ = 0.0;
+  prof_candidates_ = 0;
+  prof_culled_ = 0;
+  prof_reached_lut_ = 0;
+  prof_reached_relief_ = 0;
+  prof_tex_evals_ = 0;
+  prof_pass_count_ = 0;
+#endif
   SculptSession *ss = ob.runtime->sculpt_session;
   if (ss == nullptr || ss->cache == nullptr || !ss->cache->image_data) {
     return;
@@ -678,7 +718,13 @@ void ImageColorEffect::begin_restamp(const Depsgraph &depsgraph,
   if (image_data.image == nullptr || image_data.image_user == nullptr) {
     return;
   }
+#if CURVE_PATCH_PROFILING
+  const double prof_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
+#endif
   bke::pbvh::build_pixels(depsgraph, ob, *image_data.image, *image_data.image_user);
+#if CURVE_PATCH_PROFILING
+  prof_build_pixels_ += BLI_time_now_seconds() - prof_t0; /* DEBUG-cpatch-image */
+#endif
 }
 
 /** One accepted pixel inside a chunk. `local` indexes `ChunkWrite::values`, i.e. it is relative to
@@ -749,10 +795,22 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
 
   curve_patch_effect_ensure_falloff_curve(brush);
 
+#if CURVE_PATCH_PROFILING
+  /* Counted here, past every guard above, so the pass total matches the timed work. */
+  prof_pass_count_++;
+  const double prof_cull_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
+#endif
   const float max_radius = curve_patch_max_radius(item.geometry);
+  /* Broad-phase cull tube for the per-chunk reject in PHASE 1 below: the same tube (same margin) the
+   * node/grid culls use, so chunk rejection stays result-identical with them. */
+  const float cull_tube_radius = curve_patch_cull_tube_radius(item.geometry, max_radius);
   IndexMaskMemory culled_memory;
   const IndexMask node_mask = curve_patch_effect_node_mask(
       depsgraph, ob, brush, item, ctx, pbvh, max_radius, culled_memory);
+#if CURVE_PATCH_PROFILING
+  prof_cull_ += BLI_time_now_seconds() - prof_cull_t0;    /* DEBUG-cpatch-image */
+  const double prof_fetch_t0 = BLI_time_now_seconds();    /* DEBUG-cpatch-image */
+#endif
 
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
   MutableSpan<bke::pbvh::pixels::PixelNode> pixel_nodes = pixel_data.nodes;
@@ -801,6 +859,9 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
      * holding real "before" data. */
     undo_tiles_pushed_ = true;
   }
+#if CURVE_PATCH_PROFILING
+  prof_fetch_undo_ += BLI_time_now_seconds() - prof_fetch_t0; /* DEBUG-cpatch-image */
+#endif
 
   /* NOTE: This buffers a `float4` copy of every ACCEPTED chunk across the whole node mask before
    * PHASE 2 begins, so peak extra memory scales with the painted area of this pass rather than with
@@ -810,6 +871,24 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * oversight. */
   struct LocalData {
     Vector<ChunkWrite> chunks;
+#if CURVE_PATCH_PROFILING
+    /* DEBUG-cpatch-image: per-thread CPU-time split of PHASE 1. `sample` is the barycentric
+     * position/normal/mask interpolation plus the patch sampling (`sampler.sample()` per candidate);
+     * `read` is `read_image_pixels()`, run only for accepted chunks. `candidates` is how many pixels
+     * were sampled at all -- compared against the reported `pixels` (accepted) it shows how much of
+     * PHASE 1 is spent on pixels the patch then rejects. Summed across threads after the parallel
+     * region, so the sums exceed the wall-clock `phase1`; their RATIO is the signal. */
+    double sample_time = 0.0;
+    double read_time = 0.0;
+    int64_t candidates = 0;
+    /* Pixels in chunks the broad-phase cull skipped entirely (never sampled). `candidates + culled`
+     * equals the pre-cull candidate total. */
+    int64_t culled = 0;
+    /* sample() funnel, accumulated from the chunk's sampler after the sample loop. */
+    int64_t reached_lut = 0;
+    int64_t reached_relief = 0;
+    int64_t tex_evals = 0;
+#endif
   };
   threading::EnumerableThreadSpecific<LocalData> all_tls;
 
@@ -818,6 +897,9 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * of them. */
   ImagePool &tex_pool = ss.tex_pool_ensure();
 
+#if CURVE_PATCH_PROFILING
+  const double prof_phase1_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
+#endif
   /* PHASE 1 (parallel): derive each candidate pixel's 3D position and normal, sample the patch
    * there, and -- only for chunks that accepted at least one pixel -- read the chunk's current
    * contents into thread-local storage.
@@ -855,11 +937,53 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                buffer_size);
           }
 
-          for (const bke::pbvh::pixels::PackedPixelRow &pixel_row : tile_data.pixel_rows) {
-            const int row_size = pixel_row.num_pixels;
-            threading::parallel_for(IndexRange(row_size), 512, [&](const IndexRange range) {
-              const int thread_id = BLI_task_parallel_thread_id(nullptr);
-              LocalData &local = all_tls.local();
+          /* One 512-pixel chunk of one pixel row: broad-phase reject, then sample + read into
+           * thread-local storage. Extracted into a lambda so the loop below can parallelize ACROSS
+           * rows without reindenting or altering this body; its `return`s still just skip the chunk.
+           * A pixel row is usually shorter than a 512-pixel within-row split, so the previous inner
+           * `parallel_for(row_size, 512)` ran as a single task and, with `nodes == 1`, PHASE 1
+           * executed essentially serially. */
+          auto process_chunk = [&](const bke::pbvh::pixels::PackedPixelRow &pixel_row,
+                                   const IndexRange range,
+                                   const int thread_id,
+                                   LocalData &local) {
+              /* Broad-phase reject: skip this whole chunk when its 3D bounding sphere lies entirely
+               * outside the patch's falloff tube, before any per-pixel position/normal/mask work or
+               * `sample()` call. Within one `PackedPixelRow` (one UV primitive) a pixel's 3D position
+               * is affine in the pixel index, so the chunk's pixels lie on a straight segment and its
+               * bbox is exactly the bbox of its two end pixels -- no need to interpolate all of them.
+               * Same predicate (same `cull_tube_radius` margin, same canonicalization) as
+               * `curve_patch_cull_nodes`/`curve_patch_cull_grids`, so this is result-identical: any
+               * pixel `sample()` would accept sits within `max_radius` of the polyline. */
+              const int cull_tri_index =
+                  pixel_node.uv_primitives.tri_indices[pixel_row.uv_primitive_index];
+              const float2 cull_delta_bary =
+                  pixel_node.uv_primitives.delta_barycentric_coords[pixel_row.uv_primitive_index];
+              const float2 cull_bary_first =
+                  pixel_row.start_barycentric_coord + cull_delta_bary * float(range.start());
+              const float2 cull_bary_last =
+                  pixel_row.start_barycentric_coord +
+                  cull_delta_bary * float(range.start() + range.size() - 1);
+              const float3 cull_p_first = paint::image::calc_pixel_position(
+                  positions, pixel_data.vert_tris, cull_tri_index, cull_bary_first);
+              const float3 cull_p_last = paint::image::calc_pixel_position(
+                  positions, pixel_data.vert_tris, cull_tri_index, cull_bary_last);
+              const float3 cull_bbox_min = math::min(cull_p_first, cull_p_last);
+              const float3 cull_bbox_max = math::max(cull_p_first, cull_p_last);
+              const float3 cull_center = (cull_bbox_min + cull_bbox_max) * 0.5f;
+              const float cull_chunk_radius = math::distance(cull_center, cull_bbox_max);
+              const float3 cull_canonical = curve_patch_canonicalize(ctx, cull_center);
+              const float cull_reach = cull_tube_radius + cull_chunk_radius;
+              if (item.geometry.spline.distance_sq_to(cull_canonical) > cull_reach * cull_reach) {
+#if CURVE_PATCH_PROFILING
+                local.culled += range.size();
+#endif
+                return;
+              }
+#if CURVE_PATCH_PROFILING
+              local.candidates += range.size();
+              const double prof_sample_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
+#endif
 
               /* Row-chunk-local position/normal arrays: the same interpolation
                * `calc_pixel_row_positions()` performs, called a second time with vertex normals in
@@ -925,11 +1049,23 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                 }
                 accepted.append({li, sample->tex_color, sample->value, sample->weight});
               }
+#if CURVE_PATCH_PROFILING
+              local.reached_lut += sampler.dbg_reached_lut();
+              local.reached_relief += sampler.dbg_reached_relief();
+              local.tex_evals += sampler.dbg_tex_evals();
+#endif
               if (accepted.is_empty()) {
                 /* Bail out BEFORE the read. The float overload of `read_image_pixels()` converts
                  * the image buffer in place, so a chunk that is read must also be written back. */
+#if CURVE_PATCH_PROFILING
+                local.sample_time += BLI_time_now_seconds() - prof_sample_t0; /* DEBUG-cpatch-image */
+#endif
                 return;
               }
+#if CURVE_PATCH_PROFILING
+              local.sample_time += BLI_time_now_seconds() - prof_sample_t0; /* DEBUG-cpatch-image */
+              const double prof_read_t0 = BLI_time_now_seconds();           /* DEBUG-cpatch-image */
+#endif
 
               Vector<float4> byte_storage;
               MutableSpan<float4> scene_linear;
@@ -941,6 +1077,9 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                 scene_linear = paint::image::read_image_pixels(
                     byte_buffer, *processors, pixel_row, range, image_buffer->x, byte_storage);
               }
+#if CURVE_PATCH_PROFILING
+              local.read_time += BLI_time_now_seconds() - prof_read_t0; /* DEBUG-cpatch-image */
+#endif
 
               ChunkWrite chunk;
               chunk.tile_data = &tile_data;
@@ -955,11 +1094,45 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
               chunk.accepted = std::move(accepted);
               chunk.node_index = i;
               local.chunks.append(std::move(chunk));
-            });
-          }
+          };
+
+          /* Parallelize across ROWS, not within one row. Rows map to disjoint pixels, so this is
+           * race-free for the same reason the reference `do_paint_pixels()`
+           * (`mesh/sculpt_paint_image.cc`) parallelizes over its rows with the same in-place read.
+           * The 512-pixel chunking `read_image_pixels()` requires is kept, iterated serially within
+           * each row (a row spans at most the image width). `all_tls.local()` and the tex-pool
+           * `thread_id` are fetched once per row-range task -- one thread runs the whole task. */
+          threading::parallel_for(
+              tile_data.pixel_rows.index_range(), 8, [&](const IndexRange rows) {
+                const int thread_id = BLI_task_parallel_thread_id(nullptr);
+                LocalData &local = all_tls.local();
+                for (const int row_i : rows) {
+                  const bke::pbvh::pixels::PackedPixelRow &pixel_row = tile_data.pixel_rows[row_i];
+                  const int row_size = pixel_row.num_pixels;
+                  for (int64_t chunk_start = 0; chunk_start < row_size; chunk_start += 512) {
+                    const IndexRange range(
+                        chunk_start, std::min<int64_t>(512, int64_t(row_size) - chunk_start));
+                    process_chunk(pixel_row, range, thread_id, local);
+                  }
+                }
+              });
         }
       },
       exec_mode::grain_size(1));
+#if CURVE_PATCH_PROFILING
+  prof_phase1_ += BLI_time_now_seconds() - prof_phase1_t0; /* DEBUG-cpatch-image */
+  /* Sum the per-thread PHASE 1 split now that the parallel region has joined. */
+  for (const LocalData &local : all_tls) {
+    prof_p1_sample_ += local.sample_time;
+    prof_p1_read_ += local.read_time;
+    prof_candidates_ += local.candidates;
+    prof_culled_ += local.culled;
+    prof_reached_lut_ += local.reached_lut;
+    prof_reached_relief_ += local.reached_relief;
+    prof_tex_evals_ += local.tex_evals;
+  }
+  const double prof_phase2_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
+#endif
 
   /* PHASE 2 (serial): the sole writer of the snapshot, of `patch.apply.pass_weight_accum` and of the
    * image buffers. Follows `ColorEffect::apply_pass()`'s PHASE 2 step for step -- lazy per-slot
@@ -1101,6 +1274,9 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * `ColorEffect` scopes its own tag to the nodes it actually wrote. */
   IndexMaskMemory tag_memory;
   curve_patch_record_touched_nodes(patch.apply, IndexMask::from_bits(touched, tag_memory));
+#if CURVE_PATCH_PROFILING
+  prof_phase2_ += BLI_time_now_seconds() - prof_phase2_t0; /* DEBUG-cpatch-image */
+#endif
 }
 
 void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
@@ -1126,11 +1302,48 @@ void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
 
   /* The same two closing steps an ordinary image-paint dab runs after writing pixels, in the same
    * order: the seam fix reads the per-tile dirty flags that `mark_image_dirty()` then clears. */
+#if CURVE_PATCH_PROFILING
+  const double prof_seam_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
+#endif
   paint::image::fix_non_manifold_seam_bleeding(ob, image_data, nodes, pixel_nodes, touched_mask);
   touched_mask.foreach_index([&](const int i) {
     bke::pbvh::pixels::mark_image_dirty(
         nodes[i], pixel_nodes[i], *image_data.image, image_data.buffers);
   });
+#if CURVE_PATCH_PROFILING
+  const double prof_seam = BLI_time_now_seconds() - prof_seam_t0;
+  /* DEBUG-cpatch-image: one line per restamp, summing every symmetry pass x patch. `pixels` is the
+   * total painted-pixel count this restamp (`pass_weight_accum`, cleared per restamp), `tiles` the
+   * snapshot's live tile count. Times are wall-clock ms; the parallel phases (build/cull/phase1)
+   * report elapsed span, not summed core time. Paired with the session-level `DEBUG-cpatch` line,
+   * whose `apply` column contains all of these plus the `do_symmetrical_brush_actions()` overhead. */
+  const double to_ms = 1000.0;
+  /* `p1_sample`/`p1_read` are summed across threads (CPU-time), so they add up to more than the
+   * wall-clock `phase1`; read their RATIO, not their sum. `cand` is pixels sampled, `pixels` is
+   * pixels the patch accepted -- a large `cand`/`pixels` gap means PHASE 1 burns most of its time
+   * sampling pixels it then rejects (a culling-tightness signal). */
+  printf(
+      "[DEBUG-cpatch-image] passes=%d | build_px=%.2f cull=%.2f fetch+undo=%.2f phase1=%.2f "
+      "(sample=%.2f read=%.2f cpu) phase2=%.2f seam=%.2f (ms) | culled=%lld cand=%lld lut=%lld "
+      "relief=%lld texev=%lld pixels=%lld tiles=%lld\n",
+      prof_pass_count_,
+      prof_build_pixels_ * to_ms,
+      prof_cull_ * to_ms,
+      prof_fetch_undo_ * to_ms,
+      prof_phase1_ * to_ms,
+      prof_p1_sample_ * to_ms,
+      prof_p1_read_ * to_ms,
+      prof_phase2_ * to_ms,
+      prof_seam * to_ms,
+      (long long)prof_culled_,
+      (long long)prof_candidates_,
+      (long long)prof_reached_lut_,
+      (long long)prof_reached_relief_,
+      (long long)prof_tex_evals_,
+      (long long)patch.apply.pass_weight_accum.size(),
+      (long long)orig_tiles_.size());
+  fflush(stdout);
+#endif
 }
 
 void ImageColorEffect::commit(const Scene & /*scene*/,

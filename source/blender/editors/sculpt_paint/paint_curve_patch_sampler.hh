@@ -24,6 +24,8 @@
 
 #include "DNA_scene_enums.h"
 
+#include "paint_curve_patch_effect.hh" /* CURVE_PATCH_PROFILING */
+
 namespace blender {
 struct Brush;
 struct CCGKey;
@@ -158,6 +160,21 @@ class CurvePatchSampler {
   /** Read-only and thread-safe; `thread_id` indexes the texture pool's per-thread slot. */
   std::optional<CurvePatchSample> sample(int idx, int thread_id) const;
 
+#if CURVE_PATCH_PROFILING
+  int64_t dbg_reached_lut() const
+  {
+    return dbg_reached_lut_;
+  }
+  int64_t dbg_reached_relief() const
+  {
+    return dbg_reached_relief_;
+  }
+  int64_t dbg_tex_evals() const
+  {
+    return dbg_tex_evals_;
+  }
+#endif
+
  private:
   const CurvePatchItem &item_;
   const CurvePatchTextureBinding &texture_;
@@ -169,6 +186,13 @@ class CurvePatchSampler {
   float total_length_;
   float2 mtex_size_;
   float2 mtex_ofs_;
+#if CURVE_PATCH_PROFILING
+  /* DEBUG-cpatch-image funnel counters. `mutable` because `sample()` is `const`; no atomics needed
+   * because a sampler is constructed per chunk and a chunk is processed by a single thread. */
+  mutable int64_t dbg_reached_lut_ = 0;
+  mutable int64_t dbg_reached_relief_ = 0;
+  mutable int64_t dbg_tex_evals_ = 0;
+#endif
 };
 
 /** Largest world-space half-width anywhere on the curve, scaled by the ribbon radius. Takes the

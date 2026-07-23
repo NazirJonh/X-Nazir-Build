@@ -3542,6 +3542,21 @@ void do_brush_action(const Depsgraph &depsgraph,
                                     std::numeric_limits<float>::max());
   }
 
+  /* Curve Patch's anchor-drag phase normally stamps an ordinary preview dab and lets
+   * `restore_from_undo_step_if_necessary()` take it back before the next one. The image canvas has
+   * no such restore: its pixels live in the image undo system, not the sculpt one, so
+   * `restore_color_from_undo_step()` finds no node to write back and the round dab stays baked into
+   * the texture -- and the handoff's `BKE_undosys_step_push_init_abort()` then discards the very
+   * image undo step that could have taken it back, leaving it not even undoable. Write nothing at
+   * all for that target instead; everything the patch handoff reads from this call
+   * (#update_sculpt_normal, #update_brush_local_mat) has already run above. The other targets keep
+   * their preview, which their own restore still cleans up. */
+  if (use_pixels && brush.stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+      bke::brush::supports_curve_patch(brush) && !ss.curve_patch_session)
+  {
+    return;
+  }
+
   /* Apply one type of brush action. */
   switch (brush.sculpt_brush_type) {
     case SCULPT_BRUSH_TYPE_DRAW: {

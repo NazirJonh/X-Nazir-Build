@@ -379,7 +379,7 @@ static void build_shared_frame_clip_planes(const GestureData &gesture_data,
   for (int k = 0; k < 8; k++) {
     const float3 mirrored_world = mirror_world_point(gesture_data, float3(bb_world.vec[k]));
     const float3 mirrored_local = math::transform_point(current_object.world_to_object(),
-                                                         mirrored_world);
+                                                        mirrored_world);
     copy_v3_v3(bb_local.vec[k], mirrored_local);
   }
   const bool flip_sign = is_negative_m4(current_object.object_to_world().ptr());
@@ -414,7 +414,7 @@ static void flip_for_symmetry_pass(GestureData &gesture_data, const ePaintSymmet
   Object &current_object = *gesture_data.vc.obact;
 
   const float3 mirrored_world_view_normal = symmetry_flip(gesture_data.world_space_view_normal,
-                                                           symmpass);
+                                                          symmpass);
   gesture_data.view_normal = math::normalize(
       math::transform_direction(current_object.world_to_object(), mirrored_world_view_normal));
 
@@ -435,8 +435,10 @@ static void flip_for_symmetry_pass(GestureData &gesture_data, const ePaintSymmet
       const float3 p1 = mirror_world_point(gesture_data, gesture_data.line_plane_points[1]);
       const float3 p2 = mirror_world_point(gesture_data, gesture_data.line_plane_points[2]);
       const float3 p3 = mirror_world_point(gesture_data, gesture_data.line_plane_points[3]);
-      const float3 op0 = mirror_world_point(gesture_data, gesture_data.line_offset_plane_points[0]);
-      const float3 op1 = mirror_world_point(gesture_data, gesture_data.line_offset_plane_points[1]);
+      const float3 op0 = mirror_world_point(gesture_data,
+                                            gesture_data.line_offset_plane_points[0]);
+      const float3 op1 = mirror_world_point(gesture_data,
+                                            gesture_data.line_offset_plane_points[1]);
       line_plane_from_tri(gesture_data.line.plane, current_object, flip, p0, p1, p2);
       line_plane_from_tri(gesture_data.line.side_plane[0], current_object, false, p1, p0, op0);
       line_plane_from_tri(gesture_data.line.side_plane[1], current_object, false, p3, p2, op1);
@@ -512,7 +514,7 @@ static bool is_affected_lasso(const GestureData &gesture_data, const float3 &pos
   float2 scr_co_f;
   if (gesture_data.use_shared_symmetry_frame) {
     const float3 world_pos = math::transform_point(gesture_data.vc.obact->object_to_world(),
-                                                    position);
+                                                   position);
     const float3 mirrored_world = mirror_world_point(gesture_data, world_pos);
     scr_co_f = ED_view3d_project_float_v2_m4(
         gesture_data.vc.region, mirrored_world, float4x4(gesture_data.vc.rv3d->persmat));
@@ -606,13 +608,14 @@ void apply(bContext &C, GestureData &gesture_data, wmOperator &op)
    * bit-exact regardless of the symmetry_space setting, matching the brush-stroke
    * `multi_object_stroke` discipline. The frame itself is constant across objects/passes; only
    * `symmpass` (read separately per pass) varies the actual mirror. */
-  const ePaintSymmetrySpace symmetry_space = ePaintSymmetrySpace(gesture_data.paint->symmetry_space);
+  const ePaintSymmetrySpace symmetry_space = ePaintSymmetrySpace(
+      gesture_data.paint->symmetry_space);
   gesture_data.use_shared_symmetry_frame = gesture_data.objects.size() > 1 &&
                                            symmetry_space != PAINT_SYMM_SPACE_ACTIVE_OBJECT;
   if (gesture_data.use_shared_symmetry_frame) {
-    const float3 cursor_world = float3(gesture_data.vc.scene->cursor.location);
+    const float4x4 cursor_to_world = gesture_data.vc.scene->cursor.matrix<float4x4>();
     gesture_data.world_to_symm_space = symmetry_space_frame(
-        symmetry_space, gesture_data.objects.first()->world_to_object(), cursor_world);
+        symmetry_space, gesture_data.objects.first()->world_to_object(), cursor_to_world);
     gesture_data.symm_space_to_world = math::invert(gesture_data.world_to_symm_space);
   }
 

@@ -115,32 +115,46 @@ class Sculpts : Overlay {
   }
 
   /**
-   * Maps the space the shared symmetry planes live in into `ob`'s local space, or nullopt when
-   * there is no shared plane at all (any single-object session). Note the difference from an
-   * identity matrix, which still means "shared, and it happens to coincide with this object's own
-   * axes" - the plane overlay draws a shared plane once for the whole mode, so it must be able to
-   * tell the two apart.
+   * Maps the space the symmetry planes live in into `ob`'s local space, or nullopt when the plane
+   * is `ob`'s own local plane (single object in ACTIVE_OBJECT space). Note the difference from an
+   * identity matrix, which still means "a non-local frame that happens to coincide with this
+   * object's own axes" - the plane overlay draws a shared plane once for the whole mode, so it
+   * must be able to tell the two apart.
    *
    * This reproduces `StrokeCache.symm_cur_from_ref` as built by
    * #propagate_shared_sampling_and_symmetry_state (editors/sculpt_paint/mesh/
-   * sculpt_multi_object.cc). It is duplicated rather than shared because the draw module must not
-   * depend on editors/, and because that value only exists inside a live #StrokeCache, whereas the
-   * overlay has to draw the plane while merely hovering.
+   * sculpt_multi_object.cc): World and Cursor spaces engage for ANY object count (matching the
+   * stroke's #shared_symmetry_active, which is true for a single object outside ACTIVE_OBJECT
+   * space), while ACTIVE_OBJECT only shares a plane across a genuine multi-object session. It is
+   * duplicated rather than shared because the draw module must not depend on editors/, and because
+   * that value only exists inside a live #StrokeCache, whereas the overlay has to draw the plane
+   * while merely hovering.
    */
   std::optional<float4x4> shared_symmetry_space_to_object(const Object *ob,
                                                           const State &state) const
   {
-    if (!multi_object_sculpt_) {
+    if (state.scene == nullptr) {
       return std::nullopt;
     }
     const Sculpt *sculpt = state.scene->toolsettings->sculpt;
+    if (sculpt == nullptr) {
+      return std::nullopt;
+    }
     switch (ePaintSymmetrySpace(sculpt->paint.symmetry_space)) {
       case PAINT_SYMM_SPACE_GLOBAL_WORLD:
         return ob->world_to_object();
       case PAINT_SYMM_SPACE_GLOBAL_CURSOR:
-        return ob->world_to_object() *
-               math::from_location<float4x4>(float3(state.scene->cursor.location));
+        /* `symm_cur_from_ref` = `ob->world_to_object() * S_inv`, and for the cursor frame
+         * `S = invert(cursor_to_world)`, so `S_inv` is the cursor matrix itself. Using its full
+         * transform (location AND orientation) makes the overlay follow a rotated 3D cursor,
+         * exactly as the stroke does (see #symmetry_space_frame). */
+        return ob->world_to_object() * state.scene->cursor.matrix<float4x4>();
       case PAINT_SYMM_SPACE_ACTIVE_OBJECT:
+        /* The reference object's local axes. Only meaningful across more than one object; a single
+         * object mirrors in its own local space, so the plane is drawn in local axes (nullopt). */
+        if (!multi_object_sculpt_) {
+          return std::nullopt;
+        }
         if (ob == symmetry_reference_ob_) {
           return float4x4::identity();
         }

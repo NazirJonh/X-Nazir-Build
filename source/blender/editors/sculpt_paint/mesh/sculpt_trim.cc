@@ -208,14 +208,12 @@ static void get_origin_and_normal(gesture::GestureData &gesture_data,
    */
   switch (trim_operation->orientation) {
     case OrientationType::View:
-      mul_v3_m4v3(
-          r_origin, hit_object.object_to_world().ptr(), trim_operation->initial_location);
+      mul_v3_m4v3(r_origin, hit_object.object_to_world().ptr(), trim_operation->initial_location);
       copy_v3_v3(r_normal, gesture_data.world_space_view_normal);
       negate_v3(r_normal);
       break;
     case OrientationType::Surface:
-      mul_v3_m4v3(
-          r_origin, hit_object.object_to_world().ptr(), trim_operation->initial_location);
+      mul_v3_m4v3(r_origin, hit_object.object_to_world().ptr(), trim_operation->initial_location);
       /* Transforming the normal does not take non uniform scaling into account. Sculpt mode is not
        * expected to work on object with non uniform scaling. */
       copy_v3_v3(r_normal, trim_operation->initial_normal);
@@ -379,10 +377,10 @@ static void generate_geometry(gesture::GestureData &gesture_data)
   plane_from_point_normal_v3(shape_plane, shape_origin, shape_normal);
 
   /* true_mesh_co (and the mesh's own positions, immediately overwritten by the first call to
-   * gesture_apply_for_symmetry_pass()) are stored in the PRIMARY object's (gesture_data.objects[0])
-   * local space, NOT necessarily vc.obact's -- the active object may have been filtered out of
-   * gesture_data.objects (e.g. Multires/Dyntopo), in which case the first remaining object becomes
-   * the reference space. */
+   * gesture_apply_for_symmetry_pass()) are stored in the PRIMARY object's
+   * (gesture_data.objects[0]) local space, NOT necessarily vc.obact's -- the active object may
+   * have been filtered out of gesture_data.objects (e.g. Multires/Dyntopo), in which case the
+   * first remaining object becomes the reference space. */
   const float (*ob_imat)[4] = gesture_data.objects.first()->world_to_object().ptr();
 
   /* Write vertices coordinates OperationType::Difference for the front face. */
@@ -647,7 +645,7 @@ static void gesture_apply_for_symmetry_pass(bContext & /*C*/, gesture::GestureDa
        * where even the reference object loses its "no round trip" shortcut once shared symmetry
        * is active. */
       const float3 world = math::transform_point(primary_object.object_to_world(),
-                                                  float3(trim_operation->true_mesh_co[i]));
+                                                 float3(trim_operation->true_mesh_co[i]));
       const float3 mirrored_world = gesture::mirror_world_point(gesture_data, world);
       positions[i] = math::transform_point(current_object.world_to_object(), mirrored_world);
       continue;

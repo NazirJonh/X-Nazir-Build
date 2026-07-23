@@ -205,7 +205,8 @@ static void conjugate_quat_m3(const float mat[3][3],
 void local_pivot_rot_to_world(const Object &ob, const float local_rot[4], float r_world_rot[4])
 {
   float orientation[3][3], orientation_inv[3][3], scale[3][3], scale_inv[3][3];
-  object_orientation_and_scale(ob.object_to_world(), orientation, orientation_inv, scale, scale_inv);
+  object_orientation_and_scale(
+      ob.object_to_world(), orientation, orientation_inv, scale, scale_inv);
   conjugate_quat_m3(orientation, orientation_inv, local_rot, r_world_rot);
 }
 
@@ -277,7 +278,8 @@ static std::array<float4x4, 8> transform_matrices_init(const float4x4 &object_to
    * than read from an `Object &`) so a rigid-body Origin Correct secondary can pass its FIXED
    * session-start matrix instead of its live, per-step-mutated one. */
   float orientation[3][3], orientation_inv[3][3], scale_mat[3][3], scale_inv_mat[3][3];
-  object_orientation_and_scale(object_to_world, orientation, orientation_inv, scale_mat, scale_inv_mat);
+  object_orientation_and_scale(
+      object_to_world, orientation, orientation_inv, scale_mat, scale_inv_mat);
 
   for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
     ePaintSymmetryAreas v_symm = ePaintSymmetryAreas(i);
@@ -314,10 +316,10 @@ static std::array<float4x4, 8> transform_matrices_init(const float4x4 &object_to
     quat_to_mat3(world_rot_mat, world_d_r);
 
     float ortho_scale[3][3], world_ortho_scale[3][3], conjugated[3][3], r_mat3[3][3];
-    mul_m3_m3m3(ortho_scale, orientation, scale_mat);             /* O * S. */
-    mul_m3_m3m3(world_ortho_scale, world_rot_mat, ortho_scale);   /* Rw * O * S. */
-    mul_m3_m3m3(conjugated, orientation_inv, world_ortho_scale);  /* O^-1 * Rw * O * S. */
-    mul_m3_m3m3(r_mat3, scale_inv_mat, conjugated);                /* S^-1 * O^-1 * Rw * O * S. */
+    mul_m3_m3m3(ortho_scale, orientation, scale_mat);            /* O * S. */
+    mul_m3_m3m3(world_ortho_scale, world_rot_mat, ortho_scale);  /* Rw * O * S. */
+    mul_m3_m3m3(conjugated, orientation_inv, world_ortho_scale); /* O^-1 * Rw * O * S. */
+    mul_m3_m3m3(r_mat3, scale_inv_mat, conjugated);              /* S^-1 * O^-1 * Rw * O * S. */
 
     unit_m4(r_mat);
     copy_m4_m3(r_mat, r_mat3);
@@ -1263,7 +1265,7 @@ static wmOperatorStatus set_pivot_position_exec(bContext *C, wmOperator *op)
          * non-active mesh. Route it through world space instead. */
         Object &hit_object = hit_ob ? *hit_ob : ob;
         const float3 world_location = math::transform_point(hit_object.object_to_world(),
-                                                             stroke_location);
+                                                            stroke_location);
         ss.pivot_pos = math::transform_point(ob.world_to_object(), world_location);
       }
       break;

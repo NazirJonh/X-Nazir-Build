@@ -1002,8 +1002,7 @@ static wmOperatorStatus mask_by_color(bContext *C, wmOperator *op, const float2 
       }
     }
     else {
-      mask_by_color_full_mesh(
-          *depsgraph, *object, active_color, threshold, invert, preserve_mask);
+      mask_by_color_full_mesh(*depsgraph, *object, active_color, threshold, invert, preserve_mask);
     }
   }
 
@@ -1135,7 +1134,8 @@ static wmOperatorStatus mask_by_topology_island(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  /* Island keys are per-object and only computed for mesh PBVH; bail if the hit object is not one. */
+  /* Island keys are per-object and only computed for mesh PBVH; bail if the hit object is not one.
+   */
   if (bke::object::pbvh_get(hit_ob)->type() != bke::pbvh::Type::Mesh) {
     BKE_report(op->reports, RPT_ERROR, "Only available for meshes without dynamic topology");
     return OPERATOR_CANCELLED;
@@ -1161,7 +1161,8 @@ static wmOperatorStatus mask_by_topology_island(bContext *C,
   undo::push_begin_multi_object(scene, op, objects);
 
   for (Object *object : objects) {
-    /* Non-mesh objects have no comparable island keys and cannot be written by #write_mask_mesh. */
+    /* Non-mesh objects have no comparable island keys and cannot be written by #write_mask_mesh.
+     */
     if (bke::object::pbvh_get(*object)->type() != bke::pbvh::Type::Mesh) {
       continue;
     }
@@ -1229,7 +1230,8 @@ static void SCULPT_OT_mask_by_topology_island(wmOperatorType *ot)
   ot->name = "Mask Topology Island";
   ot->idname = "SCULPT_OT_mask_by_topology_island";
   ot->description =
-      "Mask all mesh parts except the clicked topology island, so only the island can be sculpted. "
+      "Mask all mesh parts except the clicked topology island, so only the island can be "
+      "sculpted. "
       "Shift-click to toggle an island in or out of the unmasked selection.";
 
   ot->invoke = mask_by_topology_island_invoke;

@@ -219,8 +219,8 @@ PlaneParams transform_plane_params(PlaneParams plane, const float4x4 &to_object_
    * inverse-transpose, or it stops being perpendicular to the plane under non-uniform scale. */
   plane.tangent = math::normalize(math::transform_direction(to_object_local, plane.tangent));
   plane.bitangent = math::normalize(math::transform_direction(to_object_local, plane.bitangent));
-  plane.normal = math::normalize(
-      math::transpose(math::invert(float3x3(to_object_local))) * plane.normal);
+  plane.normal = math::normalize(math::transpose(math::invert(float3x3(to_object_local))) *
+                                 plane.normal);
   return plane;
 }
 
@@ -763,13 +763,13 @@ SymmetryContour::RegenDecision SymmetryContour::compute_regen_decision(
                              has_dirty_nodes || edit_mode_live || topology_changed ||
                              positions_changed_without_detail;
   /* The per-node cache is only valid while the plane and the PBVH topology hold still. It must
-   * also be dropped for #positions_changed_without_detail: the affected nodes are unknown, so every
-   * intersecting node has to be recomputed rather than re-emitted from stale cache entries. That
-   * flag should now only fire for rare one-off events (undo/redo, filters, enabling the overlay,
-   * mesh transform), since #has_dirty_nodes stays precise through an active stroke - so paying for
-   * a full rebuild here is acceptable. When a precise dirty mask *is* available (the normal case
-   * while actively sculpting), it already pinpoints exactly which nodes to recompute, so the rest
-   * of the cache stays valid instead of being thrown away and rebuilt from scratch. */
+   * also be dropped for #positions_changed_without_detail: the affected nodes are unknown, so
+   * every intersecting node has to be recomputed rather than re-emitted from stale cache entries.
+   * That flag should now only fire for rare one-off events (undo/redo, filters, enabling the
+   * overlay, mesh transform), since #has_dirty_nodes stays precise through an active stroke - so
+   * paying for a full rebuild here is acceptable. When a precise dirty mask *is* available (the
+   * normal case while actively sculpting), it already pinpoints exactly which nodes to recompute,
+   * so the rest of the cache stays valid instead of being thrown away and rebuilt from scratch. */
   decision.reset_cache = plane_changed || topology_changed || positions_changed_without_detail;
   decision.pbvh_nodes_num = pbvh_nodes_num;
   decision.positions_count = positions_count;
@@ -792,8 +792,9 @@ void SymmetryContour::update_contours(const Object *ob,
 
   const float4x4 object_to_world = ob->object_to_world();
   /* Identity means the planes are this object's own local axes through its own origin. */
-  const float4x4 plane_to_object = symmetry_space_to_object != nullptr ? *symmetry_space_to_object :
-                                                                         float4x4::identity();
+  const float4x4 plane_to_object = symmetry_space_to_object != nullptr ?
+                                       *symmetry_space_to_object :
+                                       float4x4::identity();
   ObjectCache &cache = object_caches_.lookup_or_add_default(ob);
   cache.last_seen_frame = frame_counter_;
 

@@ -839,7 +839,6 @@ static void init_face_set_object(Object &ob, const InitMode mode, const float th
       break;
     }
   }
-
 }
 
 static wmOperatorStatus init_op_exec(bContext *C, wmOperator *op)
@@ -1194,12 +1193,10 @@ static wmOperatorStatus change_visibility_exec(bContext *C, wmOperator *op)
           break;
         }
         if (face_sets.is_empty()) {
-          face_hide_update(depsgraph,
-                           *ob,
-                           node_mask,
-                           [&](const Span<int> /*faces*/, MutableSpan<bool> hide) {
-                             hide.fill(true);
-                           });
+          face_hide_update(
+              depsgraph, *ob, node_mask, [&](const Span<int> /*faces*/, MutableSpan<bool> hide) {
+                hide.fill(true);
+              });
         }
         else {
           face_hide_update(
@@ -1214,12 +1211,10 @@ static wmOperatorStatus change_visibility_exec(bContext *C, wmOperator *op)
         break;
       case VisibilityMode::HideActiveObject:
         if (ob == hit_object) {
-          face_hide_update(depsgraph,
-                           *ob,
-                           node_mask,
-                           [&](const Span<int> /*faces*/, MutableSpan<bool> hide) {
-                             hide.fill(true);
-                           });
+          face_hide_update(
+              depsgraph, *ob, node_mask, [&](const Span<int> /*faces*/, MutableSpan<bool> hide) {
+                hide.fill(true);
+              });
         }
         break;
     }
@@ -1373,10 +1368,9 @@ static wmOperatorStatus randomize_colors_exec(bContext *C, wmOperator * /*op*/)
 
     const VArray<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
                                                           bke::AttrDomain::Face);
-    const int random_index = clamp_i(
-        mesh->faces_num * BLI_hash_int_01(mesh->face_sets_color_seed),
-        0,
-        max_ii(0, mesh->faces_num - 1));
+    const int random_index = clamp_i(mesh->faces_num * BLI_hash_int_01(mesh->face_sets_color_seed),
+                                     0,
+                                     max_ii(0, mesh->faces_num - 1));
     mesh->face_sets_color_default = face_sets[random_index];
     mesh->face_sets_color_seed += 1;
 

@@ -578,7 +578,8 @@ static bool sculpt_step_should_push(const SculptUndoStep &us)
     return true;
   }
   /* Enter sculpt mode records objects without topology counts; those steps must still be pushed
-   * so undo can leave sculpt mode. Stroke steps always store topology in #save_step_topology_data. */
+   * so undo can leave sculpt mode. Stroke steps always store topology in #save_step_topology_data.
+   */
   for (const std::unique_ptr<StepData> &sd : us.objects_data) {
     if (sd->type == Type::None && sd->mesh.verts_num == 0 && sd->grids.grids_num == 0) {
       return true;
@@ -1276,9 +1277,9 @@ static void refine_subdiv(Depsgraph *depsgraph,
 }
 
 static void restore_list_object(bContext *C,
-                                 Depsgraph *depsgraph,
-                                 StepData &step_data,
-                                 Object &object)
+                                Depsgraph *depsgraph,
+                                StepData &step_data,
+                                Object &object)
 {
   PRF_scope(ProfileCategory::Editor);
   Scene *scene = CTX_data_scene(C);
@@ -2103,8 +2104,8 @@ void push_node(const Depsgraph &depsgraph,
   /* #push_node is called concurrently from worker threads for different nodes of the same object
    * (see the parallel `foreach_index` callers in paint_mask/paint_hide/sculpt_face_set). The step
    * type and topology counts are written once per object but reached from every node, so serialize
-   * the (idempotent) writes under the step's mutex to avoid a data race. The lock is released before
-   * #ensure_node, which acquires the same mutex itself. */
+   * the (idempotent) writes under the step's mutex to avoid a data race. The lock is released
+   * before #ensure_node, which acquires the same mutex itself. */
   {
     std::scoped_lock lock(*step_data->nodes_mutex);
     BLI_assert(ELEM(step_data->type, Type::None, type));
@@ -2556,9 +2557,7 @@ void push_begin_multi_object(const Scene &scene,
   }
 }
 
-void finish_multi_object(bContext *C,
-                         Span<Object *> scene_objects,
-                         UpdateType update_type)
+void finish_multi_object(bContext *C, Span<Object *> scene_objects, UpdateType update_type)
 {
   /* Closing pending `push_begin_ex` (image paint, etc.) -- the multi-object undo step is owned
    * by the sculpt undo system, but the surrounding brush operator may have started an image

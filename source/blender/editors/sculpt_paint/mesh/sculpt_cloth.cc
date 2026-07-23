@@ -480,8 +480,9 @@ static void add_constraints_for_verts(const Object &object,
 
   /* #pin_simulation_boundary reads #StrokeCache.location_symm directly (not the
    * #cloth_sim_initial_location parameter above, a deliberate pre-existing distinction) and
-   * compares it against #init_positions, which is in sim space when #SimulationData.use_world_space
-   * is true -- convert once, outside the loop below, only when actually needed. */
+   * compares it against #init_positions, which is in sim space when
+   * #SimulationData.use_world_space is true -- convert once, outside the loop below, only when
+   * actually needed. */
   const bool need_pin_sim_location = pin_simulation_boundary && cloth_sim.use_world_space;
   const float3 pin_sim_location = need_pin_sim_location ?
                                       cloth_position_to_sim(cloth_world_transform_init(object),
@@ -555,7 +556,7 @@ static void add_constraints_for_verts(const Object &object,
 
     if (pin_simulation_boundary) {
       const float3 &pin_location = cloth_sim.use_world_space ? pin_sim_location :
-                                                                ss.cache->location_symm;
+                                                               ss.cache->location_symm;
       const float sim_falloff = cloth_brush_simulation_falloff_get(
           *brush, ss.cache->initial_radius, pin_location, init_positions[vert]);
       /* Vertex is inside the area of the simulation without any falloff applied. */
@@ -1414,10 +1415,10 @@ static void cloth_brush_solve_collision(const Object &object,
     const float3 pos_world_space = cloth_sim.use_world_space ?
                                        cloth_sim.pos[i] * iso_scale :
                                        math::transform_point(object_to_world, cloth_sim.pos[i]);
-    const float3 prev_pos_world_space =
-        cloth_sim.use_world_space ?
-            cloth_sim.last_iteration_pos[i] * iso_scale :
-            math::transform_point(object_to_world, cloth_sim.last_iteration_pos[i]);
+    const float3 prev_pos_world_space = cloth_sim.use_world_space ?
+                                            cloth_sim.last_iteration_pos[i] * iso_scale :
+                                            math::transform_point(object_to_world,
+                                                                  cloth_sim.last_iteration_pos[i]);
 
     BVHTreeRayHit hit{};
     hit.index = -1;
@@ -1453,9 +1454,9 @@ static void cloth_brush_solve_collision(const Object &object,
     const float3 movement_disp = (pos_on_friction_plane - float3(hit.co)) * friction_factor;
 
     const float3 result_world = float3(hit.co) + movement_disp + collision_disp;
-    cloth_sim.pos[i] = cloth_sim.use_world_space ? result_world / iso_scale :
-                                                   math::transform_point(world_to_object,
-                                                                         result_world);
+    cloth_sim.pos[i] = cloth_sim.use_world_space ?
+                           result_world / iso_scale :
+                           math::transform_point(world_to_object, result_world);
   }
 }
 
@@ -1495,7 +1496,8 @@ BLI_NOINLINE static void solve_verts_simulation(const Object &object,
                                           cloth_position_to_sim(cloth_world_transform_init(object),
                                                                 sim_location) :
                                           sim_location;
-    calc_brush_simulation_falloff(*brush, ss.cache->radius, sim_space_location, positions, factors);
+    calc_brush_simulation_falloff(
+        *brush, ss.cache->radius, sim_space_location, positions, factors);
   }
   scale_translations(pos_diff, factors);
 
@@ -1630,8 +1632,13 @@ static void cloth_brush_satisfy_constraints(const Depsgraph &depsgraph,
 
   /* Precalculate factors into an array since we need random access to specific vertex values. */
   Array<float> factors(vertex_count_get(object));
-  calc_constraint_factors(
-      depsgraph, object, brush, sim_location, cloth_sim.init_pos, cloth_sim.use_world_space, factors);
+  calc_constraint_factors(depsgraph,
+                          object,
+                          brush,
+                          sim_location,
+                          cloth_sim.init_pos,
+                          cloth_sim.use_world_space,
+                          factors);
 
   for (int constraint_it = 0; constraint_it < CLOTH_SIMULATION_ITERATIONS; constraint_it++) {
     for (const LengthConstraint &constraint : cloth_sim.length_constraints) {
@@ -1745,7 +1752,8 @@ void do_simulation_step(const Depsgraph &depsgraph,
             const MutableSpan<float3> translations = tls.translations;
             for (const int i : verts.index_range()) {
               const float3 local_pos = cloth_sim.use_world_space ?
-                                           cloth_position_from_sim(transform, cloth_sim.pos[verts[i]]) :
+                                           cloth_position_from_sim(transform,
+                                                                   cloth_sim.pos[verts[i]]) :
                                            cloth_sim.pos[verts[i]];
               translations[i] = local_pos - position_data.eval[verts[i]];
             }

@@ -132,8 +132,8 @@ BLI_NOINLINE static void accumulate_samples(const StrokeCache &cache,
     const bool plane_index = local_positions[i].x <= 0.0f;
     /* #normals are raw local-space vertex normals; correct them for the object's non-uniform
      * scale (see #scale_normalized) — the same correction #do_multiplane_scrape_brush applies to
-     * its #area_normal — since they drive the Dynamic mode's sampled plane angle. Kept unnormalized
-     * here on purpose: the samples are accumulated and normalized once afterwards. */
+     * its #area_normal — since they drive the Dynamic mode's sampled plane angle. Kept
+     * unnormalized here on purpose: the samples are accumulated and normalized once afterwards. */
     sample.area_nos[plane_index] += scale_normalized(cache, normals[i]) * factors[i];
     sample.area_cos[plane_index] += positions[i];
     sample.area_count[plane_index]++;

@@ -262,8 +262,14 @@ static void calc_bmesh(const Depsgraph &depsgraph,
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
-  calc_translations(
-      object, brush, cache, kelvinet_params, cache.location_symm, offset, orig_positions, translations);
+  calc_translations(object,
+                    brush,
+                    cache,
+                    kelvinet_params,
+                    cache.location_symm,
+                    offset,
+                    orig_positions,
+                    translations);
 
   scale_translations(translations, factors);
 

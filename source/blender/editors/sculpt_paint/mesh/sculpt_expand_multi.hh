@@ -22,7 +22,7 @@
 namespace blender {
 struct Depsgraph;
 struct Object;
-}
+}  // namespace blender
 
 namespace blender::ed::sculpt_paint::expand {
 
@@ -43,7 +43,8 @@ struct MultiObjectBridge {
 
 enum class PropagationMode {
   Uniform,          /* +1 per mesh-edge / bridge hop (Topology, BoundaryTopology). */
-  UniformDiagonals, /* +1 per shared-face-corner / bridge hop (TopologyNormals = Topology Diagonals). */
+  UniformDiagonals, /* +1 per shared-face-corner / bridge hop (TopologyNormals = Topology
+                       Diagonals). */
   Geodesic,
 };
 
@@ -129,8 +130,9 @@ namespace detail {
  * `object_world_positions[i]` = world-space verts of object i. `mean_world_edge_length[i]` = that
  * object's average world edge length. `nearest(obj, world_p, max_world_dist)` returns the nearest
  * vertex index of object `obj` to world point `world_p` within `max_world_dist`, or -1. The pair
- * threshold is `bridge_factor * min(mean_world_edge_length[a], mean_world_edge_length[b])`. Keeps a
- * stitch only if it is mutually nearest, capped at one edge per vertex per side, spatially deduped. */
+ * threshold is `bridge_factor * min(mean_world_edge_length[a], mean_world_edge_length[b])`. Keeps
+ * a stitch only if it is mutually nearest, capped at one edge per vertex per side, spatially
+ * deduped. */
 MultiObjectBridge build_bridge_impl(
     Span<Span<float3>> object_world_positions,
     Span<float> mean_world_edge_length,
@@ -148,8 +150,8 @@ void propagate_uniform(Span<GroupedSpan<int>> object_neighbors,
                        Span<MultiVertRef> seeds,
                        MutableSpan<Array<float>> r_vert_falloff_per_object);
 
-/* World-space per-object mesh topology, sufficient to run the geodesic core. Positions are in WORLD
- * space (spec §6.0). `hide_poly` may be empty (⇒ no hidden faces). */
+/* World-space per-object mesh topology, sufficient to run the geodesic core. Positions are in
+ * WORLD space (spec §6.0). `hide_poly` may be empty (⇒ no hidden faces). */
 struct ObjectTopology {
   Span<float3> positions;
   Span<int2> edges;
@@ -220,9 +222,8 @@ void propagate_geodesic_from_topology(const GlobalGeodesicTopology &topology,
  * production caller (#grids_canonical_map_create) wraps
  * #BKE_subdiv_ccg_neighbor_coords_get(..., include_duplicates=true, ...)'s `.duplicates()`.
  */
-Array<int> canonicalize_duplicates(int vert_count,
-                                   FunctionRef<void(int vert, Vector<int> &r_duplicates)>
-                                       duplicates_of);
+Array<int> canonicalize_duplicates(
+    int vert_count, FunctionRef<void(int vert, Vector<int> &r_duplicates)> duplicates_of);
 
 /**
  * Builds a symmetric adjacency list over CANONICAL vertex ids (a dense 0-based compaction of the

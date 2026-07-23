@@ -708,8 +708,7 @@ struct View3DOverlay {
   float sculpt_curves_cage_opacity = 0;
 
   /** Symmetry overlay settings. */
-  eView3DOverlay_SymmetryFlag symmetry_flag = V3D_OVERLAY_SYMMETRY_SCULPT_PLANE |
-                                              V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR |
+  eView3DOverlay_SymmetryFlag symmetry_flag = V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR |
                                               V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR |
                                               V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR |
                                               V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR |

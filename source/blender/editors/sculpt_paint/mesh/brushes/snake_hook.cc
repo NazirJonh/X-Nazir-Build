@@ -155,7 +155,8 @@ BLI_NOINLINE static void calc_kelvinet_translation(const Object &object,
   if (!cache.non_uniform_scale_active) {
     for (const int i : positions.index_range()) {
       float3 disp;
-      BKE_kelvinlet_grab_triscale(disp, &params, positions[i], cache.location_symm, translations[i]);
+      BKE_kelvinlet_grab_triscale(
+          disp, &params, positions[i], cache.location_symm, translations[i]);
       translations[i] = disp * factors[i];
     }
     return;

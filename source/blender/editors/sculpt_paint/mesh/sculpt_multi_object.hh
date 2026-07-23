@@ -26,11 +26,12 @@ namespace blender::ed::sculpt_paint {
  * symmetry plane is the set of `symmetry_flip` axis planes expressed in this space:
  * - #PAINT_SYMM_SPACE_ACTIVE_OBJECT: reference object's local space (world_to_object). Historical.
  * - #PAINT_SYMM_SPACE_GLOBAL_WORLD: identity (world axes through the scene origin).
- * - #PAINT_SYMM_SPACE_GLOBAL_CURSOR: world axes, translated to the 3D cursor.
+ * - #PAINT_SYMM_SPACE_GLOBAL_CURSOR: the 3D cursor's frame (its location AND orientation), so the
+ *   mirror plane follows a rotated cursor - this is `invert(cursor_to_world)`.
  */
 float4x4 symmetry_space_frame(ePaintSymmetrySpace symmetry_space,
                               const float4x4 &reference_world_to_object,
-                              const float3 &cursor_world);
+                              const float4x4 &cursor_to_world);
 
 /**
  * One symmetry pass's brush daub, in world space.
@@ -50,14 +51,14 @@ struct MirroredDaub {
  * \a world_view_direction, taken across \a reference_ob's symmetry planes, expressed in
  * \a symmetry_space. Used so a multi-object shared-symmetry stroke also processes objects whose
  * geometry only lies under a mirrored daub -- a joined mesh would deform that geometry, so the
- * separate object must not be skipped -- and so paint-cursor overlays can preview the same mirrored
- * positions the stroke itself will use. The first entry is the un-mirrored daub itself.
+ * separate object must not be skipped -- and so paint-cursor overlays can preview the same
+ * mirrored positions the stroke itself will use. The first entry is the un-mirrored daub itself.
  */
 Vector<MirroredDaub> shared_symmetry_world_daubs(const Object &reference_ob,
                                                  const float3 &world_center,
                                                  const float3 &world_view_direction,
                                                  ePaintSymmetrySpace symmetry_space,
-                                                 const float3 &cursor_world);
+                                                 const float4x4 &cursor_to_world);
 
 /**
  * Multi-object mirror surface snap: pull the mirrored (or radially rotated) brush daub center onto
@@ -67,9 +68,9 @@ Vector<MirroredDaub> shared_symmetry_world_daubs(const Object &reference_ob,
  * the secondary mesh is not an exact mirror twin of the primary, that reflection floats off its
  * surface; with #PAINT_FALLOFF_SHAPE_SPHERE the brush measures a true 3D distance, so no vertex
  * falls inside the radius and the mirror pass silently does nothing. Ray-casting the surface along
- * the MIRRORED VIEW AXIS (#StrokeCache.view_normal_symm) corrects the depth while leaving the daub's
- * position across the view exactly where the mirror put it -- the mirrored daub lands where a
- * mirrored cursor would have hit this mesh, which is how the primary object gets its own center.
+ * the MIRRORED VIEW AXIS (#StrokeCache.view_normal_symm) corrects the depth while leaving the
+ * daub's position across the view exactly where the mirror put it -- the mirrored daub lands where
+ * a mirrored cursor would have hit this mesh, which is how the primary object gets its own center.
  * The snap axis is therefore fixed for the pass and independent of the geometry the brush is
  * deforming, which is what keeps the mirrored stroke a continuous line.
  *
@@ -126,12 +127,12 @@ struct SharedStrokeStateSnapshot {
    * #update_sculpt_normal only computes #StrokeCache.sculpt_normal on the MAIN symmetry pass, and
    * that pass can produce nothing for a secondary object: the main daub may miss it entirely (the
    * whole point of shared symmetry, e.g. a mirrored limb kept as a separate mesh) or cover only
-   * masked/hidden geometry. Its mirror pass then mirrors the zero-initialized vector, and the brush
-   * runs over the right nodes with the right strength while displacing every vertex by nothing.
-   * Seeding the primary's normal is also what a joined mesh does: one area normal, taken under the
-   * main daub, mirrored onto the other side. When the secondary's own main pass DOES produce a
-   * normal it overwrites this seed -- and for a Mesh PBVH the two are the same vector anyway, since
-   * #calc_area_normal pools across every mesh in the stroke.
+   * masked/hidden geometry. Its mirror pass then mirrors the zero-initialized vector, and the
+   * brush runs over the right nodes with the right strength while displacing every vertex by
+   * nothing. Seeding the primary's normal is also what a joined mesh does: one area normal, taken
+   * under the main daub, mirrored onto the other side. When the secondary's own main pass DOES
+   * produce a normal it overwrites this seed -- and for a Mesh PBVH the two are the same vector
+   * anyway, since #calc_area_normal pools across every mesh in the stroke.
    *
    * `std::nullopt` => the primary had no normal at capture time (its own brush action bailed, or
    * the brush does not use one); the secondary is then left untouched.
@@ -179,20 +180,23 @@ struct MultiObjectStrokeContext {
   Object *primary_object = nullptr;
   /* The object a #Join would merge everything into -- #mode_objects[0], i.e. the ACTIVE object,
    * NOT #primary_object (the object under the cursor) -- fixed reference frame for the shared
-   * symmetry plane so it does not follow the cursor between meshes. Null for single-object
-   * strokes. */
+   * symmetry plane so it does not follow the cursor between meshes. For a single object this is
+   * that object itself. Null only when no object is in the mode. */
   Object *symm_reference_object = nullptr;
-  /* True only for multi-object strokes with a resolved #symm_reference_object. */
+  /* True when the shared symmetry frame is engaged: every multi-object stroke, and also a single
+   * object in World / Cursor space (where the mirror plane is not the object's own local plane).
+   * False for a single object in ACTIVE_OBJECT space, keeping that path a bit-exact local mirror.
+   */
   bool shared_symmetry_active = false;
 
   /* Shared world-space brush state, recomputed every #update_step from the primary object in
    * #brush_delta_update.
    *
-   * Anchored-origin brushes (Grab, Pose, Boundary, Thumb, Elastic Deform, Cloth-grab) lock a single
-   * world-space anchor at stroke start and accumulate a single world-space delta. The primary
-   * (under-cursor) object computes these in #brush_delta_update; secondary objects then derive their
-   * own local grab state from them, so the whole mode deforms like one joined mesh instead of each
-   * object recomputing an inconsistent per-object delta. */
+   * Anchored-origin brushes (Grab, Pose, Boundary, Thumb, Elastic Deform, Cloth-grab) lock a
+   * single world-space anchor at stroke start and accumulate a single world-space delta. The
+   * primary (under-cursor) object computes these in #brush_delta_update; secondary objects then
+   * derive their own local grab state from them, so the whole mode deforms like one joined mesh
+   * instead of each object recomputing an inconsistent per-object delta. */
   bool world_grab_state_valid = false;
   float3 world_grab_anchor = float3(0.0f);
   float3 world_grab_delta = float3(0.0f);
@@ -200,11 +204,11 @@ struct MultiObjectStrokeContext {
    * objects in #brush_delta_update. Unset when the brush has no rake or none was computed yet. */
   std::optional<math::Quaternion> world_rake_rotation;
 
-  /* Reference object for anchored-origin drag brushes (Grab, Pose, Boundary, Thumb, Elastic Deform,
-   * Cloth-grab). These brushes accumulate the grab delta on a single object across the whole stroke,
-   * so the primary must stay fixed even when the paint-stroke framework switches
-   * #SculptPaintStroke::object to a different mesh under the cursor mid-drag. Captured on the first
-   * #update_step; nullptr means not yet captured or the brush is not anchored-origin. */
+  /* Reference object for anchored-origin drag brushes (Grab, Pose, Boundary, Thumb, Elastic
+   * Deform, Cloth-grab). These brushes accumulate the grab delta on a single object across the
+   * whole stroke, so the primary must stay fixed even when the paint-stroke framework switches
+   * #SculptPaintStroke::object to a different mesh under the cursor mid-drag. Captured on the
+   * first #update_step; nullptr means not yet captured or the brush is not anchored-origin. */
   Object *anchored_primary_object = nullptr;
 
   /**
@@ -220,7 +224,7 @@ struct MultiObjectStrokeContext {
    * reference-space transforms onto every object's #StrokeCache. Must be called after
    * #resolve_primary.
    */
-  void propagate_shared_state(ePaintSymmetrySpace symmetry_space, const float3 &cursor_world);
+  void propagate_shared_state(ePaintSymmetrySpace symmetry_space, const float4x4 &cursor_to_world);
 
   /**
    * #update_step Phase 2, secondary-object branch: resolve whether/where `ob` (a non-primary

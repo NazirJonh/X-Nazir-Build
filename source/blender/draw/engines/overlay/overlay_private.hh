@@ -730,6 +730,10 @@ struct Resources : public select::SelectMap {
     int symmetry_flags = 0;
     float4x4 world_to_object = float4x4::identity();
     float4x4 symmetry_space_to_object = float4x4::identity();
+    /** Claiming object's bounds center in its own local space. The drawn quad is slid along the
+     * plane to sit under this point, so the finite quad appears over the mesh even when the mirror
+     * plane's mathematical origin (world / cursor / object origin) is far from the geometry. */
+    float3 claimer_bounds_center = float3(0.0f);
     float plane_size = 1e-3f;
   };
   SymmetryPlaneShared symmetry_plane_shared;

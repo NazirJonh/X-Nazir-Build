@@ -64,8 +64,8 @@
 
 #include "UI_resources.hh"
 
-#include "paint_intern.hh"
 #include "mesh/sculpt_intern.hh"
+#include "paint_intern.hh"
 
 namespace blender {
 
@@ -85,7 +85,8 @@ struct TexSnapshot {
   int old_size;
   float old_zoom;
   bool old_col;
-  /* The clip shape is baked into the snapshot's pixels, so it has to invalidate it when changed. */
+  /* The clip shape is baked into the snapshot's pixels, so it has to invalidate it when changed.
+   */
   eBrushTextureClipShape old_texture_clip_shape;
   /* Pointers to detect when brush or texture changes. */
   const Brush *brush_ptr;
@@ -228,7 +229,8 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
         !ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL))
     {
       /* Tiled is excluded because its coordinates are absolute screen space rather than
-       * brush-relative, so the rectangle bounds don't apply (same as in #BKE_brush_sample_tex_3d). */
+       * brush-relative, so the rectangle bounds don't apply (same as in #BKE_brush_sample_tex_3d).
+       */
       inside_bounds = std::max(std::fabs(x), std::fabs(y)) <= 1.0f;
     }
     else if (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL)) {
@@ -1127,8 +1129,14 @@ static bool paint_cursor_context_init(bContext *C,
     Object *hit_ob = nullptr;
     const float mval_fl[2] = {float(xy[0] - region->winrct.xmin),
                               float(xy[1] - region->winrct.ymin)};
-    if (stroke_get_location_bvh(
-            *pcontext.depsgraph, pcontext.vc, pcontext.sd, pcontext.brush, out, mval_fl, false, &hit_ob))
+    if (stroke_get_location_bvh(*pcontext.depsgraph,
+                                pcontext.vc,
+                                pcontext.sd,
+                                pcontext.brush,
+                                out,
+                                mval_fl,
+                                false,
+                                &hit_ob))
     {
       if (hit_ob && hit_ob->runtime->sculpt_session) {
         pcontext.vc.obact = hit_ob;
@@ -1293,9 +1301,7 @@ static void paint_cursor_draw_3D_view_brush_cursor(PaintCursorContext &pcontext)
       paint_draw_legacy_3D_view_brush_cursor(pcontext);
       return;
     }
-    if (pcontext.alpha_overlay_drawn &&
-        brush.texture_clip_shape != BRUSH_TEXTURE_CLIP_RECTANGLE)
-    {
+    if (pcontext.alpha_overlay_drawn && brush.texture_clip_shape != BRUSH_TEXTURE_CLIP_RECTANGLE) {
       paint_draw_legacy_3D_view_brush_cursor(pcontext);
       return;
     }

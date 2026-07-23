@@ -59,16 +59,17 @@ struct ObjectState {
 
   /* Held by pointer so #ObjectState stays movable: `IndexMaskMemory` (a #LinearAllocator) is
    * NonMovable, which would otherwise delete #ObjectState's move constructor and make
-   * `Cache::object_states` (a #Vector) fail to compile. Moving the pointer keeps the allocation (and
-   * therefore `node_mask`'s backing storage) in place. Allocated at invoke before `node_mask` is
-   * filled. */
+   * `Cache::object_states` (a #Vector) fail to compile. Moving the pointer keeps the allocation
+   * (and therefore `node_mask`'s backing storage) in place. Allocated at invoke before `node_mask`
+   * is filled. */
   std::unique_ptr<IndexMaskMemory> node_mask_memory;
   IndexMask node_mask;
 
-  /* Multi-object only: the set of this object's connected-island ids that are reachable from the seed
-   * component through mesh edges + the cross-mesh bridge. The cross-mesh generalization of
-   * `Cache::active_connected_islands` (which cannot represent N objects). Populated per seed change by
-   * #find_active_connected_components_from_vert; queried by #is_vert_in_active_component. */
+  /* Multi-object only: the set of this object's connected-island ids that are reachable from the
+   * seed component through mesh edges + the cross-mesh bridge. The cross-mesh generalization of
+   * `Cache::active_connected_islands` (which cannot represent N objects). Populated per seed
+   * change by #find_active_connected_components_from_vert; queried by
+   * #is_vert_in_active_component. */
   Set<int> active_islands;
 
   Array<int> initial_face_sets;
@@ -213,8 +214,8 @@ struct Cache {
   MultiVertRef seed;
 
   /* World-space positions per object, index-aligned to object_states. Built ONCE at invoke and
-   * valid for the whole modal op (Expand never mutates geometry — static-geometry invariant). Empty
-   * in the single-object path. */
+   * valid for the whole modal op (Expand never mutates geometry — static-geometry invariant).
+   * Empty in the single-object path. */
   Array<Array<float3>> world_positions;
 
   /* Cross-mesh proximity bridge, built ONCE at invoke (static-geometry invariant — Expand never

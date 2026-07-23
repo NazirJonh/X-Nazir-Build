@@ -275,8 +275,8 @@ void ensure_shared_color_attributes(Mesh &active_mesh, const Span<Mesh *> other_
       continue;
     }
     bool created = false;
-    if (const std::optional<bke::AttributeMetaData> meta =
-            mesh->attributes().lookup_meta_data(ref_name))
+    if (const std::optional<bke::AttributeMetaData> meta = mesh->attributes().lookup_meta_data(
+            ref_name))
     {
       /* Name collision with a non-color attribute: leave this mesh untouched. Painting skips it
        * the same way it skips a mesh without a color attribute today. */
@@ -639,12 +639,12 @@ static void do_sample_wet_paint_task(const Depsgraph &depsgraph,
  * any shared mutable state. Mesh PBVH only; non-mesh objects and meshes without a valid color
  * attribute are skipped. */
 static SampleWetPaintData sample_wet_paint_multi_object_mesh(const Depsgraph &depsgraph,
-                                                              const Brush &brush,
-                                                              const Object &reference_ob,
-                                                              const Span<Object *> objects,
-                                                              const float3 &ref_location,
-                                                              const float3 &ref_view_normal,
-                                                              const float ref_radius)
+                                                             const Brush &brush,
+                                                             const Object &reference_ob,
+                                                             const Span<Object *> objects,
+                                                             const float3 &ref_location,
+                                                             const float3 &ref_view_normal,
+                                                             const float ref_radius)
 {
   const float radius_sq = ref_radius * ref_radius;
   const bool use_tube = eBrushFalloffShape(brush.falloff_shape) == PAINT_FALLOFF_SHAPE_TUBE;
@@ -679,9 +679,9 @@ static SampleWetPaintData sample_wet_paint_multi_object_mesh(const Depsgraph &de
         math::transform_direction(obj_from_ref, ref_view_normal));
     /* Conservative gather radius in this object's local units; the precise filtering happens
      * per-vertex in reference space below. */
-    const float obj_scale = max_ff(max_ff(math::length(obj_from_ref.x_axis()),
-                                          math::length(obj_from_ref.y_axis())),
-                                   math::length(obj_from_ref.z_axis()));
+    const float obj_scale = max_ff(
+        max_ff(math::length(obj_from_ref.x_axis()), math::length(obj_from_ref.y_axis())),
+        math::length(obj_from_ref.z_axis()));
     const float gather_radius = ref_radius * obj_scale * 1.25f;
     const float gather_radius_sq = gather_radius * gather_radius;
 
@@ -727,8 +727,7 @@ static SampleWetPaintData sample_wet_paint_multi_object_mesh(const Depsgraph &de
               if (factors[k] <= 0.0f) {
                 continue;
               }
-              const float3 pos_ref = math::transform_point(ref_from_obj,
-                                                            vert_positions[verts[k]]);
+              const float3 pos_ref = math::transform_point(ref_from_obj, vert_positions[verts[k]]);
               float distance_sq;
               if (use_tube) {
                 float3 projected;
@@ -742,12 +741,12 @@ static SampleWetPaintData sample_wet_paint_multi_object_mesh(const Depsgraph &de
                 continue;
               }
               swptd_local.color += color_vert_get(faces,
-                                                   corner_verts,
-                                                   vert_to_face_map,
-                                                   colors,
-                                                   color_attribute.domain,
-                                                   verts[k]) *
-                                    factors[k];
+                                                  corner_verts,
+                                                  vert_to_face_map,
+                                                  colors,
+                                                  color_attribute.domain,
+                                                  verts[k]) *
+                                   factors[k];
               swptd_local.tot_samples++;
             }
           });
@@ -836,45 +835,45 @@ void do_paint_brush(const Depsgraph &depsgraph,
           math::transform_direction(ref_from_cur, ss.cache->view_normal_symm));
       const float ref_radius = ref_ss->cache->radius * brush.wet_paint_radius_factor;
       swptd = sample_wet_paint_multi_object_mesh(depsgraph,
-                                                  brush,
-                                                  *reference_ob,
-                                                  sample_objects,
-                                                  ref_location,
-                                                  ref_view_normal,
-                                                  ref_radius);
+                                                 brush,
+                                                 *reference_ob,
+                                                 sample_objects,
+                                                 ref_location,
+                                                 ref_view_normal,
+                                                 ref_radius);
     }
     else {
       threading::EnumerableThreadSpecific<ColorPaintLocalData> all_tls;
       swptd = threading::parallel_reduce(
-        node_mask.index_range(),
-        1,
-        SampleWetPaintData{},
-        [&](const IndexRange range, SampleWetPaintData swptd) {
-          ColorPaintLocalData &tls = all_tls.local();
-          node_mask.slice(range).foreach_index([&](const int i) {
-            do_sample_wet_paint_task(depsgraph,
-                                     ob,
-                                     vert_positions,
-                                     vert_normals,
-                                     faces,
-                                     corner_verts,
-                                     vert_to_face_map,
-                                     attribute_data,
-                                     color_attribute.span,
-                                     color_attribute.domain,
-                                     brush,
-                                     nodes[i],
-                                     tls,
-                                     swptd);
+          node_mask.index_range(),
+          1,
+          SampleWetPaintData{},
+          [&](const IndexRange range, SampleWetPaintData swptd) {
+            ColorPaintLocalData &tls = all_tls.local();
+            node_mask.slice(range).foreach_index([&](const int i) {
+              do_sample_wet_paint_task(depsgraph,
+                                       ob,
+                                       vert_positions,
+                                       vert_normals,
+                                       faces,
+                                       corner_verts,
+                                       vert_to_face_map,
+                                       attribute_data,
+                                       color_attribute.span,
+                                       color_attribute.domain,
+                                       brush,
+                                       nodes[i],
+                                       tls,
+                                       swptd);
+            });
+            return swptd;
+          },
+          [](const SampleWetPaintData &a, const SampleWetPaintData &b) {
+            SampleWetPaintData joined{};
+            joined.color = a.color + b.color;
+            joined.tot_samples = a.tot_samples + b.tot_samples;
+            return joined;
           });
-          return swptd;
-        },
-        [](const SampleWetPaintData &a, const SampleWetPaintData &b) {
-          SampleWetPaintData joined{};
-          joined.color = a.color + b.color;
-          joined.tot_samples = a.tot_samples + b.tot_samples;
-          return joined;
-        });
     }
 
     if (swptd.tot_samples > 0 && is_finite_v4(swptd.color)) {

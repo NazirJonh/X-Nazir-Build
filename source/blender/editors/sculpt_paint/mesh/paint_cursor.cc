@@ -419,7 +419,7 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
                                      const Object &symm_reference_ob,
                                      const float radius,
                                      const ePaintSymmetrySpace symmetry_space,
-                                     const float3 &cursor_world)
+                                     const float4x4 &cursor_to_world)
 {
   /* #PAINT_SYMM_SPACE_GLOBAL_WORLD / #PAINT_SYMM_SPACE_GLOBAL_CURSOR mirror the multi-object
    * stroke around world axes rather than the object's own local origin (see
@@ -428,10 +428,10 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
    * Tiling is left in the object's local space (unrelated to symmetry space).
    *
    * NOTE: with "Snap Mirror to Surface" enabled the stroke additionally pulls each mirrored center
-   * onto the secondary object's surface (#mirror_snap_location_to_surface), which this preview does
-   * not reproduce — the dot can therefore float slightly off the surface the daub actually lands on.
-   * Reproducing it here would need the depsgraph and each object's PBVH at hover time; the dot is
-   * only a position hint, so it is left as-is.
+   * onto the secondary object's surface (#mirror_snap_location_to_surface), which this preview
+   * does not reproduce — the dot can therefore float slightly off the surface the daub actually
+   * lands on. Reproducing it here would need the depsgraph and each object's PBVH at hover time;
+   * the dot is only a position hint, so it is left as-is.
    *
    * The same routine is also needed whenever the hovered mesh is not the symmetry reference: a
    * multi-object stroke mirrors every mesh across the REFERENCE (active) object's plane and takes
@@ -444,7 +444,7 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
    * historical local-space path below and stays bit-exact. */
   if (symmetry_space != PAINT_SYMM_SPACE_ACTIVE_OBJECT || &symm_reference_ob != &ob) {
     const float3 true_location_world = math::transform_point(ob.object_to_world(),
-                                                              float3(true_location));
+                                                             float3(true_location));
     /* This preview only needs the mirrored POSITIONS; the per-daub view axis matters solely to the
      * Projected-falloff node gate during a stroke. Any unit direction does, so pass an arbitrary
      * one rather than plumbing the view here.
@@ -454,7 +454,7 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
                                                                         true_location_world,
                                                                         float3(0.0f, 0.0f, 1.0f),
                                                                         symmetry_space,
-                                                                        cursor_world);
+                                                                        cursor_to_world);
     for (const MirroredDaub &daub : symm_daubs) {
       screen_space_point_draw(gpuattr, region, daub.center, float4x4::identity().ptr(), 3);
       if (bke::paint::supports_symmetry_tiling(paint_mode)) {
@@ -639,7 +639,7 @@ static void screen_space_overlays_draw(const PaintCursorContext &pcontext)
                              *symm_reference_ob,
                              pcontext.radius,
                              ePaintSymmetrySpace(pcontext.paint->symmetry_space),
-                             float3(pcontext.scene->cursor.location));
+                             pcontext.scene->cursor.matrix<float4x4>());
   }
 
   if (pcontext.mode != PaintMode::Sculpt) {
@@ -763,12 +763,12 @@ static void cursor_space_drawing_setup(PaintCursorContext &pcontext)
   const Object &ob = *pcontext.vc.obact;
 
   const float3 normal = bke::brush::supports_tilt(*pcontext.brush) ?
-                           tilt_apply_to_normal(ob,
-                                                float4x4(pcontext.vc.rv3d->viewinv),
-                                                pcontext.normal,
-                                                pcontext.tilt,
-                                                pcontext.brush->tilt_strength_factor) :
-                           pcontext.normal;
+                            tilt_apply_to_normal(ob,
+                                                 float4x4(pcontext.vc.rv3d->viewinv),
+                                                 pcontext.normal,
+                                                 pcontext.tilt,
+                                                 pcontext.brush->tilt_strength_factor) :
+                            pcontext.normal;
 
   const float3 z_axis = {0.0f, 0.0f, 1.0f};
   float4x4 cursor_trans;
@@ -790,11 +790,11 @@ static void cursor_space_drawing_setup(PaintCursorContext &pcontext)
      * only resizes the disc uniformly instead of reintroducing anisotropy. */
     const float iso_scale = mat4_to_scale(ob.object_to_world().ptr());
     cursor_trans = math::translate(float4x4::identity(), world_location) *
-                  math::from_scale<float4x4>(float3(iso_scale == 0.0f ? 1.0f : iso_scale));
+                   math::from_scale<float4x4>(float3(iso_scale == 0.0f ? 1.0f : iso_scale));
     /* Normals transform via the inverse-transpose to stay perpendicular under non-uniform
      * scale — this maps the local (possibly tilt-adjusted) normal directly into world space. */
-    world_normal = math::normalize(
-        math::transpose(math::invert(float3x3(ob.object_to_world()))) * normal);
+    world_normal = math::normalize(math::transpose(math::invert(float3x3(ob.object_to_world()))) *
+                                   normal);
   }
   else {
     cursor_trans = math::translate(ob.object_to_world(), pcontext.location);

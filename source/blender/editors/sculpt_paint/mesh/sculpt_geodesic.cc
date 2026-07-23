@@ -122,8 +122,7 @@ static bool dist_min_update(MutableSpan<float> dists, const int vert, const floa
 
 /** Claim `edge` for the next level, returning true only for the caller that claimed it
  * first. */
-template<bool UseAtomics>
-static bool edge_tag_claim(MutableSpan<uint8_t> edge_tag, const int edge)
+template<bool UseAtomics> static bool edge_tag_claim(MutableSpan<uint8_t> edge_tag, const int edge)
 {
   if constexpr (!UseAtomics) {
     if (edge_tag[edge] != 0) {

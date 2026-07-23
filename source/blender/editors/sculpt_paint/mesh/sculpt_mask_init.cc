@@ -260,7 +260,6 @@ static void mask_init_object(bContext &C, Object &ob, const InitMode mode, const
       break;
     }
   }
-
 }
 
 static wmOperatorStatus sculpt_mask_init_exec(bContext *C, wmOperator *op)

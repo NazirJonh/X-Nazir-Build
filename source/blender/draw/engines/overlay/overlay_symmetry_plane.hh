@@ -6,10 +6,12 @@
  * \ingroup overlay
  *
  * Draws the translucent X/Y/Z symmetry planes. Used by sculpt mode (meshes and curves) and curves
- * edit mode, where a surface contour is not meaningful. Ordinarily the planes pass through the
- * object origin along its own local axes, sized to its local bounds. A multi-object sculpt instead
- * mirrors every mesh across ONE shared plane, which is then drawn once, sized to reach every object
- * taking part (see #object_sync / #end_sync).
+ * edit mode, where a surface contour is not meaningful. Each drawn quad is a finite slice of the
+ * (infinite) mirror plane, slid along the plane to sit under the mesh and sized to its bounds, so
+ * it stays visible wherever the plane's mathematical origin is. In local (ACTIVE_OBJECT) space the
+ * plane is the object's own; in World / Cursor space, or across a multi-object sculpt, every mesh
+ * mirrors across ONE shared plane, which is drawn once, sized to reach every object taking part
+ * (see #object_sync / #end_sync).
  */
 
 #pragma once
@@ -50,12 +52,38 @@ class SymmetryPlaneOverlay {
    * A plane shared by several objects is one plane in world space, so drawing it per object would
    * stack its translucency where the quads overlap. Instead the first object to sync it claims the
    * draw, every object grows the size needed to reach it, and #end_sync emits the single quad.
-   * The state lives in #Resources rather than here because objects are split across the regular and
-   * "In Front" overlay layers, each with its own #SymmetryPlaneOverlay.
+   * The state lives in #Resources rather than here because objects are split across the regular
+   * and "In Front" overlay layers, each with its own #SymmetryPlaneOverlay.
    */
   using SharedPlane = Resources::SymmetryPlaneShared;
 
-  /** Half-extent of `ob_ref`'s bounds along the plane, in the claiming object's local space. */
+  /** Center of an object's local bounds, or the origin when it has no bounds. */
+  static float3 object_bounds_center(const Object *object)
+  {
+    if (const std::optional<blender::Bounds<float3>> bounds = BKE_object_boundbox_get(object)) {
+      return math::midpoint(bounds->min, bounds->max);
+    }
+    return float3(0.0f);
+  }
+
+  /**
+   * Slide `point` along the plane's normal onto the plane. The finite quad we draw is centered
+   * here, so it sits under the mesh even when the plane's mathematical origin (world / cursor /
+   * object origin) is far from the geometry. The plane itself is unchanged - only which slice of
+   * the infinite plane is drawn.
+   */
+  static float3 plane_projected_center(const float3 &point,
+                                       const SymmetryPlanePlacement &placement)
+  {
+    const float3 normal = math::normalize(math::cross(placement.tangent, placement.bitangent));
+    return point - math::dot(point - placement.origin, normal) * normal;
+  }
+
+  /**
+   * Half-extent of `ob_ref`'s bounds along the plane, measured from the claiming object's
+   * projected bounds center (the quad's center - see #draw_planes), in the claiming object's local
+   * space.
+   */
   static float shared_plane_size_for_object(const ObjectRef &ob_ref,
                                             const SharedPlane &shared,
                                             const int symmetry_flags)
@@ -75,11 +103,12 @@ class SymmetryPlaneOverlay {
       }
       const SymmetryPlanePlacement placement = symmetry_plane_placement(
           axis, &shared.symmetry_space_to_object);
+      const float3 center = plane_projected_center(shared.claimer_bounds_center, placement);
       for (int corner = 0; corner < 8; corner++) {
         const float3 local(corner & 1 ? bounds->max.x : bounds->min.x,
                            corner & 2 ? bounds->max.y : bounds->min.y,
                            corner & 4 ? bounds->max.z : bounds->min.z);
-        const float3 offset = math::transform_point(to_claimer, local) - placement.origin;
+        const float3 offset = math::transform_point(to_claimer, local) - center;
         size = math::max(size, math::abs(math::dot(offset, placement.tangent)));
         size = math::max(size, math::abs(math::dot(offset, placement.bitangent)));
       }
@@ -91,13 +120,14 @@ class SymmetryPlaneOverlay {
   void draw_planes(const int symmetry_flags,
                    const float plane_size,
                    const float4x4 *symmetry_space_to_object,
+                   const float3 &bounds_center,
                    const ResourceHandleRange &handle,
                    Resources &res)
   {
     auto draw_axis = [&](const int axis, const float3 &rgb) {
       const SymmetryPlanePlacement placement = symmetry_plane_placement(axis,
-                                                                       symmetry_space_to_object);
-      pass_.push_constant("plane_origin", placement.origin);
+                                                                        symmetry_space_to_object);
+      pass_.push_constant("plane_origin", plane_projected_center(bounds_center, placement));
       pass_.push_constant("plane_size", plane_size);
       pass_.push_constant("plane_tangent", placement.tangent);
       pass_.push_constant("plane_bitangent", placement.bitangent);
@@ -175,22 +205,27 @@ class SymmetryPlaneOverlay {
         shared.symmetry_flags = symmetry_flags;
         shared.world_to_object = ob_ref.object->world_to_object();
         shared.symmetry_space_to_object = *symmetry_space_to_object;
+        shared.claimer_bounds_center = object_bounds_center(ob_ref.object);
       }
-      shared.plane_size = math::max(
-          shared.plane_size, shared_plane_size_for_object(ob_ref, shared, symmetry_flags));
+      shared.plane_size = math::max(shared.plane_size,
+                                    shared_plane_size_for_object(ob_ref, shared, symmetry_flags));
       return;
     }
 
-    /* Size the plane to comfortably cover the object's local bounds. */
+    /* Size the plane to comfortably cover the object's local bounds, and center it under the mesh
+     * (its geometry may be modeled far from the object origin the plane passes through). */
     float plane_size = 1.0f;
+    float3 bounds_center(0.0f);
     if (const std::optional<blender::Bounds<float3>> bounds = BKE_object_boundbox_get(
             ob_ref.object))
     {
       const float3 extent = bounds->max - bounds->min;
       plane_size = math::max(math::reduce_max(extent) * 0.6f, 1e-3f);
+      bounds_center = math::midpoint(bounds->min, bounds->max);
     }
 
-    draw_planes(symmetry_flags, plane_size, nullptr, manager.unique_handle(ob_ref), res);
+    draw_planes(
+        symmetry_flags, plane_size, nullptr, bounds_center, manager.unique_handle(ob_ref), res);
   }
 
   /**
@@ -209,6 +244,7 @@ class SymmetryPlaneOverlay {
     draw_planes(shared.symmetry_flags,
                 shared.plane_size,
                 &shared.symmetry_space_to_object,
+                shared.claimer_bounds_center,
                 shared.handle,
                 res);
   }

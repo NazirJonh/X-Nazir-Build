@@ -416,14 +416,17 @@ struct KelvinletWorldTransform {
  */
 KelvinletWorldTransform kelvinlet_world_transform_init(const Object &ob);
 
-/** Transform a local-space POSITION (#BKE_kelvinlet_*'s `elem_orig_co`/`brush_location`) to world space. */
-inline float3 kelvinlet_position_to_world(const KelvinletWorldTransform &transform, const float3 &p)
+/** Transform a local-space POSITION (#BKE_kelvinlet_*'s `elem_orig_co`/`brush_location`) to world
+ * space. */
+inline float3 kelvinlet_position_to_world(const KelvinletWorldTransform &transform,
+                                          const float3 &p)
 {
   return math::transform_point(transform.to_world, p);
 }
 
 /** Transform a local-space DIRECTION (#BKE_kelvinlet_grab*'s `brush_delta`) to world space. */
-inline float3 kelvinlet_direction_to_world(const KelvinletWorldTransform &transform, const float3 &v)
+inline float3 kelvinlet_direction_to_world(const KelvinletWorldTransform &transform,
+                                           const float3 &v)
 {
   return math::transform_direction(transform.to_world, v);
 }
@@ -443,7 +446,8 @@ inline float3 kelvinlet_normal_to_world(const KelvinletWorldTransform &transform
  * Displacements are directions, not positions -- use the object's inverse transform's linear
  * part, not a position round-trip.
  */
-inline float3 kelvinlet_direction_to_local(const KelvinletWorldTransform &transform, const float3 &v)
+inline float3 kelvinlet_direction_to_local(const KelvinletWorldTransform &transform,
+                                           const float3 &v)
 {
   return math::transform_direction(transform.to_local, v);
 }

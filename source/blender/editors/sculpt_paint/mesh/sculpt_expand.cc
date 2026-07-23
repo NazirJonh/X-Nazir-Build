@@ -31,9 +31,9 @@
 #include "BKE_layer.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_mapping.hh"
+#include "BKE_multires.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
-#include "BKE_multires.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_report.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -206,7 +206,7 @@ static bool all_topology_supported(Span<ObjectState> states)
 static bool expand_multi_object_active(const Cache &expand_cache)
 {
   return expand_cache.object_states.size() > 1 &&
-        all_topology_supported(expand_cache.object_states);
+         all_topology_supported(expand_cache.object_states);
 }
 
 /**
@@ -254,8 +254,8 @@ static bool is_vert_in_active_component(const SculptSession &ss,
 
   /* Match BOTH the object and the island id: `active_connected_islands` now keys each symmetry
    * pass by the object it was resolved on, so a vertex is "active" only if some pass landed on its
-   * own object AND its own island. Single object: every entry's `object_index` is 0, matching every
-   * query's `object_index` of 0, so this reduces to the pre-Task-4.2 `.vert` compare. */
+   * own object AND its own island. Single object: every entry's `object_index` is 0, matching
+   * every query's `object_index` of 0, so this reduces to the pre-Task-4.2 `.vert` compare. */
   const int island_id = islands::vert_id_get(ss, vert);
   if (expand_multi_object_active(expand_cache)) {
     /* Cross-mesh: active iff this vertex's island is bridge-reachable from the seed component
@@ -635,8 +635,8 @@ static IndexMask boundary_from_enabled(Object &object,
 {
   SculptSession &ss = *object.runtime->sculpt_session;
 
-  /* `enabled_verts` must be indexed by this object's own vertex-count convention (raw CCG count for
-   * a Grids object, not the base-mesh count); a mismatch would index the wrong buffer. */
+  /* `enabled_verts` must be indexed by this object's own vertex-count convention (raw CCG count
+   * for a Grids object, not the base-mesh count); a mismatch would index the wrong buffer. */
   BLI_assert(enabled_verts.size() == vertex_count_get(object));
 
   /* Defensive (real check, not assert-only): `object_states_init` populates every group member's
@@ -1311,7 +1311,7 @@ static Vector<MultiVertRef> find_symm_multi_verts(const Depsgraph &depsgraph,
     }
     const float3 mirror_ref_local = symmetry_flip(seed_ref_local, ePaintSymmetryFlags(symm_it));
     const float3 mirror_world = math::transform_point(reference.object_to_world(),
-                                                       mirror_ref_local);
+                                                      mirror_ref_local);
     const MultiVertRef nearest = nearest_multi_vert(
         depsgraph, states, world_positions, mirror_world, max_world_distance);
     if (nearest.object_index == -1) {
@@ -1321,11 +1321,12 @@ static Vector<MultiVertRef> find_symm_multi_verts(const Depsgraph &depsgraph,
   }
 
   /* Dedup by `(object_index, vert)`: mirrored symmetry passes can resolve to the same vertex (e.g.
-   * a seed already lying on a mirror plane), which would otherwise produce redundant island entries
-   * AND redundant propagation seeds (spec §11). Keeps the FIRST occurrence, so `seed` (always the
-   * first entry) always survives and pass order is otherwise preserved -- safe for every caller:
-   * min-over-seeds falloffs (Sphere) and multi-source BFS/graph propagation (Geodesic, Topology,
-   * boundary types, islands) are unaffected by a duplicate 0-distance source. */
+   * a seed already lying on a mirror plane), which would otherwise produce redundant island
+   * entries AND redundant propagation seeds (spec §11). Keeps the FIRST occurrence, so `seed`
+   * (always the first entry) always survives and pass order is otherwise preserved -- safe for
+   * every caller: min-over-seeds falloffs (Sphere) and multi-source BFS/graph propagation
+   * (Geodesic, Topology, boundary types, islands) are unaffected by a duplicate 0-distance source.
+   */
   Vector<MultiVertRef> deduped;
   Set<int64_t> seen;
   for (const MultiVertRef &vert_ref : result) {
@@ -1727,14 +1728,15 @@ static void vert_to_face_falloff(Object &object, Mesh *mesh, Cache &expand_cache
   }
 }
 
-/* Multi-object #vert_to_face_falloff: mirrors #vert_to_face_falloff_mesh/#vert_to_face_falloff_grids,
- * per object. Needed so the FaceSets target has a `face_falloff` to read from on every object, not
- * only the active one. Per-object pbvh-type branch added so a Grids object's `state.vert_falloff`
- * (raw CCG-indexed, per #world_positions_create/Task 5) is read through the matching grid-loop
- * convention instead of through `mesh.corner_verts()`'s base-mesh vertex indices -- the two index
- * spaces are unrelated sizes, so reading the Mesh convention for a Grids object silently pulled
- * wrong (but in-bounds, since raw CCG count exceeds base-mesh count) falloff values into
- * `face_falloff`, rather than crashing. BMesh is unreachable here (multi-object gate excludes it). */
+/* Multi-object #vert_to_face_falloff: mirrors
+ * #vert_to_face_falloff_mesh/#vert_to_face_falloff_grids, per object. Needed so the FaceSets
+ * target has a `face_falloff` to read from on every object, not only the active one. Per-object
+ * pbvh-type branch added so a Grids object's `state.vert_falloff` (raw CCG-indexed, per
+ * #world_positions_create/Task 5) is read through the matching grid-loop convention instead of
+ * through `mesh.corner_verts()`'s base-mesh vertex indices -- the two index spaces are unrelated
+ * sizes, so reading the Mesh convention for a Grids object silently pulled wrong (but in-bounds,
+ * since raw CCG count exceeds base-mesh count) falloff values into `face_falloff`, rather than
+ * crashing. BMesh is unreachable here (multi-object gate excludes it). */
 static void vert_to_face_falloff_multi(Cache &expand_cache)
 {
   for (ObjectState &state : expand_cache.object_states) {
@@ -1987,8 +1989,8 @@ static void init_from_face_set_boundary(const Depsgraph &depsgraph,
  * stays consistent across the bridge.
  */
 static void face_set_boundary_falloff_multi(const Depsgraph &depsgraph,
-                                             Cache &expand_cache,
-                                             const bool internal_falloff)
+                                            Cache &expand_cache,
+                                            const bool internal_falloff)
 {
   Span<ObjectState> states = expand_cache.object_states;
   Vector<Object *> objects;
@@ -2171,8 +2173,7 @@ static void normals_falloff_multi(const Depsgraph &depsgraph,
    * `orig_normal` always comes from the requested `vert`, not from a mirrored symmetry pass. */
   const Vector<MultiVertRef> seeds = find_symm_multi_verts(
       depsgraph, states, expand_cache.world_positions, expand_cache.seed, FLT_MAX);
-  const float3 orig_normal =
-      world_normals[expand_cache.seed.object_index][expand_cache.seed.vert];
+  const float3 orig_normal = world_normals[expand_cache.seed.object_index][expand_cache.seed.vert];
 
   std::queue<MultiVertRef> queue;
   for (const MultiVertRef &seed : seeds) {
@@ -2188,7 +2189,8 @@ static void normals_falloff_multi(const Depsgraph &depsgraph,
   /* Step 6: combined flood. Relaxing a `to` vertex reproduces #normals_falloff_create's
    * accumulation formula exactly (from_edge_factor powf, edge_factors update, clamp); the bridge
    * partners let the accumulation cross the seam. */
-  auto relax = [&](const float from_edge_factor, const float3 &from_normal,
+  auto relax = [&](const float from_edge_factor,
+                   const float3 &from_normal,
                    const MultiVertRef &to) {
     if (visited[to.object_index][to.vert]) {
       return;
@@ -2196,8 +2198,7 @@ static void normals_falloff_multi(const Depsgraph &depsgraph,
     const float3 &to_normal = world_normals[to.object_index][to.vert];
     const float dist = math::dot(orig_normal, to_normal) *
                        powf(from_edge_factor, edge_sensitivity);
-    edge_factors[to.object_index][to.vert] = math::dot(to_normal, from_normal) *
-                                             from_edge_factor;
+    edge_factors[to.object_index][to.vert] = math::dot(to_normal, from_normal) * from_edge_factor;
     dists[to.object_index][to.vert] = std::clamp(dist, 0.0f, 1.0f);
     visited[to.object_index][to.vert].set();
     queue.push(to);
@@ -2354,25 +2355,22 @@ static void calc_falloff_from_vert_and_symmetry(const Depsgraph &depsgraph,
 
   switch (falloff_type) {
     case FalloffType::Geodesic:
-      state.vert_falloff = has_topology_info ?
-                                geodesic_falloff_create(depsgraph, ob, vert) :
-                                spherical_falloff_create(depsgraph, ob, vert);
+      state.vert_falloff = has_topology_info ? geodesic_falloff_create(depsgraph, ob, vert) :
+                                               spherical_falloff_create(depsgraph, ob, vert);
       break;
     case FalloffType::Topology:
       state.vert_falloff = topology_falloff_create(depsgraph, ob, vert);
       break;
     case FalloffType::TopologyNormals:
-      state.vert_falloff = has_topology_info ?
-                                diagonals_falloff_create(depsgraph, ob, vert) :
-                                topology_falloff_create(depsgraph, ob, vert);
+      state.vert_falloff = has_topology_info ? diagonals_falloff_create(depsgraph, ob, vert) :
+                                               topology_falloff_create(depsgraph, ob, vert);
       break;
     case FalloffType::Normals:
-      state.vert_falloff = normals_falloff_create(
-          depsgraph,
-          ob,
-          vert,
-          SCULPT_EXPAND_NORMALS_FALLOFF_EDGE_SENSITIVITY,
-          expand_cache.normal_falloff_blur_steps);
+      state.vert_falloff = normals_falloff_create(depsgraph,
+                                                  ob,
+                                                  vert,
+                                                  SCULPT_EXPAND_NORMALS_FALLOFF_EDGE_SENSITIVITY,
+                                                  expand_cache.normal_falloff_blur_steps);
       break;
     case FalloffType::Sphere:
       state.vert_falloff = spherical_falloff_create(depsgraph, ob, vert);
@@ -2421,8 +2419,8 @@ static void snap_init_from_enabled(const Depsgraph &depsgraph,
      * ("no snap support") for any non-Mesh pbvh -- Snap face-set init has never been implemented
      * for Multires. Contributing a Grids object's ids in Phase 1 without Phase 2 being able to
      * correctly evaluate "any disabled vertex" for it (its `corner_verts()` are base-mesh indices,
-     * but `enabled_verts` from #enabled_state_to_bitmap is raw-CCG-indexed for Grids -- reading one
-     * through the other is in-bounds but semantically wrong, not a crash) would leave some ids
+     * but `enabled_verts` from #enabled_state_to_bitmap is raw-CCG-indexed for Grids -- reading
+     * one through the other is in-bounds but semantically wrong, not a crash) would leave some ids
      * that should have been removed incorrectly stuck in the snap set. */
     for (const ObjectState &state : expand_cache.object_states) {
       if (bke::object::pbvh_get(*state.object)->type() != bke::pbvh::Type::Mesh) {
@@ -2654,7 +2652,8 @@ static void restore_original_state(bContext *C, Object &ob, Cache &expand_cache)
 
   switch (expand_cache.target) {
     case TargetType::Mask:
-      write_mask_data(CTX_data_depsgraph_pointer(C), ob, active_object_state(expand_cache).original_mask);
+      write_mask_data(
+          CTX_data_depsgraph_pointer(C), ob, active_object_state(expand_cache).original_mask);
       flush_update_step(C, UpdateType::Mask);
       flush_update_done(C, ob, UpdateType::Mask);
       tag_update_overlays(C);
@@ -2704,9 +2703,9 @@ static void calc_new_mask_mesh(const SculptSession &ss,
                                const MutableSpan<float> mask,
                                const int object_index)
 {
-  /* `expand_cache` is passed in explicitly (not `*ss.expand_cache`): in the multi-object apply loop
-   * `ss` is a secondary object's session, whose `expand_cache` pointer is null (only the active
-   * object owns the #Cache). */
+  /* `expand_cache` is passed in explicitly (not `*ss.expand_cache`): in the multi-object apply
+   * loop `ss` is a secondary object's session, whose `expand_cache` pointer is null (only the
+   * active object owns the #Cache). */
   for (const int i : verts.index_range()) {
     const int vert = verts[i];
     const bool enabled = enabled_verts[vert];
@@ -2805,8 +2804,7 @@ static float calc_new_mask_bmesh(const SculptSession &ss,
   const ObjectState &state = active_object_state(expand_cache);
   /* BMesh is never multi-object (#expand_multi_object_active is Mesh-only), so this always runs
    * on the active object (index 0). */
-  if (expand_cache.check_islands &&
-      !is_vert_in_active_component(ss, expand_cache, vert_index, 0))
+  if (expand_cache.check_islands && !is_vert_in_active_component(ss, expand_cache, vert_index, 0))
   {
     return old_mask;
   }
@@ -3092,20 +3090,19 @@ static void update_for_vert(bContext *C, Object &ob, const MultiVertRef vertex)
           switch (object_pbvh_type_check.type()) {
             case bke::pbvh::Type::Mesh: {
               const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
-              mask::update_mask_mesh(
-                  depsgraph,
-                  object,
-                  object_node_mask,
-                  [&](const MutableSpan<float> mask, const Span<int> verts) {
-                    calc_new_mask_mesh(object_ss,
-                                       expand_cache,
-                                       object_state,
-                                       positions,
-                                       enabled_verts,
-                                       verts,
-                                       mask,
-                                       i);
-                  });
+              mask::update_mask_mesh(depsgraph,
+                                     object,
+                                     object_node_mask,
+                                     [&](const MutableSpan<float> mask, const Span<int> verts) {
+                                       calc_new_mask_mesh(object_ss,
+                                                          expand_cache,
+                                                          object_state,
+                                                          positions,
+                                                          enabled_verts,
+                                                          verts,
+                                                          mask,
+                                                          i);
+                                     });
               break;
             }
             case bke::pbvh::Type::Grids: {
@@ -3127,21 +3124,22 @@ static void update_for_vert(bContext *C, Object &ob, const MultiVertRef vertex)
               IndexMaskMemory memory;
               object_pbvh.tag_masks_changed(IndexMask::from_bools(node_changed, memory));
               BKE_subdiv_ccg_average_grids(object_subdiv_ccg);
-              /* `update_mask_grids` writes ONLY to the evaluated `subdiv_ccg.masks` span. That change
-               * is flushed back to the persistent base-cage `GridPaintMask` layer only when the
-               * object's `subdiv_ccg->dirty.coords` is set (there is no separate mask flag -- see the
-               * `MultiresModifiedFlags` enum, which only has COORDS/HIDDEN; the reshape write-back
-               * path `multires_reshape_assign_final_coords_from_ccg` copies masks as a side effect of
-               * the coords reshape). `flush_update_step(C, ...)` below marks dirty.coords for the
-               * ACTIVE object only, so without this per-object mark a SECONDARY Grids object's mask
-               * survives in evaluated data while dragging (preview is correct, the viewport reads
-               * eval) but is discarded on the depsgraph re-eval triggered by Confirm's
-               * `flush_update_done` -- appearing as an empty/reverted mask on the secondary object,
-               * with the undo step (snapshot taken from eval at invoke) showing the same wrong state.
-               * This is the identical call the Mesh mask tools make (`paint_mask.cc`: every Grids
-               * mask op) and that `flush_update_step` makes for the active object. `multires_mark_as_
-               * modified` takes a non-const `Depsgraph *`, so resolve it directly from the context
-               * here instead of the function's const `depsgraph` binding. */
+              /* `update_mask_grids` writes ONLY to the evaluated `subdiv_ccg.masks` span. That
+               * change is flushed back to the persistent base-cage `GridPaintMask` layer only when
+               * the object's `subdiv_ccg->dirty.coords` is set (there is no separate mask flag --
+               * see the `MultiresModifiedFlags` enum, which only has COORDS/HIDDEN; the reshape
+               * write-back path `multires_reshape_assign_final_coords_from_ccg` copies masks as a
+               * side effect of the coords reshape). `flush_update_step(C, ...)` below marks
+               * dirty.coords for the ACTIVE object only, so without this per-object mark a
+               * SECONDARY Grids object's mask survives in evaluated data while dragging (preview
+               * is correct, the viewport reads eval) but is discarded on the depsgraph re-eval
+               * triggered by Confirm's `flush_update_done` -- appearing as an empty/reverted mask
+               * on the secondary object, with the undo step (snapshot taken from eval at invoke)
+               * showing the same wrong state. This is the identical call the Mesh mask tools make
+               * (`paint_mask.cc`: every Grids mask op) and that `flush_update_step` makes for the
+               * active object. `multires_mark_as_ modified` takes a non-const `Depsgraph *`, so
+               * resolve it directly from the context here instead of the function's const
+               * `depsgraph` binding. */
               multires_mark_as_modified(
                   CTX_data_depsgraph_pointer(C), &object, MULTIRES_COORDS_MODIFIED);
               break;
@@ -3178,7 +3176,7 @@ static void update_for_vert(bContext *C, Object &ob, const MultiVertRef vertex)
           const VArraySpan hide_vert = *attributes.lookup<bool>(".hide_vert",
                                                                 bke::AttrDomain::Point);
           const VArraySpan mask = *attributes.lookup<float>(".sculpt_mask",
-                                                             bke::AttrDomain::Point);
+                                                            bke::AttrDomain::Point);
           bke::GSpanAttributeWriter color_attribute = color::active_color_attribute_for_write(
               mesh);
           /* Hoisted once per object instead of once per node (spec §9 perf). */
@@ -3246,7 +3244,8 @@ static void update_for_vert(bContext *C, Object &ob, const MultiVertRef vertex)
           const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
           mask::update_mask_mesh(
               depsgraph, ob, node_mask, [&](const MutableSpan<float> mask, const Span<int> verts) {
-                calc_new_mask_mesh(ss, expand_cache, state, positions, enabled_verts, verts, mask, 0);
+                calc_new_mask_mesh(
+                    ss, expand_cache, state, positions, enabled_verts, verts, mask, 0);
               });
           break;
         }
@@ -3410,10 +3409,10 @@ static void reposition_pivot(bContext *C, Object &ob, Cache &expand_cache)
     const float4x4 world_to_active = ob.world_to_object();
 
     const MultiVertRef seed = expand_cache.seed;
-    const float3 world_seed = (seed.object_index >= 0 &&
-                               seed.object_index < expand_cache.world_positions.size()) ?
-                                  expand_cache.world_positions[seed.object_index][seed.vert] :
-                                  expand_cache.world_positions[0][expand_cache.initial_active_vert];
+    const float3 world_seed =
+        (seed.object_index >= 0 && seed.object_index < expand_cache.world_positions.size()) ?
+            expand_cache.world_positions[seed.object_index][seed.vert] :
+            expand_cache.world_positions[0][expand_cache.initial_active_vert];
     const float3 expand_init_co = math::transform_point(world_to_active, world_seed);
 
     double3 average(0);
@@ -3589,9 +3588,9 @@ static void find_active_connected_components_from_vert(const Depsgraph &depsgrap
 
   if (expand_multi_object_active(expand_cache)) {
     /* Cross-mesh: the active component spans every island reachable from the seed's island through
-     * mesh edges and the proximity bridge. BFS over the graph whose nodes are (object, island) pairs
-     * and whose cross-object edges are the bridge stitches; store each object's reachable island ids
-     * in its ObjectState (spec §8, cross-mesh generalization). */
+     * mesh edges and the proximity bridge. BFS over the graph whose nodes are (object, island)
+     * pairs and whose cross-object edges are the bridge stitches; store each object's reachable
+     * island ids in its ObjectState (spec §8, cross-mesh generalization). */
     Span<ObjectState> states = expand_cache.object_states;
     for (ObjectState &state : expand_cache.object_states) {
       state.active_islands.clear();
@@ -3615,8 +3614,9 @@ static void find_active_connected_components_from_vert(const Depsgraph &depsgrap
                            islands::vert_id_get(ss_b, edge.b.vert)});
     }
 
-    /* Seed the BFS with the symmetry-resolved seeds' islands. `frontier` reuses #MultiVertRef as an
-     * (object_index, island id) pair, matching how `active_connected_islands` stores islands. */
+    /* Seed the BFS with the symmetry-resolved seeds' islands. `frontier` reuses #MultiVertRef as
+     * an (object_index, island id) pair, matching how `active_connected_islands` stores islands.
+     */
     const Vector<MultiVertRef> seeds = find_symm_multi_verts(
         depsgraph, states, expand_cache.world_positions, expand_cache.seed, FLT_MAX);
     Vector<MultiVertRef> frontier;
@@ -4348,9 +4348,9 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
     for (const ObjectState &state : ss.expand_cache->object_states) {
       if (bke::object::pbvh_get(*state.object)->type() != bke::pbvh::Type::Mesh) {
         BKE_reportf(op->reports,
-                   RPT_WARNING,
-                   "Expand Color target does not support Multires: skipping \"%s\"",
-                   state.object->id.name + 2);
+                    RPT_WARNING,
+                    "Expand Color target does not support Multires: skipping \"%s\"",
+                    state.object->id.name + 2);
       }
     }
   }
@@ -4461,8 +4461,8 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
   }
   undo_push(*depsgraph, *ss.expand_cache);
 
-  /* Cache bke::pbvh::Tree nodes for every object. The multi-object apply loop reads each object's own
-   * `node_mask`; without this, secondary objects would apply Mask/Colors to zero nodes. */
+  /* Cache bke::pbvh::Tree nodes for every object. The multi-object apply loop reads each object's
+   * own `node_mask`; without this, secondary objects would apply Mask/Colors to zero nodes. */
   for (ObjectState &state : ss.expand_cache->object_states) {
     state.node_mask_memory = std::make_unique<IndexMaskMemory>();
     state.node_mask = bke::pbvh::all_leaf_nodes(*bke::object::pbvh_get(*state.object),

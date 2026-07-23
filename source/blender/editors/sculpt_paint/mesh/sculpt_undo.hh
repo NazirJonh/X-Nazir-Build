@@ -31,7 +31,7 @@ namespace ed::sculpt_paint {
  * the real definition's implicit `int` underlying type) so this header does not have to pull in
  * `sculpt_intern.hh`'s heavier dependencies just for #finish_multi_object's parameter type. */
 enum class UpdateType;
-}
+}  // namespace ed::sculpt_paint
 
 namespace ed::sculpt_paint::undo {
 
@@ -127,9 +127,9 @@ void set_object_transform_snapshot(Object &ob);
 
 /**
  * Re-apply \a ob's object-transform snapshot captured by #set_object_transform_snapshot, WITHOUT
- * consuming/swapping it (unlike the Ctrl+Z stack-level restore in `restore_list_object`) -- safe to
- * call repeatedly mid-session. Used by #cancel_modal_transform to revert a rigid-body secondary to
- * its pre-session matrix. A no-op if no snapshot was captured for \a ob.
+ * consuming/swapping it (unlike the Ctrl+Z stack-level restore in `restore_list_object`) -- safe
+ * to call repeatedly mid-session. Used by #cancel_modal_transform to revert a rigid-body secondary
+ * to its pre-session matrix. A no-op if no snapshot was captured for \a ob.
  */
 void restore_object_transform_from_undo_step(Object &ob);
 
@@ -187,9 +187,7 @@ void push_begin_multi_object(const Scene &scene,
  * field that the operator actually mutated (mask / face-set / color / position / etc.); the brush
  * helpers will route the tag to the correct update graph path.
  */
-void finish_multi_object(bContext *C,
-                         Span<Object *> scene_objects,
-                         UpdateType update_type);
+void finish_multi_object(bContext *C, Span<Object *> scene_objects, UpdateType update_type);
 
 /** \} */
 

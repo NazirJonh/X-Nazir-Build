@@ -1237,7 +1237,7 @@ struct Paint {
   int num_input_samples_deprecated = 0;
 
   /** Flags used for symmetry. */
-  ePaintSymmetryFlags symmetry_flags = PAINT_SYMMETRY_FEATHER;
+  ePaintSymmetryFlags symmetry_flags = PAINT_SYMMETRY_FEATHER | PAINT_SYMMETRY_MIRROR_SNAP_OFF;
   /** #ePaintSymmetrySpace: space for the multi-object brush symmetry plane. */
   char symmetry_space = 0;
   char _pad_symm[3] = {};

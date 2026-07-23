@@ -142,8 +142,7 @@ class ScopedObactOverride {
   Object *const saved_obact_;
 
  public:
-  ScopedObactOverride(ViewContext &vc, Object &new_obact)
-      : vc_(vc), saved_obact_(vc.obact)
+  ScopedObactOverride(ViewContext &vc, Object &new_obact) : vc_(vc), saved_obact_(vc.obact)
   {
     vc_.obact = &new_obact;
   }
@@ -153,7 +152,8 @@ class ScopedObactOverride {
   }
 
   /* The dtor must undo the constructor's swap; forbid copies and moves so we never end up with a
-   * guard whose saved pointer became stale or whose swap was performed into a different lifetime. */
+   * guard whose saved pointer became stale or whose swap was performed into a different lifetime.
+   */
   ScopedObactOverride(const ScopedObactOverride &) = delete;
   ScopedObactOverride &operator=(const ScopedObactOverride &) = delete;
   ScopedObactOverride(ScopedObactOverride &&) = delete;
@@ -274,11 +274,11 @@ struct StrokeCache {
    */
   bool multi_object_stroke = false;
   /**
-   * True when the non-uniform-scale compensation in #scale_normalized()/#position_scale_normalized()
-   * should engage: either #multi_object_stroke, or a single object whose own #Object.scale is
-   * anisotropic (#object_has_non_uniform_scale). A uniformly-scaled (or unscaled) single-object
-   * stroke stays bit-exact with its pre-correction behavior. Seeded once per object in
-   * #stroke_cache_init.
+   * True when the non-uniform-scale compensation in
+   * #scale_normalized()/#position_scale_normalized() should engage: either #multi_object_stroke,
+   * or a single object whose own #Object.scale is anisotropic (#object_has_non_uniform_scale). A
+   * uniformly-scaled (or unscaled) single-object stroke stays bit-exact with its pre-correction
+   * behavior. Seeded once per object in #stroke_cache_init.
    */
   bool non_uniform_scale_active = false;
   struct {
@@ -315,9 +315,10 @@ struct StrokeCache {
    * #calc_area_normal_and_center pool the vertices of every object in #multi_object_sample_objects
    * into #multi_object_sample_reference's local space and convert the resulting normal/center back
    * into the requesting object's space. This makes Draw (area), Clay, Clay Strips, Plane, Flatten,
-   * Multiplane Scrape, etc. see one shared surface like a single joined mesh, instead of each object
-   * sampling only itself. Empty / null in single-object mode and only honored for
-   * #bke::pbvh::Type::Mesh. Refreshed every #update_step; the span is owned by the paint stroke. */
+   * Multiplane Scrape, etc. see one shared surface like a single joined mesh, instead of each
+   * object sampling only itself. Empty / null in single-object mode and only honored for
+   * #bke::pbvh::Type::Mesh. Refreshed every #update_step; the span is owned by the paint stroke.
+   */
   Span<Object *> multi_object_sample_objects;
   const Object *multi_object_sample_reference = nullptr;
 
@@ -342,14 +343,15 @@ struct StrokeCache {
   float4x4 symm_ref_from_cur = float4x4::identity();
   float4x4 symm_cur_from_ref = float4x4::identity();
   /* True only for objects other than the symmetry reference in a multi-object stroke while
-   * #PAINT_SYMMETRY_SHARED_ORIGIN is on. When false (reference object, single-object stroke, option
-   * off) brush data is mirrored around this object's own origin exactly as in single-object mode. */
+   * #PAINT_SYMMETRY_SHARED_ORIGIN is on. When false (reference object, single-object stroke,
+   * option off) brush data is mirrored around this object's own origin exactly as in single-object
+   * mode. */
   bool symm_shared_origin_active = false;
   /* Reference object whose local space defines the single shared symmetry plane for the whole
-   * stroke (#PAINT_SYMMETRY_SHARED_ORIGIN). This is the active object — the one a #Join would merge
-   * everything into — so the plane stays fixed instead of following the cursor between meshes.
-   * The symmetry flag set and radial counts are read from its mesh. Null when the option is off or
-   * in single-object mode. */
+   * stroke (#PAINT_SYMMETRY_SHARED_ORIGIN). This is the active object — the one a #Join would
+   * merge everything into — so the plane stays fixed instead of following the cursor between
+   * meshes. The symmetry flag set and radial counts are read from its mesh. Null when the option
+   * is off or in single-object mode. */
   const Object *symm_reference_object = nullptr;
 
   /**
@@ -720,11 +722,12 @@ float raycast_init(ViewContext *vc,
  * FRONT-FACING hit, measured along \a view_axis (positive when the surface is in front of
  * \a location). Only the span reaching \a max_distance to either side of \a location is searched.
  *
- * `std::nullopt` when the ray misses that span, or when the first hit is a back face -- which means
- * the ray started inside the mesh, i.e. its front surface is farther than \a max_distance in front
- * of \a location and therefore out of reach.
+ * `std::nullopt` when the ray misses that span, or when the first hit is a back face -- which
+ * means the ray started inside the mesh, i.e. its front surface is farther than \a max_distance in
+ * front of \a location and therefore out of reach.
  *
- * \a view_axis must be normalized and point towards the viewer (like #StrokeCache.view_normal_symm).
+ * \a view_axis must be normalized and point towards the viewer (like
+ * #StrokeCache.view_normal_symm).
  */
 std::optional<float> raycast_front_facing_surface_offset(const Depsgraph &depsgraph,
                                                          Object &ob,
@@ -775,7 +778,10 @@ Vector<Object *> sculpt_mode_objects(const ViewContext &vc);
  * strokes and gesture tools that touch masks index #SubdivCCG::masks unconditionally for a Grids
  * PBVH, which is left empty for a multires object that has never had a mask layer created.
  */
-void ensure_mask_layers(Depsgraph *depsgraph, Main *bmain, const Scene *scene, Span<Object *> objects);
+void ensure_mask_layers(Depsgraph *depsgraph,
+                        Main *bmain,
+                        const Scene *scene,
+                        Span<Object *> objects);
 
 int vertex_count_get(const Object &object);
 
@@ -1097,8 +1103,9 @@ float object_space_radius_get(const ViewContext &vc,
 bool need_delta_from_anchored_origin(const Brush &brush);
 
 /**
- * Test whether any PBVH node of \a ob intersects the brush volume centered at \a world_center (given
- * in world space), projecting it into the object's local space first. Does not modify the cache.
+ * Test whether any PBVH node of \a ob intersects the brush volume centered at \a world_center
+ * (given in world space), projecting it into the object's local space first. Does not modify the
+ * cache.
  *
  * The volume matches #Brush.falloff_shape, so that this gate and the brush's own node gathering
  * (#pbvh_gather_generic) agree on what "inside the brush" means: a sphere for
@@ -1109,9 +1116,9 @@ bool need_delta_from_anchored_origin(const Brush &brush);
  * falloff. It is per-daub rather than per-stroke because mirroring a daub reflects its view axis
  * along with its center -- see #MirroredDaub.
  * \param radius_multiplier: scales the brush radius used for the test. Values above 1 are used for
- * MIRRORED daub centers when the mirror surface snap is active, so an object whose surface the snap
- * could still reach is not rejected here first. Defaults to 1.0, which keeps every existing call
- * byte-identical.
+ * MIRRORED daub centers when the mirror surface snap is active, so an object whose surface the
+ * snap could still reach is not rejected here first. Defaults to 1.0, which keeps every existing
+ * call byte-identical.
  */
 bool object_geometry_intersects_world_sphere(Object &ob,
                                              const StrokeCache &cache,
@@ -1126,11 +1133,8 @@ bool object_geometry_intersects_world_sphere(Object &ob,
  * projecting it into the object's local space. Unconditional: the caller decides whether the
  * object should be processed at all (see #object_geometry_intersects_world_sphere).
  */
-void stroke_cache_apply_world_center(Object &ob,
-                                     StrokeCache &cache,
-                                     Paint &paint,
-                                     const Brush &brush,
-                                     const float3 &world_center);
+void stroke_cache_apply_world_center(
+    Object &ob, StrokeCache &cache, Paint &paint, const Brush &brush, const float3 &world_center);
 
 /**
  * Sets the brush location for a secondary sculpt object by projecting the world-space brush
@@ -1140,8 +1144,8 @@ void stroke_cache_apply_world_center(Object &ob,
  * Unlike the primary object, which keeps the framework-provided RNA "location", this function
  * accepts any object whose geometry overlaps the brush volume in 3D world space.
  *
- * \param world_view_direction: see #object_geometry_intersects_world_sphere; only used by Projected
- * falloff.
+ * \param world_view_direction: see #object_geometry_intersects_world_sphere; only used by
+ * Projected falloff.
  * \return true if any PBVH node of \a ob intersects the brush volume and the cache was updated.
  */
 bool stroke_cache_set_location_from_world_sphere(Object &ob,

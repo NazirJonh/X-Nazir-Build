@@ -306,9 +306,8 @@ MultiObjectBridge build_bridge_impl(
     if (best_for_vert.lookup(vert_key(candidate.b_obj, candidate.b_vert)) != i) {
       continue;
     }
-    result.edges.append({{candidate.a_obj, candidate.a_vert},
-                         {candidate.b_obj, candidate.b_vert},
-                         candidate.gap});
+    result.edges.append(
+        {{candidate.a_obj, candidate.a_vert}, {candidate.b_obj, candidate.b_vert}, candidate.gap});
   }
   return result;
 }
@@ -345,7 +344,8 @@ MultiObjectBridge build_multi_object_bridge(const Depsgraph &depsgraph,
         Map<int, int> compact_id;
         for (const int raw : canonical_map.index_range()) {
           const int rep = canonical_map[raw];
-          const int id = compact_id.lookup_or_add_cb(rep, [&]() { return int(compact_id.size()); });
+          const int id = compact_id.lookup_or_add_cb(rep,
+                                                     [&]() { return int(compact_id.size()); });
           if (raw_of_canonical[id] == -1) {
             raw_of_canonical[id] = raw;
           }
@@ -394,9 +394,8 @@ MultiObjectBridge build_multi_object_bridge(const Depsgraph &depsgraph,
    * #nearest_multi_vert in sculpt_expand.cc -- convert the world-space query point/radius into
    * object `obj`'s local space before searching, since #nearest_vert_calc_mesh's `max_distance`
    * and `location` are both in object-local units. */
-  const auto nearest_fn = [&](const int obj,
-                              const float3 &world_p,
-                              const float max_world_dist) -> int {
+  const auto nearest_fn =
+      [&](const int obj, const float3 &world_p, const float max_world_dist) -> int {
     Object &object = *objects[obj];
     const float4x4 world_to_object = object.world_to_object();
     const float3 local_p = math::transform_point(world_to_object, world_p);
@@ -599,7 +598,7 @@ void propagate_uniform(const Span<GroupedSpan<int>> object_neighbors,
 }
 
 GlobalGeodesicTopology build_global_geodesic_topology(const Span<ObjectTopology> objects,
-                                                       const MultiObjectBridge &bridge)
+                                                      const MultiObjectBridge &bridge)
 {
   /* Step 1: running per-object offsets into each global (concatenated) array. */
   Array<int> vert_offset(objects.size() + 1, 0);
@@ -704,8 +703,10 @@ GlobalGeodesicTopology build_global_geodesic_topology(const Span<ObjectTopology>
                                     global_edges.size(),
                                     result.edge_to_face_offsets,
                                     result.edge_to_face_indices);
-  bke::mesh::build_vert_to_edge_map(
-      global_edges.as_span(), total_verts, result.vert_to_edge_offsets, result.vert_to_edge_indices);
+  bke::mesh::build_vert_to_edge_map(global_edges.as_span(),
+                                    total_verts,
+                                    result.vert_to_edge_offsets,
+                                    result.vert_to_edge_indices);
 
   result.positions = std::move(global_positions);
   result.edges = std::move(global_edges);
@@ -851,15 +852,16 @@ static GroupedSpan<int> build_face_diagonal_neighbors(const Mesh &mesh,
   return {offsets, r_data};
 }
 
-void multi_object_graph_propagate(const Depsgraph &depsgraph,
-                                  const Span<Object *> objects,
-                                  const Span<Array<float3>> world_positions,
-                                  const Span<Array<int>> grids_canonical_maps,
-                                  const Span<MultiVertRef> seeds,
-                                  const MultiObjectBridge &bridge,
-                                  const PropagationMode mode,
-                                  std::unique_ptr<detail::GlobalGeodesicTopology> &geodesic_topology_cache,
-                                  MutableSpan<Array<float>> r_vert_falloff_per_object)
+void multi_object_graph_propagate(
+    const Depsgraph &depsgraph,
+    const Span<Object *> objects,
+    const Span<Array<float3>> world_positions,
+    const Span<Array<int>> grids_canonical_maps,
+    const Span<MultiVertRef> seeds,
+    const MultiObjectBridge &bridge,
+    const PropagationMode mode,
+    std::unique_ptr<detail::GlobalGeodesicTopology> &geodesic_topology_cache,
+    MutableSpan<Array<float>> r_vert_falloff_per_object)
 {
   if (mode == PropagationMode::Geodesic) {
     /* Geodesic: `depsgraph` is not needed here -- `world_positions` already holds the evaluated
@@ -922,10 +924,14 @@ void multi_object_graph_propagate(const Depsgraph &depsgraph,
     const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(*objects[i]);
     if (pbvh.type() == bke::pbvh::Type::Grids) {
       object_neighbors[i] = (mode == PropagationMode::UniformDiagonals) ?
-                                grids_diagonal_neighbors_create(
-                                    *objects[i], grids_canonical_maps[i], all_offsets[i], all_data[i]) :
-                                grids_edge_neighbors_create(
-                                    *objects[i], grids_canonical_maps[i], all_offsets[i], all_data[i]);
+                                grids_diagonal_neighbors_create(*objects[i],
+                                                                grids_canonical_maps[i],
+                                                                all_offsets[i],
+                                                                all_data[i]) :
+                                grids_edge_neighbors_create(*objects[i],
+                                                            grids_canonical_maps[i],
+                                                            all_offsets[i],
+                                                            all_data[i]);
       continue;
     }
     const Mesh &mesh = *id_cast<const Mesh *>(objects[i]->data);

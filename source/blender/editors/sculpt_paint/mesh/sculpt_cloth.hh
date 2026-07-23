@@ -96,8 +96,9 @@ struct SimulationData {
    * internal Euclidean distance/direction math (spring rest-lengths, Verlet integration) is
    * physically meaningful even when #Object.scale is non-uniform. Set once in
    * #brush_simulation_create and never changed afterwards (the object's transform is assumed
-   * static for the stroke's duration, same assumption #StrokeCache.scale/#StrokeCache.non_uniform_scale_active
-   * already make). See `ClothWorldTransform` in `sculpt_cloth.cc`.
+   * static for the stroke's duration, same assumption
+   * #StrokeCache.scale/#StrokeCache.non_uniform_scale_active already make). See
+   * `ClothWorldTransform` in `sculpt_cloth.cc`.
    */
   bool use_world_space = false;
 

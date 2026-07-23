@@ -1062,7 +1062,6 @@ static void mask_filter_object(bContext &C,
       break;
     }
   }
-
 }
 
 static wmOperatorStatus sculpt_mask_filter_exec(bContext *C, wmOperator *op)

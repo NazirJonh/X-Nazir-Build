@@ -928,9 +928,9 @@ static void init_operation(bContext &C, gesture::GestureData &gesture_data, wmOp
    * unconditionally, which is left empty for a multires object that has never had a mask layer
    * created (see #ensure_mask_layers). */
   ensure_mask_layers(CTX_data_depsgraph_pointer(&C),
-                      CTX_data_main(&C),
-                      gesture_data.vc.scene,
-                      gesture_data.objects);
+                     CTX_data_main(&C),
+                     gesture_data.vc.scene,
+                     gesture_data.objects);
 
   mask_operation->op.begin = gesture_begin;
   mask_operation->op.apply_for_symmetry_pass = gesture_apply_for_symmetry_pass;

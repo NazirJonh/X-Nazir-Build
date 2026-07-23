@@ -34,4 +34,7 @@ ADDITIONAL_INFO(draw_modelmat)
 ADDITIONAL_INFO(draw_globals)
 GPU_SHADER_CREATE_END()
 
+/* NOTE: #overlay_sculpt_symmetry_plane and its `_clipped` variant now live in
+ * `overlay_sculpt_symmetry_plane.bsl.hh`. */
+
 CREATE_INFO_VARIANT(overlay_sculpt_mask_clipped, overlay_sculpt_mask, drw_clipped)

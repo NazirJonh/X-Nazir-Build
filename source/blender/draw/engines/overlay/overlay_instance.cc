@@ -12,6 +12,7 @@
 #include "ED_view3d.hh"
 
 #include "BKE_paint.hh"
+#include "BLI_math_color.h"
 
 #include "draw_debug.hh"
 #include "overlay_instance.hh"
@@ -281,6 +282,17 @@ void Resources::update_theme_settings(const DRWContext *ctx, const State &state)
   ui::theme::get_color_4fv(TH_FACE_SELECT, gb.colors.face_select);
   ui::theme::get_color_4fv(TH_FACE_MODE_SELECT, gb.colors.face_mode_select);
   ui::theme::get_color_4fv(TH_FACE_RETOPOLOGY, gb.colors.face_retopology);
+  /* Symmetry contour is View3D-only. Query it explicitly from SPACE_VIEW3D to avoid
+   * picking zeroed values from unrelated space theme states (e.g. Texture Paint context changes).
+   */
+  ui::theme::get_color_type_4fv(
+      TH_SCULPT_SYMMETRY_CONTOUR, SPACE_VIEW3D, gb.colors.sculpt_symmetry_contour);
+  if (gb.colors.sculpt_symmetry_contour[3] == 0.0f) {
+    /* Runtime safety net for legacy/custom themes carrying fully transparent contour color.
+     * Reuse selection color so the contour remains visible without affecting draw order. */
+    ui::theme::get_color_type_4fv(TH_SELECT, SPACE_VIEW3D, gb.colors.sculpt_symmetry_contour);
+    gb.colors.sculpt_symmetry_contour[3] = 1.0f;
+  }
   ui::theme::get_color_4fv(TH_FACE_BACK, gb.colors.face_back);
   ui::theme::get_color_4fv(TH_FACE_FRONT, gb.colors.face_front);
   ui::theme::get_color_4fv(TH_NORMAL, gb.colors.normal);
@@ -389,11 +401,12 @@ void Resources::update_theme_settings(const DRWContext *ctx, const State &state)
   /* Color management. */
   {
     float4 *color = reinterpret_cast<float4 *>(&gb.colors);
+    /* The loop used to run one element past the end of the array. */
     float4 *color_end = color + (sizeof(gb.colors) / sizeof(float4));
     do {
       /* TODO: more accurate transform. */
       srgb_to_linearrgb_v4(&color->x, &color->x);
-    } while (++color <= color_end);
+    } while (++color < color_end);
   }
 
   gb.sizes.pixel = 1.0f;
@@ -693,10 +706,13 @@ void Instance::end_sync()
     layer.lights.end_sync(resources, state);
     layer.light_probes.end_sync(resources, state);
     layer.mesh_uvs.end_sync(resources, state);
+    layer.meshes.end_sync(resources, state);
     layer.metaballs.end_sync(resources, state);
+    layer.paints.end_sync(resources, state);
     layer.relations.end_sync(resources, state);
     layer.fluids.end_sync(resources, state);
     layer.speakers.end_sync(resources, state);
+    layer.sculpts.end_sync(resources, state);
   };
   end_sync_layer(regular);
   end_sync_layer(infront);
@@ -872,6 +888,9 @@ void Instance::draw_v3d(Manager &manager, View &view)
     layer.attribute_viewer.draw_line(framebuffer, manager, view);
     layer.armatures.draw_line(framebuffer, manager, view);
     layer.sculpts.draw_line(framebuffer, manager, view);
+    /* NOTE: the symmetry contour overlays (layer.paints, layer.sculpts.draw_symmetry_contour) are
+     * drawn after the grid and the mesh line overlays, which share `line_tx` and would otherwise
+     * draw over them. */
     layer.grease_pencil.draw_line(framebuffer, manager, view);
     /* NOTE: Temporarily moved after grid drawing (See #136764). */
     // layer.meshes.draw_line(framebuffer, manager, view);
@@ -893,6 +912,10 @@ void Instance::draw_v3d(Manager &manager, View &view)
 
     regular.sculpts.draw_on_render(resources.render_fb, manager, view);
     infront.sculpts.draw_on_render(resources.render_in_front_fb, manager, view);
+
+    /* Curves symmetry plane (curves have no surface to contour). */
+    regular.curves.draw_on_render(resources.render_fb, manager, view);
+    infront.curves.draw_on_render(resources.render_in_front_fb, manager, view);
   }
   {
     /* Overlay Line prepass. */
@@ -969,6 +992,15 @@ void Instance::draw_v3d(Manager &manager, View &view)
 
     regular.meshes.draw_line(resources.overlay_line_fb, manager, view);
     infront.meshes.draw_line(resources.overlay_line_in_front_fb, manager, view);
+
+    /* Symmetry contours last. They target the depth-less line frame-buffer and resolve occlusion
+     * per-fragment instead of by depth test, so any later pass writing `line_tx` (the grid, the
+     * mesh line overlays) would simply paint over them. The Edit Mode contour needs no entry here:
+     * it is drawn at the end of #Meshes::draw_line just above. */
+    regular.paints.draw_line(resources.overlay_line_fb, manager, view);
+    infront.paints.draw_line(resources.overlay_line_in_front_fb, manager, view);
+    regular.sculpts.draw_symmetry_contour(resources.overlay_line_fb, manager, view);
+    infront.sculpts.draw_symmetry_contour(resources.overlay_line_in_front_fb, manager, view);
 
     draw_color_only(regular, resources.overlay_color_only_fb);
     draw_color_only(infront, resources.overlay_color_only_fb);

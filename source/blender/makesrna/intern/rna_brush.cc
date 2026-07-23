@@ -801,8 +801,7 @@ static void rna_Brush_texture_overlay_session_update(bContext *C, PointerRNA *pt
   Brush *br = static_cast<Brush *>(ptr->data);
   Paint *paint = BKE_paint_get_active_from_context(C);
   if (paint && paint->runtime) {
-    paint->runtime->session_use_texture_overlay = (br->overlay_flags & BRUSH_OVERLAY_PRIMARY) !=
-                                                    0;
+    paint->runtime->session_use_texture_overlay = (br->overlay_flags & BRUSH_OVERLAY_PRIMARY) != 0;
     paint->runtime->session_texture_overlay_alpha = br->texture_overlay_alpha;
   }
 
@@ -2945,7 +2944,8 @@ static void rna_def_brush(BlenderRNA *brna)
   prop = RNA_def_property(srna, "texture_clip_shape", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "texture_clip_shape");
   RNA_def_property_enum_items(prop, texture_clip_shape_items);
-  RNA_def_property_ui_text(prop, "Texture Clip", "Shape used to clip the brush texture when stamping");
+  RNA_def_property_ui_text(
+      prop, "Texture Clip", "Shape used to clip the brush texture when stamping");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "falloff_shape", PROP_ENUM, PROP_NONE); /* as an enum */

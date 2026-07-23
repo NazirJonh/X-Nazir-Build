@@ -28,6 +28,7 @@
 #include "gpu_shader_create_info.hh"
 
 #include "../select/select_instance.hh"
+
 #include "overlay_shader_shared.hh"
 
 #include "draw_common.hh"
@@ -278,6 +279,34 @@ struct State {
   {
     return (this->overlay.flag & V3D_OVERLAY_SCULPT_CURVES_CAGE);
   }
+  bool show_sculpt_symmetry_plane() const
+  {
+    return (this->overlay.symmetry_flag & V3D_OVERLAY_SYMMETRY_SCULPT_PLANE);
+  }
+  bool show_sculpt_symmetry_contour() const
+  {
+    return (this->overlay.symmetry_flag & V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR);
+  }
+  bool show_weight_paint_symmetry_contour() const
+  {
+    return (this->overlay.symmetry_flag & V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR);
+  }
+  bool show_vertex_paint_symmetry_contour() const
+  {
+    return (this->overlay.symmetry_flag & V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR);
+  }
+  bool show_texture_paint_symmetry_contour() const
+  {
+    return (this->overlay.symmetry_flag & V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR);
+  }
+  bool show_edit_mesh_symmetry_contour() const
+  {
+    return (this->overlay.symmetry_flag & V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR);
+  }
+  bool show_curves_symmetry_plane() const
+  {
+    return (this->overlay.symmetry_flag & V3D_OVERLAY_SYMMETRY_CURVES_PLANE);
+  }
   bool show_light_colors() const
   {
     return (this->overlay.flag & V3D_OVERLAY_SHOW_LIGHT_COLORS);
@@ -450,6 +479,12 @@ class ShaderModule {
  public:
   /** Shaders */
   StaticShader anti_aliasing = {"overlay_antialiasing_pipeline"};
+  /**
+   * Resolve variant that decodes the per-pixel line width from `line_tx.a`. Deliberately left out
+   * of the async pre-compile list below: it is only needed while a symmetry contour overlay is on,
+   * so it compiles on first use rather than costing every startup.
+   */
+  StaticShader anti_aliasing_line_width = {"overlay_antialiasing_pipeline_line_width"};
   StaticShader armature_degrees_of_freedom = shader_clippable("overlay_armature_dof");
   StaticShader attribute_viewer_mesh = shader_clippable("overlay_viewer_attribute_mesh");
   StaticShader attribute_viewer_pointcloud = shader_clippable(
@@ -507,6 +542,7 @@ class ShaderModule {
   StaticShader sculpt_curves = shader_clippable("overlay_sculpt_curves_selection");
   StaticShader sculpt_curves_cage = shader_clippable("overlay_sculpt_curves_cage");
   StaticShader sculpt_mesh = shader_clippable("overlay_sculpt_mask");
+  StaticShader sculpt_symmetry_plane = shader_clippable("overlay_sculpt_symmetry_plane");
   StaticShader uniform_color = shader_clippable("overlay_uniform_color");
   StaticShader uv_analysis_stretch_angle = {"overlay_edit_uv_stretching_angle"};
   StaticShader uv_analysis_stretch_area = {"overlay_edit_uv_stretching_area"};
@@ -539,6 +575,8 @@ class ShaderModule {
   StaticShader extra_shape = shader_selectable("overlay_extra");
   StaticShader extra_point = shader_selectable("overlay_extra_point");
   StaticShader extra_wire = shader_selectable("overlay_extra_wire");
+  /* The contour is never drawn in selection mode, so it needs no selectable variant. */
+  StaticShader extra_wire_contour = shader_clippable("overlay_extra_wire_contour");
   StaticShader extra_wire_object = shader_selectable("overlay_extra_wire_object");
   StaticShader extra_loose_points = shader_selectable("overlay_extra_loose_point");
   StaticShader extra_grid = shader_selectable("overlay_extra_grid");
@@ -664,6 +702,38 @@ struct Resources : public select::SelectMap {
   TextureRef depth_target_tx;
   TextureRef depth_target_in_front_tx;
 
+  /**
+   * Set during sync by any overlay that encodes a per-pixel line width in the alpha channel of
+   * `line_tx` (currently only #SymmetryContourOverlay). #AntiAliasing::begin_sync, which is synced
+   * after every layer, reads it to pick the resolve variant that decodes that width. Decoding it
+   * unconditionally would cost every overlay frame in every mode, so the common case compiles the
+   * decode out entirely. Reset in #begin_sync.
+   */
+  bool line_width_encoded = false;
+
+  /**
+   * Claim and accumulation state for the single symmetry plane a multi-object sculpt shares (see
+   * #SymmetryPlaneOverlay). It lives here, rather than in that overlay, because objects are split
+   * between the regular and "In Front" overlay layers and each layer owns its own instance of it:
+   * without a place both can see, each layer would claim and draw the same world-space quad and
+   * their translucency would stack. Reset in #begin_sync.
+   */
+  struct SymmetryPlaneShared {
+    /** An object has asked for the shared plane this frame. */
+    bool valid = false;
+    /** The quad has already been recorded, so later layers must not record it again. */
+    bool emitted = false;
+    /** Whether the claiming object belongs to the "In Front" layer, which owns its own buffers. */
+    bool in_front = false;
+    /** Placement below is expressed in the local space this handle's object transforms. */
+    ResourceHandleRange handle;
+    int symmetry_flags = 0;
+    float4x4 world_to_object = float4x4::identity();
+    float4x4 symmetry_space_to_object = float4x4::identity();
+    float plane_size = 1e-3f;
+  };
+  SymmetryPlaneShared symmetry_plane_shared;
+
   /** Copy of the settings the current texture was generated with. Used to detect updates. */
   bool weight_ramp_custom = false;
   ColorBand weight_ramp_copy = {};
@@ -719,6 +789,7 @@ struct Resources : public select::SelectMap {
     shaders->extra_shape.ensure_compile_async();
     shaders->extra_wire_object.ensure_compile_async();
     shaders->extra_wire.ensure_compile_async();
+    shaders->extra_wire_contour.ensure_compile_async();
     shaders->fluid_grid_lines_flags.ensure_compile_async();
     shaders->fluid_grid_lines_flat.ensure_compile_async();
     shaders->fluid_grid_lines_range.ensure_compile_async();
@@ -755,6 +826,10 @@ struct Resources : public select::SelectMap {
     shaders->particle_hair.ensure_compile_async();
     shaders->particle_shape.ensure_compile_async();
     shaders->pointcloud_points.ensure_compile_async();
+    shaders->sculpt_curves.ensure_compile_async();
+    shaders->sculpt_curves_cage.ensure_compile_async();
+    shaders->sculpt_mesh.ensure_compile_async();
+    shaders->sculpt_symmetry_plane.ensure_compile_async();
     shaders->uniform_color.ensure_compile_async();
     shaders->wireframe_curve.ensure_compile_async();
     shaders->wireframe_mesh.ensure_compile_async();
@@ -765,6 +840,8 @@ struct Resources : public select::SelectMap {
   {
     SelectMap::begin_sync(clipping_plane_count);
     free_movieclips_textures();
+    line_width_encoded = false;
+    symmetry_plane_shared = {};
   }
 
   void acquire(const DRWContext *draw_ctx, const State &state)
@@ -1121,13 +1198,31 @@ struct VertexPrimitiveBuf {
     data_buf.append({float4(position, 0.0f), color});
   }
 
-  void end_sync(PassSimple::Sub &pass, GPUPrimType primitive)
+  /**
+   * `extra` is stored in the otherwise unused `w` component of #VertexData.pos_, giving shaders a
+   * spare per-vertex float. Used by the symmetry contour to carry a per-object occlusion bias
+   * while every object accumulates into a single buffer.
+   */
+  void append(const float3 &position, const float4 &color, const float extra)
+  {
+    data_buf.append({float4(position, extra), color});
+  }
+
+  /**
+   * `upload` may be set to false to skip the GPU re-upload when the caller knows #data_buf still
+   * holds exactly what was uploaded on a previous frame (the draw command is still recorded, so
+   * the retained buffer is drawn as-is). Used by the symmetry contour to reuse a static contour
+   * while only the camera moves.
+   */
+  void end_sync(PassSimple::Sub &pass, GPUPrimType primitive, bool upload = true)
   {
     if (data_buf.is_empty()) {
       return;
     }
     select_buf.select_bind(pass);
-    data_buf.push_update();
+    if (upload) {
+      data_buf.push_update();
+    }
     pass.bind_ssbo("data_buf", &data_buf);
     pass.push_constant("colorid", color_id);
     pass.draw_procedural(primitive, 1, data_buf.size());
@@ -1197,9 +1292,21 @@ struct LinePrimitiveBuf : public VertexPrimitiveBuf {
     append(start, end, float4(), select_id);
   }
 
-  void end_sync(PassSimple::Sub &pass)
+  /** See #VertexPrimitiveBuf::append for the meaning of `extra`. */
+  void append(const float3 &start,
+              const float3 &end,
+              const float4 &color,
+              const float extra,
+              select::ID select_id = select::SelectMap::select_invalid_id())
   {
-    VertexPrimitiveBuf::end_sync(pass, GPU_PRIM_LINES);
+    select_buf.select_append(select_id);
+    VertexPrimitiveBuf::append(start, color, extra);
+    VertexPrimitiveBuf::append(end, color, extra);
+  }
+
+  void end_sync(PassSimple::Sub &pass, bool upload = true)
+  {
+    VertexPrimitiveBuf::end_sync(pass, GPU_PRIM_LINES, upload);
   }
 };
 

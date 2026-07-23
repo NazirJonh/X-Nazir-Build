@@ -75,6 +75,8 @@ class Instance : public DrawEngine {
 
   struct OverlayLayer {
     const SelectionType selection_type_;
+    /** Whether this layer holds "In Front" objects, which have their own depth buffer. */
+    const bool in_front_;
     Armatures armatures = {selection_type_};
     AttributeViewer attribute_viewer;
     AttributeTexts attribute_texts;
@@ -92,20 +94,20 @@ class Instance : public DrawEngine {
     Lattices lattices;
     Lights lights = {selection_type_};
     LightProbes light_probes = {selection_type_};
-    Meshes meshes;
+    Meshes meshes = {in_front_};
     MeshUVs mesh_uvs;
     Metaballs metaballs = {selection_type_};
     ModeTransfer mode_transfer;
     Names names;
-    Paints paints;
+    Paints paints = {in_front_};
     Particles particles;
     PointClouds pointclouds;
     Prepass prepass;
     Relations relations = {selection_type_};
-    Sculpts sculpts;
+    Sculpts sculpts = {selection_type_, in_front_};
     Speakers speakers = {selection_type_};
     Wireframe wireframe;
-  } regular{selection_type_}, infront{selection_type_};
+  } regular{selection_type_, false}, infront{selection_type_, true};
 
   Grid grid;
   AntiAliasing anti_aliasing;

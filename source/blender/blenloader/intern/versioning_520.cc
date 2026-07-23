@@ -20,6 +20,8 @@
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_space_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_xr_types.h"
 
@@ -921,6 +923,29 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
      * (see Architecture_Refactoring_Analysis.md 3.5). */
     for (Brush &brush : bmain->brushes) {
       BKE_brush_drag_kind_update(&brush);
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 46)) {
+    /* Symmetry overlays are new, older files store zeroes for them. Match the defaults of a
+     * newly created viewport so the feature is not silently invisible in existing files. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            v3d->overlay.symmetry_flag |= V3D_OVERLAY_SYMMETRY_SCULPT_PLANE |
+                                          V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR |
+                                          V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR |
+                                          V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR |
+                                          V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR |
+                                          V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR |
+                                          V3D_OVERLAY_SYMMETRY_CURVES_PLANE;
+            v3d->overlay.sculpt_symmetry_plane_opacity = 0.3f;
+            v3d->overlay.sculpt_symmetry_contour_thickness = 10.0f;
+          }
+        }
+      }
     }
   }
 

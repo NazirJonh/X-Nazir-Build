@@ -443,6 +443,11 @@ static void do_versions_theme(const UserDef *userdef, bTheme *btheme)
     FROM_DEFAULT_V4_UCHAR(tui.wcol_state.error);
   }
 
+  if (!USER_VERSION_ATLEAST(502, 46)) {
+    /* The symmetry contour color is new, so existing themes carry zeroes for it. */
+    FROM_DEFAULT_V4_UCHAR(space_view3d.sculpt_symmetry_contour);
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a USER_VERSION_ATLEAST check.

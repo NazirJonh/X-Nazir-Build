@@ -5478,6 +5478,72 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Sculpt Show Face Sets", "");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  prop = RNA_def_property(srna, "show_sculpt_symmetry_plane", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "overlay.symmetry_flag", V3D_OVERLAY_SYMMETRY_SCULPT_PLANE);
+  RNA_def_property_ui_text(
+      prop, "Show Sculpt Symmetry Plane", "Display the symmetry plane in sculpt mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "symmetry_plane_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "overlay.sculpt_symmetry_plane_opacity");
+  RNA_def_property_ui_text(prop, "Symmetry Plane Opacity", "Opacity of the symmetry plane");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_sculpt_symmetry_contour", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "overlay.symmetry_flag", V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR);
+  RNA_def_property_ui_text(
+      prop, "Show Sculpt Symmetry Contours", "Display symmetry contour lines in sculpt mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "symmetry_contour_thickness", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_float_sdna(prop, nullptr, "overlay.sculpt_symmetry_contour_thickness");
+  RNA_def_property_ui_text(
+      prop, "Symmetry Contour Thickness", "Thickness of symmetry contour lines in pixels");
+  RNA_def_property_range(prop, 1.0f, 50.0f);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_weight_paint_symmetry_contour", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "overlay.symmetry_flag", V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR);
+  RNA_def_property_ui_text(prop,
+                           "Show Weight Paint Symmetry Contours",
+                           "Display symmetry contour lines in weight paint mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_vertex_paint_symmetry_contour", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "overlay.symmetry_flag", V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR);
+  RNA_def_property_ui_text(prop,
+                           "Show Vertex Paint Symmetry Contours",
+                           "Display symmetry contour lines in vertex paint mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_texture_paint_symmetry_contour", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "overlay.symmetry_flag", V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR);
+  RNA_def_property_ui_text(prop,
+                           "Show Texture Paint Symmetry Contours",
+                           "Display symmetry contour lines in texture paint mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_edit_mesh_symmetry_contour", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "overlay.symmetry_flag", V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR);
+  RNA_def_property_ui_text(prop,
+                           "Show Edit Mesh Symmetry Contours",
+                           "Display symmetry contour lines in mesh edit mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "show_curves_symmetry_plane", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "overlay.symmetry_flag", V3D_OVERLAY_SYMMETRY_CURVES_PLANE);
+  RNA_def_property_ui_text(
+      prop, "Show Curves Symmetry Plane", "Display the symmetry plane for curves");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   /* grease pencil paper settings */
   prop = RNA_def_property(srna, "show_annotation", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag2", V3D_SHOW_ANNOTATION);

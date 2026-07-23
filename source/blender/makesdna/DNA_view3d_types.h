@@ -354,6 +354,18 @@ enum eView3DOverlay_WPaintFlag : int {
 };
 ENUM_OPERATORS(eView3DOverlay_WPaintFlag)
 
+/** #View3DOverlay.symmetry_flag */
+enum eView3DOverlay_SymmetryFlag : int {
+  V3D_OVERLAY_SYMMETRY_SCULPT_PLANE = (1 << 0),
+  V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR = (1 << 1),
+  V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR = (1 << 2),
+  V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR = (1 << 3),
+  V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR = (1 << 4),
+  V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR = (1 << 5),
+  V3D_OVERLAY_SYMMETRY_CURVES_PLANE = (1 << 6),
+};
+ENUM_OPERATORS(eView3DOverlay_SymmetryFlag)
+
 /** #View3D.around */
 enum eView3D_Around : int {
   /* center of the bounding box */
@@ -694,6 +706,21 @@ struct View3DOverlay {
 
   /** Curves sculpt mode settings. */
   float sculpt_curves_cage_opacity = 0;
+
+  /** Symmetry overlay settings. */
+  eView3DOverlay_SymmetryFlag symmetry_flag = V3D_OVERLAY_SYMMETRY_SCULPT_PLANE |
+                                              V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR |
+                                              V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR |
+                                              V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR |
+                                              V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR |
+                                              V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR |
+                                              V3D_OVERLAY_SYMMETRY_CURVES_PLANE;
+  /** Opacity of the symmetry plane. */
+  float sculpt_symmetry_plane_opacity = 0.3f;
+  /** Thickness of the symmetry contour, in pixels. */
+  float sculpt_symmetry_contour_thickness = 10.0f;
+
+  char _pad[4] = {};
 };
 
 struct View3D_Runtime {

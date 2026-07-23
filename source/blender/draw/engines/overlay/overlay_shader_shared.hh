@@ -218,6 +218,7 @@ struct [[host_shared]] ThemeColors {
   float4 face_select;      /* Stands for face selection, not face select mode. */
   float4 face_mode_select; /* Stands for face mode selection. */
   float4 face_retopology;
+  float4 sculpt_symmetry_contour;
   float4 face_freestyle;
   float4 gpencil_wire_edit;
   float4 gpencil_vertex;

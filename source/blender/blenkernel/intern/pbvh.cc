@@ -611,10 +611,18 @@ Tree::~Tree()
 
 void Tree::tag_positions_changed(const IndexMask &node_mask)
 {
+  /* Persistent signal for consumers that run after #update_bounds clears #bounds_dirty_. */
+  this->positions_changed_count_++;
   bounds_dirty_.resize(std::max(bounds_dirty_.size(), node_mask.min_array_size()), false);
   normals_dirty_.resize(std::max(normals_dirty_.size(), node_mask.min_array_size()), false);
   node_mask.set_bits(bounds_dirty_);
   node_mask.set_bits(normals_dirty_);
+  /* Unlike #bounds_dirty_, never consumed by anything internal to the tree - only by
+   * #consume_external_positions_dirty - so a consumer running later in the frame still gets a
+   * precise per-node mask even after #bounds_dirty_ has already been cleared for this step. */
+  external_positions_dirty_.resize(
+      std::max(external_positions_dirty_.size(), node_mask.min_array_size()), false);
+  node_mask.set_bits(external_positions_dirty_);
   if (this->draw_data) {
     this->draw_data->tag_positions_changed(node_mask);
   }
@@ -655,6 +663,13 @@ void Tree::tag_attribute_changed(const IndexMask &node_mask, const StringRef att
   if (this->draw_data) {
     this->draw_data->tag_attribute_changed(node_mask, attribute_name);
   }
+}
+
+IndexMask Tree::consume_external_positions_dirty(IndexMaskMemory &memory)
+{
+  const IndexMask mask = IndexMask::from_bits(external_positions_dirty_, memory);
+  external_positions_dirty_.clear_and_shrink();
+  return mask;
 }
 
 static bool tree_is_empty(const Tree &pbvh)

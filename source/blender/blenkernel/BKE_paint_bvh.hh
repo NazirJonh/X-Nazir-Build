@@ -253,6 +253,26 @@ class Tree {
    */
   BitVector<> visibility_dirty_;
 
+  /**
+   * Bumped on every #tag_positions_changed call. Unlike #bounds_dirty_ (which #update_bounds
+   * consumes and clears within the same operator, e.g. undo), this is never reset, so consumers
+   * that only run later in the frame - such as the symmetry contour overlay - can still detect
+   * that positions changed by comparing it against the value they last processed.
+   */
+  int64_t positions_changed_count_ = 0;
+
+  /**
+   * Per-node positions-changed tracking for consumers that run later in the frame, after
+   * #bounds_dirty_ has already been consumed and cleared for the tree's own bookkeeping (e.g.
+   * brush code calling #flush_bounds_to_parents right after #tag_positions_changed). Accumulates
+   * across calls to #tag_positions_changed and is only cleared by
+   * #consume_external_positions_dirty, so it stays accurate for a consumer reading it later.
+   * \note The vector's size may not match the size of the nodes array.
+   * \warning Only one consumer is supported: reading it clears it, so a second independent
+   * consumer would only see the nodes changed since the first one last checked.
+   */
+  BitVector<> external_positions_dirty_;
+
  public:
   std::variant<Vector<MeshNode>, Vector<GridsNode>, Vector<BMeshNode>> nodes_;
 
@@ -285,6 +305,29 @@ class Tree {
    * \warning Must not be called from multiple threads in parallel.
    */
   void tag_positions_changed(const IndexMask &node_mask);
+
+  /**
+   * Monotonic counter incremented by every #tag_positions_changed call. Meant for consumers that
+   * run after #update_bounds has already cleared the transient #bounds_dirty_ mask (see that
+   * member) and therefore need a persistent signal that positions changed.
+   */
+  int64_t positions_changed_count() const
+  {
+    return positions_changed_count_;
+  }
+
+  /**
+   * Returns the leaf nodes whose positions changed since the last call to this function (or
+   * since the tree was created), and clears the tracking. Unlike #positions_changed_count (a
+   * monotonic counter with no per-node detail), this gives an exact per-node mask; unlike reading
+   * #bounds_dirty_ directly, it is independent of the tree's own internal bookkeeping, so it stays
+   * accurate even when read after something else (e.g. a brush's own spatial queries) has already
+   * consumed #bounds_dirty_ earlier in the same frame.
+   * \warning Must not be called from multiple threads in parallel, and only supports a single
+   * consumer: a second independent caller would only see the nodes changed since the first
+   * caller's last call, not since its own.
+   */
+  IndexMask consume_external_positions_dirty(IndexMaskMemory &memory);
 
   /** Tag nodes where face or vertex visibility has changed. */
   void tag_visibility_changed(const IndexMask &node_mask);

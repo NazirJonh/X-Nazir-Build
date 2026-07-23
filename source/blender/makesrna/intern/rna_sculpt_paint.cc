@@ -345,6 +345,18 @@ static void rna_Paint_update(bContext *C, PointerRNA * /*ptr*/)
   }
 }
 
+static void rna_Paint_symmetry_space_update(Main * /*bmain*/,
+                                            Scene * /*scene*/,
+                                            PointerRNA * /*ptr*/)
+{
+  /* The multi-object sculpt symmetry overlay reads the symmetry space at draw time, so the 3D
+   * viewport must redraw when it changes. Its main region does not listen to
+   * `NC_SCENE | ND_TOOLSETTINGS` (unlike the tool header), so a view3d-space notifier is sent to
+   * refresh the overlay. The tool-settings notifier is still emitted by the property's noteflag.
+   */
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+}
+
 static std::optional<std::string> rna_Sculpt_path(const PointerRNA * /*ptr*/)
 {
   return "tool_settings.sculpt";
@@ -841,7 +853,7 @@ static void rna_def_paint(BlenderRNA *brna)
       "Symmetry Space",
       "Space of the brush symmetry plane in multi-object sculpt: the active object's local axes, "
       "or world axes pivoted at the world origin or 3D cursor");
-  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Paint_symmetry_space_update");
 
   prop = RNA_def_property(srna, "use_mirror_surface_snap", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_negative_sdna(

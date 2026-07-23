@@ -18,6 +18,8 @@
 #include "draw_cache_impl.hh"
 
 #include "overlay_base.hh"
+#include "overlay_symmetry_contour.hh"
+#include "overlay_symmetry_plane.hh"
 
 namespace blender::draw::overlay {
 
@@ -51,14 +53,24 @@ class Curves : Overlay {
   View view_edit_cage = {"view_edit_cage"};
   View::OffsetData offset_data_;
 
+  /* Curves have no surface to contour, so symmetry is shown as translucent planes instead. */
+  SymmetryPlaneOverlay symmetry_plane_ = {"EditCurvesSymmetryPlane"};
+
  public:
   void begin_sync(Resources &res, const State &state) final
   {
     enabled_ = state.is_space_v3d();
 
     if (!enabled_) {
+      symmetry_plane_.begin_sync(res, state, false, 0.0f);
       return;
     }
+
+    symmetry_plane_.begin_sync(res,
+                               state,
+                               state.ctx_mode == CTX_MODE_EDIT_CURVES &&
+                                   state.show_curves_symmetry_plane(),
+                               state.overlay.sculpt_symmetry_plane_opacity);
 
     offset_data_ = state.offset_data_get();
 
@@ -193,11 +205,18 @@ class Curves : Overlay {
 
   void edit_object_sync(Manager &manager,
                         const ObjectRef &ob_ref,
-                        Resources & /*res*/,
+                        Resources &res,
                         const State & /*state*/) final
   {
     if (!enabled_) {
       return;
+    }
+
+    if (ob_ref.object->type == OB_CURVES) {
+      const blender::Curves &curves_id = DRW_object_get_data_for_drawing<blender::Curves>(
+          *ob_ref.object);
+      symmetry_plane_.object_sync(
+          manager, ob_ref, symmetry_flags_from_curves_symmetry(curves_id.symmetry), res);
     }
 
     Object *ob = ob_ref.object;
@@ -267,6 +286,14 @@ class Curves : Overlay {
     manager.submit(edit_curves_ps_, view);
     manager.submit(edit_curves_handles_ps_, view_edit_cage);
     manager.submit(edit_legacy_surface_handles_ps, view);
+  }
+
+  void draw_on_render(gpu::FrameBuffer *framebuffer, Manager &manager, View &view) final
+  {
+    if (!enabled_) {
+      return;
+    }
+    symmetry_plane_.draw_on_render(framebuffer, manager, view);
   }
 
   void draw_color_only(Framebuffer &framebuffer, Manager &manager, View &view) final

@@ -1337,7 +1337,9 @@ static Vector<Object *> rna_multires_group_candidates(Main *bmain)
   return candidates;
 }
 
-static void rna_multires_group_set(PointerRNA *ptr, const MultiresLevelType level_type, const int value)
+static void rna_multires_group_set(PointerRNA *ptr,
+                                   const MultiresLevelType level_type,
+                                   const int value)
 {
   Object *active_ob = id_cast<Object *>(ptr->owner_id);
   MultiresModifierData *mmd = static_cast<MultiresModifierData *>(ptr->data);

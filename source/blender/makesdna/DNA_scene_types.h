@@ -1365,9 +1365,11 @@ struct ImagePaintSettings {
   float gradient_opacity = 1.0f;
   /** #eImagePaint_WarpInterpolation */
   char warp_interpolation = IMAGE_PAINT_WARP_INTERP_LINEAR;
+  /** Paint the selection gradient across every UDIM tile instead of only the active one. */
+  char gradient_multi_udim = 0;
   /* Pad so the embedded #ColorBand starts on an 8-byte boundary and the struct size (which holds
    * pointers) stays a multiple of 8. */
-  char _pad_gradient2[3] = {};
+  char _pad_gradient2[2] = {};
   /**
    * Color ramp (stops + interpolation) for the selection gradient tool. Embedded by value like
    * #ColorMapping::coba, so it needs a runtime #BKE_colorband_init: see #scene_init_data,

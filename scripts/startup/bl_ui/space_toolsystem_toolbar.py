@@ -2114,6 +2114,9 @@ class _defs_texture_paint:
             layout.prop(imapaint, "gradient_opacity", text="Opacity")
             layout.prop(imapaint, "gradient_blend_mode", text="Blend")
             layout.prop(imapaint, "gradient_repeat", text="Repeat")
+            sima = context.space_data
+            if sima.image and sima.image.source == 'TILED':
+                layout.prop(imapaint, "use_gradient_multi_udim", text="All UDIM Tiles")
 
         return dict(
             idname="builtin.select_gradient",

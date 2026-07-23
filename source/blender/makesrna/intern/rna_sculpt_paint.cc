@@ -1744,6 +1744,14 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Gradient Opacity", "Overall opacity of the selection gradient");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
 
+  prop = RNA_def_property(srna, "use_gradient_multi_udim", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "gradient_multi_udim", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "All UDIM Tiles",
+      "Paint the gradient across every UDIM tile instead of only the active one");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_gradient_update");
+
   prop = RNA_def_property(srna, "color_ramp", PROP_POINTER, PROP_NEVER_NULL);
   RNA_def_property_struct_type(prop, "ColorRamp");
   RNA_def_property_pointer_funcs(

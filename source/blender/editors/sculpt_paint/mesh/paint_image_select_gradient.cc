@@ -13,12 +13,14 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_array.hh"
+#include "BLI_listbase.h"
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_math_color.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
+#include "BLI_string.h"
 #include "BLI_task.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
@@ -28,6 +30,7 @@
 #include "DNA_image_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BKE_brush.hh"
 #include "BKE_colorband.hh"
@@ -61,6 +64,7 @@
 #include "UI_view2d.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "../../space_image/image_runtime.hh"
@@ -846,6 +850,11 @@ struct ImageSelectGradientState : public PaintSelectFloatingSession {
   double last_preview_time = 0.0;
   bool preview_pending = false;
   uint64_t applied_settings_revision = 0;
+
+  /** #bToolRef.idname of the tool that owned the session at start (empty if it could not be
+   * resolved). The modal commits and tears down once the active tool no longer matches this, so
+   * switching to any other tool bakes the preview instead of leaving the handles floating. */
+  char owner_tool_idname[64] = {};
 };
 
 static ImageSelectGradientTileData *image_select_gradient_find_tile(
@@ -962,7 +971,7 @@ static bool image_select_gradient_mouse_to_global_uv(const ARegion *region,
  */
 static void image_select_gradient_collect_affected_tiles(
     Image *ima,
-    Scene * /*scene*/,
+    Scene *scene,
     const ImagePaintGradientParams & /*params*/,
     const float2 & /*start_uv*/,
     const float2 & /*end_uv*/,
@@ -974,15 +983,30 @@ static void image_select_gradient_collect_affected_tiles(
   }
 
   const bool use_selection_mask = BKE_image_paint_selection_mask_has_any(ima);
+  /* Without the multi-UDIM option the gradient is confined to the active tile: the vector may still
+   * extend past it, but only that tile's pixels are painted. The active tile is tracked by
+   * #Image.active_tile_index, matching the move / transform / mask selection tools. */
+  const bool multi_udim = scene && scene->toolsettings->imapaint.gradient_multi_udim;
+  int active_tile_number = 1001;
+  if (!multi_udim) {
+    const ImageTile *active_tile = static_cast<const ImageTile *>(
+        BLI_findlink(&ima->tiles, ima->active_tile_index));
+    if (active_tile) {
+      active_tile_number = active_tile->tile_number;
+    }
+  }
 
   for (const ImageTile *tile : ListBaseWrapper<ImageTile>(ima->tiles)) {
+    if (!multi_udim && tile->tile_number != active_tile_number) {
+      continue;
+    }
     if (use_selection_mask) {
       int sel_min[2], sel_max[2];
       if (!BKE_image_paint_selection_mask_bounds(ima, tile->tile_number, sel_min, sel_max)) {
         continue;
       }
     }
-    /* Unmasked: every tile is affected, see #image_paint_gradient_affects_whole_plane. */
+    /* Unmasked: the tile is affected as a whole, see #image_paint_gradient_calc_work_region_uv. */
     r_tile_numbers.append(tile->tile_number);
   }
 }
@@ -1024,6 +1048,15 @@ static void image_select_gradient_restore_tile_backup(bContext *C,
   }
   image_paint_gradient_restore_full_backup(ibuf, tile.undo_ibuf);
   ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
+  /* Mark the whole tile as changed so the partial-update GPU texture cache re-uploads the restored
+   * pixels. #BKE_image_mark_dirty only flags the ImBuf; it does not refresh the GPU texture, which
+   * tracks changes solely through #BKE_image_partial_update_mark_region. Without this, dropping a
+   * tile mid-session (for example disabling "All UDIM Tiles") reverts the ImBuf but leaves the
+   * stale preview on screen. */
+  rcti tile_region;
+  BLI_rcti_init(&tile_region, 0, ibuf->x, 0, ibuf->y);
+  const ImageTile *itile = BKE_image_get_tile(ima, tile.tile_number);
+  BKE_image_partial_update_mark_region(ima, itile, ibuf, &tile_region);
   BKE_image_mark_dirty(ima, ibuf);
   BKE_image_release_ibuf(ima, ibuf, lock);
   DEG_id_tag_update(&ima->id, 0);
@@ -1212,6 +1245,8 @@ void image_select_gradient_refresh_preview_from_settings(bContext *C)
 static void image_select_gradient_restore_session_backup(bContext *C,
                                                          ImageSelectGradientState *state);
 
+static void image_select_gradient_apply_session(bContext *C, ImageSelectGradientState *state);
+
 static void draw_gradient_polyline_circle(const uint pos,
                                           const float center[2],
                                           const float radius,
@@ -1313,6 +1348,10 @@ static void image_select_gradient_begin_session(bContext *C,
   state->end_uv = start_uv;
   state->midpoint = 0.5f;
   state->applied_settings_revision = image_paint_gradient_settings_revision;
+  /* Remember the owning tool so the modal can commit when the user switches to another one. */
+  if (const bToolRef *tref = WM_toolsystem_ref_from_context(C)) {
+    STRNCPY(state->owner_tool_idname, tref->idname);
+  }
 
   Scene *scene = CTX_data_scene(C);
   const ImagePaintGradientParams params = image_select_gradient_current_params(scene);
@@ -1360,12 +1399,12 @@ void image_select_gradient_session_end_for_takeover(bContext *C, SpaceImage *sim
   if (!state) {
     return;
   }
+  /* Committed rather than discarded: switching to another tool with an unconfirmed gradient bakes
+   * the preview into the image and pushes a complete undo step, so the visible result is kept. Like
+   * the confirm path, this applies before the session slot is cleared. Explicit cancel (ESC) still
+   * restores the per-tile backups. */
+  image_select_gradient_apply_session(C, state);
   image_select_session_clear(sima);
-  /* Discarded rather than applied, unlike the lifted-fragment tools: the gradient is an
-   * unconfirmed preview painted over per-tile backups, so restoring the backups returns the canvas
-   * to exactly where the user left it. This is what the tool's own re-invoke and cancel paths do,
-   * and it is why a floating gradient never holds an open image undo step. */
-  image_select_gradient_restore_session_backup(C, state);
   image_select_gradient_state_free(state);
 }
 
@@ -1575,6 +1614,21 @@ static wmOperatorStatus image_select_gradient_invoke(bContext *C,
   return OPERATOR_RUNNING_MODAL;
 }
 
+/**
+ * Whether the tool that started the floating gradient is still the active tool. Returns true when
+ * the owning tool could not be resolved at session start, so a change we cannot detect never
+ * triggers an auto-commit.
+ */
+static bool image_select_gradient_owner_tool_active(bContext *C,
+                                                    const ImageSelectGradientState *state)
+{
+  if (state->owner_tool_idname[0] == '\0') {
+    return true;
+  }
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  return tref && STREQ(tref->idname, state->owner_tool_idname);
+}
+
 static wmOperatorStatus image_select_gradient_modal(bContext *C,
                                                      wmOperator *op,
                                                      const wmEvent *event)
@@ -1630,6 +1684,24 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
     op->customdata = nullptr;
     WM_cursor_modal_restore(CTX_wm_window(C));
     return OPERATOR_CANCELLED;
+  }
+
+  /* Commit and tear down when the user switches to another tool. Switching the active tool does not
+   * cancel a running modal, so without this the gradient's modal -- and its handle overlay -- would
+   * keep floating over the newly selected tool. This also runs on the 30 FPS timer, so it fires
+   * shortly after a switch even when the pointer is stationary. */
+  if (!image_select_gradient_owner_tool_active(C, state)) {
+    if (data->timer) {
+      WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data->timer);
+      data->timer = nullptr;
+    }
+    image_select_gradient_apply_session(C, state);
+    image_select_session_clear(sima);
+    image_select_gradient_state_free(state);
+    MEM_delete(data);
+    op->customdata = nullptr;
+    WM_cursor_modal_restore(CTX_wm_window(C));
+    return OPERATOR_FINISHED;
   }
 
   /* Show the gradient cross-hair only over the image (and while a handle is being dragged), and

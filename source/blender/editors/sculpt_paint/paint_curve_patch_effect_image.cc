@@ -981,6 +981,10 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * which attenuates the mix below. `CurvePatchSample::tex_color`'s RGB is deliberately left unread
    * until the color path grows real RGBA-texture support. */
   const bool has_texture = brush.mtex.tex != nullptr;
+  /* The Strength slider, applied as a separate factor exactly as the ordinary paint pipeline does --
+   * `brush_strength()` leaves it out of `bstrength` for a Paint brush. See
+   * #curve_patch_color_mix_factor. */
+  const float strength = BKE_brush_alpha_get(&paint_settings, &brush);
 
   BitVector<> touched(pbvh.nodes_num(), false);
   Set<ImBuf *> dirty_buffers;
@@ -1037,7 +1041,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
         const int accum_key = int((uint32_t(snapshot.slot_id) << 12) | uint32_t(in_tile_offset));
         const float blended = curve_patch_blend_across_passes(
             patch.apply, accum_key, pixel.weight, pixel.value);
-        const float factor = curve_patch_color_mix_factor(blended, pixel.tex_color, has_texture);
+        const float factor = curve_patch_color_mix_factor(
+            blended, pixel.tex_color, has_texture, strength);
         /* The destination alpha is carried through untouched: `BKE_brush_color_get()` returns a
          * `float3`, so writing anything else would invent data the brush never specified. */
         chunk.values[pixel.local] = float4(math::interpolate(float3(orig), brush_color, factor),

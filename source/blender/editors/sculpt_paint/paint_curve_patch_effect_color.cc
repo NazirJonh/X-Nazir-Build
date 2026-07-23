@@ -325,6 +325,10 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
    * alone cannot tell "color sampled" from "value sampled" (`paint_get_tex_pixel`'s return value
    * was verified not to encode that). */
   const bool has_texture = brush.mtex.tex != nullptr;
+  /* The Strength slider, applied as a separate factor exactly as the ordinary paint pipeline does --
+   * `brush_strength()` leaves it out of `bstrength` for a Paint brush. See
+   * #curve_patch_color_mix_factor. */
+  const float strength = BKE_brush_alpha_get(&paint, &brush);
 
   for (LocalData &local : all_tls) {
     for (const ColorWrite &write : local.writes) {
@@ -332,7 +336,8 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
 
       const float blended = curve_patch_blend_across_passes(
           patch.apply, write.idx, write.weight, write.value);
-      const float factor = curve_patch_color_mix_factor(blended, write.tex_color, has_texture);
+      const float factor = curve_patch_color_mix_factor(
+          blended, write.tex_color, has_texture, strength);
 
       /* The original alpha is carried through untouched, textured or not: `BKE_brush_color_get()`
        * returns a `float3`, so writing an alpha would invent data the brush never specified (the

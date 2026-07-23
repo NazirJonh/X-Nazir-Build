@@ -129,13 +129,22 @@ inline float curve_patch_blend_across_passes(CurvePatchApplyState &apply,
  * partial strength -- the same outcome a per-dab brush gets by multiplying the dab's alpha by the
  * texture's. `has_texture` is needed because `CurvePatchSample::tex_color` falls back to
  * `{1, 1, 1, 1}` when no texture is assigned, which is indistinguishable from an opaque sample.
+ *
+ * `strength` is the brush's Strength (`BKE_brush_alpha_get()`). Unlike a relief patch, whose
+ * Strength rides in through `bstrength` and thus through `blended`, a color/image patch does NOT get
+ * it that way: `brush_strength()` deliberately omits `alpha` for `SCULPT_BRUSH_TYPE_PAINT`
+ * (`mesh/sculpt.cc`), because the ordinary paint pipeline applies it as a separate final multiplier
+ * instead (`sculpt_paint_color.cc`'s `buffer_color * alpha`). Fold it in here so the Strength slider
+ * scales a color/image patch exactly as it scales an ordinary paint stroke; the modal editor already
+ * re-stamps when the slider changes (`CurvePatchEditOpData::last_synced_alpha`).
  */
 inline float curve_patch_color_mix_factor(const float blended,
                                           const float4 &tex_color,
-                                          const bool has_texture)
+                                          const bool has_texture,
+                                          const float strength)
 {
   const float source_alpha = has_texture ? tex_color.w : 1.0f;
-  return std::clamp(blended, 0.0f, 1.0f) * source_alpha;
+  return std::clamp(blended, 0.0f, 1.0f) * source_alpha * strength;
 }
 
 /**

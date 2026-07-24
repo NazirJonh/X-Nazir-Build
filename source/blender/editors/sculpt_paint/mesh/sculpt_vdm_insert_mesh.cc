@@ -511,12 +511,17 @@ static float3 stamp_plane_point(const VDMStampData &stamp, const float2 &uv)
  * the per-thread slot within it — that is what makes the lookup safe to run inside the parallel
  * sampling loop (the same mechanism the live VDM Draw brush relies on, see #do_draw_brush).
  *
- * \param r_has_data: false when the raw sampled texel is (near-)black -- the convention VDM
- * textures use for "nothing painted here" -- and true otherwise. The caller uses this to keep
- * unpainted texels from contributing geometry: unlike the mid-grey neutral of e.g. tangent-space
- * normal maps, black does not decode to a zero displacement vector once #Brush::texture_sample_bias
- * is added below, so leaving those texels to the generic activity threshold risks spurious spikes
- * of geometry wherever the footprint extends past the painted area (see the caller).
+ * \param r_padding_weight: 0 when the raw sampled texel is clearly painted content, 1 when it is
+ * clearly black -- the convention VDM textures use for "nothing painted here" -- and a linear
+ * blend in between for the ambiguous range where texture filtering and lossy compression fade
+ * painted content toward the black background. The caller uses this to blend unpainted texels
+ * toward the surrounding baseline instead of letting them contribute geometry outright: unlike the
+ * mid-grey neutral of e.g. tangent-space normal maps, black does not decode to a zero displacement
+ * vector once #Brush::texture_sample_bias is added below (see the caller). There is no sharp line
+ * between "padding" and "content" in that fade band -- any single fixed cutoff either leaves a
+ * fringe of unpainted texels classified as real data (fragmenting the mesh right at the content
+ * boundary) or eats into genuinely painted dark texels near the edge, depending on which side of
+ * the fade it lands on -- so the caller blends by degree rather than picking one.
  */
 static float3 stamp_displacement(const VDMStampData &stamp,
                                  const Brush &brush,
@@ -526,7 +531,7 @@ static float3 stamp_displacement(const VDMStampData &stamp,
                                  const int thread_id,
                                  const bool use_vector_displacement,
                                  const float3 &vdm_axis_scale,
-                                 bool &r_has_data)
+                                 float &r_padding_weight)
 {
   /* Sampling point: `sculpt_apply_texture()` starts from `(brush_point - plane_offset)`. */
   float3 point = plane_co - stamp.plane_offset;
@@ -546,15 +551,15 @@ static float3 stamp_displacement(const VDMStampData &stamp,
   float3 disp;
   if (use_vector_displacement) {
     /* No alpha channel marks painted vs. unpainted area on these textures, so this has to work
-     * from color alone. The border between painted content and the black background is rarely a
-     * hard edge -- texture filtering and lossy compression fade it toward black over a few texels
-     * -- so a near-zero epsilon only catches the interior of the padding and leaves that fringe
-     * classified as "real" data, which is what fragments the mesh right at the content boundary.
-     * This is deliberately generous enough to absorb that fade; the padding flood fill in the
-     * caller only pulls in no-data texels that chain back to the grid border, so being generous
-     * here costs a few texels of genuine content right at the edge, not interior detail. */
-    constexpr float black_epsilon = 0.05f;
-    r_has_data = !(rgba.x < black_epsilon && rgba.y < black_epsilon && rgba.z < black_epsilon);
+     * from color alone, ramped smoothly across the fade band rather than cut at a single value
+     * (see \a r_padding_weight above). `black_high` sits comfortably above 8-bit quantisation
+     * noise in a truly-unpainted texel; `black_low` is the point below which a texel is unpainted
+     * regardless of any compression/filtering blur. */
+    constexpr float black_low = 0.015f;
+    constexpr float black_high = 0.08f;
+    const float darkness = math::max(math::max(rgba.x, rgba.y), rgba.z);
+    r_padding_weight = 1.0f -
+                       math::clamp((darkness - black_low) / (black_high - black_low), 0.0f, 1.0f);
 
     /* Color -> object-space displacement, matching `calc_vertex_displacement()`. */
     add_v3_fl(rgba, brush.texture_sample_bias);
@@ -567,7 +572,7 @@ static float3 stamp_displacement(const VDMStampData &stamp,
     disp *= vdm_axis_scale;
   }
   else {
-    r_has_data = true;
+    r_padding_weight = 0.0f;
 
     /* Plain alpha texture: height field along the brush normal (local +Z). The brush-local matrix
      * already embeds the brush radius, so the local height only needs the sampled value scaled by
@@ -929,9 +934,10 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
   Array<float3> base_cos(grid_size);
   Array<float3> disp_vecs(grid_size);
   Array<float> active_lens(grid_size);
-  /* True unless the grid point sampled pure black -- "nothing painted here" in a VDM texture, see
-   * #stamp_displacement -- so its (otherwise garbage) displacement never counts as active. */
-  Array<bool> has_data(grid_size, true);
+  /* 0 for real content, ramping up to 1 for "nothing painted here" in a VDM texture -- see
+   * #stamp_displacement -- so its (otherwise garbage) displacement gets blended out below instead
+   * of contributing outright. */
+  Array<float> padding_weight(grid_size, 0.0f);
 
   /* The texture lookup inside #stamp_displacement is the dominant cost here (up to `side * side`
    * samples per stamp). It is thread-safe as long as each task uses its own #tex_pool slot via the
@@ -977,7 +983,7 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
                                             thread_id,
                                             use_vector_displacement,
                                             vdm_axis_scale,
-                                            has_data[n]);
+                                            padding_weight[n]);
           local_disp_ns += VDMPerfLog::since(t_disp);
         }
         else {
@@ -989,7 +995,7 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
                                             thread_id,
                                             use_vector_displacement,
                                             vdm_axis_scale,
-                                            has_data[n]);
+                                            padding_weight[n]);
         }
       }
       if (perf) {
@@ -1099,21 +1105,24 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
     t_baseline = VDMPerfLog::Clock::now();
   }
 
-  /* No-data points (pure black, see #stamp_displacement) that are also reachable from the grid
-   * border through a chain of other no-data points are true texture padding -- unpainted area
-   * surrounding the content, which by construction always touches the footprint's edge. Flood-fill
-   * from the border rather than treating every no-data point as padding: some VDM textures encode
-   * large flat/unraised areas *within* the painted content the same way, and blanket-excluding
-   * those fragments the mesh into disconnected islands wherever such an area separates two painted
-   * features. */
-  Array<bool> is_padding(grid_size, false);
+  /* Points with a nonzero #padding_weight (see #stamp_displacement) that are also reachable from
+   * the grid border through a chain of other nonzero-weight points are true texture padding --
+   * unpainted area surrounding the content, which by construction always touches the footprint's
+   * edge. Flood-fill from the border rather than treating every dark point as padding: some VDM
+   * textures encode large flat/unraised areas *within* the painted content the same way, and
+   * blanket-excluding those fragments the mesh into disconnected islands wherever such an area
+   * separates two painted features. Reachability is binary -- either a chain of dark texels
+   * connects a point to the border or it doesn't -- but each reached point's *own* weight still
+   * determines how much of it gets blended away below, so the fade band is treated gradually
+   * rather than cut at a single value. */
+  Array<bool> is_padding_region(grid_size, false);
   {
     Vector<int> stack;
     for (const int i : IndexRange(side)) {
       for (const int j : IndexRange(side)) {
         const int n = idx(i, j);
-        if ((i == 0 || i == last || j == 0 || j == last) && !has_data[n]) {
-          is_padding[n] = true;
+        if ((i == 0 || i == last || j == 0 || j == last) && padding_weight[n] > 0.0f) {
+          is_padding_region[n] = true;
           stack.append(n);
         }
       }
@@ -1131,15 +1140,15 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
           continue;
         }
         const int nn = idx(ni, nj);
-        if (!has_data[nn] && !is_padding[nn]) {
-          is_padding[nn] = true;
+        if (padding_weight[nn] > 0.0f && !is_padding_region[nn]) {
+          is_padding_region[nn] = true;
           stack.append(nn);
         }
       }
     }
   }
 
-  /* Baseline = mean displacement around the grid border.
+  /* Baseline = weighted mean displacement around the grid border.
    *
    * VDM textures pad their unused area with a flat "neutral" value, but that value is texture
    * dependent (mid-grey, black, ...) and the Sample Bias shifts it further, so it cannot be
@@ -1149,28 +1158,32 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
    * forming a raised platform. Vertex positions keep the raw displacement untouched, so the
    * generated surface matches what a live VDM Draw stroke produces at the same Strength.
    *
-   * Border points flagged as padding above are skipped: their decoded displacement is garbage,
-   * not padding-as-neutral-value, and would otherwise pull the whole baseline off. */
+   * Border points weight into the average by their own #padding_weight: a point deep in the fade
+   * band counts almost fully, one just barely past the content side counts almost not at all,
+   * instead of an all-or-nothing cutoff pulling the average toward whichever side a border point
+   * happens to land on. */
   float3 baseline(0.0f);
-  int border_num = 0;
+  float border_weight_sum = 0.0f;
 
   for (const int i : IndexRange(side)) {
     for (const int j : IndexRange(side)) {
-      if ((i == 0 || i == last || j == 0 || j == last) && !is_padding[idx(i, j)]) {
-        baseline += disp_vecs[idx(i, j)];
-        border_num++;
+      const int n = idx(i, j);
+      if ((i == 0 || i == last || j == 0 || j == last) && is_padding_region[n]) {
+        baseline += disp_vecs[n] * padding_weight[n];
+        border_weight_sum += padding_weight[n];
       }
     }
   }
-  baseline = (border_num > 0) ? baseline / float(border_num) : float3(0.0f);
+  baseline = (border_weight_sum > 0.0f) ? baseline / border_weight_sum : float3(0.0f);
 
-  /* Clamp padding to the flat baseline. #active_lens forces it out of the activity test below
-   * regardless, but a quad can still turn active from its *other* three corners; without this the
-   * padding corner would keep contributing its garbage decoded displacement to that quad's vertex
-   * position, producing exactly the boundary spikes this pass exists to prevent. */
+  /* Blend padding-region points toward the flat baseline in proportion to their own weight,
+   * rather than clamping them outright: a point barely past the content side of the fade band
+   * keeps almost all of its real displacement, so a quad turning active from its *other* three
+   * corners doesn't inherit a hard-cut vertex at this one -- while a point deep in the padding
+   * still ends up effectively at the baseline, same as a hard cutoff would have given it. */
   for (const int n : IndexRange(grid_size)) {
-    if (is_padding[n]) {
-      disp_vecs[n] = baseline;
+    if (is_padding_region[n]) {
+      disp_vecs[n] = math::interpolate(disp_vecs[n], baseline, padding_weight[n]);
     }
   }
 
@@ -1179,7 +1192,9 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
   }
 
   /* Gather the active-region metric (relative to the baseline) and the deepest recess (used to
-   * sink the bottom cap below concave geometry). */
+   * sink the bottom cap below concave geometry). Padding-region points need no special case here:
+   * blending them toward the baseline above already pulls their #active_lens down in proportion,
+   * without a hard cutoff. */
   VDMPerfLog::Clock::time_point t_active;
   if (perf) {
     t_active = VDMPerfLog::Clock::now();
@@ -1187,13 +1202,6 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
 
   float min_depth = 0.0f;
   for (const int n : IndexRange(grid_size)) {
-    /* Padding is already clamped to the baseline above, but skip it explicitly: this is what
-     * actually excludes unpainted texture area from the active region, rather than relying solely
-     * on proximity to a baseline that unpainted corners could otherwise have skewed. */
-    if (is_padding[n]) {
-      active_lens[n] = 0.0f;
-      continue;
-    }
     /* Activity is measured relative to the baseline so flat padding is cropped, but the vertex
      * positions keep the raw displacement so the generated surface matches the live VDM stroke. */
     active_lens[n] = math::length(disp_vecs[n] - baseline);

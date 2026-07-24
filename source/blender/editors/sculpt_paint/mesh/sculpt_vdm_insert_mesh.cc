@@ -910,6 +910,11 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
   const auto idx = [side](const int i, const int j) { return i * side + j; };
   const auto qidx = [last](const int i, const int j) { return i * last + j; };
 
+  /* #BRUSH_VDM_INSERT_METHOD_FLAT keeps the older, simpler behavior for stamps that rely on it:
+   * base on the flat brush plane (Pass 1.5 below is skipped entirely) and a plain border-ring
+   * average for cropping black texels (no per-texel black detection). See #eBrushVDMInsertMethod. */
+  const bool use_legacy_flat = brush.vdm_insert_method == BRUSH_VDM_INSERT_METHOD_FLAT;
+
   /* Brush basis in object space: transform local axes through `brush_local_mat_inv`. */
   float3 brush_u_axis(1.0f, 0.0f, 0.0f);
   float3 brush_v_axis(0.0f, 1.0f, 0.0f);
@@ -1025,7 +1030,7 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
    * The texture sampling above already ran against the flat `base_cos`, so nudging `base_cos` here
    * only moves where the sampled displacement is anchored in space -- it does not affect what get
    * sampled from the VDM texture. */
-  if (pbvh && pbvh->type() == bke::pbvh::Type::Mesh) {
+  if (!use_legacy_flat && pbvh && pbvh->type() == bke::pbvh::Type::Mesh) {
     VDMPerfLog::Clock::time_point t_surface;
     if (perf) {
       t_surface = VDMPerfLog::Clock::now();
@@ -1105,85 +1110,104 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
     t_baseline = VDMPerfLog::Clock::now();
   }
 
-  /* Points with a nonzero #padding_weight (see #stamp_displacement) that are also reachable from
-   * the grid border through a chain of other nonzero-weight points are true texture padding --
-   * unpainted area surrounding the content, which by construction always touches the footprint's
-   * edge. Flood-fill from the border rather than treating every dark point as padding: some VDM
-   * textures encode large flat/unraised areas *within* the painted content the same way, and
-   * blanket-excluding those fragments the mesh into disconnected islands wherever such an area
-   * separates two painted features. Reachability is binary -- either a chain of dark texels
-   * connects a point to the border or it doesn't -- but each reached point's *own* weight still
-   * determines how much of it gets blended away below, so the fade band is treated gradually
-   * rather than cut at a single value. */
-  Array<bool> is_padding_region(grid_size, false);
-  {
-    Vector<int> stack;
+  float3 baseline(0.0f);
+
+  if (use_legacy_flat) {
+    /* #BRUSH_VDM_INSERT_METHOD_FLAT: plain, unweighted border-ring average, with no black-texel
+     * detection at all -- every border point counts equally regardless of #padding_weight, and
+     * nothing gets blended below. This is the older, simpler cropping behavior some stamps rely
+     * on; see #eBrushVDMInsertMethod. */
+    int border_num = 0;
+    for (const int i : IndexRange(side)) {
+      for (const int j : IndexRange(side)) {
+        if (i == 0 || i == last || j == 0 || j == last) {
+          baseline += disp_vecs[idx(i, j)];
+          border_num++;
+        }
+      }
+    }
+    baseline = (border_num > 0) ? baseline / float(border_num) : float3(0.0f);
+  }
+  else {
+    /* Points with a nonzero #padding_weight (see #stamp_displacement) that are also reachable
+     * from the grid border through a chain of other nonzero-weight points are true texture
+     * padding -- unpainted area surrounding the content, which by construction always touches the
+     * footprint's edge. Flood-fill from the border rather than treating every dark point as
+     * padding: some VDM textures encode large flat/unraised areas *within* the painted content the
+     * same way, and blanket-excluding those fragments the mesh into disconnected islands wherever
+     * such an area separates two painted features. Reachability is binary -- either a chain of
+     * dark texels connects a point to the border or it doesn't -- but each reached point's *own*
+     * weight still determines how much of it gets blended away below, so the fade band is treated
+     * gradually rather than cut at a single value. */
+    Array<bool> is_padding_region(grid_size, false);
+    {
+      Vector<int> stack;
+      for (const int i : IndexRange(side)) {
+        for (const int j : IndexRange(side)) {
+          const int n = idx(i, j);
+          if ((i == 0 || i == last || j == 0 || j == last) && padding_weight[n] > 0.0f) {
+            is_padding_region[n] = true;
+            stack.append(n);
+          }
+        }
+      }
+      while (!stack.is_empty()) {
+        const int n = stack.pop_last();
+        const int i = n / side;
+        const int j = n % side;
+        const int neighbor_i[4] = {i - 1, i + 1, i, i};
+        const int neighbor_j[4] = {j, j, j - 1, j + 1};
+        for (const int k : IndexRange(4)) {
+          const int ni = neighbor_i[k];
+          const int nj = neighbor_j[k];
+          if (ni < 0 || ni >= side || nj < 0 || nj >= side) {
+            continue;
+          }
+          const int nn = idx(ni, nj);
+          if (padding_weight[nn] > 0.0f && !is_padding_region[nn]) {
+            is_padding_region[nn] = true;
+            stack.append(nn);
+          }
+        }
+      }
+    }
+
+    /* Baseline = weighted mean displacement around the grid border.
+     *
+     * VDM textures pad their unused area with a flat "neutral" value, but that value is texture
+     * dependent (mid-grey, black, ...) and the Sample Bias shifts it further, so it cannot be
+     * assumed to be 50 % grey. Measure it directly from the outermost ring of the brush footprint,
+     * which by construction lies in that flat padding. This measured baseline is used only to
+     * detect the active region below: padding sits near the baseline and is cropped away instead
+     * of forming a raised platform. Vertex positions keep the raw displacement untouched, so the
+     * generated surface matches what a live VDM Draw stroke produces at the same Strength.
+     *
+     * Border points weight into the average by their own #padding_weight: a point deep in the
+     * fade band counts almost fully, one just barely past the content side counts almost not at
+     * all, instead of an all-or-nothing cutoff pulling the average toward whichever side a border
+     * point happens to land on. */
+    float border_weight_sum = 0.0f;
+
     for (const int i : IndexRange(side)) {
       for (const int j : IndexRange(side)) {
         const int n = idx(i, j);
-        if ((i == 0 || i == last || j == 0 || j == last) && padding_weight[n] > 0.0f) {
-          is_padding_region[n] = true;
-          stack.append(n);
+        if ((i == 0 || i == last || j == 0 || j == last) && is_padding_region[n]) {
+          baseline += disp_vecs[n] * padding_weight[n];
+          border_weight_sum += padding_weight[n];
         }
       }
     }
-    while (!stack.is_empty()) {
-      const int n = stack.pop_last();
-      const int i = n / side;
-      const int j = n % side;
-      const int neighbor_i[4] = {i - 1, i + 1, i, i};
-      const int neighbor_j[4] = {j, j, j - 1, j + 1};
-      for (const int k : IndexRange(4)) {
-        const int ni = neighbor_i[k];
-        const int nj = neighbor_j[k];
-        if (ni < 0 || ni >= side || nj < 0 || nj >= side) {
-          continue;
-        }
-        const int nn = idx(ni, nj);
-        if (padding_weight[nn] > 0.0f && !is_padding_region[nn]) {
-          is_padding_region[nn] = true;
-          stack.append(nn);
-        }
+    baseline = (border_weight_sum > 0.0f) ? baseline / border_weight_sum : float3(0.0f);
+
+    /* Blend padding-region points toward the flat baseline in proportion to their own weight,
+     * rather than clamping them outright: a point barely past the content side of the fade band
+     * keeps almost all of its real displacement, so a quad turning active from its *other* three
+     * corners doesn't inherit a hard-cut vertex at this one -- while a point deep in the padding
+     * still ends up effectively at the baseline, same as a hard cutoff would have given it. */
+    for (const int n : IndexRange(grid_size)) {
+      if (is_padding_region[n]) {
+        disp_vecs[n] = math::interpolate(disp_vecs[n], baseline, padding_weight[n]);
       }
-    }
-  }
-
-  /* Baseline = weighted mean displacement around the grid border.
-   *
-   * VDM textures pad their unused area with a flat "neutral" value, but that value is texture
-   * dependent (mid-grey, black, ...) and the Sample Bias shifts it further, so it cannot be
-   * assumed to be 50 % grey. Measure it directly from the outermost ring of the brush footprint,
-   * which by construction lies in that flat padding. This measured baseline is used only to
-   * detect the active region below: padding sits near the baseline and is cropped away instead of
-   * forming a raised platform. Vertex positions keep the raw displacement untouched, so the
-   * generated surface matches what a live VDM Draw stroke produces at the same Strength.
-   *
-   * Border points weight into the average by their own #padding_weight: a point deep in the fade
-   * band counts almost fully, one just barely past the content side counts almost not at all,
-   * instead of an all-or-nothing cutoff pulling the average toward whichever side a border point
-   * happens to land on. */
-  float3 baseline(0.0f);
-  float border_weight_sum = 0.0f;
-
-  for (const int i : IndexRange(side)) {
-    for (const int j : IndexRange(side)) {
-      const int n = idx(i, j);
-      if ((i == 0 || i == last || j == 0 || j == last) && is_padding_region[n]) {
-        baseline += disp_vecs[n] * padding_weight[n];
-        border_weight_sum += padding_weight[n];
-      }
-    }
-  }
-  baseline = (border_weight_sum > 0.0f) ? baseline / border_weight_sum : float3(0.0f);
-
-  /* Blend padding-region points toward the flat baseline in proportion to their own weight,
-   * rather than clamping them outright: a point barely past the content side of the fade band
-   * keeps almost all of its real displacement, so a quad turning active from its *other* three
-   * corners doesn't inherit a hard-cut vertex at this one -- while a point deep in the padding
-   * still ends up effectively at the baseline, same as a hard cutoff would have given it. */
-  for (const int n : IndexRange(grid_size)) {
-    if (is_padding_region[n]) {
-      disp_vecs[n] = math::interpolate(disp_vecs[n], baseline, padding_weight[n]);
     }
   }
 

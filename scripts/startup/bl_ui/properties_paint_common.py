@@ -1626,6 +1626,8 @@ def brush_texture_settings(layout, brush, sculpt):
                 sub.prop(brush, "use_insert_into_active", text="Into Active Mesh")
                 row = sub.row()
                 row.prop(brush, "vdm_insert_quality", text="Quality", expand=True)
+                row = sub.row()
+                row.prop(brush, "vdm_insert_method", text="Method", expand=True)
 
 
 def brush_mask_texture_settings(layout, brush):

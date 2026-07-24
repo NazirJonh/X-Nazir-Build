@@ -2391,6 +2391,22 @@ static void rna_def_brush(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem vdm_insert_method_items[] = {
+      {BRUSH_VDM_INSERT_METHOD_CONFORM,
+       "CONFORM",
+       0,
+       "Conform to Surface",
+       "Base follows the target mesh's surface under the brush footprint, and black texels are "
+       "cropped by how black they are"},
+      {BRUSH_VDM_INSERT_METHOD_FLAT,
+       "FLAT",
+       0,
+       "Flat",
+       "Base sits on the flat brush plane, and black texels are cropped by a plain border average "
+       "with no per-texel detection"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   static const EnumPropertyItem brush_gradient_items[] = {
       {BRUSH_GRADIENT_PRESSURE, "PRESSURE", 0, "Pressure", ""},
       {BRUSH_GRADIENT_SPACING_REPEAT, "SPACING_REPEAT", 0, "Repeat", ""},
@@ -3810,6 +3826,15 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, vdm_insert_quality_items);
   RNA_def_property_ui_text(
       prop, "Quality", "Grid resolution level for the generated insert-mesh stamp");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "vdm_insert_method", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "vdm_insert_method");
+  RNA_def_property_enum_items(prop, vdm_insert_method_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Method",
+      "How the generated insert-mesh stamp's base and black-texel cropping are built");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "use_accumulate", PROP_BOOLEAN, PROP_NONE);

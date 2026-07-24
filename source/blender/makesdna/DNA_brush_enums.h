@@ -419,6 +419,17 @@ enum eBrushVDMInsertQuality : int {
   BRUSH_VDM_INSERT_QUALITY_HIGH = 2,
 };
 
+/** #Brush.vdm_insert_method: how the VDM insert-mesh stamp's base and black-texel cropping are
+ * built. CONFORM is 0 so files saved before this setting existed keep the previous behavior. */
+enum eBrushVDMInsertMethod : int {
+  /** Base follows the target mesh's surface under the footprint; black texels are cropped by a
+   * border-reachable flood fill blended by how black each texel is. */
+  BRUSH_VDM_INSERT_METHOD_CONFORM = 0,
+  /** Base sits on the flat brush plane; black texels are cropped by a plain border-ring average,
+   * with no per-texel black detection. Kept for stamps that rely on the older, simpler behavior. */
+  BRUSH_VDM_INSERT_METHOD_FLAT = 1,
+};
+
 enum BrushMaskPressureFlags : int {
   BRUSH_MASK_PRESSURE_RAMP = (1 << 1),
   BRUSH_MASK_PRESSURE_CUTOFF = (1 << 2),

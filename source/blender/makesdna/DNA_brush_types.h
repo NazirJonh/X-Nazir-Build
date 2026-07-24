@@ -347,7 +347,9 @@ struct Brush {
 
   /** Grid-resolution level for the VDM insert-mesh stamp. See #eBrushVDMInsertQuality. */
   eBrushVDMInsertQuality vdm_insert_quality = BRUSH_VDM_INSERT_QUALITY_MEDIUM;
-  char _pad3[4] = {};
+  /** Base-shape / black-cropping algorithm for the VDM insert-mesh stamp. See
+   * #eBrushVDMInsertMethod. */
+  eBrushVDMInsertMethod vdm_insert_method = BRUSH_VDM_INSERT_METHOD_CONFORM;
 
   /**
    * This preset is used to specify an exact function used for the distance falloff instead

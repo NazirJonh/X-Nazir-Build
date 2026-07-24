@@ -12,8 +12,12 @@
  * and, once the stroke finishes, a brand new watertight volume is generated from the texture.
  *
  * The generated volume is a closed solid made of three parts:
- * - a displaced top surface sampled from the VDM texture,
- * - a flat bottom on the brush plane,
+ * - a displaced top surface sampled from the VDM texture, conformed to the target mesh's surface
+ *   underneath the brush footprint (see #raycast_stamp_footprint_point) rather than sitting on a
+ *   flat brush plane,
+ * - a bottom that follows the same conformed base, offset along each vertex's locally conformed
+ *   surface normal so it (and the skirt connecting it to the top) keeps hugging curved geometry
+ *   near the footprint's edges,
  * - a side wall (skirt) connecting their borders.
  *
  * This makes the result directly usable for boolean/join operations against the main mesh,
@@ -49,6 +53,7 @@
 #include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_geom.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
@@ -202,6 +207,7 @@ struct VDMPerfLog {
   int64_t resolution_ns = 0;        /* resolution_from_mesh_density() */
   int64_t build_mesh_ns = 0;        /* build_stamps_mesh() total */
   int64_t pass1_wall_ns = 0;        /* threading::parallel_for wall time */
+  int64_t surface_conform_ns = 0;   /* Pass 1.5 surface raycast + bilinear height blend */
   int64_t baseline_ns = 0;          /* border baseline accumulation loop */
   int64_t active_compute_ns = 0;    /* disp subtract + active_lens per vertex */
   int64_t quad_mark_ns = 0;         /* quad_active[][] marking */
@@ -419,6 +425,7 @@ struct VDMPerfLog {
     if (est_threads > 1) {
       printf("    parallel efficiency        :  %.1f%%\n", parallel_efficiency);
     }
+    printf("    surface conform (raycast)  : %8.2f ms\n", ms(surface_conform_ns));
     printf("    baseline loop              : %8.2f ms\n", ms(baseline_ns));
     printf("    active_lens compute        : %8.2f ms\n", ms(active_compute_ns));
     printf("    quad_active mark           : %8.2f ms\n", ms(quad_mark_ns));
@@ -752,6 +759,97 @@ static int resolution_from_mesh_density(const Mesh &mesh,
 }
 
 /**
+ * Raycast a single stamp-footprint point against the sculpted mesh to find where its actual
+ * surface lies there. Used to conform the generated volume's base to curved geometry instead of
+ * always sitting on the brush's flat tangent plane (see the module docstring).
+ *
+ * Casts from outside the footprint toward the brush plane along the brush normal. Returns false
+ * when the ray misses the mesh (e.g. the footprint extends past its silhouette), or when the
+ * closest hit's face isn't reasonably outward-facing relative to the brush (e.g. the ray slipped
+ * sideways into the wall of an unrelated recess or an adjacent stamp instead of the surface
+ * directly beneath this footprint point). Either way the caller keeps the flat plane height for
+ * that sample rather than risk conforming to unrelated geometry.
+ *
+ * \note Must be called sequentially, never concurrently on the same \a pbvh from multiple
+ * threads: #bke::pbvh::raycast() writes into `Node::tmin_` for traversal pruning, which races
+ * under concurrent writers.
+ */
+static bool raycast_stamp_footprint_point(bke::pbvh::Tree &pbvh,
+                                          const Mesh &mesh,
+                                          const float3 &plane_point,
+                                          const float3 &brush_normal,
+                                          const float radius,
+                                          float3 &r_hit_position,
+                                          float3 &r_hit_normal)
+{
+  const float3 ray_normal = -brush_normal;
+  const float3 ray_start = plane_point - ray_normal * (radius * 4.0f);
+
+  const Span<float3> vert_positions = mesh.vert_positions();
+  const OffsetIndices faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const Span<int3> corner_tris = mesh.corner_tris();
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  const VArraySpan<bool> hide_poly = *attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face);
+
+  IsectRayPrecalc isect_precalc;
+  isect_ray_tri_watertight_v3_precalc(&isect_precalc, ray_normal);
+
+  float depth = radius * 8.0f;
+  bool hit = false;
+  int active_vert = -1;
+  int active_face = -1;
+  float3 face_normal;
+
+  bke::pbvh::raycast(
+      pbvh,
+      [&](bke::pbvh::Node &node, float *tmin) {
+        if (BKE_pbvh_node_get_tmin(&node) >= *tmin) {
+          return;
+        }
+        if (bke::pbvh::node_raycast_mesh(static_cast<bke::pbvh::MeshNode &>(node),
+                                         {},
+                                         vert_positions,
+                                         faces,
+                                         corner_verts,
+                                         corner_tris,
+                                         hide_poly,
+                                         ray_start,
+                                         ray_normal,
+                                         &isect_precalc,
+                                         &depth,
+                                         active_vert,
+                                         active_face,
+                                         face_normal))
+        {
+          hit = true;
+          *tmin = depth;
+        }
+      },
+      ray_start,
+      ray_normal,
+      false);
+
+  if (!hit) {
+    return false;
+  }
+
+  /* Reject hits that don't face roughly the same way as the brush: those belong to a wall
+   * transverse to the footprint (an unrelated recess, an overhang, geometry seen edge-on near
+   * the object's silhouette) rather than the surface patch this footprint point should conform
+   * to. A single such outlier would otherwise corrupt a whole rectangular region of the bilinear
+   * height blend in the caller. */
+  constexpr float min_normal_alignment = 0.3f;
+  if (math::dot(face_normal, brush_normal) < min_normal_alignment) {
+    return false;
+  }
+
+  r_hit_position = ray_start + ray_normal * depth;
+  r_hit_normal = face_normal;
+  return true;
+}
+
+/**
  * Append one watertight VDM stamp volume to the mesh buffers.
  *
  * Only grid quads that carry meaningful VDM displacement are generated — flat border padding
@@ -761,7 +859,7 @@ static int resolution_from_mesh_density(const Mesh &mesh,
  * A quad is "active" when at least one of its four corner vertices has displacement whose
  * magnitude exceeds 1 % of the grid cell size. Watertightness is preserved by emitting skirt
  * faces on every edge that borders an inactive quad (or the grid boundary). When the VDM
- * contains a recess, the flat bottom cap is sunk below the deepest displaced vertex so the
+ * contains a recess, the bottom cap is sunk further below the deepest displaced vertex so the
  * volume fully encloses concave geometry without self-intersection.
  *
  * Face winding is emitted outward directly so no BMesh normal-recalculation pass is needed.
@@ -772,6 +870,8 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
                                       const VDMStampData &stamp,
                                       const Brush &brush,
                                       SculptSession &ss,
+                                      bke::pbvh::Tree *pbvh,
+                                      const Mesh &active_mesh,
                                       const int resolution,
                                       const bool use_vector_displacement,
                                       const float3 &vdm_axis_scale,
@@ -876,6 +976,98 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
     }
   }
 
+  /* Per-vertex surface normal used to sink the bottom cap and skirt (see below Pass 2). Defaults
+   * to the rigid brush normal -- the previous behavior -- for any vertex Pass 1.5 doesn't touch. */
+  Array<float3> base_normal(grid_size, brush_normal);
+
+  /* === Pass 1.5: conform the base grid to the sculpted mesh's actual surface. ===
+   *
+   * #stamp_plane_point() only returns points on the brush's flat tangent plane, so on curved
+   * surfaces the generated volume's base does not follow the mesh underneath it. Raycast a coarse
+   * subgrid against the mesh to recover the real surface height and normal at a handful of
+   * footprint locations, then bilinearly interpolate both fields across the full grid. Footprint
+   * locations whose ray misses (or hits something not roughly facing the brush -- see
+   * #raycast_stamp_footprint_point) keep the flat plane height and the rigid brush normal,
+   * matching the previous behavior there.
+   *
+   * The texture sampling above already ran against the flat `base_cos`, so nudging `base_cos` here
+   * only moves where the sampled displacement is anchored in space -- it does not affect what get
+   * sampled from the VDM texture. */
+  if (pbvh && pbvh->type() == bke::pbvh::Type::Mesh) {
+    VDMPerfLog::Clock::time_point t_surface;
+    if (perf) {
+      t_surface = VDMPerfLog::Clock::now();
+    }
+
+    /* Raycasting is cheap per-sample but #bke::pbvh::raycast() writes into `Node::tmin_` for
+     * traversal pruning, so unlike Pass 1 this cannot run on #vdm_parallel_for -- keep the probe
+     * grid small and walk it on a single thread. */
+    constexpr int max_probe_side = 17;
+    const int probe_side = std::min(side, max_probe_side);
+    const int probe_last = probe_side - 1;
+    const auto probe_idx = [probe_side](const int i, const int j) { return i * probe_side + j; };
+
+    Array<float> probe_height(probe_side * probe_side, 0.0f);
+    Array<float3> probe_normal(probe_side * probe_side, brush_normal);
+    for (const int pi : IndexRange(probe_side)) {
+      const int i = (pi * last) / probe_last;
+      for (const int pj : IndexRange(probe_side)) {
+        const int j = (pj * last) / probe_last;
+        const float3 &plane_point = base_cos[idx(i, j)];
+        float3 hit_position;
+        float3 hit_normal;
+        if (raycast_stamp_footprint_point(*pbvh,
+                                          active_mesh,
+                                          plane_point,
+                                          brush_normal,
+                                          stamp.radius,
+                                          hit_position,
+                                          hit_normal))
+        {
+          probe_height[probe_idx(pi, pj)] = math::dot(hit_position - plane_point, brush_normal);
+          probe_normal[probe_idx(pi, pj)] = hit_normal;
+        }
+      }
+    }
+
+    for (const int i : IndexRange(side)) {
+      const float fi = float(i) * float(probe_last) / float(last);
+      const int i0 = std::min(int(fi), probe_last);
+      const int i1 = std::min(i0 + 1, probe_last);
+      const float ti = fi - float(i0);
+      for (const int j : IndexRange(side)) {
+        const float fj = float(j) * float(probe_last) / float(last);
+        const int j0 = std::min(int(fj), probe_last);
+        const int j1 = std::min(j0 + 1, probe_last);
+        const float tj = fj - float(j0);
+
+        const float h00 = probe_height[probe_idx(i0, j0)];
+        const float h10 = probe_height[probe_idx(i1, j0)];
+        const float h01 = probe_height[probe_idx(i0, j1)];
+        const float h11 = probe_height[probe_idx(i1, j1)];
+        const float height = math::interpolate(
+            math::interpolate(h00, h10, ti), math::interpolate(h01, h11, ti), tj);
+
+        base_cos[idx(i, j)] += brush_normal * height;
+
+        const float3 &n00 = probe_normal[probe_idx(i0, j0)];
+        const float3 &n10 = probe_normal[probe_idx(i1, j0)];
+        const float3 &n01 = probe_normal[probe_idx(i0, j1)];
+        const float3 &n11 = probe_normal[probe_idx(i1, j1)];
+        const float3 blended_normal = math::interpolate(
+            math::interpolate(n00, n10, ti), math::interpolate(n01, n11, ti), tj);
+        float blended_len;
+        const float3 normalized_normal = math::normalize_and_get_length(blended_normal,
+                                                                         blended_len);
+        base_normal[idx(i, j)] = (blended_len > 0.0f) ? normalized_normal : brush_normal;
+      }
+    }
+
+    if (perf) {
+      perf->surface_conform_ns += VDMPerfLog::since(t_surface);
+    }
+  }
+
   /* Baseline = mean displacement around the grid border.
    *
    * VDM textures pad their unused area with a flat "neutral" value, but that value is texture
@@ -926,8 +1118,12 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
     perf->active_compute_ns += VDMPerfLog::since(t_active);
   }
 
-  /* Sink the bottom cap if the VDM has a recess below the brush plane. */
-  const float3 bottom_offset = (min_depth < 0.0f) ? (brush_normal * min_depth) : float3(0.0f);
+  /* Sink the bottom cap if the VDM has a recess below the brush plane. Only the depth is a single
+   * value shared by the whole stamp (the deepest recess anywhere in the footprint); the direction
+   * it is sunk in follows each vertex's own #base_normal so the bottom -- and the skirt walls
+   * connecting it to the top -- keep hugging the conformed surface near the footprint's edges
+   * instead of sinking along one rigid direction. */
+  const float bottom_sink = math::min(min_depth, 0.0f);
 
   /* === Pass 2: determine which quads carry meaningful displacement. ===
    * Threshold = 1 % of the grid cell size — separates real content from 8-bit quantisation
@@ -989,7 +1185,8 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
       continue;
     }
     top_verts[n] = int(positions.append_and_get_index(base_cos[n] + disp_vecs[n]));
-    bottom_verts[n] = int(positions.append_and_get_index(base_cos[n] + bottom_offset));
+    bottom_verts[n] = int(
+        positions.append_and_get_index(base_cos[n] + base_normal[n] * bottom_sink));
   }
 
   if (perf) {
@@ -1085,6 +1282,8 @@ static void add_stamp_to_mesh_buffers(Vector<float3> &positions,
 static Mesh *build_stamps_mesh(const Span<VDMStampData> stamps,
                                const Brush &brush,
                                SculptSession &ss,
+                               bke::pbvh::Tree *pbvh,
+                               const Mesh &active_mesh,
                                const int resolution,
                                VDMPerfLog *perf = nullptr)
 {
@@ -1118,6 +1317,8 @@ static Mesh *build_stamps_mesh(const Span<VDMStampData> stamps,
                               stamp,
                               brush,
                               ss,
+                              pbvh,
+                              active_mesh,
                               resolution,
                               use_vector_displacement,
                               vdm_axis_scale,
@@ -1189,8 +1390,10 @@ static wmOperatorStatus insert_mesh_exec(bContext *C, wmOperator *op)
 
   Mesh &active_mesh = *id_cast<Mesh *>(ob->data);
   /* Derive resolution from the mesh density at the first stamp's footprint so the generated grid
-   * matches the polygon size of the target mesh rather than using an arbitrary fixed value. */
-  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*ob);
+   * matches the polygon size of the target mesh rather than using an arbitrary fixed value.
+   * Non-const: also used to raycast the stamp footprint against the surface for #add_stamp_to_mesh_buffers's
+   * surface-conform pass. */
+  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*ob);
 
   {
     VDMPerfLog::Clock::time_point t_res;
@@ -1228,7 +1431,8 @@ static wmOperatorStatus insert_mesh_exec(bContext *C, wmOperator *op)
       /* Build only the (small) stamp geometry and concatenate it onto the active mesh with a
        * specialized append. The stamps are loose geometry that is simply appended, so converting the
        * whole active mesh (millions of polygons) to a BMesh and back just to add them is unnecessary. */
-      Mesh *stamp_mesh = build_stamps_mesh(stamps, brush, ss, resolution, perf_ptr);
+      Mesh *stamp_mesh = build_stamps_mesh(
+          stamps, brush, ss, pbvh, active_mesh, resolution, perf_ptr);
 
       if (perf_ptr) {
         perf_ptr->join_active_verts = active_mesh.verts_num;
@@ -1287,7 +1491,8 @@ static wmOperatorStatus insert_mesh_exec(bContext *C, wmOperator *op)
     }
 
     /* Separate object: build the stamps in their own mesh. */
-    Mesh *new_mesh = build_stamps_mesh(stamps, brush, ss, resolution, perf_ptr);
+    Mesh *new_mesh = build_stamps_mesh(
+        stamps, brush, ss, pbvh, active_mesh, resolution, perf_ptr);
 
     /* `add_type` only applies the active object's location and rotation, so bake its scale into the
      * geometry to keep the stamp aligned with where the stroke happened. */

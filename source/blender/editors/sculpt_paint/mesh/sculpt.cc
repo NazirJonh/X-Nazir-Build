@@ -3475,7 +3475,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
    * Anchored stroke: update on every dab so that the stamp always reflects the final dragged-out
    * radius and position when the mouse button is released. The existing entry for the same
    * symmetry pass is replaced; a new one is appended when first seen. */
-  if (brush_uses_insert_mesh(brush)) {
+  if (brush_uses_insert_mesh(brush) && !ss.multires_modifier) {
     const bool is_anchored = (brush.stroke_method == BRUSH_STROKE_ANCHORED);
     if (is_anchored || ss.cache->first_time) {
       VDMStampData stamp;

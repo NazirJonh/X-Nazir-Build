@@ -454,6 +454,10 @@ static bool insert_mesh_poll(bContext *C)
 {
   Object *ob = CTX_data_active_object(C);
   if (ob != nullptr && ob->mode == OB_MODE_SCULPT) {
+    if (BKE_sculpt_multires_active(CTX_data_scene(C), ob)) {
+      CTX_wm_operator_poll_msg_set(C, "Insert Mesh is not supported on a multires object");
+      return false;
+    }
     return ED_operator_object_active_editable_mesh(C);
   }
   return false;

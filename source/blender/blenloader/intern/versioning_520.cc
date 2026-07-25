@@ -913,6 +913,14 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     FOREACH_NODETREE_END;
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
+    for (Brush &brush : bmain->brushes) {
+      brush.smooth_algorithm = BRUSH_SMOOTH_TOPOLOGY;
+      brush.smooth_flag = 0;
+      brush.smooth_scale = 0.35f;
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

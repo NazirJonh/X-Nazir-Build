@@ -9,6 +9,7 @@
 #pragma once
 
 #include "BLI_array.hh"
+#include "BLI_bit_vector.hh"
 #include "BLI_generic_span.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_math_vector_types.hh"
@@ -137,50 +138,35 @@ void calc_relaxed_translations_bmesh(const Set<BMVert *, 0> &verts,
                                      MutableSpan<float3> translations);
 
 /**
- * Resolution-independent spatial smoothing for dense meshes.
+ * The set of elements inside a brush footprint, gathered as one contiguous block per PBVH node.
  *
- * Instead of averaging each vertex over its topological 1-ring (whose world-space reach shrinks
- * as resolution grows), this gathers a spatial region around the brush once, builds a uniform
- * hash-grid over it, and runs a spatial Laplacian-based pass over a local working copy of the
- * region positions. The averaging radius is fixed in world space, so a single brush stroke smooths
- * large shapes on hi-poly meshes as strongly as on low-poly ones.
- *
- * Two operators share the same region/grid infrastructure, selected by \a preserve_volume:
- *  - `preserve_volume == true` (modes 1/2): volume-preserving Taubin lambda/mu. \a iterations pairs
- *    of shrink/inflate sub-steps; the mu inflate step cancels the low-frequency loss of the shrink
- *    step, so large-scale shape is kept while detail is smoothed.
- *  - `preserve_volume == false` (mode 3, "Aggressive Flatten"): pure spatial Laplacian with
- *    lambda = 1.0 and \a iterations diffusion passes (ping-pong between two buffers). Repeated
- *    passes propagate the flattening beyond a single radius, so large-scale shapes are removed;
- *    volume is intentionally not preserved (flattening a bump removes its volume).
- *
- * The region is collected from PBVH nodes whose bounds intersect the brush sphere, so the cost
- * scales with the brush footprint rather than the whole mesh (the previous per-vertex tree
- * search did the latter). Results are returned per region vertex; the caller maps them back to
- * the vertices it is responsible for via \a r_vert_to_region.
- *
- * \param preserve_volume: select the Taubin (volume-preserving) operator vs. the pure-flatten
- *   Laplacian operator (see above).
- * \param iterations: number of Taubin lambda/mu pairs (preserve_volume) or diffusion passes
- *   (flatten). Mode 3 uses the user-controlled brush value; modes 1/2 pass 1.
- * \param r_region_verts: global vertex indices contained in the gathered region.
- * \param r_region_positions: smoothed position for each entry in \a r_region_verts (parallel).
- * \param r_vert_to_region: sized to the mesh vertex count; maps a global vertex index to its
- *   index in \a r_region_verts, or -1 when the vertex is outside the region.
+ * #bke::pbvh::MeshNode::verts() returns vertices that no other node owns, and grids are never
+ * shared between nodes, so the blocks are disjoint. That is what lets the caller map results back
+ * with a per-node offset instead of a lookup table the size of the whole mesh.
  */
-void radius_based_smooth_mesh_aggressive(const bke::pbvh::Tree &pbvh,
-                                         const Span<float3> vert_positions,
-                                         const Span<float3> vert_normals,
-                                         const BitSpan boundary_verts,
-                                         const float3 &brush_center,
-                                         const float brush_radius,
-                                         const float search_radius_factor,
-                                         const float distance_exponent,
-                                         const bool preserve_volume,
-                                         const int iterations,
-                                         Vector<int> &r_region_verts,
-                                         Array<float3> &r_region_positions,
-                                         Array<int> &r_vert_to_region);
+struct SpatialRegion {
+  /** Global vertex indices, or grid element indices for multires. */
+  Vector<int> elems;
+  /** Indexed by PBVH node index; the start of that node's block, or -1 when it is not gathered. */
+  Array<int> node_offsets;
+  Array<float3> positions;
+  Array<float3> normals;
+  /** Elements that contribute to the smoothing field; hidden geometry is excluded. */
+  BitVector<> field_mask;
+  /** Elements that must not move, such as mesh boundary vertices. */
+  BitVector<> anchor_mask;
+};
+
+/**
+ * Gather every element within \a radius of \a center, in region-local order.
+ *
+ * Handles #bke::pbvh::Type::Mesh and #bke::pbvh::Type::Grids; leaves \a r_region empty otherwise.
+ */
+void gather_spatial_region(const Depsgraph &depsgraph,
+                           const Object &object,
+                           const float3 &center,
+                           float radius,
+                           SpatialRegion &r_region);
 
 }  // namespace ed::sculpt_paint::smooth
 

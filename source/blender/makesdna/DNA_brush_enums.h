@@ -195,6 +195,17 @@ enum eBrushSmoothDeformType : int {
   BRUSH_SMOOTH_DEFORM_SURFACE = 1,
 };
 
+/** #Brush.smooth_algorithm */
+enum eBrushSmoothAlgorithm : char {
+  BRUSH_SMOOTH_TOPOLOGY = 0,
+  BRUSH_SMOOTH_SHAPE = 1,
+};
+
+/** #Brush.smooth_flag */
+enum eBrushSmoothFlag : char {
+  BRUSH_SMOOTH_PRESERVE_VOLUME = 1 << 0,
+};
+
 enum eBrushClothForceFalloffType : int {
   BRUSH_CLOTH_FORCE_FALLOFF_RADIAL = 0,
   BRUSH_CLOTH_FORCE_FALLOFF_PLANE = 1,

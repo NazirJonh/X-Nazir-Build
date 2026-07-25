@@ -112,6 +112,7 @@ set(SRC
   mesh/sculpt_pose.cc
   mesh/sculpt_project.cc
   mesh/sculpt_smooth.cc
+  mesh/sculpt_smooth_voxel.cc
   mesh/sculpt_transform.cc
   mesh/sculpt_trim.cc
   mesh/sculpt_undo.cc
@@ -144,6 +145,7 @@ set(SRC
   mesh/sculpt_islands.hh
   mesh/sculpt_pose.hh
   mesh/sculpt_smooth.hh
+  mesh/sculpt_smooth_voxel.hh
   mesh/sculpt_undo.hh
   mesh/vw_paint_intern.hh
 
@@ -211,6 +213,7 @@ if(WITH_GTESTS)
     mesh/paint_test.cc
     mesh/sculpt_boundary_tests.cc
     mesh/sculpt_detail_test.cc
+    mesh/sculpt_smooth_voxel_tests.cc
     mesh/sculpt_undo_test.cc
   )
   set(TEST_INC

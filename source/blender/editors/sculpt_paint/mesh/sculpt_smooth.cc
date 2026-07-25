@@ -7,15 +7,14 @@
  */
 #include "sculpt_smooth.hh"
 
+#include "BLI_bit_vector.hh"
+#include "BLI_bounds.hh"
 #include "BLI_enumerable_thread_specific.hh"
-#include "BLI_map.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_task.hh"
-
-#include "CLG_log.h"
 
 #include "BKE_attribute_math.hh"
 #include "BKE_mesh.hh"
@@ -34,12 +33,9 @@
 
 #include "bmesh.hh"
 
-#include <algorithm>
 #include <cstdlib>
 
 namespace blender::ed::sculpt_paint::smooth {
-
-static CLG_LogRef LOG = {"sculpt.smooth"};
 
 template<typename T>
 void neighbor_data_average_mesh_check_loose(const Span<T> src,
@@ -868,245 +864,145 @@ void blur_geometry_data_array(const Object &object,
 }
 
 /* -------------------------------------------------------------------- */
-/** \name Radius-Based Aggressive Smoothing
+/** \name Spatial Region Gathering
  * \{ */
 
-/* Integer cell coordinate of a position in the uniform hash-grid. `floorf` (not truncation) is
- * required so negative coordinates map to the correct cell. */
-static int3 grid_cell_of(const float3 &position, const float inv_cell_size)
+static IndexMask nodes_within_radius(const bke::pbvh::Tree &pbvh,
+                                     const float3 &center,
+                                     const float radius,
+                                     IndexMaskMemory &memory)
 {
-  const float3 c = position * inv_cell_size;
-  return int3(int(floorf(c.x)), int(floorf(c.y)), int(floorf(c.z)));
+  const float radius_sq = radius * radius;
+  return bke::pbvh::search_nodes(pbvh, memory, [&](const bke::pbvh::Node &node) {
+    /* The smooth brush selects the nodes it deforms with #node_in_sphere using the node's original
+     * bounds (it is a `brush_type_needs_original` brush), while the live #bounds are only refreshed
+     * at the end of a stroke step. The region must be selected on the same basis, or a node the
+     * brush deforms could be absent from the region: it would then hit the `offset < 0` fallback,
+     * stay frozen at zero translation while its neighbors move, and tear the mesh exactly along the
+     * node's bounds. The gathered positions themselves are still read live, so quality is unchanged. */
+    const Bounds<float3> &bounds = node.bounds_orig();
+    const float3 closest = math::clamp(center, bounds.min, bounds.max);
+    return math::distance_squared(center, closest) <= radius_sq;
+  });
 }
 
-/* Gaussian-weighted spatial average of region vertex `ri` over its neighbors within `radius`.
- *
- * Connectivity comes from the hash-grid (built once on the initial positions, read-only here);
- * the weights and distances use the supplied `positions` buffer so the average tracks the current
- * Taubin sub-step. Returns the averaged position itself (the caller forms the L(p) = avg - p
- * displacement). When no neighbor qualifies the vertex is left in place. */
-static float3 grid_weighted_average(const int ri,
-                                    const Span<float3> positions,
-                                    const Span<float3> normals,
-                                    const Map<int3, Vector<int>> &grid,
-                                    const float inv_cell_size,
-                                    const float radius,
-                                    const float sigma_sq_inv)
+static void gather_region_mesh(const Depsgraph &depsgraph,
+                               const Object &object,
+                               const bke::pbvh::Tree &pbvh,
+                               const IndexMask &node_mask,
+                               SpatialRegion &r_region)
 {
-  const float3 &p = positions[ri];
-  const float3 &n_i = normals[ri];
-  const float radius_squared = radius * radius;
-  const int3 base = grid_cell_of(p, inv_cell_size);
-
-  float3 weighted_sum(0);
-  float total_weight = 0.0f;
-
-  /* With cell size == search radius, the 3x3x3 block of cells fully covers `radius`. */
-  for (int dz = -1; dz <= 1; dz++) {
-    for (int dy = -1; dy <= 1; dy++) {
-      for (int dx = -1; dx <= 1; dx++) {
-        const Vector<int> *cell = grid.lookup_ptr(base + int3(dx, dy, dz));
-        if (cell == nullptr) {
-          continue;
-        }
-        for (const int nj : *cell) {
-          if (nj == ri) {
-            continue;
-          }
-          const float dist_sq = math::distance_squared(positions[nj], p);
-          if (dist_sq > radius_squared) {
-            continue;
-          }
-          float weight = expf(-dist_sq * sigma_sq_inv);
-          /* Soft normal weight: discard neighbors that face the opposite way so a folded-over
-           * surface does not blend its two sides together. */
-          weight *= std::max(0.0f, math::dot(n_i, normals[nj]));
-          if (UNLIKELY(!isfinite(weight))) {
-            continue;
-          }
-          weighted_sum += positions[nj] * weight;
-          total_weight += weight;
-        }
-      }
-    }
-  }
-
-  if (total_weight < 1e-6f) {
-    return p;
-  }
-  return weighted_sum / total_weight;
-}
-
-void radius_based_smooth_mesh_aggressive(const bke::pbvh::Tree &pbvh,
-                                         const Span<float3> vert_positions,
-                                         const Span<float3> vert_normals,
-                                         const BitSpan boundary_verts,
-                                         const float3 &brush_center,
-                                         const float brush_radius,
-                                         const float search_radius_factor,
-                                         const float distance_exponent,
-                                         const bool preserve_volume,
-                                         const int iterations,
-                                         Vector<int> &r_region_verts,
-                                         Array<float3> &r_region_positions,
-                                         Array<int> &r_vert_to_region)
-{
-  r_region_verts.clear();
-  r_vert_to_region.reinitialize(vert_positions.size());
-  r_vert_to_region.fill(-1);
-  r_region_positions.reinitialize(0);
-
-  /* Only the dense mesh PBVH is handled in this iteration. */
-  if (pbvh.type() != bke::pbvh::Type::Mesh) {
-    return;
-  }
-
-  const float base_search_radius = brush_radius * search_radius_factor;
-  if (base_search_radius < 1e-6f) {
-    return;
-  }
-  const float radius_squared = base_search_radius * base_search_radius;
-
-  /* 1. Gather the region once: every vertex owned by a PBVH node whose bounds intersect the brush
-   *    sphere. Collected once per call (not per vertex), so the cost scales with the brush
-   *    footprint rather than the whole mesh. */
-  IndexMaskMemory memory;
-  const IndexMask node_mask = bke::pbvh::search_nodes(
-      pbvh, memory, [&](const bke::pbvh::Node &node) {
-        const Bounds<float3> &bounds = node.bounds();
-        const float3 closest_point = math::clamp(brush_center, bounds.min, bounds.max);
-        return math::distance_squared(brush_center, closest_point) <= radius_squared;
-      });
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
+  const Span<float3> normals = bke::pbvh::vert_normals_eval(depsgraph, object);
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  const VArraySpan<bool> hide_vert = *attributes.lookup<bool>(".hide_vert", bke::AttrDomain::Point);
+  const BitSpan boundary = ss.boundary_info_cache->verts;
 
   const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
   node_mask.foreach_index([&](const int node_index) {
-    for (const int vert : nodes[node_index].verts()) {
-      if (r_vert_to_region[vert] == -1) {
-        r_vert_to_region[vert] = r_region_verts.size();
-        r_region_verts.append(vert);
-      }
-    }
+    r_region.node_offsets[node_index] = r_region.elems.size();
+    r_region.elems.extend(nodes[node_index].verts());
   });
 
-  if (r_region_verts.is_empty()) {
-    return;
-  }
+  const int region_num = r_region.elems.size();
+  r_region.positions.reinitialize(region_num);
+  r_region.normals.reinitialize(region_num);
+  r_region.field_mask.resize(region_num, false);
+  r_region.anchor_mask.resize(region_num, false);
 
-  /* Perf guard: cap the region so a very large brush on a dense mesh cannot stall interactivity.
-   * Keep the vertices closest to the brush center and report the truncation rather than silently
-   * dropping work. */
-  constexpr int max_region_verts = 200000;
-  const int gathered_num = r_region_verts.size();
-  if (gathered_num > max_region_verts) {
-    std::nth_element(r_region_verts.begin(),
-                     r_region_verts.begin() + max_region_verts,
-                     r_region_verts.end(),
-                     [&](const int a, const int b) {
-                       return math::distance_squared(vert_positions[a], brush_center) <
-                              math::distance_squared(vert_positions[b], brush_center);
-                     });
-    r_region_verts.resize(max_region_verts);
-    /* `nth_element` reordered the vertices, so rebuild the global->region map from scratch. */
-    r_vert_to_region.fill(-1);
-    for (const int i : r_region_verts.index_range()) {
-      r_vert_to_region[r_region_verts[i]] = i;
-    }
-    CLOG_WARN(&LOG,
-              "Spatial Taubin smooth region capped at %d vertices (gathered %d); reduce the brush "
-              "radius or smooth radius factor for full coverage.",
-              max_region_verts,
-              gathered_num);
-  }
-
-  const int region_num = r_region_verts.size();
-
-  /* 2. Local working copy of the region positions and normals (region-local indexing). */
-  Array<float3> positions_a(region_num);
-  Array<float3> region_normals(region_num);
   threading::parallel_for(IndexRange(region_num), 4096, [&](const IndexRange range) {
     for (const int i : range) {
-      positions_a[i] = vert_positions[r_region_verts[i]];
-      region_normals[i] = vert_normals[r_region_verts[i]];
+      const int vert = r_region.elems[i];
+      r_region.positions[i] = positions[vert];
+      r_region.normals[i] = normals[vert];
     }
   });
 
-  /* 3. Uniform hash-grid over the region. Cell size == search radius, so a neighbor query only
-   *    needs the surrounding 3x3x3 cells. Built once and used read-only during the Taubin pass. */
-  const float inv_cell_size = 1.0f / base_search_radius;
-  Map<int3, Vector<int>> grid;
+  /* #BitVector packs many bits into one machine word, so two threads setting neighboring bits in
+   * `field_mask` or `anchor_mask` would race on that shared word. This loop must stay serial. */
   for (const int i : IndexRange(region_num)) {
-    grid.lookup_or_add_default(grid_cell_of(positions_a[i], inv_cell_size)).append(i);
+    const int vert = r_region.elems[i];
+    const bool hidden = !hide_vert.is_empty() && hide_vert[vert];
+    r_region.field_mask[i].set(!hidden);
+    /* Boundary vertices still feed the field, but moving them would drag an open edge inward. */
+    r_region.anchor_mask[i].set(hidden || (!boundary.is_empty() && boundary[vert]));
   }
+}
 
-  /* Gaussian sigma from `distance_exponent` (matching the previous weighted average):
-   * lower exponent -> wider sigma -> more large-scale smoothing. */
-  const float sigma = base_search_radius / std::max(distance_exponent, 0.1f);
-  const float sigma_sq_inv = (sigma > 1e-6f) ? 1.0f / (2.0f * sigma * sigma) : 0.0f;
+static void gather_region_grids(const Object &object,
+                                const bke::pbvh::Tree &pbvh,
+                                const IndexMask &node_mask,
+                                SpatialRegion &r_region)
+{
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+  const int grid_area = subdiv_ccg.grid_area;
+  const BitGroupVector<> &grid_hidden = subdiv_ccg.grid_hidden;
 
-  /* 4. Spatial Laplacian step: move each vertex a `factor` of the way toward its Gaussian-weighted
-   *    neighborhood average. This is the shared operator for both modes -- for `preserve_volume` it
-   *    is the shrink/inflate building block of Taubin; for the flatten mode it is applied directly
-   *    with factor = 1.0. Boundary vertices are anchored so smoothing does not drag the open edge
-   *    inward. */
-  Array<float3> positions_b(region_num);
-
-  const auto step = [&](const Span<float3> src, MutableSpan<float3> dst, const float factor) {
-    threading::parallel_for(IndexRange(region_num), 1024, [&](const IndexRange range) {
-      for (const int i : range) {
-        const int vert = r_region_verts[i];
-        /* Anchor boundary vertices so smoothing does not drag the open edge inward. */
-        if (!boundary_verts.is_empty() && boundary_verts[vert]) {
-          dst[i] = src[i];
-          continue;
-        }
-        const float3 avg = grid_weighted_average(
-            i, src, region_normals, grid, inv_cell_size, base_search_radius, sigma_sq_inv);
-        float3 result = src[i] + factor * (avg - src[i]);
-        if (UNLIKELY(!isfinite(result.x) || !isfinite(result.y) || !isfinite(result.z))) {
-          result = src[i];
-        }
-        dst[i] = result;
+  const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+  node_mask.foreach_index([&](const int node_index) {
+    r_region.node_offsets[node_index] = r_region.elems.size();
+    for (const int grid : nodes[node_index].grids()) {
+      for (const int offset : IndexRange(grid_area)) {
+        r_region.elems.append(grid * grid_area + offset);
       }
-    });
-  };
-
-  if (preserve_volume) {
-    /* Volume-preserving Taubin lambda/mu. mu is derived from lambda so the inflate step cancels
-     * the shrink step's low-frequency loss: mu = lambda / (k*lambda - 1), with k ~ 0.1. The large-
-     * scale shape is thus kept while detail is smoothed. */
-    constexpr float taubin_lambda = 0.5f;
-    constexpr float taubin_k = 0.1f;
-    constexpr float taubin_mu = taubin_lambda / (taubin_k * taubin_lambda - 1.0f);
-
-    for (int pair = 0; pair < iterations; pair++) {
-      step(positions_a, positions_b, taubin_lambda); /* Shrink. */
-      step(positions_b, positions_a, taubin_mu);     /* Inflate. */
     }
-    /* Each pair is an even number of sub-steps, so the result lands back in `positions_a`. The
-     * caller maps these back via `r_vert_to_region`. */
-    r_region_positions = std::move(positions_a);
+  });
+
+  const int region_num = r_region.elems.size();
+  r_region.positions.reinitialize(region_num);
+  r_region.normals.reinitialize(region_num);
+  r_region.field_mask.resize(region_num, false);
+  r_region.anchor_mask.resize(region_num, false);
+
+  threading::parallel_for(IndexRange(region_num), 4096, [&](const IndexRange range) {
+    for (const int i : range) {
+      const int elem = r_region.elems[i];
+      r_region.positions[i] = subdiv_ccg.positions[elem];
+      r_region.normals[i] = subdiv_ccg.normals[elem];
+    }
+  });
+
+  /* #BitVector packs many bits into one machine word, so two threads setting neighboring bits in
+   * `field_mask` or `anchor_mask` would race on that shared word. This loop must stay serial. */
+  for (const int i : IndexRange(region_num)) {
+    const int elem = r_region.elems[i];
+    const int grid = elem / grid_area;
+    const bool hidden = !grid_hidden.is_empty() && grid_hidden[grid][elem - grid * grid_area];
+    r_region.field_mask[i].set(!hidden);
+    /* Multires has no per-element boundary mask, so only hidden elements are anchored. */
+    r_region.anchor_mask[i].set(hidden);
   }
-  else {
-    /* Pure spatial Laplacian ("Aggressive Flatten"): lambda = 1.0 moves each vertex fully to its
-     * weighted average, with no inflate step, so volume is not preserved and bumps are flattened
-     * away. `iterations` diffusion passes ping-pong between the two buffers; each pass propagates
-     * the flattening beyond a single search radius, so more passes remove larger-scale shapes. */
-    constexpr float flatten_lambda = 1.0f;
+}
 
-    float3 *src = positions_a.data();
-    float3 *dst = positions_b.data();
-    for (int it = 0; it < iterations; it++) {
-      step(Span<float3>(src, region_num), MutableSpan<float3>(dst, region_num), flatten_lambda);
-      /* Swap so the just-written buffer becomes the source of the next pass. */
-      std::swap(src, dst);
-    }
-    /* After the loop `src` points at the last buffer that was written. */
-    if (src == positions_b.data()) {
-      r_region_positions = std::move(positions_b);
-    }
-    else {
-      r_region_positions = std::move(positions_a);
-    }
+void gather_spatial_region(const Depsgraph &depsgraph,
+                           const Object &object,
+                           const float3 &center,
+                           const float radius,
+                           SpatialRegion &r_region)
+{
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+
+  r_region.elems.clear();
+  r_region.node_offsets.reinitialize(pbvh.nodes_num());
+  r_region.node_offsets.fill(-1);
+
+  IndexMaskMemory memory;
+  const IndexMask node_mask = nodes_within_radius(pbvh, center, radius, memory);
+
+  switch (pbvh.type()) {
+    case bke::pbvh::Type::Mesh:
+      gather_region_mesh(depsgraph, object, pbvh, node_mask, r_region);
+      break;
+    case bke::pbvh::Type::Grids:
+      gather_region_grids(object, pbvh, node_mask, r_region);
+      break;
+    case bke::pbvh::Type::BMesh:
+      /* Dyntopo positions are not stored in a flat array; the caller falls back to the
+       * topological path. */
+      break;
   }
 }
 

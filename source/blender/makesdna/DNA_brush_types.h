@@ -168,6 +168,7 @@ struct BrushCurvesSculptSettings {
 
 /** Max number of propagation steps for automasking settings. */
 #define AUTOMASKING_BOUNDARY_EDGES_MAX_PROPAGATION_STEPS 20
+
 /**
  * \note Any change to members that is user visible and that may make the brush differ from the one
  * saved in the asset library should be followed by a #BKE_brush_tag_unsaved_changes() call.
@@ -317,9 +318,10 @@ struct Brush {
   eBrushGPWeightType gpencil_weight_brush_type = GPWEIGHT_BRUSH_TYPE_DRAW;
   /** Active curves sculpt brush type. */
   eBrushCurvesSculptType curves_sculpt_brush_type = CURVES_SCULPT_BRUSH_TYPE_COMB;
-  /** Smoothing algorithm type: 0=Conservative, 1=Moderate, 2=Aggressive. */
-  char smooth_algorithm = 0;
-  char _pad1[1] = {};
+  /** Smoothing algorithm, see #eBrushSmoothAlgorithm. */
+  char smooth_algorithm = BRUSH_SMOOTH_TOPOLOGY;
+  /** Flags for the Shape smoothing algorithm, see #eBrushSmoothFlag. */
+  char smooth_flag = 0;
 
   float autosmooth_factor = 0.0f;
 
@@ -404,13 +406,8 @@ struct Brush {
   float surface_smooth_current_vertex = 0;
   int surface_smooth_iterations = 0;
 
-  /* TASK-001: Radius-Based Aggressive Smoothing Algorithm */
-  /** Radius multiplier for spatial search (1.0-3.0, default 1.5). */
-  float smooth_radius_factor = 1.5f;
-  /** Distance weighting exponent (1.0-4.0, default 1.0). Lower = wider sigma = more large-scale. */
-  float smooth_distance_exponent = 1.0f;
-  /** Number of diffusion passes for the Aggressive Flatten smooth mode (1-20, default 5). */
-  int smooth_flatten_iterations = 5;
+  /** Size of the shapes the Shape algorithm smooths, as a fraction of the brush radius. */
+  float smooth_scale = 0.35f;
   char _pad6[4] = {};
 
   /* multiplane scrape */

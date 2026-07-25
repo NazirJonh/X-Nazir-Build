@@ -27,8 +27,6 @@
 
 #include "WM_types.hh"
 
-#include "BKE_brush.hh"
-
 namespace blender {
 
 static const EnumPropertyItem prop_direction_items[] = {
@@ -708,7 +706,6 @@ static PointerRNA rna_Brush_capabilities_get(PointerRNA *ptr)
 static void rna_Brush_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   Brush *br = static_cast<Brush *>(ptr->data);
-  BKE_brush_init_smooth_algorithm_settings(br);
   BKE_brush_tag_unsaved_changes(br);
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
   // WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
@@ -2575,28 +2572,18 @@ static void rna_def_brush(BlenderRNA *brna)
   };
 
   static const EnumPropertyItem brush_smooth_algorithm_items[] = {
-      {0,
-       "CONSERVATIVE",
+      {BRUSH_SMOOTH_TOPOLOGY,
+       "TOPOLOGY",
        0,
-       "Conservative",
-       "Standard topological smoothing, fast but limited by mesh density"},
-      {1,
-       "MODERATE",
+       "Topology",
+       "Average each vertex with its connected neighbors. Fast, but the smoothing scale shrinks as "
+       "the mesh gets denser"},
+      {BRUSH_SMOOTH_SHAPE,
+       "SHAPE",
        0,
-       "Moderate",
-       "Auto-selects algorithm based on mesh size (aggressive for meshes >100k vertices)"},
-      {2,
-       "AGGRESSIVE",
-       0,
-       "Shape (Taubin)",
-       "Radius-based spatial Taubin smoothing: smooths detail while preserving large-scale shape "
-       "(volume preserving)"},
-      {3,
-       "FLATTEN",
-       0,
-       "Aggressive Flatten",
-       "Pure spatial Laplacian that removes large-scale shapes over repeated passes; volume is not "
-       "preserved (flattens bumps)"},
+       "Shape",
+       "Smooth over a fixed world-space scale, so broad forms are smoothed just as strongly on a "
+       "dense mesh as on a coarse one"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -3406,41 +3393,28 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Iterations", "Number of smoothing iterations per brush step");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  prop = RNA_def_property(srna, "smooth_scale", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "smooth_scale");
+  RNA_def_property_range(prop, 0.05f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.05f, 1.0f, 0.05f, 2);
+  RNA_def_property_ui_text(prop,
+                           "Scale",
+                           "Size of the shapes to smooth, as a fraction of the brush radius. Small "
+                           "values remove fine detail, large values remove broad forms");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "smooth_preserve_volume", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "smooth_flag", BRUSH_SMOOTH_PRESERVE_VOLUME);
+  RNA_def_property_ui_text(prop,
+                           "Preserve Volume",
+                           "Compensate the shrinking a plain smoothing pass causes, keeping the "
+                           "overall volume of the shape");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   prop = RNA_def_property(srna, "smooth_algorithm", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, brush_smooth_algorithm_items);
   RNA_def_property_enum_sdna(prop, nullptr, "smooth_algorithm");
   RNA_def_property_ui_text(prop, "Smoothing Algorithm", "Algorithm used for mesh smoothing");
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
-
-  prop = RNA_def_property(srna, "smooth_radius_factor", PROP_FLOAT, PROP_FACTOR);
-  RNA_def_property_float_sdna(prop, nullptr, "smooth_radius_factor");
-  RNA_def_property_range(prop, 1.0f, 3.0f);
-  RNA_def_property_ui_range(prop, 1.0f, 3.0f, 0.1f, 2);
-  RNA_def_property_ui_text(
-      prop,
-      "Search Radius Factor",
-      "Multiplier for spatial search radius in aggressive smoothing");
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
-
-  prop = RNA_def_property(srna, "smooth_distance_exponent", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "smooth_distance_exponent");
-  RNA_def_property_range(prop, 1.0f, 4.0f);
-  RNA_def_property_ui_range(prop, 1.0f, 4.0f, 0.1f, 2);
-  RNA_def_property_ui_text(
-      prop,
-      "Distance Weighting",
-      "Controls Gaussian kernel width: 1.0 = wide kernel, pulls toward large-scale "
-      "surface (sigma=radius); 4.0 = narrow kernel, only local neighbors matter");
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
-
-  prop = RNA_def_property(srna, "smooth_flatten_iterations", PROP_INT, PROP_UNSIGNED);
-  RNA_def_property_int_sdna(prop, nullptr, "smooth_flatten_iterations");
-  RNA_def_property_range(prop, 1, 50);
-  RNA_def_property_ui_range(prop, 1, 20, 1, 3);
-  RNA_def_property_ui_text(prop,
-                           "Flatten Iterations",
-                           "Number of diffusion passes per brush step for the Aggressive Flatten "
-                           "mode; more passes flatten larger-scale shapes");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "multiplane_scrape_angle", PROP_FLOAT, PROP_FACTOR);

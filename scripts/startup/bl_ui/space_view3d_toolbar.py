@@ -2338,40 +2338,6 @@ class VIEW3D_PT_tools_grease_pencil_v3_brush_gap_closure(View3DPanel, Panel):
                 col.prop(gp_settings, "fill_gap_factor", text="Detection Factor")
 
 
-class VIEW3D_PT_tools_brush_smooth_algorithm(Panel, View3DPaintBrushPanel):
-    """Smooth brush algorithm settings"""
-    bl_context = ".paint_common"
-    bl_parent_id = "VIEW3D_PT_tools_brush_settings"
-    bl_label = "Smooth Algorithm"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    @classmethod
-    def poll(cls, context):
-        settings = cls.paint_settings(context)
-        brush = settings.brush if settings else None
-        return (brush is not None and
-                hasattr(brush, 'sculpt_tool') and
-                brush.sculpt_tool == 'SMOOTH')
-
-    def draw(self, _context):
-        layout = self.layout
-        layout.use_property_split = True
-        layout.use_property_decorate = False
-
-        settings = self.paint_settings(_context)
-        brush = settings.brush
-
-        col = layout.column(align=True)
-        col.prop(brush, "smooth_algorithm", text="Mode")
-
-        if brush.smooth_algorithm in {2, 3}:  # AGGRESSIVE (Shape/Taubin) or FLATTEN
-            col.separator()
-            col.prop(brush, "smooth_radius_factor", text="Search Radius")
-            col.prop(brush, "smooth_distance_exponent", text="Distance Weight")
-        if brush.smooth_algorithm == 3:  # FLATTEN (Aggressive Flatten)
-            col.prop(brush, "smooth_flatten_iterations", text="Iterations")
-
-
 classes = (
     VIEW3D_MT_brush_context_menu,
     VIEW3D_PT_tools_object_options,
@@ -2388,7 +2354,6 @@ classes = (
     VIEW3D_PT_slots_vertex_groups,
     VIEW3D_PT_tools_brush_select,
     VIEW3D_PT_tools_brush_settings,
-    VIEW3D_PT_tools_brush_smooth_algorithm,
     VIEW3D_PT_tools_brush_color,
     VIEW3D_PT_tools_brush_swatches,
     VIEW3D_PT_tools_brush_settings_advanced,

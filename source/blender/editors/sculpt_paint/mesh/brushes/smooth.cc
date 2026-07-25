@@ -25,6 +25,7 @@
 #include "editors/sculpt_paint/mesh/sculpt_boundary.hh"
 #include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 #include "editors/sculpt_paint/mesh/sculpt_smooth.hh"
+#include "editors/sculpt_paint/mesh/sculpt_smooth_voxel.hh"
 
 #include "bmesh.hh"
 
@@ -108,43 +109,50 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
 
   threading::EnumerableThreadSpecific<LocalData> all_tls;
 
-  /* The "Spatial Taubin" path (aggressive, or moderate on dense meshes) averages each vertex over
-   * a fixed world-space radius rather than its topological 1-ring, so a single stroke smooths large
-   * shapes equally on low- and high-poly meshes. Its region gather + hash-grid + Laplacian pass are
-   * resolution-independent and run once per iteration, before the per-node loop, which then only
-   * reads back the result for the vertices it owns. */
-  const bool use_spatial_taubin = (brush.smooth_algorithm == 2) ||
-                                  (brush.smooth_algorithm == 3) ||
-                                  (brush.smooth_algorithm == 1 && mesh.verts_num > 100000);
+  /* The Shape path averages over a fixed world-space scale rather than the topological one-ring,
+   * so a stroke smooths broad forms just as strongly on a dense mesh as on a coarse one. Its
+   * region gather and voxel field run once per iteration, before the per-node loop, which then
+   * only reads the result back for the vertices it owns. */
+  const bool use_shape = brush.smooth_algorithm == BRUSH_SMOOTH_SHAPE;
 
-  /* Mode 3 ("Aggressive Flatten") is a pure spatial Laplacian that does not preserve volume and
-   * runs a user-controlled number of diffusion passes. Modes 1/2 use the volume-preserving Taubin
-   * operator with a single lambda/mu pair. */
-  const bool preserve_volume = brush.smooth_algorithm != 3;
-  const int smooth_iterations = (brush.smooth_algorithm == 3) ? brush.smooth_flatten_iterations : 1;
+  smooth::VoxelSmoothParams voxel_params;
+  voxel_params.kernel_radius = ss.cache->radius * brush.smooth_scale;
+  voxel_params.preserve_volume = (brush.smooth_flag & BRUSH_SMOOTH_PRESERVE_VOLUME) != 0;
 
-  Vector<int> region_verts;
-  Array<float3> region_positions;
-  Array<int> vert_to_region;
+  smooth::SpatialRegion region;
+  Array<float3> region_targets;
 
   /* Calculate the new positions into a separate array in a separate loop because multiple loops
    * are updated in parallel. Without this there would be non-threadsafe access to changing
    * positions in other bke::pbvh::Tree nodes. */
-  for (const float strength : iteration_strengths(brush_strength)) {
-    if (use_spatial_taubin) {
-      smooth::radius_based_smooth_mesh_aggressive(pbvh,
-                                                  position_data.eval,
-                                                  vert_normals,
-                                                  ss.boundary_info_cache->verts,
-                                                  ss.cache->location,
-                                                  ss.cache->radius,
-                                                  brush.smooth_radius_factor,
-                                                  brush.smooth_distance_exponent,
-                                                  preserve_volume,
-                                                  smooth_iterations,
-                                                  region_verts,
-                                                  region_positions,
-                                                  vert_to_region);
+  /* The topological path needs several sub-passes because each Laplacian step moves a vertex only a
+   * little. The voxel field already produces a fully smoothed target in a single solve, so the
+   * Shape path runs exactly one pass at the full strength. Iterating it would re-rasterize the
+   * already-moved vertices into the voxel grid every pass, snapping each cell's vertices toward its
+   * centroid and baking the grid into the surface as voxel-sized stair-stepped facets. */
+  const Vector<float> pass_strengths = use_shape ?
+                                           Vector<float>{std::min(brush_strength, 1.0f)} :
+                                           iteration_strengths(brush_strength);
+  for (const float strength : pass_strengths) {
+    if (use_shape) {
+      /* A zero-strength iteration would still gather the full region and solve the voxel field,
+       * only to multiply every translation by zero afterward, so skip it outright. */
+      if (strength == 0.0f) {
+        continue;
+      }
+
+      /* Two kernel radii of margin beyond the brush footprint keep the field fully populated for
+       * the vertices at the edge of the stroke, which is what prevents a seam there. */
+      const float gather_radius = ss.cache->radius + 2.0f * voxel_params.kernel_radius;
+      smooth::gather_spatial_region(
+          depsgraph, object, ss.cache->location_symm, gather_radius, region);
+      region_targets.reinitialize(region.elems.size());
+      smooth::voxel_smooth_positions(region.positions,
+                                     region.normals,
+                                     region.field_mask,
+                                     region.anchor_mask,
+                                     voxel_params,
+                                     region_targets);
     }
 
     node_mask.foreach_index(
@@ -168,13 +176,39 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
           const MutableSpan<float3> node_new_positions =
               new_positions.as_mutable_span().slice(node_vert_offsets[pos]);
 
-          if (use_spatial_taubin) {
-            /* Read back the region result for this node's vertices. Vertices outside the gathered
-             * region keep their current position (no smoothing target). */
-            for (const int v : verts.index_range()) {
-              const int region_index = vert_to_region[verts[v]];
-              node_new_positions[v] = (region_index >= 0) ? region_positions[region_index] :
-                                                            position_data.eval[verts[v]];
+          if (use_shape) {
+            /* The region is gathered around the same symmetry-mirrored center as the node mask,
+             * with sufficient margin beyond the radius, ensuring every node is inside and its
+             * vertices form one contiguous block. */
+            const int offset = region.node_offsets[i];
+            if (offset < 0) {
+              /* TEMP DEBUG (remove once the Shape-mode PBVH-tile artifact is diagnosed): this
+               * branch should be unreachable for a node in node_mask, since gather_radius is
+               * always >= the brush radius used to build node_mask and both use bounds_orig()
+               * around the same center. If it fires, the region and node_mask disagree right at
+               * this node's boundary, which is a candidate root cause for tile-shaped seams. */
+              if (!verts.is_empty()) {
+                const Bounds<float3> &b = nodes[i].bounds_orig();
+                const float gather_radius = ss.cache->radius + 2.0f * voxel_params.kernel_radius;
+                fprintf(stderr,
+                        "[smooth-shape-debug] node %d MISSING from region: %d verts frozen | "
+                        "bounds_orig min=(%.4f,%.4f,%.4f) max=(%.4f,%.4f,%.4f) | "
+                        "cache center=(%.4f,%.4f,%.4f) brush_radius=%.4f gather_radius=%.4f\n",
+                        i,
+                        int(verts.size()),
+                        b.min.x, b.min.y, b.min.z,
+                        b.max.x, b.max.y, b.max.z,
+                        ss.cache->location_symm.x, ss.cache->location_symm.y,
+                        ss.cache->location_symm.z,
+                        ss.cache->radius,
+                        gather_radius);
+              }
+              for (const int v : verts.index_range()) {
+                node_new_positions[v] = position_data.eval[verts[v]];
+              }
+            }
+            else {
+              node_new_positions.copy_from(region_targets.as_span().slice(offset, verts.size()));
             }
           }
           else {
@@ -252,6 +286,121 @@ static void calc_grids(const Depsgraph &depsgraph,
   apply_translations(translations, grids, subdiv_ccg);
 }
 
+BLI_NOINLINE static void do_smooth_brush_grids(const Depsgraph &depsgraph,
+                                               const Sculpt &sd,
+                                               const Brush &brush,
+                                               Object &object,
+                                               const IndexMask &node_mask,
+                                               const float brush_strength)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+  const Mesh &base_mesh = *id_cast<const Mesh *>(object.data);
+  const OffsetIndices faces = base_mesh.faces();
+  const Span<int> corner_verts = base_mesh.corner_verts();
+
+  /* As in #do_smooth_brush_mesh, the Shape path averages over a fixed world-space scale rather
+   * than the topological one-ring, so multires benefits from it the same way a dense mesh does. */
+  const bool use_shape = brush.smooth_algorithm == BRUSH_SMOOTH_SHAPE;
+
+  smooth::VoxelSmoothParams voxel_params;
+  voxel_params.kernel_radius = ss.cache->radius * brush.smooth_scale;
+  voxel_params.preserve_volume = (brush.smooth_flag & BRUSH_SMOOTH_PRESERVE_VOLUME) != 0;
+
+  smooth::SpatialRegion region;
+  Array<float3> region_targets;
+
+  threading::EnumerableThreadSpecific<LocalData> all_tls;
+  MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+
+  /* One pass at full strength for Shape: the voxel field is already a fully smoothed target, and
+   * iterating it would re-rasterize moved grid elements into the voxel grid every pass, snapping
+   * each cell's elements toward its centroid and baking the grid in as stair-stepped facets. */
+  const Vector<float> pass_strengths = use_shape ?
+                                           Vector<float>{std::min(brush_strength, 1.0f)} :
+                                           iteration_strengths(brush_strength);
+  for (const float strength : pass_strengths) {
+    if (!use_shape) {
+      node_mask.foreach_index(
+          [&](const int i) {
+            LocalData &tls = all_tls.local();
+            calc_grids(depsgraph,
+                       sd,
+                       faces,
+                       corner_verts,
+                       ss.boundary_info_cache->verts,
+                       ss.boundary_info_cache->edges,
+                       object,
+                       brush,
+                       strength,
+                       nodes[i],
+                       tls);
+          },
+          exec_mode::grain_size(1));
+      continue;
+    }
+
+    /* A zero-strength iteration would still gather the full region and solve the voxel field,
+     * only to multiply every translation by zero afterward, so skip it outright. */
+    if (strength == 0.0f) {
+      continue;
+    }
+
+    /* Two kernel radii of margin beyond the brush footprint keep the field fully populated for
+     * the grid elements at the edge of the stroke, which is what prevents a seam there. */
+    const float gather_radius = ss.cache->radius + 2.0f * voxel_params.kernel_radius;
+    /* The gather must be centered on the same symmetry-mirrored point used to build node_mask,
+     * not the unmirrored input location: otherwise, under mirror symmetry, the gathered region
+     * would land on the opposite half from the nodes being smoothed, every node would miss the
+     * region, and this pass would silently do nothing. */
+    smooth::gather_spatial_region(
+        depsgraph, object, ss.cache->location_symm, gather_radius, region);
+    region_targets.reinitialize(region.elems.size());
+    smooth::voxel_smooth_positions(region.positions,
+                                   region.normals,
+                                   region.field_mask,
+                                   region.anchor_mask,
+                                   voxel_params,
+                                   region_targets);
+
+    const int grid_area = subdiv_ccg.grid_area;
+    node_mask.foreach_index(
+        [&](const int i) {
+          LocalData &tls = all_tls.local();
+          const Span<int> grids = nodes[i].grids();
+          const MutableSpan positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
+
+          calc_factors_common_grids(
+              depsgraph, brush, object, positions, nodes[i], tls.factors, tls.distances);
+          scale_factors(tls.factors, strength);
+
+          /* The region is gathered around the same symmetry-mirrored center as the node mask,
+           * with sufficient margin beyond the radius, ensuring every node's grids are inside and
+           * form one contiguous block. */
+          const int elem_num = grids.size() * grid_area;
+          tls.new_positions.resize(elem_num);
+          const MutableSpan<float3> new_positions = tls.new_positions;
+          const int offset = region.node_offsets[i];
+          if (offset < 0) {
+            new_positions.copy_from(positions);
+          }
+          else {
+            new_positions.copy_from(region_targets.as_span().slice(offset, elem_num));
+          }
+
+          tls.translations.resize(elem_num);
+          const MutableSpan<float3> translations = tls.translations;
+          translations_from_new_positions(new_positions, positions, translations);
+          scale_translations(translations, tls.factors);
+
+          clip_and_lock_translations(sd, ss, positions, translations);
+          apply_translations(translations, grids, subdiv_ccg);
+        },
+        exec_mode::grain_size(1));
+  }
+}
+
 static void calc_bmesh(const Depsgraph &depsgraph,
                        const Sculpt &sd,
                        Object &object,
@@ -291,7 +440,6 @@ void do_smooth_brush(const Depsgraph &depsgraph,
                      const float brush_strength)
 {
   PRF_scope(ProfileCategory::Editor);
-  SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
 
@@ -301,33 +449,9 @@ void do_smooth_brush(const Depsgraph &depsgraph,
     case bke::pbvh::Type::Mesh:
       do_smooth_brush_mesh(depsgraph, sd, brush, object, node_mask, brush_strength);
       break;
-    case bke::pbvh::Type::Grids: {
-      const Mesh &base_mesh = *id_cast<const Mesh *>(object.data);
-      const OffsetIndices faces = base_mesh.faces();
-      const Span<int> corner_verts = base_mesh.corner_verts();
-
-      threading::EnumerableThreadSpecific<LocalData> all_tls;
-      for (const float strength : iteration_strengths(brush_strength)) {
-        MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
-        node_mask.foreach_index(
-            [&](const int i) {
-              LocalData &tls = all_tls.local();
-              calc_grids(depsgraph,
-                         sd,
-                         faces,
-                         corner_verts,
-                         ss.boundary_info_cache->verts,
-                         ss.boundary_info_cache->edges,
-                         object,
-                         brush,
-                         strength,
-                         nodes[i],
-                         tls);
-            },
-            exec_mode::grain_size(1));
-      }
+    case bke::pbvh::Type::Grids:
+      do_smooth_brush_grids(depsgraph, sd, brush, object, node_mask, brush_strength);
       break;
-    }
     case bke::pbvh::Type::BMesh: {
       vert_random_access_ensure(object);
       threading::EnumerableThreadSpecific<LocalData> all_tls;

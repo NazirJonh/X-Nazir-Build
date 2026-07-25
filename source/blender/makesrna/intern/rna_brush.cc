@@ -3766,8 +3766,9 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop,
       "Uniform Depth",
-      "Measure each stroke from a fixed base surface so overlapping strokes reach the same "
-      "depth instead of stacking on top of each other");
+      "Measure each stroke from a snapshot of the surface so overlapping strokes reach the same "
+      "depth instead of stacking on top of each other. The snapshot is taken when sculpting with "
+      "this option enabled and is kept until the option is disabled or sculpt mode is left");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "use_bidirectional", PROP_BOOLEAN, PROP_NONE);

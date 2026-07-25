@@ -126,10 +126,9 @@ static void calc_faces(const Depsgraph &depsgraph,
                        const Brush &brush,
                        const MeshAttributeData &attribute_data,
                        const Span<float3> vert_normals,
-                       const bool use_persistent_base,
-                       const bool invert_resets,
-                       const Span<float3> persistent_base_positions,
-                       const Span<float3> persistent_base_normals,
+                       const bool use_base,
+                       const Span<float3> base_positions,
+                       const Span<float3> base_normals,
                        Object &object,
                        bke::pbvh::MeshNode &node,
                        LocalData &tls,
@@ -176,8 +175,11 @@ static void calc_faces(const Depsgraph &depsgraph,
   const MutableSpan<float> displacement_factors = tls.displacement_factors;
   gather_data_mesh(layer_displacement_factor.as_span(), verts, displacement_factors);
 
-  if (use_persistent_base) {
-    if (invert_resets && cache.toggle_settings.invert) {
+  if (use_base) {
+    /* Only the manually set persistent base uses the invert toggle to erase layers back to the
+     * base. The uniform depth base keeps the regular layer behavior where inverting carves in the
+     * opposite direction. */
+    if ((brush.flag & BRUSH_PERSISTENT) && cache.toggle_settings.invert) {
       reset_displacement_factors(displacement_factors, tls.factors, cache.bstrength);
     }
     else {
@@ -189,8 +191,8 @@ static void calc_faces(const Depsgraph &depsgraph,
 
     tls.translations.resize(verts.size());
     const MutableSpan<float3> translations = tls.translations;
-    calc_translations(persistent_base_positions,
-                      persistent_base_normals,
+    calc_translations(base_positions,
+                      base_normals,
                       verts,
                       positions,
                       displacement_factors,
@@ -226,10 +228,9 @@ static void calc_grids(const Depsgraph &depsgraph,
                        const Sculpt &sd,
                        const Brush &brush,
                        Object &object,
-                       const bool use_persistent_base,
-                       const bool invert_resets,
-                       const Span<float3> persistent_base_positions,
-                       const Span<float3> persistent_base_normals,
+                       const bool use_base,
+                       const Span<float3> base_positions,
+                       const Span<float3> base_normals,
                        bke::pbvh::GridsNode &node,
                        LocalData &tls,
                        MutableSpan<float> layer_displacement_factor)
@@ -274,8 +275,9 @@ static void calc_grids(const Depsgraph &depsgraph,
   const MutableSpan<float> displacement_factors = gather_data_grids(
       subdiv_ccg, layer_displacement_factor.as_span(), grids, tls.displacement_factors);
 
-  if (use_persistent_base) {
-    if (invert_resets && cache.toggle_settings.invert) {
+  if (use_base) {
+    /* See #calc_faces for why only the persistent base reacts to the invert toggle. */
+    if ((brush.flag & BRUSH_PERSISTENT) && cache.toggle_settings.invert) {
       reset_displacement_factors(displacement_factors, tls.factors, cache.bstrength);
     }
     else {
@@ -289,8 +291,8 @@ static void calc_grids(const Depsgraph &depsgraph,
     tls.translations.resize(positions.size());
     const MutableSpan<float3> translations = tls.translations;
     calc_translations(
-        gather_data_grids(subdiv_ccg, persistent_base_positions, grids, tls.persistent_positions),
-        gather_data_grids(subdiv_ccg, persistent_base_normals, grids, tls.persistent_normals),
+        gather_data_grids(subdiv_ccg, base_positions, grids, tls.persistent_positions),
+        gather_data_grids(subdiv_ccg, base_normals, grids, tls.persistent_normals),
         positions,
         displacement_factors,
         tls.factors,
@@ -388,6 +390,56 @@ static void calc_bmesh(const Depsgraph &depsgraph,
 
 }  // namespace layer_cc
 
+void layer_uniform_base_update(const Depsgraph &depsgraph, const Brush &brush, Object &object)
+{
+  if (brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_LAYER) {
+    return;
+  }
+
+  SculptSession &ss = *object.runtime->sculpt_session;
+
+  /* The persistent base is a reference of its own and takes precedence, so the option is inactive
+   * while it is enabled. Releasing the data in every case where it is unused also gives the user a
+   * way to capture a new reference: sculpt with the option disabled, then enable it again. */
+  if ((brush.flag2 & BRUSH_LAYER_UNIFORM_DEPTH) == 0 || (brush.flag & BRUSH_PERSISTENT) != 0) {
+    ss.layer_uniform_base = {};
+    return;
+  }
+
+  switch (bke::object::pbvh_get(object)->type()) {
+    case bke::pbvh::Type::Mesh: {
+      const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, object);
+      const int positions_num = int(positions.size());
+      if (ss.layer_uniform_base.elements_num == positions_num) {
+        break;
+      }
+      ss.layer_uniform_base.positions = positions;
+      ss.layer_uniform_base.normals = bke::pbvh::vert_normals_eval(depsgraph, object);
+      ss.layer_uniform_base.displacement = Array<float>(positions_num, 0.0f);
+      ss.layer_uniform_base.elements_num = positions_num;
+      break;
+    }
+    case bke::pbvh::Type::Grids: {
+      const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+      const int positions_num = int(subdiv_ccg.positions.size());
+      if (ss.layer_uniform_base.elements_num == positions_num) {
+        break;
+      }
+      ss.layer_uniform_base.positions = subdiv_ccg.positions;
+      ss.layer_uniform_base.normals = subdiv_ccg.normals;
+      ss.layer_uniform_base.displacement = Array<float>(positions_num, 0.0f);
+      ss.layer_uniform_base.elements_num = positions_num;
+      break;
+    }
+    case bke::pbvh::Type::BMesh: {
+      /* Dynamic topology changes the vertex set between strokes, so a stored reference surface
+       * cannot be matched back to the geometry. */
+      ss.layer_uniform_base = {};
+      break;
+    }
+  }
+}
+
 void do_layer_brush(const Depsgraph &depsgraph,
                     const Sculpt &sd,
                     Object &object,
@@ -398,34 +450,18 @@ void do_layer_brush(const Depsgraph &depsgraph,
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
 
+  /* The reference surface for this option is captured once per stroke in
+   * #layer_uniform_base_update. The persistent base takes precedence: both are a fixed reference,
+   * but only the persistent one is stored with the mesh and reacts to the invert toggle. */
+  const bool use_uniform_depth = (brush.flag2 & BRUSH_LAYER_UNIFORM_DEPTH) != 0 &&
+                                 (brush.flag & BRUSH_PERSISTENT) == 0;
+
   threading::EnumerableThreadSpecific<LocalData> all_tls;
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
       Mesh &mesh = *id_cast<Mesh *>(object.data);
-
-      const bool uniform_depth = brush.flag2 & BRUSH_LAYER_UNIFORM_DEPTH;
-      if (uniform_depth) {
-        /* Lazily capture a persistent base from the current surface so that every stroke is
-         * measured against the same reference and reaches an even depth, instead of stacking
-         * on top of the result of previous strokes.
-         *
-         * This must run before #PositionDeformData is constructed. That constructor calls
-         * #vert_positions_for_write and keeps a raw writable span of the mesh positions. The
-         * captured base (".sculpt_persistent_co") shares that position buffer through
-         * copy-on-write, so it has to be created while the buffer is still shared: taking the
-         * writable span first would let brush deformations mutate the base in lock-step with the
-         * surface during the first stroke, pushing displacement far beyond the set height. */
-        persistent_base_ensure(depsgraph, object, /*reset=*/false);
-      }
-
       const PositionDeformData position_data(depsgraph, object);
       const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, object);
-
-      /* The manual persistent base (Set Persistent Base) uses the Ctrl/invert toggle to erase
-       * layers back to the base. The automatic uniform-depth base keeps the regular layer
-       * behavior where Ctrl simply carves in the opposite direction. */
-      const bool invert_resets = brush.flag & BRUSH_PERSISTENT;
-      const bool use_persistent = (brush.flag & BRUSH_PERSISTENT) || uniform_depth;
 
       const MeshAttributeData attribute_data(mesh);
       bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
@@ -435,16 +471,30 @@ void do_layer_brush(const Depsgraph &depsgraph,
                                                                       bke::AttrDomain::Point);
 
       bke::SpanAttributeWriter<float> persistent_disp_attr;
-      bool use_persistent_base = false;
+      bool use_base = false;
+      Span<float3> base_positions;
+      Span<float3> base_normals;
       MutableSpan<float> displacement;
-      if (use_persistent) {
+      if (brush.flag & BRUSH_PERSISTENT) {
         if (!persistent_position.is_empty() && !persistent_normal.is_empty()) {
           persistent_disp_attr = attributes.lookup_or_add_for_write_span<float>(
               ".sculpt_persistent_disp", bke::AttrDomain::Point);
           if (persistent_disp_attr) {
-            use_persistent_base = true;
+            use_base = true;
+            base_positions = persistent_position;
+            base_normals = persistent_normal;
             displacement = persistent_disp_attr.span;
           }
+        }
+      }
+      else if (use_uniform_depth) {
+        if (const std::optional<LayerUniformBaseData> base = ss.layer_uniform_base_data(
+                int(position_data.eval.size())))
+        {
+          use_base = true;
+          base_positions = base->positions;
+          base_normals = base->normals;
+          displacement = base->displacements;
         }
       }
 
@@ -464,10 +514,9 @@ void do_layer_brush(const Depsgraph &depsgraph,
                        brush,
                        attribute_data,
                        vert_normals,
-                       use_persistent_base,
-                       invert_resets,
-                       persistent_position,
-                       persistent_normal,
+                       use_base,
+                       base_positions,
+                       base_normals,
                        object,
                        nodes[i],
                        tls,
@@ -483,28 +532,29 @@ void do_layer_brush(const Depsgraph &depsgraph,
       SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
       MutableSpan<float3> positions = subdiv_ccg.positions;
 
-      const bool uniform_depth = brush.flag2 & BRUSH_LAYER_UNIFORM_DEPTH;
-      if (uniform_depth) {
-        /* See the mesh case: capture a stable reference on first use for even-depth strokes. */
-        persistent_base_ensure(depsgraph, object, /*reset=*/false);
-      }
-      const bool invert_resets = brush.flag & BRUSH_PERSISTENT;
-      const bool use_persistent = (brush.flag & BRUSH_PERSISTENT) || uniform_depth;
-
       const std::optional<PersistentMultiresData> persistent_multires_data =
           ss.persistent_multires_data();
 
-      Span<float3> persistent_position;
-      Span<float3> persistent_normal;
-
-      bool use_persistent_base = false;
+      bool use_base = false;
+      Span<float3> base_positions;
+      Span<float3> base_normals;
       MutableSpan<float> displacement;
-      if (use_persistent) {
+      if (brush.flag & BRUSH_PERSISTENT) {
         if (persistent_multires_data) {
-          use_persistent_base = true;
-          persistent_position = persistent_multires_data->positions;
-          persistent_normal = persistent_multires_data->normals;
+          use_base = true;
+          base_positions = persistent_multires_data->positions;
+          base_normals = persistent_multires_data->normals;
           displacement = persistent_multires_data->displacements;
+        }
+      }
+      else if (use_uniform_depth) {
+        if (const std::optional<LayerUniformBaseData> base = ss.layer_uniform_base_data(
+                int(positions.size())))
+        {
+          use_base = true;
+          base_positions = base->positions;
+          base_normals = base->normals;
+          displacement = base->displacements;
         }
       }
 
@@ -523,10 +573,9 @@ void do_layer_brush(const Depsgraph &depsgraph,
                        sd,
                        brush,
                        object,
-                       use_persistent_base,
-                       invert_resets,
-                       persistent_position,
-                       persistent_normal,
+                       use_base,
+                       base_positions,
+                       base_normals,
                        nodes[i],
                        tls,
                        displacement);

@@ -82,63 +82,6 @@ namespace blender::ed::sculpt_paint {
 /** \name Set Persistent Base Operator
  * \{ */
 
-void persistent_base_ensure(const Depsgraph &depsgraph, Object &object, const bool reset)
-{
-  SculptSession *ss = object.runtime->sculpt_session;
-  if (!ss) {
-    return;
-  }
-
-  switch (bke::object::pbvh_get(object)->type()) {
-    case bke::pbvh::Type::Mesh: {
-      Mesh &mesh = *id_cast<Mesh *>(object.data);
-      bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
-      if (!reset && attributes.contains(".sculpt_persistent_co")) {
-        return;
-      }
-      attributes.remove(".sculpt_persistent_co");
-      attributes.remove(".sculpt_persistent_no");
-      attributes.remove(".sculpt_persistent_disp");
-
-      const bke::AttributeReader positions = attributes.lookup<float3>("position");
-      if (positions.sharing_info && positions.varray.is_span()) {
-        attributes.add<float3>(
-            ".sculpt_persistent_co",
-            bke::AttrDomain::Point,
-            bke::AttributeInitShared(positions.varray.get_internal_span().data(),
-                                     *positions.sharing_info));
-      }
-      else {
-        attributes.add<float3>(".sculpt_persistent_co",
-                               bke::AttrDomain::Point,
-                               bke::AttributeInitVArray(positions.varray));
-      }
-
-      const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, object);
-      attributes.add<float3>(".sculpt_persistent_no",
-                             bke::AttrDomain::Point,
-                             bke::AttributeInitVArray(VArray<float3>::from_span(vert_normals)));
-      break;
-    }
-    case bke::pbvh::Type::Grids: {
-      if (!reset && ss->persistent_multires_data().has_value()) {
-        return;
-      }
-      const SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
-      ss->persistent.sculpt_persistent_co = subdiv_ccg.positions;
-      ss->persistent.sculpt_persistent_no = subdiv_ccg.normals;
-      ss->persistent.sculpt_persistent_disp = Array<float>(subdiv_ccg.positions.size(), 0.0f);
-      ss->persistent.grid_size = subdiv_ccg.grid_size;
-      ss->persistent.grids_num = subdiv_ccg.grids_num;
-      break;
-    }
-    case bke::pbvh::Type::BMesh: {
-      /* Persistent base is not supported for dynamic topology. */
-      break;
-    }
-  }
-}
-
 static wmOperatorStatus set_persistent_base_exec(bContext *C, wmOperator * /*op*/)
 {
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
@@ -157,11 +100,47 @@ static wmOperatorStatus set_persistent_base_exec(bContext *C, wmOperator * /*op*
 
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
 
-  if (bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::BMesh) {
-    return OPERATOR_CANCELLED;
-  }
+  switch (bke::object::pbvh_get(ob)->type()) {
+    case bke::pbvh::Type::Mesh: {
+      Mesh &mesh = *id_cast<Mesh *>(ob.data);
+      bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
+      attributes.remove(".sculpt_persistent_co");
+      attributes.remove(".sculpt_persistent_no");
+      attributes.remove(".sculpt_persistent_disp");
 
-  persistent_base_ensure(*depsgraph, ob, /*reset=*/true);
+      const bke::AttributeReader positions = attributes.lookup<float3>("position");
+      if (positions.sharing_info && positions.varray.is_span()) {
+        attributes.add<float3>(
+            ".sculpt_persistent_co",
+            bke::AttrDomain::Point,
+            bke::AttributeInitShared(positions.varray.get_internal_span().data(),
+                                     *positions.sharing_info));
+      }
+      else {
+        attributes.add<float3>(".sculpt_persistent_co",
+                               bke::AttrDomain::Point,
+                               bke::AttributeInitVArray(positions.varray));
+      }
+
+      const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(*depsgraph, ob);
+      attributes.add<float3>(".sculpt_persistent_no",
+                             bke::AttrDomain::Point,
+                             bke::AttributeInitVArray(VArray<float3>::from_span(vert_normals)));
+      break;
+    }
+    case bke::pbvh::Type::Grids: {
+      const SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
+      ss->persistent.sculpt_persistent_co = subdiv_ccg.positions;
+      ss->persistent.sculpt_persistent_no = subdiv_ccg.normals;
+      ss->persistent.sculpt_persistent_disp = Array<float>(subdiv_ccg.positions.size(), 0.0f);
+      ss->persistent.grid_size = subdiv_ccg.grid_size;
+      ss->persistent.grids_num = subdiv_ccg.grids_num;
+      break;
+    }
+    case bke::pbvh::Type::BMesh: {
+      return OPERATOR_CANCELLED;
+    }
+  }
 
   return OPERATOR_FINISHED;
 }

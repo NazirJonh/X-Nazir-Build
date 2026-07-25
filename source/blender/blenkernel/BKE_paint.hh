@@ -379,6 +379,13 @@ struct PersistentMultiresData {
   MutableSpan<float> displacements;
 };
 
+/* Helper return struct for the layer brush's uniform depth reference surface. */
+struct LayerUniformBaseData {
+  Span<float3> positions;
+  Span<float3> normals;
+  MutableSpan<float> displacements;
+};
+
 struct SculptSession : NonCopyable, NonMovable {
   /* The current active shapekey for the mesh. Only non-null for Type::Mesh */
   KeyBlock *shapekey_active = nullptr;
@@ -466,6 +473,20 @@ struct SculptSession : NonCopyable, NonMovable {
     int grids_num = -1;
     int grid_size = -1;
   } persistent;
+
+  /* Reference surface for the layer brush's "Uniform Depth" option, shared by all geometry types
+   * that support it. Unlike #persistent this is never written to the mesh: it only has to stay
+   * stable across the strokes of a sculpt session, so keeping it out of the file also keeps it
+   * out of undo steps and away from the persistent base used by "Set Persistent Base". */
+  struct {
+    Array<float3> positions;
+    Array<float3> normals;
+    Array<float> displacement;
+
+    /* The number of elements at the time of capture, used to detect that the topology changed
+     * since and the stored data can no longer be used. */
+    int elements_num = -1;
+  } layer_uniform_base;
 
   /* Contains information used by tools and brushes that require different logic based on boundary
    * elements. Typically used for anything which needs to consider neighbor values.
@@ -565,6 +586,15 @@ struct SculptSession : NonCopyable, NonMovable {
    * \returns an empty optional if the current data cannot be used
    */
   std::optional<PersistentMultiresData> persistent_multires_data();
+
+  /**
+   * Retrieves the layer brush's uniform depth reference surface.
+   *
+   * \param elements_num: the number of vertices or grid elements the caller expects, used to
+   * reject a base captured before a topology change.
+   * \returns an empty optional if the current data cannot be used.
+   */
+  std::optional<LayerUniformBaseData> layer_uniform_base_data(int elements_num);
 };
 
 void BKE_sculptsession_free(Object *ob);

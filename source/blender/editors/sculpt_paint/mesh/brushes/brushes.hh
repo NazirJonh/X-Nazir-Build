@@ -149,6 +149,17 @@ void do_layer_brush(const Depsgraph &depsgraph,
                     const Sculpt &sd,
                     Object &object,
                     const IndexMask &node_mask);
+/**
+ * Update #SculptSession::layer_uniform_base, the reference surface the layer brush measures
+ * against when the "Uniform Depth" option is enabled. Must be called before the stroke deforms
+ * any positions, so that the whole stroke sequence shares a single snapshot of the surface.
+ *
+ * The base is captured only when it is missing or no longer matches the topology, so it stays
+ * stable across strokes. Passing a brush that does not use the option releases it, which is how
+ * the user gets a new reference: sculpt with the option off, then turn it back on. Dynamic
+ * topology is not supported and is a no-op, since its vertex indices are not stable.
+ */
+void layer_uniform_base_update(const Depsgraph &depsgraph, const Brush &brush, Object &object);
 /** A brush that modifies mask values instead of position. */
 void do_mask_brush(const Depsgraph &depsgraph,
                    const Sculpt &sd,

@@ -5163,6 +5163,10 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, brush_type_is_paint(brush->sculpt_brush_type));
 
+  /* The layer brush measures its uniform depth against a snapshot of the surface, which has to be
+   * taken before the stroke starts deforming positions. */
+  brushes::layer_uniform_base_update(*depsgraph, *brush, ob);
+
   ED_paint_brush_type_update_sticky_shading_color(C, &ob);
 }
 

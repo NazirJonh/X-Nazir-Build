@@ -866,18 +866,6 @@ void orig_position_data_gather_bmesh(const BMLog &bm_log,
                                      MutableSpan<float3> positions,
                                      MutableSpan<float3> normals);
 
-/**
- * Ensure the "persistent base" (a fixed snapshot of the surface used as the reference for the
- * layer and cloth brushes) exists. For meshes this populates the `.sculpt_persistent_co` and
- * `.sculpt_persistent_no` attributes; for multires it fills #SculptSession::persistent.
- *
- * \param reset: When true the base is always re-captured from the current geometry (used by the
- * "Set Persistent Base" operator). When false the base is captured only if it does not already
- * exist, leaving stored data untouched (used to lazily initialize the layer brush's
- * uniform-depth base). Dynamic topology does not support a persistent base and is a no-op.
- */
-void persistent_base_ensure(const Depsgraph &depsgraph, Object &object, bool reset);
-
 std::optional<Span<float4>> orig_color_data_lookup_mesh(const Object &object,
                                                         const bke::pbvh::MeshNode &node);
 inline Span<float4> orig_color_data_get_mesh(const Object &object, const bke::pbvh::MeshNode &node)

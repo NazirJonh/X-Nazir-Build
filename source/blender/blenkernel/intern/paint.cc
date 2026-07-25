@@ -2237,6 +2237,16 @@ std::optional<PersistentMultiresData> SculptSession::persistent_multires_data()
                                 persistent.sculpt_persistent_disp};
 }
 
+std::optional<LayerUniformBaseData> SculptSession::layer_uniform_base_data(const int elements_num)
+{
+  if (layer_uniform_base.elements_num != elements_num) {
+    return std::nullopt;
+  }
+
+  return LayerUniformBaseData{
+      layer_uniform_base.positions, layer_uniform_base.normals, layer_uniform_base.displacement};
+}
+
 static MultiresModifierData *sculpt_multires_modifier_get(const Scene *scene,
                                                           Object *ob,
                                                           const bool auto_create_mdisps)

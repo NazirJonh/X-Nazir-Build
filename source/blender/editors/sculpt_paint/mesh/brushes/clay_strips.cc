@@ -154,10 +154,20 @@ static void calc_faces(const Depsgraph &depsgraph,
 
   const Span<int> verts = node.verts();
 
+  /* Base view: compute the target against the un-layered base (see #layers::stroke_base_view). */
+  Vector<float3> base_view_storage;
+  const Span<float3> base_view_positions = layers::base_view_gather_mesh(
+      object, verts, position_data.eval, base_view_storage);
+
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
-  filter_region_clip_factors(ss, position_data.eval, verts, factors);
+  if (base_view_positions.is_empty()) {
+    filter_region_clip_factors(ss, position_data.eval, verts, factors);
+  }
+  else {
+    filter_region_clip_factors(ss, base_view_positions, factors);
+  }
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
   }
@@ -167,7 +177,12 @@ static void calc_faces(const Depsgraph &depsgraph,
   MutableSpan<float2> xy_positions = tls.xy_positions;
   MutableSpan<float> z_positions = tls.z_positions;
 
-  calc_local_positions(position_data.eval, verts, mat, xy_positions, z_positions);
+  if (base_view_positions.is_empty()) {
+    calc_local_positions(position_data.eval, verts, mat, xy_positions, z_positions);
+  }
+  else {
+    calc_local_positions(base_view_positions, mat, xy_positions, z_positions);
+  }
   apply_z_axis_factors(z_positions, factors);
   apply_plane_trim_factors(brush, z_positions, factors);
 
@@ -209,10 +224,15 @@ static void calc_grids(const Depsgraph &depsgraph,
   const Span<int> grids = node.grids();
   const MutableSpan positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
 
+  /* Base view: compute the target against the un-layered base (see #layers::stroke_base_view). */
+  Vector<float3> base_view_storage;
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, positions, base_view_storage);
+
   tls.factors.resize(positions.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
-  filter_region_clip_factors(ss, positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, subdiv_ccg, grids, factors);
   }
@@ -222,7 +242,7 @@ static void calc_grids(const Depsgraph &depsgraph,
   MutableSpan<float2> xy_positions = tls.xy_positions;
   MutableSpan<float> z_positions = tls.z_positions;
 
-  calc_local_positions(positions, mat, xy_positions, z_positions);
+  calc_local_positions(calc_positions, mat, xy_positions, z_positions);
   apply_z_axis_factors(z_positions, factors);
   apply_plane_trim_factors(brush, z_positions, factors);
 

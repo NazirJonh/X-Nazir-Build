@@ -1477,6 +1477,13 @@ enum eSculptFlags : int {
   SCULPT_DYNTOPO_DETAIL_BRUSH = (1 << 14),
   /* unused = (1 << 15), */
   SCULPT_DYNTOPO_DETAIL_MANUAL = (1 << 16),
+  /**
+   * Tint the surface where the active sculpt layer holds recorded displacement.
+   *
+   * A new bit in an existing field, so a file predating it reads back unset — which is the correct
+   * default for a new overlay and is why no versioning touches this flag.
+   */
+  SCULPT_SHOW_LAYER_PREVIEW = (1 << 17),
 };
 ENUM_OPERATORS(eSculptFlags)
 
@@ -1552,6 +1559,19 @@ struct Sculpt {
   /** For use by operators. */
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve_op = nullptr;
   struct Object *gravity_object = nullptr;
+
+  /**
+   * Layer preview overlay (#SCULPT_SHOW_LAYER_PREVIEW): the displacement at which the tint reaches
+   * full saturation, as a fraction of the mesh bounding-box diagonal, and the blend factor of that
+   * tint.
+   *
+   * Appended at the end rather than grouped with the other floats above: every existing member then
+   * keeps its offset, which is what keeps an object file compiled against the previous layout from
+   * reading this struct at shifted offsets. Two 4-byte floats after an 8-byte pointer leave the
+   * struct 8-byte aligned, so no padding member is needed.
+   */
+  float sculpt_layer_preview_threshold = 0.01f;
+  float sculpt_layer_preview_opacity = 0.75f;
 };
 
 struct CurvesSculpt {

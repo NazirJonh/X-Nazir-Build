@@ -181,6 +181,11 @@ const EnumPropertyItem rna_enum_brush_sculpt_brush_type_items[] = {
      0,
      "Multires Displacement Eraser",
      ""},
+    {SCULPT_BRUSH_TYPE_LAYER_ERASER,
+     "LAYER_ERASER",
+     0,
+     "Erase Sculpt Layer",
+     "Reduce the active sculpt layer's own contribution under the brush, on Mesh or Multires"},
     {SCULPT_BRUSH_TYPE_DISPLACEMENT_SMEAR,
      "DISPLACEMENT_SMEAR",
      0,
@@ -3857,6 +3862,16 @@ static void rna_def_brush(BlenderRNA *brna)
   prop = RNA_def_property(srna, "use_persistent", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_PERSISTENT);
   RNA_def_property_ui_text(prop, "Persistent", "Sculpt on a persistent layer of the mesh");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_layer_uniform_depth", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_LAYER_UNIFORM_DEPTH);
+  RNA_def_property_ui_text(
+      prop,
+      "Uniform Depth",
+      "Measure each stroke from a snapshot of the surface so overlapping strokes reach the same "
+      "depth instead of stacking on top of each other. The snapshot is taken when sculpting with "
+      "this option enabled and is kept until the option is disabled or sculpt mode is left");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "use_bidirectional", PROP_BOOLEAN, PROP_NONE);

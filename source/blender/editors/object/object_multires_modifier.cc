@@ -17,6 +17,7 @@
 #include "BKE_main.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
 
@@ -68,6 +69,60 @@ static Vector<Object *> multires_level_action_followers(bContext *C,
   return multires_totlvl_matching_group(group, active_ob, reference_totlvl);
 }
 
+/* Refuse topology/resolution-changing multires operations while a sculpt stroke is in progress.
+ * Switching resolution mid-stroke silently drops the stroke's recorded sculpt-layer delta, and
+ * freeing the PBVH mid-stroke would corrupt the active brush. Returns true if the caller should
+ * abort (with a report). */
+static bool multires_stroke_in_progress_abort(wmOperator *op, Object *ob)
+{
+  if (!ob || !(ob->mode & OB_MODE_SCULPT) || !ob->runtime->sculpt_session) {
+    return false;
+  }
+  if (ob->runtime->sculpt_session->cache == nullptr) {
+    return false;
+  }
+  BKE_report(op->reports,
+             RPT_ERROR,
+             "Cannot change multires resolution while a sculpt stroke is in progress");
+  return true;
+}
+
+/* Refuse operations that redefine the multires base or its tangent frames while grid-domain
+ * sculpt layers exist: the layers store tangent displacement relative to the current base limit
+ * surface, so Apply Base / Unsubdivide / Reshape would silently distort every layer. The user
+ * bakes the layers first to keep the combined shape. Returns true if the caller should abort. */
+static bool multires_sculpt_layers_abort(wmOperator *op, Object *ob)
+{
+  if (!ob || ob->type != OB_MESH || !ob->data) {
+    return false;
+  }
+  if (!BKE_multires_mesh_has_grid_sculpt_layers(*id_cast<const Mesh *>(ob->data))) {
+    return false;
+  }
+  BKE_report(op->reports,
+             RPT_ERROR,
+             "Cannot perform this operation while grid sculpt layers exist: bake layers first");
+  return true;
+}
+
+/* Store an open sculpt-layer weight-mask edit before the subdivision level moves under it. Unlike
+ * the two aborts above this does not refuse: the level change is a legitimate thing to do with
+ * layers present (#multires_set_tot_level resamples both the layer coefficients and their masks),
+ * and only the *session* cannot survive it — its weights live in the #SubdivCCG the change rebuilds.
+ * Reported because the user did not ask for the edit to end. */
+static void multires_finish_mask_edit(wmOperator *op, Object *ob)
+{
+  if (!ob || ob->type != OB_MESH || !ob->data) {
+    return;
+  }
+  if (blender::ed::sculpt_paint::layers::finish_mask_edit(*ob)) {
+    BKE_report(op->reports,
+               RPT_INFO,
+               "Applied the sculpt layer weight mask being edited: changing the subdivision level "
+               "cannot preserve an open edit");
+  }
+}
+
 static wmOperatorStatus multires_higher_levels_delete_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
@@ -79,6 +134,11 @@ static wmOperatorStatus multires_higher_levels_delete_exec(bContext *C, wmOperat
   if (!mmd) {
     return OPERATOR_CANCELLED;
   }
+  if (multires_stroke_in_progress_abort(op, ob)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* After the refusals, so a cancelled operator never ends an edit the user is still working on. */
+  multires_finish_mask_edit(op, ob);
 
   const int old_totlvl = mmd->totlvl;
   const Vector<Object *> followers = multires_level_action_followers(C, ob, old_totlvl);
@@ -163,6 +223,11 @@ static wmOperatorStatus multires_subdivide_exec(bContext *C, wmOperator *op)
   if (!mmd) {
     return OPERATOR_CANCELLED;
   }
+  if (multires_stroke_in_progress_abort(op, object)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* After the refusals, so a cancelled operator never ends an edit the user is still working on. */
+  multires_finish_mask_edit(op, object);
 
   const MultiresSubdivideModeType subdivide_mode = MultiresSubdivideModeType(
       RNA_enum_get(op->ptr, "mode"));
@@ -245,6 +310,10 @@ static wmOperatorStatus multires_reshape_exec(bContext *C, wmOperator *op)
       edit_modifier_property_get(op, ob, eModifierType_Multires));
 
   if (!mmd) {
+    return OPERATOR_CANCELLED;
+  }
+
+  if (multires_sculpt_layers_abort(op, ob)) {
     return OPERATOR_CANCELLED;
   }
 
@@ -449,6 +518,9 @@ static wmOperatorStatus multires_base_apply_exec(bContext *C, wmOperator *op)
   if (!mmd) {
     return OPERATOR_CANCELLED;
   }
+  if (multires_sculpt_layers_abort(op, object)) {
+    return OPERATOR_CANCELLED;
+  }
 
   const ApplyBaseMode mode = RNA_boolean_get(op->ptr, "apply_heuristic") ?
                                  ApplyBaseMode::ForSubdivision :
@@ -513,6 +585,9 @@ static wmOperatorStatus multires_unsubdivide_exec(bContext *C, wmOperator *op)
       edit_modifier_property_get(op, object, eModifierType_Multires));
 
   if (!mmd) {
+    return OPERATOR_CANCELLED;
+  }
+  if (multires_sculpt_layers_abort(op, object)) {
     return OPERATOR_CANCELLED;
   }
 
@@ -598,6 +673,9 @@ static wmOperatorStatus multires_rebuild_subdiv_exec(bContext *C, wmOperator *op
   if (!mmd) {
     return OPERATOR_CANCELLED;
   }
+  if (multires_sculpt_layers_abort(op, object)) {
+    return OPERATOR_CANCELLED;
+  }
 
   MultiresUnsubdivideInfo info = {};
   int new_levels = multiresModifier_rebuild_subdiv(depsgraph, object, mmd, INT_MAX, false, info);
@@ -676,15 +754,26 @@ static wmOperatorStatus multires_level_sync_exec(bContext *C, wmOperator *op)
   const int reference_value = multires_level_get(mmd, level_type);
 
   const Vector<Object *> candidates = multires_group_objects(bmain, scene, view_layer, v3d);
+  Vector<Object *> skipped;
   const Vector<Object *> changed = multires_level_group_sync(
-      candidates, ob, level_type, reference_value, reference_value, false);
+      candidates, ob, level_type, reference_value, reference_value, false, &skipped);
 
   for (Object *changed_ob : changed) {
     DEG_id_tag_update(&changed_ob->id, ID_RECALC_GEOMETRY);
     WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, changed_ob);
   }
 
-  if (changed.is_empty()) {
+  for (const Object *skipped_ob : skipped) {
+    BKE_reportf(op->reports,
+                RPT_WARNING,
+                "Sync Subdivision Level: skipping \"%s\" (finish the sculpt stroke or the sculpt "
+                "layer weight mask edit on it first)",
+                skipped_ob->id.name + 2);
+  }
+
+  /* Only claim a match when nothing was held back: a skipped object is still out of sync, and
+   * saying otherwise would send the user away from the one thing that fixes it. */
+  if (changed.is_empty() && skipped.is_empty()) {
     BKE_report(op->reports, RPT_INFO, "All selected objects already match");
   }
 

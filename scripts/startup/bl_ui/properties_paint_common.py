@@ -905,6 +905,14 @@ def brush_settings(layout, context, brush, popover=False):
         # height
         if capabilities.has_height:
             layout.prop(brush, "height", slider=True, text="Height")
+            # The reference surface cannot be stored for Dyntopo, and the persistent base is a
+            # reference of its own that takes precedence.
+            col = layout.column()
+            if brush.use_persistent or (
+                    context.sculpt_object and context.sculpt_object.use_dynamic_topology_sculpting
+            ):
+                col.enabled = False
+            col.prop(brush, "use_layer_uniform_depth")
 
         if capabilities.has_plane_height:
             layout.prop(brush, "plane_height", slider=True, text="Height")

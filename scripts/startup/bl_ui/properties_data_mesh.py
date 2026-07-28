@@ -262,6 +262,247 @@ class DATA_PT_vertex_groups(MeshButtonsPanel, Panel):
         draw_attribute_warnings(context, layout, None)
 
 
+class MESH_MT_sculpt_layer_mask_menu(Menu):
+    bl_label = "Mask Sculpt Layer"
+
+    def draw(self, context):
+        layout = self.layout
+        # Weight mask of the active layer. Folders get the same entries from their own row's context
+        # menu, which is drawn in C++: nothing in the data names an "active" folder, so a folder can
+        # only ever be addressed by the uid its row knows.
+        active = context.object.data.sculpt_layers_active
+
+        if active is None or not active.has_mask:
+            col = layout.column()
+            col.enabled = active is not None
+            col.operator("sculpt.layer_mask_add", text="Add Mask", icon='MOD_MASK')
+            return
+
+        if active.mask_edit_active:
+            layout.operator("sculpt.layer_mask_edit_toggle", text="Finish Mask Edit",
+                            icon='CLIPUV_DEHLT')
+        else:
+            layout.operator("sculpt.layer_mask_edit_toggle", text="Edit Mask", icon='CLIPUV_HLT')
+        # Same checkbox pair the layer row's own toggle uses, so both read as one state.
+        if active.mask_enabled:
+            layout.operator("sculpt.layer_mask_toggle", text="Disable Mask", icon='CHECKBOX_HLT')
+        else:
+            layout.operator("sculpt.layer_mask_toggle", text="Enable Mask", icon='CHECKBOX_DEHLT')
+        layout.separator()
+        layout.operator("sculpt.layer_mask_invert", text="Invert Mask", icon='ARROW_LEFTRIGHT')
+        layout.operator("sculpt.layer_mask_clear", text="Clear Mask")
+        layout.operator("sculpt.layer_mask_fill", text="Fill Mask")
+        layout.separator()
+        # Layers only, so it is absent from the folder menu drawn in C++: a folder has no data
+        # of its own to fold the weights into, and the operator refuses one.
+        layout.operator("sculpt.layer_mask_apply", text="Apply Mask", icon='CHECKMARK')
+        layout.operator("sculpt.layer_mask_remove", text="Remove Mask", icon='X')
+
+
+class MESH_MT_sculpt_layer_context_menu(Menu):
+    bl_label = "Sculpt Layer Specials"
+
+    def draw(self, context):
+        layout = self.layout
+        ob = context.object
+        mesh = ob.data
+        has_layers = len(mesh.sculpt_layers) > 0
+        has_keys = mesh.shape_keys is not None
+        has_multires = any(mod.type == 'MULTIRES' for mod in ob.modifiers)
+
+        layout.operator("sculpt.layer_duplicate", icon='DUPLICATE')
+        layout.separator()
+        layout.operator("sculpt.layer_clear")
+        layout.operator("sculpt.layer_invert")
+        layout.separator()
+        active = mesh.sculpt_layers_active
+        col = layout.column()
+        col.enabled = active is not None and any(
+            layer != active and layer.select for layer in mesh.sculpt_layers
+        )
+        col.operator("sculpt.layer_merge_selected", text="Merge Selected Into Active")
+        layout.separator()
+        layout.operator("sculpt.layer_mask_isolate", text="Isolate by Mask")
+        layout.separator()
+        col = layout.column()
+        col.enabled = active is not None
+        col.menu("MESH_MT_sculpt_layer_mask_menu", text="Mask Sculpt Layer", icon='MOD_MASK')
+        # Only reachable when the topology changed behind the layers' back; the stored displacement
+        # is unmappable either way, so both entries only choose whether the layer itself survives.
+        # Hidden rather than greyed out: with valid data they are not a choice the user has, and
+        # their appearance is itself the warning that something went stale.
+        if any(not layer.is_valid for layer in mesh.sculpt_layers):
+            layout.separator()
+            props = layout.operator("sculpt.layer_validate", text="Reset Stale Layers", icon='ERROR')
+            props.action = 'CLEAR'
+            props = layout.operator("sculpt.layer_validate", text="Remove Stale Layers", icon='ERROR')
+            props.action = 'REMOVE'
+        layout.separator()
+        # Dial-able, non-destructive: no keys yet bootstraps Basis + Sculpt Layers, an existing key
+        # gets one more dial-able block (the operator delegates to sculpt.layer_bake). Meaningless
+        # on Multires, which has no vertex shape keys.
+        col = layout.column()
+        col.enabled = has_layers and not has_multires
+        col.operator(
+            "sculpt.layer_bake_to_shape_key",
+            text="Bake Sculpt Layers to Shape Keys",
+            icon='SHAPEKEY_DATA',
+        )
+        # Permanent fold into the base geometry (or Multires displacement). Only meaningful when
+        # there is no shape key to keep the result dial-able against, or on Multires.
+        col = layout.column()
+        col.enabled = has_layers and (has_multires or not has_keys)
+        col.operator("sculpt.layer_bake", text="Bake Sculpt Layers", icon='CHECKMARK')
+
+        # ToolSettings.sculpt is allocated on the first entry into Sculpt Mode, and this menu is
+        # drawn from the Properties editor in every mode, so it is legitimately None here.
+        sculpt = context.tool_settings.sculpt
+        if sculpt:
+            layout.separator()
+            layout.prop(sculpt, "show_layer_preview")
+            col = layout.column(align=True)
+            col.enabled = sculpt.show_layer_preview
+            col.prop(sculpt, "layer_preview_threshold", text="Threshold")
+            col.prop(sculpt, "layer_preview_opacity", text="Opacity")
+
+
+class SCULPT_PT_layer_editmode_confirm(Panel):
+    # Popped up (as a popover, not a plain dropdown menu) by OBJECT_OT_editmode_toggle
+    # (object_edit.cc) when entering Edit Mode on a mesh that still has sculpt layers: Edit Mode
+    # topology changes can't be tracked by layer data.
+    #
+    # A popover is required (rather than a Menu) so the "Don't Show This Again" checkbox below
+    # can be toggled without immediately closing the popup: only widgets added through
+    # UILayout.template_popup_confirm() are wired to close a popover on click, plain
+    # UILayout.prop() checkboxes are not.
+    bl_space_type = 'VIEW_3D'  # dummy, only ever invoked as a popover
+    bl_region_type = 'WINDOW'
+    bl_label = "Sculpt Layers Present"
+    bl_ui_units_x = 14
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Entering Edit Mode can change the topology sculpt layers depend on.")
+        layout.separator()
+
+        props = layout.template_popup_confirm(
+            "object.editmode_toggle", text="Continue Editing", icon='EDITMODE_HLT', cancel_text="")
+        props.sculpt_layers_bake_confirmed = True
+
+        layout.template_popup_confirm(
+            "sculpt.layer_bake_and_editmode_enter", text="Bake All Layers", icon='CHECKMARK',
+            cancel_text="")
+
+        layout.template_popup_confirm("", text="", cancel_text="Cancel")
+
+        # Separated from the choices above so it reads as "remember my answer", not a fourth
+        # action of its own.
+        layout.separator()
+        layout.prop(
+            context.window_manager,
+            "sculpt_layers_hide_editmode_warning",
+            text="Don't Show This Again This Session",
+        )
+
+
+class DATA_PT_sculpt_layers(MeshButtonsPanel, Panel):
+    bl_label = "Sculpt Layers"
+    bl_options = {'DEFAULT_CLOSED'}
+    COMPAT_ENGINES = {
+        'BLENDER_RENDER',
+        'BLENDER_EEVEE',
+        'BLENDER_WORKBENCH',
+    }
+
+    @classmethod
+    def poll(cls, context):
+        engine = context.engine
+        obj = context.object
+        return (obj and obj.type == 'MESH' and (engine in cls.COMPAT_ENGINES))
+
+    def draw(self, context):
+        layout = self.layout
+
+        ob = context.object
+        mesh = ob.data
+
+        row = layout.row()
+        row.template_sculpt_layer_tree()
+
+        col = row.column(align=True)
+        col.operator("sculpt.layer_add", icon='ADD', text="")
+        col.operator("sculpt.layer_group_add", icon='NEWFOLDER', text="")
+        col.separator()
+        col.operator("sculpt.layer_remove", icon='REMOVE', text="")
+        col.separator()
+        col.menu("MESH_MT_sculpt_layer_context_menu", icon='DOWNARROW_HLT', text="")
+        col.separator()
+
+        active = mesh.sculpt_layers_active
+        # Move acts on the active layer alone, so it stays disabled while a multi-layer selection
+        # is being built for the merge entries: only one row can be reordered at a time.
+        sub = col.column(align=True)
+        sub.enabled = active is not None and not any(
+            layer != active and layer.select for layer in mesh.sculpt_layers
+        )
+        sub.operator("sculpt.layer_move", icon='TRIA_UP', text="").direction = 'UP'
+        sub.operator("sculpt.layer_move", icon='TRIA_DOWN', text="").direction = 'DOWN'
+        col.separator()
+        col.operator("sculpt.layer_merge_down", icon='TRIA_DOWN_BAR', text="")
+        col.separator()
+        # The quick panel button is the permanent bake (fold into the base / Multires): the common,
+        # simple action. Baking into a dial-able Shape Key is the more advanced option and lives in
+        # the Specials dropdown instead.
+        col.operator("sculpt.layer_bake", icon='CHECKMARK', text="")
+
+        if active:
+            sub = layout.column()
+            sub.use_property_split = True
+            # In Edit Mode the live mesh positions can't be updated, so changing a vertex-domain
+            # layer's influence would desync the combined surface (see rna_SculptLayer_influence_set).
+            # Disable the control there instead of silently ignoring edits.
+            sub.enabled = ob.mode != 'EDIT'
+            if ob.mode == 'SCULPT':
+                # Drag handle runs the modal operator for smooth interactive updates; the slider
+                # itself stays for precise keyboard entry. Split manually so the label stays
+                # leftmost and the drag handle sits directly before the slider, not before the
+                # label.
+                row = sub.row(align=True)
+                row.use_property_split = False
+                split = row.split(factor=0.4)
+                split.alignment = 'RIGHT'
+                split.label(text="Influence")
+                value_row = split.row(align=True)
+                value_row.operator("sculpt.layer_influence_drag", text="", icon='ARROW_LEFTRIGHT')
+                value_row.prop(active, "influence", text="")
+            else:
+                sub.prop(active, "influence")
+
+        if ob.mode == 'SCULPT':
+            solo = mesh.sculpt_layers_solo_active
+            row = layout.row(align=True)
+            # Solo Base isolates the base shape, so REC has nothing to record into; disable it
+            # rather than let the user think strokes are still being captured into the layer.
+            rec_row = row.row(align=True)
+            rec_row.enabled = not solo
+            rec_row.operator(
+                "sculpt.layer_toggle_rec",
+                text="REC",
+                icon='RECORD_ON',
+                depress=ob.sculpt_layers_rec_active,
+            )
+            # Isolates the base shape for direct sculpting: hides all layers so surface-dependent
+            # brushes (smooth, grab, flatten) cannot bake the layer residue into the base.
+            row.operator(
+                "sculpt.layer_solo_base",
+                text="Solo Base",
+                icon='SOLO_ON' if solo else 'SOLO_OFF',
+                depress=solo,
+            )
+        else:
+            layout.label(text="Enter Sculpt Mode to record layers", icon='INFO')
+
+
 def draw_shape_key_properties(context, layout):
     layout.use_property_split = True
     ob = context.object
@@ -723,12 +964,16 @@ classes = (
     MESH_MT_shape_key_tree_context_menu,
     MESH_MT_color_attribute_context_menu,
     MESH_MT_attribute_context_menu,
+    MESH_MT_sculpt_layer_mask_menu,
+    MESH_MT_sculpt_layer_context_menu,
+    SCULPT_PT_layer_editmode_confirm,
     MESH_UL_vgroups,
     MESH_UL_uvmaps,
     MESH_UL_attributes,
     DATA_PT_context_mesh,
     DATA_PT_vertex_groups,
     DATA_PT_shape_keys,
+    DATA_PT_sculpt_layers,
     DATA_PT_uv_texture,
     DATA_PT_vertex_colors,
     DATA_PT_mesh_attributes,
@@ -740,6 +985,28 @@ classes = (
     MESH_UL_color_attributes,
     MESH_UL_color_attributes_selector,
 )
+
+
+def register_props():
+    from bpy.props import BoolProperty
+    from bpy.types import WindowManager
+
+    # Session-only (not saved to the .blend file): backs the "Don't Show This Again This
+    # Session" checkbox in SCULPT_MT_layer_editmode_confirm, read from
+    # OBJECT_OT_editmode_toggle (object_edit.cc) before popping that menu up.
+    WindowManager.sculpt_layers_hide_editmode_warning = BoolProperty(
+        name="Don't Show Again",
+        description="Don't warn about sculpt layers when entering Edit Mode again this session",
+        default=False,
+        options={'SKIP_SAVE'},
+    )
+
+
+def unregister_props():
+    from bpy.types import WindowManager
+
+    del WindowManager.sculpt_layers_hide_editmode_warning
+
 
 if __name__ == "__main__":  # only for live edit.
     from bpy.utils import register_class

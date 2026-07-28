@@ -47,6 +47,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_report.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph.hh"
@@ -1825,6 +1826,55 @@ static wmOperatorStatus edit_op_exec(bContext *C, wmOperator *op)
       continue;
     }
     BKE_sculpt_update_object_for_edit(&depsgraph, ob, false);
+
+    /* Checked per object, alongside the gates above, rather than aborting the whole operator: the
+     * checks sit after #BKE_sculpt_update_object_for_edit so the session they query is the live
+     * one, and before the undo pushes in #edit_modify_coordinates and #edit_modify_geometry.
+     *
+     * Only the modes that reach geometry are gated: #EditMode::Grow and #EditMode::Shrink rewrite
+     * the `.sculpt_face_set` attribute alone, leaving positions and topology untouched. */
+    if (ELEM(mode, EditMode::FairPositions, EditMode::FairTangency, EditMode::DeleteGeometry)) {
+      /* Fairing deforms the surface outright, outside any brush stroke, so by the time anything
+       * could notice it has already been applied. A session also leaves recording disarmed (see
+       * #mask_edit_enter), so the deformation would land in the base mesh while the user believes
+       * they are painting a mask. See #mask_edit_refuse_deform.
+       *
+       * Passed `nullptr` for `reports` and reported here instead: #mask_edit_refuse_deform's own
+       * message doesn't name the object, and #edit_is_operation_valid's skip just above is silent,
+       * so an unnamed message would be the loudest -- and only -- thing this loop ever reports,
+       * with no way to tell which of several selected objects it was about. */
+      if (layers::mask_edit_refuse_deform(*ob, nullptr)) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Face Set Edit: skipping \"%s\" (weight-mask editing session is open)",
+                    ob->id.name + 2);
+        continue;
+      }
+    }
+    if (mode == EditMode::DeleteGeometry) {
+      /* Deleting faces changes the element count, which leaves every sculpt layer describing a
+       * domain that no longer exists -- the same reason trim and the remesh operators refuse.
+       * Unlike the check in #sculpt_ops.cc no `!ss.bm` gate is needed:
+       * #edit_is_operation_valid above already rejects this mode for anything but a
+       * #bke::pbvh::Type::Mesh.
+       *
+       * Needed in addition to the mask-session check above, not instead of it:
+       * #destructive_edit_check counts *layers* (see #bke::sculpt_layers::layers, which never
+       * collects folders), while a session can be anchored on a folder -- including an empty one.
+       * On a mesh with no layers at all, an empty folder holding a mask therefore passes this bake
+       * check while a session is open, and the changed element count then sends #mask_edit_end
+       * down its destructive branch, which removes the user's own `.sculpt_mask` for good.
+       *
+       * Passed `nullptr` here too, for the same per-object naming reason as above. */
+      if (!layers::destructive_edit_check(*id_cast<const Mesh *>(ob->data), nullptr)) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Face Set Edit: skipping \"%s\" (sculpt layers not baked)",
+                    ob->id.name + 2);
+        continue;
+      }
+    }
+
     objects.append(ob);
   }
 

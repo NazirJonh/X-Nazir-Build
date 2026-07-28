@@ -37,6 +37,9 @@ struct LocalData {
   Vector<float> factors;
   Vector<float> distances;
   Vector<float3> translations;
+  /* Reused per-thread scratch for the base-view-adjusted positions (see #base_view_adjust_*), so a
+   * base edit with visible layers does not malloc a node-sized buffer per node per dab. */
+  Vector<float3> base_view_storage;
 };
 
 struct SculptProjectVector {
@@ -196,6 +199,14 @@ static void calc_faces(const Depsgraph &depsgraph,
   const Span<int> verts = node.verts();
   const MutableSpan positions = gather_data_mesh(position_data.eval, verts, tls.positions);
 
+  /* Base view: compute the surface-shape-dependent inputs (region clip, falloff distances,
+   * pinch/rake/grab offsets) against the un-layered base so a base edit with visible layers does
+   * not bake the layer pattern in (see #layers::stroke_base_view). The brush texture is sampled on
+   * the composed surface instead (see #sculpt_apply_texture). Returns `positions` unchanged when
+   * the base view is inactive; the translations still apply to the live positions. */
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_mesh(
+      object, verts, positions, tls.base_view_storage);
+
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
 
@@ -204,14 +215,14 @@ static void calc_faces(const Depsgraph &depsgraph,
   }
   else {
     fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
-    filter_region_clip_factors(ss, positions, factors);
+    filter_region_clip_factors(ss, calc_positions, factors);
     if (brush.flag & BRUSH_FRONTFACE) {
       calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
     }
 
     tls.distances.resize(verts.size());
     const MutableSpan<float> distances = tls.distances;
-    calc_brush_distances(ss, positions, eBrushFalloffShape(brush.falloff_shape), distances);
+    calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
     filter_distances_with_radius(cache.radius, distances, factors);
     apply_hardness_to_distances(cache, distances);
     calc_brush_strength_factors(cache, brush, distances, factors);
@@ -226,16 +237,19 @@ static void calc_faces(const Depsgraph &depsgraph,
 
   translations_from_offset_and_factors(grab_delta, factors, translations);
 
-  calc_pinch_influence(brush, cache, grab_delta, spvc, positions, factors, translations);
+  calc_pinch_influence(brush, cache, grab_delta, spvc, calc_positions, factors, translations);
 
-  calc_rake_rotation_influence(cache, positions, factors, translations);
+  calc_rake_rotation_influence(cache, calc_positions, factors, translations);
 
   if (do_elastic) {
     fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
     scale_factors(factors, cache.bstrength * 20.0f);
     auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
 
-    calc_kelvinet_translation(object, cache, positions, factors, translations);
+    /* #object is required by the non-uniform-scale world-transform path (HEAD, see
+     * #kelvinlet_world_transform_init); #calc_positions is the base-view-adjusted span so a base
+     * edit does not bake in visible layers (V3, see #layers::stroke_base_view). */
+    calc_kelvinet_translation(object, cache, calc_positions, factors, translations);
   }
 
   clip_and_lock_translations(sd, ss, position_data.eval, verts, translations);
@@ -259,6 +273,13 @@ static void calc_grids(const Depsgraph &depsgraph,
   const Span<int> grids = node.grids();
   const MutableSpan positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
 
+  /* Base view: compute the surface-shape-dependent inputs against the un-layered base so a base
+   * edit with visible layers does not bake the layer pattern in (see #layers::stroke_base_view).
+   * Returns `positions` unchanged when the base view is inactive; the translations still apply to
+   * the live CCG positions. */
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, positions, tls.base_view_storage);
+
   tls.factors.resize(positions.size());
   const MutableSpan<float> factors = tls.factors;
 
@@ -267,14 +288,14 @@ static void calc_grids(const Depsgraph &depsgraph,
   }
   else {
     fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
-    filter_region_clip_factors(ss, positions, factors);
+    filter_region_clip_factors(ss, calc_positions, factors);
     if (brush.flag & BRUSH_FRONTFACE) {
       calc_front_face(cache.view_normal_symm, subdiv_ccg, grids, factors);
     }
 
     tls.distances.resize(positions.size());
     const MutableSpan<float> distances = tls.distances;
-    calc_brush_distances(ss, positions, eBrushFalloffShape(brush.falloff_shape), distances);
+    calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
     filter_distances_with_radius(cache.radius, distances, factors);
     apply_hardness_to_distances(cache, distances);
     calc_brush_strength_factors(cache, brush, distances, factors);
@@ -290,9 +311,9 @@ static void calc_grids(const Depsgraph &depsgraph,
 
   translations_from_offset_and_factors(grab_delta, factors, translations);
 
-  calc_pinch_influence(brush, cache, grab_delta, spvc, positions, factors, translations);
+  calc_pinch_influence(brush, cache, grab_delta, spvc, calc_positions, factors, translations);
 
-  calc_rake_rotation_influence(cache, positions, factors, translations);
+  calc_rake_rotation_influence(cache, calc_positions, factors, translations);
 
   if (do_elastic) {
     fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
@@ -300,7 +321,10 @@ static void calc_grids(const Depsgraph &depsgraph,
     auto_mask::calc_grids_factors(
         depsgraph, object, cache.automasking.get(), node, grids, factors);
 
-    calc_kelvinet_translation(object, cache, positions, factors, translations);
+    /* #object is required by the non-uniform-scale world-transform path (HEAD, see
+     * #kelvinlet_world_transform_init); #calc_positions is the base-view-adjusted span so a base
+     * edit does not bake in visible layers (V3, see #layers::stroke_base_view). */
+    calc_kelvinet_translation(object, cache, calc_positions, factors, translations);
   }
 
   clip_and_lock_translations(sd, ss, positions, translations);

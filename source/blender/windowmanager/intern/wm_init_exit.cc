@@ -48,6 +48,7 @@
 #include "BKE_preview_image.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_sound.hh"
 #include "BKE_vfont.hh"
 
@@ -500,6 +501,18 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
       const int fileflags = G.fileflags | G_FILE_COMPRESS | G_FILE_RECOVER_WRITE;
 
       BLI_path_join(filepath, sizeof(filepath), BKE_tempdir_base(), BLENDER_QUIT_FILE);
+
+      /* See #wm_file_write. This is the ordinary "quit without saving" flow, not a crash path, and
+       * `quit.blend` is what *File ▸ Recover Last Session* loads. Sculpt mode is torn down by the
+       * #ED_screen_exit calls *below*, so a weight-mask editing session is still open here and its
+       * weights would be recorded as the user's own `.sculpt_mask`. The guard spans to the end of
+       * this block, which covers the write. */
+      const blender::bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard(*bmain);
+      if (mask_edit_guard.suspend_refused()) {
+        CLOG_WARN(&LOG_BLEND,
+                  "A sculpt layer mask session could not be suspended; session recovery is being "
+                  "saved with the layer's mask weights in place of the user's sculpt mask.");
+      }
 
       ED_editors_flush_edits(bmain);
       ED_image_internal_autosave_flush(bmain);

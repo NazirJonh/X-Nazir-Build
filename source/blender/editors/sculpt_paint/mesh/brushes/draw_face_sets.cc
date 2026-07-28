@@ -35,6 +35,8 @@ struct MeshLocalData {
   Vector<float3> normals;
   Vector<float> factors;
   Vector<float> distances;
+  /* Face centers with the sculpt-layer base view removed (see #layers::stroke_base_view). */
+  Vector<float3> base_view_storage;
 };
 
 static void calc_face_normals(const OffsetIndices<int> faces,
@@ -92,19 +94,41 @@ static void calc_faces(const Depsgraph &depsgraph,
   const MutableSpan<float3> face_normals = tls.normals;
   calc_face_normals(faces, corner_verts, positions_eval, face_indices, face_normals);
 
+  /* Base view: the brush footprint follows the un-layered base so the painted area is not modulated
+   * by the layer pattern. A face center is the mean of its corner positions, so subtracting the mean
+   * of the corners' base-view offsets yields the base face center exactly. The texture keeps
+   * sampling the composed centers (see #sculpt_apply_texture), hence the separate array. */
+  Span<float3> calc_centers = face_centers;
+  const Span<float3> base_view = layers::stroke_base_view(object);
+  if (!base_view.is_empty()) {
+    const float3 dc = layers::stroke_base_view_dc(object);
+    tls.base_view_storage.resize(face_indices.size());
+    const MutableSpan<float3> base_centers = tls.base_view_storage;
+    for (const int i : face_indices.index_range()) {
+      const Span<int> face_verts = corner_verts.slice(faces[face_indices[i]]);
+      float3 offset(0.0f);
+      for (const int vert : face_verts) {
+        offset += base_view[vert];
+      }
+      offset /= float(face_verts.size());
+      base_centers[i] = face_centers[i] - (offset - dc);
+    }
+    calc_centers = base_centers;
+  }
+
   tls.factors.resize(face_indices.size());
   const MutableSpan<float> factors = tls.factors;
 
   face_set::fill_factor_from_hide_and_mask(mesh, face_indices, factors);
 
-  filter_region_clip_factors(ss, face_centers, factors);
+  filter_region_clip_factors(ss, calc_centers, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, face_normals, factors);
   }
 
   tls.distances.resize(face_indices.size());
   const MutableSpan<float> distances = tls.distances;
-  calc_brush_distances(ss, face_centers, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_centers, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -163,6 +187,8 @@ struct GridLocalData {
   Vector<float3> positions;
   Vector<float> factors;
   Vector<float> distances;
+  /* Positions with the sculpt-layer base view removed (see #layers::stroke_base_view). */
+  Vector<float3> base_view_storage;
 };
 
 static void calc_grids(const Depsgraph &depsgraph,
@@ -181,17 +207,21 @@ static void calc_grids(const Depsgraph &depsgraph,
   const Span<int> grids = node.grids();
   const MutableSpan positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
 
+  /* Base view: see the mesh variant in #calc_faces. */
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, positions, tls.base_view_storage);
+
   tls.factors.resize(positions.size());
   const MutableSpan<float> factors = tls.factors;
   ed::sculpt_paint::fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
-  filter_region_clip_factors(ss, positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, subdiv_ccg, grids, factors);
   }
 
   tls.distances.resize(positions.size());
   const MutableSpan<float> distances = tls.distances;
-  calc_brush_distances(ss, positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);

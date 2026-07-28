@@ -322,6 +322,7 @@ set(GLSL_SRC
   intern/shaders/draw_debug_infos.hh
   intern/shaders/draw_object_infos_infos.hh
   intern/shaders/draw_view_infos.hh
+  intern/shaders/pbvh_infos.hh
   intern/shaders/subdiv_infos.hh
   intern/shaders/subdiv_patch_eval_infos.hh
 
@@ -549,6 +550,7 @@ set(GLSL_SRC
 
   intern/shaders/osd_patch_defines.glsl
   intern/shaders/osd_patch_basis.glsl
+  intern/shaders/pbvh_layer_drag_comp.glsl
   intern/shaders/subdiv_custom_data_interp_comp.glsl
   intern/shaders/subdiv_ibo_lines_comp.glsl
   intern/shaders/subdiv_ibo_tris_comp.glsl

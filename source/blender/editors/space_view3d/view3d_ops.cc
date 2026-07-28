@@ -18,6 +18,7 @@
 #include "BKE_blendfile.hh"
 #include "BKE_context.hh"
 #include "BKE_report.hh"
+#include "BKE_sculpt_layers.hh"
 
 #include "BLO_readfile.hh"
 
@@ -60,6 +61,21 @@ static wmOperatorStatus view3d_copybuffer_exec(bContext *C, wmOperator *op)
   using namespace blender::bke::blendfile;
 
   Main *bmain = CTX_data_main(C);
+
+  /* Park any open sculpt layer weight-mask editing session for the duration. A session keeps the
+   * layer's weights in the mesh's own `.sculpt_mask` with the user's mask set aside, and this
+   * operator's poll (#ED_operator_scene) does not exclude sculpt mode — so the copied mesh would
+   * carry a layer's weight map masquerading as the user's sculpt mask, and pasting it back would
+   * make that permanent. Scoped over #id_add as well as the write: the copies are taken there. */
+  const bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard{*bmain};
+  if (mask_edit_guard.suspend_refused()) {
+    BKE_report(op->reports,
+               RPT_WARNING,
+               "A sculpt layer mask session could not be suspended: the objects were copied with "
+               "the layer's mask weights in place of the sculpt mask. Close the mask session and "
+               "repaint the sculpt mask");
+  }
+
   PartialWriteContext copybuffer{*bmain};
 
   Object *obact = CTX_data_active_object(C);

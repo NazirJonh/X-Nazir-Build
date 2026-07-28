@@ -92,6 +92,7 @@
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_sound.hh"
 #include "BKE_undo_system.hh"
 #include "BKE_workspace.hh"
@@ -2050,6 +2051,17 @@ static ImBuf *blend_file_thumb_from_camera(const bContext *C,
 
 bool write_crash_blend()
 {
+  /* NOTE: Deliberately *not* bracketed by a #MaskEditSuspendGuard, unlike every other writer here.
+   * This is a debugging entry point with no in-tree callers, invoked by hand from a debugger on a
+   * process that has already crashed or been stopped. Suspending a session is not a read: it
+   * allocates and it adds/removes a `.sculpt_mask` layer on the mesh in #Main. Doing that here
+   * would perturb the very state the crash file is meant to preserve, and a failure inside it
+   * loses the file altogether — the outcome this function exists to avoid.
+   *
+   * The accepted consequence: if a sculpt layer weight-mask editing session is open, the crash
+   * file carries that layer's weights in place of the user's sculpt mask. That is correct for a
+   * post-mortem snapshot, which should show the session as it actually was, and the file is not
+   * one the user loads and keeps working in. */
   char filepath[FILE_MAX];
 
   STRNCPY(filepath, BKE_main_blendfile_path_from_global());
@@ -2209,6 +2221,23 @@ static bool wm_file_write(bContext *C,
     BKE_packedfile_pack_all(bmain, reports, false);
   }
 
+  /* Must span #BLO_write_file below, not merely the flush: a sculpt-layer weight-mask editing
+   * session keeps the layer's weights in the mesh's `.sculpt_mask` attribute, which is the
+   * persistent store, so writing the file mid-session would save those weights as the user's own
+   * sculpt mask. RAII because everything from here to the end of the function may return early. */
+  const blender::bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard(*bmain);
+  if (mask_edit_guard.suspend_refused()) {
+    /* A save cannot be cancelled, so the file is written either way — but not silently. The refusal
+     * is not confined to allocation failure: a suspend also refuses when the parked mask no longer
+     * matches the object (a vertex count change under an open session, from an Edit Mode round trip
+     * or a script), which involves no allocation at all. */
+    BKE_report(reports,
+               RPT_WARNING,
+               "A sculpt layer mask session could not be suspended: the file was saved with the "
+               "layer's mask weights in place of the sculpt mask. Close the mask session and "
+               "repaint the sculpt mask");
+  }
+
   ED_editors_flush_edits(bmain);
 
   /* XXX(ton): temp solution to solve bug, real fix coming. */
@@ -2333,6 +2362,18 @@ bool WM_autosave_is_scheduled(wmWindowManager *wm)
 
 bool WM_autosave_write(wmWindowManager *wm, Main *bmain, ReportList *reports)
 {
+  /* See #wm_file_write. Auto-save especially must not close an open weight-mask editing session:
+   * it fires on a timer, so the user's in-progress mask edit would vanish for no visible cause.
+   * Note that auto-save emits no #BKE_CB_EVT_SAVE_PRE, so a pre-save handler would not cover it. */
+  const blender::bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard(*bmain);
+  if (mask_edit_guard.suspend_refused()) {
+    /* See #wm_file_write: reported rather than cancelled, and not confined to allocation failure. */
+    BKE_report(reports,
+               RPT_WARNING,
+               "A sculpt layer mask session could not be suspended: the auto-save was written with "
+               "the layer's mask weights in place of the sculpt mask");
+  }
+
   ED_editors_flush_edits(bmain);
   ED_image_internal_autosave_flush(bmain);
 
@@ -2541,6 +2582,16 @@ static wmOperatorStatus wm_homefile_write_exec(bContext *C, wmOperator *op)
   BLI_path_join(filepath, sizeof(filepath), cfgdir->c_str(), BLENDER_STARTUP_FILE);
 
   CLOG_INFO_NOCHECK(&LOG, "Writing startup file: \"%s\" ", filepath);
+
+  /* See #wm_file_write. */
+  const blender::bke::sculpt_layers::MaskEditSuspendGuard mask_edit_guard(*bmain);
+  if (mask_edit_guard.suspend_refused()) {
+    /* See #wm_file_write: reported rather than cancelled, and not confined to allocation failure. */
+    BKE_report(op->reports,
+               RPT_WARNING,
+               "A sculpt layer mask session could not be suspended: the startup file was written "
+               "with the layer's mask weights in place of the sculpt mask");
+  }
 
   ED_editors_flush_edits(bmain);
 

@@ -39,6 +39,9 @@ struct MeshRuntime;
 class AttributeAccessor;
 class MutableAttributeAccessor;
 enum class MeshNormalDomain : int8_t;
+namespace sculpt_layers {
+class SculptLayerGroupRuntime;
+}
 }  // namespace bke
 
 struct AnimData;
@@ -141,6 +144,375 @@ enum eMeshSymmetryType : char {
 };
 ENUM_OPERATORS(eMeshSymmetryType)
 
+/** #SculptLayerTreeNode.flag of a #SculptLayer. */
+enum eSculptLayerFlag : int {
+  /** Layer contributes to the combined sculpted result. */
+  SCULPT_LAYER_ENABLED = 1 << 0,
+  /** Layer is protected from being recorded into or edited. */
+  SCULPT_LAYER_LOCKED = 1 << 1,
+  /**
+   * Layer was enabled but is temporarily hidden by the "Solo Base" mode, which isolates the base
+   * shape for direct sculpting (a brush over the composed surface would otherwise bake the layer
+   * residual into the base). Ending the mode re-enables exactly the layers carrying this flag.
+   */
+  SCULPT_LAYER_SOLO_HIDDEN = 1 << 2,
+  /**
+   * Row selected in the tree view. Pure UI state for multi-item drag and drop reordering; existing
+   * layer operators still act on the single active layer (#Mesh::sculpt_layers_active_uid), not on
+   * this selection. Never versioned: a new bit in an existing #flag reads as unset from old files.
+   */
+  SCULPT_LAYER_SELECTED = 1 << 3,
+  /**
+   * Set when any ancestor group (following the #SculptLayerTreeNode::parent chain) is currently
+   * disabled. Maintained by
+   * #bke::sculpt_layers::resync_group_state and consulted by #bke::sculpt_layers::effective; the
+   * layer's own #SCULPT_LAYER_ENABLED bit is left untouched, so re-enabling the ancestor restores
+   * exactly what was visible before — the same convention as #SCULPT_LAYER_SOLO_HIDDEN. Never
+   * versioned: a new bit in an existing #flag reads as unset from old files.
+   */
+  SCULPT_LAYER_GROUP_HIDDEN = 1 << 4,
+  /**
+   * REC is armed on this layer, so every composite ignores this layer's mask *and* the masks of the
+   * folders above it. See #bke::sculpt_layers::rec_exempt_set for why the exemption has to exist.
+   *
+   * Session state living in a DNA field, which is unusual and deliberate. The composite reaches a
+   * layer through an *evaluated* mesh with no #Object and no #SculptSession in scope (see
+   * #bke::sculpt_layers::apply_vert_layers_eval), so the answer has to travel with the layer
+   * itself; #flag is one of the members the original-to-evaluated copy carries verbatim, exactly as
+   * #SculptLayerTreeNode::uid does. An #ID::session_uid cannot be used for this — the copy starts
+   * at `sizeof(ID)` and never carries the header — and a process-wide slot cannot either, because
+   * it is scoped to nothing and would exempt an unrelated mesh's layer.
+   *
+   * Never persisted: `group_blend_write_recursive` — the per-node walk
+   * #bke::sculpt_layers::tree_blend_write drives, in `blenkernel/intern/sculpt_layers.cc` — strips
+   * it from the sanitized copy it writes, and the matching reader (`group_blend_read_children`)
+   * clears it again. A file that opened with this bit set would show a layer whose weight map has
+   * silently vanished, with nothing in the UI to explain it and no operator that puts it back.
+   *
+   * Never versioned: a new bit in an existing #flag reads as unset from old files.
+   */
+  SCULPT_LAYER_REC_EXEMPT = 1 << 5,
+  /**
+   * The node's own weight mask is switched off: it stays on the node with every painted weight
+   * intact, but the composite ignores it. What the user reaches for to compare "with mask" against
+   * "without mask" without destroying the weights, which Remove Mask would.
+   *
+   * Only the node's *own* mask, deliberately unlike #SCULPT_LAYER_REC_EXEMPT, which additionally
+   * drops the folder chain above the layer. That wider radius exists because REC stores its delta
+   * raw and any surviving factor would distort it; nothing here needs it, and "own mask only"
+   * composes — every folder carries this same bit, so switching a layer clear of every mask is a
+   * matter of switching it and the folders above it.
+   *
+   * Persisted, deliberately unlike #SCULPT_LAYER_REC_EXEMPT, which is stripped on write: that bit
+   * is invisible to the user, so a file opening with it set would show a mask that silently
+   * vanished. This one is set by a visible button whose state the tree row always shows.
+   *
+   * Never versioned: a new bit in an existing #flag reads as unset from old files, and unset is
+   * "the mask is in force" — the behavior every existing file was saved with.
+   */
+  SCULPT_LAYER_MASK_DISABLED = 1 << 6,
+  /**
+   * REC is armed on this layer. A mirror of #SculptSession::layers::rec_active kept on the mesh, and
+   * it exists for exactly one reason: the session is destroyed on the way out of sculpt mode (see
+   * #object_sculpt_mode_exit), so a flag living only there cannot survive a trip through object mode.
+   * The entry path reads this bit back to restore REC; everything inside the mode keeps reading the
+   * session, which stays the authority for as long as it exists.
+   *
+   * Written only by #bke::sculpt_layers::rec_armed_set, driven from
+   * #ed::sculpt_paint::layers::rec_exemption_refresh alongside #SCULPT_LAYER_REC_EXEMPT. Both bits
+   * follow the same "at most one layer carries it" invariant, and the refresh is called from every
+   * path that can change either answer, so a bit dropped by an undo restore repairs itself.
+   *
+   * The one place the two part ways is the mode exit, where there is no session left to mirror:
+   * #SCULPT_LAYER_REC_EXEMPT must be cleared there (a composite outside sculpt mode would otherwise
+   * silently drop the layer's weight map), while this bit must be left standing — that is the whole
+   * feature.
+   *
+   * Never persisted: stripped on write and cleared again on read, like #SCULPT_LAYER_REC_EXEMPT but
+   * for a different reason. Not "the surface would be wrong" — nothing composes from this bit — but
+   * "a file must not open with strokes silently recording into a layer the user did not arm in this
+   * session". Recording state is scoped to a Blender run, deliberately.
+   *
+   * Never versioned: a new bit in an existing #flag reads as unset from old files.
+   */
+  SCULPT_LAYER_REC_ARMED = 1 << 7,
+};
+ENUM_OPERATORS(eSculptLayerFlag)
+
+/** #SculptLayer.domain (matches the #short storage type). */
+enum eSculptLayerDomain : int16_t {
+  /** #SculptLayer.data holds one `float3` per mesh vertex. */
+  SCULPT_LAYER_DOMAIN_VERT = 0,
+  /** #SculptLayer.data holds one `float3` per multires grid point. */
+  SCULPT_LAYER_DOMAIN_GRID = 1,
+};
+
+/** #SculptLayerTreeNode.type */
+enum eSculptLayerTreeNodeType : int8_t {
+  SCULPT_LAYER_TREE_NODE_TYPE_LAYER = 0,
+  SCULPT_LAYER_TREE_NODE_TYPE_GROUP = 1,
+};
+
+/**
+ * Folder color tag, drawn in place of the folder icon in the sculpt layer tree. Mirrors
+ * #GroupColorTag, with one deliberate difference: zero means "no tag" here, because the field is
+ * carved out of #SculptLayerTreeNode's existing padding and therefore reads back as zero from
+ * every file written before it existed. Grease Pencil's -1 sentinel would paint all of them.
+ */
+enum eSculptLayerColorTag : int8_t {
+  SCULPT_LAYER_COLOR_NONE = 0,
+  SCULPT_LAYER_COLOR_01 = 1,
+  SCULPT_LAYER_COLOR_02 = 2,
+  SCULPT_LAYER_COLOR_03 = 3,
+  SCULPT_LAYER_COLOR_04 = 4,
+  SCULPT_LAYER_COLOR_05 = 5,
+  SCULPT_LAYER_COLOR_06 = 6,
+  SCULPT_LAYER_COLOR_07 = 7,
+  SCULPT_LAYER_COLOR_08 = 8,
+};
+
+struct SculptLayerGroup;
+
+/**
+ * Optional per-element weight map attached to a sculpt layer tree node.
+ *
+ * Stored sparsely: elements are grouped into fixed-size blocks, and a block that holds a single
+ * repeated value keeps only that value. A typical mask covers a small part of the mesh, so most
+ * blocks stay uniform — which is what keeps this affordable next to the node's own offset data
+ * (a mask costs roughly 1-2% of the layer it modulates).
+ *
+ * Values are `uint8` mapping 0..255 onto 0..1. The quantization is invisible for a weight, and the
+ * byte width is what keeps the composite loop from becoming bandwidth-bound.
+ */
+typedef struct SculptLayerMask {
+  /**
+   * Domain element count this mask describes. Used to detect a stale mask, as
+   * #SculptLayer::totelem does, and 64-bit for the same reason — it counts the same grid domain.
+   * Taken out of the padding below, so the struct size is unchanged.
+   */
+  int64_t totelem;
+  /** Elements per block. Grids use `grid_area`; meshes use #SCULPT_LAYER_MASK_VERT_BLOCK. */
+  int block_size;
+  int blocks_num;
+  /**
+   * Total bytes across every dense block, and the range #block_offset indexes. Stays 32-bit: a mask
+   * only turns a block dense where it was painted, so reaching 2^31 dense bytes would mean a layer
+   * buffer twelve times that size. #mask_compress accumulates it in 64-bit and refuses to build a
+   * mask that would exceed the field rather than wrapping an offset into #data.
+   */
+  int data_num;
+  char _pad[4];
+  /** `blocks_num` entries of #eSculptLayerMaskBlockKind. */
+  int8_t *block_kind;
+  /** `blocks_num` entries: the value of a uniform block. Meaningless for a dense block. */
+  uint8_t *block_value;
+  /** `blocks_num` entries: byte offset into #data, -1 for a uniform block. */
+  int *block_offset;
+  /** `data_num` bytes: the contents of every dense block, back to back. */
+  uint8_t *data;
+} SculptLayerMask;
+
+typedef enum eSculptLayerMaskBlockKind {
+  SCULPT_LAYER_MASK_BLOCK_UNIFORM = 0,
+  SCULPT_LAYER_MASK_BLOCK_DENSE = 1,
+} eSculptLayerMaskBlockKind;
+
+#define SCULPT_LAYER_MASK_VERT_BLOCK 4096
+
+/**
+ * Fields shared by every row of the sculpt layer tree. Embedded as #SculptLayer::base and
+ * #SculptLayerGroup::base, following #GreasePencilLayerTreeNode.
+ *
+ * #next and #prev must stay the first two members, and this struct must stay the first member of
+ * both node types: the blend-file reader relinks a #ListBase by casting each element to #Link and
+ * reading `next` at offset 0, and #ListBaseTIterator does the same, so both only ever see this
+ * node's links no matter which concrete type the list is declared over.
+ */
+struct SculptLayerTreeNode {
+  SculptLayerTreeNode *next = nullptr, *prev = nullptr;
+  /**
+   * The folder holding this node, and the inverse of #SculptLayerGroup::children: a node appears in
+   * exactly the child list of the group named here. Null only for the root group, which is what
+   * terminates every walk up the tree.
+   */
+  SculptLayerGroup *parent = nullptr;
+  /** MAX_NAME. Unique across every node of the mesh tree (see #node_name_ensure_unique). */
+  char name[64] = {};
+  /** #eSculptLayerFlag for a layer, #eSculptLayerGroupFlag for a group. */
+  int flag = 0;
+  /** Unique across every node of the mesh. Stable across reordering. */
+  int uid = 0;
+  /** #eSculptLayerTreeNodeType. */
+  int8_t type = SCULPT_LAYER_TREE_NODE_TYPE_LAYER;
+  /**
+   * #eSculptLayerColorTag. Taken out of the padding below, so the struct size is unchanged and
+   * older files load without versioning. Held on the shared node rather than on
+   * #SculptLayerGroup so a layer tag stays possible later; only folders expose it today.
+   */
+  int8_t color_tag = SCULPT_LAYER_COLOR_NONE;
+  char _pad[6] = {};
+  /**
+   * Optional weight map. Null means there is no mask, which is *not* the same as a mask full of
+   * ones: a node without a mask skips the masked code paths entirely and costs nothing.
+   *
+   * Lives on the shared base so folders and layers are served by one implementation.
+   */
+  struct SculptLayerMask *mask = nullptr;
+};
+
+/**
+ * A single non-destructive sculpt layer.
+ *
+ * Stores a per-element displacement delta together with an #influence factor. The final sculpted
+ * position of an element is:
+ * \code{.unparsed}
+ *   position = base + sum_over_enabled_layers(layer.data[i] * layer.influence)
+ * \endcode
+ * The delta domain (#domain) is per mesh vertex for regular meshes and per multires grid point
+ * for multires:
+ * - VERT domain: object-space deltas, one `float3` per mesh vertex; the base is the un-layered
+ *   vertex position.
+ * - GRID domain: *tangent-space* displacement in the #MDisps grid layout, one `float3` per grid
+ *   point at subdivision level #level (always the multires top level). The base is #CD_MDISPS
+ *   (which never contains layer contributions); layers are composed with the base displacement
+ *   at subdivision-surface evaluation time (see `subdiv_displacement_multires.cc`).
+ * Held by the #SculptLayerGroup::children list of the folder that contains it (the root group for a
+ * top-level layer), persisted in blend files.
+ */
+struct SculptLayer {
+  /** Must stay first: the list links live here, see #SculptLayerTreeNode. */
+  SculptLayerTreeNode base;
+  /**
+   * Number of elements in #data (mesh vertices, or multires grid points).
+   *
+   * 64-bit because a grid-domain layer counts `corners_num * grid_size(level)^2` elements, which
+   * crosses 2^31 well inside the range multires already allows — a 200k-corner base mesh at level 7
+   * needs 3.3e9. A 32-bit count wrapped there and handed a truncated length to the allocator while
+   * the writers kept indexing with the untruncated one.
+   *
+   * Placed first after #base so it lands on an 8-byte boundary with no padding. Widening needs no
+   * versioning: DNA matches members by name and casts #SDNA_TYPE_INT to #SDNA_TYPE_INT64 on read.
+   */
+  int64_t totelem = 0;
+  /** Influence factor (soft UI range `0..1` shown as 0..100%, hard range `-10..10`). */
+  float influence = 1.0f;
+  /** #eSculptLayerDomain. */
+  short domain = 0;
+  /**
+   * Grid (multires) domain only: subdivision level at which #data is stored. Always equals the
+   * mesh's multires top level (`totlvl`); Subdivide / Delete Higher resample the data to keep
+   * this invariant. Mirrors #MDisps.level. Unused (0) for the vertex domain.
+   */
+  short level = 0;
+  /**
+   * Derived cache: the product of the #influence of every ancestor folder (the running
+   * `Pi_ancestors(influence_folder)` of the position model). Not authored state — it is recomputed
+   * from the tree by #bke::sculpt_layers::resync_group_state on every tree mutation and on blend
+   * read, and #bke::sculpt_layers::effective multiplies it in so the hot path stays a single flat
+   * multiply. Written to blend files like any member, but its stored value is ignored on read.
+   */
+  float group_influence_cached = 1.0f;
+  char _pad[4] = {};
+  /**
+   * Padding, and specifically a *pointer* rather than more bytes.
+   *
+   * Widening #totelem raised this struct's alignment to 8 on 32-bit builds too, so its size must be
+   * a multiple of 8 there as well as on 64-bit. Counting #SculptLayerTreeNode's four, the struct
+   * held five pointers — an odd number, so the 32-bit and 64-bit sizes differ by an odd multiple of
+   * 4 and cannot both be a multiple of 8. Only a sixth pointer fixes both at once (124 -> 128 and
+   * 144 -> 152); padding bytes would shift them together and keep the mismatch. This is the case
+   * #makesdna reports as "add padding pointer".
+   */
+  void *_pad0 = nullptr;
+  /** `float3[totelem]` array of per-element displacement deltas. May be null (treated as zeros). */
+  void *data = nullptr;
+};
+
+/** #SculptLayerTreeNode.flag of a #SculptLayerGroup. */
+enum eSculptLayerGroupFlag : int {
+  /**
+   * The group's own enabled state. Descendant layers are not edited when this changes; instead
+   * #bke::sculpt_layers::resync_group_state folds the whole ancestor chain into their
+   * #SCULPT_LAYER_GROUP_HIDDEN bit, so a group can be re-enabled without having to remember what
+   * each descendant's own state was.
+   */
+  SCULPT_LAYER_GROUP_ENABLED = 1 << 0,
+  /** Row selected in the tree view. Pure UI state, same semantics as #SCULPT_LAYER_SELECTED. */
+  SCULPT_LAYER_GROUP_SELECTED = 1 << 1,
+  /**
+   * Tree-view expanded (as opposed to collapsed) state. Persisted rather than kept as view-only
+   * runtime state — matching the #GP_LAYER_TREE_NODE_EXPANDED precedent — so it survives a file
+   * save and stays consistent across every window showing the tree. New groups start expanded.
+   */
+  SCULPT_LAYER_GROUP_EXPANDED = 1 << 2,
+  /**
+   * The folder counterpart of #SCULPT_LAYER_MASK_DISABLED, and deliberately the *same numeric
+   * value*: it lets #bke::sculpt_layers::mask_enabled answer for a node of either kind without a
+   * type test, exactly as #SculptLayerTreeNode::mask serves both with one implementation. A
+   * #BLI_STATIC_ASSERT next to that function holds the two spellings together.
+   *
+   * Switches off this folder's own mask, so every layer below it stops being attenuated by it. The
+   * masks of folders further up are unaffected and keep applying.
+   */
+  SCULPT_LAYER_GROUP_MASK_DISABLED = 1 << 6,
+};
+ENUM_OPERATORS(eSculptLayerGroupFlag)
+
+/**
+ * A folder in the sculpt layer tree, persisted in blend files. Every group is reachable from
+ * #Mesh::sculpt_layer_root by following #children.
+ *
+ * Groups carry no displacement data of their own, so the model stays purely additive and
+ * order-independent: `position = base + sum(layer.data[i] * effective(layer))`. A group affects that
+ * sum only through per-layer *weights*, never through a term of its own — its #influence folds into
+ * every descendant layer's #effective as one factor of the ancestor product, and its enabled bit
+ * feeds the boolean visibility cascade (both maintained by #bke::sculpt_layers::resync_group_state).
+ */
+struct SculptLayerGroup {
+  /**
+   * Must stay first: the list links live here, see #SculptLayerTreeNode.
+   *
+   * NOTE: #SculptLayerTreeNode::flag defaults to 0 here, not to
+   * `SCULPT_LAYER_GROUP_ENABLED | SCULPT_LAYER_GROUP_EXPANDED` as it did while it was a member
+   * of this struct — a default member initializer cannot reach into an embedded base. Every
+   * group is created through #bke::sculpt_layers::group_add, which sets both bits explicitly.
+   * The root group is the one exception: it is never created through #group_add and keeps uid 0
+   * (see #Mesh::sculpt_layer_root).
+   */
+  SculptLayerTreeNode base;
+  /**
+   * Influence multiplier this folder contributes to the cascade (soft UI range `0..1`, hard range
+   * `-10..10`, default 1). It folds into every descendant layer's weight as one factor of
+   * `Pi_ancestors(influence_folder)`; #bke::sculpt_layers::resync_group_state bakes that product onto
+   * each layer's #SculptLayer::group_influence_cached. A folder dialled to 0 is not the same as a
+   * disabled folder: the enabled bit stays a separate #SCULPT_LAYER_GROUP_HIDDEN cascade.
+   */
+  float influence = 1.0f;
+  char _pad[4] = {};
+  /**
+   * The nodes this folder holds, of both kinds interleaved, owned by this group.
+   *
+   * This list *is* the sibling order, which is why interleaving needs no order field: a folder
+   * dropped between two layers is simply linked between them. Declared over the shared node rather
+   * than over either concrete type because it holds both; dispatch on #SculptLayerTreeNode::type
+   * and reinterpret to the concrete struct (legal because #base is its first member).
+   */
+  ListBaseT<SculptLayerTreeNode> children = {nullptr, nullptr};
+  /**
+   * Runtime-only cache of this folder's flat layer span (see
+   * #bke::sculpt_layers::SculptLayerGroupRuntime). Never persisted: it is written to the file as a
+   * null and rebuilt on read, and every group-creating path allocates it through
+   * #bke::sculpt_layers::group_runtime_ensure.
+   *
+   * A *pointer* rather than the runtime by value, following #GreasePencilLayerTreeGroup::runtime:
+   * the runtime holds a #CacheMutex and a #Vector, neither of which is trivially destructible,
+   * whereas a raw pointer is — and no destructor ever runs on a group (see the allocation notes in
+   * `BKE_sculpt_layers.hh`, and the static asserts in `blenkernel/intern/sculpt_layers.cc` that
+   * enforce this).
+   */
+  bke::sculpt_layers::SculptLayerGroupRuntime *runtime = nullptr;
+};
+
 struct Mesh {
 #ifdef __cplusplus
   DNA_DEFINE_CXX_METHODS(Mesh)
@@ -196,6 +568,33 @@ struct Mesh {
   ListBaseT<bDeformGroup> vertex_group_names = {nullptr, nullptr};
   /** The active index in the #vertex_group_names list. */
   int vertex_group_active_index = 0;
+  /**
+   * #SculptLayerTreeNode::uid of the active sculpt layer, or 0 when there is none (uids start at 1).
+   *
+   * Identifies the active layer rather than pointing at a position, because a position is only
+   * meaningful for as long as the list does not change shape underneath it.
+   *
+   * This field occupies what used to be explicit padding: `vertex_group_active_index` (4 bytes)
+   * must be followed by 4 more bytes so that #sculpt_layer_root (an 8-byte pointer) starts on an
+   * 8-byte boundary, as the DNA system requires.
+   *
+   * NOTE: 0 means "no active layer", it does NOT resolve to the root group the way it does for
+   * #bke::sculpt_layers::node_find_by_uid. See #bke::sculpt_layers::active_get, which is the only
+   * correct way to read this field.
+   */
+  int sculpt_layers_active_uid = 0;
+
+  /**
+   * Root of the non-destructive sculpt layer tree (#SculptLayer / #SculptLayerGroup), owned by the
+   * mesh and *always allocated* — see #bke::sculpt_layers::root_group_ensure, which every path that
+   * produces a mesh (ID creation and the blend-file reader) goes through.
+   *
+   * The root is a real #SculptLayerGroup rather than a bare list so that a folder and "the top
+   * level" are the same type: every walk, insert and reparent then has one case instead of a root
+   * special case. It is never drawn as a row and keeps uid 0. Follows the #GreasePencil
+   * ::root_group_ptr precedent.
+   */
+  SculptLayerGroup *sculpt_layer_root = nullptr;
 
   /**
    * The index of the active attribute in the UI. The attribute list is a combination of the
@@ -210,6 +609,12 @@ struct Mesh {
    * for now.
    */
   int attributes_active_index = 0;
+  /**
+   * Explicit padding so that the following #mselect pointer stays 8-byte aligned. Needed because
+   * #attributes_active_index lost the neighbouring int it used to pair up with (the deprecated
+   * `sculpt_layers_active_index`); makesdna demands explicit padding and never inserts any.
+   */
+  char _pad2[4] = {};
 
   /**
    * This array represents the selection order when the user manually picks elements in edit-mode,

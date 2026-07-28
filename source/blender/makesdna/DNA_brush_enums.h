@@ -425,6 +425,8 @@ enum eBrushFlags2 : int {
   BRUSH_USE_COLOR_AS_DISPLACEMENT = (1 << 9),
   BRUSH_JITTER_COLOR = (1 << 10),
   BRUSH_PROJECT_USE_BIDIRECTIONAL = (1 << 11),
+  /** Layer brush: keep every stroke at the same depth relative to a fixed (persistent) base. */
+  BRUSH_LAYER_UNIFORM_DEPTH = (1 << 12),
 };
 ENUM_OPERATORS(eBrushFlags2)
 
@@ -490,6 +492,7 @@ enum eBrushSculptType : char {
   SCULPT_BRUSH_TYPE_PLANE = 33,
   SCULPT_BRUSH_TYPE_BLUR = 34,
   SCULPT_BRUSH_TYPE_SCENE_PROJECT = 35,
+  SCULPT_BRUSH_TYPE_LAYER_ERASER = 36,
 };
 
 /* Brush.curves_sculpt_brush_type. */

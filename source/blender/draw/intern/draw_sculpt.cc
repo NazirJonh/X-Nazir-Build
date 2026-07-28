@@ -144,6 +144,12 @@ Vector<SculptBatch> sculpt_batches_get(const Object *ob, SculptBatchFeature feat
   if (features & SCULPT_BATCH_FACE_SET) {
     attrs.append(pbvh::CustomRequest::FaceSet);
   }
+  if (features & SCULPT_BATCH_LAYER_MASK) {
+    attrs.append(pbvh::CustomRequest::LayerMask);
+  }
+  if (features & SCULPT_BATCH_LAYER_PREVIEW) {
+    attrs.append(pbvh::CustomRequest::LayerPreview);
+  }
 
   const Mesh *mesh = BKE_object_get_original_mesh(ob);
   if (features & SCULPT_BATCH_VERTEX_COLOR) {

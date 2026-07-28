@@ -87,7 +87,17 @@ static void calc_faces(const Depsgraph &depsgraph,
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
 
-  calc_closest_to_plane(test_plane, position_data.eval, verts, translations);
+  /* Base view: project the un-layered base onto the plane so the layer pattern is not flattened
+   * into it (see #layers::stroke_base_view). */
+  Vector<float3> base_view_storage;
+  const Span<float3> base_view_positions = layers::base_view_gather_mesh(
+      object, verts, position_data.eval, base_view_storage);
+  if (base_view_positions.is_empty()) {
+    calc_closest_to_plane(test_plane, position_data.eval, verts, translations);
+  }
+  else {
+    calc_closest_to_plane(test_plane, base_view_positions, translations);
+  }
   scale_translations(translations, strength);
   scale_translations(translations, tls.factors);
 
@@ -115,7 +125,11 @@ static void calc_grids(const Depsgraph &depsgraph,
   tls.translations.resize(positions.size());
   const MutableSpan<float3> translations = tls.translations;
 
-  calc_closest_to_plane(test_plane, positions, translations);
+  /* Base view: see #calc_faces above. */
+  Vector<float3> base_view_storage;
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, positions, base_view_storage);
+  calc_closest_to_plane(test_plane, calc_positions, translations);
   scale_translations(translations, strength);
   scale_translations(translations, tls.factors);
 

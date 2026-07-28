@@ -77,6 +77,17 @@ static void createTransSculpt(bContext *C, TransInfo *t)
       if (!sculpt_paint::shape_key_check(*ob, t->reports)) {
         return;
       }
+      /* A weight-mask editing session has the user's own sculpt mask parked and the layer's
+       * weights in its place, so a transform would be shaped by a mask the user cannot see and
+       * did not paint — and unlike a refused brush, it has already moved the surface by the time
+       * anything could notice. Checked here, before any undo step is opened, for the same reason
+       * #shape_key_check is above -- and per object, so one locked/session-open secondary object
+       * cancels the whole session cleanly rather than leaving a partially-opened multi-object undo
+       * step. Mirrored in #special_aftertrans_update__sculpt, which must not end a transform this
+       * never started. */
+      if (sculpt_paint::layers::mask_edit_refuse_deform(*ob, t->reports)) {
+        return;
+      }
     }
   }
 
@@ -198,9 +209,25 @@ static void special_aftertrans_update__sculpt(bContext *C, TransInfo *t)
 
   BKE_view_layer_synced_ensure(*t->bmain, t->scene, t->view_layer);
   Object &active_ob = *BKE_view_layer_active_object_get(t->view_layer);
-  BLI_assert(!(t->options & CTX_PAINT_CURVE));
 
   const Vector<Object *> objects = sculpt_transform_objects(C, active_ob);
+
+  /* Mirrors the refusal in #createTransSculpt, silently because that pass already reported it:
+   * #sculpt_paint::init_transform was not called, so ending here would close an undo step that was
+   * never opened. Kept for the same reason as the #BKE_id_is_editable mirror above, and it is
+   * unreachable for the same reason too — a refusal returns before `tc->data_len` is set, and
+   * #special_aftertrans_update bails on an empty `data_len_all` before dispatching here. Checked
+   * for every object in the session, mirroring #createTransSculpt's per-object refusal loop, since
+   * insurance that only covers the active object is not insurance for the rest of the group. Both
+   * are insurance against that entry condition changing, not live paths. */
+  for (Object *ob : objects) {
+    if (sculpt_paint::layers::mask_edit_refuse_deform(*ob, nullptr)) {
+      return;
+    }
+  }
+
+  BLI_assert(!(t->options & CTX_PAINT_CURVE));
+
   if (objects.size() == 1) {
     sculpt_paint::end_transform(C, *objects[0]);
   }

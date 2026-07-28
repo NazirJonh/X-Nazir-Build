@@ -302,6 +302,7 @@ enum eView3DOverlay_Flag : int {
   V3D_OVERLAY_SHOW_LIGHT_COLORS = (1 << 17),
   V3D_OVERLAY_VIEWER_ATTRIBUTE_TEXT = (1 << 18),
   V3D_OVERLAY_PERFORMANCE = (1 << 19),
+  V3D_OVERLAY_SCULPT_SHOW_LAYER_MASK = (1 << 20),
 };
 ENUM_OPERATORS(eView3DOverlay_Flag)
 
@@ -652,7 +653,8 @@ struct View3DShading {
 /** 3D Viewport Overlay settings. */
 struct View3DOverlay {
   eView3DOverlay_Flag flag = V3D_OVERLAY_VIEWER_ATTRIBUTE | V3D_OVERLAY_SCULPT_SHOW_MASK |
-                             V3D_OVERLAY_SCULPT_SHOW_FACE_SETS;
+                             V3D_OVERLAY_SCULPT_SHOW_FACE_SETS |
+                             V3D_OVERLAY_SCULPT_SHOW_LAYER_MASK;
 
   /** Edit mode settings. */
   eView3DOverlay_EditFlag edit_flag = V3D_OVERLAY_EDIT_FACES | V3D_OVERLAY_EDIT_SEAMS |
@@ -674,6 +676,7 @@ struct View3DOverlay {
   float weight_paint_mode_opacity = 1.0f;
   float sculpt_mode_mask_opacity = 0.75f;
   float sculpt_mode_face_sets_opacity = 1.0f;
+  float sculpt_mode_layer_mask_opacity = 0.75f;
   float viewer_attribute_opacity = 1.0f;
 
   /** Armature edit/pose mode settings. */
@@ -719,7 +722,11 @@ struct View3DOverlay {
   /** Thickness of the symmetry contour, in pixels. */
   float sculpt_symmetry_contour_thickness = 10.0f;
 
-  char _pad[4] = {};
+  /* NOTE: no trailing `_pad` member is needed here, because the 4-byte members above already sum
+   * to a multiple of 8. #View3D depends on that: it embeds this struct directly ahead of
+   * #ViewerPath, whose members must start 8-byte aligned, and any implicit tail padding the
+   * compiler inserted to achieve that would not be described by the SDNA. Re-check when adding
+   * fields: an odd number of new 4-byte members has to be balanced by a `char _pad[4]`. */
 };
 
 struct View3D_Runtime {

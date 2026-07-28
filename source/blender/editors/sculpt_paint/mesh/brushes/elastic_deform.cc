@@ -34,6 +34,9 @@ inline namespace elastic_deform_cc {
 struct LocalData {
   Vector<float> factors;
   Vector<float3> translations;
+  /* Reused per-thread scratch for the base-view-adjusted positions, so a base edit with visible
+   * layers does not malloc a node-sized buffer per node per dab. */
+  Vector<float3> base_view_storage;
 };
 
 BLI_NOINLINE static void calc_translations(const Object &object,
@@ -169,10 +172,17 @@ static void calc_faces(const Depsgraph &depsgraph,
   const OrigPositionData orig_data = orig_position_data_get_mesh(object, node);
   const Span<int> verts = node.verts();
 
+  /* Base view: compute the elastic falloff and displacement against the un-layered base so a base
+   * edit with visible layers does not bake the layer pattern in (see #layers::stroke_base_view).
+   * The original positions are the composed pre-stroke surface; subtracting the base-view offset
+   * recovers the base. Returns the input unchanged when the base view is inactive. */
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_mesh(
+      object, verts, orig_data.positions, tls.base_view_storage);
+
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
-  filter_region_clip_factors(ss, orig_data.positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
 
   auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
 
@@ -184,7 +194,7 @@ static void calc_faces(const Depsgraph &depsgraph,
                     kelvinet_params,
                     cache.location_symm,
                     offset,
-                    orig_data.positions,
+                    calc_positions,
                     translations);
 
   scale_translations(translations, factors);
@@ -211,10 +221,16 @@ static void calc_grids(const Depsgraph &depsgraph,
   const Span<int> grids = node.grids();
   const int grid_verts_num = grids.size() * key.grid_area;
 
+  /* Base view: compute the elastic falloff and displacement against the un-layered base so a base
+   * edit with visible layers does not bake the layer pattern in (see #layers::stroke_base_view).
+   * Returns the input unchanged when the base view is inactive. */
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, orig_data.positions, tls.base_view_storage);
+
   tls.factors.resize(grid_verts_num);
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
-  filter_region_clip_factors(ss, orig_data.positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
 
   auto_mask::calc_grids_factors(depsgraph, object, cache.automasking.get(), node, grids, factors);
 
@@ -226,7 +242,7 @@ static void calc_grids(const Depsgraph &depsgraph,
                     kelvinet_params,
                     cache.location_symm,
                     offset,
-                    orig_data.positions,
+                    calc_positions,
                     translations);
 
   scale_translations(translations, factors);

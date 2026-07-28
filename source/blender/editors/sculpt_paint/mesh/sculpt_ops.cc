@@ -39,6 +39,7 @@
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph.hh"
@@ -237,6 +238,26 @@ static wmOperatorStatus symmetrize_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  /* A weight-mask editing session must be refused in its own right, not left to the bake check
+   * below: #destructive_edit_check counts *layers* (see #bke::sculpt_layers::layers, which never
+   * collects folders), while a session can be anchored on a folder — including an empty one. On a
+   * mesh carrying no layers at all, an empty folder holding a mask therefore passes the bake check
+   * while a session is open, and the changed element count then sends #mask_edit_end down its
+   * destructive branch, which removes the user's own `.sculpt_mask` for good. Left un-gated by
+   * `ss.bm`: a session cannot legitimately exist under dyntopo, and refusing is the safe answer if
+   * one somehow does. */
+  if (layers::mask_edit_refuse_deform(ob, op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Mirroring changes the element count, which leaves every sculpt layer describing a domain that no
+   * longer exists — the same reason trim, dyntopo and the remesh operators refuse. Conditioned on
+   * `!ss.bm` exactly as #sculpt_dyntopo.cc's own check is: under dyntopo the live geometry is the
+   * BMesh and the stored layers do not describe it. */
+  if (!ss.bm && !layers::destructive_edit_check(*id_cast<const Mesh *>(ob.data), op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
+
   switch (pbvh->type()) {
     case bke::pbvh::Type::BMesh: {
       /* Dyntopo Symmetrize. */
@@ -329,10 +350,74 @@ static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &s
 
   /* Create sculpt mode session data. */
   if (ob.runtime->sculpt_session != nullptr) {
+    /* Entering sculpt mode over a session that was never exited — a script setting `object.mode`
+     * directly, or a mode switch that skipped #object_sculpt_mode_exit. A leftover weight-mask
+     * session would otherwise be discarded with the #SculptSession while its weights sat in the
+     * mesh's `.sculpt_mask` attribute, permanently passing for the user's own mask. A no-op in the
+     * ordinary case and for the vertex/weight paint sessions that also land here, which can never
+     * have one open. */
+    layers::mask_edit_end(ob);
     BKE_sculptsession_free(&ob);
   }
   ob.runtime->sculpt_session = MEM_new<SculptSession>(__func__);
   ob.runtime->sculpt_session->mode_type = OB_MODE_SCULPT;
+
+  /* REC is restored from the mesh before the refresh below, and this is the only site that reads
+   * #SCULPT_LAYER_REC_ARMED. The session is the authority for as long as it exists, but it was just
+   * created with REC off, so the bit the previous session left behind is the only thing that knows
+   * the user was recording when they stepped out into object mode.
+   *
+   * Strictly before #rec_exemption_refresh: that call mirrors the session onto the mesh, so running
+   * it first would read "no REC" out of the fresh session and erase the very bit being read here.
+   *
+   * The question asked is "was REC on", not "was REC on *this* layer": the bit is looked for anywhere
+   * in the tree and REC is then re-armed on whatever layer is active now. That is what makes changing
+   * the active layer in object mode (#SCULPT_OT_layer_select is polled there) behave exactly as it
+   * does inside sculpt mode, where #SculptSession::layers::rec_active is not tied to a layer at all
+   * and #layer_select_exec simply lets the exemption follow the new active layer. Anything narrower
+   * would make a trip through object mode silently switch recording off, which is the bug this whole
+   * mirror exists to prevent.
+   *
+   * Restored only if the layer can still receive a stroke — the same refusal #layer_toggle_rec_exec
+   * makes against arming REC on a folder-hidden layer, plus the lock, since both can be set from the
+   * mesh properties UI while the object sits in object mode. When it cannot, REC simply stays off and
+   * the refresh below clears the stale bit; the user sees an unpressed REC button rather than a
+   * stroke silently landing in the base.
+   *
+   * Deliberately not routed through #rec_active_set: that call captures the runtime base, measures
+   * the layer's mask, flushes multires and recomposes, none of which can run here (there is no PBVH
+   * and no runtime base yet). It also pins the layer to enabled / influence 1.0, which must *not* be
+   * repeated — the pin happened when REC was first armed, and an influence the user changed in the
+   * meantime is an edit to respect, not to overwrite. The full geometry re-evaluation a few lines
+   * below composes the surface from scratch under the answer the refresh settles. */
+  if (ob.type == OB_MESH && ob.data != nullptr) {
+    const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+    bool was_armed = false;
+    for (const SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
+      if (layer->base.flag & SCULPT_LAYER_REC_ARMED) {
+        was_armed = true;
+        break;
+      }
+    }
+    const SculptLayer *active = bke::sculpt_layers::active_get(mesh);
+    if (was_armed && active != nullptr &&
+        !(active->base.flag & (SCULPT_LAYER_GROUP_HIDDEN | SCULPT_LAYER_LOCKED)))
+    {
+      ob.runtime->sculpt_session->layers.rec_active = true;
+    }
+  }
+
+  /* Every entry, not just the skipped-exit case above. #SCULPT_LAYER_REC_EXEMPT lives on the mesh's
+   * own layer nodes, so it is not lost when the #SculptSession is, and any path that armed REC and
+   * never reached #object_sculpt_mode_exit — a mode switch that bypassed the exit, a script
+   * assigning `object.mode` — leaves this mesh with a layer still exempt while nothing is
+   * recording. The freshly built session has no REC armed, so reading it back here is what makes
+   * entering sculpt mode self-healing.
+   *
+   * Nothing here can recompose on the result, and nothing has to: there is no runtime base and no
+   * PBVH yet at this point, and the full geometry re-evaluation two lines below composes the surface
+   * from scratch under whatever answer this just settled. */
+  layers::rec_exemption_refresh(ob);
 
   /* Trigger evaluation of modifier stack to ensure
    * multires modifier sets .runtime.ccg in
@@ -432,7 +517,23 @@ void object_sculpt_mode_enter(Main &bmain,
 
   /* Check dynamic-topology flag; re-enter dynamic-topology mode when changing modes,
    * As long as no data was added that is not supported. */
-  if (mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) {
+  /* A saved file can pair the dyntopo flag with un-baked sculpt layers, a combination
+   * #sculpt_dynamic_topology_toggle_exec refuses to create interactively. Entering sculpt mode must
+   * still succeed, so only dyntopo is skipped here, and #ME_SCULPT_DYNAMIC_TOPOLOGY is deliberately
+   * left set: the obstruction is temporary — baking the layers lifts it — and quietly rewriting DNA
+   * during a mode switch would cost the user a saved setting for a reason never shown to them.
+   * Unlike the unsupported-data cases below, this is not overridable by \a force_dyntopo, which
+   * exists to push past attribute warnings rather than past data that dyntopo would silently ignore:
+   * under a BMesh every layer turns stale and each consumer skips it. */
+  const bool layers_block_dyntopo = (mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) &&
+                                    !layers::destructive_edit_check(*mesh, nullptr);
+  if (layers_block_dyntopo) {
+    /* Reported here rather than by #destructive_edit_check, whose message names a destructive mesh
+     * edit — the user only switched modes, and nothing in that text would connect the refusal to
+     * dyntopo. */
+    BKE_report(reports, RPT_INFO, "Dynamic Topology disabled: bake the sculpt layers first");
+  }
+  if ((mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) && !layers_block_dyntopo) {
     MultiresModifierData *mmd = BKE_sculpt_multires_active(&scene, &ob);
 
     const char *message_unsupported = nullptr;
@@ -483,6 +584,15 @@ void object_sculpt_mode_enter(Main &bmain,
 
   ensure_valid_pivot(ob, *paint);
 
+  /* Capture the un-layered runtime base for the mesh (vertex) domain and validate grid-domain
+   * layer data against the current top level. This has to happen while the geometry still matches
+   * the stored per-layer influences, i.e. before the user can change anything. Only force-build
+   * the BVH when layers actually exist. */
+  if (mesh && !bke::sculpt_layers::layers(*mesh).is_empty()) {
+    bke::object::pbvh_ensure(depsgraph, ob);
+  }
+  layers::session_state_ensure(ob);
+
   /* Flush object mode. */
   DEG_id_tag_update(&ob.id, ID_RECALC_SYNC_TO_EVAL);
 }
@@ -503,6 +613,19 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
   Mesh *mesh = BKE_mesh_from_object(&ob);
 
   mesh->runtime->corner_tris_cache.unfreeze();
+
+  /* Close any open weight-mask editing session BEFORE the flush below, and this ordering is
+   * load-bearing rather than incidental: while a session is open the layer's weights occupy
+   * #SubdivCCG::masks, and #multires_flush_sculpt_updates copies that array straight into the base
+   * mesh's persistent `CD_GRID_PAINT_MASK` layer. Flushing first would overwrite the user's paint
+   * mask with the layer's weights permanently — the session's own restore cannot undo a write to
+   * CustomData, and the next CCG rebuild re-derives `masks` from the corrupted base layer.
+   *
+   * This is also the last point at which the session *can* be closed. #BKE_sculptsession_free below
+   * is blenkernel and must not call into the editors, and by the time it runs the derived caches
+   * that carry the CCG are about to go; here the mesh, the attribute API, the #SubdivCCG and the
+   * tree are all still alive. */
+  layers::mask_edit_end(ob);
 
   multires_flush_sculpt_updates(&ob);
 
@@ -533,6 +656,23 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
   ob.mode &= ~mode_flag;
 
   BKE_sculptsession_free(&ob);
+
+  /* After the session is gone, which is what makes this a *clear*: with no session to mirror, the
+   * refresh drops the exemption. It has to be dropped, because
+   * #SCULPT_LAYER_REC_EXEMPT lives on the mesh's layer nodes rather than on the session and would
+   * otherwise outlive the mode — leaving this mesh rendering, and every later operator composing,
+   * with a layer whose weight map is silently absent.
+   *
+   * This is the one caller that *cannot* recompose on the result even in principle: the session it
+   * would need is already freed above, so there is no runtime base to recompose from. It does not
+   * have to. The mode exit tears the sculpt PBVH down and tags the object for a full re-evaluation
+   * below, so the next composed surface is built from stored data under the settled answer.
+   *
+   * #SCULPT_LAYER_REC_ARMED goes the other way and is left exactly as it stands. It composes nothing,
+   * so it is harmless outside the mode, and it is the only surviving record that REC was on —
+   * #init_sculpt_mode_session reads it back, which is what stops a trip through object mode from
+   * silently switching recording off. */
+  layers::rec_exemption_refresh(ob);
 
   paint_cursor_delete_textures();
 
@@ -655,11 +795,16 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
         if (!(ob->mode & mode_flag)) {
           continue;
         }
-        Mesh *mesh = id_cast<Mesh *>(ob->data);
-        if (mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) {
-          continue;
+        /* Dyntopo adds its own undo step. Asked of the live session rather than of
+         * #ME_SCULPT_DYNAMIC_TOPOLOGY: the flag is only a request.
+         * #object_sculpt_mode_enter leaves it set while skipping dyntopo when
+         * un-baked sculpt layers block it, so the flag no longer answers "did
+         * dyntopo actually turn on" — and trusting it there would skip this push
+         * as well, leaving the mode switch with no sculpt undo step at all. */
+        const SculptSession *ss = ob->runtime->sculpt_session;
+        if (ss == nullptr || ss->bm == nullptr) {
+          sculpt_objects.append(ob);
         }
-        sculpt_objects.append(ob);
       }
 
       bool sculpt_undo_started = false;
@@ -736,8 +881,15 @@ static wmOperatorStatus sculpt_selection_enter_sculpt_mode_exec(bContext *C, wmO
     if (wm->op_undo_depth <= 1) {
       bool sculpt_undo_started = false;
       for (Object *ob : newly_entered) {
-        Mesh *mesh = id_cast<Mesh *>(ob->data);
-        if (mesh->flag & ME_SCULPT_DYNAMIC_TOPOLOGY) {
+        /* Dyntopo adds its own undo step, so skip only the objects that really are in one.
+         * Asked of the live session rather than of #ME_SCULPT_DYNAMIC_TOPOLOGY: the flag is
+         * only a request, and #object_sculpt_mode_enter leaves it set while skipping dyntopo
+         * when un-baked sculpt layers block it. Trusting the flag here would skip this push
+         * for such an object as well, leaving its mode switch with no sculpt undo step at all.
+         * Same predicate as the guard in #sculpt_mode_toggle_exec, negated because this loop
+         * skips rather than collects. */
+        const SculptSession *ss = ob->runtime->sculpt_session;
+        if (ss != nullptr && ss->bm != nullptr) {
           continue;
         }
         if (!sculpt_undo_started) {
@@ -1939,6 +2091,43 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_mask_extract);
   WM_operatortype_append(SCULPT_OT_face_set_extract);
   WM_operatortype_append(SCULPT_OT_paint_mask_slice);
+
+  WM_operatortype_append(layers::SCULPT_OT_layer_add);
+  WM_operatortype_append(layers::SCULPT_OT_layer_remove);
+  WM_operatortype_append(layers::SCULPT_OT_layer_move);
+  WM_operatortype_append(layers::SCULPT_OT_layer_move_to);
+  WM_operatortype_append(layers::SCULPT_OT_layer_duplicate);
+  WM_operatortype_append(layers::SCULPT_OT_layer_merge_down);
+  WM_operatortype_append(layers::SCULPT_OT_layer_merge_selected);
+  WM_operatortype_append(layers::SCULPT_OT_layer_bake);
+  WM_operatortype_append(layers::SCULPT_OT_layer_bake_to_shape_key);
+  WM_operatortype_append(layers::SCULPT_OT_layer_bake_and_editmode_enter);
+  WM_operatortype_append(layers::SCULPT_OT_layer_clear);
+  WM_operatortype_append(layers::SCULPT_OT_layer_invert);
+  WM_operatortype_append(layers::SCULPT_OT_layer_validate);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_isolate);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_add);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_remove);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_invert);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_apply);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_clear);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_fill);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_edit_toggle);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_edit_finish);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_edit_cancel);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mask_toggle);
+  WM_operatortype_append(layers::SCULPT_OT_layer_set_influence);
+  WM_operatortype_append(layers::SCULPT_OT_layer_influence_drag);
+  WM_operatortype_append(layers::SCULPT_OT_layer_toggle_visibility);
+  WM_operatortype_append(layers::SCULPT_OT_layer_select);
+  WM_operatortype_append(layers::SCULPT_OT_layer_toggle_rec);
+  WM_operatortype_append(layers::SCULPT_OT_layer_solo_base);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_add);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_remove);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_merge);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_delete);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_toggle_visibility);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_color_tag);
 }
 
 void operatormacros_sculpt()

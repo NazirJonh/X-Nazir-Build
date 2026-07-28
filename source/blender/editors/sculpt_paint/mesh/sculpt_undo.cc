@@ -24,8 +24,12 @@
  */
 #include "sculpt_undo.hh"
 
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <mutex>
 #include <shared_mutex>
+#include <utility>
 #include <zstd.h>
 
 #include "CLG_log.h"
@@ -47,9 +51,12 @@
 #include "MEM_guardedalloc.h"
 
 #include "DNA_key_types.h"
+#include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+
+#include "BLT_translation.hh"
 
 #include "BKE_attribute.hh"
 #include "BKE_attribute_legacy_convert.hh"
@@ -69,6 +76,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_undo_system.hh"
 
@@ -303,6 +311,155 @@ struct StepData {
   std::unique_ptr<PositionUndoStorage> position_step_storage;
   size_t undo_size;
 
+  /**
+   * Sculpt layers: explicit per-element deltas recorded into this step for the active layer.
+   * Undo subtracts the delta from the live layer data, redo adds it. #sculpt_layer_uid is 0 when
+   * no layer was recorded.
+   *
+   * Mesh (vertex) path (#sculpt_layer_grids == false): #sculpt_layer_data holds per-vertex deltas
+   * at the vertices listed in #sculpt_layer_verts, keeping undo memory proportional to the
+   * brushed area rather than the whole mesh. The two arrays are not tightly packed: each touched
+   * PBVH node owns a contiguous slot, and only the slot's leading #sculpt_layer_seg_count[s]
+   * entries (starting at #sculpt_layer_seg_start[s]) are valid, the trailing entries being unused
+   * zero-delta holes. This lets stroke end skip the sequential compact pass (which was on the hot
+   * path); restore iterates the segments instead. When the segment table is empty the arrays are
+   * tightly packed (legacy).
+   *
+   * Multires/grid path (#sculpt_layer_grids == true): #sculpt_layer_verts holds the indices of
+   * the grids touched by the stroke, and #sculpt_layer_data holds `grid_area` tangent-space
+   * deltas per grid, in the order of the grid list (see
+   * #multiresModifier_reshapeFromCCG_into_sculpt_layer). The CCG positions are not restored
+   * directly for these steps: the layer delta is reverted and the composed surface re-evaluated.
+   */
+  int sculpt_layer_uid = 0;
+  bool sculpt_layer_grids = false;
+  Vector<int> sculpt_layer_verts;
+  Vector<float3> sculpt_layer_data;
+  Vector<int> sculpt_layer_seg_start;
+  Vector<int> sculpt_layer_seg_count;
+
+  /** Operator-level sculpt-layer undo (#Type::SculptLayer): captures metadata and optionally a
+   * full data snapshot for reversible influence/visibility and data-edit operations, plus
+   * tree changes (add / remove / duplicate / merge / bake, folder create / disband) as full node
+   * payloads whose data ownership toggles between the undo step and the tree. Keyed by #uid so
+   * restoring finds the right node even after the tree has been reordered. */
+  struct SculptLayerOpUndo {
+    /** #SculptLayerTreeNode::uid of the node whose metadata was captured, of either kind (0 = no
+     * metadata captured, *not* the root folder — see #sculpt_layer_find). One uid counter spans
+     * layers and folders, so this needs no companion "which kind" field: the restore resolves the
+     * node once and swaps whatever that node has. */
+    int uid = 0;
+    /** Layer-only, and only meaningful when #uid names a layer; a folder has no influence. */
+    float influence = 1.0f;
+    int flag = 0;
+    /** #eSculptLayerColorTag of the node named by #uid, swapped with the live one exactly like
+     * #flag. Folders are the only nodes that ever carry a non-default value today. */
+    int8_t color_tag = SCULPT_LAYER_COLOR_NONE;
+    /** Swapped with the live name like #influence / #flag; for operators that leave the name alone
+     * the swap is simply a no-op, so it needs no separate "was captured" marker. */
+    std::string name;
+    Array<float3> data;
+    bool has_data = false;
+
+    /** Layers removed by the operator (held by the step after the operator ran). */
+    Vector<SculptLayerUndoPayload> removed;
+    /** Layers added by the operator (in the mesh after the operator ran; extracted on undo). */
+    Vector<SculptLayerUndoPayload> added;
+    /** Layers whose data buffer the operator replaced wholesale, keyed by #uid. Unlike the
+     * in-place #data swap above, this also carries #totelem, so it expresses a *resize* — which is
+     * what repairing a stale layer is (#SCULPT_OT_layer_validate). Each payload's buffer is
+     * swapped with the live layer's on undo and swapped back on redo; the swap is its own
+     * inverse, like the metadata above. */
+    Vector<SculptLayerUndoPayload> resized;
+    /** Bake: each removed payload's contribution is also added to / subtracted from MDisps. */
+    bool is_bake = false;
+
+    /** Bake on a mesh with relative shape keys: uid of the key block the bake created (0 when the
+     * bake used another carrier). #bake_key holds that block while it is detached from the mesh
+     * (between undo and redo); the step owns and frees it then. */
+    int bake_key_uid = 0;
+    KeyBlock *bake_key = nullptr;
+    /** Position #bake_key was detached from, so the redo puts it back where it was rather than at
+     * the tail. It is appended at the tail by the bake, but the user is free to reorder or add
+     * blocks before the undo, and #KeyBlock::relative is a positional index into #Key::block. -1
+     * while the block is attached. */
+    int bake_key_index = -1;
+    /** #Object::shapenr from before the undo detached #bake_key, restored when the redo reattaches
+     * it (the detach itself shifts it down when the active block sat after the detached one). */
+    short pre_undo_shapenr = 0;
+    /** Uids of the blocks whose #KeyBlock::relative pointed *at* #bake_key when the undo detached
+     * it, and were remapped to the basis so they would not dangle. The redo points them back. */
+    Vector<int> relative_uids;
+
+    /** Bake on a mesh with NO shape keys yet: this step's operator created the mesh's #Key from
+     * scratch. Unlike #bake_key (which detaches/reattaches one block within an already-existing
+     * key), a freshly created key is fully torn down on undo and freshly rebuilt on redo —
+     * nothing referenced it before this step, so there is nothing to preserve piecemeal.
+     * #bake_key_uid / #bake_key are NOT used for these steps: they stay 0 / null, see the
+     * `!op.created_key` guards added to #restore_list in Task 2. */
+    bool created_key = false;
+    /** #Object::shapenr from before the operator ran (captured rather than assumed, though it is
+     * always 1 in practice since the mesh had no #Key yet). Restored verbatim on undo; recomputed
+     * from the freshly rebuilt key's block index on redo. */
+    short pre_bake_shapenr = 1;
+
+    /** Node move batch (reorder, reparent, or both): empty when the step is not a move. See
+     * #ReparentMove for why each entry anchors to a neighbour uid rather than a position, and why
+     * it no longer says which kind of node it moves. */
+    Vector<ReparentMove> moves;
+
+    /** Folders the operator removed / added, mirroring #removed / #added for layers exactly —
+     * including #groups_added holding payloads rather than bare uids: the payload is the buffer the
+     * restore extracts a folder *into*, so redo can insert it back (see
+     * #push_sculpt_layer_group_list_change, which fills them from uids, and the restore branch in
+     * #restore_list).
+     *
+     * Kept apart from #removed / #added even though the payload type is now the same, because
+     * #restore_list has to straddle the #moves batch with them: a folder must exist before anything
+     * moves into it, and be empty before it is removed. See the ordering note there. */
+    Vector<SculptLayerUndoPayload> groups_removed;
+    Vector<SculptLayerUndoPayload> groups_added;
+
+    /** Active-layer selection change: the active uid before and after (0 = no active layer, which
+     * is a legal value on both sides — hence the separate flag rather than a sentinel). */
+    bool has_active_change = false;
+    int active_uid_from = 0;
+    int active_uid_to = 0;
+
+    /** Batch flag swap (Solo Base, folder visibility cascade): pre-change flags of the affected
+     * layers, swapped with the live ones. See #push_sculpt_layer_flags_batch. */
+    Vector<int> flags_batch_uids;
+    Vector<int> flags_batch_flags;
+
+    /** #SculptLayerTreeNode::uid of the node whose weight mask this step swaps, of either kind
+     * (0 = no mask captured). Separate from #uid rather than folded into it because the two are
+     * captured by different operators: a mask operator changes no metadata, and reusing #uid would
+     * make the restore swap this step's empty #name onto the node. */
+    int mask_uid = 0;
+    /** The mask the node carried before the operator ran, owned by the step and swapped with the
+     * live one on restore. Null is a legal captured state ("the node had no mask"), which is why
+     * #mask_uid and not this pointer says whether anything was captured. */
+    SculptLayerMask *mask_swap = nullptr;
+
+    /** Non-zero when this step opens or closes a mask editing session; holds the node's uid. */
+    int mask_session_uid = 0;
+    /** Whether the step *opened* the session named by #mask_session_uid (as opposed to closing it).
+     * See #mask_session_boundary for how the two combine with the restore direction. */
+    bool mask_session_entering = false;
+
+    SculptLayerOpUndo() = default;
+    /* Move-only and owning, mirroring #SculptLayerUndoPayload: #mask_swap is a raw owning pointer,
+     * and an implicit copy would hand the same mask to two steps to free. Nothing moves or copies a
+     * #StepData today (it holds a #Mutex and a map of unique pointers), so the copy operations are
+     * deleted rather than replaced by move ones that no caller needs. */
+    SculptLayerOpUndo(const SculptLayerOpUndo &) = delete;
+    SculptLayerOpUndo &operator=(const SculptLayerOpUndo &) = delete;
+    ~SculptLayerOpUndo()
+    {
+      bke::sculpt_layers::mask_free(mask_swap);
+    }
+  } sculpt_layer_op;
+
   /** Whether processing code needs to handle the current data as an undo step. */
   bool needs_undo() const
   {
@@ -526,6 +683,11 @@ size_t step_memory_size_get(UndoStep *step)
  * Return the sculpt undo step currently being built (#UndoStack.step_init).
  * Must not fall back to the last applied sculpt step: doing so would write stroke undo data into
  * an already committed step, or finalize/destroy the wrong step in #push_end_all_ex.
+ *
+ * This replaces the bundle's `get_active_step` / object-less `get_step_data()` pair outright: on
+ * this fork a step owns one #StepData per participating object (#SculptUndoStep.objects_data), so
+ * there is no single step-wide #StepData for an object-less accessor to return. Every layer-undo
+ * caller must go through #get_step_data(const Object &) below.
  */
 static SculptUndoStep *get_init_sculpt_step()
 {
@@ -765,7 +927,8 @@ static void swap_indexed_data(MutableSpan<T> full, const Span<int> indices, Muta
 
 static void restore_position_mesh(Object &object,
                                   PositionUndoStorage &undo_data,
-                                  const MutableSpan<bool> modified_verts)
+                                  const MutableSpan<bool> modified_verts,
+                                  const bool skip_positions_swap)
 {
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *object.runtime->sculpt_session;
@@ -800,7 +963,12 @@ static void restore_position_mesh(Object &object,
         /* When original positions aren't written separately in the undo step, there are no
          * deform modifiers. Therefore the original and evaluated deform positions will be the
          * same, and modifying the positions from the original mesh is enough. */
-        swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, positions);
+        if (!skip_positions_swap) {
+          swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, positions);
+        }
+        else {
+          undo_positions.take_front(unique_verts_num);
+        }
       }
       else {
         /* When original positions are stored in the undo step, undo/redo will cause a reevaluation
@@ -822,11 +990,21 @@ static void restore_position_mesh(Object &object,
             /* The basis key positions and the mesh positions are always kept in sync. */
             scatter_data_mesh(undo_positions.as_span(), verts, positions);
           }
-          swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, active_data);
+          if (!skip_positions_swap) {
+            swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, active_data);
+          }
+          else {
+            undo_positions.take_front(unique_verts_num);
+          }
         }
         else {
           /* There is a deform modifier, but no shape keys. */
-          swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, positions);
+          if (!skip_positions_swap) {
+            swap_indexed_data(undo_positions.take_front(unique_verts_num), verts, positions);
+          }
+          else {
+            undo_positions.take_front(unique_verts_num);
+          }
         }
       }
 
@@ -1276,10 +1454,877 @@ static void refine_subdiv(Depsgraph *depsgraph,
   bke::subdiv::eval_refine_from_mesh(subdiv, id_cast<const Mesh *>(object.data), deformed_verts);
 }
 
+/**
+ * The layer with \a uid, or null when nothing on \a mesh holds it or the node holding it is a
+ * folder.
+ *
+ * Kind-checked and 0-guarded rather than a bare #bke::sculpt_layers::node_find_by_uid, because one
+ * uid counter now spans both kinds: reinterpreting whatever a uid resolves to would read a
+ * #SculptLayerGroup's child list as #SculptLayer::influence and its #SculptLayer::data pointer past
+ * the end of the smaller allocation. Uid 0 needs a guard of its own — #node_find_by_uid resolves it
+ * to the *root folder*, whereas every uid field that reaches this function uses 0 to mean "nothing
+ * recorded".
+ */
+static SculptLayer *sculpt_layer_find(Mesh &mesh, const int uid)
+{
+  if (uid == 0) {
+    return nullptr;
+  }
+  return bke::sculpt_layers::node_as_layer(bke::sculpt_layers::node_find_by_uid(mesh, uid));
+}
+
+/**
+ * Whether the recorded per-element layer deltas of a mesh (vertex domain) Position step can be
+ * applied: the recorded layer must still exist with a data buffer, and the stored arrays must be
+ * consistent. Used to decide whether the position restore may be delegated to
+ * #restore_active_sculpt_layer (`skip_positions_swap`): if this returns false the plain position
+ * swap must run instead, otherwise the step would silently restore nothing (e.g. when the layer
+ * was removed out-of-band, bypassing the layer operators' undo payloads).
+ */
+static bool can_restore_active_sculpt_layer_mesh(const StepData &step_data, Object &object)
+{
+  if (step_data.sculpt_layer_uid == 0 || step_data.sculpt_layer_grids ||
+      step_data.sculpt_layer_data.is_empty())
+  {
+    return false;
+  }
+  if (step_data.sculpt_layer_verts.size() != step_data.sculpt_layer_data.size()) {
+    return false;
+  }
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const SculptLayer *layer = sculpt_layer_find(mesh, step_data.sculpt_layer_uid);
+  return layer != nullptr && layer->data != nullptr;
+}
+
+/**
+ * Sculpt layers: revert or re-apply the explicit per-element deltas recorded for the active
+ * layer. The delta is constant, so undo subtracts and redo adds it (no swap needed).
+ *
+ * \a is_undo is threaded down from #restore_list rather than read off #StepData::needs_undo:
+ * that flag is flipped only by the dyntopo and geometry restore helpers, and a #Type::Position
+ * step recorded into a layer reaches none of them, so it would read a constant `true` and repeat
+ * the undo subtraction on every redo (see the identical reasoning at #restore_list's is_undo
+ * parameter comment).
+ */
+static void restore_active_sculpt_layer(StepData &step_data, Object &object, const bool is_undo)
+{
+  if (step_data.sculpt_layer_uid == 0 || step_data.sculpt_layer_data.is_empty()) {
+    return;
+  }
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  SculptLayer *layer = sculpt_layer_find(mesh, step_data.sculpt_layer_uid);
+  if (!layer || !layer->data) {
+    return;
+  }
+  MutableSpan<float3> live(static_cast<float3 *>(layer->data), layer->totelem);
+  MutableSpan<float3> stored = step_data.sculpt_layer_data;
+  if (step_data.sculpt_layer_grids) {
+    /* Multires/grid path: per-grid tangent-space deltas at the touched grids. Only the layer
+     * data is adjusted here; the CCG positions are re-evaluated from base + layers by the
+     * caller (the composed surface is a deterministic function of the stored data). */
+    const Span<int> grids = step_data.sculpt_layer_verts;
+    if (grids.is_empty() || stored.size() % grids.size() != 0) {
+      return;
+    }
+    const int64_t grid_area = stored.size() / grids.size();
+    const bool undo_grids = is_undo;
+    for (const int64_t t : grids.index_range()) {
+      const int64_t start = int64_t(grids[t]) * grid_area;
+      if (start < 0 || start + grid_area > live.size()) {
+        continue;
+      }
+      float3 *layer_grid = live.data() + start;
+      const float3 *delta_grid = stored.data() + t * grid_area;
+      for (int64_t i = 0; i < grid_area; i++) {
+        if (undo_grids) {
+          layer_grid[i] -= delta_grid[i];
+        }
+        else {
+          layer_grid[i] += delta_grid[i];
+        }
+      }
+    }
+    return;
+  }
+  /* Partial delta snapshot (mesh path): add or subtract per-vertex deltas.
+   * #sculpt_layer_data holds the delta (new - old) recorded at stroke end; undo subtracts it,
+   * redo adds it. Unlike the whole-buffer path the delta is constant, so no swap is needed.
+   *
+   * The arrays may carry per-node holes (see #StepData::sculpt_layer_seg_start): when a segment
+   * table is present only the listed ranges are valid, otherwise the arrays are tightly packed. */
+  const Span<int> verts = step_data.sculpt_layer_verts;
+  if (verts.size() != stored.size()) {
+    return;
+  }
+  const bool undo = is_undo;
+  /* Deliberately the CURRENT effective influence, not the one in force when the stroke was
+   * recorded: every influence change keeps `positions == base + sum(data * effective)` (canonical
+   * recompute or the incremental RNA delta), so the positions embed the recorded delta scaled by
+   * the influence in force NOW, and that is the amount to add or remove. */
+  const float influence = bke::sculpt_layers::effective(*layer);
+  MutableSpan<float3> positions = mesh.vert_positions_for_write();
+
+  /* Under a shape key the combined surface is recomposed from the base plus layers at evaluation
+   * (the layer overlay is applied on top of the shape-keyed positions), and #mesh.vert_positions
+   * holds the untouched basis. Only revert the layer data here; leave the basis alone and let the
+   * re-evaluation reflect the change, mirroring how the stroke itself never touched the basis. */
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const bool skip_positions = ss.shapekey_active != nullptr;
+
+  const auto apply_range = [&](const int start, const int count) {
+    for (const int64_t i : IndexRange(start, count)) {
+      const int v = verts[i];
+      if (v >= 0 && v < live.size()) {
+        if (undo) {
+          live[v] -= stored[i];
+          if (!skip_positions) {
+            positions[v] -= stored[i] * influence;
+          }
+        }
+        else {
+          live[v] += stored[i];
+          if (!skip_positions) {
+            positions[v] += stored[i] * influence;
+          }
+        }
+      }
+    }
+  };
+  if (step_data.sculpt_layer_seg_start.is_empty()) {
+    /* Legacy tightly-packed layout. */
+    apply_range(0, int(verts.size()));
+  }
+  else {
+    for (const int s : step_data.sculpt_layer_seg_start.index_range()) {
+      apply_range(step_data.sculpt_layer_seg_start[s], step_data.sculpt_layer_seg_count[s]);
+    }
+  }
+}
+
+void store_active_sculpt_layer_grids(Object &object, Vector<int> &&grids, Vector<float3> &&deltas)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data || grids.is_empty() || deltas.is_empty()) {
+    return;
+  }
+  BLI_assert(deltas.size() % grids.size() == 0);
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
+  if (!layer) {
+    return;
+  }
+  step_data->sculpt_layer_uid = layer->base.uid;
+  step_data->sculpt_layer_grids = true;
+  step_data->undo_size += grids.as_span().size_in_bytes() + deltas.as_span().size_in_bytes();
+  step_data->sculpt_layer_verts = std::move(grids);
+  step_data->sculpt_layer_data = std::move(deltas);
+}
+
+void store_active_sculpt_layer_verts(Object &object,
+                                     Vector<int> &&verts,
+                                     Vector<float3> &&deltas,
+                                     Vector<int> &&seg_start,
+                                     Vector<int> &&seg_count)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data || verts.is_empty()) {
+    return;
+  }
+  BLI_assert(verts.size() == deltas.size());
+  BLI_assert(seg_start.size() == seg_count.size());
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
+  if (!layer) {
+    return;
+  }
+  step_data->sculpt_layer_uid = layer->base.uid;
+  step_data->undo_size += verts.as_span().size_in_bytes() + deltas.as_span().size_in_bytes() +
+                          seg_start.as_span().size_in_bytes() + seg_count.as_span().size_in_bytes();
+  step_data->sculpt_layer_verts = std::move(verts);
+  step_data->sculpt_layer_data = std::move(deltas);
+  step_data->sculpt_layer_seg_start = std::move(seg_start);
+  step_data->sculpt_layer_seg_count = std::move(seg_count);
+}
+
+SculptLayerUndoPayload::SculptLayerUndoPayload(SculptLayerUndoPayload &&other) noexcept
+    : type(other.type),
+      name(std::move(other.name)),
+      flag(other.flag),
+      color_tag(other.color_tag),
+      uid(other.uid),
+      parent_uid(other.parent_uid),
+      prev_uid(other.prev_uid),
+      influence(other.influence),
+      totelem(other.totelem),
+      domain(other.domain),
+      level(other.level),
+      data(other.data),
+      mask(other.mask)
+{
+  other.data = nullptr;
+  other.mask = nullptr;
+}
+
+SculptLayerUndoPayload &SculptLayerUndoPayload::operator=(SculptLayerUndoPayload &&other) noexcept
+{
+  if (this != &other) {
+    if (data) {
+      MEM_delete_void(data);
+    }
+    bke::sculpt_layers::mask_free(mask);
+    type = other.type;
+    name = std::move(other.name);
+    flag = other.flag;
+    color_tag = other.color_tag;
+    uid = other.uid;
+    parent_uid = other.parent_uid;
+    prev_uid = other.prev_uid;
+    influence = other.influence;
+    totelem = other.totelem;
+    domain = other.domain;
+    level = other.level;
+    data = other.data;
+    mask = other.mask;
+    other.data = nullptr;
+    other.mask = nullptr;
+  }
+  return *this;
+}
+
+SculptLayerUndoPayload::~SculptLayerUndoPayload()
+{
+  /* A folder payload never acquires a buffer — nothing but the layer branch of
+   * #sculpt_layer_payload_capture / #sculpt_layer_payload_extract ever writes #data — so the free
+   * below is unreachable for one. Asserted rather than assumed: a future path that filled #data
+   * without setting #type would hand a #SculptLayerGroup's bytes to #MEM_delete_void. */
+  BLI_assert(this->is_layer() || data == nullptr);
+  if (data) {
+    MEM_delete_void(data);
+  }
+  /* No kind test, unlike #data: a folder carries a mask exactly as a layer does, and both payload
+   * kinds may therefore own one. A no-op when the payload never held a mask, or handed it back to
+   * the tree in #sculpt_layer_payload_insert. */
+  bke::sculpt_layers::mask_free(mask);
+}
+
+/* Everything a payload mirrors from a node except its slot in the tree, whose meaning differs per
+ * direction, and a layer's data buffer, whose ownership does. Kept in one place so that a new node
+ * field cannot be handled on one of the payload paths and forgotten on the others.
+ *
+ * The layer-only fields are filled only for a layer, which is what keeps a folder payload's copy of
+ * them at the defaults #SculptLayerUndoPayload documents. */
+static void payload_metadata_from_node(SculptLayerUndoPayload &payload,
+                                       const SculptLayerTreeNode &node)
+{
+  payload.type = node.type;
+  payload.name = node.name;
+  payload.flag = node.flag;
+  payload.color_tag = node.color_tag;
+  payload.uid = node.uid;
+  /* The parent is a pointer now rather than a stored uid, so it is read off the tree here. Null only
+   * for the root group, which is never captured; 0 then means "the root folder", which is where
+   * #sculpt_layer_payload_insert puts a node back. */
+  payload.parent_uid = node.parent ? node.parent->base.uid : 0;
+  if (const SculptLayer *layer = bke::sculpt_layers::node_as_layer(&node)) {
+    payload.influence = layer->influence;
+    payload.totelem = layer->totelem;
+    payload.domain = layer->domain;
+    payload.level = layer->level;
+  }
+}
+
+/* The inverse of #payload_metadata_from_node, onto a node the caller allocated for `payload.type`.
+ *
+ * #SculptLayerTreeNode::parent and the sibling links are deliberately not written: linking the node
+ * is what sets them (see #sculpt_layer_payload_insert), and a parent pointer written without the
+ * matching entry in that parent's child list would be a tree that disagrees with itself. */
+static void node_metadata_from_payload(SculptLayerTreeNode &node,
+                                       const SculptLayerUndoPayload &payload)
+{
+  /* Before the kind test below: #SculptLayerTreeNode::type defaults to the layer type, so a folder
+   * rebuilt from a payload would otherwise claim to be a layer. */
+  node.type = payload.type;
+  /* Safe against truncation on repeated round trips: `payload.name` was itself read out of a
+   * fixed-size #SculptLayerTreeNode::name (see #payload_metadata_from_node), so it can never exceed
+   * what this copy back can hold. */
+  STRNCPY_UTF8(node.name, payload.name.c_str());
+  node.flag = payload.flag;
+  node.color_tag = payload.color_tag;
+  node.uid = payload.uid;
+  if (SculptLayer *layer = bke::sculpt_layers::node_as_layer(&node)) {
+    layer->influence = payload.influence;
+    layer->totelem = payload.totelem;
+    layer->domain = payload.domain;
+    layer->level = payload.level;
+  }
+}
+
+/* The folder a recorded `parent_uid` / #ReparentMove::group_to names, falling back to the root.
+ *
+ * Unlike #sculpt_layer_find, uid 0 is *not* guarded away here: the root group holds uid 0, so
+ * "recorded at the top level" and "resolves to the root" are the same lookup, which is exactly why
+ * a payload can store the parent as a plain uid with no separate "was at the root" marker. */
+static SculptLayerGroup *sculpt_layer_parent_resolve(Mesh &mesh, const int parent_uid)
+{
+  SculptLayerGroup *parent = bke::sculpt_layers::node_as_group(
+      bke::sculpt_layers::node_find_by_uid(mesh, parent_uid));
+  if (parent == nullptr) {
+    /* The folder is gone (removed by a later step that is not being undone), or the uid names a
+     * layer. The root is the closest surviving approximation; leaving the node unlinked would leak
+     * it and drop it off the tree entirely. */
+    CLOG_WARN(&LOG,
+              "Sculpt layer undo: folder %d recorded as a parent is missing; falling back to the "
+              "root folder",
+              parent_uid);
+    parent = bke::sculpt_layers::root_group(mesh);
+  }
+  return parent;
+}
+
+/* The sibling \a node must land after inside \a parent for a recorded \a prev_uid, or null for the
+ * head. \a node may be null when nothing is being re-linked yet.
+ *
+ * The anchor may be of either kind: one uid space means a folder and a layer are ordinary siblings
+ * in #SculptLayerGroup::children, so the lookup is over nodes and no kind test applies. */
+static SculptLayerTreeNode *sculpt_layer_anchor_resolve(Mesh &mesh,
+                                                        const int prev_uid,
+                                                        const SculptLayerGroup &parent,
+                                                        const SculptLayerTreeNode *node)
+{
+  if (prev_uid == 0) {
+    /* The head. Not looked up: #node_find_by_uid resolves uid 0 to the root folder, which is never
+     * anyone's sibling. */
+    return nullptr;
+  }
+  SculptLayerTreeNode *after = bke::sculpt_layers::node_find_by_uid(mesh, prev_uid);
+  if (after == nullptr || after == node || after->parent != &parent) {
+    /* Either the anchor is gone (removed by a later step that is not being undone), or it no longer
+     * sits in the folder the node is going into, in which case #node_move_into could not insert
+     * after it at all. The head is the closest surviving approximation of where the node sat. */
+    return nullptr;
+  }
+  return after;
+}
+
+/* Whether \a node may legally be moved into \a dst.
+ *
+ * Only a folder can fail this: putting one inside itself or its own subtree would detach that
+ * subtree from the root and leak it. #node_move_into asserts the two cases rather than handling
+ * them, so a recorded move is checked here first — the tree can have changed since the move was
+ * captured (a later step that is not being undone), which is precisely what a debug-only assert
+ * cannot cover in a release build. */
+static bool sculpt_layer_move_is_legal(const SculptLayerTreeNode &node,
+                                       const SculptLayerGroup &dst)
+{
+  const SculptLayerGroup *moved = bke::sculpt_layers::node_as_group(&node);
+  if (moved == nullptr) {
+    return true;
+  }
+  return &dst != moved && !bke::sculpt_layers::node_is_descendant_of(dst.base, *moved);
+}
+
+SculptLayerUndoPayload sculpt_layer_payload_capture(Mesh & /*mesh*/,
+                                                    SculptLayerTreeNode &node,
+                                                    const PayloadCapture capture)
+{
+  SculptLayerUndoPayload payload;
+  payload_metadata_from_node(payload, node);
+  /* Read while the node is still linked; the caller unlinks it afterwards. */
+  payload.prev_uid = node.prev ? node.prev->uid : 0;
+  /* Only a layer owns a buffer. This branch is the whole reason a folder payload can never reach the
+   * free in #SculptLayerUndoPayload::~SculptLayerUndoPayload. */
+  if (SculptLayer *layer = bke::sculpt_layers::node_as_layer(&node)) {
+    payload.data = layer->data;
+    layer->data = nullptr;
+    layer->totelem = 0;
+  }
+  /* Taken from both kinds, and only when the node is on its way out: #bke::sculpt_layers::remove and
+   * #group_remove free the node's mask along with the node, so the transfer has to happen here or
+   * the weights are gone before the payload ever sees them. A #PayloadCapture::DataOnly capture
+   * leaves the node in the tree, where its mask stays valid and untouched. */
+  if (capture == PayloadCapture::NodeRemoved) {
+    payload.mask = node.mask;
+    node.mask = nullptr;
+  }
+  return payload;
+}
+
+void sculpt_layer_payload_insert(Mesh &mesh, SculptLayerUndoPayload &payload)
+{
+  SculptLayerTreeNode *node = nullptr;
+  if (payload.is_layer()) {
+    SculptLayer *layer = MEM_new<SculptLayer>(__func__);
+    node_metadata_from_payload(layer->base, payload);
+    layer->data = payload.data;
+    payload.data = nullptr;
+    node = &layer->base;
+  }
+  else {
+    SculptLayerGroup *group = MEM_new<SculptLayerGroup>(__func__);
+    node_metadata_from_payload(group->base, payload);
+    /* A folder coming into existence outside the module's own creation paths — this is one of the
+     * two, next to the blend-file reader — must be given its runtime here: #bke::sculpt_layers::
+     * layers dereferences it rather than allocating it on demand (it is const and runs from
+     * evaluation threads), so without this the next span rebuild of any folder above this one
+     * dereferences null. */
+    bke::sculpt_layers::group_runtime_ensure(*group);
+    node = &group->base;
+  }
+
+  /* The mask goes back with the node, for both kinds. Without this a masked node that was deleted
+   * would come back unmasked: the weights are owned by the payload from the capture onwards (see
+   * #sculpt_layer_payload_capture), and nothing else would ever hand them to the tree again.
+   * Assigned rather than swapped — the node was allocated a few lines above and has no mask of its
+   * own to displace. */
+  BLI_assert(node->mask == nullptr);
+  node->mask = payload.mask;
+  payload.mask = nullptr;
+
+  /* Through the module's own move rather than a raw #BLI_addhead / #BLI_insertlinkafter: it is what
+   * maintains #SculptLayerTreeNode::parent and tags the cached layer spans of both ends dirty, and a
+   * missed tag hands the eval paths a pointer to a freed node. The node was just allocated and has
+   * no parent to unlink from, which #node_move_into's null-parent branch covers. */
+  SculptLayerGroup &parent = *sculpt_layer_parent_resolve(mesh, payload.parent_uid);
+  bke::sculpt_layers::node_move_into(
+      mesh, *node, parent, sculpt_layer_anchor_resolve(mesh, payload.prev_uid, parent, node));
+}
+
+/* Pull the node identified by `payload.uid` out of the tree back into \a payload, transferring a
+ * layer's data buffer to the undo step. Returns false when the node is missing.
+ *
+ * A folder must already be empty: it owns its children, so this refuses to guess what an orphaned
+ * subtree should become (#bke::sculpt_layers::group_remove asserts it). The operator records the
+ * lift-out as a reparent batch, which #restore_list re-applies before it gets here. */
+static bool sculpt_layer_payload_extract(Mesh &mesh, SculptLayerUndoPayload &payload)
+{
+  if (payload.uid == 0) {
+    /* Uid 0 is the root folder, which is never captured into a payload and must never be freed by
+     * one. An uninitialized payload reaching here is a bug elsewhere, not a request to extract it. */
+    BLI_assert_unreachable();
+    return false;
+  }
+  SculptLayerTreeNode *node = bke::sculpt_layers::node_find_by_uid(mesh, payload.uid);
+  if (node == nullptr) {
+    return false;
+  }
+  /* Nothing may already be owned here: a payload is extracted into only after it was inserted from
+   * (which nulls the pointer) or while it holds nothing but a uid. */
+  BLI_assert(payload.data == nullptr);
+  BLI_assert(payload.mask == nullptr);
+  payload_metadata_from_node(payload, *node);
+  payload.prev_uid = node->prev ? node->prev->uid : 0;
+
+  /* Before either removal below, which free the node's mask along with the node. Taken for both
+   * kinds, so a folder's mask survives an undo/redo cycle exactly as a layer's does. */
+  payload.mask = node->mask;
+  node->mask = nullptr;
+
+  if (SculptLayer *layer = bke::sculpt_layers::node_as_layer(node)) {
+    payload.data = layer->data;
+    layer->data = nullptr;
+    /* Hands the active marker to a sibling layer when this layer held it. */
+    bke::sculpt_layers::remove(mesh, *layer);
+    return true;
+  }
+  SculptLayerGroup *group = bke::sculpt_layers::node_as_group(node);
+  /* A node is of one kind or the other, and the layer branch above returned. */
+  BLI_assert(group != nullptr);
+  bke::sculpt_layers::group_remove(mesh, *group);
+  return true;
+}
+
+void push_sculpt_layer_list_change(Object &object,
+                                   Vector<SculptLayerUndoPayload> &&removed,
+                                   Vector<int> &&added_uids,
+                                   const bool is_bake)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.removed = std::move(removed);
+  /* Charged after the move, so the payloads counted are the ones the step now owns. Only the mask is
+   * added here: #SculptLayerUndoPayload::data is the layer's own buffer, whose accounting is not
+   * this change's to introduce. */
+  for (const SculptLayerUndoPayload &payload : step_data->sculpt_layer_op.removed) {
+    if (payload.mask != nullptr) {
+      step_data->undo_size += size_t(bke::sculpt_layers::mask_size_in_bytes(*payload.mask));
+    }
+  }
+  step_data->sculpt_layer_op.added.clear();
+  for (const int uid : added_uids) {
+    SculptLayerUndoPayload payload;
+    payload.uid = uid;
+    /* Explicit rather than left at the (layer) default, for the same reason
+     * #push_sculpt_layer_group_list_change spells the folder type out. */
+    payload.type = SCULPT_LAYER_TREE_NODE_TYPE_LAYER;
+    step_data->sculpt_layer_op.added.append(std::move(payload));
+  }
+  step_data->sculpt_layer_op.is_bake = is_bake;
+}
+
+void push_sculpt_layer_bake_shape_key(Object &object, const int key_uid)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  step_data->sculpt_layer_op.bake_key_uid = key_uid;
+}
+
+void push_sculpt_layer_bake_to_shape_key(Object &object, const short pre_bake_shapenr)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  step_data->sculpt_layer_op.created_key = true;
+  step_data->sculpt_layer_op.pre_bake_shapenr = pre_bake_shapenr;
+}
+
+void push_sculpt_layer_reparent(Object &object, Vector<ReparentMove> &&moves)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.moves = std::move(moves);
+}
+
+void push_sculpt_layer_active(Object &object, const int uid_from, const int uid_to)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.active_uid_from = uid_from;
+  step_data->sculpt_layer_op.active_uid_to = uid_to;
+  step_data->sculpt_layer_op.has_active_change = true;
+}
+
+void push_sculpt_layer_metadata(Object &object, const SculptLayerTreeNode &node)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  /* The root group (uid 0) has no metadata worth recording — it is never renamed, never re-flagged
+   * and never drawn — and #restore_list guards its swap behind `op.uid != 0`, so a root passed here
+   * would be captured only to be silently skipped on restore. No caller does this today; the assert
+   * is the contract, since neither the signature nor a runtime check would otherwise catch it. */
+  BLI_assert(node.uid != 0);
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.uid = node.uid;
+  step_data->sculpt_layer_op.flag = node.flag;
+  step_data->sculpt_layer_op.color_tag = node.color_tag;
+  /* Always read out of the fixed-size #SculptLayerTreeNode::name, never from a caller-supplied
+   * string, so the stored copy can never exceed what the swap on restore can write back — otherwise
+   * a long name would be truncated a little more on each undo/redo round trip. */
+  step_data->sculpt_layer_op.name = node.name;
+  /* Influence is a layer field: a folder has none, and the restore's swap of it is skipped for one.
+   * Left at its default here rather than swapped with a meaningless value. */
+  if (const SculptLayer *layer = bke::sculpt_layers::node_as_layer(&node)) {
+    step_data->sculpt_layer_op.influence = layer->influence;
+  }
+  step_data->sculpt_layer_op.has_data = false;
+}
+
+void push_sculpt_layer_group_list_change(Object &object,
+                                         Vector<SculptLayerUndoPayload> &&removed,
+                                         Vector<int> &&added_uids)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.groups_removed = std::move(removed);
+  step_data->sculpt_layer_op.groups_added.clear();
+  for (const int uid : added_uids) {
+    SculptLayerUndoPayload payload;
+    payload.uid = uid;
+    /* Explicit rather than left at the default: the payload is filled in for real only when a later
+     * undo extracts the folder into it, and until then #SculptLayerUndoPayload::is_layer would claim
+     * a folder is a layer. */
+    payload.type = SCULPT_LAYER_TREE_NODE_TYPE_GROUP;
+    step_data->sculpt_layer_op.groups_added.append(std::move(payload));
+  }
+}
+
+void push_sculpt_layer_flags_batch(Object &object, Vector<int> &&uids, Vector<int> &&flags)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  BLI_assert(uids.size() == flags.size());
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.flags_batch_uids = std::move(uids);
+  step_data->sculpt_layer_op.flags_batch_flags = std::move(flags);
+}
+
+void push_sculpt_layer_data(Object &object, const SculptLayer &layer)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.uid = layer.base.uid;
+  step_data->sculpt_layer_op.influence = layer.influence;
+  step_data->sculpt_layer_op.flag = layer.base.flag;
+  step_data->sculpt_layer_op.name = layer.base.name;
+  if (layer.data && layer.totelem > 0) {
+    const Span<float3> src(static_cast<const float3 *>(layer.data), layer.totelem);
+    step_data->sculpt_layer_op.data = Array<float3>(src);
+    step_data->sculpt_layer_op.has_data = true;
+  }
+  else {
+    step_data->sculpt_layer_op.has_data = false;
+  }
+}
+
+void push_sculpt_layer_mask(Object &object, const SculptLayerTreeNode &node)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  /* Uid 0 is the root group, whose mask is never editable — the restore's `mask_uid != 0` test would
+   * skip it anyway, so capturing one would only snapshot a mask that can never be put back. */
+  BLI_assert(node.uid != 0);
+  /* Refused, loudly, while a weight-mask editing session is open on this very node: the node's
+   * weights then live in the dense standard mask storage and #SculptLayerTreeNode::mask holds the
+   * stale value it had when the session opened. Snapshotting that would capture a mask the user
+   * never made, and the restore's swap would write it into a field the next #layers::mask_edit_end
+   * unconditionally overwrites from the dense buffer — an undo that appears to do nothing at all.
+   *
+   * The caller's contract, not a condition to recover from: an operator that edits the mask of the
+   * node being edited must go through the session's dense buffer, which is where the authoritative
+   * weights are (see the constraint recorded on this function in `sculpt_undo.hh`). Asserted so a
+   * debug build stops at the offending call site, and logged as an error so a release build cannot
+   * lose the edit quietly. */
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (ss != nullptr && ss->layers.mask_edit.node_uid == node.uid) {
+    BLI_assert_unreachable();
+    CLOG_ERROR(&LOG,
+               "Sculpt layer mask undo: refusing to capture node %d while its weight-mask editing "
+               "session is open; the capture would snapshot a stale mask",
+               node.uid);
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.mask_uid = node.uid;
+  /* A copy rather than the node's own pointer: the operator goes on to edit or replace the live
+   * mask, and taking it here would leave the node unmasked in the state the user is looking at.
+   * #SculptLayerUndoPayload takes the pointer instead because there the node is going away. */
+  if (step_data->sculpt_layer_op.mask_swap != nullptr) {
+    /* Uncharged again before being replaced, so a step that captures twice is not billed twice. */
+    step_data->undo_size -= size_t(
+        bke::sculpt_layers::mask_size_in_bytes(*step_data->sculpt_layer_op.mask_swap));
+  }
+  bke::sculpt_layers::mask_free(step_data->sculpt_layer_op.mask_swap);
+  step_data->sculpt_layer_op.mask_swap = node.mask ? bke::sculpt_layers::mask_copy(*node.mask) :
+                                                     nullptr;
+  /* Charged against the undo memory limit: without this a run of mask edits on a dense mesh reads
+   * as free and the stack is never trimmed for it. */
+  if (step_data->sculpt_layer_op.mask_swap != nullptr) {
+    step_data->undo_size += size_t(
+        bke::sculpt_layers::mask_size_in_bytes(*step_data->sculpt_layer_op.mask_swap));
+  }
+}
+
+void push_sculpt_layer_mask_session(Object &object, const int node_uid, const bool entering)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  /* Uid 0 is both the root group and the "no session" sentinel, so it can never name a session. */
+  BLI_assert(node_uid != 0);
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.mask_session_uid = node_uid;
+  step_data->sculpt_layer_op.mask_session_entering = entering;
+}
+
+MaskSessionBoundary mask_session_boundary(const int step_session_uid,
+                                          const bool step_entering,
+                                          const bool is_undo)
+{
+  MaskSessionBoundary boundary;
+  if (step_session_uid == 0) {
+    return boundary;
+  }
+  boundary.node_uid = step_session_uid;
+  /* Undo lands on the state before the step and redo on the state after it, so an entering step
+   * wants the session open on redo and closed on undo, and an exiting step the other way round. */
+  boundary.want_open = is_undo ? !step_entering : step_entering;
+  return boundary;
+}
+
+void push_sculpt_layer_data_resize(Object &object, Vector<SculptLayerUndoPayload> &&resized)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data) {
+    return;
+  }
+  step_data->type = Type::SculptLayer;
+  step_data->sculpt_layer_op.resized = std::move(resized);
+}
+
+bool foreach_recorded_position_mesh(
+    const Object &object, FunctionRef<void(Span<int> verts, Span<float3> orig_positions)> fn)
+{
+  /* Per-object lookup, never a step-wide one: #Node.vert_indices indexes the vertex array of the
+   * object its #StepData belongs to, so folding another participating object's nodes in here would
+   * scatter deltas at foreign indices. */
+  StepData *step_data = get_step_data(object);
+  if (!step_data || step_data->type != Type::Position) {
+    return false;
+  }
+
+  /* Must run before #push_end, while the per-node undo data is still in the map. */
+  for (const std::unique_ptr<Node> &unode : step_data->undo_nodes_by_pbvh_node.values()) {
+    /* Skip multires (grid) nodes: this path handles the mesh (vertex) domain only. */
+    if (unode->vert_indices.is_empty()) {
+      continue;
+    }
+    const int unique_num = unode->unique_verts_num;
+    if (unique_num <= 0) {
+      continue;
+    }
+
+    /* Prefer #orig_position (original mesh space) when deform modifiers are active, since
+     * #position is then stored in evaluated space; otherwise the two are identical. This keeps the
+     * delta in the same space as the layer data and the live mesh positions. */
+    const Span<float3> orig = !unode->orig_position.is_empty() ?
+                                  unode->orig_position.as_span().take_front(unique_num) :
+                                  unode->position.as_span().take_front(unique_num);
+    fn(unode->vert_indices.as_span().take_front(unique_num), orig);
+  }
+
+  return true;
+}
+
+bool foreach_recorded_eval_position_mesh(
+    const Object &object, FunctionRef<void(Span<int> verts, Span<float3> eval_positions)> fn)
+{
+  /* Per-object lookup, for the same reason as #foreach_recorded_position_mesh. */
+  StepData *step_data = get_step_data(object);
+  if (!step_data || step_data->type != Type::Position) {
+    return false;
+  }
+
+  /* Must run before #push_end, while the per-node undo data is still in the map. */
+  for (const std::unique_ptr<Node> &unode : step_data->undo_nodes_by_pbvh_node.values()) {
+    if (unode->vert_indices.is_empty()) {
+      continue;
+    }
+    const int unique_num = unode->unique_verts_num;
+    if (unique_num <= 0) {
+      continue;
+    }
+    /* Always the evaluated/display positions (#Node.position), unlike #foreach_recorded_position_mesh
+     * which prefers #orig_position (base space) when a deform is active. Under a shape key the layer
+     * stroke is captured in the evaluated space, so the recorder diffs these against the post-stroke
+     * #deform_cos to recover the object-space per-vertex layer delta. */
+    fn(unode->vert_indices.as_span().take_front(unique_num),
+       unode->position.as_span().take_front(unique_num));
+  }
+
+  return true;
+}
+
+bool foreach_recorded_grids(const Object &object, FunctionRef<void(Span<int> grids)> fn)
+{
+  /* Per-object lookup, for the same reason as #foreach_recorded_position_mesh: #Node.grids indexes
+   * the #SubdivCCG of the object its #StepData belongs to. */
+  StepData *step_data = get_step_data(object);
+  if (!step_data || step_data->type != Type::Position) {
+    return false;
+  }
+
+  /* Must run before #push_end, while the per-node undo data is still in the map. */
+  for (const std::unique_ptr<Node> &unode : step_data->undo_nodes_by_pbvh_node.values()) {
+    if (unode->grids.is_empty()) {
+      continue;
+    }
+    fn(unode->grids.as_span());
+  }
+
+  return true;
+}
+
+/* Bring the open weight-mask editing session in line with \a boundary: close whatever is open when
+ * the boundary names a different node or none at all, then open the one it asks for.
+ *
+ * Split from #mask_session_boundary so that the *decision* stays pure and testable and only its
+ * effect lives here, and split from #restore_list so that the ordering rule the caller states has
+ * one place to point at. */
+static void restore_mask_session(bContext *C,
+                                 Depsgraph *depsgraph,
+                                 Object &object,
+                                 const MaskSessionBoundary &boundary)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  const int open_uid = ss.layers.mask_edit.node_uid;
+  const int wanted_uid = boundary.want_open ? boundary.node_uid : 0;
+  if (open_uid == wanted_uid) {
+    return;
+  }
+  if (open_uid != 0) {
+    /* Closing compresses the dense weights back onto the node it was opened on. At this point the
+     * #Type::Mask steps made inside the session have already been restored (undo walks newest
+     * first), so what is compressed is the mask as it stood when the session opened — which is
+     * exactly what a later redo of this step expands again. */
+    layers::mask_edit_end(object);
+  }
+  if (wanted_uid == 0) {
+    return;
+  }
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  SculptLayerTreeNode *node = bke::sculpt_layers::node_find_by_uid(mesh, wanted_uid);
+  if (node == nullptr) {
+    /* Gone, removed by a later step that is not being undone. There is no mask to edit, and leaving
+     * the session closed is the only state the rest of the restore can be consistent with. */
+    return;
+  }
+  /* #mask_edit_enter, not #mask_edit_begin, and this is load-bearing rather than tidiness. REC is
+   * live session state that no undo step captures (see the #rec_exemption_refresh note below), so
+   * decoding a step cannot assume it stands where it did when that step was recorded. The reachable
+   * case: the user closes a session, arms REC — allowed, since the refusal in #layer_toggle_rec_exec
+   * only guards against arming *over* an open session — then presses Ctrl+Z. #mask_edit_begin
+   * refuses outright while REC is armed, so it would silently reopen nothing and leave the undo
+   * state disagreeing with the world. The shared entry disarms REC under the #rec_active_set
+   * contract first, which is the state the recorded step describes anyway. */
+  if (!layers::mask_edit_enter(*depsgraph, *CTX_data_main(C), object, *node)) {
+    /* Refused rather than failed — a stroke still recording, a domain the session cannot open on.
+     * (Not REC being armed: the entry above disarms it, and that disarm is one-way, here as
+     * everywhere else.) The world stays consistent (no session, the user's own mask live); only the
+     * redo of a session the user opened by hand is not reproduced, which is a state they can simply
+     * re-enter. */
+    CLOG_WARN(&LOG,
+              "Sculpt layer undo: could not reopen the mask editing session on node %d",
+              wanted_uid);
+  }
+}
+
+/* \a is_undo is the direction the undo system is decoding in, threaded down from the two
+ * #step_decode_undo_impl / #step_decode_redo_impl entry points that already know it, by way of
+ * #restore_list's per-object loop.
+ *
+ * Deliberately a parameter rather than #StepData::needs_undo: that flag is flipped only by the
+ * dyntopo and geometry restore helpers, and a #Type::SculptLayer step reaches none of them, so for
+ * every step this function's layer branch handles it reads a constant `true`. Every direction test
+ * built on it would therefore answer "undo" while redoing. */
 static void restore_list_object(bContext *C,
                                 Depsgraph *depsgraph,
                                 StepData &step_data,
-                                Object &object)
+                                Object &object,
+                                const bool is_undo)
 {
   PRF_scope(ProfileCategory::Editor);
   Scene *scene = CTX_data_scene(C);
@@ -1290,7 +2335,12 @@ static void restore_list_object(bContext *C,
   }
 
   SculptSession &ss = *object.runtime->sculpt_session;
-  bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(*depsgraph, object);
+  /* Called here for its side effect alone — the session hook below needs a tree to already exist,
+   * since #layers::mask_edit_begin refuses when #bke::object::pbvh_get hands it null — and
+   * deliberately not bound to a reference: reopening a grid session re-evaluates the depsgraph and
+   * replaces the tree, which would leave a reference taken here dangling. The one consumer far
+   * below takes a fresh one. */
+  bke::object::pbvh_ensure(*depsgraph, object);
 
   /* Restore pivot. */
   ss.pivot_pos = step_data.pivot_pos;
@@ -1309,6 +2359,29 @@ static void restore_list_object(bContext *C,
     DEG_id_tag_update(&object.id, ID_RECALC_TRANSFORM);
   }
 
+  /* A weight-mask editing session parks the user's sculpt mask and puts the node's own weights into
+   * the standard mask storage in its place, so what a #Type::Mask step's dense buffer *means*
+   * depends on whether one is open. Restoring across the step that opened or closed a session would
+   * therefore write those buffers into the wrong mask and strand the parked one; the session is
+   * moved to the side of the boundary this restore lands on before anything else runs.
+   *
+   * Placed at the common entry rather than inside the #Type::SculptLayer branch below — the only
+   * branch a session step can reach — because closing a session compresses the node's mask and
+   * recomposes the surface, which must happen before that branch derives the runtime base from the
+   * state it finds. It is the same ordering discipline the folder payloads there already require.
+   *
+   * Ordered after the Origin Correct swap above because the two are independent (object matrix vs.
+   * mask storage) and reopening a session re-evaluates the depsgraph: applying the matrix first
+   * lets that evaluation see the transform this restore lands on rather than the previous one. */
+  if (step_data.sculpt_layer_op.mask_session_uid != 0) {
+    restore_mask_session(C,
+                         depsgraph,
+                         object,
+                         mask_session_boundary(step_data.sculpt_layer_op.mask_session_uid,
+                                               step_data.sculpt_layer_op.mask_session_entering,
+                                               is_undo));
+  }
+
   if (bmesh_restore(C, *depsgraph, step_data, object)) {
     return;
   }
@@ -1319,6 +2392,471 @@ static void restore_list_object(bContext *C,
   if (step_data.type == Type::None && step_data.nodes.is_empty()) {
     return;
   }
+
+  /* Operator-level sculpt-layer undo: metadata / data / layer-list toggles. Runs the same code
+   * for undo and redo (each sub-operation is its own inverse or direction-aware; the direction is
+   * the \a is_undo parameter). */
+  if (step_data.type == Type::SculptLayer) {
+    Mesh &mesh = *id_cast<Mesh *>(object.data);
+    StepData::SculptLayerOpUndo &op = step_data.sculpt_layer_op;
+
+    /* Active-layer selection: pure UI state, no geometry or layer contents involved. Handled
+     * before the base derivation / multires flush below, and returns early so undoing a
+     * selection never pays a canonical position recompute. */
+    if (op.has_active_change) {
+      mesh.sculpt_layers_active_uid = is_undo ? op.active_uid_from : op.active_uid_to;
+      /* The overlay shows the active node's weight mask, so a different node is now on screen and
+       * no node of the draw cache holds a valid value. */
+      layers::tag_layer_overlays_dirty(object);
+      WM_event_add_notifier(C, NC_GEOM | ND_DATA, &mesh.id);
+      return;
+    }
+
+    /* A previously restored base-stroke step may have left the CCG marked dirty; consume it
+     * before the layer set or influences change, otherwise the later flush would reshape the
+     * stale composed CCG against the changed layers and leak the difference into the base. */
+    layers::flush_pending_multires_base(object);
+
+    /* The mesh (vertex) domain recomputes canonical positions from the runtime base after the
+     * change; derive the base from the current, still-consistent state BEFORE the layer list or
+     * metadata is modified. */
+    layers::session_state_ensure(object);
+
+    /* Metadata / data swap for the referenced node — of either kind (a layer's influence,
+     * visibility, clear / invert and the surviving layer of a merge; a folder's rename and
+     * visibility toggle). One uid space means one lookup answers for both, so the folder swap that
+     * used to sit in its own branch against its own uid field is this same code now.
+     *
+     * The 0 test is what keeps uid 0 ("nothing captured" here) away from
+     * #bke::sculpt_layers::node_find_by_uid, where it resolves to the root folder. */
+    if (op.uid != 0) {
+      if (SculptLayerTreeNode *node = bke::sculpt_layers::node_find_by_uid(mesh, op.uid)) {
+        std::swap(node->flag, op.flag);
+        /* #SCULPT_LAYER_GROUP_MASK_DISABLED rides in the word just swapped, and it decides whether
+         * this folder's own mask is folded into the cached chain product. Without this the bit
+         * would be restored while the cache kept the product built under the other state, and the
+         * recompose below would run against a mask the tree no longer describes.
+         *
+         * Unconditional rather than gated on a bit difference: the tag is cheap and idempotent, and
+         * testing one bit here would put knowledge of which bits exist into a branch whose whole
+         * design is to swap the word wholesale. A layer needs nothing — its mask is read straight
+         * off the node and caches nowhere — which is why this is scoped to folders, exactly as the
+         * matching invalidation in the mask branch below is. */
+        if (SculptLayerGroup *group = bke::sculpt_layers::node_as_group(node)) {
+          bke::sculpt_layers::tag_chain_mask_dirty(*group);
+        }
+        std::swap(node->color_tag, op.color_tag);
+        std::string live_name = node->name;
+        STRNCPY_UTF8(node->name, op.name.c_str());
+        op.name = std::move(live_name);
+        /* Influence and the data buffer are layer fields. A folder capture left both at their
+         * defaults, so there is nothing to swap them with — and reading a folder as a layer would
+         * put #SculptLayer::influence over its child list. */
+        if (SculptLayer *layer = bke::sculpt_layers::node_as_layer(node)) {
+          std::swap(layer->influence, op.influence);
+          if (op.has_data && layer->data) {
+            MutableSpan<float3> cur(static_cast<float3 *>(layer->data), layer->totelem);
+            /* All-or-nothing: a size mismatch means the layer was resized between capture and
+             * restore (stale layer / out-of-band edit). A partial swap would leave the buffer as
+             * an inconsistent mix of both states, which no further undo/redo could repair. */
+            if (cur.size() == op.data.size()) {
+              for (int64_t i = 0; i < cur.size(); i++) {
+                std::swap(cur[i], op.data[i]);
+              }
+            }
+            else {
+              CLOG_WARN(&LOG,
+                        "Sculpt layer data size changed since the undo step was captured "
+                        "(%d vs %d); skipping the data restore",
+                        int(cur.size()),
+                        int(op.data.size()));
+            }
+          }
+        }
+      }
+    }
+
+    /* Weight mask of the referenced node — of either kind. Swapped with the stored one exactly as
+     * the metadata above is, which makes it its own inverse and needs no direction test. Kept in its
+     * own block against its own uid because a mask operator changes no metadata: sharing #uid would
+     * make the swap above write this step's empty name onto the node.
+     *
+     * A null on either side is a legal state and simply means "no mask", so the swap handles a mask
+     * being added and removed with no special case. */
+    if (op.mask_uid != 0) {
+      if (SculptLayerTreeNode *node = bke::sculpt_layers::node_find_by_uid(mesh, op.mask_uid)) {
+        /* All-or-nothing, mirroring the data guard above: two masks that disagree on the domain
+         * they describe cannot both be right, and installing the stored one would put a mask on the
+         * node whose block table indexes a topology the object no longer has. Every consumer reads
+         * a mask through its own block table, so the mismatch would not fault — it would silently
+         * weight the wrong elements.
+         *
+         * Only comparable when both sides carry a mask. A null on either side is the legal "no
+         * mask" state (see below), and there is nothing to measure a lone mask against here: a
+         * folder's domain is the object's sculpt domain, which mesh data alone does not resolve. */
+        const bool domains_agree = node->mask == nullptr || op.mask_swap == nullptr ||
+                                   (node->mask->totelem == op.mask_swap->totelem &&
+                                    node->mask->block_size == op.mask_swap->block_size);
+        if (domains_agree) {
+          std::swap(node->mask, op.mask_swap);
+          /* Only a *folder's* mask takes part in a cached chain product (#chain_mask folds in the
+           * ancestors' masks alone), so only a folder invalidates anything here — and downward, over
+           * its own subtree. A layer's mask is read straight off the node and caches nowhere, which
+           * is why this is not #tag_layers_cache_dirty: the tree's shape did not change. */
+          if (SculptLayerGroup *group = bke::sculpt_layers::node_as_group(node)) {
+            bke::sculpt_layers::tag_chain_mask_dirty(*group);
+          }
+        }
+        else {
+          CLOG_WARN(&LOG,
+                    "Sculpt layer mask domain changed since the undo step was captured "
+                    "(%lld elements at %d vs %lld at %d); skipping the mask restore",
+                    (long long)node->mask->totelem,
+                    node->mask->block_size,
+                    (long long)op.mask_swap->totelem,
+                    op.mask_swap->block_size);
+        }
+      }
+    }
+
+    /* Data buffers the operator resized: swap each stored buffer back with the live one. Carries
+     * #totelem alongside the pointer, so the two states may differ in size (which is exactly why
+     * the in-place swap above cannot express this). */
+    for (SculptLayerUndoPayload &payload : op.resized) {
+      /* Only a layer has a buffer to resize; #push_sculpt_layer_data_resize is documented for
+       * layers alone, and #sculpt_layer_find would hand back null for a folder anyway. */
+      BLI_assert(payload.is_layer());
+      /* These payloads come from a #PayloadCapture::DataOnly capture: the layer never left the tree
+       * and kept its mask, so there is nothing here to swap and a mask would have nowhere to go. */
+      BLI_assert(payload.mask == nullptr);
+      if (SculptLayer *layer = sculpt_layer_find(mesh, payload.uid)) {
+        std::swap(layer->data, payload.data);
+        std::swap(layer->totelem, payload.totelem);
+      }
+    }
+
+    /* Batch flag swap (Solo Base, folder visibility cascade): swap every affected layer's flags
+     * with the stored pre-change values. Layers only, both callers included: Solo Base marks
+     * layers, and #bke::sculpt_layers::resync_group_state writes #SCULPT_LAYER_GROUP_HIDDEN on
+     * layers rather than on the folders that caused it. */
+    for (const int64_t i : op.flags_batch_uids.index_range()) {
+      if (SculptLayer *layer = sculpt_layer_find(mesh, op.flags_batch_uids[i])) {
+        std::swap(layer->base.flag, op.flags_batch_flags[i]);
+      }
+    }
+
+    /* Immediately after the flag swap above, which is what makes it necessary.
+     * #SCULPT_LAYER_REC_EXEMPT rides in the same word, so the swap can just as easily resurrect an
+     * exemption captured while REC was armed as drop the one that should be set — and from here on
+     * this branch both composes (the bake fold-in / fold-out below calls
+     * #bke::sculpt_layers::apply_vert_layer_to_shape_keys and
+     * #BKE_multires_sculpt_layer_apply_to_mdisps, both of which resolve the layer's mask through
+     * #node_mask_for_composite) and inverts (#layers::session_state_ensure further down). Either one
+     * run under a swapped-in bit dents the base by the difference between the masked and the
+     * unmasked contribution, permanently.
+     *
+     * Correct in both directions because it does not read the step at all: it re-derives the answer
+     * from the live #SculptSession and the active uid restored at the top of this branch, and REC is
+     * session state that no undo step captures. Undo and redo therefore settle on the same answer
+     * the live positions were composed under, whatever the swapped word happened to hold. */
+    layers::rec_exemption_refresh(object);
+
+    /* Folder tree changes, first half: re-create the folders this direction needs to exist.
+     *
+     * The folder branch straddles the #moves batch rather than sitting on one side of it, because a
+     * folder is now a real container: a node can only be linked into a folder that already exists,
+     * and #bke::sculpt_layers::group_remove refuses a folder that still has children (it owns them,
+     * so freeing one would leak the subtree). That gives one rule for both directions — insert
+     * before the moves, extract after them — and it is what makes the two folder operators reverse:
+     *
+     * - "Create a folder, move nodes into it" (#SCULPT_OT_layer_group_add) records the folder in
+     *   #groups_added and the moves after it. Undoing runs the moves backwards, lifting the nodes
+     *   back out, and only then can extract the emptied folder. Redoing re-creates the folder
+     *   first, and only then can move the nodes back in.
+     * - "Disband a folder, lifting its children out" (#SCULPT_OT_layer_group_remove) records the
+     *   lift-out as moves and the folder in #groups_removed, and reverses by the same rule.
+     *
+     * Within one direction the payloads run in capture order, so each one's anchor is restored
+     * before it is, and a folder nested in another is inserted after the folder holding it. */
+    if (is_undo) {
+      for (SculptLayerUndoPayload &payload : op.groups_removed) {
+        sculpt_layer_payload_insert(mesh, payload);
+      }
+    }
+    else {
+      for (SculptLayerUndoPayload &payload : op.groups_added) {
+        sculpt_layer_payload_insert(mesh, payload);
+      }
+    }
+
+    /* Node move batch: put each moved node back into the folder it was in and after the sibling it
+     * followed in the target state, in capture order — a node's anchor is always restored before it
+     * is (mirrors #removed/#added below and #SculptLayerUndoPayload::prev_uid). That anchor may be a
+     * folder rather than a layer: they are siblings in one #SculptLayerGroup::children list, and one
+     * uid counter spans both, which is why an entry no longer has to say which kind it moves.
+     *
+     * The active layer is left untouched: reordering never changes which uid is active, and a
+     * multi-node drop's moved set is not implicitly "the active layer" — forcing one would silently
+     * reassign active from a drag-selection, which is meant to be pure UI state. */
+    for (const ReparentMove &move : op.moves) {
+      if (move.uid == 0) {
+        /* Uid 0 is the root folder, which never moves. A zeroed entry is not a real move. */
+        BLI_assert_unreachable();
+        continue;
+      }
+      SculptLayerTreeNode *node = bke::sculpt_layers::node_find_by_uid(mesh, move.uid);
+      if (node == nullptr) {
+        /* Gone, removed by a later step that is not being undone. */
+        continue;
+      }
+      const int target_prev_uid = is_undo ? move.prev_from : move.prev_to;
+      const int target_group_uid = is_undo ? move.group_from : move.group_to;
+      SculptLayerGroup &dst = *sculpt_layer_parent_resolve(mesh, target_group_uid);
+      if (!sculpt_layer_move_is_legal(*node, dst)) {
+        CLOG_WARN(&LOG,
+                  "Sculpt layer undo: recorded move of folder %d into %d would nest it in its own "
+                  "subtree; skipping",
+                  move.uid,
+                  target_group_uid);
+        continue;
+      }
+      /* Through the module's own move rather than an open-coded relink: it maintains
+       * #SculptLayerTreeNode::parent (which replaced the parent uid tag this branch used to write by
+       * hand) and tags the cached layer spans of *both* the source and the destination folder dirty,
+       * up to the root. Those spans are what the eval paths read, so a missed tag is a pointer to a
+       * freed node rather than a stale row. */
+      bke::sculpt_layers::node_move_into(
+          mesh, *node, dst, sculpt_layer_anchor_resolve(mesh, target_prev_uid, dst, node));
+    }
+
+    /* Folder tree changes, second half: remove the folders this direction no longer needs, now that
+     * the moves above have emptied them. See the first half for why the two are split.
+     *
+     * Reversed relative to the insertion pass: a batch may hold several nested folders (a recursive
+     * merge removes a folder together with every folder inside it), and #sculpt_layer_payload_extract
+     * refuses a folder that still owns children. The insert pass runs the batch top-down so a nested
+     * folder always finds its parent already there; the extract pass therefore has to run it
+     * bottom-up, freeing the deepest folder first. For a single-folder batch (#SCULPT_OT_layer_group_add
+     * / #SCULPT_OT_layer_group_remove) the two orders coincide, so this is a no-op there. */
+    if (is_undo) {
+      for (int64_t i = op.groups_added.size() - 1; i >= 0; i--) {
+        sculpt_layer_payload_extract(mesh, op.groups_added[i]);
+      }
+    }
+    else {
+      for (int64_t i = op.groups_removed.size() - 1; i >= 0; i--) {
+        sculpt_layer_payload_extract(mesh, op.groups_removed[i]);
+      }
+    }
+
+    /* Bake-to-shape-key redo: rebuild the #Key this step created from scratch, using the layers
+     * that are still present at this point (the generic layer-list swap below has not run yet —
+     * it would otherwise remove them before #bake_vert_layers_into_new_shape_key can sum them).
+     * Mirrors the operator's own bootstrap (see #layer_bake_to_shape_key_exec). */
+    if (op.created_key && !is_undo) {
+      Main *bmain_rw = CTX_data_main(C);
+      Key *key = mesh.key = BKE_key_add(bmain_rw, &mesh.id);
+      key->type = KEY_RELATIVE;
+      KeyBlock *basis = BKE_keyblock_add_ctime(key, DATA_("Basis"), false);
+      BKE_keyblock_convert_from_mesh(&mesh, key, basis);
+      KeyBlock *baked = bke::sculpt_layers::bake_vert_layers_into_new_shape_key(mesh);
+      object.shapenr = BLI_findindex(&key->block, (baked && baked->data) ? baked : basis) + 1;
+    }
+
+    /* Layer-list changes: toggle the affected layers between the undo step and the mesh list.
+     * `removed` holds layers the operator removed (in the step after the operator ran), `added`
+     * holds layers the operator added (in the mesh after the operator ran). Data buffers move by
+     * pointer, so this is cheap even for dense meshes. */
+    if (is_undo) {
+      for (SculptLayerUndoPayload &payload : op.removed) {
+        sculpt_layer_payload_insert(mesh, payload);
+        if (op.is_bake) {
+          /* Undo of a bake: remove this layer's baked contribution from the base again. Which base
+           * the bake folded it into depends on the session: MDisps for grids, every key block for
+           * absolute shape keys, and for relative shape keys a whole new key block, which is
+           * detached below instead (#bake_key_uid). Without shape keys this is a no-op: the live
+           * positions carry the layer and the recompute below restores them. */
+          if (SculptLayer *layer = sculpt_layer_find(mesh, payload.uid)) {
+            const float eff = bke::sculpt_layers::effective(*layer);
+            if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+              BKE_multires_sculpt_layer_apply_to_mdisps(mesh, *layer, -eff);
+            }
+            else if (op.bake_key_uid == 0 && !op.created_key) {
+              /* Symmetric with the bake across the undo boundary only because
+               * #sculpt_layer_payload_insert above put the node's mask back before this runs: both
+               * this call and the bake resolve the weights through #node_mask_for_composite, so the
+               * same mask that scaled the contribution in scales it back out. Were the layer
+               * re-inserted unmasked, the subtraction would leave a permanent `-(1 - mask[i]) *
+               * delta` residue in the positions and in every absolute key block —
+               * #recompute_mesh_canonical cannot absorb it under shape keys, since it returns early
+               * there and re-evaluates instead of recomposing from `mesh_base`. */
+              bke::sculpt_layers::apply_vert_layer_to_shape_keys(mesh, *layer, -eff);
+            }
+          }
+        }
+      }
+      for (SculptLayerUndoPayload &payload : op.added) {
+        sculpt_layer_payload_extract(mesh, payload);
+      }
+    }
+    else {
+      for (SculptLayerUndoPayload &payload : op.added) {
+        sculpt_layer_payload_insert(mesh, payload);
+      }
+      for (SculptLayerUndoPayload &payload : op.removed) {
+        if (op.is_bake) {
+          /* Redo of a bake: fold the contribution back into the base before extracting (see the
+           * undo branch above for which base that is). */
+          if (SculptLayer *layer = sculpt_layer_find(mesh, payload.uid)) {
+            const float eff = bke::sculpt_layers::effective(*layer);
+            if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+              BKE_multires_sculpt_layer_apply_to_mdisps(mesh, *layer, eff);
+            }
+            else if (op.bake_key_uid == 0 && !op.created_key) {
+              bke::sculpt_layers::apply_vert_layer_to_shape_keys(mesh, *layer, eff);
+            }
+          }
+        }
+        sculpt_layer_payload_extract(mesh, payload);
+      }
+    }
+    if (op.bake_key_uid != 0 && mesh.key != nullptr) {
+      /* Relative shape keys: the bake put the combined layer contribution into a new key block.
+       * Undo unlinks it from the mesh (the step keeps it alive until it is freed or redone), redo
+       * links it back where it was taken from.
+       *
+       * The bake appends the block at the tail and nothing is relative to it at that moment, but
+       * this code runs arbitrarily later: between the bake and its undo the user may have pointed
+       * another block's Relative To at it, moved it (#BKE_keyblock_move) or added blocks around it.
+       * Since #KeyBlock::relative is a positional index into #Key::block, the detach and the
+       * reattach each have to fix those indices up — the same bookkeeping
+       * #BKE_object_shapekey_remove does, mirrored so that undo and redo compose. */
+      Key &key = *mesh.key;
+      if (is_undo && op.bake_key == nullptr) {
+        for (KeyBlock &kb : key.block) {
+          if (kb.uid != op.bake_key_uid) {
+            continue;
+          }
+          const int index = BLI_findindex(&key.block, &kb);
+          /* The bake never makes its block the reference (it is created relative to the existing
+           * one), so the refkey re-seeding half of #BKE_object_shapekey_remove cannot apply here. */
+          BLI_assert(key.refkey != &kb);
+          op.relative_uids.clear();
+          for (KeyBlock &other : key.block) {
+            if (&other == &kb) {
+              continue;
+            }
+            if (other.relative == index) {
+              /* Would dangle once the block leaves the list: #BKE_key_evaluate_object_ex silently
+               * skips a block whose reference is out of range, so the dependent shape would go
+               * quiet with no explanation. Remap to the basis and remember it for the redo. */
+              op.relative_uids.append(other.uid);
+              other.relative = 0;
+            }
+            else if (other.relative > index) {
+              other.relative -= 1;
+            }
+          }
+          BLI_remlink(&key.block, &kb);
+          key.totkey--;
+          op.bake_key = &kb;
+          op.bake_key_index = index;
+          op.pre_undo_shapenr = object.shapenr;
+          if (object.shapenr > index) {
+            object.shapenr = std::max(1, object.shapenr - 1);
+          }
+          break;
+        }
+      }
+      else if (!is_undo && op.bake_key != nullptr) {
+        KeyBlock *before = static_cast<KeyBlock *>(BLI_findlink(&key.block, op.bake_key_index));
+        if (before) {
+          BLI_insertlinkbefore(&key.block, before, op.bake_key);
+        }
+        else {
+          BLI_addtail(&key.block, op.bake_key);
+        }
+        key.totkey++;
+        /* Undo the index fix-up the detach did, in the reverse order: shift back the blocks it
+         * decremented, then re-point the ones it remapped to the basis. The remapped blocks are
+         * excluded from the shift explicitly rather than by relying on where the block landed, so
+         * the two passes stay independent of its index. */
+        const int index = BLI_findindex(&key.block, op.bake_key);
+        for (KeyBlock &other : key.block) {
+          if (&other == op.bake_key || op.relative_uids.contains(other.uid)) {
+            continue;
+          }
+          if (other.relative >= index) {
+            other.relative += 1;
+          }
+        }
+        for (const int uid : op.relative_uids) {
+          if (KeyBlock *other = BKE_keyblock_find_uid(&key, uid)) {
+            other->relative = short(index);
+          }
+        }
+        op.relative_uids.clear();
+        object.shapenr = op.pre_undo_shapenr;
+        op.bake_key = nullptr;
+        op.bake_key_index = -1;
+      }
+    }
+
+    /* A second pass, because the layer-list swap above reinserts nodes whose #flag comes straight
+     * out of the payload (#node_metadata_from_payload copies the whole word), so a layer captured
+     * while REC was armed carries its exemption back into a tree the first pass had already
+     * settled. Re-derived here rather than stripped in the payload copy, so that a layer that
+     * *should* be exempt — the active one, with REC still armed — gets the bit back rather than
+     * merely losing it.
+     *
+     * Placed before everything below that composes or inverts: #BKE_object_shapekey_free (which in
+     * this fork folds the layers into `vert_positions`) and #layers::session_state_ensure, whose
+     * #bke::sculpt_layers::derive_base_mesh recovers the base at the weights in force when it runs.
+     * The refresh inside #layers::commit_layers_change at the end of this branch is too late for
+     * both: it would overwrite the bit those two had already been measured against, dropping the
+     * difference into the base for good. Idempotent, so this costs one flag test per layer when the
+     * pass above already settled the tree — the ordinary case. */
+    layers::rec_exemption_refresh(object);
+
+    /* Bake-to-shape-key undo: fully tear the #Key this step created back down. Runs after the
+     * generic layer-list swap above has already reinserted the removed layers into the tree,
+     * because #BKE_object_shapekey_free — in this fork — itself calls
+     * #bke::sculpt_layers::bake_vert_layers_into_positions, which needs to see those layers to
+     * fold their contribution back into `vert_positions`. */
+    if (op.created_key && is_undo && mesh.key != nullptr) {
+      Main *bmain_rw = CTX_data_main(C);
+      BKE_object_shapekey_free(bmain_rw, &object);
+      object.shapenr = op.pre_bake_shapenr;
+    }
+
+    if (op.is_bake && !op.removed.is_empty()) {
+      /* A bake toggles between "contribution in the base" and "contribution in the layers" while
+       * the combined surface stays identical. Re-derive the runtime mesh base against the
+       * unchanged live positions and the new layer set so `base + layers` keeps matching them.
+       * For plain add / remove changes the base derived above (before the list change) is the
+       * correct one and must NOT be re-derived: the live positions do not yet reflect the new
+       * layer set until the recompute below. */
+      layers::invalidate_runtime(object);
+      layers::session_state_ensure(object);
+    }
+
+    /* A structural undo (reparent / create / delete) can change a layer's ancestry and staleify its
+     * cached folder-influence product, even though the influence values themselves are never undone
+     * (folder influence is live, non-undoable slider state). Rebuild the float cache from the
+     * restored tree before the recompute below reads it through #effective. Float-only, so it cannot
+     * clobber the #SCULPT_LAYER_GROUP_HIDDEN / Solo-Base flags restored earlier in this branch. */
+    bke::sculpt_layers::refresh_group_influence_cache(mesh);
+
+    /* Bring the positions in sync with the restored layer state: canonical recompute for the
+     * mesh domain, honest re-evaluation for multires. */
+    layers::commit_layers_change(*depsgraph, object);
+    return;
+  }
+
+  /* Taken here rather than at the top of the function: the mask session hook above can re-evaluate
+   * the depsgraph and replace the tree (see the #bke::object::pbvh_ensure call there). Cheap when
+   * the tree is already built, which is the case on every path that reaches this point. */
+  bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(*depsgraph, object);
 
   /* Adding multires via the `subdivision_set` operator results in the subsequent undo step
    * not correctly performing a global undo step; we exit early here to avoid crashing.
@@ -1351,6 +2889,22 @@ static void restore_list_object(bContext *C,
       }
 
       if (use_multires_undo(step_data, ss)) {
+        if (step_data.sculpt_layer_uid != 0 && step_data.sculpt_layer_grids) {
+          /* A stroke recorded into a grid sculpt layer: the base MDisps were not modified by the
+           * stroke, so the CCG positions are not restored directly. Revert the layer's explicit
+           * delta and re-evaluate: the composed surface (base + layers) is a deterministic
+           * function of the stored data. Skipping #multires_mark_as_modified is intentional —
+           * a later flush must not bake the composed surface into the base.
+           *
+           * Consume any pending base edits first (e.g. left dirty by a previously restored
+           * base-stroke step): the layer data is about to change, and a later flush against the
+           * changed layer set would leak the delta into the base. */
+          layers::flush_pending_multires_base(object);
+          restore_active_sculpt_layer(step_data, object, is_undo);
+          Mesh &mesh = *id_cast<Mesh *>(object.data);
+          DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+          break;
+        }
         MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
         SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
         const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
@@ -1374,7 +2928,29 @@ static void restore_list_object(bContext *C,
         }
         const Mesh &mesh = *id_cast<const Mesh *>(object.data);
         Array<bool> modified_verts(mesh.verts_num, false);
-        restore_position_mesh(object, *step_data.position_step_storage, modified_verts);
+
+        /* Delegate the position restore to #restore_active_sculpt_layer only when the recorded
+         * layer deltas are actually applicable; otherwise fall back to the plain swap so the
+         * positions are still undone (the layer data is gone with the layer in that case). */
+        const bool skip_positions_swap = can_restore_active_sculpt_layer_mesh(step_data, object);
+        if (!skip_positions_swap && step_data.sculpt_layer_uid != 0 &&
+            !step_data.sculpt_layer_verts.is_empty())
+        {
+          CLOG_WARN(&LOG,
+                    "Recorded sculpt-layer deltas not applicable (layer removed out-of-band?); "
+                    "falling back to plain position restore");
+        }
+        restore_position_mesh(
+            object, *step_data.position_step_storage, modified_verts, skip_positions_swap);
+
+        /* Keep the active sculpt layer in sync with the restored positions. This has to run before
+         * the bounds are recomputed below: with `skip_positions_swap` set #restore_position_mesh
+         * deliberately leaves the positions alone, so this call is what actually moves them.
+         * Recomputing first would copy boxes describing the still-deformed surface into
+         * #bounds_orig_ (and #store_bounds_orig clears the dirty accumulator, so nothing catches up
+         * later), and the next stroke would drop nodes whose geometry moved back under the cursor
+         * while deforming their neighbors — the mesh tears along leaf-node borders. */
+        restore_active_sculpt_layer(step_data, object, is_undo);
 
         const IndexMask changed_nodes = IndexMask::from_predicate(
             node_mask,
@@ -1400,6 +2976,15 @@ static void restore_list_object(bContext *C,
       }
       pbvh.update_bounds(*depsgraph, object);
       bke::pbvh::store_bounds_orig(pbvh);
+
+      /* A base-editing stroke (not recorded into a layer) folds itself into the runtime layer base
+       * at stroke end; undoing it restores the positions but leaves that cached base advanced by
+       * the now-undone stroke. Invalidate it so the next stroke re-derives the base from the
+       * restored positions instead of a phantom surface. Recorded-layer strokes (uid != 0) keep the
+       * base unchanged and are already reconciled by #restore_active_sculpt_layer above. */
+      if (step_data.sculpt_layer_uid == 0) {
+        layers::invalidate_runtime(object);
+      }
       break;
     }
     case Type::HideVert: {
@@ -1612,6 +3197,10 @@ static void restore_list_object(bContext *C,
       /* Handled elsewhere. */
       BLI_assert_unreachable();
       break;
+    case Type::SculptLayer:
+      /* Handled via early return above (before the pbvh-type check). */
+      BLI_assert_unreachable();
+      break;
   }
 
   DEG_id_tag_update(&object.id, ID_RECALC_SHADING);
@@ -1620,9 +3209,13 @@ static void restore_list_object(bContext *C,
   }
 }
 
+/* \a is_undo is the decode direction, threaded straight through to each object's
+ * #restore_list_object; see the note there for why it is a parameter rather than
+ * #StepData::needs_undo. */
 static void restore_list(bContext *C,
                          Depsgraph *depsgraph,
-                         Vector<std::unique_ptr<StepData>> &objects_data)
+                         Vector<std::unique_ptr<StepData>> &objects_data,
+                         const bool is_undo)
 {
   for (std::unique_ptr<StepData> &sd_ptr : objects_data) {
     StepData &sd = *sd_ptr;
@@ -1634,11 +3227,11 @@ static void restore_list(bContext *C,
     }
 
     if (sd.needs_undo()) {
-      restore_list_object(C, depsgraph, sd, *ob);
+      restore_list_object(C, depsgraph, sd, *ob, is_undo);
       sd.tag_needs_redo();
     }
     else {
-      restore_list_object(C, depsgraph, sd, *ob);
+      restore_list_object(C, depsgraph, sd, *ob, is_undo);
       sd.tag_needs_undo();
     }
 
@@ -1648,6 +3241,21 @@ static void restore_list(bContext *C,
 
 static void free_step_data_resources(StepData &step_data)
 {
+  if (KeyBlock *kb = step_data.sculpt_layer_op.bake_key) {
+    /* The step still owns the key block a bake created and an undo detached from the mesh (the redo
+     * that would link it back can no longer happen once the step is freed). Mirrors the tail of
+     * #BKE_object_shapekey_remove; the `relative` fix-up that call also does already happened at
+     * detach time (see #restore_list).
+     *
+     * TODO: drivers keyed to this block's RNA path survive on the #Key, because
+     * #BKE_animdata_drivers_remove_for_rna_struct needs a #Main that is not reachable here. The
+     * detach itself must not remove them (a redo needs them back), so only this path leaks them. */
+    if (kb->data) {
+      MEM_delete_void(kb->data);
+    }
+    MEM_delete(kb);
+    step_data.sculpt_layer_op.bake_key = nullptr;
+  }
   geometry_free_data(&step_data.geometry_original);
   geometry_free_data(&step_data.geometry_modified);
   geometry_free_data(&step_data.bmesh.geometry_enter);
@@ -1913,6 +3521,9 @@ static void fill_node_data_mesh(const Depsgraph &depsgraph,
       store_face_sets(mesh, unode);
       break;
     }
+    case Type::SculptLayer:
+      /* Operator-level layer undo captures metadata/data in StepData directly, not per-node. */
+      break;
   }
 }
 
@@ -1977,6 +3588,9 @@ static void fill_node_data_grids(const Object &object,
       store_face_sets(base_mesh, unode);
       break;
     }
+    case Type::SculptLayer:
+      /* Operator-level layer undo captures metadata/data in StepData directly, not per-node. */
+      break;
   }
 }
 
@@ -2066,6 +3680,7 @@ BLI_NOINLINE static void bmesh_push(const Object &object,
       case Type::Geometry:
       case Type::FaceSet:
       case Type::Color:
+      case Type::SculptLayer:
         break;
     }
   }
@@ -2726,7 +4341,7 @@ static void step_decode_undo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoS
 {
   BLI_assert(us->step.is_applied == true);
 
-  restore_list(C, depsgraph, us->objects_data);
+  restore_list(C, depsgraph, us->objects_data, true);
   us->step.is_applied = false;
 }
 
@@ -2734,7 +4349,7 @@ static void step_decode_redo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoS
 {
   BLI_assert(us->step.is_applied == false);
 
-  restore_list(C, depsgraph, us->objects_data);
+  restore_list(C, depsgraph, us->objects_data, false);
   us->step.is_applied = true;
 }
 

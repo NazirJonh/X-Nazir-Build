@@ -5352,6 +5352,11 @@ def km_sculpt(params):
          {"properties": [("level", -1), ("relative", True), ("ensure_modifier", False)]}),
         ("object.subdivision_set", {"type": 'TWO', "value": 'PRESS', "alt": True, "repeat": True},
          {"properties": [("level", 1), ("relative", True), ("ensure_modifier", False)]}),
+        # Sculpt layer weight mask edit. Polls false unless an edit is in progress, so a bare Enter
+        # stays free for everything else.
+        ("sculpt.layer_mask_edit_finish", {"type": 'RET', "value": 'PRESS'}, None),
+        ("sculpt.layer_mask_edit_finish", {"type": 'NUMPAD_ENTER', "value": 'PRESS'}, None),
+        ("sculpt.layer_mask_edit_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
         # Mask
         ("paint.mask_flood_fill", {"type": 'M', "value": 'PRESS', "alt": True},
          {"properties": [("mode", 'VALUE'), ("value", 0.0)]}),

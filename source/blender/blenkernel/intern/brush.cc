@@ -1932,6 +1932,7 @@ bool supports_dyntopo(const Brush &brush)
                SCULPT_BRUSH_TYPE_THUMB,
                SCULPT_BRUSH_TYPE_LAYER,
                SCULPT_BRUSH_TYPE_DISPLACEMENT_ERASER,
+               SCULPT_BRUSH_TYPE_LAYER_ERASER,
                SCULPT_BRUSH_TYPE_DRAW_SHARP,
                SCULPT_BRUSH_TYPE_SLIDE_RELAX,
                SCULPT_BRUSH_TYPE_ELASTIC_DEFORM,
@@ -1969,6 +1970,7 @@ bool supports_topology_rake(const Brush &brush)
                SCULPT_BRUSH_TYPE_THUMB,
                SCULPT_BRUSH_TYPE_DRAW_SHARP,
                SCULPT_BRUSH_TYPE_DISPLACEMENT_ERASER,
+               SCULPT_BRUSH_TYPE_LAYER_ERASER,
                SCULPT_BRUSH_TYPE_SLIDE_RELAX,
                SCULPT_BRUSH_TYPE_MASK);
 }
@@ -2125,7 +2127,8 @@ bool supports_gravity(const Brush &brush)
                SCULPT_BRUSH_TYPE_SMOOTH,
                SCULPT_BRUSH_TYPE_SIMPLIFY,
                SCULPT_BRUSH_TYPE_DISPLACEMENT_SMEAR,
-               SCULPT_BRUSH_TYPE_DISPLACEMENT_ERASER) &&
+               SCULPT_BRUSH_TYPE_DISPLACEMENT_ERASER,
+               SCULPT_BRUSH_TYPE_LAYER_ERASER) &&
          !is_paint_tool(brush);
 }
 bool supports_tilt(const Brush &brush)

@@ -2007,6 +2007,16 @@ class _defs_sculpt:
         )
 
     @ToolDef.from_fn
+    def layer_eraser():
+        return dict(
+            idname="builtin_brush.layer_eraser",
+            label="Erase Sculpt Layer",
+            icon="brush.sculpt.displacement_eraser",
+            options={'USE_BRUSHES'},
+            brush_type='LAYER_ERASER',
+        )
+
+    @ToolDef.from_fn
     def face_set_edit():
         def draw_settings(_context, layout, tool):
             props = tool.operator_properties("sculpt.face_set_edit")
@@ -4029,6 +4039,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.face_set_edit,
             _defs_sculpt.mask_by_color,
             _defs_sculpt.mask_by_topology_island,
+            _defs_sculpt.layer_eraser,
             None,
             _defs_transform.translate,
             _defs_transform.rotate,

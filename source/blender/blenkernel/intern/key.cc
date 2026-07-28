@@ -51,6 +51,7 @@
 #include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_scene.hh"
+#include "BKE_sculpt_layers.hh"
 
 #include "RNA_access.hh"
 #include "RNA_path.hh"
@@ -243,6 +244,14 @@ Key *BKE_key_add(Main *bmain, ID *id) /* Common function. */
       el[2] = 0;
 
       key->elemsize = sizeof(float[KEYELEM_FLOAT_LEN_COORD]);
+
+      /* The mesh is gaining shape keys: its vertex sculpt layers move from the positions (where a
+       * key-less mesh carries them) to the evaluation-time composition step, so take them out of
+       * the positions now. This is the one point every "mesh gains a #Key" path passes through, and
+       * it runs before the Basis block is filled from those positions — which would otherwise copy
+       * the layer contribution into the key and have it composed a second time at evaluation (see
+       * #bke::sculpt_layers::strip_vert_layers_from_positions). No-op without vertex layers. */
+      bke::sculpt_layers::strip_vert_layers_from_positions(*id_cast<Mesh *>(id));
 
       break;
     case ID_LT:

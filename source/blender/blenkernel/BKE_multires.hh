@@ -11,8 +11,13 @@
 #include "BLI_array.hh"
 #include "BLI_enum_flags.hh"
 #include "BLI_math_matrix_types.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
+
+/* For #bke::sculpt_layers::CompositeMask and the shared mask weight fold, which the grid layer
+ * composition below is expressed in terms of. */
+#include "BKE_sculpt_layers.hh"
 
 namespace blender {
 
@@ -25,6 +30,7 @@ struct MultiresModifierData;
 struct Object;
 struct ReportList;
 struct Scene;
+struct SculptLayer;
 struct SubdivCCG;
 struct View3D;
 struct ViewLayer;
@@ -78,13 +84,21 @@ void multires_level_set(MultiresModifierData *mmd, MultiresLevelType level_type,
  * are left untouched). When false, every candidate with a Multires modifier is force-set.
  * Pure data function: does not tag the depsgraph or post notifiers, callers do that for the
  * returned objects.
+ *
+ * A candidate carrying live session state that the level change would destroy — a sculpt stroke
+ * in progress, or an open sculpt-layer weight-mask edit whose painted weights live in the
+ * #SubdivCCG the change rebuilds — is left at its level and appended to `r_skipped` instead.
+ * Settling either state means calling into the editors, which blenkernel cannot do, so this
+ * refuses rather than losing the user's work. Callers should report the skipped objects by name;
+ * pass nullptr only when the caller has no way to tell the user.
  */
 Vector<Object *> multires_level_group_sync(Span<Object *> candidates,
                                            const Object *active_ob,
                                            MultiresLevelType level_type,
                                            int old_value,
                                            int new_value,
-                                           bool only_matching);
+                                           bool only_matching,
+                                           Vector<Object *> *r_skipped = nullptr);
 
 /**
  * Mesh objects that are part of the same multi-object sculpt session as `active_ob` would be
@@ -223,7 +237,124 @@ bool multiresModifier_reshapeFromDeformModifier(Depsgraph *depsgraph,
                                                 Object *ob,
                                                 MultiresModifierData *mmd,
                                                 ModifierData *deform_md);
-bool multiresModifier_reshapeFromCCG(int tot_level, Mesh *coarse_mesh, SubdivCCG *subdiv_ccg);
+
+enum class MultiresReshapeFromCCGMode : int8_t {
+  /** The CCG positions are the evaluated composed surface (`base + enabled sculpt layers`). */
+  Composed,
+  /** The CCG positions are a base-edit source; enabled sculpt layers must not be written back. */
+  Base,
+};
+
+bool multiresModifier_reshapeFromCCG(int tot_level,
+                                     Mesh *coarse_mesh,
+                                     SubdivCCG *subdiv_ccg,
+                                     MultiresReshapeFromCCGMode mode);
+
+/**
+ * Sculpt layer recording: convert the sculpted CCG surface to tangent displacement at the top
+ * level and accumulate the difference against the pre-stroke composed surface
+ * (`MDisps + sum(enabled layers)`) into \a layer for the \a touched_grids. #CD_MDISPS itself is
+ * left unchanged (it only ever stores the base surface, layers are composed at evaluation time).
+ *
+ * \param touched_grids: indices of the grids modified by the stroke.
+ * \param r_undo_delta: per-element deltas that were added to the layer, laid out as
+ * `touched_grids.size() * grid_area` values in the order of \a touched_grids.
+ */
+bool multiresModifier_reshapeFromCCG_into_sculpt_layer(int tot_level,
+                                                       Mesh *coarse_mesh,
+                                                       SubdivCCG *subdiv_ccg,
+                                                       Span<int> touched_grids,
+                                                       SculptLayer &layer,
+                                                       Vector<float3> &r_undo_delta);
+
+/**
+ * Add `layer.data * factor` to the mesh's #CD_MDISPS displacement (both are stored in the same
+ * tangent-space grid layout). Used to bake a layer's contribution into the base and to undo such
+ * a bake (negative factor). No-op for layers whose data does not match the MDisps layout.
+ */
+void BKE_multires_sculpt_layer_apply_to_mdisps(Mesh &mesh, const SculptLayer &layer, float factor);
+
+/**
+ * True when the mesh has any grid-domain sculpt layer with displacement data (regardless of
+ * visibility). Used to block destructive multires operations that would invalidate the layers.
+ */
+bool BKE_multires_mesh_has_grid_sculpt_layers(const Mesh &mesh);
+
+/**
+ * An enabled grid-domain sculpt layer selected for composition with (or subtraction from) the base
+ * multires displacement: a pointer into its tangent coefficients (MDisps layout at the top level),
+ * its influence, and the weight masks that attenuate it.
+ */
+struct MultiresGridSculptLayer {
+  const float3 *data;
+  float influence;
+  /**
+   * The layer's own mask and its folder chain's, already resolved and gated by #is_stale_mask.
+   * Both null unless this layer is actually masked.
+   *
+   * A GRID mask's block size is `grid_area`, so one grid is exactly one block and a grid index is
+   * directly a block index — see #BKE_multires_grid_sculpt_layer_weight, which is the only place
+   * that correspondence is relied upon.
+   */
+  bke::sculpt_layers::CompositeMask masks;
+};
+
+/**
+ * Collect the enabled grid-domain sculpt layers whose data matches the MDisps layout at
+ * \a grid_area (the `grid_size^2` of the multires top level). Both the displacement evaluator
+ * (which composes them onto the base) and the base flush (which subtracts them back) use this
+ * single collector so they always operate on an identical layer set; any asymmetry would leak the
+ * difference into the base #CD_MDISPS.
+ *
+ * Deliberately per-mesh and not per-grid: the displacement evaluator calls this once when it
+ * attaches (#displacement_init_data) and then evaluates every grid — including *neighbouring*
+ * grids while averaging across grid boundaries — from the one result. Folding a specific grid's
+ * mask block in here would mean a layer-tree walk and an allocation per element evaluated. The
+ * per-grid fold happens in #BKE_multires_grid_sculpt_layer_weight instead.
+ */
+Vector<MultiresGridSculptLayer> BKE_multires_grid_sculpt_layers_collect(const Mesh &mesh,
+                                                                        int grid_area);
+
+/**
+ * Fold \a layer's masks for a single grid against its influence, optionally negated by \a sign.
+ *
+ * The single place a grid layer's weight is decided. Every direction goes through it — the
+ * displacement evaluator that composes layers onto the base, the temporary composition into MDisps
+ * and its matching subtraction, the bake into MDisps, the CCG-position subtraction on flush, and
+ * the pre-stroke surface the recorder reconstructs — so a forward and an inverse can never be
+ * spelled two subtly different ways. That matters more here than anywhere else in the subsystem: a
+ * disagreement does not show up as a visible error but as a base that drifts a little on every
+ * flush, silently and cumulatively.
+ *
+ * \a grid_index is used directly as a mask block index, which holds because a GRID mask's block
+ * size is `grid_area`. #BKE_multires_grid_sculpt_layers_collect checks that before storing the
+ * masks and drops them if it does not hold.
+ */
+bke::sculpt_layers::MaskBlockWeight BKE_multires_grid_sculpt_layer_weight(
+    const MultiresGridSculptLayer &layer, int grid_index, float sign = 1.0f);
+
+/**
+ * Compute the object-space contribution of \a layer (at influence 1.0, but *with* its weight masks
+ * applied) for every element of the given CCG at its current level: the layer's tangent
+ * coefficients subsampled to the CCG level and transformed by the base-mesh limit-surface tangent
+ * matrices. Used by the interactive influence drag to update positions incrementally
+ * (`positions += contribution * delta`), and by the base flush to subtract the layers back off the
+ * CCG positions.
+ *
+ * The mask is folded in here rather than by the callers because this is where the current-level
+ * index and the layer's top-level index are both in hand: the mask is sampled through the same
+ * index stride #grid_subsample uses for the coefficients, which is what keeps the subtraction
+ * symmetric with the composition the displacement evaluator performed. A caller that scaled an
+ * unmasked contribution would eat into the masked region a little on every flush.
+ *
+ * Returns false when the CCG is finer than \a layer's storage level, which cannot be served.
+ *
+ * \param r_contrib: must hold `grids_num * ccg_grid_size^2` elements.
+ */
+bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
+                                                   SubdivCCG &subdiv_ccg,
+                                                   const SculptLayer &layer,
+                                                   MutableSpan<float3> r_contrib);
 
 /* Subdivide multi-res displacement once. */
 
@@ -275,6 +406,15 @@ BLI_INLINE void BKE_multires_construct_tangent_matrix(float3x3 &tangent_matrix,
                                                       const float3 &dPdv,
                                                       int corner);
 
+/**
+ * Tangent matrix construction as it was before the well-conditioned rewrite. Only used by
+ * versioning code to decode displacement grids stored by older files.
+ */
+BLI_INLINE void BKE_multires_construct_tangent_matrix_for_versioning(float3x3 &tangent_matrix,
+                                                                     const float3 &dPdu,
+                                                                     const float3 &dPdv,
+                                                                     int corner);
+
 /* Versioning. */
 
 /**
@@ -282,6 +422,12 @@ BLI_INLINE void BKE_multires_construct_tangent_matrix(float3x3 &tangent_matrix,
  * subdivided mesh.
  */
 void multires_do_versions_simple_to_catmull_clark(Object *object, MultiresModifierData *mmd);
+
+/**
+ * Re-encode displacement grids from the legacy tangent space (normalized axes) into the
+ * well-conditioned tangent space produced by #BKE_multires_construct_tangent_matrix.
+ */
+void multires_do_versions_tangent_space_conversion(Object *object, MultiresModifierData *mmd);
 
 }  // namespace blender
 

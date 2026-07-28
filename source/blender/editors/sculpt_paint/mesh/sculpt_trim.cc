@@ -813,10 +813,42 @@ static Vector<Object *> trimmable_objects(const ViewContext &vc, ReportList &rep
                   object->id.name + 2);
       continue;
     }
-    if (id_cast<const Mesh *>(object->data)->faces_num == 0) {
+    const Mesh &mesh = *id_cast<const Mesh *>(object->data);
+    if (mesh.faces_num == 0) {
       /* No geometry to trim or to detect a valid position for the trimming shape. */
       continue;
     }
+
+    /* Checked per object, alongside the pbvh-type gates above, rather than aborting the whole
+     * gesture -- mirrors the warn-and-skip treatment already given to BMesh/Grids objects here.
+     *
+     * The session check is needed in addition to the bake check, not instead of it:
+     * #destructive_edit_check counts *layers* (see #bke::sculpt_layers::layers, which never
+     * collects folders), while a session can be anchored on a folder — including an empty one. On
+     * a mesh carrying no layers at all, an empty folder holding a mask therefore passes the bake
+     * check while a session is open, and the changed element count then sends #mask_edit_end down
+     * its destructive branch, which removes the user's own `.sculpt_mask` for good. */
+    if (layers::mask_edit_refuse_deform(*object, &reports)) {
+      /* #mask_edit_refuse_deform's own message doesn't name the object, so a per-object skip
+       * would otherwise be indistinguishable from the whole gesture having failed. Matches the
+       * BMesh/Grids warnings above in shape and wording. */
+      BKE_reportf(&reports,
+                  RPT_WARNING,
+                  "Trim: skipping \"%s\" (weight-mask editing session is open)",
+                  object->id.name + 2);
+      continue;
+    }
+
+    if (!layers::destructive_edit_check(mesh, &reports)) {
+      /* Same naming problem as the mask-session skip just above: #destructive_edit_check reports
+       * for the mesh in general, not for which selected object it skipped. */
+      BKE_reportf(&reports,
+                  RPT_WARNING,
+                  "Trim: skipping \"%s\" (sculpt layers not baked)",
+                  object->id.name + 2);
+      continue;
+    }
+
     result.append(object);
   }
   return result;

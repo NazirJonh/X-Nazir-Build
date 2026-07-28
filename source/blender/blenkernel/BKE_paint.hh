@@ -8,11 +8,14 @@
  * \ingroup bke
  */
 
+#include <string>
 #include <variant>
 
 #include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
+#include "BLI_bounds_types.hh"
 #include "BLI_enum_flags.hh"
+#include "BLI_map.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_offset_indices.hh"
@@ -388,6 +391,168 @@ struct PersistentMultiresData {
   MutableSpan<float> displacements;
 };
 
+/* Helper return struct for the layer brush's uniform depth reference surface. */
+struct LayerUniformBaseData {
+  Span<float3> positions;
+  Span<float3> normals;
+  MutableSpan<float> displacements;
+};
+
+/**
+ * State of a sculpt layer mask editing session.
+ *
+ * While a session is open the node's sparse mask is expanded into the standard mask buffer, so the
+ * whole existing toolset — Mask brush, gesture operators, flood fill, mask filters, the viewport
+ * overlay and its undo steps — works on it unchanged. The user's own sculpt mask is parked here for
+ * the duration.
+ *
+ * Runtime only. The dense buffer is never written to a .blend, so a crash costs an unfinished
+ * session but cannot corrupt the file.
+ *
+ * Lives here rather than in the editor module's `sculpt_intern.hh` because it is held by value on
+ * #SculptSession, which blenkernel owns.
+ */
+struct SculptLayerMaskEdit {
+  /**
+   * Uid of the #SculptLayerTreeNode whose mask is being edited; 0 when no session is open. Uid 0
+   * names the root group, which is never drawn and therefore never editable, so the sentinel
+   * collides with nothing (see #bke::sculpt_layers::node_find_by_uid).
+   */
+  int node_uid = 0;
+  /**
+   * True when the session was opened on the multires grid domain rather than on mesh vertices.
+   *
+   * Recorded rather than re-derived from the live #bke::pbvh::Tree on exit. The two domains park
+   * the user's mask in different places — a mesh attribute against #SubdivCCG::masks — and the
+   * exit path is destructive about the one it did not use (it removes the storage when the session
+   * created it). Should the multires modifier be removed while a session is open, a re-derived
+   * domain would make the exit restore one domain and delete the other's mask.
+   */
+  bool on_grids = false;
+  /** True when the mesh already carried a `.sculpt_mask` attribute before the session opened. */
+  bool had_vert_mask = false;
+  /** The user's sculpt mask, parked. Empty when #had_vert_mask is false. */
+  Array<float> saved_vert_mask;
+  /**
+   * True when #SubdivCCG::masks was already materialized before the session opened. The grid
+   * counterpart of #had_vert_mask, kept separate because the two answer different questions: an
+   * absent mesh mask is a missing attribute, an absent grid mask is an empty array.
+   */
+  bool had_grid_mask = false;
+  /** The user's grid sculpt mask, parked. Empty when #had_grid_mask is false. */
+  Array<float> saved_grid_mask;
+  /**
+   * `SubdivCCG::grid_area` as it was when the session opened, and therefore the block size the
+   * node's mask is cut at. Zero for a vertex-domain session.
+   *
+   * The exit path refuses to compress a grid mask whose grid area no longer matches: a subdivision
+   * level change rebuilds the CCG and re-derives #SubdivCCG::masks from the base mesh, so the
+   * expanded weights the session was authoring are simply gone and compressing what replaced them
+   * would store the user's own sculpt mask onto the node.
+   */
+  int grid_area = 0;
+  /**
+   * `SubdivCCG::grids_num` as it was when the session opened. Zero for a vertex-domain session.
+   *
+   * #grid_area alone cannot catch a base-topology change that rebuilds the CCG at the same
+   * subdivision level: `grids_num` changes while `grid_area` does not, and comparing
+   * `masks.size()` against a total re-derived from the *live* CCG is self-consistent by
+   * construction, so it cannot detect the rebuild either. Checked alongside #grid_area in the exit
+   * path for exactly the case that check exists for.
+   */
+  int grids_num = 0;
+  /**
+   * Multires top level, i.e. the level the node's mask is *stored* at. Zero for a vertex-domain
+   * session.
+   *
+   * The session authors on #SubdivCCG::masks, which sits at the *sculpt* level, while grid masks
+   * are stored at the top level alongside the layer data they weight (see #resample_grid_masks).
+   * With `Sculpt Levels < Levels` the two differ and the weights are resampled at both session
+   * boundaries. Recorded rather than re-read from the modifier on exit, so the buffer is always
+   * mapped back out of the level it was mapped into.
+   */
+  int store_level = 0;
+  /**
+   * `SubdivCCG::id` as it was when the session opened. Zero for a vertex-domain session, and never
+   * a valid id (#subdiv_ccg_next_id starts at one).
+   *
+   * #grid_area and #grids_num together still cannot see every rebuild: one at the *same*
+   * subdivision level over the *same* base topology leaves both unchanged, and `masks.size()` with
+   * them. Such a rebuild re-derives #SubdivCCG::masks from `CD_GRID_PAINT_MASK` — the user's own
+   * sculpt mask, since the suspend guards make sure the session's weights never reach that layer —
+   * so the exit path would find an apparently intact domain and compress the user's mask onto the
+   * node as the layer's weight map, losing the painted weights without a word. It is reachable:
+   * every mask operator re-evaluates the depsgraph before it runs, and anything that tagged the
+   * mesh `ID_RECALC_GEOMETRY` during the session rebuilds the CCG there.
+   *
+   * An id rather than the #SubdivCCG address, which would be worthless: the old instance is freed
+   * before the new one is allocated, so the allocator may hand back the same address.
+   */
+  uint64_t ccg_id = 0;
+  /**
+   * True when the session synthesized the node's mask on open rather than finding a usable one.
+   *
+   * Only the cancel path reads it, and it is what lets that path be faithful: a node that carried no
+   * mask before the edit must carry none after a discarded one, or "cancel" would leave behind an
+   * opaque mask the user never asked for. The open path replaces an unusable mask (missing, stale,
+   * or cut for the other domain) with an opaque one, and all three cases collapse to the same
+   * restoration — every consumer already ignores an unusable mask, so "no mask" is the state the
+   * user was in.
+   */
+  bool mask_created = false;
+  /**
+   * Number of #bke::sculpt_layers::MaskEditSuspendGuard instances currently holding this session
+   * parked. Non-zero means the session's dense weights are in #suspended_dense and the standard
+   * mask storage holds the user's own mask again.
+   *
+   * A session keeps the node's weights in the *persistent* store — the `.sculpt_mask` attribute on
+   * the original mesh, or #SubdivCCG::masks, which the multires flush copies into the base mesh's
+   * `CD_GRID_PAINT_MASK` layer. Anything that serializes the file, or that flushes the CCG into the
+   * base mesh, would therefore record the layer's weights as the user's own mask. Such an operation
+   * is bracketed by a suspend/resume pair rather than by closing the session, because it can happen
+   * without the user asking for it (auto-save runs on a timer) and closing a session the user is
+   * working in would be both surprising and lossy.
+   *
+   * A counter rather than a flag because the brackets nest: a save parks the whole #Main and then
+   * calls a flush that parks the object again. With a flag the inner bracket's exit would put the
+   * layer's weights back before the outer one's operation had run — the precise corruption the
+   * brackets exist to prevent. Only the transition to and from zero performs the swap, so the
+   * scheme is correct at any nesting depth.
+   *
+   * Distinct from "no session": #node_uid stays set while suspended, so nothing else in the feature
+   * has to know the difference.
+   */
+  int suspend_depth = 0;
+  /**
+   * The session's dense weights, parked while #suspend_depth is non-zero. Empty otherwise.
+   *
+   * The counterpart of #saved_vert_mask / #saved_grid_mask with the two roles swapped: while
+   * suspended it is the *session's* buffer that is held here and the *user's* that is live.
+   */
+  Array<float> suspended_dense;
+  /**
+   * True once a refused suspend has been logged for this session.
+   *
+   * A refusal is reported, never silent, but it is also persistent: the condition that makes a
+   * suspend impossible (a parked buffer describing a domain the object no longer has) does not
+   * clear itself, so every subsequent depsgraph re-evaluation would re-report the same fact.
+   * Latched here rather than on the CCG because the mesh domain has no CCG to latch on, and reset
+   * with the rest of the session on close.
+   */
+  bool suspend_refusal_reported = false;
+  /**
+   * Idname of the 3D viewport's active tool as it was when the session opened, empty when it could
+   * not be read (no viewport on screen).
+   *
+   * Restored on exit only if the active tool is still `builtin_brush.mask`: a user who switched
+   * tools deliberately inside the session has made a choice that closing the session must not undo.
+   *
+   * The tool is the *only* thing the session parks. Entering also disarms REC, but that is not put
+   * back on exit: arming carries invariants and an undo record that only its operator can supply.
+   */
+  std::string saved_tool_id;
+};
+
 struct SculptSession : NonCopyable, NonMovable {
   /* The current active shapekey for the mesh. Only non-null for Type::Mesh */
   KeyBlock *shapekey_active = nullptr;
@@ -416,6 +581,10 @@ struct SculptSession : NonCopyable, NonMovable {
 
   /* Object is deformed with some modifiers. */
   bool deform_modifiers_active = false;
+  /* The active shape key is the only deformer (no other enabled modifier changes the drawn
+   * surface), so the sculpt PBVH can be drawn directly instead of re-evaluating the mesh every
+   * redraw. Only meaningful for #Type::Mesh sessions with #shapekey_active set. */
+  bool shapekey_pbvh_draw = false;
   /* Coords of deformed mesh but without stroke displacement. */
   Array<float3, 0> deform_cos;
   /* Crazy-space deformation matrices. */
@@ -475,6 +644,101 @@ struct SculptSession : NonCopyable, NonMovable {
     int grids_num = -1;
     int grid_size = -1;
   } persistent;
+
+  /* Reference surface for the layer brush's "Uniform Depth" option, shared by all geometry types
+   * that support it. Unlike #persistent this is never written to the mesh: it only has to stay
+   * stable across the strokes of a sculpt session, so keeping it out of the file also keeps it
+   * out of undo steps and away from the persistent base used by "Set Persistent Base". */
+  struct {
+    Array<float3> positions;
+    Array<float3> normals;
+    Array<float> displacement;
+
+    /* The number of elements at the time of capture, used to detect that the topology changed
+     * since and the stored data can no longer be used. */
+    int elements_num = -1;
+  } layer_uniform_base;
+
+  /* Sculpt layers (non-destructive sculpt edits, see #BKE_sculpt_layers.hh). Runtime state used
+   * by the editor module to record strokes into the active layer. Multires (grid domain) layers
+   * keep no runtime base: the composed surface is evaluated from `MDisps + sum(enabled layers)`
+   * by the subdivision displacement evaluator, so grid state is fully derived from stored data. */
+  struct {
+    /* True between #stroke_record_begin and #stroke_record_end while a valid active layer is
+     * being recorded. This is the authoritative "recording" signal. */
+    bool recording = false;
+    /* True while REC (record) mode is on: brush strokes are recorded into the active layer (pinned
+     * to influence 1.0). When false, strokes edit the base geometry instead. Transient editing
+     * state, not saved to the blend file.
+     *
+     * Mirrored onto the mesh as #SCULPT_LAYER_REC_ARMED so that it survives this session being
+     * destroyed on the way out of sculpt mode; the session stays the authority while it exists, and
+     * the mirror is read back exactly once, by #init_sculpt_mode_session. */
+    bool rec_active = false;
+    /* #SculptLayerTreeNode::uid of the layer whose recording has already been reported to the user
+     * in this session, or 0 if nothing has been. Strokes report once rather than every time, and a
+     * change of active layer reports again — both fall out of comparing against this.
+     *
+     * Session-scoped on purpose, and that is the whole implementation of "once per entry into sculpt
+     * mode": a new session starts silent with no reset to run. Now that REC survives object mode, the
+     * user can return to a mode that records without having touched the REC button, which is what
+     * these two fields exist to say out loud. */
+    int rec_notified_uid = 0;
+    /* Whether the "REC is armed but the stroke cannot be recorded" warning has already been given in
+     * this session. Cleared again by a stroke that does record, so that a cause the user fixes and
+     * then re-introduces is reported anew. */
+    bool rec_notified_blocked = false;
+    /* For the mesh (vertex) domain: the vertex positions with every layer's contribution removed
+     * (the un-layered base). Captured lazily on sculpt-mode enter; kept current by non-REC strokes.
+     * Empty for the grid domain. */
+    Array<float3> mesh_base;
+    /* Whether #mesh_base has been initialized for this session. */
+    bool state_valid = false;
+    /* Per-element object-space contribution of the enabled layers ("base view" offset,
+     * `combined[i] - base[i]`), valid only for the duration of one stroke. Brushes subtract it from
+     * the live positions when computing surface-shape-dependent inputs (falloff, area normal,
+     * smoothing targets, plane fits), so neither a base edit nor a stroke recorded into another
+     * layer absorbs the residual of the layers below. While recording, the layer being authored is
+     * excluded (it stays WYSIWYG). Under a shape key the offset is summed straight from the layer
+     * data, which is exactly how it is composed there. Empty when no layer contributes (no enabled
+     * layers, and deform-modifier sessions without a shape key, which cannot record). */
+    Array<float3> base_view;
+    /* The base view offset sampled at the current brush contact point, refreshed once per brush
+     * action (per symmetry / tile pass). Every consumer of #base_view removes it, i.e. the brush
+     * inputs use `base_view[i] - base_view_dc` rather than the raw offset.
+     *
+     * The raw offset cannot be used directly: the brush reference point (#StrokeCache::location_symm
+     * and the radius around it) lives on the *composed* surface, so subtracting the full offset from
+     * the sampled positions moves them away from the cursor by the layer height. Once that height
+     * approaches the brush radius every falloff factor is zeroed (the stroke does nothing) and the
+     * area-plane sampling finds no vertex at all, falling back to a plane through the composed
+     * location, which yanks the still-active vertices by the layer height and tears the mesh.
+     * Removing the offset *at the contact point* keeps the sampled surface anchored under the cursor
+     * while still stripping the layer pattern from the brush inputs, which is what the base view is
+     * for. All consumers are either differential (smoothing, plane fits) or use a matching
+     * adjust / compose pair, so a constant shift is exactly invariant for them. */
+    float3 base_view_dc = float3(0.0f);
+    /* Bounds of the base-view offset (`base_view[i]`, without the DC) over each PBVH leaf node's
+     * elements, computed once per stroke. Empty when the base view is inactive.
+     *
+     * The brush measures its falloff on the base view, but the nodes it processes are selected from
+     * the node bounds on the *composed* surface. Those two footprints differ by the layer height, so
+     * an element can earn a non-zero factor while its node was never gathered — and since a node is
+     * processed as a whole, the stroke boundary then follows node borders (square tiles).
+     * #layers::base_view_extend_node_mask subtracts these offset bounds from the node's position
+     * bounds to box the node in base-view space, and adds every node that box brings within the
+     * radius. That restores the invariant "every element with a non-zero factor belongs to a
+     * gathered node" without touching the falloff itself.
+     *
+     * Only the offset is stored, not the base-view positions themselves: the offset is constant for
+     * the whole stroke (the layer data does not change while the base is edited), while the
+     * positions move under the brush. Deriving the box from #Node::bounds_ at test time therefore
+     * follows the stroke, whereas a stored `position - base_view` box would go stale as soon as the
+     * first dab moved anything and would drop nodes the falloff still reaches. */
+    Array<Bounds<float3>> base_view_node_offset_bounds;
+    /* Open weight-mask editing session, if any. See #SculptLayerMaskEdit. */
+    SculptLayerMaskEdit mask_edit;
+  } layers;
 
   /* Contains information used by tools and brushes that require different logic based on boundary
    * elements. Typically used for anything which needs to consider neighbor values.
@@ -597,6 +861,15 @@ struct SculptSession : NonCopyable, NonMovable {
    * \returns an empty optional if the current data cannot be used
    */
   std::optional<PersistentMultiresData> persistent_multires_data();
+
+  /**
+   * Retrieves the layer brush's uniform depth reference surface.
+   *
+   * \param elements_num: the number of vertices or grid elements the caller expects, used to
+   * reject a base captured before a topology change.
+   * \returns an empty optional if the current data cannot be used.
+   */
+  std::optional<LayerUniformBaseData> layer_uniform_base_data(int elements_num);
 };
 
 void BKE_sculptsession_free(Object *ob);

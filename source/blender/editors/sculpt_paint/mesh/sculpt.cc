@@ -7,7 +7,9 @@
  * Implements the Sculpt Mode Brushes.
  */
 
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -67,6 +69,7 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
+#include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "BLT_translation.hh"
@@ -115,6 +118,17 @@ namespace blender {
 static CLG_LogRef LOG = {"sculpt"};
 
 namespace ed::sculpt_paint {
+
+/* Temporary end-of-stroke timing for manual latency breakdown. Keep separate from the sculpt-layer
+ * instrumentation so the full `done()` path can be profiled even when layer timings are compiled
+ * out. */
+#define SCULPT_DONE_DEBUG_PERF 0
+#if SCULPT_DONE_DEBUG_PERF
+#  define SCULPT_DONE_PERF(...) printf(__VA_ARGS__)
+#else
+template<typename... Args> inline void sculpt_done_perf_discard(const Args &... /*args*/) {}
+#  define SCULPT_DONE_PERF(...) sculpt_done_perf_discard(__VA_ARGS__)
+#endif
 
 /* -------------------------------------------------------------------- */
 /** \name Sculpt Brush Utilities
@@ -1554,7 +1568,11 @@ static void calc_area_normal_and_center_node_mesh(const Object &object,
     if (const std::optional<OrigPositionData> orig_data = orig_position_data_lookup_mesh(object,
                                                                                          node))
     {
-      const Span<float3> orig_positions = orig_data->positions;
+      /* Base view: sample the plane/normal from the un-layered base so plane brushes target the
+       * base shape and the falloff is not modulated by the layer pattern. Normals stay the
+       * composed ones (the weighted average cancels the pattern). */
+      const Span<float3> orig_positions = layers::base_view_adjust_compact_mesh(
+          object, verts, orig_data->positions, tls.positions);
       const Span<float3> orig_normals = orig_data->normals;
 
       tls.distances.reinitialize(verts.size());
@@ -1589,10 +1607,19 @@ static void calc_area_normal_and_center_node_mesh(const Object &object,
     }
   }
 
+  const Span<float3> base_view_positions = layers::base_view_gather_mesh(
+      object, verts, vert_positions, tls.positions);
+
   tls.distances.reinitialize(verts.size());
   const MutableSpan<float> distances_sq = tls.distances;
-  calc_brush_distances_squared(
-      ss, vert_positions, verts, eBrushFalloffShape(brush.falloff_shape), distances_sq);
+  if (base_view_positions.is_empty()) {
+    calc_brush_distances_squared(
+        ss, vert_positions, verts, eBrushFalloffShape(brush.falloff_shape), distances_sq);
+  }
+  else {
+    calc_brush_distances_squared(
+        ss, base_view_positions, eBrushFalloffShape(brush.falloff_shape), distances_sq);
+  }
 
   for (const int i : verts.index_range()) {
     const int vert = verts[i];
@@ -1610,8 +1637,9 @@ static void calc_area_normal_and_center_node_mesh(const Object &object,
     const float distance = std::sqrt(distances_sq[i]);
     const int flip_index = math::dot(view_normal, normal) <= 0.0f;
     if (needs_center) {
-      accumulate_area_center(
-          location, vert_positions[vert], distance, position_radius_inv, flip_index, anctd);
+      const float3 &position = base_view_positions.is_empty() ? vert_positions[vert] :
+                                                                base_view_positions[i];
+      accumulate_area_center(location, position, distance, position_radius_inv, flip_index, anctd);
     }
     if (needs_normal) {
       accumulate_area_normal(normal, distance, normal_radius_inv, flip_index, anctd);
@@ -1646,7 +1674,9 @@ static void calc_area_normal_and_center_node_grids(const Object &object,
     if (const std::optional<OrigPositionData> orig_data = orig_position_data_lookup_grids(object,
                                                                                           node))
     {
-      const Span<float3> orig_positions = orig_data->positions;
+      /* Base view: see the mesh variant above. */
+      const Span<float3> orig_positions = layers::base_view_adjust_compact_grids(
+          object, subdiv_ccg, grids, orig_data->positions, tls.positions);
       const Span<float3> orig_normals = orig_data->normals;
 
       tls.distances.reinitialize(orig_positions.size());
@@ -1691,6 +1721,18 @@ static void calc_area_normal_and_center_node_grids(const Object &object,
   }
 
   const Span<float3> positions = gather_grids_positions(subdiv_ccg, grids, tls.positions);
+  /* Base view: see the mesh variant above. The gathered copy is adjusted in place. */
+  const Span<float3> base_view = layers::stroke_base_view(object);
+  if (!base_view.is_empty()) {
+    const float3 dc = layers::stroke_base_view_dc(object);
+    for (const int i : grids.index_range()) {
+      const IndexRange node_range = bke::ccg::grid_range(key, i);
+      const IndexRange grid_range = bke::ccg::grid_range(key, grids[i]);
+      for (const int offset : IndexRange(key.grid_area)) {
+        tls.positions[node_range[offset]] -= base_view[grid_range[offset]] - dc;
+      }
+    }
+  }
   tls.distances.reinitialize(positions.size());
   const MutableSpan<float> distances_sq = tls.distances;
   calc_brush_distances_squared(
@@ -2696,6 +2738,7 @@ static float brush_strength(const Sculpt &sd,
     case SCULPT_BRUSH_TYPE_LAYER:
       return alpha * flip * pressure * overlap * feather;
     case SCULPT_BRUSH_TYPE_DISPLACEMENT_ERASER:
+    case SCULPT_BRUSH_TYPE_LAYER_ERASER:
       return alpha * pressure * overlap * feather;
     case SCULPT_BRUSH_TYPE_CLOTH:
       if (brush.cloth_deform_type == BRUSH_CLOTH_DEFORM_GRAB) {
@@ -3985,13 +4028,9 @@ static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgra
     /* These brushes need to update all nodes as they are not constrained by the brush radius */
     return {all_leaf_nodes(pbvh, memory), std::nullopt, std::nullopt};
   }
-  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PLANE) {
-    return brushes::plane::calc_node_mask(depsgraph, ob, brush, memory);
-  }
-  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLAY_STRIPS) {
-    return brushes::clay_strips::calc_node_mask(depsgraph, ob, brush, memory);
-  }
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLOTH) {
+    /* The cloth brush gathers its nodes from the simulation area, not from the brush radius, so the
+     * sculpt-layer extension below (which is radius based) does not apply. */
     return {cloth::brush_affected_nodes_gather(ob, brush, memory), std::nullopt, std::nullopt};
   }
 
@@ -4007,25 +4046,44 @@ static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgra
     radius_scale = 2.0f;
   }
 
-  /* Node culling uses a raw local-space sphere (#node_in_sphere), but whenever the
-   * non-uniform-scale correction is active the per-vertex falloff is measured through
-   * #StrokeCache.position_scale — a world-isotropic sphere (#calc_brush_distances_squared). Where
-   * position_scale shrinks a local axis
-   * (< 1) the falloff reaches past the raw radius; expand the node search to cover it so no
-   * falloff-affected vertex is culled. Otherwise the factor drops abruptly at the node-search
-   * boundary and accumulating brushes that do not restore between steps (e.g. Snake Hook) tear the
-   * mesh along it. Over-inclusion is harmless: the extra vertices simply receive a zero falloff
-   * factor. */
-  if (ss.cache && ss.cache->non_uniform_scale_active) {
-    const float3 &position_scale = ss.cache->position_scale;
-    const float min_axis = std::min({position_scale.x, position_scale.y, position_scale.z});
-    if (min_axis > 0.0f && min_axis < 1.0f) {
-      radius_scale /= min_axis;
-    }
+  brushes::CursorSampleResult result;
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PLANE) {
+    result = brushes::plane::calc_node_mask(depsgraph, ob, brush, memory);
   }
-  return {pbvh_gather_generic(ob, brush, use_original, radius_scale, memory),
-          std::nullopt,
-          std::nullopt};
+  else if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLAY_STRIPS) {
+    result = brushes::clay_strips::calc_node_mask(depsgraph, ob, brush, memory);
+    /* A cube tip reaches past the radius at the corners. */
+    radius_scale = std::max(radius_scale, float(M_SQRT2));
+  }
+  else {
+    /* Node culling uses a raw local-space sphere (#node_in_sphere), but whenever the
+     * non-uniform-scale correction is active the per-vertex falloff is measured through
+     * #StrokeCache.position_scale — a world-isotropic sphere (#calc_brush_distances_squared). Where
+     * position_scale shrinks a local axis
+     * (< 1) the falloff reaches past the raw radius; expand the node search to cover it so no
+     * falloff-affected vertex is culled. Otherwise the factor drops abruptly at the node-search
+     * boundary and accumulating brushes that do not restore between steps (e.g. Snake Hook) tear the
+     * mesh along it. Over-inclusion is harmless: the extra vertices simply receive a zero falloff
+     * factor. */
+    if (ss.cache && ss.cache->non_uniform_scale_active) {
+      const float3 &position_scale = ss.cache->position_scale;
+      const float min_axis = std::min({position_scale.x, position_scale.y, position_scale.z});
+      if (min_axis > 0.0f && min_axis < 1.0f) {
+        radius_scale /= min_axis;
+      }
+    }
+    result = {pbvh_gather_generic(ob, brush, use_original, radius_scale, memory),
+              std::nullopt,
+              std::nullopt};
+  }
+
+  /* Sculpt layers: the gather above works on the composed surface, but with visible layers the brush
+   * measures its falloff on the base view. Add the nodes that footprint reaches, so that no element
+   * with a non-zero factor sits in an ungathered node (which would decide "moves or not" per node
+   * and carve the stroke along node borders). No-op without layers. */
+  result.node_mask = layers::base_view_extend_node_mask(
+      ob, result.node_mask, ss.cache->radius * radius_scale, memory);
+  return result;
 }
 
 static void push_undo_nodes(const Depsgraph &depsgraph,
@@ -4116,6 +4174,8 @@ static const char *sculpt_brush_type_name(const Brush &brush)
       return "Draw Face Sets";
     case SCULPT_BRUSH_TYPE_DISPLACEMENT_ERASER:
       return "Multires Displacement Eraser";
+    case SCULPT_BRUSH_TYPE_LAYER_ERASER:
+      return "Erase Sculpt Layer";
     case SCULPT_BRUSH_TYPE_DISPLACEMENT_SMEAR:
       return "Multires Displacement Smear";
     case SCULPT_BRUSH_TYPE_PAINT:
@@ -4159,6 +4219,12 @@ static void do_brush_action(const Depsgraph &depsgraph,
       return;
     }
   }
+
+  /* Anchor the sculpt-layer base view to this action's contact point. Must run before the node
+   * gather, which uses the anchored base-view footprint to extend the node mask (see
+   * #layers::base_view_extend_node_mask), and before any brush input reads the base view. No-op
+   * without layers. */
+  layers::base_view_dc_update(depsgraph, ob);
 
   const brushes::CursorSampleResult cursor_sample_result = calc_brush_node_mask(
       depsgraph, ob, brush, memory);
@@ -4362,6 +4428,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
       break;
     case SCULPT_BRUSH_TYPE_DISPLACEMENT_ERASER:
       brushes::do_displacement_eraser_brush(depsgraph, sd, ob, node_mask);
+      break;
+    case SCULPT_BRUSH_TYPE_LAYER_ERASER:
+      brushes::do_layer_eraser_brush(depsgraph, sd, ob, node_mask);
       break;
     case SCULPT_BRUSH_TYPE_DISPLACEMENT_SMEAR:
       brushes::do_displacement_smear_brush(depsgraph, sd, ob, node_mask);
@@ -6484,6 +6553,16 @@ struct SculptPaintStroke final : public PaintStroke {
   /* Multi-object ("global") sculpt stroke state -- see #MultiObjectStrokeContext. */
   MultiObjectStrokeContext multi_;
 
+  /* Sculpt layers: Erase Layer transiently arms recording into the active layer for the duration
+   * of this stroke when REC was not already on (see #test_start / #done and the design spec's
+   * "Writing into the active layer" section for why this is required for correctness on masked
+   * layers). #layer_eraser_armed_ is false whenever REC was already on, or there was no active
+   * layer to arm — the guard #done checks before restoring anything. */
+  bool layer_eraser_armed_ = false;
+  bool layer_eraser_saved_rec_active_ = false;
+  bool layer_eraser_saved_enabled_ = false;
+  float layer_eraser_saved_influence_ = 1.0f;
+
   SculptPaintStroke(bContext *C, wmOperator *op, const int event_type)
       : PaintStroke(C, op, event_type)
   {
@@ -6628,6 +6707,10 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, brush_type_is_paint(brush->sculpt_brush_type));
 
+  /* The layer brush measures its uniform depth against a snapshot of the surface, which has to be
+   * taken before the stroke starts deforming positions. */
+  brushes::layer_uniform_base_update(*depsgraph, *brush, ob);
+
   ED_paint_brush_type_update_sticky_shading_color(C, &ob);
 }
 
@@ -6638,6 +6721,14 @@ static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *ob.runtime->sculpt_session;
   const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
+
+  /* Sculpt layers: restoring the positions to their pre-stroke state must also rewind the active
+   * layer, which a recorded mesh stroke accumulates per dab (#PositionDeformData::deform). Without
+   * this the layer keeps the sum of every dab while the positions only hold the last one, breaking
+   * the `positions == base + layers` invariant — the surplus then surfaces as corrupted positions
+   * when the layer is disabled, and leaks into the base once it is re-derived from the positions.
+   * Must run while the live positions still hold the previous dab's result (both it and the
+   * per-node undo data are consumed by #restore_from_undo_step below). */
 
   /* Brushes that use original coordinates and need a "restore" step. This has to happen separately
    * rather than in the brush deformation calculation because that is called once for each symmetry
@@ -6653,6 +6744,7 @@ static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
            SCULPT_BRUSH_TYPE_THUMB,
            SCULPT_BRUSH_TYPE_ROTATE))
   {
+    layers::cancel_recorded_offsets(depsgraph, ob);
     undo::restore_from_undo_step(depsgraph, sd, ob);
     return;
   }
@@ -6666,6 +6758,7 @@ static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
   /* Restore the mesh before continuing with anchored stroke. */
   if (ELEM(brush->stroke_method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT)) {
 
+    layers::cancel_recorded_offsets(depsgraph, ob);
     undo::restore_from_undo_step(depsgraph, sd, ob);
 
     if (ss.cache) {
@@ -6766,7 +6859,10 @@ void flush_update_step(ViewContext &vc, Object &object, const UpdateType update_
   ED_region_tag_redraw(vc.region);
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
-  if (update_type == UpdateType::Position && !ss.shapekey_active) {
+  /* Refresh the PBVH position buffers and mesh bounds for the mesh path. Skipped for a shape-key
+   * session that draws through the evaluated mesh (the full re-evaluation above already refreshes
+   * it), but required when a shape-key-only session draws directly from the PBVH. */
+  if (update_type == UpdateType::Position && (!ss.shapekey_active || use_pbvh_draw)) {
     if (pbvh.type() == bke::pbvh::Type::Mesh) {
       tag_mesh_positions_changed(object, use_pbvh_draw);
     }
@@ -6785,6 +6881,38 @@ void flush_update_done(ViewContext &vc,
                        Object &ob,
                        const UpdateType update_type)
 {
+#if SCULPT_DONE_DEBUG_PERF
+  const auto func_start = std::chrono::high_resolution_clock::now();
+  int64_t redraw_us = 0;
+  int64_t image_redraw_us = 0;
+  int64_t bounds_orig_us = 0;
+  int64_t fake_neighbors_us = 0;
+  int64_t bmesh_after_us = 0;
+  int64_t tag_us = 0;
+  int bounds_orig_dirty_leaves = 0;
+  int bounds_orig_total_nodes = 0;
+  const char *update_type_name = "Unknown";
+  switch (update_type) {
+    case UpdateType::Position:
+      update_type_name = "Position";
+      break;
+    case UpdateType::Mask:
+      update_type_name = "Mask";
+      break;
+    case UpdateType::Visibility:
+      update_type_name = "Visibility";
+      break;
+    case UpdateType::Color:
+      update_type_name = "Color";
+      break;
+    case UpdateType::Image:
+      update_type_name = "Image";
+      break;
+    case UpdateType::FaceSet:
+      update_type_name = "FaceSet";
+      break;
+  }
+#endif
   /* After we are done drawing the stroke, check if we need to do a more
    * expensive depsgraph tag to update geometry. */
   const Mesh &mesh = *id_cast<Mesh *>(ob.data);
@@ -6798,6 +6926,9 @@ void flush_update_done(ViewContext &vc,
 
   /* TODO: this might be better in the `redraw` callback instead of here */
   for (wmWindow &win : wm.windows) {
+#if SCULPT_DONE_DEBUG_PERF
+    const auto redraw_start = std::chrono::high_resolution_clock::now();
+#endif
     const bScreen &screen = *WM_window_get_active_screen(&win);
     for (ScrArea &area : screen.areabase) {
       const SpaceLink &sl = *static_cast<SpaceLink *>(area.spacedata.first);
@@ -6819,8 +6950,15 @@ void flush_update_done(ViewContext &vc,
         }
       }
     }
-
+#if SCULPT_DONE_DEBUG_PERF
+    redraw_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                     std::chrono::high_resolution_clock::now() - redraw_start)
+                     .count();
+#endif
     if (update_type == UpdateType::Image) {
+#if SCULPT_DONE_DEBUG_PERF
+      const auto image_redraw_start = std::chrono::high_resolution_clock::now();
+#endif
       for (ScrArea &area : screen.areabase) {
         const SpaceLink &sl = *static_cast<SpaceLink *>(area.spacedata.first);
         if (sl.spacetype != SPACE_IMAGE) {
@@ -6828,6 +6966,11 @@ void flush_update_done(ViewContext &vc,
         }
         ED_area_tag_redraw_regiontype(&area, RGN_TYPE_WINDOW);
       }
+#if SCULPT_DONE_DEBUG_PERF
+      image_redraw_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::high_resolution_clock::now() - image_redraw_start)
+                             .count();
+#endif
     }
   }
 
@@ -6837,22 +6980,83 @@ void flush_update_done(ViewContext &vc,
   bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(*vc.depsgraph, ob);
 
   if (update_type == UpdateType::Position) {
-    bke::pbvh::store_bounds_orig(pbvh);
+#if SCULPT_DONE_DEBUG_PERF
+    const auto bounds_start = std::chrono::high_resolution_clock::now();
+#endif
+    /* Mesh strokes keep the whole tree's bounds up to date during the stroke, so only the touched
+     * leaves and their ancestors need their "original" bounds resynced. Grids/BMesh keep the full
+     * copy: their dirty tracking and post-stroke topology handling differ. */
+    if (pbvh.type() == bke::pbvh::Type::Mesh) {
+      [[maybe_unused]] const int dirty_leaves = pbvh.store_bounds_orig_for_dirty_leaves();
+#if SCULPT_DONE_DEBUG_PERF
+      bounds_orig_dirty_leaves = dirty_leaves;
+      bounds_orig_total_nodes = pbvh.nodes_num();
+#endif
+    }
+    else {
+      bke::pbvh::store_bounds_orig(pbvh);
+    }
+#if SCULPT_DONE_DEBUG_PERF
+    bounds_orig_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                         std::chrono::high_resolution_clock::now() - bounds_start)
+                         .count();
+    const auto fake_neighbors_start = std::chrono::high_resolution_clock::now();
+#endif
 
     /* Coordinates were modified, so fake neighbors are not longer valid. */
     fake_neighbors_free(ob);
+#if SCULPT_DONE_DEBUG_PERF
+    fake_neighbors_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::high_resolution_clock::now() - fake_neighbors_start)
+                            .count();
+#endif
   }
 
   if (update_type == UpdateType::Position) {
     if (pbvh.type() == bke::pbvh::Type::BMesh) {
       SculptSession &ss = *ob.runtime->sculpt_session;
+#if SCULPT_DONE_DEBUG_PERF
+      const auto bmesh_after_start = std::chrono::high_resolution_clock::now();
+#endif
       BKE_pbvh_bmesh_after_stroke(*ss.bm, pbvh);
+#if SCULPT_DONE_DEBUG_PERF
+      bmesh_after_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::high_resolution_clock::now() - bmesh_after_start)
+                           .count();
+#endif
     }
   }
 
   if (need_tag) {
+#if SCULPT_DONE_DEBUG_PERF
+    const auto tag_start = std::chrono::high_resolution_clock::now();
+#endif
     DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+#if SCULPT_DONE_DEBUG_PERF
+    tag_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                 std::chrono::high_resolution_clock::now() - tag_start)
+                 .count();
+#endif
   }
+#if SCULPT_DONE_DEBUG_PERF
+  const int64_t total_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::high_resolution_clock::now() - func_start)
+                               .count();
+  SCULPT_DONE_PERF(
+      "[DEBUG-perf] flush_update_done(%s): redraw=%lld image_redraw=%lld "
+      "bounds_orig=%lld (dirty_leaves=%d/%d) fake_neighbors=%lld bmesh_after=%lld tag=%lld "
+      "TOTAL=%lld us\n",
+      update_type_name,
+      redraw_us,
+      image_redraw_us,
+      bounds_orig_us,
+      bounds_orig_dirty_leaves,
+      bounds_orig_total_nodes,
+      fake_neighbors_us,
+      bmesh_after_us,
+      tag_us,
+      total_us);
+#endif
 }
 
 /* Replace an entire attribute using implicit sharing to avoid copies when possible. */
@@ -7483,8 +7687,62 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 
     cursor_geometry_info_update(*this->depsgraph, *paint, sculpt_, this->vc, base_, mval, false);
 
+    /* Sculpt layers, Phase 1 (single-object): the layer hooks below are armed for the primary
+     * object only. Phase 2 loops them over #multi_.mode_objects.
+     *
+     * Position brushes (not the paint brushes, not Mask) are the ones that record. */
+    const bool records_into_layer = brush && !brush_type_is_paint(brush->sculpt_brush_type) &&
+                                    brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK;
+
+    /* Sculpt layers: Erase Layer must write into the active layer even when REC is off — it is an
+     * explicit, targeted action on that layer, like Clear/Invert, not a request to start
+     * recording. Unlike those operators it is a brush stroke, so instead of mutating #data
+     * directly it transiently arms the same state REC's toggle establishes (forced influence 1.0,
+     * enabled, and mask exemption — see #stroke_record_begin's masked-layer invariant), only for
+     * the duration of this stroke, then #done restores exactly what changed. Skipped entirely when
+     * REC is already on: the existing pipeline already does the right thing, and disarming
+     * afterward would incorrectly turn REC off. Must run before #stroke_undo_begin below, so the
+     * undo-captured "orig" positions already reflect the recomposed (unmasked) surface this stroke
+     * actually paints against — otherwise the recompose itself would be misread as part of the
+     * stroke's own delta. */
+    SculptSession &ss = *ob.runtime->sculpt_session;
+    if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_LAYER_ERASER &&
+        !ss.layers.rec_active)
+    {
+      Mesh &mesh = *id_cast<Mesh *>(ob.data);
+      SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
+      if (layer) {
+        this->layer_eraser_armed_ = true;
+        this->layer_eraser_saved_rec_active_ = ss.layers.rec_active;
+        this->layer_eraser_saved_enabled_ = (layer->base.flag & SCULPT_LAYER_ENABLED) != 0;
+        this->layer_eraser_saved_influence_ = layer->influence;
+
+        layers::flush_pending_multires_base(ob);
+        layers::session_state_ensure(ob);
+        ss.layers.rec_active = true;
+        layer->base.flag |= SCULPT_LAYER_ENABLED;
+        layer->influence = 1.0f;
+        if (layers::rec_exemption_refresh(ob)) {
+          layers::commit_layers_change(*this->depsgraph, ob);
+        }
+      }
+    }
+
+    /* Before the stroke's undo step opens, and that ordering is required rather than tidy: the layer
+     * this may create is recorded in a step of its own, because a layer-list record and the stroke's
+     * position records cannot share one step's type field. See #layers::stroke_ensure_rec_layer. */
+    if (records_into_layer) {
+      layers::stroke_ensure_rec_layer(*this->scene, ob);
+    }
+
     stroke_undo_begin(
         *this->scene, this->brush, *this->paint_mode_settings_, this->multi_.mode_objects, op);
+
+    /* Start recording this stroke into the active layer. Undo data is recorded at stroke end
+     * (explicit deltas for both domains). */
+    if (records_into_layer) {
+      layers::stroke_record_begin(*this->depsgraph, ob);
+    }
 
     return true;
   }
@@ -8050,6 +8308,44 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     brush = BKE_paint_brush(&sd.paint);
   }
 
+  /* Sculpt layers, Phase 1 (single-object): the recording is settled for the primary object only,
+   * matching the single-object arm in #test_start. Phase 2 loops this over #multi_.mode_objects. */
+  if (!is_cancel && stroke_started) {
+    /* Sculpt layers: accumulate this stroke's net displacement into the active layer. This must run
+     * before #stroke_undo_end (#undo::push_end), while the per-node undo data of the stroke is still
+     * available, so the mesh path can read the touched vertices instead of scanning the whole mesh.
+     */
+    if (brush && !brush_type_is_paint(brush->sculpt_brush_type) &&
+        brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK)
+    {
+      layers::stroke_record_end(*this->depsgraph, ob);
+    }
+  }
+  else {
+    /* Cancelled (or never started): restore the pre-stroke sculpt-layer state. No-op when nothing
+     * was being recorded. */
+    layers::stroke_record_cancel(*this->depsgraph, ob);
+  }
+
+  /* Sculpt layers: reverse the transient Erase Layer arm from #test_start, whether the stroke
+   * finished or was cancelled — the layer's influence/enabled state and the REC toggle must end up
+   * exactly as the user left them, regardless of outcome. #stroke_record_end / #stroke_record_cancel
+   * above already settled #data; this only restores the settings, then recomposes once more so the
+   * visible surface reflects those restored settings against the (now different) data. */
+  if (this->layer_eraser_armed_) {
+    Mesh &mesh = *id_cast<Mesh *>(ob.data);
+    SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
+    if (layer) {
+      layer->influence = this->layer_eraser_saved_influence_;
+      SET_FLAG_FROM_TEST(layer->base.flag, this->layer_eraser_saved_enabled_, SCULPT_LAYER_ENABLED);
+    }
+    ss.layers.rec_active = this->layer_eraser_saved_rec_active_;
+    if (layers::rec_exemption_refresh(ob)) {
+      layers::commit_layers_change(*this->depsgraph, ob);
+    }
+    this->layer_eraser_armed_ = false;
+  }
+
   /* Free caches. */
   for (Object *object_ptr : objects) {
     Object &ob_iter = *object_ptr;
@@ -8153,6 +8449,37 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
       return OPERATOR_CANCELLED;
     }
   }
+  /* The cloth simulation solves its constraints and its simulation-area falloff on the composed
+   * surface, which it cannot separate from the layer contribution: it would flatten the layers into
+   * the base instead of riding on top of them (see #layers::stroke_base_view). */
+  if ((brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLOTH ||
+       brush.deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM) &&
+      layers::in_use(ob))
+  {
+    BKE_report(op->reports, RPT_ERROR, "Cloth simulation is not supported with sculpt layers");
+    stroke->cancel(C);
+    MEM_delete(stroke);
+    return OPERATOR_CANCELLED;
+  }
+
+  /* A weight-mask editing session has the layer's mask sitting in the standard mask storage exactly
+   * so the mask tools can author it, which is why the attribute-only brushes keep working here. The
+   * brushes that move vertices are refused instead: with the user's mask parked, everything that
+   * consults the mask — automasking, and the mask factor every brush multiplies its strength by —
+   * would read the layer's weights, so the stroke would be shaped by a mask the user cannot see and
+   * did not paint. Refused rather than silently closing the session, which would throw away an
+   * in-progress mask edit as a side effect of an unrelated action. See #mask_edit_blocks_brush. */
+  if (const SculptSession *ss = ob.runtime->sculpt_session) {
+    if (layers::mask_edit_blocks_brush(layers::mask_edit_active_uid(*ss), brush.sculpt_brush_type))
+    {
+      BKE_report(op->reports,
+                 RPT_ERROR,
+                 "Close the sculpt layer mask session to sculpt geometry");
+      stroke->cancel(C);
+      MEM_delete(stroke);
+      return OPERATOR_CANCELLED;
+    }
+  }
 
   if (brush_type_is_mask(brush.sculpt_brush_type)) {
     /* Ensure the grid paint mask layer on EVERY object in the mode, not just the active one --
@@ -8225,6 +8552,30 @@ static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
 {
   brush_stroke_init(C, op);
 
+  /* The scripted and redo path into the same stroke, so it must refuse a geometry brush during a
+   * weight-mask editing session for the reason #sculpt_brush_stroke_invoke does. Checked before the
+   * stroke is allocated: there is nothing to cancel yet.
+   *
+   * Every lookup is null-tested, unlike the invoke path: this runs from Python, where
+   * `('EXEC_DEFAULT')` bypasses the poll that would otherwise have established an active object, a
+   * sculpt tool-settings block and a brush. A missing one simply means there is no session to
+   * refuse, so the check is skipped rather than the operator failed — the stroke below reports its
+   * own missing prerequisites. */
+  {
+    const Object *ob = CTX_data_active_object(C);
+    const ToolSettings *tool_settings = CTX_data_tool_settings(C);
+    const Sculpt *sd = tool_settings ? tool_settings->sculpt : nullptr;
+    const Brush *brush = sd ? BKE_paint_brush_for_read(&sd->paint) : nullptr;
+    const SculptSession *ss = ob ? ob->runtime->sculpt_session : nullptr;
+    if (ss != nullptr && brush != nullptr &&
+        layers::mask_edit_blocks_brush(layers::mask_edit_active_uid(*ss),
+                                       brush->sculpt_brush_type))
+    {
+      BKE_report(op->reports, RPT_ERROR, "Close the sculpt layer mask session to sculpt geometry");
+      return OPERATOR_CANCELLED;
+    }
+  }
+
   SculptPaintStroke *stroke = MEM_new<SculptPaintStroke>(__func__, C, op, 0);
   op->customdata = stroke;
 
@@ -8247,6 +8598,10 @@ static void sculpt_brush_stroke_cancel(bContext *C, wmOperator *op)
   BLI_assert(!dyntopo::stroke_is_dyntopo(ob, brush));
   UNUSED_VARS_NDEBUG(brush);
 
+  /* Sculpt layers: a recorded mesh stroke is accumulated into the active layer per dab, so the
+   * layer must be reverted here, while the live positions still hold this stroke's result and the
+   * per-node undo data is still available (both are consumed by #restore_from_undo_step next). */
+  layers::cancel_recorded_offsets(depsgraph, ob);
   undo::restore_from_undo_step(depsgraph, sd, ob);
   stroke->cancel(C);
 }
@@ -9015,14 +9370,32 @@ void calc_factors_common_mesh_indexed(const Depsgraph &depsgraph,
 
   const Span<int> verts = node.verts();
 
+  /* Base view: falloff distances and region clipping are evaluated against the un-layered base so
+   * the factors are not modulated by the layer pattern. Texture coordinates are not: they stay on
+   * the composed surface the user aims at (see #sculpt_apply_texture). */
+  Vector<float3> base_view_storage;
+  const Span<float3> base_view_positions = layers::base_view_gather_mesh(
+      object, verts, vert_positions, base_view_storage);
+
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
-  filter_region_clip_factors(ss, vert_positions, verts, factors);
+  if (base_view_positions.is_empty()) {
+    filter_region_clip_factors(ss, vert_positions, verts, factors);
+  }
+  else {
+    filter_region_clip_factors(ss, base_view_positions, factors);
+  }
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
   }
 
-  calc_brush_distances(
-      ss, vert_positions, verts, eBrushFalloffShape(brush.falloff_shape), distances);
+  if (base_view_positions.is_empty()) {
+    calc_brush_distances(
+        ss, vert_positions, verts, eBrushFalloffShape(brush.falloff_shape), distances);
+  }
+  else {
+    calc_brush_distances(
+        ss, base_view_positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  }
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -9048,17 +9421,22 @@ void calc_factors_common_mesh(const Depsgraph &depsgraph,
 
   const Span<int> verts = node.verts();
 
+  /* Base view: see #calc_factors_common_mesh_indexed. */
+  Vector<float3> base_view_storage;
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_mesh(
+      object, verts, positions, base_view_storage);
+
   r_factors.resize(verts.size());
   const MutableSpan<float> factors = r_factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
-  filter_region_clip_factors(ss, positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
   }
 
   r_distances.resize(verts.size());
   const MutableSpan<float> distances = r_distances;
-  calc_brush_distances(ss, positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -9082,17 +9460,22 @@ void calc_factors_common_grids(const Depsgraph &depsgraph,
 
   const Span<int> grids = node.grids();
 
+  /* Base view: see #calc_factors_common_mesh_indexed. */
+  Vector<float3> base_view_storage;
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, positions, base_view_storage);
+
   r_factors.resize(positions.size());
   const MutableSpan<float> factors = r_factors;
   fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
-  filter_region_clip_factors(ss, positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, subdiv_ccg, grids, factors);
   }
 
   r_distances.resize(positions.size());
   const MutableSpan<float> distances = r_distances;
-  calc_brush_distances(ss, positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -9150,10 +9533,16 @@ void calc_factors_common_from_orig_data_mesh(const Depsgraph &depsgraph,
 
   const Span<int> verts = node.verts();
 
+  /* Base view: see #calc_factors_common_mesh_indexed. The offset is constant for the stroke, so
+   * subtracting it from the original (pre-stroke) positions yields the pre-stroke base. */
+  Vector<float3> base_view_storage;
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_mesh(
+      object, verts, positions, base_view_storage);
+
   r_factors.resize(verts.size());
   const MutableSpan<float> factors = r_factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
-  filter_region_clip_factors(ss, positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
 
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, normals, factors);
@@ -9161,7 +9550,7 @@ void calc_factors_common_from_orig_data_mesh(const Depsgraph &depsgraph,
 
   r_distances.resize(verts.size());
   const MutableSpan<float> distances = r_distances;
-  calc_brush_distances(ss, positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -9186,17 +9575,22 @@ void calc_factors_common_from_orig_data_grids(const Depsgraph &depsgraph,
 
   const Span<int> grids = node.grids();
 
+  /* Base view: see #calc_factors_common_from_orig_data_mesh. */
+  Vector<float3> base_view_storage;
+  const Span<float3> calc_positions = layers::base_view_adjust_compact_grids(
+      object, subdiv_ccg, grids, positions, base_view_storage);
+
   r_factors.resize(positions.size());
   const MutableSpan<float> factors = r_factors;
   fill_factor_from_hide_and_mask(subdiv_ccg, grids, factors);
-  filter_region_clip_factors(ss, positions, factors);
+  filter_region_clip_factors(ss, calc_positions, factors);
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, normals, factors);
   }
 
   r_distances.resize(positions.size());
   const MutableSpan<float> distances = r_distances;
-  calc_brush_distances(ss, positions, eBrushFalloffShape(brush.falloff_shape), distances);
+  calc_brush_distances(ss, calc_positions, eBrushFalloffShape(brush.falloff_shape), distances);
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
@@ -10041,6 +10435,21 @@ PositionDeformData::PositionDeformData(const Depsgraph &depsgraph, Object &objec
   }
 
   shape_key_data_ = ShapeKeyData::from_object(object_orig);
+
+  /* When a mesh sculpt-layer stroke is being recorded, accumulate the stroke into the layer as it
+   * happens (see #deform) rather than rescanning the whole brushed area at the end of the stroke. */
+  layer_record_data_ = layers::active_record_data(object_orig);
+}
+
+void PositionDeformData::record_layer_offsets(const Span<int> verts,
+                                              const Span<float3> translations) const
+{
+  if (layer_record_data_.is_empty()) {
+    return;
+  }
+  for (const int i : verts.index_range()) {
+    layer_record_data_[verts[i]] += translations[i];
+  }
 }
 
 void PositionDeformData::deform(MutableSpan<float3> translations, const Span<int> verts) const
@@ -10051,6 +10460,18 @@ void PositionDeformData::deform(MutableSpan<float3> translations, const Span<int
      * evaluations can happen in between object reevaluations (otherwise just deforming the
      * original positions would be enough). */
     apply_translations(translations, verts, *eval_mut_);
+  }
+
+  /* Recording a vertex sculpt layer while a shape key (or a deforming modifier) is active: #eval_mut_
+   * holds the separate display buffer that was just moved above, and the layer is composed as an
+   * object-space offset on top of every deform at evaluation. Capture that object-space displacement
+   * here — BEFORE #apply_crazyspace_to_translations rewrites #translations into the pre-deform base
+   * space — and route it into the layer only, leaving the key blocks and base positions (#orig_)
+   * untouched. Without a deform (#eval_mut_ unset) the base positions ARE the display, so recording
+   * still bakes into them in the plain branch below. */
+  if (!layer_record_data_.is_empty() && eval_mut_) {
+    this->record_layer_offsets(verts, translations);
+    return;
   }
 
   if (deform_imats_) {
@@ -10069,11 +10490,15 @@ void PositionDeformData::deform(MutableSpan<float3> translations, const Span<int
     if (shape_key_data_->basis_key_active) {
       /* The basis key positions and the mesh positions are always kept in sync. */
       apply_translations(translations, verts, orig_);
+      /* Record the same delta that was applied to the mesh positions (#orig_). */
+      this->record_layer_offsets(verts, translations);
     }
     apply_translations(translations, verts, shape_key_data_->active_key_data);
   }
   else {
     apply_translations(translations, verts, orig_);
+    /* Record the same delta that was applied to the mesh positions (#orig_). */
+    this->record_layer_offsets(verts, translations);
   }
 }
 

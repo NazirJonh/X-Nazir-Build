@@ -30,6 +30,7 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "ED_sculpt.hh"
 #include "ED_undo.hh"
 
 #include "sculpt_intern.hh"
@@ -194,13 +195,35 @@ static void enable_with_undo(Main &bmain, Depsgraph &depsgraph, const Scene &sce
   }
 }
 
-static wmOperatorStatus sculpt_dynamic_topology_toggle_exec(bContext *C, wmOperator * /*op*/)
+static wmOperatorStatus sculpt_dynamic_topology_toggle_exec(bContext *C, wmOperator *op)
 {
   Main &bmain = *CTX_data_main(C);
   Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
   Scene &scene = *CTX_data_scene(C);
   Object &ob = *CTX_data_active_object(C);
   SculptSession &ss = *ob.runtime->sculpt_session;
+
+  /* Guards the enable path, where an open #mask_edit session is reachable: the toggle rebuilds the
+   * geometry and changes the element count, which sends that session down the destructive branch of
+   * #mask_edit_end and removes the user's own `.sculpt_mask` for good. It cannot be left to
+   * #destructive_edit_check below, which counts *layers* (see #bke::sculpt_layers::layers, which
+   * never collects folders) while a session can be anchored on a folder — including an empty one on
+   * a mesh that carries no layers at all.
+   *
+   * Left un-gated by `ss.bm` all the same, though the disable direction cannot currently trip it:
+   * #mask_edit_begin does not open a session for #bke::pbvh::Type::BMesh, so none can exist while
+   * dyntopo runs. The condition is the honest one to test rather than a reachability argument that
+   * a later change to that no-op would silently invalidate. */
+  if (layers::mask_edit_refuse_deform(ob, op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Layers cannot survive a BMesh conversion (dyntopo is unsupported for their #bke::pbvh::Tree,
+   * see #layers::is_supported), so block turning it on while un-baked layers are present. Only
+   * gates the enable path; disabling dyntopo back to a regular mesh is always allowed. */
+  if (!ss.bm && !layers::destructive_edit_check(*id_cast<const Mesh *>(ob.data), op->reports)) {
+    return OPERATOR_CANCELLED;
+  }
 
   WM_cursor_wait(true);
 

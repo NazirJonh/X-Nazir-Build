@@ -30,7 +30,7 @@ struct wmWindowManager;
 namespace blender::ui {
 
 /* Shared compile-time constants (were file-static constexpr in the monolith). */
-constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
+constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
 constexpr int GLYPH_SEARCH_MAX_RESULTS = 1000;
 
 /* Local tag filter mode for the edit popup (0 = all tags, 1+ = current mode).

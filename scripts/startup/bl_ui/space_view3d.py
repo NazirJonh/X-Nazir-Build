@@ -4,7 +4,7 @@
 
 import bpy
 
-TAG_DEBUG = True  # Set to True to enable debug output for tag operations
+TAG_DEBUG = False  # Set to True to enable debug output for tag operations
 
 from bpy.types import (
     Header,

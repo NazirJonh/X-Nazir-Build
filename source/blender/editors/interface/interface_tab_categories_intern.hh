@@ -60,7 +60,7 @@ enum eCategoryGlyphBaseSource {
 };
 
 /* Shared compile-time debug switch (was a file-static constexpr). */
-constexpr bool CATEGORY_TAB_DEBUG_ENABLED = true;
+constexpr bool CATEGORY_TAB_DEBUG_ENABLED = false;
 
 /* Shared data structures (moved here so both translation units can use them). */
 struct PendingCategoryInsert {

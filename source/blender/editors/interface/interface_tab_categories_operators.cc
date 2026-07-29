@@ -48,7 +48,7 @@ namespace blender::ui {
 /** \name Operator: Category Quick Focus
  * \{ */
 
-static constexpr bool CATEGORY_QUICK_FOCUS_DEBUG = true;
+static constexpr bool CATEGORY_QUICK_FOCUS_DEBUG = false;
 
 /* Recent categories history — stores up to 8 recently used category idnames. */
 static constexpr int QUICK_FOCUS_RECENT_MAX = 8;

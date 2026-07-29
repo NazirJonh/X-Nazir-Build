@@ -52,7 +52,7 @@
  * Keep this value in sync with CATEGORY_TAB_DEBUG_ENABLED in interface_tab_categories_edit.cc;
  * a shared header is the proper single source of truth (follow-up). */
 #ifndef CATEGORY_TAB_DEBUG_ENABLED
-#  define CATEGORY_TAB_DEBUG_ENABLED 1
+#  define CATEGORY_TAB_DEBUG_ENABLED 0
 #endif
 
 #include "RNA_access.hh"

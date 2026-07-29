@@ -13,9 +13,9 @@ package dependencies and can be imported standalone.
 # ----------------------------------------------------------------------------
 # Debug / feature flags
 
-TAG_DEBUG = True  # Set to False to disable all debug output
+TAG_DEBUG = False  # Set to True to enable tag/glyph discovery debug output
 TAG_BACKUP_ENABLED = False  # Отключено временно для отладки
-SAVE_DEBUG = True  # Set to True to enable verbose save/load logging (printf-style)
+SAVE_DEBUG = False  # Set to True to enable verbose save/load logging (printf-style)
 
 # [POPULAR ADDONS DB] - Temporary: fallback icon lookup from Popular Addons Database.
 # When extensions start bundling their own icons, this functionality will no longer be needed.

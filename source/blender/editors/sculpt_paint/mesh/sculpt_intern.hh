@@ -1397,6 +1397,47 @@ void stroke_record_cancel(const Depsgraph &depsgraph, Object &object);
 void stroke_ensure_rec_layer(const Scene &scene, Object &object);
 
 /**
+ * Every other object sharing \a active_ob's #Object::sculpt_layer_sync_group, excluding
+ * \a active_ob itself. Empty when \a active_ob is not in any group (#sculpt_layer_sync_group ==
+ * 0). The single source of truth for "who else is in this object's group" -- used by both the
+ * tree-operator fan-out and the stroke-recording extension, so the two never disagree about group
+ * membership.
+ *
+ * Deduplicated by #Object::data pointer identity, also against \a active_ob's own data: a member
+ * sharing mesh data with another object in the group (e.g. a linked duplicate made after the
+ * group was created) would otherwise resolve to the same #SculptLayerTreeNode under the same
+ * sync_uid twice, which #node_find_by_sync_uid's first-match resolution cannot tell apart.
+ */
+Vector<Object *> sync_group_members(const Main &bmain, const Object &active_ob);
+
+/**
+ * Every other object sharing \a active_ob's sync group id, with no #Object::data deduplication.
+ * Used for group name propagate, Select All, member counts, and unlink dissolve -- not for
+ * fan-out mutation (see #sync_group_members / #fanout_targets).
+ */
+Vector<Object *> sync_group_raw_members(const Main &bmain, const Object &active_ob);
+
+/**
+ * \a active_ob followed by every member of #sync_group_members(bmain, active_ob) -- the full set
+ * of objects a fan-out operator or stroke should act on. Just \a active_ob alone when it is not
+ * grouped.
+ */
+Vector<Object *> fanout_targets(const Main &bmain, Object &active_ob);
+
+/**
+ * True when every selectable ViewLayer base among #fanout_targets is currently selected.
+ * Targets with no base, or not #BASE_SELECTABLE, are ignored (they do not make selection
+ * "incomplete").
+ */
+bool sync_group_all_targets_selected(bContext *C, Object &active_ob);
+
+/**
+ * Clear \a ob's sync group id and name; if that leaves exactly one raw partner, dissolve that
+ * partner too. Notifies every touched object.
+ */
+void sync_group_unlink_object(Main &bmain, Object &ob);
+
+/**
  * The active mesh-domain recording layer's per-vertex offset buffer, or an empty span when no mesh
  * layer is currently being recorded. Used by #PositionDeformData to accumulate a stroke per dab.
  */
@@ -1794,6 +1835,10 @@ void SCULPT_OT_layer_set_influence(wmOperatorType *ot);
 void SCULPT_OT_layer_influence_drag(wmOperatorType *ot);
 void SCULPT_OT_layer_toggle_visibility(wmOperatorType *ot);
 void SCULPT_OT_layer_select(wmOperatorType *ot);
+void SCULPT_OT_layer_sync_group_create(wmOperatorType *ot);
+void SCULPT_OT_layer_sync_group_unlink(wmOperatorType *ot);
+void SCULPT_OT_layer_sync_group_repair_names(wmOperatorType *ot);
+void SCULPT_OT_layer_sync_group_select_members(wmOperatorType *ot);
 void SCULPT_OT_layer_toggle_rec(wmOperatorType *ot);
 void SCULPT_OT_layer_solo_base(wmOperatorType *ot);
 void SCULPT_OT_layer_group_add(wmOperatorType *ot);

@@ -24,6 +24,7 @@
 #include "BLI_enum_flags.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_math_axis_angle.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.h"
@@ -6553,15 +6554,32 @@ struct SculptPaintStroke final : public PaintStroke {
   /* Multi-object ("global") sculpt stroke state -- see #MultiObjectStrokeContext. */
   MultiObjectStrokeContext multi_;
 
-  /* Sculpt layers: Erase Layer transiently arms recording into the active layer for the duration
-   * of this stroke when REC was not already on (see #test_start / #done and the design spec's
-   * "Writing into the active layer" section for why this is required for correctness on masked
-   * layers). #layer_eraser_armed_ is false whenever REC was already on, or there was no active
-   * layer to arm — the guard #done checks before restoring anything. */
-  bool layer_eraser_armed_ = false;
-  bool layer_eraser_saved_rec_active_ = false;
-  bool layer_eraser_saved_enabled_ = false;
-  float layer_eraser_saved_influence_ = 1.0f;
+  /* Sculpt layers: Erase Layer transiently arms recording into the recording target layer for
+   * the duration of this stroke when REC was not already on (see #test_start / #done). One entry
+   * per object that had the Erase Layer brush arm recording this stroke — each sync-group member
+   * needs its own saved/restore state. Absent from the map whenever REC was already on, or there
+   * was no target layer to arm. */
+  struct LayerEraserArmedState {
+    bool saved_rec_active = false;
+    bool saved_enabled = false;
+    float saved_influence = 1.0f;
+  };
+  Map<Object *, LayerEraserArmedState> layer_eraser_armed_state_;
+
+  /* Objects that had layer recording armed/begun in #test_start. Stored on the stroke because
+   * #get_location can permanently reassign #PaintStroke::object mid-stroke; #done must settle
+   * the same set that was armed, not a set recomputed from the (possibly different) primary.
+   *
+   * Sync-group members are included only when they hold a #SculptLayer matching the primary's
+   * active layer #sync_uid (design: record into the counterpart layer, not whatever happens to
+   * be locally active on the member). Members without a match stay in the multi-object stroke
+   * for ordinary sculpt, but are excluded from layer recording. */
+  Vector<Object *> layer_recording_objects_;
+
+  /* Previous #Mesh::sculpt_layers_active_uid for sync-group members whose active was temporarily
+   * pointed at the sync_uid-matched recording target for this stroke. Restored in
+   * #layer_recording_finish after record-end and eraser disarm. */
+  Map<Object *, int> layer_recording_saved_active_uid_;
 
   SculptPaintStroke(bContext *C, wmOperator *op, const int event_type)
       : PaintStroke(C, op, event_type)
@@ -6577,6 +6595,9 @@ struct SculptPaintStroke final : public PaintStroke {
 
   void stroke_cache_init(const float mval[2]);
   void stroke_cache_update(PointerRNA *ptr);
+
+  /** Settle or roll back layer-recording / eraser / temporary-active state from #test_start. */
+  void layer_recording_finish(bool is_cancel, bool stroke_started, Brush *brush);
 
   bool get_location(float out[3], const float mouse[2], bool force_original) override;
   bool test_start(wmOperator *op, const float mouse[2]) override;
@@ -7687,16 +7708,50 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 
     cursor_geometry_info_update(*this->depsgraph, *paint, sculpt_, this->vc, base_, mval, false);
 
-    /* Sculpt layers, Phase 1 (single-object): the layer hooks below are armed for the primary
-     * object only. Phase 2 loops them over #multi_.mode_objects.
+    /* Sculpt layers: layer hooks below fan out to the primary object plus sync-group members
+     * that (a) are in #multi_.mode_objects for this stroke and (b) hold a layer matching the
+     * primary's active layer via #sync_uid. A member without a match is still sculpted by the
+     * multi-object stroke machinery, but not through layer recording (design: base path).
      *
      * Position brushes (not the paint brushes, not Mask) are the ones that record. */
     const bool records_into_layer = brush && !brush_type_is_paint(brush->sculpt_brush_type) &&
                                     brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK;
 
-    /* Sculpt layers: Erase Layer must write into the active layer even when REC is off — it is an
-     * explicit, targeted action on that layer, like Clear/Invert, not a request to start
-     * recording. Unlike those operators it is a brush stroke, so instead of mutating #data
+    this->layer_recording_objects_.clear();
+    this->layer_recording_saved_active_uid_.clear();
+    this->layer_recording_objects_.append(&ob);
+
+    Mesh &primary_mesh = *id_cast<Mesh *>(ob.data);
+    const SculptLayer *primary_layer = bke::sculpt_layers::active_get(primary_mesh);
+    const int primary_sync_uid = primary_layer ? primary_layer->base.sync_uid : 0;
+
+    if (ob.sculpt_layer_sync_group != 0 && primary_sync_uid != 0) {
+      for (Object *member : layers::sync_group_members(*this->bmain_, ob)) {
+        if (!this->multi_.mode_objects.contains(member)) {
+          continue;
+        }
+        Mesh &member_mesh = *id_cast<Mesh *>(member->data);
+        SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+            member_mesh, primary_sync_uid);
+        SculptLayer *matched = bke::sculpt_layers::node_as_layer(member_node);
+        if (matched == nullptr) {
+          /* No sync_uid counterpart (or it is a folder): exclude from layer recording only. */
+          continue;
+        }
+        /* Point the member's active at the matched layer for the stroke so
+         * #stroke_record_begin / eraser arm (which read #active_get) hit the design target.
+         * Previous active is restored in #layer_recording_finish. */
+        if (member_mesh.sculpt_layers_active_uid != matched->base.uid) {
+          this->layer_recording_saved_active_uid_.add(member, member_mesh.sculpt_layers_active_uid);
+          bke::sculpt_layers::active_set(member_mesh, matched);
+        }
+        this->layer_recording_objects_.append(member);
+      }
+    }
+
+    /* Sculpt layers: Erase Layer must write into the recording target layer even when REC is off
+     * — it is an explicit, targeted action on that layer, like Clear/Invert, not a request to
+     * start recording. Unlike those operators it is a brush stroke, so instead of mutating #data
      * directly it transiently arms the same state REC's toggle establishes (forced influence 1.0,
      * enabled, and mask exemption — see #stroke_record_begin's masked-layer invariant), only for
      * the duration of this stroke, then #done restores exactly what changed. Skipped entirely when
@@ -7705,43 +7760,51 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
      * undo-captured "orig" positions already reflect the recomposed (unmasked) surface this stroke
      * actually paints against — otherwise the recompose itself would be misread as part of the
      * stroke's own delta. */
-    SculptSession &ss = *ob.runtime->sculpt_session;
-    if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_LAYER_ERASER &&
-        !ss.layers.rec_active)
-    {
-      Mesh &mesh = *id_cast<Mesh *>(ob.data);
-      SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
-      if (layer) {
-        this->layer_eraser_armed_ = true;
-        this->layer_eraser_saved_rec_active_ = ss.layers.rec_active;
-        this->layer_eraser_saved_enabled_ = (layer->base.flag & SCULPT_LAYER_ENABLED) != 0;
-        this->layer_eraser_saved_influence_ = layer->influence;
+    for (Object *rec_ob_ptr : this->layer_recording_objects_) {
+      Object &rec_ob = *rec_ob_ptr;
+      SculptSession &rec_ss = *rec_ob.runtime->sculpt_session;
+      if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_LAYER_ERASER &&
+          !rec_ss.layers.rec_active)
+      {
+        Mesh &rec_mesh = *id_cast<Mesh *>(rec_ob.data);
+        SculptLayer *layer = bke::sculpt_layers::active_get(rec_mesh);
+        if (layer) {
+          LayerEraserArmedState &armed = this->layer_eraser_armed_state_.lookup_or_add_default(
+              &rec_ob);
+          armed.saved_rec_active = rec_ss.layers.rec_active;
+          armed.saved_enabled = (layer->base.flag & SCULPT_LAYER_ENABLED) != 0;
+          armed.saved_influence = layer->influence;
 
-        layers::flush_pending_multires_base(ob);
-        layers::session_state_ensure(ob);
-        ss.layers.rec_active = true;
-        layer->base.flag |= SCULPT_LAYER_ENABLED;
-        layer->influence = 1.0f;
-        if (layers::rec_exemption_refresh(ob)) {
-          layers::commit_layers_change(*this->depsgraph, ob);
+          layers::flush_pending_multires_base(rec_ob);
+          layers::session_state_ensure(rec_ob);
+          rec_ss.layers.rec_active = true;
+          layer->base.flag |= SCULPT_LAYER_ENABLED;
+          layer->influence = 1.0f;
+          if (layers::rec_exemption_refresh(rec_ob)) {
+            layers::commit_layers_change(*this->depsgraph, rec_ob);
+          }
         }
       }
-    }
 
-    /* Before the stroke's undo step opens, and that ordering is required rather than tidy: the layer
-     * this may create is recorded in a step of its own, because a layer-list record and the stroke's
-     * position records cannot share one step's type field. See #layers::stroke_ensure_rec_layer. */
-    if (records_into_layer) {
-      layers::stroke_ensure_rec_layer(*this->scene, ob);
+      /* Before the stroke's undo step opens, and that ordering is required rather than tidy: the
+       * layer this may create is recorded in a step of its own, because a layer-list record and
+       * the stroke's position records cannot share one step's type field. See
+       * #layers::stroke_ensure_rec_layer. */
+      if (records_into_layer) {
+        layers::stroke_ensure_rec_layer(*this->scene, rec_ob);
+      }
     }
 
     stroke_undo_begin(
         *this->scene, this->brush, *this->paint_mode_settings_, this->multi_.mode_objects, op);
 
-    /* Start recording this stroke into the active layer. Undo data is recorded at stroke end
-     * (explicit deltas for both domains). */
+    /* Start recording this stroke into each recording object's target layer (primary active, or
+     * the sync_uid-matched layer temporarily made active on members). Undo data is recorded at
+     * stroke end (explicit deltas for both domains). */
     if (records_into_layer) {
-      layers::stroke_record_begin(*this->depsgraph, ob);
+      for (Object *rec_ob_ptr : this->layer_recording_objects_) {
+        layers::stroke_record_begin(*this->depsgraph, *rec_ob_ptr);
+      }
     }
 
     return true;
@@ -8260,6 +8323,68 @@ static void brush_exit_tex(Sculpt &sd)
   }
 }
 
+void SculptPaintStroke::layer_recording_finish(const bool is_cancel,
+                                               const bool stroke_started,
+                                               Brush *brush)
+{
+  /* Settle recording for the same set armed in #test_start (#layer_recording_objects_), not a set
+   * recomputed from #PaintStroke::object — that pointer can change mid-stroke via #get_location
+   * promotion. Also called from the #done early-return when no #StrokeCache remains, so eraser /
+   * temporary-active state cannot stick. */
+  for (Object *rec_ob_ptr : this->layer_recording_objects_) {
+    Object &rec_ob = *rec_ob_ptr;
+    if (!is_cancel && stroke_started) {
+      /* Accumulate this stroke's net displacement into the target layer. Must run before
+       * #stroke_undo_end (#undo::push_end), while the per-node undo data of the stroke is still
+       * available, so the mesh path can read the touched vertices instead of scanning the whole
+       * mesh. */
+      if (brush && !brush_type_is_paint(brush->sculpt_brush_type) &&
+          brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK)
+      {
+        layers::stroke_record_end(*this->depsgraph, rec_ob);
+      }
+    }
+    else {
+      /* Cancelled (or never started / early #done exit): restore the pre-stroke sculpt-layer
+       * state. No-op when nothing was being recorded. */
+      layers::stroke_record_cancel(*this->depsgraph, rec_ob);
+    }
+
+    /* Reverse the transient Erase Layer arm from #test_start. #stroke_record_end /
+     * #stroke_record_cancel above already settled #data; this only restores the settings, then
+     * recomposes once more so the visible surface reflects those restored settings against the
+     * (now different) data. Still uses #active_get: members were pointed at the sync_uid-matched
+     * target before arming, so the layer that was armed is still the active one here. */
+    if (LayerEraserArmedState *armed = this->layer_eraser_armed_state_.lookup_ptr(&rec_ob)) {
+      SculptSession &rec_ss = *rec_ob.runtime->sculpt_session;
+      Mesh &rec_mesh = *id_cast<Mesh *>(rec_ob.data);
+      SculptLayer *layer = bke::sculpt_layers::active_get(rec_mesh);
+      if (layer) {
+        layer->influence = armed->saved_influence;
+        SET_FLAG_FROM_TEST(layer->base.flag, armed->saved_enabled, SCULPT_LAYER_ENABLED);
+      }
+      rec_ss.layers.rec_active = armed->saved_rec_active;
+      if (layers::rec_exemption_refresh(rec_ob)) {
+        layers::commit_layers_change(*this->depsgraph, rec_ob);
+      }
+    }
+
+    /* Restore the member's pre-stroke active layer after record-end and eraser disarm (both read
+     * the temporary sync-matched active). Refresh REC exemption when REC remains armed so the
+     * exemption follows the restored active rather than the stroke target. */
+    if (const int *saved_uid = this->layer_recording_saved_active_uid_.lookup_ptr(&rec_ob)) {
+      Mesh &rec_mesh = *id_cast<Mesh *>(rec_ob.data);
+      rec_mesh.sculpt_layers_active_uid = *saved_uid;
+      if (layers::rec_exemption_refresh(rec_ob)) {
+        layers::commit_layers_change(*this->depsgraph, rec_ob);
+      }
+    }
+  }
+  this->layer_recording_objects_.clear();
+  this->layer_eraser_armed_state_.clear();
+  this->layer_recording_saved_active_uid_.clear();
+}
+
 void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
 {
   Sculpt &sd = *this->sculpt_;
@@ -8274,8 +8399,10 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     }
   }
 
-  /* Finished. */
+  /* Finished without a usable cache: still roll back any layer-recording / eraser / temporary-
+   * active state #test_start may have armed (I1). */
   if (!any_stroke_cache) {
+    this->layer_recording_finish(true, false, BKE_paint_brush(&sd.paint));
     brush_exit_tex(sd);
     return;
   }
@@ -8308,43 +8435,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     brush = BKE_paint_brush(&sd.paint);
   }
 
-  /* Sculpt layers, Phase 1 (single-object): the recording is settled for the primary object only,
-   * matching the single-object arm in #test_start. Phase 2 loops this over #multi_.mode_objects. */
-  if (!is_cancel && stroke_started) {
-    /* Sculpt layers: accumulate this stroke's net displacement into the active layer. This must run
-     * before #stroke_undo_end (#undo::push_end), while the per-node undo data of the stroke is still
-     * available, so the mesh path can read the touched vertices instead of scanning the whole mesh.
-     */
-    if (brush && !brush_type_is_paint(brush->sculpt_brush_type) &&
-        brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK)
-    {
-      layers::stroke_record_end(*this->depsgraph, ob);
-    }
-  }
-  else {
-    /* Cancelled (or never started): restore the pre-stroke sculpt-layer state. No-op when nothing
-     * was being recorded. */
-    layers::stroke_record_cancel(*this->depsgraph, ob);
-  }
-
-  /* Sculpt layers: reverse the transient Erase Layer arm from #test_start, whether the stroke
-   * finished or was cancelled — the layer's influence/enabled state and the REC toggle must end up
-   * exactly as the user left them, regardless of outcome. #stroke_record_end / #stroke_record_cancel
-   * above already settled #data; this only restores the settings, then recomposes once more so the
-   * visible surface reflects those restored settings against the (now different) data. */
-  if (this->layer_eraser_armed_) {
-    Mesh &mesh = *id_cast<Mesh *>(ob.data);
-    SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
-    if (layer) {
-      layer->influence = this->layer_eraser_saved_influence_;
-      SET_FLAG_FROM_TEST(layer->base.flag, this->layer_eraser_saved_enabled_, SCULPT_LAYER_ENABLED);
-    }
-    ss.layers.rec_active = this->layer_eraser_saved_rec_active_;
-    if (layers::rec_exemption_refresh(ob)) {
-      layers::commit_layers_change(*this->depsgraph, ob);
-    }
-    this->layer_eraser_armed_ = false;
-  }
+  this->layer_recording_finish(is_cancel, stroke_started, brush);
 
   /* Free caches. */
   for (Object *object_ptr : objects) {

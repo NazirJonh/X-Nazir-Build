@@ -1214,6 +1214,25 @@ void mask_edit_exit_ui(bContext *C, Object &object)
 /** \name Add / remove
  * \{ */
 
+/* One sync-group member's counterpart for mask add/remove: the node synced to the active
+ * object's target, plus that member's own mask layout (totelem/block_size are per-object).
+ * Carried from gather so the do-loop does not re-resolve under a tree the active path may have
+ * already mutated — and so each member gets a mask cut for *its* element count, not the active
+ * object's. Safe because #fanout_targets dedups by #Object::data. */
+struct MaskFanoutMember {
+  Object *object = nullptr;
+  SculptLayerTreeNode *node = nullptr;
+  MaskLayout layout;
+  /* #layer_mask_apply_exec gather only: layer pointer, fold-in eligibility, and captured weights. */
+  SculptLayer *layer = nullptr;
+  bool apply_usable = false;
+  Array<float> apply_weights;
+};
+
+/* FIND-shaped fan-out: add an all-255 mask on each sync_uid-matched member node; session open
+ * (#mask_edit_enter_ui / #push_sculpt_layer_mask_session / REC-disarm reports) stays ACTIVE-ONLY;
+ * close with #push_end_all_ex(false, true)+#mask_ui_notify (no #commit_layers_change — all-255 is
+ * a surface no-op). */
 static wmOperatorStatus layer_mask_add_exec(bContext *C, wmOperator *op)
 {
   MaskOpContext ctx;
@@ -1228,8 +1247,111 @@ static wmOperatorStatus layer_mask_add_exec(bContext *C, wmOperator *op)
     BKE_reportf(op->reports, RPT_ERROR, "'%s' already carries a weight mask", ctx.node->name);
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
+  /* Target may be a layer or a folder; #sync_uid links like-to-like, so the kind check below
+   * mirrors whichever the active node is. */
+  const bool active_is_layer = bke::sculpt_layers::node_as_layer(ctx.node) != nullptr;
 
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is gated as #mask_op_context_get gates the active object, plus FIND-shaped
+   * sync_uid / kind / already-has-mask gates. Session open is deliberately active-only (see the
+   * function's own decision comment). */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<MaskFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Add Sculpt Layer Mask: skipping \"%s\" (sculpt layers are not available for "
+                  "this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME node wherever it sits in the member's own tree.
+     * A zero #sync_uid (the active node was never fanned-out-created) makes every member miss
+     * here by design -- see the function's own doc comment -- which degrades this operator to the
+     * single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, ctx.node->sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Add Sculpt Layer Mask: skipping \"%s\" (no layer or folder synced to the "
+                  "active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link layer↔layer / group↔group, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    const bool member_is_layer = bke::sculpt_layers::node_as_layer(member_node) != nullptr;
+    if (member_is_layer != active_is_layer) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Add Sculpt Layer Mask: skipping \"%s\" (the synced node is a %s, not a %s)",
+                  member->id.name + 2,
+                  member_is_layer ? "layer" : "group",
+                  active_is_layer ? "layer" : "group");
+      continue;
+    }
+    /* Mirrors #mask_op_context_get's domain gate: a vertex-domain layer on a multires member
+     * would otherwise be given a grid-cut mask that #node_mask_for_composite calls stale. Folders
+     * are exempt (#node_as_layer returns null). */
+    if (const SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+        member_layer != nullptr && member_layer->domain != domain_for(*member))
+    {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Add Sculpt Layer Mask: skipping \"%s\" (synced layer domain does not match "
+                  "the object)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (mask_op_refuse_during_session(op, *member, *member_node)) {
+      continue;
+    }
+    const MaskLayout member_layout = mask_layout_for_object(*member);
+    if (member_layout.totelem == 0) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Add Sculpt Layer Mask: skipping \"%s\" (this object has no elements to mask)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (mask_is_usable(*member_node, member_layout)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Add Sculpt Layer Mask: skipping \"%s\" ('%s' already carries a weight mask)",
+                  member->id.name + 2,
+                  member_node->name);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #mask_op_context_get: consume any pending base sculpt edits first, while the live
+       * CCG still matches the stored layers. */
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    MaskFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.node = member_node;
+    fanout_member.layout = member_layout;
+    fanout_members.append(fanout_member);
+  }
+
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
   undo::push_sculpt_layer_mask(*ctx.object, *ctx.node);
   bke::sculpt_layers::mask_free(ctx.node->mask);
   /* Fully opaque, which is what makes adding a mask a no-op on the surface: an all-255 mask weights
@@ -1241,9 +1363,24 @@ static wmOperatorStatus layer_mask_add_exec(bContext *C, wmOperator *op)
   tag_masked_chains_dirty(*ctx.node);
   tag_layer_overlays_dirty(*ctx.object);
 
+  for (const MaskFanoutMember &fanout_member : fanout_members) {
+    /* Eligibility and the multires pending-base flush already ran for every member of
+     * `fanout_members` in the gather pass above -- nothing here can fail or need skipping
+     * (mirrors #layer_add_exec's own second loop). Use this member's own layout, never the
+     * active object's. */
+    undo::push_sculpt_layer_mask(*fanout_member.object, *fanout_member.node);
+    bke::sculpt_layers::mask_free(fanout_member.node->mask);
+    fanout_member.node->mask = bke::sculpt_layers::mask_new(
+        fanout_member.layout.totelem, fanout_member.layout.block_size, 255);
+    tag_masked_chains_dirty(*fanout_member.node);
+    tag_layer_overlays_dirty(*fanout_member.object);
+  }
+
   /* Adding a mask and then editing it is one intention, so the session opens here rather than
    * making the user find "Edit Mask" as a second step. The session marker rides the same undo step
-   * so that undoing the add also closes the session it opened. */
+   * so that undoing the add also closes the session it opened.
+   * ACTIVE OBJECT ONLY: a member's mask-edit session is local UI state, not synced data — same
+   * split as #layer_select_exec (Task 10c). */
   /* Read before the entry below, which disarms it. */
   const SculptSession *ss = session_of(*ctx.object);
   const bool rec_was_armed = ss != nullptr && ss->layers.rec_active;
@@ -1254,10 +1391,18 @@ static wmOperatorStatus layer_mask_add_exec(bContext *C, wmOperator *op)
      * behind by a refused open is harmless to undo — nothing to close — but a redo would replay it
      * and open a session this execution never created. The late push is admissible because
      * #push_sculpt_layer_mask_session writes two scalars onto the step and reads no layer state, so
-     * unlike #push_sculpt_layer_mask above it has nothing to capture before the mutation. */
+     * unlike #push_sculpt_layer_mask above it has nothing to capture before the mutation.
+     * ACTIVE-ONLY (see above). */
     undo::push_sculpt_layer_mask_session(*ctx.object, ctx.node->uid, true);
   }
-  undo::push_end(*ctx.object);
+
+  /* No #commit_layers_change (all-255 is a surface no-op), so #finish_multi_object is not used: it
+   * would call #flush_update_done per object, inventing work the single-object do-path never
+   * performed. #push_end_all_ex(false, true) is the same close #finish_multi_object uses
+   * internally, minus that flush -- the documented multi-object idiom for never-commit paths
+   * (#layer_group_color_tag_exec, #layer_select_exec). #mask_ui_notify is looped over every
+   * eligible member to still redraw each one. */
+  undo::push_end_all_ex(false, true);
 
   if (!entered) {
     /* The mask itself was added, which is what the operator is named for, so this is a warning
@@ -1266,11 +1411,14 @@ static wmOperatorStatus layer_mask_add_exec(bContext *C, wmOperator *op)
   }
   /* Reported on both outcomes, unlike the message above: #mask_edit_enter disarms REC before it can
    * refuse, so a failed entry costs the user their armed recording just as a successful one does.
-   * Its own report rather than folded into either message, because only this one is conditional. */
+   * Its own report rather than folded into either message, because only this one is conditional.
+   * ACTIVE-ONLY (session open is active-only). */
   if (rec_was_armed) {
     BKE_report(op->reports, RPT_INFO, rec_disarmed_note);
   }
-  mask_ui_notify(C, *ctx.object);
+  for (Object *member : eligible) {
+    mask_ui_notify(C, *member);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -1289,6 +1437,9 @@ void SCULPT_OT_layer_mask_add(wmOperatorType *ot)
   mask_op_properties(ot);
 }
 
+/* FIND-shaped fan-out: free each sync_uid-matched member node's mask; no session side effect;
+ * refuse-during-session per member (does not close sessions); close with
+ * #finish_multi_object(..., UpdateType::Position) because #commit_layers_change recomposes. */
 static wmOperatorStatus layer_mask_remove_exec(bContext *C, wmOperator *op)
 {
   MaskOpContext ctx;
@@ -1306,9 +1457,99 @@ static wmOperatorStatus layer_mask_remove_exec(bContext *C, wmOperator *op)
     BKE_reportf(op->reports, RPT_ERROR, "'%s' carries no weight mask", ctx.node->name);
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
+  const bool active_is_layer = bke::sculpt_layers::node_as_layer(ctx.node) != nullptr;
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is gated as #mask_op_context_get gates the active object, plus FIND-shaped
+   * sync_uid / kind / no-mask / refuse-during-session gates. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<MaskFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Remove Sculpt Layer Mask: skipping \"%s\" (sculpt layers are not available "
+                  "for this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME node wherever it sits in the member's own tree.
+     * A zero #sync_uid (the active node was never fanned-out-created) makes every member miss
+     * here by design -- see the function's own doc comment -- which degrades this operator to the
+     * single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, ctx.node->sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Remove Sculpt Layer Mask: skipping \"%s\" (no layer or folder synced to the "
+                  "active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link layer↔layer / group↔group, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    const bool member_is_layer = bke::sculpt_layers::node_as_layer(member_node) != nullptr;
+    if (member_is_layer != active_is_layer) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Remove Sculpt Layer Mask: skipping \"%s\" (the synced node is a %s, not a %s)",
+                  member->id.name + 2,
+                  member_is_layer ? "layer" : "group",
+                  active_is_layer ? "layer" : "group");
+      continue;
+    }
+    /* Mirrors #mask_op_context_get's domain gate (folders exempt). */
+    if (const SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+        member_layer != nullptr && member_layer->domain != domain_for(*member))
+    {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Remove Sculpt Layer Mask: skipping \"%s\" (synced layer domain does not "
+                  "match the object)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (mask_op_refuse_during_session(op, *member, *member_node)) {
+      continue;
+    }
+    if (member_node->mask == nullptr) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Remove Sculpt Layer Mask: skipping \"%s\" ('%s' carries no weight mask)",
+                  member->id.name + 2,
+                  member_node->name);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #mask_op_context_get: consume any pending base sculpt edits first, while the live
+       * CCG still matches the stored layers -- load-bearing here because #commit_layers_change
+       * below recomposes. */
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    MaskFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.node = member_node;
+    fanout_members.append(fanout_member);
+  }
 
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
   undo::push_sculpt_layer_mask(*ctx.object, *ctx.node);
   bke::sculpt_layers::mask_free(ctx.node->mask);
   ctx.node->mask = nullptr;
@@ -1316,7 +1557,26 @@ static wmOperatorStatus layer_mask_remove_exec(bContext *C, wmOperator *op)
   /* The node's full contribution comes back wherever the mask was attenuating it, so the composed
    * surface moves. Recomputed canonically rather than nudged, as everywhere in this module. */
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  for (const MaskFanoutMember &fanout_member : fanout_members) {
+    /* Eligibility (#is_supported, sync_uid resolution, kind, refuse-during-session, no-mask skip)
+     * and the multires pending-base flush already ran for every member of `fanout_members` in the
+     * gather pass above -- nothing here can fail or need skipping (mirrors #layer_add_exec's own
+     * second loop). */
+    session_state_ensure(*fanout_member.object);
+    undo::push_sculpt_layer_mask(*fanout_member.object, *fanout_member.node);
+    bke::sculpt_layers::mask_free(fanout_member.node->mask);
+    fanout_member.node->mask = nullptr;
+    tag_masked_chains_dirty(*fanout_member.node);
+    commit_layers_change(*ctx.depsgraph, *fanout_member.object);
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way #layer_add_exec
+   * requires it. #mask_ui_notify stays active-only, matching the single-object path and
+   * #layer_clear_exec's #layers_ui_notify pattern (#finish_multi_object already flushes each
+   * member). */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   mask_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -1344,7 +1604,9 @@ void SCULPT_OT_layer_mask_remove(wmOperatorType *ot)
  * otherwise. The two paths agree on what each operation means, so the user sees one behavior.
  * \{ */
 
-/** Replace \a node's mask with a uniform one. Shared by Clear and Fill. */
+/* FIND-shaped fan-out on the sparse-mask path: uniform fill/clear per sync_uid-matched member using
+ * each member's layout; session dense-buffer path (#mask_flood_fill_delegate) is ACTIVE-ONLY and
+ * returns without fan-out; close with #finish_multi_object(..., UpdateType::Position). */
 static wmOperatorStatus mask_uniform_exec(bContext *C,
                                           wmOperator *op,
                                           const uint8_t fill,
@@ -1356,6 +1618,7 @@ static wmOperatorStatus mask_uniform_exec(bContext *C,
     return OPERATOR_CANCELLED;
   }
   if (mask_session_open_on(*ctx.object, *ctx.node)) {
+    /* Session paint is single-object; dense flood-fill does not fan (Task 10c/11a). */
     return mask_flood_fill_delegate(C, flood_mode, flood_value);
   }
   /* A session open on some *other* node parks that node's weights in the very storage this
@@ -1369,8 +1632,83 @@ static wmOperatorStatus mask_uniform_exec(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
+  Main *bmain = CTX_data_main(C);
+  const bool active_is_layer = bke::sculpt_layers::node_as_layer(ctx.node) != nullptr;
+
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<MaskFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Sculpt Layer Mask value edit: skipping \"%s\" (sculpt layers are not available "
+                  "for this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, ctx.node->sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Sculpt Layer Mask value edit: skipping \"%s\" (no layer or folder synced to the "
+                  "active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    const bool member_is_layer = bke::sculpt_layers::node_as_layer(member_node) != nullptr;
+    if (member_is_layer != active_is_layer) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Sculpt Layer Mask value edit: skipping \"%s\" (the synced node is a %s, not a %s)",
+                  member->id.name + 2,
+                  member_is_layer ? "layer" : "group",
+                  active_is_layer ? "layer" : "group");
+      continue;
+    }
+    if (const SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+        member_layer != nullptr && member_layer->domain != domain_for(*member))
+    {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Sculpt Layer Mask value edit: skipping \"%s\" (synced layer domain does not "
+                  "match the object)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (mask_op_refuse_during_session(op, *member, *member_node)) {
+      continue;
+    }
+    if (member_node->mask == nullptr) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Sculpt Layer Mask value edit: skipping \"%s\" ('%s' carries no weight mask)",
+                  member->id.name + 2,
+                  member_node->name);
+      continue;
+    }
+    const MaskLayout member_layout = mask_layout_for_object(*member);
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    MaskFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.node = member_node;
+    fanout_member.layout = member_layout;
+    fanout_members.append(fanout_member);
+  }
+
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
   undo::push_sculpt_layer_mask(*ctx.object, *ctx.node);
   bke::sculpt_layers::mask_free(ctx.node->mask);
   /* Built fresh at the object's layout rather than refilled in place, so a mask that was stale or
@@ -1378,7 +1716,18 @@ static wmOperatorStatus mask_uniform_exec(bContext *C,
   ctx.node->mask = bke::sculpt_layers::mask_new(ctx.layout.totelem, ctx.layout.block_size, fill);
   tag_masked_chains_dirty(*ctx.node);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  for (const MaskFanoutMember &fanout_member : fanout_members) {
+    session_state_ensure(*fanout_member.object);
+    undo::push_sculpt_layer_mask(*fanout_member.object, *fanout_member.node);
+    bke::sculpt_layers::mask_free(fanout_member.node->mask);
+    fanout_member.node->mask = bke::sculpt_layers::mask_new(
+        fanout_member.layout.totelem, fanout_member.layout.block_size, fill);
+    tag_masked_chains_dirty(*fanout_member.node);
+    commit_layers_change(*ctx.depsgraph, *fanout_member.object);
+  }
+
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   mask_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -1419,6 +1768,9 @@ void SCULPT_OT_layer_mask_fill(wmOperatorType *ot)
   mask_op_properties(ot);
 }
 
+/* FIND-shaped fan-out on the sparse-mask path: invert each sync_uid-matched member's mask using that
+ * member's layout; session dense-buffer path (#mask_flood_fill_delegate) is ACTIVE-ONLY and returns
+ * without fan-out; close with #finish_multi_object(..., UpdateType::Position). */
 static wmOperatorStatus layer_mask_invert_exec(bContext *C, wmOperator *op)
 {
   MaskOpContext ctx;
@@ -1426,6 +1778,7 @@ static wmOperatorStatus layer_mask_invert_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   if (mask_session_open_on(*ctx.object, *ctx.node)) {
+    /* Session paint is single-object; dense flood-fill does not fan (Task 10c/11a). */
     return mask_flood_fill_delegate(C, "INVERT", 0.0f);
   }
   /* A session open on some *other* node parks that node's weights in the very storage this
@@ -1444,6 +1797,81 @@ static wmOperatorStatus layer_mask_invert_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  Main *bmain = CTX_data_main(C);
+  const bool active_is_layer = bke::sculpt_layers::node_as_layer(ctx.node) != nullptr;
+
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<MaskFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Invert Sculpt Layer Mask: skipping \"%s\" (sculpt layers are not available for "
+                  "this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, ctx.node->sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Invert Sculpt Layer Mask: skipping \"%s\" (no layer or folder synced to the "
+                  "active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    const bool member_is_layer = bke::sculpt_layers::node_as_layer(member_node) != nullptr;
+    if (member_is_layer != active_is_layer) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Invert Sculpt Layer Mask: skipping \"%s\" (the synced node is a %s, not a %s)",
+                  member->id.name + 2,
+                  member_is_layer ? "layer" : "group",
+                  active_is_layer ? "layer" : "group");
+      continue;
+    }
+    if (const SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+        member_layer != nullptr && member_layer->domain != domain_for(*member))
+    {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Invert Sculpt Layer Mask: skipping \"%s\" (synced layer domain does not match "
+                  "the object)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (mask_op_refuse_during_session(op, *member, *member_node)) {
+      continue;
+    }
+    const MaskLayout member_layout = mask_layout_for_object(*member);
+    if (!mask_is_usable(*member_node, member_layout)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Invert Sculpt Layer Mask: skipping \"%s\" ('%s' carries no usable weight mask)",
+                  member->id.name + 2,
+                  member_node->name);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    MaskFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.node = member_node;
+    fanout_member.layout = member_layout;
+    fanout_members.append(fanout_member);
+  }
+
   /* Expanded, inverted and compressed rather than flipped byte by byte through #mask_block: the
    * round trip goes through the one authority on the block layout, and #mask_compress collapses
    * uniform blocks again, so an inverted mask does not degrade to dense storage. */
@@ -1454,13 +1882,29 @@ static wmOperatorStatus layer_mask_invert_exec(bContext *C, wmOperator *op)
   }
 
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
   undo::push_sculpt_layer_mask(*ctx.object, *ctx.node);
   bke::sculpt_layers::mask_free(ctx.node->mask);
   ctx.node->mask = bke::sculpt_layers::mask_compress(dense.as_span(), ctx.layout.block_size);
   tag_masked_chains_dirty(*ctx.node);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  for (const MaskFanoutMember &fanout_member : fanout_members) {
+    Array<float> member_dense(fanout_member.layout.totelem);
+    bke::sculpt_layers::mask_expand(*fanout_member.node->mask, member_dense.as_mutable_span());
+    for (float &value : member_dense) {
+      value = 1.0f - value;
+    }
+    session_state_ensure(*fanout_member.object);
+    undo::push_sculpt_layer_mask(*fanout_member.object, *fanout_member.node);
+    bke::sculpt_layers::mask_free(fanout_member.node->mask);
+    fanout_member.node->mask = bke::sculpt_layers::mask_compress(member_dense.as_span(),
+                                                                 fanout_member.layout.block_size);
+    tag_masked_chains_dirty(*fanout_member.node);
+    commit_layers_change(*ctx.depsgraph, *fanout_member.object);
+  }
+
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   mask_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -1476,6 +1920,9 @@ void SCULPT_OT_layer_mask_invert(wmOperatorType *ot)
   mask_op_properties(ot);
 }
 
+/* FIND-shaped fan-out: bake each sync_uid-matched layer's mask into its layer data and free the mask;
+ * groups refused on the active object and skipped on members; close with
+ * #finish_multi_object(..., UpdateType::Position). */
 static wmOperatorStatus layer_mask_apply_exec(bContext *C, wmOperator *op)
 {
   MaskOpContext ctx;
@@ -1527,8 +1974,103 @@ static wmOperatorStatus layer_mask_apply_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  Main *bmain = CTX_data_main(C);
+
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<MaskFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Apply Sculpt Layer Mask: skipping \"%s\" (sculpt layers are not available for "
+                  "this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, ctx.node->sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Apply Sculpt Layer Mask: skipping \"%s\" (no layer synced to the active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+    if (member_layer == nullptr) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Apply Sculpt Layer Mask: skipping \"%s\" (the synced node is a folder, not a "
+                  "layer)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (member_layer->domain != domain_for(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Apply Sculpt Layer Mask: skipping \"%s\" (synced layer domain does not match "
+                  "the object)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (mask_op_refuse_during_session(op, *member, *member_node)) {
+      continue;
+    }
+    if (member_node->mask == nullptr) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Apply Sculpt Layer Mask: skipping \"%s\" ('%s' carries no weight mask)",
+                  member->id.name + 2,
+                  member_node->name);
+      continue;
+    }
+    if (member_node->flag & SCULPT_LAYER_REC_EXEMPT) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Apply Sculpt Layer Mask: skipping \"%s\" (disarm REC before applying the weight "
+                  "mask)",
+                  member->id.name + 2);
+      continue;
+    }
+    const MaskLayout member_layout = mask_layout_for_object(*member);
+    const bool member_mask_in_force = bke::sculpt_layers::mask_enabled(*member_node);
+    Array<float> member_weights;
+    const bool member_usable = member_mask_in_force &&
+                               gather_node_weight_mask(
+                                   *member_node, member_layout.totelem, member_weights);
+    if (member_mask_in_force && !member_usable) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Apply Sculpt Layer Mask: skipping \"%s\" (the weight mask of '%s' does not match "
+                  "the mesh)",
+                  member->id.name + 2,
+                  member_node->name);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    MaskFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.node = member_node;
+    fanout_member.layout = member_layout;
+    fanout_member.layer = member_layer;
+    fanout_member.apply_usable = member_usable;
+    fanout_member.apply_weights = std::move(member_weights);
+    fanout_members.append(fanout_member);
+  }
+
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
   undo::push_sculpt_layer_mask(*ctx.object, *ctx.node);
 
   if (usable) {
@@ -1553,10 +2095,31 @@ static wmOperatorStatus layer_mask_apply_exec(bContext *C, wmOperator *op)
    * the *next* mask the user adds would be born switched off. */
   bke::sculpt_layers::mask_enabled_set(*ctx.node, true);
   tag_masked_chains_dirty(*ctx.node);
-  /* Recomposes and, through it, refills the overlay. The surface is unchanged by construction, but
-   * the commit is what re-derives the runtime base from the new layer state. */
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  for (const MaskFanoutMember &fanout_member : fanout_members) {
+    session_state_ensure(*fanout_member.object);
+    undo::push_sculpt_layer_mask(*fanout_member.object, *fanout_member.node);
+    if (fanout_member.apply_usable) {
+      undo::push_sculpt_layer_data(*fanout_member.object, *fanout_member.layer);
+      MutableSpan<float3> member_data = bke::sculpt_layers::data_get(*fanout_member.layer);
+      const int64_t count = std::min<int64_t>(member_data.size(),
+                                              fanout_member.apply_weights.size());
+      for (const int64_t i : IndexRange(count)) {
+        member_data[i] *= fanout_member.apply_weights[i];
+      }
+    }
+    else {
+      undo::push_sculpt_layer_metadata(*fanout_member.object, *fanout_member.node);
+    }
+    bke::sculpt_layers::mask_free(fanout_member.node->mask);
+    fanout_member.node->mask = nullptr;
+    bke::sculpt_layers::mask_enabled_set(*fanout_member.node, true);
+    tag_masked_chains_dirty(*fanout_member.node);
+    commit_layers_change(*ctx.depsgraph, *fanout_member.object);
+  }
+
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
 
   /* Two spellings rather than one format string chosen by a ternary, so both remain extractable for
    * translation — as #layer_mask_toggle_exec does for the same reason. */
@@ -1587,6 +2150,9 @@ void SCULPT_OT_layer_mask_apply(wmOperatorType *ot)
   mask_op_properties(ot);
 }
 
+/* FIND-shaped fan-out: apply the active object's once-computed mask-enable target to each
+ * sync_uid-matched member node (mirrors #layer_solo_base / #layer_toggle_rec); close with
+ * #finish_multi_object(..., UpdateType::Position) because #commit_layers_change recomposes. */
 static wmOperatorStatus layer_mask_toggle_exec(bContext *C, wmOperator *op)
 {
   MaskOpContext ctx;
@@ -1621,7 +2187,94 @@ static wmOperatorStatus layer_mask_toggle_exec(bContext *C, wmOperator *op)
   session_state_ensure(*ctx.object);
 
   const bool enable = !bke::sculpt_layers::mask_enabled(*ctx.node);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  Main *bmain = CTX_data_main(C);
+  const bool active_is_layer = bke::sculpt_layers::node_as_layer(ctx.node) != nullptr;
+
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<MaskFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Mask: skipping \"%s\" (sculpt layers are not available for "
+                  "this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, ctx.node->sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Mask: skipping \"%s\" (no layer or folder synced to the "
+                  "active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    const bool member_is_layer = bke::sculpt_layers::node_as_layer(member_node) != nullptr;
+    if (member_is_layer != active_is_layer) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Mask: skipping \"%s\" (the synced node is a %s, not a %s)",
+                  member->id.name + 2,
+                  member_is_layer ? "layer" : "group",
+                  active_is_layer ? "layer" : "group");
+      continue;
+    }
+    if (member_node->mask == nullptr) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Mask: skipping \"%s\" ('%s' carries no weight mask)",
+                  member->id.name + 2,
+                  member_node->name);
+      continue;
+    }
+    if (member_node->uid == 0) {
+      /* #node_find_by_sync_uid falls back to the root folder when the active node's own
+       * #sync_uid is 0 (never minted); the root is never a real synced layer/folder, so this is
+       * effectively the same "nothing synced" outcome as the #member_node null case above. */
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Mask: skipping \"%s\" (no layer or folder synced to the "
+                  "active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (mask_op_refuse_during_session(op, *member, *member_node)) {
+      continue;
+    }
+    if (const SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+        member_layer != nullptr && member_layer->domain != domain_for(*member))
+    {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Mask: skipping \"%s\" (synced layer domain does not match "
+                  "the object)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::sculpt_layers::mask_enabled(*member_node) == enable) {
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    MaskFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.node = member_node;
+    fanout_members.append(fanout_member);
+  }
+
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
   /* Captures #SculptLayerTreeNode::flag whole, which is where the bit lives; no undo field of its
    * own is needed. The matching restore additionally invalidates a folder's chain cache. */
   undo::push_sculpt_layer_metadata(*ctx.object, *ctx.node);
@@ -1630,7 +2283,16 @@ static wmOperatorStatus layer_mask_toggle_exec(bContext *C, wmOperator *op)
    * visible, since #chain_mask would otherwise keep serving the product built a moment ago. */
   tag_masked_chains_dirty(*ctx.node);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  for (const MaskFanoutMember &fanout_member : fanout_members) {
+    session_state_ensure(*fanout_member.object);
+    undo::push_sculpt_layer_metadata(*fanout_member.object, *fanout_member.node);
+    bke::sculpt_layers::mask_enabled_set(*fanout_member.node, enable);
+    tag_masked_chains_dirty(*fanout_member.node);
+    commit_layers_change(*ctx.depsgraph, *fanout_member.object);
+  }
+
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   /* Two spellings rather than one format string chosen by a ternary, so both remain extractable for
    * translation. */
   if (enable) {
@@ -1726,6 +2388,8 @@ static SculptLayerTreeNode *mask_edit_open_node(Object &object)
   return bke::sculpt_layers::node_find_by_uid(mesh_of(object), open_uid);
 }
 
+/* No fan-out: mask-edit session is per-object #SculptSession::layers.mask_edit state; this opens
+ * or closes the active object's session only — not multi-object mask painting. */
 static wmOperatorStatus layer_mask_edit_toggle_exec(bContext *C, wmOperator *op)
 {
   MaskOpContext ctx;
@@ -1837,6 +2501,8 @@ static bool mask_edit_finish_poll(bContext *C)
   return mask_edit_open_node(*object) != nullptr;
 }
 
+/* No fan-out: addresses the active object's open session via #mask_edit_open_node (no sync_uid
+ * RNA); session is per-object #SculptSession state, not a tree-row fan-out target. */
 static wmOperatorStatus layer_mask_edit_finish_exec(bContext *C, wmOperator *op)
 {
   Object &object = *CTX_data_active_object(C);
@@ -1868,6 +2534,8 @@ void SCULPT_OT_layer_mask_edit_finish(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER;
 }
 
+/* No fan-out: same as #layer_mask_edit_finish_exec — closes the active object's open session only
+ * (per-object #SculptSession state; no sync_uid). */
 static wmOperatorStatus layer_mask_edit_cancel_exec(bContext *C, wmOperator *op)
 {
   Object &object = *CTX_data_active_object(C);

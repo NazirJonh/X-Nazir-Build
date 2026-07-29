@@ -715,12 +715,11 @@ struct View3DOverlay {
                                               V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR |
                                               V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR |
                                               V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR |
-                                              V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR |
-                                              V3D_OVERLAY_SYMMETRY_CURVES_PLANE;
+                                              V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR;
   /** Opacity of the symmetry plane. */
-  float sculpt_symmetry_plane_opacity = 0.3f;
+  float sculpt_symmetry_plane_opacity = 0.03f;
   /** Thickness of the symmetry contour, in pixels. */
-  float sculpt_symmetry_contour_thickness = 10.0f;
+  float sculpt_symmetry_contour_thickness = 3.0f;
 
   /* NOTE: no trailing `_pad` member is needed here, because the 4-byte members above already sum
    * to a multiple of 8. #View3D depends on that: it embeds this struct directly ahead of

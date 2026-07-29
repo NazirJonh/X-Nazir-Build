@@ -866,7 +866,6 @@ static void rna_def_paint(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "mirror_snap_distance", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "mirror_snap_distance");
   RNA_def_property_float_funcs(
       prop, "rna_Paint_mirror_snap_distance_get", "rna_Paint_mirror_snap_distance_set", nullptr);
   RNA_def_property_range(prop, 1.0f, 10.0f);

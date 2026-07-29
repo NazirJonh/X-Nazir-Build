@@ -7598,6 +7598,22 @@ class VIEW3D_PT_overlay_sculpt(Panel):
     bl_context = ".sculpt_mode"
     bl_region_type = 'HEADER'
     bl_label = "Sculpt"
+    bl_ui_units_x = 14
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'SCULPT'
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.label(text="Sculpt Mode Overlays")
+
+
+class VIEW3D_PT_overlay_sculpt_general(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_parent_id = "VIEW3D_PT_overlay_sculpt"
+    bl_label = "General"
 
     @classmethod
     def poll(cls, context):
@@ -7606,12 +7622,8 @@ class VIEW3D_PT_overlay_sculpt(Panel):
     def draw(self, context):
         prefs = context.preferences
         layout = self.layout
-
+        overlay = context.space_data.overlay
         sculpt = context.scene.tool_settings.sculpt
-        view = context.space_data
-        overlay = view.overlay
-
-        layout.label(text="Sculpt Mode Overlays")
 
         row = layout.row(align=True)
         row.prop(overlay, "show_sculpt_mask", text="")
@@ -7623,7 +7635,28 @@ class VIEW3D_PT_overlay_sculpt(Panel):
         row.prop(overlay, "show_sculpt_face_sets", text="")
         sub = row.row()
         sub.active = overlay.show_sculpt_face_sets
-        row.prop(overlay, "sculpt_mode_face_sets_opacity", text="Face Sets")
+        sub.prop(overlay, "sculpt_mode_face_sets_opacity", text="Face Sets")
+
+        use_debug = prefs.experimental.use_paint_debug and prefs.view.show_developer_ui
+        if use_debug:
+            row = layout.row(align=True)
+            row.prop(sculpt, "show_bvh_nodes")
+
+
+class VIEW3D_PT_overlay_sculpt_layers(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_parent_id = "VIEW3D_PT_overlay_sculpt"
+    bl_label = "Layers"
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'SCULPT'
+
+    def draw(self, context):
+        layout = self.layout
+        overlay = context.space_data.overlay
+        sculpt = context.scene.tool_settings.sculpt
 
         ob = context.object
         mesh = ob.data if ob is not None else None
@@ -7644,19 +7677,27 @@ class VIEW3D_PT_overlay_sculpt(Panel):
         sub.active = sculpt.show_layer_preview and has_layers
         sub.prop(sculpt, "layer_preview_opacity", text="Layer Preview")
 
-        use_debug = prefs.experimental.use_paint_debug and prefs.view.show_developer_ui
-        if use_debug:
-            row = layout.row(align=True)
-            row.prop(sculpt, "show_bvh_nodes")
 
-        # Symmetry plane overlay
+class VIEW3D_PT_overlay_sculpt_symmetry(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_parent_id = "VIEW3D_PT_overlay_sculpt"
+    bl_label = "Symmetry"
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'SCULPT'
+
+    def draw(self, context):
+        layout = self.layout
+        overlay = context.space_data.overlay
+
         row = layout.row(align=True)
         row.prop(overlay, "show_sculpt_symmetry_plane", text="")
         sub = row.row()
         sub.active = overlay.show_sculpt_symmetry_plane
         sub.prop(overlay, "symmetry_plane_opacity", text="Symmetry Plane")
 
-        # Symmetry contour overlay
         row = layout.row(align=True)
         row.prop(overlay, "show_sculpt_symmetry_contour", text="")
         sub = row.row()
@@ -9578,6 +9619,9 @@ classes = (
     VIEW3D_PT_overlay_weight_paint,
     VIEW3D_PT_overlay_bones,
     VIEW3D_PT_overlay_sculpt,
+    VIEW3D_PT_overlay_sculpt_general,
+    VIEW3D_PT_overlay_sculpt_layers,
+    VIEW3D_PT_overlay_sculpt_symmetry,
     VIEW3D_PT_overlay_sculpt_curves,
     VIEW3D_PT_snapping,
     VIEW3D_PT_sculpt_snapping,

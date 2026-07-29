@@ -10,24 +10,33 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstddef>
 #include <cstdio>
+#include <string>
 #include <type_traits>
 
 #if SCULPT_LAYERS_DEBUG_COPY
 #  include <atomic>
 #endif
 
+#include <cstdint>
+
 #include "CLG_log.h"
 
 #include "MEM_guardedalloc.h"
 
 #include "DNA_key_types.h"
+#include "DNA_ID.h"
 #include "DNA_mesh_types.h"
+#include "DNA_object_types.h"
 
 #include "BLI_array.hh"
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_set.hh"
+#include "BLI_hash.h"
+#include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
 #include "BLI_task.hh"
@@ -36,6 +45,8 @@
 
 #include "BKE_ccg.hh"
 #include "BKE_key.hh"
+#include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_multires_grid_resample.hh"
 
 #include "BLO_read_write.hh"
@@ -375,6 +386,416 @@ int node_unique_uid(const Mesh &mesh)
   return node_max_uid(*root_group(mesh)) + 1;
 }
 
+/* The #sync_uid counterpart of #node_max_uid: same recursive max-plus-one walk, but over
+ * #SculptLayerTreeNode::sync_uid instead of #SculptLayerTreeNode::uid. */
+static int node_max_sync_uid(const SculptLayerGroup &group)
+{
+  int uid = group.base.sync_uid;
+  for (SculptLayerTreeNode &node : group.children) {
+    uid = std::max(uid, node.sync_uid);
+    if (const SculptLayerGroup *child = node_as_group(&node)) {
+      uid = std::max(uid, node_max_sync_uid(*child));
+    }
+  }
+  return uid;
+}
+
+int layer_sync_uid_unique(const Main &bmain)
+{
+  int max_sync_uid = 0;
+  for (const Mesh &mesh : bmain.meshes) {
+    /* Raw field access rather than #root_group: that helper asserts a non-null tree, and a mesh
+     * whose tree was never touched by #root_group_ensure must simply contribute nothing here. */
+    if (mesh.sculpt_layer_root) {
+      max_sync_uid = std::max(max_sync_uid, node_max_sync_uid(*mesh.sculpt_layer_root));
+    }
+  }
+  /* Avoid signed overflow on a corrupted/artificially maxed file; colliding with INT_MAX is
+   * still wrong but defined, and far safer than wrapping to a negative id. */
+  return (max_sync_uid < INT_MAX) ? max_sync_uid + 1 : INT_MAX;
+}
+
+int sync_group_unique_id(const Main &bmain)
+{
+  int max_group = 0;
+  for (const Object &ob : bmain.objects) {
+    max_group = std::max(max_group, ob.sculpt_layer_sync_group);
+  }
+  return (max_group < INT_MAX) ? max_group + 1 : INT_MAX;
+}
+
+bool sync_group_is_valid_mesh_member(const Object &ob)
+{
+  if (ob.type != OB_MESH || ob.data == nullptr) {
+    return false;
+  }
+  return GS(static_cast<const ID *>(ob.data)->name) == ID_ME;
+}
+
+bool sync_group_object_membership_editable(Main &bmain, const Object &ob)
+{
+  if (!sync_group_is_valid_mesh_member(ob)) {
+    return false;
+  }
+  if (ID_IS_LINKED(&ob.id) || !BKE_id_is_editable(&bmain, &ob.id)) {
+    return false;
+  }
+  ID *mesh_id = static_cast<ID *>(ob.data);
+  if (ID_IS_LINKED(mesh_id) || !BKE_id_is_editable(&bmain, mesh_id)) {
+    return false;
+  }
+  if (ID_IS_OVERRIDE_LIBRARY(mesh_id)) {
+    return false;
+  }
+  return true;
+}
+
+void sync_group_display_name_get(const Object &ob, char r_name[64])
+{
+  if (ob.sculpt_layer_sync_group_name[0] != '\0') {
+    BLI_strncpy(r_name, ob.sculpt_layer_sync_group_name, 64);
+    return;
+  }
+  if (ob.sculpt_layer_sync_group == 0) {
+    r_name[0] = '\0';
+    return;
+  }
+  BLI_snprintf(r_name, 64, "Sculpt Layers Grp. (%d)", ob.sculpt_layer_sync_group);
+}
+
+bool object_in_same_sync_group(const Object &a, const Object &b)
+{
+  if (a.sculpt_layer_sync_group == 0 || b.sculpt_layer_sync_group == 0) {
+    return false;
+  }
+  if (a.sculpt_layer_sync_group_key != 0 && b.sculpt_layer_sync_group_key != 0) {
+    return a.sculpt_layer_sync_group_key == b.sculpt_layer_sync_group_key;
+  }
+  if (a.sculpt_layer_sync_group_key != 0 || b.sculpt_layer_sync_group_key != 0) {
+    return false;
+  }
+  return a.sculpt_layer_sync_group == b.sculpt_layer_sync_group;
+}
+
+static bool sync_group_key_in_use(const Main &bmain, const uint64_t candidate)
+{
+  for (const Object &ob : bmain.objects) {
+    if (ob.sculpt_layer_sync_group_key == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* #BLI_hash_string(bmain.filepath) is constant for every unsaved file (empty path), so an
+ * unsaved file's first sync group always minted the same high bits as any other unsaved file's
+ * first group -- a guaranteed collision once two such files' objects are appended/linked into a
+ * third. Folding in a steady-clock sample gives real entropy that does not depend on the path. */
+static uint32_t sync_group_key_namespace_hash(const Main &bmain)
+{
+  const uint32_t path_hash = BLI_hash_string(bmain.filepath);
+  const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  const uint32_t time_hash = uint32_t(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+  return path_hash ^ time_hash;
+}
+
+uint64_t sync_group_new_key(const Main &bmain)
+{
+  const uint64_t serial = uint64_t(sync_group_unique_id(bmain));
+  uint64_t key = (uint64_t(sync_group_key_namespace_hash(bmain)) << 32) | (serial & 0xFFFFFFFFu);
+  if (key == 0) {
+    key = 1;
+  }
+  while (sync_group_key_in_use(bmain, key)) {
+    key++;
+  }
+  return key;
+}
+
+void sync_group_mint_keys_for_legacy_groups(Main &bmain)
+{
+  Map<int, uint64_t> int_to_key;
+  for (Object &ob : bmain.objects) {
+    if (ob.sculpt_layer_sync_group == 0 || ob.sculpt_layer_sync_group_key != 0) {
+      continue;
+    }
+    uint64_t *key = int_to_key.lookup_ptr(ob.sculpt_layer_sync_group);
+    if (key == nullptr) {
+      uint64_t candidate = (uint64_t(sync_group_key_namespace_hash(bmain)) << 32) |
+                           uint32_t(ob.sculpt_layer_sync_group);
+      if (candidate == 0) {
+        candidate = 1;
+      }
+      while (sync_group_key_in_use(bmain, candidate)) {
+        candidate++;
+      }
+      int_to_key.add_new(ob.sculpt_layer_sync_group, candidate);
+      key = int_to_key.lookup_ptr(ob.sculpt_layer_sync_group);
+    }
+    ob.sculpt_layer_sync_group_key = *key;
+  }
+}
+
+static thread_local Object *g_sculpt_layers_rna_context_object = nullptr;
+
+void sculpt_layers_rna_context_object_set(Object *object)
+{
+  g_sculpt_layers_rna_context_object = object;
+}
+
+void sculpt_layers_rna_context_object_clear()
+{
+  g_sculpt_layers_rna_context_object = nullptr;
+}
+
+Object *sync_source_object_for_mesh(Main &bmain, const Mesh &mesh)
+{
+  if (g_sculpt_layers_rna_context_object != nullptr) {
+    Object &ctx = *g_sculpt_layers_rna_context_object;
+    if (ctx.data == &mesh.id) {
+      if (ctx.sculpt_layer_sync_group != 0) {
+        return &ctx;
+      }
+      if (ctx.mode & OB_MODE_SCULPT) {
+        return &ctx;
+      }
+    }
+  }
+
+  Object *sculpt_grouped = nullptr;
+  Object *sculpt_ungrouped = nullptr;
+  Object *grouped = nullptr;
+  for (Object &ob : bmain.objects) {
+    if (ob.data != &mesh.id) {
+      continue;
+    }
+    const bool in_sync_group = ob.sculpt_layer_sync_group != 0;
+    if (ob.mode & OB_MODE_SCULPT) {
+      if (in_sync_group) {
+        sculpt_grouped = &ob;
+      }
+      else if (sculpt_ungrouped == nullptr) {
+        sculpt_ungrouped = &ob;
+      }
+    }
+    else if (in_sync_group && grouped == nullptr) {
+      grouped = &ob;
+    }
+  }
+  if (sculpt_grouped != nullptr) {
+    return sculpt_grouped;
+  }
+  if (grouped != nullptr) {
+    return grouped;
+  }
+  return sculpt_ungrouped;
+}
+
+/* Path-hash based, so two distinct libraries can in principle collide onto the same offset and
+ * let #node_find_by_sync_uid cross-match nodes from unrelated files -- the same class of
+ * limitation #sync_group_new_key documents for group keys, until a dedicated per-library identity
+ * exists. */
+static int sync_uid_library_offset(const Library *lib)
+{
+  if (lib == nullptr) {
+    return 0;
+  }
+  const uint32_t h = BLI_hash_string(lib->filepath);
+  return int((h & 0x3FFFFFFF) + 1);
+}
+
+static void node_sync_uid_apply_offset(SculptLayerTreeNode &node, const int offset)
+{
+  if (node.sync_uid > 0) {
+    const int64_t value = int64_t(node.sync_uid) + int64_t(offset);
+    /* Clamping every overflowing value to the same #INT_MAX sentinel would make
+     * #node_find_by_sync_uid treat unrelated overflowed nodes as sync partners. Zero (no sync
+     * identity) is a safe degradation: the pathological node just stops matching, rather than
+     * falsely matching another one. */
+    node.sync_uid = (value > 0 && value <= INT_MAX) ? int(value) : 0;
+  }
+  if (SculptLayerGroup *group = node_as_group(&node)) {
+    for (SculptLayerTreeNode &child : group->children) {
+      node_sync_uid_apply_offset(child, offset);
+    }
+  }
+}
+
+void layer_sync_uid_namespace_linked_meshes(Main &bmain)
+{
+  for (Mesh &mesh : bmain.meshes) {
+    if (mesh.id.lib == nullptr || mesh.sculpt_layer_root == nullptr) {
+      continue;
+    }
+    SculptLayerGroup &root = *mesh.sculpt_layer_root;
+    if (root.base.flag & SCULPT_LAYER_GROUP_SYNC_UID_NAMESPACED) {
+      continue;
+    }
+    const int offset = sync_uid_library_offset(mesh.id.lib);
+    node_sync_uid_apply_offset(root.base, offset);
+    root.base.flag |= SCULPT_LAYER_GROUP_SYNC_UID_NAMESPACED;
+  }
+}
+
+bool sync_group_detach_object(Main &bmain, Object &ob)
+{
+  if (ob.sculpt_layer_sync_group == 0) {
+    return false;
+  }
+  if (!sync_group_object_membership_editable(bmain, ob)) {
+    return false;
+  }
+  Object *solo_editable_partner = nullptr;
+  int editable_partner_count = 0;
+  for (Object &other : bmain.objects) {
+    if (&other == &ob || !object_in_same_sync_group(ob, other)) {
+      continue;
+    }
+    if (!sync_group_object_membership_editable(bmain, other)) {
+      continue;
+    }
+    editable_partner_count++;
+    solo_editable_partner = &other;
+  }
+
+  ob.sculpt_layer_sync_group = 0;
+  ob.sculpt_layer_sync_group_key = 0;
+  ob.sculpt_layer_sync_group_name[0] = '\0';
+
+  if (editable_partner_count == 1 && solo_editable_partner != nullptr) {
+    solo_editable_partner->sculpt_layer_sync_group = 0;
+    solo_editable_partner->sculpt_layer_sync_group_key = 0;
+    solo_editable_partner->sculpt_layer_sync_group_name[0] = '\0';
+  }
+  return true;
+}
+
+void sync_group_unique_name(const Main &bmain, char r_name[64])
+{
+  /* One representative name per group id (first non-empty wins). */
+  Map<int, const char *> group_names;
+  for (const Object &ob : bmain.objects) {
+    if (ob.sculpt_layer_sync_group == 0) {
+      continue;
+    }
+    const char **slot = group_names.lookup_ptr(ob.sculpt_layer_sync_group);
+    if (slot == nullptr) {
+      group_names.add_new(ob.sculpt_layer_sync_group,
+                          ob.sculpt_layer_sync_group_name[0] != '\0' ?
+                              ob.sculpt_layer_sync_group_name :
+                              nullptr);
+    }
+    else if (*slot == nullptr && ob.sculpt_layer_sync_group_name[0] != '\0') {
+      *slot = ob.sculpt_layer_sync_group_name;
+    }
+  }
+
+  Set<std::string> occupied;
+  for (const char *name : group_names.values()) {
+    if (name != nullptr) {
+      occupied.add(name);
+    }
+  }
+
+  for (int n = 1; n <= 999; n++) {
+    char candidate[64];
+    SNPRINTF(candidate, "Sculpt Layers Grp.%03d", n);
+    if (!occupied.contains(std::string(candidate))) {
+      BLI_strncpy(r_name, candidate, 64);
+      return;
+    }
+  }
+  for (int n = 1000; n < 1000000; n++) {
+    char candidate[64];
+    SNPRINTF(candidate, "Sculpt Layers Grp.%d", n);
+    if (!occupied.contains(std::string(candidate))) {
+      BLI_strncpy(r_name, candidate, 64);
+      return;
+    }
+  }
+  BLI_strncpy(r_name, "Sculpt Layers Grp.", 64);
+}
+
+void sync_group_name_ensure(Main &bmain, Object &ob)
+{
+  if (ob.sculpt_layer_sync_group == 0 || ob.sculpt_layer_sync_group_name[0] != '\0') {
+    return;
+  }
+  /* Prefer any existing name already stored on a raw member (desync / old file) before minting. */
+  const char *existing = nullptr;
+  for (Object &other : bmain.objects) {
+    if (!object_in_same_sync_group(ob, other) || other.sculpt_layer_sync_group_name[0] == '\0') {
+      continue;
+    }
+    existing = other.sculpt_layer_sync_group_name;
+    break;
+  }
+  char name[64];
+  if (existing != nullptr) {
+    BLI_strncpy(name, existing, sizeof(name));
+  }
+  else {
+    sync_group_unique_name(bmain, name);
+  }
+  for (Object &other : bmain.objects) {
+    if (!object_in_same_sync_group(ob, other)) {
+      continue;
+    }
+    if (!sync_group_object_membership_editable(bmain, other)) {
+      continue;
+    }
+    BLI_strncpy(other.sculpt_layer_sync_group_name, name, sizeof(other.sculpt_layer_sync_group_name));
+  }
+}
+
+void sync_group_name_propagate(Main &bmain, Object &source)
+{
+  if (source.sculpt_layer_sync_group == 0) {
+    return;
+  }
+  for (Object &other : bmain.objects) {
+    if (!object_in_same_sync_group(source, other)) {
+      continue;
+    }
+    if (ID_IS_LINKED(&other.id) || !BKE_id_is_editable(&bmain, &other.id)) {
+      continue;
+    }
+    BLI_strncpy(other.sculpt_layer_sync_group_name,
+                source.sculpt_layer_sync_group_name,
+                sizeof(other.sculpt_layer_sync_group_name));
+  }
+}
+
+void sync_group_repair_empty_names(Main &bmain)
+{
+  Set<uint64_t> repaired_keys;
+  Set<int> repaired_legacy_ints;
+  for (Object &ob : bmain.objects) {
+    if (ob.sculpt_layer_sync_group == 0 || ob.sculpt_layer_sync_group_name[0] != '\0') {
+      continue;
+    }
+    if (ob.sculpt_layer_sync_group_key != 0) {
+      if (!repaired_keys.add(ob.sculpt_layer_sync_group_key)) {
+        continue;
+      }
+    }
+    else {
+      if (!repaired_legacy_ints.add(ob.sculpt_layer_sync_group)) {
+        continue;
+      }
+    }
+    sync_group_name_ensure(bmain, ob);
+  }
+}
+
+void sculpt_layers_after_lib_link_fixups(Main &bmain)
+{
+  sync_group_mint_keys_for_legacy_groups(bmain);
+  sync_group_repair_empty_names(bmain);
+  layer_sync_uid_namespace_linked_meshes(bmain);
+}
+
 static SculptLayerTreeNode *node_find_in_group(const SculptLayerGroup &group, const int uid)
 {
   for (SculptLayerTreeNode &node : group.children) {
@@ -402,6 +823,39 @@ const SculptLayerTreeNode *node_find_by_uid(const Mesh &mesh, const int uid)
     return &root->base;
   }
   return node_find_in_group(*root, uid);
+}
+
+/* The #sync_uid counterpart of #node_find_in_group. */
+static SculptLayerTreeNode *node_find_in_group_by_sync_uid(const SculptLayerGroup &group,
+                                                            const int sync_uid)
+{
+  for (SculptLayerTreeNode &node : group.children) {
+    if (node.sync_uid == sync_uid) {
+      return &node;
+    }
+    if (const SculptLayerGroup *child = node_as_group(&node)) {
+      if (SculptLayerTreeNode *found = node_find_in_group_by_sync_uid(*child, sync_uid)) {
+        return found;
+      }
+    }
+  }
+  return nullptr;
+}
+
+SculptLayerTreeNode *node_find_by_sync_uid(Mesh &mesh, const int sync_uid)
+{
+  return const_cast<SculptLayerTreeNode *>(
+      node_find_by_sync_uid(const_cast<const Mesh &>(mesh), sync_uid));
+}
+
+const SculptLayerTreeNode *node_find_by_sync_uid(const Mesh &mesh, const int sync_uid)
+{
+  /* Unlike uid 0 (which resolves to the root for #node_find_by_uid), sync_uid 0 is never a match:
+   * it means "this node is not synced" for every node, root included. */
+  if (sync_uid == 0) {
+    return nullptr;
+  }
+  return node_find_in_group_by_sync_uid(*root_group(mesh), sync_uid);
 }
 
 const SculptLayerGroup *find_ancestor(const SculptLayerGroup *start,
@@ -555,7 +1009,11 @@ void node_move_into(Mesh &mesh,
  * layers sharing one #SculptLayer::data allocation, which #tree_free would then release twice, so
  * the deep copy of the buffer must not be separable from the copy of the struct.
  *
- * The copy keeps \a src's uid; a caller inserting it into a mesh assigns a fresh one.
+ * The copy keeps \a src's uid and #SculptLayerTreeNode::sync_uid; a caller inserting it into a mesh
+ * assigns a fresh uid and decides what the copy's cross-object identity should be. #tree_copy wants
+ * both carried over verbatim (the whole tree lands in a different mesh, so nothing collides and the
+ * copy stays synced with the original's group), whereas #duplicate must clear the sync_uid — see
+ * there.
  */
 static SculptLayer *layer_copy(const SculptLayer &src)
 {
@@ -661,6 +1119,17 @@ SculptLayer *duplicate(Mesh &mesh, const SculptLayer &src)
 {
   SculptLayer *layer = layer_copy(src);
   layer->base.uid = node_unique_uid(mesh);
+  /* Same reasoning as the fresh uid above, for the cross-object identity: a duplicate is a new
+   * layer, not another object's view of \a src, so it must not silently inherit \a src's
+   * #SculptLayerTreeNode::sync_uid — which #layer_copy's struct copy carries over exactly as it
+   * carries #SculptLayer::data. Left inherited, the mesh would hold TWO nodes under one sync_uid,
+   * and #node_find_by_sync_uid is first-match: every fan-out operator would then resolve both to
+   * the same node, turning an involutive operation into a no-op on one of them, or — where the
+   * operation frees the node — into a double free. Cleared rather than freshly minted because
+   * minting needs #Main (see #layer_sync_uid_unique) which is not available here, and because a
+   * copy is only part of a sync group if the caller is fanning the duplication out across one:
+   * #layer_duplicate_exec is the single place that knows that and stamps a shared value back on. */
+  layer->base.sync_uid = 0;
 
   /* Right after the source, i.e. into the same folder — a duplicate landing somewhere else in the
    * tree would be a surprise. Every node but the root carries a parent, and the root is never a

@@ -5502,7 +5502,7 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "overlay.sculpt_symmetry_contour_thickness");
   RNA_def_property_ui_text(
       prop, "Symmetry Contour Thickness", "Thickness of symmetry contour lines in pixels");
-  RNA_def_property_range(prop, 1.0f, 50.0f);
+  RNA_def_property_range(prop, 1.0f, 10.0f);
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
   prop = RNA_def_property(srna, "show_weight_paint_symmetry_contour", PROP_BOOLEAN, PROP_NONE);

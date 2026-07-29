@@ -438,7 +438,13 @@ class Sculpts : Overlay {
       }
     }
 
-    const bool use_pbvh = BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object, state.rv3d);
+    /* Layer mask/preview live only in the PBVH attribute fillers; the cached-mesh sculpt overlay
+     * batch carries face sets and the ordinary mask but no `layer_weight`. Until the first stroke
+     * #BKE_sculptsession_use_pbvh_draw_for_display stays false (#SculptSession::pbvh_draw_required),
+     * so force the PBVH path while either layer overlay is on. */
+    const bool use_pbvh = BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object, state.rv3d) ||
+                          ((show_layer_mask_ || show_layer_preview_) &&
+                           BKE_sculptsession_use_pbvh_draw(ob_ref.object, state.rv3d));
     if (use_pbvh) {
       ResourceHandleRange handle = manager.unique_handle_for_sculpt(ob_ref);
 

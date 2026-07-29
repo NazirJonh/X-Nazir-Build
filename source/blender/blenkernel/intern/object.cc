@@ -244,6 +244,11 @@ static void object_copy_data(Main *bmain,
   ob_dst->mode = OB_MODE_OBJECT;
   ob_dst->runtime->sculpt_session = nullptr;
 
+  /* Duplicates are not auto-enrolled in the source object's sculpt-layer sync group. */
+  ob_dst->sculpt_layer_sync_group = 0;
+  ob_dst->sculpt_layer_sync_group_key = 0;
+  ob_dst->sculpt_layer_sync_group_name[0] = '\0';
+
   if (ob_src->pd) {
     ob_dst->pd = MEM_dupalloc(ob_src->pd);
   }

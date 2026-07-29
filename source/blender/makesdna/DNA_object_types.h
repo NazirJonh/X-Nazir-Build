@@ -482,7 +482,27 @@ struct Object {
   char parsubstr[/*MAX_NAME*/ 64] = "";
   struct Object *parent = nullptr, *track = nullptr;
   float parent_bone_head_tail_factor = 1.0f;
-  char _pad4[4] = {};
+  /**
+   * Sculpt-layer sync group identifier. `0` = not in any group; otherwise every #Object sharing
+   * this value is a member of the same group (see #bke::sculpt_layers::sync_group_unique_id and
+   * #layers::sync_group_members). Display serial only; membership is keyed by
+   * #sculpt_layer_sync_group_key. Occupies what used to be explicit padding -- exactly 4 bytes,
+   * same as the #char[4] it replaces.
+   */
+  int sculpt_layer_sync_group = 0;
+  /**
+   * Display name for #sculpt_layer_sync_group (e.g. "Sculpt Layers Grp.001"). Duplicated on every
+   * raw member of the group and kept in sync by rename propagate. Empty when not in a group.
+   * Length matches #MAX_NAME / #parsubstr. New on load of older files: DNA reconstruct zero-fills
+   * (no do_versions); #bke::sculpt_layers::sync_group_name_ensure fills a unique name when needed.
+   */
+  char sculpt_layer_sync_group_name[/*MAX_NAME*/ 64] = "";
+  /**
+   * Persistent sync-group identity across append/link. Members share the same nonzero value;
+   * #sculpt_layer_sync_group alone is a display serial only. `0` on load of older files until
+   * #bke::sculpt_layers::sync_group_mint_keys_for_legacy_groups runs.
+   */
+  uint64_t sculpt_layer_sync_group_key = 0;
   /* Proxy pointer are deprecated, only kept for conversion to liboverrides. */
   DNA_DEPRECATED struct Object *proxy = nullptr;
   DNA_DEPRECATED struct Object *proxy_group = nullptr;

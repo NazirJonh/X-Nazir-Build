@@ -23,6 +23,8 @@ struct RegionView3D;
 struct ReportList;
 struct Scene;
 struct SculptLayer;
+struct SculptLayerGroup;
+struct SculptLayerTreeNode;
 struct UndoType;
 struct UndoStep;
 struct bContext;
@@ -189,6 +191,24 @@ bool flush_interactive_update(Main &bmain, Mesh &mesh);
  * to a full #ID_RECALC_GEOMETRY tag itself (object not in sculpt mode, or no live grid PBVH).
  */
 bool sync_multires_for_rna(Main &bmain, Scene *scene, Mesh &mesh, SculptLayer &changed_layer);
+
+/**
+ * Copy the active mesh's synced layer / folder influence or node name onto every other member of
+ * the same sculpt layer sync group (matched by #SculptLayerTreeNode::sync_uid). Called from the RNA
+ * setters and from #SCULPT_OT_layer_influence_drag during and after the drag. \a source_ob is the
+ * object whose layer tree was edited (used to resolve sync-group membership). When \a depsgraph is
+ * non-null, sculpt-ready members get a full #commit_layers_change recompose.
+ */
+void sync_group_propagate_layer_influence(Main &bmain,
+                                          Object &source_ob,
+                                          const SculptLayer &source_layer,
+                                          Depsgraph *depsgraph = nullptr);
+void sync_group_propagate_group_influence(Main &bmain,
+                                          Object &source_ob,
+                                          const SculptLayerGroup &source_group);
+void sync_group_propagate_node_name(Main &bmain,
+                                    Object &source_ob,
+                                    const SculptLayerTreeNode &source_node);
 
 /**
  * Drop the cached runtime mesh base (#SculptSession::layers::mesh_base) and mark the session

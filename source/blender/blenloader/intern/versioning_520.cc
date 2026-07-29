@@ -50,6 +50,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_report.hh"
+#include "BKE_sculpt_layers.hh"
 
 #include "SEQ_effects.hh"
 #include "SEQ_iterator.hh"
@@ -544,6 +545,10 @@ void do_versions_after_linking_520(FileData *fd, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 49)) {
+    bke::sculpt_layers::sculpt_layers_after_lib_link_fixups(*bmain);
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.
@@ -958,15 +963,14 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
         for (SpaceLink &sl : area.spacedata) {
           if (sl.spacetype == SPACE_VIEW3D) {
             View3D *v3d = reinterpret_cast<View3D *>(&sl);
-            v3d->overlay.symmetry_flag |= V3D_OVERLAY_SYMMETRY_SCULPT_PLANE |
-                                          V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR |
+            /* Contours on by default; translucent symmetry plane stays off. */
+            v3d->overlay.symmetry_flag |= V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR |
                                           V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR |
                                           V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR |
                                           V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR |
-                                          V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR |
-                                          V3D_OVERLAY_SYMMETRY_CURVES_PLANE;
-            v3d->overlay.sculpt_symmetry_plane_opacity = 0.3f;
-            v3d->overlay.sculpt_symmetry_contour_thickness = 10.0f;
+                                          V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR;
+            v3d->overlay.sculpt_symmetry_plane_opacity = 0.03f;
+            v3d->overlay.sculpt_symmetry_contour_thickness = 3.0f;
           }
         }
       }
@@ -1008,6 +1012,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
    * the current SDNA, so a pre-migration file's layers are never read back at all: such a file
    * opens with no sculpt layers. That is the accepted outcome of the no-backward-compatibility
    * decision, not a defect. */
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 49)) {
+    bke::sculpt_layers::sculpt_layers_after_lib_link_fixups(*bmain);
+  }
 
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning

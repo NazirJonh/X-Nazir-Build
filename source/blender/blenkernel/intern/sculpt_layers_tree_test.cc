@@ -4,11 +4,14 @@
 
 #include "testing/testing.h"
 
+#include <cstddef>
 #include <string>
 
 #include "BKE_gtest_base.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_mesh.h"
+#include "BKE_object.hh"
 #include "BKE_sculpt_layers.hh"
 
 #include "BLI_array.hh"
@@ -18,6 +21,7 @@
 #include "BLI_vector.hh"
 
 #include "DNA_mesh_types.h"
+#include "DNA_object_types.h"
 
 namespace blender::bke::sculpt_layers::tests {
 
@@ -1543,6 +1547,85 @@ TEST_F(sculpt_layers_tree, composite_ignores_every_mask_of_an_armed_rec_layer)
   derive_base_mesh(result, layers(*mesh), derived);
   EXPECT_EQ(derived[0].z, 1.0f - masked);
   EXPECT_NE(derived[0].z, base[0].z);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Sync group id generation and cross-object lookup
+ *
+ * #sync_group_unique_id and #layer_sync_uid_unique need a #Main holding several objects/meshes,
+ * which nothing above this point in the file builds -- #sculpt_layers_tree's fixture owns a single
+ * bare #Mesh with no #Main at all. So these tests build their own #Main (and #Object/#Mesh) per
+ * case with the same helpers the rest of blenkernel's tests use for that
+ * (`lib_query_test.cc`, `main_test.cc`): #BKE_main_new / #BKE_main_free and
+ * #BKE_object_add_only_object. Grouped under their own fixture, rather than #sculpt_layers_tree,
+ * so the gtest listing keeps the sync-group cases separate from the tree-structure ones.
+ * \{ */
+
+struct sculpt_layers_sync : public BlenderGTestBase {};
+
+TEST_F(sculpt_layers_sync, sculpt_layer_tree_node_sizeof_unchanged)
+{
+  /* Task 2 DNA change reuses padding for #SculptLayerTreeNode::sync_uid; the struct must stay
+   * 112 bytes with #mask still at offset 104 (makesdna align + file compatibility). */
+  EXPECT_EQ(sizeof(SculptLayerTreeNode), 112u);
+  EXPECT_EQ(offsetof(SculptLayerTreeNode, mask), 104u);
+}
+
+TEST_F(sculpt_layers_sync, sync_group_unique_id_starts_at_one_with_no_groups)
+{
+  Main *bmain = BKE_main_new();
+  EXPECT_EQ(sync_group_unique_id(*bmain), 1);
+  BKE_main_free(bmain);
+}
+
+TEST_F(sculpt_layers_sync, sync_group_unique_id_skips_existing_values)
+{
+  Main *bmain = BKE_main_new();
+  Object *ob_a = BKE_object_add_only_object(bmain, OB_MESH, "A");
+  ob_a->sculpt_layer_sync_group = 5;
+  EXPECT_EQ(sync_group_unique_id(*bmain), 6);
+  BKE_main_free(bmain);
+}
+
+TEST_F(sculpt_layers_sync, layer_sync_uid_unique_starts_at_one_with_no_synced_layers)
+{
+  Main *bmain = BKE_main_new();
+  EXPECT_EQ(layer_sync_uid_unique(*bmain), 1);
+  BKE_main_free(bmain);
+}
+
+TEST_F(sculpt_layers_sync, node_find_by_sync_uid_finds_layer_and_group)
+{
+  /* Built the same way #sculpt_layers_tree's own fixture builds its bare mesh
+   * (sculpt_layers_tree_test.cc:39: `BKE_mesh_new_nomain(0, 0, 0, 0)`), not via
+   * `BKE_mesh_add(nullptr, ...)`: that routes through #BKE_id_new -> #BKE_id_new_in_lib, which
+   * asserts and then dereferences a non-null `bmain` (lib_id.cc:1511-1527, main.cc:591-594) --
+   * a real null-pointer crash with a null `bmain`, not merely an assert. #BKE_mesh_new_nomain
+   * takes the `LIB_ID_CREATE_NO_MAIN` path instead, which is what actually tolerates no #Main. */
+  Mesh *mesh = BKE_mesh_new_nomain(0, 0, 0, 0);
+  SculptLayer *layer = add(*mesh, "L", SCULPT_LAYER_DOMAIN_VERT, 0, 0);
+  layer->base.sync_uid = 7;
+  EXPECT_EQ(node_find_by_sync_uid(*mesh, 7), &layer->base);
+  EXPECT_EQ(node_find_by_sync_uid(*mesh, 8), nullptr);
+  BKE_id_free(nullptr, mesh);
+}
+
+TEST_F(sculpt_layers_sync, node_find_by_sync_uid_zero_never_matches)
+{
+  /* sync_uid 0 means "not synced" for every node -- including the root, whose #sync_uid also
+   * defaults to 0 -- unlike node_find_by_uid, where uid 0 deliberately resolves to the root
+   * group. A lookup for 0 must not fall back to that same "the root reads as 0" convention. */
+  Mesh *mesh = BKE_mesh_new_nomain(0, 0, 0, 0);
+  ASSERT_NE(root_group(*mesh), nullptr);
+  EXPECT_EQ(root_group(*mesh)->base.sync_uid, 0) << "the root's sync_uid is the default, unset";
+
+  SculptLayer *layer = add(*mesh, "L", SCULPT_LAYER_DOMAIN_VERT, 0, 0);
+  EXPECT_EQ(layer->base.sync_uid, 0) << "a freshly created layer is not synced either";
+
+  EXPECT_EQ(node_find_by_sync_uid(*mesh, 0), nullptr);
+  BKE_id_free(nullptr, mesh);
 }
 
 /** \} */

@@ -333,6 +333,7 @@ const EnumPropertyItem rna_enum_object_axis_flip_items[] = {
 #  include "BKE_object_deform.h"
 #  include "BKE_particle.h"
 #  include "BKE_scene.hh"
+#  include "BKE_sculpt_layers.hh"
 
 #  include "DEG_depsgraph.hh"
 #  include "DEG_depsgraph_build.hh"
@@ -2150,6 +2151,75 @@ static bool rna_Object_sculpt_layers_rec_active_get(PointerRNA *ptr)
   return ss ? ss->layers.rec_active : false;
 }
 
+static int rna_Object_sculpt_layer_sync_group_name_editable(const PointerRNA *ptr,
+                                                            const char ** /*r_info*/)
+{
+  const Object *ob = static_cast<const Object *>(ptr->data);
+  if (ob->sculpt_layer_sync_group == 0) {
+    return false;
+  }
+  if (G_MAIN == nullptr) {
+    return false;
+  }
+  return bke::sculpt_layers::sync_group_object_membership_editable(*G_MAIN, *ob);
+}
+
+static void rna_Object_sculpt_layer_sync_group_name_get(PointerRNA *ptr, char *value)
+{
+  Object *ob = static_cast<Object *>(ptr->data);
+  bke::sculpt_layers::sync_group_display_name_get(*ob, value);
+}
+
+static int rna_Object_sculpt_layer_sync_group_name_length(PointerRNA *ptr)
+{
+  Object *ob = static_cast<Object *>(ptr->data);
+  char name[64];
+  bke::sculpt_layers::sync_group_display_name_get(*ob, name);
+  return int(strlen(name));
+}
+
+static void rna_Object_sculpt_layer_sync_group_uid_get(PointerRNA *ptr, char *value)
+{
+  const Object *ob = static_cast<const Object *>(ptr->data);
+  if (ob->sculpt_layer_sync_group_key == 0) {
+    value[0] = '\0';
+    return;
+  }
+  BLI_snprintf(value, 32, "%llu", unsigned long long(ob->sculpt_layer_sync_group_key));
+}
+
+static int rna_Object_sculpt_layer_sync_group_uid_length(PointerRNA *ptr)
+{
+  char uid[32];
+  rna_Object_sculpt_layer_sync_group_uid_get(ptr, uid);
+  return int(strlen(uid));
+}
+
+static void rna_Object_sculpt_layer_sync_group_name_set(PointerRNA *ptr, const char *value)
+{
+  Object *ob = static_cast<Object *>(ptr->data);
+  if (G_MAIN == nullptr || ob->sculpt_layer_sync_group == 0 ||
+      !bke::sculpt_layers::sync_group_object_membership_editable(*G_MAIN, *ob))
+  {
+    return;
+  }
+  BLI_strncpy_utf8(
+      ob->sculpt_layer_sync_group_name, value, sizeof(ob->sculpt_layer_sync_group_name));
+}
+
+static void rna_Object_sculpt_layer_sync_group_name_update(Main *bmain,
+                                                           Scene * /*scene*/,
+                                                           PointerRNA *ptr)
+{
+  Object *ob = static_cast<Object *>(ptr->data);
+  bke::sculpt_layers::sync_group_name_propagate(*bmain, *ob);
+  for (Object &other : bmain->objects) {
+    if (bke::sculpt_layers::object_in_same_sync_group(*ob, other)) {
+      WM_main_add_notifier(NC_OBJECT | ND_DRAW, &other);
+    }
+  }
+}
+
 static int rna_Object_mesh_symmetry_yz_editable(const PointerRNA *ptr, const char ** /*r_info*/)
 {
   const Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
@@ -3781,6 +3851,43 @@ static void rna_def_object(BlenderRNA *brna)
       prop,
       "Sculpt Layers REC Active",
       "True when sculpt layer recording mode is on and strokes go into the active layer");
+
+  /* Sculpt-layer sync group. */
+  prop = RNA_def_property(srna, "sculpt_layer_sync_group", PROP_INT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Sculpt Layer Sync Group",
+      "Display serial for this object's sculpt-layer sync group; membership uses "
+      "sculpt_layer_sync_group_uid. Changed only through sync-group operators");
+
+  prop = RNA_def_property(srna, "sculpt_layer_sync_group_uid", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_Object_sculpt_layer_sync_group_uid_get",
+                                "rna_Object_sculpt_layer_sync_group_uid_length",
+                                nullptr);
+  RNA_def_property_string_maxlength(prop, 32);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Sculpt Layer Sync Group UID",
+      "Persistent identity shared by every object in the same sculpt-layer sync group");
+
+  prop = RNA_def_property(srna, "sculpt_layer_sync_group_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_Object_sculpt_layer_sync_group_name_get",
+                                "rna_Object_sculpt_layer_sync_group_name_length",
+                                "rna_Object_sculpt_layer_sync_group_name_set");
+  RNA_def_property_string_maxlength(prop, /*MAX_NAME*/ 64);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_editable_func(prop, "rna_Object_sculpt_layer_sync_group_name_editable");
+  RNA_def_property_override_clear_flag(prop, PROPOVERRIDE_OVERRIDABLE_LIBRARY);
+  RNA_def_property_ui_text(
+      prop,
+      "Sculpt Layer Sync Group Name",
+      "Display name of the sculpt-layer sync group; renaming updates every local member");
+  RNA_def_property_update(
+      prop, NC_OBJECT | ND_DRAW, "rna_Object_sculpt_layer_sync_group_name_update");
 
   /* Shadow terminator. */
   prop = RNA_def_property(srna, "shadow_terminator_normal_offset", PROP_FLOAT, PROP_DISTANCE);

@@ -53,7 +53,9 @@
 #include "BLI_listbase.h"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_set.hh"
 #include "BLI_span.hh"
+#include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_task.hh"
 #include "BLI_vector.hh"
@@ -63,9 +65,12 @@
 #include "BKE_attribute.hh"
 #include "BKE_context.hh"
 #include "BKE_key.hh"
+#include "BKE_layer.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_multires.hh"
+#include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
@@ -76,17 +81,21 @@
 
 #include "DEG_depsgraph.hh"
 
+#include "ED_object.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
+#include "ED_select_utils.hh"
 #include "ED_undo.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
 
-#include "UI_interface_icons.hh"
+#include "UI_interface.hh"
+#include "UI_interface_layout.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "sculpt_intern.hh"
@@ -213,6 +222,56 @@ bool is_supported(const Object &object)
 {
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
   return pbvh && pbvh->type() != bke::pbvh::Type::BMesh;
+}
+
+/* Sync-group tree fan-out (add layer / add folder / move / drag-reorder): prefer a live sculpt
+ * session, but still allow mutating the layer tree on mesh data for other group members that are
+ * not in sculpt mode yet. Those members are recorded in \a r_tree_only and skip surface recompose
+ * / mask-edit gates. */
+static bool sync_group_tree_create_member_prepare(Depsgraph *depsgraph,
+                                                  const Object &active_ob,
+                                                  Object *member,
+                                                  wmOperator *op,
+                                                  const char *warn_prefix,
+                                                  bool &r_tree_only)
+{
+  r_tree_only = false;
+  if (member->type != OB_MESH || member->data == nullptr) {
+    return false;
+  }
+  if (active_ob.sculpt_layer_sync_group == 0 ||
+      !bke::sculpt_layers::object_in_same_sync_group(active_ob, *member))
+  {
+    return false;
+  }
+
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*member);
+  if (pbvh && pbvh->type() == bke::pbvh::Type::BMesh) {
+    BKE_reportf(op->reports,
+                RPT_WARNING,
+                "%s: skipping \"%s\" (dynamic topology)",
+                warn_prefix,
+                member->id.name + 2);
+    return false;
+  }
+
+  if (member->runtime->sculpt_session != nullptr) {
+    BKE_sculpt_update_object_for_edit(depsgraph, member, false);
+    if (!is_supported(*member)) {
+      bke::object::pbvh_ensure(*depsgraph, *member);
+    }
+  }
+  else if (member->mode & OB_MODE_SCULPT) {
+    BKE_object_sculpt_data_create(member);
+    bke::object::pbvh_ensure(*depsgraph, *member);
+  }
+
+  if (is_supported(*member)) {
+    return true;
+  }
+
+  r_tree_only = true;
+  return true;
 }
 
 bool in_use(const Object &object)
@@ -809,6 +868,209 @@ bool sync_multires_for_rna(Main &bmain, Scene * /*scene*/, Mesh &mesh, SculptLay
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, &object->id);
   WM_main_add_notifier(NC_GEOM | ND_DATA, &mesh.id);
   return true;
+}
+
+static void apply_layer_enabled_value_to_mesh(Main &bmain,
+                                              Mesh &mesh,
+                                              SculptLayer &layer,
+                                              const bool enable)
+{
+  const bool was_enabled = (layer.base.flag & SCULPT_LAYER_ENABLED) != 0;
+  if (was_enabled == enable) {
+    return;
+  }
+  if (layer.domain == SCULPT_LAYER_DOMAIN_VERT) {
+    if (mesh.runtime->edit_mesh != nullptr || mesh.verts_num == 0) {
+      return;
+    }
+    if (bke::sculpt_layers::is_stale(layer, mesh.verts_num)) {
+      return;
+    }
+  }
+  if (layer.domain == SCULPT_LAYER_DOMAIN_GRID) {
+    flush_pending_multires_base_for_mesh(bmain, mesh);
+  }
+  const float old_effective = effective(layer);
+  SET_FLAG_FROM_TEST(layer.base.flag, enable, SCULPT_LAYER_ENABLED);
+  if (layer.domain == SCULPT_LAYER_DOMAIN_VERT && mesh.key == nullptr) {
+    MutableSpan<float3> positions = mesh.vert_positions_for_write();
+    bke::sculpt_layers::apply_delta_mesh(layer, effective(layer) - old_effective, positions);
+    mesh.tag_positions_changed();
+  }
+}
+
+static void apply_layer_influence_value_to_mesh(Main &bmain,
+                                                Mesh &mesh,
+                                                SculptLayer &layer,
+                                                const float value)
+{
+  if (layer.domain == SCULPT_LAYER_DOMAIN_VERT) {
+    if (mesh.runtime->edit_mesh != nullptr || mesh.verts_num == 0) {
+      return;
+    }
+    if (bke::sculpt_layers::is_stale(layer, mesh.verts_num)) {
+      return;
+    }
+  }
+  if (layer.domain == SCULPT_LAYER_DOMAIN_GRID) {
+    flush_pending_multires_base_for_mesh(bmain, mesh);
+  }
+  const float old_effective = effective(layer);
+  layer.influence = value;
+  if (layer.domain == SCULPT_LAYER_DOMAIN_VERT && mesh.key == nullptr) {
+    MutableSpan<float3> positions = mesh.vert_positions_for_write();
+    bke::sculpt_layers::apply_delta_mesh(layer, effective(layer) - old_effective, positions);
+    mesh.tag_positions_changed();
+  }
+}
+
+static void apply_group_influence_value_to_mesh(Main &bmain,
+                                                Mesh &mesh,
+                                                SculptLayerGroup &group,
+                                                const float value)
+{
+  const Span<SculptLayer *> descendants = bke::sculpt_layers::layers(group);
+  for (SculptLayer *layer : descendants) {
+    if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+      flush_pending_multires_base_for_mesh(bmain, mesh);
+      break;
+    }
+  }
+  Vector<float> old_effective(descendants.size());
+  for (const int64_t i : descendants.index_range()) {
+    old_effective[i] = effective(*descendants[i]);
+  }
+  group.influence = value;
+  bke::sculpt_layers::resync_group_state(mesh);
+  bool tagged_positions = false;
+  for (const int64_t i : descendants.index_range()) {
+    SculptLayer &layer = *descendants[i];
+    if (layer.domain != SCULPT_LAYER_DOMAIN_VERT || mesh.key != nullptr ||
+        mesh.runtime->edit_mesh != nullptr || mesh.verts_num == 0 ||
+        bke::sculpt_layers::is_stale(layer, mesh.verts_num))
+    {
+      continue;
+    }
+    MutableSpan<float3> positions = mesh.vert_positions_for_write();
+    bke::sculpt_layers::apply_delta_mesh(
+        layer, effective(layer) - old_effective[i], positions);
+    tagged_positions = true;
+  }
+  if (tagged_positions) {
+    mesh.tag_positions_changed();
+  }
+}
+
+static void refresh_mesh_after_interactive_layer_change(Main &bmain, Mesh &mesh)
+{
+  if (flush_interactive_update(bmain, mesh)) {
+    return;
+  }
+  for (SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
+    if (layer->domain == SCULPT_LAYER_DOMAIN_GRID) {
+      if (sync_multires_for_rna(bmain, nullptr, mesh, *layer)) {
+        return;
+      }
+      break;
+    }
+  }
+  DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_GEOM | ND_DATA, &mesh.id);
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, nullptr);
+}
+
+void sync_group_propagate_layer_influence(Main &bmain,
+                                          Object &source_ob,
+                                          const SculptLayer &source_layer,
+                                          Depsgraph *depsgraph)
+{
+  if (source_layer.base.sync_uid == 0 || source_ob.sculpt_layer_sync_group == 0) {
+    return;
+  }
+  const float value = source_layer.influence;
+  const int sync_uid = source_layer.base.sync_uid;
+
+  for (Object *member_ob : sync_group_members(bmain, source_ob)) {
+    if (!bke::sculpt_layers::sync_group_is_valid_mesh_member(*member_ob)) {
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member_ob);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(member_mesh,
+                                                                                  sync_uid);
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+    if (member_layer == nullptr) {
+      continue;
+    }
+    if (depsgraph != nullptr && member_ob->runtime->sculpt_session != nullptr &&
+        is_supported(*member_ob))
+    {
+      if (bke::object::pbvh_get(*member_ob)->type() == bke::pbvh::Type::Grids) {
+        flush_pending_multires_base(*member_ob);
+      }
+      session_state_ensure(*member_ob);
+      member_layer->influence = value;
+      commit_layers_change(*depsgraph, *member_ob);
+    }
+    else {
+      apply_layer_influence_value_to_mesh(bmain, member_mesh, *member_layer, value);
+      refresh_mesh_after_interactive_layer_change(bmain, member_mesh);
+    }
+    WM_main_add_notifier(NC_OBJECT | ND_DRAW, member_ob);
+  }
+}
+
+void sync_group_propagate_group_influence(Main &bmain,
+                                          Object &source_ob,
+                                          const SculptLayerGroup &source_group)
+{
+  if (source_group.base.sync_uid == 0 || source_ob.sculpt_layer_sync_group == 0) {
+    return;
+  }
+  const float value = source_group.influence;
+  const int sync_uid = source_group.base.sync_uid;
+
+  for (Object *member_ob : sync_group_members(bmain, source_ob)) {
+    if (!bke::sculpt_layers::sync_group_is_valid_mesh_member(*member_ob)) {
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member_ob);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(member_mesh,
+                                                                                  sync_uid);
+    SculptLayerGroup *member_group = bke::sculpt_layers::node_as_group(member_node);
+    if (member_group == nullptr) {
+      continue;
+    }
+    apply_group_influence_value_to_mesh(bmain, member_mesh, *member_group, value);
+    refresh_mesh_after_interactive_layer_change(bmain, member_mesh);
+    WM_main_add_notifier(NC_OBJECT | ND_DRAW, member_ob);
+  }
+}
+
+void sync_group_propagate_node_name(Main &bmain,
+                                    Object &source_ob,
+                                    const SculptLayerTreeNode &source_node)
+{
+  if (source_node.sync_uid == 0 || source_ob.sculpt_layer_sync_group == 0) {
+    return;
+  }
+  const int sync_uid = source_node.sync_uid;
+
+  for (Object *member_ob : sync_group_members(bmain, source_ob)) {
+    if (!bke::sculpt_layers::sync_group_is_valid_mesh_member(*member_ob)) {
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member_ob);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(member_mesh,
+                                                                                  sync_uid);
+    if (member_node == nullptr) {
+      continue;
+    }
+    STRNCPY_UTF8(member_node->name, source_node.name);
+    bke::sculpt_layers::node_name_ensure_unique(*member_node);
+    DEG_id_tag_update(&member_mesh.id, ID_RECALC_GEOMETRY);
+    WM_main_add_notifier(NC_GEOM | ND_DATA, &member_mesh.id);
+    WM_main_add_notifier(NC_OBJECT | ND_DRAW, member_ob);
+  }
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -1446,6 +1708,308 @@ void stroke_ensure_rec_layer(const Scene &scene, Object &object)
   undo::push_end(object);
 }
 
+Vector<Object *> sync_group_members(const Main &bmain, const Object &active_ob)
+{
+  Vector<Object *> result;
+  if (active_ob.sculpt_layer_sync_group == 0) {
+    return result;
+  }
+  /* #ListBaseT::begin()/end() always yield a mutable element reference regardless of the
+   * container's own constness (see the TODO on #ListBaseT in DNA_listBase.h), and this file
+   * already relies on that to collect `Object *` from `bmain.objects` -- see
+   * #flush_pending_multires_base_for_mesh above. */
+  /* #layer_sync_group_create_exec refuses to *create* a group containing two objects that share
+   * one #Mesh, but nothing stops a member from being linked-duplicated (Alt+D) afterwards: the
+   * duplicate inherits #Object::sculpt_layer_sync_group and shares `data` with the original. Both
+   * would then resolve to the SAME #SculptLayerTreeNode under the same sync_uid, and
+   * #node_find_by_sync_uid's first-match resolution could no longer tell them apart -- silently
+   * turning an involutive fan-out (invert, toggle) into a no-op on the duplicate. Deduplicated by
+   * data pointer here, the single choke point every fan-out operator and the stroke-recording
+   * extension go through, rather than guarded at each of their call sites. Seeded with \a
+   * active_ob's own data so a member sharing data with the ACTIVE object is excluded too, not just
+   * members sharing data with each other. Same idiom as #layer_sync_group_create_exec's
+   * `object_data` set: #Set::add returns false when the key was already present. This function has
+   * no #wmOperator to report through, so a duplicate is skipped silently rather than reported. */
+  Set<const ID *> seen_data;
+  seen_data.add(static_cast<const ID *>(active_ob.data));
+  for (Object &ob : bmain.objects) {
+    if (&ob == &active_ob || !bke::sculpt_layers::object_in_same_sync_group(active_ob, ob)) {
+      continue;
+    }
+    if (!bke::sculpt_layers::sync_group_is_valid_mesh_member(ob)) {
+      continue;
+    }
+    if (seen_data.add(static_cast<const ID *>(ob.data))) {
+      result.append(&ob);
+    }
+  }
+  return result;
+}
+
+Vector<Object *> sync_group_raw_members(const Main &bmain, const Object &active_ob)
+{
+  Vector<Object *> result;
+  if (active_ob.sculpt_layer_sync_group == 0) {
+    return result;
+  }
+  for (Object &ob : bmain.objects) {
+    if (&ob == &active_ob || !bke::sculpt_layers::object_in_same_sync_group(active_ob, ob)) {
+      continue;
+    }
+    result.append(&ob);
+  }
+  return result;
+}
+
+Vector<Object *> fanout_targets(const Main &bmain, Object &active_ob)
+{
+  Vector<Object *> result;
+  result.append(&active_ob);
+  result.extend(sync_group_members(bmain, active_ob));
+  return result;
+}
+
+bool sync_group_all_targets_selected(bContext *C, Object &active_ob)
+{
+  Main *bmain = CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  const View3D *v3d = CTX_wm_view3d(C);
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+
+  for (Object *ob : fanout_targets(*bmain, active_ob)) {
+    Base *base = BKE_view_layer_base_find(view_layer, ob);
+    if (base == nullptr) {
+      continue;
+    }
+    if (!BASE_SELECTABLE(v3d, base)) {
+      continue;
+    }
+    if ((base->flag & BASE_SELECTED) == 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void sync_group_unlink_object(Main &bmain, Object &ob)
+{
+  bke::sculpt_layers::sync_group_detach_object(bmain, ob);
+}
+
+/* Sync-group remove scope: #AllSyncGroup removes matching layers on every member and keeps sync;
+ * #ActiveOnly removes only on the active object and unlinks it from the group afterward.
+ * Unsynced layers (#sync_uid == 0) always take the #ActiveOnly + unlink path. */
+enum class SyncScope : int {
+  AllSyncGroup = 0,
+  ActiveOnly = 1,
+};
+
+static const EnumPropertyItem sync_scope_items[] = {
+    {int(SyncScope::AllSyncGroup),
+     "ALL_SYNC_GROUP",
+     0,
+     "All Sync Group",
+     "Apply to every object in the sync group, including unselected members"},
+    {int(SyncScope::ActiveOnly),
+     "ACTIVE_ONLY",
+     0,
+     "Active Object Only",
+     "Apply only to the active object and remove it from the sync group"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static void sync_scope_rna_def(wmOperatorType *ot)
+{
+  PropertyRNA *prop = RNA_def_enum(ot->srna,
+                                   "sync_scope",
+                                   sync_scope_items,
+                                   int(SyncScope::AllSyncGroup),
+                                   "Sync Scope",
+                                   "Which sync-group members this operator affects");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+}
+
+static SyncScope sync_scope_get(const wmOperator *op)
+{
+  PropertyRNA *prop = RNA_struct_find_property(op->ptr, "sync_scope");
+  if (prop == nullptr) {
+    return SyncScope::AllSyncGroup;
+  }
+  return SyncScope(RNA_property_enum_get(op->ptr, prop));
+}
+
+static Vector<Object *> sync_scope_targets(Main &bmain, Object &active_ob, const SyncScope scope)
+{
+  if (scope == SyncScope::ActiveOnly) {
+    Vector<Object *> result;
+    result.append(&active_ob);
+    return result;
+  }
+  return fanout_targets(bmain, active_ob);
+}
+
+static void sync_scope_unlink_after_success(Main &bmain, Object &active_ob, const SyncScope scope)
+{
+  if (scope == SyncScope::ActiveOnly && active_ob.sculpt_layer_sync_group != 0) {
+    sync_group_unlink_object(bmain, active_ob);
+  }
+}
+
+struct SyncScopeChoiceDialog {
+  wmOperator *op;
+  std::string title;
+  std::string message;
+  bool enable_active_only = true;
+};
+
+static void sync_scope_choice_popup_cancel(bContext *C, void *user_data)
+{
+  SyncScopeChoiceDialog *data = static_cast<SyncScopeChoiceDialog *>(user_data);
+  if (data->op != nullptr) {
+    if (data->op->type->cancel != nullptr) {
+      data->op->type->cancel(C, data->op);
+    }
+    WM_operator_free(data->op);
+  }
+  MEM_delete(data);
+}
+
+static void sync_scope_choice_apply(bContext *C,
+                                    SyncScopeChoiceDialog *data,
+                                    ui::Block *block,
+                                    const SyncScope scope)
+{
+  RNA_enum_set(data->op->ptr, "sync_scope", int(scope));
+  wmOperator *op = data->op;
+  data->op = nullptr;
+  MEM_delete(data);
+
+  ui::popup_menu_retval_set(block, ui::RETURN_OK, true);
+  ui::popup_block_close(C, CTX_wm_window(C), block);
+  WM_operator_call_ex(C, op, true);
+}
+
+static void sync_scope_choice_all_cb(bContext *C, void *arg1, void *arg2)
+{
+  sync_scope_choice_apply(
+      C, static_cast<SyncScopeChoiceDialog *>(arg1), static_cast<ui::Block *>(arg2), SyncScope::AllSyncGroup);
+}
+
+static void sync_scope_choice_active_cb(bContext *C, void *arg1, void *arg2)
+{
+  sync_scope_choice_apply(
+      C, static_cast<SyncScopeChoiceDialog *>(arg1), static_cast<ui::Block *>(arg2), SyncScope::ActiveOnly);
+}
+
+static void sync_scope_choice_cancel_cb(bContext *C, void *arg1, void *arg2)
+{
+  SyncScopeChoiceDialog *data = static_cast<SyncScopeChoiceDialog *>(arg1);
+  ui::Block *block = static_cast<ui::Block *>(arg2);
+  if (data->op != nullptr) {
+    if (data->op->type->cancel != nullptr) {
+      data->op->type->cancel(C, data->op);
+    }
+    WM_operator_free(data->op);
+    data->op = nullptr;
+  }
+  MEM_delete(data);
+  ui::popup_menu_retval_set(block, ui::RETURN_CANCEL, true);
+  ui::popup_block_close(C, CTX_wm_window(C), block);
+}
+
+static ui::Block *sync_scope_choice_block_create(bContext *C, ARegion *region, void *user_data)
+{
+  SyncScopeChoiceDialog *data = static_cast<SyncScopeChoiceDialog *>(user_data);
+  const uiStyle *style = ui::style_get_dpi();
+  const short icon_size = 40 * UI_SCALE_FAC;
+  const int dialog_width = int(350.0f * UI_SCALE_FAC);
+
+  ui::Block *block = ui::block_begin(C, region, __func__, ui::EmbossType::Emboss);
+  ui::block_theme_style_set(block, ui::BLOCK_THEME_STYLE_POPUP);
+  ui::block_flag_disable(block, ui::BLOCK_LOOP);
+  ui::popup_dummy_panel_set(region, block, data->op->type->idname);
+  ui::block_flag_enable(block, ui::BLOCK_KEEP_OPEN | ui::BLOCK_NUMSELECT | ui::BLOCK_POPUP);
+
+  ui::Layout &layout = *ui::uiItemsAlertBox(
+      block, style, dialog_width + icon_size, ui::AlertIcon::Warning, icon_size);
+
+  ui::Layout &content = layout.column(false);
+  content.scale_y_set(0.75f);
+  ui::uiItemL_ex(&content, data->title, ICON_NONE, true, false);
+  content.separator(1.0f);
+  content.label(data->message, ICON_NONE);
+
+  layout.separator(1.5f);
+  ui::block_func_set(block, nullptr, nullptr, nullptr);
+
+  ui::Layout &buttons = layout.column(false);
+  buttons.scale_y_set(1.2f);
+  ui::Block *buttons_block = buttons.block();
+
+  ui::Button *all_but = ui::uiDefBut(buttons_block,
+                                     ui::ButtonType::But,
+                                     IFACE_("All Sync Group"),
+                                     0,
+                                     0,
+                                     0,
+                                     UI_UNIT_Y,
+                                     nullptr,
+                                     0,
+                                     0,
+                                     "");
+  ui::button_func_set(all_but, sync_scope_choice_all_cb, data, block);
+
+  ui::Button *active_but = ui::uiDefBut(buttons_block,
+                                        ui::ButtonType::But,
+                                        IFACE_("Active Object Only"),
+                                        0,
+                                        0,
+                                        0,
+                                        UI_UNIT_Y,
+                                        nullptr,
+                                        0,
+                                        0,
+                                        "");
+  ui::button_func_set(active_but, sync_scope_choice_active_cb, data, block);
+  if (!data->enable_active_only) {
+    ui::button_flag_enable(active_but, ui::BUT_DISABLED);
+  }
+
+  ui::Button *cancel_but = ui::uiDefBut(buttons_block,
+                                        ui::ButtonType::But,
+                                        IFACE_("Cancel"),
+                                        0,
+                                        0,
+                                        0,
+                                        UI_UNIT_Y,
+                                        nullptr,
+                                        0,
+                                        0,
+                                        "");
+  ui::button_func_set(cancel_but, sync_scope_choice_cancel_cb, data, block);
+  ui::button_flag_enable(cancel_but, ui::BUT_ACTIVE_DEFAULT);
+
+  ui::block_bounds_set_centered(block, 14 * UI_SCALE_FAC);
+  return block;
+}
+
+static wmOperatorStatus sync_scope_choice_dialog(bContext *C,
+                                                 wmOperator *op,
+                                                 const char *title,
+                                                 const char *message,
+                                                 const bool enable_active_only = true)
+{
+  SyncScopeChoiceDialog *data = MEM_new<SyncScopeChoiceDialog>(__func__);
+  data->op = op;
+  data->title = title;
+  data->message = message;
+  data->enable_active_only = enable_active_only;
+  ui::popup_block_ex(
+      C, sync_scope_choice_block_create, nullptr, sync_scope_choice_popup_cancel, data, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
 /* Which surface the stroke that is starting will actually land on, said once rather than on every
  * dab. #WM_global_reportf rather than #BKE_report because a stroke start has no #bContext and no
  * #wmOperator in scope; the status bar and the info log are reached all the same.
@@ -1971,6 +2535,18 @@ static bool layers_object_mode_poll(bContext *C)
   if (ob == nullptr || ob->type != OB_MESH) {
     return false;
   }
+  Main *bmain = CTX_data_main(C);
+  if (!BKE_id_is_editable(bmain, &ob->id) || ID_IS_LINKED(&ob->id)) {
+    return false;
+  }
+  if (ob->data != nullptr) {
+    ID *mesh_id = static_cast<ID *>(ob->data);
+    if (!BKE_id_is_editable(bmain, mesh_id) || ID_IS_LINKED(mesh_id) ||
+        ID_IS_OVERRIDE_LIBRARY(mesh_id))
+    {
+      return false;
+    }
+  }
   return (ob->mode & OB_MODE_SCULPT) || ob->mode == OB_MODE_OBJECT;
 }
 
@@ -2070,8 +2646,52 @@ static wmOperatorStatus layer_add_exec(bContext *C, wmOperator *op)
   if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather the eligible fan-out set BEFORE opening any undo bracket: #push_begin_multi_object and
+   * #finish_multi_object both dereference every listed object's #SculptSession unconditionally
+   * (session-state save, lazy #bke::object::pbvh_ensure) -- a crash for a sync-group member that
+   * was never taken into sculpt mode, which is an entirely ordinary state, since
+   * #sync_group_members applies no mode/session filter and #SCULPT_OT_layer_sync_group_create
+   * groups objects from OBJECT mode. Mirrors #edit_op_exec's own gather-then-bracket structure
+   * (`sculpt_face_set.cc`): filter into a local list first, brace only the survivors. The active
+   * object was already validated by #op_context_get above and is included unconditionally; each
+   * other member is brought up to date and gated exactly as #op_context_get gates the active
+   * object. */
+  Vector<Object *> eligible;
+  Set<Object *> tree_only_members;
+  eligible.append(ctx.object);
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    bool tree_only = false;
+    if (!sync_group_tree_create_member_prepare(ctx.depsgraph,
+                                               *ctx.object,
+                                               member,
+                                               op,
+                                               "Add Sculpt Layer",
+                                               tree_only))
+    {
+      continue;
+    }
+    if (tree_only) {
+      tree_only_members.add(member);
+      eligible.append(member);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      flush_pending_multires_base(*member);
+    }
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    eligible.append(member);
+  }
+
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   SculptLayer *layer = nullptr;
   if (ctx.grids) {
     /* Grid layers store data canonically at the max subdivision level. Pass totelem = 0 so no
@@ -2103,8 +2723,77 @@ static wmOperatorStatus layer_add_exec(bContext *C, wmOperator *op)
   if (rec_exemption_refresh(*ctx.object)) {
     commit_layers_change(*ctx.depsgraph, *ctx.object);
   }
-  undo::push_end(*ctx.object);
-  layers_ui_notify(C, *ctx.object);
+
+  /* Fan out: mint ONE shared #SculptLayerTreeNode::sync_uid for the active object's new layer and
+   * every sync-group member's new layer, so #node_find_by_sync_uid can resolve "the same" layer
+   * across the group. `eligible[0]` is always `ctx.object` (appended first, above), hence the
+   * `member == ctx.object` skip below rather than a `drop_front(1)`, which would silently
+   * misbehave if that ordering guarantee ever changed. */
+  if (ctx.object->sculpt_layer_sync_group != 0) {
+    const int new_sync_uid = bke::sculpt_layers::layer_sync_uid_unique(*bmain);
+    layer->base.sync_uid = new_sync_uid;
+
+    for (Object *member : eligible) {
+      if (member == ctx.object) {
+        continue;
+      }
+      if (tree_only_members.contains(member)) {
+        Mesh &member_mesh = mesh_of(*member);
+        SculptLayer *member_layer = bke::sculpt_layers::add(
+            member_mesh, DATA_("Layer"), domain_for(*member), element_count(*member));
+        member_layer->base.sync_uid = new_sync_uid;
+        undo::push_sculpt_layer_list_change(
+            *member, {}, Vector<int>({member_layer->base.uid}), false);
+        DEG_id_tag_update(&member_mesh.id, ID_RECALC_GEOMETRY);
+        continue;
+      }
+      /* Eligibility (#is_supported, #mask_edit_refuse_ccg_rebuild) and the multires pending-base
+       * flush already ran for every member of `eligible` in the gather pass above, before the undo
+       * bracket opened -- nothing here can fail or need skipping. */
+      const bool member_grids = bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids;
+      /* Mirrors #session_state_ensure's call above for the active object: it has to run before this
+       * member's layer set changes and before its REC exemption moves below, or the mesh_base
+       * captured here would fold an already-moved exemption's contribution permanently into the
+       * base (see #commit_layers_change's comment on capture ordering). */
+      session_state_ensure(*member);
+
+      Mesh &member_mesh = mesh_of(*member);
+      SculptLayer *member_layer = nullptr;
+      if (member_grids) {
+        const SculptSession *member_ss = member->runtime->sculpt_session;
+        const short totlvl = member_ss->multires_modifier ?
+                                 member_ss->multires_modifier->totlvl :
+                                 short(member_ss->subdiv_ccg ? member_ss->subdiv_ccg->level : 0);
+        member_layer = bke::sculpt_layers::add(
+            member_mesh, DATA_("Layer"), SCULPT_LAYER_DOMAIN_GRID, 0, totlvl);
+      }
+      else {
+        member_layer = bke::sculpt_layers::add(
+            member_mesh, DATA_("Layer"), domain_for(*member), element_count(*member));
+      }
+      member_layer->base.sync_uid = new_sync_uid;
+      undo::push_sculpt_layer_list_change(
+          *member, {}, Vector<int>({member_layer->base.uid}), false);
+      if (SculptSession *member_ss_mut = session_of(*member)) {
+        member_ss_mut->layers.rec_active = true;
+      }
+      if (rec_exemption_refresh(*member)) {
+        commit_layers_change(*ctx.depsgraph, *member);
+      }
+    }
+  }
+
+  Vector<Object *> eligible_finish;
+  eligible_finish.reserve(eligible.size());
+  for (Object *ob : eligible) {
+    if (!tree_only_members.contains(ob)) {
+      eligible_finish.append(ob);
+    }
+  }
+  undo::finish_multi_object(C, eligible_finish.as_span(), UpdateType::Position);
+  for (Object *member : eligible) {
+    layers_ui_notify(C, *member);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -2119,6 +2808,19 @@ void SCULPT_OT_layer_add(wmOperatorType *ot)
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
 }
+
+/* One sync-group member's counterpart set for a removal: the subset of the active object's
+ * `targets` that this member actually has a layer synced to. Resolved once, in the gather pass
+ * below, before the active object's own `targets` are freed by its own removal loop further
+ * down — #bke::sculpt_layers::remove deletes the node outright, so re-deriving these from
+ * `target->base.sync_uid` *after* that point (the idiom every other find-shaped fan-out in this
+ * file uses in its own second loop, since their targets are never removed) would dereference
+ * freed memory. Kept instead as pointers resolved into this member's own mesh, which nothing
+ * touches until this member's own turn in the fan-out loop below. */
+struct RemoveFanoutMember {
+  Object *object;
+  Vector<SculptLayer *> targets;
+};
 
 static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
 {
@@ -2141,6 +2843,111 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
   if (targets.is_empty()) {
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
+  const SyncScope sync_scope = sync_scope_get(op);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally with its full
+   * `targets` list; every other sync-group member is brought up to date and gated exactly as
+   * #op_context_get gates the active object, plus a find-shaped gate: of `targets`, only the
+   * subset with a synced counterpart on this member is ever removed there. A member with none of
+   * them synced is skipped entirely; a member missing only some of them still has the rest
+   * removed, with a warning naming what was left behind.
+   *
+   * Unlike #layer_add_exec / #layer_clear_exec this gather does NOT call
+   * #mask_edit_refuse_ccg_rebuild on a member: removal is one of the operators that *closes* an
+   * open mask-edit session rather than refusing on its account (see #layer_add_exec's own comment
+   * on that split, and #layer_group_delete_exec for the group-shaped equivalent), and the
+   * per-member loop below closes each member's own session unconditionally, exactly as the active
+   * object's own body does. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<RemoveFanoutMember> fanout_members;
+  for (Object *member : sync_scope_targets(*bmain, *ctx.object, sync_scope)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Remove Sculpt Layer: skipping \"%s\" (sculpt layers are not available for "
+                  "this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree,
+     * one target at a time; a target with #sync_uid == 0 (never fanned-out-created) simply misses
+     * on every member, degrading that one layer's removal to the single-object behavior it always
+     * had. The kind check is folded into the single #node_as_layer call below (it returns null for
+     * a group), rather than a separate two-step resolve-then-check as elsewhere in this file --
+     * #sync_uid should only ever link a layer to a layer, but the tree is user-editable, so the
+     * defensive intent is the same either way. */
+    Mesh &member_mesh = mesh_of(*member);
+    Vector<SculptLayer *> member_targets;
+    Vector<const char *> missing_names;
+    for (SculptLayer *target : targets) {
+      SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(
+          bke::sculpt_layers::node_find_by_sync_uid(member_mesh, target->base.sync_uid));
+      if (!member_layer) {
+        missing_names.append(target->base.name);
+        continue;
+      }
+      /* #node_find_by_sync_uid is first-match: two entries of the active object's own `targets`
+       * sharing the same non-zero #sync_uid would otherwise resolve to the SAME member layer
+       * twice, and the removal loop further down would double-free it (#bke::sculpt_layers::remove
+       * unlinks and #MEM_delete_void's the node; a second call on the same pointer is a
+       * use-after-free, not a no-op). No longer produced by duplication -- #bke::sculpt_layers::
+       * duplicate now clears the copy's #base.sync_uid and #layer_duplicate_exec re-mints a fresh
+       * shared one -- but still reachable from any file saved before that fix, where a
+       * duplicated-then-selected layer does share its original's sync_uid. Not treated as
+       * "missing": the active object itself carries the same collision without complaint, so a
+       * repeat is silently folded into the one entry already collected rather than warned about. */
+      if (!member_targets.contains(member_layer)) {
+        member_targets.append(member_layer);
+      }
+    }
+    if (member_targets.is_empty()) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Remove Sculpt Layer: skipping \"%s\" (no synced layers to remove)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (!missing_names.is_empty()) {
+      /* Not a skip: the rest of `targets` still has a synced counterpart here, and removing those
+       * is worth doing even though this member cannot keep the whole set in lock-step. */
+      std::string joined = missing_names[0];
+      for (const char *name : missing_names.as_span().drop_front(1)) {
+        joined += ", ";
+        joined += name;
+      }
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Remove Sculpt Layer: \"%s\" has no synced counterpart for: %s (its other "
+                  "synced layers are still removed)",
+                  member->id.name + 2,
+                  joined.c_str());
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers, before the removal below invalidates
+       * that. */
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    RemoveFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.targets = std::move(member_targets);
+    fanout_members.append(std::move(fanout_member));
+  }
+
   /* Read before the close below, which clears it. Zero when no session is open, which is the common
    * case. */
   const SculptSession *ss = session_of(*ctx.object);
@@ -2156,7 +2963,8 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
   mask_edit_end(*ctx.object);
   /* Derive the mesh base from the still-consistent pre-change state. */
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   if (session_uid != 0) {
     undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
   }
@@ -2178,9 +2986,93 @@ static wmOperatorStatus layer_remove_exec(bContext *C, wmOperator *op)
   }
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  /* Fan out: mirror the active object's own body exactly, scoped to each member and the subset of
+   * `targets` it actually had synced -- resolved above, before `targets` itself was freed by the
+   * active object's own removal loop just above. */
+  for (RemoveFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    Mesh &member_mesh = mesh_of(member);
+    /* Read before the close below, which clears it -- this member's own session, not the active
+     * object's. */
+    const SculptSession *member_ss = session_of(member);
+    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
+    mask_edit_exit_ui(C, member);
+    mask_edit_end(member);
+    session_state_ensure(member);
+    if (member_session_uid != 0) {
+      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
+    }
+    Vector<undo::SculptLayerUndoPayload> member_removed;
+    for (SculptLayer *layer : fanout_member.targets) {
+      member_removed.append(undo::sculpt_layer_payload_capture(
+          member_mesh, layer->base, undo::PayloadCapture::NodeRemoved));
+    }
+    for (SculptLayer *layer : fanout_member.targets) {
+      bke::sculpt_layers::remove(member_mesh, *layer);
+    }
+    undo::push_sculpt_layer_list_change(member, std::move(member_removed), {}, false);
+    commit_layers_change(*ctx.depsgraph, member);
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way #layer_add_exec
+   * requires it. */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   layers_ui_notify(C, *ctx.object);
+  sync_scope_unlink_after_success(*bmain, *ctx.object, sync_scope);
   return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus layer_remove_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (ctx.object->sculpt_layer_sync_group == 0) {
+    return layer_remove_exec(C, op);
+  }
+
+  const SculptLayer *active = bke::sculpt_layers::active_get(*ctx.mesh);
+  Vector<SculptLayer *> targets;
+  for (SculptLayer *layer : bke::sculpt_layers::layers(*ctx.mesh)) {
+    if ((layer->base.flag & SCULPT_LAYER_SELECTED) || layer == active) {
+      targets.append(layer);
+    }
+  }
+  if (targets.is_empty()) {
+    return OPERATOR_CANCELLED;
+  }
+
+  bool has_unsynced = false;
+  for (const SculptLayer *layer : targets) {
+    if (layer->base.sync_uid == 0) {
+      has_unsynced = true;
+      break;
+    }
+  }
+
+  if (has_unsynced) {
+    RNA_enum_set(op->ptr, "sync_scope", int(SyncScope::ActiveOnly));
+    return WM_operator_confirm_ex(
+        C,
+        op,
+        IFACE_("Remove Unsynced Sculpt Layer"),
+        IFACE_("Removing a layer that is not synced across the group breaks the sync link. "
+               "This object will be removed from the sync group."),
+        IFACE_("Remove and Unlink"),
+        ui::AlertIcon::Warning,
+        false);
+  }
+
+  return sync_scope_choice_dialog(
+      C,
+      op,
+      IFACE_("Remove Sculpt Layer (Sync Group)"),
+      IFACE_("Remove the synced layer from every object in the sync group and keep objects "
+             "linked, remove it only on this object and unlink this object from the group, or "
+             "cancel."));
 }
 
 void SCULPT_OT_layer_remove(wmOperatorType *ot)
@@ -2189,10 +3081,12 @@ void SCULPT_OT_layer_remove(wmOperatorType *ot)
   ot->idname = "SCULPT_OT_layer_remove";
   ot->description = "Remove the selected sculpt layers and their contribution";
   ot->exec = layer_remove_exec;
+  ot->invoke = layer_remove_invoke;
   ot->poll = layers_poll;
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
+  sync_scope_rna_def(ot);
 }
 
 static wmOperatorStatus layer_move_exec(bContext *C, wmOperator *op)
@@ -2218,26 +3112,155 @@ static wmOperatorStatus layer_move_exec(bContext *C, wmOperator *op)
   SculptLayerTreeNode *neighbour = (dir == 0) ? node.prev : node.next;
   if (!neighbour) {
     /* Already the first / last row of its folder. Stepping further would leave the folder,
-     * which is a reparent this operator does not do. */
+     * which is a reparent this operator does not do. No sync-group fan-out is attempted when the
+     * active object itself has nothing to do, matching the single-object behavior this operator
+     * always had. */
     return OPERATOR_FINISHED;
   }
+
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
+   * object, plus a find-shaped gate #layer_add_exec has no analog for: the member must actually
+   * hold a layer synced to the active one, AND that layer must itself have a neighbour to swap
+   * with in the SAME direction among ITS OWN siblings. A member's tree is independently ordered
+   * outside of #sync_uid identity, so its layer may already sit at the edge of its own folder even
+   * though the active object's does not -- that is not a failure to warn about, only nothing to do
+   * for this member, exactly like the active object's own early return just above, so such a
+   * member is simply left out of `eligible` without a report.
+   *
+   * No per-member #flush_pending_multires_base or #mask_edit_refuse_ccg_rebuild is needed here.
+   * #op_context_get already ran #flush_pending_multires_base for the active object (if grids)
+   * before this function's own body starts -- that is not skipped, it already happened -- and a
+   * SECOND run is not needed for the same reason a per-member run is not needed either: a
+   * same-folder reorder never calls #commit_layers_change and never recomposes the surface (see
+   * #layer_group_color_tag_exec's own comment for the same reasoning applied to a color tag), so
+   * nothing after that one flush ever invalidates the CCG-to-layer correspondence it established.
+   * #mask_edit_refuse_ccg_rebuild only refuses when a multires rebuild is imminent, and this
+   * operator triggers none. */
+  Vector<Object *> eligible;
+  Set<Object *> tree_only_members;
+  eligible.append(ctx.object);
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    bool tree_only = false;
+    if (!sync_group_tree_create_member_prepare(ctx.depsgraph,
+                                               *ctx.object,
+                                               member,
+                                               op,
+                                               "Move Sculpt Layer",
+                                               tree_only))
+    {
+      continue;
+    }
+    if (tree_only) {
+      tree_only_members.add(member);
+    }
+    /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree;
+     * the member's own active layer is unrelated. A zero #sync_uid (the active layer was never
+     * fanned-out-created) makes every member miss here by design -- see the function's own doc
+     * comment -- which degrades this operator to the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(member_mesh,
+                                                                                  node.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Move Sculpt Layer: skipping \"%s\" (no layer synced to the active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a layer to a layer, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    if (!bke::sculpt_layers::node_as_layer(member_node)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Move Sculpt Layer: skipping \"%s\" (the synced node is a group, not a layer)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Every node but the root sits in a folder, and the root is never a layer -- mirrors the
+     * active object's own assert above. */
+    BLI_assert(member_node->parent != nullptr);
+    const SculptLayerTreeNode *member_neighbour = (dir == 0) ? member_node->prev :
+                                                                member_node->next;
+    if (!member_neighbour) {
+      /* Already the first / last row of the member's OWN folder -- nothing to do here, not a
+       * failure (see the comment above this loop). */
+      continue;
+    }
+    eligible.append(member);
+  }
+
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   const int prev_uid_from = node_prev_uid(node);
   /* Up: land where the neighbour sat, i.e. after whatever the neighbour followed (null = the head
    * of the folder). Down: land directly after the neighbour. */
   SculptLayerTreeNode *after = (dir == 0) ? neighbour->prev : neighbour;
   bke::sculpt_layers::node_move_into(*ctx.mesh, node, parent, after);
-
   bke::sculpt_layers::active_set(*ctx.mesh, layer);
   tag_layer_overlays_dirty(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
   /* Move Up/Down never leaves the layer's folder, so both group fields carry the same uid. */
   const int parent_uid = parent.base.uid;
   Vector<undo::ReparentMove> moves = {
       {node.uid, prev_uid_from, node_prev_uid(node), parent_uid, parent_uid}};
   undo::push_sculpt_layer_reparent(*ctx.object, std::move(moves));
-  undo::push_end(*ctx.object);
-  /* Layer order does not affect the additive combination; UI refresh only. */
-  layers_ui_notify(C, *ctx.object);
+
+  for (Object *member : eligible) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Eligibility (#is_supported, sync_uid resolution, the kind check, and the neighbour check)
+     * already ran for every member of `eligible` in the gather pass above -- nothing here can fail
+     * or need skipping (mirrors #layer_add_exec's own second loop). Re-resolved rather than
+     * cached: nothing moves in this member's own tree until this loop reaches it, so the resolve
+     * is still first-match-correct (mirrors #layer_toggle_visibility_exec's own second loop).
+     *
+     * #active_set is deliberately NOT called for a member: which layer is "active" is local UI
+     * state, not synced data -- #layer_select_exec itself has no fan-out at all for the same
+     * reason. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(
+        bke::sculpt_layers::node_find_by_sync_uid(member_mesh, node.sync_uid));
+    SculptLayerTreeNode &member_node = member_layer->base;
+    /* Every node but the root sits in a folder, and the root is never a layer -- mirrors the
+     * assert in the gather pass above; re-asserted here since this is a fresh resolve, not the
+     * same pointer. */
+    BLI_assert(member_node.parent != nullptr);
+    SculptLayerGroup &member_parent = *member_node.parent;
+    SculptLayerTreeNode *member_neighbour = (dir == 0) ? member_node.prev : member_node.next;
+    const int member_prev_uid_from = node_prev_uid(member_node);
+    SculptLayerTreeNode *member_after = (dir == 0) ? member_neighbour->prev : member_neighbour;
+    bke::sculpt_layers::node_move_into(member_mesh, member_node, member_parent, member_after);
+    tag_layer_overlays_dirty(*member);
+    const int member_parent_uid = member_parent.base.uid;
+    Vector<undo::ReparentMove> member_moves = {{member_node.uid,
+                                                 member_prev_uid_from,
+                                                 node_prev_uid(member_node),
+                                                 member_parent_uid,
+                                                 member_parent_uid}};
+    undo::push_sculpt_layer_reparent(*member, std::move(member_moves));
+    if (tree_only_members.contains(member)) {
+      DEG_id_tag_update(&member_mesh.id, ID_RECALC_GEOMETRY);
+    }
+  }
+
+  /* Order does not affect the additive combination and nothing here reads or writes the runtime
+   * mesh base or recomposes the surface, so #finish_multi_object is not used to close the step --
+   * it would call #flush_update_done per object, which does work (PBVH ensure, viewport/geometry
+   * tags) the single-object do-path never performed for a reorder. #push_end_all_ex(false, true)
+   * is the same close #finish_multi_object itself uses internally, minus that per-object flush
+   * loop -- the documented multi-object idiom in `sculpt_undo.hh` for exactly this case, and the
+   * same one #layer_group_color_tag_exec already relies on for the same reasoning. */
+  undo::push_end_all_ex(false, true);
+  for (Object *member : eligible) {
+    layers_ui_notify(C, *member);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -2276,6 +3299,14 @@ static SculptLayerGroup *group_row_lookup(Mesh &mesh, const int uid)
   return bke::sculpt_layers::node_as_group(bke::sculpt_layers::node_find_by_uid(mesh, uid));
 }
 
+static SculptLayer *layer_row_lookup(Mesh &mesh, const int uid)
+{
+  if (uid == 0) {
+    return bke::sculpt_layers::active_get(mesh);
+  }
+  return bke::sculpt_layers::node_as_layer(bke::sculpt_layers::node_find_by_uid(mesh, uid));
+}
+
 /* Every selected node at or below \a group, depth-first in tree order — which is exactly the order
  * the rows are drawn in, so a batch move keeps the selection's mutual order.
  *
@@ -2307,6 +3338,21 @@ static void selected_nodes_gather(const SculptLayerGroup &group,
     }
   }
 }
+
+/* One sync-group member's resolved move for #layer_move_to_exec, gathered once before any
+ * mutation runs (mirrors #RemoveFanoutMember's own reasoning): #dst / #cursor / #moved are
+ * resolved from THIS member's own tree via #sync_uid, and #moves carries every
+ * #undo::ReparentMove field but \a prev_to, which is only known once the move itself has actually
+ * run. Nothing here is re-derived after the fact -- #sync_group_members dedups fan-out targets by
+ * #Object::data, so no two members ever share a mesh, but a member's OWN #moved pointers would
+ * still go stale the moment its OWN #node_move_into calls start relinking them. */
+struct MoveToFanoutMember {
+  Object *object;
+  SculptLayerGroup *dst;
+  SculptLayerTreeNode *cursor;
+  Vector<SculptLayerTreeNode *> moved;
+  Vector<undo::ReparentMove> moves;
+};
 
 static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
 {
@@ -2410,6 +3456,179 @@ static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
     moves.append(move);
   }
 
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
+   * object -- including the grids #flush_pending_multires_base gate #op_context_get itself already
+   * ran for the active object, mirrored per-member below immediately before
+   * #mask_edit_refuse_ccg_rebuild, exactly as #layer_add_exec / #layer_remove_exec /
+   * #layer_clear_exec do: unlike #layer_move_exec, this operator DOES call #commit_layers_change
+   * (a folder-boundary move can change what composes), so a pending base edit really would be
+   * invalidated by the move below if it were not flushed first -- plus find-shaped gates
+   * #layer_add_exec has no analog for: the member must resolve BOTH the destination and every one
+   * of the moved source nodes via #sync_uid before it participates at all. Unlike
+   * #layer_remove_exec's per-target degradation, a member missing even one of these is skipped
+   * ENTIRELY with a named warning, never partially applied -- a move whose destination or source
+   * set differs from what the active object did is not a smaller version of the same edit, it is
+   * a different edit (see this task's own brief). */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Set<Object *> tree_only_members;
+  Vector<MoveToFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    bool tree_only = false;
+    if (!sync_group_tree_create_member_prepare(ctx.depsgraph,
+                                               *ctx.object,
+                                               member,
+                                               op,
+                                               "Move Sculpt Layer To",
+                                               tree_only))
+    {
+      continue;
+    }
+    if (tree_only) {
+      tree_only_members.add(member);
+    }
+    Mesh &member_mesh = mesh_of(*member);
+
+    /* Resolve the destination the same way the source nodes are resolved below: via #sync_uid,
+     * since #anchor_uid is a raw #SculptLayerTreeNode::uid that only means something inside the
+     * tree it was read from. A null #anchor stands for the top level, i.e. this member's own
+     * root, which always resolves without a lookup -- mirroring how #anchor itself was normalized
+     * above. A non-null #anchor whose #sync_uid is 0 (never fanned-out-created) makes every member
+     * miss here by design, degrading to the single-object behavior this operator always had. */
+    SculptLayerTreeNode *member_anchor = nullptr;
+    if (anchor) {
+      member_anchor = bke::sculpt_layers::node_find_by_sync_uid(member_mesh, anchor->sync_uid);
+      if (!member_anchor) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Move Sculpt Layer To: skipping \"%s\" (no destination synced to the active "
+                    "one)",
+                    member->id.name + 2);
+        continue;
+      }
+    }
+    SculptLayerGroup *member_dst = nullptr;
+    SculptLayerTreeNode *member_cursor = nullptr;
+    if (location == MoveLocation::Into) {
+      member_dst = member_anchor ? bke::sculpt_layers::node_as_group(member_anchor) :
+                                    bke::sculpt_layers::root_group(member_mesh);
+      if (!member_dst) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Move Sculpt Layer To: skipping \"%s\" (the synced destination is a layer, "
+                    "not a group)",
+                    member->id.name + 2);
+        continue;
+      }
+      member_cursor = static_cast<SculptLayerTreeNode *>(member_dst->children.last);
+    }
+    else {
+      member_dst = member_anchor ? member_anchor->parent :
+                                    bke::sculpt_layers::root_group(member_mesh);
+      member_cursor = (location == MoveLocation::After) ?
+                          member_anchor :
+                          (member_anchor ? member_anchor->prev : nullptr);
+    }
+
+    /* Resolve every moved source node via #sync_uid, one at a time; missing even one skips the
+     * whole member (see the comment above this loop). */
+    Vector<SculptLayerTreeNode *> member_moved;
+    Vector<undo::ReparentMove> member_moves;
+    member_moved.reserve(moved.size());
+    member_moves.reserve(moved.size());
+    bool member_missing_source = false;
+    for (const SculptLayerTreeNode *node : moved) {
+      SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(member_mesh,
+                                                                                    node->sync_uid);
+      if (!member_node) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Move Sculpt Layer To: skipping \"%s\" (no layer or group synced to \"%s\")",
+                    member->id.name + 2,
+                    node->name);
+        member_missing_source = true;
+        break;
+      }
+      /* #node_find_by_sync_uid is first-match: two entries of `moved` sharing the same non-zero
+       * #sync_uid would otherwise resolve to the SAME member node twice, and the chain loop below
+       * would try to move it twice as if it were two distinct rows. Reachable the same way
+       * #layer_remove_exec's own dedup comment explains: no longer produced by duplication, but
+       * still present in any file saved before #bke::sculpt_layers::duplicate started clearing the
+       * copy's #base.sync_uid. Not treated as "missing": the active object itself carries the same
+       * collision without complaint, so a repeat is silently folded into the one entry already
+       * collected. */
+      if (member_moved.contains(member_node)) {
+        continue;
+      }
+      member_moved.append(member_node);
+      undo::ReparentMove member_move;
+      member_move.uid = member_node->uid;
+      member_move.prev_from = node_prev_uid(*member_node);
+      member_move.group_from = node_parent_uid(*member_node);
+      member_move.group_to = member_dst->base.uid;
+      member_moves.append(member_move);
+    }
+    if (member_missing_source) {
+      continue;
+    }
+
+    /* Mirrors the active object's own self-containment check above, evaluated against THIS
+     * member's own tree: the active object's tree not rejecting a move is no guarantee a
+     * sync-group member's independently-ordered tree would not, since the two are only linked by
+     * #sync_uid identity, not by shared structure. */
+    bool member_self_contained = false;
+    for (const SculptLayerTreeNode *member_node : member_moved) {
+      const SculptLayerGroup *member_group = bke::sculpt_layers::node_as_group(member_node);
+      if (!member_group) {
+        continue;
+      }
+      if (member_dst == member_group ||
+          bke::sculpt_layers::node_is_descendant_of(member_dst->base, *member_group))
+      {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Move Sculpt Layer To: skipping \"%s\" (would move a group into itself)",
+                    member->id.name + 2);
+        member_self_contained = true;
+        break;
+      }
+    }
+    if (member_self_contained) {
+      continue;
+    }
+
+    if (!tree_only) {
+      if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+        /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+         * while the live CCG still matches the stored layers, before the move below invalidates
+         * that. */
+        flush_pending_multires_base(*member);
+      }
+      if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+        continue;
+      }
+    }
+
+    eligible.append(member);
+    MoveToFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.dst = member_dst;
+    fanout_member.cursor = member_cursor;
+    fanout_member.moved = std::move(member_moved);
+    fanout_member.moves = std::move(member_moves);
+    fanout_members.append(std::move(fanout_member));
+  }
+
+  session_state_ensure(*ctx.object);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   /* Chain: the first moved node lands next to the drop anchor, every following one right after
    * the previously placed one, which preserves the selection's mutual order. One cursor for both
    * kinds, because there is one list. */
@@ -2426,16 +3645,56 @@ static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
   for (const int64_t i : moved.index_range()) {
     moves[i].prev_to = node_prev_uid(*moved[i]);
   }
-
-  session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
   undo::push_sculpt_layer_reparent(*ctx.object, std::move(moves));
   /* A move across a folder boundary changes what is visible (the destination folder may be
    * disabled), so unlike a plain same-folder reorder this is not a UI-only refresh. */
   group_cascade_resync_with_undo(*ctx.object, mesh);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
-  layers_ui_notify(C, *ctx.object);
+
+  for (MoveToFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    Mesh &member_mesh = mesh_of(member);
+    const bool member_tree_only = tree_only_members.contains(&member);
+    if (!member_tree_only) {
+      /* Mirrors #layer_add_exec's own per-member call: has to run before this member's tree changes
+       * below, or the mesh_base captured here would fold an already-moved state into the base (see
+       * #commit_layers_change's comment on capture ordering). */
+      session_state_ensure(member);
+    }
+    SculptLayerTreeNode *member_cursor = fanout_member.cursor;
+    for (SculptLayerTreeNode *member_node : fanout_member.moved) {
+      if (member_cursor != member_node) {
+        bke::sculpt_layers::node_move_into(member_mesh, *member_node, *fanout_member.dst,
+                                            member_cursor);
+      }
+      member_cursor = member_node;
+    }
+    for (const int64_t i : fanout_member.moved.index_range()) {
+      fanout_member.moves[i].prev_to = node_prev_uid(*fanout_member.moved[i]);
+    }
+    undo::push_sculpt_layer_reparent(member, std::move(fanout_member.moves));
+    group_cascade_resync_with_undo(member, member_mesh);
+    if (member_tree_only) {
+      DEG_id_tag_update(&member_mesh.id, ID_RECALC_GEOMETRY);
+    }
+    else {
+      commit_layers_change(*ctx.depsgraph, member);
+    }
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface on sculpt-ready members; tree-only
+   * members only had their DNA tree updated. */
+  Vector<Object *> eligible_finish;
+  eligible_finish.reserve(eligible.size());
+  for (Object *ob : eligible) {
+    if (!tree_only_members.contains(ob)) {
+      eligible_finish.append(ob);
+    }
+  }
+  undo::finish_multi_object(C, eligible_finish.as_span(), UpdateType::Position);
+  for (Object *member : eligible) {
+    layers_ui_notify(C, *member);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -2474,6 +3733,18 @@ void SCULPT_OT_layer_move_to(wmOperatorType *ot)
                "Where to place the moved items relative to the anchor");
 }
 
+/* Both find-shaped and create-shaped: the source is looked up per member by #sync_uid the way
+ * #layer_clear_exec looks its target up, but what the operator produces is a *new* node on every
+ * participant, the way #layer_add_exec does.
+ *
+ * This is also where a live bug was fixed. #bke::sculpt_layers::duplicate used to hand back a copy
+ * that still carried the source's #SculptLayerTreeNode::sync_uid (a blind struct copy), so one mesh
+ * could end up holding two nodes under one sync_uid -- the collision #layer_remove_exec and
+ * #layer_move_to_exec each had to defend against, since #node_find_by_sync_uid is first-match. That
+ * is now cleared at the source, in #bke::sculpt_layers::duplicate itself, so every caller gets a
+ * copy with no cross-object identity at all; this operator is the one place that re-establishes it,
+ * minting a single fresh shared value only when the duplication actually fans out across a sync
+ * group. An ungrouped object's duplicate keeps sync_uid 0 -- it is nobody else's layer. */
 static wmOperatorStatus layer_duplicate_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -2487,13 +3758,116 @@ static wmOperatorStatus layer_duplicate_exec(bContext *C, wmOperator *op)
   if (!src) {
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
+   * object, plus a find-shaped gate #layer_add_exec has no analog for: the member must actually
+   * hold a layer synced to the one being duplicated. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Duplicate Sculpt Layer: skipping \"%s\" (sculpt layers are not available for "
+                  "this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree;
+     * the member's own active layer is unrelated. A zero #sync_uid (the source layer was never
+     * fanned-out-created, or is itself an earlier duplicate) makes every member miss here by
+     * design -- see the function's own doc comment -- which degrades this operator to the
+     * single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, src->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Duplicate Sculpt Layer: skipping \"%s\" (no layer synced to the active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a layer to a layer, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    if (!bke::sculpt_layers::node_as_layer(member_node)) {
+      BKE_reportf(
+          op->reports,
+          RPT_WARNING,
+          "Duplicate Sculpt Layer: skipping \"%s\" (the synced node is a group, not a layer)",
+          member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers. */
+      flush_pending_multires_base(*member);
+    }
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    eligible.append(member);
+  }
+
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   SculptLayer *copy = bke::sculpt_layers::duplicate(*ctx.mesh, *src);
   undo::push_sculpt_layer_list_change(*ctx.object, {}, Vector<int>({copy->base.uid}), false);
   /* The duplicated contribution doubles up in the combined result. */
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  /* Fan out: mint ONE shared #SculptLayerTreeNode::sync_uid for the active object's copy and every
+   * member's copy, so #node_find_by_sync_uid can resolve "the same" copy across the group -- the
+   * same mint-once-stamp-everywhere pattern as #layer_add_exec, overwriting the 0 that
+   * #bke::sculpt_layers::duplicate leaves on every copy. Skipped entirely when nothing else is
+   * eligible, so a duplicate that is not part of a fan-out keeps sync_uid 0 rather than consuming a
+   * value and claiming an identity no other object shares. `eligible[0]` is always `ctx.object`
+   * (appended first, above), hence the `member == ctx.object` skip below rather than a
+   * `drop_front(1)`, which would silently misbehave if that ordering guarantee ever changed. */
+  if (eligible.size() > 1) {
+    const int new_sync_uid = bke::sculpt_layers::layer_sync_uid_unique(*bmain);
+    copy->base.sync_uid = new_sync_uid;
+
+    for (Object *member : eligible) {
+      if (member == ctx.object) {
+        continue;
+      }
+      /* Eligibility (#is_supported, sync_uid resolution, #mask_edit_refuse_ccg_rebuild) and the
+       * multires pending-base flush already ran for every member of `eligible` in the gather pass
+       * above -- nothing here can fail or need skipping (mirrors #layer_add_exec's own second
+       * loop). Re-resolved rather than carried forward, as in #layer_clear_exec: this operator
+       * frees no node, and the copy each iteration inserts carries sync_uid 0 until it is stamped
+       * below, so the lookup cannot start matching a copy instead of a source. */
+      session_state_ensure(*member);
+      Mesh &member_mesh = mesh_of(*member);
+      SculptLayer *member_src = bke::sculpt_layers::node_as_layer(
+          bke::sculpt_layers::node_find_by_sync_uid(member_mesh, src->base.sync_uid));
+      SculptLayer *member_copy = bke::sculpt_layers::duplicate(member_mesh, *member_src);
+      member_copy->base.sync_uid = new_sync_uid;
+      undo::push_sculpt_layer_list_change(
+          *member, {}, Vector<int>({member_copy->base.uid}), false);
+      commit_layers_change(*ctx.depsgraph, *member);
+    }
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way #layer_add_exec
+   * requires it. */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -2777,6 +4151,26 @@ static bool node_chain_carries_mask(const SculptLayerTreeNode &node)
          }) != nullptr;
 }
 
+/* One sync-group member's resolved participants for a merge-down: the layer synced to the active
+ * object's active layer, and the sibling directly below THAT layer in the member's OWN tree.
+ *
+ * #below carries no sync identity of its own. It is found positionally, by #layer_below on the
+ * member's own tree, the same way #layer_move_exec derives its neighbour and #layer_move_to_exec
+ * its insertion cursor -- so a member may merge a different pair of rows than the active object
+ * did. That is expected rather than an error: trees are independently ordered outside of
+ * #sync_uid identity.
+ *
+ * Resolved once, in the gather pass, and carried forward as pointers rather than re-derived in the
+ * fan-out loop -- the same reason #RemoveFanoutMember exists: the merge frees #active with
+ * #bke::sculpt_layers::remove, so re-resolving by #sync_uid after any member's turn would
+ * dereference freed memory. Safe because #fanout_targets dedups by #Object::data, so no two
+ * members ever share a #Mesh and nothing touches this member's tree until its own turn below. */
+struct MergeDownFanoutMember {
+  Object *object;
+  SculptLayer *active;
+  SculptLayer *below;
+};
+
 static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -2853,8 +4247,200 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  Main *bmain = CTX_data_main(C);
+  const SyncScope sync_scope = sync_scope_get(op);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object was already validated above and is included
+   * unconditionally; every other sync-group member is brought up to date and gated exactly as
+   * #op_context_get gates the active object, and then re-runs EVERY one of this operator's own
+   * guards against ITS OWN pair of participants.
+   *
+   * Re-running them is the whole point. The guards ask about weight masks, folder visibility and
+   * the REC exemption -- all per-object state that #sync_uid identity says nothing about -- so
+   * carrying the active object's verdict over to a member could fold a stale mask into that
+   * member's data, zero a hidden folder's content, or move its surface under an armed REC. Every
+   * per-object value the fold consumes (#MaskLayout, the element count, `stop_above`, the
+   * masked-ness) is therefore recomputed from the member itself, never reused.
+   *
+   * A member that fails a guard is skipped with a warning naming it and the guard, not a hard
+   * cancel: one member's local problem must not abort the merge on all the others. The ACTIVE
+   * object's own guards above still hard-cancel the whole operator, unchanged -- it is the row the
+   * user pressed, so refusing it refuses the operation.
+   *
+   * The per-member #flush_pending_multires_base mirrors the one #op_context_get already ran for the
+   * active object: this merge rewrites layer data and removes a node from the layer set, so a
+   * pending base edit really would be stranded if it were not consumed while the live CCG still
+   * matches the stored layers. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<MergeDownFanoutMember> fanout_members;
+  for (Object *member : sync_scope_targets(*bmain, *ctx.object, sync_scope)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Down: skipping \"%s\" (sculpt layers are not available for "
+                  "this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree;
+     * the member's own active layer is unrelated. A zero #sync_uid (the active layer was never
+     * fanned-out-created) makes every member miss here by design, degrading this operator to the
+     * single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, active->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Down: skipping \"%s\" (no layer synced to the active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a layer to a layer, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    SculptLayer *member_active = bke::sculpt_layers::node_as_layer(member_node);
+    if (!member_active) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Down: skipping \"%s\" (the synced node is a group, not a "
+                  "layer)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* The member's own neighbour, not a second synced node -- see #MergeDownFanoutMember. Its
+     * absence is this member's own version of the early-out at the top of this function. */
+    SculptLayer *member_below = layer_below(*member_active);
+    if (!member_below) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Down: skipping \"%s\" (no layer below to merge into)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Where the destination itself carries cross-object identity, the positional answer must agree
+     * with it. #layer_move_exec needs no such check -- a reorder that lands differently in a
+     * differently-ordered tree destroys nothing -- but this operator FREES a node, so a member
+     * whose sibling order differs would silently merge and destroy the wrong pair of layers, with
+     * nothing in the UI to say it happened. A zero #sync_uid means the destination was never
+     * fanned-out-created and has no counterpart to compare against, so the purely positional
+     * neighbour stands, exactly as it did before this check existed. */
+    if (below->base.sync_uid != 0 && member_below->base.sync_uid != below->base.sync_uid) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Down: skipping \"%s\" (the layer below '%s' is not the "
+                  "synced counterpart of '%s')",
+                  member->id.name + 2,
+                  member_active->base.name,
+                  below->base.name);
+      continue;
+    }
+    /* The active object's own disabled-folder guard, re-asked of this member's pair: folder
+     * visibility is per-object state, so the active object's participants being visible says
+     * nothing about this member's. */
+    if ((member_active->base.flag & SCULPT_LAYER_GROUP_HIDDEN) ||
+        (member_below->base.flag & SCULPT_LAYER_GROUP_HIDDEN))
+    {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Down: skipping \"%s\" (its layers are inside a disabled "
+                  "group)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers, before the merge below invalidates
+       * that. Placed after the cheap gates so a member that is skipped anyway is left alone. */
+      flush_pending_multires_base(*member);
+    }
+    /* The active object's own pair of session guards, in the same order and for the same reasons.
+     * #mask_edit_end has to run before every mask-reading guard below, exactly as it does above:
+     * it settles an open session's weights back onto the node, and the guards must see the settled
+     * mask rather than the pre-session snapshot #SculptLayerTreeNode::mask still holds. */
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    mask_edit_end(*member);
+
+    const SculptLayerGroup *member_stop_above = member_below->base.parent;
+    const int64_t member_mask_elem_num = mask_layout_for_object(*member).totelem;
+    /* #merge_refuse_foreign_chain's own condition, spelled out rather than called: that helper
+     * reports a hard RPT_ERROR, and a member's local problem has to degrade to a named skip
+     * instead of a message that reads like the whole operator failed. As on the active object it
+     * can never fire -- #layer_below walks the sibling chain, so the pair is always in one folder
+     * -- and it is kept for the same reason: a future change to how the neighbour is found must
+     * not quietly lose the guard. */
+    if (member_active->base.parent != member_below->base.parent &&
+        bke::sculpt_layers::find_ancestor(member_below->base.parent,
+                                          [](const SculptLayerGroup &group) {
+                                            return group.base.mask != nullptr;
+                                          }) != nullptr)
+    {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Down: skipping \"%s\" (its layers sit in different folders "
+                  "and the target's folder carries a weight mask)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Asked of this member's own element count: a mask that describes the active object's mesh
+     * says nothing about whether it describes this one. */
+    const std::array<SculptLayer *, 2> member_participants = {member_active, member_below};
+    const SculptLayerTreeNode *member_stale = nullptr;
+    for (const SculptLayer *participant : member_participants) {
+      if (const SculptLayerTreeNode *stale = find_stale_mask_in_fold(
+              participant->base, member_stop_above, member_mask_elem_num))
+      {
+        member_stale = stale;
+        break;
+      }
+    }
+    if (member_stale) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Down: skipping \"%s\" (the weight mask of '%s' does not "
+                  "match its mesh)",
+                  member->id.name + 2,
+                  member_stale->name);
+      continue;
+    }
+    /* See the active object's own guard above: an armed REC makes the composite ignore the layer's
+     * masks, so folding them in would move this member's surface right now. */
+    if ((node_chain_carries_mask(member_active->base) ||
+         node_chain_carries_mask(member_below->base)) &&
+        ((member_active->base.flag | member_below->base.flag) & SCULPT_LAYER_REC_EXEMPT))
+    {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Down: skipping \"%s\" (disarm REC before merging layers that "
+                  "carry a weight mask)",
+                  member->id.name + 2);
+      continue;
+    }
+
+    eligible.append(member);
+    MergeDownFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.active = member_active;
+    fanout_member.below = member_below;
+    fanout_members.append(fanout_member);
+  }
+
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   /* Snapshot the surviving layer's pre-merge metadata and data for undo. */
   undo::push_sculpt_layer_data(*ctx.object, *below);
 
@@ -2914,7 +4500,112 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
    * follows. */
   rec_exemption_refresh(*ctx.object);
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
-  undo::push_end(*ctx.object);
+
+  /* Fan out: mirror the active object's own body exactly, scoped to each member's pair -- resolved
+   * in the gather pass, before anything was freed. Every per-object quantity is recomputed from
+   * the member rather than reused from `ctx`: a member's PBVH type, element count, mask layout,
+   * folder chain and mask presence are all independent of the active object's, and folding the
+   * active object's numbers into a member's data would corrupt that member's mesh.
+   *
+   * Recomputing here rather than caching it in #MergeDownFanoutMember is safe for the same reason
+   * the resolved pointers stay valid: #fanout_targets dedups by #Object::data, so nothing between
+   * the gather pass and this member's turn has touched this member's mesh. */
+  bool any_masked_anywhere = any_masked;
+  for (const MergeDownFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    Mesh &member_mesh = mesh_of(member);
+    SculptLayer &member_active = *fanout_member.active;
+    SculptLayer &member_below = *fanout_member.below;
+    /* Eligibility, both session guards and every one of this operator's own guards already ran for
+     * every entry of `fanout_members` in the gather pass above, before the undo bracket opened --
+     * nothing here can fail or need skipping (mirrors #layer_add_exec's own second loop). */
+    const bool member_grids = bke::object::pbvh_get(member)->type() == bke::pbvh::Type::Grids;
+    /* Mirrors #session_state_ensure's call above for the active object: it has to run before this
+     * member's own data changes, or the mesh_base captured here would fold an already-merged state
+     * into the base (see #commit_layers_change's comment on capture ordering). */
+    session_state_ensure(member);
+    undo::push_sculpt_layer_data(member, member_below);
+
+    const SculptLayerGroup *member_stop_above = member_below.base.parent;
+    const MaskLayout member_layout = mask_layout_for_object(member);
+    const int64_t member_mask_elem_num = member_layout.totelem;
+    const std::array<SculptLayer *, 2> member_participants = {&member_active, &member_below};
+    const bool member_any_masked = node_chain_carries_mask(member_active.base) ||
+                                   node_chain_carries_mask(member_below.base);
+    any_masked_anywhere |= member_any_masked;
+
+    const int64_t member_n = member_grids ?
+                                 std::max(member_active.totelem, member_below.totelem) :
+                                 element_count(member);
+    MutableSpan<float3> member_below_data = bke::sculpt_layers::data_ensure(member_below, member_n);
+    if (member_grids && member_active.data && member_below.level != member_active.level) {
+      member_below.level = member_active.level;
+    }
+    const Array<float> member_combined =
+        (policy == MergeMaskPolicy::Combine && member_any_masked) ?
+            merge_combined_mask(
+                member_participants, member_below, member_stop_above, member_mask_elem_num) :
+            Array<float>();
+
+    const float member_active_eff = effective(member_active);
+    const float member_below_eff = effective(member_below);
+    Array<float> member_fold;
+    const bool member_below_masked =
+        member_any_masked &&
+        gather_fold_mask(member_below.base, member_stop_above, member_mask_elem_num, member_fold);
+    for (const int64_t i : member_below_data.index_range()) {
+      member_below_data[i] *= member_below_eff *
+                              (member_below_masked && i < member_fold.size() ? member_fold[i] :
+                                                                              1.0f);
+    }
+    if (member_active.data) {
+      Array<float> member_active_fold;
+      const bool member_active_masked = member_any_masked &&
+                                        gather_fold_mask(member_active.base,
+                                                         member_stop_above,
+                                                         member_mask_elem_num,
+                                                         member_active_fold);
+      const Span<float3> member_active_data(static_cast<const float3 *>(member_active.data),
+                                            member_active.totelem);
+      const int64_t member_count = std::min<int64_t>(member_below_data.size(),
+                                                     member_active_data.size());
+      for (int64_t i = 0; i < member_count; i++) {
+        member_below_data[i] += member_active_data[i] * member_active_eff *
+                                (member_active_masked && i < member_active_fold.size() ?
+                                     member_active_fold[i] :
+                                     1.0f);
+      }
+    }
+    member_below.influence = 1.0f;
+    member_below.base.flag |= SCULPT_LAYER_ENABLED;
+
+    merge_settle_mask(member,
+                      member_below,
+                      member_below_data,
+                      policy,
+                      member_combined,
+                      member_layout.block_size,
+                      nullptr);
+
+    Vector<undo::SculptLayerUndoPayload> member_removed;
+    member_removed.append(undo::sculpt_layer_payload_capture(
+        member_mesh, member_active.base, undo::PayloadCapture::NodeRemoved));
+    bke::sculpt_layers::remove(member_mesh, member_active);
+    tag_layer_overlays_dirty(member);
+    /* No #active_set for a member, unlike the active object above: which layer is "active" is local
+     * UI state and not synced data -- #layer_select_exec has no fan-out at all for that reason, and
+     * #layer_move_exec's own second loop states the same rule. Nothing is left dangling either way:
+     * #bke::sculpt_layers::remove hands the active marker to a neighbour when the removed node was
+     * the one carrying it.
+     *
+     * #rec_exemption_refresh IS still called, for the active object's own reason: the exemption bit
+     * died with the removed layer here too, and an armed REC left with no layer exempt at all is the
+     * one state the exemption exists to prevent. It cannot move this member's surface -- a masked
+     * participant with REC armed was skipped in the gather pass -- so no #commit_layers_change
+     * follows here either. */
+    rec_exemption_refresh(member);
+    undo::push_sculpt_layer_list_change(member, std::move(member_removed), {}, false);
+  }
 
   /* `Σ(data · effective · folded mask)` at influence 1 equals the previous combination, so the
    * combined surface (and the live positions) are unchanged — and therefore no
@@ -2922,11 +4613,33 @@ static wmOperatorStatus layer_merge_down_exec(bContext *C, wmOperator *op)
    * ones folded into the data, and the folder chain both participants share was left alone because
    * it goes on acting; that is what keeps the two sides equal. Under Combine the equality is up to
    * the mask's `uint8` quantization rather than exact, which #merge_settle_mask divides by the
-   * quantized value to keep within float rounding. */
-  if (any_masked) {
+   * quantized value to keep within float rounding. That reasoning is per object and holds for every
+   * fanned-out member for the same reasons, so none of them commits either.
+   *
+   * That absence of #commit_layers_change is exactly the criterion #layer_move_exec and
+   * #layer_group_color_tag_exec close on, and this operator meets it: #finish_multi_object would
+   * call #flush_update_done per object, which does work (#fake_neighbors_free, #store_bounds_orig,
+   * a conditional #DEG_id_tag_update) the single-object do-path never performed for a merge that
+   * provably moves nothing. #push_end_all_ex(false, true) is the same close #finish_multi_object
+   * uses internally, minus that per-object flush loop -- the documented multi-object idiom in
+   * `sculpt_undo.hh` for exactly this case -- so the fan-out's do-path stays identical to what the
+   * active-object-only version always did. (#layer_remove_exec is NOT the precedent here despite
+   * being the other node-freeing operator: its own body does call #commit_layers_change, which is
+   * why it needs the #UpdateType::Position flush this one does not.) #layers_ui_notify has none of
+   * that work (just two #WM_event_add_notifier calls), so it is looped over every member below to
+   * still redraw each one -- which is also what publishes `NC_GEOM | ND_DATA` for a member whose
+   * layer list just lost a row. */
+  undo::push_end_all_ex(false, true);
+  /* One report for the whole operation, not one per object: the policy is a single choice made in
+   * the operator's own properties. Raised by any participating object that carried a mask, so a
+   * member whose masks were folded is still explained even when the active object had none. */
+  if (any_masked_anywhere) {
     merge_report_mask_policy(op, policy);
   }
-  layers_ui_notify(C, *ctx.object);
+  for (Object *member : eligible) {
+    layers_ui_notify(C, *member);
+  }
+  sync_scope_unlink_after_success(*bmain, *ctx.object, sync_scope);
   return OPERATOR_FINISHED;
 }
 
@@ -2940,10 +4653,36 @@ void SCULPT_OT_layer_merge_down(wmOperatorType *ot)
   ot->exec = layer_merge_down_exec;
   ot->poll = layers_poll;
   merge_mask_policy_prop(ot);
+  sync_scope_rna_def(ot);
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
 }
+
+/* One sync-group member's resolved participants for a Merge Selected: the layer synced to the
+ * active object's active layer -- the survivor everything is merged into -- and whichever of the
+ * active object's source layers have a #sync_uid counterpart in this member's own tree.
+ *
+ * #sources is a #Vector rather than the fixed pair #MergeDownFanoutMember holds, and it is
+ * deliberately allowed to be a SUBSET of the active object's selection. That is the one place this
+ * operator departs from the all-or-nothing rule the other multi-node fan-outs follow: the selection
+ * here is an arbitrary set of independent synced identities, so a member carrying only some of them
+ * still has a well-defined merge to perform for exactly those -- the same partial shape
+ * #RemoveFanoutMember already uses. (#MergeDownFanoutMember cannot be partial in that sense: its
+ * `below` carries no sync identity at all and is found positionally.) A member where NOT EVEN ONE
+ * source resolves has nothing to merge and is skipped whole instead, as is one whose survivor does
+ * not resolve -- there is then no destination to merge into.
+ *
+ * Resolved once, in the gather pass, and carried forward as pointers rather than re-derived in the
+ * fan-out loop -- the same reason #RemoveFanoutMember exists, and doubly so here since this
+ * operator frees SEVERAL nodes per object with #bke::sculpt_layers::remove. Safe because
+ * #fanout_targets dedups by #Object::data, so no two members ever share a #Mesh and nothing touches
+ * this member's tree until its own turn below. */
+struct MergeSelectedFanoutMember {
+  Object *object;
+  SculptLayer *active;
+  Vector<SculptLayer *> sources;
+};
 
 static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
 {
@@ -3030,8 +4769,242 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
     }
   }
 
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object was already validated above and is included
+   * unconditionally; every other sync-group member is brought up to date and gated exactly as
+   * #op_context_get gates the active object, and then re-runs EVERY one of this operator's own
+   * guards against ITS OWN set of participants.
+   *
+   * Re-running them is the whole point, for the reasons spelled out in #layer_merge_down_exec's
+   * matching comment: the guards ask about weight masks, folder visibility and the REC exemption,
+   * all per-object state that #sync_uid identity says nothing about. Every per-object value the
+   * fold consumes (#MaskLayout, the element count, `stop_above`, the masked-ness) is therefore
+   * recomputed from the member itself, never reused.
+   *
+   * Where this differs from #layer_merge_down_exec is participation: a member takes part with
+   * whichever SUBSET of the selection resolves on it, rather than being skipped for the first
+   * missing source -- see #MergeSelectedFanoutMember for why a partial set is still a well-defined
+   * merge here. Only a member with no survivor, or with no source at all, has nothing to do.
+   *
+   * A member that fails a guard is skipped with a warning naming it and the guard, not a hard
+   * cancel: one member's local problem must not abort the merge on all the others. The ACTIVE
+   * object's own guards above still hard-cancel the whole operator, unchanged -- it is the row the
+   * user pressed, so refusing it refuses the operation.
+   *
+   * The per-member #flush_pending_multires_base mirrors the one #op_context_get already ran for the
+   * active object: this merge rewrites layer data and removes nodes from the layer set, so a
+   * pending base edit really would be stranded if it were not consumed while the live CCG still
+   * matches the stored layers. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<MergeSelectedFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Selected Sculpt Layers: skipping \"%s\" (sculpt layers are not available "
+                  "for this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* The survivor first: it is the destination everything else is folded into, so a member that
+     * cannot resolve it has nowhere to merge and is skipped whole -- unlike a missing source, which
+     * only shrinks the set. #node_find_by_sync_uid resolves the SAME layer wherever it sits in the
+     * member's own tree; the member's own active layer is unrelated. A zero #sync_uid (the active
+     * layer was never fanned-out-created) makes every member miss here by design, degrading this
+     * operator to the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, active->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Selected Sculpt Layers: skipping \"%s\" (no layer synced to the active "
+                  "one to merge into)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a layer to a layer, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    SculptLayer *member_active = bke::sculpt_layers::node_as_layer(member_node);
+    if (!member_active) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Selected Sculpt Layers: skipping \"%s\" (the synced node is a group, not "
+                  "a layer)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Each source resolved by its OWN #sync_uid, independently of the others: they are unrelated
+     * identities and nothing says a member must carry all of them. The kind check is folded into
+     * the single #node_as_layer call (it returns null for a group), as in #layer_remove_exec. */
+    Vector<SculptLayer *> member_sources;
+    Vector<const char *> missing_names;
+    for (const SculptLayer *source : sources) {
+      SculptLayer *member_source = bke::sculpt_layers::node_as_layer(
+          bke::sculpt_layers::node_find_by_sync_uid(member_mesh, source->base.sync_uid));
+      if (!member_source) {
+        missing_names.append(source->base.name);
+        continue;
+      }
+      /* #node_find_by_sync_uid is first-match, so two of the active object's own layers sharing one
+       * non-zero #sync_uid would resolve to the SAME member layer twice -- and the removal loop
+       * below would double-free it (see #layer_remove_exec's longer note: #bke::sculpt_layers::
+       * remove unlinks and deletes the node, so a second call is a use-after-free). The survivor is
+       * excluded for the same reason and a worse outcome: merging the destination into itself and
+       * then freeing it would destroy the very layer the result lives in. Neither is reachable on
+       * the active object, whose `sources` are distinct pointers that exclude `active` by
+       * construction, and neither is produced by duplication any more -- but both are still
+       * reachable from files saved before #bke::sculpt_layers::duplicate started clearing the
+       * copy's #sync_uid. Silently folded rather than reported: the collision is the file's, not
+       * this member's. */
+      if (member_source != member_active && !member_sources.contains(member_source)) {
+        member_sources.append(member_source);
+      }
+    }
+    if (member_sources.is_empty()) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Selected Sculpt Layers: skipping \"%s\" (no synced layers to merge)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (!missing_names.is_empty()) {
+      /* Not a skip: the rest of the selection does have a synced counterpart here, and merging
+       * those is worth doing even though this member cannot keep the whole set in lock-step. The
+       * surface stays unchanged either way -- the identity the merge preserves is a sum over
+       * whichever layers actually take part. */
+      std::string joined = missing_names[0];
+      for (const char *name : missing_names.as_span().drop_front(1)) {
+        joined += ", ";
+        joined += name;
+      }
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Selected Sculpt Layers: \"%s\" has no synced counterpart for: %s (its "
+                  "other synced layers are still merged)",
+                  member->id.name + 2,
+                  joined.c_str());
+    }
+    /* The active object's own disabled-folder guard, re-asked of this member's own participants:
+     * folder visibility is per-object state, so the active object's participants being visible says
+     * nothing about this member's. */
+    bool member_group_hidden = (member_active->base.flag & SCULPT_LAYER_GROUP_HIDDEN) != 0;
+    for (const SculptLayer *member_source : member_sources) {
+      member_group_hidden |= (member_source->base.flag & SCULPT_LAYER_GROUP_HIDDEN) != 0;
+    }
+    if (member_group_hidden) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Selected Sculpt Layers: skipping \"%s\" (its layers are inside a disabled "
+                  "group)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers, before the merge below invalidates
+       * that. Placed after the cheap gates so a member that is skipped anyway is left alone. */
+      flush_pending_multires_base(*member);
+    }
+    /* The active object's own pair of session guards, in the same order and for the same reasons.
+     * #mask_edit_end has to run before every mask-reading guard below, exactly as it does above:
+     * it settles an open session's weights back onto the node, and the guards must see the settled
+     * mask rather than the pre-session snapshot #SculptLayerTreeNode::mask still holds. */
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    mask_edit_end(*member);
+
+    Vector<SculptLayer *> member_participants;
+    member_participants.append(member_active);
+    member_participants.extend(member_sources);
+    const SculptLayerGroup *member_stop_above = member_active->base.parent;
+    const int64_t member_mask_elem_num = mask_layout_for_object(*member).totelem;
+    /* #merge_refuse_foreign_chain's own condition, spelled out rather than called: that helper
+     * reports a hard RPT_ERROR, and a member's local problem has to degrade to a named skip instead
+     * of a message that reads like the whole operator failed. Unlike in #layer_merge_down_exec this
+     * one really can fire -- the selection is free to span folders -- and it matters for the same
+     * reason it does on the active object: a masked chain over the survivor cannot be divided out
+     * of a source that never sat under it. */
+    if (bke::sculpt_layers::find_ancestor(member_active->base.parent,
+                                          [](const SculptLayerGroup &group) {
+                                            return group.base.mask != nullptr;
+                                          }) != nullptr)
+    {
+      bool member_foreign = false;
+      for (const SculptLayer *participant : member_participants) {
+        member_foreign |= participant->base.parent != member_active->base.parent;
+      }
+      if (member_foreign) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Merge Selected Sculpt Layers: skipping \"%s\" (its layers sit in different "
+                    "folders and the target's folder carries a weight mask)",
+                    member->id.name + 2);
+        continue;
+      }
+    }
+    /* Asked of this member's own element count: a mask that describes the active object's mesh says
+     * nothing about whether it describes this one. */
+    const SculptLayerTreeNode *member_stale = nullptr;
+    for (const SculptLayer *participant : member_participants) {
+      if (const SculptLayerTreeNode *stale = find_stale_mask_in_fold(
+              participant->base, member_stop_above, member_mask_elem_num))
+      {
+        member_stale = stale;
+        break;
+      }
+    }
+    if (member_stale) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Selected Sculpt Layers: skipping \"%s\" (the weight mask of '%s' does not "
+                  "match its mesh)",
+                  member->id.name + 2,
+                  member_stale->name);
+      continue;
+    }
+    /* See the active object's own guard above: an armed REC makes the composite ignore the layer's
+     * masks, so folding them in would move this member's surface right now. */
+    bool member_any_masked = false;
+    bool member_rec_exempt = false;
+    for (const SculptLayer *participant : member_participants) {
+      member_any_masked |= node_chain_carries_mask(participant->base);
+      member_rec_exempt |= (participant->base.flag & SCULPT_LAYER_REC_EXEMPT) != 0;
+    }
+    if (member_any_masked && member_rec_exempt) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Selected Sculpt Layers: skipping \"%s\" (disarm REC before merging layers "
+                  "that carry a weight mask)",
+                  member->id.name + 2);
+      continue;
+    }
+
+    eligible.append(member);
+    MergeSelectedFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.active = member_active;
+    fanout_member.sources = std::move(member_sources);
+    fanout_members.append(std::move(fanout_member));
+  }
+
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   /* Snapshot the surviving layer's pre-merge metadata and data for undo. */
   undo::push_sculpt_layer_data(*ctx.object, *active);
 
@@ -3099,16 +5072,166 @@ static wmOperatorStatus layer_merge_selected_exec(bContext *C, wmOperator *op)
   bke::sculpt_layers::active_set(*ctx.mesh, active);
   tag_layer_overlays_dirty(*ctx.object);
   undo::push_sculpt_layer_list_change(*ctx.object, std::move(removed), {}, false);
-  undo::push_end(*ctx.object);
+
+  /* Fan out: mirror the active object's own body exactly, scoped to each member's own survivor and
+   * its own resolved subset of the selection -- both resolved in the gather pass, before anything
+   * was freed. Every per-object quantity is recomputed from the member rather than reused from
+   * `ctx`: a member's PBVH type, element count, mask layout, folder chain and mask presence are all
+   * independent of the active object's, and folding the active object's numbers into a member's
+   * data would corrupt that member's mesh.
+   *
+   * Recomputing here rather than caching it in #MergeSelectedFanoutMember is safe for the same
+   * reason the resolved pointers stay valid: #fanout_targets dedups by #Object::data, so nothing
+   * between the gather pass and this member's turn has touched this member's mesh. */
+  bool any_masked_anywhere = any_masked;
+  for (const MergeSelectedFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    Mesh &member_mesh = mesh_of(member);
+    SculptLayer &member_active = *fanout_member.active;
+    const Span<SculptLayer *> member_sources = fanout_member.sources;
+    /* Eligibility, both session guards and every one of this operator's own guards already ran for
+     * every entry of `fanout_members` in the gather pass above, before the undo bracket opened --
+     * nothing here can fail or need skipping (mirrors #layer_add_exec's own second loop). */
+    const bool member_grids = bke::object::pbvh_get(member)->type() == bke::pbvh::Type::Grids;
+    /* Mirrors #session_state_ensure's call above for the active object: it has to run before this
+     * member's own data changes, or the mesh_base captured here would fold an already-merged state
+     * into the base (see #commit_layers_change's comment on capture ordering). */
+    session_state_ensure(member);
+    undo::push_sculpt_layer_data(member, member_active);
+
+    Vector<SculptLayer *> member_participants;
+    member_participants.append(&member_active);
+    member_participants.extend(member_sources);
+    const SculptLayerGroup *member_stop_above = member_active.base.parent;
+    const MaskLayout member_layout = mask_layout_for_object(member);
+    const int64_t member_mask_elem_num = member_layout.totelem;
+    bool member_any_masked = false;
+    for (const SculptLayer *participant : member_participants) {
+      member_any_masked |= node_chain_carries_mask(participant->base);
+    }
+    any_masked_anywhere |= member_any_masked;
+
+    int64_t member_n = member_grids ? member_active.totelem : element_count(member);
+    if (member_grids) {
+      for (const SculptLayer *member_source : member_sources) {
+        member_n = std::max(member_n, member_source->totelem);
+      }
+    }
+    MutableSpan<float3> member_active_data = bke::sculpt_layers::data_ensure(member_active,
+                                                                            member_n);
+
+    const Array<float> member_combined =
+        (policy == MergeMaskPolicy::Combine && member_any_masked) ?
+            merge_combined_mask(
+                member_participants, member_active, member_stop_above, member_mask_elem_num) :
+            Array<float>();
+
+    Array<float> member_fold;
+    const float member_active_eff = effective(member_active);
+    const bool member_active_masked =
+        member_any_masked &&
+        gather_fold_mask(member_active.base, member_stop_above, member_mask_elem_num, member_fold);
+    for (const int64_t i : member_active_data.index_range()) {
+      member_active_data[i] *= member_active_eff * (member_active_masked && i < member_fold.size() ?
+                                                        member_fold[i] :
+                                                        1.0f);
+    }
+    for (const SculptLayer *member_source : member_sources) {
+      if (member_grids && member_source->data && member_active.level != member_source->level) {
+        member_active.level = member_source->level;
+      }
+      if (!member_source->data) {
+        continue;
+      }
+      const float member_source_eff = effective(*member_source);
+      const bool member_source_masked = member_any_masked &&
+                                        gather_fold_mask(member_source->base,
+                                                         member_stop_above,
+                                                         member_mask_elem_num,
+                                                         member_fold);
+      const Span<float3> member_source_data(static_cast<const float3 *>(member_source->data),
+                                            member_source->totelem);
+      const int64_t member_count = std::min<int64_t>(member_active_data.size(),
+                                                     member_source_data.size());
+      for (int64_t i = 0; i < member_count; i++) {
+        member_active_data[i] += member_source_data[i] * member_source_eff *
+                                 (member_source_masked && i < member_fold.size() ? member_fold[i] :
+                                                                                   1.0f);
+      }
+    }
+    member_active.influence = 1.0f;
+    member_active.base.flag |= SCULPT_LAYER_ENABLED;
+
+    merge_settle_mask(member,
+                      member_active,
+                      member_active_data,
+                      policy,
+                      member_combined,
+                      member_layout.block_size,
+                      nullptr);
+
+    /* Capture every payload before removing any of them, for the reason spelled out on the active
+     * object's own two passes above: a payload captured after an earlier sibling was unlinked would
+     * record a stale neighbour. */
+    Vector<undo::SculptLayerUndoPayload> member_removed;
+    for (SculptLayer *member_source : member_sources) {
+      member_removed.append(undo::sculpt_layer_payload_capture(
+          member_mesh, member_source->base, undo::PayloadCapture::NodeRemoved));
+    }
+    for (SculptLayer *member_source : member_sources) {
+      bke::sculpt_layers::remove(member_mesh, *member_source);
+    }
+    tag_layer_overlays_dirty(member);
+    /* No #active_set for a member, unlike the active object above: which layer is "active" is local
+     * UI state and not synced data -- #layer_select_exec has no fan-out at all for that reason, and
+     * #layer_move_exec's own second loop states the same rule. Nothing is left dangling either way:
+     * #bke::sculpt_layers::remove hands the active marker to a neighbour when the removed node was
+     * the one carrying it.
+     *
+     * #rec_exemption_refresh IS called here even though the active object's own body above does not
+     * call it, and the asymmetry is the point. On the active object the survivor is by definition
+     * that object's #active_get, so the layer #rec_exempt_set marks is the one layer this operator
+     * never frees -- an armed REC cannot be stranded, and skipping the refresh is provably safe. A
+     * member's survivor carries no such guarantee: `member_active` is resolved by #sync_uid and, as
+     * the gather pass above says, the member's own active layer is unrelated to it. That member's
+     * #active_get may well be one of `member_sources`, which the loop just freed, handing the
+     * active marker to a sibling and leaving REC armed with NO layer exempt -- the one state the
+     * exemption exists to prevent. The gather pass does not catch it either: it only refuses
+     * masked-and-REC-exempt members, so an all-unmasked one reaches here and only breaks later,
+     * once the new active layer acquires a mask. Refreshed unconditionally, exactly as
+     * #layer_merge_down_exec's own member loop does, and it cannot move this member's surface for
+     * that same operator's reason: the exemption only ever changes the composite of a *masked*
+     * layer, and a masked participant with REC armed was skipped in the gather pass -- which is why
+     * no #commit_layers_change follows here either. */
+    rec_exemption_refresh(member);
+    undo::push_sculpt_layer_list_change(member, std::move(member_removed), {}, false);
+  }
 
   /* `Σ(data · effective · folded mask)` at influence 1 equals the previous combination, so the
    * combined surface (and the live positions) are unchanged — and therefore no
    * #commit_layers_change is needed. See #layer_merge_down_exec for why the equality holds and for
-   * the one way Combine departs from it. */
-  if (any_masked) {
+   * the one way Combine departs from it. That reasoning is per object and holds for every
+   * fanned-out member for the same reasons, so none of them commits either.
+   *
+   * That absence of #commit_layers_change is exactly the criterion #layer_move_exec and
+   * #layer_group_color_tag_exec close on, and this operator meets it, so it closes the same way:
+   * #finish_multi_object would call #flush_update_done per object, which does work the
+   * single-object do-path never performed for a merge that provably moves nothing.
+   * #push_end_all_ex(false, true) is the same close #finish_multi_object uses internally, minus
+   * that per-object flush loop -- the documented multi-object idiom in `sculpt_undo.hh` for exactly
+   * this case. #layers_ui_notify has none of that work (just two #WM_event_add_notifier calls), so
+   * it is looped over every member below to still redraw each one -- which is also what publishes
+   * `NC_GEOM | ND_DATA` for a member whose layer list just lost rows. */
+  undo::push_end_all_ex(false, true);
+  /* One report for the whole operation, not one per object: the policy is a single choice made in
+   * the operator's own properties. Raised by any participating object that carried a mask, so a
+   * member whose masks were folded is still explained even when the active object had none. */
+  if (any_masked_anywhere) {
     merge_report_mask_policy(op, policy);
   }
-  layers_ui_notify(C, *ctx.object);
+  for (Object *member : eligible) {
+    layers_ui_notify(C, *member);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -3127,6 +5250,17 @@ void SCULPT_OT_layer_merge_selected(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER;
 }
 
+/* One fan-out target of #SCULPT_OT_layer_bake / the bootstrap path of
+ * #SCULPT_OT_layer_bake_to_shape_key: the member and ITS own full layer list, captured in the gather
+ * pass. Carrying the list rather than re-deriving it in the fan-out loop is mandatory --
+ * #bke::sculpt_layers::remove invalidates the cached span, and the active object's removals run
+ * before any member is touched. Safe because #fanout_targets dedups by #Object::data. */
+struct BakeFanoutMember {
+  Object *object;
+  Vector<SculptLayer *> layers;
+};
+
+/* Whole-tree fan-out: bake drops EVERY layer on each eligible sync-group member (no sync_uid match). */
 static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -3145,6 +5279,56 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
    *   #bke::sculpt_layers::bake_vert_layers_into_new_shape_key), which keeps the surface as it is
    *   while leaving the baked result mutable / dial-able like any other key. Absolute keys have no
    *   such dial, so there the contribution is folded into every block instead. */
+  Main *bmain = CTX_data_main(C);
+  const SyncScope sync_scope = sync_scope_get(op);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. Whole-tree (not find-shaped): every eligible member gets the
+   * same full-stack bake; there is no per-node #sync_uid gate. The active object was already
+   * validated by #op_context_get and is included unconditionally.
+   *
+   * Unlike #layer_add_exec / #layer_clear_exec this gather does NOT call
+   * #mask_edit_refuse_ccg_rebuild on a member: bake is one of the operators that *closes* an open
+   * mask-edit session rather than refusing on its account (see #layer_add_exec's comment on that
+   * split), and the per-member loop below closes each member's own session unconditionally. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<BakeFanoutMember> fanout_members;
+  for (Object *member : sync_scope_targets(*bmain, *ctx.object, sync_scope)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Bake Sculpt Layers: skipping \"%s\" (sculpt layers are not available for this "
+                  "object)",
+                  member->id.name + 2);
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member);
+    /* Captured here, on this member's own tree, and carried forward -- see #BakeFanoutMember.
+     * Must happen before ANY #bke::sculpt_layers::remove runs (the active object's included). */
+    Vector<SculptLayer *> member_layers(bke::sculpt_layers::layers(member_mesh));
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers, before the bake below folds them. */
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    BakeFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.layers = std::move(member_layers);
+    fanout_members.append(std::move(fanout_member));
+  }
+
   /* Read before the close below, which clears it. Zero when no session is open, which is the common
    * case. */
   const SculptSession *bake_ss = session_of(*ctx.object);
@@ -3160,7 +5344,8 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
   /* Before the close, which clears the session struct the parked tool idname lives on. */
   mask_edit_exit_ui(C, *ctx.object);
   mask_edit_end(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   if (session_uid != 0) {
     undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
   }
@@ -3203,14 +5388,98 @@ static wmOperatorStatus layer_bake_exec(bContext *C, wmOperator *op)
   /* The combined surface is unchanged; the runtime mesh base now equals the live positions. */
   invalidate_runtime(*ctx.object);
   session_state_ensure(*ctx.object);
-  undo::push_end(*ctx.object);
-  if (!ctx.grids && ctx.mesh->key != nullptr) {
-    /* The key data changed and the session's #deform_cos is a snapshot of the pre-bake surface:
-     * re-evaluate so the display is rebuilt from the new keys. */
-    DEG_id_tag_update(&ctx.mesh->id, ID_RECALC_GEOMETRY);
+  /* No #rec_exemption_refresh: the single-object path never called it, and after every layer is
+   * gone the exemption bit has nowhere to live -- it cannot move the (already-unchanged) surface. */
+
+  /* Fan out: mirror the active object's own body exactly on each member's own full layer list,
+   * captured in the gather pass before ANY removal ran anywhere. */
+  for (const BakeFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    Mesh &member_mesh = mesh_of(member);
+    const bool member_grids = bke::object::pbvh_get(member)->type() == bke::pbvh::Type::Grids;
+    const Span<SculptLayer *> member_all = fanout_member.layers;
+    /* Eligibility and the session guards already ran for every entry of `fanout_members` in the
+     * gather pass above, before the undo bracket opened -- nothing here can fail or need skipping
+     * (mirrors #layer_add_exec's own second loop). */
+
+    /* Read before the close below, which clears it -- this member's own session, not the active
+     * object's. Both halves of the close fan out: #mask_edit_end because the member's own layers
+     * are about to be destroyed under its own session, and #mask_edit_exit_ui because it is safe
+     * to fan out per member (Task 9d1: returns immediately when this object has no open session). */
+    const SculptSession *member_ss = session_of(member);
+    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
+    mask_edit_exit_ui(C, member);
+    mask_edit_end(member);
+    if (member_session_uid != 0) {
+      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
+    }
+
+    const KeyBlock *member_bake_key =
+        member_grids ? nullptr :
+                       bke::sculpt_layers::bake_vert_layers_into_new_shape_key(member_mesh);
+    Vector<undo::SculptLayerUndoPayload> member_baked;
+    for (SculptLayer *layer : member_all) {
+      if (member_grids && layer->domain == SCULPT_LAYER_DOMAIN_GRID && layer->data) {
+        BKE_multires_sculpt_layer_apply_to_mdisps(
+            member_mesh, *layer, bke::sculpt_layers::effective(*layer));
+      }
+      else if (!member_bake_key) {
+        bke::sculpt_layers::apply_vert_layer_to_shape_keys(
+            member_mesh, *layer, bke::sculpt_layers::effective(*layer));
+      }
+      member_baked.append(undo::sculpt_layer_payload_capture(
+          member_mesh, layer->base, undo::PayloadCapture::NodeRemoved));
+    }
+    for (SculptLayer *layer : member_all) {
+      bke::sculpt_layers::remove(member_mesh, *layer);
+    }
+    undo::push_sculpt_layer_list_change(member, std::move(member_baked), {}, true);
+    if (member_bake_key) {
+      undo::push_sculpt_layer_bake_shape_key(member, member_bake_key->uid);
+    }
+    tag_layer_overlays_dirty(member);
+    invalidate_runtime(member);
+    session_state_ensure(member);
   }
-  layers_ui_notify(C, *ctx.object);
+
+  /* No #commit_layers_change on the active object or any member (surface unchanged), so
+   * #finish_multi_object is not used -- it would call #flush_update_done per object, which does
+   * work the single-object do-path never performed. #push_end_all_ex(false, true) is the same close
+   * #finish_multi_object uses internally, minus that flush, matching #layer_move_exec /
+   * #layer_merge_down_exec. #layers_ui_notify is looped over every member to redraw each one. */
+  undo::push_end_all_ex(false, true);
+  for (Object *member : eligible) {
+    Mesh &member_mesh = mesh_of(*member);
+    if (bke::object::pbvh_get(*member)->type() != bke::pbvh::Type::Grids &&
+        member_mesh.key != nullptr)
+    {
+      /* The key data changed and the session's #deform_cos is a snapshot of the pre-bake surface:
+       * re-evaluate so the display is rebuilt from the new keys. */
+      DEG_id_tag_update(&member_mesh.id, ID_RECALC_GEOMETRY);
+    }
+    layers_ui_notify(C, *member);
+  }
+  sync_scope_unlink_after_success(*bmain, *ctx.object, sync_scope);
   return OPERATOR_FINISHED;
+}
+
+static const char *layer_bake_confirm_message(const OpContext &ctx)
+{
+  if (ctx.grids) {
+    return IFACE_("All sculpt layers will be baked into the multires displacement.");
+  }
+  if (ctx.mesh->key == nullptr) {
+    return IFACE_(
+        "All sculpt layers will be permanently baked into the base geometry and removed.");
+  }
+  if (ctx.mesh->key->type == KEY_RELATIVE) {
+    return IFACE_(
+        "This mesh has shape keys, so all sculpt layers will be baked into a new dial-able shape "
+        "key.");
+  }
+  return IFACE_(
+      "This mesh has shape keys, so all sculpt layers will be baked into the existing shape "
+      "keys.");
 }
 
 static wmOperatorStatus layer_bake_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
@@ -3219,29 +5488,8 @@ static wmOperatorStatus layer_bake_invoke(bContext *C, wmOperator *op, const wmE
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
   }
-  /* State-aware confirmation matching what #layer_bake_exec actually does with the layers:
-   * - Multires: folded into the displacement (permanent).
-   * - Mesh without shape keys: folded into the base geometry (permanent, the layers are gone).
-   * - Mesh with a relative key: turned into one new dial-able shape key (non-destructive).
-   * - Mesh with an absolute key: folded into every existing key block (no dial). */
-  const char *message;
-  if (ctx.grids) {
-    message = IFACE_("All sculpt layers will be baked into the multires displacement.");
-  }
-  else if (ctx.mesh->key == nullptr) {
-    message = IFACE_(
-        "All sculpt layers will be permanently baked into the base geometry and removed.");
-  }
-  else if (ctx.mesh->key->type == KEY_RELATIVE) {
-    message = IFACE_(
-        "This mesh has shape keys, so all sculpt layers will be baked into a new dial-able shape "
-        "key.");
-  }
-  else {
-    message = IFACE_(
-        "This mesh has shape keys, so all sculpt layers will be baked into the existing shape "
-        "keys.");
-  }
+  const char *message = layer_bake_confirm_message(ctx);
+
   return WM_operator_confirm_ex(
       C, op, IFACE_("Bake Sculpt Layers"), message, IFACE_("Bake"), ui::AlertIcon::Warning, false);
 }
@@ -3260,8 +5508,20 @@ void SCULPT_OT_layer_bake(wmOperatorType *ot)
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
+  sync_scope_rna_def(ot);
 }
 
+static wmOperatorStatus call_layer_bake_with_scope(bContext *C, wmOperator *op)
+{
+  PointerRNA props = WM_operator_properties_create("SCULPT_OT_layer_bake");
+  RNA_enum_set(&props, "sync_scope", int(sync_scope_get(op)));
+  const wmOperatorStatus status = WM_operator_name_call(
+      C, "SCULPT_OT_layer_bake", wm::OpCallContext::ExecDefault, &props, nullptr);
+  WM_operator_properties_free(&props);
+  return status;
+}
+
+/* Bootstrap path fans out; existing-Key branch delegates to the now-fanned-out #SCULPT_OT_layer_bake. */
 static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -3281,10 +5541,68 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
    * duplicate that logic; the delegate's own sculpt-undo push provides the single undo step, so
    * this operator adds none of its own here. Mirrors #layer_bake_and_editmode_enter_exec's
    * #wm::OpCallContext::ExecDefault delegation (which is likewise #OPTYPE_UNDO, so no double push).
-   * The bootstrap below (and its #created_key undo machinery) runs only when there is no key yet. */
+   * The bootstrap below (and its #created_key undo machinery) runs only when there is no key yet.
+   * Once #layer_bake_exec fans out, this branch covers every eligible sync-group member too. */
   if (ctx.mesh->key != nullptr) {
-    return WM_operator_name_call(
-        C, "SCULPT_OT_layer_bake", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+    return call_layer_bake_with_scope(C, op);
+  }
+
+  Main *bmain = CTX_data_main(C);
+  const SyncScope sync_scope = sync_scope_get(op);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. Whole-tree bootstrap (not find-shaped): every eligible mesh
+   * member that still has layers is baked. Members that already own a #Key take the existing-key
+   * bake path inside this same undo step (not a second #BKE_key_add); members without a #Key get
+   * the same bootstrap as the active object. Multires members are skipped -- this operator is
+   * mesh-only, matching the active-object guard above. Empty-layer members are skipped for the
+   * same reason the active object cancels above.
+   *
+   * Unlike #layer_add_exec this gather does NOT call #mask_edit_refuse_ccg_rebuild: bake closes
+   * an open mask-edit session rather than refusing (see #layer_bake_exec). */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<BakeFanoutMember> fanout_members;
+  for (Object *member : sync_scope_targets(*bmain, *ctx.object, sync_scope)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Bake Sculpt Layers to Shape Keys: skipping \"%s\" (sculpt layers are not "
+                  "available for this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Bake Sculpt Layers to Shape Keys: skipping \"%s\" (not available for Multires; "
+                  "only Mesh data)",
+                  member->id.name + 2);
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member);
+    Vector<SculptLayer *> member_layers(bke::sculpt_layers::layers(member_mesh));
+    if (member_layers.is_empty()) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Bake Sculpt Layers to Shape Keys: skipping \"%s\" (no sculpt layers to bake)",
+                  member->id.name + 2);
+      continue;
+    }
+    eligible.append(member);
+    BakeFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.layers = std::move(member_layers);
+    fanout_members.append(std::move(fanout_member));
   }
 
   /* Only the bootstrap path reaches here; the delegating branch above closes the session inside
@@ -3297,7 +5615,8 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
   mask_edit_end(*ctx.object);
 
   const short pre_bake_shapenr = ctx.object->shapenr;
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object bootstrap path. */
   if (session_uid != 0) {
     undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
   }
@@ -3306,7 +5625,6 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
    * strips the layer contribution out of `vert_positions` (see
    * #bke::sculpt_layers::strip_vert_layers_from_positions), so `basis` below is seeded with the
    * un-layered original shape. */
-  Main *bmain = CTX_data_main(C);
   Key *key = ctx.mesh->key = BKE_key_add(bmain, &ctx.mesh->id);
   key->type = KEY_RELATIVE;
   KeyBlock *basis = BKE_keyblock_add_ctime(key, DATA_("Basis"), false);
@@ -3341,12 +5659,88 @@ static wmOperatorStatus layer_bake_to_shape_key_exec(bContext *C, wmOperator *op
    * composed through the new key instead of the (now absent) layer list. */
   invalidate_runtime(*ctx.object);
   session_state_ensure(*ctx.object);
-  undo::push_end(*ctx.object);
-  /* The key data changed and the session's deform snapshot is a pre-bake surface: re-evaluate
-   * so the display is rebuilt from the new keys (unconditional here, unlike #layer_bake_exec's
-   * equivalent tag, because this operator's `ctx.mesh->key` is always non-null by this point). */
-  DEG_id_tag_update(&ctx.mesh->id, ID_RECALC_GEOMETRY);
-  layers_ui_notify(C, *ctx.object);
+  /* No #rec_exemption_refresh: mirrors #layer_bake_exec -- every layer is gone. */
+
+  /* Fan out: each member without a #Key gets the same bootstrap; each member that already has one
+   * takes the existing-key bake path (#bake_vert_layers_into_new_shape_key + remove), so a mixed
+   * sync group does not get a second Key created on meshes that already own one. */
+  for (const BakeFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    Mesh &member_mesh = mesh_of(member);
+    const Span<SculptLayer *> member_all = fanout_member.layers;
+
+    const SculptSession *member_ss = session_of(member);
+    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
+    mask_edit_exit_ui(C, member);
+    mask_edit_end(member);
+    if (member_session_uid != 0) {
+      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
+    }
+
+    if (member_mesh.key != nullptr) {
+      /* Existing-key path: same fold #layer_bake_exec uses for a mesh that already has shape keys. */
+      const KeyBlock *member_bake_key =
+          bke::sculpt_layers::bake_vert_layers_into_new_shape_key(member_mesh);
+      Vector<undo::SculptLayerUndoPayload> member_baked;
+      for (SculptLayer *layer : member_all) {
+        if (!member_bake_key) {
+          bke::sculpt_layers::apply_vert_layer_to_shape_keys(
+              member_mesh, *layer, bke::sculpt_layers::effective(*layer));
+        }
+        member_baked.append(undo::sculpt_layer_payload_capture(
+            member_mesh, layer->base, undo::PayloadCapture::NodeRemoved));
+      }
+      for (SculptLayer *layer : member_all) {
+        bke::sculpt_layers::remove(member_mesh, *layer);
+      }
+      undo::push_sculpt_layer_list_change(member, std::move(member_baked), {}, true);
+      if (member_bake_key) {
+        undo::push_sculpt_layer_bake_shape_key(member, member_bake_key->uid);
+      }
+      tag_layer_overlays_dirty(member);
+      invalidate_runtime(member);
+      session_state_ensure(member);
+      continue;
+    }
+
+    /* Bootstrap path for this member: mirrors the active object's body above. */
+    const short member_pre_bake_shapenr = member.shapenr;
+    Key *member_key = member_mesh.key = BKE_key_add(bmain, &member_mesh.id);
+    member_key->type = KEY_RELATIVE;
+    KeyBlock *member_basis = BKE_keyblock_add_ctime(member_key, DATA_("Basis"), false);
+    BKE_keyblock_convert_from_mesh(&member_mesh, member_key, member_basis);
+
+    KeyBlock *member_baked_kb = bke::sculpt_layers::bake_vert_layers_into_new_shape_key(
+        member_mesh);
+
+    Vector<undo::SculptLayerUndoPayload> member_baked_layers;
+    for (SculptLayer *layer : member_all) {
+      member_baked_layers.append(undo::sculpt_layer_payload_capture(
+          member_mesh, layer->base, undo::PayloadCapture::NodeRemoved));
+    }
+    for (SculptLayer *layer : member_all) {
+      bke::sculpt_layers::remove(member_mesh, *layer);
+    }
+    undo::push_sculpt_layer_list_change(member, std::move(member_baked_layers), {}, true);
+    undo::push_sculpt_layer_bake_to_shape_key(member, member_pre_bake_shapenr);
+    tag_layer_overlays_dirty(member);
+
+    KeyBlock *member_active_key = (member_baked_kb && member_baked_kb->data) ? member_baked_kb :
+                                                                              member_basis;
+    member.shapenr = BLI_findindex(&member_key->block, member_active_key) + 1;
+
+    invalidate_runtime(member);
+    session_state_ensure(member);
+  }
+
+  /* No #commit_layers_change (surface unchanged) -- close like #layer_bake_exec. */
+  undo::push_end_all_ex(false, true);
+  for (Object *member : eligible) {
+    /* Key data always changed on this path (bootstrap or existing-key bake); re-evaluate. */
+    DEG_id_tag_update(&mesh_of(*member).id, ID_RECALC_GEOMETRY);
+    layers_ui_notify(C, *member);
+  }
+  sync_scope_unlink_after_success(*bmain, *ctx.object, sync_scope);
   return OPERATOR_FINISHED;
 }
 
@@ -3413,6 +5807,7 @@ void SCULPT_OT_layer_bake_to_shape_key(wmOperatorType *ot)
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
+  sync_scope_rna_def(ot);
 }
 
 /* "Bake All Layers" choice of #SCULPT_PT_layer_editmode_confirm (see
@@ -3421,7 +5816,9 @@ void SCULPT_OT_layer_bake_to_shape_key(wmOperatorType *ot)
  * mode (not just Sculpt Mode), but #SCULPT_OT_layer_bake needs a live sculpt session, so enter
  * Sculpt Mode first if the object is not already in it; #OBJECT_OT_editmode_toggle's own
  * mode-compat handling below exits Sculpt Mode again on the way into Edit Mode. */
-static wmOperatorStatus layer_bake_and_editmode_enter_exec(bContext *C, wmOperator * /*op*/)
+/* Active-object-only wrapper for mode toggles: bake fans out via #SCULPT_OT_layer_bake (honoring
+ * sync_scope); mode toggles must not fan out. */
+static wmOperatorStatus layer_bake_and_editmode_enter_exec(bContext *C, wmOperator *op)
 {
   const Object *object = CTX_data_active_object(C);
   if (object && !(object->mode & OB_MODE_SCULPT)) {
@@ -3431,9 +5828,12 @@ static wmOperatorStatus layer_bake_and_editmode_enter_exec(bContext *C, wmOperat
 
   /* Only claim the layers are baked if the bake actually ran. #SCULPT_OT_layer_bake cancels when
    * the object has no usable PBVH (or a dyntopo one), and entering Edit Mode anyway would bypass
-   * the warning with the layers still unbaked, silently dropping them on the way out. */
-  const wmOperatorStatus bake_status = WM_operator_name_call(
-      C, "SCULPT_OT_layer_bake", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+   * the warning with the layers still unbaked, silently dropping them on the way out.
+   * Sync-group fan-out of the bake itself lives inside #layer_bake_exec; this wrapper deliberately
+   * does not also fan out #sculptmode_toggle / #editmode_toggle across the group -- entering Edit
+   * Mode on every member is a different product decision and wrong for a confirm that only names
+   * the active object. */
+  const wmOperatorStatus bake_status = call_layer_bake_with_scope(C, op);
   if (!(bake_status & OPERATOR_FINISHED)) {
     return OPERATOR_CANCELLED;
   }
@@ -3473,6 +5873,7 @@ void SCULPT_OT_layer_bake_and_editmode_enter(wmOperatorType *ot)
    * push their own undo steps; an extra global push would insert a memfile step that does not
    * compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
+  sync_scope_rna_def(ot);
 }
 
 static wmOperatorStatus layer_clear_exec(bContext *C, wmOperator *op)
@@ -3488,12 +5889,96 @@ static wmOperatorStatus layer_clear_exec(bContext *C, wmOperator *op)
   if (!layer) {
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
+   * object, plus a find-shaped gate #layer_add_exec has no analog for: the member must actually
+   * hold a layer synced to the active one. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Clear Sculpt Layer: skipping \"%s\" (sculpt layers are not available for this "
+                  "object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree;
+     * the member's own active layer is unrelated. A zero #sync_uid (the active layer was never
+     * fanned-out-created) makes every member miss here by design -- see the function's own doc
+     * comment -- which degrades this operator to the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, layer->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Clear Sculpt Layer: skipping \"%s\" (no layer synced to the active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a layer to a layer, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    if (!bke::sculpt_layers::node_as_layer(member_node)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Clear Sculpt Layer: skipping \"%s\" (the synced node is a group, not a layer)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers. */
+      flush_pending_multires_base(*member);
+    }
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    eligible.append(member);
+  }
+
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   undo::push_sculpt_layer_data(*ctx.object, *layer);
   bke::sculpt_layers::data_clear(*layer);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  for (Object *member : eligible) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Eligibility (#is_supported, sync_uid resolution, #mask_edit_refuse_ccg_rebuild) and the
+     * multires pending-base flush already ran for every member of `eligible` in the gather pass
+     * above -- nothing here can fail or need skipping (mirrors #layer_add_exec's own second
+     * loop). */
+    session_state_ensure(*member);
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(
+        bke::sculpt_layers::node_find_by_sync_uid(member_mesh, layer->base.sync_uid));
+    undo::push_sculpt_layer_data(*member, *member_layer);
+    bke::sculpt_layers::data_clear(*member_layer);
+    commit_layers_change(*ctx.depsgraph, *member);
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way #layer_add_exec
+   * requires it. */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -3521,14 +6006,112 @@ static wmOperatorStatus layer_invert_exec(bContext *C, wmOperator *op)
   if (!layer || !layer->data) {
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
+   * object, plus two find-shaped gates #layer_add_exec has no analog for: the member must actually
+   * hold a layer synced to the active one, and that layer must itself have data (mirrors the
+   * active-object early-return above, but as a per-member skip rather than an operator abort). */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Invert Sculpt Layer: skipping \"%s\" (sculpt layers are not available for this "
+                  "object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree;
+     * the member's own active layer is unrelated. A zero #sync_uid (the active layer was never
+     * fanned-out-created) makes every member miss here by design -- see the function's own doc
+     * comment -- which degrades this operator to the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, layer->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Invert Sculpt Layer: skipping \"%s\" (no layer synced to the active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a layer to a layer, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+    if (!member_layer) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Invert Sculpt Layer: skipping \"%s\" (the synced node is a group, not a "
+                  "layer)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Mirrors the active-object early return: a layer with no allocated data has nothing to
+     * invert. */
+    if (!member_layer->data) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Invert Sculpt Layer: skipping \"%s\" (the synced layer has no data)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers. */
+      flush_pending_multires_base(*member);
+    }
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    eligible.append(member);
+  }
+
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   undo::push_sculpt_layer_data(*ctx.object, *layer);
   for (float3 &v : bke::sculpt_layers::data_get(*layer)) {
     v = -v;
   }
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  for (Object *member : eligible) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Eligibility (#is_supported, sync_uid resolution, the layer-has-data check,
+     * #mask_edit_refuse_ccg_rebuild) and the multires pending-base flush already ran for every
+     * member of `eligible` in the gather pass above -- nothing here can fail or need skipping
+     * (mirrors #layer_add_exec's own second loop). */
+    session_state_ensure(*member);
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(
+        bke::sculpt_layers::node_find_by_sync_uid(member_mesh, layer->base.sync_uid));
+    undo::push_sculpt_layer_data(*member, *member_layer);
+    for (float3 &v : bke::sculpt_layers::data_get(*member_layer)) {
+      v = -v;
+    }
+    commit_layers_change(*ctx.depsgraph, *member);
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way #layer_add_exec
+   * requires it. */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -3564,6 +6147,18 @@ static Vector<SculptLayer *> stale_layers_gather(Mesh &mesh)
   return stale;
 }
 
+/* One fan-out target of #SCULPT_OT_layer_validate: the member and ITS own stale-layer set, captured
+ * in the gather pass. Carrying the list rather than re-deriving it in the fan-out loop is mandatory
+ * for Remove (node-freeing) -- #bke::sculpt_layers::remove invalidates the cached span, and the
+ * active object's removals run before any member is touched. Safe because #fanout_targets dedups by
+ * #Object::data. Clear also carries the list so both actions share one gather shape. */
+struct ValidateFanoutMember {
+  Object *object;
+  Vector<SculptLayer *> stale;
+};
+
+/* Whole-tree fan-out: repair each eligible member's OWN stale set (no sync_uid match); members with
+ * none are skipped, while an empty set on the active object still cancels. */
 static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -3576,6 +6171,63 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   const ValidateAction action = ValidateAction(RNA_enum_get(op->ptr, "action"));
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. Whole-tree (not find-shaped): every eligible member repairs its
+   * own stale set; there is no per-node #sync_uid gate. The active object already passed the
+   * non-empty stale gate above and is included unconditionally.
+   *
+   * Unlike #layer_add_exec / #layer_clear_exec this gather does NOT call
+   * #mask_edit_refuse_ccg_rebuild on a member: validate is one of the operators that *closes* an
+   * open mask-edit session rather than refusing on its account (see #layer_add_exec's comment on
+   * that split), and the per-member loop below closes each member's own session unconditionally. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<ValidateFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Repair Stale Sculpt Layers: skipping \"%s\" (sculpt layers are not available "
+                  "for this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member);
+    /* Captured here, on this member's own tree, and carried forward -- see #ValidateFanoutMember.
+     * Must happen before ANY #bke::sculpt_layers::remove runs (the active object's included). A
+     * member with nothing stale is skipped (not a cancel): only the active object's empty set
+     * cancels the whole operator. */
+    Vector<SculptLayer *> member_stale = stale_layers_gather(member_mesh);
+    if (member_stale.is_empty()) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Repair Stale Sculpt Layers: skipping \"%s\" (no stale sculpt layers to repair)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers, before the repair below rewrites them. */
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    ValidateFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.stale = std::move(member_stale);
+    fanout_members.append(std::move(fanout_member));
+  }
 
   /* Read before the close below, which clears it. Zero when no session is open. */
   const SculptSession *ss = session_of(*ctx.object);
@@ -3590,7 +6242,8 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
   mask_edit_end(*ctx.object);
 
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   if (session_uid != 0) {
     undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
   }
@@ -3651,7 +6304,73 @@ static wmOperatorStatus layer_validate_exec(bContext *C, wmOperator *op)
   /* A stale layer contributed nothing to the surface, so neither action moves any vertex; the
    * commit is still needed to rebuild the runtime base and the display from the new layer set. */
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  /* Fan out: mirror the active object's own body exactly on each member's own stale set, captured
+   * in the gather pass before ANY removal ran anywhere. */
+  for (const ValidateFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    Mesh &member_mesh = mesh_of(member);
+    const Span<SculptLayer *> member_stale = fanout_member.stale;
+    /* Eligibility and the session guards already ran for every entry of `fanout_members` in the
+     * gather pass above, before the undo bracket opened -- nothing here can fail or need skipping
+     * (mirrors #layer_add_exec's own second loop). */
+
+    /* Read before the close below, which clears it -- this member's own session, not the active
+     * object's. Both halves of the close fan out: #mask_edit_end because the member's own stale
+     * layers are about to be rewritten under its own session, and #mask_edit_exit_ui because it is
+     * safe to fan out per member (Task 9d1: returns immediately when this object has no open
+     * session). */
+    const SculptSession *member_ss = session_of(member);
+    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
+    mask_edit_exit_ui(C, member);
+    mask_edit_end(member);
+    session_state_ensure(member);
+    if (member_session_uid != 0) {
+      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
+    }
+
+    if (action == ValidateAction::Remove) {
+      Vector<undo::SculptLayerUndoPayload> removed;
+      for (SculptLayer *layer : member_stale) {
+        removed.append(undo::sculpt_layer_payload_capture(
+            member_mesh, layer->base, undo::PayloadCapture::NodeRemoved));
+      }
+      for (SculptLayer *layer : member_stale) {
+        bke::sculpt_layers::remove(member_mesh, *layer);
+      }
+      undo::push_sculpt_layer_list_change(member, std::move(removed), {}, false);
+    }
+    else {
+      Vector<undo::SculptLayerUndoPayload> resized;
+      for (SculptLayer *layer : member_stale) {
+        resized.append(undo::sculpt_layer_payload_capture(
+            member_mesh, layer->base, undo::PayloadCapture::DataOnly));
+        const int64_t new_count = bke::sculpt_layers::element_count(member_mesh, *layer);
+        bke::sculpt_layers::data_ensure(*layer, new_count);
+        if (layer->base.mask != nullptr &&
+            bke::sculpt_layers::is_stale_mask(*layer->base.mask, new_count))
+        {
+          undo::push_sculpt_layer_mask(member, layer->base);
+          bke::sculpt_layers::mask_free(layer->base.mask);
+          layer->base.mask = nullptr;
+          BKE_reportf(op->reports,
+                      RPT_INFO,
+                      "Removed the weight mask of sculpt layer '%s'; it no longer matches the "
+                      "mesh and the layer now contributes in full",
+                      layer->base.name);
+        }
+      }
+      undo::push_sculpt_layer_data_resize(member, std::move(resized));
+    }
+    commit_layers_change(*ctx.depsgraph, member);
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way #layer_add_exec
+   * requires it. No explicit #rec_exemption_refresh: it already runs inside #commit_layers_change. */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
+  /* Active-object-only, matching #layer_add_exec / every other #finish_multi_object-based fan-out
+   * in this file: #finish_multi_object already sent `NC_OBJECT | ND_DRAW` for every member above. */
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -3910,6 +6629,80 @@ static bool gather_layer_mask(Object &object, const SculptLayer &layer, Array<fl
   return max_value > 0.0f;
 }
 
+static bool layer_has_usable_paint_mask(Object &object, const SculptLayer &layer)
+{
+  Array<float> mask;
+  return gather_layer_mask(object, layer, mask);
+}
+
+static bool sync_group_member_has_layer_paint_mask(Main &bmain,
+                                                   Object &active_ob,
+                                                   const SculptLayer &active_layer,
+                                                   const Object *skip_member)
+{
+  if (active_layer.base.sync_uid == 0) {
+    return false;
+  }
+  for (Object *member : fanout_targets(bmain, active_ob)) {
+    if (member == skip_member) {
+      continue;
+    }
+    if (member->type != OB_MESH || member->data == nullptr) {
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, active_layer.base.sync_uid);
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+    if (!member_layer || !member_layer->data) {
+      continue;
+    }
+    if (layer_has_usable_paint_mask(*member, *member_layer)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool layer_mask_isolate_weight_mask_editing(const Object &object)
+{
+  const SculptSession *ss = session_of(const_cast<Object &>(object));
+  return ss != nullptr && ss->layers.mask_edit.node_uid != 0;
+}
+
+static void layer_mask_isolate_apply_mask_to_data(SculptLayer &layer,
+                                                  const Span<float> mask,
+                                                  const bool invert)
+{
+  MutableSpan<float3> data = bke::sculpt_layers::data_get(layer);
+  for (const int64_t i : data.index_range()) {
+    const float factor = invert ? 1.0f - mask[i] : mask[i];
+    data[i] *= factor;
+  }
+}
+
+static void layer_mask_isolate_clear_paint_mask(bContext *C, ViewLayer *view_layer, Object &object)
+{
+  Base *base = BKE_view_layer_base_find(view_layer, &object);
+  if (base == nullptr) {
+    return;
+  }
+  ed::object::base_activate(C, base);
+  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  BKE_sculpt_update_object_for_edit(depsgraph, &object, false);
+  PointerRNA props = WM_operator_properties_create("PAINT_OT_mask_flood_fill");
+  RNA_enum_set_identifier(C, &props, "mode", "VALUE");
+  RNA_float_set(&props, "value", 0.0f);
+  WM_operator_name_call(
+      C, "PAINT_OT_mask_flood_fill", wm::OpCallContext::ExecDefault, &props, nullptr);
+  WM_operator_properties_free(&props);
+}
+
+struct LayerMaskIsolateTarget {
+  Object *object;
+  SculptLayer *layer;
+};
+
 static wmOperatorStatus layer_mask_isolate_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -3919,18 +6712,11 @@ static wmOperatorStatus layer_mask_isolate_exec(bContext *C, wmOperator *op)
   if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
-  SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
-  if (!layer || !layer->data) {
+  SculptLayer *active_layer = bke::sculpt_layers::active_get(*ctx.mesh);
+  if (!active_layer || !active_layer->data) {
     return OPERATOR_CANCELLED;
   }
-  /* The same exclusion #layer_toggle_rec_exec makes, for the same storage reason. #gather_layer_mask
-   * reads exactly the two buffers a session borrows — the `.sculpt_mask` attribute and
-   * #SubdivCCG::masks — which hold the node's *weights* while a session is open, not the paint mask
-   * this operator is defined on. Refused rather than folded: the paint mask is not in the store at
-   * all but parked in #SculptLayerMaskEdit::saved_vert_mask, and reaching into that would be a
-   * second spelling of the session's storage contract. */
-  const SculptSession *ss = session_of(*ctx.object);
-  if (ss && ss->layers.mask_edit.node_uid != 0) {
+  if (layer_mask_isolate_weight_mask_editing(*ctx.object)) {
     BKE_report(op->reports,
                RPT_ERROR,
                "A sculpt layer weight mask is being edited; finish the mask edit before isolating "
@@ -3938,42 +6724,198 @@ static wmOperatorStatus layer_mask_isolate_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  Array<float> mask;
-  if (!gather_layer_mask(*ctx.object, *layer, mask)) {
+  Main *bmain = CTX_data_main(C);
+  const SyncScope sync_scope = sync_scope_get(op);
+  const bool invert = RNA_boolean_get(op->ptr, "invert");
+  const bool clear_mask = RNA_boolean_get(op->ptr, "clear_mask");
+
+  Vector<Object *> eligible;
+  Vector<LayerMaskIsolateTarget> targets;
+
+  auto try_add = [&](Object *member) {
+    if (layer_mask_isolate_weight_mask_editing(*member)) {
+      if (member != ctx.object) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Isolate Layer by Mask: skipping \"%s\" (a sculpt layer weight mask is being "
+                    "edited)",
+                    member->id.name + 2);
+      }
+      return;
+    }
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      if (member != ctx.object) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Isolate Layer by Mask: skipping \"%s\" (sculpt layers are not available for "
+                    "this object)",
+                    member->id.name + 2);
+      }
+      return;
+    }
+
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayer *layer = active_layer;
+    if (member != ctx.object) {
+      SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+          member_mesh, active_layer->base.sync_uid);
+      layer = bke::sculpt_layers::node_as_layer(member_node);
+      if (!layer) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Isolate Layer by Mask: skipping \"%s\" (no layer synced to the active one)",
+                    member->id.name + 2);
+        return;
+      }
+    }
+    if (!layer->data) {
+      return;
+    }
+    if (!layer_has_usable_paint_mask(*member, *layer)) {
+      if (member == ctx.object) {
+        if (sync_scope == SyncScope::ActiveOnly) {
+          BKE_report(op->reports, RPT_ERROR, "No mask painted");
+        }
+        else {
+          BKE_reportf(op->reports,
+                      RPT_WARNING,
+                      "Isolate Layer by Mask: skipping \"%s\" (no mask painted)",
+                      member->id.name + 2);
+        }
+      }
+      else {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Isolate Layer by Mask: skipping \"%s\" (no mask painted)",
+                    member->id.name + 2);
+      }
+      return;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      flush_pending_multires_base(*member);
+    }
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      return;
+    }
+    if (!eligible.contains(member)) {
+      eligible.append(member);
+    }
+    targets.append({member, layer});
+  };
+
+  for (Object *member : sync_scope_targets(*bmain, *ctx.object, sync_scope)) {
+    try_add(member);
+  }
+
+  if (targets.is_empty()) {
+    if (sync_scope == SyncScope::ActiveOnly) {
+      BKE_report(op->reports, RPT_ERROR, "No mask painted");
+    }
+    else {
+      BKE_report(op->reports,
+                 RPT_ERROR,
+                 "No mask painted on any object in the sync group for this layer");
+    }
+    return OPERATOR_CANCELLED;
+  }
+
+  for (Object *member : eligible) {
+    session_state_ensure(*member);
+  }
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  for (const LayerMaskIsolateTarget &target : targets) {
+    Array<float> mask;
+    if (!gather_layer_mask(*target.object, *target.layer, mask)) {
+      BLI_assert_unreachable();
+      continue;
+    }
+    undo::push_sculpt_layer_data(*target.object, *target.layer);
+    layer_mask_isolate_apply_mask_to_data(*target.layer, mask, invert);
+  }
+  for (Object *member : eligible) {
+    commit_layers_change(*ctx.depsgraph, *member);
+  }
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
+
+  if (clear_mask) {
+    ViewLayer *view_layer = CTX_data_view_layer(C);
+    Base *restore_base = BKE_view_layer_base_find(view_layer, ctx.object);
+    for (const LayerMaskIsolateTarget &target : targets) {
+      layer_mask_isolate_clear_paint_mask(C, view_layer, *target.object);
+    }
+    if (restore_base != nullptr) {
+      ed::object::base_activate(C, restore_base);
+    }
+  }
+
+  for (Object *member : eligible) {
+    layers_ui_notify(C, *member);
+  }
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus layer_mask_isolate_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
+{
+  OpContext ctx;
+  if (!op_context_get(C, op, ctx)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (layer_mask_isolate_weight_mask_editing(*ctx.object)) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "A sculpt layer weight mask is being edited; finish the mask edit before isolating "
+               "by mask");
+    return OPERATOR_CANCELLED;
+  }
+  SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
+  if (!layer || !layer->data) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Main *bmain = CTX_data_main(C);
+  const bool active_has_mask = layer_has_usable_paint_mask(*ctx.object, *layer);
+
+  if (ctx.object->sculpt_layer_sync_group == 0 || layer->base.sync_uid == 0) {
+    if (!active_has_mask) {
+      BKE_report(op->reports, RPT_ERROR, "No mask painted");
+      return OPERATOR_CANCELLED;
+    }
+    return layer_mask_isolate_exec(C, op);
+  }
+
+  const bool other_has_mask = sync_group_member_has_layer_paint_mask(
+      *bmain, *ctx.object, *layer, ctx.object);
+
+  if (!active_has_mask && !other_has_mask) {
     BKE_report(op->reports, RPT_ERROR, "No mask painted");
     return OPERATOR_CANCELLED;
   }
 
-  const bool invert = RNA_boolean_get(op->ptr, "invert");
-  const bool clear_mask = RNA_boolean_get(op->ptr, "clear_mask");
-
-  session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
-  undo::push_sculpt_layer_data(*ctx.object, *layer);
-  MutableSpan<float3> data = bke::sculpt_layers::data_get(*layer);
-  for (const int64_t i : data.index_range()) {
-    const float factor = invert ? 1.0f - mask[i] : mask[i];
-    data[i] *= factor;
-  }
-  commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
-
-  if (clear_mask) {
-    /* Reuse the existing flood-fill operator instead of re-deriving the per-domain mask-clear
-     * logic (grid dirty flags, node mask-changed tagging, multires-modified marking are already
-     * handled there). Runs as its own undo step, same as other layer operators that delegate to
-     * a sibling operator (see #layer_bake_and_editmode_enter_exec calling SCULPT_OT_layer_bake).
-     */
-    PointerRNA props = WM_operator_properties_create("PAINT_OT_mask_flood_fill");
-    RNA_enum_set_identifier(C, &props, "mode", "VALUE");
-    RNA_float_set(&props, "value", 0.0f);
-    WM_operator_name_call(
-        C, "PAINT_OT_mask_flood_fill", wm::OpCallContext::ExecDefault, &props, nullptr);
-    WM_operator_properties_free(&props);
+  if (active_has_mask && !other_has_mask) {
+    RNA_enum_set(op->ptr, "sync_scope", int(SyncScope::ActiveOnly));
+    return layer_mask_isolate_exec(C, op);
   }
 
-  layers_ui_notify(C, *ctx.object);
-  return OPERATOR_FINISHED;
+  if (!active_has_mask && other_has_mask) {
+    return sync_scope_choice_dialog(
+        C,
+        op,
+        IFACE_("Isolate Layer by Mask (Sync Group)"),
+        IFACE_("The active object has no painted mask on this layer. Other objects in the sync "
+               "group do. Isolate only on the active object when it has a mask, on every group "
+               "object that has a mask, or cancel."),
+        false);
+  }
+
+  return sync_scope_choice_dialog(
+      C,
+      op,
+      IFACE_("Isolate Layer by Mask (Sync Group)"),
+      IFACE_("Isolate using the paint mask on the active object only, on every sync-group object "
+             "that has a mask on the synced layer, or cancel."));
 }
 
 void SCULPT_OT_layer_mask_isolate(wmOperatorType *ot)
@@ -3983,8 +6925,10 @@ void SCULPT_OT_layer_mask_isolate(wmOperatorType *ot)
   ot->description =
       "Keep only the masked part of the active sculpt layer's displacement, zeroing the rest";
   ot->exec = layer_mask_isolate_exec;
+  ot->invoke = layer_mask_isolate_invoke;
   ot->poll = layers_poll;
   ot->flag = OPTYPE_REGISTER;
+  sync_scope_rna_def(ot);
 
   RNA_def_boolean(
       ot->srna, "invert", false, "Invert", "Keep the unmasked part instead of the masked part");
@@ -4008,14 +6952,116 @@ static wmOperatorStatus layer_set_influence_exec(bContext *C, wmOperator *op)
   if (!layer) {
     return OPERATOR_CANCELLED;
   }
+  /* Read once from the active object's RNA prop and applied identically to every member: an
+   * influence drag is not per-member-relative. */
   const float value = RNA_float_get(op->ptr, "influence");
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
+   * object, plus a find-shaped gate #layer_add_exec has no analog for: the member must actually
+   * hold a layer synced to the active one. */
+  Vector<Object *> eligible;
+  Set<Object *> tree_only_members;
+  eligible.append(ctx.object);
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    bool tree_only = false;
+    if (!sync_group_tree_create_member_prepare(ctx.depsgraph,
+                                               *ctx.object,
+                                               member,
+                                               op,
+                                               "Set Sculpt Layer Influence",
+                                               tree_only))
+    {
+      continue;
+    }
+    if (tree_only) {
+      tree_only_members.add(member);
+    }
+    /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree;
+     * the member's own active layer is unrelated. A zero #sync_uid (the active layer was never
+     * fanned-out-created) makes every member miss here by design -- see the function's own doc
+     * comment -- which degrades this operator to the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, layer->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Set Sculpt Layer Influence: skipping \"%s\" (no layer synced to the active "
+                  "one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a layer to a layer, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    if (!bke::sculpt_layers::node_as_layer(member_node)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Set Sculpt Layer Influence: skipping \"%s\" (the synced node is a group, not "
+                  "a layer)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers. */
+      flush_pending_multires_base(*member);
+    }
+    if (!tree_only && mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    eligible.append(member);
+  }
+
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   undo::push_sculpt_layer_metadata(*ctx.object, layer->base);
   layer->influence = value;
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
-  layers_ui_notify(C, *ctx.object);
+
+  for (Object *member : eligible) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Eligibility (#is_supported, sync_uid resolution, #mask_edit_refuse_ccg_rebuild) and the
+     * multires pending-base flush already ran for every member of `eligible` in the gather pass
+     * above -- nothing here can fail or need skipping (mirrors #layer_add_exec's own second
+     * loop). */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(
+        bke::sculpt_layers::node_find_by_sync_uid(member_mesh, layer->base.sync_uid));
+    if (tree_only_members.contains(member)) {
+      undo::push_sculpt_layer_metadata(*member, member_layer->base);
+      member_layer->influence = value;
+      DEG_id_tag_update(&member_mesh.id, ID_RECALC_GEOMETRY);
+      continue;
+    }
+    session_state_ensure(*member);
+    undo::push_sculpt_layer_metadata(*member, member_layer->base);
+    member_layer->influence = value;
+    commit_layers_change(*ctx.depsgraph, *member);
+  }
+
+  Vector<Object *> eligible_finish;
+  eligible_finish.reserve(eligible.size());
+  for (Object *ob : eligible) {
+    if (!tree_only_members.contains(ob)) {
+      eligible_finish.append(ob);
+    }
+  }
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way #layer_add_exec
+   * requires it. */
+  undo::finish_multi_object(C, eligible_finish.as_span(), UpdateType::Position);
+  for (Object *member : eligible) {
+    layers_ui_notify(C, *member);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -4077,6 +7123,9 @@ struct InfluenceDragData {
    * with an honest re-evaluation. Empty when the contribution could not be computed (the drag
    * then only changes the influence value and relies on the final re-evaluation). */
   Array<float3> grid_contrib;
+  /* Last influence value already pushed to other sync-group members during this drag (lightweight
+   * path without #commit_layers_change). */
+  float last_sync_propagated_influence = std::numeric_limits<float>::quiet_NaN();
 };
 
 /* Influence units changed per pixel of horizontal mouse motion. */
@@ -4138,6 +7187,32 @@ static void influence_drag_refresh_normals(Object &object,
            int64_t(node_mask.size()));
 }
 
+static void influence_drag_propagate_sync_group(bContext *C,
+                                                Object &source_ob,
+                                                const SculptLayer &layer,
+                                                Depsgraph *depsgraph)
+{
+  if (source_ob.sculpt_layer_sync_group == 0 || layer.base.sync_uid == 0) {
+    return;
+  }
+  Main *bmain = CTX_data_main(C);
+  if (bmain == nullptr) {
+    return;
+  }
+  sync_group_propagate_layer_influence(*bmain, source_ob, layer, depsgraph);
+}
+
+static void influence_drag_sync_group_during_modal(bContext *C,
+                                                   InfluenceDragData &data,
+                                                   const float value)
+{
+  if (value == data.last_sync_propagated_influence) {
+    return;
+  }
+  influence_drag_propagate_sync_group(C, *data.object, *data.layer, nullptr);
+  data.last_sync_propagated_influence = value;
+}
+
 static void influence_drag_finish(bContext *C, wmOperator *op, const bool cancel)
 {
   InfluenceDragData *data = static_cast<InfluenceDragData *>(op->customdata);
@@ -4155,6 +7230,10 @@ static void influence_drag_finish(bContext *C, wmOperator *op, const bool cancel
     DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
     WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &object.id);
     WM_event_add_notifier(C, NC_GEOM | ND_DATA, &mesh.id);
+    if (!cancel) {
+      Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+      influence_drag_propagate_sync_group(C, object, layer, depsgraph);
+    }
     MEM_delete(data);
     op->customdata = nullptr;
     return;
@@ -4211,6 +7290,11 @@ static void influence_drag_finish(bContext *C, wmOperator *op, const bool cancel
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &object);
   WM_event_add_notifier(C, NC_GEOM | ND_DATA, &mesh.id);
 
+  if (!cancel) {
+    Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+    influence_drag_propagate_sync_group(C, object, layer, depsgraph);
+  }
+
   MEM_delete(data);
   op->customdata = nullptr;
 }
@@ -4249,6 +7333,7 @@ static wmOperatorStatus layer_influence_drag_invoke(bContext *C,
   data->mesh = &mesh;
   data->layer = layer;
   data->start_influence = layer->influence;
+  data->last_sync_propagated_influence = layer->influence;
   data->clamp_min = layer->influence < influence_drag_default_min ? influence_drag_hard_min :
                                                                      influence_drag_default_min;
   data->clamp_max = layer->influence > influence_drag_default_max ? influence_drag_hard_max :
@@ -4354,6 +7439,7 @@ static wmOperatorStatus layer_influence_drag_modal(bContext *C, wmOperator *op, 
         }
         ED_region_tag_redraw(CTX_wm_region(C));
         WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &object.id);
+        influence_drag_sync_group_during_modal(C, *data, value);
         break;
       }
       if (data->deg_reeval) {
@@ -4366,6 +7452,7 @@ static wmOperatorStatus layer_influence_drag_modal(bContext *C, wmOperator *op, 
         ED_region_tag_redraw(CTX_wm_region(C));
         WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &object.id);
         WM_event_add_notifier(C, NC_GEOM | ND_DATA, &mesh.id);
+        influence_drag_sync_group_during_modal(C, *data, value);
         break;
       }
       bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
@@ -4416,6 +7503,7 @@ static wmOperatorStatus layer_influence_drag_modal(bContext *C, wmOperator *op, 
        * GPU influence compute runs at draw time) is only refreshed by this object-draw notifier. */
       ED_region_tag_redraw(CTX_wm_region(C));
       WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &object.id);
+      influence_drag_sync_group_during_modal(C, *data, value);
       break;
     }
     case LEFTMOUSE:
@@ -4452,8 +7540,73 @@ void SCULPT_OT_layer_influence_drag(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_BLOCKING;
 }
 
+/* The object-mode half of #layer_toggle_visibility_exec — mirrors
+ * #layer_group_toggle_visibility_object_mode_exec. */
+static wmOperatorStatus layer_toggle_visibility_object_mode_exec(bContext *C,
+                                                                 wmOperator *op,
+                                                                 Object &object)
+{
+  Mesh &mesh = mesh_of(object);
+  const int layer_uid = RNA_int_get(op->ptr, "layer_uid");
+  const bool use_sync_group = RNA_boolean_get(op->ptr, "use_sync_group");
+  SculptLayer *layer = layer_row_lookup(mesh, layer_uid);
+  if (!layer) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layer with that id");
+    return OPERATOR_CANCELLED;
+  }
+  Main *bmain = CTX_data_main(C);
+  const bool enable = !(layer->base.flag & SCULPT_LAYER_ENABLED);
+
+  Vector<Object *> eligible;
+  eligible.append(&object);
+  if (use_sync_group && layer->base.sync_uid != 0 && object.sculpt_layer_sync_group != 0) {
+    for (Object *member : sync_group_members(*bmain, object)) {
+      if (member->type != OB_MESH) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Toggle Sculpt Layer Visibility: skipping \"%s\" (not a mesh object)",
+                    member->id.name + 2);
+        continue;
+      }
+      Mesh &member_mesh = mesh_of(*member);
+      SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+          member_mesh, layer->base.sync_uid);
+      if (!bke::sculpt_layers::node_as_layer(member_node)) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Toggle Sculpt Layer Visibility: skipping \"%s\" (no layer synced to the "
+                    "active one)",
+                    member->id.name + 2);
+        continue;
+      }
+      eligible.append(member);
+    }
+  }
+
+  for (Object *target : eligible) {
+    Mesh &target_mesh = mesh_of(*target);
+    SculptLayer *target_layer = layer;
+    if (target != &object) {
+      target_layer = bke::sculpt_layers::node_as_layer(
+          bke::sculpt_layers::node_find_by_sync_uid(target_mesh, layer->base.sync_uid));
+    }
+    apply_layer_enabled_value_to_mesh(*bmain, target_mesh, *target_layer, enable);
+    DEG_id_tag_update(&target_mesh.id, ID_RECALC_GEOMETRY);
+  }
+
+  ED_undo_push(C, "Toggle Sculpt Layer Visibility");
+  for (Object *target : eligible) {
+    layers_ui_notify(C, *target);
+  }
+  return OPERATOR_FINISHED;
+}
+
 static wmOperatorStatus layer_toggle_visibility_exec(bContext *C, wmOperator *op)
 {
+  Object *object_poll = CTX_data_active_object(C);
+  if (object_poll != nullptr && !(object_poll->mode & OB_MODE_SCULPT)) {
+    return layer_toggle_visibility_object_mode_exec(C, op, *object_poll);
+  }
   OpContext ctx;
   if (!op_context_get(C, op, ctx)) {
     return OPERATOR_CANCELLED;
@@ -4461,28 +7614,123 @@ static wmOperatorStatus layer_toggle_visibility_exec(bContext *C, wmOperator *op
   if (mask_edit_refuse_ccg_rebuild(op, *ctx.object)) {
     return OPERATOR_CANCELLED;
   }
-  SculptLayer *layer = bke::sculpt_layers::active_get(*ctx.mesh);
+  const int layer_uid = RNA_int_get(op->ptr, "layer_uid");
+  const bool use_sync_group = RNA_boolean_get(op->ptr, "use_sync_group");
+  SculptLayer *layer = layer_row_lookup(*ctx.mesh, layer_uid);
   if (!layer) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layer with that id");
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
+  /* One target state for every object touched: derived from the active mesh row, then applied
+   * absolutely (not per-member XOR) so Alt+sync-group can turn every member on or off together
+   * even when their stored bits had drifted apart. */
+  const bool enable = !(layer->base.flag & SCULPT_LAYER_ENABLED);
+
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  if (use_sync_group && layer->base.sync_uid != 0) {
+    for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+      if (member == ctx.object) {
+        continue;
+      }
+      if (member->runtime->sculpt_session != nullptr) {
+        BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+      }
+      if (!is_supported(*member)) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Toggle Sculpt Layer Visibility: skipping \"%s\" (sculpt layers are not "
+                    "available for this object)",
+                    member->id.name + 2);
+        continue;
+      }
+      Mesh &member_mesh = mesh_of(*member);
+      SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+          member_mesh, layer->base.sync_uid);
+      if (!member_node) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Toggle Sculpt Layer Visibility: skipping \"%s\" (no layer synced to the "
+                    "active one)",
+                    member->id.name + 2);
+        continue;
+      }
+      if (!bke::sculpt_layers::node_as_layer(member_node)) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Toggle Sculpt Layer Visibility: skipping \"%s\" (the synced node is a group, "
+                    "not a layer)",
+                    member->id.name + 2);
+        continue;
+      }
+      if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+        flush_pending_multires_base(*member);
+      }
+      if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+        continue;
+      }
+      eligible.append(member);
+    }
+  }
+
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
   undo::push_sculpt_layer_metadata(*ctx.object, layer->base);
-  layer->base.flag ^= SCULPT_LAYER_ENABLED;
+  SET_FLAG_FROM_TEST(layer->base.flag, enable, SCULPT_LAYER_ENABLED);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  for (Object *member : eligible) {
+    if (member == ctx.object) {
+      continue;
+    }
+    session_state_ensure(*member);
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(
+        bke::sculpt_layers::node_find_by_sync_uid(member_mesh, layer->base.sync_uid));
+    undo::push_sculpt_layer_metadata(*member, member_layer->base);
+    SET_FLAG_FROM_TEST(member_layer->base.flag, enable, SCULPT_LAYER_ENABLED);
+    commit_layers_change(*ctx.depsgraph, *member);
+  }
+
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus layer_toggle_visibility_invoke(bContext *C,
+                                                       wmOperator *op,
+                                                       const wmEvent *event)
+{
+  RNA_boolean_set(op->ptr, "use_sync_group", (event->modifier & KM_ALT) != 0);
+  return layer_toggle_visibility_exec(C, op);
 }
 
 void SCULPT_OT_layer_toggle_visibility(wmOperatorType *ot)
 {
   ot->name = "Toggle Sculpt Layer Visibility";
   ot->idname = "SCULPT_OT_layer_toggle_visibility";
-  ot->description = "Toggle whether the active sculpt layer contributes to the result";
+  ot->description =
+      "Toggle whether this sculpt layer contributes to the result. Hold Alt to apply the same "
+      "visibility to every object in the sculpt-layer sync group";
+  ot->invoke = layer_toggle_visibility_invoke;
   ot->exec = layer_toggle_visibility_exec;
-  ot->poll = layers_poll;
+  ot->poll = layers_object_mode_poll;
   ot->flag = OPTYPE_REGISTER;
+  RNA_def_int(ot->srna,
+              "layer_uid",
+              0,
+              0,
+              INT_MAX,
+              "Layer ID",
+              "Unique id of the sculpt layer to toggle (0 uses the active layer)",
+              0,
+              INT_MAX);
+  RNA_def_boolean(ot->srna,
+                  "use_sync_group",
+                  false,
+                  "Sync Group",
+                  "Apply the toggled visibility to every object in the sculpt-layer sync group");
 }
 
 /* Solo Base: sculpting the base while layers are visible bakes the layer residual into the base
@@ -4490,6 +7738,18 @@ void SCULPT_OT_layer_toggle_visibility(wmOperatorType *ot)
  * the flush must store `surface - layers` to keep the result intact. Isolating the base removes
  * the layers from the surface the brush sees, so base edits stay clean. The enabled flags of the
  * hidden layers are preserved via #SCULPT_LAYER_SOLO_HIDDEN and restored on the second toggle. */
+
+/* One fan-out target of #SCULPT_OT_layer_solo_base: the member and ITS own affected-layer set for
+ * the once-computed toggle direction, captured in the gather pass so the fan-out loop does not
+ * re-walk the tree under a different (member-local) #solo_active. Flags are not node-freeing, but
+ * carrying the list keeps gather and do aligned on the same set the empty-skip already judged. */
+struct SoloBaseFanoutMember {
+  Object *object;
+  Vector<SculptLayer *> affected;
+};
+
+/* Whole-tree fan-out: apply the active object's once-computed solo direction to each member's own
+ * affected set (mirrors #layer_toggle_rec_exec); do not independently toggle per member. */
 static wmOperatorStatus layer_solo_base_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -4501,13 +7761,16 @@ static wmOperatorStatus layer_solo_base_exec(bContext *C, wmOperator *op)
   }
   Mesh &mesh = *ctx.mesh;
 
-  /* Solo is active when any layer carries the marker (single authority in BKE). */
+  /* Solo is active when any layer carries the marker (single authority in BKE). Computed once from
+   * the active object and applied uniformly to every fanned-out member -- not each member flipping
+   * its own independently-current #solo_active (mirrors Task 8c2 #layer_toggle_rec_exec computing
+   * target state once). */
   const bool solo_active = bke::sculpt_layers::solo_active(mesh);
+  const int test_flag = solo_active ? SCULPT_LAYER_SOLO_HIDDEN : SCULPT_LAYER_ENABLED;
 
   /* Layers the toggle changes: the enabled ones when activating, the marked ones when ending. */
   Vector<SculptLayer *> affected;
   for (SculptLayer *layer : bke::sculpt_layers::layers(mesh)) {
-    const int test_flag = solo_active ? SCULPT_LAYER_SOLO_HIDDEN : SCULPT_LAYER_ENABLED;
     if (layer->base.flag & test_flag) {
       affected.append(layer);
     }
@@ -4515,12 +7778,74 @@ static wmOperatorStatus layer_solo_base_exec(bContext *C, wmOperator *op)
   if (affected.is_empty()) {
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. Whole-tree (not find-shaped): every eligible member gets the
+   * same batch-hide/restore direction on its own tree; there is no per-node #sync_uid gate. The
+   * active object already passed #mask_edit_refuse_ccg_rebuild and the non-empty affected gate
+   * above and is included unconditionally. Members whose own affected set is empty for that
+   * direction are skipped with a warning (not a cancel). */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<SoloBaseFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Solo Base: skipping \"%s\" (sculpt layers are not available for this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member);
+    /* Same #test_flag derived from the active object's #solo_active, applied to this member's own
+     * layers -- see the decision comment at the top of this function. */
+    Vector<SculptLayer *> member_affected;
+    for (SculptLayer *layer : bke::sculpt_layers::layers(member_mesh)) {
+      if (layer->base.flag & test_flag) {
+        member_affected.append(layer);
+      }
+    }
+    if (member_affected.is_empty()) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Solo Base: skipping \"%s\" (no layers affected by this solo toggle)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers. */
+      flush_pending_multires_base(*member);
+    }
+    /* Mirrors the active object's own gate above: an open weight-mask edit session on this member
+     * would have its multires rebuild silently discard the session. Reports the error itself. */
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    eligible.append(member);
+    SoloBaseFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.affected = std::move(member_affected);
+    fanout_members.append(std::move(fanout_member));
+  }
 
   /* Derive the mesh-domain runtime base from the still-consistent pre-change state (pending
    * multires base edits were already consumed by #op_context_get). */
   session_state_ensure(*ctx.object);
 
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   Vector<int> uids;
   Vector<int> flags;
   uids.reserve(affected.size());
@@ -4543,7 +7868,44 @@ static wmOperatorStatus layer_solo_base_exec(bContext *C, wmOperator *op)
   }
 
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  /* Fan out: same direction (#solo_active) on each member's own pre-gathered affected set. */
+  for (const SoloBaseFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    /* Eligibility (#is_supported, non-empty affected, #mask_edit_refuse_ccg_rebuild) and the
+     * multires pending-base flush already ran for every entry of `fanout_members` in the gather
+     * pass above -- nothing here can fail or need skipping (mirrors #layer_add_exec's own second
+     * loop). */
+    session_state_ensure(member);
+    Vector<int> member_uids;
+    Vector<int> member_flags;
+    member_uids.reserve(fanout_member.affected.size());
+    member_flags.reserve(fanout_member.affected.size());
+    for (const SculptLayer *layer : fanout_member.affected) {
+      member_uids.append(layer->base.uid);
+      member_flags.append(layer->base.flag);
+    }
+    undo::push_sculpt_layer_flags_batch(member, std::move(member_uids), std::move(member_flags));
+
+    for (SculptLayer *layer : fanout_member.affected) {
+      if (solo_active) {
+        layer->base.flag |= SCULPT_LAYER_ENABLED;
+        layer->base.flag &= ~SCULPT_LAYER_SOLO_HIDDEN;
+      }
+      else {
+        layer->base.flag &= ~SCULPT_LAYER_ENABLED;
+        layer->base.flag |= SCULPT_LAYER_SOLO_HIDDEN;
+      }
+    }
+    commit_layers_change(*ctx.depsgraph, member);
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way #layer_add_exec
+   * requires it. No explicit #rec_exemption_refresh: it already runs inside #commit_layers_change. */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
+  /* Active-object-only, matching #layer_add_exec / every other #finish_multi_object-based fan-out
+   * in this file: #finish_multi_object already sent `NC_OBJECT | ND_DRAW` for every member above. */
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -4586,48 +7948,112 @@ static wmOperatorStatus layer_group_toggle_visibility_object_mode_exec(bContext 
     BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
 
-  const Span<SculptLayer *> descendants = bke::sculpt_layers::layers(*group);
-  Vector<float> old_effective(descendants.size());
-  for (const int64_t i : descendants.index_range()) {
-    old_effective[i] = bke::sculpt_layers::effective(*descendants[i]);
+  /* Gather-then-gate, as every fan-out elsewhere in this file: the active object is included
+   * unconditionally, and every other sync-group member is brought in only if it clears two gates.
+   * There is no #is_supported / session / PBVH gate here, unlike the in-sculpt-mode variant above --
+   * this whole code path has no #SculptSession to begin with -- but #mesh_of is still an unguarded
+   * cast to `Mesh *`, and #sync_group_members applies no object-type filter of its own, so a member
+   * of a different type has to be turned away before it reaches #mesh_of. */
+  Vector<Object *> eligible;
+  eligible.append(&object);
+  for (Object *member : sync_group_members(*bmain, object)) {
+    if (member->type != OB_MESH) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Group Visibility: skipping \"%s\" (not a mesh object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME group wherever it sits in the member's own tree;
+     * the member's own group is unrelated. A zero #sync_uid (the active group was never
+     * fanned-out-created) makes every member miss here by design, which degrades this operator to
+     * the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, group->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Group Visibility: skipping \"%s\" (no group synced to the "
+                  "active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a group to a group, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    if (!bke::sculpt_layers::node_as_group(member_node)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Group Visibility: skipping \"%s\" (the synced node is a "
+                  "layer, not a group)",
+                  member->id.name + 2);
+      continue;
+    }
+    eligible.append(member);
   }
 
-  group->base.flag ^= SCULPT_LAYER_GROUP_ENABLED;
-  bke::sculpt_layers::resync_group_state(mesh);
+  /* The exact mutation the single-object path always ran, once per fanned-out target.
+   * #ED_undo_push is a single global memfile snapshot of the whole file rather than a per-object
+   * push, so unlike the mutation itself it is not repeated per target -- it runs exactly once below,
+   * after every target's tree (and, where writable, positions) have settled. */
+  for (Object *target : eligible) {
+    Mesh &target_mesh = mesh_of(*target);
+    SculptLayerGroup *target_group = group;
+    if (target != &object) {
+      target_group = bke::sculpt_layers::node_as_group(
+          bke::sculpt_layers::node_find_by_sync_uid(target_mesh, group->base.sync_uid));
+    }
 
-  /* Skipped wholesale for the cases where the stored positions are not what the surface is composed
-   * from, and where writing a delta into them would corrupt the basis rather than update it: an edit
-   * mesh owns the live positions, and under a shape key the layers are an evaluation-time overlay
-   * over an untouched basis (#apply_vert_layers_eval). Both are covered by the re-evaluation tagged
-   * below instead. Grid-domain descendants are skipped per layer for the same reason, inside the
-   * loop. */
-  const bool positions_writable = mesh.verts_num > 0 && mesh.runtime->edit_mesh == nullptr &&
-                                  mesh.key == nullptr;
-  if (positions_writable) {
-    MutableSpan<float3> positions = mesh.vert_positions_for_write();
-    bool moved = false;
+    const Span<SculptLayer *> descendants = bke::sculpt_layers::layers(*target_group);
+    Vector<float> old_effective(descendants.size());
     for (const int64_t i : descendants.index_range()) {
-      SculptLayer &layer = *descendants[i];
-      const float delta = bke::sculpt_layers::effective(layer) - old_effective[i];
-      if (delta == 0.0f || layer.domain != SCULPT_LAYER_DOMAIN_VERT) {
-        continue;
+      old_effective[i] = bke::sculpt_layers::effective(*descendants[i]);
+    }
+
+    target_group->base.flag ^= SCULPT_LAYER_GROUP_ENABLED;
+    bke::sculpt_layers::resync_group_state(target_mesh);
+
+    /* Skipped wholesale for the cases where the stored positions are not what the surface is
+     * composed from, and where writing a delta into them would corrupt the basis rather than update
+     * it: an edit mesh owns the live positions, and under a shape key the layers are an
+     * evaluation-time overlay over an untouched basis (#apply_vert_layers_eval). Both are covered by
+     * the re-evaluation tagged below instead. Grid-domain descendants are skipped per layer for the
+     * same reason, inside the loop. */
+    const bool positions_writable = target_mesh.verts_num > 0 &&
+                                    target_mesh.runtime->edit_mesh == nullptr &&
+                                    target_mesh.key == nullptr;
+    if (positions_writable) {
+      MutableSpan<float3> positions = target_mesh.vert_positions_for_write();
+      bool moved = false;
+      for (const int64_t i : descendants.index_range()) {
+        SculptLayer &layer = *descendants[i];
+        const float delta = bke::sculpt_layers::effective(layer) - old_effective[i];
+        if (delta == 0.0f || layer.domain != SCULPT_LAYER_DOMAIN_VERT) {
+          continue;
+        }
+        bke::sculpt_layers::apply_delta_mesh(layer, delta, positions);
+        moved = true;
       }
-      bke::sculpt_layers::apply_delta_mesh(layer, delta, positions);
-      moved = true;
+      if (moved) {
+        target_mesh.tag_positions_changed();
+      }
     }
-    if (moved) {
-      mesh.tag_positions_changed();
-    }
+
+    /* Unconditional, and the only thing that updates the shape-key and multires cases: there the
+     * incremental write above is deliberately skipped and the composite is rebuilt from stored data
+     * at evaluation. */
+    DEG_id_tag_update(&target_mesh.id, ID_RECALC_GEOMETRY);
   }
 
-  /* A plain memfile step, for the reason given in #layer_select_object_mode_exec. */
+  /* A single plain memfile step for the whole fan-out, for the reason given in
+   * #layer_select_object_mode_exec: this path has no per-object sculpt undo stack to push into, so
+   * one global step covers every target's mutation above. */
   ED_undo_push(C, "Toggle Sculpt Layer Group Visibility");
-  /* Unconditional, and the only thing that updates the shape-key and multires cases: there the
-   * incremental write above is deliberately skipped and the composite is rebuilt from stored data at
-   * evaluation. */
-  DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
-  layers_ui_notify(C, object);
+  for (Object *target : eligible) {
+    layers_ui_notify(C, *target);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -4650,17 +8076,103 @@ static wmOperatorStatus layer_group_toggle_visibility_exec(bContext *C, wmOperat
     BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
+   * object, plus a find-shaped gate #layer_add_exec has no analog for: the member must actually
+   * hold a group synced to the active one. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Group Visibility: skipping \"%s\" (sculpt layers are not "
+                  "available for this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME group wherever it sits in the member's own tree;
+     * the member's own group is unrelated. A zero #sync_uid (the active group was never
+     * fanned-out-created) makes every member miss here by design -- see the function's own doc
+     * comment -- which degrades this operator to the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, group->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Group Visibility: skipping \"%s\" (no group synced to the "
+                  "active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a group to a group, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    if (!bke::sculpt_layers::node_as_group(member_node)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer Group Visibility: skipping \"%s\" (the synced node is a "
+                  "layer, not a group)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers. */
+      flush_pending_multires_base(*member);
+    }
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    eligible.append(member);
+  }
 
   /* Derive the mesh-domain runtime base from the still-consistent pre-change state (pending multires
    * base edits were already consumed by #op_context_get), as the Solo Base toggle does. */
   session_state_ensure(*ctx.object);
 
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   undo::push_sculpt_layer_metadata(*ctx.object, group->base);
   group->base.flag ^= SCULPT_LAYER_GROUP_ENABLED;
   group_cascade_resync_with_undo(*ctx.object, *ctx.mesh);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  for (Object *member : eligible) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Eligibility (#is_supported, sync_uid resolution, #mask_edit_refuse_ccg_rebuild) and the
+     * multires pending-base flush already ran for every member of `eligible` in the gather pass
+     * above -- nothing here can fail or need skipping (mirrors #layer_add_exec's own second
+     * loop). */
+    session_state_ensure(*member);
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerGroup *member_group = bke::sculpt_layers::node_as_group(
+        bke::sculpt_layers::node_find_by_sync_uid(member_mesh, group->base.sync_uid));
+    undo::push_sculpt_layer_metadata(*member, member_group->base);
+    member_group->base.flag ^= SCULPT_LAYER_GROUP_ENABLED;
+    group_cascade_resync_with_undo(*member, member_mesh);
+    commit_layers_change(*ctx.depsgraph, *member);
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way #layer_add_exec
+   * requires it. */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -4698,16 +8210,101 @@ static wmOperatorStatus layer_group_color_tag_exec(bContext *C, wmOperator *op)
     BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
     return OPERATOR_CANCELLED;
   }
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
+   * object, plus a find-shaped gate #layer_add_exec has no analog for: the member must actually
+   * hold a group synced to the active one. Unlike the layer/group operators that touch the
+   * surface, there is no multires/CCG gate here -- a color tag never depends on the runtime base or
+   * the PBVH, so #flush_pending_multires_base and #mask_edit_refuse_ccg_rebuild are not applicable. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Set Sculpt Layer Group Color Tag: skipping \"%s\" (sculpt layers are not "
+                  "available for this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME group wherever it sits in the member's own tree;
+     * the member's own group is unrelated. A zero #sync_uid (the active group was never
+     * fanned-out-created) makes every member miss here by design -- see the function's own doc
+     * comment -- which degrades this operator to the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, group->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Set Sculpt Layer Group Color Tag: skipping \"%s\" (no group synced to the "
+                  "active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a group to a group, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    if (!bke::sculpt_layers::node_as_group(member_node)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Set Sculpt Layer Group Color Tag: skipping \"%s\" (the synced node is a "
+                  "layer, not a group)",
+                  member->id.name + 2);
+      continue;
+    }
+    eligible.append(member);
+  }
 
   /* Neither #session_state_ensure nor #commit_layers_change, unlike every neighbouring group
    * operator: a color tag is drawn state only, so nothing about the sculpted shape or the layer
    * cascade depends on it. The undo step is still a sculpt step, so it interleaves correctly with
-   * the stroke steps around it. */
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+   * the stroke steps around it.
+   *
+   * #finish_multi_object is not used to close the step either: it would call #flush_update_done
+   * per object, which does work (PBVH ensure, viewport/geometry tags) the single-object do-path
+   * never performed for a color tag. #push_end_all_ex(false, true) is the same close
+   * #finish_multi_object itself uses internally, minus that per-object flush loop -- the documented
+   * multi-object idiom in `sculpt_undo.hh` for exactly this case -- so the fan-out's do-path stays
+   * identical to what the active-object-only version always did. #layers_ui_notify has none of
+   * that work (just two #WM_event_add_notifier calls), so it is looped over every member below to
+   * still redraw each one. */
+  const int8_t color_tag = int8_t(RNA_enum_get(op->ptr, "color_tag"));
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   undo::push_sculpt_layer_metadata(*ctx.object, group->base);
-  group->base.color_tag = int8_t(RNA_enum_get(op->ptr, "color_tag"));
-  undo::push_end(*ctx.object);
-  layers_ui_notify(C, *ctx.object);
+  group->base.color_tag = color_tag;
+
+  for (Object *member : eligible) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Eligibility (#is_supported, sync_uid resolution) already ran for every member of `eligible`
+     * in the gather pass above -- nothing here can fail or need skipping (mirrors
+     * #layer_add_exec's own second loop). */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerGroup *member_group = bke::sculpt_layers::node_as_group(
+        bke::sculpt_layers::node_find_by_sync_uid(member_mesh, group->base.sync_uid));
+    undo::push_sculpt_layer_metadata(*member, member_group->base);
+    member_group->base.color_tag = color_tag;
+  }
+
+  undo::push_end_all_ex(false, true);
+  for (Object *member : eligible) {
+    layers_ui_notify(C, *member);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -4748,6 +8345,42 @@ static wmOperatorStatus layer_group_add_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   Mesh &mesh = *ctx.mesh;
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
+   * object. */
+  Vector<Object *> eligible;
+  Set<Object *> tree_only_members;
+  eligible.append(ctx.object);
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    bool tree_only = false;
+    if (!sync_group_tree_create_member_prepare(ctx.depsgraph,
+                                               *ctx.object,
+                                               member,
+                                               op,
+                                               "Add Sculpt Layer Group",
+                                               tree_only))
+    {
+      continue;
+    }
+    if (tree_only) {
+      tree_only_members.add(member);
+      eligible.append(member);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      flush_pending_multires_base(*member);
+    }
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    eligible.append(member);
+  }
 
   /* Wrap the current selection, if any: the new folder takes the place of the first selected row
    * (so it appears where the user was looking) and everything selected moves into it.
@@ -4755,7 +8388,11 @@ static wmOperatorStatus layer_group_add_exec(bContext *C, wmOperator *op)
    * The gather skips whatever sits inside a selected folder, which is what makes the wrap safe as
    * well as right: the first wrapped node is then never nested in another wrapped folder, so the
    * new folder — a sibling of that first node — is never inside one either, and no move below can
-   * detach a subtree. */
+   * detach a subtree.
+   *
+   * This reads the active object's own tree-panel selection only; a sync-group member's tree is
+   * not shown while fanning out from the active object, so there is nothing analogous to wrap for
+   * a member (see the plain #group_add below, in the fan-out loop). */
   Vector<SculptLayerTreeNode *> wrapped;
   selected_nodes_gather(*bke::sculpt_layers::root_group(mesh), wrapped);
 
@@ -4767,7 +8404,8 @@ static wmOperatorStatus layer_group_add_exec(bContext *C, wmOperator *op)
   SculptLayerTreeNode *slot = wrapped.is_empty() ? nullptr : wrapped.first()->prev;
 
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
 
   SculptLayerGroup *group = bke::sculpt_layers::group_add(mesh, "Group", parent->base.uid);
 
@@ -4808,8 +8446,62 @@ static wmOperatorStatus layer_group_add_exec(bContext *C, wmOperator *op)
 
   group_cascade_resync_with_undo(*ctx.object, mesh);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
-  layers_ui_notify(C, *ctx.object);
+
+  /* Fan out: mint ONE shared #SculptLayerTreeNode::sync_uid for the active object's new folder and
+   * every sync-group member's new folder, so #node_find_by_sync_uid can resolve "the same" folder
+   * across the group. `eligible[0]` is always `ctx.object` (appended first, above), hence the
+   * `member == ctx.object` skip below rather than a `drop_front(1)`, which would silently
+   * misbehave if that ordering guarantee ever changed. */
+  if (ctx.object->sculpt_layer_sync_group != 0) {
+    const int new_sync_uid = bke::sculpt_layers::layer_sync_uid_unique(*bmain);
+    group->base.sync_uid = new_sync_uid;
+
+    for (Object *member : eligible) {
+      if (member == ctx.object) {
+        continue;
+      }
+      if (tree_only_members.contains(member)) {
+        Mesh &member_mesh = mesh_of(*member);
+        SculptLayerGroup *member_group = bke::sculpt_layers::group_add(
+            member_mesh, "Group", bke::sculpt_layers::root_group(member_mesh)->base.uid);
+        member_group->base.sync_uid = new_sync_uid;
+        undo::push_sculpt_layer_group_list_change(*member, {}, {member_group->base.uid});
+        bke::sculpt_layers::resync_group_state(member_mesh);
+        DEG_id_tag_update(&member_mesh.id, ID_RECALC_GEOMETRY);
+        continue;
+      }
+      /* Eligibility (#is_supported, #mask_edit_refuse_ccg_rebuild) and the multires pending-base
+       * flush already ran for every member of `eligible` in the gather pass above -- nothing here
+       * can fail or need skipping (mirrors #layer_add_exec's own second loop).
+       *
+       * A plain new folder at the member's own tree root, not a wrap of any selection: the member's
+       * tree is not shown while fanning out from the active object, so there is no analogous
+       * selection state to wrap (see the comment above #selected_nodes_gather's call). */
+      session_state_ensure(*member);
+      Mesh &member_mesh = mesh_of(*member);
+      SculptLayerGroup *member_group = bke::sculpt_layers::group_add(
+          member_mesh, "Group", bke::sculpt_layers::root_group(member_mesh)->base.uid);
+      member_group->base.sync_uid = new_sync_uid;
+      undo::push_sculpt_layer_group_list_change(*member, {}, {member_group->base.uid});
+      group_cascade_resync_with_undo(*member, member_mesh);
+      commit_layers_change(*ctx.depsgraph, *member);
+    }
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way #layer_add_exec
+   * requires it. */
+  Vector<Object *> eligible_finish;
+  eligible_finish.reserve(eligible.size());
+  for (Object *ob : eligible) {
+    if (!tree_only_members.contains(ob)) {
+      eligible_finish.append(ob);
+    }
+  }
+  undo::finish_multi_object(C, eligible_finish.as_span(), UpdateType::Position);
+  for (Object *member : eligible) {
+    layers_ui_notify(C, *member);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -4824,6 +8516,22 @@ void SCULPT_OT_layer_group_add(wmOperatorType *ot)
    * memfile step that does not compose with the stroke SCULPT steps (see #SCULPT_OT_layer_solo_base). */
   ot->flag = OPTYPE_REGISTER;
 }
+
+/* One sync-group member's counterpart for a folder disband: the member's own folder synced to the
+ * one the active object is disbanding. Only one node is involved per object, so this is a single
+ * pointer rather than the lists #RemoveFanoutMember / #MergeSelectedFanoutMember carry.
+ *
+ * Resolved once, in the gather pass, and carried forward rather than re-derived in the fan-out
+ * loop (the idiom every non-destructive find-shaped fan-out in this file uses) — the same reason
+ * #RemoveFanoutMember exists: #bke::sculpt_layers::group_remove frees the folder outright, so once
+ * the active object's own disband has run, re-deriving a member's folder from
+ * `group->base.sync_uid` would read freed memory. Safe because #fanout_targets dedups by
+ * #Object::data, so no two members ever share a #Mesh and nothing touches this member's tree until
+ * its own turn below. */
+struct GroupRemoveFanoutMember {
+  Object *object;
+  SculptLayerGroup *group;
+};
 
 static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
 {
@@ -4842,6 +8550,86 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
    * inside is removed — cascading deletion is a separate feature (design doc, non-goals). */
   SculptLayerGroup &parent = *group->base.parent;
   const int parent_uid = parent.base.uid;
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
+   * object, plus a find-shaped gate #layer_add_exec has no analog for: the member must actually
+   * hold a folder synced to the active one.
+   *
+   * Two gates the active object's own path needs are deliberately absent here. There is no
+   * "does the folder have children" gate: an empty folder is a perfectly ordinary disband target
+   * (the relink below simply moves nothing), so a member whose synced folder happens to be empty
+   * still participates. And there is no "does it have a parent" gate: #node_find_by_sync_uid walks
+   * the root group's descendants only and never hands back the root itself, so anything it
+   * resolves is a child of some folder and always carries a non-null #base.parent — unlike
+   * #group_row_lookup, which has to refuse uid 0 explicitly.
+   *
+   * Unlike #layer_add_exec / #layer_clear_exec this gather does NOT call
+   * #mask_edit_refuse_ccg_rebuild on a member: a disband is one of the operators that *closes* an
+   * open mask-edit session rather than refusing on its account (see #layer_add_exec's own comment
+   * on that split), and the fan-out loop below closes each member's own session unconditionally,
+   * exactly as the active object's own body does. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<GroupRemoveFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Remove Sculpt Layer Group: skipping \"%s\" (sculpt layers are not "
+                  "available for this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME folder wherever it sits in the member's own tree;
+     * the member's own folders are unrelated. A zero #sync_uid (the active folder was never
+     * fanned-out-created) makes every member miss here by design -- see the function's own doc
+     * comment -- which degrades this operator to the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, group->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Remove Sculpt Layer Group: skipping \"%s\" (no group synced to the active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a group to a group, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    SculptLayerGroup *member_group = bke::sculpt_layers::node_as_group(member_node);
+    if (!member_group) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Remove Sculpt Layer Group: skipping \"%s\" (the synced node is a layer, not a "
+                  "group)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers, before the disband below invalidates
+       * that. */
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    GroupRemoveFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.group = member_group;
+    fanout_members.append(fanout_member);
+  }
 
   /* Read before the close below, which clears it. Zero when no session is open. */
   const SculptSession *ss = session_of(*ctx.object);
@@ -4867,7 +8655,8 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
   }
 
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   if (session_uid != 0) {
     undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
   }
@@ -4921,7 +8710,88 @@ static wmOperatorStatus layer_group_remove_exec(bContext *C, wmOperator *op)
 
   group_cascade_resync_with_undo(*ctx.object, mesh);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  /* Fan out: mirror the active object's own body exactly, scoped to each member's own folder --
+   * resolved above, before the active object's own #group_remove freed its folder. Every value the
+   * relink and the undo payloads depend on is re-read from the member: its folder's own children,
+   * its folder's own parent (which need not be the counterpart of the active object's parent --
+   * the trees are only linked through #sync_uid identity, not through shape) and both uids. */
+  for (GroupRemoveFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    Mesh &member_mesh = mesh_of(member);
+    SculptLayerGroup &member_group = *fanout_member.group;
+    SculptLayerGroup &member_parent = *member_group.base.parent;
+    const int member_group_uid = member_group.base.uid;
+    const int member_parent_uid = member_parent.base.uid;
+
+    /* Read before the close below, which clears it -- this member's own session, not the active
+     * object's. Both halves of the close fan out, as in #layer_remove_exec: #mask_edit_end because
+     * the member's own folder is about to be destroyed under its own session, and
+     * #mask_edit_exit_ui because it is a no-op for anything but the object whose session is
+     * actually open (it returns immediately when the object has no session or none open, and only
+     * then restores the parked tool). Calling it per member is therefore how the ONE object that
+     * owns the open session gets its tool back, whichever object in the group that is. */
+    const SculptSession *member_ss = session_of(member);
+    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
+    mask_edit_exit_ui(C, member);
+    mask_edit_end(member);
+
+    /* Per member and naming the member, for the reason the active object's own report gives: the
+     * lifted-out children going back to contributing in full is a shape change on THAT object, and
+     * an unattributed message would not say which one moved. Reported after the close (so it tests
+     * the settled mask) and before the removal (which frees the name), as on the active object. */
+    if (member_group.base.mask != nullptr) {
+      BKE_reportf(op->reports,
+                  RPT_INFO,
+                  "Remove Sculpt Layer Group: removed the weight mask of group '%s' on "
+                  "\"%s\"; its contents now contribute in full",
+                  member_group.base.name,
+                  member.id.name + 2);
+    }
+
+    session_state_ensure(member);
+    if (member_session_uid != 0) {
+      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
+    }
+
+    Vector<SculptLayerTreeNode *> member_children;
+    for (SculptLayerTreeNode &child : member_group.children) {
+      member_children.append(&child);
+    }
+    Vector<undo::ReparentMove> member_moves;
+    member_moves.reserve(member_children.size());
+    for (const SculptLayerTreeNode *child : member_children) {
+      undo::ReparentMove move;
+      move.uid = child->uid;
+      move.prev_from = node_prev_uid(*child);
+      move.group_from = member_group_uid;
+      move.group_to = member_parent_uid;
+      member_moves.append(move);
+    }
+    SculptLayerTreeNode *member_cursor = &member_group.base;
+    for (SculptLayerTreeNode *child : member_children) {
+      bke::sculpt_layers::node_move_into(member_mesh, *child, member_parent, member_cursor);
+      member_cursor = child;
+    }
+    for (const int64_t i : member_children.index_range()) {
+      member_moves[i].prev_to = node_prev_uid(*member_children[i]);
+    }
+    undo::push_sculpt_layer_reparent(member, std::move(member_moves));
+
+    Vector<undo::SculptLayerUndoPayload> member_removed;
+    member_removed.append(undo::sculpt_layer_payload_capture(
+        member_mesh, member_group.base, undo::PayloadCapture::NodeRemoved));
+    bke::sculpt_layers::group_remove(member_mesh, member_group);
+    undo::push_sculpt_layer_group_list_change(member, std::move(member_removed), {});
+
+    group_cascade_resync_with_undo(member, member_mesh);
+    commit_layers_change(*ctx.depsgraph, member);
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way #layer_add_exec
+   * requires it. */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -5002,6 +8872,37 @@ static void remove_folder_subtree_with_undo(Object &object, Mesh &mesh, SculptLa
   }
   undo::push_sculpt_layer_group_list_change(object, std::move(removed_groups), {});
 }
+
+/* One sync-group member's resolved target for a folder merge: the folder synced to the one the
+ * user pressed, and every layer in THAT folder's own subtree, depth-first.
+ *
+ * Only the folder carries cross-object identity. The survivor is not resolved by #sync_uid at
+ * all -- it is the first entry of #subtree_layers, the member's own depth-first first layer,
+ * exactly the positional resolution #MergeDownFanoutMember uses for its `below`. There is nothing
+ * to compare it against either, unlike #layer_merge_down_exec's synced-counterpart check: the
+ * survivor is not one of two rows the user pointed at, it is whichever layer the dissolve happens
+ * to keep, and every other layer in the subtree is folded into it rather than lost. So a member
+ * whose subtree is ordered differently keeps a different layer -- the same "trees are
+ * independently ordered outside of #sync_uid identity" rule the move operators state, and the
+ * combined surface is preserved either way because the sum is over the whole subtree.
+ *
+ * Participation is therefore all-or-nothing, as in #layer_merge_down_exec and unlike
+ * #MergeSelectedFanoutMember: the set is "every layer under this folder", not an externally
+ * chosen selection that a member may hold only part of. A member whose synced folder is empty has
+ * nothing to merge and is skipped whole, mirroring the active object's own early-out.
+ *
+ * #subtree_layers is an owning #Vector captured in the gather pass, not the cached #Span
+ * #bke::sculpt_layers::layers hands out: the removals below invalidate that cache, and re-deriving
+ * the list after any object's turn would walk a tree this operator has already freed nodes from.
+ * Resolved once for the same reason #RemoveFanoutMember exists, and doubly so here -- this
+ * operator frees every non-surviving layer AND the whole folder subtree per object. Safe because
+ * #fanout_targets dedups by #Object::data, so no two members ever share a #Mesh and nothing
+ * touches this member's tree until its own turn below. */
+struct GroupMergeFanoutMember {
+  Object *object;
+  SculptLayerGroup *group;
+  Vector<SculptLayer *> subtree_layers;
+};
 
 static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
 {
@@ -5107,8 +9008,181 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
 
   SculptLayer *survivor = subtree_layers.first();
 
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object was already validated above and is included
+   * unconditionally; every other sync-group member is brought up to date and gated exactly as
+   * #op_context_get gates the active object, plus the find-shaped gate #layer_group_remove_exec
+   * uses (the member must hold a folder synced to the active one), and then re-runs EVERY one of
+   * this operator's own guards against ITS OWN subtree.
+   *
+   * Re-running them is the whole point, for the reasons spelled out in #layer_merge_down_exec's
+   * matching comment: the guards ask about weight masks, folder visibility and the REC exemption,
+   * all per-object state that #sync_uid identity says nothing about. Every per-object value the
+   * fold consumes (#MaskLayout, the element count, `stop_above`, the masked-ness) is therefore
+   * recomputed from the member itself, never reused. Only `policy` is shared -- it is a single
+   * operator-wide RNA property, not per-object state.
+   *
+   * A member that fails a guard is skipped with a warning naming it and the guard, not a hard
+   * cancel: one member's local problem must not abort the merge on all the others. The ACTIVE
+   * object's own guards above still hard-cancel the whole operator, unchanged -- it is the row the
+   * user pressed, so refusing it refuses the operation.
+   *
+   * The per-member #flush_pending_multires_base mirrors the one #op_context_get already ran for
+   * the active object, and it really is needed despite the comment above about the grid domain
+   * never reaching here: #mask_edit_refuse_ccg_rebuild refuses an open mask-edit SESSION on grids,
+   * not the grid domain itself, so an ordinary multires object with no session open reaches this
+   * merge (the `ctx.grids` branches below exist for exactly that). This merge rewrites layer data
+   * and removes nodes from the layer set, so a pending base edit would be stranded if it were not
+   * consumed while the live CCG still matches the stored layers. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<GroupMergeFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Group: skipping \"%s\" (sculpt layers are not available for "
+                  "this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME folder wherever it sits in the member's own tree;
+     * the member's own folders are unrelated. A zero #sync_uid (the active folder was never
+     * fanned-out-created) makes every member miss here by design, degrading this operator to the
+     * single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, group->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Group: skipping \"%s\" (no group synced to the active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a group to a group, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    SculptLayerGroup *member_group = bke::sculpt_layers::node_as_group(member_node);
+    if (!member_group) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Group: skipping \"%s\" (the synced node is a layer, not a "
+                  "group)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Captured here, on this member's own tree, and carried forward -- see
+     * #GroupMergeFanoutMember. No dedup pass is needed on it, unlike the #sync_uid-resolved lists
+     * in #layer_remove_exec and #layer_merge_selected_exec: #bke::sculpt_layers::layers walks each
+     * children list exactly once, so a node can appear at most once no matter what the file holds.
+     * An empty subtree is this member's own version of the early-out at the top of this
+     * function. */
+    Vector<SculptLayer *> member_subtree_layers(bke::sculpt_layers::layers(*member_group));
+    if (member_subtree_layers.is_empty()) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Group: skipping \"%s\" (no layers in its synced group to "
+                  "merge)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* The active object's own disabled-folder guard, re-asked of this member's own subtree: folder
+     * visibility is per-object state, so the active object's layers being visible says nothing
+     * about this member's, and at a group-hidden layer's weight of 0 the fold silently zeroes the
+     * subtree's content instead of preserving the combined surface. */
+    bool member_group_hidden = false;
+    for (const SculptLayer *layer : member_subtree_layers) {
+      member_group_hidden |= (layer->base.flag & SCULPT_LAYER_GROUP_HIDDEN) != 0;
+    }
+    if (member_group_hidden) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Group: skipping \"%s\" (its layers are inside a disabled "
+                  "group)",
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Placed after the cheap gates so a member that is skipped anyway is left alone. */
+      flush_pending_multires_base(*member);
+    }
+    /* The active object's own pair of session guards, in the same order and for the same reasons.
+     * #mask_edit_end has to run before every mask-reading guard below, exactly as it does above:
+     * it settles an open session's weights back onto the node, and the guards must see the settled
+     * mask rather than the pre-session snapshot #SculptLayerTreeNode::mask still holds. */
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    mask_edit_end(*member);
+
+    /* This member's own fold bound, derived from ITS folder -- the shared `policy` decides only
+     * whether the folder is inside or outside the fold, exactly as on the active object. */
+    const SculptLayerGroup *member_stop_above = (policy == MergeMaskPolicy::KeepGroup) ?
+                                                    member_group :
+                                                    member_group->base.parent;
+    /* Asked of this member's own element count: a mask that describes the active object's mesh
+     * says nothing about whether it describes this one. */
+    const int64_t member_mask_elem_num = mask_layout_for_object(*member).totelem;
+    const SculptLayerTreeNode *member_stale = nullptr;
+    for (const SculptLayer *layer : member_subtree_layers) {
+      if (const SculptLayerTreeNode *stale = find_stale_mask_in_fold(
+              layer->base, member_stop_above, member_mask_elem_num))
+      {
+        member_stale = stale;
+        break;
+      }
+    }
+    if (member_stale) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Group: skipping \"%s\" (the weight mask of '%s' does not "
+                  "match its mesh)",
+                  member->id.name + 2,
+                  member_stale->name);
+      continue;
+    }
+    /* See the active object's own guard above: an armed REC makes the composite ignore that
+     * layer's masks, so folding them in would move this member's surface right now. The member's
+     * folder is tested explicitly too, for the active object's reason -- the folder being
+     * dissolved may itself carry the mask that attenuated the whole subtree. */
+    bool member_any_masked = node_chain_carries_mask(member_group->base);
+    bool member_rec_exempt = false;
+    for (const SculptLayer *layer : member_subtree_layers) {
+      member_any_masked |= node_chain_carries_mask(layer->base);
+      member_rec_exempt |= (layer->base.flag & SCULPT_LAYER_REC_EXEMPT) != 0;
+    }
+    if (member_any_masked && member_rec_exempt) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Merge Sculpt Layer Group: skipping \"%s\" (disarm REC before merging layers "
+                  "that carry a weight mask)",
+                  member->id.name + 2);
+      continue;
+    }
+
+    eligible.append(member);
+    GroupMergeFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.group = member_group;
+    fanout_member.subtree_layers = std::move(member_subtree_layers);
+    fanout_members.append(std::move(fanout_member));
+  }
+
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
 
   /* Accumulate `data[i] * effective * folded mask` of every subtree layer into the survivor at
    * influence 1. The sum equals the folder's prior combined contribution, so the visible surface is
@@ -5225,13 +9299,189 @@ static wmOperatorStatus layer_group_merge_exec(bContext *C, wmOperator *op)
   bke::sculpt_layers::active_set(mesh, survivor);
   group_cascade_resync_with_undo(*ctx.object, mesh);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  /* Fan out: mirror the active object's own body exactly, scoped to each member's own folder and
+   * its own subtree -- both resolved in the gather pass, before ANY removal ran anywhere, the
+   * active object's own included. Every per-object quantity is recomputed from the member rather
+   * than reused from `ctx`: a member's PBVH type, element count, mask layout, folder chain, folder
+   * name, folder parent and mask presence are all independent of the active object's, and folding
+   * the active object's numbers into a member's data would corrupt that member's mesh. The
+   * member's parent in particular need not be the counterpart of the active object's parent -- the
+   * trees are only linked through #sync_uid identity, not through shape (see
+   * #layer_group_remove_exec).
+   *
+   * Recomputing here rather than caching it in #GroupMergeFanoutMember is safe for the same reason
+   * the resolved pointers stay valid: #fanout_targets dedups by #Object::data, so nothing between
+   * the gather pass and this member's turn has touched this member's mesh. */
+  bool any_masked_anywhere = any_masked;
+  for (const GroupMergeFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    Mesh &member_mesh = mesh_of(member);
+    SculptLayerGroup &member_group = *fanout_member.group;
+    const Span<SculptLayer *> member_subtree_layers = fanout_member.subtree_layers;
+    /* Eligibility, both session guards and every one of this operator's own guards already ran for
+     * every entry of `fanout_members` in the gather pass above, before the undo bracket opened --
+     * nothing here can fail or need skipping (mirrors #layer_add_exec's own second loop). */
+
+    /* Read before the removals below free the folder -- THIS member's own folder name, which the
+     * survivor is renamed to. Folder names are ordinary per-object metadata, not synced state, so
+     * the counterpart folder may well be named differently and renaming to the active object's
+     * name would silently rewrite it. */
+    const std::string member_group_name = member_group.base.name;
+    SculptLayerGroup &member_parent = *member_group.base.parent;
+    /* The member's OWN depth-first first layer; see #GroupMergeFanoutMember on why this is
+     * positional rather than resolved by #sync_uid. */
+    SculptLayer &member_survivor = *member_subtree_layers.first();
+
+    const bool member_grids = bke::object::pbvh_get(member)->type() == bke::pbvh::Type::Grids;
+    const SculptLayerGroup *member_stop_above = (policy == MergeMaskPolicy::KeepGroup) ?
+                                                    &member_group :
+                                                    member_group.base.parent;
+    const MaskLayout member_layout = mask_layout_for_object(member);
+    const int64_t member_mask_elem_num = member_layout.totelem;
+    bool member_any_masked = node_chain_carries_mask(member_group.base);
+    for (const SculptLayer *layer : member_subtree_layers) {
+      member_any_masked |= node_chain_carries_mask(layer->base);
+    }
+    any_masked_anywhere |= member_any_masked;
+
+    /* Mirrors #session_state_ensure's call above for the active object: it has to run before this
+     * member's own data changes -- #data_ensure below already counts as one -- or the mesh_base
+     * captured here would fold an already-merged state into the base (see #commit_layers_change's
+     * comment on capture ordering). */
+    session_state_ensure(member);
+
+    int64_t member_n = member_grids ? member_survivor.totelem : element_count(member);
+    if (member_grids) {
+      for (const SculptLayer *layer : member_subtree_layers) {
+        member_n = std::max(member_n, layer->totelem);
+      }
+    }
+    /* Grown before the snapshot below, for the active object's own reason: an initially-empty
+     * survivor would otherwise capture `has_data = false` and undo would double the sources. */
+    MutableSpan<float3> member_survivor_data = bke::sculpt_layers::data_ensure(member_survivor,
+                                                                              member_n);
+    undo::push_sculpt_layer_data(member, member_survivor);
+
+    const Array<float> member_combined =
+        (policy == MergeMaskPolicy::Combine && member_any_masked) ?
+            merge_combined_mask(
+                member_subtree_layers, member_survivor, member_stop_above, member_mask_elem_num) :
+            Array<float>();
+
+    Array<float> member_fold;
+    const float member_survivor_eff = effective(member_survivor);
+    const bool member_survivor_masked =
+        member_any_masked && gather_fold_mask(member_survivor.base,
+                                              member_stop_above,
+                                              member_mask_elem_num,
+                                              member_fold);
+    for (const int64_t i : member_survivor_data.index_range()) {
+      member_survivor_data[i] *= member_survivor_eff *
+                                 (member_survivor_masked && i < member_fold.size() ?
+                                      member_fold[i] :
+                                      1.0f);
+    }
+    for (const SculptLayer *layer : member_subtree_layers) {
+      if (layer == &member_survivor) {
+        continue;
+      }
+      if (member_grids && layer->data && member_survivor.level != layer->level) {
+        member_survivor.level = layer->level;
+      }
+      if (!layer->data) {
+        continue;
+      }
+      const float layer_eff = effective(*layer);
+      const bool layer_masked = member_any_masked && gather_fold_mask(layer->base,
+                                                                     member_stop_above,
+                                                                     member_mask_elem_num,
+                                                                     member_fold);
+      const Span<float3> layer_data(static_cast<const float3 *>(layer->data), layer->totelem);
+      const int64_t count = std::min<int64_t>(member_survivor_data.size(), layer_data.size());
+      for (int64_t i = 0; i < count; i++) {
+        member_survivor_data[i] += layer_data[i] * layer_eff *
+                                   (layer_masked && i < member_fold.size() ? member_fold[i] :
+                                                                            1.0f);
+      }
+    }
+    member_survivor.influence = 1.0f;
+    member_survivor.base.flag |= SCULPT_LAYER_ENABLED;
+
+    /* Runs while THIS member's folder is still alive, for the active object's reason: the removal
+     * below frees its mask, and KeepGroup copies that mask onto the result. */
+    merge_settle_mask(member,
+                      member_survivor,
+                      member_survivor_data,
+                      policy,
+                      member_combined,
+                      member_layout.block_size,
+                      &member_group);
+    bke::sculpt_layers::tag_chain_mask_dirty(member_group);
+
+    /* Captured at their original positions, before the lift moves them; see the active object's
+     * own two passes above for why capture and removal cannot be one loop. */
+    Vector<undo::SculptLayerUndoPayload> member_removed_layers;
+    for (SculptLayer *layer : member_subtree_layers) {
+      if (layer == &member_survivor) {
+        continue;
+      }
+      member_removed_layers.append(undo::sculpt_layer_payload_capture(
+          member_mesh, layer->base, undo::PayloadCapture::NodeRemoved));
+    }
+
+    lift_subtree_layers_to_parent(
+        member, member_mesh, member_group, member_parent, member_subtree_layers);
+
+    for (SculptLayer *layer : member_subtree_layers) {
+      if (layer == &member_survivor) {
+        continue;
+      }
+      bke::sculpt_layers::remove(member_mesh, *layer);
+    }
+    undo::push_sculpt_layer_list_change(member, std::move(member_removed_layers), {}, false);
+
+    remove_folder_subtree_with_undo(member, member_mesh, member_group);
+
+    /* No extra undo push, as on the active object: the #push_sculpt_layer_data above already
+     * snapshotted this survivor's name. */
+    STRNCPY_UTF8(member_survivor.base.name, member_group_name.c_str());
+    bke::sculpt_layers::node_name_ensure_unique(member_survivor.base);
+
+    /* No #active_set for a member, unlike the active object above: which layer is "active" is
+     * local UI state and not synced data -- #layer_select_exec has no fan-out at all for that
+     * reason. Nothing is left dangling either way: #bke::sculpt_layers::remove hands the active
+     * marker to a neighbour when the removed node was the one carrying it.
+     *
+     * No explicit #rec_exemption_refresh either, on the member or on the active object above: the
+     * removals here can strand an armed REC with no exempt layer, but #commit_layers_change below
+     * already refreshes the exemption itself, on every path and before it recomposes. That is
+     * what separates this operator from #layer_merge_down_exec and #layer_merge_selected_exec,
+     * whose own member loops DO call it: those two provably move nothing and so never commit at
+     * all, which leaves the refresh with no other caller. The same split decides the undo close
+     * (see #finish_multi_object below). */
+
+    group_cascade_resync_with_undo(member, member_mesh);
+    commit_layers_change(*ctx.depsgraph, member);
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required exactly as in
+   * #layer_group_remove_exec -- and unlike #layer_merge_down_exec / #layer_merge_selected_exec,
+   * whose do-paths provably move nothing and therefore close with #push_end_all_ex instead. */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
   /* `Σ(data · effective · folded mask)` at influence 1 equals the folder's prior combined
-   * contribution, so the combined surface (and the live positions) are unchanged. */
-  if (any_masked) {
+   * contribution, so the combined surface (and the live positions) are unchanged.
+   *
+   * One report for the whole operation, not one per object: the policy is a single choice made in
+   * the operator's own properties. Raised by any participating object that carried a mask, so a
+   * member whose masks were folded is still explained even when the active object had none. */
+  if (any_masked_anywhere) {
     merge_report_mask_policy(op, policy);
   }
-  layers_ui_notify(C, *ctx.object);
+  for (Object *member : eligible) {
+    layers_ui_notify(C, *member);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -5260,6 +9510,18 @@ void SCULPT_OT_layer_group_merge(wmOperatorType *ot)
               INT_MAX);
 }
 
+/* One fan-out target of #SCULPT_OT_layer_group_delete: the member, ITS counterpart folder and ITS
+ * own subtree of layers, all resolved in the gather pass. Carrying the subtree rather than
+ * re-deriving it in the fan-out loop is mandatory for the reason #GroupMergeFanoutMember carries
+ * one: #bke::sculpt_layers::layers hands out a cached span that the removals below invalidate, and
+ * the folder itself is freed by #remove_folder_subtree_with_undo, so nothing can be re-derived from
+ * it afterwards. */
+struct GroupDeleteFanoutMember {
+  Object *object;
+  SculptLayerGroup *group;
+  Vector<SculptLayer *> subtree_layers;
+};
+
 static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -5280,6 +9542,94 @@ static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
    * keeps the layers), this deletes the whole subtree: every layer *and* every folder inside it. */
   const Vector<SculptLayer *> subtree_layers(bke::sculpt_layers::layers(*group));
 
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object was already validated by #op_context_get and is
+   * included unconditionally; every other sync-group member is brought up to date and gated exactly
+   * as #op_context_get gates the active object, plus the find-shaped gate #layer_group_remove_exec
+   * uses -- the member must actually hold a folder synced to the active one.
+   *
+   * Beyond that this operator has no guards to re-ask of a member, and none are invented here. It
+   * folds nothing and keeps nothing, so the mask, folder-visibility and REC-exemption guards
+   * #layer_group_merge_exec re-runs per member have no counterpart: there is no arithmetic whose
+   * result a per-object mask could corrupt. There is no non-empty-subtree gate either, on the
+   * member or on the active object above -- deleting a folder that happens to hold no layers is an
+   * ordinary request, and the loops below simply move and remove nothing before the folder itself
+   * goes.
+   *
+   * Unlike #layer_add_exec / #layer_clear_exec this gather does NOT call
+   * #mask_edit_refuse_ccg_rebuild on a member, matching this operator's own active-object path,
+   * which does not call it either: a delete is one of the operators that *closes* an open mask-edit
+   * session rather than refusing on its account (see #layer_add_exec's comment on that split), and
+   * the fan-out loop below closes each member's own session unconditionally. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<GroupDeleteFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Delete Sculpt Layer Group: skipping \"%s\" (sculpt layers are not available for "
+                  "this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME folder wherever it sits in the member's own tree;
+     * the member's own folders are unrelated. A zero #sync_uid (the active folder was never
+     * fanned-out-created) makes every member miss here by design -- see the function's own doc
+     * comment -- which degrades this operator to the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, group->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Delete Sculpt Layer Group: skipping \"%s\" (no group synced to the active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a group to a group, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    SculptLayerGroup *member_group = bke::sculpt_layers::node_as_group(member_node);
+    if (!member_group) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Delete Sculpt Layer Group: skipping \"%s\" (the synced node is a layer, not a "
+                  "group)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Captured here, on this member's own tree, and carried forward -- see
+     * #GroupDeleteFanoutMember. No dedup pass is needed on it, unlike the #sync_uid-resolved lists
+     * in #layer_remove_exec and #layer_merge_selected_exec: #bke::sculpt_layers::layers walks each
+     * children list exactly once, so a node can appear at most once no matter what the file holds,
+     * and a double #bke::sculpt_layers::remove of one node is therefore impossible. */
+    Vector<SculptLayer *> member_subtree_layers(bke::sculpt_layers::layers(*member_group));
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers, before the removals below invalidate
+       * that. Placed after the cheap gates so a member that is skipped anyway is left alone. */
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    GroupDeleteFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.group = member_group;
+    fanout_member.subtree_layers = std::move(member_subtree_layers);
+    fanout_members.append(std::move(fanout_member));
+  }
+
   /* Read before the close below, which clears it. Zero when no session is open. */
   const SculptSession *ss = session_of(*ctx.object);
   const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
@@ -5293,7 +9643,8 @@ static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
   /* Derive the mesh base from the still-consistent pre-change state: dropping the layers changes the
    * combined surface, and the commit below recomputes it from that base. */
   session_state_ensure(*ctx.object);
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+  /* Active object: unchanged from the single-object path. */
   if (session_uid != 0) {
     undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
   }
@@ -5323,7 +9674,90 @@ static wmOperatorStatus layer_group_delete_exec(bContext *C, wmOperator *op)
 
   group_cascade_resync_with_undo(*ctx.object, mesh);
   commit_layers_change(*ctx.depsgraph, *ctx.object);
-  undo::push_end(*ctx.object);
+
+  /* Fan out: mirror the active object's own body exactly, scoped to each member's own folder and its
+   * own subtree -- both resolved in the gather pass, before ANY removal ran anywhere, the active
+   * object's own included. Every per-object quantity is re-read from the member: its folder's own
+   * parent need not be the counterpart of the active object's parent, since the trees are only
+   * linked through #sync_uid identity and not through shape (see #layer_group_remove_exec).
+   *
+   * Re-reading the parent here rather than caching it in #GroupDeleteFanoutMember is safe for the
+   * same reason the resolved pointers stay valid: #fanout_targets dedups by #Object::data, so
+   * nothing between the gather pass and this member's turn has touched this member's mesh. */
+  for (const GroupDeleteFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    Mesh &member_mesh = mesh_of(member);
+    SculptLayerGroup &member_group = *fanout_member.group;
+    SculptLayerGroup &member_parent = *member_group.base.parent;
+    const Span<SculptLayer *> member_subtree_layers = fanout_member.subtree_layers;
+    /* Eligibility and the session guards already ran for every entry of `fanout_members` in the
+     * gather pass above, before the undo bracket opened -- nothing here can fail or need skipping
+     * (mirrors #layer_add_exec's own second loop). */
+
+    /* Read before the close below, which clears it -- this member's own session, not the active
+     * object's. Both halves of the close fan out, as in #layer_group_remove_exec: #mask_edit_end
+     * because the member's own folder and layers are about to be destroyed under its own session,
+     * and #mask_edit_exit_ui because it is a no-op for anything but the object whose session is
+     * actually open (it returns immediately when the object has no session or none open, and only
+     * then restores the parked tool). Calling it per member is therefore how the ONE object that
+     * owns the open session gets its tool back, whichever object in the group that is. */
+    const SculptSession *member_ss = session_of(member);
+    const int member_session_uid = member_ss ? member_ss->layers.mask_edit.node_uid : 0;
+    mask_edit_exit_ui(C, member);
+    mask_edit_end(member);
+
+    /* Mirrors #session_state_ensure's call above for the active object: it has to run before this
+     * member's own data changes, or the mesh base captured here would fold an already-deleted state
+     * into the base (see #commit_layers_change's comment on capture ordering). */
+    session_state_ensure(member);
+    if (member_session_uid != 0) {
+      undo::push_sculpt_layer_mask_session(member, member_session_uid, false);
+    }
+
+    /* Captured at their original positions, before the lift moves them; see the active object's own
+     * two passes above for why capture and removal cannot be one loop. */
+    Vector<undo::SculptLayerUndoPayload> member_removed_layers;
+    member_removed_layers.reserve(member_subtree_layers.size());
+    for (SculptLayer *layer : member_subtree_layers) {
+      member_removed_layers.append(undo::sculpt_layer_payload_capture(
+          member_mesh, layer->base, undo::PayloadCapture::NodeRemoved));
+    }
+
+    lift_subtree_layers_to_parent(
+        member, member_mesh, member_group, member_parent, member_subtree_layers);
+
+    /* No #active_set for a member, exactly as on the active object above and for the same reason:
+     * #bke::sculpt_layers::remove hands the active marker to a neighbour, and when that neighbour is
+     * itself removed it hands it on again, so the marker walks off the deleted run on its own.
+     *
+     * No explicit #rec_exemption_refresh either, on the member or on the active object above: the
+     * removals here can strand an armed REC with no exempt layer, but #commit_layers_change below
+     * already refreshes the exemption itself, on every path and before it recomposes. That is what
+     * separates this operator from #layer_merge_down_exec and #layer_merge_selected_exec, whose own
+     * member loops DO call it: those two provably move nothing and so never commit at all, which
+     * leaves the refresh with no other caller. The same split decides the undo close (see
+     * #finish_multi_object below). */
+    for (SculptLayer *layer : member_subtree_layers) {
+      bke::sculpt_layers::remove(member_mesh, *layer);
+    }
+    undo::push_sculpt_layer_list_change(member, std::move(member_removed_layers), {}, false);
+
+    remove_folder_subtree_with_undo(member, member_mesh, member_group);
+
+    group_cascade_resync_with_undo(member, member_mesh);
+    commit_layers_change(*ctx.depsgraph, member);
+  }
+
+  /* #commit_layers_change unconditionally recomposes the surface, on the active object and every
+   * fanned-out member alike, so #UpdateType::Position is required the same way
+   * #layer_group_remove_exec requires it -- and unlike #layer_merge_down_exec /
+   * #layer_merge_selected_exec, whose do-paths provably move nothing and therefore close with
+   * #push_end_all_ex instead. */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
+  /* Active-object-only, matching #layer_group_remove_exec / #layer_add_exec: #finish_multi_object
+   * already sent `NC_OBJECT | ND_DRAW` for every member above, so the only thing still missing is
+   * the `NC_GEOM | ND_DATA` notifier the original always sent for the active object's own mesh, and
+   * #layers_ui_notify sends exactly that pair. */
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
@@ -5376,6 +9810,16 @@ void SCULPT_OT_layer_group_delete(wmOperatorType *ot)
               INT_MAX);
 }
 
+/* Carried from gather into the fan-out loop so each member's sync_uid-matched layer is resolved
+ * once. Select never frees nodes, so re-resolving would also be safe; carrying matches the
+ * tree-mutating ops' clarity without needing it for pointer validity. */
+struct SelectFanoutMember {
+  Object *object = nullptr;
+  SculptLayer *layer = nullptr;
+};
+
+/* FIND-shaped fan-out: set each member's #sculpt_layers_active_uid to its sync_uid-matched layer's
+ * own uid (never copy the active object's uid); one shared #ED_undo_push for the whole set. */
 /* The object-mode half of #layer_select_exec, which shares none of its machinery.
  *
  * #Mesh::sculpt_layers_active_uid is plain persistent DNA, and outside sculpt mode nothing derives
@@ -5391,23 +9835,94 @@ static wmOperatorStatus layer_select_object_mode_exec(bContext *C, wmOperator *o
 {
   Mesh &mesh = mesh_of(object);
   const int uid = RNA_int_get(op->ptr, "uid");
-  if (bke::sculpt_layers::node_as_layer(bke::sculpt_layers::node_find_by_uid(mesh, uid)) == nullptr)
-  {
+  SculptLayer *layer = bke::sculpt_layers::node_as_layer(
+      bke::sculpt_layers::node_find_by_uid(mesh, uid));
+  if (layer == nullptr) {
     BKE_report(op->reports, RPT_ERROR, "No sculpt layer with that id");
     return OPERATOR_CANCELLED;
   }
   if (mesh.sculpt_layers_active_uid == uid) {
     return OPERATOR_FINISHED;
   }
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate, as every fan-out elsewhere in this file: the active object is included
+   * unconditionally, and every other sync-group member is brought in only if it clears the
+   * object-type and sync_uid-match gates. There is no #is_supported / session / PBVH gate here,
+   * unlike the in-sculpt-mode variant below -- this whole code path has no #SculptSession to begin
+   * with -- but #mesh_of is still an unguarded cast to `Mesh *`, and #sync_group_members applies no
+   * object-type filter of its own, so a member of a different type has to be turned away before it
+   * reaches #mesh_of. */
+  Vector<Object *> eligible;
+  eligible.append(&object);
+  Vector<SelectFanoutMember> fanout_members;
+  for (Object *member : sync_group_members(*bmain, object)) {
+    if (member->type != OB_MESH) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Select Sculpt Layer: skipping \"%s\" (not a mesh object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree;
+     * the member's own active layer is unrelated. A zero #sync_uid (the active layer was never
+     * fanned-out-created) makes every member miss here by design, which degrades this operator to
+     * the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, layer->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Select Sculpt Layer: skipping \"%s\" (no layer synced to the active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a layer to a layer, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+    if (!member_layer) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Select Sculpt Layer: skipping \"%s\" (the synced node is a group, not a layer)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Already active on this member — nothing to do here, not a failure (mirrors the active
+     * object's own early return above). */
+    if (member_mesh.sculpt_layers_active_uid == member_layer->base.uid) {
+      continue;
+    }
+    eligible.append(member);
+    SelectFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.layer = member_layer;
+    fanout_members.append(fanout_member);
+  }
+
+  /* Active object first, then every eligible member: each gets its OWN layer's uid written into
+   * #sculpt_layers_active_uid (uids are per-mesh; copying the active object's uid would name the
+   * wrong layer — or none — on the member). */
   mesh.sculpt_layers_active_uid = uid;
-  /* A plain memfile step, which is the right kind here and the wrong kind in sculpt mode — the
-   * reason #SCULPT_OT_layer_select carries no #OPTYPE_UNDO and pushes its own sculpt step instead.
-   * Outside the mode there are no delta-based sculpt steps for a memfile step to sit between. */
+  for (const SelectFanoutMember &fanout_member : fanout_members) {
+    Mesh &member_mesh = mesh_of(*fanout_member.object);
+    member_mesh.sculpt_layers_active_uid = fanout_member.layer->base.uid;
+  }
+
+  /* A single plain memfile step for the whole fan-out — the right kind here and the wrong kind in
+   * sculpt mode (the reason #SCULPT_OT_layer_select carries no #OPTYPE_UNDO and pushes its own
+   * sculpt step instead). Outside the mode there are no delta-based sculpt steps for a memfile
+   * step to sit between, and unlike the mutation itself the push is not repeated per target. */
   ED_undo_push(C, "Select Sculpt Layer");
-  layers_ui_notify(C, object);
+  for (Object *target : eligible) {
+    layers_ui_notify(C, *target);
+  }
   return OPERATOR_FINISHED;
 }
 
+/* FIND-shaped fan-out: activate each member's sync_uid-matched layer by that member's own uid;
+ * mask-edit close/#push_sculpt_layer_mask_session stay ACTIVE-ONLY; close with
+ * #push_end_all_ex(false, true)+#layers_ui_notify (commit is conditional on #rec_exemption_refresh). */
 static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
 {
   Object *object_poll = CTX_data_active_object(C);
@@ -5423,9 +9938,9 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
    * with it, uid 0: #node_find_by_uid resolves 0 to the root folder, which is not a layer. That is
    * a different convention from #Mesh::sculpt_layers_active_uid below, where 0 means "no active
    * layer"; the two must not be resolved through each other. */
-  if (bke::sculpt_layers::node_as_layer(bke::sculpt_layers::node_find_by_uid(*ctx.mesh, uid)) ==
-      nullptr)
-  {
+  SculptLayer *layer = bke::sculpt_layers::node_as_layer(
+      bke::sculpt_layers::node_find_by_uid(*ctx.mesh, uid));
+  if (layer == nullptr) {
     BKE_report(op->reports, RPT_ERROR, "No sculpt layer with that id");
     return OPERATOR_CANCELLED;
   }
@@ -5435,8 +9950,83 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
      * edited is exactly what a user does while working. */
     return OPERATOR_FINISHED;
   }
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally; every other
+   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
+   * object, plus a find-shaped gate #layer_add_exec has no analog for: the member must actually
+   * hold a layer synced to the one being selected. #mask_edit_refuse_ccg_rebuild is NOT applied
+   * on members: the active path closes sessions instead of refusing, and that session close is
+   * deliberately active-only (see the function's own decision comment). */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<SelectFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Select Sculpt Layer: skipping \"%s\" (sculpt layers are not available for this "
+                  "object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree;
+     * the member's own active layer is unrelated. A zero #sync_uid (the active layer was never
+     * fanned-out-created) makes every member miss here by design -- see the function's own doc
+     * comment -- which degrades this operator to the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, layer->base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Select Sculpt Layer: skipping \"%s\" (no layer synced to the active one)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a layer to a layer, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+    if (!member_layer) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Select Sculpt Layer: skipping \"%s\" (the synced node is a group, not a layer)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* Already active on this member — nothing to do here, not a failure (mirrors the active
+     * object's own early return above). */
+    if (member_mesh.sculpt_layers_active_uid == member_layer->base.uid) {
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers -- load-bearing here because
+       * #rec_exemption_refresh may still call #commit_layers_change below. */
+      flush_pending_multires_base(*member);
+    }
+    eligible.append(member);
+    SelectFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.layer = member_layer;
+    fanout_members.append(fanout_member);
+  }
+
   /* Read before the close below, which clears it. Zero when no session is open, which is the
-   * common case. */
+   * common case. ACTIVE OBJECT ONLY: a member's open mask-edit session is unrelated to which
+   * layer the active object just selected, so #mask_edit_exit_ui / #mask_edit_end /
+   * #push_sculpt_layer_mask_session must not fan out. */
   const SculptSession *ss = session_of(*ctx.object);
   const int session_uid = ss ? ss->layers.mask_edit.node_uid : 0;
 
@@ -5451,7 +10041,7 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
   /* Selection must ride on a sculpt undo step: without one, #OPTYPE_UNDO used to push a plain
    * memfile step, and undoing across it between two stroke SCULPT steps corrupted the delta-based
    * sculpt undo state. */
-  undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
   /* The close above is part of what this step did, so undoing it must reopen the session and
    * redoing it must close one again. No mask has to be captured alongside: #mask_edit_end compresses
    * the session's dense weights onto #SculptLayerTreeNode::mask, so the node already carries exactly
@@ -5461,7 +10051,7 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
    * value of that field is stale by construction.
    *
    * Pushed after #push_begin because there is no step to record into before it, which is why the uid
-   * is read out above rather than here. */
+   * is read out above rather than here. ACTIVE-ONLY (see above). */
   if (session_uid != 0) {
     undo::push_sculpt_layer_mask_session(*ctx.object, session_uid, false);
   }
@@ -5478,7 +10068,8 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
    * back in line. The runtime base is settled first, against the pre-move exemption, for the reason
    * spelled out on #bke::sculpt_layers::rec_exempt_set: derived afterwards it would absorb the
    * difference permanently. Both halves are conditional, so the common case (REC disarmed, or
-   * neither layer masked) costs one guard and one flag test per layer. */
+   * neither layer masked) costs one guard and one flag test per layer. Explicit
+   * #rec_exemption_refresh is load-bearing here — do not rely on an unconditional commit. */
   const SculptSession *ss_select = session_of(*ctx.object);
   if (ss_select && !ss_select->layers.state_valid) {
     session_state_ensure(*ctx.object);
@@ -5486,8 +10077,40 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
   if (rec_exemption_refresh(*ctx.object)) {
     commit_layers_change(*ctx.depsgraph, *ctx.object);
   }
-  undo::push_end(*ctx.object);
-  layers_ui_notify(C, *ctx.object);
+
+  for (const SelectFanoutMember &fanout_member : fanout_members) {
+    Object &member = *fanout_member.object;
+    Mesh &member_mesh = mesh_of(member);
+    /* Eligibility (#is_supported, sync_uid resolution, already-active skip) and the multires
+     * pending-base flush already ran for every member of `fanout_members` in the gather pass
+     * above -- nothing here can fail or need skipping (mirrors #layer_add_exec's own second
+     * loop). Write this member's OWN layer uid, never the active object's. */
+    const int member_uid_from = member_mesh.sculpt_layers_active_uid;
+    const int member_uid_to = fanout_member.layer->base.uid;
+    undo::push_sculpt_layer_active(member, member_uid_from, member_uid_to);
+    member_mesh.sculpt_layers_active_uid = member_uid_to;
+    tag_layer_overlays_dirty(member);
+    /* Mirror the active object's exact conditional pattern above, per member. */
+    const SculptSession *member_ss = session_of(member);
+    if (member_ss && !member_ss->layers.state_valid) {
+      session_state_ensure(member);
+    }
+    if (rec_exemption_refresh(member)) {
+      commit_layers_change(*ctx.depsgraph, member);
+    }
+  }
+
+  /* #commit_layers_change is conditional on #rec_exemption_refresh and commonly skipped, so
+   * #finish_multi_object is not used: it would call #flush_update_done per object, inventing work
+   * (PBVH ensure, viewport/geometry tags) the single-object do-path never performed when refresh
+   * returned false. #push_end_all_ex(false, true) is the same close #finish_multi_object uses
+   * internally, minus that flush -- the documented multi-object idiom for never-/conditionally-
+   * commit metadata paths (#layer_group_color_tag_exec, #layer_move_exec). #layers_ui_notify is
+   * looped over every eligible member to still redraw each one. */
+  undo::push_end_all_ex(false, true);
+  for (Object *member : eligible) {
+    layers_ui_notify(C, *member);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -5506,6 +10129,299 @@ void SCULPT_OT_layer_select(wmOperatorType *ot)
   RNA_def_int(
       ot->srna, "uid", 0, 0, INT_MAX, "Layer ID", "Unique id of the layer to make active", 0, INT_MAX);
 }
+
+/* Mints one shared #Object::sculpt_layer_sync_group id for every selected mesh object, linking
+ * their sculpt-layer operations and REC recording together (see #sync_group_members /
+ * #fanout_targets). Writes a plain DNA field on #Object and needs neither a session nor a PBVH,
+ * so -- like #layer_select_object_mode_exec above -- it works from object mode as well as sculpt
+ * mode; #ED_operator_view3d_active would wrongly refuse it from the Properties editor, which is
+ * this operator's real UI home. */
+static wmOperatorStatus layer_sync_group_create_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  Vector<Object *> selected;
+  {
+    Vector<PointerRNA> selected_ptrs;
+    CTX_data_selected_objects(C, &selected_ptrs);
+    for (const PointerRNA &ptr : selected_ptrs) {
+      Object *ob = reinterpret_cast<Object *>(ptr.owner_id);
+      if (!bke::sculpt_layers::sync_group_is_valid_mesh_member(*ob)) {
+        continue;
+      }
+      selected.append(ob);
+    }
+  }
+  if (selected.size() < 2) {
+    BKE_report(op->reports, RPT_ERROR, "Select at least 2 mesh objects to sync");
+    return OPERATOR_CANCELLED;
+  }
+  for (Object *ob : selected) {
+    if (!bke::sculpt_layers::sync_group_object_membership_editable(*bmain, *ob)) {
+      BKE_reportf(op->reports,
+                  RPT_ERROR,
+                  "Object '%s' is linked, non-editable, or not a valid mesh object",
+                  ob->id.name + 2);
+      return OPERATOR_CANCELLED;
+    }
+    if (ob->sculpt_layer_sync_group != 0) {
+      BKE_reportf(op->reports,
+                  RPT_ERROR,
+                  "Object '%s' is already in a sync group; unlink it first",
+                  ob->id.name + 2);
+      return OPERATOR_CANCELLED;
+    }
+  }
+  /* Two selected objects sharing one #Mesh (linked duplicates / Alt+D) would each still get their
+   * own #SculptLayerTreeNode from a later fan-out #SCULPT_OT_layer_add, both stamped with the SAME
+   * sync_uid onto the one tree they actually share -- #node_find_by_sync_uid (which returns the
+   * first match) could then no longer tell the two apart. Refused here, at group-creation time,
+   * rather than left for a fan-out operator to discover later. Same dedup idiom as
+   * #gather_supported_objects in `node_group_operator.cc`: #Set::add returns false when the key was
+   * already present. */
+  Set<const ID *> object_data;
+  for (Object *ob : selected) {
+    if (!object_data.add(static_cast<const ID *>(ob->data))) {
+      BKE_reportf(op->reports,
+                  RPT_ERROR,
+                  "Object '%s' shares its mesh data with another selected object; sync groups "
+                  "require distinct mesh data per object",
+                  ob->id.name + 2);
+      return OPERATOR_CANCELLED;
+    }
+  }
+  const int new_group = bke::sculpt_layers::sync_group_unique_id(*bmain);
+  const uint64_t new_key = bke::sculpt_layers::sync_group_new_key(*bmain);
+  char new_name[64];
+  bke::sculpt_layers::sync_group_unique_name(*bmain, new_name);
+  for (Object *ob : selected) {
+    ob->sculpt_layer_sync_group = new_group;
+    ob->sculpt_layer_sync_group_key = new_key;
+    BLI_strncpy(
+        ob->sculpt_layer_sync_group_name, new_name, sizeof(ob->sculpt_layer_sync_group_name));
+  }
+  for (Object *ob : selected) {
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  }
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_sync_group_create(wmOperatorType *ot)
+{
+  ot->name = "Sync Sculpt Layers";
+  ot->idname = "SCULPT_OT_layer_sync_group_create";
+  ot->description =
+      "Link every selected mesh object into one sync group so sculpt-layer tree operations and "
+      "layer-recording strokes apply across the whole group until an object is unlinked";
+  ot->exec = layer_sync_group_create_exec;
+  /* Matches #SCULPT_OT_layer_select and #SCULPT_OT_layer_group_toggle_visibility, the two other
+   * operators the Properties editor's object-mode-or-sculpt-mode panel relies on -- see the
+   * exec's comment above for why. */
+  ot->poll = layers_object_mode_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/* Clears this object's own #Object::sculpt_layer_sync_group (and name) and, if that leaves exactly
+ * one other raw member, dissolves that now-partnerless group of one too (see
+ * #SCULPT_OT_layer_sync_group_create for why a group of one is meaningless). */
+static wmOperatorStatus layer_sync_group_unlink_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || ob->sculpt_layer_sync_group == 0) {
+    return OPERATOR_CANCELLED;
+  }
+  if (!bke::sculpt_layers::sync_group_object_membership_editable(*bmain, *ob)) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Cannot unlink a linked, non-editable, or invalid mesh object from a sync group");
+    return OPERATOR_CANCELLED;
+  }
+
+  sync_group_unlink_object(*bmain, *ob);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_sync_group_unlink(wmOperatorType *ot)
+{
+  ot->name = "Unlink Sculpt Layer Sync";
+  ot->idname = "SCULPT_OT_layer_sync_group_unlink";
+  ot->description = "Remove this object from its sculpt-layer sync group";
+  ot->exec = layer_sync_group_unlink_exec;
+  /* Matches #SCULPT_OT_layer_sync_group_create: this operator's UI home is the Properties editor
+   * in either object or sculpt mode, not sculpt mode only (#layers_poll). */
+  ot->poll = layers_object_mode_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus layer_sync_group_repair_names_exec(bContext *C, wmOperator * /*op*/)
+{
+  Main *bmain = CTX_data_main(C);
+  bke::sculpt_layers::sync_group_repair_empty_names(*bmain);
+  bke::sculpt_layers::sync_group_mint_keys_for_legacy_groups(*bmain);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_sync_group_repair_names(wmOperatorType *ot)
+{
+  ot->name = "Repair Sculpt Layer Sync Group Names";
+  ot->idname = "SCULPT_OT_layer_sync_group_repair_names";
+  ot->description =
+      "Fill empty sculpt-layer sync group names in DNA and mint persistent group keys for legacy "
+      "groups";
+  ot->exec = layer_sync_group_repair_names_exec;
+  ot->poll = layers_object_mode_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus layer_sync_group_select_members_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  Object *active = CTX_data_active_object(C);
+  if (!active || active->sculpt_layer_sync_group == 0) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  View3D *v3d = CTX_wm_view3d(C);
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+
+  const bool enter_sculpt = (active->mode & OB_MODE_SCULPT) != 0;
+
+  Vector<Object *> candidates;
+  candidates.append(active);
+  candidates.extend(sync_group_raw_members(*bmain, *active));
+
+  /* From sculpt mode, replace the current selection with sync-group members so multi-object sculpt
+   * targets exactly this group. In object mode, keep the additive selection behavior. */
+  if (enter_sculpt) {
+    ed::object::base_deselect_all(*bmain, scene, view_layer, v3d, SEL_DESELECT);
+  }
+
+  int skipped = 0;
+  int selected = 0;
+  Vector<Object *> selected_objects;
+  for (Object *ob : candidates) {
+    Base *base = BKE_view_layer_base_find(view_layer, ob);
+    if (base == nullptr || !BASE_SELECTABLE(v3d, base)) {
+      skipped++;
+      continue;
+    }
+    ed::object::base_select(base, ed::object::BA_SELECT);
+    selected_objects.append(ob);
+    selected++;
+  }
+
+  if (selected == 0) {
+    BKE_report(op->reports, RPT_WARNING, "No sync-group members are selectable in this view layer");
+    return OPERATOR_CANCELLED;
+  }
+  if (skipped > 0) {
+    BKE_reportf(op->reports,
+                RPT_WARNING,
+                "Selected %d sync-group member(s); skipped %d (hidden, unselectable, or not in "
+                "this view layer)",
+                selected,
+                skipped);
+  }
+
+  Base *active_base = BKE_view_layer_base_find(view_layer, active);
+  if (active_base) {
+    ed::object::base_activate(C, active_base);
+  }
+
+  if (enter_sculpt) {
+    Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+    if (!depsgraph) {
+      return OPERATOR_CANCELLED;
+    }
+
+    Vector<Object *> newly_entered;
+    for (Object *ob : selected_objects) {
+      if (ob->type != OB_MESH) {
+        continue;
+      }
+      if (ob->mode != OB_MODE_OBJECT) {
+        continue;
+      }
+      ed::sculpt_paint::object_sculpt_mode_enter(
+          *bmain, *depsgraph, *scene, *ob, false, op->reports);
+      newly_entered.append(ob);
+    }
+
+    if (!newly_entered.is_empty()) {
+      wmWindowManager *wm = CTX_wm_manager(C);
+      if (wm->op_undo_depth <= 1) {
+        bool sculpt_undo_started = false;
+        for (Object *ob : newly_entered) {
+          /* Dyntopo adds its own undo step; ask the live session, not #ME_SCULPT_DYNAMIC_TOPOLOGY
+           * (see #sculpt_selection_enter_sculpt_mode_exec). */
+          const SculptSession *ss = ob->runtime->sculpt_session;
+          if (ss != nullptr && ss->bm != nullptr) {
+            continue;
+          }
+          if (!sculpt_undo_started) {
+            undo::push_enter_sculpt_mode(*scene, *ob, op);
+            sculpt_undo_started = true;
+          }
+          else {
+            undo::push_enter_sculpt_mode_add_object(*ob);
+          }
+        }
+        if (sculpt_undo_started) {
+          undo::push_end_all_ex(false, true);
+        }
+      }
+
+      for (Object *ob : newly_entered) {
+        ed::object::object_overlay_mode_transfer_animation_start(C, ob);
+      }
+    }
+
+    WM_event_add_notifier(C, NC_SCENE | ND_MODE, scene);
+    WM_toolsystem_update_from_context_view3d(C);
+  }
+
+  DEG_id_tag_update(&scene->id, ID_RECALC_SELECT);
+  WM_event_add_notifier(C, NC_SCENE | ND_OB_SELECT, scene);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_layer_sync_group_select_members(wmOperatorType *ot)
+{
+  ot->name = "Select Sync Group Members";
+  ot->idname = "SCULPT_OT_layer_sync_group_select_members";
+  ot->description =
+      "Select every object in this object's sculpt-layer sync group; from Sculpt Mode, also enter "
+      "every selected member into the current multi-object sculpt session";
+  ot->exec = layer_sync_group_select_members_exec;
+  ot->poll = layers_object_mode_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/* One sync-group member's REC-toggle state, resolved once in the gather pass below and carried
+ * into the fan-out loop that actually flips it. Unlike #RemoveFanoutMember and every other
+ * fan-out target in this file, there is no tree-node lookup here: the toggle sets the SAME
+ * per-object session flag on every member (#rec_active_set, which takes an #Object&), not a
+ * sync_uid-matched node. #layer and #create_layer are still resolved per member, up front, because
+ * -- exactly like the active object -- arming on a member with no active layer must create one for
+ * it, and whether to push a metadata undo step or a list-change undo step depends on which case
+ * that member is in. */
+struct RecFanoutMember {
+  Object *object;
+  /* This member's own active layer at gather time, or null if it currently has none. Mirrors the
+   * active object's own #layer. */
+  SculptLayer *layer;
+  /* Whether arming REC (see #new_active below) finds this member with no active layer, and so must
+   * create one for it. Mirrors the active object's own #create_layer, but judged against the
+   * group's uniform target state rather than this member's own (possibly already-diverged) current
+   * #rec_active, so that "armed implies an active layer" ends up holding for every member the
+   * operator leaves armed -- not only the ones that already happened to agree with the active
+   * object going in. */
+  bool create_layer;
+};
 
 static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
 {
@@ -5544,6 +10460,87 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  /* The whole sync group arms or disarms together: computed once, from the active object's state
+   * before anything below changes it, and then applied uniformly to every fanned-out member --
+   * not each member flipping its own independently-current #rec_active. This is the "fan out means
+   * setting the SAME session flag on every member" shape this operator's plan brief calls for,
+   * unlike every other conversion in this file, which instead resolves a sync_uid-matched tree node
+   * per member. */
+  const bool new_active = !ss->layers.rec_active;
+
+  Main *bmain = CTX_data_main(C);
+
+  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
+   * before any undo bracket opens. The active object is included unconditionally, already
+   * validated above; every other sync-group member is brought up to date and gated exactly as the
+   * active object is gated above -- #mask_edit_refuse_ccg_rebuild unconditionally, the group-hidden
+   * and open-mask-edit refusals only when arming (#new_active). A member that fails one is skipped
+   * with a warning rather than aborting the whole batch. */
+  Vector<Object *> eligible;
+  eligible.append(ctx.object);
+  Vector<RecFanoutMember> fanout_members;
+  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
+    if (member == ctx.object) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Toggle Sculpt Layer REC: skipping \"%s\" (sculpt layers are not available for "
+                  "this object)",
+                  member->id.name + 2);
+      continue;
+    }
+    /* #is_supported guarantees a live session here (a non-null PBVH cannot exist without one) --
+     * the same chain #layer_add_exec's own gather loop and every other fan-out in this file rely
+     * on. */
+    SculptSession *member_ss = session_of(*member);
+    BLI_assert(member_ss != nullptr);
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers. */
+      flush_pending_multires_base(*member);
+    }
+    if (mask_edit_refuse_ccg_rebuild(op, *member)) {
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayer *member_layer = bke::sculpt_layers::active_get(member_mesh);
+    if (new_active) {
+      /* Mirror of the active object's own two arming refusals above, judged against this
+       * member's own layer and session state. */
+      if (member_layer && (member_layer->base.flag & SCULPT_LAYER_GROUP_HIDDEN)) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Toggle Sculpt Layer REC: skipping \"%s\" (its active layer is inside a "
+                    "disabled group)",
+                    member->id.name + 2);
+        continue;
+      }
+      if (member_ss->layers.mask_edit.node_uid != 0) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Toggle Sculpt Layer REC: skipping \"%s\" (a sculpt layer weight mask is "
+                    "being edited on it)",
+                    member->id.name + 2);
+        continue;
+      }
+    }
+    eligible.append(member);
+    RecFanoutMember fanout_member;
+    fanout_member.object = member;
+    fanout_member.layer = member_layer;
+    fanout_member.create_layer = new_active && member_layer == nullptr;
+    fanout_members.append(fanout_member);
+  }
+
   /* Arming REC on a mesh with no layers creates one, rather than leaving the button on with nothing
    * behind it — the state where every stroke edits the base while the UI says it is recording. Done
    * here rather than at stroke start because this is where the user expresses the intent, so the
@@ -5553,19 +10550,20 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
    *
    * Before the undo bracket opens, mirroring #layer_add_exec: #session_state_ensure inverts the
    * composite to recover the runtime base and must measure the pre-change state. */
-  const bool create_layer = !ss->layers.rec_active && layer == nullptr;
+  const bool create_layer = new_active && layer == nullptr;
   if (create_layer) {
     session_state_ensure(*ctx.object);
   }
 
-  /* Captured before the flip so Ctrl+Z can revert the enabled/influence normalization that
-   * #rec_active_set applies when arming. Everything else that call does ahead of the normalization
-   * — measuring whether the layer is masked, and the protective multires flush that measurement
-   * gates — reads and writes nothing this push touches, so pushing first cannot change their
-   * outcome; only the normalization has to land after the capture, and it does. */
-  if (layer || create_layer) {
-    undo::push_begin(*CTX_data_scene(C), *ctx.object, op);
-  }
+  /* Unconditional, unlike the original single-object bracket, which opened #undo::push_begin only
+   * `if (layer || create_layer)` -- skipping it entirely when disarming with nothing active. A
+   * multi-object span cannot compose that fine-grained a per-object conditional, and an eligible
+   * member that ends up with nothing pushed into the step is harmless: #layer_add_exec's own
+   * gather-then-gate comment already relies on exactly that degenerate case (a member surviving
+   * eligibility but contributing no undo data) being fine. */
+  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
+
+  /* Active object: unchanged from the single-object path. */
   if (create_layer) {
     layer = auto_layer_create(*ctx.object);
     /* Recorded as a list change, exactly as #layer_add_exec does, so undoing the REC toggle also
@@ -5578,13 +10576,46 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
   }
   /* The whole state change lives there, shared with the mask-editing entry so that both go through
    * one ordering of the multires flush, the exemption refresh and the recompose. Only the undo
-   * bracket, the refusals above and the notifiers below are this operator's own. */
-  rec_active_set(*ctx.object, !ss->layers.rec_active);
-  if (layer) {
-    undo::push_end(*ctx.object);
+   * bracket, the refusals above and the notifier below are this operator's own. */
+  rec_active_set(*ctx.object, new_active);
+
+  for (const RecFanoutMember &member : fanout_members) {
+    /* Mirrors the active object's own body immediately above, scoped to this member. Eligibility
+     * (#is_supported, #mask_edit_refuse_ccg_rebuild, the arming refusals) already ran for every
+     * member of `fanout_members` in the gather pass above -- nothing here can fail or need
+     * skipping (mirrors #layer_add_exec's own second loop). */
+    if (member.create_layer) {
+      session_state_ensure(*member.object);
+      SculptLayer *member_layer = auto_layer_create(*member.object);
+      undo::push_sculpt_layer_list_change(
+          *member.object, {}, Vector<int>({member_layer->base.uid}), false);
+    }
+    else if (member.layer) {
+      undo::push_sculpt_layer_metadata(*member.object, member.layer->base);
+    }
+    /* Already a safe no-op if this member turns out to already be at #new_active, or lost its
+     * session between the gather pass and here -- #rec_active_set checks both itself. */
+    rec_active_set(*member.object, new_active);
+    /* #rec_active_set short-circuits when this member was already at #new_active, taking its own
+     * #rec_exemption_refresh with it -- so a layer created for an already-armed member would keep
+     * neither #SCULPT_LAYER_REC_ARMED nor the exemption. Mirrors #layer_add_exec /
+     * #stroke_ensure_rec_layer. A no-op when #rec_active_set already refreshed. */
+    if (member.create_layer && rec_exemption_refresh(*member.object)) {
+      commit_layers_change(*ctx.depsgraph, *member.object);
+    }
   }
-  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ctx.object);
-  WM_event_add_notifier(C, NC_GEOM | ND_DATA, &ctx.mesh->id);
+
+  /* #rec_active_set recomposes internally (via #commit_layers_change) whenever the toggle actually
+   * moves the surface -- a masked layer's exemption flipping, or the enabled/influence
+   * normalization on arming -- for the active object and every fanned-out member alike, so
+   * #UpdateType::Position is required the same way #layer_add_exec requires it. */
+  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
+  /* Active-object-only, matching #layer_add_exec / #layer_clear_exec and every other
+   * #finish_multi_object-based fan-out in this file: #finish_multi_object already sent
+   * `NC_OBJECT | ND_DRAW` for every member above, so the only thing still missing is the
+   * `NC_GEOM | ND_DATA` notifier the original always sent for the active object's own mesh, and
+   * #layers_ui_notify sends exactly that pair. */
+  layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }
 

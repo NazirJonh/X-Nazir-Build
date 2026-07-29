@@ -126,6 +126,14 @@ SculptLayerTreeNode *node_find_by_uid(Mesh &mesh, int uid);
 const SculptLayerTreeNode *node_find_by_uid(const Mesh &mesh, int uid);
 
 /**
+ * Find the node with the given #SculptLayerTreeNode::sync_uid in \a mesh's tree, or null if none
+ * matches (including when \a sync_uid is 0, since 0 means "not synced" for every node). Mirrors
+ * #node_find_by_uid but keyed on the cross-object identity instead of the per-mesh one.
+ */
+SculptLayerTreeNode *node_find_by_sync_uid(Mesh &mesh, int sync_uid);
+const SculptLayerTreeNode *node_find_by_sync_uid(const Mesh &mesh, int sync_uid);
+
+/**
  * Walk \a start and its ancestor folders up to the root, returning the first for which \a predicate
  * is true, or null when none matches.
  *
@@ -183,6 +191,108 @@ void node_move_into(Mesh &mesh,
  * never named a unique row; every caller had to carry the kind alongside it.
  */
 int node_unique_uid(const Mesh &mesh);
+
+/**
+ * Next free #Object::sculpt_layer_sync_group value across the whole file -- the max of every
+ * existing nonzero value plus 1, or 1 if none exist. Scans #Main::objects directly rather than
+ * using any in-process counter, so it is correct immediately after loading an old file and never
+ * collides with a value already saved in it (see the design doc's correction regarding
+ * #BLI_session_uid_generate, which is wrong for this purpose). Only called from the rare,
+ * UI-driven "Sync Sculpt Layers" action -- not a hot path.
+ *
+ * Integer ids are unique only within one #Main; linking or appending another file can introduce
+ * the same value on unrelated groups until a dedicated group identity (UUID / ID block) exists.
+ */
+int sync_group_unique_id(const Main &bmain);
+
+/**
+ * Next free sync-group display name of the form "Sculpt Layers Grp.001", written into \a r_name
+ * (at most 64 bytes including null). Considers only names on objects with a nonzero
+ * #Object::sculpt_layer_sync_group, one name per group id. Does not compare against
+ * #Object::id.name. Uses the lowest free three-digit suffix (.001-.999); beyond that, falls back
+ * to a plain (undecorated) numeric suffix up to 999999, then to the bare "Sculpt Layers Grp."
+ * name if even that range is exhausted.
+ */
+void sync_group_unique_name(const Main &bmain, char r_name[64]);
+
+/**
+ * If \a ob is in a sync group and its #sculpt_layer_sync_group_name is empty, mint
+ * #sync_group_unique_name and stamp it onto every raw member of that group (old files / desync).
+ * No-op when not grouped or the name is already set.
+ */
+void sync_group_name_ensure(Main &bmain, Object &ob);
+
+/**
+ * Copy \a source's #sculpt_layer_sync_group_name onto every other raw member of the same group.
+ * Skips linked / non-editable IDs. No-op when \a source is not in a group.
+ */
+void sync_group_name_propagate(Main &bmain, Object &source);
+
+/**
+ * True when \a ob is a mesh object with mesh data suitable for sync-group fan-out.
+ */
+bool sync_group_is_valid_mesh_member(const Object &ob);
+
+/**
+ * True when sync-group membership on \a ob may be created, cleared, or renamed locally.
+ * Requires #sync_group_is_valid_mesh_member, a local editable #Object, and editable mesh data
+ * that is not a library override.
+ */
+bool sync_group_object_membership_editable(Main &bmain, const Object &ob);
+
+/**
+ * Remove \a ob from its sync group when membership is editable on \a ob. Clears fields only on
+ * editable targets; dissolves a remaining single editable partner. Returns false when \a ob is not
+ * grouped or its membership is not editable.
+ */
+bool sync_group_detach_object(Main &bmain, Object &ob);
+
+/**
+ * Fill \a r_name with the stored group name, or a non-persistent placeholder when grouped but the
+ * DNA name is still empty (old files). Does not write DNA.
+ */
+void sync_group_display_name_get(const Object &ob, char r_name[64]);
+
+/**
+ * True when both objects belong to the same sculpt-layer sync group (persistent key when set,
+ * otherwise legacy int match within one file).
+ */
+bool object_in_same_sync_group(const Object &a, const Object &b);
+
+/** Mint a new persistent #Object::sculpt_layer_sync_group_key for a freshly created group. */
+uint64_t sync_group_new_key(const Main &bmain);
+
+/** Assign legacy int-only groups a stable key derived from the blend path (run on file load/link). */
+void sync_group_mint_keys_for_legacy_groups(Main &bmain);
+
+/** Stamp empty #sculpt_layer_sync_group_name on every editable member of each grouped set. */
+void sync_group_repair_empty_names(Main &bmain);
+
+/**
+ * Shift #SculptLayerTreeNode::sync_uid on library-linked meshes once per mesh so unrelated files
+ * cannot collide after append/link.
+ */
+void layer_sync_uid_namespace_linked_meshes(Main &bmain);
+
+/** File load / library-link entry point for sculpt-layer sync identity fixups. */
+void sculpt_layers_after_lib_link_fixups(Main &bmain);
+
+/**
+ * Object that should drive mesh-level RNA sync propagation for \a mesh (UI context, then search).
+ */
+Object *sync_source_object_for_mesh(Main &bmain, const Mesh &mesh);
+
+/** Set the UI object context for mesh-level sculpt-layer RNA setters (Properties / tree view). */
+void sculpt_layers_rna_context_object_set(Object *object);
+void sculpt_layers_rna_context_object_clear();
+
+/**
+ * Next free #SculptLayerTreeNode::sync_uid value across every mesh in \a bmain -- mirrors
+ * #node_unique_uid's own recursive max-plus-one walk, but scans #SculptLayerTreeNode::sync_uid
+ * instead of #uid, and across every #Mesh in the file rather than one mesh's tree. Only called
+ * from the rare, UI-driven layer-creation fan-out path.
+ */
+int layer_sync_uid_unique(const Main &bmain);
 
 /**
  * Runtime-only state of a #SculptLayerGroup, reached through #SculptLayerGroup::runtime.
@@ -319,7 +429,14 @@ SculptLayer *add(Mesh &mesh, const char *name, short domain, int64_t totelem, sh
  */
 void remove(Mesh &mesh, SculptLayer &layer);
 
-/** Duplicate \a src (including its data) into \a mesh, right after \a src, and make it active. */
+/**
+ * Duplicate \a src (including its data) into \a mesh, right after \a src, and make it active.
+ *
+ * The copy gets a fresh #SculptLayerTreeNode::uid and a zero #SculptLayerTreeNode::sync_uid: it is
+ * a new layer, not another object's view of \a src, and two nodes of one mesh sharing a sync_uid
+ * would break #node_find_by_sync_uid's first-match resolution. A caller duplicating across a sync
+ * group assigns the shared value itself (see #layer_sync_uid_unique).
+ */
 SculptLayer *duplicate(Mesh &mesh, const SculptLayer &src);
 
 /**

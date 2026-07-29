@@ -347,6 +347,11 @@ static std::optional<std::string> rna_SculptLayer_path(const PointerRNA *ptr)
   return fmt::format("sculpt_layers[\"{}\"]", name_esc);
 }
 
+static Object *rna_sculpt_layer_sync_source_object(Main &bmain, const Mesh &mesh)
+{
+  return bke::sculpt_layers::sync_source_object_for_mesh(bmain, mesh);
+}
+
 static void rna_SculptLayer_name_set(PointerRNA *ptr, const char *value)
 {
   SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
@@ -355,6 +360,11 @@ static void rna_SculptLayer_name_set(PointerRNA *ptr, const char *value)
    * collection and #rna_SculptLayer_path key a layer by name alone, so a name shared with another
    * layer — even in a different folder — would let either resolve the wrong one. */
   bke::sculpt_layers::node_name_ensure_unique(layer->base);
+  if (G_MAIN != nullptr) {
+    if (Object *ob = rna_sculpt_layer_sync_source_object(*G_MAIN, *rna_mesh(ptr))) {
+      ed::sculpt_paint::layers::sync_group_propagate_node_name(*G_MAIN, *ob, layer->base);
+    }
+  }
 }
 
 /* Every folder of the mesh, depth-first, the root excluded (it is not a row: see
@@ -398,6 +408,11 @@ static void rna_SculptLayerGroup_name_set(PointerRNA *ptr, const char *value)
   /* Unique across the whole tree — the same single authority #group_add uses, so the two paths
    * cannot drift apart on what a legal name is. */
   bke::sculpt_layers::node_name_ensure_unique(group->base);
+  if (G_MAIN != nullptr) {
+    if (Object *ob = rna_sculpt_layer_sync_source_object(*G_MAIN, *rna_mesh(ptr))) {
+      ed::sculpt_paint::layers::sync_group_propagate_node_name(*G_MAIN, *ob, group->base);
+    }
+  }
 }
 
 /* [DEBUG-perf] Per-tick timing for the Sculpt Layers influence slider hot path. Tied to the
@@ -580,6 +595,11 @@ static void rna_SculptLayer_influence_set(PointerRNA *ptr, float value)
   const float old_effective = bke::sculpt_layers::effective(*layer);
   layer->influence = value;
   rna_SculptLayer_apply_mesh_delta(mesh, *layer, bke::sculpt_layers::effective(*layer) - old_effective);
+  if (G_MAIN != nullptr) {
+    if (Object *ob = rna_sculpt_layer_sync_source_object(*G_MAIN, *mesh)) {
+      ed::sculpt_paint::layers::sync_group_propagate_layer_influence(*G_MAIN, *ob, *layer);
+    }
+  }
 }
 
 static bool rna_SculptLayer_enabled_get(PointerRNA *ptr)
@@ -655,6 +675,11 @@ static void rna_SculptLayerGroup_influence_set(PointerRNA *ptr, float value)
     SculptLayer &layer = *descendants[i];
     rna_SculptLayer_apply_mesh_delta(
         mesh, layer, bke::sculpt_layers::effective(layer) - old_effective[i]);
+  }
+  if (G_MAIN != nullptr) {
+    if (Object *ob = rna_sculpt_layer_sync_source_object(*G_MAIN, *mesh)) {
+      ed::sculpt_paint::layers::sync_group_propagate_group_influence(*G_MAIN, *ob, *group);
+    }
   }
 }
 

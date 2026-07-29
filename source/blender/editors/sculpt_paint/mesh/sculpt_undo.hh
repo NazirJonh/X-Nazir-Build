@@ -207,6 +207,10 @@ struct SculptLayerUndoPayload {
    * removed folder comes back with its color on undo. */
   int8_t color_tag = SCULPT_LAYER_COLOR_NONE;
   int uid = 0;
+  /** Mirrors #SculptLayerTreeNode::sync_uid, which — like #uid — lives on the shared node base
+   * rather than being layer-only. Carried the same way #uid is: without it, undo/redo would
+   * silently drop the node back out of its sync group by rebuilding it with `sync_uid == 0`. */
+  int sync_uid = 0;
   /**
    * The folder the node sat in, as its uid (0 when it sat at the root — the root group holds uid 0,
    * so this reads back through #bke::sculpt_layers::node_find_by_uid without a special case).

@@ -2127,6 +2127,10 @@ void operatortypes_sculpt()
   WM_operatortype_append(layers::SCULPT_OT_layer_group_merge);
   WM_operatortype_append(layers::SCULPT_OT_layer_group_delete);
   WM_operatortype_append(layers::SCULPT_OT_layer_group_toggle_visibility);
+  WM_operatortype_append(layers::SCULPT_OT_layer_sync_group_create);
+  WM_operatortype_append(layers::SCULPT_OT_layer_sync_group_unlink);
+  WM_operatortype_append(layers::SCULPT_OT_layer_sync_group_repair_names);
+  WM_operatortype_append(layers::SCULPT_OT_layer_sync_group_select_members);
   WM_operatortype_append(layers::SCULPT_OT_layer_group_color_tag);
 }
 

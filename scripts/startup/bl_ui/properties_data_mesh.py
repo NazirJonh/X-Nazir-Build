@@ -426,6 +426,52 @@ class DATA_PT_sculpt_layers(MeshButtonsPanel, Panel):
         ob = context.object
         mesh = ob.data
 
+        selected_meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        if ob.sculpt_layer_sync_group == 0:
+            if (
+                len(selected_meshes) >= 2
+                and all(o.sculpt_layer_sync_group == 0 for o in selected_meshes)
+            ):
+                sync_row = layout.row()
+                sync_row.operator("sculpt.layer_sync_group_create", text="Sync Sculpt Layers")
+        else:
+            group_uid = ob.sculpt_layer_sync_group_uid
+            group_id = ob.sculpt_layer_sync_group
+            if group_uid:
+                member_meshes = {
+                    other.data
+                    for other in bpy.data.objects
+                    if other.type == 'MESH'
+                    and other.sculpt_layer_sync_group_uid == group_uid
+                    and other.data is not None
+                }
+            else:
+                member_meshes = {
+                    other.data
+                    for other in bpy.data.objects
+                    if other.type == 'MESH'
+                    and other.sculpt_layer_sync_group == group_id
+                    and other.data is not None
+                }
+            member_count = len(member_meshes)
+            sync_row = layout.row(align=True)
+            sync_row.prop(ob, "sculpt_layer_sync_group_name", text="")
+            right = sync_row.row(align=True)
+            right.alignment = 'RIGHT'
+            right.label(text="({:d})".format(member_count))
+            if not ob.sculpt_layer_sync_group_name:
+                right.operator(
+                    "sculpt.layer_sync_group_repair_names",
+                    icon='FILE_REFRESH',
+                    text="",
+                )
+            right.operator(
+                "sculpt.layer_sync_group_select_members",
+                icon='RESTRICT_SELECT_OFF',
+                text="",
+            )
+            right.operator("sculpt.layer_sync_group_unlink", icon='UNLINKED', text="")
+
         row = layout.row()
         row.template_sculpt_layer_tree()
 

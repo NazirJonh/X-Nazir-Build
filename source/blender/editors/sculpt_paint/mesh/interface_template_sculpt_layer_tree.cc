@@ -647,7 +647,14 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
      * which is what is restored when the folder is re-enabled. */
     vis.active_set(values_editable && !(layer.base.flag & SCULPT_LAYER_GROUP_HIDDEN));
     const int vis_icon = (layer.base.flag & SCULPT_LAYER_ENABLED) ? ICON_HIDE_OFF : ICON_HIDE_ON;
-    vis.prop(&layer_ptr, "enabled", ui::ITEM_R_ICON_ONLY, "", vis_icon);
+    /* Operator, not the RNA property: sculpt undo, mesh deltas, and sync-group fan-out (Alt) need
+     * the same path as folder visibility — a bare #enabled write would skip them. */
+    PointerRNA op_ptr = vis.op("SCULPT_OT_layer_toggle_visibility",
+                               "",
+                               vis_icon,
+                               wm::OpCallContext::InvokeDefault,
+                               UI_ITEM_NONE);
+    RNA_int_set(&op_ptr, "layer_uid", uid_);
   }
 
   std::optional<bool> should_be_active() const override
@@ -759,7 +766,7 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
       return;
     }
     WM_operator_name_call(
-        C, "SCULPT_OT_layer_remove", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+        C, "SCULPT_OT_layer_remove", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
   }
 
   void build_context_menu(bContext &C, ui::Layout &layout) const override
@@ -823,6 +830,7 @@ void SculptLayerTreeView::build_tree()
 void template_layer_tree(ui::Layout *layout, bContext *C)
 {
   Object *ob = CTX_data_active_object(C);
+  bke::sculpt_layers::sculpt_layers_rna_context_object_set(ob);
   if (ob == nullptr) {
     return;
   }

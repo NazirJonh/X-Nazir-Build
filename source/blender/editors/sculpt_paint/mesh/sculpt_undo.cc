@@ -1721,6 +1721,7 @@ static void payload_metadata_from_node(SculptLayerUndoPayload &payload,
   payload.flag = node.flag;
   payload.color_tag = node.color_tag;
   payload.uid = node.uid;
+  payload.sync_uid = node.sync_uid;
   /* The parent is a pointer now rather than a stored uid, so it is read off the tree here. Null only
    * for the root group, which is never captured; 0 then means "the root folder", which is where
    * #sculpt_layer_payload_insert puts a node back. */
@@ -1751,6 +1752,7 @@ static void node_metadata_from_payload(SculptLayerTreeNode &node,
   node.flag = payload.flag;
   node.color_tag = payload.color_tag;
   node.uid = payload.uid;
+  node.sync_uid = payload.sync_uid;
   if (SculptLayer *layer = bke::sculpt_layers::node_as_layer(&node)) {
     layer->influence = payload.influence;
     layer->totelem = payload.totelem;
@@ -3857,6 +3859,10 @@ static void save_common_data(Object &ob, SculptUndoStep *us)
     us->active_color_end.was_set = false;
   }
 
+  if (ob.runtime->sculpt_session == nullptr) {
+    return;
+  }
+
   const SculptSession &ss = *ob.runtime->sculpt_session;
 
   step_data->pivot_pos = ss.pivot_pos;
@@ -3877,6 +3883,11 @@ static void save_step_topology_data(Object &ob, SculptUndoStep *us)
   save_common_data(ob, us);
   StepData *step_data = get_step_data(ob);
   if (!step_data) {
+    return;
+  }
+
+  if (ob.runtime->sculpt_session == nullptr) {
+    save_mesh_topology_data(ob, *step_data);
     return;
   }
 

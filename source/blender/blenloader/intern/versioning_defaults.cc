@@ -215,16 +215,16 @@ static void blo_update_defaults_screen(bScreen *screen,
       v3d->overlay.retopology_offset = 0.01f;
       /* Clear this deprecated bit for later reuse. */
       v3d->overlay.edit_flag &= ~V3D_OVERLAY_EDIT_EDGES_DEPRECATED;
-      /* Always enable the symmetry overlays by default, with sane opacity and thickness. */
-      v3d->overlay.symmetry_flag |= V3D_OVERLAY_SYMMETRY_SCULPT_PLANE |
-                                    V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR |
+      /* Enable symmetry contour overlays by default; keep the translucent plane off. */
+      v3d->overlay.symmetry_flag &= ~(V3D_OVERLAY_SYMMETRY_SCULPT_PLANE |
+                                      V3D_OVERLAY_SYMMETRY_CURVES_PLANE);
+      v3d->overlay.symmetry_flag |= V3D_OVERLAY_SYMMETRY_SCULPT_CONTOUR |
                                     V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR |
                                     V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR |
                                     V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR |
-                                    V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR |
-                                    V3D_OVERLAY_SYMMETRY_CURVES_PLANE;
-      v3d->overlay.sculpt_symmetry_plane_opacity = 0.3f;
-      v3d->overlay.sculpt_symmetry_contour_thickness = 10.0f;
+                                    V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR;
+      v3d->overlay.sculpt_symmetry_plane_opacity = 0.03f;
+      v3d->overlay.sculpt_symmetry_contour_thickness = 3.0f;
       /* grease pencil settings */
       v3d->vertex_opacity = 1.0f;
       v3d->gp_flag |= V3D_GP_SHOW_EDIT_LINES;

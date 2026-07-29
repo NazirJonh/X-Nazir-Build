@@ -350,7 +350,18 @@ struct SculptLayerTreeNode {
    * #SculptLayerGroup so a layer tag stays possible later; only folders expose it today.
    */
   int8_t color_tag = SCULPT_LAYER_COLOR_NONE;
-  char _pad[6] = {};
+  char _pad[2] = {};
+  /**
+   * Cross-object identity for sync-group fan-out (see #bke::sculpt_layers::layer_sync_uid_unique
+   * and #layers::find_sync_uid_match). `0` = this node is local-only -- either created before its
+   * object joined a sync group, or created without going through the fan-out path. Deliberately
+   * separate from #uid: #uid is unique only within ONE mesh's tree (see #node_unique_uid), while
+   * two different meshes' trees legitimately share #uid values, so #uid cannot identify "the same"
+   * node across objects. This field occupies what used to be 6 bytes of explicit padding -- 4 for
+   * this field, 2 remaining above -- so the struct's total size (and therefore #mask's required
+   * 8-byte alignment) is unchanged.
+   */
+  int sync_uid = 0;
   /**
    * Optional weight map. Null means there is no mask, which is *not* the same as a mask full of
    * ones: a node without a mask skips the masked code paths entirely and costs nothing.
@@ -455,6 +466,11 @@ enum eSculptLayerGroupFlag : int {
    * masks of folders further up are unaffected and keep applying.
    */
   SCULPT_LAYER_GROUP_MASK_DISABLED = 1 << 6,
+  /**
+   * Set only on #Mesh::sculpt_layer_root: #sync_uid values were shifted for library-namespace
+   * isolation (see #bke::sculpt_layers::layer_sync_uid_namespace_linked_meshes).
+   */
+  SCULPT_LAYER_GROUP_SYNC_UID_NAMESPACED = 1 << 7,
 };
 ENUM_OPERATORS(eSculptLayerGroupFlag)
 

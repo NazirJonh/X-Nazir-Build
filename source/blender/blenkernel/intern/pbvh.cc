@@ -1665,6 +1665,9 @@ Bounds<float3> bounds_get(const Tree &pbvh)
 
 void BKE_pbvh_mark_rebuild_pixels(bke::pbvh::Tree &pbvh)
 {
+  for (bke::pbvh::pixels::PixelData *pixels : pbvh.pixels_cache_) {
+    pixels->flags.dirty = true;
+  }
   if (pbvh.pixels_) {
     pbvh.pixels_->flags.dirty = true;
   }

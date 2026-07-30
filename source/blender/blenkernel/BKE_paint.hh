@@ -642,6 +642,15 @@ bool BKE_object_sculpt_use_dyntopo(const Object *object);
  */
 std::string BKE_paint_canvas_key_get(PaintModeSettings *settings, Object *ob);
 
+/**
+ * Layout key for PBVH pixel encoding of \a image: seam margin and each tile's
+ * (tile_number, width, height). Images that share this key can reuse the same
+ * #bke::pbvh::pixels::PixelData without re-encoding.
+ */
+std::string BKE_paint_pixels_layout_key_get(Image &image,
+                                            ImageUser &image_user,
+                                            StringRef uv_map_name);
+
 bool BKE_paint_canvas_image_get(PaintModeSettings *settings,
                                 Object *ob,
                                 Image **r_image,

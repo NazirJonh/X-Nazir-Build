@@ -148,6 +148,16 @@ static void append_image_key(std::stringstream &ss, Image &image, ImageUser &ima
   }
 }
 
+std::string BKE_paint_pixels_layout_key_get(Image &image,
+                                            ImageUser &image_user,
+                                            const StringRef uv_map_name)
+{
+  std::stringstream ss;
+  ss << "UV_MAP:" << uv_map_name;
+  append_image_key(ss, image, image_user);
+  return ss.str();
+}
+
 std::string BKE_paint_canvas_key_get(PaintModeSettings *settings, Object *ob)
 {
   std::stringstream ss;

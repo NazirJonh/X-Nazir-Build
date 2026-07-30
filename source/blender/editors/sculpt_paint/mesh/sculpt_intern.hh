@@ -187,6 +187,7 @@ struct ImagePaintTarget {
   std::unique_ptr<ImageData> data;
   std::optional<float4> color_override;
   bool is_color_channel = false;
+  const char *channel_name = nullptr;
 };
 
 /** Builds paint targets for Mode=`Image` (one canvas) or Mode=`Material` (Principled maps). */

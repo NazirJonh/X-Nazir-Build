@@ -256,7 +256,10 @@ class Tree {
  public:
   std::variant<Vector<MeshNode>, Vector<GridsNode>, Vector<BMeshNode>> nodes_;
 
+  /* Active pixel encoding. Entries are kept per image layout so Material paint
+   * can switch between different resolutions without re-encoding each dab. */
   pixels::PixelData *pixels_ = nullptr;
+  Vector<pixels::PixelData *> pixels_cache_;
 
   std::unique_ptr<DrawCache> draw_data;
 
@@ -331,7 +334,11 @@ class Tree {
   static Tree from_spatially_organized_mesh(const Mesh &mesh);
 };
 
-void build_pixels(const Depsgraph &depsgraph, Object &object, Image &image, ImageUser &image_user);
+bool build_pixels(const Depsgraph &depsgraph,
+                  Object &object,
+                  Image &image,
+                  ImageUser &image_user,
+                  StringRef uv_map_name);
 
 /* Ray-cast
  * the hit callback is called for all leaf nodes intersecting the ray;

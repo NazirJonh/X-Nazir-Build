@@ -70,6 +70,7 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_paint_material_channel_perf_debug.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -2504,6 +2505,9 @@ void BKE_sculpt_update_object_before_eval(Object *ob_eval)
     const IndexMask node_mask = bke::pbvh::all_leaf_nodes(*pbvh, memory);
     pbvh->tag_positions_changed(node_mask);
     BKE_pbvh_mark_rebuild_pixels(*pbvh);
+#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+    bke::paint_material_channel_perf::stroke_eval_rebuild();
+#endif
   }
 }
 

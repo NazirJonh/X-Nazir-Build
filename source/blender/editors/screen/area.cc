@@ -21,6 +21,7 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
+#include "BLI_span.hh"
 #include "BLI_utildefines.h"
 
 #include "BKE_context.hh"
@@ -722,6 +723,29 @@ void ED_area_tag_redraw_regiontype(ScrArea *area, int regiontype)
     for (ARegion &region : area->regionbase) {
       if (region.regiontype == regiontype) {
         ED_region_tag_redraw(&region);
+      }
+    }
+  }
+}
+
+void ED_screen_tag_redraw_spacetype_all_windows(const wmWindowManager *wm,
+                                                const blender::Span<int> space_types,
+                                                const int region_type)
+{
+  if (!wm) {
+    return;
+  }
+  for (const wmWindow &win : wm->windows) {
+    bScreen *screen = WM_window_get_active_screen(&win);
+    if (!screen) {
+      continue;
+    }
+    ED_screen_areas_iter (&win, screen, area) {
+      for (const int space_type : space_types) {
+        if (area->spacetype == space_type) {
+          ED_area_tag_redraw_regiontype(area, region_type);
+          break;
+        }
       }
     }
   }

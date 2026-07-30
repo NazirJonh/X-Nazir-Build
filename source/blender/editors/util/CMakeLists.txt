@@ -19,6 +19,7 @@ set(SRC
   ed_transverts.cc
   ed_util.cc
   ed_util_imbuf.cc
+  ed_util_modal_multiwin.cc
   ed_util_ops.cc
   ed_viewer_path.cc
   gizmo_utils.cc
@@ -87,6 +88,7 @@ set(SRC
   ../include/ED_userpref.hh
   ../include/ED_util.hh
   ../include/ED_util_imbuf.hh
+  ../include/ED_util_modal_multiwin.hh
   ../include/ED_uvedit.hh
   ../include/ED_view3d.hh
   ../include/ED_view3d_offscreen.hh

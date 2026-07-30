@@ -75,6 +75,9 @@
 #include "ED_paint.hh"
 #include "ED_undo.hh"
 
+#include "WM_api.hh"
+#include "WM_types.hh"
+
 #include "paint_curve_patch_effect_common.hh"
 #include "paint_intern.hh"
 
@@ -1310,6 +1313,20 @@ void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
     bke::pbvh::pixels::mark_image_dirty(
         nodes[i], pixel_nodes[i], *image_data.image, image_data.buffers);
   });
+
+  /* Force pending partial updates onto the GPU texture NOW, while the event-thread GL context is
+   * still available. `mark_image_dirty()` only records changeset tiles; the upload normally waits
+   * for the next `BKE_image_get_gpu_*` during draw. Curve Patch restamps (restore + re-apply) can
+   * leave Workbench/EEVEE holding a cached `gpu::Texture *` whose contents are still the previous
+   * frame -- so the mesh canvas keeps showing a stale preview until some unrelated full refresh.
+   * Calling get here applies the changeset in place to that same texture object.
+   *
+   * Also notify Image Editors the way legacy texture paint does on every dab (`NA_PAINTING`), so
+   * an open canvas preview redraws without waiting for a full `NA_EDITED` area refresh. */
+  if (image_data.image_user != nullptr) {
+    BKE_image_get_gpu_material_texture(image_data.image, image_data.image_user, true);
+  }
+  WM_main_add_notifier(NC_IMAGE | NA_PAINTING, image_data.image);
 #if CURVE_PATCH_PROFILING
   const double prof_seam = BLI_time_now_seconds() - prof_seam_t0;
   /* DEBUG-cpatch-image: one line per restamp, summing every symmetry pass x patch. `pixels` is the

@@ -42,6 +42,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_bit_span_ops.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
@@ -77,6 +78,7 @@
 #include "ED_paint.hh"
 #include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
+#include "ED_util_modal_multiwin.hh"
 #include "ED_view3d.hh"
 
 #include "RNA_access.hh"
@@ -89,8 +91,6 @@
 
 #include "WM_api.hh"
 #include "WM_types.hh"
-
-#include "wm_event_system.hh"
 
 #include "mesh/sculpt_intern.hh"
 #include "paint_curve_intern.hh"
@@ -418,79 +418,6 @@ static int patch_find_point_index_at_pos_for_delete(const bke::CurvesGeometry &g
 /** \name Multi-Viewport Context
  * \{ */
 
-/** Restores the frozen invoke context on scope exit. */
-struct CurvePatchContextScope {
-  bContext *C;
-  ScrArea *prev_area;
-  ARegion *prev_region;
-
-  CurvePatchContextScope(bContext *C)
-      : C(C), prev_area(CTX_wm_area(C)), prev_region(CTX_wm_region(C))
-  {
-  }
-
-  ~CurvePatchContextScope()
-  {
-    CTX_wm_area_set(C, prev_area);
-    CTX_wm_region_set(C, prev_region);
-  }
-};
-
-static ScrArea *curve_patch_area_for_region(bScreen *screen, const ARegion *region)
-{
-  if (!screen || !region) {
-    return nullptr;
-  }
-  for (ScrArea &area : screen->areabase) {
-    if (BLI_findindex(&area.regionbase, region) != -1) {
-      return &area;
-    }
-  }
-  return nullptr;
-}
-
-/**
- * The 3D viewport WINDOW region visually under \a event_xy in \a win (not the N-panel/HUD/header
- * drawn on top). Returns null when the cursor sits outside any 3D view or over an on-viewport panel.
- */
-static ARegion *curve_patch_viewport_region_under_cursor(wmWindow *win,
-                                                         const int event_xy[2],
-                                                         ScrArea **r_area)
-{
-  *r_area = nullptr;
-  if (!win) {
-    return nullptr;
-  }
-  bScreen *screen = WM_window_get_active_screen(win);
-  if (!screen) {
-    return nullptr;
-  }
-  ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_VIEW3D, event_xy);
-  if (!area) {
-    return nullptr;
-  }
-  ARegion *region_hovered = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, event_xy);
-  ARegion *region_window = BKE_area_find_region_xy(area, RGN_TYPE_WINDOW, event_xy);
-  if (region_hovered && region_window && region_hovered == region_window) {
-    *r_area = area;
-    return region_window;
-  }
-  return nullptr;
-}
-
-/** Window-level modals keep `CTX_wm_region()` frozen at invoke time, so recompute mval for \a region. */
-static void curve_patch_event_mval(const wmEvent *event, const ARegion *region, int r_mval[2])
-{
-  if (region) {
-    r_mval[0] = event->xy[0] - region->winrct.xmin;
-    r_mval[1] = event->xy[1] - region->winrct.ymin;
-  }
-  else {
-    r_mval[0] = event->mval[0];
-    r_mval[1] = event->mval[1];
-  }
-}
-
 /** Point the session's owned `ViewContext` (and `StrokeCache::vc`) at the viewport under edit. */
 static void curve_patch_sync_view_context(bContext *C,
                                           ScrArea *area,
@@ -510,104 +437,15 @@ static void curve_patch_sync_view_context(bContext *C,
   }
 }
 
-/** First 3D View WINDOW region on \a screen, for freezing modal context in secondary windows. */
-static void curve_patch_find_view3d_window_region(const bScreen *screen,
-                                                  ScrArea **r_area,
-                                                  ARegion **r_region)
-{
-  *r_area = nullptr;
-  *r_region = nullptr;
-  if (!screen) {
-    return;
-  }
-  for (ScrArea &area : screen->areabase) {
-    if (area.spacetype != SPACE_VIEW3D) {
-      continue;
-    }
-    for (ARegion &region : area.regionbase) {
-      if (region.regiontype == RGN_TYPE_WINDOW) {
-        *r_area = &area;
-        *r_region = &region;
-        return;
-      }
-    }
-  }
-}
-
-static bool curve_patch_edit_modal_handler_on_window(const wmWindow &win, const wmOperator *op)
-{
-  for (const wmEventHandler &handler_base : win.runtime->modalhandlers) {
-    if (handler_base.type != WM_HANDLER_TYPE_OP) {
-      continue;
-    }
-    const wmEventHandler_Op *handler = reinterpret_cast<const wmEventHandler_Op *>(&handler_base);
-    if (!handler->op) {
-      continue;
-    }
-    const wmOperator *handler_op = handler->op->opm ? handler->op->opm : handler->op;
-    if (handler_op == op) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static wmOperator *curve_patch_edit_op_from_handlers(wmWindowManager *wm)
-{
-  if (!wm) {
-    return nullptr;
-  }
-  for (wmWindow &win : wm->windows) {
-    for (wmEventHandler &handler_base : win.runtime->modalhandlers) {
-      if (handler_base.type != WM_HANDLER_TYPE_OP) {
-        continue;
-      }
-      wmEventHandler_Op *handler = reinterpret_cast<wmEventHandler_Op *>(&handler_base);
-      wmOperator *op = handler->op;
-      if (!op) {
-        continue;
-      }
-      wmOperator *op_test = op->opm ? op->opm : op;
-      if (STREQ(op_test->type->idname, "SCULPT_OT_curve_patch_edit")) {
-        return op_test;
-      }
-    }
-  }
-  return nullptr;
-}
-
 /**
- * Window-level modals only receive events from the window they were registered on. Curve Patch is
- * object-global, so register the same operator on every open window -- otherwise a second window
- * showing the same mesh would still route LMB to the sculpt stroke underneath. Windows opened after
- * the session started are picked up here (and from the overlay-redraw poll) on the next event.
+ * Called from outside the modal (the overlay-redraw poll) to catch windows opened after the
+ * session started -- `curve_patch_edit_modal()` re-runs
+ * #WM_event_add_modal_handler_all_windows() itself on every tick too, but this covers the gap
+ * before the next event reaches it. Discovers the running #SCULPT_OT_curve_patch_edit instance
+ * by type: there is always at most one active session, so a type-based search (unlike an
+ * instance-match idempotency check) is the right tool here -- there is no already-known
+ * `wmOperator *` to compare against yet.
  */
-static void curve_patch_edit_modal_handlers_ensure_all(bContext *C, wmOperator *op)
-{
-  wmWindowManager *wm = CTX_wm_manager(C);
-  if (!wm || !op) {
-    return;
-  }
-  wmWindow *invoke_win = CTX_wm_window(C);
-  ScrArea *invoke_area = CTX_wm_area(C);
-  ARegion *invoke_region = CTX_wm_region(C);
-  for (wmWindow &win : wm->windows) {
-    if (curve_patch_edit_modal_handler_on_window(win, op)) {
-      continue;
-    }
-    ScrArea *area = nullptr;
-    ARegion *region = nullptr;
-    if (&win == invoke_win && invoke_area && invoke_region) {
-      area = invoke_area;
-      region = invoke_region;
-    }
-    else {
-      curve_patch_find_view3d_window_region(WM_window_get_active_screen(&win), &area, &region);
-    }
-    WM_event_add_modal_handler_ex(&win, area, region, op);
-  }
-}
-
 void ED_paint_curve_patch_modal_handlers_ensure(bContext *C)
 {
   const Object *ob = CTX_data_active_object(C);
@@ -615,27 +453,24 @@ void ED_paint_curve_patch_modal_handlers_ensure(bContext *C)
     return;
   }
   wmWindowManager *wm = CTX_wm_manager(C);
-  wmOperator *op = curve_patch_edit_op_from_handlers(wm);
+  if (!wm) {
+    return;
+  }
+  const wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_curve_patch_edit", false);
+  if (!ot) {
+    return;
+  }
+  wmOperator *op = nullptr;
+  for (wmWindow &win : wm->windows) {
+    op = WM_operator_find_modal_by_type(&win, ot);
+    if (op) {
+      break;
+    }
+  }
   if (!op) {
     return;
   }
-  curve_patch_edit_modal_handlers_ensure_all(C, op);
-}
-
-/** Tear down handlers on every window except the one finishing the operator (that one is removed by
- * the event system when the modal returns #OPERATOR_FINISHED / #OPERATOR_CANCELLED). */
-static void curve_patch_edit_modal_handlers_remove_other_windows(bContext *C, const wmOperator *op)
-{
-  wmWindowManager *wm = CTX_wm_manager(C);
-  wmWindow *current_win = CTX_wm_window(C);
-  if (!wm || !current_win) {
-    return;
-  }
-  for (wmWindow &win : wm->windows) {
-    if (&win != current_win) {
-      WM_event_remove_modal_handler(&win.runtime->modalhandlers, op, false);
-    }
-  }
+  WM_event_add_modal_handler_all_windows(C, op, SPACE_VIEW3D, RGN_TYPE_WINDOW);
 }
 
 /** \} */
@@ -660,11 +495,25 @@ static void curve_patch_tag_overlay_redraw_all(bContext *C)
   ED_paint_curve_overlay_tag_redraw_all(C);
 }
 
-/** Overlay plus the full finished-stroke sculpt redraw handshake in all 3D views (mesh + curves). */
-static void curve_patch_tag_viewports_redraw_after_edit(bContext &C, Object &ob)
+/** Overlay plus the finished-stroke redraw handshake after a discrete edit (drag release, undo,
+ * delete, etc.). Always issues the shared #UpdateType::Position flush; Image/Color effects also
+ * need their own type so #flush_update_done reaches the #SPACE_IMAGE loop and the paint-done
+ * handshake -- the same reason #curve_patch_finish_commit issues a second effect-typed flush.
+ * Without that second call, Texture Paint (Draw brush / image canvas) keeps a stale GPU preview
+ * after moving points or segments even though the ImBuf was already re-stamped. */
+static void curve_patch_tag_viewports_redraw_after_edit(bContext &C,
+                                                       Object &ob,
+                                                       const CurvePatchSession &patch)
 {
   ED_paint_curve_overlay_tag_redraw_all(&C);
   flush_update_done(&C, ob, UpdateType::Position);
+  if (!patch.effect) {
+    return;
+  }
+  const UpdateType update_type = patch.effect->update_type();
+  if (update_type != UpdateType::Position && bits::any_bit_set(patch.apply.all_touched_nodes)) {
+    flush_update_done(&C, ob, update_type);
+  }
 }
 
 /* -------------------------------------------------------------------- */
@@ -716,7 +565,7 @@ static void curve_patch_undo_restore(bContext &C, Object &ob, CurvePatchSession 
 
   curve_patch_edit_status_set(&C, patch);
   curve_patch_restore_and_restamp(C, ob, patch);
-  curve_patch_tag_viewports_redraw_after_edit(C, ob);
+  curve_patch_tag_viewports_redraw_after_edit(C, ob, patch);
 }
 
 /* Returns false when there is nothing left to undo, i.e. the session is back at the state the
@@ -778,7 +627,7 @@ static bool curve_patch_delete_active_point(bContext &C,
 
   curve_patch_undo_push(patch);
   curve_patch_restore_and_restamp(C, ob, patch);
-  curve_patch_tag_viewports_redraw_after_edit(C, ob);
+  curve_patch_tag_viewports_redraw_after_edit(C, ob, patch);
   return true;
 }
 
@@ -800,7 +649,7 @@ static void curve_patch_set_active_handle_type(bContext &C,
 
   curve_patch_undo_push(patch);
   curve_patch_restore_and_restamp(C, ob, patch);
-  curve_patch_tag_viewports_redraw_after_edit(C, ob);
+  curve_patch_tag_viewports_redraw_after_edit(C, ob, patch);
 }
 
 /* Close or re-open the control curve. Returns false only when there is no usable curve at all. */
@@ -825,7 +674,7 @@ static bool curve_patch_toggle_cyclic(bContext &C, Object &ob, CurvePatchSession
   curve_patch_undo_push(patch);
   curve_patch_edit_status_set(&C, patch);
   curve_patch_restore_and_restamp(C, ob, patch);
-  curve_patch_tag_viewports_redraw_after_edit(C, ob);
+  curve_patch_tag_viewports_redraw_after_edit(C, ob, patch);
   return true;
 }
 
@@ -843,7 +692,7 @@ static bool curve_patch_reseed_stamps(bContext &C, Object &ob, CurvePatchSession
 
   curve_patch_undo_push(patch);
   curve_patch_restore_and_restamp(C, ob, patch);
-  curve_patch_tag_viewports_redraw_after_edit(C, ob);
+  curve_patch_tag_viewports_redraw_after_edit(C, ob, patch);
   return true;
 }
 
@@ -990,7 +839,7 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
       STRNCPY(data->tool_idname_at_invoke, tref->idname);
     }
   }
-  curve_patch_edit_modal_handlers_ensure_all(C, op);
+  WM_event_add_modal_handler_all_windows(C, op, SPACE_VIEW3D, RGN_TYPE_WINDOW);
   /* Drive the live-sync poll at a steady cadence (see `CurvePatchEditOpData::sync_timer`). 20 Hz:
    * fast enough that a panel change feels immediate, light enough that idle ticks -- which only
    * compare scalars and re-stamp on an actual change -- cost nothing. */
@@ -1077,14 +926,14 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     curve_patch_edit_snap_ctx_free(data);
     MEM_delete(&data);
     op->customdata = nullptr;
-    curve_patch_edit_modal_handlers_remove_other_windows(C, op);
+    WM_event_remove_modal_handler_other_windows(C, op);
     return OPERATOR_CANCELLED;
   }
 
   /* Windows opened after invoke only get a handler once this runs (also polled from the overlay
    * redraw cursor on MOUSEMOVE in any viewport). Without it, #sculpt_mode_and_brush_poll blocks
    * strokes globally but nothing in that window consumes curve-edit events. */
-  curve_patch_edit_modal_handlers_ensure_all(C, op);
+  WM_event_add_modal_handler_all_windows(C, op, SPACE_VIEW3D, RGN_TYPE_WINDOW);
 
   /* Commit and end the session once another tool or brush has taken over (see
    * #curve_patch_edit_session_superseded for how that is detected and why it has to be polled).
@@ -1270,7 +1119,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
          * not only where the modal's own hotkeys change them. */
         curve_patch_edit_status_set(C, patch);
         curve_patch_restore_and_restamp(*C, ob, patch);
-        curve_patch_tag_viewports_redraw_after_edit(*C, ob);
+        curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
       }
     }
   }
@@ -1295,26 +1144,20 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     return OPERATOR_CANCELLED;
   }
 
-  /* #WM_event_add_modal_handler() (called from `curve_patch_edit_invoke()`) registers this
-   * operator as a WINDOW-level modal handler (`win->runtime->modalhandlers`), not an area/region
-   * one -- so it receives every mouse/keyboard event in the entire window, for whichever area
-   * happens to be under the cursor, before that area's own handlers ever run. Without this guard,
-   * a click on a Properties panel button, an Outliner entry, the N-panel, or a header -- anywhere
-   * outside the 3D view this patch was started in -- was consumed by the `LEFTMOUSE`/`RIGHTMOUSE`
-   * cases below (after missing the curve hit-test), so the click never reached the editor it was
-   * actually meant for and all other UI interaction appeared frozen for the whole session.
+  /* #WM_event_add_modal_handler_all_windows() (called from `curve_patch_edit_invoke()`)
+   * registers this operator as a WINDOW-level modal handler (`win->runtime->modalhandlers`), not
+   * an area/region one -- so it receives every mouse/keyboard event in the entire window, for
+   * whichever area happens to be under the cursor, before that area's own handlers ever run.
+   * Without this guard, a click on a Properties panel button, an Outliner entry, the N-panel, or
+   * a header -- anywhere outside the 3D view this patch was started in -- was consumed by the
+   * `LEFTMOUSE`/`RIGHTMOUSE` cases below (after missing the curve hit-test), so the click never
+   * reached the editor it was actually meant for and all other UI interaction appeared frozen for
+   * the whole session.
    *
    * The event belongs to this modal when the cursor sits over ANY 3D viewport WINDOW region in the
-   * window (split views included), not only the one frozen at invoke time. Routing is decided the
-   * same way the window manager itself routes events to regions --
-   * #wm_event_do_handlers_area_regions() -> #ED_area_find_region_xy_visual() (wm_event_system.cc).
-   * A plain `winrct` test is NOT enough: the 3D viewport's overlapping regions (the N-panel
-   * #RGN_TYPE_UI, the redo HUD, the tool/area headers) are drawn ON TOP of the WINDOW region,
-   * whose `winrct` extends underneath them. A click on the N-panel therefore still lies inside the
-   * WINDOW `winrct`, so an earlier `winrct`-only test reported it as "inside the viewport" and
-   * consumed it -- which is why those on-viewport panels stayed frozen even after the first fix.
-   * #ED_area_find_region_xy_visual walks overlapping regions first, so it returns the N-panel/HUD/
-   * header for such a click, and the WINDOW region only for a click on the actual 3D view.
+   * window (split views included), not only the one frozen at invoke time --
+   * #ModalViewportTracker resolves that the same way the window manager itself routes events to
+   * regions (#ED_area_find_region_xy_visual).
    *
    * Enter/Esc are exempt so commit/cancel works even with the cursor off the viewport. An active
    * drag is exempt too, so dragging a point over the N-panel or past the viewport edge does not
@@ -1333,31 +1176,30 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
                              (event->modifier & (KM_CTRL | KM_OSKEY)) != 0;
   const bool is_commit_key = ELEM(event->type, EVT_RETKEY, EVT_PADENTER, EVT_ESCKEY) ||
                              is_undo_chord;
-  wmWindow *win = CTX_wm_window(C);
-  ScrArea *area_viewport = nullptr;
-  ARegion *region_viewport = curve_patch_viewport_region_under_cursor(
-      win, event->xy, &area_viewport);
-  const bool over_viewport = region_viewport != nullptr;
+
+  /* Constructed before the pass-through decision (not after, as the two locals it replaces used
+   * to be computed): a "not found" construction never touches `CTX_wm_area()`/`CTX_wm_region()`,
+   * so returning #OPERATOR_PASS_THROUGH immediately below is exactly as safe as it was when the
+   * lookup was a plain read-only query -- the tracker's destructor restores the frozen context on
+   * that path too, as a no-op. */
+  ed::ModalViewportTracker tracker(*C, *event, SPACE_VIEW3D, RGN_TYPE_WINDOW);
+  const bool over_viewport = tracker.found();
   const bool should_pass_through = !is_dragging && !over_viewport && !is_commit_key;
   if (should_pass_through) {
     return OPERATOR_PASS_THROUGH;
   }
 
-  /* Window-level modals freeze `CTX_wm_area()`/`CTX_wm_region()` at invoke time. For split views,
-   * repoint them at the viewport actually under the cursor and refresh the session's owned
+  /* Window-level modals freeze `CTX_wm_area()`/`CTX_wm_region()` at invoke time; the tracker above
+   * already repointed them at the viewport actually under the cursor. Refresh the session's owned
    * `ViewContext` so hit-tests, screen projection and sculpt flushes all target the right region.
    * During an in-flight drag that wanders over an N-panel, fall back to the last synced viewport. */
-  CurvePatchContextScope context_scope(C);
-  if (!region_viewport && is_dragging && patch.view_context.region) {
-    region_viewport = patch.view_context.region;
-    area_viewport = curve_patch_area_for_region(WM_window_get_active_screen(win), region_viewport);
+  if (!tracker.found() && is_dragging && patch.view_context.region) {
+    tracker.use_fallback_region(patch.view_context.region);
   }
-  if (area_viewport && region_viewport) {
-    curve_patch_sync_view_context(C, area_viewport, region_viewport, patch);
+  if (tracker.found()) {
+    curve_patch_sync_view_context(C, tracker.area(), tracker.region(), patch);
   }
-  int event_mval[2];
-  curve_patch_event_mval(
-      event, region_viewport ? region_viewport : patch.view_context.region, event_mval);
+  const int event_mval[2] = {tracker.mval().x, tracker.mval().y};
 
   /* Below this point the modal only ever ends via an explicit Enter (commit) or Esc (cancel) -- no
    * click and no mouse-leaving-the-viewport implicitly ends it. Events that don't match anything
@@ -1450,7 +1292,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
          * the stack with intermediate positions nobody wants to step through. */
         curve_patch_undo_push(patch);
         curve_patch_restore_and_restamp(*C, ob, patch);
-        curve_patch_tag_viewports_redraw_after_edit(*C, ob);
+        curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
       }
       break;
     case MOUSEMOVE:
@@ -1728,7 +1570,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
 
         curve_patch_undo_push(patch);
         curve_patch_restore_and_restamp(*C, ob, patch);
-        curve_patch_tag_viewports_redraw_after_edit(*C, ob);
+        curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
       }
       break;
     case EVT_XKEY:
@@ -1804,7 +1646,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         curve_patch_undo_push(patch);
         curve_patch_edit_status_set(C, patch);
         curve_patch_restore_and_restamp(*C, ob, patch);
-        curve_patch_tag_viewports_redraw_after_edit(*C, ob);
+        curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
       }
       break;
     case EVT_RETKEY:
@@ -1873,7 +1715,7 @@ static bool curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
       /* Same full redraw handshake as commit: restore only updates mesh data in memory; without
        * tagging every viewport the relief in other areas/windows stays stale until the cursor
        * happens to move there. */
-      curve_patch_tag_viewports_redraw_after_edit(*C, ob);
+      curve_patch_tag_viewports_redraw_after_edit(*C, ob, *patch);
     }
     else {
       /* Re-stamp once at final quality BEFORE the undo step is built, so the mesh (and with it the
@@ -1918,7 +1760,7 @@ static bool curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
   }
   MEM_delete(op_data);
   op->customdata = nullptr;
-  curve_patch_edit_modal_handlers_remove_other_windows(C, op);
+  WM_event_remove_modal_handler_other_windows(C, op);
   return committed;
 }
 

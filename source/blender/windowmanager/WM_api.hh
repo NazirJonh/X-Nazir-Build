@@ -742,6 +742,15 @@ wmEventHandler_UI *WM_event_add_ui_handler(const bContext *C,
 wmOperator *WM_operator_find_modal_by_type(wmWindow *win, const wmOperatorType *ot);
 
 /**
+ * Is \a op (exactly this instance, not merely an operator of the same type) already registered
+ * as a modal handler on \a win? Mirrors the instance-match #WM_event_remove_modal_handler()
+ * already uses. #WM_operator_find_modal_by_type() is NOT a substitute for this: it matches by
+ * #wmOperatorType, so it can report "already registered" for a *different* instance of the same
+ * type and cause a real instance's registration to be skipped.
+ */
+bool WM_operator_is_modal(const wmWindow *win, const wmOperator *op);
+
+/**
  * \param postpone: Enable for `win->modalhandlers`,
  * this is in a running for () loop in wm_handlers_do().
  */
@@ -769,6 +778,41 @@ void WM_event_remove_modal_handler(ListBaseT<wmEventHandler> *handlers,
                                    bool postpone) ATTR_NONNULL(1, 2);
 
 void WM_event_remove_modal_handler_all(const wmOperator *op, bool postpone) ATTR_NONNULL(1);
+
+/**
+ * Register \a op as a modal handler on every open window, not only the one it was invoked in.
+ * Window-level event dispatch means a modal tool that must intercept events in *every* visible
+ * viewport across every window needs its own handler per window. Idempotent via
+ * #WM_operator_is_modal: windows that already have this exact \a op registered are left
+ * untouched, so this can be called again later (e.g. every modal tick) to pick up windows opened
+ * after the operator started.
+ *
+ * The invoking window keeps its own frozen area/region (from \a C). Other windows get the first
+ * region of type \a region_type found in an area of type \a space_type; if none is found there,
+ * that window is registered with a null area/region (same as `WM_event_add_modal_handler_ex()`
+ * accepts for any other window).
+ */
+wmEventHandler_Op *WM_event_add_modal_handler_all_windows(bContext *C,
+                                                          wmOperator *op,
+                                                          int space_type,
+                                                          int region_type);
+
+/**
+ * Remove \a op's modal handler from every window except the current one. Complements
+ * #WM_event_add_modal_handler_all_windows for tearing down a multi-window modal on finish/cancel.
+ *
+ * \note Contract: call this synchronously from inside the modal callback of the window that is
+ * about to finish/cancel, BEFORE returning `OPERATOR_FINISHED`/`OPERATOR_CANCELLED` -- never
+ * after, never from a different event. Once that callback returns, the core frees \a op for the
+ * *current* window's handler only (`wm_operator_finished()` on `OPERATOR_FINISHED`, or a direct
+ * `WM_operator_free(op)` on `OPERATOR_CANCELLED`; see `wm_event_system.cc` around the
+ * `ot->modal(C, op, event)` call in `wm_handlers_do()`) -- it does not know about, and will not
+ * touch, this operator's handlers on other windows. Removing them first (via
+ * `WM_event_remove_modal_handler()`, which only unlinks and frees the *handler* wrapper, never
+ * the operator itself) is what prevents those other windows from being left holding a
+ * `handler->op` pointer into memory the core is about to free.
+ */
+void WM_event_remove_modal_handler_other_windows(const bContext *C, const wmOperator *op);
 
 /**
  * Modal handlers store a pointer to an area which might be freed while the handler runs.

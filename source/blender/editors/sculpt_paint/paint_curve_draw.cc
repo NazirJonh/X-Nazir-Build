@@ -9,6 +9,8 @@
  * Implements the functions declared in ED_paint_curve_draw.hh.
  */
 
+#include <array>
+
 #include "ED_paint_curve_draw.hh"
 
 #include "DNA_brush_types.h"
@@ -761,17 +763,16 @@ void ED_paint_curve_overlay_tag_redraw_all(bContext *C)
     return;
   }
 
+  /* #SPACE_IMAGE alongside #SPACE_VIEW3D is this overlay's own legacy scope (Paint Curve also
+   * draws over the Image Editor for 2D texture-paint curves, see
+   * #ED_paint_curve_overlay_is_relevant's `is_space_image` parameter) -- not a general property
+   * of the redraw-broadcast helper, which any caller can point at whichever spacetypes it needs.
+   * A `std::array`, not a bare C array: #blender::Span has an implicit constructor from
+   * `std::array` but not from a raw `T[N]` (only from a `(pointer, size)` pair). */
+  const std::array<int, 2> space_types = {SPACE_VIEW3D, SPACE_IMAGE};
+  ED_screen_tag_redraw_spacetype_all_windows(wm, space_types, RGN_TYPE_WINDOW);
   for (wmWindow &win : wm->windows) {
     WM_paint_cursor_tag_redraw(&win, nullptr);
-    bScreen *screen = WM_window_get_active_screen(&win);
-    if (screen == nullptr) {
-      continue;
-    }
-    ED_screen_areas_iter (&win, screen, area) {
-      if (ELEM(area->spacetype, SPACE_VIEW3D, SPACE_IMAGE)) {
-        ED_area_tag_redraw_regiontype(area, RGN_TYPE_WINDOW);
-      }
-    }
   }
 
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_VIEW3D, nullptr);

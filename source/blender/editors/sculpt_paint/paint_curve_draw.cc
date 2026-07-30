@@ -46,6 +46,7 @@
 #include "UI_resources.hh"
 
 #include "WM_api.hh"
+#include "WM_types.hh"
 #include "WM_toolsystem.hh"
 
 #include "paint_curve_intern.hh"
@@ -283,9 +284,9 @@ bool ED_paint_curve_slide_is_active()
   return paintcurve_slide_is_active();
 }
 
-bool ED_paint_curve_snap_marker_get(float r_screen[2], int *r_type)
+bool ED_paint_curve_snap_marker_get(float r_world_pos[3], int *r_type)
 {
-  return paintcurve_snap_marker_get(r_screen, r_type);
+  return paintcurve_snap_marker_get(r_world_pos, r_type);
 }
 
 /** \} */
@@ -747,6 +748,33 @@ bool ED_paint_curve_overlay_wants_redraw(const bContext *C)
   const char *tool_id = tref ? tref->idname : nullptr;
   return ED_paint_curve_overlay_is_relevant(
       brush, tool_id, area->spacetype == SPACE_VIEW3D, area->spacetype == SPACE_IMAGE);
+}
+
+void ED_paint_curve_overlay_tag_redraw_all(bContext *C)
+{
+  if (!ED_paint_curve_overlay_wants_redraw(C)) {
+    return;
+  }
+
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm == nullptr) {
+    return;
+  }
+
+  for (wmWindow &win : wm->windows) {
+    WM_paint_cursor_tag_redraw(&win, nullptr);
+    bScreen *screen = WM_window_get_active_screen(&win);
+    if (screen == nullptr) {
+      continue;
+    }
+    ED_screen_areas_iter (&win, screen, area) {
+      if (ELEM(area->spacetype, SPACE_VIEW3D, SPACE_IMAGE)) {
+        ED_area_tag_redraw_regiontype(area, RGN_TYPE_WINDOW);
+      }
+    }
+  }
+
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 }
 
 /** \} */

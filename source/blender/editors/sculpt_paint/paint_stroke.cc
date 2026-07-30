@@ -47,6 +47,7 @@
 #include "GPU_immediate.hh"
 #include "GPU_state.hh"
 
+#include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
 
@@ -1067,6 +1068,8 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
   if (stroke_started_) {
     this->redraw(true);
   }
+
+  ed::sculpt_paint::ED_paint_curve_overlay_tag_redraw_all(C);
 
   this->done(is_cancel, stroke_started_);
 

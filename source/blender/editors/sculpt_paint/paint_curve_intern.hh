@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2008 Blender Authors
+/* SPDX-FileCopyrightText: 2026 Nazir Galimov
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -79,10 +79,12 @@ bool paintcurve_slide_is_active();
 bool paintcurve_slide_segment_active(int *r_point_a, int *r_point_b);
 
 /**
- * Region-space position of the active 3D-slide snap marker, or false when no snap is active.
- * \param r_type: receives the active geometry snap elements (#SCE_SNAP_TO_GEOM subset) for styling.
+ * World-space position of the snap marker shown during a 3D paint-curve slide.
+ * Returns false when no geometry snap is currently active.
+ * \param r_world_pos: receives the snapped target in world space for per-viewport projection.
+ * \param r_type: receives the active snap elements (#SCE_SNAP_TO_GEOM subset) for marker styling.
  */
-bool paintcurve_snap_marker_get(float r_screen[2], int *r_type);
+bool paintcurve_snap_marker_get(float r_world_pos[3], int *r_type);
 
 /** \} */
 

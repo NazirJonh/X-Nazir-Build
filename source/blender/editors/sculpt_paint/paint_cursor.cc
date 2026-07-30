@@ -1168,13 +1168,11 @@ namespace {
 /** Poll for the paint-curve overlay redraw cursor: tags the viewport for redraw on mouse move. */
 static bool paint_curve_overlay_redraw_poll(bContext *C)
 {
+  ed::sculpt_paint::ED_paint_curve_patch_modal_handlers_ensure(C);
   if (!ed::sculpt_paint::ED_paint_curve_overlay_wants_redraw(C)) {
     return false;
   }
-  ARegion *region = CTX_wm_region(C);
-  if (region) {
-    ED_region_tag_redraw(region);
-  }
+  ed::sculpt_paint::ED_paint_curve_overlay_tag_redraw_all(C);
   return true;
 }
 

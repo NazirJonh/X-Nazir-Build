@@ -24,6 +24,7 @@
 #include "DNA_view3d_types.h"
 #include "DNA_workspace_types.h"
 
+#include "BLI_listbase.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_rotation.hh"
@@ -47,11 +48,13 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_screen.hh"
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "ED_paint.hh"
+#include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
 
@@ -82,12 +85,12 @@ static int paintcurve_slide_segment_a = -1;
 static int paintcurve_slide_segment_b = -1;
 
 /* Screen-space snap indicator shown during a 3D paint-curve slide. The slide modal stores the
- * snapped target here on each mouse-move; the Overlay engine (#PaintCurveCursor) reads it via
- * #paintcurve_snap_marker_get and draws the marker. Kept here (not in #PointSlideData) because the
+ * snapped target in world space on each mouse-move; the Overlay engine (#PaintCurveCursor) projects
+ * it per viewport via #paintcurve_snap_marker_get. Kept here (not in #PointSlideData) because the
  * draw engine cannot access the operator's custom data. */
 struct PaintCurveSnapMarker {
   bool active = false;
-  float screen_pos[2] = {0.0f, 0.0f};
+  float world_pos[3] = {0.0f, 0.0f, 0.0f};
   /** Active geometry snap elements (#SCE_SNAP_TO_GEOM subset), for marker styling. */
   eSnapMode type = SCE_SNAP_TO_NONE;
 };
@@ -98,34 +101,25 @@ static void paintcurve_snap_marker_clear_local()
   paintcurve_snap_marker.active = false;
 }
 
-/** Project an object-space snap hit to region-space and store it for the overlay marker. */
+/** Store an object-space snap hit in world space for per-viewport overlay projection. */
 static void paintcurve_snap_marker_update(bContext *C,
-                                          const ARegion *region,
                                           const float ob_to_world[4][4],
                                           const float hit_obj[3])
 {
-  if (region == nullptr) {
-    paintcurve_snap_marker_clear_local();
-    return;
-  }
   const ToolSettings *ts = CTX_data_tool_settings(C);
   const eSnapMode type = ts ? eSnapMode(ED_paintcurve_snap_elements(ts) & SCE_SNAP_TO_GEOM) :
                               SCE_SNAP_TO_NONE;
-  float hit_world[3];
-  mul_v3_m4v3(hit_world, ob_to_world, hit_obj);
-  float screen[2];
-  ED_view3d_project_v2(region, hit_world, screen);
+  mul_v3_m4v3(paintcurve_snap_marker.world_pos, ob_to_world, hit_obj);
   paintcurve_snap_marker.active = true;
-  copy_v2_v2(paintcurve_snap_marker.screen_pos, screen);
   paintcurve_snap_marker.type = type;
 }
 
-bool paintcurve_snap_marker_get(float r_screen[2], int *r_type)
+bool paintcurve_snap_marker_get(float r_world_pos[3], int *r_type)
 {
   if (!paintcurve_snap_marker.active) {
     return false;
   }
-  copy_v2_v2(r_screen, paintcurve_snap_marker.screen_pos);
+  copy_v3_v3(r_world_pos, paintcurve_snap_marker.world_pos);
   if (r_type != nullptr) {
     *r_type = int(paintcurve_snap_marker.type);
   }
@@ -162,6 +156,129 @@ static bool paintcurve_try_insert_point_at_mouse(bContext *C,
                                                  PaintCurve *pc,
                                                  const float loc_fl[2]);
 static const bToolRef *paintcurve_tool_ref_from_context(bContext *C);
+
+static void paintcurve_tag_redraw_all(bContext *C)
+{
+  ed::sculpt_paint::ED_paint_curve_overlay_tag_redraw_all(C);
+}
+
+/** Restores the invoke context on scope exit. */
+struct PaintCurveContextScope {
+  bContext *C;
+  ScrArea *prev_area;
+  ARegion *prev_region;
+
+  PaintCurveContextScope(bContext *C)
+      : C(C), prev_area(CTX_wm_area(C)), prev_region(CTX_wm_region(C))
+  {
+  }
+
+  ~PaintCurveContextScope()
+  {
+    CTX_wm_area_set(C, prev_area);
+    CTX_wm_region_set(C, prev_region);
+  }
+};
+
+static ScrArea *paintcurve_area_for_region(bScreen *screen, const ARegion *region)
+{
+  if (!screen || !region) {
+    return nullptr;
+  }
+  for (ScrArea &area : screen->areabase) {
+    if (BLI_findindex(&area.regionbase, region) != -1) {
+      return &area;
+    }
+  }
+  return nullptr;
+}
+
+static ARegion *paintcurve_viewport_region_under_cursor(bScreen *screen,
+                                                        const int event_xy[2],
+                                                        ScrArea **r_area)
+{
+  *r_area = nullptr;
+  if (!screen) {
+    return nullptr;
+  }
+  ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_VIEW3D, event_xy);
+  if (!area) {
+    return nullptr;
+  }
+  ARegion *region_hovered = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, event_xy);
+  ARegion *region_window = BKE_area_find_region_xy(area, RGN_TYPE_WINDOW, event_xy);
+  if (region_hovered && region_window && region_hovered == region_window) {
+    *r_area = area;
+    return region_window;
+  }
+  return nullptr;
+}
+
+static void paintcurve_event_mval(const wmEvent *event, const ARegion *region, int r_mval[2])
+{
+  if (region) {
+    r_mval[0] = event->xy[0] - region->winrct.xmin;
+    r_mval[1] = event->xy[1] - region->winrct.ymin;
+  }
+  else {
+    r_mval[0] = event->mval[0];
+    r_mval[1] = event->mval[1];
+  }
+}
+
+static void paintcurve_slide_modal_handlers_add_all(bContext *C, wmOperator *op)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (!wm) {
+    return;
+  }
+  wmWindow *invoke_win = CTX_wm_window(C);
+  ScrArea *invoke_area = CTX_wm_area(C);
+  ARegion *invoke_region = CTX_wm_region(C);
+  for (wmWindow &win : wm->windows) {
+    ScrArea *area = nullptr;
+    ARegion *region = nullptr;
+    if (&win == invoke_win) {
+      area = invoke_area;
+      region = invoke_region;
+    }
+    else {
+      bScreen *screen = WM_window_get_active_screen(&win);
+      if (screen) {
+        for (ScrArea &area_iter : screen->areabase) {
+          if (area_iter.spacetype != SPACE_VIEW3D) {
+            continue;
+          }
+          for (ARegion &region_iter : area_iter.regionbase) {
+            if (region_iter.regiontype == RGN_TYPE_WINDOW) {
+              area = &area_iter;
+              region = &region_iter;
+              break;
+            }
+          }
+          if (region) {
+            break;
+          }
+        }
+      }
+    }
+    WM_event_add_modal_handler_ex(&win, area, region, op);
+  }
+}
+
+static void paintcurve_slide_modal_handlers_remove_other_windows(bContext *C, const wmOperator *op)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  wmWindow *current_win = CTX_wm_window(C);
+  if (!wm || !current_win) {
+    return;
+  }
+  for (wmWindow &win : wm->windows) {
+    if (&win != current_win) {
+      WM_event_remove_modal_handler(&win.runtime->modalhandlers, op, false);
+    }
+  }
+}
 
 bool paintcurve_slide_is_active()
 {
@@ -863,7 +980,7 @@ static void paintcurve_point_add(bContext *C,
 
   ED_paintcurve_undo_push_end(C);
   BKE_brush_tag_unsaved_changes(br);
-  WM_paint_cursor_tag_redraw(window, region);
+  paintcurve_tag_redraw_all(C);
 }
 
 static wmOperatorStatus paintcurve_add_point_invoke(bContext *C,
@@ -1072,7 +1189,7 @@ static wmOperatorStatus paintcurve_new_spline_exec(bContext *C, wmOperator *op)
 
   wmWindow *window = CTX_wm_window(C);
   ARegion *region = CTX_wm_region(C);
-  WM_paint_cursor_tag_redraw(window, region);
+  paintcurve_tag_redraw_all(C);
 
   return OPERATOR_FINISHED;
 }
@@ -1114,7 +1231,7 @@ static wmOperatorStatus paintcurve_clear_exec(bContext *C, wmOperator *op)
   ED_paintcurve_undo_push_end(C);
 
   BKE_brush_tag_unsaved_changes(br);
-  WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+  paintcurve_tag_redraw_all(C);
   return OPERATOR_FINISHED;
 }
 
@@ -1173,7 +1290,7 @@ static wmOperatorStatus paintcurve_delete_point_exec(bContext *C, wmOperator *op
 
   ED_paintcurve_undo_push_end(C);
   BKE_brush_tag_unsaved_changes(br);
-  WM_paint_cursor_tag_redraw(window, region);
+  paintcurve_tag_redraw_all(C);
   return OPERATOR_FINISHED;
 }
 
@@ -1230,7 +1347,7 @@ static wmOperatorStatus paintcurve_duplicate_exec(bContext *C, wmOperator *op)
 
   ED_paintcurve_undo_push_end(C);
   BKE_brush_tag_unsaved_changes(br);
-  WM_paint_cursor_tag_redraw(window, region);
+  paintcurve_tag_redraw_all(C);
 
   return OPERATOR_FINISHED;
 }
@@ -1291,7 +1408,7 @@ static bool paintcurve_point_select(bContext *C,
         (paintcurve_geom_get_selection(geom, pre_idx) & 0x07))
     {
       paintcurve_cycle_handle_type_at_point(C, op, pc, pre_idx);
-      WM_paint_cursor_tag_redraw(window, region);
+      paintcurve_tag_redraw_all(C);
       return true;
     }
   }
@@ -1341,7 +1458,7 @@ static bool paintcurve_point_select(bContext *C,
   }
 
   ED_paintcurve_undo_push_end(C);
-  WM_paint_cursor_tag_redraw(window, region);
+  paintcurve_tag_redraw_all(C);
   return true;
 }
 
@@ -1370,7 +1487,7 @@ static wmOperatorStatus paintcurve_select_point_invoke(bContext *C,
         ARegion *region = CTX_wm_region(C);
         wmWindow *window = CTX_wm_window(C);
         paintcurve_cycle_handle_type_at_point(C, op, pc, found);
-        WM_paint_cursor_tag_redraw(window, region);
+        paintcurve_tag_redraw_all(C);
         RNA_int_set_array(op->ptr, "location", loc);
         return OPERATOR_FINISHED;
       }
@@ -1927,7 +2044,7 @@ static bool paintcurve_insert_point_at_segment(
   }
 
   ED_paintcurve_undo_push_end(C);
-  WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+  paintcurve_tag_redraw_all(C);
   /* Full region redraw so the synced source object's evaluated geometry is rebuilt immediately,
    * matching the slide path. */
   if (paintcurve_uses_3d_geometry(pc)) {
@@ -1994,6 +2111,29 @@ static void paintcurve_slide_refresh_object_mats(PointSlideData *psd)
   }
   copy_m4_m4(psd->ob_to_world, ob->object_to_world().ptr());
   copy_m4_m4(psd->world_to_ob, ob->world_to_object().ptr());
+}
+
+static void paintcurve_slide_update_view_from_event(bContext *C,
+                                                  const wmEvent *event,
+                                                  PointSlideData *psd,
+                                                  int r_mval[2])
+{
+  bScreen *screen = CTX_wm_screen(C);
+  ScrArea *area_viewport = nullptr;
+  ARegion *region_viewport = paintcurve_viewport_region_under_cursor(
+      screen, event->xy, &area_viewport);
+  if (!region_viewport && psd->use_3d_view && psd->vc.region) {
+    region_viewport = psd->vc.region;
+    area_viewport = paintcurve_area_for_region(screen, region_viewport);
+  }
+  if (area_viewport && region_viewport) {
+    CTX_wm_area_set(C, area_viewport);
+    CTX_wm_region_set(C, region_viewport);
+    psd->vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
+    paintcurve_slide_refresh_object_mats(psd);
+  }
+  paintcurve_event_mval(
+      event, region_viewport ? region_viewport : CTX_wm_region(C), r_mval);
 }
 
 static void paintcurve_get_prev_co_world(const PointSlideData *psd, float r_prev_co_world[3])
@@ -2322,7 +2462,7 @@ static bool paintcurve_try_select_segment_on_shift_double_click(bContext *C,
 
   BKE_brush_tag_unsaved_changes(br);
   ED_paintcurve_undo_push_end(C);
-  WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+  paintcurve_tag_redraw_all(C);
   paintcurve_shift_segment_click_clear();
   return true;
 }
@@ -2437,8 +2577,6 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
         return OPERATOR_FINISHED;
       }
 
-      ARegion *region = CTX_wm_region(C);
-      wmWindow *window = CTX_wm_window(C);
       PointSlideData *psd = MEM_new<PointSlideData>(__func__);
       psd->is_segment = true;
       psd->segment_index = segment_index;
@@ -2467,16 +2605,14 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
       paintcurve_slide_segment_a = segment_index;
       paintcurve_slide_segment_b = segment_index_next;
       paintcurve_slide_active = true;
-      WM_event_add_modal_handler(C, op);
+      paintcurve_slide_modal_handlers_add_all(C, op);
       paintcurve_slide_status_set(C, op, pc);
-      WM_paint_cursor_tag_redraw(window, region);
+      paintcurve_tag_redraw_all(C);
       return OPERATOR_RUNNING_MODAL;
     }
   }
 
   if (point_index >= 0) {
-    ARegion *region = CTX_wm_region(C);
-    wmWindow *window = CTX_wm_window(C);
     PointSlideData *psd = MEM_new<PointSlideData>(__func__);
     psd->is_segment = false;
     psd->segment_index = -1;
@@ -2530,9 +2666,9 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
     BKE_brush_tag_unsaved_changes(br);
     paintcurve_slide_segment_clear();
     paintcurve_slide_active = true;
-    WM_event_add_modal_handler(C, op);
+    paintcurve_slide_modal_handlers_add_all(C, op);
     paintcurve_slide_status_set(C, op, pc);
-    WM_paint_cursor_tag_redraw(window, region);
+    paintcurve_tag_redraw_all(C);
     return OPERATOR_RUNNING_MODAL;
   }
 
@@ -2564,13 +2700,12 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
     if (do_cycle && release_pc) {
       paintcurve_cycle_point_handle_type(release_pc, cycle_point_index);
       paintcurve_sync_after_handle_type_change(C, release_pc);
-      WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+      paintcurve_tag_redraw_all(C);
     }
     ED_paintcurve_undo_push_end(C);
     paintcurve_sync_to_source_if_3d(C, release_pc);
-    if (paintcurve_uses_3d_geometry(release_pc)) {
-      ED_region_tag_redraw(CTX_wm_region(C));
-    }
+    paintcurve_tag_redraw_all(C);
+    paintcurve_slide_modal_handlers_remove_other_windows(C, op);
     return OPERATOR_FINISHED;
   }
 
@@ -2595,8 +2730,7 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
   switch (event->type) {
     case MOUSEMOVE:
     case INBETWEEN_MOUSEMOVE: {
-      ARegion *region = CTX_wm_region(C);
-      wmWindow *window = CTX_wm_window(C);
+      PaintCurveContextScope context_scope(C);
       Paint *paint = BKE_paint_get_active_from_context(C);
       Brush *br = BKE_paint_brush(paint);
       PaintCurve *pc = br ? br->paint_curve : nullptr;
@@ -2605,7 +2739,9 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
         break;
       }
 
-      const float mval_fl[2] = {float(event->mval[0]), float(event->mval[1])};
+      int event_mval[2];
+      paintcurve_slide_update_view_from_event(C, event, psd, event_mval);
+      const float mval_fl[2] = {float(event_mval[0]), float(event_mval[1])};
 
       bke::CurvesGeometry &geom = pc->geometry.wrap();
 
@@ -2632,7 +2768,7 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
                                                           hit_no_obj))
           {
             mul_v3_m4v3(depth_world, psd->ob_to_world, hit_obj);
-            paintcurve_snap_marker_update(C, psd->vc.region, psd->ob_to_world, hit_obj);
+            paintcurve_snap_marker_update(C, psd->ob_to_world, hit_obj);
           }
           else {
             paintcurve_snap_marker_clear_local();
@@ -2668,7 +2804,7 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
             {
               paintcurve_apply_surface_snap_to_point(geom, psd, hit_obj, hit_no_obj);
               snapped = true;
-              paintcurve_snap_marker_update(C, psd->vc.region, psd->ob_to_world, hit_obj);
+              paintcurve_snap_marker_update(C, psd->ob_to_world, hit_obj);
             }
           }
 
@@ -2694,14 +2830,9 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
       }
 
       psd->did_move = true;
-      copy_v2_v2_int(psd->prev_mval, event->mval);
+      copy_v2_v2_int(psd->prev_mval, event_mval);
       paintcurve_sync_to_source_if_3d(C, pc);
-      WM_paint_cursor_tag_redraw(window, region);
-      /* The paint-cursor redraw above only re-composites the cursor. The synced source object is
-       * drawn from evaluated geometry, so it needs a full region redraw to rebuild its batch. */
-      if (paintcurve_uses_3d_geometry(pc)) {
-        ED_region_tag_redraw(region);
-      }
+      paintcurve_tag_redraw_all(C);
       break;
     }
     default:
@@ -2842,8 +2973,8 @@ static wmOperatorStatus paintcurve_slide_radius_invoke(bContext *C,
   paintcurve_slide_radius_status_set(C, paintcurve_get_point_radius(pc, point_index));
   paintcurve_slide_segment_clear();
   paintcurve_slide_active = true;
-  WM_event_add_modal_handler(C, op);
-  WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+  paintcurve_slide_modal_handlers_add_all(C, op);
+  paintcurve_tag_redraw_all(C);
   return OPERATOR_RUNNING_MODAL;
 }
 
@@ -2865,19 +2996,33 @@ static wmOperatorStatus paintcurve_slide_radius_modal(bContext *C,
     ED_paintcurve_undo_push_begin(C, op->type->name);
     ED_paintcurve_undo_push_end(C);
     paintcurve_sync_to_source_if_3d(C, pc);
+    paintcurve_tag_redraw_all(C);
+    paintcurve_slide_modal_handlers_remove_other_windows(C, op);
     return OPERATOR_FINISHED;
   }
 
   if (event->type == MOUSEMOVE && pc) {
+    PaintCurveContextScope context_scope(C);
+    bScreen *screen = CTX_wm_screen(C);
+    ScrArea *area_viewport = nullptr;
+    ARegion *region_viewport = paintcurve_viewport_region_under_cursor(
+        screen, event->xy, &area_viewport);
+    if (area_viewport && region_viewport) {
+      CTX_wm_area_set(C, area_viewport);
+      CTX_wm_region_set(C, region_viewport);
+    }
+    int event_mval[2];
+    paintcurve_event_mval(event, region_viewport ? region_viewport : CTX_wm_region(C), event_mval);
+
     bke::CurvesGeometry &geom = pc->geometry.wrap();
     if (paintcurve_geometry_is_valid(geom) && rsd->point_index < geom.points_num()) {
-      const float mval_fl[2] = {float(event->mval[0]), float(event->mval[1])};
+      const float mval_fl[2] = {float(event_mval[0]), float(event_mval[1])};
       const float new_radius = paintcurve_radius_from_handle_screen_pos(&rsd->handle, mval_fl);
       geom.radius_for_write()[rsd->point_index] = new_radius;
       geom.tag_positions_changed();
       paintcurve_slide_radius_status_set(C, new_radius);
       paintcurve_sync_to_source_if_3d(C, pc);
-      WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+      paintcurve_tag_redraw_all(C);
     }
   }
 
@@ -2892,6 +3037,7 @@ static void paintcurve_slide_radius_cancel(bContext *C, wmOperator *op)
   op->customdata = nullptr;
   paintcurve_slide_segment_clear();
   paintcurve_slide_active = false;
+  paintcurve_slide_modal_handlers_remove_other_windows(C, op);
 }
 
 void PAINTCURVE_OT_slide_radius(wmOperatorType *ot)
@@ -2919,6 +3065,7 @@ static void paintcurve_slide_cancel(bContext *C, wmOperator *op)
   }
   paintcurve_slide_segment_clear();
   paintcurve_slide_active = false;
+  paintcurve_slide_modal_handlers_remove_other_windows(C, op);
 }
 
 void PAINTCURVE_OT_slide(wmOperatorType *ot)
@@ -3225,7 +3372,7 @@ static wmOperatorStatus paintcurve_separate_to_curve_object_exec(bContext *C, wm
     WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, dst_ob);
     DEG_id_tag_update(&dst_ob->id, ID_RECALC_TRANSFORM);
   }
-  WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+  paintcurve_tag_redraw_all(C);
   if (paintcurve_uses_3d_geometry(pc)) {
     ED_region_tag_redraw(CTX_wm_region(C));
   }
@@ -3369,7 +3516,7 @@ static wmOperatorStatus paintcurve_sculpt_pick_invoke(bContext *C,
     if (!ED_paintcurve_import_from_source_object(C, op->reports, true)) {
       return OPERATOR_CANCELLED;
     }
-    WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
+    paintcurve_tag_redraw_all(C);
     WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
     return OPERATOR_FINISHED;
   }

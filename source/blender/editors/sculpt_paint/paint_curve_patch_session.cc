@@ -415,8 +415,16 @@ void curve_patch_restore_and_restamp(const Scene &scene,
 
   /* Resolve which textures this restamp samples. Done here, once, on the main thread: the effects'
    * parallel per-element walk only reads the result. Ahead of the geometry rebuild because the
-   * stamp layout draws each stamp's slot from the weight table resolved here. */
-  StrokeCache &cache = *ob.runtime->sculpt_session->cache;
+   * stamp layout draws each stamp's slot from the weight table resolved here.
+   *
+   * The session owns the only `StrokeCache` for the whole live-edit lifetime, but a sculpt stroke
+   * that leaks through in another viewport (before the modal's pass-through gate was widened) could
+   * tear it down and leave this null -- bail rather than crash. */
+  SculptSession *ss = ob.runtime->sculpt_session;
+  if (!ss || !ss->cache) {
+    return;
+  }
+  StrokeCache &cache = *ss->cache;
   if (const Brush *tex_brush = BKE_paint_brush_for_read(cache.paint)) {
     /* The binding is shared by every patch, so it is resolved from the active patch's radius --
      * the only one whose brush the user is currently looking at. */

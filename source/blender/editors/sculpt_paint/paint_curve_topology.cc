@@ -27,6 +27,7 @@
 
 #include "ED_curves.hh"
 #include "ED_paint.hh"
+#include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
 
@@ -78,10 +79,8 @@ static bool paintcurve_any_point_selected(const bke::CurvesGeometry &geom)
 
 static void paintcurve_tag_redraw(bContext *C, PaintCurve *pc)
 {
-  WM_paint_cursor_tag_redraw(CTX_wm_window(C), CTX_wm_region(C));
-  if (paintcurve_uses_3d_geometry(pc)) {
-    ED_region_tag_redraw(CTX_wm_region(C));
-  }
+  ed::sculpt_paint::ED_paint_curve_overlay_tag_redraw_all(C);
+  UNUSED_VARS(pc);
 }
 
 static void paintcurve_finish_topology_edit(bContext *C, PaintCurve *pc, Brush *brush)

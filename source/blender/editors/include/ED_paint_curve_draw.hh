@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2026 Blender Authors
+/* SPDX-FileCopyrightText: 2026 Nazir Galimov
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -107,14 +107,21 @@ bool ED_paint_curve_overlay_is_relevant(const Brush *brush,
 
 bool ED_paint_curve_overlay_wants_redraw(const bContext *C);
 
+/** Tag every 3D View / Image editor region that may show the paint-curve overlay for redraw. */
+void ED_paint_curve_overlay_tag_redraw_all(bContext *C);
+
+/** Register #SCULPT_OT_curve_patch_edit modal handlers on every open window (idempotent). */
+void ED_paint_curve_patch_modal_handlers_ensure(bContext *C);
+
 bool ED_paint_curve_slide_is_active();
 
 /**
- * Region-space position of the snap marker shown during a 3D paint-curve slide.
+ * World-space position of the snap marker shown during a 3D paint-curve slide.
  * Returns false when no geometry snap is currently active.
+ * \param r_world_pos: receives the snapped target in world space for per-viewport projection.
  * \param r_type: receives the active snap elements (#SCE_SNAP_TO_GEOM subset) for marker styling.
  */
-bool ED_paint_curve_snap_marker_get(float r_screen[2], int *r_type);
+bool ED_paint_curve_snap_marker_get(float r_world_pos[3], int *r_type);
 
 /** Squared screen-space distance from \a mval to a tessellated curve polyline. */
 float ED_paint_curve_polyline_distance_sq(blender::Span<blender::float2> polyline,

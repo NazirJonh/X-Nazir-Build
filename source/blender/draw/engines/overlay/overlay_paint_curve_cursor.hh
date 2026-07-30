@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2026 Blender Authors
+/* SPDX-FileCopyrightText: 2026 Nazir Galimov
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -12,6 +12,7 @@
 #pragma once
 
 #include "ED_paint_curve_draw.hh"
+#include "ED_view3d.hh"
 
 #include "BKE_brush.hh"
 #include "BKE_paint.hh"
@@ -226,15 +227,19 @@ class PaintCurveCursor : Overlay {
       }
     }
 
-    /* Snap marker: shown only while a 3D slide is snapping to geometry. The slide modal stores the
-     * region-space target; here we just fetch it for #fill_pass_from_pod to draw. */
+    /* Snap marker: shown only while a 3D slide is snapping to geometry. World position is stored
+     * by the slide modal; project it into each viewport's region space here. */
     if (state.is_space_v3d() && ed::sculpt_paint::ED_paint_curve_slide_is_active()) {
-      float screen[2];
+      float world_pos[3];
       int type = 0;
-      if (ed::sculpt_paint::ED_paint_curve_snap_marker_get(screen, &type)) {
-        snap_marker_active_ = true;
-        snap_marker_pos_ = float2(screen[0], screen[1]);
-        snap_marker_type_ = type;
+      if (ed::sculpt_paint::ED_paint_curve_snap_marker_get(world_pos, &type) && vc.region) {
+        float screen[2];
+        ED_view3d_project_v2(vc.region, world_pos, screen);
+        if (isfinite(screen[0]) && isfinite(screen[1])) {
+          snap_marker_active_ = true;
+          snap_marker_pos_ = float2(screen[0], screen[1]);
+          snap_marker_type_ = type;
+        }
       }
     }
 

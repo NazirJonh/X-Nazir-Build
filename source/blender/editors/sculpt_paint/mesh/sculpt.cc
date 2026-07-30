@@ -3970,7 +3970,20 @@ bool sculpt_mode_poll_view3d(bContext *C)
 
 bool sculpt_mode_and_brush_poll(bContext *C)
 {
-  return sculpt_mode_poll(C) && paint_brush_tool_poll(C);
+  if (!sculpt_mode_poll(C)) {
+    return false;
+  }
+  const Object *ob = CTX_data_active_object(C);
+  if (ob && ob->runtime->sculpt_session &&
+      ob->runtime->sculpt_session->curve_patch_session)
+  {
+    ED_paint_curve_patch_modal_handlers_ensure(C);
+    return false;
+  }
+  if (ED_paint_curve_slide_is_active()) {
+    return false;
+  }
+  return paint_brush_tool_poll(C);
 }
 
 /**
@@ -4022,6 +4035,10 @@ bool brush_cursor_poll(bContext *C)
 {
   if (!sculpt_mode_poll(C)) {
     return false;
+  }
+  const Object *ob = CTX_data_active_object(C);
+  if (ob && ob->runtime->sculpt_session && ob->runtime->sculpt_session->curve_patch_session) {
+    ED_paint_curve_patch_modal_handlers_ensure(C);
   }
   if (paint_brush_cursor_poll(C) || is_brush_related_tool(C)) {
     return true;
@@ -6094,6 +6111,8 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   else {
     flush_update_step(this->vc, *this->object, UpdateType::Position);
   }
+
+  ed::sculpt_paint::ED_paint_curve_overlay_tag_redraw_all(this->evil_C);
 }
 
 static void brush_exit_tex(Sculpt &sd)

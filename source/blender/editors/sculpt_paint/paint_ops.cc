@@ -725,6 +725,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINTCURVE_OT_split);
   WM_operatortype_append(PAINTCURVE_OT_make_segment);
   WM_operatortype_append(PAINTCURVE_OT_select_linked);
+  WM_operatortype_append(PAINTCURVE_OT_toggle_cyclic);
   WM_operatortype_append(PAINTCURVE_OT_context_menu);
 
   /* brush */

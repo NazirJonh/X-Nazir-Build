@@ -460,6 +460,48 @@ void PAINTCURVE_OT_select_linked(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Toggle Cyclic
+ * \{ */
+
+static wmOperatorStatus paintcurve_toggle_cyclic_exec(bContext *C, wmOperator *op)
+{
+  Brush *brush = nullptr;
+  PaintCurve *pc = paintcurve_from_context(C, &brush);
+  if (!pc) {
+    return OPERATOR_CANCELLED;
+  }
+
+  bke::CurvesGeometry &geom = pc->geometry.wrap();
+  if (!paintcurve_geometry_is_valid(geom)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const int curve_index = paintcurve_active_curve_get(pc);
+  ED_paintcurve_undo_push_begin(C, op->type->name);
+  if (!paintcurve_geometry_toggle_cyclic(geom, curve_index)) {
+    ED_paintcurve_undo_push_end(C);
+    return OPERATOR_CANCELLED;
+  }
+  ED_paintcurve_undo_push_end(C);
+  paintcurve_finish_topology_edit(C, pc, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINTCURVE_OT_toggle_cyclic(wmOperatorType *ot)
+{
+  ot->name = "Toggle Paint Curve Cyclic";
+  ot->description = "Close or re-open the active paint curve spline";
+  ot->idname = "PAINTCURVE_OT_toggle_cyclic";
+
+  ot->exec = paintcurve_toggle_cyclic_exec;
+  ot->poll = paint_curve_poll;
+
+  ot->flag = OPTYPE_REGISTER;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Context Menu
  * \{ */
 
@@ -506,12 +548,25 @@ static wmOperatorStatus paintcurve_context_menu_invoke(bContext *C,
     return OPERATOR_PASS_THROUGH;
   }
 
+  PaintCurve *pc = paintcurve_from_context(C);
+  const int curve_index = paintcurve_curve_of_point(pc, point_index);
+  if (curve_index >= 0) {
+    pc->active_curve = curve_index;
+  }
+
   ui::PopupMenu *pup = ui::popup_menu_begin(C, IFACE_("Paint Curve"), ICON_NONE);
   ui::Layout &layout = *ui::popup_menu_layout(pup);
   layout.operator_context_set(wm::OpCallContext::InvokeDefault);
   layout.op_menu_enum(
       C, "PAINTCURVE_OT_handle_type_set", "type", IFACE_("Handle Type"), ICON_NONE);
   layout.op("PAINTCURVE_OT_select_linked", std::nullopt, ICON_NONE);
+
+  const bool is_cyclic = paintcurve_is_curve_cyclic(pc, curve_index);
+  layout.separator();
+  layout.op("PAINTCURVE_OT_toggle_cyclic",
+            is_cyclic ? IFACE_("Open Curve") : IFACE_("Close Curve"),
+            ICON_NONE);
+
   layout.separator();
   layout.op("PAINTCURVE_OT_duplicate", std::nullopt, ICON_NONE);
   layout.separator();

@@ -161,6 +161,7 @@ static bool paintcurve_try_insert_point_at_mouse(bContext *C,
                                                  wmOperator *op,
                                                  PaintCurve *pc,
                                                  const float loc_fl[2]);
+static const bToolRef *paintcurve_tool_ref_from_context(bContext *C);
 
 bool paintcurve_slide_is_active()
 {
@@ -294,7 +295,7 @@ bool paint_curve_poll(bContext *C)
   }
 
   /* Also allow paint-curve operators when the standalone Curve Edit tool is active. */
-  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  const bToolRef *tref = paintcurve_tool_ref_from_context(C);
   if (tref && STREQ(tref->idname, "builtin.curves_edit")) {
     return true;
   }
@@ -428,6 +429,24 @@ static char paintcurve_point_side_index(const BezTriple *bezt,
 }
 
 /******************* Operators *********************************/
+
+/** Safer than #WM_toolsystem_ref_from_context when the area tool runtime is briefly out of sync. */
+static const bToolRef *paintcurve_tool_ref_from_context(bContext *C)
+{
+  Main *bmain = CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  WorkSpace *workspace = CTX_wm_workspace(C);
+  ScrArea *area = CTX_wm_area(C);
+  if (!(workspace && bmain && scene && area)) {
+    return nullptr;
+  }
+  bToolKey tkey{};
+  if (!WM_toolsystem_key_from_context(*bmain, scene, view_layer, area, &tkey)) {
+    return nullptr;
+  }
+  return WM_toolsystem_ref_find(workspace, &tkey);
+}
 
 PaintCurve *paintcurve_for_brush_add(Main *bmain, const char *name, const Brush *brush)
 {
@@ -989,9 +1008,8 @@ static wmOperatorStatus paintcurve_insert_or_add_point_invoke(bContext *C,
                                                               wmOperator *op,
                                                               const wmEvent *event)
 {
-  Paint *paint = BKE_paint_get_active_from_context(C);
-  Brush *br = BKE_paint_brush(paint);
-  PaintCurve *pc = br ? br->paint_curve : nullptr;
+  Brush *br = nullptr;
+  PaintCurve *pc = paintcurve_active_from_context(C, &br);
 
   const int loc[2] = {event->mval[0], event->mval[1]};
   const float loc_fl[2] = {float(loc[0]), float(loc[1])};
@@ -3282,7 +3300,7 @@ static bool paintcurve_sculpt_pick_poll(bContext *C)
   if (!(ob && (ob->mode & OB_MODE_SCULPT))) {
     return false;
   }
-  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  const bToolRef *tref = paintcurve_tool_ref_from_context(C);
   return tref && STREQ(tref->idname, "builtin.curves_edit");
 }
 
@@ -3290,6 +3308,11 @@ static wmOperatorStatus paintcurve_sculpt_pick_invoke(bContext *C,
                                                       wmOperator *op,
                                                       const wmEvent *event)
 {
+  /* Ctrl+RMB is reserved for inserting/extending the paint curve (#PAINTCURVE_OT_insert_or_add_point). */
+  if (event->modifier & KM_CTRL) {
+    return OPERATOR_PASS_THROUGH;
+  }
+
   const float loc_fl[2] = {float(event->mval[0]), float(event->mval[1])};
 
   /* 1. Control point under cursor → pass through so PAINTCURVE_OT_slide handles the drag.

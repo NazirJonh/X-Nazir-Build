@@ -348,6 +348,7 @@ Paint *ED_paint_curve_resolve_active_paint(Depsgraph *depsgraph,
 
 void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
                                                         const bke::CurvesGeometry &geometry,
+                                                        const bool use_3d_space,
                                                         const Sculpt *sculpt,
                                                         const bool show_radius_handles,
                                                         const float2 mval_region,
@@ -365,7 +366,7 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
   }
 
   Vector<PaintCurvePoint> screen_points;
-  paintcurve_build_screen_points_from_geometry(geometry, true, &vc, screen_points);
+  paintcurve_build_screen_points_from_geometry(geometry, use_3d_space, &vc, screen_points);
   if (screen_points.is_empty()) {
     return;
   }
@@ -427,8 +428,13 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
 
   paintcurve_foreach_bezier_segment_from_geometry(geometry, [&](const int point_a, const int point_b) {
     PaintCurveSegmentDrawData seg;
-    paintcurve_build_screen_segment_polyline_from_geometry(
-        geometry, &vc, point_a, point_b, seg.polyline);
+    paintcurve_build_screen_segment_polyline_from_geometry(geometry,
+                                                           use_3d_space,
+                                                           &vc,
+                                                           point_a,
+                                                           point_b,
+                                                           screen_points,
+                                                           seg.polyline);
     if (seg.polyline.size() < 2) {
       return;
     }
@@ -465,7 +471,7 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
     PaintCurveInsertPreviewDrawData preview;
     if (hover_point_a >= 0 && hover_point_b >= 0 &&
         paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(
-            &vc, geometry, mval, hover_point_a, hover_point_b, bezier_t) &&
+            &vc, geometry, use_3d_space, mval, hover_point_a, hover_point_b, screen_points, bezier_t) &&
         paintcurve_polyline_point_and_tangent_at_bezier_param(
             hover_seg.polyline, bezier_t, preview.point, preview.tangent))
     {
@@ -503,6 +509,7 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
   }
   ED_paint_curve_screen_handles_build_from_geometry(vc,
                                                     pc->geometry.wrap(),
+                                                    pc->use_3d_space != 0,
                                                     sculpt,
                                                     pc->show_radius_handles != 0,
                                                     mval_region,

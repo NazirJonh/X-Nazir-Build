@@ -182,6 +182,7 @@ class PaintCurveCursor : Overlay {
       {
         ed::sculpt_paint::ED_paint_curve_screen_handles_build_from_geometry(vc,
                                                                             *control_curve,
+                                                                            true,
                                                                             sculpt,
                                                                             true,
                                                                             mval_region,
@@ -190,7 +191,9 @@ class PaintCurveCursor : Overlay {
                                                                             handles_);
       }
     }
-    else if (brush->stroke_method == BRUSH_STROKE_CURVE || is_curve_patch_stroke) {
+    else if (brush->stroke_method == BRUSH_STROKE_CURVE || is_curve_patch_stroke || is_curves_edit) {
+      /* Curve Edit uses the same paint-curve handle overlay as Stroke Method: Curve so Ctrl+RMB
+       * point creation and handle drags are visible while editing (silhouettes alone are not enough). */
       ed::sculpt_paint::ED_paint_curve_screen_handles_build(
           vc, *brush, sculpt, mval_region, compute_hover, show_insert_preview, handles_);
     }

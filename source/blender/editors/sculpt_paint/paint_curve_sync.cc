@@ -68,6 +68,39 @@ static bool paintcurve_project_local_to_screen(const ViewContext *vc,
   return isfinite(r_screen.x) && isfinite(r_screen.y);
 }
 
+static void paintcurve_build_screen_segment_polyline_from_screen_points(
+    const Span<PaintCurvePoint> screen_points,
+    const int point_index_a,
+    const int point_index_b,
+    Vector<float2> &r_polyline)
+{
+  r_polyline.clear();
+  if (screen_points.is_empty() || point_index_a >= screen_points.size() ||
+      point_index_b >= screen_points.size())
+  {
+    return;
+  }
+
+  const PaintCurvePoint &pcp_a = screen_points[point_index_a];
+  const PaintCurvePoint &pcp_b = screen_points[point_index_b];
+  float data[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];
+  for (int j = 0; j < 2; j++) {
+    BKE_curve_forward_diff_bezier(pcp_a.bez.vec[1][j],
+                                  pcp_a.bez.vec[2][j],
+                                  pcp_b.bez.vec[0][j],
+                                  pcp_b.bez.vec[1][j],
+                                  data + j,
+                                  PAINT_CURVE_NUM_SEGMENTS,
+                                  sizeof(float[2]));
+  }
+
+  r_polyline.reinitialize(PAINT_CURVE_NUM_SEGMENTS + 1);
+  const float(*v)[2] = reinterpret_cast<const float(*)[2]>(data);
+  for (int j = 0; j <= PAINT_CURVE_NUM_SEGMENTS; j++) {
+    r_polyline[j] = float2(v[j][0], v[j][1]);
+  }
+}
+
 void paintcurve_build_screen_segment_polyline(const PaintCurve *pc,
                                               const ViewContext *vc,
                                               const int point_index_a,
@@ -149,39 +182,25 @@ void paintcurve_build_screen_segment_polyline(const PaintCurve *pc,
     return;
   }
 
-  if (screen_points_fallback.is_empty() || point_index_a >= screen_points_fallback.size() ||
-      point_index_b >= screen_points_fallback.size())
-  {
-    return;
-  }
-
-  const PaintCurvePoint &pcp_a = screen_points_fallback[point_index_a];
-  const PaintCurvePoint &pcp_b = screen_points_fallback[point_index_b];
-  float data[(PAINT_CURVE_NUM_SEGMENTS + 1) * 2];
-  for (int j = 0; j < 2; j++) {
-    BKE_curve_forward_diff_bezier(pcp_a.bez.vec[1][j],
-                                  pcp_a.bez.vec[2][j],
-                                  pcp_b.bez.vec[0][j],
-                                  pcp_b.bez.vec[1][j],
-                                  data + j,
-                                  PAINT_CURVE_NUM_SEGMENTS,
-                                  sizeof(float[2]));
-  }
-
-  r_polyline.reinitialize(PAINT_CURVE_NUM_SEGMENTS + 1);
-  const float(*v)[2] = reinterpret_cast<const float(*)[2]>(data);
-  for (int j = 0; j <= PAINT_CURVE_NUM_SEGMENTS; j++) {
-    r_polyline[j] = float2(v[j][0], v[j][1]);
-  }
+  paintcurve_build_screen_segment_polyline_from_screen_points(
+      screen_points_fallback, point_index_a, point_index_b, r_polyline);
 }
 
 void paintcurve_build_screen_segment_polyline_from_geometry(const bke::CurvesGeometry &geom,
+                                                             const bool use_3d_space,
                                                              const ViewContext *vc,
                                                              const int point_index_a,
                                                              const int point_index_b,
+                                                             const Span<PaintCurvePoint>
+                                                                 screen_points_fallback,
                                                              Vector<float2> &r_polyline)
 {
   r_polyline.clear();
+  if (!use_3d_space) {
+    paintcurve_build_screen_segment_polyline_from_screen_points(
+        screen_points_fallback, point_index_a, point_index_b, r_polyline);
+    return;
+  }
   if (vc == nullptr || !paintcurve_geometry_is_valid(geom)) {
     return;
   }
@@ -288,14 +307,22 @@ static void paintcurve_update_edge_hit(const float point[2],
 
 bool paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(const ViewContext *vc,
                                                                     const bke::CurvesGeometry &geom,
+                                                                    const bool use_3d_space,
                                                                     const float pos[2],
                                                                     const int point_index_a,
                                                                     const int point_index_b,
+                                                                    const Span<PaintCurvePoint>
+                                                                        screen_points_fallback,
                                                                     float &r_bezier_t)
 {
   Vector<float2> polyline;
-  paintcurve_build_screen_segment_polyline_from_geometry(
-      geom, vc, point_index_a, point_index_b, polyline);
+  paintcurve_build_screen_segment_polyline_from_geometry(geom,
+                                                         use_3d_space,
+                                                         vc,
+                                                         point_index_a,
+                                                         point_index_b,
+                                                         screen_points_fallback,
+                                                         polyline);
   if (polyline.size() < 2) {
     return false;
   }

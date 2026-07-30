@@ -154,6 +154,7 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
  */
 void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
                                                         const blender::bke::CurvesGeometry &geometry,
+                                                        bool use_3d_space,
                                                         const Sculpt *sculpt,
                                                         bool show_radius_handles,
                                                         float2 mval_region,

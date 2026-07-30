@@ -78,6 +78,19 @@ bool paintcurve_is_curve_cyclic(const PaintCurve *pc, const int curve_index)
   return geom.cyclic()[curve_index];
 }
 
+bool paintcurve_geometry_toggle_cyclic(bke::CurvesGeometry &geom, const int curve_index)
+{
+  if (!paintcurve_geometry_is_valid(geom) || curve_index < 0 || curve_index >= geom.curves_num()) {
+    return false;
+  }
+  const bool was_cyclic = geom.cyclic()[curve_index];
+  geom.cyclic_for_write()[curve_index] = !was_cyclic;
+  geom.calculate_bezier_auto_handles();
+  geom.calculate_bezier_aligned_handles();
+  geom.tag_topology_changed();
+  return true;
+}
+
 bool paintcurve_has_multi_curves(const PaintCurve *pc)
 {
   if (pc == nullptr) {
@@ -383,56 +396,28 @@ bke::CurvesGeometry paintcurve_geometry_build_from_selected_points(const bke::Cu
 
   const bke::AttributeAccessor src_attributes = geom.attributes();
   bke::MutableAttributeAccessor dst_attributes = dst.attributes_for_write();
-  src_attributes.foreach_attribute([&](const bke::AttributeIter &iter) {
-    if (iter.storage_type == bke::AttrStorageType::Single) {
-      return;
-    }
-    bke::GSpanAttributeWriter dst_attr = dst_attributes.lookup_or_add_for_write_span(
-        iter.name, iter.domain, iter.data_type);
-    if (!dst_attr) {
-      return;
-    }
 
-    switch (iter.domain) {
-      case bke::AttrDomain::Curve: {
-        if (iter.name == "cyclic") {
-          dst_attr.finish();
-          return;
-        }
-        const bke::GAttributeReader src_attr = src_attributes.lookup(iter.name);
-        if (!src_attr) {
-          dst_attr.finish();
-          return;
-        }
-        bke::attribute_math::gather(*src_attr, dst_to_src_curve, dst_attr.span);
-        break;
-      }
-      case bke::AttrDomain::Point: {
-        const bke::GAttributeReader src_attr = src_attributes.lookup(iter.name);
-        if (!src_attr) {
-          dst_attr.finish();
-          return;
-        }
-        GVArraySpan src_span(src_attr.varray);
-        bke::attribute_math::gather_ranges_to_groups(src_ranges.as_span(),
-                                                     OffsetIndices<int>(dst_offsets),
-                                                     src_span,
-                                                     dst_attr.span);
-        break;
-      }
-      default: {
-        dst_attr.finish();
-        BLI_assert_unreachable();
-        return;
-      }
-    }
+  /* Match #copy_data_to_geometry in curves_edit.cc: gather_attributes handles single-value
+   * attributes (curve_type, uniform handle types, etc.) that foreach_attribute would skip. */
+  bke::gather_attributes(src_attributes,
+                         bke::AttrDomain::Curve,
+                         bke::AttrDomain::Curve,
+                         bke::attribute_filter_from_skip_ref({"cyclic"}),
+                         dst_to_src_curve,
+                         dst_attributes);
 
-    dst_attr.finish();
-  });
+  for (auto &attribute : bke::retrieve_attributes_for_transfer(
+           src_attributes,
+           dst_attributes,
+           {bke::AttrDomain::Point},
+           bke::attribute_filter_from_skip_ref({"paintcurve_selection"})))
+  {
+    bke::attribute_math::gather_ranges_to_groups(
+        src_ranges.as_span(), OffsetIndices<int>(dst_offsets), attribute.src, attribute.dst.span);
+    attribute.dst.finish();
+  }
 
   dst.update_curve_types();
-  dst.calculate_bezier_auto_handles();
-  dst.calculate_bezier_aligned_handles();
   dst.tag_topology_changed();
   return dst;
 }

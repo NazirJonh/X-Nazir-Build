@@ -72,6 +72,7 @@ void PAINTCURVE_OT_handle_type_set(wmOperatorType *ot);
 void PAINTCURVE_OT_split(wmOperatorType *ot);
 void PAINTCURVE_OT_make_segment(wmOperatorType *ot);
 void PAINTCURVE_OT_select_linked(wmOperatorType *ot);
+void PAINTCURVE_OT_toggle_cyclic(wmOperatorType *ot);
 void PAINTCURVE_OT_context_menu(wmOperatorType *ot);
 wmKeyMap *paintcurve_slide_modal_keymap(wmKeyConfig *keyconf);
 bool paintcurve_slide_is_active();
@@ -211,6 +212,8 @@ bool paintcurve_geometry_merge_curve_endpoints(bke::CurvesGeometry &geom,
                                                bool b_is_start);
 /** Select every point on splines that have at least one selected point. */
 void paintcurve_geometry_select_linked(bke::CurvesGeometry &geom);
+/** Close or re-open one spline. Returns false when `curve_index` is out of range. */
+bool paintcurve_geometry_toggle_cyclic(bke::CurvesGeometry &geom, int curve_index);
 bool paintcurve_geometry_any_point_selected(const bke::CurvesGeometry &geom);
 /**
  * Build a standalone geometry with only the selected points (one spline per contiguous run on each
@@ -360,13 +363,16 @@ void paintcurve_build_screen_segment_polyline(const PaintCurve *pc,
 
 /**
  * Core of #paintcurve_build_screen_segment_polyline for a standalone control curve (e.g. a Curve
- * Patch): always 3D (there is no legacy screen-space variant outside a #PaintCurve), so no
- * `screen_points_fallback` is needed. `vc->obact` supplies the object-to-world transform.
+ * Patch) or a viewport-bound paint curve. When `use_3d_space` is false, tessellates from
+ * `screen_points_fallback`; otherwise projects object-space geometry through `vc`.
  */
 void paintcurve_build_screen_segment_polyline_from_geometry(const bke::CurvesGeometry &geom,
+                                                             bool use_3d_space,
                                                              const ViewContext *vc,
                                                              int point_index_a,
                                                              int point_index_b,
+                                                             Span<PaintCurvePoint>
+                                                                 screen_points_fallback,
                                                              Vector<float2> &r_polyline);
 
 /**
@@ -386,9 +392,12 @@ bool paintcurve_bezier_param_at_screen_pos_on_segment(const ViewContext *vc,
 /** Core of #paintcurve_bezier_param_at_screen_pos_on_segment for a standalone control curve. */
 bool paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(const ViewContext *vc,
                                                                     const bke::CurvesGeometry &geom,
+                                                                    bool use_3d_space,
                                                                     const float pos[2],
                                                                     int point_index_a,
                                                                     int point_index_b,
+                                                                    Span<PaintCurvePoint>
+                                                                        screen_points_fallback,
                                                                     float &r_bezier_t);
 
 /**

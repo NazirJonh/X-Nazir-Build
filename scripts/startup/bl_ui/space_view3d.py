@@ -4146,7 +4146,7 @@ class VIEW3D_MT_sculpt_paint_curves(Menu):
         )
         props.curve_type = 'CURVES'
         props.use_selection = True
-        props.assign_as_source = False
+        props.assign_as_source = True
 
         props = layout.operator(
             "paintcurve.separate_to_curve_object",

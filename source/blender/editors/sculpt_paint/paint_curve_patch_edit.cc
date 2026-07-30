@@ -208,6 +208,11 @@ struct CurvePatchEditOpData {
   float last_synced_tex_ofs[2] = {0.0f, 0.0f};
   const void *last_synced_tex = nullptr;
   uint64_t last_synced_tex_edit_count = 0;
+  /* Last brush primary color this modal re-stamped with. The color/image effects read
+   * `BKE_brush_color_get()` live on every re-stamp, but unlike strength or texture mapping there is
+   * no field in #bke::CurvePatchParams to compare -- a color-picker drag would otherwise leave the
+   * patch frozen until some unrelated brush setting changed. */
+  float3 last_synced_brush_color = float3(-1.0f);
   /* Last brush Falloff (distance falloff) this modal re-stamped with. The relief reads the falloff
    * live on every re-stamp via `BKE_brush_curve_strength()`, which folds in
    * `Brush::curve_distance_falloff_preset` and the custom `curve_distance_falloff` CurveMapping.
@@ -331,12 +336,13 @@ static bool patch_find_closest_segment(const bke::CurvesGeometry &geom,
 
   paintcurve_foreach_bezier_segment_from_geometry(geom, [&](const int point_a, const int point_b) {
     Vector<float2> polyline;
-    paintcurve_build_screen_segment_polyline_from_geometry(geom, vc, point_a, point_b, polyline);
+    paintcurve_build_screen_segment_polyline_from_geometry(
+        geom, true, vc, point_a, point_b, {}, polyline);
     const float dist_sq = ED_paint_curve_polyline_distance_sq(polyline, mval);
     if (dist_sq < best_dist_sq) {
       float bezier_t = 0.0f;
       if (paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(
-              vc, geom, pos, point_a, point_b, bezier_t))
+              vc, geom, true, pos, point_a, point_b, {}, bezier_t))
       {
         best_dist_sq = dist_sq;
         segment_index = point_a;
@@ -353,6 +359,54 @@ static bool patch_find_closest_segment(const bke::CurvesGeometry &geom,
   *r_segment_index_next = segment_index_next;
   *r_edge_t = edge_t;
   return true;
+}
+
+/** Control point under `pos` for X-to-delete, mirroring the combined hit tests in the modal's
+ * `LEFTMOUSE` press handler (radius widget, pivot/handles, then segment wire). Returns -1 when
+ * nothing is hovered -- in that case X must reach `PAINT_OT_brush_colors_flip` (and, during an
+ * active stencil RMB-drag, `BRUSH_OT_stencil_control`'s axis constraints). */
+static int patch_find_point_index_at_pos_for_delete(const bke::CurvesGeometry &geom,
+                                                    const ViewContext *vc,
+                                                    const float pos[2])
+{
+  if (!paintcurve_geometry_is_valid(geom)) {
+    return -1;
+  }
+
+  Vector<PaintCurvePoint> screen_points;
+  paintcurve_build_screen_points_from_geometry(geom, true, vc, screen_points);
+
+  const int radius_hit = patch_find_radius_handle_at_pos(
+      geom, screen_points.as_span(), pos, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
+  if (radius_hit >= 0) {
+    return radius_hit;
+  }
+
+  char selflag = 0;
+  const int hit = paintcurve_find_in_screen_points(screen_points.as_span(),
+                                                   pos,
+                                                   /*ignore_pivot=*/false,
+                                                   PAINT_CURVE_POINT_SELECT_THRESHOLD,
+                                                   &selflag);
+  if (hit >= 0) {
+    return hit;
+  }
+
+  int segment_index = -1;
+  int segment_index_next = -1;
+  float edge_t = 0.0f;
+  if (patch_find_closest_segment(geom,
+                                 vc,
+                                 pos,
+                                 PAINT_CURVE_POINT_SELECT_THRESHOLD,
+                                 &segment_index,
+                                 &segment_index_next,
+                                 &edge_t))
+  {
+    return edge_t < 0.5f ? segment_index : segment_index_next;
+  }
+
+  return -1;
 }
 
 /** \} */
@@ -676,6 +730,7 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
       data->last_synced_tex_ofs[1] = brush->mtex.ofs[1];
       data->last_synced_tex = brush->mtex.tex;
       data->last_synced_tex_edit_count = BKE_paint_get_overlay_texture_edit_count();
+      data->last_synced_brush_color = BKE_brush_color_get(&sd.paint, brush);
       data->last_synced_falloff_preset = brush->curve_distance_falloff_preset;
       data->last_synced_falloff_curve_ts = brush->curve_distance_falloff ?
                                                brush->curve_distance_falloff->changed_timestamp :
@@ -893,6 +948,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
                                brush->mtex.size[1] != data.last_synced_tex_size[1] ||
                                brush->mtex.ofs[0] != data.last_synced_tex_ofs[0] ||
                                brush->mtex.ofs[1] != data.last_synced_tex_ofs[1];
+      const float3 brush_color = BKE_brush_color_get(&sd.paint, brush);
+      const bool color_changed = brush_color != data.last_synced_brush_color;
       /* Every brush-driven build parameter in one shot, instead of the two dozen hand-written field
        * compares this used to be. The values the brush cannot supply come from the session: the
        * frozen ones, and `swap_axis`, which the brush may only overwrite when the BRUSH is what
@@ -920,7 +977,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
 
       if (live != item.params || alpha != data.last_synced_alpha ||
           dir_in != data.last_synced_dir_in || symm != data.last_synced_symm || tex_changed ||
-          falloff_preset != data.last_synced_falloff_preset ||
+          color_changed || falloff_preset != data.last_synced_falloff_preset ||
           falloff_curve_ts != data.last_synced_falloff_curve_ts || multi_texture_changed)
       {
         item.params = live;
@@ -929,6 +986,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         data.last_synced_symm = symm;
         data.last_synced_tex = tex;
         data.last_synced_tex_edit_count = tex_edit_count;
+        data.last_synced_brush_color = brush_color;
         data.last_synced_tex_size[0] = brush->mtex.size[0];
         data.last_synced_tex_size[1] = brush->mtex.size[1];
         data.last_synced_tex_ofs[0] = brush->mtex.ofs[0];
@@ -1316,9 +1374,13 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           if (hit >= 0) {
             patch.edit.active_point = hit;
             curve_patch_edit_context_menu_open(C);
+            break;
           }
         }
-        break;
+        /* Plain RMB away from a control point must reach `BRUSH_OT_stencil_control` and the rest of
+         * the paint keymap -- consuming the event on a miss left stencil adjustment (and its X/Y
+         * axis constraints) dead for the whole session. */
+        return OPERATOR_PASS_THROUGH;
       }
       if (event->val == KM_PRESS && (event->modifier & KM_CTRL)) {
         bke::CurvesGeometry &geom = patch.active_item().control_curve;
@@ -1400,17 +1462,39 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       }
       break;
     case EVT_XKEY:
+      if (event->val == KM_PRESS) {
+        bke::CurvesGeometry &geom = patch.active_item().control_curve;
+        Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+        ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+        const float loc_fl[2] = {float(event->mval[0]), float(event->mval[1])};
+        const int hit = patch_find_point_index_at_pos_for_delete(geom, &vc, loc_fl);
+        if (hit < 0) {
+          /* Away from the control curve, X belongs to Sculpt/Texture Paint's primary/secondary color
+           * swap (`PAINT_OT_brush_colors_flip`). During an active stencil RMB-drag it also reaches
+           * `BRUSH_OT_stencil_control` for axis constraints. */
+          return OPERATOR_PASS_THROUGH;
+        }
+        patch.edit.active_point = hit;
+        if (curve_patch_delete_active_point(*C, ob, patch, op->reports)) {
+          /* The removed point may have been the one under an in-flight drag; drop the drag state so
+           * the next MOUSEMOVE does not index into geometry that no longer has it. */
+          data.dragging_point = false;
+          data.dragging_radius = false;
+          data.dragging_handle = false;
+          data.dragging_segment = false;
+          curve_patch_edit_snap_ctx_free(data);
+        }
+      }
+      break;
     case EVT_DELKEY:
-      if (event->val == KM_PRESS &&
-          curve_patch_delete_active_point(*C, ob, patch, op->reports))
-      {
-        /* The removed point may have been the one under an in-flight drag; drop the drag state so
-         * the next MOUSEMOVE does not index into geometry that no longer has it. */
-        data.dragging_point = false;
-        data.dragging_radius = false;
-        data.dragging_handle = false;
-        data.dragging_segment = false;
-        curve_patch_edit_snap_ctx_free(data);
+      if (event->val == KM_PRESS) {
+        if (curve_patch_delete_active_point(*C, ob, patch, op->reports)) {
+          data.dragging_point = false;
+          data.dragging_radius = false;
+          data.dragging_handle = false;
+          data.dragging_segment = false;
+          curve_patch_edit_snap_ctx_free(data);
+        }
       }
       break;
     case EVT_ZKEY:
@@ -1443,8 +1527,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     case EVT_SKEY:
       /* Deliberately NOT Tab, which this used to answer to as well: Tab belongs to the mode toggle,
        * and swallowing it left no way to leave Sculpt Mode for the whole session. X is not an
-       * option either -- it deletes the active point (see `EVT_XKEY` above), per Blender
-       * convention. */
+       * option either -- away from the curve it swaps brush colors (see `EVT_XKEY` above). */
       if (event->val == KM_PRESS) {
         bke::CurvePatchParams &params = patch.active_item().params;
         params.swap_axis = !params.swap_axis;

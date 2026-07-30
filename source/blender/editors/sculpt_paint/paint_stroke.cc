@@ -948,6 +948,17 @@ static bool print_pressure_status_enabled()
 
 /**** Public API ****/
 
+static bool paint_stroke_uses_roll_texture_mapping(const Brush &brush)
+{
+  if (brush.mtex.tex != nullptr && brush.mtex.brush_map_mode == MTEX_MAP_MODE_ROLL) {
+    return true;
+  }
+  if (brush.mask_mtex.tex != nullptr && brush.mask_mtex.brush_map_mode == MTEX_MAP_MODE_ROLL) {
+    return true;
+  }
+  return false;
+}
+
 PaintStroke::PaintStroke(bContext *C, wmOperator *op, int event_type) : event_type_(event_type)
 {
   this->depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
@@ -1022,7 +1033,10 @@ PaintStroke::PaintStroke(bContext *C, wmOperator *op, int event_type) : event_ty
 
   paint_runtime->start_pixel_radius = BKE_brush_radius_get(this->paint, this->brush);
 
-  if (this->brush->stroke_method == BRUSH_STROKE_ROLL) {
+  if (ELEM(this->brush->stroke_method, BRUSH_STROKE_ROLL) ||
+      (this->brush->stroke_method == BRUSH_STROKE_CURVE &&
+       paint_stroke_uses_roll_texture_mapping(*this->brush)))
+  {
     need_roll_mapping_ = true;
   }
   if (need_roll_mapping_) {
@@ -1423,6 +1437,17 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
     return true;
   }
 
+  if (need_roll_mapping_) {
+    spacing_raw_ = br.spacing * 0.01f;
+  }
+
+  auto finish_curve_roll_stroke = [&]() {
+    if (need_roll_mapping_ && stroke_started_) {
+      const float2 finish_mouse(this->last_mouse_position[0], this->last_mouse_position[1]);
+      this->finish_roll_stroke(C, op, finish_mouse, 1.0f);
+    }
+  };
+
   /* 3D stroke path — view-independent curve shape. */
   if (paintcurve_uses_3d_geometry(pc)) {
     Object *ob = this->vc.obact;
@@ -1478,6 +1503,7 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
       }
     }
 
+    finish_curve_roll_stroke();
     this->done(C, false);
     return true;
   }
@@ -1488,6 +1514,8 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
 
   Vector<PaintCurvePoint> stroke_screen_points;
   paintcurve_build_screen_points(pc, &this->vc, stroke_screen_points);
+
+  const bool do_roll_texture = need_roll_mapping_;
 
   paintcurve_foreach_bezier_segment(pc, [&](const int point_a, const int point_b) {
     const PaintCurvePoint *pcp = &stroke_screen_points[point_a];
@@ -1508,8 +1536,9 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
                                     sizeof(float[2]));
     }
 
-    if ((br.mtex.brush_angle_mode & MTEX_ANGLE_RAKE) ||
-        (br.mask_mtex.brush_angle_mode & MTEX_ANGLE_RAKE))
+    if (!do_roll_texture &&
+        ((br.mtex.brush_angle_mode & MTEX_ANGLE_RAKE) ||
+         (br.mask_mtex.brush_angle_mode & MTEX_ANGLE_RAKE)))
     {
       do_rake = true;
       for (int j = 0; j < 2; j++) {
@@ -1572,6 +1601,7 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
     }
   });
 
+  finish_curve_roll_stroke();
   this->done(C, false);
 
   return true;

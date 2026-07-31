@@ -162,7 +162,7 @@ static void gesture_apply_for_symmetry_pass(bContext &C, gesture::GestureData &g
           const PositionDeformData position_data(depsgraph, object);
           const MeshAttributeData attribute_data(mesh);
           const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, object);
-          undo::push_nodes(depsgraph, object, node_mask, undo::Type::Position);
+          undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::Position);
           node_mask.foreach_index(
               [&](const int i) {
                 LocalData &tls = all_tls.local();
@@ -183,7 +183,7 @@ static void gesture_apply_for_symmetry_pass(bContext &C, gesture::GestureData &g
           SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
           MutableSpan<float3> positions = subdiv_ccg.positions;
           MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
-          undo::push_nodes(depsgraph, object, node_mask, undo::Type::Position);
+          undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::Position);
           node_mask.foreach_index(
               [&](const int i) {
                 LocalData &tls = all_tls.local();
@@ -195,7 +195,7 @@ static void gesture_apply_for_symmetry_pass(bContext &C, gesture::GestureData &g
         }
         case bke::pbvh::Type::BMesh: {
           MutableSpan<bke::pbvh::BMeshNode> nodes = pbvh.nodes<bke::pbvh::BMeshNode>();
-          undo::push_nodes(depsgraph, object, node_mask, undo::Type::Position);
+          undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::Position);
           node_mask.foreach_index(
               [&](const int i) {
                 LocalData &tls = all_tls.local();

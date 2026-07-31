@@ -607,7 +607,7 @@ static int sculpt_color_filter_init(bContext *C, wmOperator *op)
     filter::cache_init(C,
                        *object,
                        sd,
-                       undo::Type::Color,
+                       undo::NodeDataFlag::Color,
                        mval_fl,
                        RNA_float_get(op->ptr, "area_normal_radius"),
                        RNA_float_get(op->ptr, "strength"));

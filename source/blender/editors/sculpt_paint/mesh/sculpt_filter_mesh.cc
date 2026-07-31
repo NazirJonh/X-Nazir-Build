@@ -125,7 +125,7 @@ Cache::~Cache() = default;
 void cache_init(bContext *C,
                 Object &ob,
                 Sculpt &sd,
-                const undo::Type undo_type,
+                const undo::NodeDataFlag undo_flags,
                 const float mval_fl[2],
                 float area_normal_radius,
                 float start_strength)
@@ -144,7 +144,7 @@ void cache_init(bContext *C,
         return !node_fully_masked_or_hidden(node);
       });
 
-  undo::push_nodes(*depsgraph, ob, ss.filter_cache->node_mask, undo_type);
+  undo::push_nodes(*depsgraph, ob, ss.filter_cache->node_mask, undo_flags);
 
   /* Setup orientation matrices. */
   copy_m4_m4(ss.filter_cache->obmat.ptr(), ob.object_to_world().ptr());
@@ -2648,7 +2648,7 @@ static wmOperatorStatus sculpt_mesh_filter_start(bContext *C, wmOperator *op)
     cache_init(C,
                *object,
                sd,
-               undo::Type::Position,
+               undo::NodeDataFlag::Position,
                mval_fl,
                RNA_float_get(op->ptr, "area_normal_radius"),
                RNA_float_get(op->ptr, "strength"));

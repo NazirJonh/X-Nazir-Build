@@ -37,8 +37,10 @@
 #include "BLI_span.hh"
 #include "BLI_task.h"
 #include "BLI_task.hh"
+#include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
+#include "DNA_brush_enums.h"
 #include "DNA_brush_types.h"
 #include "DNA_customdata_types.h"
 #include "DNA_key_types.h"
@@ -63,6 +65,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
@@ -75,7 +78,14 @@
 
 #include "BLT_translation.hh"
 
+#include "UI_interface.hh"
+#include "UI_interface_types.hh"
+
 #include "NOD_texture.h"
+
+#include "IMB_colormanagement.hh"
+#include "IMB_imbuf_types.hh"
+#include "IMB_interp.hh"
 
 #include "PRF_profile.hh"
 
@@ -86,6 +96,7 @@
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
+#include "ED_mesh.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
@@ -2950,6 +2961,424 @@ static bool sculpt_texture_uses_brush_local_projection(const MTex &mtex, const B
   return false;
 }
 
+static bool sculpt_brush_mtex_sample_is_black(const float texture_value, const float4 &rgba)
+{
+  return texture_value <= 0.0f && rgba[0] == 0.0f && rgba[1] == 0.0f && rgba[2] == 0.0f;
+}
+
+static void sculpt_sample_brush_mtex_apply_bias(const Brush &brush,
+                                                const bool apply_texture_bias,
+                                                float *r_value,
+                                                float4 &r_rgba)
+{
+  if (!apply_texture_bias) {
+    return;
+  }
+  add_v3_fl(r_rgba, brush.texture_sample_bias);
+  *r_value -= brush.texture_sample_bias;
+}
+
+struct SculptBrushTexSampleCoords {
+  float x = 0.0f;
+  float y = 0.0f;
+  bool valid = false;
+};
+
+/* Forward declarations for texture sampling functions. */
+static bool sculpt_sample_color_image_at_brush_tex_coords(
+    const Tex &tex, const float x, const float y, ImagePool *pool, float r_rgb[3]);
+
+/**
+ * Screen-space texture coordinates for a screen position (View, Tiled, Random, Stencil).
+ * Matches the logic in #BKE_brush_sample_tex_3d and #BKE_brush_sample_masktex.
+ */
+static SculptBrushTexSampleCoords sculpt_brush_texture_sample_coords_get_screen(
+    const Brush &brush,
+    const bke::PaintRuntime &paint_runtime,
+    const MTex *coord_mtex,
+    const float2 screen_co)
+{
+  SculptBrushTexSampleCoords result;
+  float x, y;
+  float rotation = -coord_mtex->rot;
+
+  if (coord_mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL) {
+    const bool is_mask = (coord_mtex == &brush.mask_mtex) ||
+                         (coord_mtex == &brush.face_set_color_mtex);
+    const float *stencil_pos = is_mask ? brush.mask_stencil_pos : brush.stencil_pos;
+    const float *stencil_dim = is_mask ? brush.mask_stencil_dimension : brush.stencil_dimension;
+
+    x = screen_co.x - stencil_pos[0];
+    y = screen_co.y - stencil_pos[1];
+
+    if (rotation > 0.001f || rotation < -0.001f) {
+      const float angle = atan2f(y, x) + rotation;
+      const float flen = sqrtf(x * x + y * y);
+      x = flen * cosf(angle);
+      y = flen * sinf(angle);
+    }
+
+    if (fabsf(x) > stencil_dim[0] || fabsf(y) > stencil_dim[1]) {
+      result.valid = false;
+      return result;
+    }
+    x /= stencil_dim[0];
+    y /= stencil_dim[1];
+  }
+  else {
+    const bool is_mask_projection = (coord_mtex == &brush.mask_mtex) ||
+                                    (coord_mtex == &brush.face_set_color_mtex);
+
+    float invradius;
+    if (coord_mtex->brush_map_mode == MTEX_MAP_MODE_TILED) {
+      x = screen_co.x;
+      y = screen_co.y;
+      invradius = 1.0f / std::max(paint_runtime.start_pixel_radius, 1e-8f);
+    }
+    else {
+      /* VIEW or RANDOM */
+      if (is_mask_projection) {
+        rotation -= paint_runtime.brush_rotation_sec;
+        x = screen_co.x - paint_runtime.mask_tex_mouse[0];
+        y = screen_co.y - paint_runtime.mask_tex_mouse[1];
+      }
+      else {
+        rotation -= paint_runtime.brush_rotation;
+        x = screen_co.x - paint_runtime.tex_mouse[0];
+        y = screen_co.y - paint_runtime.tex_mouse[1];
+      }
+      invradius = 1.0f / std::max(paint_runtime.pixel_radius, 1e-8f);
+    }
+
+    x *= invradius;
+    y *= invradius;
+
+    if (rotation > 0.001f || rotation < -0.001f) {
+      const float angle = atan2f(y, x) + rotation;
+      const float flen = sqrtf(x * x + y * y);
+      x = flen * cosf(angle);
+      y = flen * sinf(angle);
+    }
+  }
+
+  result.x = x;
+  result.y = y;
+  result.valid = true;
+  return result;
+}
+
+/** Sampling at a screen position (same math as #BKE_brush_sample_tex_3d). */
+static void sculpt_sample_brush_mtex_at_screen(const SculptSession &ss,
+                                               const Brush &brush,
+                                               const MTex *mtex,
+                                               const MTex *coord_mtex,
+                                               const float2 screen_co,
+                                               const int thread_id,
+                                               const bool apply_texture_bias,
+                                               const bool use_image_fallback,
+                                               float *r_value,
+                                               float4 &r_rgba)
+{
+  const StrokeCache &cache = *ss.cache;
+  const bke::PaintRuntime &paint_runtime = *cache.paint->runtime;
+
+  const SculptBrushTexSampleCoords coords = sculpt_brush_texture_sample_coords_get_screen(
+      brush, paint_runtime, coord_mtex, screen_co);
+
+  if (!coords.valid) {
+    *r_value = 0.0f;
+    zero_v4(r_rgba);
+    return;
+  }
+
+  paint_get_tex_pixel(mtex, coords.x, coords.y, ss.tex_pool, thread_id, r_value, &r_rgba[0]);
+  sculpt_sample_brush_mtex_apply_bias(brush, apply_texture_bias, r_value, r_rgba);
+
+  /* Fallback: if paint_get_tex_pixel returns black (e.g., when Tex nodetree reads mesh UV),
+   * try sampling image directly using brush texture coordinates. */
+  if (use_image_fallback && sculpt_brush_mtex_sample_is_black(*r_value, r_rgba) &&
+      mtex->tex != nullptr)
+  {
+    float image_rgb[3];
+    if (sculpt_sample_color_image_at_brush_tex_coords(
+            *mtex->tex, coords.x, coords.y, ss.tex_pool, image_rgb))
+    {
+      copy_v3_v3(&r_rgba[0], image_rgb);
+      r_rgba[3] = 1.0f;
+      *r_value = max_ff(max_ff(image_rgb[0], image_rgb[1]), image_rgb[2]);
+    }
+  }
+
+  if (paint_runtime.do_linear_conversion) {
+    IMB_colormanagement_colorspace_to_scene_linear_v3(r_rgba, paint_runtime.colorspace);
+  }
+}
+
+static Image *sculpt_brush_tex_image_get(const Tex &tex)
+{
+  if (tex.type == TEX_IMAGE && tex.ima != nullptr) {
+    return tex.ima;
+  }
+  if (tex.nodetree != nullptr) {
+    for (bNode &node : tex.nodetree->nodes) {
+      if (node.id != nullptr && node.type_legacy == TEX_NODE_IMAGE) {
+        return id_cast<Image *>(node.id);
+      }
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * Sample image pixels using brush texture coordinates (same `x`, `y` as #paint_get_tex_pixel).
+ * Needed when the Tex nodetree reads mesh UV and #RE_texture_evaluate returns black in sculpt.
+ */
+static bool sculpt_sample_color_image_at_brush_tex_coords(
+    const Tex &tex, const float x, const float y, ImagePool *pool, float r_rgb[3])
+{
+  Image *image = sculpt_brush_tex_image_get(tex);
+  if (image == nullptr) {
+    return false;
+  }
+
+  /* Brush tex coords are in the same space as #paint_get_tex_pixel / Generated mapping. */
+  const float u = x * 0.5f + 0.5f;
+  const float v = y * 0.5f + 0.5f;
+
+  ImageUser local_iuser = tex.iuser;
+  ImageUser *iuser = &local_iuser;
+  float2 sample_uv(u, v);
+  if (image->source == IMA_SRC_TILED) {
+    float mapped_uv[2];
+    iuser->tile = BKE_image_get_tile_from_pos(image, sample_uv, mapped_uv, nullptr);
+    sample_uv[0] = mapped_uv[0];
+    sample_uv[1] = mapped_uv[1];
+  }
+
+  ImBuf *ibuf = BKE_image_pool_acquire_ibuf(image, iuser, pool);
+  if (ibuf == nullptr || (ibuf->byte_data() == nullptr && ibuf->float_data() == nullptr)) {
+    if (ibuf != nullptr) {
+      BKE_image_pool_release_ibuf(image, ibuf, pool);
+    }
+    return false;
+  }
+
+  const float pixel_u = sample_uv[0] * ibuf->x;
+  const float pixel_v = sample_uv[1] * ibuf->y;
+
+  float4 rgba;
+  if (ibuf->float_data()) {
+    rgba = imbuf::interpolate_nearest_wrap_fl(ibuf, pixel_u, pixel_v);
+    rgba = math::clamp(rgba, 0.0f, 1.0f);
+  }
+  else {
+    const uchar4 byte_rgba = imbuf::interpolate_nearest_wrap_byte(ibuf, pixel_u, pixel_v);
+    rgba_uchar_to_float(rgba, byte_rgba);
+    if (!ibuf->colorspace_is_data()) {
+      IMB_colormanagement_colorspace_to_scene_linear_v3(rgba, ibuf->byte_buffer.colorspace);
+    }
+  }
+
+  BKE_image_pool_release_ibuf(image, ibuf, pool);
+  copy_v3_v3(r_rgb, rgba);
+  return true;
+}
+
+/** Brush-space texture coordinates passed to #paint_get_tex_pixel (Area / View). */
+static SculptBrushTexSampleCoords sculpt_brush_texture_sample_coords_get(
+    const SculptSession &ss,
+    const Brush &brush,
+    const MTex *coord_mtex,
+    const float brush_point[3])
+{
+  SculptBrushTexSampleCoords result;
+  const StrokeCache &cache = *ss.cache;
+
+  float point[3];
+  sub_v3_v3v3(point, brush_point, cache.plane_offset);
+
+  if (coord_mtex->brush_map_mode == MTEX_MAP_MODE_3D) {
+    return result;
+  }
+
+  /* If the active area is being applied for symmetry, flip it across the symmetry axis and rotate
+   * it back to the original position in order to project it. This insures that the brush texture
+   * will be oriented correctly. */
+  const float3 symm_point = sculpt_point_to_first_symm_pass(cache, float3(point));
+
+  if (sculpt_texture_uses_brush_local_projection(*coord_mtex, brush)) {
+    /* Area mapping always projects through the stroke's local matrix, which #update_brush_local_mat
+     * builds once per symmetry pass from the mask texture rotation. Every caller derives its
+     * coordinates from that same slot, so the matrix must never be rebuilt here: doing it per
+     * sample would put a full matrix construction in the per-vertex loop. */
+    if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+        !sculpt_point_inside_texture_rectangle_clip(cache, symm_point))
+    {
+      result.valid = false;
+      return result;
+    }
+
+    float3 area_point = symm_point;
+    mul_m4_v3(cache.brush_local_mat.ptr(), area_point);
+
+    /* Applied before scale and offset, to match #BKE_brush_sample_tex_3d where the correction
+     * scales the raw coordinate and #MTex::size and #MTex::ofs are applied afterwards. */
+    const float2 &aspect = cache.paint->runtime->tex_aspect_correction;
+    result.x = area_point[0] * aspect[0] * coord_mtex->size[0] + coord_mtex->ofs[0];
+    result.y = area_point[1] * aspect[1] * coord_mtex->size[1] + coord_mtex->ofs[1];
+    result.valid = true;
+    return result;
+  }
+
+  const float2 point_2d = ED_view3d_project_float_v2_m4(
+      cache.vc->region, symm_point, cache.projection_mat);
+  const bke::PaintRuntime &paint_runtime = *cache.paint->runtime;
+
+  return sculpt_brush_texture_sample_coords_get_screen(brush, paint_runtime, coord_mtex, point_2d);
+}
+
+/**
+ * \param use_image_fallback: When #RE_texture_evaluate returns black, re-sample the underlying
+ * image directly at the same brush coordinates. This is a workaround for texture node trees that
+ * read mesh UVs, which sculpt cannot provide. It is opt-in because it is expensive (it acquires an
+ * #ImBuf per sample) and because it would otherwise change the result of legitimately black
+ * texture samples for every existing sculpt brush.
+ */
+static void sculpt_sample_brush_mtex(const SculptSession &ss,
+                                     const Brush &brush,
+                                     const MTex *mtex,
+                                     const float brush_point[3],
+                                     const int thread_id,
+                                     float *r_value,
+                                     float4 &r_rgba,
+                                     const bool apply_texture_bias = true,
+                                     const MTex *coord_mtex_override = nullptr,
+                                     const bool use_image_fallback = false)
+{
+  const StrokeCache &cache = *ss.cache;
+  const MTex *coord_mtex = coord_mtex_override ? coord_mtex_override : mtex;
+
+  float point[3];
+  sub_v3_v3v3(point, brush_point, cache.plane_offset);
+
+  if (coord_mtex->brush_map_mode == MTEX_MAP_MODE_3D) {
+    /* Get strength by feeding the vertex location directly into a texture. Sample in the shared
+     * multi-object space so all objects of a stroke read the texture like a joined mesh; the
+     * matrix is identity in single-object mode. */
+    const float3 point_3d = math::transform_point(cache.texture_sample_from_object, float3(point));
+    *r_value = BKE_brush_sample_tex_3d(
+        cache.paint, &brush, mtex, point_3d, r_rgba, thread_id, ss.tex_pool);
+    return;
+  }
+
+  const float3 symm_point = sculpt_point_to_first_symm_pass(cache, float3(point));
+
+  if (sculpt_texture_uses_brush_local_projection(*coord_mtex, brush)) {
+    const SculptBrushTexSampleCoords coords = sculpt_brush_texture_sample_coords_get(
+        ss, brush, coord_mtex, brush_point);
+    if (!coords.valid) {
+      /* Outside the rectangle stamp: nothing is applied here. */
+      *r_value = 0.0f;
+      zero_v4(r_rgba);
+      return;
+    }
+
+    paint_get_tex_pixel(mtex, coords.x, coords.y, ss.tex_pool, thread_id, r_value, &r_rgba[0]);
+    sculpt_sample_brush_mtex_apply_bias(brush, apply_texture_bias, r_value, r_rgba);
+
+    if (use_image_fallback && sculpt_brush_mtex_sample_is_black(*r_value, r_rgba) &&
+        mtex->tex != nullptr)
+    {
+      float image_rgb[3];
+      if (sculpt_sample_color_image_at_brush_tex_coords(
+              *mtex->tex, coords.x, coords.y, ss.tex_pool, image_rgb))
+      {
+        copy_v3_v3(&r_rgba[0], image_rgb);
+        r_rgba[3] = 1.0f;
+        *r_value = max_ff(max_ff(image_rgb[0], image_rgb[1]), image_rgb[2]);
+      }
+      else {
+        const float2 point_2d = ED_view3d_project_float_v2_m4(
+            cache.vc->region, symm_point, cache.projection_mat);
+        sculpt_sample_brush_mtex_at_screen(ss,
+                                           brush,
+                                           mtex,
+                                           coord_mtex,
+                                           point_2d,
+                                           thread_id,
+                                           apply_texture_bias,
+                                           use_image_fallback,
+                                           r_value,
+                                           r_rgba);
+        if (sculpt_brush_mtex_sample_is_black(*r_value, r_rgba)) {
+          const bke::PaintRuntime &paint_runtime = *cache.paint->runtime;
+          float rotation = -coord_mtex->rot;
+          rotation -= paint_runtime.brush_rotation;
+          float vx = point_2d.x - paint_runtime.tex_mouse[0];
+          float vy = point_2d.y - paint_runtime.tex_mouse[1];
+          const float invradius = 1.0f / std::max(paint_runtime.pixel_radius, 1e-8f);
+          vx *= invradius;
+          vy *= invradius;
+          if (rotation > 0.001f || rotation < -0.001f) {
+            const float angle = atan2f(vy, vx) + rotation;
+            const float flen = sqrtf(vx * vx + vy * vy);
+            vx = flen * cosf(angle);
+            vy = flen * sinf(angle);
+          }
+          if (sculpt_sample_color_image_at_brush_tex_coords(
+                  *mtex->tex, vx, vy, ss.tex_pool, image_rgb))
+          {
+            copy_v3_v3(&r_rgba[0], image_rgb);
+            r_rgba[3] = 1.0f;
+            *r_value = max_ff(max_ff(image_rgb[0], image_rgb[1]), image_rgb[2]);
+          }
+        }
+      }
+    }
+    return;
+  }
+
+  const float2 point_2d = ED_view3d_project_float_v2_m4(
+      cache.vc->region, symm_point, cache.projection_mat);
+
+  if (coord_mtex == mtex) {
+    const float point_3d[3] = {point_2d[0], point_2d[1], 0.0f};
+    /* #BKE_brush_sample_tex_3d skips the clip for the screen-mapped modes (Tiled, Random) that
+     * have no brush-relative coordinates to test against; there the rectangular boundary comes
+     * from the brush falloff instead. */
+    const bool apply_texture_clip = brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
+    *r_value = BKE_brush_sample_tex_3d(
+        cache.paint, &brush, mtex, point_3d, r_rgba, thread_id, ss.tex_pool, apply_texture_clip);
+    if (use_image_fallback && sculpt_brush_mtex_sample_is_black(*r_value, r_rgba) &&
+        mtex->tex != nullptr)
+    {
+      float image_rgb[3];
+      const SculptBrushTexSampleCoords coords = sculpt_brush_texture_sample_coords_get(
+          ss, brush, coord_mtex, brush_point);
+      if (coords.valid && sculpt_sample_color_image_at_brush_tex_coords(
+                              *mtex->tex, coords.x, coords.y, ss.tex_pool, image_rgb))
+      {
+        copy_v3_v3(&r_rgba[0], image_rgb);
+        r_rgba[3] = 1.0f;
+        *r_value = max_ff(max_ff(image_rgb[0], image_rgb[1]), image_rgb[2]);
+      }
+    }
+    return;
+  }
+
+  /* Projection from mask (or other) slot; RGB from color slot. */
+  sculpt_sample_brush_mtex_at_screen(ss,
+                                     brush,
+                                     mtex,
+                                     coord_mtex,
+                                     point_2d,
+                                     thread_id,
+                                     apply_texture_bias,
+                                     use_image_fallback,
+                                     r_value,
+                                     r_rgba);
+}
+
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const float brush_point[3],
@@ -2957,7 +3386,6 @@ void sculpt_apply_texture(const SculptSession &ss,
                           float *r_value,
                           float4 &r_rgba)
 {
-  const StrokeCache &cache = *ss.cache;
   const MTex *mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
 
   if (!mtex->tex) {
@@ -2966,73 +3394,40 @@ void sculpt_apply_texture(const SculptSession &ss,
     return;
   }
 
-  float point[3];
-  sub_v3_v3v3(point, brush_point, cache.plane_offset);
+  sculpt_sample_brush_mtex(ss, brush, mtex, brush_point, thread_id, r_value, r_rgba);
+}
 
-  if (mtex->brush_map_mode == MTEX_MAP_MODE_3D) {
-    /* Get strength by feeding the vertex location directly into a texture. Sample in the shared
-     * multi-object space so all objects of a stroke read the texture like a joined mesh; the
-     * matrix is identity in single-object mode. */
-    const float3 point_3d = math::transform_point(cache.texture_sample_from_object, float3(point));
-    *r_value = BKE_brush_sample_tex_3d(
-        cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool);
+bool sculpt_sample_face_set_color_texture(const SculptSession &ss,
+                                          const Brush &brush,
+                                          const float brush_point[3],
+                                          const int thread_id,
+                                          float r_rgb[3])
+{
+  const MTex *mtex = BKE_brush_face_set_color_texture_get(&brush, OB_MODE_SCULPT);
+
+  if (!mtex->tex) {
+    return false;
   }
-  else {
-    /* If the active area is being applied for symmetry, flip it
-     * across the symmetry axis and rotate it back to the original
-     * position in order to project it. This insures that the
-     * brush texture will be oriented correctly. */
-    float3 symm_point = sculpt_point_to_first_symm_pass(cache, float3(point));
 
-    const bool use_brush_local_projection = sculpt_texture_uses_brush_local_projection(*mtex,
-                                                                                       brush);
+  const MTex *mask_mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
 
-    if (use_brush_local_projection && brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
-        !sculpt_point_inside_texture_rectangle_clip(cache, symm_point))
-    {
-      *r_value = 0.0f;
-      zero_v4(r_rgba);
-      return;
-    }
+  float texture_value;
+  float4 texture_rgba;
+  /* Projection from alpha/mask slot; RGB from color texture. The image fallback is enabled only
+   * here: color maps are commonly authored as image textures whose node tree reads mesh UVs. */
+  sculpt_sample_brush_mtex(ss,
+                           brush,
+                           mtex,
+                           brush_point,
+                           thread_id,
+                           &texture_value,
+                           texture_rgba,
+                           /*apply_texture_bias*/ false,
+                           /*coord_mtex_override*/ mask_mtex,
+                           /*use_image_fallback*/ true);
 
-    /* Still no symmetry supported for other paint modes.
-     * Sculpt does it DIY. */
-    if (use_brush_local_projection) {
-      /* Similar to fixed mode, but projects from the brush plane rather than the view direction.
-       * Rectangle clipping uses the same surface-aligned projection for sampling as for its
-       * brush-local bounds test. */
-
-      mul_m4_v3(cache.brush_local_mat.ptr(), symm_point);
-
-      /* Applied before scale and offset, to match #BKE_brush_sample_tex_3d where the correction
-       * scales the raw coordinate and #MTex::size and #MTex::ofs are applied afterwards. */
-      const float2 &aspect = cache.paint->runtime->tex_aspect_correction;
-      float x = symm_point[0] * aspect[0];
-      float y = symm_point[1] * aspect[1];
-
-      x *= mtex->size[0];
-      y *= mtex->size[1];
-
-      x += mtex->ofs[0];
-      y += mtex->ofs[1];
-
-      paint_get_tex_pixel(mtex, x, y, ss.tex_pool, thread_id, r_value, r_rgba);
-
-      add_v3_fl(r_rgba, brush.texture_sample_bias);  // v3 -> Ignore alpha
-      *r_value -= brush.texture_sample_bias;
-    }
-    else {
-      const float2 point_2d = ED_view3d_project_float_v2_m4(
-          cache.vc->region, symm_point, cache.projection_mat);
-      const float point_3d[3] = {point_2d[0], point_2d[1], 0.0f};
-      /* #BKE_brush_sample_tex_3d skips the clip for the screen-mapped modes (Tiled, Random) that
-       * have no brush-relative coordinates to test against; there the rectangular boundary comes
-       * from the brush falloff instead. */
-      const bool apply_texture_clip = brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE;
-      *r_value = BKE_brush_sample_tex_3d(
-          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool, apply_texture_clip);
-    }
-  }
+  copy_v3_v3(r_rgb, texture_rgba);
+  return !sculpt_brush_mtex_sample_is_black(texture_value, texture_rgba);
 }
 
 void calc_vertex_displacement(const SculptSession &ss, const Brush &brush, float translation[3])
@@ -3940,10 +4335,10 @@ static void dynamic_topology_update(const Depsgraph &depsgraph,
   }
 
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
-    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Mask);
+    undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::Mask);
   }
   else {
-    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Position);
+    undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::Position);
   }
   pbvh.tag_positions_changed(node_mask);
   pbvh.tag_topology_changed(node_mask);
@@ -4087,6 +4482,33 @@ static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgra
   return result;
 }
 
+/**
+ * Undo data flags for the texture-as-data Face Set modes, shared by every brush type.
+ *
+ * The color attribute is created once at stroke start (see #SculptPaintStroke::test_start), so
+ * this only flags the undo step; it must never create the attribute while pushing nodes, as
+ * mutating the mesh mid-step would desynchronize the position undo nodes in the same step.
+ */
+static undo::NodeDataFlag texture_data_undo_flags(const Brush &brush, const Object &ob)
+{
+  undo::NodeDataFlag flags{};
+  if (!face_set::brush_texture_data_mode_is_active(brush)) {
+    return flags;
+  }
+  if (face_set::brush_texture_data_writes_face_sets(brush)) {
+    flags |= undo::NodeDataFlag::FaceSet;
+  }
+  /* Color undo data is only stored for the Mesh pbvh::Tree: color attributes live on the base
+   * mesh and there is nothing to snapshot per grid or BMesh node. */
+  if (face_set::brush_texture_data_writes_color(brush) &&
+      bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Mesh &&
+      color::active_color_attribute(*id_cast<const Mesh *>(ob.data)))
+  {
+    flags |= undo::NodeDataFlag::Color;
+  }
+  return flags;
+}
+
 static void push_undo_nodes(const Depsgraph &depsgraph,
                             Object &ob,
                             const Brush &brush,
@@ -4094,29 +4516,43 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
 {
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *ob.runtime->sculpt_session;
-  bool need_coords = ss.cache->supports_gravity;
+
+  undo::NodeDataFlag flags{};
 
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
-    /* Draw face sets in smooth mode moves the vertices. */
     if (ss.cache->toggle_settings.alt_smooth) {
-      need_coords = true;
+      /* Smooth mode runs #do_relax_face_sets_brush instead, which moves vertices. This must use
+       * the same condition as the brush dispatch in #do_brush_action, otherwise the step stores
+       * the wrong data kind. */
+      flags |= undo::NodeDataFlag::Position;
     }
-    else {
-      undo::push_nodes(depsgraph, ob, node_mask, undo::Type::FaceSet);
+    else if (face_set::brush_texture_data_mode_is_active(brush)) {
+      flags |= texture_data_undo_flags(brush, ob);
     }
-  }
-  else if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
-    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Mask);
-  }
-  else if (brush_type_is_paint(brush.sculpt_brush_type)) {
-    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Color);
+    else if (face_set::brush_texture_data_writes_face_sets(brush)) {
+      flags |= undo::NodeDataFlag::FaceSet;
+    }
   }
   else {
-    need_coords = true;
+    if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
+      flags |= undo::NodeDataFlag::Mask;
+    }
+    else if (brush_type_is_paint(brush.sculpt_brush_type)) {
+      flags |= undo::NodeDataFlag::Color;
+    }
+    else {
+      flags |= undo::NodeDataFlag::Position;
+    }
+    /* Any non-Draw-Face-Sets brush may additionally route texture samples to Face Sets/colors. */
+    flags |= texture_data_undo_flags(brush, ob);
   }
 
-  if (need_coords) {
-    undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Position);
+  if (ss.cache->supports_gravity) {
+    flags |= undo::NodeDataFlag::Position;
+  }
+
+  if (flags != undo::NodeDataFlag{}) {
+    undo::push_nodes(depsgraph, ob, node_mask, flags);
   }
 }
 
@@ -4210,6 +4646,14 @@ static void do_brush_action(const Depsgraph &depsgraph,
   const bool use_original = brush_type_needs_original(brush.sculpt_brush_type) ? true :
                                                                                  !ss.cache->accum;
   const bool use_pixels = sculpt_needs_pbvh_pixels(brush, ob);
+
+  /* Ctrl+LMB samples color from the face under the cursor; it does not need brush nodes. */
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      ss.cache->toggle_settings.invert)
+  {
+    face_set::sample_face_set_color_at_active(ob, *BKE_paint_brush(&sd.paint));
+    return;
+  }
 
   if (sculpt_needs_pbvh_pixels(brush, ob)) {
     sculpt_pbvh_update_pixels(depsgraph, ob);
@@ -4489,6 +4933,19 @@ static void do_brush_action(const Depsgraph &depsgraph,
     if (stroke_is_main_symmetry_pass(*ss.cache)) {
       cloth::sim_activate_nodes(ob, *ss.cache->cloth_sim, node_mask);
       cloth::do_simulation_step(depsgraph, sd, ob, *ss.cache->cloth_sim, node_mask);
+    }
+  }
+
+  if (!use_pixels && brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      face_set::brush_texture_data_mode_is_active(brush) &&
+      (face_set::brush_texture_data_writes_face_sets(brush) ||
+       face_set::brush_texture_data_writes_color(brush)))
+  {
+    if (face_set::brush_texture_data_mode_is_alpha(brush)) {
+      face_set::apply_from_texture(depsgraph, ob, brush, node_mask);
+    }
+    else if (face_set::brush_texture_data_mode_is_color(brush)) {
+      face_set::apply_from_color_texture(depsgraph, ob, brush, node_mask);
     }
   }
 
@@ -6658,6 +7115,11 @@ static void brush_init_tex(const Sculpt &sd, SculptSession &ss)
     ntreeTexBeginExecTree(mask_tex->tex->nodetree);
   }
 
+  const MTex *color_tex = BKE_brush_face_set_color_texture_get(brush, OB_MODE_SCULPT);
+  if (color_tex->tex && color_tex->tex->nodetree) {
+    ntreeTexBeginExecTree(color_tex->tex->nodetree);
+  }
+
   if (ss.tex_pool == nullptr) {
     ss.tex_pool = BKE_image_pool_new();
   }
@@ -7216,7 +7678,7 @@ void store_mesh_from_eval(const wmOperator &op,
     const IndexMask leaf_nodes = bke::pbvh::all_leaf_nodes(pbvh, memory);
     if (changed_attributes.as_span() == Span<StringRef>{"position"}) {
       undo::push_begin(scene, object, &op);
-      undo::push_nodes(depsgraph, object, leaf_nodes, undo::Type::Position);
+      undo::push_nodes(depsgraph, object, leaf_nodes, undo::NodeDataFlag::Position);
       undo::push_end(object);
       mesh.attribute_storage.wrap().remove("position");
       const bke::AttributeReader position = new_mesh->attributes().lookup<float3>("position");
@@ -7245,7 +7707,7 @@ void store_mesh_from_eval(const wmOperator &op,
     }
     else if (changed_attributes.as_span() == Span<StringRef>{".sculpt_mask"}) {
       undo::push_begin(scene, object, &op);
-      undo::push_nodes(depsgraph, object, leaf_nodes, undo::Type::Mask);
+      undo::push_nodes(depsgraph, object, leaf_nodes, undo::NodeDataFlag::Mask);
       undo::push_end(object);
       replace_attribute(new_mesh->attributes(),
                         ".sculpt_mask",
@@ -7258,7 +7720,7 @@ void store_mesh_from_eval(const wmOperator &op,
     }
     else if (changed_attributes.as_span() == Span<StringRef>{".sculpt_face_set"}) {
       undo::push_begin(scene, object, &op);
-      undo::push_nodes(depsgraph, object, leaf_nodes, undo::Type::FaceSet);
+      undo::push_nodes(depsgraph, object, leaf_nodes, undo::NodeDataFlag::FaceSet);
       undo::push_end(object);
       replace_attribute(new_mesh->attributes(),
                         ".sculpt_face_set",
@@ -7496,6 +7958,48 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
     }
   }
 
+  /* Face Set IDs allocated mid-stroke must be free on every object the stroke can reach, not just
+   * on the one that happens to allocate them -- see #StrokeCache::shared_next_face_set_id. Computed
+   * once per stroke (the first step finds no cache carrying it yet) and only for brushes that can
+   * allocate an ID at all, since the scan walks every face of every mesh in the mode. */
+  int shared_next_face_set_id = 0;
+  for (Object *object_ptr : objects) {
+    const SculptSession *ss_iter = object_ptr->runtime->sculpt_session;
+    if (ss_iter && ss_iter->cache && ss_iter->cache->shared_next_face_set_id > 0) {
+      shared_next_face_set_id = ss_iter->cache->shared_next_face_set_id;
+      break;
+    }
+  }
+  if (shared_next_face_set_id == 0 && objects.size() > 1 && brush &&
+      (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS ||
+       face_set::brush_texture_data_mode_is_active(*brush)))
+  {
+    shared_next_face_set_id = face_set::find_shared_next_available_id(objects);
+  }
+
+  /* Face Sets Color From Texture: build the one #FaceSetColorStrokeCache for the whole stroke here
+   * from the PRIMARY (under-cursor) object's mesh, then install the SAME instance on every
+   * object's #StrokeCache in the loop below -- see #StrokeCache::face_set_color_cache's doc
+   * comment. Done before the loop (order-independent of its own iteration order, which starts at
+   * the ACTIVE object per #MultiObjectStrokeContext.mode_objects, not necessarily the primary)
+   * so no object races another to lazily allocate its own divergent cache. */
+  std::shared_ptr<face_set::FaceSetColorStrokeCache> shared_face_set_color_cache;
+  if (brush && face_set::brush_texture_data_mode_is_color(*brush)) {
+    SculptSession &primary_ss_mut = *primary_ob->runtime->sculpt_session;
+    if (!primary_ss_mut.cache) {
+      primary_ss_mut.cache = MEM_new<StrokeCache>(__func__);
+      if (shared_toggle_settings) {
+        primary_ss_mut.cache->toggle_settings = *shared_toggle_settings;
+      }
+    }
+    const Mesh *primary_mesh = id_cast<Mesh *>(primary_ob->data);
+    /* Seed the floor before the init below: it derives #FaceSetColorStrokeCache.next_face_set_id
+     * from the primary mesh alone otherwise. */
+    primary_ss_mut.cache->shared_next_face_set_id = shared_next_face_set_id;
+    face_set::face_set_color_stroke_cache_init(*primary_ss_mut.cache, *brush, *primary_mesh);
+    shared_face_set_color_cache = primary_ss_mut.cache->face_set_color_cache;
+  }
+
   for (Object *object_ptr : objects) {
     Object &ob = *object_ptr;
     SculptSession &ss = *ob.runtime->sculpt_session;
@@ -7508,6 +8012,7 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
       }
     }
     StrokeCache *cache = ss.cache;
+    cache->shared_next_face_set_id = shared_next_face_set_id;
 
     /* Set scaling adjustment. */
     cache->scale = non_uniform_scale_compensation(ob);
@@ -7656,6 +8161,29 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
       constexpr int pixel_input_threshold = 5;
       cache->dial = BLI_dial_init(cache->initial_mouse, pixel_input_threshold);
     }
+
+    if (face_set::brush_texture_data_mode_is_color(*brush)) {
+      const MTex *color_mtex = BKE_brush_face_set_color_texture_get(brush, OB_MODE_SCULPT);
+      if (color_mtex->tex && color_mtex->tex->type == TEX_IMAGE && color_mtex->tex->ima) {
+        ImBuf *tex_ibuf = BKE_image_acquire_ibuf(
+            color_mtex->tex->ima, &color_mtex->tex->iuser, nullptr);
+        if (tex_ibuf && tex_ibuf->float_data() == nullptr) {
+          paint_runtime->do_linear_conversion = true;
+          paint_runtime->colorspace = tex_ibuf->byte_buffer.colorspace;
+        }
+        BKE_image_release_ibuf(color_mtex->tex->ima, tex_ibuf, nullptr);
+      }
+      face_set::sync_face_set_color_mtex_mapping_from_mask(*this->brush);
+      /* Shared across every object in this stroke -- see the pre-loop block above that builds
+       * #shared_face_set_color_cache once from the primary object's mesh. Assigning it here
+       * (rather than each object independently calling #face_set_color_stroke_cache_init on its
+       * OWN mesh) is what keeps the same texture-sampled color resolving to the same Face Set id
+       * on every mesh, instead of each one allocating its own id for what should be one shared
+       * assignment across the whole multi-object stroke. */
+      if (!cache->face_set_color_cache) {
+        cache->face_set_color_cache = shared_face_set_color_cache;
+      }
+    }
   }
 }
 
@@ -7707,6 +8235,17 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     }
 
     cursor_geometry_info_update(*this->depsgraph, *paint, sculpt_, this->vc, base_, mval, false);
+
+    /* When writing texture data to vertex colors, create the color attribute once here, before the
+     * undo step begins. Creating it lazily while pushing undo nodes would mutate the mesh
+     * mid-stroke and corrupt the position undo nodes captured in the same step. */
+    if (brush && face_set::brush_texture_data_mode_is_active(*brush) &&
+        face_set::brush_texture_data_writes_color(*brush) && !ob.runtime->sculpt_session->bm)
+    {
+      if (bke::object::pbvh_get(ob)->type() != bke::pbvh::Type::BMesh) {
+        ED_mesh_color_ensure(id_cast<Mesh *>(ob.data), nullptr);
+      }
+    }
 
     /* Sculpt layers: layer hooks below fan out to the primary object plus sync-group members
      * that (a) are in #multi_.mode_objects for this stroke and (b) hold a layer matching the
@@ -8321,6 +8860,11 @@ static void brush_exit_tex(Sculpt &sd)
   if (mask_tex->tex && mask_tex->tex->nodetree) {
     ntreeTexEndExecTree(mask_tex->tex->nodetree->runtime->execdata);
   }
+
+  const MTex *color_tex = BKE_brush_face_set_color_texture_get(brush, OB_MODE_SCULPT);
+  if (color_tex->tex && color_tex->tex->nodetree) {
+    ntreeTexEndExecTree(color_tex->tex->nodetree->runtime->execdata);
+  }
 }
 
 void SculptPaintStroke::layer_recording_finish(const bool is_cancel,
@@ -8437,15 +8981,27 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
 
   this->layer_recording_finish(is_cancel, stroke_started, brush);
 
+  /* Restore cursor if it was changed to eyedropper during Face Sets color sampling. */
+  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
+    wmWindow *win = CTX_wm_window(this->evil_C);
+    if (win) {
+      WM_cursor_modal_restore(win);
+    }
+  }
+
   /* Free caches. */
   for (Object *object_ptr : objects) {
     Object &ob_iter = *object_ptr;
     SculptSession &ss_iter = *ob_iter.runtime->sculpt_session;
     if (ss_iter.cache) {
+      face_set::face_set_color_stroke_cache_clear(*ss_iter.cache);
       MEM_delete(ss_iter.cache);
       ss_iter.cache = nullptr;
     }
   }
+
+  /* Clear status bar message set during stroke. */
+  ED_workspace_status_text(this->evil_C, nullptr);
 
   if (!is_cancel && stroke_started) {
     stroke_undo_end(*paint_mode_settings_, this->multi_.mode_objects, brush);
@@ -8509,11 +9065,31 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  stroke = MEM_new<SculptPaintStroke>(__func__, C, op, event->type);
-  brush_stroke_init(C, op);
-
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   Brush &brush = *BKE_paint_brush(&sd.paint);
+
+  /* Ctrl+LMB samples a face set color without starting a sculpt stroke.
+   * A regular stroke never reaches sampling because #PaintStroke::add_step aborts when
+   * #PaintRuntime.last_hit is false, which is common for zero-strength sampling clicks. */
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      BrushStrokeMode(RNA_enum_get(op->ptr, "mode")) == BrushStrokeMode::Invert)
+  {
+    face_set_overlay_check(*C, *op);
+    if (!CTX_wm_region_view3d(C)) {
+      return OPERATOR_CANCELLED;
+    }
+    const ARegion *region = CTX_wm_region(C);
+    const float mval[2] = {float(event->xy[0] - region->winrct.xmin),
+                           float(event->xy[1] - region->winrct.ymin)};
+    if (face_set::sample_face_set_color_at_cursor(C, ob, brush, mval)) {
+      WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, &brush);
+      return OPERATOR_FINISHED;
+    }
+    return OPERATOR_CANCELLED;
+  }
+
+  stroke = MEM_new<SculptPaintStroke>(__func__, C, op, event->type);
+  brush_stroke_init(C, op);
 
   if (brush_type_is_paint(brush.sculpt_brush_type) &&
       !color_supported_check(scene, ob, op->reports))
@@ -8584,6 +9160,16 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   }
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {
     face_set_overlay_check(*C, *op);
+
+    WorkspaceStatus status(C);
+    if (BrushStrokeMode(RNA_enum_get(op->ptr, "mode")) == BrushStrokeMode::Invert) {
+      status.item(IFACE_("Sample Color"), ICON_MOUSE_LMB);
+      status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
+    }
+    else {
+      status.item(IFACE_("Draw Face Set"), ICON_MOUSE_LMB);
+      status.item(IFACE_("Sample Color"), ICON_EVENT_CTRL, ICON_MOUSE_LMB);
+    }
   }
 
   /* Warn once at stroke start when a Tiled-mapped brush texture uses an image whose extension is
@@ -8631,6 +9217,7 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     }
     return retval;
   }
+
   /* Add modal handler. */
   WM_event_add_modal_handler(C, op);
 

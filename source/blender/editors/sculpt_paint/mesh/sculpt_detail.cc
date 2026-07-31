@@ -139,7 +139,7 @@ static wmOperatorStatus sculpt_detail_flood_fill_exec(bContext *C, wmOperator *o
   const float min_edge_len = max_edge_len * detail_size::EDGE_LENGTH_MIN_FACTOR;
 
   undo::push_begin(scene, ob, op);
-  undo::push_node(depsgraph, ob, nullptr, undo::Type::Position);
+  undo::push_node(depsgraph, ob, nullptr, undo::NodeDataFlag::Position);
 
   const double start_time = BLI_time_now_seconds();
 

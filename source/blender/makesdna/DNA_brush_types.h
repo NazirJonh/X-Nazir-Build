@@ -349,6 +349,17 @@ struct Brush {
 
   float texture_sample_bias = 0; /* value to added to texture samples */
 
+  /** How texture affects brush behavior. #eBrushTextureDataMode. */
+  int texture_data_mode = BRUSH_TEXTURE_DATA_MODE_NONE;
+  /** Alpha threshold for binary texture mode. Range [0..1], default 0.5. */
+  float texture_threshold = 0.5f;
+  /** Explicit Face Set ID to assign (0 = auto-generate on first stroke). */
+  int face_set_id = 0;
+  char write_vcol = 0;
+  char vcol_channel = BRUSH_VCOL_CHANNEL_RGB;
+  char vcol_mode = 0;
+  char _pad_vcol[1] = {};
+
   /**
    * This preset is used to specify an exact function used for the distance falloff instead
    * of doing a Bezier spline evaluation via CurveMapping for performance reasons.
@@ -453,6 +464,19 @@ struct Brush {
 
   DNA_DEPRECATED struct CurveMapping *automasking_cavity_curve = nullptr;
   struct MeshAutomaskingSettings *mesh_automasking_settings = nullptr;
+
+  /** Draw Face Sets color assignment mode (#eSculptFaceSetDrawMode). */
+  int face_set_draw_mode = 0;
+  /** Last sampled Face Set ID via Ctrl+LMB; -1 if unset. */
+  int face_set_sample_id = -1;
+  /** Primary color used to identify or create a Face Set when draw mode is Custom (linear RGB). */
+  float face_set_color[3] = {144.0f / 255.0f, 178.0f / 255.0f, 218.0f / 255.0f};
+  char _pad_fsc[4] = {};
+  /** Secondary color, swapped with the primary via the X key (linear RGB). */
+  float face_set_secondary_color[3] = {144.0f / 255.0f, 178.0f / 255.0f, 218.0f / 255.0f};
+  char _pad_fssc[4] = {};
+  /** RGB texture for per-face Face Set color assignment (#eBrushTextureDataMode). */
+  struct MTex face_set_color_mtex;
 };
 
 struct PaletteColor {

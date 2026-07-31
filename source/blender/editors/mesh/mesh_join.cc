@@ -37,6 +37,7 @@
 #include "BKE_multires.hh"
 #include "BKE_object.hh"
 #include "BKE_object_deform.h"
+#include "BKE_paint.hh"
 #include "BKE_report.hh"
 
 #include "DEG_depsgraph.hh"
@@ -510,7 +511,21 @@ static void join_face_sets(const Span<const Object *> objects_to_join,
     return;
   }
 
-  int max_face_set = 0;
+  /* Custom Face Set colors are keyed by ID, so they have to follow the same offset that is applied
+   * to the IDs themselves. This mirrors the explicit material slot remapping done above; without
+   * it the joined mesh would show each source's colors on the wrong Face Sets. */
+  Vector<FaceSetColor> dst_colors;
+
+  /* The default Face Set is what the overlay renders neutrally, so it is shared by all sources
+   * rather than offset like the others. Geometry that was unassigned before the join must stay
+   * unassigned afterwards instead of picking up an arbitrary random overlay color. */
+  const int default_face_set = dst_mesh.face_sets_color_default;
+
+  /* Offset applied to the next source's non-default IDs. It has to track the highest ID actually
+   * written to the destination, not the highest ID a source happened to use: with three or more
+   * sources the latter lets a later source land on IDs a previous one already claimed. */
+  int next_offset = 0;
+
   for (const int i : objects_to_join.index_range()) {
     const Object &src_object = *objects_to_join[i];
     const IndexRange dst_range = face_ranges[i];
@@ -518,20 +533,40 @@ static void join_face_sets(const Span<const Object *> objects_to_join,
     const bke::AttributeAccessor src_attributes = src_mesh.attributes();
     const VArraySpan src_face_sets = *src_attributes.lookup<int>(".sculpt_face_set",
                                                                  bke::AttrDomain::Face);
+    const int offset = next_offset;
+
     if (src_face_sets.is_empty()) {
-      dst_face_sets.span.slice(dst_range).fill(max_face_set);
+      dst_face_sets.span.slice(dst_range).fill(default_face_set);
+      next_offset = std::max(next_offset, default_face_set + 1);
+      continue;
     }
-    else {
-      for (const int face : dst_range.index_range()) {
-        dst_face_sets.span[dst_range[face]] = src_face_sets[face] + max_face_set;
+
+    const int src_default = src_mesh.face_sets_color_default;
+    int max_dst_face_set = default_face_set;
+    for (const int face : dst_range.index_range()) {
+      const int src_face_set = src_face_sets[face];
+      const int dst_face_set = src_face_set == src_default ? default_face_set :
+                                                             src_face_set + offset;
+      dst_face_sets.span[dst_range[face]] = dst_face_set;
+      max_dst_face_set = std::max(max_dst_face_set, dst_face_set);
+    }
+
+    for (const FaceSetColor &src_color : BKE_paint_face_set_custom_colors_get_all(&src_mesh)) {
+      /* The source's default set merged into the destination's default, which renders neutrally
+       * and therefore carries no custom color. */
+      if (src_color.face_set_id == src_default) {
+        continue;
       }
-      max_face_set = std::max(
-          max_face_set,
-          *std::max_element(src_face_sets.begin(), src_face_sets.begin() + dst_range.size()));
+      FaceSetColor dst_color = src_color;
+      dst_color.face_set_id = src_color.face_set_id + offset;
+      dst_colors.append(dst_color);
     }
-    max_face_set++;
+
+    next_offset = max_dst_face_set + 1;
   }
   dst_face_sets.finish();
+
+  BKE_paint_face_set_custom_colors_set_all(&dst_mesh, dst_colors);
 }
 
 wmOperatorStatus join_objects_exec(bContext *C, wmOperator *op)

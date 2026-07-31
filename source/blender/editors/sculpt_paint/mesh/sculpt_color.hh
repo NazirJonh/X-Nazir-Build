@@ -64,6 +64,8 @@ float4 color_vert_get(OffsetIndices<int> faces,
 
 bke::GAttributeReader active_color_attribute(const Mesh &mesh);
 bke::GSpanAttributeWriter active_color_attribute_for_write(Mesh &mesh);
+/** Create a default color attribute on \a mesh when missing, then return a writer. */
+bke::GSpanAttributeWriter ensure_active_color_attribute_for_write(Mesh &mesh);
 
 /**
  * Align every mesh in \a other_meshes to one shared color channel. The reference channel is the

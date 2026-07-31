@@ -91,7 +91,7 @@ static void init_transform_common(bContext *C, Object &ob, const float mval_fl[2
 
   vert_random_access_ensure(ob);
 
-  filter::cache_init(C, ob, sd, undo::Type::Position, mval_fl, 5.0, 1.0f);
+  filter::cache_init(C, ob, sd, undo::NodeDataFlag::Position, mval_fl, 5.0, 1.0f);
 
   if (sd.transform_mode == SCULPT_TRANSFORM_MODE_RADIUS_ELASTIC) {
     ss.filter_cache->transform_displacement_mode = TransformDisplacementMode::Incremental;

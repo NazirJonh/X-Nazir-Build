@@ -14,6 +14,7 @@
 #include "DNA_texture_types.h"
 
 #include "BLI_math_base.h"
+#include "BLI_math_vector.h"
 #include "BLI_string_utf8_symbols.h"
 
 #include "BLT_translation.hh"
@@ -742,6 +743,39 @@ static void rna_Brush_color_update(Main *bmain, Scene *scene, PointerRNA *ptr)
   BKE_brush_color_sync_legacy(br);
 }
 
+static void rna_Brush_face_set_color_get(PointerRNA *ptr, float *values)
+{
+  Brush *br = static_cast<Brush *>(ptr->data);
+  copy_v3_v3(values, br->face_set_color);
+}
+
+static void rna_Brush_face_set_color_set(PointerRNA *ptr, const float *values)
+{
+  Brush *br = static_cast<Brush *>(ptr->data);
+  if (compare_v3v3(br->face_set_color, values, FLT_EPSILON)) {
+    return;
+  }
+  /* Only invalidate the cached sample when the color actually changes. */
+  br->face_set_sample_id = -1;
+  copy_v3_v3(br->face_set_color, values);
+}
+
+static bool rna_Brush_use_write_color_attribute_get(PointerRNA *ptr)
+{
+  Brush *br = static_cast<Brush *>(ptr->data);
+  return br->write_vcol != 0;
+}
+
+static void rna_Brush_use_write_color_attribute_set(PointerRNA *ptr, bool value)
+{
+  Brush *br = static_cast<Brush *>(ptr->data);
+  const bool was_enabled = br->write_vcol != 0;
+  br->write_vcol = value;
+  if (value && !was_enabled) {
+    br->vcol_channel = BRUSH_VCOL_CHANNEL_RGB;
+  }
+}
+
 static void rna_Brush_material_update(bContext * /*C*/, PointerRNA *ptr)
 {
   Brush *br = static_cast<Brush *>(ptr->data);
@@ -767,6 +801,16 @@ static void rna_Brush_secondary_tex_update(bContext *C, PointerRNA *ptr)
   ViewLayer *view_layer = CTX_data_view_layer(C);
   Brush *br = static_cast<Brush *>(ptr->data);
   BKE_paint_invalidate_overlay_tex(*bmain, scene, view_layer, br->mask_mtex.tex);
+  rna_Brush_update(bmain, scene, ptr);
+}
+
+static void rna_Brush_face_set_color_tex_update(bContext *C, PointerRNA *ptr)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  Brush *br = static_cast<Brush *>(ptr->data);
+  BKE_paint_invalidate_overlay_tex(*bmain, scene, view_layer, br->face_set_color_mtex.tex);
   rna_Brush_update(bmain, scene, ptr);
 }
 
@@ -1221,6 +1265,61 @@ static std::optional<std::string> rna_BrushCurvesSculptSettings_path(const Point
 #else
 
 namespace blender {
+
+static const EnumPropertyItem brush_texture_data_mode_items[] = {
+    {BRUSH_TEXTURE_DATA_MODE_NONE,
+     "NONE",
+     0,
+     "Texture as Multiplier",
+     "Use texture as intensity modifier (default behavior)"},
+    {BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE,
+     "FACE_SETS_FROM_TEXTURE",
+     0,
+     "Face Sets from Texture",
+     "Sample texture alpha to determine Face Set ID assignment (binary threshold mode)"},
+    {BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE,
+     "FACE_SETS_COLOR_FROM_TEXTURE",
+     0,
+     "Face Sets from Color Texture",
+     "Sample RGB texture per face to assign Face Set IDs; alpha texture remains the stroke mask"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem brush_write_color_channel_items[] = {
+    {BRUSH_VCOL_CHANNEL_RGB,
+     "RGB",
+     0,
+     "RGB",
+     "Write sampled color to Red, Green, and Blue channels"},
+    {BRUSH_VCOL_CHANNEL_R, "R", 0, "Red", "Write texture value to Red channel"},
+    {BRUSH_VCOL_CHANNEL_G, "G", 0, "Green", "Write texture value to Green channel"},
+    {BRUSH_VCOL_CHANNEL_B, "B", 0, "Blue", "Write texture value to Blue channel"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem brush_write_color_mode_items[] = {
+    {BRUSH_VCOL_MODE_GRAYSCALE,
+     "GRAYSCALE",
+     0,
+     "Continuous",
+     "Blend with mask strength; edges may darken toward the background"},
+    {BRUSH_VCOL_MODE_BINARY,
+     "BINARY",
+     0,
+     "Binary",
+     "Write full color above threshold; write black below threshold"},
+    {BRUSH_VCOL_MODE_MASK,
+     "MASK",
+     0,
+     "Masked",
+     "Write full color above threshold; leave existing vertex color below threshold"},
+    {BRUSH_VCOL_MODE_DUAL,
+     "DUAL",
+     0,
+     "Dual",
+     "Primary Face Set color above threshold; secondary Face Set color below threshold"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
 
 static void rna_def_brush_texture_slot(BlenderRNA *brna)
 {
@@ -3394,6 +3493,69 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Texture Sample Bias", "Value added to texture samples");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  prop = RNA_def_enum(srna,
+                      "texture_data_mode",
+                      brush_texture_data_mode_items,
+                      BRUSH_TEXTURE_DATA_MODE_NONE,
+                      "Texture Data Mode",
+                      "How texture affects brush behavior");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "texture_threshold", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "texture_threshold");
+  RNA_def_property_float_default(prop, 0.5f);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop,
+      "Threshold",
+      "Alpha threshold for binary texture mode (faces above threshold receive the Face Set ID)");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_invert_texture_alpha", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_TEXTURE_INVERT_ALPHA);
+  RNA_def_property_ui_text(
+      prop, "Invert Alpha", "Invert alpha channel (white skips, black receives the Face Set ID)");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "face_set_id", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "face_set_id");
+  RNA_def_property_int_default(prop, 0);
+  RNA_def_property_range(prop, 0, INT_MAX);
+  RNA_def_property_ui_text(
+      prop, "Face Set ID", "Face Set ID to assign (0 = auto-generate on first stroke)");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_write_face_sets", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "flag2", BRUSH_DISABLE_FACE_SET_WRITE);
+  RNA_def_property_ui_text(
+      prop, "Write to Face Sets", "Assign sampled texture data to Face Sets during the stroke");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_write_color_attribute", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Brush_use_write_color_attribute_get", "rna_Brush_use_write_color_attribute_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Write to Color Attribute",
+      "Simultaneously write sampled texture values to the active color attribute");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "write_color_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "vcol_channel");
+  RNA_def_property_enum_items(prop, brush_write_color_channel_items);
+  RNA_def_property_enum_default(prop, BRUSH_VCOL_CHANNEL_RGB);
+  RNA_def_property_ui_text(
+      prop, "Color Channel", "Which channel of the color attribute to write to");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "write_color_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "vcol_mode");
+  RNA_def_property_enum_items(prop, brush_write_color_mode_items);
+  RNA_def_property_enum_default(prop, BRUSH_VCOL_MODE_MASK);
+  RNA_def_property_ui_text(
+      prop, "Color Mode", "How sampled texture values are written to the color attribute");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   prop = RNA_def_property(srna, "use_color_as_displacement", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_USE_COLOR_AS_DISPLACEMENT);
   RNA_def_property_ui_text(
@@ -4058,6 +4220,18 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Mask Texture", "");
   RNA_def_property_update(prop, NC_TEXTURE, "rna_Brush_secondary_tex_update");
 
+  prop = RNA_def_property(srna, "face_set_color_texture_slot", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "BrushTextureSlot");
+  RNA_def_property_pointer_sdna(prop, nullptr, "face_set_color_mtex");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Face Set Color Texture Slot", "");
+
+  prop = RNA_def_property(srna, "face_set_color_texture", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "face_set_color_mtex.tex");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_CONTEXT_UPDATE);
+  RNA_def_property_ui_text(prop, "Face Set Color Texture", "RGB map for per-face Face Set colors");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_Brush_face_set_color_tex_update");
+
   prop = RNA_def_property(srna, "texture_overlay_alpha", PROP_INT, PROP_PERCENTAGE);
   RNA_def_property_int_sdna(prop, nullptr, "texture_overlay_alpha");
   RNA_def_property_range(prop, 0, 100);
@@ -4139,6 +4313,61 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "MeshAutomaskingSettings");
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Mesh Automasking Settings", nullptr);
+
+  /* Face Sets (Draw Face Sets brush). */
+  static const EnumPropertyItem face_set_draw_mode_items[] = {
+      {SCULPT_FACE_SET_DRAW_MODE_COLOR,
+       "CUSTOM",
+       0,
+       "Custom",
+       "Use a specific Face Set identified by a chosen color"},
+      {SCULPT_FACE_SET_DRAW_MODE_RANDOM,
+       "RANDOM",
+       0,
+       "Random",
+       "Create a new Face Set ID on each stroke"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "face_set_draw_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "face_set_draw_mode");
+  RNA_def_property_enum_items(prop, face_set_draw_mode_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Face Set Color Mode",
+      "How the Face Set ID is determined when using the Draw Face Sets brush");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "face_set_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "face_set_color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop,
+      "Face Set Color",
+      "Color used to find or create a Face Set when using the Draw Face Sets brush");
+  RNA_def_property_float_funcs(
+      prop, "rna_Brush_face_set_color_get", "rna_Brush_face_set_color_set", nullptr);
+  /* Not #rna_Brush_color_update: the Face Set color is unrelated to #Brush.rgb, so it must not
+   * trigger the legacy paint color sync. */
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "face_set_secondary_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_float_sdna(prop, nullptr, "face_set_secondary_color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Secondary Face Set Color", "Secondary color, swapped with the primary via the X key");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "face_set_sample_id", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "face_set_sample_id");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Face Set Sample ID",
+      "Face Set ID last sampled via Ctrl+LMB; used by the Draw Face Sets brush "
+      "to paint the exact sampled face set without a color lookup (-1 if unset)");
 }
 
 /**

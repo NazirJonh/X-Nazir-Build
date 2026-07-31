@@ -138,7 +138,7 @@ void mesh_show_all(const Depsgraph &depsgraph, Object &object, const IndexMask &
               verts.begin(), verts.end(), [&](const int i) { return hide_vert[i]; });
         },
         exec_mode::grain_size(1));
-    undo::push_nodes(depsgraph, object, changed_nodes, undo::Type::HideVert);
+    undo::push_nodes(depsgraph, object, changed_nodes, undo::NodeDataFlag::HideVert);
     pbvh.tag_visibility_changed(changed_nodes);
   }
 
@@ -169,7 +169,7 @@ void grids_show_all(Depsgraph &depsgraph, Object &object, const IndexMask &node_
     if (changed_nodes.is_empty()) {
       return;
     }
-    undo::push_nodes(depsgraph, object, changed_nodes, undo::Type::HideVert);
+    undo::push_nodes(depsgraph, object, changed_nodes, undo::NodeDataFlag::HideVert);
     pbvh.tag_visibility_changed(changed_nodes);
   }
 
@@ -312,7 +312,7 @@ static void vert_hide_update(const Depsgraph &depsgraph,
         }
 
         any_changed = true;
-        undo::push_node(depsgraph, object, &nodes[i], undo::Type::HideVert);
+        undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::HideVert);
         scatter_data_mesh(new_hide.as_span(), verts, hide_vert.span);
       },
       exec_mode::grain_size(1));
@@ -361,7 +361,7 @@ static void grid_hide_update(Depsgraph &depsgraph,
         }
 
         any_changed = true;
-        undo::push_node(depsgraph, object, &nodes[i], undo::Type::HideVert);
+        undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::HideVert);
 
         for (const int i : grids.index_range()) {
           grid_hidden[grids[i]].copy_from(new_hide[i].as_span());
@@ -430,7 +430,7 @@ static void partialvis_update_bmesh_nodes(const Depsgraph &depsgraph,
     bool any_changed = false;
     bool any_visible = false;
 
-    undo::push_node(depsgraph, ob, &nodes[i], undo::Type::HideVert);
+    undo::push_node(depsgraph, ob, &nodes[i], undo::NodeDataFlag::HideVert);
 
     partialvis_update_bmesh_verts(BKE_pbvh_bmesh_node_unique_verts(&nodes[i]),
                                   action,
@@ -760,7 +760,7 @@ static void invert_visibility_mesh(const Depsgraph &depsgraph,
   bke::SpanAttributeWriter<bool> hide_poly = attributes.lookup_or_add_for_write_span<bool>(
       ".hide_poly", bke::AttrDomain::Face);
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::HideFace);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::HideFace);
 
   node_mask.foreach_index(
       [&](const int i) {
@@ -784,7 +784,7 @@ static void invert_visibility_grids(Depsgraph &depsgraph,
   MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
   SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::HideVert);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::HideVert);
 
   BitGroupVector<> &grid_hidden = BKE_subdiv_ccg_grid_hidden_ensure(subdiv_ccg);
   node_mask.foreach_index(
@@ -807,7 +807,7 @@ static void invert_visibility_bmesh(const Depsgraph &depsgraph,
 {
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   MutableSpan<bke::pbvh::BMeshNode> nodes = pbvh.nodes<bke::pbvh::BMeshNode>();
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::HideVert);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::HideVert);
 
   node_mask.foreach_index(
       [&](const int i) {
@@ -958,7 +958,7 @@ static void update_undo_state(const Depsgraph &depsgraph,
       [&](const int i) {
         for (const int vert : nodes[i].verts()) {
           if (old_hide_vert[vert] != new_hide_vert[vert]) {
-            undo::push_node(depsgraph, object, &nodes[i], undo::Type::HideVert);
+            undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::HideVert);
             break;
           }
         }
@@ -1120,7 +1120,7 @@ static void grow_shrink_visibility_grid(Depsgraph &depsgraph,
   IndexMaskMemory memory;
   const IndexMask changed_nodes = IndexMask::from_bools(node_changed, memory);
 
-  undo::push_nodes(depsgraph, object, changed_nodes, undo::Type::HideVert);
+  undo::push_nodes(depsgraph, object, changed_nodes, undo::NodeDataFlag::HideVert);
 
   BitGroupVector<> &last_buffer = buffers.write_buffer(iterations - 1);
   grid_hidden = std::move(last_buffer);

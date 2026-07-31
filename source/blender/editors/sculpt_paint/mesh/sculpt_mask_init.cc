@@ -55,7 +55,7 @@ void write_mask_mesh(const Depsgraph &depsgraph,
   bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
   const VArraySpan hide_vert = *attributes.lookup<bool>(".hide_vert", bke::AttrDomain::Point);
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::Mask);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::Mask);
 
   bke::SpanAttributeWriter mask = attributes.lookup_or_add_for_write_span<float>(
       ".sculpt_mask", bke::AttrDomain::Point);
@@ -95,7 +95,7 @@ static void init_mask_grids(
   MutableSpan<float> masks = subdiv_ccg.masks;
   const BitGroupVector<> &grid_hidden = subdiv_ccg.grid_hidden;
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::Mask);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::Mask);
 
   node_mask.foreach_index(
       [&](const int i) {
@@ -229,7 +229,7 @@ static void mask_init_object(bContext &C, Object &ob, const InitMode mode, const
     case bke::pbvh::Type::BMesh: {
       MutableSpan<bke::pbvh::BMeshNode> nodes = pbvh.nodes<bke::pbvh::BMeshNode>();
       const int offset = CustomData_get_offset_named(&ss.bm->vdata, CD_PROP_FLOAT, ".sculpt_mask");
-      undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Mask);
+      undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::Mask);
       node_mask.foreach_index(
           [&](const int i) {
             for (BMVert *vert : BKE_pbvh_bmesh_node_unique_verts(&nodes[i])) {

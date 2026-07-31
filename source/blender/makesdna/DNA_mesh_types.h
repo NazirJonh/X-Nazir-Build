@@ -529,6 +529,19 @@ struct SculptLayerGroup {
   bke::sculpt_layers::SculptLayerGroupRuntime *runtime = nullptr;
 };
 
+/**
+ * A custom overlay color assigned to a single Face Set. See #Mesh.face_set_colors.
+ *
+ * NOTE: kept trivial (no default member initializers) because it is the element type of a raw
+ * array that is allocated uninitialized and duplicated with the trivial-type memory helpers.
+ */
+struct FaceSetColor {
+  int face_set_id;
+  /** Custom color for this Face Set (RGB). */
+  float color[3];
+  char _pad0[8];
+};
+
 struct Mesh {
 #ifdef __cplusplus
   DNA_DEFINE_CXX_METHODS(Mesh)
@@ -759,6 +772,14 @@ struct Mesh {
 
   char _pad1 = {};
   int8_t radial_symmetry[3] = {1, 1, 1};
+
+  /**
+   * Custom overlay colors for Face Sets, indexed by #FaceSetColor.face_set_id. Face Sets without
+   * an entry here fall back to the deterministic random color derived from #face_sets_color_seed.
+   */
+  struct FaceSetColor *face_set_colors = nullptr;
+  int face_set_colors_num = 0;
+  char _pad3[4] = {};
 
   /**
    * Data that isn't saved in files, including caches of derived data, temporary data to improve

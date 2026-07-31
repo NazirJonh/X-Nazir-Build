@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <string>
 
+#include "BLI_enum_flags.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_index_mask_fwd.hh"
 #include "BLI_math_matrix_types.hh"
@@ -44,36 +45,53 @@ enum class UpdateType;
 
 namespace ed::sculpt_paint::undo {
 
+/* Flags describing which per-node data is stored in an undo step.
+ * Multiple flags may be ORed together. */
+enum class NodeDataFlag : uint8_t {
+  Position = (1 << 0),
+  FaceSet = (1 << 1),
+  Color = (1 << 2),
+  Mask = (1 << 3),
+  HideVert = (1 << 4),
+  HideFace = (1 << 5),
+};
+ENUM_OPERATORS(NodeDataFlag)
+
+/* Type of a special non-per-node undo step.
+ * Mutually exclusive with NodeDataFlag steps. */
 enum class Type : int8_t {
   None,
-  Position,
-  HideVert,
-  HideFace,
-  Mask,
+  Geometry,
   DyntopoBegin,
   DyntopoEnd,
-  Geometry,
-  FaceSet,
-  Color,
+  /* Sculpt layer tree/metadata change; not per-node data, hence a special type. */
   SculptLayer,
 };
 
 struct StepData;
 
 /**
- * Store undo data of the given type for a pbvh::Tree node. This function can be called by multiple
- * threads concurrently, as long as they don't pass the same pbvh::Tree node.
+ * Store undo data of the given flags for a pbvh::Tree node. This function can be called by
+ * multiple threads concurrently, as long as they don't pass the same pbvh::Tree node.
  *
  * This is only possible when building an undo step, in between #push_begin and #push_end.
  */
 void push_node(const Depsgraph &depsgraph,
                const Object &object,
                const bke::pbvh::Node *node,
-               undo::Type type);
+               NodeDataFlag flags);
+/**
+ * Store undo data for all nodes in \a node_mask. Thread-safe per node — different threads may
+ * call this concurrently for different nodes, but must not share the same node.
+ *
+ * This is only possible when building an undo step, in between #push_begin and #push_end.
+ */
 void push_nodes(const Depsgraph &depsgraph,
                 Object &object,
                 const IndexMask &node_mask,
-                undo::Type type);
+                NodeDataFlag flags);
+/* Store a special non-per-node undo step (Geometry, DyntopoBegin, DyntopoEnd). */
+void push_node_special(const Depsgraph &depsgraph, Object &object, Type special_type);
 
 /**
  * Pushes an undo step using the operator name. This is necessary for

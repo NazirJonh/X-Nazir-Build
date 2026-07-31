@@ -144,7 +144,7 @@ static void apply_new_mask_mesh(const Depsgraph &depsgraph,
         if (array_utils::indexed_data_equal<float>(mask, verts, new_node_mask)) {
           return;
         }
-        undo::push_node(depsgraph, object, &nodes[i], undo::Type::Mask);
+        undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::Mask);
         scatter_data_mesh(new_node_mask, verts, mask);
         bke::pbvh::node_update_mask_mesh(mask, nodes[i]);
         node_changed[i] = true;
@@ -294,7 +294,7 @@ static bool increase_contrast_mask_mesh(const Depsgraph &depsgraph,
     return false;
   }
 
-  undo::push_node(depsgraph, object, &node, undo::Type::Mask);
+  undo::push_node(depsgraph, object, &node, undo::NodeDataFlag::Mask);
   scatter_data_mesh(new_mask.as_span(), verts, mask);
   bke::pbvh::node_update_mask_mesh(mask, node);
   return true;
@@ -320,7 +320,7 @@ static bool decrease_contrast_mask_mesh(const Depsgraph &depsgraph,
     return false;
   }
 
-  undo::push_node(depsgraph, object, &node, undo::Type::Mask);
+  undo::push_node(depsgraph, object, &node, undo::NodeDataFlag::Mask);
   scatter_data_mesh(new_mask.as_span(), verts, mask);
   bke::pbvh::node_update_mask_mesh(mask, node);
   return true;
@@ -366,7 +366,7 @@ static void apply_new_mask_grids(const Depsgraph &depsgraph,
         if (mask_equals_array_grids(masks, key, grids, new_node_mask)) {
           return;
         }
-        undo::push_node(depsgraph, object, &nodes[i], undo::Type::Mask);
+        undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::Mask);
         scatter_data_grids(subdiv_ccg, new_node_mask, grids, masks);
         bke::pbvh::node_update_mask_grids(key, masks, nodes[i]);
         node_changed[i] = true;
@@ -514,7 +514,7 @@ static bool increase_contrast_mask_grids(const Depsgraph &depsgraph,
     return false;
   }
 
-  undo::push_node(depsgraph, object, &node, undo::Type::Mask);
+  undo::push_node(depsgraph, object, &node, undo::NodeDataFlag::Mask);
   scatter_data_grids(subdiv_ccg, new_mask.as_span(), grids, subdiv_ccg.masks.as_mutable_span());
   bke::pbvh::node_update_mask_grids(key, subdiv_ccg.masks, node);
   return true;
@@ -546,7 +546,7 @@ static bool decrease_contrast_mask_grids(const Depsgraph &depsgraph,
     return false;
   }
 
-  undo::push_node(depsgraph, object, &node, undo::Type::Mask);
+  undo::push_node(depsgraph, object, &node, undo::NodeDataFlag::Mask);
   scatter_data_grids(subdiv_ccg, new_mask.as_span(), grids, subdiv_ccg.masks.as_mutable_span());
   bke::pbvh::node_update_mask_grids(key, subdiv_ccg.masks, node);
   return true;
@@ -586,7 +586,7 @@ static void apply_new_mask_bmesh(const Depsgraph &depsgraph,
         if (mask_equals_array_bmesh(mask_offset, verts, new_node_mask)) {
           return;
         }
-        undo::push_node(depsgraph, object, &nodes[i], undo::Type::Mask);
+        undo::push_node(depsgraph, object, &nodes[i], undo::NodeDataFlag::Mask);
         scatter_mask_bmesh(new_node_mask, bm, verts);
         bke::pbvh::node_update_mask_bmesh(mask_offset, nodes[i]);
         node_changed[i] = true;
@@ -698,7 +698,7 @@ static bool increase_contrast_mask_bmesh(const Depsgraph &depsgraph,
     return false;
   }
 
-  undo::push_node(depsgraph, object, &node, undo::Type::Mask);
+  undo::push_node(depsgraph, object, &node, undo::NodeDataFlag::Mask);
   scatter_mask_bmesh(new_mask.as_span(), bm, verts);
   bke::pbvh::node_update_mask_bmesh(mask_offset, node);
   return true;
@@ -729,7 +729,7 @@ static bool decrease_contrast_mask_bmesh(const Depsgraph &depsgraph,
     return false;
   }
 
-  undo::push_node(depsgraph, object, &node, undo::Type::Mask);
+  undo::push_node(depsgraph, object, &node, undo::NodeDataFlag::Mask);
   scatter_mask_bmesh(new_mask.as_span(), bm, verts);
   bke::pbvh::node_update_mask_bmesh(mask_offset, node);
   return true;

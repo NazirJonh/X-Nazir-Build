@@ -20,6 +20,8 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 
+#include "DEG_depsgraph.hh"
+
 #include "../paint_intern.hh"
 #include "sculpt_intern.hh"
 
@@ -311,6 +313,48 @@ static void propagate_shared_sampling_and_symmetry_state(const Span<Object *> mo
   }
 }
 
+/** The custom overlay color registered for \a face_set_id in \a object's mesh, if any. */
+static std::optional<float3> face_set_custom_color_get(const Object &object, const int face_set_id)
+{
+  if (face_set_id == face_set_none_id) {
+    return std::nullopt;
+  }
+  const Mesh *mesh = id_cast<Mesh *>(object.data);
+  if (!mesh || !BKE_paint_face_set_custom_color_exists(mesh, face_set_id)) {
+    return std::nullopt;
+  }
+  float color[3];
+  BKE_paint_face_set_custom_color_get(mesh, face_set_id, color);
+  return float3(color);
+}
+
+/**
+ * Register \a color for \a face_set_id in \a object's mesh so the ID renders with the stroke's
+ * color rather than the ID-derived fallback hue. A no-op when the mesh already agrees, which is the
+ * common case for every stroke step after the first.
+ */
+static void face_set_custom_color_propagate(Object &object,
+                                            const int face_set_id,
+                                            const std::optional<float3> &color)
+{
+  if (!color || face_set_id == face_set_none_id) {
+    return;
+  }
+  Mesh *mesh = id_cast<Mesh *>(object.data);
+  if (!mesh) {
+    return;
+  }
+  if (BKE_paint_face_set_custom_color_exists(mesh, face_set_id)) {
+    float existing[3];
+    BKE_paint_face_set_custom_color_get(mesh, face_set_id, existing);
+    if (float3(existing) == *color) {
+      return;
+    }
+  }
+  BKE_paint_face_set_custom_color_set(mesh, face_set_id, *color);
+  DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY);
+}
+
 SharedStrokeStateSnapshot capture_shared_stroke_state(const Object &primary_ob)
 {
   SharedStrokeStateSnapshot result;
@@ -318,6 +362,11 @@ SharedStrokeStateSnapshot capture_shared_stroke_state(const Object &primary_ob)
   if (ss && ss->cache) {
     result.density_seed = ss->cache->paint_brush.density_seed;
     result.painted_face_set_id = ss->cache->paint_face_set;
+    result.painted_face_set_secondary_id = ss->cache->paint_face_set_secondary;
+    result.painted_face_set_color = face_set_custom_color_get(primary_ob,
+                                                              result.painted_face_set_id);
+    result.painted_face_set_secondary_color = face_set_custom_color_get(
+        primary_ob, result.painted_face_set_secondary_id);
 
     /* #StrokeCache.sculpt_normal is written only by the MAIN symmetry pass, and the mirror passes
      * leave it alone, so it still holds the main-pass value here (after all of the primary's
@@ -349,6 +398,28 @@ void propagate_shared_stroke_state(Object &secondary_ob,
       cache->paint_face_set == face_set_none_id)
   {
     cache->paint_face_set = primary_state.painted_face_set_id;
+  }
+  if (primary_state.painted_face_set_secondary_id != face_set_none_id &&
+      cache->paint_face_set_secondary == face_set_none_id)
+  {
+    cache->paint_face_set_secondary = primary_state.painted_face_set_secondary_id;
+  }
+  /* The IDs above are only half of the state: their custom colors live in each #Mesh separately,
+   * so a secondary that inherits an ID without its color paints faces the overlay can only render
+   * with the pseudo-random hue derived from that ID. Install the color here, before this object's
+   * brush action writes any face. See #SharedStrokeStateSnapshot::painted_face_set_color.
+   *
+   * Gated on the IDs actually matching: if this secondary allocated its own ID in an earlier step
+   * (the primary had none to share yet), the two meshes are painting different Face Sets and the
+   * primary's color does not describe the secondary's ID. */
+  if (cache->paint_face_set == primary_state.painted_face_set_id) {
+    face_set_custom_color_propagate(
+        secondary_ob, cache->paint_face_set, primary_state.painted_face_set_color);
+  }
+  if (cache->paint_face_set_secondary == primary_state.painted_face_set_secondary_id) {
+    face_set_custom_color_propagate(secondary_ob,
+                                    cache->paint_face_set_secondary,
+                                    primary_state.painted_face_set_secondary_color);
   }
   if (primary_state.sculpt_normal_world) {
     /* Inverse transpose of #Object::world_to_object, which is the transpose of the object-to-world

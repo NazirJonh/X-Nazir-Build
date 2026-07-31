@@ -27,6 +27,7 @@
 #include "DNA_xr_types.h"
 
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_vector.h"
 #include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
@@ -557,6 +558,27 @@ void do_versions_after_linking_520(FileData *fd, Main *bmain)
    */
 }
 
+static bool face_set_brush_color_is_uninitialized(const float color[3])
+{
+  static const float legacy_primary[3] = {1.0f, 0.5f, 0.2f};
+  static const float legacy_secondary[3] = {0.2f, 0.5f, 1.0f};
+  static const float previous_default[3] = {71.0f / 255.0f, 114.0f / 255.0f, 179.0f / 255.0f};
+
+  if (is_zero_v3(color)) {
+    return true;
+  }
+  if (compare_v3v3(color, legacy_primary, FLT_EPSILON)) {
+    return true;
+  }
+  if (compare_v3v3(color, legacy_secondary, FLT_EPSILON)) {
+    return true;
+  }
+  if (compare_v3v3(color, previous_default, FLT_EPSILON)) {
+    return true;
+  }
+  return false;
+}
+
 static void version_solid_color_width_height_defaults(Main &bmain)
 {
   for (Scene &scene : bmain.scenes) {
@@ -1015,6 +1037,25 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 49)) {
     bke::sculpt_layers::sculpt_layers_after_lib_link_fixups(*bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 50)) {
+    /* #Brush.face_set_color and #Brush.face_set_secondary_color are new; files predating them read
+     * zeroes. Development builds also shipped interim defaults that should converge on the current
+     * Face Set color. */
+    static const float face_set_color_default[3] = {
+        144.0f / 255.0f, 178.0f / 255.0f, 218.0f / 255.0f};
+    for (Brush &brush : bmain->brushes) {
+      if ((brush.ob_mode & OB_MODE_SCULPT) == 0) {
+        continue;
+      }
+      if (face_set_brush_color_is_uninitialized(brush.face_set_color)) {
+        copy_v3_v3(brush.face_set_color, face_set_color_default);
+      }
+      if (face_set_brush_color_is_uninitialized(brush.face_set_secondary_color)) {
+        copy_v3_v3(brush.face_set_secondary_color, face_set_color_default);
+      }
+    }
   }
 
   /**

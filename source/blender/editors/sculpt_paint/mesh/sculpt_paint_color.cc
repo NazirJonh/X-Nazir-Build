@@ -34,7 +34,11 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 
+#include "BLT_translation.hh"
+
 #include "DEG_depsgraph.hh"
+
+#include "ED_mesh.hh"
 
 #include "IMB_colormanagement.hh"
 
@@ -321,6 +325,14 @@ void ensure_shared_color_attributes(Object &active_object, const Span<Object *> 
     other_meshes.append(BKE_object_get_original_mesh(object));
   }
   ensure_shared_color_attributes(active_mesh, other_meshes);
+}
+
+bke::GSpanAttributeWriter ensure_active_color_attribute_for_write(Mesh &mesh)
+{
+  if (!active_color_attribute(mesh)) {
+    ED_mesh_color_ensure(&mesh, DATA_("Color"));
+  }
+  return active_color_attribute_for_write(mesh);
 }
 
 struct ColorPaintLocalData {

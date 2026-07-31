@@ -102,7 +102,7 @@ void do_layer_eraser_brush(const Depsgraph &depsgraph,
                            Object &ob,
                            const IndexMask &node_mask);
 void do_draw_face_sets_brush(const Depsgraph &depsgraph,
-                             const Sculpt &sd,
+                             Sculpt &sd,
                              Object &object,
                              const IndexMask &node_mask);
 /** A simple normal-direction displacement. */

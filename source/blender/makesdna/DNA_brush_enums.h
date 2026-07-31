@@ -427,8 +427,46 @@ enum eBrushFlags2 : int {
   BRUSH_PROJECT_USE_BIDIRECTIONAL = (1 << 11),
   /** Layer brush: keep every stroke at the same depth relative to a fixed (persistent) base. */
   BRUSH_LAYER_UNIFORM_DEPTH = (1 << 12),
+  /** Invert alpha channel in texture-as-data-source mode. */
+  BRUSH_TEXTURE_INVERT_ALPHA = (1 << 13),
+  /** Disable Face Set assignment in texture-as-data-source mode. */
+  BRUSH_DISABLE_FACE_SET_WRITE = (1 << 14),
 };
 ENUM_OPERATORS(eBrushFlags2)
+
+/** #Brush.texture_data_mode */
+enum eBrushTextureDataMode {
+  /** Use texture as intensity multiplier (default). */
+  BRUSH_TEXTURE_DATA_MODE_NONE = 0,
+  /** Sample texture to determine Face Set ID assignment (binary threshold mode). */
+  BRUSH_TEXTURE_DATA_MODE_FACE_SETS_FROM_TEXTURE = 1,
+  /** Sample RGB texture per face to assign Face Set IDs (alpha mtex = mask). */
+  BRUSH_TEXTURE_DATA_MODE_FACE_SETS_COLOR_FROM_TEXTURE = 2,
+};
+
+/** #Brush.vcol_channel */
+enum eBrushVertexColorChannel {
+  BRUSH_VCOL_CHANNEL_R = 0,
+  BRUSH_VCOL_CHANNEL_G = 1,
+  BRUSH_VCOL_CHANNEL_B = 2,
+  BRUSH_VCOL_CHANNEL_RGB = 3,
+};
+
+/** #Brush.vcol_mode */
+enum eBrushVertexColorMode {
+  BRUSH_VCOL_MODE_GRAYSCALE = 0,
+  BRUSH_VCOL_MODE_BINARY = 1,
+  /** Write full color above threshold; leave existing vertex color below threshold. */
+  BRUSH_VCOL_MODE_MASK = 2,
+  /** Primary color above threshold; secondary Face Set color below threshold. */
+  BRUSH_VCOL_MODE_DUAL = 3,
+};
+
+/** #Brush.face_set_draw_mode */
+enum eSculptFaceSetDrawMode {
+  SCULPT_FACE_SET_DRAW_MODE_RANDOM = 0,
+  SCULPT_FACE_SET_DRAW_MODE_COLOR = 1,
+};
 
 enum BrushMaskPressureFlags : int {
   BRUSH_MASK_PRESSURE_RAMP = (1 << 1),

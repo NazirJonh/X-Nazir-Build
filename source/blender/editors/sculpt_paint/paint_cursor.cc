@@ -51,7 +51,10 @@
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf_types.hh"
 
+#include "BLT_translation.hh"
+
 #include "ED_image.hh"
+#include "ED_screen.hh"
 #include "ED_view3d.hh"
 
 #include "GPU_immediate.hh"
@@ -1213,6 +1216,16 @@ static void paint_update_mouse_cursor(PaintCursorContext &pcontext)
     return;
   }
 
+  /* Don't override eyedropper cursor for face sets color sampling. */
+  if (pcontext.mode == PaintMode::Sculpt && pcontext.brush != nullptr &&
+      pcontext.brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS)
+  {
+    const wmEvent *event_state = pcontext.win->runtime->eventstate;
+    if (event_state && (event_state->modifier & KM_CTRL)) {
+      return;
+    }
+  }
+
   if (ELEM(pcontext.mode, PaintMode::GPencil, PaintMode::VertexGPencil)) {
     WM_cursor_set(pcontext.win, WM_CURSOR_DOT);
   }
@@ -1399,6 +1412,17 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
   PaintCursorContext pcontext;
   if (!paint_cursor_context_init(C, xy, tilt, pcontext)) {
     return;
+  }
+
+  /* Show eyedropper cursor when Ctrl is held over the Draw Face Sets brush for color sampling. */
+  if (pcontext.mode == PaintMode::Sculpt && pcontext.brush != nullptr &&
+      pcontext.brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      pcontext.win->modalcursor == 0 && pcontext.win->grabcursor == 0)
+  {
+    const wmEvent *event_state = pcontext.win->runtime->eventstate;
+    if (event_state && (event_state->modifier & KM_CTRL)) {
+      WM_cursor_set(pcontext.win, WM_CURSOR_EYEDROPPER);
+    }
   }
 
   if (!paint_cursor_is_brush_cursor_enabled(pcontext)) {

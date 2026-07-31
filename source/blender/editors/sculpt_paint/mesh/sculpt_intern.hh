@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include "BKE_brush.hh"
@@ -51,6 +52,9 @@ namespace undo {
 struct Node;
 enum class Type : int8_t;
 }  // namespace undo
+namespace face_set {
+struct FaceSetColorStrokeCache;
+}
 }  // namespace ed::sculpt_paint
 struct bContext;
 struct BMLog;
@@ -442,6 +446,34 @@ struct StrokeCache {
 
   /* The face set being painted. */
   int paint_face_set = face_set_none_id;
+  /** Secondary face set for dual-color alpha-mask texture mode (#BRUSH_VCOL_MODE_DUAL). */
+  int paint_face_set_secondary = face_set_none_id;
+
+  /**
+   * Lowest Face Set ID that is free on EVERY object of the stroke, computed once per stroke in
+   * #SculptPaintStroke::stroke_cache_init and identical on every object's cache.
+   *
+   * A Face Set ID allocated during a multi-object stroke is shared by all the meshes it touches
+   * (see #SharedStrokeStateSnapshot), but #find_next_available_id only scans the object it is
+   * given -- so an ID free on the object under the cursor can already be in use on another object,
+   * whose daub then silently merges into that pre-existing Face Set instead of forming a new one.
+   * Raising every new allocation to this floor is what the gesture, trim, expand and "create Face
+   * Set" operators already do via #find_shared_next_available_id; this brings brush strokes in
+   * line.
+   *
+   * 0 => not computed: a single-object stroke, or a brush that allocates no Face Set ID (the scan
+   * is O(total faces), so it is not paid by strokes that cannot need it).
+   */
+  int shared_next_face_set_id = 0;
+
+  /**
+   * Shared (not owned solely by this object) in a multi-object stroke: every object's #StrokeCache
+   * points at the SAME instance, built once from the primary (under-cursor) object's mesh in
+   * #SculptPaintStroke::stroke_cache_init. This is what makes the same texture-sampled color
+   * resolve to the same Face Set id on every mesh in the stroke -- an independent instance per
+   * object (the single-object shape) would let each mesh allocate its own id for what should be one
+   * shared assignment, exactly the #paint_face_set divergence bug this mirrors the fix for. */
+  std::shared_ptr<face_set::FaceSetColorStrokeCache> face_set_color_cache;
 
   /* The symmetry pass we are currently on between 0 and 7. */
   ePaintSymmetryFlags mirror_symmetry_pass = ePaintSymmetryFlags(0);
@@ -997,6 +1029,13 @@ void sculpt_apply_texture(const SculptSession &ss,
                           float *r_value,
                           float4 &r_rgba);
 
+/** Sample face_set_color_mtex RGB at brush_point; returns false if no texture. */
+bool sculpt_sample_face_set_color_texture(const SculptSession &ss,
+                                          const Brush &brush,
+                                          const float brush_point[3],
+                                          int thread_id,
+                                          float r_rgb[3]);
+
 /**
  * Calculates the vertex offset for a single vertex depending on the brush setting rgb as vector
  * displacement.
@@ -1236,11 +1275,17 @@ void SCULPT_OT_face_set_change_visibility(wmOperatorType *ot);
 void SCULPT_OT_face_sets_init(wmOperatorType *ot);
 void SCULPT_OT_face_sets_create(wmOperatorType *ot);
 void SCULPT_OT_face_sets_edit(wmOperatorType *ot);
+void SCULPT_OT_face_set_clear_all_custom_colors(wmOperatorType *ot);
+void SCULPT_OT_face_set_colors_flip(wmOperatorType *ot);
+void SCULPT_OT_face_set_color_texture_open(wmOperatorType *ot);
+void SCULPT_OT_face_set_draw_mode_toggle(wmOperatorType *ot);
 
 void SCULPT_OT_face_set_lasso_gesture(wmOperatorType *ot);
 void SCULPT_OT_face_set_box_gesture(wmOperatorType *ot);
 void SCULPT_OT_face_set_line_gesture(wmOperatorType *ot);
 void SCULPT_OT_face_set_polyline_gesture(wmOperatorType *ot);
+
+void SCULPT_OT_sample_face_set_id(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint::face_set
 

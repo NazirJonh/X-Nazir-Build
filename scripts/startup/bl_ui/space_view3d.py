@@ -90,7 +90,29 @@ class VIEW3D_HT_tool_header(Header):
         if draw_fn is not None:
             is_valid_context = draw_fn(context, layout, tool)
 
+        _FACE_SET_TEXTURE_BRUSH_TYPES = {
+            'DRAW',
+            'CLAY',
+            'CLAY_STRIPS',
+            'CREASE',
+            'BLOB',
+            'INFLATE',
+            'SMOOTH',
+            'PINCH',
+            'DRAW_SHARP',
+            'MULTIPLANE_SCRAPE',
+        }
+
         def draw_3d_brush_settings(layout, tool_mode):
+            if tool_mode == 'SCULPT':
+                sculpt = context.tool_settings.sculpt
+                if sculpt and sculpt.brush:
+                    brush_type = sculpt.brush.sculpt_brush_type
+                    if brush_type == 'DRAW_FACE_SETS':
+                        layout.popover("VIEW3D_PT_tools_brush_face_set_settings", text="Face Sets")
+                    elif brush_type in _FACE_SET_TEXTURE_BRUSH_TYPES:
+                        layout.popover("VIEW3D_PT_tools_brush_face_set_texture", text="Face Sets")
+
             layout.popover("VIEW3D_PT_tools_brush_settings_advanced", text="Brush")
             if tool_mode != 'PAINT_WEIGHT':
                 layout.popover("VIEW3D_PT_tools_brush_texture")
@@ -272,6 +294,30 @@ class _draw_tool_settings_context_mode:
 
         if brush is None:
             return False
+
+        if brush.sculpt_brush_type == 'DRAW_FACE_SETS':
+            is_custom = (brush.face_set_draw_mode == 'CUSTOM')
+            row = layout.row(align=True)
+            row.ui_units_x = 4.8
+
+            wm = context.window_manager
+            use_unified = getattr(wm, 'use_unified_face_set_color', False)
+            color_owner = wm if use_unified else brush
+            primary_prop = "unified_face_set_color" if use_unified else "face_set_color"
+            secondary_prop = "unified_face_set_secondary_color" if use_unified else "face_set_secondary_color"
+
+            sub = row.row(align=True)
+            sub.active = is_custom
+            sub.prop(color_owner, primary_prop, text="")
+            sub.prop(color_owner, secondary_prop, text="")
+
+            # Toggle button remains outside 'sub' so it's always active.
+            row.operator(
+                "sculpt.face_set_draw_mode_toggle",
+                text="",
+                icon='EVENT_R',
+                depress=(not is_custom),
+            )
 
         capabilities = brush.sculpt_capabilities
 
@@ -4074,6 +4120,10 @@ class VIEW3D_MT_face_sets(Menu):
         layout.separator()
 
         props = layout.operator("sculpt.face_sets_randomize_colors", text="Randomize Colors")
+
+        layout.separator()
+
+        layout.operator("sculpt.face_set_clear_all_custom_colors", text="Clear All Colors")
 
         layout.template_node_operator_asset_menu_items(catalog_path=self.bl_label)
 

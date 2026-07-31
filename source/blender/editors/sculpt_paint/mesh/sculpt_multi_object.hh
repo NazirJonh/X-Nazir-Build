@@ -121,6 +121,24 @@ struct SharedStrokeStateSnapshot {
    * The secondary will allocate one itself; this case should not normally happen during the
    * first stroke step if the brush is engaged, but is allowed for completeness. */
   int painted_face_set_id = face_set_none_id;
+  int painted_face_set_secondary_id = face_set_none_id;
+  /**
+   * Custom overlay colors registered for the two IDs above in the PRIMARY object's mesh.
+   *
+   * The IDs are shared across the whole stroke, but #Mesh.face_set_colors is per-mesh: a secondary
+   * that only receives the ID writes faces for a Face Set its own table knows nothing about, and
+   * the overlay falls back to the pseudo-random hue derived from the ID. That is the "same brush
+   * color on the object under the cursor, similar-but-wrong color on the other one" symptom in
+   * Custom mode. Carrying the color lets #propagate_shared_stroke_state install it on every
+   * secondary mesh before that mesh's brush action writes any face, mirroring what
+   * #FaceSetColorStrokeCache::ensure_face_set_id_for_quant_color already does for the
+   * Color-from-Texture path.
+   *
+   * `std::nullopt` => the ID has no custom color on the primary (Random mode, or an ID sampled
+   * from geometry that never had one); the secondary's table is then left untouched.
+   */
+  std::optional<float3> painted_face_set_color;
+  std::optional<float3> painted_face_set_secondary_color;
   /**
    * The primary object's #StrokeCache.sculpt_normal for this step, in WORLD space.
    *

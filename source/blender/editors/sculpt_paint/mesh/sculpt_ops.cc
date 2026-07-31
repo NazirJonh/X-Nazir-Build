@@ -267,7 +267,7 @@ static wmOperatorStatus symmetrize_exec(bContext *C, wmOperator *op)
        * are logged as added (as opposed to attempting to store just the
        * parts that symmetrize modifies). */
       undo::push_begin(scene, ob, op);
-      undo::push_node(depsgraph, ob, nullptr, undo::Type::Geometry);
+      undo::push_node_special(depsgraph, ob, undo::Type::Geometry);
       BM_log_before_all_removed(ss.bm, ss.bm_log);
 
       BM_mesh_toolflags_set(ss.bm, true);
@@ -571,7 +571,7 @@ void object_sculpt_mode_enter(Main &bmain,
       }
       dyntopo::enable_ex(bmain, depsgraph, ob);
       if (has_undo) {
-        undo::push_node(depsgraph, ob, nullptr, undo::Type::DyntopoBegin);
+        undo::push_node_special(depsgraph, ob, undo::Type::DyntopoBegin);
         undo::push_end(ob);
       }
     }
@@ -651,6 +651,12 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
     /* Store so we know to re-enable when entering sculpt mode. */
     mesh->flag |= ME_SCULPT_DYNAMIC_TOPOLOGY;
   }
+
+  /* Custom Face Set colors for Face Sets that no longer exist are kept while sculpting, so that
+   * re-painting the same color maps back to the same ID across undo. Leaving sculpt mode is a
+   * natural session boundary at which to drop them, keeping saved files from accumulating
+   * unreachable entries. */
+  BKE_paint_face_set_custom_colors_remove_unused(mesh);
 
   /* Leave sculpt mode. */
   ob.mode &= ~mode_flag;
@@ -1761,7 +1767,7 @@ static wmOperatorStatus mask_from_cavity_exec(bContext *C, wmOperator *op)
   }
 
   undo::push_begin(scene, ob, op);
-  undo::push_nodes(*depsgraph, ob, node_mask, undo::Type::Mask);
+  undo::push_nodes(*depsgraph, ob, node_mask, undo::NodeDataFlag::Mask);
 
   automasking->calc_cavity_factor(*depsgraph, ob, node_mask);
   apply_mask_from_settings(*depsgraph, ob, pbvh, node_mask, *automasking, mode, factor);
@@ -1959,7 +1965,7 @@ static wmOperatorStatus mask_from_boundary_exec(bContext *C, wmOperator *op)
   }
 
   undo::push_begin(scene, ob, op);
-  undo::push_nodes(*depsgraph, ob, node_mask, undo::Type::Mask);
+  undo::push_nodes(*depsgraph, ob, node_mask, undo::NodeDataFlag::Mask);
 
   apply_mask_from_settings(*depsgraph, ob, pbvh, node_mask, *automasking, mode, factor);
 
@@ -2068,11 +2074,16 @@ void operatortypes_sculpt()
   WM_operatortype_append(face_set::SCULPT_OT_face_sets_randomize_colors);
   WM_operatortype_append(face_set::SCULPT_OT_face_sets_init);
   WM_operatortype_append(face_set::SCULPT_OT_face_sets_edit);
+  WM_operatortype_append(face_set::SCULPT_OT_face_set_clear_all_custom_colors);
+  WM_operatortype_append(face_set::SCULPT_OT_face_set_colors_flip);
+  WM_operatortype_append(face_set::SCULPT_OT_face_set_color_texture_open);
+  WM_operatortype_append(face_set::SCULPT_OT_face_set_draw_mode_toggle);
   WM_operatortype_append(cloth::SCULPT_OT_cloth_filter);
   WM_operatortype_append(face_set::SCULPT_OT_face_set_lasso_gesture);
   WM_operatortype_append(face_set::SCULPT_OT_face_set_box_gesture);
   WM_operatortype_append(face_set::SCULPT_OT_face_set_line_gesture);
   WM_operatortype_append(face_set::SCULPT_OT_face_set_polyline_gesture);
+  WM_operatortype_append(face_set::SCULPT_OT_sample_face_set_id);
   WM_operatortype_append(trim::SCULPT_OT_trim_box_gesture);
   WM_operatortype_append(trim::SCULPT_OT_trim_lasso_gesture);
   WM_operatortype_append(trim::SCULPT_OT_trim_line_gesture);

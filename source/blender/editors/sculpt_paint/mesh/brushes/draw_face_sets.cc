@@ -7,23 +7,33 @@
 #include "editors/sculpt_paint/mesh/sculpt_automask.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_scene_types.h"
 
+#include "BKE_brush.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_math_base.hh"
+#include "BLI_task.h"
 #include "BLI_task.hh"
 
 #include "PRF_profile.hh"
 
+#include "editors/sculpt_paint/mesh/sculpt_color.hh"
 #include "editors/sculpt_paint/mesh/sculpt_face_set.hh"
 #include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 #include "editors/sculpt_paint/mesh/sculpt_undo.hh"
 
 #include "ED_sculpt.hh"
+
+#include "DEG_depsgraph.hh"
+
+#include "WM_api.hh"
+#include "WM_types.hh"
 
 #include "bmesh.hh"
 
@@ -155,7 +165,7 @@ static void do_draw_face_sets_brush_mesh(const Depsgraph &depsgraph,
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Span<float3> positions_eval = bke::pbvh::vert_positions_eval(depsgraph, object);
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::FaceSet);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::FaceSet);
 
   bke::SpanAttributeWriter<int> face_sets = face_set::ensure_face_sets_mesh(
       *id_cast<Mesh *>(object.data));
@@ -165,7 +175,6 @@ static void do_draw_face_sets_brush_mesh(const Depsgraph &depsgraph,
   node_mask.foreach_index(
       [&](const int i) {
         MeshLocalData &tls = all_tls.local();
-        const Span<int> face_indices = nodes[i].faces();
         calc_faces(depsgraph,
                    object,
                    brush,
@@ -173,7 +182,7 @@ static void do_draw_face_sets_brush_mesh(const Depsgraph &depsgraph,
                    ss.cache->paint_face_set,
                    positions_eval,
                    nodes[i],
-                   face_indices,
+                   nodes[i].faces(),
                    tls,
                    face_sets.span);
       },
@@ -246,7 +255,7 @@ static void do_draw_face_sets_brush_grids(const Depsgraph &depsgraph,
   SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::FaceSet);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::FaceSet);
 
   bke::SpanAttributeWriter<int> face_sets = face_set::ensure_face_sets_mesh(
       *id_cast<Mesh *>(object.data));
@@ -334,7 +343,7 @@ static void do_draw_face_sets_brush_bmesh(const Depsgraph &depsgraph,
   SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
 
-  undo::push_nodes(depsgraph, object, node_mask, undo::Type::FaceSet);
+  undo::push_nodes(depsgraph, object, node_mask, undo::NodeDataFlag::FaceSet);
 
   const int cd_offset = face_set::ensure_face_sets_bmesh(object);
 
@@ -358,27 +367,32 @@ static void do_draw_face_sets_brush_bmesh(const Depsgraph &depsgraph,
 }  // namespace draw_face_sets_cc
 
 void do_draw_face_sets_brush(const Depsgraph &depsgraph,
-                             const Sculpt &sd,
+                             Sculpt &sd,
                              Object &object,
                              const IndexMask &node_mask)
 {
   PRF_scope(ProfileCategory::Editor);
-  const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
+  Brush &brush = *BKE_paint_brush(&sd.paint);
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const bool supports_texture_data_modes = pbvh.type() != bke::pbvh::Type::BMesh;
 
-  if (object.runtime->sculpt_session->cache->paint_face_set == face_set_none_id) {
-    if (object.runtime->sculpt_session->cache->toggle_settings.invert) {
-      /* When inverting the brush, pick the paint face mask ID from the mesh. */
-      object.runtime->sculpt_session->cache->paint_face_set = face_set::active_face_set_get(
-          object);
-    }
-    else {
-      /* By default, create a new Face Sets. */
-      object.runtime->sculpt_session->cache->paint_face_set = face_set::find_next_available_id(
-          object);
-    }
+  /* The texture-as-data Face Set modes share a single implementation with the generic
+   * (non-Draw-Face-Sets) brush path in #face_set, dispatched internally by pbvh type. BMesh falls
+   * through to normal drawing until dyntopo is supported (see the early return in
+   * #apply_from_color_texture). */
+  if (supports_texture_data_modes && face_set::brush_texture_data_mode_is_alpha(brush)) {
+    face_set::apply_from_texture(depsgraph, object, brush, node_mask);
+    return;
+  }
+  if (supports_texture_data_modes && face_set::brush_uses_color_texture(brush)) {
+    face_set::apply_from_color_texture(depsgraph, object, brush, node_mask);
+    return;
   }
 
-  switch (bke::object::pbvh_get(object)->type()) {
+  /* Normal Face Set drawing paints a single resolved ID. */
+  face_set::ensure_stroke_face_set(object, brush);
+
+  switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh:
       do_draw_face_sets_brush_mesh(depsgraph, object, brush, node_mask);
       break;

@@ -779,7 +779,7 @@ static void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &pa
    * sentence, and neither half reads as a sentence on its own. */
   status.item(patch.active_item().params.swap_axis ? IFACE_("Swap Texture Axis (now U)") :
                                        IFACE_("Swap Texture Axis (now V)"),
-              ICON_EVENT_S);
+              ICON_EVENT_Y);
   status.item(curve_patch_is_cyclic(patch) ? IFACE_("Open Curve") : IFACE_("Close Curve"),
               ICON_EVENT_C);
   /* Reseed has no shortcut -- this modal has no free key left -- so advertise the route that does
@@ -1636,10 +1636,12 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         curve_patch_toggle_cyclic(*C, ob, patch);
       }
       break;
-    case EVT_SKEY:
+    case EVT_YKEY:
       /* Deliberately NOT Tab, which this used to answer to as well: Tab belongs to the mode toggle,
        * and swallowing it left no way to leave Sculpt Mode for the whole session. X is not an
-       * option either -- away from the curve it swaps brush colors (see `EVT_XKEY` above). */
+       * option either -- away from the curve it swaps brush colors (see `EVT_XKEY` above). S is not
+       * an option either -- this modal runs over the viewport and would swallow the S of Ctrl+S /
+       * Cmd+S save. */
       if (event->val == KM_PRESS) {
         bke::CurvePatchParams &params = patch.active_item().params;
         params.swap_axis = !params.swap_axis;

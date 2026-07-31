@@ -493,6 +493,9 @@ void curve_patch_finish_commit(const Scene &scene,
  * repaint, and tags the ID itself instead. */
 void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchSession &session);
 
+/** Plane the patch is projected onto, fitted to the control curve itself. */
+float3 curve_patch_plane_normal_from_curve(const bke::CurvesGeometry &curve);
+
 /**
  * Publish a Curve Patch session right after a `BRUSH_STROKE_CURVE_PATCH` anchor stroke finishes.
  * Takes over ownership of the just-finished stroke's `SculptSession::cache`; the caller must not
@@ -509,6 +512,10 @@ void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchSession 
  * when the patch is committed. Leaving a transaction open for the modal's whole lifetime is what
  * let any unrelated undo push in the application adopt or free it. See `paint_curve_patch_edit.cc`
  * (Stage 04) for the modal editor implementation.
+ *
+ * When the brush already owns a paint curve with at least two points on its active spline (as left
+ * behind by Stroke Method: Curve), that curve is adopted as the control curve instead of seeding a
+ * fresh two-point segment from the anchor drag.
  */
 bool curve_patch_start_from_anchor(const Depsgraph &depsgraph,
                                    Object &ob,

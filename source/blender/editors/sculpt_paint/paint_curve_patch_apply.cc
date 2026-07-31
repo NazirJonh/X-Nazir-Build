@@ -272,29 +272,7 @@ bool curve_patch_apply(const Scene &scene,
  * \{ */
 
 /* Plane the patch is projected onto, fitted to the control curve itself.
- *
- * Newell's method over the control points, treated as a closed loop: it is exact for a planar
- * curve, degrades gracefully for a nearly planar one, and -- unlike anything derived from the
- * view -- gives the same answer in `--background` as it does with a viewport open. A straight
- * curve spans no plane at all and falls back to the object's own Z, which costs nothing on a Mesh:
- * there the surface snapshot supplies real per-point normals and `plane_normal` is only consulted
- * where that snapshot misses. */
-static float3 curve_patch_plane_normal_from_curve(const bke::CurvesGeometry &curve)
-{
-  const Span<float3> positions = curve.positions();
-  float3 normal(0.0f);
-  for (const int64_t i : positions.index_range()) {
-    const float3 &a = positions[i];
-    const float3 &b = positions[(i + 1) % positions.size()];
-    normal.x += (a.y - b.y) * (a.z + b.z);
-    normal.y += (a.z - b.z) * (a.x + b.x);
-    normal.z += (a.x - b.x) * (a.y + b.y);
-  }
-  if (math::length_squared(normal) < 1e-12f) {
-    return float3(0.0f, 0.0f, 1.0f);
-  }
-  return math::normalize(normal);
-}
+ * Implemented in `paint_curve_patch_params.cc` as #curve_patch_plane_normal_from_curve. */
 
 static float3 curve_patch_curve_center(const bke::CurvesGeometry &curve)
 {

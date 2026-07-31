@@ -24,7 +24,11 @@
 /* Must follow BLI_math_vector.hh: length_parameterize.hh pulls only scalar math (BLI_math_base.hh),
  * and MSVC resolves the vector `math::distance` used by accumulate_lengths<float2/float3> at this
  * header's definition point -- so the vector overload has to be visible first. */
+#include "BLI_array.hh"
+#include "BLI_index_range.hh"
 #include "BLI_length_parameterize.hh"
+#include "BLI_math_geom.hh"
+#include "BLI_stack.hh"
 #include "BLI_utildefines.h"
 
 #include "DNA_object_types.h"
@@ -77,6 +81,125 @@ static void extrapolate_pressures(float base_p,
   for (int i = 0; i < n_points; i++) {
     const int steps = farthest_first ? (n_points - i) : (i + 1);
     r_pressures.append(std::clamp(base_p * powf(ratio, float(steps)), 0.01f, 1.0f));
+  }
+}
+
+/** Project onto the roll stroke's frozen projection plane (see `roll_proj_normal_`). */
+static float3 roll_point_in_projection_plane(const float3 &point,
+                                             const float3 &plane_origin,
+                                             const float3 &plane_normal)
+{
+  return point - plane_normal * math::dot(point - plane_origin, plane_normal);
+}
+
+static float roll_point_segment_distance(const float3 &point,
+                                         const float3 &seg_a,
+                                         const float3 &seg_b,
+                                         const float3 &plane_origin,
+                                         const float3 &plane_normal)
+{
+  if (math::length_squared(plane_normal) > 1e-12f) {
+    const float3 p = roll_point_in_projection_plane(point, plane_origin, plane_normal);
+    const float3 a = roll_point_in_projection_plane(seg_a, plane_origin, plane_normal);
+    const float3 b = roll_point_in_projection_plane(seg_b, plane_origin, plane_normal);
+    return math::sqrt(math::dist_squared_to_line_segment(p, a, b));
+  }
+  return math::sqrt(math::dist_squared_to_line_segment(point, seg_a, seg_b));
+}
+
+/**
+ * Ramer-Douglas-Peucker on the real stroke knots. Marks interior points that can be removed without
+ * deviating more than `epsilon` from the chord between kept neighbors. Endpoints are always kept.
+ */
+static void roll_simplify_polyline_mask(const Span<float3> positions,
+                                        const float epsilon,
+                                        const float3 &plane_origin,
+                                        const float3 &plane_normal,
+                                        MutableSpan<bool> r_keep)
+{
+  const int n = int(positions.size());
+  BLI_assert(r_keep.size() == n);
+  r_keep.fill(true);
+  if (n < 3 || epsilon <= 0.0f) {
+    return;
+  }
+
+  Array<bool> to_delete(n, false);
+  Stack<IndexRange> stack;
+  stack.push(IndexRange(n));
+
+  while (!stack.is_empty()) {
+    const IndexRange range = stack.pop();
+    if (range.size() < 3) {
+      continue;
+    }
+    const IndexRange inside = range.drop_front(1).drop_back(1);
+    float max_dist = -1.0f;
+    int max_index = -1;
+    const float3 &a = positions[range.first()];
+    const float3 &b = positions[range.last()];
+    for (const int64_t index : inside) {
+      const float dist = roll_point_segment_distance(
+          positions[index], a, b, plane_origin, plane_normal);
+      if (dist > max_dist) {
+        max_dist = dist;
+        max_index = int(index);
+      }
+    }
+    if (max_dist > epsilon) {
+      stack.push(IndexRange(range.first(), max_index - range.first() + 1));
+      stack.push(IndexRange(max_index, range.last() - max_index + 1));
+    }
+    else {
+      for (const int64_t index : inside) {
+        to_delete[index] = true;
+      }
+    }
+  }
+
+  for (const int i : IndexRange(n)) {
+    r_keep[i] = !to_delete[i];
+  }
+}
+
+/** Uniform arc-length resample when a safety cap is still exceeded after RDP. */
+static void roll_uniform_resample(const Span<float3> positions,
+                                  const Span<float> radii,
+                                  const int target_count,
+                                  Vector<float3> &r_positions,
+                                  Vector<float> &r_radii)
+{
+  BLI_assert(positions.size() == radii.size());
+  BLI_assert(target_count >= 2);
+  BLI_assert(positions.size() >= 2);
+
+  Vector<float> len(positions.size());
+  len[0] = 0.0f;
+  for (const int i : IndexRange(1, positions.size() - 1)) {
+    len[i] = len[i - 1] + math::distance(positions[i - 1], positions[i]);
+  }
+  const float total = len.last();
+
+  r_positions.clear();
+  r_radii.clear();
+  if (total < 1e-6f) {
+    r_positions.append(positions.first());
+    r_positions.append(positions.last());
+    r_radii.append(radii.first());
+    r_radii.append(radii.last());
+    return;
+  }
+
+  int seg = 0;
+  for (int k = 0; k < target_count; k++) {
+    const float s = total * float(k) / float(target_count - 1);
+    while (seg < positions.size() - 2 && len[seg + 1] < s) {
+      seg++;
+    }
+    const float seg_len = len[seg + 1] - len[seg];
+    const float t = seg_len > 1e-8f ? (s - len[seg]) / seg_len : 0.0f;
+    r_positions.append(math::interpolate(positions[seg], positions[seg + 1], t));
+    r_radii.append(math::interpolate(radii[seg], radii[seg + 1], t));
   }
 }
 
@@ -1884,20 +2007,46 @@ void PaintStroke::extract_roll_control_points(Vector<float3> &r_positions,
     return;
   }
 
-  constexpr int target = 14;
-  const int n = std::clamp(std::min(target, num_points_), 2, num_points_);
+  /* Shape-aware simplification for the Roll -> Curve Patch handoff. The old path always emitted
+   * fourteen evenly spaced knots, so a straight stroke still arrived with fourteen control points.
+   * Ramer-Douglas-Peucker keeps endpoints and corners while dropping collinear dab samples.
+   * Distance is measured in the roll projection plane so surface curvature does not inflate the
+   * count the way a raw 3D test would. */
+  const float3 plane_normal = math::length_squared(roll_proj_normal_) > 1e-12f ?
+                                  math::normalize(roll_proj_normal_) :
+                                  float3(0.0f);
+  const float scale = roll_initial_radius_ > 1e-6f ? roll_initial_radius_ :
+                                                      std::max(total * 0.05f, 1e-4f);
+  const float epsilon = scale * 0.12f;
 
-  int seg = 0;
-  for (int k = 0; k < n; k++) {
-    const float s = total * float(k) / float(n - 1);
-    while (seg < num_points_ - 2 && len[seg + 1] < s) {
-      seg++;
+  Array<bool> keep(num_points_);
+  roll_simplify_polyline_mask(pos.as_span(), epsilon, pos[0], plane_normal, keep);
+
+  Vector<float3> simplified_positions;
+  Vector<float> simplified_radii;
+  simplified_positions.reserve(num_points_);
+  simplified_radii.reserve(num_points_);
+  for (const int i : IndexRange(num_points_)) {
+    if (!keep[i]) {
+      continue;
     }
-    const float seg_len = len[seg + 1] - len[seg];
-    const float t = seg_len > 1e-8f ? (s - len[seg]) / seg_len : 0.0f;
-    r_positions.append(math::interpolate(pos[seg], pos[seg + 1], t));
-    r_radii.append(radius_from_pressure(math::interpolate(pres[seg], pres[seg + 1], t)));
+    simplified_positions.append(pos[i]);
+    simplified_radii.append(radius_from_pressure(pres[i]));
   }
+
+  /* Pathological scribbles can still exceed a sane editing budget; thin uniformly only then. */
+  constexpr int kMaxControlPoints = 48;
+  if (simplified_positions.size() > kMaxControlPoints) {
+    roll_uniform_resample(simplified_positions.as_span(),
+                          simplified_radii.as_span(),
+                          kMaxControlPoints,
+                          r_positions,
+                          r_radii);
+    return;
+  }
+
+  r_positions = simplified_positions;
+  r_radii = simplified_radii;
 }
 
 void PaintStroke::draw_debug_roll(bContext *C) const

@@ -770,54 +770,66 @@ bool curve_patch_start_from_anchor(const Depsgraph &depsgraph,
   }
 
   auto *session = MEM_new<CurvePatchSession>(__func__);
-  /* The anchor click-to-release screen distance is often just a handful of pixels -- or zero,
-   * for a plain click -- which used to seed a control curve far too short to be a useful starting
-   * shape, and its direction (the raw drag vector) did not match the brush's texture Angle at all.
-   * Instead orient the starting segment along the brush texture Angle (`MTex::rot`) and always span
-   * exactly one brush diameter along it, so every anchor stroke starts from a usable, editable
-   * two-point curve that lines up with the angle the user set in the brush's texture settings.
-   *
-   * `MTex::rot` is a screen-space rotation, so convert it into an in-plane object-space direction
-   * the same way the brush's own `calc_brush_local_mat()` does: build a screen-space unit vector at
-   * the angle, unproject it to a world-space delta at the anchor's depth, rotate that into object
-   * space, then flatten it into the anchor plane.
-   *
-   * The extra -90 degrees aligns the curve with the brush texture's own orientation: `MTex::rot`
-   * defines the texture's X (transverse) axis, whereas the curve runs along the strip's LENGTH,
-   * which is that axis rotated a quarter turn (matching `calc_brush_local_mat()`'s motion axis
-   * being the 90-degree rotation of `[cos(rot), sin(rot)]`). */
-  const float angle = brush.mtex.rot + float(M_PI_2);
-  const float screen_dir[2] = {std::cos(angle), std::sin(angle)};
-  const float3 loc_world = math::transform_point(ob.object_to_world(), cache.initial_location);
-  const float zfac = ED_view3d_calc_zfac(vc.rv3d, loc_world);
-  float3 dir_world;
-  ED_view3d_win_to_delta(vc.region, screen_dir, zfac, dir_world);
-  float3 direction = math::transform_direction(ob.world_to_object(), dir_world);
-  direction -= cache.sculpt_normal * math::dot(direction, cache.sculpt_normal);
-  if (math::length_squared(direction) > 1e-12f) {
-    direction = math::normalize(direction);
-  }
-  else {
-    /* The angle direction happened to point straight along the surface normal (a near-edge-on
-     * view): fall back to any in-plane direction so the curve is still usable. */
-    direction = math::normalize(math::cross(cache.sculpt_normal, cache.view_normal));
-    if (math::length_squared(direction) < 1e-12f) {
-      direction = float3(1.0f, 0.0f, 0.0f);
-    }
-  }
-  /* `std::array`, not a raw C array: `blender::Span` has no constructor for the latter. */
-  const std::array<float3, 2> anchor_positions = {
-      cache.initial_location - direction * cache.initial_radius,
-      cache.initial_location + direction * cache.initial_radius};
-  const std::array<float, 2> anchor_radii = {1.0f, 1.0f};
   session->patches.resize(1);
   session->active_patch = 0;
-  session->patches[0].control_curve = curve_patch_control_curve_from_points(
-      anchor_positions, anchor_radii, /*cyclic=*/false);
+
+  float3 plane_normal = cache.sculpt_normal;
+  if (const PaintCurve *paint_curve = brush.paint_curve) {
+    bke::CurvesGeometry control_curve = ED_paintcurve_control_curve_for_patch(*paint_curve, -1);
+    if (control_curve.points_num() >= 2) {
+      session->patches[0].control_curve = std::move(control_curve);
+      plane_normal = curve_patch_plane_normal_from_curve(session->patches[0].control_curve);
+    }
+  }
+
+  if (session->patches[0].control_curve.points_num() < 2) {
+    /* The anchor click-to-release screen distance is often just a handful of pixels -- or zero,
+     * for a plain click -- which used to seed a control curve far too short to be a useful starting
+     * shape, and its direction (the raw drag vector) did not match the brush's texture Angle at all.
+     * Instead orient the starting segment along the brush texture Angle (`MTex::rot`) and always span
+     * exactly one brush diameter along it, so every anchor stroke starts from a usable, editable
+     * two-point curve that lines up with the angle the user set in the brush's texture settings.
+     *
+     * `MTex::rot` is a screen-space rotation, so convert it into an in-plane object-space direction
+     * the same way the brush's own `calc_brush_local_mat()` does: build a screen-space unit vector at
+     * the angle, unproject it to a world-space delta at the anchor's depth, rotate that into object
+     * space, then flatten it into the anchor plane.
+     *
+     * The extra -90 degrees aligns the curve with the brush texture's own orientation: `MTex::rot`
+     * defines the texture's X (transverse) axis, whereas the curve runs along the strip's LENGTH,
+     * which is that axis rotated a quarter turn (matching `calc_brush_local_mat()`'s motion axis
+     * being the 90-degree rotation of `[cos(rot), sin(rot)]`). */
+    const float angle = brush.mtex.rot + float(M_PI_2);
+    const float screen_dir[2] = {std::cos(angle), std::sin(angle)};
+    const float3 loc_world = math::transform_point(ob.object_to_world(), cache.initial_location);
+    const float zfac = ED_view3d_calc_zfac(vc.rv3d, loc_world);
+    float3 dir_world;
+    ED_view3d_win_to_delta(vc.region, screen_dir, zfac, dir_world);
+    float3 direction = math::transform_direction(ob.world_to_object(), dir_world);
+    direction -= cache.sculpt_normal * math::dot(direction, cache.sculpt_normal);
+    if (math::length_squared(direction) > 1e-12f) {
+      direction = math::normalize(direction);
+    }
+    else {
+      /* The angle direction happened to point straight along the surface normal (a near-edge-on
+       * view): fall back to any in-plane direction so the curve is still usable. */
+      direction = math::normalize(math::cross(cache.sculpt_normal, cache.view_normal));
+      if (math::length_squared(direction) < 1e-12f) {
+        direction = float3(1.0f, 0.0f, 0.0f);
+      }
+    }
+    /* `std::array`, not a raw C array: `blender::Span` has no constructor for the latter. */
+    const std::array<float3, 2> anchor_positions = {
+        cache.initial_location - direction * cache.initial_radius,
+        cache.initial_location + direction * cache.initial_radius};
+    const std::array<float, 2> anchor_radii = {1.0f, 1.0f};
+    session->patches[0].control_curve = curve_patch_control_curve_from_points(
+        anchor_positions, anchor_radii, /*cyclic=*/false);
+  }
 
   ToolSettings *tool_settings = CTX_data_tool_settings(vc.C);
   return curve_patch_begin_editing(
-      ob, brush, vc, session, cache.sculpt_normal, cache.initial_radius, tool_settings->paint_mode);
+      ob, brush, vc, session, plane_normal, cache.initial_radius, tool_settings->paint_mode);
 }
 
 bool roll_start_curve_patch_from_stroke(const Depsgraph &depsgraph,

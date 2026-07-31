@@ -1120,11 +1120,20 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
     return;
   }
 
-  /* Suppress brush cursor for the curves edit tool; the overlay engine draws the cursor there. */
+  /* Suppress the default brush cursor (size circle and texture/strength overlays) whenever the
+   * paint-curve overlay engine is responsible for feedback -- Curve, Curve Patch, Roll, and the
+   * standalone Curve Edit tool. Without this, switching from Curve to Curve Patch leaves both the
+   * paint-curve handles and the brush overlays visible at once. */
+  const ScrArea *area = CTX_wm_area(C);
+  const bool is_space_v3d = area && area->spacetype == SPACE_VIEW3D;
+  const bool is_space_image = area && area->spacetype == SPACE_IMAGE;
   const bToolRef *tref = WM_toolsystem_ref_from_context(C);
-  if (tref && ed::sculpt_paint::ED_paint_curve_is_curves_edit_tool(tref->idname)) {
+  if (ed::sculpt_paint::ED_paint_curve_overlay_is_relevant(
+          pcontext.brush, tref ? tref->idname : nullptr, is_space_v3d, is_space_image))
+  {
     return;
   }
+
   if (paint_cursor_is_3d_view_navigating(pcontext)) {
     /* Still draw stencil while navigating. */
     paint_cursor_check_and_draw_alpha_overlays(pcontext);

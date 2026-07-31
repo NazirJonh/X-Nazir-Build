@@ -23,7 +23,9 @@
 #include "BLI_assert.h"
 #include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
 
 #include "paint_curve_patch_session.hh"
 
@@ -82,6 +84,26 @@ static bke::CurvePatchStampProjection stamp_projection_from_dna(const int dna_va
   }
   BLI_assert_unreachable();
   return bke::CurvePatchStampProjection::Curve;
+}
+
+float3 curve_patch_plane_normal_from_curve(const bke::CurvesGeometry &curve)
+{
+  /* Newell's method over the control points, treated as a closed loop: exact for a planar curve,
+   * degrades gracefully for a nearly planar one, and view-independent. A straight curve spans no
+   * plane at all and falls back to the object's own +Z. */
+  const Span<float3> positions = curve.positions();
+  float3 normal(0.0f);
+  for (const int64_t i : positions.index_range()) {
+    const float3 &a = positions[i];
+    const float3 &b = positions[(i + 1) % positions.size()];
+    normal.x += (a.y - b.y) * (a.z + b.z);
+    normal.y += (a.z - b.z) * (a.x + b.x);
+    normal.z += (a.x - b.x) * (a.y + b.y);
+  }
+  if (math::length_squared(normal) < 1e-12f) {
+    return float3(0.0f, 0.0f, 1.0f);
+  }
+  return math::normalize(normal);
 }
 
 bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,

@@ -415,9 +415,13 @@ static void initRotation(TransInfo *t, wmOperator * /*op*/)
   t->num.unit_type[0] = B_UNIT_ROTATION;
 
   if (t->flag & T_2D_EDIT) {
-    /* Paint curves in the 3D viewport store positions in 3D and support axis constraints.
-     * Other 2D-edit contexts have no depth axis. */
-    if (!((t->options & CTX_PAINT_CURVE) && t->spacetype == SPACE_VIEW3D)) {
+    /* 3D paint curves in the 3D viewport store positions in 3D and support axis constraints.
+     * 2D (screen-space) paint curves are flat, like other 2D-edit contexts, and have no
+     * depth axis to constrain to: #flushTransPaintCurve always rotates them in the screen
+     * plane regardless of any axis constraint. */
+    if (!((t->options & CTX_PAINT_CURVE) && t->spacetype == SPACE_VIEW3D &&
+          paintcurve_transform_use_3d_viewport(t)))
+    {
       t->flag |= T_NO_CONSTRAINT;
     }
   }

@@ -37,6 +37,7 @@ struct PaintCurveRadiusHandleDrawData {
   float2 end;
   float2 perp;
   float4 color;
+  bool hovered = false;
 };
 
 struct PaintCurveHandleDrawData {
@@ -50,6 +51,7 @@ struct PaintCurveHandleDrawData {
   bool selected_left;
   bool selected_right;
   bool selected_center;
+  bool hovered_center = false;
 };
 
 struct PaintCurveSegmentDrawData {

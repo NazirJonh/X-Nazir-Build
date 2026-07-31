@@ -1058,10 +1058,13 @@ static bool transdata_center_global_get(const TransDataContainer *tc,
 void calculateCenterMedian(TransInfo *t, float r_center[3])
 {
   /* 3D paint curves use a true world-space median so that t->center_global is correct for
-   * axis-constraint line display (drawConstraint) during both rotation and translation. */
+   * axis-constraint line display (drawConstraint) during both rotation and translation.
+   * 2D (screen-space) paint curves must skip this: their handle positions differ from the
+   * point's pivot, so a raw position average would drift away from the pivot diamond. */
   const bool is_3d_paint_curve_3d_transform = (t->options & CTX_PAINT_CURVE) &&
                                                (t->spacetype == SPACE_VIEW3D) &&
-                                               ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION);
+                                               ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION) &&
+                                               paintcurve_transform_use_3d_viewport(t);
   if (is_3d_paint_curve_3d_transform) {
     paintcurve_center_median_3d_get(t, r_center);
     return;
@@ -1097,7 +1100,8 @@ void calculateCenterBound(TransInfo *t, float r_center[3])
 {
   const bool is_3d_paint_curve_3d_transform = (t->options & CTX_PAINT_CURVE) &&
                                                (t->spacetype == SPACE_VIEW3D) &&
-                                               ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION);
+                                               ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION) &&
+                                               paintcurve_transform_use_3d_viewport(t);
   if (is_3d_paint_curve_3d_transform) {
     paintcurve_center_median_3d_get(t, r_center);
     return;
@@ -1168,31 +1172,39 @@ bool calculateCenterActive(TransInfo *t, bool select_only, float r_center[3])
       return false;
     }
     const float3 obj_co = geom.positions()[add_idx];
-    BKE_view_layer_synced_ensure(*t->bmain, t->scene, t->view_layer);
-    const Object *ob = BKE_view_layer_active_object_get(t->view_layer);
-    float world_co[3];
-    if (ob) {
-      mul_v3_m4v3(world_co, ob->object_to_world().ptr(), obj_co);
-    }
-    else {
-      copy_v3_v3(world_co, obj_co);
-    }
-    const bool is_3d_paint_curve_rotation = (t->options & CTX_PAINT_CURVE) &&
-                                             (t->spacetype == SPACE_VIEW3D) &&
-                                             (t->mode == TFM_ROTATION);
-    if (is_3d_paint_curve_rotation) {
-      copy_v3_v3(r_center, world_co);
-    }
-    else if (t->region) {
-      float screen_co[2];
-      ED_view3d_project_v2(t->region, world_co, screen_co);
-      r_center[0] = screen_co[0];
-      r_center[1] = screen_co[1];
+    if (!pc->use_3d_space) {
+      /* Viewport-bound curves store region pixel coordinates in geometry. */
+      r_center[0] = obj_co.x;
+      r_center[1] = obj_co.y;
       r_center[2] = 0.0f;
     }
     else {
-      copy_v3_v3(r_center, world_co);
-      r_center[2] = 0.0f;
+      BKE_view_layer_synced_ensure(*t->bmain, t->scene, t->view_layer);
+      const Object *ob = BKE_view_layer_active_object_get(t->view_layer);
+      float world_co[3];
+      if (ob) {
+        mul_v3_m4v3(world_co, ob->object_to_world().ptr(), obj_co);
+      }
+      else {
+        copy_v3_v3(world_co, obj_co);
+      }
+      const bool is_3d_paint_curve_rotation = (t->options & CTX_PAINT_CURVE) &&
+                                               (t->spacetype == SPACE_VIEW3D) &&
+                                               (t->mode == TFM_ROTATION);
+      if (is_3d_paint_curve_rotation) {
+        copy_v3_v3(r_center, world_co);
+      }
+      else if (t->region) {
+        float screen_co[2];
+        ED_view3d_project_v2(t->region, world_co, screen_co);
+        r_center[0] = screen_co[0];
+        r_center[1] = screen_co[1];
+        r_center[2] = 0.0f;
+      }
+      else {
+        copy_v3_v3(r_center, world_co);
+        r_center[2] = 0.0f;
+      }
     }
     BKE_brush_tag_unsaved_changes(br);
     return true;

@@ -380,6 +380,8 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
   ui::theme::get_color_type_4fv(TH_WIRE, SPACE_VIEW3D, wire_col);
   ui::theme::get_color_type_4fv(TH_EDGE_SELECT, SPACE_VIEW3D, radius_col);
 
+  int hover_point_index = -1;
+  bool radius_handle_hovered = false;
   int64_t hover_segment_index = -1;
   int hover_point_a = -1;
   int hover_point_b = -1;
@@ -413,6 +415,8 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
   }
 
   if (show_radius_handles) {
+    float hover_radius_dist = PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS;
+    int hover_radius_handle_index = -1;
     for (const int i : screen_points.index_range()) {
       if (!should_show_radius_handle_draw_from_geometry(sculpt, geometry, screen_points, i)) {
         continue;
@@ -425,7 +429,20 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
       rd.end = handle_screen.end;
       rd.perp = handle_screen.perp;
       copy_v4_v4(rd.color, radius_col);
+      if (compute_segment_hover) {
+        const float mval[2] = {mval_region.x, mval_region.y};
+        const float end[2] = {rd.end.x, rd.end.y};
+        const float dist = len_v2v2(mval, end);
+        if (dist < hover_radius_dist) {
+          hover_radius_dist = dist;
+          hover_radius_handle_index = r_out.radius_handles.size();
+        }
+      }
       r_out.radius_handles.append(rd);
+    }
+    if (hover_radius_handle_index >= 0) {
+      r_out.radius_handles[hover_radius_handle_index].hovered = true;
+      radius_handle_hovered = true;
     }
   }
 
@@ -460,7 +477,21 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
     r_out.segments.append(std::move(seg));
   });
 
-  if (hover_segment_index >= 0 && compute_segment_hover) {
+  if (compute_segment_hover) {
+    const float mval[2] = {mval_region.x, mval_region.y};
+    char point_selflag = 0;
+    hover_point_index = paintcurve_find_in_screen_points(screen_points.as_span(),
+                                                         mval,
+                                                         false,
+                                                         PAINT_CURVE_HOVER_THRESHOLD,
+                                                         &point_selflag);
+    if (hover_point_index >= 0 && point_selflag == SEL_F2 && !radius_handle_hovered) {
+      r_out.points[hover_point_index].hovered_center = true;
+    }
+  }
+
+  if (hover_segment_index >= 0 && compute_segment_hover && hover_point_index < 0 &&
+      !radius_handle_hovered) {
     r_out.segments[hover_segment_index].hovered = true;
   }
   else if (slide_segment_draw_index >= 0) {

@@ -347,7 +347,29 @@ static void flushTransPaintCurve(TransInfo *t)
     const int hi = tdpc->handle_index;
 
     if (screen_space) {
-      const float3 new_obj(td2d->loc[0], td2d->loc[1], 0.0f);
+      float3 new_obj;
+      if (t->mode == TFM_ROTATION) {
+        /* Recompute a pure 2D screen-plane rotation directly from the resolved angle instead of
+         * trusting `td2d->loc` (as produced by the generic #ElementRotation_ex path). The
+         * generic rotate mode picks its default (unconstrained) axis from the current Transform
+         * Orientation matrix, which has no meaningful direction for flat region-pixel points, so
+         * it does not reliably land on the screen normal. Deriving the rotation from the angle
+         * value alone sidesteps that entirely and matches how the 3D-curve branch below already
+         * does it for `has_axis_constraint == false`. */
+        const TransData *td = &td_arr[i];
+        const float angle = t->values_final[0];
+        const float *center = transdata_check_local_center(t, t->around) ? td->center :
+                                                                            t->center2d;
+        const float dx = td->iloc[0] - center[0];
+        const float dy = td->iloc[1] - center[1];
+        const float cos_a = cosf(angle);
+        const float sin_a = sinf(angle);
+        new_obj = float3(
+            center[0] + dx * cos_a - dy * sin_a, center[1] + dx * sin_a + dy * cos_a, 0.0f);
+      }
+      else {
+        new_obj = float3(td2d->loc[0], td2d->loc[1], 0.0f);
+      }
       switch (hi) {
         case 0:
           handles_left[pt] = new_obj;

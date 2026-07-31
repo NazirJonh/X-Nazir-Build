@@ -575,9 +575,19 @@ class PaintCurveCursor : Overlay {
 
         /* Control point diamond. */
         {
-          const float4 cp_col = hd.selected_center ?
-                                    float4(selec_col[0], selec_col[1], selec_col[2], selec_col[3]) :
-                                    float4(vert_col[0], vert_col[1], vert_col[2], vert_col[3]);
+          const bool hovered = hd.hovered_center;
+          float4 cp_col = hd.selected_center ?
+                              float4(selec_col[0], selec_col[1], selec_col[2], selec_col[3]) :
+                              float4(vert_col[0], vert_col[1], vert_col[2], vert_col[3]);
+          if (hovered) {
+            const float hover_t = 0.65f;
+            cp_col = float4(cp_col.x + (1.0f - cp_col.x) * hover_t,
+                            cp_col.y + (1.0f - cp_col.y) * hover_t,
+                            cp_col.z + (1.0f - cp_col.z) * hover_t,
+                            1.0f);
+          }
+          const float4 inner_col = hovered ? float4(1.0f, 1.0f, 1.0f, 0.8f) :
+                                             float4(1.0f, 1.0f, 1.0f, 0.5f);
           const float2 diamond[4] = {
               {co.x - w, co.y}, {co.x, co.y + w}, {co.x + w, co.y}, {co.x, co.y - w}};
           if (gpu::Batch *b = make_line_strip_closed({diamond, 4})) {
@@ -585,7 +595,7 @@ class PaintCurveCursor : Overlay {
             ps_.push_constant("color", cp_col);
             draw_strip(b);
             ps_.push_constant("lineWidth", 1.0f);
-            ps_.push_constant("color", float4(1.0f, 1.0f, 1.0f, 0.5f));
+            ps_.push_constant("color", inner_col);
             draw_strip(b);
           }
         }
@@ -620,10 +630,19 @@ class PaintCurveCursor : Overlay {
           circle[i] = {rd.end.x + r * cosf(angle), rd.end.y + r * sinf(angle)};
         }
         if (gpu::Batch *b = make_line_strip_closed({circle, CIRCLE_SEGS})) {
+          const float4 underlay_col = rd.hovered ? float4(1.0f, 1.0f, 1.0f, 0.8f) :
+                                                   float4(1.0f, 1.0f, 1.0f, 0.5f);
+          const float hover_t = 0.65f;
+          const float4 circle_col = rd.hovered ?
+                                          float4(rd.color.x + (1.0f - rd.color.x) * hover_t,
+                                                 rd.color.y + (1.0f - rd.color.y) * hover_t,
+                                                 rd.color.z + (1.0f - rd.color.z) * hover_t,
+                                                 1.0f) :
+                                          rd.color;
           ps_.push_constant("lineWidth", 1.0f);
-          ps_.push_constant("color", float4(1.0f, 1.0f, 1.0f, 0.5f));
+          ps_.push_constant("color", underlay_col);
           draw_strip(b);
-          ps_.push_constant("color", rd.color);
+          ps_.push_constant("color", circle_col);
           draw_strip(b);
         }
       }

@@ -51,6 +51,7 @@
 
 #include "SEQ_transform.hh"
 #include "transform.hh"
+#include "transform_convert.hh"
 #include "transform_orientations.hh"
 
 namespace blender::ed::transform {
@@ -815,10 +816,21 @@ short transform_orientation_matrix_get(bContext *C,
       *t->bmain, scene, t->view_layer, v3d, rv3d, ob, obedit, orient_index, t->around, r_spacemtx);
 
   if (rv3d && (t->options & CTX_PAINT_CURVE)) {
-    if (t->mode == TFM_TRANSLATION) {
+    const bool is_2d_curve_rotation = (t->mode == TFM_ROTATION) &&
+                                      !paintcurve_transform_use_3d_viewport(t);
+    if (t->mode == TFM_TRANSLATION || is_2d_curve_rotation) {
       /* Paint curve translation applies world-space deltas directly in the flush function,
        * so constraint axes must always be world axes (X/Y/Z = identity rows).
-       * Force Global regardless of the user's current orientation setting. */
+       * Force Global regardless of the user's current orientation setting.
+       *
+       * 2D (screen-space) paint curve points are rotated as flat (x, y, 0) region-pixel
+       * vectors (#ElementRotation_ex with identity `td->mtx`), which have no meaningful world
+       * orientation at all. The identity matrix's Z column, (0, 0, 1), is the only axis that
+       * keeps such a rotation in the screen plane, so it must be forced here the same way,
+       * regardless of the user's current orientation setting, or the default (unconstrained)
+       * rotation would tilt out of the screen plane. 3D paint curves keep `r_spacemtx` in world
+       * space for #TFM_ROTATION (see the axis-constrained rotation branch in
+       * `flushTransPaintCurve`, which reads its columns directly). */
       unit_m3(r_spacemtx);
     }
     else if (t->mode != TFM_ROTATION) {

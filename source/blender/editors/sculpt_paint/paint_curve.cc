@@ -2046,17 +2046,32 @@ static void paintcurve_slide_status_clear(bContext *C)
   ED_workspace_status_text(C, nullptr);
 }
 
+/** Mouse coords relative to `region` (viewport-bound curves are stored in this space). */
+static void paintcurve_event_mval_region(const wmEvent *event,
+                                         const ARegion *region,
+                                         int r_mval[2])
+{
+  if (region) {
+    r_mval[0] = event->xy[0] - region->winrct.xmin;
+    r_mval[1] = event->xy[1] - region->winrct.ymin;
+  }
+  else {
+    r_mval[0] = event->mval[0];
+    r_mval[1] = event->mval[1];
+  }
+}
+
 static void paintcurve_point_slide_init_3d_view(PointSlideData *psd,
                                                 const ViewContext &vc,
                                                 PaintCurve *pc,
                                                 const int point_index)
 {
+  psd->vc = vc;
+  psd->use_3d_view = false;
   if (!paintcurve_uses_3d_geometry(pc) || vc.obact == nullptr) {
-    psd->use_3d_view = false;
     return;
   }
   psd->use_3d_view = true;
-  psd->vc = vc;
   copy_m4_m4(psd->ob_to_world, vc.obact->object_to_world().ptr());
   copy_m4_m4(psd->world_to_ob, vc.obact->world_to_object().ptr());
   if (point_index >= 0) {
@@ -2077,7 +2092,6 @@ static void paintcurve_apply_handle_move_2d(bke::CurvesGeometry &geom,
   MutableSpan<int8_t> types_right = geom.handle_types_right_for_write();
 
   float3 &left = paintcurve_geom_co(geom, point_index, 0);
-  float3 &center = paintcurve_geom_co(geom, point_index, 1);
   float3 &right = paintcurve_geom_co(geom, point_index, 2);
 
   const bool pivot_only = (psd->select == 1);
@@ -2111,7 +2125,12 @@ static void paintcurve_apply_handle_move_2d(bke::CurvesGeometry &geom,
       h_right = BEZIER_HANDLE_ALIGN;
     }
 
-    float2 offset(mval[0] - center.x, mval[1] - center.y);
+    /* Viewport-bound curves store screen coordinates in geometry. Rotate around the pivot
+     * captured at drag start (matches the overlay diamond at vec[1]) rather than a live center
+     * that may diverge after intermediate auto-handle updates. */
+    const float pivot_x = psd->point_initial_loc[1][0];
+    const float pivot_y = psd->point_initial_loc[1][1];
+    float2 offset(mval[0] - pivot_x, mval[1] - pivot_y);
     if (psd->snap_angle) {
       offset = paintcurve_snap_handle_offset(offset, psd->snap_angle_increment_rad);
     }
@@ -2124,11 +2143,11 @@ static void paintcurve_apply_handle_move_2d(bke::CurvesGeometry &geom,
       if (h_right == BEZIER_HANDLE_VECTOR) {
         h_left = BEZIER_HANDLE_FREE;
       }
-      left.x = center.x + offset.x;
-      left.y = center.y + offset.y;
+      left.x = pivot_x + offset.x;
+      left.y = pivot_y + offset.y;
       if (h_right == BEZIER_HANDLE_ALIGN) {
-        right.x = 2.0f * center.x - left.x;
-        right.y = 2.0f * center.y - left.y;
+        right.x = 2.0f * pivot_x - left.x;
+        right.y = 2.0f * pivot_y - left.y;
       }
     }
     else {
@@ -2139,11 +2158,11 @@ static void paintcurve_apply_handle_move_2d(bke::CurvesGeometry &geom,
       if (h_left == BEZIER_HANDLE_VECTOR) {
         h_right = BEZIER_HANDLE_FREE;
       }
-      right.x = center.x + offset.x;
-      right.y = center.y + offset.y;
+      right.x = pivot_x + offset.x;
+      right.y = pivot_y + offset.y;
       if (h_left == BEZIER_HANDLE_ALIGN) {
-        left.x = 2.0f * center.x - right.x;
-        left.y = 2.0f * center.y - right.y;
+        left.x = 2.0f * pivot_x - right.x;
+        left.y = 2.0f * pivot_y - right.y;
       }
     }
   }
@@ -2328,7 +2347,6 @@ static bool paintcurve_try_select_segment_on_shift_double_click(bContext *C,
 static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   Paint *paint = BKE_paint_get_active_from_context(C);
-  const float loc_fl[2] = {float(event->mval[0]), float(event->mval[1])};
   const bool do_select = RNA_boolean_get(op->ptr, "select");
   const bool align = RNA_boolean_get(op->ptr, "align");
   const bool extend = RNA_boolean_get(op->ptr, "extend");
@@ -2352,6 +2370,21 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
 
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
   ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  int event_mval_arr[2];
+  if (!pc->use_3d_space && vc.region) {
+    /* 2D curves are bound to the viewport region where they were created. */
+    paintcurve_event_mval_region(event, vc.region, event_mval_arr);
+  }
+  else {
+    ed::ModalViewportTracker tracker(*C, *event, SPACE_VIEW3D, RGN_TYPE_WINDOW);
+    if (!tracker.found() && vc.region) {
+      tracker.use_fallback_region(vc.region);
+    }
+    event_mval_arr[0] = tracker.mval().x;
+    event_mval_arr[1] = tracker.mval().y;
+  }
+  const int2 event_mval = {event_mval_arr[0], event_mval_arr[1]};
+  const float loc_fl[2] = {float(event_mval.x), float(event_mval.y)};
   Vector<PaintCurvePoint> screen_points;
   paintcurve_build_screen_points(pc, &vc, screen_points);
 
@@ -2442,8 +2475,8 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
       psd->segment_t = edge_t;
       psd->select = 0;
       psd->point_index = -1;
-      copy_v2_v2_int(psd->initial_loc, event->mval);
-      copy_v2_v2_int(psd->prev_mval, event->mval);
+      copy_v2_v2_int(psd->initial_loc, event_mval);
+      copy_v2_v2_int(psd->prev_mval, event_mval);
       psd->event = event->type;
       psd->align = false;
       psd->move_entire = false;
@@ -2478,8 +2511,8 @@ static wmOperatorStatus paintcurve_slide_invoke(bContext *C, wmOperator *op, con
     psd->segment_t = 0.0f;
     psd->select = paintcurve_point_co_index(select);
     psd->point_index = point_index;
-    copy_v2_v2_int(psd->initial_loc, event->mval);
-    copy_v2_v2_int(psd->prev_mval, event->mval);
+    copy_v2_v2_int(psd->initial_loc, event_mval);
+    copy_v2_v2_int(psd->prev_mval, event_mval);
     psd->event = event->type;
     psd->align = align;
     psd->move_entire = false;
@@ -2596,15 +2629,22 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
         break;
       }
 
-      ed::ModalViewportTracker tracker(*C, *event, SPACE_VIEW3D, RGN_TYPE_WINDOW);
-      if (!tracker.found() && psd->use_3d_view && psd->vc.region) {
-        tracker.use_fallback_region(psd->vc.region);
+      int event_mval[2];
+      if (!psd->use_3d_view && psd->vc.region) {
+        paintcurve_event_mval_region(event, psd->vc.region, event_mval);
       }
-      if (tracker.found()) {
-        psd->vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
-        paintcurve_slide_refresh_object_mats(psd);
+      else {
+        ed::ModalViewportTracker tracker(*C, *event, SPACE_VIEW3D, RGN_TYPE_WINDOW);
+        if (!tracker.found() && psd->vc.region) {
+          tracker.use_fallback_region(psd->vc.region);
+        }
+        if (tracker.found()) {
+          psd->vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
+          paintcurve_slide_refresh_object_mats(psd);
+        }
+        event_mval[0] = tracker.mval().x;
+        event_mval[1] = tracker.mval().y;
       }
-      const int event_mval[2] = {tracker.mval().x, tracker.mval().y};
       const float mval_fl[2] = {float(event_mval[0]), float(event_mval[1])};
 
       bke::CurvesGeometry &geom = pc->geometry.wrap();
@@ -2769,6 +2809,7 @@ struct RadiusSlideData {
   int point_index;
   PaintCurveRadiusHandleScreen handle;
   short event;
+  ViewContext vc;
 };
 
 static void paintcurve_slide_radius_status_set(bContext *C, const float radius)
@@ -2814,13 +2855,26 @@ static wmOperatorStatus paintcurve_slide_radius_invoke(bContext *C,
 
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
   ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+  int event_mval_arr[2];
+  if (!pc->use_3d_space && vc.region) {
+    paintcurve_event_mval_region(event, vc.region, event_mval_arr);
+  }
+  else {
+    ed::ModalViewportTracker tracker(*C, *event, SPACE_VIEW3D, RGN_TYPE_WINDOW);
+    if (!tracker.found() && vc.region) {
+      tracker.use_fallback_region(vc.region);
+    }
+    event_mval_arr[0] = tracker.mval().x;
+    event_mval_arr[1] = tracker.mval().y;
+  }
+  const int2 event_mval = {event_mval_arr[0], event_mval_arr[1]};
   Vector<PaintCurvePoint> screen_points;
   paintcurve_build_screen_points(pc, &vc, screen_points);
   if (screen_points.is_empty()) {
     return OPERATOR_PASS_THROUGH;
   }
 
-  const float loc_fl[2] = {float(event->mval[0]), float(event->mval[1])};
+  const float loc_fl[2] = {float(event_mval.x), float(event_mval.y)};
   const int point_index = paintcurve_find_radius_handle_at_pos(
       pc, screen_points.data(), loc_fl, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
   if (point_index < 0) {
@@ -2831,6 +2885,7 @@ static wmOperatorStatus paintcurve_slide_radius_invoke(bContext *C,
   rsd->point_index = point_index;
   paintcurve_radius_handle_screen_get(pc, screen_points.data(), point_index, &rsd->handle);
   rsd->event = event->type;
+  rsd->vc = vc;
 
   op->customdata = rsd;
   BKE_brush_tag_unsaved_changes(br);
@@ -2866,8 +2921,18 @@ static wmOperatorStatus paintcurve_slide_radius_modal(bContext *C,
   }
 
   if (event->type == MOUSEMOVE && pc) {
-    ed::ModalViewportTracker tracker(*C, *event, SPACE_VIEW3D, RGN_TYPE_WINDOW);
-    const int event_mval[2] = {tracker.mval().x, tracker.mval().y};
+    int event_mval[2];
+    if (!pc->use_3d_space && rsd->vc.region) {
+      paintcurve_event_mval_region(event, rsd->vc.region, event_mval);
+    }
+    else {
+      ed::ModalViewportTracker tracker(*C, *event, SPACE_VIEW3D, RGN_TYPE_WINDOW);
+      if (!tracker.found() && rsd->vc.region) {
+        tracker.use_fallback_region(rsd->vc.region);
+      }
+      event_mval[0] = tracker.mval().x;
+      event_mval[1] = tracker.mval().y;
+    }
 
     bke::CurvesGeometry &geom = pc->geometry.wrap();
     if (paintcurve_geometry_is_valid(geom) && rsd->point_index < geom.points_num()) {

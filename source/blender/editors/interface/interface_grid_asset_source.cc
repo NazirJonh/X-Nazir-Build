@@ -138,9 +138,9 @@ void AssetGridItem::build_grid_tile(const bContext &C, Layout &layout) const
 
   button_func_tooltip_custom_set(
       item_but,
-      [](bContext & /*C*/, TooltipData &tip, Button * /*but*/, void *argN) {
+      [](bContext &C, TooltipData &tip, Button * /*but*/, void *argN) {
         const auto *asset = static_cast<const asset_system::AssetRepresentation *>(argN);
-        ed::asset::asset_tooltip(*asset, tip);
+        ed::asset::asset_tooltip(&C, *asset, tip);
       },
       asset_,
       nullptr);

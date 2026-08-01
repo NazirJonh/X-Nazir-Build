@@ -438,10 +438,10 @@ class ImageAssetGridItem : public PreviewGridItem {
 
     button_func_tooltip_custom_set(
         view_but,
-        [](bContext & /*C*/, TooltipData &tip, Button * /*but*/, void *argN) {
+        [](bContext &C, TooltipData &tip, Button * /*but*/, void *argN) {
           const ImageAssetGridItem *item = static_cast<const ImageAssetGridItem *>(argN);
           if (item->kind_ == ImageGridItemKind::Asset) {
-            ed::asset::asset_tooltip(*item->asset_, tip);
+            ed::asset::asset_tooltip(&C, *item->asset_, tip);
           }
           else {
             tooltip_text_field_add(

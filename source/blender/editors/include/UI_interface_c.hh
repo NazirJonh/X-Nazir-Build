@@ -2182,6 +2182,23 @@ void tooltip_text_field_add(TooltipData &data,
                             const bool is_pad = false);
 
 /**
+ * Like #tooltip_text_field_add, but draws `suffix` in a different color than `text`.
+ * Only #TIP_STYLE_HEADER and #TIP_STYLE_NORMAL draw the suffix; other styles ignore it.
+ *
+ * \param text: Allocated text (transfer ownership to `data`) or null.
+ * \param suffix: Allocated text (transfer ownership to `data`) or null.
+ * \param text_color_id: Color for `text`.
+ * \param suffix_color_id: Color for `suffix`.
+ */
+void tooltip_multicolor_text_field_add(TooltipData &data,
+                                       std::string text,
+                                       std::string suffix,
+                                       const TooltipStyle style,
+                                       const TooltipColorID text_color_id,
+                                       const TooltipColorID suffix_color_id,
+                                       const bool is_pad = false);
+
+/**
  * \param image_data: Image buffer (duplicated, ownership is *not* transferred to `data`).
  */
 void tooltip_image_field_add(TooltipData &data, const TooltipImage &image_data);

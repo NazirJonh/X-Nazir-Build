@@ -25,7 +25,13 @@
 
 #include <fmt/format.h>
 
+#include "AS_asset_library.hh"
+#include "AS_asset_representation.hh"
 #include "AS_essentials_library.hh"
+
+#include "BKE_preview_image.hh"
+#include "ED_asset.hh"
+#include "ED_asset_menu_utils.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -97,6 +103,8 @@ namespace blender::ui {
 struct TooltipFormat {
   TooltipStyle style;
   TooltipColorID color_id;
+  /** Color for #TooltipField::text_suffix. Only used by #TIP_STYLE_HEADER and #TIP_STYLE_NORMAL. */
+  TooltipColorID suffix_color_id;
 };
 
 struct TooltipField {
@@ -137,6 +145,29 @@ void tooltip_text_field_add(TooltipData &data,
   TooltipField field{};
   field.format.style = style;
   field.format.color_id = color_id;
+  field.format.suffix_color_id = TIP_LC_ACTIVE;
+  field.text = std::move(text);
+  field.text_suffix = std::move(suffix);
+  data.fields.append(std::move(field));
+}
+
+void tooltip_multicolor_text_field_add(TooltipData &data,
+                                       std::string text,
+                                       std::string suffix,
+                                       const TooltipStyle style,
+                                       const TooltipColorID text_color_id,
+                                       const TooltipColorID suffix_color_id,
+                                       const bool is_pad)
+{
+  if (is_pad) {
+    /* Add a spacer field before this one. */
+    tooltip_text_field_add(data, {}, {}, TIP_STYLE_SPACER, TIP_LC_NORMAL, false);
+  }
+
+  TooltipField field{};
+  field.format.style = style;
+  field.format.color_id = text_color_id;
+  field.format.suffix_color_id = suffix_color_id;
   field.text = std::move(text);
   field.text_suffix = std::move(suffix);
   data.fields.append(std::move(field));
@@ -251,7 +282,7 @@ static void tooltip_region_draw_cb(const bContext * /*C*/, ARegion *region)
         bbox.xmin += xofs;
         bbox.ymax -= yofs;
 
-        rgb_float_to_uchar(drawcol, tip_colors[TIP_LC_ACTIVE]);
+        rgb_float_to_uchar(drawcol, tip_colors[int(field->format.suffix_color_id)]);
         fontstyle_draw(&data->fstyle,
                        &bbox,
                        field->text_suffix.c_str(),
@@ -353,6 +384,26 @@ static void tooltip_region_draw_cb(const bContext * /*C*/, ARegion *region)
       fontstyle_set(&data->fstyle);
       fontstyle_draw(
           &data->fstyle, &bbox, field->text.c_str(), field->text.size(), drawcol, &fs_params);
+
+      /* Offset to the end of the last line and draw the suffix in its own color. */
+      if (!field->text_suffix.empty()) {
+        const float xofs = field->geom.x_pos;
+        const float yofs = data->lineh * (field->geom.lines - 1);
+        bbox.xmin += xofs;
+        bbox.ymax -= yofs;
+
+        rgb_float_to_uchar(drawcol, tip_colors[int(field->format.suffix_color_id)]);
+        fontstyle_draw(&data->fstyle,
+                       &bbox,
+                       field->text_suffix.c_str(),
+                       field->text_suffix.size(),
+                       drawcol,
+                       &fs_params);
+
+        /* Undo offset. */
+        bbox.xmin -= xofs;
+        bbox.ymax += yofs;
+      }
     }
 
     bbox.ymax -= data->lineh * field->geom.lines;
@@ -994,6 +1045,110 @@ static void tooltip_uibut_icon_add(TooltipData &data, Button &but)
       data, fmt::format("Icon: {}", icon_name), {}, TIP_STYLE_MONO, TIP_LC_DIMMED);
 }
 
+/**
+ * Return a scaled #ImBuf for the brush asset preview, or null if unavailable.
+ *
+ * \note The returned buffer is owned by the caller and must be freed with #IMB_freeImBuf.
+ */
+static ImBuf *get_brush_asset_preview_imbuf(
+    const blender::asset_system::AssetRepresentation &asset)
+{
+  PreviewImage *preview = asset.get_preview();
+  if (!preview) {
+    return nullptr;
+  }
+
+  if (!BKE_previewimg_is_finished(preview, ICON_SIZE_PREVIEW)) {
+    return nullptr;
+  }
+
+  ImBuf *ibuf = BKE_previewimg_to_imbuf(preview, ICON_SIZE_PREVIEW);
+  if (!ibuf) {
+    return nullptr;
+  }
+
+  /* Cap at 100 DPI-independent pixels so the tooltip stays compact. */
+  const float max_size = 100.0f * UI_SCALE_FAC;
+  const float current_max = float(std::max(ibuf->x, ibuf->y));
+  if (current_max > max_size) {
+    const float scale = max_size / current_max;
+    IMB_scale(ibuf, int(scale * ibuf->x), int(scale * ibuf->y), IMBScaleFilter::Box, false);
+  }
+
+  /* Tooltip rendering requires a byte buffer, not a float buffer. */
+  IMB_byte_from_float(ibuf);
+
+  return ibuf;
+}
+
+static void tooltip_from_brush_asset(bContext *C,
+                                     const blender::asset_system::AssetRepresentation &asset,
+                                     TooltipData &data)
+{
+  using namespace blender;
+
+  const StringRefNull asset_name = asset.get_name();
+  if (!asset_name.is_empty()) {
+    tooltip_text_field_add(data, asset_name, {}, TIP_STYLE_HEADER, TIP_LC_MAIN);
+  }
+
+  const std::string hotkey = ed::asset::asset_brush_hotkey(C, asset);
+  if (!hotkey.empty()) {
+    tooltip_multicolor_text_field_add(
+        data, TIP_("Shortcut: "), hotkey, TIP_STYLE_NORMAL, TIP_LC_VALUE, TIP_LC_ACTIVE);
+  }
+
+  const AssetMetaData &meta_data = asset.get_metadata();
+  if (meta_data.description && meta_data.description[0] != '\0') {
+    tooltip_text_field_add(data, meta_data.description, {}, TIP_STYLE_NORMAL, TIP_LC_NORMAL);
+  }
+
+  switch (asset.owner_asset_library().library_type()) {
+    case ASSET_LIBRARY_CUSTOM: {
+      const std::string full_blend_path = asset.full_library_path();
+      if (!full_blend_path.empty()) {
+        char dir[FILE_MAX], file[FILE_MAX];
+        BLI_path_split_dir_file(full_blend_path.c_str(), dir, sizeof(dir), file, sizeof(file));
+        if (file[0]) {
+          tooltip_text_field_add(data, file, {}, TIP_STYLE_NORMAL, TIP_LC_VALUE);
+        }
+        if (dir[0]) {
+          tooltip_text_field_add(data, dir, {}, TIP_STYLE_NORMAL, TIP_LC_VALUE);
+        }
+      }
+      break;
+    }
+    case ASSET_LIBRARY_LOCAL:
+      tooltip_text_field_add(
+          data, TIP_("Asset Library: Current File"), {}, TIP_STYLE_NORMAL, TIP_LC_VALUE);
+      break;
+    case ASSET_LIBRARY_ESSENTIALS:
+      tooltip_text_field_add(
+          data, TIP_("Asset Library: Essentials"), {}, TIP_STYLE_NORMAL, TIP_LC_VALUE);
+      break;
+    default:
+      break;
+  }
+
+  ImBuf *ibuf = get_brush_asset_preview_imbuf(asset);
+  if (ibuf) {
+    TooltipImage image_data;
+    image_data.ibuf = ibuf;
+    image_data.width = ibuf->x;
+    image_data.height = ibuf->y;
+    image_data.border = true;
+    image_data.background = TooltipImageBackground::Checkerboard_Themed;
+    image_data.premultiplied = true;
+
+    tooltip_text_field_add(data, {}, {}, TIP_STYLE_SPACER, TIP_LC_NORMAL);
+    tooltip_text_field_add(data, {}, {}, TIP_STYLE_SPACER, TIP_LC_NORMAL);
+    tooltip_image_field_add(data, image_data);
+
+    /* #tooltip_image_field_add duplicates the buffer internally. */
+    IMB_freeImBuf(ibuf);
+  }
+}
+
 static std::unique_ptr<TooltipData> tooltip_data_from_button_or_extra_icon(
     bContext *C, Button *but, ButtonExtraOpIcon *extra_icon, const bool is_quick_tip)
 {
@@ -1332,6 +1487,24 @@ static std::unique_ptr<TooltipData> tooltip_data_from_button_or_extra_icon(
   /* If the last field is a spacer, remove it. */
   while (!data->fields.is_empty() && data->fields.last().format.style == TIP_STYLE_SPACER) {
     data->fields.pop_last();
+  }
+
+  if (optype && STREQ(optype->idname, "BRUSH_OT_asset_activate")) {
+    PointerRNA *opptr = extra_icon ? button_extra_operator_icon_opptr_get(extra_icon) :
+                                     button_operator_ptr_ensure(but);
+
+    if (opptr && blender::ed::asset::operator_asset_reference_props_is_set(*opptr)) {
+      const blender::asset_system::AssetRepresentation *asset =
+          blender::ed::asset::operator_asset_reference_props_get_asset_from_all_library(
+              *C, *opptr, nullptr);
+
+      if (asset) {
+        /* #AssetRepresentation::ensure_previewable is non-const as it modifies internal preview
+         * state; the call is non-blocking and safe from tooltip context. */
+        const_cast<blender::asset_system::AssetRepresentation *>(asset)->ensure_previewable(*C);
+        tooltip_from_brush_asset(C, *asset, *data);
+      }
+    }
   }
 
   return data->fields.is_empty() ? nullptr : std::move(data);

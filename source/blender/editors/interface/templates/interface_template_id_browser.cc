@@ -221,10 +221,10 @@ class IDBrowserGridItem : public PreviewGridItem {
     if (kind_ == IDBrowserItemKind::Asset) {
       button_func_tooltip_custom_set(
           item_but,
-          [](bContext & /*C*/, TooltipData &tip, Button * /*but*/, void *arg) {
+          [](bContext &C, TooltipData &tip, Button * /*but*/, void *arg) {
             asset_system::AssetRepresentation &asset =
                 *static_cast<asset_system::AssetRepresentation *>(arg);
-            ed::asset::asset_tooltip(asset, tip);
+            ed::asset::asset_tooltip(&C, asset, tip);
 
             /* #asset_tooltip is text-only; append the same preview image #tooltip_from_id shows
              * for a local ID below, using whatever preview the grid tile itself already triggered

@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <string>
+
 /* Barely anything here. Just general editor level functions. Actual asset level code is in
  * dedicated headers. */
 
@@ -31,6 +33,7 @@ namespace blender {
 /** From UI_resources.hh. */
 using BIFIconID = int;
 
+struct bContext;
 struct PointerRNA;
 namespace ui {
 struct TooltipData;
@@ -38,9 +41,18 @@ struct TooltipData;
 
 namespace ed::asset {
 
-void asset_tooltip(const asset_system::AssetRepresentation &asset,
+void asset_tooltip(const bContext *C,
+                   const asset_system::AssetRepresentation &asset,
                    ui::TooltipData &tip,
                    bool include_name = true);
+
+/**
+ * Look up the hotkey assigned to activating \a asset (a brush asset) via
+ * #BRUSH_OT_asset_activate, searching known brush keymaps and legacy operators as fallbacks.
+ * Returns an empty string if \a asset isn't a brush or has no hotkey assigned.
+ */
+std::string asset_brush_hotkey(const bContext *C,
+                               const asset_system::AssetRepresentation &asset);
 
 BIFIconID asset_preview_icon_id(const asset_system::AssetRepresentation &asset);
 BIFIconID asset_preview_or_icon(const asset_system::AssetRepresentation &asset);

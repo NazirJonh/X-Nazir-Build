@@ -1250,6 +1250,13 @@ struct GWL_Seat {
   /** Drag & Drop. */
   GWL_DataOffer *data_offer_dnd = nullptr;
   std::mutex data_offer_dnd_mutex;
+  /**
+   * Set when a drag enters a window that offers files (`text/uri-list`). The offered data is read
+   * outside the WAYLAND callbacks (in #GHOST_SystemWayland::processEvents, where a blocking pipe
+   * read is safe) so the #GHOST_kEventDraggingEntered event can carry the dragged paths and the
+   * window manager can show a drag preview, matching the Win32 backend.
+   */
+  bool dnd_preview_pending = false;
 
   /** Copy & Paste. */
   GWL_DataOffer *data_offer_copy_paste = nullptr;
@@ -2444,9 +2451,9 @@ static const char *ghost_wl_mime_preference_order[] = {
 };
 /* Aligned to `ghost_wl_mime_preference_order`. */
 static const GHOST_TDragnDropTypes ghost_wl_mime_preference_order_type[] = {
-    GHOST_kDragnDropTypeString,
-    GHOST_kDragnDropTypeString,
-    GHOST_kDragnDropTypeFilenames,
+    GHOST_kDragnDropTypeFilenames, /* `text/uri-list`. */
+    GHOST_kDragnDropTypeString,    /* `text/plain;charset=utf-8`. */
+    GHOST_kDragnDropTypeString,    /* `text/plain`. */
 };
 
 static const char *ghost_wl_mime_send[] = {
@@ -4108,7 +4115,16 @@ static void data_device_handle_enter(void *data,
 
   seat->system->seat_active_set(seat);
 
-  dnd_events(seat, GHOST_kEventDraggingEntered, event_ms);
+  /* When a file list is offered, defer reading it until #GHOST_SystemWayland::processEvents (outside
+   * this callback, where a blocking pipe read with round-trips is safe). The resulting
+   * #GHOST_kEventDraggingEntered then carries the dragged paths so a drag preview can be shown.
+   * Other content types keep the data-less behavior (cursor tracking, no preview). */
+  if (data_offer->types.contains(ghost_wl_mime_text_uri_list)) {
+    seat->dnd_preview_pending = true;
+  }
+  else {
+    dnd_events(seat, GHOST_kEventDraggingEntered, event_ms);
+  }
 }
 
 static void data_device_handle_leave(void *data, wl_data_device * /*wl_data_device*/)
@@ -4122,6 +4138,9 @@ static void data_device_handle_leave(void *data, wl_data_device * /*wl_data_devi
     return;
   }
   CLOG_DEBUG(LOG, "leave");
+
+  /* A pending preview read (see #data_device_handle_enter) is no longer relevant. */
+  seat->dnd_preview_pending = false;
 
   dnd_events(seat, GHOST_kEventDraggingExited, event_ms);
   seat->wl.surface_window_focus_dnd = nullptr;
@@ -4168,6 +4187,9 @@ static void data_device_handle_drop(void *data, wl_data_device * /*wl_data_devic
   /* Take ownership of `data_offer` to prevent a double-free, see: #128766.
    * The thread this function spawns is responsible for freeing it. */
   seat->data_offer_dnd = nullptr;
+
+  /* A pending preview read (see #data_device_handle_enter) is superseded by the actual drop. */
+  seat->dnd_preview_pending = false;
 
   /* Use a blank string for  `mime_receive` to prevent crashes, although could also be `nullptr`.
    * Failure to set this to a known type just means the file won't have any special handling.
@@ -4262,6 +4284,99 @@ static void data_device_handle_drop(void *data, wl_data_device * /*wl_data_devic
   std::thread read_thread(
       read_drop_data_fn, seat, data_offer, seat->wl.surface_window_focus_dnd, mime_receive);
   read_thread.detach();
+}
+
+/**
+ * Read the file list offered by an active drag (queued by #data_device_handle_enter) and push a
+ * #GHOST_kEventDraggingEntered event carrying the paths, so the window manager can show a drag
+ * preview. Called from #GHOST_SystemWayland::processEvents, i.e. outside the WAYLAND callbacks, so
+ * the blocking pipe read and round-trips are safe (not re-entrant).
+ *
+ * Unlike #data_device_handle_drop this does NOT take ownership of the data-offer: it must stay valid
+ * for subsequent motion events and the final drop. Only the pipe is read; the offer itself is not
+ * touched once the receive request has been issued, so a concurrent leave/drop that frees it is
+ * safe (the pointer is only compared afterwards, never dereferenced).
+ */
+static void gwl_seat_dnd_preview_read(GWL_Seat *seat)
+{
+  std::mutex &mutex = seat->data_offer_dnd_mutex;
+  mutex.lock();
+  seat->dnd_preview_pending = false;
+
+  GWL_DataOffer *data_offer = seat->data_offer_dnd;
+  wl_surface *wl_surface_window = seat->wl.surface_window_focus_dnd;
+  if (data_offer == nullptr || wl_surface_window == nullptr ||
+      !data_offer->types.contains(ghost_wl_mime_text_uri_list))
+  {
+    mutex.unlock();
+    return;
+  }
+
+  const wl_fixed_t xy[2] = {UNPACK2(data_offer->dnd.xy)};
+
+  struct ThreadResult {
+    char *data = nullptr;
+    size_t data_len = 0;
+    std::atomic<bool> done = false;
+  } thread_result;
+
+  /* Receive the URI list in a thread, performing round-trips while waiting - the same approach used
+   * for the clipboard and the final drop, so reading from our own data-source cannot hang. */
+  auto read_preview_fn =
+      [](GWL_DataOffer *data_offer, std::mutex *mutex, ThreadResult *thread_result) {
+        /* `nil_terminate = false` matches the URI-list handling in #data_device_handle_drop. */
+        thread_result->data = read_buffer_from_data_offer(
+            data_offer, ghost_wl_mime_text_uri_list, mutex, false, &thread_result->data_len);
+        thread_result->done = true;
+      };
+  std::thread read_thread(read_preview_fn, data_offer, &mutex, &thread_result);
+  read_thread.detach();
+
+  /* `read_buffer_from_data_offer` unlocks `mutex` once the receive request has been issued. */
+  while (!thread_result.done) {
+    wl_display_roundtrip(seat->system->wl_display_get());
+  }
+
+  char *data_buf = thread_result.data;
+  if (data_buf == nullptr) {
+    /* An error will have been logged. */
+    return;
+  }
+
+  /* The drag may have left or been dropped while reading; only surface a preview if it is still
+   * active over the same window and offer. */
+  GHOST_TStringArray *flist = nullptr;
+  {
+    std::lock_guard lock{mutex};
+    if (seat->wl.surface_window_focus_dnd == wl_surface_window &&
+        seat->data_offer_dnd == data_offer)
+    {
+      const std::vector<std::string_view> uris = gwl_clipboard_uri_ranges(data_buf,
+                                                                          thread_result.data_len);
+      flist = static_cast<GHOST_TStringArray *>(malloc(sizeof(GHOST_TStringArray)));
+      flist->count = int(uris.size());
+      flist->strings = static_cast<uint8_t **>(malloc(uris.size() * sizeof(uint8_t *)));
+      for (size_t i = 0; i < uris.size(); i++) {
+        flist->strings[i] = reinterpret_cast<uint8_t *>(
+            GHOST_URL_decode_alloc(uris[i].data(), uris[i].size()));
+      }
+    }
+  }
+  free(data_buf);
+
+  if (flist == nullptr) {
+    return;
+  }
+
+  GHOST_SystemWayland *const system = seat->system;
+  GHOST_WindowWayland *win = ghost_wl_surface_user_data(wl_surface_window);
+  const int event_xy[2] = {WL_FIXED_TO_INT_FOR_WINDOW_V2(win, xy)};
+  system->pushEvent_maybe_pending(std::make_unique<GHOST_EventDragnDrop>(system->getMilliSeconds(),
+                                                                         GHOST_kEventDraggingEntered,
+                                                                         GHOST_kDragnDropTypeFilenames,
+                                                                         win,
+                                                                         UNPACK2(event_xy),
+                                                                         flist));
 }
 
 static void data_device_handle_selection(void *data,
@@ -8598,6 +8713,20 @@ bool GHOST_SystemWayland::processEvents(bool waitForEvent)
 #endif
     if (key_repeat_timer_manager()->fireTimers(now)) {
       any_processed = true;
+    }
+  }
+
+  /* Read any drag & drop file list queued by #data_device_handle_enter here, outside the WAYLAND
+   * callbacks, so the #GHOST_kEventDraggingEntered event can carry the dragged paths (enabling a
+   * drag preview). The `dnd_preview_pending` read is an unsynchronized fast-path check; the helper
+   * re-validates and clears it under the seat's data-offer mutex. */
+  for (GWL_Seat *seat : display_->seats) {
+    if (seat->dnd_preview_pending) {
+#ifdef USE_EVENT_BACKGROUND_THREAD
+      /* The round-trips performed while reading must hold the server lock, matching #getClipboard. */
+      std::lock_guard lock_server_guard{*server_mutex};
+#endif
+      gwl_seat_dnd_preview_read(seat);
     }
   }
 

@@ -217,12 +217,20 @@
 
     const NSPoint mouseLocation = sender.draggingLocation;
     window_cocoa_->setAcceptDragOperation(TRUE); /* Drag operation is accepted by default. */
+
+    /* Provide the file names already on enter (not only on drop), so a preview can be shown while
+     * the cursor hovers over the window. Other types keep the lightweight null-data enter event. */
+    id data = nil;
+    if (dragged_object_type_ == GHOST_kDragnDropTypeFilenames) {
+      data = [draggingPBoard propertyListForType:NSFilenamesPboardType];
+    }
+
     system_cocoa_->handleDraggingEvent(GHOST_kEventDraggingEntered,
                                        dragged_object_type_,
                                        window_cocoa_,
                                        mouseLocation.x,
                                        mouseLocation.y,
-                                       nil);
+                                       (void *)data);
   }
   return NSDragOperationCopy;
 }

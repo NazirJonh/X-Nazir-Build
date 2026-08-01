@@ -683,6 +683,7 @@ static const EnumPropertyItem spreadsheet_table_id_type_items[] = {
 #  include <algorithm>
 #  include <fmt/format.h>
 
+#  include "AS_asset_library.hh"
 #  include "AS_asset_representation.hh"
 
 #  include "DNA_anim_types.h"
@@ -743,6 +744,7 @@ static const EnumPropertyItem spreadsheet_table_id_type_items[] = {
 #  include "IMB_imbuf_types.hh"
 
 #  include "UI_interface.hh"
+#  include "UI_interface_c.hh"
 #  include "UI_view2d.hh"
 
 #  include "SEQ_proxy.hh"
@@ -750,7 +752,14 @@ static const EnumPropertyItem spreadsheet_table_id_type_items[] = {
 
 #  include "RE_engine.h"
 
+#  include "CLG_log.h"
+
 namespace blender {
+
+static CLG_LogRef LOG = {"rna.space"};
+
+/* Extern declaration for paint slot type enum items defined in rna_nodetree.cc */
+extern const EnumPropertyItem rna_enum_node_tex_image_paint_slot_type_items[];
 
 /* -------------------------------------------------------------------- */
 /** \name Private Utilities
@@ -1219,6 +1228,38 @@ static void rna_SpaceView3D_use_local_camera_set(PointerRNA *ptr, bool value)
       v3d->camera = scene->camera;
     }
   }
+}
+
+static int rna_SpaceView3D_image_grid_preview_size_get(PointerRNA *ptr)
+{
+  View3D *v3d = static_cast<View3D *>(ptr->data);
+  const int stored = v3d->image_grid_preview_size;
+  if (stored >= 24) {
+    return stored;
+  }
+  return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
+}
+
+static void rna_SpaceView3D_image_grid_preview_size_set(PointerRNA *ptr, const int value)
+{
+  View3D *v3d = static_cast<View3D *>(ptr->data);
+  v3d->image_grid_preview_size = short(std::clamp(value, 24, 256));
+}
+
+static int rna_SpaceImage_image_grid_preview_size_get(PointerRNA *ptr)
+{
+  const SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  const int stored = sima->image_grid_preview_size;
+  if (stored >= 24) {
+    return stored;
+  }
+  return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
+}
+
+static void rna_SpaceImage_image_grid_preview_size_set(PointerRNA *ptr, const int value)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  sima->image_grid_preview_size = short(std::clamp(value, 24, 256));
 }
 
 static float rna_View3DOverlay_GridScaleUnit_get(PointerRNA *ptr)
@@ -3321,7 +3362,8 @@ static int rna_FileAssetSelectParams_asset_library_get(PointerRNA *ptr)
 static void rna_FileAssetSelectParams_asset_library_set(PointerRNA *ptr, int value)
 {
   FileAssetSelectParams *params = static_cast<FileAssetSelectParams *>(ptr->data);
-  params->asset_library_ref = ed::asset::library_reference_from_enum_value(value);
+  ED_fileselect_asset_library_reference_set(
+      params, ed::asset::library_reference_from_enum_value(value));
 }
 
 static PointerRNA rna_FileAssetSelectParams_filter_id_get(PointerRNA *ptr)
@@ -3940,8 +3982,7 @@ static void rna_FileAssetSelectParams_catalog_id_set(PointerRNA *ptr, const char
   FileAssetSelectParams *params = static_cast<FileAssetSelectParams *>(ptr->data);
 
   if (value[0] == '\0') {
-    params->catalog_id = BLI_uuid_nil();
-    params->asset_catalog_visibility = FILE_SHOW_ASSETS_ALL_CATALOGS;
+    ED_fileselect_asset_catalog_set_all(params);
     return;
   }
 
@@ -3951,8 +3992,87 @@ static void rna_FileAssetSelectParams_catalog_id_set(PointerRNA *ptr, const char
     return;
   }
 
-  params->catalog_id = new_uuid;
-  params->asset_catalog_visibility = FILE_SHOW_ASSETS_FROM_CATALOG;
+  ED_fileselect_asset_catalog_set(params, new_uuid);
+}
+
+/* Catalog path (human-readable, e.g. "Characters/Props") mirror of #catalog_id above. The
+ * catalog tree (#asset_system::AssetCatalogTree) isn't itself RNA -- Python only ever gets a
+ * name to display/set through this pair of functions, resolving through the *current* asset
+ * library's #AssetCatalogService each time (catalog pointers must never be cached, see
+ * #AS_asset_library_load()'s warning: reloading a library invalidates them).
+ *
+ * Reading resolves against the library only if it is *already* loaded: a getter can run on every
+ * redraw (any script drawing this property), and #AS_asset_library_load() reloads catalogs on
+ * every call -- invalidating catalog pointers held elsewhere -- besides walking every other
+ * library for the "All" library. An unloaded library simply reads as an empty path. */
+static std::string rna_FileAssetSelectParams_catalog_path_resolve(
+    const FileAssetSelectParams *params)
+{
+  if (params->asset_catalog_visibility != FILE_SHOW_ASSETS_FROM_CATALOG) {
+    return {};
+  }
+  const asset_system::AssetLibrary *library = AS_asset_library_find_loaded(
+      G_MAIN, params->asset_library_ref);
+  if (!library) {
+    return {};
+  }
+  const asset_system::AssetCatalog *catalog = library->catalog_service().find_catalog(
+      params->catalog_id);
+  return catalog ? catalog->path.str() : std::string();
+}
+
+static void rna_FileAssetSelectParams_catalog_path_get(PointerRNA *ptr, char *value)
+{
+  const FileAssetSelectParams *params = static_cast<FileAssetSelectParams *>(ptr->data);
+  /* The buffer RNA passes in is sized from the `_length` callback below, so the path (plus its
+   * null byte) always fits. */
+  const std::string path = rna_FileAssetSelectParams_catalog_path_resolve(params);
+  memcpy(value, path.c_str(), path.size() + 1);
+}
+
+static int rna_FileAssetSelectParams_catalog_path_length(PointerRNA *ptr)
+{
+  const FileAssetSelectParams *params = static_cast<FileAssetSelectParams *>(ptr->data);
+  return int(rna_FileAssetSelectParams_catalog_path_resolve(params).size());
+}
+
+static void rna_FileAssetSelectParams_catalog_path_set(PointerRNA *ptr, const char *value)
+{
+  FileAssetSelectParams *params = static_cast<FileAssetSelectParams *>(ptr->data);
+
+  if (value[0] == '\0') {
+    ED_fileselect_asset_catalog_set_all(params);
+    return;
+  }
+
+  /* Unlike the getter, setting is always user/script driven and never happens while drawing, so
+   * loading the library here is acceptable -- and necessary, since a script may well set the
+   * catalog before anything has opened the library. */
+  const asset_system::AssetLibrary *library = AS_asset_library_load(G_MAIN,
+                                                                    params->asset_library_ref);
+  const asset_system::AssetCatalog *catalog =
+      library ?
+          library->catalog_service().find_catalog_by_path(asset_system::AssetCatalogPath(value)) :
+          nullptr;
+  if (!catalog) {
+    CLOG_WARN(&LOG, "Catalog path \"%s\" not found in the active library, ignoring new value",
+              value);
+    return;
+  }
+
+  ED_fileselect_asset_catalog_set(params, catalog->catalog_id);
+}
+
+static void rna_FileAssetSelectParams_catalog_path_search(
+    const bContext * /*C*/,
+    PointerRNA *ptr,
+    PropertyRNA * /*prop*/,
+    const char *edit_text,
+    const FunctionRef<void(StringPropertySearchVisitParams)> visit_fn)
+{
+  const FileAssetSelectParams *params = static_cast<FileAssetSelectParams *>(ptr->data);
+  ed::asset::visit_library_catalogs_catalog_for_search(
+      *G_MAIN, params->asset_library_ref, edit_text, visit_fn);
 }
 
 static const EnumPropertyItem *rna_FileAssetSelectParams_import_method_itemf(
@@ -3969,8 +4089,8 @@ static const EnumPropertyItem *rna_FileAssetSelectParams_import_method_itemf(
     if ((item->value == FILE_ASSET_IMPORT_LINK) &&
         (params->asset_library_ref.type == ASSET_LIBRARY_CUSTOM))
     {
-      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
-          &U, params->asset_library_ref.custom_library_index);
+      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(
+          &U, &params->asset_library_ref);
       if (user_library && user_library->flag & ASSET_LIBRARY_USE_REMOTE_URL) {
         /* Don't allow linking with remote libraries. */
         continue;
@@ -4004,6 +4124,9 @@ static const EnumPropertyItem *rna_FileAssetSelectParams_import_method_itemf(
 }  // namespace blender
 
 #else
+
+#  include "UI_interface_c.hh"
+#  include "UI_resources.hh"
 
 namespace blender {
 
@@ -5968,6 +6091,73 @@ static void rna_def_space_view3d(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Show Viewer", "Display non-final geometry from viewer nodes");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D | NS_VIEW3D_SHADING, nullptr);
 
+  prop = RNA_def_property(srna, "image_grid_rows", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "image_grid.rows");
+  RNA_def_property_range(prop, 0, 16);
+  RNA_def_property_ui_text(
+      prop,
+      "Image Grid Rows",
+      "Number of visible rows in the sculpt texture image grid (0 uses default 1)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "image_grid_mask_rows", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "image_grid_mask.rows");
+  RNA_def_property_range(prop, 0, 16);
+  RNA_def_property_ui_text(
+      prop,
+      "Mask Grid Rows",
+      "Number of visible rows in the sculpt mask texture image grid (0 uses default 1)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "image_grid_preview_size", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "image_grid_preview_size");
+  RNA_def_property_int_funcs(prop,
+                             "rna_SpaceView3D_image_grid_preview_size_get",
+                             "rna_SpaceView3D_image_grid_preview_size_set",
+                             nullptr);
+  RNA_def_property_range(prop, 24, 256);
+  RNA_def_property_ui_text(
+      prop, "Preview Size", "Size of the image grid preview thumbnails in pixels");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  /* Image browser filter/view-mode (mirrors SpaceImage and SpaceNode). */
+  {
+    static const EnumPropertyItem image_filter_mode_items[] = {
+        {ui::TEMPLATE_ID_FILTER_ALL, "ALL", ICON_IMAGE, "All", "Show all images"},
+        {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL,
+         "CURRENT_MATERIAL",
+         ICON_MATERIAL,
+         "Current Material",
+         "Show images used by the active material"},
+        {ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+         "SLOT_TYPE",
+         ICON_NODE_TEXTURE,
+         "Slot Type",
+         "Show images used by a specific paint slot type"},
+        {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL | ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+         "CURRENT_MATERIAL_AND_SLOT_TYPE",
+         ICON_MATERIAL_DATA,
+         "Current Material & Slot Type",
+         "Show images used by the active material and specific paint slot type"},
+        {0, nullptr, 0, nullptr, nullptr},
+    };
+
+    prop = RNA_def_property(srna, "image_filter_mode", PROP_ENUM, PROP_NONE);
+    RNA_def_property_enum_sdna(prop, nullptr, "image_filter_mode");
+    RNA_def_property_enum_items(prop, image_filter_mode_items);
+    RNA_def_property_ui_text(prop,
+                             "Image Filter Mode",
+                             "Criteria used when filtering images in paint-related ID browsers");
+    RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+    prop = RNA_def_property(srna, "image_filter_slot_type", PROP_ENUM, PROP_NONE);
+    RNA_def_property_enum_sdna(prop, nullptr, "image_filter_slot_type");
+    RNA_def_property_enum_items(prop, rna_enum_node_tex_image_paint_slot_type_items);
+    RNA_def_property_ui_text(
+        prop, "Image Filter Slot Type", "Paint slot type used when filtering by slot type");
+    RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+  }
+
   /* Nested Structs */
   prop = RNA_def_property(srna, "shading", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_NEVER_NULL);
@@ -6283,6 +6473,26 @@ static void rna_def_space_image(BlenderRNA *brna)
   StructRNA *srna;
   PropertyRNA *prop;
 
+  static const EnumPropertyItem image_filter_mode_items[] = {
+      {ui::TEMPLATE_ID_FILTER_ALL, "ALL", ICON_IMAGE, "All", "Show all images"},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL,
+       "CURRENT_MATERIAL",
+       ICON_MATERIAL,
+       "Current Material",
+       "Show images used by the active material"},
+      {ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+       "SLOT_TYPE",
+       ICON_NODE_TEXTURE,
+       "Slot Type",
+       "Show images used by a specific paint slot type"},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL | ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+       "CURRENT_MATERIAL_AND_SLOT_TYPE",
+       ICON_MATERIAL_DATA,
+       "Current Material & Slot Type",
+       "Show images used by the active material and specific paint slot type"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   srna = RNA_def_struct(brna, "SpaceImageEditor", "Space");
   RNA_def_struct_sdna(srna, "SpaceImage");
   RNA_def_struct_ui_text(srna, "Space Image Editor", "Image and UV editor space data");
@@ -6326,6 +6536,48 @@ static void rna_def_space_image(BlenderRNA *brna)
       prop, "Image Pin", "Display current image regardless of object selection");
   RNA_def_property_ui_icon(prop, ICON_UNPINNED, 1);
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "image_grid_rows", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "image_grid.rows");
+  RNA_def_property_range(prop, 0, 16);
+  RNA_def_property_ui_text(
+      prop,
+      "Image Grid Rows",
+      "Number of visible rows in the brush texture image grid (0 uses default 1)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "image_grid_mask_rows", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "image_grid_mask.rows");
+  RNA_def_property_range(prop, 0, 16);
+  RNA_def_property_ui_text(
+      prop,
+      "Mask Grid Rows",
+      "Number of visible rows in the brush mask texture image grid (0 uses default 1)");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "image_grid_preview_size", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "image_grid_preview_size");
+  RNA_def_property_int_funcs(prop,
+                             "rna_SpaceImage_image_grid_preview_size_get",
+                             "rna_SpaceImage_image_grid_preview_size_set",
+                             nullptr);
+  RNA_def_property_range(prop, 24, 256);
+  RNA_def_property_ui_text(
+      prop, "Preview Size", "Thumbnail size for the brush texture asset grid");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "image_filter_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "image_filter_mode");
+  RNA_def_property_enum_items(prop, image_filter_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Image Filter Mode",
+                           "Criteria used when filtering images in paint-related ID browsers");
+
+  prop = RNA_def_property(srna, "image_filter_slot_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "image_filter_slot_type");
+  RNA_def_property_enum_items(prop, rna_enum_node_tex_image_paint_slot_type_items);
+  RNA_def_property_ui_text(
+      prop, "Image Filter Slot Type", "Paint slot type used when filtering by slot type");
 
   prop = RNA_def_property(srna, "sample_histogram", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "sample_line_hist");
@@ -7949,6 +8201,22 @@ static void rna_def_fileselect_asset_params(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Catalog UUID", "The UUID of the catalog shown in the browser");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_FILE_PARAMS, nullptr);
 
+  prop = RNA_def_property(srna, "catalog_path", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_FileAssetSelectParams_catalog_path_get",
+                                "rna_FileAssetSelectParams_catalog_path_length",
+                                "rna_FileAssetSelectParams_catalog_path_set");
+  RNA_def_property_string_search_func(
+      prop,
+      "rna_FileAssetSelectParams_catalog_path_search",
+      eStringPropertySearchFlag(PROP_STRING_SEARCH_SUPPORTED | PROP_STRING_SEARCH_SORT));
+  RNA_def_property_ui_text(
+      prop,
+      "Catalog",
+      "Path of the catalog shown in the browser, the human-readable form of \"catalog_id\". "
+      "Empty while the asset library is not loaded");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_FILE_PARAMS, nullptr);
+
   prop = RNA_def_property(srna, "asset_catalog_visibility", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "asset_catalog_visibility");
   RNA_def_property_enum_items(prop, rna_enum_asset_catalog_visibility_items);
@@ -7997,6 +8265,27 @@ static void rna_def_fileselect_asset_params(BlenderRNA *brna)
                            "Create instances for collections when appending, rather than adding "
                            "them directly to the scene");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_FILE_PARAMS, nullptr);
+
+  prop = RNA_def_property(srna, "filter_name_match_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "asset_flags", FILE_ASSET_FILTER_NAME_MATCH_ENABLED);
+  RNA_def_property_ui_text(
+      prop, "Name Match Filter", "Filter assets by image map-type name matching");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_FILE_LIST, nullptr);
+
+  /* Read-only: reuses the #AssetShelfNameMatchMapType item type already registered for
+   * #AssetShelf.filter_name_match_map_types (rna_ui.cc) -- same underlying #AssetNameMatchIdLink
+   * list, just a different owner. Editing goes through #ASSET_OT_browser_name_match_map_type_toggle;
+   * this only exists so scripts can read which map types are currently active (there was
+   * previously no way to do that from Python for this owner, unlike the AssetShelf one). */
+  prop = RNA_def_property(srna, "filter_name_match_map_types", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "filter_name_match_map_types", nullptr);
+  RNA_def_property_struct_type(prop, "AssetShelfNameMatchMapType");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Name Match Map Types",
+                           "Active map type identifiers for include filtering");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_FILE_LIST, nullptr);
 }
 
 static void rna_def_filemenu_entry(BlenderRNA *brna)
@@ -8049,8 +8338,10 @@ static void rna_def_space_filebrowser(BlenderRNA *brna)
   RNA_def_struct_sdna(srna, "SpaceFile");
   RNA_def_struct_ui_text(srna, "Space File Browser", "File browser space data");
 
-  rna_def_space_generic_show_region_toggles(
-      srna, (1 << RGN_TYPE_TOOLS) | (1 << RGN_TYPE_UI) | (1 << RGN_TYPE_TOOL_PROPS));
+  rna_def_space_generic_show_region_toggles(srna,
+                                            (1 << RGN_TYPE_TOOLS) | (1 << RGN_TYPE_UI) |
+                                                (1 << RGN_TYPE_TOOL_PROPS) |
+                                                (1 << RGN_TYPE_TOOL_HEADER));
 
   prop = RNA_def_property(srna, "browse_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_space_file_browse_mode_items);
@@ -8496,6 +8787,26 @@ static void rna_def_space_node(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem image_filter_mode_items[] = {
+      {ui::TEMPLATE_ID_FILTER_ALL, "ALL", ICON_IMAGE, "All", "Show all images"},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL,
+       "CURRENT_MATERIAL",
+       ICON_MATERIAL,
+       "Current Material",
+       "Show images used by the active material"},
+      {ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+       "SLOT_TYPE",
+       ICON_NODE_TEXTURE,
+       "Slot Type",
+       "Show images used by a specific paint slot type"},
+      {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL | ui::TEMPLATE_ID_FILTER_SLOT_TYPE,
+       "CURRENT_MATERIAL_AND_SLOT_TYPE",
+       ICON_MATERIAL_DATA,
+       "Current Material & Slot Type",
+       "Show images used by the active material and specific paint slot type"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   srna = RNA_def_struct(brna, "SpaceNodeEditor", "Space");
   RNA_def_struct_sdna(srna, "SpaceNode");
   RNA_def_struct_ui_text(srna, "Space Node Editor", "Node editor space data");
@@ -8511,6 +8822,21 @@ static void rna_def_space_node(BlenderRNA *brna)
                               "rna_SpaceNodeEditor_tree_type_itemf");
   RNA_def_property_flag(prop, PROP_ENUM_NO_CONTEXT);
   RNA_def_property_ui_text(prop, "Tree Type", "Node tree type to display and edit");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_NODE, nullptr);
+
+  prop = RNA_def_property(srna, "image_filter_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "image_filter_mode");
+  RNA_def_property_enum_items(prop, image_filter_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Image Filter Mode",
+                           "Criteria used when filtering images in paint-related ID browsers");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_NODE, nullptr);
+
+  prop = RNA_def_property(srna, "image_filter_slot_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "image_filter_slot_type");
+  RNA_def_property_enum_items(prop, rna_enum_node_tex_image_paint_slot_type_items);
+  RNA_def_property_ui_text(
+      prop, "Image Filter Slot Type", "Paint slot type used when filtering by slot type");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_NODE, nullptr);
 
   prop = RNA_def_property(srna, "texture_type", PROP_ENUM, PROP_NONE);

@@ -2196,6 +2196,31 @@ enum eGPencil_Guide_Reference : char {
   GP_GUIDE_REF_OBJECT = 2,
 };
 
+/**
+ * #ToolSettings::texture_grid_display_view3d, #ToolSettings::texture_grid_display_image_editor,
+ * #ToolSettings::mask_texture_grid_display_view3d and
+ * #ToolSettings::mask_texture_grid_display_image_editor.
+ */
+enum eToolSettings_TextureGridDisplay : char {
+  TOOL_SETTINGS_TEXTURE_GRID_DISPLAY_ASSET_GRID = 0,
+  TOOL_SETTINGS_TEXTURE_GRID_DISPLAY_LEGACY_LIST = 1,
+};
+
+/**
+ * Per-color-picker palette association.
+ *
+ * Stored in #ToolSettings::color_picker_palettes so that each color picker popup can keep its own
+ * #Palette independently of the tool's active palette (#Paint::palette). Identified by #key, which
+ * combines the edited data-block name and the property's RNA path.
+ */
+typedef struct ColorPickerPalette {
+  struct ColorPickerPalette *next, *prev;
+  /** Identifier of the color picker: owning ID name + the edited property's RNA path. */
+  char *key;
+  /** Palette assigned to this color picker (may be null). */
+  struct Palette *palette;
+} ColorPickerPalette;
+
 struct ToolSettings {
   DNA_DEFINE_CXX_METHODS(ToolSettings)
 
@@ -2216,6 +2241,9 @@ struct ToolSettings {
   GpWeightPaint *gp_weightpaint = nullptr;
   /** Curves sculpt. */
   CurvesSculpt *curves_sculpt = nullptr;
+
+  /** Per-color-picker palette associations (#ColorPickerPalette). */
+  ListBaseT<ColorPickerPalette> color_picker_palettes = {nullptr, nullptr};
 
   /** Vertex group weight - used only for editmode, not weight paint. */
   float vgroup_weight = 1.0f;
@@ -2294,6 +2322,18 @@ struct ToolSettings {
 
   /** Settings for paint mode. */
   struct PaintModeSettings paint_mode;
+
+  /** Texture panel grid display mode, per panel instance (see #eToolSettings_TextureGridDisplay). */
+  eToolSettings_TextureGridDisplay texture_grid_display_view3d =
+      TOOL_SETTINGS_TEXTURE_GRID_DISPLAY_ASSET_GRID;
+  eToolSettings_TextureGridDisplay texture_grid_display_image_editor =
+      TOOL_SETTINGS_TEXTURE_GRID_DISPLAY_LEGACY_LIST;
+  /** Texture Mask panel grid display mode, per panel instance. */
+  eToolSettings_TextureGridDisplay mask_texture_grid_display_view3d =
+      TOOL_SETTINGS_TEXTURE_GRID_DISPLAY_ASSET_GRID;
+  eToolSettings_TextureGridDisplay mask_texture_grid_display_image_editor =
+      TOOL_SETTINGS_TEXTURE_GRID_DISPLAY_LEGACY_LIST;
+  char _pad_texture_grid_display[4] = {};
 
   /** Particle Editing. */
   struct ParticleEditSettings particle;

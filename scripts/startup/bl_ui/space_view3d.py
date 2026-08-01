@@ -8750,11 +8750,33 @@ class VIEW3D_PT_grease_pencil_sculpt_automasking(Panel):
         col.prop(tool_settings.gpencil_sculpt, "use_automasking_material_active", text="Active Material")
 
 
+def draw_color_palette_section(layout, settings):
+    # Collapsible Color Palette section for paint context menus.
+    layout.separator()
+
+    palette_header, palette_panel = layout.panel("color_palette", default_closed=True)
+    palette_header.label(text="Color Palette", icon='COLOR')
+
+    if palette_panel:
+        # Palette selector (create/browse/rename).
+        palette_selector = palette_panel.row(align=True)
+        palette_selector.template_ID(settings, "palette", new="palette.new")
+
+        # Color swatches.
+        if settings.palette:
+            palette_panel.template_palette(
+                settings, "palette",
+                show_empty_message=True,
+                show_sort_buttons=False,
+            )
+
+
 class VIEW3D_PT_paint_vertex_context_menu(Panel):
     # Only for popover, these are dummy values.
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'WINDOW'
     bl_label = "Vertex Paint"
+    bl_ui_units_x = 12
 
     def draw(self, context):
         layout = self.layout
@@ -8787,6 +8809,10 @@ class VIEW3D_PT_paint_vertex_context_menu(Panel):
             slider=True,
         )
 
+        # Color Palette section
+        if capabilities.has_color:
+            draw_color_palette_section(layout, context.tool_settings.vertex_paint)
+
 
 class VIEW3D_PT_paint_texture_context_menu(Panel):
     # Used in both the 3DView as well as the Image Editor
@@ -8794,6 +8820,7 @@ class VIEW3D_PT_paint_texture_context_menu(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'WINDOW'
     bl_label = "Texture Paint"
+    bl_ui_units_x = 12
 
     @classmethod
     def poll(cls, context):
@@ -8835,12 +8862,17 @@ class VIEW3D_PT_paint_texture_context_menu(Panel):
                 slider=True,
             )
 
+        # Color Palette section
+        if capabilities.has_color:
+            draw_color_palette_section(layout, context.tool_settings.image_paint)
+
 
 class VIEW3D_PT_paint_weight_context_menu(Panel):
     # Only for popover, these are dummy values.
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'WINDOW'
     bl_label = "Weights"
+    bl_ui_units_x = 12
 
     def draw(self, context):
         layout = self.layout
@@ -8972,6 +9004,7 @@ class VIEW3D_PT_sculpt_context_menu(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'WINDOW'
     bl_label = "Sculpt"
+    bl_ui_units_x = 12
 
     def draw(self, context):
         layout = self.layout
@@ -9033,6 +9066,10 @@ class VIEW3D_PT_sculpt_context_menu(Panel):
 
         if capabilities.has_height:
             layout.prop(brush, "height", slider=True, text="Height")
+
+        # Color Palette section
+        if capabilities.has_color:
+            draw_color_palette_section(layout, paint)
 
 
 class TOPBAR_PT_grease_pencil_materials(GreasePencilMaterialsPanel, Panel):
@@ -9241,6 +9278,40 @@ class VIEW3D_AST_brush_texture_paint(View3DAssetShelf, bpy.types.AssetShelf):
         # #IMAGE_AST_brush_paint and #VIEW3D_AST_brush_texture_paint are included
         # in the #km_image_paint keymap). See #145987.
         return context.space_data.type != 'IMAGE_EDITOR'
+
+
+class VIEW3D_AST_image_texture(AssetShelfHiddenByDefault, bpy.types.AssetShelf):
+    """Image texture assets for sculpt/paint toolbars (popover only)."""
+    bl_space_type = 'VIEW_3D'
+    bl_idname = "VIEW3D_AST_image_texture"
+    bl_label = "Image Textures"
+    bl_activate_operator = "view3d.image_shelf_activate_asset"
+    bl_reorder_operator = "ASSETSHELF_OT_asset_favorite_reorder_to"
+    bl_reorder_direction_operator = "ASSETSHELF_OT_asset_favorite_reorder"
+    filter_image = True
+
+    @classmethod
+    def poll(cls, context):
+        # Popover-only: never become the active shelf in the permanent View3D asset shelf region.
+        region = context.region
+        if region and region.type == 'ASSET_SHELF':
+            return False
+        # The compact image grid (and its "Browse Image" popover) also draws in the Image Editor's
+        # own N-Panel/Tool tab and, via Properties Editor mirroring of the biggest View3D, in the
+        # Properties Editor -- so this shelf must be reachable from all three space types, not just
+        # the 3D Viewport it was originally written for.
+        if context.space_data.type not in {'VIEW_3D', 'IMAGE_EDITOR', 'PROPERTIES'}:
+            return False
+        if context.mode not in {
+            'SCULPT', 'PAINT_TEXTURE', 'PAINT_VERTEX', 'PAINT_WEIGHT',
+            'PAINT_GPENCIL', 'SCULPT_GPENCIL', 'VERTEX_GPENCIL', 'WEIGHT_GPENCIL',
+        }:
+            return False
+        return context.tool_settings is not None
+
+    @classmethod
+    def asset_poll(cls, asset):
+        return asset.id_type == 'IMAGE'
 
 
 class VIEW3D_AST_brush_gpencil_paint(View3DAssetShelf, bpy.types.AssetShelf):
@@ -9528,6 +9599,7 @@ classes = (
     VIEW3D_AST_brush_vertex_paint,
     VIEW3D_AST_brush_weight_paint,
     VIEW3D_AST_brush_texture_paint,
+    VIEW3D_AST_image_texture,
     VIEW3D_AST_brush_gpencil_paint,
     VIEW3D_AST_brush_gpencil_sculpt,
     VIEW3D_AST_brush_gpencil_vertex,

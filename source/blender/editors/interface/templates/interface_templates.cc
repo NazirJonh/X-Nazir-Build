@@ -111,6 +111,9 @@ void template_add_button_search_menu(const bContext *C,
     else {
       def_but_icon(but, RNA_struct_ui_icon(type), UI_HAS_ICON);
       button_drawflag_enable(but, BUT_ICON_LEFT);
+      if (but->str.empty()) {
+        button_drawflag_disable(but, BUT_ICON_LEFT);
+      }
     }
 
     if ((idfrom && !ID_IS_EDITABLE(idfrom)) || !editable) {
@@ -145,6 +148,9 @@ void template_add_button_search_menu(const bContext *C,
       button_drag_set_id(but, id);
     }
     button_drawflag_enable(but, BUT_ICON_LEFT);
+    if (but->str.empty()) {
+      button_drawflag_disable(but, BUT_ICON_LEFT);
+    }
 
     if ((idfrom && !ID_IS_EDITABLE(idfrom)) || !editable) {
       button_flag_enable(but, BUT_DISABLED);

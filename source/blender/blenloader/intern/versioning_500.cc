@@ -30,6 +30,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_sequence_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_workspace_types.h"
 #include "DNA_world_types.h"
@@ -78,6 +79,8 @@
 #include "SEQ_utils.hh"
 
 #include "WM_api.hh"
+
+#include "UI_interface_c.hh"
 
 #include "AS_asset_library.hh"
 
@@ -4507,6 +4510,19 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
     FOREACH_NODETREE_END;
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 116)) {
+    /* Initialize paint_slot_type for image texture nodes in old files. */
+    FOREACH_NODETREE_BEGIN (bmain, ntree, id) {
+      for (bNode &node : ntree->nodes) {
+        if (node.type_legacy == SH_NODE_TEX_IMAGE && node.storage) {
+          NodeTexImage *storage = static_cast<NodeTexImage *>(node.storage);
+          storage->paint_slot_type = NODE_TEX_IMAGE_SLOT_NONE;
+        }
+      }
+    }
+    FOREACH_NODETREE_END;
+  }
+
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 500, 117)) {
     FOREACH_NODETREE_BEGIN (bmain, node_tree, id) {
       if (node_tree->type == NTREE_GEOMETRY) {
@@ -4516,6 +4532,65 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 20)) {
+    /* Initialize SpaceImage filter fields for image filtering in texture paint mode. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_IMAGE) {
+            SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
+            if (sima->image_filter_mode == 0) {
+              sima->image_filter_mode = ui::TEMPLATE_ID_FILTER_ALL;
+            }
+            if (sima->image_filter_slot_type == 0) {
+              sima->image_filter_slot_type = NODE_TEX_IMAGE_SLOT_NONE;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 41)) {
+    /* Initialize SpaceNode image filter fields, mirroring the SpaceImage block above. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_NODE) {
+            SpaceNode *snode = reinterpret_cast<SpaceNode *>(&sl);
+            if (snode->image_filter_mode == 0) {
+              snode->image_filter_mode = ui::TEMPLATE_ID_FILTER_ALL;
+            }
+            if (snode->image_filter_slot_type == 0) {
+              snode->image_filter_slot_type = NODE_TEX_IMAGE_SLOT_NONE;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 43)) {
+    /* Initialize SpaceView3D image browser paint-slot filter fields, mirroring #SpaceImage and
+     * #SpaceNode. The grid/list view mode and search now live on the window manager (see
+     * #wmWindowManager::id_browser_view_mode), so they need no per-space initialization. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            if (v3d->image_filter_mode == 0) {
+              v3d->image_filter_mode = ui::TEMPLATE_ID_FILTER_ALL;
+            }
+            if (v3d->image_filter_slot_type == 0) {
+              v3d->image_filter_slot_type = NODE_TEX_IMAGE_SLOT_NONE;
+            }
+          }
+        }
+      }
+    }
   }
 
   /**

@@ -19,6 +19,7 @@
 
 #include "GPU_state.hh"
 
+#include "UI_grid_view.hh"
 #include "UI_interface.hh"
 #include "UI_view2d.hh"
 
@@ -120,6 +121,7 @@ void ED_spacetypes_init()
 
   ui::ED_operatortypes_view2d();
   ui::operatortypes_ui();
+  ui::grid_view_register_pre_button_handler();
 
   ED_screen_user_menu_register();
 

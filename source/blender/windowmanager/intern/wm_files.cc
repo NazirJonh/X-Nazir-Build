@@ -86,6 +86,7 @@
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_main_namemap.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_node.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_packedFile.hh"
@@ -1355,6 +1356,10 @@ void wm_homefile_read_ex(bContext *C,
 
         BKE_blender_userdef_data_set_and_free(userdef);
         userdef = nullptr;
+
+        /* Versioning already ran inside the read; ensure again in case an on-disk prefs file
+         * already had the current subversion with an empty name-match list. */
+        BKE_name_matching_userdef_ensure_defaults(&U);
 
         skip_flags |= BLO_READ_SKIP_USERDEF;
       }

@@ -1306,6 +1306,88 @@ static blender::ImBuf *NSImageToImBuf(NSImage *image)
   return ibuf;
 }
 
+/**
+ * Convert the raw pasteboard \a data (an `NSArray`, `NSString` or `NSImage`) into the GHOST event
+ * data expected by #GHOST_EventDragnDrop for the given \a draggedObjectType. The returned pointer is
+ * owned by the event and freed in its destructor. Returns null on failure.
+ */
+static GHOST_TDragnDropDataPtr ghost_cocoa_dnd_event_data(GHOST_TDragnDropTypes draggedObjectType,
+                                                          void *data)
+{
+  if (!data) {
+    return nullptr;
+  }
+
+  GHOST_TDragnDropDataPtr eventData = nullptr;
+  @autoreleasepool {
+    switch (draggedObjectType) {
+      case GHOST_kDragnDropTypeFilenames: {
+        NSArray *droppedArray = (NSArray *)data;
+
+        GHOST_TStringArray *strArray = (GHOST_TStringArray *)malloc(sizeof(GHOST_TStringArray));
+        if (!strArray) {
+          return nullptr;
+        }
+
+        strArray->count = droppedArray.count;
+        if (strArray->count == 0) {
+          free(strArray);
+          return nullptr;
+        }
+
+        strArray->strings = (uint8_t **)malloc(strArray->count * sizeof(uint8_t *));
+
+        for (int i = 0; i < strArray->count; i++) {
+          NSString *droppedStr = [droppedArray objectAtIndex:i];
+          const size_t pastedTextSize = [droppedStr lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+          uint8_t *temp_buff = (uint8_t *)malloc(pastedTextSize + 1);
+
+          if (!temp_buff) {
+            strArray->count = i;
+            break;
+          }
+
+          memcpy(temp_buff, [droppedStr cStringUsingEncoding:NSUTF8StringEncoding], pastedTextSize);
+          temp_buff[pastedTextSize] = '\0';
+
+          strArray->strings[i] = temp_buff;
+        }
+
+        eventData = static_cast<GHOST_TDragnDropDataPtr>(strArray);
+        break;
+      }
+      case GHOST_kDragnDropTypeString: {
+        NSString *droppedStr = (NSString *)data;
+        const size_t pastedTextSize = [droppedStr lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        uint8_t *temp_buff = (uint8_t *)malloc(pastedTextSize + 1);
+
+        if (temp_buff == nullptr) {
+          return nullptr;
+        }
+
+        memcpy(temp_buff, [droppedStr cStringUsingEncoding:NSUTF8StringEncoding], pastedTextSize);
+        temp_buff[pastedTextSize] = '\0';
+
+        eventData = static_cast<GHOST_TDragnDropDataPtr>(temp_buff);
+        break;
+      }
+      case GHOST_kDragnDropTypeBitmap: {
+        NSImage *droppedImg = static_cast<NSImage *>(data);
+        blender::ImBuf *ibuf = NSImageToImBuf(droppedImg);
+
+        eventData = static_cast<GHOST_TDragnDropDataPtr>(ibuf);
+
+        [droppedImg release];
+        break;
+      }
+      default:
+        return nullptr;
+    }
+  }
+
+  return eventData;
+}
+
 /* NOTE: called from #NSWindow subclass. */
 GHOST_TSuccess GHOST_SystemCocoa::handleDraggingEvent(GHOST_TEventType eventType,
                                                       GHOST_TDragnDropTypes draggedObjectType,
@@ -1320,89 +1402,24 @@ GHOST_TSuccess GHOST_SystemCocoa::handleDraggingEvent(GHOST_TEventType eventType
   switch (eventType) {
     case GHOST_kEventDraggingEntered:
     case GHOST_kEventDraggingUpdated:
-    case GHOST_kEventDraggingExited:
+    case GHOST_kEventDraggingExited: {
       window->clientToScreenIntern(mouseX, mouseY, mouseX, mouseY);
+      /* On enter the pasteboard \a data may be supplied (currently for file names) so the window
+       * manager can create the drag and draw a preview while hovering; on update/exit it is null. */
+      GHOST_TDragnDropDataPtr eventData = ghost_cocoa_dnd_event_data(draggedObjectType, data);
       pushEvent(std::make_unique<GHOST_EventDragnDrop>(
-          getMilliSeconds(), eventType, draggedObjectType, window, mouseX, mouseY, nullptr));
+          getMilliSeconds(), eventType, draggedObjectType, window, mouseX, mouseY, eventData));
       break;
+    }
 
     case GHOST_kEventDraggingDropDone: {
       if (!data) {
         return GHOST_kFailure;
       }
 
-      GHOST_TDragnDropDataPtr eventData;
-      @autoreleasepool {
-        switch (draggedObjectType) {
-          case GHOST_kDragnDropTypeFilenames: {
-            NSArray *droppedArray = (NSArray *)data;
-
-            GHOST_TStringArray *strArray = (GHOST_TStringArray *)malloc(
-                sizeof(GHOST_TStringArray));
-            if (!strArray) {
-              return GHOST_kFailure;
-            }
-
-            strArray->count = droppedArray.count;
-            if (strArray->count == 0) {
-              free(strArray);
-              return GHOST_kFailure;
-            }
-
-            strArray->strings = (uint8_t **)malloc(strArray->count * sizeof(uint8_t *));
-
-            for (int i = 0; i < strArray->count; i++) {
-              NSString *droppedStr = [droppedArray objectAtIndex:i];
-              const size_t pastedTextSize = [droppedStr
-                  lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-              uint8_t *temp_buff = (uint8_t *)malloc(pastedTextSize + 1);
-
-              if (!temp_buff) {
-                strArray->count = i;
-                break;
-              }
-
-              memcpy(temp_buff,
-                     [droppedStr cStringUsingEncoding:NSUTF8StringEncoding],
-                     pastedTextSize);
-              temp_buff[pastedTextSize] = '\0';
-
-              strArray->strings[i] = temp_buff;
-            }
-
-            eventData = static_cast<GHOST_TDragnDropDataPtr>(strArray);
-            break;
-          }
-          case GHOST_kDragnDropTypeString: {
-            NSString *droppedStr = (NSString *)data;
-            const size_t pastedTextSize = [droppedStr
-                lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-            uint8_t *temp_buff = (uint8_t *)malloc(pastedTextSize + 1);
-
-            if (temp_buff == nullptr) {
-              return GHOST_kFailure;
-            }
-
-            memcpy(
-                temp_buff, [droppedStr cStringUsingEncoding:NSUTF8StringEncoding], pastedTextSize);
-            temp_buff[pastedTextSize] = '\0';
-
-            eventData = static_cast<GHOST_TDragnDropDataPtr>(temp_buff);
-            break;
-          }
-          case GHOST_kDragnDropTypeBitmap: {
-            NSImage *droppedImg = static_cast<NSImage *>(data);
-            blender::ImBuf *ibuf = NSImageToImBuf(droppedImg);
-
-            eventData = static_cast<GHOST_TDragnDropDataPtr>(ibuf);
-
-            [droppedImg release];
-            break;
-          }
-          default:
-            return GHOST_kFailure;
-            break;
-        }
+      GHOST_TDragnDropDataPtr eventData = ghost_cocoa_dnd_event_data(draggedObjectType, data);
+      if (!eventData) {
+        return GHOST_kFailure;
       }
 
       window->clientToScreenIntern(mouseX, mouseY, mouseX, mouseY);

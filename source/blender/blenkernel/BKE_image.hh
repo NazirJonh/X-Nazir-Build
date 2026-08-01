@@ -13,6 +13,7 @@
 #include "BLI_function_ref.hh"
 #include "BLI_mutex.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_vector.hh"
 
 #include "IMB_imbuf_enums.h"
 
@@ -43,6 +44,8 @@ struct ImageTile;
 struct ImbFormatOptions;
 struct Library;
 struct Main;
+struct Material;
+struct MovieCache;
 struct Object;
 struct PartialUpdateRegister;
 struct PartialUpdateUser;
@@ -63,6 +66,37 @@ constexpr int IMAGE_GPU_LAYER_NONE = std::numeric_limits<short>::max();
 constexpr int IMAGE_GPU_VIEW_NONE = std::numeric_limits<short>::max();
 
 namespace bke {
+
+/**
+ * Record describing a single usage of an image in a material.
+ * Used for runtime indexing to enable fast filtering.
+ */
+struct UsageRecord {
+  /**
+   * Session UID of the material that uses this image (see #ID.session_uid). A session UID is
+   * stored instead of a raw #Material pointer so a stale index can never dereference or falsely
+   * match freed data: UIDs are unique and never reused within a session.
+   */
+  uint32_t material_session_uid;
+  /** Slot type this image is used as (from NodeTexImage::paint_slot_type). */
+  char slot_type;
+};
+
+/**
+ * Runtime index structure for fast image filtering by material and slot type.
+ * Stored in #ImageRuntime and rebuilt on demand. The index is invalidated on the known mutation
+ * paths (node image/slot edits, material removal); it is best-effort, so it may briefly lag behind
+ * actual usage. Records store material session UIDs (not pointers) so a stale index is always safe
+ * to read.
+ */
+struct ImagePaintSlotInfo {
+  /** List of all usage records for this image. */
+  blender::Vector<UsageRecord> usage_records;
+  /** Bitmask of slot types used across all materials (bit N = slot type N is used). */
+  uint16_t slot_types_mask = 0;
+  /** Whether this image is used in any material at all. */
+  bool is_used = false;
+};
 
 struct ImageRuntime {
   /* Mutex used to guarantee thread-safe access to the cached ImBuf of the corresponding image ID.
@@ -93,6 +127,9 @@ struct ImageRuntime {
 
   float view_offset[2] = {};
   float view_zoom = 1.0f;
+
+  /* Runtime index for fast image filtering by material and slot type. */
+  ImagePaintSlotInfo *paint_slot_info = nullptr;
 };
 
 }  // namespace bke
@@ -721,6 +758,44 @@ void BKE_image_update_gputexture(Image *ima, ImageUser *iuser, int x, int y, int
  */
 void BKE_image_update_gputexture_delayed(
     Image *ima, ImageTile *image_tile, ImBuf *ibuf, int x, int y, int w, int h);
+
+/**
+ * Runtime index functions for fast image filtering.
+ */
+
+/**
+ * Build or rebuild the paint slot usage index for this image.
+ * Scans all materials in \a bmain and collects information about how this image is used.
+ */
+void BKE_image_paint_slot_info_rebuild(Main *bmain, Image *ima);
+void BKE_image_paint_slot_info_invalidate(Image *ima);
+
+/**
+ * Check if the paint slot info index is valid (doesn't need rebuilding).
+ * Returns false if index is nullptr or outdated.
+ */
+bool BKE_image_paint_slot_info_is_valid(const Image *ima);
+
+/**
+ * Quick check if image is used in any material (uses cached index).
+ * Rebuilds index from \a bmain if needed.
+ */
+bool BKE_image_paint_slot_info_is_used_in_any_material(Main *bmain, const Image *ima);
+
+/**
+ * Quick check if image has a specific slot type usage (uses cached index).
+ * Rebuilds index from \a bmain if needed.
+ */
+bool BKE_image_paint_slot_info_has_slot_type(Main *bmain, const Image *ima, char slot_type);
+
+/**
+ * Quick check if image is used in a specific material with optional slot type filter
+ * (uses cached index). Rebuilds index from \a bmain if needed.
+ */
+bool BKE_image_paint_slot_info_is_used_in_material(Main *bmain,
+                                                   const Image *ima,
+                                                   const Material *material,
+                                                   char slot_type = 0);
 
 /**
  * Called on entering and exiting texture paint mode,

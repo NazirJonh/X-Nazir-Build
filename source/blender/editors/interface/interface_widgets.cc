@@ -4307,6 +4307,16 @@ static void widget_scroll(Button *but,
                           int /*roundboxalign*/,
                           const float /*zoom*/)
 {
+  uiWidgetColors wcol_draw = *wcol;
+  /* Optional per-button track fill (#button_color_set), e.g. overlay scroll on image previews. */
+  if (but->col[3] != 0) {
+    copy_v4_v4_uchar(wcol_draw.inner, but->col);
+  }
+  else if (wcol_draw.inner[3] == 0) {
+    /* Same fallback as #view2d_scrollers_draw for theme tracks with zero alpha. */
+    wcol_draw.inner[3] = uchar(255.0f * 0.25f);
+  }
+
   const ButtonScrollBar *but_scroll = reinterpret_cast<const ButtonScrollBar *>(but);
   const float height = but_scroll->visual_height;
 
@@ -4356,7 +4366,7 @@ static void widget_scroll(Button *but,
     }
   }
 
-  draw_widget_scroll(wcol, rect, &rect1, (state->but_flag & UI_SELECT) ? SCROLL_PRESSED : 0);
+  draw_widget_scroll(&wcol_draw, rect, &rect1, (state->but_flag & UI_SELECT) ? SCROLL_PRESSED : 0);
 }
 
 static void widget_progress_type_bar(ButtonProgress *but_progress,
@@ -4885,10 +4895,12 @@ static void widget_list_itembut(Button *but,
       is_selected = true;
     }
     if (item_but->draw_width > 0) {
-      BLI_rcti_resize_x(&draw_rect, zoom * item_but->draw_width);
+      const int draw_w = min_ii(zoom * item_but->draw_width, BLI_rcti_size_x(&draw_rect));
+      BLI_rcti_resize_x(&draw_rect, draw_w);
     }
     if (item_but->draw_height > 0) {
-      BLI_rcti_resize_y(&draw_rect, zoom * item_but->draw_height);
+      const int draw_h = min_ii(zoom * item_but->draw_height, BLI_rcti_size_y(&draw_rect));
+      BLI_rcti_resize_y(&draw_rect, draw_h);
     }
   }
 
@@ -4924,7 +4936,8 @@ static void widget_preview_tile(Button *but,
                               icon,
                               wcol->text,
                               UI_STYLE_TEXT_CENTER,
-                              !(but->drawflag & BUT_NO_PREVIEW_PADDING));
+                              !(but->drawflag & BUT_NO_PREVIEW_PADDING),
+                              but->preview_size_px);
 }
 
 static void widget_optionbut(uiWidgetColors *wcol,
@@ -5120,11 +5133,16 @@ static void widget_roundbut_exec(Button *but,
       wtb.draw_outline = false;
       wtb.draw_emboss = true;
       /* Use a black transparent background and a white icon color, to ensure good contrast. */
-      const uchar background_col[4] = {0, 0, 0, (but->flag & UI_HOVER) ? uchar(120) : uchar(100)};
+      const float overlay_alpha = (but->flag & UI_HOVER) ?
+                                      1.0f :
+                                      push_but->overlay_alpha_factor;
+      const uchar background_alpha = uchar(
+          int((but->flag & UI_HOVER) ? 120 : 100) * overlay_alpha);
+      const uchar background_col[4] = {0, 0, 0, background_alpha};
       copy_v4_v4_uchar(wcol->inner, background_col);
       copy_v4_v4_uchar(wcol->inner_sel, background_col);
-      const uchar foreground_col[4] = {
-          255, 255, 255, (but->flag & UI_HOVER) ? uchar(255) : uchar(230)};
+      const uchar foreground_alpha = uchar(int((but->flag & UI_HOVER) ? 255 : 230) * overlay_alpha);
+      const uchar foreground_col[4] = {255, 255, 255, foreground_alpha};
       copy_v4_v4_uchar(wcol->text, foreground_col);
       copy_v4_v4_uchar(wcol->text_sel, foreground_col);
     }
@@ -6407,11 +6425,19 @@ void draw_preview_item_stateless(const uiFontStyle *fstyle,
                                  int iconid,
                                  const uchar text_col[4],
                                  FontStyleAlign text_align,
-                                 const bool add_padding)
+                                 const bool add_padding,
+                                 int preview_size_px)
 {
   rcti trect = *rect;
-  const float text_size = UI_UNIT_Y;
+  float text_size = UI_UNIT_Y;
   const bool has_text = !name.is_empty();
+
+  /* Use preview_size_px (the unscaled icon size) when available, because rect already includes the
+   * label rect in tiles that show a label (e.g. Asset Shelf). */
+  const int preview_height = (preview_size_px > 0) ? preview_size_px : BLI_rcti_size_y(rect);
+  if (const float scale_factor = preview_tile_text_scale(preview_height); scale_factor < 1.0f) {
+    text_size = std::max(text_size * scale_factor, float(PREVIEW_TILE_TEXT_MIN_HEIGHT));
+  }
 
   float alpha = 1.0f;
 
@@ -6443,11 +6469,19 @@ void draw_preview_item_stateless(const uiFontStyle *fstyle,
 
     memcpy(drawstr, name.data(), name.size());
     drawstr[name.size()] = '\0';
-    text_clip_middle_ex(fstyle, drawstr, okwidth, minwidth, max_len, '\0');
+
+    /* Create a modifiable copy of font style to scale font size. */
+    uiFontStyle fs_scaled = *fstyle;
+    if (const float scale_factor = preview_tile_text_scale(preview_height); scale_factor < 1.0f) {
+      fs_scaled.points = std::max(int(fs_scaled.points * scale_factor),
+                                  PREVIEW_TILE_TEXT_MIN_POINTS);
+    }
+
+    text_clip_middle_ex(&fs_scaled, drawstr, okwidth, minwidth, max_len, '\0');
 
     FontStyleDrawParams params{};
     params.align = text_align;
-    fontstyle_draw(fstyle, &trect, drawstr, sizeof(drawstr), text_col, &params);
+    fontstyle_draw(&fs_scaled, &trect, drawstr, sizeof(drawstr), text_col, &params);
   }
 }
 
@@ -6457,7 +6491,8 @@ void draw_preview_item(const uiFontStyle *fstyle,
                        const char *name,
                        int iconid,
                        int but_flag,
-                       FontStyleAlign text_align)
+                       FontStyleAlign text_align,
+                       int preview_size_px)
 {
   WidgetType *wt = widget_type(WidgetStyle::MenuItemUnpadded);
 
@@ -6468,7 +6503,8 @@ void draw_preview_item(const uiFontStyle *fstyle,
   wt->state(wt, &state, EmbossType::Undefined);
   wt->draw(&wt->wcol, rect, &STATE_INFO_NULL, 0, zoom);
 
-  draw_preview_item_stateless(fstyle, rect, name, iconid, wt->wcol.text, text_align, true);
+  draw_preview_item_stateless(
+      fstyle, rect, name, iconid, wt->wcol.text, text_align, true, preview_size_px);
 }
 
 /** \} */

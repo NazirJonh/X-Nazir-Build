@@ -13,6 +13,7 @@
 #include "DNA_mask_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_view3d_types.h"
 
 #include "MEM_guardedalloc.h"
 
@@ -38,6 +39,7 @@
 
 #include "ED_asset_shelf.hh"
 #include "ED_image.hh"
+#include "ED_image_grid.hh"
 #include "ED_mask.hh"
 #include "ED_node.hh"
 #include "ED_render.hh"
@@ -193,6 +195,13 @@ static void image_free(SpaceLink *sl)
   SpaceImage *simage = reinterpret_cast<SpaceImage *>(sl);
 
   BKE_scopes_free(&simage->scopes);
+
+  for (ImageGridSlotDNA *slot : {&simage->image_grid, &simage->image_grid_mask}) {
+    ed::image_grid::image_grid_slot_dna_free(*slot);
+  }
+  if (simage->runtime.image_grid_state) {
+    ed::image_grid::image_grid_state_remove(ed::image_grid::ImageGridOwner::from(*simage));
+  }
 }
 
 /* spacetype; init callback, add handlers */
@@ -206,11 +215,16 @@ static void image_init(wmWindowManager * /*wm*/, ScrArea *area)
 
 static SpaceLink *image_duplicate(SpaceLink *sl)
 {
-  SpaceImage *simagen = MEM_dupalloc(reinterpret_cast<SpaceImage *>(sl));
+  SpaceImage *simago = reinterpret_cast<SpaceImage *>(sl);
+  SpaceImage *simagen = MEM_dupalloc(simago);
 
   /* clear or remove stuff from old */
 
   BKE_scopes_new(&simagen->scopes);
+
+  ed::image_grid::image_grid_slot_dna_duplicate(simagen->image_grid, simago->image_grid);
+  ed::image_grid::image_grid_slot_dna_duplicate(simagen->image_grid_mask, simago->image_grid_mask);
+  simagen->runtime = SpaceImage_Runtime{};
 
   return reinterpret_cast<SpaceLink *>(simagen);
 }
@@ -1104,6 +1118,19 @@ static void image_tools_region_listener(const wmRegionListenerParams *params)
     case NC_NODE:
       ED_region_tag_redraw(region);
       break;
+    case NC_ASSET:
+      switch (wmn->data) {
+        case ND_ASSET_CATALOGS:
+        case ND_ASSET_LIST:
+        case ND_ASSET_LIST_READING:
+          ED_region_tag_redraw(region);
+          break;
+        default:
+          if (ELEM(wmn->action, NA_ADDED, NA_REMOVED, NA_EDITED)) {
+            ED_region_tag_redraw(region);
+          }
+      }
+      break;
   }
 }
 
@@ -1278,7 +1305,7 @@ static int image_space_icon_get(const ScrArea *area)
   return item.icon;
 }
 
-static void image_space_blend_read_data(BlendDataReader * /*reader*/, SpaceLink *sl)
+static void image_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
 {
   SpaceImage *sima = reinterpret_cast<SpaceImage *>(sl);
 
@@ -1299,11 +1326,18 @@ static void image_space_blend_read_data(BlendDataReader * /*reader*/, SpaceLink 
     BKE_gpencil_blend_read_data(fd, sima->gpd);
   }
 #endif
+
+  ed::image_grid::image_grid_slot_dna_blend_read(reader, sima->image_grid);
+  ed::image_grid::image_grid_slot_dna_blend_read(reader, sima->image_grid_mask);
+  sima->runtime = SpaceImage_Runtime{};
 }
 
 static void image_space_blend_write(BlendWriter *writer, SpaceLink *sl)
 {
+  SpaceImage *sima = reinterpret_cast<SpaceImage *>(sl);
   writer->write_struct_cast<SpaceImage>(sl);
+  ed::image_grid::image_grid_slot_dna_blend_write(writer, sima->image_grid);
+  ed::image_grid::image_grid_slot_dna_blend_write(writer, sima->image_grid_mask);
 }
 
 /**************************** spacetype *****************************/
@@ -1399,6 +1433,9 @@ void ED_spacetype_image()
   art->draw = image_header_region_draw;
 
   BLI_addhead(&st->regiontypes, art);
+  image_grid_catalog_selector_panel_register(art);
+  image_grid_display_panel_register(art);
+  image_grid_name_match_filter_panel_register(art);
 
   /* regions: asset shelf */
   art = MEM_new_zeroed<ARegionType>("spacetype image asset shelf region");

@@ -7,22 +7,32 @@
  */
 
 #include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
+#include "DNA_uuid_types.h"
 
 #include "AS_asset_catalog.hh"
 #include "AS_asset_catalog_tree.hh"
 #include "AS_asset_library.hh"
 
 #include "BKE_asset.hh"
+#include "BKE_context.hh"
+#include "BKE_preferences.h"
 
 #include "BLI_listbase.h"
+#include "BLI_path_utils.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_uuid.h"
 
 #include "BLT_translation.hh"
 
 #include "ED_asset.hh"
 #include "ED_asset_catalog.hh"
+#include "ED_asset_image_library.hh"
+#include "ED_asset_list.hh"
 #include "ED_fileselect.hh"
 #include "ED_undo.hh"
+
+#include "intern/asset_library_reference.hh"
 
 #include "RNA_access.hh"
 
@@ -97,6 +107,13 @@ class AssetCatalogTreeViewItem : public ui::BasicTreeViewItem {
   std::unique_ptr<ui::AbstractViewItemDragController> create_drag_controller() const override;
   /** Add dropping support for catalog items. */
   std::unique_ptr<ui::TreeViewItemDropTarget> create_drop_target() override;
+
+  /** Saved collapsed state for this catalog, or nullopt to use the tree's default. */
+  std::optional<bool> should_be_collapsed() const override;
+  /** Update the per-editor working copy of the collapsed state. */
+  bool set_collapsed(bool collapsed) override;
+  /** Persist the collapsed state to the user preferences when changed through the UI. */
+  void on_collapse_change(bContext &C, bool is_collapsed) override;
 };
 
 class AssetCatalogDragController : public ui::AbstractViewItemDragController {
@@ -117,7 +134,7 @@ class AssetCatalogDropTarget : public ui::TreeViewItemDropTarget {
  public:
   AssetCatalogDropTarget(AssetCatalogTreeViewItem &item, const AssetCatalogTreeItem &catalog_item);
 
-  bool can_drop(const wmDrag &drag, const char **r_disabled_hint) const override;
+  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char **r_disabled_hint) const override;
   std::string drop_tooltip(const ui::DragInfo &drag_info) const override;
   bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override;
 
@@ -158,7 +175,7 @@ class AssetCatalogTreeViewAllItem : public ui::BasicTreeViewItem {
   struct DropTarget : public ui::TreeViewItemDropTarget {
     DropTarget(AssetCatalogTreeViewAllItem &item);
 
-    bool can_drop(const wmDrag &drag, const char **r_disabled_hint) const override;
+    bool can_drop(bContext & /*C*/, const wmDrag &drag, const char **r_disabled_hint) const override;
     std::string drop_tooltip(const ui::DragInfo &drag_info) const override;
     bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override;
   };
@@ -172,7 +189,7 @@ class AssetCatalogTreeViewUnassignedItem : public ui::BasicTreeViewItem {
   struct DropTarget : public ui::TreeViewItemDropTarget {
     DropTarget(AssetCatalogTreeViewUnassignedItem &item);
 
-    bool can_drop(const wmDrag &drag, const char **r_disabled_hint) const override;
+    bool can_drop(bContext & /*C*/, const wmDrag &drag, const char **r_disabled_hint) const override;
     std::string drop_tooltip(const ui::DragInfo &drag_info) const override;
     bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override;
   };
@@ -201,6 +218,20 @@ AssetCatalogTreeView::AssetCatalogTreeView(asset_system::AssetLibrary *library,
 
 void AssetCatalogTreeView::build_tree()
 {
+  if (space_file_.runtime) {
+    SpaceFile_Runtime &runtime = *space_file_.runtime;
+    if (!(runtime.catalog_validated_library_ref == params_->asset_library_ref)) {
+      runtime.catalog_validated_library_ref = params_->asset_library_ref;
+      runtime.catalog_validated = false;
+    }
+    if (!runtime.catalog_validated) {
+      /* Re-run the same restore-and-validate logic used on explicit library switch -- idempotent
+       * if the library was already loaded and validated the first time. */
+      ED_fileselect_asset_library_reference_set(params_, params_->asset_library_ref);
+      runtime.catalog_validated = true;
+    }
+  }
+
   AssetCatalogTreeViewAllItem &all_item = add_all_item();
   all_item.uncollapse_by_default();
 
@@ -234,7 +265,7 @@ AssetCatalogTreeViewAllItem &AssetCatalogTreeView::add_all_item()
 
   AssetCatalogTreeViewAllItem &item = add_tree_item<AssetCatalogTreeViewAllItem>(IFACE_("All"));
   item.set_on_activate_fn([params](bContext & /*C*/, ui::BasicTreeViewItem & /*item*/) {
-    params->asset_catalog_visibility = FILE_SHOW_ASSETS_ALL_CATALOGS;
+    ED_fileselect_asset_catalog_set_all(params);
     WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
   });
   item.set_is_active_fn(
@@ -250,6 +281,9 @@ void AssetCatalogTreeView::add_unassigned_item()
       IFACE_("Unassigned"), ICON_FILE_HIDDEN);
 
   item.set_on_activate_fn([params](bContext & /*C*/, ui::BasicTreeViewItem & /*item*/) {
+    /* Not a catalog selection (no catalog_id changes) -- #ED_fileselect_asset_catalog_set_all
+     * would wrongly narrow #asset_catalog_visibility to #FILE_SHOW_ASSETS_ALL_CATALOGS and clear
+     * the remembered catalog memory. "Unassigned" isn't persisted there. */
     params->asset_catalog_visibility = FILE_SHOW_ASSETS_WITHOUT_CATALOG;
     WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
   });
@@ -259,8 +293,7 @@ void AssetCatalogTreeView::add_unassigned_item()
 
 void AssetCatalogTreeView::activate_catalog_by_id(CatalogID catalog_id)
 {
-  params_->asset_catalog_visibility = FILE_SHOW_ASSETS_FROM_CATALOG;
-  params_->catalog_id = catalog_id;
+  ED_fileselect_asset_catalog_set(params_, catalog_id);
   WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
 }
 
@@ -370,6 +403,58 @@ std::unique_ptr<ui::AbstractViewItemDragController> AssetCatalogTreeViewItem::
       static_cast<AssetCatalogTreeView &>(this->get_tree_view()), catalog_item_);
 }
 
+std::optional<bool> AssetCatalogTreeViewItem::should_be_collapsed() const
+{
+  const AssetCatalogTreeView &tree_view = static_cast<const AssetCatalogTreeView &>(
+      this->get_tree_view());
+  if (!tree_view.asset_library_ || !tree_view.params_) {
+    return std::nullopt;
+  }
+  const AssetCatalogPath catalog_path = catalog_item_.catalog_path();
+  return BKE_asset_catalog_state_get_collapsed(tree_view.params_->catalog_states,
+                                               catalog_path.c_str());
+}
+
+bool AssetCatalogTreeViewItem::set_collapsed(bool collapsed)
+{
+  const bool result = BasicTreeViewItem::set_collapsed(collapsed);
+  if (!result) {
+    return false;
+  }
+
+  AssetCatalogTreeView &tree_view = static_cast<AssetCatalogTreeView &>(this->get_tree_view());
+  if (!tree_view.asset_library_ || !tree_view.params_) {
+    return result;
+  }
+
+  /* Update the per-editor working copy. */
+  const AssetCatalogPath catalog_path = catalog_item_.catalog_path();
+  BKE_asset_catalog_state_set_collapsed(
+      tree_view.params_->catalog_states, catalog_path.c_str(), collapsed);
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_FILE_PARAMS, nullptr);
+  return result;
+}
+
+void AssetCatalogTreeViewItem::on_collapse_change(bContext & /*C*/, bool is_collapsed)
+{
+  AssetCatalogTreeView &tree_view = static_cast<AssetCatalogTreeView &>(this->get_tree_view());
+  if (!tree_view.asset_library_ || !tree_view.params_) {
+    return;
+  }
+
+  const AssetCatalogPath catalog_path = catalog_item_.catalog_path();
+  const AssetLibraryReference *library_ref = &tree_view.params_->asset_library_ref;
+
+  /* Persist to the user preferences for the current library only (no cross-library sync). */
+  bUserAssetBrowserSettings *settings =
+      BKE_preferences_asset_browser_settings_get_from_library_ref(&U, library_ref);
+  if (settings) {
+    BKE_preferences_asset_browser_settings_set_catalog_collapsed(
+        &U, settings->library_name, catalog_path.c_str(), is_collapsed);
+  }
+  WM_main_add_notifier(NC_ASSET | ND_ASSET_CATALOGS, nullptr);
+}
+
 /* ---------------------------------------------------------------------- */
 
 AssetCatalogDropTarget::AssetCatalogDropTarget(AssetCatalogTreeViewItem &item,
@@ -378,7 +463,9 @@ AssetCatalogDropTarget::AssetCatalogDropTarget(AssetCatalogTreeViewItem &item,
 {
 }
 
-bool AssetCatalogDropTarget::can_drop(const wmDrag &drag, const char **r_disabled_hint) const
+bool AssetCatalogDropTarget::can_drop(bContext & /*C*/,
+                                      const wmDrag &drag,
+                                      const char **r_disabled_hint) const
 {
   if (drag.type == WM_DRAG_ASSET_CATALOG) {
     const asset_system::AssetLibrary &library = get_asset_library();
@@ -404,6 +491,27 @@ bool AssetCatalogDropTarget::can_drop(const wmDrag &drag, const char **r_disable
   if (drag.type == WM_DRAG_ASSET_LIST && has_droppable_asset(drag, r_disabled_hint)) {
     return true;
   }
+
+  if (drag.type == WM_DRAG_PATH) {
+    const AssetCatalogTreeView &tree_view = this->get_view<AssetCatalogTreeView>();
+    if (!tree_view.params_ ||
+        tree_view.params_->asset_library_ref.type != ASSET_LIBRARY_LOCAL)
+    {
+      if (r_disabled_hint) {
+        *r_disabled_hint = RPT_(
+            "Image import into catalogs is only available while browsing Current File");
+      }
+      return false;
+    }
+    const asset_system::AssetLibrary &library = get_asset_library();
+    if (!can_modify_catalogs(library, r_disabled_hint)) {
+      return false;
+    }
+    if (!WM_drag_has_path_file_type(&drag, FILE_TYPE_IMAGE)) {
+      return false;
+    }
+    return true;
+  }
   return false;
 }
 
@@ -411,6 +519,17 @@ std::string AssetCatalogDropTarget::drop_tooltip(const ui::DragInfo &drag_info) 
 {
   if (drag_info.drag_data.type == WM_DRAG_ASSET_CATALOG) {
     return this->drop_tooltip_asset_catalog(drag_info.drag_data);
+  }
+  if (drag_info.drag_data.type == WM_DRAG_PATH) {
+    int image_num = 0;
+    for (const std::string &path : WM_drag_get_paths(&drag_info.drag_data)) {
+      if (ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) {
+        image_num++;
+      }
+    }
+    std::string tip = (image_num > 1) ? TIP_("Mark images as assets in catalog") :
+                                        TIP_("Mark image as asset in catalog");
+    return tip + ": " + catalog_item_.get_name();
   }
   return this->drop_tooltip_asset_list(drag_info.drag_data);
 }
@@ -455,6 +574,23 @@ bool AssetCatalogDropTarget::on_drop(bContext *C, const ui::DragInfo &drag_info)
                                            this->get_view<AssetCatalogTreeView>(),
                                            catalog_item_.get_catalog_id());
   }
+  if (drag_info.drag_data.type == WM_DRAG_PATH) {
+    const wmDrag &drag = drag_info.drag_data;
+    PointerRNA props = WM_operator_properties_create("ASSET_OT_image_import_mark");
+
+    file_asset_image_import_fill_images_from_drag(&props, &drag);
+
+    /* Lock the catalog field to the drop target. */
+    char catalog_id_str[UUID_STRING_SIZE];
+    BLI_uuid_format(catalog_id_str, catalog_item_.get_catalog_id());
+    RNA_string_set(&props, "catalog_id", catalog_id_str);
+    RNA_boolean_set(&props, "catalog_locked", true);
+
+    const wmOperatorStatus status = WM_operator_name_call(
+        C, "ASSET_OT_image_import_mark", wm::OpCallContext::InvokeDefault, &props, nullptr);
+    WM_operator_properties_free(&props);
+    return (status & OPERATOR_FINISHED) != 0;
+  }
   return drop_assets_into_catalog(C,
                                   this->get_view<AssetCatalogTreeView>(),
                                   drag_info.drag_data,
@@ -488,24 +624,68 @@ bool AssetCatalogDropTarget::drop_assets_into_catalog(bContext *C,
     return false;
   }
 
+  const char *library_root = asset::image_library_editable_root_from_asset_library(
+      *tree_view.asset_library_);
+
   bool did_update = false;
+  /* Set when an on-disk image drop was attempted (even if the assign itself failed) so that the
+   * filelist is refreshed and any stale entries are cleared from the UI. */
+  bool attempted_image_catalog_drop = false;
   for (wmDragAssetListItem &asset_item : *asset_drags) {
     if (asset_item.is_external) {
-      /* Only internal assets can be modified! */
+      const asset_system::AssetRepresentation *asset = asset_item.asset_data.external_info->asset;
+      if (!asset || !asset::image_library_asset_is_movable_on_disk(*asset) || !library_root) {
+        continue;
+      }
+
+      attempted_image_catalog_drop = true;
+
+      if (!asset::image_library_assign_image_to_catalog(library_root,
+                                                        *tree_view.asset_library_,
+                                                        asset->library_relative_identifier(),
+                                                        catalog_id))
+      {
+        continue;
+      }
+
+      BKE_asset_metadata_catalog_id_set(&asset->get_metadata(), catalog_id, simple_name.c_str());
+      /* Remove the pre-move representation so the next read job does not reuse stale paths from
+       * the in-memory asset library cache. */
+      tree_view.asset_library_->remove_asset(const_cast<AssetRepresentation &>(*asset));
+      did_update = true;
       continue;
     }
 
     did_update = true;
     BKE_asset_metadata_catalog_id_set(
         asset_item.asset_data.local_id->asset_data, catalog_id, simple_name.c_str());
+  }
 
-    /* Trigger re-run of filtering to update visible assets. */
+  if (attempted_image_catalog_drop) {
+    /* Follow the same path as #ASSET_OT_library_refresh: scan+index, clear filelist with
+     * force-reset, send notifier, tag visible browsers — the async read job starts on next draw.
+     */
+    const std::optional<AssetLibraryReference> library_ref =
+        tree_view.asset_library_->library_reference();
+    if (library_ref) {
+      asset::list::library_refresh(C, &*library_ref);
+    }
+    else if (const FileAssetSelectParams *asset_params = ED_fileselect_get_asset_params(
+                 &tree_view.space_file_))
+    {
+      asset::list::library_refresh(C, &asset_params->asset_library_ref);
+    }
+  }
+  else if (did_update && tree_view.space_file_.files) {
+    /* Internal asset: re-run filter to update visible assets. */
     filelist_tag_needs_filtering(tree_view.space_file_.files);
+  }
+
+  if (did_update || attempted_image_catalog_drop) {
     file_select_deselect_all(&tree_view.space_file_, FILE_SEL_SELECTED | FILE_SEL_HIGHLIGHTED);
     WM_main_add_notifier(NC_SPACE | ND_SPACE_FILE_LIST, nullptr);
     WM_main_add_notifier(NC_ASSET | ND_ASSET_CATALOGS, nullptr);
   }
-
   if (did_update) {
     ED_undo_push(C, "Assign Asset Catalog");
   }
@@ -528,14 +708,20 @@ bool AssetCatalogDropTarget::has_droppable_asset(const wmDrag &drag, const char 
 {
   const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
 
-  /* There needs to be at least one asset from the current file. */
+  /* There needs to be at least one assignable asset. */
   for (const wmDragAssetListItem &asset_item : *asset_drags) {
     if (!asset_item.is_external) {
       return true;
     }
+    const asset_system::AssetRepresentation *asset = asset_item.asset_data.external_info->asset;
+    if (asset && asset::image_library_asset_is_movable_on_disk(*asset)) {
+      return true;
+    }
   }
 
-  *r_disabled_hint = RPT_("Only assets from this current file can be moved between catalogs");
+  *r_disabled_hint = RPT_(
+      "Only assets from this file or on-disk images from this library can be moved between "
+      "catalogs");
   return false;
 }
 
@@ -611,7 +797,8 @@ AssetCatalogTreeViewAllItem::DropTarget::DropTarget(AssetCatalogTreeViewAllItem 
 {
 }
 
-bool AssetCatalogTreeViewAllItem::DropTarget::can_drop(const wmDrag &drag,
+bool AssetCatalogTreeViewAllItem::DropTarget::can_drop(bContext & /*C*/,
+                                                       const wmDrag &drag,
                                                        const char **r_disabled_hint) const
 {
   if (drag.type != WM_DRAG_ASSET_CATALOG) {
@@ -667,7 +854,8 @@ AssetCatalogTreeViewUnassignedItem::DropTarget::DropTarget(
 {
 }
 
-bool AssetCatalogTreeViewUnassignedItem::DropTarget::can_drop(const wmDrag &drag,
+bool AssetCatalogTreeViewUnassignedItem::DropTarget::can_drop(bContext & /*C*/,
+                                                              const wmDrag &drag,
                                                               const char **r_disabled_hint) const
 {
   if (drag.type != WM_DRAG_ASSET_LIST) {
@@ -751,6 +939,13 @@ void file_ensure_updated_catalog_filter_data(AssetCatalogFilterSettings *filter_
 bool file_is_asset_visible_in_catalog_filter_settings(
     const AssetCatalogFilterSettings *filter_settings, const AssetMetaData *asset_data)
 {
+  if (!filter_settings->catalog_filter) {
+    /* The catalog filter data hasn't been built yet (e.g. the asset library reference doesn't
+     * currently resolve to a loaded library, see #prepare_filter_asset_library()). Nothing to
+     * filter on, so don't hide the asset. */
+    return true;
+  }
+
   switch (filter_settings->asset_catalog_visibility) {
     case FILE_SHOW_ASSETS_WITHOUT_CATALOG:
       return !filter_settings->catalog_filter->is_known(asset_data->catalog_id);

@@ -65,6 +65,13 @@ ENUM_OPERATORS(eUserPref_Flag)
 /** #UserDef.asset_flag */
 enum eUserPref_AssetFlag : char {
   USER_ASSETS_USE_ONLINE_ESSENTIALS = 1 << 0,
+  /** Show the "Current File" library as a tab at the top of the asset shelf popover.
+   * The built-in libraries are not #bUserAssetLibrary entries, so they have nowhere of their own to
+   * carry #ASSET_LIBRARY_IS_PINNED; these bits replace it. They need no order field to go with them
+   * because the built-in tabs sit in a fixed position and cannot be reordered. */
+  USER_ASSETS_PIN_CURRENT_FILE = 1 << 1,
+  /** Show the "Essentials" library as a tab at the top of the asset shelf popover. */
+  USER_ASSETS_PIN_ESSENTIALS = 1 << 2,
 };
 ENUM_OPERATORS(eUserPref_AssetFlag)
 
@@ -644,13 +651,27 @@ struct bUserMenuItem_Prop {
   char _pad0[4] = {};
 };
 
+/**
+ * Type of asset library item in Preferences.
+ * Used to distinguish between actual asset libraries and folder containers.
+ */
+enum eUserAssetLibraryItemType {
+  /** Regular asset library with a path on disk. */
+  USER_ASSET_LIBRARY_ITEM_TYPE_LEAF = 0,
+  /** Folder/container for organizing asset libraries. */
+  USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER = 1,
+};
+
 struct bUserAssetLibrary {
   struct bUserAssetLibrary *next = nullptr, *prev = nullptr;
+  /** Parent folder name for hierarchical organization. Empty string for root level items.
+   * Used for DNA serialization - the parent pointer is restored from this after loading. */
+  char parent_name[/*MAX_NAME*/ 64] = "";
 
   char name[/*MAX_NAME*/ 64] = "";
   /** The path on disk for this asset library. For remote libraries
    * (#ASSET_LIBRARY_USE_REMOTE_URL), this is the download cache directory, where already
-   * downloaded assets will be placed. */
+   * downloaded assets will be placed. Empty for folder containers. */
   char dirpath[/*FILE_MAX*/ 1024] = "";
   /** Only for remote asset libraries (#ASSET_LIBRARY_USE_REMOTE_URL is set). Update using
    * #BKE_preferences_remote_asset_library_url_set() only. */
@@ -658,7 +679,18 @@ struct bUserAssetLibrary {
 
   short import_method = ASSET_IMPORT_PACK;  /* eAssetImportMethod */
   short flag = ASSET_LIBRARY_RELATIVE_PATH; /* eAssetLibrary_Flag */
-  char _pad0[4] = {};
+  /** Type of item: #eUserAssetLibraryItemType (LEAF for library, FOLDER for container). */
+  short type = USER_ASSET_LIBRARY_ITEM_TYPE_LEAF;
+  /** Position of this library in the popover's pinned tab row. Dense over `0 .. N-1` across all
+   * libraries carrying #ASSET_LIBRARY_IS_PINNED; meaningless (and zero) on the others. Written
+   * only by the `BKE_preferences_asset_library_pin_*` functions, which maintain that invariant. */
+  short pin_order = 0;
+
+  /** Runtime pointer to the parent folder. The persistent hierarchy is stored in #parent_name;
+   * this pointer is written to disk by DNA but its saved value is meaningless (a stale address),
+   * so it is cleared and reconstructed from #parent_name on load
+   * (see #BKE_preferences_asset_library_restore_hierarchy). */
+  struct bUserAssetLibrary *parent = nullptr;
 
 #ifdef __cplusplus
   bool is_enabled() const
@@ -880,6 +912,110 @@ struct bUserScriptDirectory {
   char dir_path[/*FILE_MAXDIR*/ 768] = "";
 };
 
+/** #bUserAssetShelfSettings.popup_view_flag */
+enum eUserAssetShelfPopupViewFlag {
+  /**
+   * The popup view preferences (#bUserAssetShelfSettings.popup_preview_size etc.) were explicitly
+   * stored by the user. Needed to distinguish "never set" from a stored zero value, such as all
+   * display flags being disabled.
+   */
+  USER_ASSET_SHELF_POPUP_VIEW_STORED = (1 << 0),
+};
+
+/**
+ * Per-asset-library collapsed state of catalog paths, stored in the user preferences so it
+ * persists across sessions and editors.
+ */
+struct bUserAssetBrowserSettings {
+  struct bUserAssetBrowserSettings *next = nullptr, *prev = nullptr;
+
+  /** Asset library identifier (see BKE_preferences_asset_library_identifier_from_ref). */
+  char library_name[/*MAX_NAME*/ 64] = "";
+
+  ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
+};
+
+/** #bUserAssetCatalogMemory.mode */
+enum eAssetCatalogMemoryMode : int8_t {
+  /** No narrowing ("All"). Default state for an absent entry. */
+  ASSET_CATALOG_MEMORY_ALL = 0,
+  /** #bUserAssetCatalogMemory::single_catalog_id is the active catalog. */
+  ASSET_CATALOG_MEMORY_SINGLE = 1,
+  /** #bUserAssetCatalogMemory::catalog_id_set lists the enabled catalogs. */
+  ASSET_CATALOG_MEMORY_SET = 2,
+  /** ID Browser / Image Grid "Recent" pseudo-catalog is active. */
+  ASSET_CATALOG_MEMORY_RECENT = 3,
+  /** ID Browser / Image Grid "Favorites" pseudo-catalog is active. */
+  ASSET_CATALOG_MEMORY_FAVORITES = 4,
+};
+
+/**
+ * Per-(library, domain) remembered catalog selection, stored in the user preferences so it
+ * persists across sessions and blend files. `domain` distinguishes independent consumers that
+ * share the same library (Asset Browser, ID Browser, Image Grid, one entry per AssetShelfType
+ * for popup shelves) so switching libraries in one does not affect another's memory.
+ *
+ * `mode` only selects which payload is currently active for filtering. `single_catalog_id` and
+ * `catalog_id_set` are independently persisted and are never cleared by a mode change -- only by
+ * an explicit call that overwrites that specific field. See
+ * docs/superpowers/specs/2026-08-08-per-library-catalog-memory-design.md Section A for the full
+ * invariant table and rationale (this independence is required to match existing Image Grid
+ * behavior, which must not lose its saved catalog filter when switching to Recent/Favorites).
+ */
+struct bUserAssetCatalogMemory {
+  struct bUserAssetCatalogMemory *next = nullptr, *prev = nullptr;
+
+  /** Asset library identifier (see BKE_preferences_asset_library_identifier_from_ref). */
+  char library_identifier[/*MAX_NAME*/ 64] = "";
+  /** "asset_browser", "id_browser", "image_grid", or "asset_shelf_popup:<AssetShelfType.idname>". */
+  char domain[96] = "";
+
+  eAssetCatalogMemoryMode mode = ASSET_CATALOG_MEMORY_ALL;
+  char _pad0[7] = {};
+  bUUID single_catalog_id;
+  ListBaseT<AssetCatalogUUIDLink> catalog_id_set = {nullptr, nullptr};
+
+#if defined(__cplusplus) && !defined(DNA_NO_EXTERNAL_CONSTRUCTORS)
+  bUserAssetCatalogMemory() = default;
+  bUserAssetCatalogMemory(const bUserAssetCatalogMemory &other);
+  bUserAssetCatalogMemory &operator=(const bUserAssetCatalogMemory &other);
+  ~bUserAssetCatalogMemory();
+#endif
+};
+
+/** #bUserNameMatchMapType.flag */
+enum eUserNameMatchMapType_Flag : short {
+  /** Core map type seeded by Blender; row is not removable. */
+  USER_NAME_MATCH_MAP_TYPE_BUILTIN = (1 << 0),
+};
+ENUM_OPERATORS(eUserNameMatchMapType_Flag)
+
+/** Token / abbreviation for a #bUserNameMatchMapType (e.g. "N", "nor", "BaseColor"). */
+struct bUserNameMatchToken {
+  struct bUserNameMatchToken *next = nullptr, *prev = nullptr;
+  char value[/*MAX_NAME*/ 64] = "";
+};
+
+/**
+ * Map type for image asset name matching (Preferences → Name Matching).
+ * Built-in rows use stable #identifier values such as "BASE_COLOR"; custom rows use
+ * caller-assigned identifiers.
+ */
+struct bUserNameMatchMapType {
+  struct bUserNameMatchMapType *next = nullptr, *prev = nullptr;
+  char identifier[/*MAX_NAME*/ 64] = "";
+  char name[/*MAX_NAME*/ 64] = "";
+  short flag = 0; /* #eUserNameMatchMapType_Flag */
+  char _pad[6] = {};
+  ListBaseT<bUserNameMatchToken> tokens = {nullptr, nullptr};
+};
+
+/** User-authored filter tag for name-match include filtering. */
+struct bUserNameMatchFilterTag {
+  struct bUserNameMatchFilterTag *next = nullptr, *prev = nullptr;
+  char name[/*MAX_NAME*/ 64] = "";
+};
+
 /**
  * Settings for an asset shelf, stored in the Preferences. Most settings are still stored in the
  * asset shelf instance in #AssetShelfSettings. This is just for the options that should be shared
@@ -892,6 +1028,21 @@ struct bUserAssetShelfSettings {
   char shelf_idname[/*MAX_NAME*/ 64] = "";
 
   ListBaseT<AssetCatalogPathLink> enabled_catalog_paths = {nullptr, nullptr};
+
+  /**
+   * Popup-shelf view preferences. Persisted per shelf type in the Preferences so that the asset
+   * popover (e.g. brush asset popup) keeps its size and display options between sessions and
+   * across `.blend` files. Only meaningful once #USER_ASSET_SHELF_POPUP_VIEW_STORED is set in
+   * #popup_view_flag; otherwise the shelf type's defaults are used.
+   */
+  short popup_preview_size = 0;
+  short popup_display_flag = 0; /* #AssetShelfSettings_DisplayFlag */
+  short popup_width_units = 0;
+  short popup_height_units = 0;
+  /** Maximum number of brushes kept in the Recent pseudo-catalog. */
+  short recent_max_count = 20;
+  short popup_view_flag = 0; /* #eUserAssetShelfPopupViewFlag */
+  char _pad[4] = {};
 };
 
 /**
@@ -1058,7 +1209,18 @@ struct UserDef {
   ListBaseT<bUserMenu> user_menus = {nullptr, nullptr};
   ListBaseT<bUserAssetLibrary> asset_libraries = {nullptr, nullptr};
   ListBaseT<bUserExtensionRepo> extension_repos = {nullptr, nullptr};
+  ListBaseT<bUserAssetBrowserSettings> asset_browser_settings = {nullptr, nullptr};
+  ListBaseT<bUserAssetCatalogMemory> catalog_memory = {nullptr, nullptr};
   ListBaseT<bUserAssetShelfSettings> asset_shelves_settings = {nullptr, nullptr};
+  /** Preferences → Assets → Name Matching: map types (core + custom). */
+  ListBaseT<bUserNameMatchMapType> name_match_map_types = {nullptr, nullptr};
+  /** Preferences → Assets → Name Matching: filter tags. */
+  ListBaseT<bUserNameMatchFilterTag> name_match_filter_tags = {nullptr, nullptr};
+  /** Index of the map type being edited in the Preferences UI. */
+  short active_name_match_map_type = 0;
+  /** Index of the filter tag being edited in the Preferences UI. */
+  short active_name_match_filter_tag = 0;
+  char _pad_name_match[4] = {};
 
   char keyconfigstr[64] = "Blender";
 
@@ -1248,10 +1410,20 @@ struct UserDef {
   eUserpref_RenderDisplayType render_display_type = USER_RENDER_DISPLAY_WINDOW;
   eUserpref_TempSpaceDisplayType filebrowser_display_type = USER_TEMP_SPACE_DISPLAY_WINDOW;
   eUserpref_TempSpaceDisplayType preferences_display_type = USER_TEMP_SPACE_DISPLAY_WINDOW;
-  char _pad18[7] = {};
+  char _pad18[5] = {};
 
   eUserpref_SeqProxySetup sequencer_proxy_setup = USER_SEQ_PROXY_SETUP_AUTOMATIC;
-  short _pad1 = {};
+  /** Default maximum number of brushes kept in asset shelf Recent lists. */
+  short asset_shelf_recent_brushes_max = 20;
+  /** Default maximum number of images kept in the image asset shelf Recent list. */
+  short asset_shelf_recent_images_max = 20;
+  /** Default preview size for Asset Shelf "Small" preset (in pixels). */
+  short asset_shelf_preview_size_small = 32;
+  /** Default preview size for Asset Shelf "Medium" preset (in pixels). */
+  short asset_shelf_preview_size_medium = 56;
+  /** Default preview size for Asset Shelf "Large" preset (in pixels). */
+  short asset_shelf_preview_size_large = 96;
+  char _pad19[2] = {};
 
   float collection_instance_empty_size = 1.0f;
   eTextEdit_Flags text_flag = {};

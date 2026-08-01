@@ -12,6 +12,7 @@
 #include "DNA_asset_types.h"
 #include "DNA_color_types.h" /* for Histogram */
 #include "DNA_defs.h"
+#include "DNA_image_grid_types.h"
 #include "DNA_image_types.h" /* ImageUser */
 #include "DNA_listBase.h"
 #include "DNA_mask_types.h"
@@ -467,10 +468,14 @@ struct FileAssetSelectParams {
    * catalog to show. */
   bUUID catalog_id;
 
+  /** Persistent collapsed state of catalog paths in the asset browser catalog tree. */
+  ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
+
   eFileAssetImportMethod import_method = FILE_ASSET_IMPORT_LINK;
   eFileAssetImportFlags import_flags = {};
 
   eFileSel_AssetParams_Flag asset_flags = {};
+  ListBaseT<AssetNameMatchIdLink> filter_name_match_map_types = {nullptr, nullptr};
 };
 
 /**
@@ -632,11 +637,25 @@ struct SpaceImageOverlay {
   float passepartout_alpha = 0;
 };
 
+/**
+ * Runtime-only Image Editor state. Not written to .blend files; reset on load,
+ * duplicate, and file read. Same role as #View3D_Runtime for the brush-texture
+ * image grid (a typed cache slot instead of a serializable `void *` on #SpaceImage).
+ */
+struct SpaceImage_Runtime {
+  /**
+   * Per-space session state for the brush texture image grid template. Created lazily,
+   * freed with the space. Opaque here to keep DNA free of C++ containers.
+   * See #ImageGridSlotDNA.
+   */
+  void *image_grid_state = nullptr;
+};
+
 struct SpaceImage {
   SpaceLink *next = nullptr, *prev = nullptr;
   /** Storage of regions for inactive spaces. */
   ListBaseT<ARegion> regionbase = {nullptr, nullptr};
-  char spacetype = 0;
+  char spacetype = SPACE_IMAGE;
   eSpace_Link_Flag link_flag = {};
   char _pad0[6] = {};
   /* End 'SpaceLink' header. */
@@ -665,6 +684,12 @@ struct SpaceImage {
   eSpaceImage_Mode mode = SI_MODE_VIEW;
   /* Storage for sub-space types. */
   eSpaceImage_Mode mode_prev = SI_MODE_VIEW;
+
+  /** Paint-slot filter mode for the image browser popover (#TEMPLATE_ID_FILTER_*). */
+  char image_filter_mode = 0;
+  /** Slot type filter used when image_filter_mode includes the slot bit. */
+  char image_filter_slot_type = 0;
+  char _pad_filter[6] = {};
 
   char pin = 0;
 
@@ -699,6 +724,14 @@ struct SpaceImage {
 
   MaskSpaceInfo mask_info;
   SpaceImageOverlay overlay;
+
+  /** Brush-texture image grid state — mirrors #View3D::image_grid /
+   * #image_grid_mask / #image_grid_preview_size (see #ImageGridOwner). */
+  short image_grid_preview_size = 0;
+  char _pad_image_grid[6] = {};
+  ImageGridSlotDNA image_grid;
+  ImageGridSlotDNA image_grid_mask;
+  SpaceImage_Runtime runtime;
 };
 
 /** \} */
@@ -899,7 +932,13 @@ struct SpaceNode {
   struct bGPdata *gpd = nullptr;
 
   eSpaceNode_Gizmo_Flag gizmo_flag = {};
-  char _pad2[7] = {};
+
+  /** Paint-slot filter mode for the image browser popover (#TEMPLATE_ID_FILTER_*). Mirrors
+   * #SpaceImage. */
+  char image_filter_mode = 0;
+  /** Slot type filter used when image_filter_mode includes the slot bit. */
+  char image_filter_slot_type = 0;
+  char _pad2[5] = {};
 
   SpaceNodeOverlay overlay;
 

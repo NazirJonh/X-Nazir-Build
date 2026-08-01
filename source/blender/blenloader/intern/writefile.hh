@@ -19,6 +19,8 @@
 
 #include "BLO_undofile.hh"
 
+struct ID;
+
 namespace blender {
 
 class WriteWrap;
@@ -112,6 +114,8 @@ struct WriteData {
      * detecting invalid re-uses of the same address multiple times.
      */
     Set<const void *> per_id_addresses_set;
+    /** The ID currently being written (for diagnostics only, e.g. #write_at_address_validate). */
+    const ID *current_id = nullptr;
   } validation_data;
 
   /**

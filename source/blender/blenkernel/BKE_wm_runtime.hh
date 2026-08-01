@@ -60,6 +60,13 @@ struct WindowManagerRuntime {
   char save_modified_images_when_file_is_saved = true;
 
   /**
+   * Transient name-search text of the ID-browser popover (#UI_PT_id_browser; see
+   * #UILayout.template_ID_browser). Session-only (deliberately not persisted to file) and shared,
+   * so the popover works from any editor. Only one such popover is open at a time.
+   */
+  char id_browser_search[64] = {};
+
+  /**
    * Indicates the main loop (#WM_main()) to stop processing the event queue and move to the next
    * step. The Remaining events will then be processed during the next iteration of the loop.
    *

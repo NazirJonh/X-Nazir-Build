@@ -10,8 +10,13 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string>
 
 #include "BLI_fileops.h"
+#include "BLI_vector.hh"
+
+#include "BKE_name_matching.hh"
 #include "BLI_map.hh"
 
 #include "DNA_listBase.h"
@@ -183,6 +188,11 @@ struct FileListFilter {
   short flags;
 
   ed::asset_browser::AssetCatalogFilterSettings *asset_catalog_filter;
+
+  bool name_match_enabled = false;
+  Vector<std::string> name_match_map_type_ids;
+  /** Valid for current filter pass after prepare. */
+  std::optional<NameMatchResolvedFilter> name_match_resolved;
 };
 
 /** #FileListFilter.flags */

@@ -17,6 +17,7 @@
 
 #include "DNA_screen_types.h"
 
+#include "BKE_context.hh"
 #include "BKE_screen.hh"
 
 #include "UI_view2d.hh"
@@ -26,6 +27,7 @@
 #include "interface_intern.hh"
 
 #include "UI_abstract_view.hh"
+#include "UI_grid_view.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -101,7 +103,7 @@ bool button_is_interactive_ex(const Button *but, const bool labeledit, const boo
   if (but->flag & UI_HIDDEN) {
     return false;
   }
-  if (but->flag & UI_SCROLLED) {
+  if (but->flag & UI_SCROLLED && !block_grid_scroll_clip_contains_button(but)) {
     return false;
   }
   if ((but->type == ButtonType::Text) &&
@@ -361,6 +363,15 @@ Button *button_find_mouse_over_ex(const ARegion *region,
           }
         }
         else if (button_contains_pt(&but, mx, my)) {
+          /* Grid-scroll-clipped tiles are only hit within their own grid's visible clip window,
+           * so a partially scrolled row can't be activated through its cut-off (off-window) part. */
+          if ((but.drawflag & BUT_GRID_SCROLL_CLIP) && but.grid_scroll_clip_owner &&
+              but.grid_scroll_clip_owner->scroll_clip_enabled())
+          {
+            if (!BLI_rctf_isect_pt(&but.grid_scroll_clip_owner->scroll_clip_rect(), mx, my)) {
+              continue;
+            }
+          }
           butover = &but;
           break;
         }
@@ -510,6 +521,24 @@ Button *view_item_find_mouse_over(const ARegion *region, const int xy[2])
   return button_find_mouse_over_ex(region, xy, false, false, but_is_view_item_fn, nullptr);
 }
 
+bool region_scroll_button_under_mouse(const ARegion *region, const int xy[2], const void *poin)
+{
+  if (!poin || !region_contains_point_px(region, xy)) {
+    return false;
+  }
+  for (Block &block : region->runtime->uiblocks) {
+    for (Button &but : block.buttons()) {
+      if (but.type != ButtonType::Scroll || but.poin != poin) {
+        continue;
+      }
+      if (button_contains_point_px(&but, region, xy)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static bool but_is_active_view_item(const Button *but, const void *view)
 {
   if (but->type != ButtonType::ViewItem) {
@@ -524,6 +553,24 @@ static bool but_is_active_view_item(const Button *but, const void *view)
 Button *view_item_find_active(const ARegion *region, const AbstractView *view)
 {
   return but_find(region, but_is_active_view_item, view);
+}
+
+static bool but_is_active_grid_view_item(const Button *but, const void * /*customdata*/)
+{
+  if (but->type != ButtonType::ViewItem) {
+    return false;
+  }
+
+  const auto *view_item_but = static_cast<const ButtonViewItem *>(but);
+  if (!view_item_but->view_item->is_active()) {
+    return false;
+  }
+  return dynamic_cast<const AbstractGridView *>(&view_item_but->view_item->get_view()) != nullptr;
+}
+
+Button *view_item_find_active_grid(const ARegion *region)
+{
+  return but_find(region, but_is_active_grid_view_item, nullptr);
 }
 
 Button *view_item_find_search_highlight(const ARegion *region)
@@ -675,6 +722,27 @@ bool block_is_menu(const Block *block)
 bool block_is_popover(const Block *block)
 {
   return (block->flag & BLOCK_POPOVER) != 0;
+}
+
+bool region_popup_has_panel(const ARegion *region, const char *panel_idname)
+{
+  if (!region || !region->runtime || panel_idname == nullptr || panel_idname[0] == '\0') {
+    return false;
+  }
+  for (Block &block : region->runtime->uiblocks) {
+    if (block.panel) {
+      /* For panels drawn inline via `paneltype_draw_impl` (e.g. popovers), the block's
+       * panel has a shared dummy PanelType with an empty idname. The actual panel idname
+       * is stored in `panelname` by `popup_dummy_panel_set`. Check both to cover all cases. */
+      if (STREQ(block.panel->panelname, panel_idname)) {
+        return true;
+      }
+      if (block.panel->type && STREQ(block.panel->type->idname, panel_idname)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 bool block_is_pie_menu(const Block *block)

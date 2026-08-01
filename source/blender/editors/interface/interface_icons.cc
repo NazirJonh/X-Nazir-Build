@@ -1425,6 +1425,9 @@ static void icon_draw_rect(float x,
     BLI_assert_msg(0, "invalid icon size");
     return;
   }
+  if (rw <= 0 || rh <= 0 || rect == nullptr) {
+    return;
+  }
   /* modulate color */
   const float col[4] = {alpha, alpha, alpha, alpha};
 
@@ -1698,6 +1701,9 @@ static void icon_draw_size(float x,
 
   if (di->type == ICON_TYPE_IMBUF) {
     const ImBuf *ibuf = static_cast<const ImBuf *>(icon->obj);
+    if (ibuf->x <= 0 || ibuf->y <= 0 || !ibuf->byte_data()) {
+      return;
+    }
 
     GPU_blend(GPU_BLEND_ALPHA_PREMULT);
     icon_draw_rect(x, y, w, h, ibuf->x, ibuf->y, ibuf->byte_data(), alpha, desaturate);
@@ -1841,9 +1847,11 @@ static void icon_draw_size(float x,
        * downscale it on the GPU (with mipmaps and filtering, for decent results). Useful for
        * data-block previews where the big preview was rendered/loaded before, but we attempt to
        * display the small icon version of it. */
-      if (!pi->rect[size]) {
+      if (!pi->rect[size] || pi->w[size] <= 0 || pi->h[size] <= 0) {
         for (int bigger_size = size + 1; bigger_size < NUM_ICON_SIZES; bigger_size++) {
-          if (pi->rect[bigger_size] && !BKE_previewimg_is_rendering(pi, bigger_size)) {
+          if (pi->rect[bigger_size] && pi->w[bigger_size] > 0 && pi->h[bigger_size] > 0 &&
+              !BKE_previewimg_is_rendering(pi, bigger_size))
+          {
             size = eIconSizes(bigger_size);
             break;
           }
@@ -1851,7 +1859,7 @@ static void icon_draw_size(float x,
       }
 
       /* no create icon on this level in code */
-      if (!pi->rect[size]) {
+      if (!pi->rect[size] || pi->w[size] <= 0 || pi->h[size] <= 0) {
         /* Something has gone wrong! */
         return;
       }

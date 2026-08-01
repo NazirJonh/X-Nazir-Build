@@ -32,7 +32,7 @@ bool drop_target_apply_drop(bContext &C,
 {
   const char *disabled_hint_dummy = nullptr;
   for (const wmDrag &drag : drags) {
-    if (!drop_target.can_drop(drag, &disabled_hint_dummy)) {
+    if (!drop_target.can_drop(C, drag, &disabled_hint_dummy)) {
       return false;
     }
 
@@ -72,13 +72,14 @@ bool drop_target_apply_drop(bContext &C,
   return false;
 }
 
-std::string drop_target_tooltip(const ARegion &region,
+std::string drop_target_tooltip(bContext &C,
+                                ARegion &region,
                                 const DropTargetInterface &drop_target,
                                 const wmDrag &drag,
                                 const wmEvent &event)
 {
   const char *disabled_hint_dummy = nullptr;
-  if (!drop_target.can_drop(drag, &disabled_hint_dummy)) {
+  if (!drop_target.can_drop(C, drag, &disabled_hint_dummy)) {
     return {};
   }
 
@@ -89,6 +90,7 @@ std::string drop_target_tooltip(const ARegion &region,
   }
 
   const DragInfo drag_info{drag, event, *drop_location};
+  drop_target.drop_linehint(region, drag_info);
   return drop_target.drop_tooltip(drag_info);
 }
 

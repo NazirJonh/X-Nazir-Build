@@ -80,6 +80,10 @@ bool asset_shelf_popover_invoke(bContext &C, StringRef asset_shelf_idname, Repor
    * name via some context-store, but there's nothing to provide that here. Asset shelf type is
    * polled above, so it's okay. */
 
+  if (shelf_type->pre_popover_invoke) {
+    shelf_type->pre_popover_invoke(C, shelf_type);
+  }
+
   std::string asset_shelf_id_str = asset_shelf_idname;
   popover_panel_create(
       &C,
@@ -87,6 +91,11 @@ bool asset_shelf_popover_invoke(bContext &C, StringRef asset_shelf_idname, Repor
       nullptr,
       [asset_shelf_id_str](bContext *C, Layout *layout, void *arg_pt) {
         layout->context_string_set("asset_shelf_idname", asset_shelf_id_str);
+        if (AssetShelfType *type = ed::asset::shelf::type_find_from_idname(asset_shelf_id_str)) {
+          if (type->setup_popover_layout) {
+            type->setup_popover_layout(*C, *layout);
+          }
+        }
         item_paneltype_func(C, layout, arg_pt);
       },
       pt);

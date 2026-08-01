@@ -78,6 +78,7 @@ struct PaintModeSettings;
 struct Palette;
 struct PaletteColor;
 struct RegionView3D;
+struct ReportList;
 struct Scene;
 struct Sculpt;
 struct SculptSession;
@@ -212,6 +213,33 @@ Brush *BKE_paint_brush_from_essentials(Main *bmain, PaintMode paint_mode, const 
  * true.
  */
 bool BKE_paint_can_use_brush(const Paint *paint, const Brush *brush);
+
+/** Groups of brush settings that can be "recorded" and forced onto every brush of a session. */
+enum class BrushOverrideGroup : int8_t {
+  FaceSets = 0,
+  Stroke = 1,
+  Falloff = 2,
+};
+
+/**
+ * Carries over the brush setting groups the user is currently recording (see
+ * #PaintRuntime::override_stroke and friends) from the brush that was active before a brush
+ * switch onto the brush that just became active. Settings the target brush has no capability
+ * for are skipped. Does nothing when no group is being recorded.
+ */
+void BKE_paint_brush_group_overrides_apply(Paint *paint, const Brush *src, Brush *dst);
+
+/**
+ * Reverts a single group of settings of the active brush back to the values stored in its asset
+ * on disk, leaving every other setting the user has changed untouched. The brush data-block is
+ * re-linked in the process, so #Paint.brush changes address.
+ *
+ * \return False when the active brush is not an editable asset or re-linking failed.
+ */
+bool BKE_paint_brush_group_reset_from_asset(Main *bmain,
+                                            Paint *paint,
+                                            BrushOverrideGroup group,
+                                            ReportList *reports);
 
 /**
  * Activates \a brush for painting, and updates #Paint.brush_asset_reference so the brush can be

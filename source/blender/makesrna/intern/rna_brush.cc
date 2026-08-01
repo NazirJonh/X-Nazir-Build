@@ -567,6 +567,12 @@ static bool rna_BrushCapabilitiesSculpt_has_secondary_color_get(PointerRNA *ptr)
   return bke::brush::supports_secondary_cursor_color(*br);
 }
 
+static bool rna_BrushCapabilitiesSculpt_has_face_set_texture_get(PointerRNA *ptr)
+{
+  const Brush *br = static_cast<const Brush *>(ptr->data);
+  return bke::brush::supports_face_set_texture(*br);
+}
+
 static bool rna_BrushCapabilitiesSculpt_has_smooth_stroke_get(PointerRNA *ptr)
 {
   const Brush *br = static_cast<const Brush *>(ptr->data);
@@ -1439,6 +1445,7 @@ static void rna_def_sculpt_capabilities(BlenderRNA *brna)
   SCULPT_BRUSH_CAPABILITY(has_sculpt_plane, "Has Sculpt Plane");
   SCULPT_BRUSH_CAPABILITY(has_color, "Has Color");
   SCULPT_BRUSH_CAPABILITY(has_secondary_color, "Has Secondary Color");
+  SCULPT_BRUSH_CAPABILITY(has_face_set_texture, "Has Face Sets From Texture");
   SCULPT_BRUSH_CAPABILITY(has_smooth_stroke, "Has Smooth Stroke");
   SCULPT_BRUSH_CAPABILITY(has_space_attenuation, "Has Space Attenuation");
   SCULPT_BRUSH_CAPABILITY(has_strength_pressure, "Has Strength Pressure");

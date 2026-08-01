@@ -543,6 +543,78 @@ static void BRUSH_OT_stencil_reset_transform(wmOperatorType *ot)
       ot->srna, "mask", false, "Modify Mask Stencil", "Modify either the primary or mask stencil");
 }
 
+static const EnumPropertyItem brush_override_group_items[] = {
+    {int(BrushOverrideGroup::FaceSets), "FACE_SETS", 0, "Face Sets", ""},
+    {int(BrushOverrideGroup::Stroke), "STROKE", 0, "Stroke", ""},
+    {int(BrushOverrideGroup::Falloff), "FALLOFF", 0, "Falloff", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static bool *brush_override_group_flag(Paint *paint, const BrushOverrideGroup group)
+{
+  switch (group) {
+    case BrushOverrideGroup::FaceSets:
+      return &paint->runtime->override_face_sets;
+    case BrushOverrideGroup::Stroke:
+      return &paint->runtime->override_stroke;
+    case BrushOverrideGroup::Falloff:
+      return &paint->runtime->override_falloff;
+  }
+  BLI_assert_unreachable();
+  return nullptr;
+}
+
+static bool brush_group_override_toggle_poll(bContext *C)
+{
+  const Paint *paint = BKE_paint_get_active_from_context(C);
+  return paint != nullptr && paint->runtime != nullptr &&
+         BKE_paint_brush_for_read(paint) != nullptr;
+}
+
+static wmOperatorStatus brush_group_override_toggle_invoke(bContext *C,
+                                                           wmOperator *op,
+                                                           const wmEvent *event)
+{
+  Main *bmain = CTX_data_main(C);
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  const BrushOverrideGroup group = BrushOverrideGroup(RNA_enum_get(op->ptr, "group"));
+
+  if (event->modifier & KM_ALT) {
+    if (!BKE_paint_brush_group_reset_from_asset(bmain, paint, group, op->reports)) {
+      return OPERATOR_CANCELLED;
+    }
+    WM_main_add_notifier(NC_BRUSH | NA_EDITED, nullptr);
+    WM_main_add_notifier(NC_TEXTURE | ND_NODES, nullptr);
+    return OPERATOR_FINISHED;
+  }
+
+  bool *flag = brush_override_group_flag(paint, group);
+  *flag = !*flag;
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_brush_group_override_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Brush Group Override";
+  ot->description =
+      "Keep this group of brush settings when switching brushes during this session. "
+      "Alt click reverts the group to the values stored in the brush asset";
+  ot->idname = "PAINT_OT_brush_group_override_toggle";
+
+  ot->invoke = brush_group_override_toggle_invoke;
+  ot->poll = brush_group_override_toggle_poll;
+
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_enum(ot->srna,
+               "group",
+               brush_override_group_items,
+               int(BrushOverrideGroup::Stroke),
+               "Group",
+               "Which group of brush settings to toggle");
+}
+
 /**************************** registration **********************************/
 
 void ED_operatormacros_paint()
@@ -604,6 +676,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_project_image);
   WM_operatortype_append(PAINT_OT_image_from_view);
   WM_operatortype_append(PAINT_OT_brush_colors_flip);
+  WM_operatortype_append(PAINT_OT_brush_group_override_toggle);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 

@@ -744,8 +744,12 @@ bool BKE_paint_brush_set(Main *bmain,
     return false;
   }
 
+  /* Read before the assignment below: the group override mechanism uses the brush that was
+   * active before the switch as its source. */
+  Brush *previous_brush = paint->brush;
+
   /* Check if brush is actually changing to avoid unnecessary overlay invalidation. */
-  const bool brush_changed = (paint->brush != brush);
+  const bool brush_changed = (previous_brush != brush);
 
   /* Update the brush itself. */
   paint->brush = brush;
@@ -763,6 +767,7 @@ bool BKE_paint_brush_set(Main *bmain,
   if (brush_changed) {
     BKE_paint_invalidate_overlay_all();
     paint_apply_session_texture_overlay(paint, brush);
+    BKE_paint_brush_group_overrides_apply(paint, previous_brush, brush);
   }
 
   return true;
@@ -774,8 +779,11 @@ bool BKE_paint_brush_set(Paint *paint, Brush *brush)
     return false;
   }
 
+  /* Read before the assignment below, see the other #BKE_paint_brush_set overload. */
+  Brush *previous_brush = paint->brush;
+
   /* Check if brush is actually changing to avoid unnecessary overlay invalidation. */
-  const bool brush_changed = (paint->brush != brush);
+  const bool brush_changed = (previous_brush != brush);
 
   paint->brush = brush;
 
@@ -789,6 +797,7 @@ bool BKE_paint_brush_set(Paint *paint, Brush *brush)
   if (brush_changed) {
     BKE_paint_invalidate_overlay_all();
     paint_apply_session_texture_overlay(paint, brush);
+    BKE_paint_brush_group_overrides_apply(paint, previous_brush, brush);
   }
 
   return true;

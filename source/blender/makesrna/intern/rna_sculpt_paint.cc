@@ -715,6 +715,48 @@ static void rna_Paint_mirror_snap_distance_set(PointerRNA *ptr, const float valu
   paint->mirror_snap_distance = clamp_f(value, 1.0f, 10.0f);
 }
 
+static bool rna_Paint_use_override_face_sets_get(PointerRNA *ptr)
+{
+  const Paint *paint = static_cast<const Paint *>(ptr->data);
+  return paint->runtime != nullptr && paint->runtime->override_face_sets;
+}
+
+static void rna_Paint_use_override_face_sets_set(PointerRNA *ptr, bool value)
+{
+  Paint *paint = static_cast<Paint *>(ptr->data);
+  if (paint->runtime != nullptr) {
+    paint->runtime->override_face_sets = value;
+  }
+}
+
+static bool rna_Paint_use_override_stroke_get(PointerRNA *ptr)
+{
+  const Paint *paint = static_cast<const Paint *>(ptr->data);
+  return paint->runtime != nullptr && paint->runtime->override_stroke;
+}
+
+static void rna_Paint_use_override_stroke_set(PointerRNA *ptr, bool value)
+{
+  Paint *paint = static_cast<Paint *>(ptr->data);
+  if (paint->runtime != nullptr) {
+    paint->runtime->override_stroke = value;
+  }
+}
+
+static bool rna_Paint_use_override_falloff_get(PointerRNA *ptr)
+{
+  const Paint *paint = static_cast<const Paint *>(ptr->data);
+  return paint->runtime != nullptr && paint->runtime->override_falloff;
+}
+
+static void rna_Paint_use_override_falloff_set(PointerRNA *ptr, bool value)
+{
+  Paint *paint = static_cast<Paint *>(ptr->data);
+  if (paint->runtime != nullptr) {
+    paint->runtime->override_falloff = value;
+  }
+}
+
 }  // namespace blender
 
 #else
@@ -796,6 +838,36 @@ static void rna_def_paint(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "flags", PAINT_SHOW_BRUSH);
   RNA_def_property_ui_text(prop, "Show Brush", "");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_override_face_sets", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Paint_use_override_face_sets_get", "rna_Paint_use_override_face_sets_set");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Override Face Sets",
+                           "Apply the active brush's Face Sets settings to every brush activated "
+                           "during this session");
+  RNA_def_property_update(prop, NC_BRUSH | NA_EDITED, nullptr);
+
+  prop = RNA_def_property(srna, "use_override_stroke", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Paint_use_override_stroke_get", "rna_Paint_use_override_stroke_set");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Override Stroke",
+                           "Apply the active brush's Stroke settings to every brush activated "
+                           "during this session");
+  RNA_def_property_update(prop, NC_BRUSH | NA_EDITED, nullptr);
+
+  prop = RNA_def_property(srna, "use_override_falloff", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Paint_use_override_falloff_get", "rna_Paint_use_override_falloff_set");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Override Falloff",
+                           "Apply the active brush's Falloff settings to every brush activated "
+                           "during this session");
+  RNA_def_property_update(prop, NC_BRUSH | NA_EDITED, nullptr);
 
   prop = RNA_def_property(srna, "show_brush_on_surface", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flags", PAINT_SHOW_BRUSH_ON_SURFACE);

@@ -736,11 +736,38 @@ class IMAGE_HT_tool_header(Header):
 
         if tool_mode == 'PAINT':
             if (tool is not None) and tool.use_brushes:
+                settings = UnifiedPaintPanel.paint_settings(context)
+
                 layout.popover("IMAGE_PT_paint_settings_advanced")
                 layout.popover("IMAGE_PT_tools_brush_texture")
                 layout.popover("IMAGE_PT_tools_mask_texture")
-                layout.popover("IMAGE_PT_paint_stroke")
-                layout.popover("IMAGE_PT_paint_curve")
+
+                if settings is None:
+                    layout.popover("IMAGE_PT_paint_stroke")
+                    layout.popover("IMAGE_PT_paint_curve")
+                else:
+                    row = layout.row(align=True)
+                    is_on = settings.use_override_stroke
+                    props = row.operator(
+                        "paint.brush_group_override_toggle",
+                        text="",
+                        icon='RECORD_ON' if is_on else 'RECORD_OFF',
+                        depress=is_on,
+                    )
+                    props.group = 'STROKE'
+                    row.popover("IMAGE_PT_paint_stroke")
+
+                    row = layout.row(align=True)
+                    is_on = settings.use_override_falloff
+                    props = row.operator(
+                        "paint.brush_group_override_toggle",
+                        text="",
+                        icon='RECORD_ON' if is_on else 'RECORD_OFF',
+                        depress=is_on,
+                    )
+                    props.group = 'FALLOFF'
+                    row.popover("IMAGE_PT_paint_curve")
+
                 layout.popover("IMAGE_PT_tools_brush_display")
 
     def draw_mode_settings(self, context):

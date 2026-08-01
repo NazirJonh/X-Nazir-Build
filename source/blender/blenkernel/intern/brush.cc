@@ -2079,6 +2079,21 @@ bool supports_secondary_cursor_color(const Brush &brush)
               SCULPT_BRUSH_TYPE_LAYER,
               SCULPT_BRUSH_TYPE_MASK);
 }
+bool supports_face_set_texture(const Brush &brush)
+{
+  return ELEM(brush.sculpt_brush_type,
+              SCULPT_BRUSH_TYPE_DRAW,
+              SCULPT_BRUSH_TYPE_CLAY,
+              SCULPT_BRUSH_TYPE_CLAY_STRIPS,
+              SCULPT_BRUSH_TYPE_CREASE,
+              SCULPT_BRUSH_TYPE_BLOB,
+              SCULPT_BRUSH_TYPE_INFLATE,
+              SCULPT_BRUSH_TYPE_SMOOTH,
+              SCULPT_BRUSH_TYPE_PINCH,
+              SCULPT_BRUSH_TYPE_DRAW_SHARP,
+              SCULPT_BRUSH_TYPE_MULTIPLANE_SCRAPE,
+              SCULPT_BRUSH_TYPE_LAYER);
+}
 bool supports_smooth_stroke(const Brush &brush)
 {
   return !(ELEM(brush.stroke_method,

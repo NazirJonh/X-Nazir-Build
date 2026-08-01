@@ -1047,26 +1047,15 @@ class VIEW3D_PT_tools_brush_face_set_texture(Panel, View3DPaintPanel):
     bl_options = {'DEFAULT_CLOSED'}
     bl_ui_units_x = 18
 
-    _BRUSH_TYPES = {
-        'DRAW',
-        'CLAY',
-        'CLAY_STRIPS',
-        'CREASE',
-        'BLOB',
-        'INFLATE',
-        'SMOOTH',
-        'PINCH',
-        'DRAW_SHARP',
-        'MULTIPLANE_SCRAPE',
-    }
-
     @classmethod
     def poll(cls, context):
         sculpt = context.tool_settings.sculpt
         if not (context.sculpt_object and sculpt):
             return False
         brush = sculpt.brush
-        return brush and brush.sculpt_brush_type in cls._BRUSH_TYPES
+        # Single source of truth is #blender::bke::brush::supports_face_set_texture (C++),
+        # exposed here as a read-only capability so this list is not duplicated in Python.
+        return brush and brush.sculpt_capabilities.has_face_set_texture
 
     def draw(self, context):
         layout = self.layout

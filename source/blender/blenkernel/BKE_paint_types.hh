@@ -55,6 +55,15 @@ struct PaintRuntime : NonCopyable, NonMovable {
   bool session_use_texture_overlay = false;
   int session_texture_overlay_alpha = 100;
 
+  /**
+   * Session-only "record" toggles for brush setting groups (not saved to file). While a group is
+   * enabled, its settings are carried over from the brush that was active before a brush switch
+   * onto the brush that becomes active, see #BKE_paint_brush_group_overrides_apply.
+   */
+  bool override_face_sets = false;
+  bool override_stroke = false;
+  bool override_falloff = false;
+
   float2 last_rake = float2(0.0f, 0.0f);
   float last_rake_angle = 0.0f;
 

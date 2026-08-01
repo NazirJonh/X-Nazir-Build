@@ -90,36 +90,52 @@ class VIEW3D_HT_tool_header(Header):
         if draw_fn is not None:
             is_valid_context = draw_fn(context, layout, tool)
 
-        _FACE_SET_TEXTURE_BRUSH_TYPES = {
-            'DRAW',
-            'CLAY',
-            'CLAY_STRIPS',
-            'CREASE',
-            'BLOB',
-            'INFLATE',
-            'SMOOTH',
-            'PINCH',
-            'DRAW_SHARP',
-            'MULTIPLANE_SCRAPE',
-        }
+        def override_row(layout, settings, prop_name, group):
+            row = layout.row(align=True)
+            is_on = getattr(settings, prop_name)
+            props = row.operator(
+                "paint.brush_group_override_toggle",
+                text="",
+                icon='RECORD_ON' if is_on else 'RECORD_OFF',
+                depress=is_on,
+            )
+            props.group = group
+            return row
 
         def draw_3d_brush_settings(layout, tool_mode):
+            from bl_ui.properties_paint_common import UnifiedPaintPanel
+            settings = UnifiedPaintPanel.paint_settings(context)
+
+            if settings is None:
+                layout.popover("VIEW3D_PT_tools_brush_settings_advanced", text="Brush")
+                return
+
             if tool_mode == 'SCULPT':
                 sculpt = context.tool_settings.sculpt
                 if sculpt and sculpt.brush:
-                    brush_type = sculpt.brush.sculpt_brush_type
-                    if brush_type == 'DRAW_FACE_SETS':
-                        layout.popover("VIEW3D_PT_tools_brush_face_set_settings", text="Face Sets")
-                    elif brush_type in _FACE_SET_TEXTURE_BRUSH_TYPES:
-                        layout.popover("VIEW3D_PT_tools_brush_face_set_texture", text="Face Sets")
+                    brush = sculpt.brush
+                    if brush.sculpt_brush_type == 'DRAW_FACE_SETS':
+                        row = override_row(layout, settings, "use_override_face_sets", 'FACE_SETS')
+                        row.popover("VIEW3D_PT_tools_brush_face_set_settings", text="Face Sets")
+                    # Single source of truth is #blender::bke::brush::supports_face_set_texture
+                    # (C++), exposed here as a read-only capability so this brush-type list is
+                    # not duplicated in Python.
+                    elif brush.sculpt_capabilities.has_face_set_texture:
+                        row = override_row(layout, settings, "use_override_face_sets", 'FACE_SETS')
+                        row.popover("VIEW3D_PT_tools_brush_face_set_texture", text="Face Sets")
 
             layout.popover("VIEW3D_PT_tools_brush_settings_advanced", text="Brush")
             if tool_mode != 'PAINT_WEIGHT':
                 layout.popover("VIEW3D_PT_tools_brush_texture")
             if tool_mode == 'PAINT_TEXTURE':
                 layout.popover("VIEW3D_PT_tools_mask_texture")
-            layout.popover("VIEW3D_PT_tools_brush_stroke")
-            layout.popover("VIEW3D_PT_tools_brush_falloff")
+
+            row = override_row(layout, settings, "use_override_stroke", 'STROKE')
+            row.popover("VIEW3D_PT_tools_brush_stroke")
+
+            row = override_row(layout, settings, "use_override_falloff", 'FALLOFF')
+            row.popover("VIEW3D_PT_tools_brush_falloff")
+
             layout.popover("VIEW3D_PT_tools_brush_display")
 
         # NOTE: general mode options should be added to `draw_mode_settings`.

@@ -527,6 +527,7 @@ void PAINT_OT_image_from_view(wmOperatorType *ot);
 void PAINT_OT_add_texture_paint_slot(wmOperatorType *ot);
 void PAINT_OT_image_paint(wmOperatorType *ot);
 void PAINT_OT_add_simple_uvs(wmOperatorType *ot);
+void PAINT_OT_brush_group_override_toggle(wmOperatorType *ot);
 
 /* paint_image_2d_curve_mask.cc */
 

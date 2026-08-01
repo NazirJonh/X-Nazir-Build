@@ -244,6 +244,7 @@ set(SRC
   intern/outliner_treehash.cc
   intern/packedFile.cc
   intern/paint.cc
+  intern/paint_brush_group_override.cc
   intern/paint_canvas.cc
   intern/paint_runtime.cc
   intern/particle.cc

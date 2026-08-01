@@ -294,6 +294,12 @@ bool supports_random_texture_angle(const Brush &brush);
 bool supports_sculpt_plane(const Brush &brush);
 bool supports_color(const Brush &brush);
 bool supports_secondary_cursor_color(const Brush &brush);
+/**
+ * Whether the Face Sets From Texture popover is shown for this brush. Single source of truth for
+ * both #BrushCapabilitiesSculpt.has_face_set_texture (RNA, used by the Python UI) and the brush
+ * group override "record" mechanism (see #BKE_paint_brush_group_reset_from_asset).
+ */
+bool supports_face_set_texture(const Brush &brush);
 bool supports_smooth_stroke(const Brush &brush);
 bool supports_space_attenuation(const Brush &brush);
 bool supports_strength_pressure(const Brush &brush);

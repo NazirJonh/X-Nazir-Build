@@ -1566,6 +1566,14 @@ class _defs_sculpt:
         if draw_popover:
             layout.popover("TOPBAR_PT_tool_settings_extra", text="Stroke")
 
+    @staticmethod
+    def draw_trim_slice_settings(layout, props):
+        if props.trim_mode != 'SLICE':
+            return
+        layout.prop(props, "use_slice_mask_selection", expand=False)
+        layout.prop(props, "use_slice_random_face_set", expand=False)
+        layout.prop(props, "use_slice_new_object", expand=False)
+
     @ToolDef.from_fn
     def mask_border():
         def draw_settings(_context, layout, tool):
@@ -1799,6 +1807,7 @@ class _defs_sculpt:
             layout.prop(props, "trim_orientation", expand=False)
             layout.prop(props, "trim_extrude_mode", expand=False)
             layout.prop(props, "use_cursor_depth", expand=False)
+            _defs_sculpt.draw_trim_slice_settings(layout, props)
         return dict(
             idname="builtin.box_trim",
             label="Box Trim",
@@ -1820,6 +1829,7 @@ class _defs_sculpt:
                 layout.prop(props, "trim_orientation", expand=False)
                 layout.prop(props, "trim_extrude_mode", expand=False)
                 layout.prop(props, "use_cursor_depth", expand=False)
+                _defs_sculpt.draw_trim_slice_settings(layout, props)
                 region_is_header = bpy.context.region.type == 'TOOL_HEADER'
                 if region_is_header:
                     draw_popover = True
@@ -1842,9 +1852,11 @@ class _defs_sculpt:
         def draw_settings(_context, layout, tool):
             props = tool.operator_properties("sculpt.trim_line_gesture")
             layout.prop(props, "trim_solver", expand=False)
+            layout.prop(props, "trim_mode", expand=False)
             layout.prop(props, "trim_orientation", expand=False)
             layout.prop(props, "trim_extrude_mode", expand=False)
             layout.prop(props, "use_cursor_depth", expand=False)
+            _defs_sculpt.draw_trim_slice_settings(layout, props)
             layout.prop(props, "use_limit_to_segment", expand=False)
         return dict(
             idname="builtin.line_trim",
@@ -1864,6 +1876,7 @@ class _defs_sculpt:
             layout.prop(props, "trim_orientation", expand=False)
             layout.prop(props, "trim_extrude_mode", expand=False)
             layout.prop(props, "use_cursor_depth", expand=False)
+            _defs_sculpt.draw_trim_slice_settings(layout, props)
 
         return dict(
             idname="builtin.polyline_trim",

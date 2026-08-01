@@ -2545,6 +2545,11 @@ struct FaceSetOperation {
   gesture::Operation op;
 
   int new_face_set_id;
+
+  /* Only used by the line gesture. These values are stored per object because face set IDs are
+   * local to each mesh in multi-object sculpt mode. */
+  bool keep_existing_face_sets;
+  Vector<int> boundary_face_set_ids;
 };
 
 static void gesture_begin(bContext &C, wmOperator &op, gesture::GestureData &gesture_data)
@@ -2569,6 +2574,11 @@ static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMa
   const Depsgraph &depsgraph = *gesture_data.vc.depsgraph;
   Object &object = *gesture_data.vc.obact;
   Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const int object_index = gesture_data.objects.first_index_of(&object);
+  const int boundary_face_set = face_set_operation->keep_existing_face_sets ?
+                                    face_set_operation->boundary_face_set_ids[object_index] :
+                                    face_set_none_id;
+  const int default_face_set = mesh.face_sets_color_default;
   SculptSession &ss = *gesture_data.ss;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
 
@@ -2622,6 +2632,12 @@ static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMa
             if (!gesture::is_affected(gesture_data, face_centers[idx], face_normal)) {
               continue;
             }
+            if (face_set_operation->keep_existing_face_sets &&
+                face_sets.span[face] != default_face_set &&
+                face_sets.span[face] != boundary_face_set)
+            {
+              continue;
+            }
             face_sets.span[face] = new_face_set;
             any_updated = true;
           }
@@ -2670,6 +2686,12 @@ static void gesture_apply_mesh(gesture::GestureData &gesture_data, const IndexMa
             if (!gesture::is_affected(gesture_data, positions[idx], normals[idx])) {
               continue;
             }
+            if (face_set_operation->keep_existing_face_sets &&
+                face_sets.span[face] != default_face_set &&
+                face_sets.span[face] != boundary_face_set)
+            {
+              continue;
+            }
             face_sets.span[face] = new_face_set;
             any_updated = true;
           }
@@ -2692,6 +2714,12 @@ static void gesture_apply_bmesh(gesture::GestureData &gesture_data, const IndexM
       gesture_data.operation);
   const Depsgraph &depsgraph = *gesture_data.vc.depsgraph;
   const int new_face_set = face_set_operation->new_face_set_id;
+  const int object_index = gesture_data.objects.first_index_of(gesture_data.vc.obact);
+  const int boundary_face_set = face_set_operation->keep_existing_face_sets ?
+                                    face_set_operation->boundary_face_set_ids[object_index] :
+                                    face_set_none_id;
+  const int default_face_set =
+      id_cast<const Mesh *>(gesture_data.vc.obact->data)->face_sets_color_default;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(*gesture_data.vc.obact);
   MutableSpan<bke::pbvh::BMeshNode> nodes = pbvh.nodes<bke::pbvh::BMeshNode>();
   const int offset = face_set::ensure_face_sets_bmesh(*gesture_data.vc.obact);
@@ -2732,6 +2760,13 @@ static void gesture_apply_bmesh(gesture::GestureData &gesture_data, const IndexM
             idx++;
             continue;
           }
+          if (face_set_operation->keep_existing_face_sets) {
+            const int current_face_set = BM_ELEM_CD_GET_INT(face, offset);
+            if (current_face_set != default_face_set && current_face_set != boundary_face_set) {
+              idx++;
+              continue;
+            }
+          }
           BM_ELEM_CD_SET_INT(face, offset, new_face_set);
           any_updated = true;
           idx++;
@@ -2771,7 +2806,7 @@ static void gesture_end(bContext &C, gesture::GestureData &gesture_data)
 static void init_operation(gesture::GestureData &gesture_data, wmOperator & /*op*/)
 {
   gesture_data.operation = reinterpret_cast<gesture::Operation *>(
-      MEM_new_zeroed<FaceSetOperation>(__func__));
+      MEM_new<FaceSetOperation>(__func__));
 
   FaceSetOperation *face_set_operation = reinterpret_cast<FaceSetOperation *>(
       gesture_data.operation);
@@ -2781,6 +2816,7 @@ static void init_operation(gesture::GestureData &gesture_data, wmOperator & /*op
   face_set_operation->op.end = gesture_end;
 
   face_set_operation->new_face_set_id = find_shared_next_available_id(gesture_data.objects);
+  face_set_operation->keep_existing_face_sets = false;
 }
 
 static wmOperatorStatus gesture_box_invoke(bContext *C, wmOperator *op, const wmEvent *event)
@@ -2850,6 +2886,19 @@ static wmOperatorStatus gesture_line_exec(bContext *C, wmOperator *op)
   }
   gesture_data->objects = sculpt_mode_objects(gesture_data->vc);
   init_operation(*gesture_data, *op);
+  FaceSetOperation *face_set_operation = reinterpret_cast<FaceSetOperation *>(
+      gesture_data->operation);
+  face_set_operation->keep_existing_face_sets = RNA_boolean_get(op->ptr,
+                                                                  "keep_existing_face_sets");
+  if (face_set_operation->keep_existing_face_sets) {
+    const float mval[2] = {float(RNA_int_get(op->ptr, "xstart")),
+                           float(RNA_int_get(op->ptr, "ystart"))};
+    face_set_operation->boundary_face_set_ids.reinitialize(gesture_data->objects.size());
+    for (const int i : gesture_data->objects.index_range()) {
+      face_set_operation->boundary_face_set_ids[i] = active_update_and_get(
+          C, *gesture_data->objects[i], mval);
+    }
+  }
   ed::sculpt_paint::face_set_overlay_check(*C, *op);
   gesture::apply(*C, *gesture_data, *op);
   return OPERATOR_FINISHED;
@@ -2949,6 +2998,13 @@ void SCULPT_OT_face_set_line_gesture(wmOperatorType *ot)
 
   WM_operator_properties_gesture_straightline(ot, WM_CURSOR_EDIT);
   gesture::operator_properties(ot, gesture::ShapeType::Line);
+
+  RNA_def_boolean(ot->srna,
+                  "keep_existing_face_sets",
+                  false,
+                  "Keep Existing Face Sets",
+                  "Only overwrite unassigned faces and the face set under the line start point, "
+                  "stopping the fill at other existing face sets (hold Shift)");
 }
 
 /** \} */

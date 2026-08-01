@@ -22,11 +22,14 @@
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
+#include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector_set.hh"
 
 #include "BKE_context.hh"
 #include "BKE_screen.hh"
+
+#include "UI_grid_view.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -53,8 +56,15 @@ void popup_translate(ARegion *region, const int mdiff[2])
   /* update blocks */
   for (Block &block : region->runtime->uiblocks) {
     PopupBlockHandle *handle = block.handle;
-    /* Make empty, will be initialized on next use, see #60608. */
-    BLI_rctf_init(&handle->prev_block_rect, 0, 0, 0, 0);
+    /* Keep #prev_block_rect in sync with the drag instead of invalidating it to zero (as before,
+     * see #60608): #BLOCK_POPUP_ANCHOR_LEFT's left-edge pin and
+     * #popup_block_left_anchored_budget_px's width budget both read this rect on the next
+     * refresh, and both treat an `xmin` of exactly 0 as "not yet positioned" (first open).
+     * Zeroing it here made any refresh after a header-drag misread the popup as unpositioned,
+     * snapping its left edge back to the window edge and reopening its width budget to the full
+     * window width. Translating by the same delta keeps it valid and avoids colliding with that
+     * sentinel. */
+    BLI_rctf_translate(&handle->prev_block_rect, float(mdiff[0]), float(mdiff[1]));
 
     for (SafetyRect &saferct : block.saferct) {
       BLI_rctf_translate(&saferct.parent, UNPACK2(mdiff));
@@ -320,6 +330,13 @@ static void popup_block_position(wmWindow *window, ARegion *butregion, Button *b
     button_update(&bt);
   }
 
+  for (AbstractGridView *grid_view : block_view_scroll_clipped_grids(*block)) {
+    rctf rect = grid_view->scroll_clip_rect();
+    block_to_window_rctf(butregion, but->block, &rect, &rect);
+    BLI_rctf_translate(&rect, offset_x, offset_y);
+    grid_view->scroll_clip_set(rect);
+  }
+
   BLI_rctf_translate(&block->rect, offset_x, offset_y);
 
   /* Safety calculus. */
@@ -415,12 +432,17 @@ static void block_region_refresh(const bContext *C, ARegion *region)
 
   ScrArea *ctx_area = CTX_wm_area(C);
   ARegion *ctx_region = CTX_wm_region(C);
+  ARegion *ctx_region_popup = CTX_wm_region_popup(C);
 
   if (region->runtime->do_draw & RGN_REFRESH_UI) {
     ScrArea *handle_ctx_area;
     ARegion *handle_ctx_region;
 
     region->runtime->do_draw &= ~RGN_REFRESH_UI;
+    /* Mirror what #popup_block_create does: make the popup region accessible via
+     * CTX_wm_region_popup so that draw callbacks can distinguish it from the host region
+     * returned by CTX_wm_region. */
+    CTX_wm_region_popup_set(const_cast<bContext *>(C), region);
     for (Block &block : region->runtime->uiblocks.items_mutable()) {
       PopupBlockHandle *handle = block.handle;
 
@@ -444,6 +466,7 @@ static void block_region_refresh(const bContext *C, ARegion *region)
 
   CTX_wm_area_set(const_cast<bContext *>(C), ctx_area);
   CTX_wm_region_set(const_cast<bContext *>(C), ctx_region);
+  CTX_wm_region_popup_set(const_cast<bContext *>(C), ctx_region_popup);
 }
 
 static void block_region_draw(const bContext *C, ARegion *region)
@@ -508,6 +531,23 @@ static void popup_block_clip(wmWindow *window, Block *block)
     bt.rect.xmin += xofs;
     bt.rect.xmax += xofs;
   }
+  block_view_scroll_clip_translate(block, xofs, 0.0f);
+}
+
+int popup_block_left_anchored_budget_px(const wmWindow *window, const Block *block)
+{
+  const int win_x = WM_window_native_pixel_size(window)[0];
+  const int margin = UI_SCREEN_MARGIN;
+  /* Before the block is positioned (its first open) the pinned left edge is unknown; fall back to
+   * the full usable window width so the caller's window-relative clamp still applies. The left edge
+   * is measured in window space (#PopupBlockHandle::prev_block_rect, stored before the block is
+   * brought into region space). */
+  if (block == nullptr || block->handle == nullptr ||
+      block->handle->prev_block_rect.xmin <= 0.0f)
+  {
+    return std::max(0, win_x - 2 * margin);
+  }
+  return std::max(0, win_x - margin - int(block->handle->prev_block_rect.xmin));
 }
 
 void popup_block_scrolltest(Block *block)
@@ -529,6 +569,12 @@ void popup_block_scrolltest(Block *block)
   }
 
   for (Button &bt : block->buttons()) {
+    /* Sub-row scrolled grid tiles can extend past the popup block bounds while still being inside
+     * their owning grid's clip rect; keep them drawable (see
+     * #block_grid_scroll_clip_contains_button). */
+    if (block_grid_scroll_clip_contains_button(&bt)) {
+      continue;
+    }
     /* Tag buttons that are outside boundary */
     if (bt.rect.ymax < block->rect.ymin) {
       bt.flag |= UI_SCROLLED;
@@ -590,6 +636,8 @@ static void popup_block_remove(bContext *C, PopupBlockHandle *handle)
   if (handle->scrolltimer) {
     WM_event_timer_remove(wm, win, handle->scrolltimer);
   }
+  /* Stop the unified grid handler's fling/drag if this dying region owns it, before it is freed. */
+  grid_view_input_region_freed(handle->region);
   if (handle->keep_open_timer) {
     WM_event_timer_remove(wm, win, handle->keep_open_timer);
   }
@@ -612,6 +660,102 @@ void layout_panel_popup_scroll_apply(Panel *panel, const float dy)
     header.start_y += dy;
     header.end_y += dy;
   }
+}
+
+float popover_vertical_chrome_px(const float aspect)
+{
+  /* Vertical space the popover positioning pipeline wraps around the content block, which a
+   * build-time height budget must subtract before it can size a fixed-viewport grid:
+   * - the arrow hint (~0.5 widget unit, keep in sync with #ui_draw_popover_back_impl and the
+   *   arrow offset applied in #popup_block_refresh),
+   * - the block bounds padding applied on both sides during positioning (`block_margin` =
+   *   `U.widget_unit / 2` each, see #block_func_POPOVER),
+   * all scaling with 1/aspect like the layout, plus a fixed screen-edge margin so the final
+   * block never turns menu-scrollable. */
+  const float arrow_px = 0.5f * float(U.widget_unit);
+  const float block_margin_px = 0.5f * float(U.widget_unit);
+  return (arrow_px + 2.0f * block_margin_px) / aspect + 1.5f * float(U.widget_unit);
+}
+
+void popup_block_scroll_apply_offset_y(ARegion *region, Block *block, const float dy)
+{
+  BLI_assert(dy != 0.0f);
+
+  PopupBlockHandle *handle = block->handle;
+  const float prev_scroll = handle->scrolloffset;
+  handle->scrolloffset = std::clamp(
+      handle->scrolloffset + dy, handle->scrollmin, handle->scrollmax);
+  const float applied_dy = handle->scrolloffset - prev_scroll;
+  layout_panel_popup_scroll_apply(block->panel, applied_dy);
+
+  for (Button &bt : block->buttons()) {
+    bt.rect.ymin += applied_dy;
+    bt.rect.ymax += applied_dy;
+  }
+  block_view_scroll_clip_offset_apply(block, applied_dy);
+
+  popup_block_scrolltest(block);
+  ED_region_tag_redraw(region);
+}
+
+bool popup_region_scroll_apply_dy(ARegion *region, const float dy)
+{
+  if (dy == 0.0f) {
+    return false;
+  }
+  Block *block = static_cast<Block *>(region->runtime->uiblocks.first);
+  if (!block || !block->handle) {
+    return false;
+  }
+  PopupBlockHandle *handle = block->handle;
+  /* Both 0 means the popup fits on screen and has no scrollable range. */
+  if (handle->scrollmin == 0.0f && handle->scrollmax == 0.0f) {
+    return false;
+  }
+  popup_block_scroll_apply_offset_y(region, block, dy);
+  return true;
+}
+
+static bool popup_scroll_to_but(ARegion *region, Block *block, Button *but_target)
+{
+  float dy = 0.0f;
+  if (block->flag & BLOCK_CLIPTOP) {
+    if (but_target->rect.ymax > block->rect.ymax - UI_MENU_SCROLL_MOUSE / block->aspect) {
+      dy = block->rect.ymax - but_target->rect.ymax - UI_MENU_SCROLL_MOUSE / block->aspect;
+    }
+  }
+  if (block->flag & BLOCK_CLIPBOTTOM) {
+    if (but_target->rect.ymin < block->rect.ymin + UI_MENU_SCROLL_MOUSE / block->aspect) {
+      dy = block->rect.ymin - but_target->rect.ymin + UI_MENU_SCROLL_MOUSE / block->aspect;
+    }
+  }
+  if (dy != 0.0f) {
+    popup_block_scroll_apply_offset_y(region, block, dy);
+    return true;
+  }
+  return false;
+}
+
+static void popup_scroll_active_grid_item_into_view_on_open(ARegion *region,
+                                                            Block *block,
+                                                            PopupBlockHandle *handle)
+{
+  if (handle->refresh) {
+    return;
+  }
+  if ((block->flag & BLOCK_POPOVER) == 0) {
+    return;
+  }
+  if (handle->scrollmin == 0.0f && handle->scrollmax == 0.0f) {
+    return;
+  }
+
+  Button *but_target = view_item_find_active_grid(region);
+  if (!but_target) {
+    return;
+  }
+
+  popup_scroll_to_but(region, block, but_target);
 }
 
 /**
@@ -668,6 +812,9 @@ void popup_dummy_panel_set(ARegion *region, Block *block, StringRef idname)
     }();
     panel = BKE_panel_new(&panel_type);
   }
+  /* Store the actual panel idname so callers can identify which panel type this popup
+   * represents via `panel->panelname`, even though the PanelType is a shared dummy. */
+  STRNCPY_UTF8(panel->panelname, idname.data());
   panel->runtime->layout_panels.clear();
   panel->runtime->layout_panel_states_storage = &popup_persistent_layout_panel_states(idname);
   block->panel = panel;
@@ -846,12 +993,35 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
     popup_block_clip(window, block);
 
     /* Avoid menu moving down and losing cursor focus by keeping it at the same height when the
-     * popup is displaced down by at least one window unit. */
-    if (handle->refresh && (handle->prev_block_rect.ymax - block->rect.ymax) > 1.0f) {
+     * popup is displaced down by at least one window unit. Skip this for an upward-anchored popover:
+     * its bottom edge is pinned to the button, so a dropping top edge is a genuine size change (e.g.
+     * an interactive resize grip shrinking it), not a displacement to correct. Pinning the top here
+     * would cancel the shrink while leaving growth unaffected (which only raises the top). */
+    const bool upward_anchored_popover = (block->flag & BLOCK_POPOVER) &&
+                                         (block->direction & UI_DIR_UP);
+    /* Color picker popups are exempt: their height legitimately changes when the palette sub-panel is
+     * switched or collapsed, and pinning the old size would leave the popup oversized with empty space
+     * when the new palette has fewer swatches. */
+    const bool is_color_picker = block->color_pickers.list.first != nullptr;
+    if (handle->refresh && (handle->prev_block_rect.ymax - block->rect.ymax) > 1.0f &&
+        !upward_anchored_popover && !is_color_picker)
+    {
       if (block->bounds_type != BLOCK_BOUNDS_POPUP_CENTER) {
         const float offset = handle->prev_block_rect.ymax - block->rect.ymax;
         block_translate(block, 0, offset);
         block->rect.ymin = handle->prev_block_rect.ymin;
+      }
+    }
+
+    /* Keep the left edge pinned across refreshes for popovers that manage their own width and
+     * expose a width control (e.g. the asset-shelf catalog-tree divider grip). The block then only
+     * grows/shrinks to the right, so resizing never shifts the fixed left edge - even when the
+     * block was right-aligned to the window edge. The creator clamps its width so the right edge
+     * stays on screen (see #BLOCK_POPUP_ANCHOR_LEFT). */
+    if (handle->refresh && (block->flag & BLOCK_POPUP_ANCHOR_LEFT)) {
+      const float xofs = handle->prev_block_rect.xmin - block->rect.xmin;
+      if (xofs != 0.0f) {
+        block_translate(block, xofs, 0.0f);
       }
     }
 
@@ -866,12 +1036,18 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
     region->winrct.ymax = block->rect.ymax + UI_POPUP_MENU_TOP;
 
     block_translate(block, -region->winrct.xmin, -region->winrct.ymin);
-    /* Popups can change size, fix scroll offset if a panel was closed. */
+    /* Popups can change size, fix scroll offset if a panel was closed. Use the clip-clamped rect
+     * so a sub-row-scrolled image grid's buffer/partial rows (clipped away when drawn) don't
+     * inflate the measured content height and trigger a spurious popup auto-scroll. */
     float ymin = FLT_MAX;
     float ymax = -FLT_MAX;
     for (const Button &bt : block->buttons()) {
-      ymin = min_ff(ymin, bt.rect.ymin);
-      ymax = max_ff(ymax, bt.rect.ymax);
+      rctf bounds_rect;
+      if (!block_grid_scroll_clip_bounds_rect(&bt, &bounds_rect)) {
+        continue;
+      }
+      ymin = min_ff(ymin, bounds_rect.ymin);
+      ymax = max_ff(ymax, bounds_rect.ymax);
     }
     const float bounds = block->bounds / block->aspect;
 
@@ -885,6 +1061,7 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
         bt.rect.ymin += handle->scrolloffset;
         bt.rect.ymax += handle->scrolloffset;
       }
+      block_view_scroll_clip_offset_apply(block, handle->scrolloffset);
     }
     /* Layout panels are relative to `block->rect.ymax`. Rather than a
      * scroll, this is a offset applied due to the overflow at the top. */
@@ -901,6 +1078,16 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
 
   /* checks which buttons are visible, sets flags to prevent draw (do after region init) */
   popup_block_scrolltest(block);
+
+  /* Update bounds of all views in this block. For region panels this happens in #panels_end(), and
+   * #block_end() skips it for panel blocks. Popups own a dummy #Block::panel (see
+   * #popup_dummy_panel_set) and never go through #panels_end(), so without this a view's bounds
+   * would stay unset. Needed e.g. by the image-browser popover's fixed-viewport edge scrolling. */
+  block_views_end(region, block);
+
+  if ((block->flag & BLOCK_PIE_MENU) == 0) {
+    popup_scroll_active_grid_item_into_view_on_open(region, block, handle);
+  }
 
   /* Adds sub-window. */
   ED_region_floating_init(region);
@@ -969,6 +1156,11 @@ PopupBlockHandle *popup_block_create(bContext *C,
   region->runtime->type = &type;
 
   region_handlers_add(&region->runtime->handlers);
+  /* Temporary popup regions do not go through the regular area handler setup. Add the standard UI
+   * dropboxes explicitly so views inside popovers can receive drag-and-drop events. */
+  ListBaseT<wmDropBox> *dropboxes = WM_dropboxmap_find(
+      "User Interface", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  WM_event_add_dropbox_handler(&region->runtime->handlers, dropboxes);
 
   /* Note that this will be set in the code-path that typically calls refreshing
    * (that loops over #Screen::regionbase and refreshes regions tagged with #RGN_REFRESH_UI).

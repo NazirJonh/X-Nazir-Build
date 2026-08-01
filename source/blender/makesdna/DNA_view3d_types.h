@@ -12,6 +12,7 @@
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_quaternion_types.hh"
 
+#include "DNA_asset_types.h"
 #include "DNA_defs.h"
 #include "DNA_listBase.h"
 #include "DNA_object_types.h"
@@ -696,10 +697,69 @@ struct View3DOverlay {
   float sculpt_curves_cage_opacity = 0;
 };
 
+/** Per-library enabled catalog paths stored on #View3D for the sculpt image asset grid. */
+struct ImageGridLibraryCatalogState {
+  ImageGridLibraryCatalogState *next = nullptr, *prev = nullptr;
+  AssetLibraryReference library_ref;
+  /** Enabled catalog paths (empty = show all catalogs for this library). */
+  ListBaseT<AssetCatalogPathLink> enabled_catalog_paths = {nullptr, nullptr};
+};
+
+/**
+ * Membership / catalog follow mode persisted on #ImageGridSlotDNA::catalog_mode.
+ * Values match #blender::ed::view3d::ImageGridShelfCatalogMode (All / CatalogPath /
+ * Recent / Favorites). Old files had zero padding here → #IMAGE_GRID_CATALOG_MODE_ALL.
+ */
+typedef enum eImageGridCatalogMode {
+  IMAGE_GRID_CATALOG_MODE_ALL = 0,
+  IMAGE_GRID_CATALOG_MODE_CATALOG_PATH = 1,
+  IMAGE_GRID_CATALOG_MODE_RECENT = 2,
+  IMAGE_GRID_CATALOG_MODE_FAVORITES = 3,
+} eImageGridCatalogMode;
+
+/**
+ * Persisted per-slot state for the sculpt/paint brush-texture image grid. #View3D keeps one
+ * instance per independent slot (#View3D::image_grid, #View3D::image_grid_mask) instead of
+ * duplicating each field per slot.
+ */
+struct ImageGridSlotDNA {
+  /** Number of visible rows for the image grid. 0 = use default (1). */
+  short rows = 0;
+  /**
+   * #eImageGridCatalogMode. Uses former `_pad_rows` bytes so old .blend files (zero padding)
+   * load as #IMAGE_GRID_CATALOG_MODE_ALL without do_version.
+   */
+  short catalog_mode = IMAGE_GRID_CATALOG_MODE_ALL;
+  /** Struct padding: #library_ref is struct-typed and needs 8-byte native alignment. */
+  char _pad_rows[4] = {};
+  /** Asset library browsed by this slot. */
+  AssetLibraryReference library_ref;
+  /**
+   * Legacy library selection (migrated to #library_ref). Kept for do-version migration from files
+   * written before 5.2 subversion 47. 0 = unset, meaning "current file".
+   */
+  short library_type_legacy = 0;
+  char _pad_lib[2] = {};
+  int library_custom_index_legacy = 0;
+  /**
+   * Legacy per-view catalog filter (migrated to #library_catalog_states).
+   * Kept for do-version migration from files written before 5.2 subversion 40.
+   */
+  ListBaseT<AssetCatalogPathLink> enabled_catalog_paths_legacy = {nullptr, nullptr};
+  /** Per-asset-library catalog selection for the image grid (empty paths = show all). */
+  ListBaseT<ImageGridLibraryCatalogState> library_catalog_states = {nullptr, nullptr};
+};
+
 struct View3D_Runtime {
   /** Nkey panel stores stuff here. */
   void *properties_storage = nullptr;
   void (*properties_storage_free)(void *properties_storage) = nullptr;
+  /**
+   * Per-View3D session state for the brush texture image grid template
+   * (#blender::ed::view3d::ImageGridStatesPerView3D). Created lazily, freed in #view3d_free, and
+   * reset on file read and space duplication. Opaque here to keep DNA free of C++ containers.
+   */
+  void *image_grid_state = nullptr;
   /** Runtime only flags. */
   int flag = 0;
 
@@ -814,12 +874,29 @@ struct View3D {
   float stereo3d_volume_alpha = 0.05f;
   float stereo3d_convergence_alpha = 0.15f;
 
+  /** Paint-slot filter mode for the image browser popover (#TEMPLATE_ID_FILTER_*). Mirrors
+   * #SpaceImage. The grid/list view mode and search now live on the window manager
+   * (#wmWindowManager::id_browser_view_mode), shared across editors. */
+  char image_filter_mode = 0;
+  /** Slot type filter used when `image_filter_mode` includes the slot bit. */
+  char image_filter_slot_type = 0;
+  char _pad_ibrowse[6] = {};
+
   /** Display settings. */
   View3DShading shading;
   View3DOverlay overlay;
 
   /** Path to the viewer node that is currently previewed. This is retrieved from the workspace. */
   ViewerPath viewer_path;
+
+  /** Preview thumbnail size in pixels for the image grid (shared by both slots below). 0 = use
+   * default (48). */
+  short image_grid_preview_size = 0;
+  char _pad_image_grid[6] = {};
+  /** Brush-texture image grid state. */
+  ImageGridSlotDNA image_grid;
+  /** Mask-texture image grid state (independent library/catalog/row state from #image_grid). */
+  ImageGridSlotDNA image_grid_mask;
 
   /** Runtime evaluation data (keep last). */
   View3D_Runtime runtime;

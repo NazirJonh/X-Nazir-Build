@@ -58,6 +58,20 @@ enum eAssetLibrary_Flag : int {
   ASSET_LIBRARY_RELATIVE_PATH = (1 << 0),
   ASSET_LIBRARY_DISABLED = (1 << 1),
   ASSET_LIBRARY_USE_REMOTE_URL = (1 << 2),
+  /** Set on libraries created via "Add Image Library": a folder of image files indexed as image
+   * assets. Used to leave these out of UI surfaces that only ever show a different asset type
+   * (e.g. the brush shelf), independent of what happens to be scanned into the library's on-disk
+   * image index (see #image_library_scan_and_index, which -- for image-asset support -- indexes
+   * any local library that has image files in it, not just ones added this way). */
+  ASSET_LIBRARY_IS_IMAGE_LIBRARY = (1 << 3),
+  /** Set on libraries created via "Add Brush Library": a library dedicated to brush assets. Used
+   * to leave these out of Texture asset browsing (the image grid), so incidental image files
+   * living alongside the brushes (e.g. stencil/alpha textures) never show up as texture assets. */
+  ASSET_LIBRARY_IS_BRUSH_LIBRARY = (1 << 4),
+  /** Set when the user pins this library, which shows it as a tab at the top of the asset shelf
+   * popover. Distinct from the brush "favorites" feature in the same popover, which is about
+   * individual brush assets, not libraries. */
+  ASSET_LIBRARY_IS_PINNED = (1 << 5),
 };
 
 enum class AssetAccess : int8_t {
@@ -164,18 +178,32 @@ struct AssetImportSettings {
  * Information to identify an asset library. May be either one of the predefined types (current
  * 'Main', builtin library, project library), or a custom type as defined in the Preferences.
  *
- * If the type is set to #ASSET_LIBRARY_CUSTOM, `custom_library_index` must be set to identify the
- * custom library. Otherwise it is not used.
+ * If the type is set to #ASSET_LIBRARY_CUSTOM, `custom_library_name` identifies the custom
+ * library. Otherwise neither of the custom members is used.
  */
 struct AssetLibraryReference {
   eAssetLibraryType type = ASSET_LIBRARY_LOCAL;
   char _pad1[2] = {};
   /**
-   * If showing a custom asset library (#ASSET_LIBRARY_CUSTOM), this is the index of the
-   * #bUserAssetLibrary within #UserDef.asset_libraries.
-   * Should be ignored otherwise (but better set to -1 then, for sanity and debugging).
+   * Runtime handle: the index of the #bUserAssetLibrary within #UserDef.asset_libraries. Derived
+   * from #custom_library_name and kept in sync with it, so that Blender versions without the name
+   * field still resolve this reference. Should be ignored for other types (but better set to -1
+   * then, for sanity and debugging).
+   *
+   * \warning Never resolve this directly. An index is a *position*: it shifts whenever the
+   * Preferences list is reordered or an entry removed, silently pointing at a different library.
+   * Use #BKE_preferences_asset_library_find_from_ref().
    */
   int custom_library_index = -1;
+  /**
+   * Persistent identity of the custom library: the #bUserAssetLibrary.name, which is unique
+   * (#BKE_preferences_asset_library_name_set uniquifies it). This is the truth on disk;
+   * #custom_library_index is merely a cache of it.
+   *
+   * Empty means the reference was written before this field existed, and only
+   * #custom_library_index can resolve it.
+   */
+  char custom_library_name[/*MAX_NAME*/ 64] = "";
 };
 
 /**
@@ -229,6 +257,24 @@ struct AssetWeakReference {
 struct AssetCatalogPathLink {
   struct AssetCatalogPathLink *next = nullptr, *prev = nullptr;
   char *path = nullptr;
+};
+
+/**
+ * Persistent collapsed/expanded state of a single asset catalog path in a tree view.
+ * Kept separate from #AssetCatalogPathLink so existing enabled-catalog lists and their on-disk
+ * format are untouched.
+ */
+struct AssetCatalogState {
+  struct AssetCatalogState *next = nullptr, *prev = nullptr;
+
+  /** Full catalog path. */
+  char *path = nullptr;
+
+  /** Time when this entry was last used (seconds since epoch). Used to drop stale entries. */
+  uint32_t last_used = 0;
+
+  char is_collapsed = false;
+  char _pad[3] = {};
 };
 
 }  // namespace blender

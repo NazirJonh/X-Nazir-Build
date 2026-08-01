@@ -17,7 +17,10 @@
 
 #include "DNA_ID_enums.h"
 #include "DNA_layer_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_windowmanager_types.h"
+
+#include "BLO_read_write.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -29,6 +32,7 @@
 #include "BLT_translation.hh"
 
 #include "BKE_context.hh"
+#include "BKE_asset.hh"
 #include "BKE_global.hh"
 #include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
@@ -53,6 +57,7 @@
 #  include "wm_xr.hh"
 #endif
 
+#include "BKE_asset_shelf.hh"
 #include "BKE_undo_system.hh"
 #include "ED_screen.hh"
 
@@ -114,6 +119,33 @@ static void write_wm_xr_data(BlendWriter *writer, wmXrData *xr_data)
   BKE_screen_view3d_shading_blend_write(writer, &xr_data->session_settings.shading);
 }
 
+static void wm_popup_library_catalogs_blend_write(BlendWriter *writer, const wmWindowManager &wm)
+{
+  for (const AssetShelfPopupLibraryCatalogs &entry : wm.asset_shelf_popup_library_catalogs) {
+    writer->write_struct(&entry);
+    BKE_asset_shelf_library_catalog_state_list_blend_write(writer, entry.library_catalog_states);
+  }
+}
+
+static void wm_popup_library_catalogs_blend_read_data(BlendDataReader *reader, wmWindowManager &wm)
+{
+  BLO_read_struct_list(reader, AssetShelfPopupLibraryCatalogs, &wm.asset_shelf_popup_library_catalogs);
+  for (AssetShelfPopupLibraryCatalogs &entry : wm.asset_shelf_popup_library_catalogs) {
+    BKE_asset_shelf_library_catalog_state_list_blend_read_data(reader,
+                                                               entry.library_catalog_states);
+  }
+}
+
+static void wm_popup_library_catalogs_free(wmWindowManager &wm)
+{
+  while (AssetShelfPopupLibraryCatalogs *entry = static_cast<AssetShelfPopupLibraryCatalogs *>(
+             BLI_pophead(&wm.asset_shelf_popup_library_catalogs)))
+  {
+    BKE_asset_shelf_library_catalog_state_list_free(entry->library_catalog_states);
+    MEM_delete(entry);
+  }
+}
+
 static void window_manager_blend_write(BlendWriter *writer, ID *id, const void *id_address)
 {
   wmWindowManager *wm = id_cast<wmWindowManager *>(id);
@@ -122,6 +154,7 @@ static void window_manager_blend_write(BlendWriter *writer, ID *id, const void *
 
   writer->write_id_struct(id_address, wm);
   BKE_id_blend_write(writer, &wm->id);
+  BKE_asset_catalog_path_list_blend_write(writer, wm->id_browser_enabled_catalog_paths);
   write_wm_xr_data(writer, &wm->xr);
 
   for (wmWindow &win : wm->windows) {
@@ -137,6 +170,13 @@ static void window_manager_blend_write(BlendWriter *writer, ID *id, const void *
     /* Data is written, clear deprecated data again. */
     win.screen = nullptr;
   }
+
+  /* Per-`.blend` asset shelf popup size overrides. The list head is part of the wm struct written
+   * above; the entries need their own #write_struct. */
+  for (AssetShelfPopupSize &popup_size : wm->asset_shelf_popup_sizes) {
+    writer->write_struct(&popup_size);
+  }
+  wm_popup_library_catalogs_blend_write(writer, *wm);
 }
 
 static void direct_link_wm_xr_data(BlendDataReader *reader, wmXrData *xr_data)
@@ -150,6 +190,9 @@ static void window_manager_blend_read_data(BlendDataReader *reader, ID *id)
 
   id_us_ensure_real(&wm->id);
   BLO_read_struct_list(reader, wmWindow, &wm->windows);
+  BLO_read_struct_list(reader, AssetShelfPopupSize, &wm->asset_shelf_popup_sizes);
+  wm_popup_library_catalogs_blend_read_data(reader, *wm);
+  BKE_asset_catalog_path_list_blend_read_data(reader, wm->id_browser_enabled_catalog_paths);
 
   for (wmWindow &win : wm->windows) {
     BLO_read_struct(reader, wmWindow, &win.parent);
@@ -549,6 +592,13 @@ void wm_add_default(Main *bmain, bContext *C)
   wm->runtime->winactive = win;
   wm->file_saved = 1;
   wm_window_make_drawable(wm, win);
+
+  /* #BKE_libblock_alloc calloc's the struct (ID_WM has no #IDTypeInfo::init_data), so the C++
+   * default member initializer on #AssetLibraryReference::type never runs. Left at 0 that is not
+   * a valid #eAssetLibraryType (#ASSET_LIBRARY_LOCAL == 1), which the ID browser's asset-library
+   * source would otherwise silently treat as an unhandled type. */
+  wm->id_browser_asset_library_ref.type = ASSET_LIBRARY_LOCAL;
+  wm->id_browser_asset_library_ref.custom_library_index = -1;
 }
 
 static void wm_xr_data_free(wmWindowManager *wm)
@@ -587,6 +637,11 @@ void wm_close_and_free(bContext *C, wmWindowManager *wm)
 #endif
 
   wm_reports_free(wm);
+
+  /* Per-`.blend` asset shelf popup sizes are plain (no nested allocations). */
+  BLI_freelistN(&wm->asset_shelf_popup_sizes);
+  wm_popup_library_catalogs_free(*wm);
+  BKE_asset_catalog_path_list_free(wm->id_browser_enabled_catalog_paths);
 
   if (C && CTX_wm_manager(C) == wm) {
     CTX_wm_manager_set(C, nullptr);

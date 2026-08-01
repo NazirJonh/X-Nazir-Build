@@ -76,7 +76,11 @@ void regiondata_blend_write(BlendWriter *writer, const RegionAssetShelf *shelf_r
   writer->write_struct(shelf_regiondata);
   for (const AssetShelf &shelf : shelf_regiondata->shelves) {
     writer->write_struct(&shelf);
-    settings_blend_write(writer, shelf.settings);
+    /* Commit the active catalog into the per-library list on a copy so runtime shelf state is
+     * unchanged and this write path stays logically const for the region data. */
+    AssetShelfSettings settings = shelf.settings;
+    settings_commit_catalog_states_for_file_save(settings);
+    settings_blend_write(writer, settings);
   }
 }
 

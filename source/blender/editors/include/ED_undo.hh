@@ -71,6 +71,18 @@ bool ED_undo_has_redo_step(const bContext *C);
 
 bool ED_undo_is_memfile_compatible(const bContext *C);
 
+/**
+ * Push a global (memfile) undo step with the given \a name, regardless of the current context
+ * mode.  Use this when a non-paint operation modifies IDs (e.g. brush texture assignment) while
+ * the undo stack is owned by a specialized system (image-paint, sculpt), where #ED_undo_push
+ * would push the wrong undo type.
+ *
+ * The resulting step is NOT marked as skip, so it acts as a normal user-visible landing point.
+ * This ensures that undoing paint strokes above it leaves \a name as the active step rather than
+ * falling through to an earlier memfile that predates the ID change.
+ */
+void ED_undo_memfile_push(bContext *C, const char *name);
+
 /* Unfortunate workaround for limits mixing undo systems. */
 
 /**

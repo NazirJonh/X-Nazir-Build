@@ -866,6 +866,10 @@ struct ARegion {
 /* #AssetShelfSettings.display_flag */
 enum AssetShelfSettings_DisplayFlag : short {
   ASSETSHELF_SHOW_NAMES = (1 << 0),
+  /** Only show assets that are in the shelf's Favorites list, regardless of selected catalog. */
+  ASSETSHELF_FILTER_FAVORITES_ONLY = (1 << 1),
+  /** Hide the per-tile favorite star on brush asset shelves. Off by default (stars are shown). */
+  ASSETSHELF_HIDE_FAVORITE_ICON = (1 << 2),
 };
 ENUM_OPERATORS(AssetShelfSettings_DisplayFlag)
 
@@ -880,6 +884,14 @@ enum AssetShelf_InstanceFlag : short {
 };
 ENUM_OPERATORS(AssetShelf_InstanceFlag);
 
+/** Per-asset-library active catalog for an #AssetShelfSettings instance or popup override. */
+struct AssetShelfLibraryCatalogState {
+  struct AssetShelfLibraryCatalogState *next = nullptr, *prev = nullptr;
+  AssetLibraryReference library_ref;
+  /** Owned heap string (serialized separately). Null/empty means All for this library. */
+  const char *active_catalog_path = nullptr;
+};
+
 struct AssetShelfSettings {
   AssetLibraryReference asset_library_reference;
 
@@ -890,9 +902,23 @@ struct AssetShelfSettings {
   /** For filtering assets displayed in the asset view. */
   char search_string[64] = "";
 
+  /** Persistent collapsed state of catalog paths in this shelf's catalog tree. */
+  ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
+
   short preview_size = 0;
+  /** Maximum number of brushes kept in the Recent pseudo-catalog. */
+  short recent_max_count = 20;
   AssetShelfSettings_DisplayFlag display_flag = {};
+  short popup_width_units = 60;
+  /** Grid-viewport height of the popup shelf in #UI_UNIT_Y units. 0 = use the type default
+   * (#ASSET_SHELF_POPUP_GRID_DEFAULT_UNITS_Y). Set interactively by the popover resize grip. */
+  short popup_height_units = 0;
+  /** Catalog tree column width of the popup shelf in #UI_UNIT_X units. 0 = use the default
+   * (#LEFT_COL_WIDTH_UNITS). Set interactively by the vertical grip between the columns. */
+  short popup_catalog_width_units = 0;
   char _pad1[4] = {};
+  /** Per-asset-library active catalog (empty path = All for that library). */
+  ListBaseT<AssetShelfLibraryCatalogState> library_catalog_states = {nullptr, nullptr};
 
 #if defined(__cplusplus) && !defined(DNA_NO_EXTERNAL_CONSTRUCTORS)
   /* Zero initializes. */
@@ -902,6 +928,35 @@ struct AssetShelfSettings {
   AssetShelfSettings &operator=(const AssetShelfSettings &other);
   ~AssetShelfSettings();
 #endif
+};
+
+/**
+ * Per-`.blend` remembered size of a popup asset shelf (e.g. the brush/texture browse popover),
+ * keyed by #AssetShelfType.idname. Stored in a list on #wmWindowManager and overrides the global
+ * Preferences default (#bUserAssetShelfSettings) when present. Written interactively by the
+ * popover resize grip and the numeric size fields.
+ */
+struct AssetShelfPopupSize {
+  struct AssetShelfPopupSize *next = nullptr, *prev = nullptr;
+  /** Matches #AssetShelfType.idname of the shelf this size applies to. */
+  char idname[/*MAX_NAME*/ 64] = "";
+  /** Width in #UI_UNIT_X units, height in #UI_UNIT_Y units. */
+  short width_units = 0;
+  short height_units = 0;
+  /** Catalog tree column width in #UI_UNIT_X units. */
+  short catalog_width_units = 0;
+  short flag = 0;
+};
+
+/**
+ * Per-`.blend` per-library active catalog for a popup asset shelf, keyed by #AssetShelfType.idname.
+ * Popup shelves are not stored in #RegionAssetShelf, so their #AssetShelfSettings::library_catalog_states
+ * are mirrored here on #wmWindowManager (see #asset_shelf_popup_library_catalogs).
+ */
+struct AssetShelfPopupLibraryCatalogs {
+  struct AssetShelfPopupLibraryCatalogs *next = nullptr, *prev = nullptr;
+  char idname[/*MAX_NAME*/ 64] = "";
+  ListBaseT<AssetShelfLibraryCatalogState> library_catalog_states = {nullptr, nullptr};
 };
 
 struct AssetShelf {
@@ -920,7 +975,8 @@ struct AssetShelf {
   /** Only for the permanent asset shelf regions, not asset shelves in temporary popups. */
   short preferred_row_count = 0;
   AssetShelf_InstanceFlag instance_flag = {};
-  char _pad[4] = {};
+  short is_popup = 0;
+  char _pad[2] = {};
 };
 
 /**

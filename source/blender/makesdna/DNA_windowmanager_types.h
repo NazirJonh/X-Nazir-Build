@@ -10,6 +10,7 @@
 
 #include "DNA_windowmanager_enums.h" /* Own enums. */
 
+#include "DNA_asset_types.h"  /* for #AssetLibraryReference, #AssetCatalogPathLink */
 #include "DNA_listBase.h"
 #include "DNA_screen_types.h" /* for #ScrAreaMap */
 #include "DNA_xr_types.h"     /* for #XrSessionSettings */
@@ -119,6 +120,16 @@ struct wmWindowManager {
 
   ListBaseT<wmWindow> windows = {nullptr, nullptr};
 
+  /**
+   * Per-`.blend` remembered sizes of popup asset shelves (brush/texture browse popovers), keyed
+   * by #AssetShelfType.idname. Overrides the global Preferences default. Kept here (rather than in
+   * a space) because popup shelves are global and only one is open at a time. See
+   * #AssetShelfPopupSize.
+   */
+  ListBaseT<AssetShelfPopupSize> asset_shelf_popup_sizes = {nullptr, nullptr};
+  /** Per-`.blend` per-library catalog selection for popup asset shelves. See #AssetShelfPopupLibraryCatalogs. */
+  ListBaseT<AssetShelfPopupLibraryCatalogs> asset_shelf_popup_library_catalogs = {nullptr, nullptr};
+
   /** Set on file read. */
   eWM_InitFlag init_flag = {};
   char _pad0[1] = {};
@@ -139,7 +150,37 @@ struct wmWindowManager {
   struct wmTimer *autosavetimer = nullptr;
   /** Auto-save timer was up, but it wasn't possible to auto-save in the current mode. */
   char autosave_scheduled = 0;
-  char _pad2[7] = {};
+
+  /**
+   * Persistent grid/list display mode of the ID-browser popover (#UI_PT_id_browser). Kept here,
+   * rather than in a specific editor's space, so the popover and #UILayout.template_ID_browser
+   * work from any editor. Only one such popover is open at a time, so a single shared value is
+   * correct. The transient name-search text is session-only, see
+   * #bke::WindowManagerRuntime::id_browser_search. #eImageBrowserViewMode.
+   */
+  char id_browser_view_mode = 0;
+  /**
+   * Interactive size of the ID-browser popover (#UI_PT_id_browser), set by its corner resize grip.
+   * Width in #UI_UNIT_X units, height (grid viewport) in #UI_UNIT_Y units. 0 = use the built-in
+   * default. Stored here (per-`.blend`) like #id_browser_view_mode; only one popover is open at a
+   * time so a single shared value is correct.
+   */
+  short id_browser_popup_width_units = 0;
+  short id_browser_popup_height_units = 0;
+  /**
+   * Where the ID-browser popover takes its items from. Stored next to #id_browser_view_mode (and
+   * for the same reason): the popover is not bound to a specific editor's space. #eIDBrowserSource.
+   */
+  char id_browser_source = 0;
+  char _pad2[1] = {};
+
+  /**
+   * Asset library browsed when #id_browser_source is #ID_BROWSER_SOURCE_ASSET_LIBRARY.
+   * A zeroed `type` (from a file written before this field existed) is invalid — see do-versions.
+   */
+  AssetLibraryReference id_browser_asset_library_ref;
+  /** Catalogs the asset source is narrowed to. An empty list means "all catalogs". */
+  ListBaseT<AssetCatalogPathLink> id_browser_enabled_catalog_paths = {nullptr, nullptr};
 
   // #ifdef WITH_XR_OPENXR
   wmXrData xr;

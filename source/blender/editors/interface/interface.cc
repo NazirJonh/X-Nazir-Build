@@ -48,6 +48,7 @@
 #include "BLT_translation.hh"
 
 #include "UI_abstract_view.hh"
+#include "UI_grid_view.hh"
 #include "UI_interface.hh"
 #include "UI_interface_icons.hh"
 #include "UI_interface_layout.hh"
@@ -397,6 +398,44 @@ void region_winrct_get_no_margin(const ARegion *region, rcti *r_rect)
 
 /* ******************* block calc ************************* */
 
+void block_view_scroll_clip_translate(Block *block, const float dx, const float dy)
+{
+  for (AbstractGridView *grid_view : block_view_scroll_clipped_grids(*block)) {
+    rctf rect = grid_view->scroll_clip_rect();
+    BLI_rctf_translate(&rect, dx, dy);
+    grid_view->scroll_clip_set(rect);
+  }
+}
+
+void block_view_scroll_clip_offset_apply(Block *block, const float dy)
+{
+  block_view_scroll_clip_translate(block, 0.0f, dy);
+}
+
+bool block_grid_scroll_clip_contains_button(const Button *but)
+{
+  if (!(but->drawflag & BUT_GRID_SCROLL_CLIP) || !but->grid_scroll_clip_owner ||
+      !but->grid_scroll_clip_owner->scroll_clip_enabled())
+  {
+    return false;
+  }
+  return BLI_rctf_isect(&but->grid_scroll_clip_owner->scroll_clip_rect(), &but->rect, nullptr);
+}
+
+bool block_grid_scroll_clip_bounds_rect(const Button *but, rctf *r_rect)
+{
+  if (!(but->drawflag & BUT_GRID_SCROLL_CLIP) || !but->grid_scroll_clip_owner ||
+      !but->grid_scroll_clip_owner->scroll_clip_enabled())
+  {
+    *r_rect = but->rect;
+    return true;
+  }
+  /* Clamp the tile to the visible window so the clipped-away buffer/partial rows don't inflate
+   * block bounds (which drive panel size, popup size and popup auto-scroll). Each grid clips to
+   * its own window, so two clip-scrolled grids in one block never leak into each other's bounds. */
+  return BLI_rctf_isect(&but->grid_scroll_clip_owner->scroll_clip_rect(), &but->rect, r_rect);
+}
+
 void block_translate(Block *block, float x, float y)
 {
   for (Button &but : block->buttons()) {
@@ -404,12 +443,66 @@ void block_translate(Block *block, float x, float y)
   }
 
   BLI_rctf_translate(&block->rect, x, y);
+  block_view_scroll_clip_translate(block, x, y);
 }
 
 static bool but_is_row_alignment_group(const Button *left, const Button *right)
 {
   const bool is_same_align_group = (left->alignnr && (left->alignnr == right->alignnr));
   return is_same_align_group && (left->rect.xmin < right->rect.xmin);
+}
+
+/**
+ * Place a horizontal alignment group -- a row of buttons living inside a menu column -- into the
+ * column starting at \a col_xmin and \a col_width wide.
+ *
+ * The row always moves as a unit, so the spacing the layout gave its buttons survives.
+ *
+ * \note Assumes the row is contiguous, i.e. each button's #Button.rect xmax is the next one's xmin.
+ * #block_align_calc runs before this and stitches aligned neighbors to exactly that, so the widths
+ * summed here telescope into the row's span. Were a gap left between two members, the row would
+ * overshoot the column's right edge by that gap.
+ *
+ * \param first: the group's first (leftmost) button.
+ * \param group_end: one past the group's last button.
+ * \param absorb_slack: let the first button swallow the difference between the row's width and the
+ * column's, which leaves the trailing buttons (an icon toggle, say) flush with the column's right
+ * edge -- the same edge every plain button in the column is stretched to. Off, the row keeps the
+ * widths the layout handed it and simply sits at the column's left edge, which is what every menu
+ * that has not opted in to #Block.menu_col_padding expects.
+ *
+ * \note With \a absorb_slack the slack is negative when the column was sized to the row's text
+ * rather than to the placeholder widths the layout handed the row's buttons (see
+ * #Block.menu_col_padding). The row then gives width back instead of taking it, which is the same
+ * arithmetic: the first button ends up spanning the column minus the trailing buttons. It would
+ * only invert if the column were narrower than those trailing buttons -- which is why sizing to
+ * text stays opt-in, for menus whose rows trail an icon.
+ */
+static void block_bounds_place_align_group(std::unique_ptr<Button> *first,
+                                           std::unique_ptr<Button> *group_end,
+                                           const int col_xmin,
+                                           const int col_width,
+                                           const bool absorb_slack)
+{
+  float slack = 0.0f;
+  if (absorb_slack) {
+    float group_width = 0.0f;
+    for (std::unique_ptr<Button> *bt = first; bt < group_end; bt++) {
+      group_width += BLI_rctf_size_x(&(*bt)->rect);
+    }
+    slack = float(col_width) - group_width;
+  }
+
+  const float lead_x = (*first)->rect.xmin;
+
+  for (std::unique_ptr<Button> *bt = first; bt < group_end; bt++) {
+    const bool is_first = (bt == first);
+    /* Everything shifts into the column; everything after the first button shifts by the slack the
+     * first button is about to absorb, so the row stays contiguous. */
+    const float delta = float(col_xmin) - lead_x + (is_first ? 0.0f : slack);
+    (*bt)->rect.xmin += delta;
+    (*bt)->rect.xmax += delta + (is_first ? slack : 0.0f);
+  }
 }
 
 static void block_bounds_calc_text(Block *block, float offset)
@@ -420,6 +513,27 @@ static void block_bounds_calc_text(Block *block, float offset)
   const uiStyle *style = style_get();
   std::unique_ptr<Button> *col_bt;
   int i = 0, j, x1addval = offset;
+  /* #block_bounds_calc_text sizes each column to its widest text; a caller may instead want the
+   * first column held to a fixed minimum width (e.g. to match the dropdown button that opened the
+   * menu). When set, the first column's width becomes max(text, this). */
+  const int first_col_minwidth = block->menu_first_col_minwidth;
+  bool is_first_col = first_col_minwidth > 0;
+  /* A menu that lays its items out in several columns can ask for those columns to hug their
+   * content (see #Block.menu_col_padding). Three things then change, all scoped to that menu: the
+   * padding a column adds on top of its widest text is the caller's figure rather than the
+   * #Block.bounds blanket, a row of aligned buttons is measured by its text, like a plain button
+   * is, instead of by the width the layout handed it, and such a row is stretched to fill its
+   * column. A menu that leaves this at 0 keeps its rows at the widths the layout gave them.
+   *
+   * Note that *placing* an aligned row as a unit is not opt-in and applies to every menu: that is
+   * what this pass always meant to do (see #block_bounds_place_align_group). Only the stretching
+   * is new, and only that is gated here. */
+  const bool cols_hug_text = block->menu_col_padding > 0;
+  const int col_padding = cols_hug_text ? block->menu_col_padding : block->bounds;
+  /* How far short of the column's right edge a row of aligned buttons stops, so its trailing
+   * buttons sit beside the column's content instead of on the boundary with the next column (see
+   * #Block.menu_col_row_inset). */
+  const int row_inset = cols_hug_text ? block->menu_col_row_inset : 0;
 
   fontstyle_set(&style->widget);
   std::unique_ptr<Button> *end = block->buttons_ptrs.end();
@@ -432,54 +546,117 @@ static void block_bounds_calc_text(Block *block, float offset)
       i = std::max(j, i);
     }
 
-    /* Skip all buttons that are in a horizontal alignment group.
-     * We don't want to split them apart (but still check the row's width and apply current
-     * offsets). */
+    /* Measure a horizontal alignment group as one unit, so the column ends up wide enough for the
+     * whole row and the split logic below never tears the row apart.
+     *
+     * Only measure: the row's buttons are positioned later, by the same loops that position the
+     * plain buttons. Moving them here instead would break the column-split test below, which
+     * compares `bt` against the button after it -- one moved and one still at its layout position
+     * are not comparable. */
     if (bt + 1 < end && but_is_row_alignment_group((*bt).get(), bt[1].get())) {
       int width = 0;
       const int alignnr = (*bt)->alignnr;
       for (col_bt = bt; col_bt < end && (*col_bt)->alignnr == alignnr; col_bt++) {
-        width += BLI_rctf_size_x(&(*col_bt)->rect);
-        (*col_bt)->rect.xmin += x1addval;
-        (*col_bt)->rect.xmax += x1addval;
+        /* When the columns hug their text, a member that has text is measured by its text, exactly
+         * as the plain buttons above are: its rect is still whatever width the layout handed out,
+         * and a menu item is defined at a placeholder width (see #def_but_rna__menu) unrelated to
+         * the text -- taking it would peg every column holding a row to that placeholder. A member
+         * with no text to measure (an icon toggle) still contributes its rect, since that is all it
+         * occupies. Otherwise the row keeps its laid-out width, which is what every menu that has
+         * not opted in relies on to keep its rows intact. */
+        const Button *member = (*col_bt).get();
+        width += (cols_hug_text && !member->drawstr.empty()) ?
+                     BLF_width(style->widget.uifont_id,
+                               member->drawstr.c_str(),
+                               member->drawstr.size()) :
+                     int(BLI_rctf_size_x(&member->rect));
       }
       i = std::max(width, i);
       /* Give the following code the last button in the alignment group, there might have to be a
-       * split immediately after. */
-      bt = col_bt != end ? col_bt-- : nullptr;
+       * split immediately after. `col_bt` has stopped one past the group's last button (or at
+       * `end` if the group runs to the end of the block), so step back to that last button. The
+       * group always has at least two buttons here (that's what #but_is_row_alignment_group just
+       * matched), so `col_bt - 1` can never move before `bt`.
+       *
+       * NOTE: this used to read `bt = col_bt != end ? col_bt-- : nullptr`, which is a mis-port of
+       * the linked-list `bt = col_bt ? col_bt->prev : nullptr`: `col_bt--` evaluates to `col_bt`,
+       * i.e. the button *after* the group, and the `nullptr` branch was left unguarded once the
+       * test below became `bt < end` (a null pointer passes it, and is then dereferenced). Both
+       * are upstream defects, not fork-local. */
+      bt = col_bt - 1;
     }
 
     if (bt < end && (bt + 1 < end) && (*bt)->rect.xmin < bt[1]->rect.xmin) {
       /* End of this column, and it's not the last one. */
+      const int col_width = is_first_col ? std::max(i + col_padding, first_col_minwidth) :
+                                           i + col_padding;
       for (col_bt = init_col_bt; (col_bt - 1) != bt; col_bt++) {
+        /* Place a horizontal alignment group as one unit (see #block_bounds_place_align_group);
+         * assigning its buttons the column's rect, as the plain buttons below get, would collapse
+         * the row onto itself. Looped rather than checked once, to cover groups stacked back-to-back
+         * with no plain button between them. The "last column" loop below does the same. */
+        while ((col_bt < bt) && but_is_row_alignment_group((*col_bt).get(), col_bt[1].get())) {
+          const int alignnr = (*col_bt)->alignnr;
+          std::unique_ptr<Button> *group_first = col_bt;
+          for (; (col_bt - 1) != bt && (*col_bt)->alignnr == alignnr; col_bt++) {
+            /* pass */
+          }
+          block_bounds_place_align_group(
+              group_first, col_bt, x1addval, col_width - row_inset, cols_hug_text);
+        }
+        if ((col_bt - 1) == bt) {
+          break;
+        }
+
         (*col_bt)->rect.xmin = x1addval;
-        (*col_bt)->rect.xmax = x1addval + i + block->bounds;
+        (*col_bt)->rect.xmax = x1addval + col_width;
 
         button_update((*col_bt).get()); /* clips text again */
       }
 
       /* And we prepare next column. */
-      x1addval += i + block->bounds;
+      x1addval += col_width;
       i = 0;
+      is_first_col = false;
       init_col_bt = col_bt;
     }
   }
 
-  /* Last column. */
+  /* Last column. Its right edge is the same for every button in it and nothing below changes what
+   * it is built from, so it is computed once here rather than per button: an alignment group needs
+   * it before the loop ever reaches a plain button. */
+  /* Last column may also be the first (single-column menu): honor the first-column minimum too. */
+  int last_col_width = i + col_padding;
+  if (is_first_col) {
+    last_col_width = std::max(last_col_width, first_col_minwidth);
+  }
+  /* #Block.minbounds is a floor on the total menu width (an absolute xmax), not a per-column
+   * width; applying it as a column width would stretch the last column by the whole menu minimum
+   * whenever earlier columns are wide. */
+  const float last_col_xmax = max_ff(x1addval + last_col_width, offset + block->minbounds);
+
   for (col_bt = init_col_bt; col_bt < end; col_bt++) {
-    /* Recognize a horizontally arranged alignment group and skip its items. */
-    if ((col_bt + 1 < end) && but_is_row_alignment_group((*col_bt).get(), col_bt[1].get())) {
+    /* Place a horizontal alignment group as one unit, exactly as the mid-column loop above does
+     * (see #block_bounds_place_align_group). Looped rather than checked once, to cover groups
+     * stacked back-to-back. */
+    while ((col_bt + 1 < end) && but_is_row_alignment_group((*col_bt).get(), col_bt[1].get())) {
       const int alignnr = (*col_bt)->alignnr;
+      std::unique_ptr<Button> *group_first = col_bt;
       for (; col_bt < end && (*col_bt)->alignnr == alignnr; col_bt++) {
         /* pass */
       }
+      block_bounds_place_align_group(group_first,
+                                     col_bt,
+                                     x1addval,
+                                     int(last_col_xmax) - x1addval - row_inset,
+                                     cols_hug_text);
     }
     if (col_bt == end) {
       break;
     }
 
     (*col_bt)->rect.xmin = x1addval;
-    (*col_bt)->rect.xmax = max_ff(x1addval + i + block->bounds, offset + block->minbounds);
+    (*col_bt)->rect.xmax = last_col_xmax;
 
     button_update((*col_bt).get()); /* clips text again */
   }
@@ -500,7 +677,10 @@ void block_bounds_calc(Block *block)
     BLI_rctf_init_minmax(&block->rect);
 
     for (const Button &bt : block->buttons()) {
-      BLI_rctf_union(&block->rect, &bt.rect);
+      rctf bounds_rect;
+      if (block_grid_scroll_clip_bounds_rect(&bt, &bounds_rect)) {
+        BLI_rctf_union(&block->rect, &bounds_rect);
+      }
     }
 
     block->rect.xmin -= block->bounds;
@@ -946,7 +1126,9 @@ static void but_update_old_active_from_new(Button *oldbut, Button *but)
 
   /* flags from the buttons we want to refresh, may want to add more here... */
   const int flag_copy = BUT_REDALERT | BUT_DISABLED | UI_HAS_ICON | UI_SELECT_DRAW;
-  const int drawflag_copy = BUT_HAS_QUICK_TOOLTIP | BUT_NO_TOOLTIP;
+  /* #BUT_GRID_SCROLL_CLIP is synced (together with #grid_scroll_clip_owner below) so the carried
+   * over tile matches this frame's grid clip state instead of the freed previous one. */
+  const int drawflag_copy = BUT_HAS_QUICK_TOOLTIP | BUT_NO_TOOLTIP | BUT_GRID_SCROLL_CLIP;
 
   /* still stuff needs to be copied */
   oldbut->rect = but->rect;
@@ -979,6 +1161,11 @@ static void but_update_old_active_from_new(Button *oldbut, Button *but)
 
   oldbut->flag = (oldbut->flag & ~flag_copy) | (but->flag & flag_copy);
   oldbut->drawflag = (oldbut->drawflag & ~drawflag_copy) | (but->drawflag & drawflag_copy);
+
+  /* The grid a clip-scrolled tile belongs to is rebuilt every redraw. Re-point the carried-over
+   * active tile at the live grid view; otherwise #grid_scroll_clip_owner keeps referencing the
+   * just-freed previous view, a use-after-free on the next hit-test/draw that reads its clip rect. */
+  oldbut->grid_scroll_clip_owner = but->grid_scroll_clip_owner;
 
   but_extra_icons_update_from_old_but(but, oldbut);
   std::swap(but->extra_op_icons, oldbut->extra_op_icons);
@@ -2305,15 +2492,54 @@ void block_draw(const bContext *C, Block *block)
   BLF_batch_draw_begin();
   widgetbase_draw_cache_begin();
 
+  /* Base scissor for everything drawn from here on, including the grid-clip pass below: the
+   * entry scissor, narrowed at top/bottom when this is a scrolling popup menu so the scroll
+   * arrows stay protected. The grid pass must intersect against this box and restore to it, not
+   * the raw entry scissor -- #GPU_scissor replaces rather than intersects, so restoring to the
+   * raw box would silently undo the arrow narrowing for everything drawn after a scroll-clipped
+   * grid, including the overlays drawn below via #block_views_draw_overlays. */
+  rcti base_scissor;
+  BLI_rcti_init(
+      &base_scissor, scissor[0], scissor[0] + scissor[2], scissor[1], scissor[1] + scissor[3]);
   if (block->flag & (BLOCK_CLIPTOP | BLOCK_CLIPBOTTOM)) {
     const int arrow_size = UI_MENU_SCROLL_MOUSE / block->aspect;
-    const int ymax = rect.ymax - ((block->flag & BLOCK_CLIPTOP) ? arrow_size : 0.0f);
-    const int ymin = rect.ymin + ((block->flag & BLOCK_CLIPBOTTOM) ? arrow_size : 0.0f);
-    GPU_scissor(rect.xmin, ymin, BLI_rcti_size_x(&rect), ymax - ymin);
+    base_scissor.xmin = rect.xmin;
+    base_scissor.xmax = rect.xmax;
+    base_scissor.ymax = rect.ymax - ((block->flag & BLOCK_CLIPTOP) ? arrow_size : 0.0f);
+    base_scissor.ymin = rect.ymin + ((block->flag & BLOCK_CLIPBOTTOM) ? arrow_size : 0.0f);
+    GPU_scissor(base_scissor.xmin,
+                base_scissor.ymin,
+                BLI_rcti_size_x(&base_scissor),
+                BLI_rcti_size_y(&base_scissor));
   }
+
+  /* Pixel-space clip rect for #BUT_GRID_SCROLL_CLIP buttons (sub-row scrolled grid views).
+   * Intersected with the current scissor on first use per grid (cached below, keyed by owner):
+   * #GPU_scissor REPLACES (does not intersect) the active box, and during a partial region redraw
+   * that active box is #ARegion::drawrct (see #wmPartialViewport). Without the intersection the
+   * grid tiles could paint outside the area being repainted this pass, smearing over the
+   * (not-redrawn) widgets below the grid. A block may host more than one clip-scrolled grid, each
+   * with its own window, so this is resolved per #Button::grid_scroll_clip_owner instead of once
+   * for the whole block. */
+  Map<const AbstractGridView *, std::pair<rcti, bool>> grid_clip_rect_cache;
+  rcti cur_scissor = base_scissor;
+  auto grid_clip_for = [&](const AbstractGridView *owner) -> const std::pair<rcti, bool> & {
+    return grid_clip_rect_cache.lookup_or_add_cb(owner, [&]() -> std::pair<rcti, bool> {
+      rcti pixel_rect = rect_to_pixelrect(region, block, &owner->scroll_clip_rect());
+      const bool has_area = BLI_rcti_isect(&pixel_rect, &cur_scissor, &pixel_rect);
+      return {pixel_rect, has_area};
+    });
+  };
+
   /* widgets */
+  const AbstractGridView *grid_scissor_active_owner = nullptr;
   for (Button &but : block->buttons()) {
-    if (but.flag & (UI_HIDDEN | UI_SCROLLED)) {
+    if (but.flag & UI_HIDDEN) {
+      continue;
+    }
+    /* Popup #popup_block_scrolltest can mark sub-row scrolled grid tiles #UI_SCROLLED when they
+     * extend past #Block::rect even though they are still inside their grid's clip rect. */
+    if ((but.flag & UI_SCROLLED) && !block_grid_scroll_clip_contains_button(&but)) {
       continue;
     }
 
@@ -2321,6 +2547,32 @@ void block_draw(const bContext *C, Block *block)
     /* Optimization: Don't draw buttons that are not visible (outside view bounds). */
     if (!but_pixelrect_in_view(region, &rect)) {
       continue;
+    }
+
+    const bool grid_clipped = (but.drawflag & BUT_GRID_SCROLL_CLIP) &&
+                              but.grid_scroll_clip_owner &&
+                              but.grid_scroll_clip_owner->scroll_clip_enabled();
+    rcti grid_clip_rect = {};
+    /* Grid-scroll-clipped buttons: skip rows fully scrolled out of the visible window, and clip
+     * the partially-visible rows to it so the sub-row scroll offset cuts them cleanly. */
+    if (grid_clipped) {
+      const std::pair<rcti, bool> &cached = grid_clip_for(but.grid_scroll_clip_owner);
+      grid_clip_rect = cached.first;
+      /* Nothing of the clip window is inside the current (partial) scissor, or this tile row is
+       * fully outside the window: skip it entirely. */
+      if (!cached.second || rect.ymax <= grid_clip_rect.ymin || rect.ymin >= grid_clip_rect.ymax) {
+        continue;
+      }
+    }
+
+    if (grid_scissor_active_owner && grid_scissor_active_owner != but.grid_scroll_clip_owner) {
+      widgetbase_draw_cache_flush();
+      BLF_batch_draw_flush();
+      GPU_scissor(base_scissor.xmin,
+                  base_scissor.ymin,
+                  BLI_rcti_size_x(&base_scissor),
+                  BLI_rcti_size_y(&base_scissor));
+      grid_scissor_active_owner = nullptr;
     }
 
     /* Don't draw buttons that are wider than enclosing panel. #150173 */
@@ -2337,8 +2589,28 @@ void block_draw(const bContext *C, Block *block)
     /* XXX: figure out why invalid coordinates happen when closing render window */
     /* and material preview is redrawn in main window (temp fix for bug #23848) */
     if (rect.xmin < rect.xmax && rect.ymin < rect.ymax) {
+      if (grid_clipped && grid_scissor_active_owner != but.grid_scroll_clip_owner) {
+        /* Flush pending batched widget/text draws before narrowing the scissor, otherwise they
+         * would be emitted under the new (smaller) clip box. */
+        widgetbase_draw_cache_flush();
+        BLF_batch_draw_flush();
+        GPU_scissor(grid_clip_rect.xmin,
+                    grid_clip_rect.ymin,
+                    BLI_rcti_size_x(&grid_clip_rect),
+                    BLI_rcti_size_y(&grid_clip_rect));
+        grid_scissor_active_owner = but.grid_scroll_clip_owner;
+      }
       draw_button(C, region, &style, &but, &rect);
     }
+  }
+
+  if (grid_scissor_active_owner) {
+    widgetbase_draw_cache_flush();
+    BLF_batch_draw_flush();
+    GPU_scissor(base_scissor.xmin,
+                base_scissor.ymin,
+                BLI_rcti_size_x(&base_scissor),
+                BLI_rcti_size_y(&base_scissor));
   }
 
   widgetbase_draw_cache_end();
@@ -4019,6 +4291,11 @@ void block_theme_style_set(Block *block, char theme_style)
 bool block_is_search_only(const Block *block)
 {
   return block->flag & BLOCK_SEARCH_ONLY;
+}
+
+bool block_is_first_open(const Block *block)
+{
+  return block->oldblock == nullptr;
 }
 
 void block_set_search_only(Block *block, bool search_only)
@@ -5985,6 +6262,29 @@ void button_func_pushed_state_set(Button *but, std::function<bool(const Button &
   button_update(but);
 }
 
+void button_tab_menu_set(Button *but, MenuType *mt, void *custom_data)
+{
+  BLI_assert(but->type == ButtonType::Tab);
+  ButtonTab *tab = static_cast<ButtonTab *>(but);
+  tab->menu = mt;
+  tab->custom_data = custom_data;
+}
+
+void *context_active_but_tab_custom_data_get(const bContext *C)
+{
+  /* The popup region is respected because this runs from a tab's context-menu draw callback, while
+   * the popup hosting the tab is still being handled: #CTX_wm_region then points at the region the
+   * popup was invoked from (#PopupBlockHandle.ctx_region, restored by #handle_menu_button), which
+   * holds no tab -- so a tab in a popup would never be found. #popup_context_menu_for_button, which
+   * is what calls this menu's draw, resolves the region for its own hit-tests the same way. Tabs in
+   * an ordinary region (e.g. workspace tabs) set no popup region, so they resolve as before. */
+  const Button *but = context_active_but_get_respect_popup(C);
+  if (but && but->type == ButtonType::Tab) {
+    return but->custom_data;
+  }
+  return nullptr;
+}
+
 Button *uiDefBlockBut(Block *block,
                       BlockCreateFunc func,
                       void *arg,
@@ -6368,6 +6668,14 @@ void button_pushbutton_draw_as_overlay_set(Button *but, const bool value)
   but_push->draw_as_overlay = value;
 }
 
+void button_pushbutton_overlay_alpha_factor_set(Button *but, const float alpha_factor)
+{
+  ButtonPush *but_push = static_cast<ButtonPush *>(but);
+  BLI_assert(but->type == ButtonType::But);
+
+  but_push->overlay_alpha_factor = std::clamp(alpha_factor, 0.0f, 1.0f);
+}
+
 void button_number_step_size_set(Button *but, float step_size)
 {
   ButtonNumber *but_number = static_cast<ButtonNumber *>(but);
@@ -6436,6 +6744,14 @@ void button_view_item_draw_size_set(Button *but,
   ButtonViewItem *but_view_item = reinterpret_cast<ButtonViewItem *>(but);
   but_view_item->draw_width = draw_width.value_or(0);
   but_view_item->draw_height = draw_height.value_or(0);
+}
+
+void button_grip_2d_set(Button *but, short *height_poin, const bool flip_y)
+{
+  BLI_assert(but->type == ButtonType::Grip);
+  but->grip_2d = true;
+  but->grip_2d_flip_y = flip_y;
+  but->poin2 = reinterpret_cast<char *>(height_poin);
 }
 
 void button_focus_on_enter_event(wmWindow *win, Button *but)

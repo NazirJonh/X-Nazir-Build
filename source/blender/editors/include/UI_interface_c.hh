@@ -10,6 +10,7 @@
 
 #include <bit>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -43,6 +44,7 @@ struct IDProperty;
 struct ImBuf;
 struct Image;
 struct ImageUser;
+struct Material;
 struct MTex;
 struct Panel;
 struct PanelType;
@@ -77,6 +79,7 @@ struct wmOperator;
 struct wmOperatorType;
 struct wmRegionListenerParams;
 struct wmWindow;
+struct wmWindowManager;
 namespace ed::asset {
 struct AssetFilterSettings;
 }
@@ -322,6 +325,15 @@ enum {
    * and inherited by sub-menus from their parent.
    */
   BLOCK_NO_ACCELERATOR_KEYS = 1 << 27,
+  /**
+   * Keep the popup's left edge pinned across refreshes so it only grows/shrinks to the right.
+   *
+   * For popovers that manage their own width and expose an interactive width control (e.g. the
+   * asset-shelf catalog-tree divider grip): without this, growing the content width shifts the
+   * left edge left whenever the block is right-aligned to the window edge. The creator is
+   * responsible for clamping its width so the right edge stays within the window.
+   */
+  BLOCK_POPUP_ANCHOR_LEFT = 1 << 28,
 };
 
 /** #PopupBlockHandle.menuretval */
@@ -521,6 +533,14 @@ enum {
 
   /** Draw icon inverted to indicate a special state. */
   BUT_ICON_INVERT = 1 << 27,
+
+  /**
+   * Button belongs to a clip-scrolled view region (see #Layout::view_scroll_clip_set). When drawn,
+   * #block_draw clips it to its owning grid's clip rect (#Button::grid_scroll_clip_owner) and
+   * skips it entirely when fully outside, so partially-scrolled grid rows are cut cleanly instead
+   * of overflowing the visible area.
+   */
+  BUT_GRID_SCROLL_CLIP = 1 << 28,
 };
 
 enum class ButPointerType : uint8_t {
@@ -1056,6 +1076,14 @@ void popup_block_close(bContext *C, wmWindow *win, Block *block);
 
 bool popup_block_name_exists(const bScreen *screen, StringRef name);
 
+/**
+ * Get the current color (in scene-linear space) from the active color picker popup. Looks first at
+ * the popup/current region in the context, then falls back to the screen's temporary popup regions.
+ * Returns true when an initialized color picker was found. Use this to read the displayed color in a
+ * color picker popup at operator execution time.
+ */
+bool colorpicker_active_rgb_get(const bContext *C, float r_rgb[3]);
+
 /* Blocks
  *
  * Functions for creating, drawing and freeing blocks. A Block is a
@@ -1101,6 +1129,13 @@ EmbossType block_emboss_get(Block *block);
 void block_emboss_set(Block *block, EmbossType emboss);
 bool block_is_search_only(const Block *block);
 /**
+ * True on a popup/popover block's initial build, false on a refresh. On first open the region is
+ * fresh (#Block::oldblock is null); a refresh (e.g. from #ED_region_tag_refresh_ui) reuses the
+ * region so the previous block is matched into #Block::oldblock. Lets callers run one-time setup
+ * (e.g. scrolling the active item into view) without fighting later user interaction.
+ */
+bool block_is_first_open(const Block *block);
+/**
  * Use when a block must be searched to give accurate results
  * for the whole region but shouldn't be displayed.
  */
@@ -1129,6 +1164,15 @@ void blocklist_free_inactive(const bContext *C, ARegion *region);
  */
 void UI_screen_free_active_but_highlight(const bContext *C, bScreen *screen);
 void UI_region_free_active_but_all(bContext *C, ARegion *region);
+
+/**
+ * A region owning the unified grid view handler's active fling or touch drag is being torn
+ * down: stop the fling (removing its timer) and drop the drag, so no later event touches the
+ * dead region. Thin public wrapper around #grid_view_input_region_freed for callers outside
+ * `editors/interface` (e.g. #ED_region_exit). Safe to call for any region; a no-op if the
+ * region owns neither the active fling nor the active drag.
+ */
+void UI_grid_view_input_region_freed(const ARegion *region);
 
 void block_region_set(Block *block, ARegion *region);
 
@@ -1203,6 +1247,14 @@ void block_flag_enable(Block *block, int flag);
 void block_flag_disable(Block *block, int flag);
 void block_translate(Block *block, float x, float y);
 
+/**
+ * Horizontal budget in pixels from a #BLOCK_POPUP_ANCHOR_LEFT popover's pinned left edge to the
+ * window's right margin, for clamping content that manages its own width so its right edge stays on
+ * screen. Returns the full usable window width before the block has been positioned (its first
+ * open), so the caller falls back to a window-relative clamp until the pinned left edge is known.
+ */
+int popup_block_left_anchored_budget_px(const wmWindow *window, const Block *block);
+
 int button_return_value_get(Button *but);
 
 Button *button_active_drop_name_button(const bContext *C);
@@ -1220,6 +1272,23 @@ void button_flag2_enable(Button *but, int flag);
 
 void button_drawflag_enable(Button *but, int flag);
 void button_drawflag_disable(Button *but, int flag);
+
+/**
+ * Draw an asset-library enum property (`prop_name` on `ptr`) as a columnar dropdown: folder
+ * headings become side-by-side columns and the first (folder-less) column is pinned to the
+ * selector button's width. Use in place of a plain #Layout::prop on the property, when the enum
+ * groups its items under folder headings.
+ *
+ * \param show_pins: add a pin toggle to each custom library's row. Only for hosts that actually
+ * display the pinned libraries (the asset shelf popover's tab row); elsewhere the toggle would
+ * change state with nothing on screen to show for it.
+ */
+void template_asset_library_column_selector(Layout &row,
+                                            const bContext *C,
+                                            PointerRNA *ptr,
+                                            StringRefNull prop_name,
+                                            int icon,
+                                            bool show_pins = false);
 
 void button_dragflag_enable(Button *but, int flag);
 void button_dragflag_disable(Button *but, int flag);
@@ -1657,7 +1726,50 @@ std::string button_extra_icon_string_get_operator_keymap(const bContext &C,
 enum {
   TEMPLATE_ID_FILTER_ALL = 0,
   TEMPLATE_ID_FILTER_AVAILABLE = 1,
+  /** Filter images by current active material. */
+  TEMPLATE_ID_FILTER_CURRENT_MATERIAL = 2,
+  /** Filter images by slot type (requires slot_type context). */
+  TEMPLATE_ID_FILTER_SLOT_TYPE = 4,
 };
+
+/** Filter context for template ID browsing. */
+struct TemplateIDFilterContext {
+  /** Current active material to filter by (for CURRENT_MATERIAL filter). */
+  struct Material *material;
+  /** Slot type to filter by (for SLOT_TYPE filter). */
+  char slot_type;
+};
+
+/**
+ * A script-defined filter for ID-browsing templates (#template_id_browser,
+ * #template_ID_with_filter_context). Registered from Python by subclassing `bpy.types.IDFilter`
+ * and implementing a `filter_id` class-method; the templates reference it by its #idname. Mirrors
+ * the registered-type model used by #AssetShelfType and #uiListType: the type owns the RNA
+ * extension and a C bridge that calls the Python method per candidate ID.
+ */
+struct IDFilterType {
+  /** Unique identifier; the registered class's `bl_idname` (matches #BKE_ST_MAXNAME). */
+  char idname[64];
+  /**
+   * Decide whether \a id should be shown. For Python types this bridges to the class's `filter_id`
+   * method. Null when the registered class did not implement it (then everything passes).
+   */
+  bool (*filter_id)(const IDFilterType *type, const bContext *C, ID *id);
+  /** RNA integration. */
+  ExtensionRNA rna_ext;
+};
+
+/** Register (or replace) a script-defined #IDFilterType. Takes ownership of \a type. */
+void id_filter_type_register(std::unique_ptr<IDFilterType> type);
+/** Remove a previously registered #IDFilterType (frees it). */
+void id_filter_type_unregister(const IDFilterType &type);
+/** Find a registered #IDFilterType by its #IDFilterType::idname, or null (null/empty -> null). */
+IDFilterType *id_filter_type_find(StringRef idname);
+/**
+ * Run \a type's filter on \a id. Returns true when the ID passes (should be shown); also true when
+ * the type defines no `filter_id` method.
+ */
+bool id_filter_type_poll(const IDFilterType &type, const bContext &C, ID &id);
 
 /***************************** ID Utilities *******************************/
 
@@ -1931,6 +2043,7 @@ void button_node_link_set(Button *but, bNodeSocket *socket, const float draw_col
  * Requires embossing to be enabled.
  */
 void button_pushbutton_draw_as_overlay_set(Button *but, bool value);
+void button_pushbutton_overlay_alpha_factor_set(Button *but, float alpha_factor);
 
 void button_number_step_size_set(Button *but, float step_size);
 void button_number_precision_set(Button *but, float precision);
@@ -1946,6 +2059,16 @@ void button_search_preview_grid_size_set(Button *but, int rows, int cols);
 void button_view_item_draw_size_set(Button *but,
                                     const std::optional<int> draw_width = std::nullopt,
                                     const std::optional<int> draw_height = std::nullopt);
+
+/**
+ * Turn a #ButtonType::Grip button into a 2D corner grip that resizes on both axes at once. The
+ * button's own value pointer (from #uiDefIconButV) drives the horizontal axis; \a height_poin (a
+ * `short`) drives the vertical axis. Both are written directly during the drag.
+ *
+ * \param flip_y: place the grip at the top edge (e.g. a popover that opened upward) so dragging
+ * *up* grows the height. The width axis is unaffected.
+ */
+void button_grip_2d_set(Button *but, short *height_poin, bool flip_y = false);
 
 void block_func_handle_set(Block *block, BlockHandleFunc func, void *arg);
 void block_func_set(Block *block, ButtonHandleFunc func, void *arg1, void *arg2);
@@ -2312,6 +2435,29 @@ bool panel_list_matches_data(ARegion *region,
  * as screen/ if ED_KEYMAP_UI is set, or internally in popup functions. */
 
 void region_handlers_add(ListBaseT<wmEventHandler> *handlers);
+/**
+ * True when \a region has a block whose panel matches the given #PanelType.idname.
+ * For popups, \a region is typically the popup region (e.g. #CTX_wm_region_popup),
+ * but it may also be passed directly when the context popup isn't set yet
+ * (e.g. pre-button handlers invoked from button-attached popovers).
+ */
+bool region_popup_has_panel(const ARegion *region, const char *panel_idname);
+
+/**
+ * Handler tried during region and popup-menu event handling, *before* button activation, so an
+ * editor that embeds a custom view can intercept events (e.g. wheel/drag scroll over the brush
+ * texture image grid). Registered by the owning editor to keep the generic UI layer free of
+ * space-specific dependencies. Returns a #WM_UI_HANDLER_* value; #WM_UI_HANDLER_BREAK stops both
+ * the remaining pre-button handlers and the default button handling.
+ */
+using RegionPreButtonHandlerFn = int (*)(bContext *C, const wmEvent *event, ARegion *region);
+void region_pre_button_handler_add(RegionPreButtonHandlerFn fn);
+/**
+ * Apply a Y-axis scroll delta (screen pixels) to the first popup block in \a region.
+ * Uses the same mechanism as MMB panning. No-op when the popup fits entirely on screen.
+ * Returns true if any scrolling was actually applied.
+ */
+bool popup_region_scroll_apply_dy(ARegion *region, float dy);
 void popup_handlers_add(bContext *C,
                         ListBaseT<wmEventHandler> *handlers,
                         PopupBlockHandle *popup,
@@ -2435,6 +2581,54 @@ void template_id_browse(Layout *layout,
                         const char *unlinkop,
                         int filter = TEMPLATE_ID_FILTER_ALL,
                         const char *text = nullptr);
+/**
+ * Extended version with filter context for material/slot type filtering. \a filter_type optionally
+ * names a registered #IDFilterType to further filter the offered IDs from Python (may be
+ * null/empty).
+ */
+void template_id_browse_with_context(Layout *layout,
+                                     bContext *C,
+                                     PointerRNA *ptr,
+                                     StringRefNull propname,
+                                     const char *newop,
+                                     const char *openop,
+                                     const char *unlinkop,
+                                     int filter,
+                                     const char *text,
+                                     struct Material *material,
+                                     char slot_type,
+                                     const char *filter_type = nullptr);
+/**
+ * Browse/assign an ID-block via a popover panel with a grid/list view toggle and a search field.
+ * \a ptr / \a propname identify the pointer property to set; its ID type determines the listed
+ * data-blocks. For Image properties the popover also shows the paint-slot/material filters (driven
+ * by the editor's own #SpaceImage / #SpaceNode `image_filter_*` properties); \a material seeds the
+ * material filter context (may be null). \a filter_type optionally names a registered #IDFilterType
+ * to further filter the listed data-blocks from Python (may be null/empty).
+ */
+void template_id_browser(Layout *layout,
+                         const bContext *C,
+                         PointerRNA *ptr,
+                         const char *propname,
+                         struct Material *material,
+                         const char *newop,
+                         const char *openop,
+                         const char *unlinkop,
+                         const char *filter_type = nullptr);
+
+/**
+ * Switch the asset library browsed by the ID browser popover (stored on the #wmWindowManager) to
+ * the one identified by \a library_enum_value (see #ed::asset::library_reference_from_enum_value).
+ * Also resets the library-specific catalog filter and grid scroll, and flags the file modified.
+ * Returns true if the library actually changed. Shared by #UI_OT_id_browser_set_library and the
+ * `WindowManager.id_browser_asset_library_reference` RNA property.
+ */
+bool id_browser_set_asset_library(wmWindowManager &wm, int library_enum_value);
+/**
+ * Folder-grouped asset-library enum items for the ID browser's library selector, restricted to
+ * image libraries when the popover browses images. Caller frees the result when `*r_free` is set.
+ */
+const EnumPropertyItem *id_browser_library_rna_itemf(const bContext *C, bool *r_free);
 void template_id_preview(Layout *layout,
                          bContext *C,
                          PointerRNA *ptr,
@@ -2446,6 +2640,36 @@ void template_id_preview(Layout *layout,
                          int cols,
                          int filter = TEMPLATE_ID_FILTER_ALL,
                          bool hide_buttons = false);
+void template_asset_image_grid(
+    Layout *layout, bContext *C, PointerRNA *ptr, const char *propname, bool is_popover = false);
+
+/** Reusable grid view header widgets operating on #GridViewSettings. */
+void template_grid_library_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+void template_grid_catalog_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+void template_grid_preview_size(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+
+/**
+ * Reusable asset-library grid. Activating an item runs \a activate_operator with standard asset
+ * reference properties set.
+ */
+void template_grid_view_asset(Layout *layout,
+                              bContext *C,
+                              const char *grid_id,
+                              PointerRNA *settings_ptr,
+                              const char *activate_operator,
+                              const char *drag_operator);
+
+/**
+ * Reusable grid driven by a registered Python #UIGrid type over a collection property.
+ */
+void template_grid_view_custom(Layout *layout,
+                               bContext *C,
+                               const char *grid_id,
+                               const char *gridtype_name,
+                               PointerRNA *dataptr,
+                               const char *propname,
+                               PointerRNA *settings_ptr);
+
 void template_matrix(Layout *layout, PointerRNA *ptr, StringRefNull propname);
 /**
  * Version of #template_id using tabs.
@@ -2594,7 +2818,11 @@ void template_color_picker(Layout *layout,
                            bool lock,
                            bool lock_luminosity,
                            bool cubic);
-void template_palette(Layout *layout, PointerRNA *ptr, StringRefNull propname);
+void template_palette(Layout *layout,
+                      PointerRNA *ptr,
+                      StringRefNull propname,
+                      bool show_empty_message,
+                      bool show_sort_buttons);
 void template_crypto_picker(Layout *layout, PointerRNA *ptr, StringRefNull propname, int icon);
 /**
  * TODO: for now, grouping of layers is determined by dividing up the length of
@@ -2876,7 +3104,35 @@ void context_active_but_prop_get_filebrowser(const bContext *C,
 void context_active_but_prop_get_templateID(const bContext *C,
                                             PointerRNA *r_ptr,
                                             PropertyRNA **r_prop);
+/**
+ * \return the #ID a #ButtonType::Tab acts on, for tabs backed by one (see #template_ID_tabs).
+ *
+ * Resolves the active button against #CTX_wm_region, *not* against the active popup, which is what
+ * the untyped #context_active_but_tab_custom_data_get below does instead. Pick between the two by
+ * who calls you: this one serves operators, which may run while an unrelated popup is open, so it
+ * must keep resolving against the region the tab lives in.
+ */
 ID *context_active_but_get_tab_ID(bContext *C);
+/**
+ * Attach a context menu to a #ButtonType::Tab, along with the data the menu acts on. Setting both
+ * together is the point: a tab with a menu but no data (or the reverse) is a bug the menu's draw
+ * would have to discover at runtime.
+ *
+ * \param custom_data: borrowed, not owned; must outlive the button. Read back with
+ * #context_active_but_tab_custom_data_get from the menu's draw callback.
+ */
+void button_tab_menu_set(Button *but, MenuType *mt, void *custom_data);
+/**
+ * \return the `custom_data` of the active button if it is a #ButtonType::Tab, else null. The
+ * untyped counterpart to #context_active_but_get_tab_ID, for tabs not backed by an #ID.
+ *
+ * Meant for a tab's context-menu draw callback, so unlike #context_active_but_get_tab_ID it
+ * resolves the button against the popup region when there is one (see
+ * #context_active_but_get_respect_popup): a tab hosted in a popup is not reachable from
+ * #CTX_wm_region, which still points at the region the popup was invoked from. Tabs in an ordinary
+ * region (e.g. workspace tabs) set no popup region, so they resolve identically either way.
+ */
+void *context_active_but_tab_custom_data_get(const bContext *C);
 
 Button *region_active_but_get(const ARegion *region);
 Button *region_but_find_rect_over(const ARegion *region, const rcti *rect_px);
@@ -3061,6 +3317,8 @@ ARegion *tooltip_create_from_search_item_generic(bContext *C,
                                                  const ARegion *searchbox_region,
                                                  const rcti *item_rect,
                                                  ID *id);
+/** Same content as search-box ID tooltips (incl. image preview), for custom button tooltips. */
+void tooltip_from_id(TooltipData &tip, ID *id);
 
 /* How long before a tool-tip shows. */
 #define UI_TOOLTIP_DELAY 0.5
@@ -3135,11 +3393,12 @@ bool view_item_supports_drag(const AbstractViewItem &item);
 /** If this view is displayed in a popup, don't close it when clicking to activate items. */
 bool view_item_popup_keep_open(const AbstractViewItem &item);
 /**
- * Attempt to start dragging \a item_. This will not work if the view item doesn't
- * support dragging, i.e. if it won't create a drag-controller upon request.
+ * Attempt to start dragging \a item. This will not work if #AbstractViewItem::create_drag_controller()
+ * (optionally given \a event, e.g. for modifier-gated drags) returns null. Note that
+ * #AbstractViewItem::supports_drag() may be true even in that case, see its doc-comment.
  * \return True if dragging started successfully, otherwise false.
  */
-bool view_item_drag_start(bContext &C, AbstractViewItem &item);
+bool view_item_drag_start(bContext &C, AbstractViewItem &item, const wmEvent *event = nullptr);
 
 /**
  * \param xy: Coordinate to find a view item at, in window space.
@@ -3149,6 +3408,27 @@ AbstractView *region_view_find_at(const ARegion *region,
                                   const int xy[2],
                                   int pad,
                                   Block **r_block = nullptr);
+bool region_view_has_idname_at(const ARegion *region, const int xy[2], int pad, StringRef idname);
+/** Like #region_view_has_idname_at, but also matches a #ButtonType::ViewItem under \a xy. */
+bool region_view_item_has_idname_at(const ARegion *region, const int xy[2], StringRef idname);
+/**
+ * Like #region_view_item_has_idname_at, but only true when that view item is the *top-most*
+ * interactive button under the cursor — i.e. nothing else (an overlay scrollbar, a resize grip, …)
+ * sits above it. Uses the same hit test the window manager routes presses through, so callers can
+ * tell "the press lands on a tile" apart from "a tile happens to be behind another widget".
+ */
+bool region_view_item_topmost_at(const ARegion *region, const wmEvent *event, StringRef idname);
+/**
+ * Like #region_view_item_topmost_at, but returns the idname of the topmost
+ * #ButtonType::ViewItem's owning view (empty when none), instead of testing against one
+ * already-known idname. \a r_view optionally receives the view itself so callers needing the
+ * concrete type (e.g. via `dynamic_cast`) do not have to look it up again.
+ */
+StringRef region_view_item_topmost_idname_at(const ARegion *region,
+                                             const wmEvent *event,
+                                             AbstractView **r_view = nullptr);
+/** True when \a xy is over a #ButtonType::Scroll bound to \a poin. */
+bool region_scroll_button_under_mouse(const ARegion *region, const int xy[2], const void *poin);
 void region_view_scroll_at_borders(bContext *C, wmDropBox &dropbox, const wmEvent *event);
 /**
  * \param xy: Coordinate to find a view item at, in window space.

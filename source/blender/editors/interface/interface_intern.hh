@@ -192,6 +192,8 @@ enum class TextDirection : int8_t {
   Up,
 };
 
+class AbstractGridView;
+
 struct Button : NonMovable {
 
   /** Pointer back to the layout item holding this button. */
@@ -199,6 +201,13 @@ struct Button : NonMovable {
   int flag = 0;
   int drawflag = 0;
   char flag2 = 0;
+  /** Set alongside #BUT_GRID_SCROLL_CLIP by #layout_scroll_clip_apply_buttons; the grid this
+   * clip-scrolled button belongs to (never null when #BUT_GRID_SCROLL_CLIP is set). Every read
+   * site resolves the per-grid clip rect through this instead of a block-global field, so two
+   * clip-scrolled grids in the same block don't share one window. The grid view is rebuilt every
+   * redraw; an active tile carried over to the new block re-points this at the live view in
+   * #but_update_old_active_from_new so it never dangles at the freed old view. */
+  AbstractGridView *grid_scroll_clip_owner = nullptr;
 
   TextDirection text_direction = TextDirection::Default;
 
@@ -236,6 +245,14 @@ struct Button : NonMovable {
   rctf rect = {};
 
   char *poin = nullptr;
+  /** For a 2D corner #ButtonType::Grip: the second (vertical) raw value pointer; #poin drives the
+   * horizontal axis. Both point at `short` values. Set via #button_grip_2d_set. */
+  char *poin2 = nullptr;
+  /** This #ButtonType::Grip resizes on both axes at once (#poin = X, #poin2 = Y). */
+  bool grip_2d = false;
+  /** For a 2D corner grip placed at the *top* (e.g. a popover that opened upward): dragging up
+   * grows #poin2 instead of dragging down. #poin (width) is unaffected. */
+  bool grip_2d_flip_y = false;
   float hardmin = 0, hardmax = 0, softmin = 0, softmax = 0;
 
   /** See \ref button_func_identity_compare_set(). */
@@ -414,6 +431,9 @@ struct ButtonPush : public Button {
   bool draw_as_link = false;
   /** See #button_pushbutton_draw_as_overlay_set(). */
   bool draw_as_overlay = false;
+  /** Multiplier for overlay background and icon alpha when #draw_as_overlay is set and the button
+   * is not hovered (#UI_HOVER). Hovered overlay buttons always draw at full alpha. */
+  float overlay_alpha_factor = 1.0f;
 };
 
 /** Derived struct for #ButtonType::Num */
@@ -759,6 +779,45 @@ struct Block {
   int bounds_offset[2] = {};
   /** for doing delayed */
   int bounds = 0, minbounds = 0;
+  /** Minimum width (px) for the first column of a popup-menu (#BLOCK_BOUNDS_POPUP_MENU). 0 = off.
+   * Honored by #block_bounds_calc_text, which otherwise re-sizes each column to its widest text.
+   * Lets a caller hold the first column to a fixed width (e.g. match the dropdown button).
+   * #block_bounds_calc_text also runs for #BLOCK_BOUNDS_TEXT blocks (color ramp, curve mapping,
+   * header menus); those leave this at 0, so their layout is unchanged. Only set it for the
+   * popup-menu case it was validated for. */
+  int menu_first_col_minwidth = 0;
+  /** Ask #block_bounds_calc_text for columns that hug their content, and say what each column adds
+   * on top of its widest text (px). 0 = off.
+   *
+   * Off, a column's padding is #Block.bounds, which #block_bounds_calc_popup sets to a blanket 2.5
+   * units. That blanket covers what the pass does not measure -- the left text margin
+   * (#UI_TEXT_MARGIN_X) and an icon column -- plus slack. A single-column enum menu pays it once,
+   * which is why it goes unnoticed there; a menu laying its items out in several columns pays it
+   * per column, and every column ends up wider than its text.
+   *
+   * Setting this also makes a row of aligned buttons in a column measured by its text rather than
+   * by the width the layout handed it, and then stretched to fill the column, so a row hugs the
+   * column as a plain button does. That is deliberately not the default: a menu whose column holds
+   * only such a row would have it sized to its text and the row would then have to give back more
+   * width than its trailing buttons occupy.
+   *
+   * Note that a row is *placed* as a unit regardless of this field (see
+   * #block_bounds_place_align_group) -- only the measuring and the stretching are opt-in. A menu
+   * that leaves this at 0 keeps its rows at the widths the layout gave them, sitting at the
+   * column's left edge.
+   *
+   * Same restraint as #Block.menu_first_col_minwidth: leave it at 0 unless the menu was checked
+   * with it. */
+  int menu_col_padding = 0;
+  /** How far short of a column's right edge a row of aligned buttons stops (px), so its last button
+   * lands beside the column's content rather than on the edge, where the next column begins. Only
+   * read when #Block.menu_col_padding is set.
+   *
+   * Plain buttons are stretched to the whole column and their text is left-aligned, so the padding
+   * simply trails off as empty space; a row's last button is flush right and would otherwise sit in
+   * that space. Keep it smaller than the gap folded into #Block.menu_col_padding: the difference is
+   * what stays between the row's text and its trailing buttons. */
+  int menu_col_row_inset = 0;
 
   /** Pull-downs, to detect outside, can differ per case how it is created. */
   rctf safety = {};
@@ -824,6 +883,33 @@ void fontscale(float *points, float aspect);
 /** Project button or block (but==nullptr) to pixels in region-space. */
 void button_to_pixelrect(rcti *rect, const ARegion *region, const Block *block, const Button *but);
 rcti rect_to_pixelrect(const ARegion *region, const Block *block, const rctf *src_rect);
+
+/** Translate every clip-scrolled grid's clip rect in \a block with its buttons (e.g.
+ * #block_translate). */
+void block_view_scroll_clip_translate(Block *block, float dx, float dy);
+
+/** Vertical-only helper (e.g. #offset_panel_block, popup scroll offsets). */
+void block_view_scroll_clip_offset_apply(Block *block, float dy);
+
+/**
+ * True when \a but is a grid-scroll-clipped tile that intersects its owning grid's effective clip
+ * rect (#Button::grid_scroll_clip_owner). Such buttons must stay visible/interactive even if popup
+ * scroll tests mark them #UI_SCROLLED.
+ */
+bool block_grid_scroll_clip_contains_button(const Button *but);
+
+/**
+ * Effective rect of \a but for bounds/scroll computations.
+ *
+ * A #BUT_GRID_SCROLL_CLIP tile may overflow its fixed window (the extra buffer row and the
+ * sub-row-scrolled partial rows). That overflow is masked away at draw time, so it must not
+ * inflate block bounds either - otherwise it would grow the panel/popup size and feed the popup
+ * auto-scroll, shifting rows around. For such buttons \a r_rect is clamped to its owning grid's
+ * clip rect (#Button::grid_scroll_clip_owner); returns false when the button lies fully outside
+ * the window (it should be ignored). For all other buttons \a r_rect is the button rect and the
+ * result is true.
+ */
+bool block_grid_scroll_clip_bounds_rect(const Button *but, rctf *r_rect);
 
 void block_to_region_fl(const ARegion *region, const Block *block, float *x, float *y);
 void block_to_window_fl(const ARegion *region, const Block *block, float *x, float *y);
@@ -1052,6 +1138,16 @@ struct PopupBlockHandle {
   float scrollmin = 0.0f;
   float scrollmax = 0.0f;
 
+  /**
+   * Fixed-viewport grid edge auto-scroll: guards against the popup's initial cursor position
+   * (set by #PanelType::offset_units_xy, which assumes the first row is at the top) being
+   * misread as a scroll request when #ASSET_SHELF_TYPE_FLAG_CENTER_ACTIVE_ASSET_ON_OPEN moves
+   * the first row away from 0 before the user has moved the mouse at all.
+   */
+  bool fixed_grid_autoscroll_baseline_set = false;
+  bool fixed_grid_autoscroll_gate_released = false;
+  int fixed_grid_autoscroll_baseline_my = 0;
+
   KeyNavLock keynav_state;
 
   /* for operator popups */
@@ -1228,6 +1324,14 @@ void pie_menu_level_create(Block *block,
 void popup_translate(ARegion *region, const int mdiff[2]);
 void popup_block_free(bContext *C, PopupBlockHandle *handle);
 void popup_block_scrolltest(Block *block);
+/** Apply popup menu scroll delta (#PopupBlockHandle::scrolloffset and button rects). */
+void popup_block_scroll_apply_offset_y(ARegion *region, Block *block, float dy);
+/**
+ * Vertical popover chrome (arrow hint + bounds padding, scaled by 1/aspect, + screen margin)
+ * that a build-time height budget must subtract. Defined next to the positioning code that
+ * applies these offsets so the two cannot drift apart.
+ */
+float popover_vertical_chrome_px(float aspect);
 
 /** \} */
 
@@ -1263,6 +1367,22 @@ bool layout_panel_toggle_open(const bContext *C, LayoutPanelHeader *header);
 LayoutPanelHeader *layout_panel_header_under_mouse(const Panel &panel, const int my);
 /** Apply scroll to layout panels when the main panel is used in popups. */
 void layout_panel_popup_scroll_apply(Panel *panel, const float dy);
+
+/** Fixed-viewport grid popover: edge hover auto-scroll (#PopupBlockHandle::scrolltimer). */
+bool popup_block_fixed_grid_scrolltimer_step(bContext *C,
+                                             PopupBlockHandle *menu,
+                                             Block *block,
+                                             int my);
+bool popup_block_fixed_grid_autoscroll_at_pointer(PopupBlockHandle *menu, Block *block, int my);
+
+/**
+ * A region owning the unified grid handler's active fling or touch drag is being freed: stop the
+ * fling (removing its timer) and drop the drag, so no later event touches the dead region. Called
+ * from #popup_block_remove (temporary/popup regions) and, via the public #UI_grid_view_input_region_freed
+ * wrapper, from #ED_region_exit (any region). Idempotent: safe to call more than once for the
+ * same region.
+ */
+void grid_view_input_region_freed(const ARegion *region);
 
 /**
  * Draws in resolution of 48x4 colors.
@@ -1653,6 +1773,8 @@ Button *listrow_find_index(const ARegion *region,
                            Button *listbox) ATTR_WARN_UNUSED_RESULT;
 Button *view_item_find_mouse_over(const ARegion *region, const int xy[2]) ATTR_NONNULL(1, 2);
 Button *view_item_find_active(const ARegion *region, const AbstractView *view = nullptr);
+/** Active #ButtonType::ViewItem in an #AbstractGridView (skips tree/list view items). */
+Button *view_item_find_active_grid(const ARegion *region);
 Button *view_item_find_search_highlight(const ARegion *region);
 
 using ButtonFindPollFn = bool (*)(const Button *but, const void *customdata);
@@ -1747,6 +1869,10 @@ void UI_OT_eyedropper_driver(wmOperatorType *ot);
 
 void UI_OT_eyedropper_grease_pencil_color(wmOperatorType *ot);
 
+/* `templates/interface_template_id_browser_asset.cc` */
+
+void UI_OT_id_browser_set_library(wmOperatorType *ot);
+
 /* interface_ops_color.cc */
 
 MenuType *UI_MT_color_space_select();
@@ -1777,6 +1903,8 @@ void rna_collection_search_update_fn(
 /* `interface_ops.cc` */
 
 bool jump_to_target_button_poll(bContext *C);
+/** Session-only display state toggled by #UI_OT_palette_swatch_size_toggle. */
+bool palette_swatch_size_large_get();
 
 /* `interface_query.cc` */
 
@@ -1785,6 +1913,26 @@ void interface_tag_script_reload_queries();
 /* `views/interface_view.cc` */
 
 void block_free_views(Block *block);
+/**
+ * First grid view in \a block that uses a fixed-viewport layout (the popover/menu scroll model).
+ * Lets popup event handling drive grid scrolling without knowing the concrete view, so no caller
+ * needs to match a specific view idname. Returns null if there is no such view.
+ */
+AbstractGridView *block_view_find_fixed_viewport_grid(Block &block);
+/**
+ * All grid views in \a block with an active scroll-clip window
+ * (#AbstractGridView::scroll_clip_enabled()). #ViewLink is private to `interface_view.cc`, so
+ * callers elsewhere that need to update every clip-scrolled grid's rect (e.g. translating it
+ * along with the rest of the block) go through this instead of iterating #Block::views directly.
+ */
+Vector<AbstractGridView *> block_view_scroll_clipped_grids(Block &block);
+/**
+ * Like #block_view_find_fixed_viewport_grid, but when \a block hosts more than one fixed-viewport
+ * grid, picks the one whose own edge-scroll geometry actually contains \a block_space_y (via
+ * #AbstractGridView::fixed_viewport_scroll_at_y) instead of always the first. Falls back to the
+ * first grid when none matches, preserving today's single-grid behavior exactly.
+ */
+AbstractGridView *block_view_find_fixed_viewport_grid_at_y(Block &block, float block_space_y);
 void block_views_end(ARegion *region, const Block *block);
 void block_view_persistent_state_restore(const ARegion &region,
                                          const Block &block,

@@ -877,6 +877,7 @@ static void offset_panel_block(Block *block)
     but.rect.ymin += ofsy;
     but.rect.ymax += ofsy;
   }
+  block_view_scroll_clip_offset_apply(block, float(ofsy));
   for (LayoutPanelBody &body : block->panel->runtime->layout_panels.bodies) {
     body.start_y -= panels_space;
     body.end_y -= panels_space;

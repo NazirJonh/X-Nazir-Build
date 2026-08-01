@@ -44,6 +44,7 @@
 #include "BLT_translation.hh"
 
 #include "BKE_appdir.hh"
+#include "BKE_asset.hh"
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
 #include "BKE_main.hh"
@@ -117,6 +118,16 @@ static void fileselect_ensure_updated_asset_params(SpaceFile *sfile)
     asset_params->asset_library_ref.custom_library_index = -1;
     asset_params->import_method = FILE_ASSET_IMPORT_FOLLOW_PREFS;
     asset_params->import_flags = FILE_ASSET_IMPORT_INSTANCE_COLLECTIONS_ON_LINK;
+
+    /* Catalog collapsed states: per-editor working copy, seeded from the user preferences. */
+    asset_params->catalog_states.clear_no_delete();
+    if (const bUserAssetBrowserSettings *global_settings =
+            BKE_preferences_asset_browser_settings_get_from_library_ref(
+                &U, &asset_params->asset_library_ref))
+    {
+      BKE_asset_catalog_state_list_duplicate(asset_params->catalog_states,
+                                             global_settings->catalog_states);
+    }
   }
 
   FileSelectParams *base_params = &asset_params->base_params;
@@ -432,12 +443,24 @@ static void fileselect_refresh_asset_params(FileAssetSelectParams *asset_params)
   FileSelectParams *base_params = &asset_params->base_params;
   bUserAssetLibrary *user_library = nullptr;
 
-  /* Ensure valid repository, or fall-back to local one. */
+  /* Ensure valid repository, or fall-back. */
   if (library->type == ASSET_LIBRARY_CUSTOM) {
-    BLI_assert(library->custom_library_index >= 0);
-
-    user_library = BKE_preferences_asset_library_find_index(&U, library->custom_library_index);
-    if (!user_library || !BKE_preferences_asset_library_is_valid(&U, user_library, false)) {
+    user_library = BKE_preferences_asset_library_find_from_ref(&U, library);
+    if (!user_library) {
+      /* The library is gone from the Preferences (renamed, removed, or this file came from another
+       * machine). Keep the reference: #file_draw_hint_if_invalid() names it and fully replaces the
+       * normal grid draw for this state, so nothing from this list is ever shown. Use the "current
+       * file" job type (matches #ASSET_LIBRARY_LOCAL below): unlike a single on-disk library's job,
+       * it never scans a directory (avoiding the "root must end in a slash" assert on this empty
+       * dir), and unlike the "All" library job, its read function only uses the resolved library
+       * conditionally rather than asserting it non-null -- #AS_asset_library_load() legitimately
+       * returns null for a #ASSET_LIBRARY_CUSTOM reference that no longer resolves, and the "All"
+       * job's own internal assert does not tolerate that. */
+      base_params->dir[0] = '\0';
+      base_params->type = FILE_MAIN_ASSET;
+      return;
+    }
+    if (!BKE_preferences_asset_library_is_valid(&U, user_library, false)) {
       library->type = ASSET_LIBRARY_ALL;
     }
   }
@@ -1332,6 +1355,10 @@ void ED_fileselect_clear(wmWindowManager *wm, SpaceFile *sfile)
     filelist_readjob_stop(sfile->files, wm);
     filelist_freelib(sfile->files);
     filelist_clear(sfile->files);
+    /* Ensure a new read job starts even when the old job had partially moved entries into the
+     * filelist (entries_num > 0). Without FL_FORCE_RESET, filelist_needs_reading() returns false
+     * and file_refresh() skips starting the read job. Mirrors AssetList::clear(). */
+    filelist_tag_force_reset(sfile->files);
   }
 
   if (FileSelectParams *params = ED_fileselect_get_active_params(sfile)) {

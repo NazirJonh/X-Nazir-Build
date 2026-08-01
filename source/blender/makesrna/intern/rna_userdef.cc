@@ -122,6 +122,16 @@ static const EnumPropertyItem rna_enum_date_format_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_user_asset_library_type_items[] = {
+    {USER_ASSET_LIBRARY_ITEM_TYPE_LEAF, "LIBRARY", ICON_FILE_BLEND, "Library", "An asset library"},
+    {USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER,
+     "FOLDER",
+     ICON_FILE_FOLDER,
+     "Folder",
+     "A folder for organizing asset libraries"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem audio_device_items[] = {
     {0, "None", 0, "None", "No device - there will be no audio output"},
     {0, nullptr, 0, nullptr, nullptr},
@@ -434,13 +444,40 @@ static void rna_userdef_translation_update(Main *bmain, Scene * /*scene*/, Point
 static void rna_userdef_asset_library_name_set(PointerRNA *ptr, const char *value)
 {
   bUserAssetLibrary *library = static_cast<bUserAssetLibrary *>(ptr->data);
+  char old_name[MAX_NAME];
+  STRNCPY(old_name, library->name);
   BKE_preferences_asset_library_name_set(&U, library, value);
+  /* Keep references in open files pointing at this library (see #library_references_rename). RNA
+   * setters get no #bContext, and the Preferences are global anyway. */
+  ed::asset::library_references_rename(*G_MAIN, old_name, library->name);
 }
 
 static void rna_userdef_asset_library_path_set(PointerRNA *ptr, const char *value)
 {
   bUserAssetLibrary *library = static_cast<bUserAssetLibrary *>(ptr->data);
   BKE_preferences_asset_library_path_set(library, value);
+}
+
+/* Routed through the BKE setter rather than writing the flag, because pinning also has to keep
+ * #bUserAssetLibrary.pin_order dense across the pinned libraries. That invariant belongs to BKE and
+ * the asset shelf popover's tab row depends on it, so there is no raw path to the flag from here.
+ * #pin_order itself is exposed read-only for the same reason. */
+static void rna_userdef_asset_library_is_pinned_set(PointerRNA *ptr, const bool value)
+{
+  bUserAssetLibrary *library = static_cast<bUserAssetLibrary *>(ptr->data);
+  BKE_preferences_asset_library_pin_set(&U, library, value);
+}
+
+/* An open asset shelf popover shows the pinned libraries as tabs. A popup only rebuilds on
+ * #RGN_REFRESH_UI, which is what #asset_shelf_popover_listen turns this notifier into; a plain
+ * redraw would leave a stale tab row behind. Matches what
+ * #PREFERENCES_OT_asset_library_pin_set sends. */
+static void rna_userdef_asset_library_pin_update(Main * /*bmain*/,
+                                                 Scene * /*scene*/,
+                                                 PointerRNA * /*ptr*/)
+{
+  WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+  USERDEF_TAG_DIRTY;
 }
 
 int rna_userdef_asset_library_path_editable(const PointerRNA *ptr, const char **r_info)
@@ -729,6 +766,11 @@ static void rna_userdef_asset_library_remove(bContext *C, ReportList *reports, P
 
   if (BLI_findindex(&U.asset_libraries, library) == -1) {
     BKE_report(reports, RPT_ERROR, "Asset Library not found");
+    return;
+  }
+
+  if (!BKE_preferences_asset_library_can_delete(&U, library)) {
+    BKE_report(reports, RPT_ERROR, "Cannot delete non-empty folder");
     return;
   }
 
@@ -7008,6 +7050,40 @@ static void rna_def_userdef_filepaths_asset_library(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", ASSET_LIBRARY_USE_REMOTE_URL);
   RNA_def_property_ui_text(prop, "Use Remote", "Synchronize the asset library with a remote URL");
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+
+  prop = RNA_def_property(srna, "is_pinned", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", ASSET_LIBRARY_IS_PINNED);
+  RNA_def_property_boolean_funcs(prop, nullptr, "rna_userdef_asset_library_is_pinned_set");
+  RNA_def_property_ui_text(
+      prop, "Pinned", "Show this asset library as a tab at the top of the asset shelf popover");
+  RNA_def_property_update(prop, 0, "rna_userdef_asset_library_pin_update");
+
+  prop = RNA_def_property(srna, "pin_order", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "pin_order");
+  RNA_def_property_ui_text(prop,
+                           "Pin Order",
+                           "Position of this library in the asset shelf popover's pinned tab row. "
+                           "Meaningless when the library is not pinned");
+  /* Read-only: the order is owned by the BKE pin helpers, which keep it dense across the pinned
+   * libraries (use #PREFERENCES_OT_asset_library_pin_reorder to change it). Writing it from Python
+   * would break that invariant -- the same reason `type` and `parent` are read-only. */
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+
+  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_user_asset_library_type_items);
+  RNA_def_property_ui_text(prop, "Type", "Type of item (library or folder)");
+  /* Read-only: the type is owned by the BKE hierarchy helpers (folders are created via
+   * BKE_preferences_asset_library_folder_add); setting it from Python would bypass that. */
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+
+  prop = RNA_def_property(srna, "parent", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "UserAssetLibrary");
+  RNA_def_property_pointer_sdna(prop, nullptr, "parent");
+  RNA_def_property_ui_text(prop, "Parent", "Parent folder for hierarchical organization");
+  /* Read-only: the parent relationship is owned by the BKE hierarchy helpers, which also keep
+   * #bUserAssetLibrary.parent_name in sync for save/load. A raw pointer set from Python would
+   * bypass that and be lost on reload. */
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
 }
 
 static void rna_def_userdef_filepaths_extension_repo(BlenderRNA *brna)
@@ -7515,6 +7591,22 @@ static void rna_def_userdef_filepaths(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Active Asset Library",
                            "Index of the asset library being edited in the Preferences UI");
+
+  prop = RNA_def_property(srna, "pin_current_file_library", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "asset_flag", USER_ASSETS_PIN_CURRENT_FILE);
+  RNA_def_property_ui_text(
+      prop,
+      "Pin Current File Library",
+      "Show the Current File library as a tab at the top of the asset shelf popover");
+  RNA_def_property_update(prop, 0, "rna_userdef_asset_library_pin_update");
+
+  prop = RNA_def_property(srna, "pin_essentials_library", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "asset_flag", USER_ASSETS_PIN_ESSENTIALS);
+  RNA_def_property_ui_text(
+      prop,
+      "Pin Essentials Library",
+      "Show the Essentials library as a tab at the top of the asset shelf popover");
+  RNA_def_property_update(prop, 0, "rna_userdef_asset_library_pin_update");
 }
 
 static void rna_def_userdef_asset_libraries(BlenderRNA *brna)

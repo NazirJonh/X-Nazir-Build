@@ -36,6 +36,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 #include "RNA_prototypes.hh"
 #include "RNA_types.hh"
 
@@ -46,6 +47,7 @@
 #include "WM_types.hh"
 
 #include "ED_asset.hh"
+#include "ED_asset_image_library.hh"
 #include "ED_screen.hh"
 #include "ED_userpref.hh"
 
@@ -149,6 +151,8 @@ static void PREFERENCES_OT_autoexec_path_remove(wmOperatorType *ot)
 enum class bUserAssetLibraryAddType {
   Remote = 0,
   Local = 1,
+  ImageLibrary = 2,
+  BrushLibrary = 3,
 };
 
 static wmOperatorStatus preferences_asset_library_add_exec(bContext *C, wmOperator *op)
@@ -181,6 +185,42 @@ static wmOperatorStatus preferences_asset_library_add_exec(bContext *C, wmOperat
       MEM_delete(dirpath);
       break;
     }
+    case bUserAssetLibraryAddType::ImageLibrary: {
+      char *dirpath = RNA_string_get_alloc(op->ptr, "directory", nullptr, 0, nullptr);
+
+      BLI_path_slash_rstrip(dirpath);
+      if (!name[0]) {
+        BLI_path_split_file_part(dirpath, name, sizeof(name));
+      }
+      if (!name[0]) {
+        STRNCPY(name, DATA_("Image Library"));
+      }
+
+      new_library = BKE_preferences_asset_library_add(&U, name, dirpath);
+      new_library->flag |= ASSET_LIBRARY_IS_IMAGE_LIBRARY;
+
+      blender::ed::asset::image_library_on_library_added(C, dirpath);
+
+      MEM_delete(dirpath);
+      break;
+    }
+    case bUserAssetLibraryAddType::BrushLibrary: {
+      char *dirpath = RNA_string_get_alloc(op->ptr, "directory", nullptr, 0, nullptr);
+
+      BLI_path_slash_rstrip(dirpath);
+      if (!name[0]) {
+        BLI_path_split_file_part(dirpath, name, sizeof(name));
+      }
+      if (!name[0]) {
+        STRNCPY(name, DATA_("Brush Library"));
+      }
+
+      new_library = BKE_preferences_asset_library_add(&U, name, dirpath);
+      new_library->flag |= ASSET_LIBRARY_IS_BRUSH_LIBRARY;
+
+      MEM_delete(dirpath);
+      break;
+    }
     case bUserAssetLibraryAddType::Remote: {
       char *remote_url = RNA_string_get_alloc(op->ptr, "remote_url", nullptr, 0, nullptr);
 
@@ -196,6 +236,54 @@ static wmOperatorStatus preferences_asset_library_add_exec(bContext *C, wmOperat
       MEM_delete(remote_url);
       break;
     }
+  }
+
+  /* Check if a parent folder was specified. */
+  bUserAssetLibrary *parent_folder = nullptr;
+  /* Set when an explicit parent was named but rejected, so the auto-parent fallback below
+   * does not silently substitute a different folder the caller never asked for. */
+  bool named_parent_rejected = false;
+  PropertyRNA *parent_prop = RNA_struct_find_property(op->ptr, "parent_folder_name");
+  if (parent_prop && RNA_property_is_set(op->ptr, parent_prop)) {
+    char parent_name[sizeof(bUserAssetLibrary::name)];
+    RNA_property_string_get(op->ptr, parent_prop, parent_name);
+    bUserAssetLibrary *named_parent = BKE_preferences_asset_library_find_by_name(&U, parent_name);
+    if (named_parent && BKE_preferences_asset_library_is_folder(named_parent)) {
+      parent_folder = named_parent;
+    }
+    else if (named_parent) {
+      /* The new library was already created above; cancelling here would leave it in the
+       * preferences while reporting failure, which is worse than placing it at root level. */
+      BKE_report(op->reports,
+                 RPT_WARNING,
+                 "The given parent is not a folder; new library added at root level");
+      named_parent_rejected = true;
+    }
+    else {
+      /* Same reasoning as above: a typo'd name must not be silently swallowed by the
+       * auto-parent fallback below, which would drop the library into whatever folder happens
+       * to be active instead of the root level the caller gets reported. */
+      BKE_report(op->reports,
+                 RPT_WARNING,
+                 "The given parent folder was not found; new library added at root level");
+      named_parent_rejected = true;
+    }
+  }
+
+  /* No explicit parent given: if the active item in the Preferences list is a folder, drop the new
+   * library straight into it. Lets the generic "Add Asset Library" button honor the selected folder
+   * without the caller having to pass a parent. The new library was appended at the list tail
+   * (#BKE_preferences_asset_library_add), so the active item's index still points at the folder. */
+  if (!parent_folder && !named_parent_rejected) {
+    bUserAssetLibrary *active_library = userpref_ui_active_asset_library();
+    if (active_library && active_library->type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      parent_folder = active_library;
+    }
+  }
+
+  /* Move to parent folder if specified. */
+  if (parent_folder) {
+    BKE_preferences_asset_library_move_to_folder(&U, new_library, parent_folder);
   }
 
   /* Activate new library in the UI for further setup. */
@@ -224,7 +312,10 @@ static wmOperatorStatus preferences_asset_library_add_invoke(bContext *C,
   const bUserAssetLibraryAddType library_type = bUserAssetLibraryAddType(
       RNA_enum_get(op->ptr, "type"));
 
-  if ((library_type == bUserAssetLibraryAddType::Local) &&
+  if ((ELEM(library_type,
+            bUserAssetLibraryAddType::Local,
+            bUserAssetLibraryAddType::ImageLibrary,
+            bUserAssetLibraryAddType::BrushLibrary)) &&
       !RNA_struct_property_is_set(op->ptr, "directory"))
   {
     WM_event_add_fileselect(C, op);
@@ -249,7 +340,9 @@ static void preferences_asset_library_add_ui(bContext * /*C*/, wmOperator *op)
       layout->prop(op->ptr, "remote_url", ui::ITEM_R_IMMEDIATE, std::nullopt, ICON_NONE);
       break;
     }
-    case bUserAssetLibraryAddType::Local: {
+    case bUserAssetLibraryAddType::Local:
+    case bUserAssetLibraryAddType::ImageLibrary:
+    case bUserAssetLibraryAddType::BrushLibrary: {
       layout->prop(op->ptr, "name", ui::ITEM_R_IMMEDIATE, std::nullopt, ICON_NONE);
       break;
     }
@@ -269,6 +362,18 @@ static constexpr EnumPropertyItem custom_library_type_items[] = {
      "Add Local Asset Library",
      "Add an asset library managed via the file system without referencing an external "
      "repository"},
+    {int(bUserAssetLibraryAddType::ImageLibrary),
+     "IMAGE_LIBRARY",
+     ICON_FILE_IMAGE,
+     "Add Image Library",
+     "Add a folder of image files as an image asset library; "
+     "creates a catalog tree based on the folder structure"},
+    {int(bUserAssetLibraryAddType::BrushLibrary),
+     "BRUSH_LIBRARY",
+     ICON_BRUSH_DATA,
+     "Add Brush Library",
+     "Add an asset library dedicated to brushes; any image assets it contains are never shown "
+     "in Texture asset browsing"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -345,6 +450,14 @@ static void PREFERENCES_OT_asset_library_add(wmOperatorType *ot)
                           "The kind of asset library to add");
   RNA_def_enum_funcs(ot->prop, custom_library_type_itemf);
   RNA_def_property_flag(ot->prop, PROP_SKIP_SAVE | PROP_HIDDEN);
+
+  PropertyRNA *prop = RNA_def_string(ot->srna,
+                                     "parent_folder_name",
+                                     nullptr,
+                                     sizeof(bUserAssetLibrary::name),
+                                     "Parent Folder",
+                                     "Name of the parent folder to add the library into");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
 }
 
 /** \} */
@@ -368,6 +481,11 @@ static wmOperatorStatus preferences_asset_library_remove_exec(bContext *C, wmOpe
   bUserAssetLibrary *library = static_cast<bUserAssetLibrary *>(
       BLI_findlink(&U.asset_libraries, index));
   if (!library) {
+    return OPERATOR_CANCELLED;
+  }
+
+  if (!BKE_preferences_asset_library_can_delete(&U, library)) {
+    BKE_report(op->reports, RPT_ERROR, "Cannot delete non-empty folder");
     return OPERATOR_CANCELLED;
   }
 
@@ -410,6 +528,244 @@ static void PREFERENCES_OT_asset_library_remove(wmOperatorType *ot)
   ot->flag = OPTYPE_INTERNAL;
 
   RNA_def_int(ot->srna, "index", 0, 0, INT_MAX, "Index", "", 0, 1000);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Pin Asset Library Operators
+ * \{ */
+
+/* Both operators identify their library by name rather than by index: the index into
+ * #UserDef.asset_libraries shifts whenever the Preferences list is edited, and these operators can
+ * outlive that edit (they are fired from a popover that rebuilds lazily). Names are unique --
+ * #BKE_preferences_asset_library_name_set runs every name through #BLI_uniquename -- and
+ * #AssetLibraryReference identifies its library the same way. */
+static bUserAssetLibrary *library_from_op_props(wmOperator *op)
+{
+  char library_name[sizeof(bUserAssetLibrary::name)];
+  RNA_string_get(op->ptr, "library_name", library_name);
+  return BKE_preferences_asset_library_find_by_name(&U, library_name);
+}
+
+/* Pinning is a Preferences change, so it is global: an asset shelf popover in any window may be
+ * showing the tab row. A popup only rebuilds on #RGN_REFRESH_UI, which is what
+ * #asset_shelf_popover_listen turns this notifier into -- a plain redraw tag would leave a stale
+ * tab row behind. */
+static void library_pin_changed_notify()
+{
+  U.runtime.is_dirty = true;
+  WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+}
+
+static wmOperatorStatus preferences_asset_library_pin_set_exec(bContext * /*C*/, wmOperator *op)
+{
+  const bool pinned = RNA_boolean_get(op->ptr, "pinned");
+  const eAssetLibraryType type = eAssetLibraryType(RNA_enum_get(op->ptr, "library_type"));
+
+  /* A built-in library: identified by its type alone, which is a stable constant. `library_name` is
+   * not read at all. */
+  if (type != ASSET_LIBRARY_CUSTOM) {
+    if (!BKE_preferences_asset_builtin_pin_supported(type)) {
+      return OPERATOR_CANCELLED;
+    }
+    if (pinned == BKE_preferences_asset_builtin_pin_get(&U, type)) {
+      /* Nothing to do; not an error. */
+      return OPERATOR_CANCELLED;
+    }
+    BKE_preferences_asset_builtin_pin_set(&U, type, pinned);
+    library_pin_changed_notify();
+    return OPERATOR_FINISHED;
+  }
+
+  bUserAssetLibrary *library = library_from_op_props(op);
+  if (!library) {
+    return OPERATOR_CANCELLED;
+  }
+  if (pinned == ((library->flag & ASSET_LIBRARY_IS_PINNED) != 0)) {
+    /* Nothing to do; not an error. */
+    return OPERATOR_CANCELLED;
+  }
+  BKE_preferences_asset_library_pin_set(&U, library, pinned);
+  library_pin_changed_notify();
+
+  return OPERATOR_FINISHED;
+}
+
+static void PREFERENCES_OT_asset_library_pin_set(wmOperatorType *ot)
+{
+  ot->name = "Pin Asset Library";
+  ot->description =
+      "Pin or unpin an asset library, showing it as a tab at the top of the asset shelf popover";
+  ot->idname = "PREFERENCES_OT_asset_library_pin_set";
+
+  ot->exec = preferences_asset_library_pin_set_exec;
+
+  ot->flag = OPTYPE_INTERNAL;
+
+  /* Mirrors #AssetLibraryReference: a type, plus a name that only means anything when the type is
+   * #ASSET_LIBRARY_CUSTOM. That is how a library is identified everywhere else in Blender, and it
+   * is why a built-in needs no name. The enum also lists types with no pin (ALL,
+   * ONLINE_ESSENTIALS); the exec cancels on those rather than silently doing nothing. */
+  RNA_def_enum(ot->srna,
+               "library_type",
+               rna_enum_asset_library_type_items,
+               ASSET_LIBRARY_CUSTOM,
+               "Library Type",
+               "Which library to pin; a custom library is named by \"library_name\"");
+
+  RNA_def_string(ot->srna,
+                 "library_name",
+                 nullptr,
+                 sizeof(bUserAssetLibrary::name),
+                 "Library Name",
+                 "Name of the asset library to pin or unpin");
+  /* Stated rather than toggled, so a caller that already knows the state it wants (the "Unpin
+   * Library" menu entry, say) cannot flip the wrong way if the flag changed underneath it. */
+  RNA_def_boolean(ot->srna, "pinned", true, "Pinned", "Whether the library should be pinned");
+}
+
+enum class LibraryPinMove {
+  Left = 0,
+  Right = 1,
+  Front = 2,
+  Back = 3,
+};
+
+static const EnumPropertyItem library_pin_move_items[] = {
+    {int(LibraryPinMove::Left), "LEFT", 0, "Move Left", "Move the tab one position to the left"},
+    {int(LibraryPinMove::Right),
+     "RIGHT",
+     0,
+     "Move Right",
+     "Move the tab one position to the right"},
+    {int(LibraryPinMove::Front), "FRONT", 0, "Reorder to Front", "Move the tab to the front"},
+    {int(LibraryPinMove::Back), "BACK", 0, "Reorder to Back", "Move the tab to the back"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static wmOperatorStatus preferences_asset_library_pin_reorder_exec(bContext * /*C*/,
+                                                                   wmOperator *op)
+{
+  bUserAssetLibrary *library = library_from_op_props(op);
+  if (!library) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const int count = BKE_preferences_asset_library_pinned_count(&U);
+  const int current = library->pin_order;
+  int new_index = current;
+  switch (LibraryPinMove(RNA_enum_get(op->ptr, "direction"))) {
+    case LibraryPinMove::Left:
+      new_index = current - 1;
+      break;
+    case LibraryPinMove::Right:
+      new_index = current + 1;
+      break;
+    case LibraryPinMove::Front:
+      new_index = 0;
+      break;
+    case LibraryPinMove::Back:
+      new_index = count - 1;
+      break;
+  }
+
+  /* Returns false at the ends of the row (the index clamps back onto the current one), which is
+   * not an error -- there is simply nowhere left to move. */
+  if (!BKE_preferences_asset_library_pin_reorder(&U, library, new_index)) {
+    return OPERATOR_CANCELLED;
+  }
+  library_pin_changed_notify();
+
+  return OPERATOR_FINISHED;
+}
+
+static void PREFERENCES_OT_asset_library_pin_reorder(wmOperatorType *ot)
+{
+  ot->name = "Reorder Pinned Asset Library";
+  ot->description = "Move a library's tab within the asset shelf popover's pinned tab row";
+  ot->idname = "PREFERENCES_OT_asset_library_pin_reorder";
+
+  ot->exec = preferences_asset_library_pin_reorder_exec;
+
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_string(ot->srna,
+                 "library_name",
+                 nullptr,
+                 sizeof(bUserAssetLibrary::name),
+                 "Library Name",
+                 "Name of the asset library whose tab to move");
+  ot->prop = RNA_def_enum(ot->srna,
+                          "direction",
+                          library_pin_move_items,
+                          int(LibraryPinMove::Left),
+                          "Direction",
+                          "Where to move the tab");
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Add Asset Library Folder Operator
+ * \{ */
+
+static wmOperatorStatus preferences_asset_library_folder_add_exec(bContext * /*C*/, wmOperator *op)
+{
+  char name[sizeof(bUserAssetLibrary::name)] = "";
+
+  PropertyRNA *prop = RNA_struct_find_property(op->ptr, "name");
+  if (RNA_property_is_set(op->ptr, prop)) {
+    RNA_property_string_get(op->ptr, prop, name);
+  }
+
+  if (!name[0]) {
+    STRNCPY(name, DATA_("New Folder"));
+  }
+
+  /* Folders always live at the root level: nesting folders inside other folders is not supported,
+   * so the parent is always null regardless of any caller-supplied parent. */
+  bUserAssetLibrary *new_folder = BKE_preferences_asset_library_folder_add(
+      &U, name, /*parent=*/nullptr);
+
+  /* Place the new folder right before the currently selected item, instead of leaving it appended
+   * at the tail of the whole list. If the selection is a library nested in a folder, anchor on
+   * that folder itself: folders cannot nest inside other folders, and #BKE_preferences_asset_library_reorder
+   * rejects any move that would give a folder a non-null parent, so "before the selection" can only
+   * be honored relative to the selected item's root-level folder (i.e. before the whole subtree). */
+  if (bUserAssetLibrary *active_library = userpref_ui_active_asset_library()) {
+    bUserAssetLibrary *insert_before = active_library->parent ? active_library->parent :
+                                                               active_library;
+    BKE_preferences_asset_library_reorder(&U, new_folder, insert_before, ASSET_LIBRARY_MOVE_BEFORE);
+  }
+
+  /* Activate new folder in the UI list. Uses the remote-aware UI index (same scheme as
+   * #preferences_asset_library_add_exec), not the raw listbase index. */
+  if (const std::optional<int> new_active_idx =
+          userpref_ui_asset_libraries_index_from_user_library(*new_folder))
+  {
+    U.active_asset_library = *new_active_idx;
+  }
+  U.runtime.is_dirty = true;
+
+  /* There's no dedicated notifier for the Preferences. */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+
+  return OPERATOR_FINISHED;
+}
+
+static void PREFERENCES_OT_asset_library_folder_add(wmOperatorType *ot)
+{
+  ot->name = "Add Asset Library Folder";
+  ot->idname = "PREFERENCES_OT_asset_library_folder_add";
+  ot->description = "Add a new folder to organize asset libraries";
+
+  ot->exec = preferences_asset_library_folder_add_exec;
+
+  ot->flag = OPTYPE_INTERNAL | OPTYPE_REGISTER;
+
+  RNA_def_string(
+      ot->srna, "name", nullptr, sizeof(bUserAssetLibrary::name), "Name", "Name of the folder");
 }
 
 /** \} */
@@ -1307,7 +1663,10 @@ void ED_operatortypes_userpref()
   WM_operatortype_append(PREFERENCES_OT_autoexec_path_remove);
 
   WM_operatortype_append(PREFERENCES_OT_asset_library_add);
+  WM_operatortype_append(PREFERENCES_OT_asset_library_folder_add);
   WM_operatortype_append(PREFERENCES_OT_asset_library_remove);
+  WM_operatortype_append(PREFERENCES_OT_asset_library_pin_set);
+  WM_operatortype_append(PREFERENCES_OT_asset_library_pin_reorder);
 
   WM_operatortype_append(PREFERENCES_OT_extension_repo_add);
   WM_operatortype_append(PREFERENCES_OT_extension_repo_remove);

@@ -65,6 +65,13 @@ ENUM_OPERATORS(eUserPref_Flag)
 /** #UserDef.asset_flag */
 enum eUserPref_AssetFlag : char {
   USER_ASSETS_USE_ONLINE_ESSENTIALS = 1 << 0,
+  /** Show the "Current File" library as a tab at the top of the asset shelf popover.
+   * The built-in libraries are not #bUserAssetLibrary entries, so they have nowhere of their own to
+   * carry #ASSET_LIBRARY_IS_PINNED; these bits replace it. They need no order field to go with them
+   * because the built-in tabs sit in a fixed position and cannot be reordered. */
+  USER_ASSETS_PIN_CURRENT_FILE = 1 << 1,
+  /** Show the "Essentials" library as a tab at the top of the asset shelf popover. */
+  USER_ASSETS_PIN_ESSENTIALS = 1 << 2,
 };
 ENUM_OPERATORS(eUserPref_AssetFlag)
 
@@ -644,13 +651,27 @@ struct bUserMenuItem_Prop {
   char _pad0[4] = {};
 };
 
+/**
+ * Type of asset library item in Preferences.
+ * Used to distinguish between actual asset libraries and folder containers.
+ */
+enum eUserAssetLibraryItemType {
+  /** Regular asset library with a path on disk. */
+  USER_ASSET_LIBRARY_ITEM_TYPE_LEAF = 0,
+  /** Folder/container for organizing asset libraries. */
+  USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER = 1,
+};
+
 struct bUserAssetLibrary {
   struct bUserAssetLibrary *next = nullptr, *prev = nullptr;
+  /** Parent folder name for hierarchical organization. Empty string for root level items.
+   * Used for DNA serialization - the parent pointer is restored from this after loading. */
+  char parent_name[/*MAX_NAME*/ 64] = "";
 
   char name[/*MAX_NAME*/ 64] = "";
   /** The path on disk for this asset library. For remote libraries
    * (#ASSET_LIBRARY_USE_REMOTE_URL), this is the download cache directory, where already
-   * downloaded assets will be placed. */
+   * downloaded assets will be placed. Empty for folder containers. */
   char dirpath[/*FILE_MAX*/ 1024] = "";
   /** Only for remote asset libraries (#ASSET_LIBRARY_USE_REMOTE_URL is set). Update using
    * #BKE_preferences_remote_asset_library_url_set() only. */
@@ -658,7 +679,18 @@ struct bUserAssetLibrary {
 
   short import_method = ASSET_IMPORT_PACK;  /* eAssetImportMethod */
   short flag = ASSET_LIBRARY_RELATIVE_PATH; /* eAssetLibrary_Flag */
-  char _pad0[4] = {};
+  /** Type of item: #eUserAssetLibraryItemType (LEAF for library, FOLDER for container). */
+  short type = USER_ASSET_LIBRARY_ITEM_TYPE_LEAF;
+  /** Position of this library in the popover's pinned tab row. Dense over `0 .. N-1` across all
+   * libraries carrying #ASSET_LIBRARY_IS_PINNED; meaningless (and zero) on the others. Written
+   * only by the `BKE_preferences_asset_library_pin_*` functions, which maintain that invariant. */
+  short pin_order = 0;
+
+  /** Runtime pointer to the parent folder. The persistent hierarchy is stored in #parent_name;
+   * this pointer is written to disk by DNA but its saved value is meaningless (a stale address),
+   * so it is cleared and reconstructed from #parent_name on load
+   * (see #BKE_preferences_asset_library_restore_hierarchy). */
+  struct bUserAssetLibrary *parent = nullptr;
 
 #ifdef __cplusplus
   bool is_enabled() const
@@ -880,6 +912,29 @@ struct bUserScriptDirectory {
   char dir_path[/*FILE_MAXDIR*/ 768] = "";
 };
 
+/** #bUserAssetShelfSettings.popup_view_flag */
+enum eUserAssetShelfPopupViewFlag {
+  /**
+   * The popup view preferences (#bUserAssetShelfSettings.popup_preview_size etc.) were explicitly
+   * stored by the user. Needed to distinguish "never set" from a stored zero value, such as all
+   * display flags being disabled.
+   */
+  USER_ASSET_SHELF_POPUP_VIEW_STORED = (1 << 0),
+};
+
+/**
+ * Per-asset-library collapsed state of catalog paths, stored in the user preferences so it
+ * persists across sessions and editors.
+ */
+struct bUserAssetBrowserSettings {
+  struct bUserAssetBrowserSettings *next = nullptr, *prev = nullptr;
+
+  /** Asset library identifier (see BKE_preferences_asset_library_identifier_from_ref). */
+  char library_name[/*MAX_NAME*/ 64] = "";
+
+  ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
+};
+
 /**
  * Settings for an asset shelf, stored in the Preferences. Most settings are still stored in the
  * asset shelf instance in #AssetShelfSettings. This is just for the options that should be shared
@@ -892,6 +947,21 @@ struct bUserAssetShelfSettings {
   char shelf_idname[/*MAX_NAME*/ 64] = "";
 
   ListBaseT<AssetCatalogPathLink> enabled_catalog_paths = {nullptr, nullptr};
+
+  /**
+   * Popup-shelf view preferences. Persisted per shelf type in the Preferences so that the asset
+   * popover (e.g. brush asset popup) keeps its size and display options between sessions and
+   * across `.blend` files. Only meaningful once #USER_ASSET_SHELF_POPUP_VIEW_STORED is set in
+   * #popup_view_flag; otherwise the shelf type's defaults are used.
+   */
+  short popup_preview_size = 0;
+  short popup_display_flag = 0; /* #AssetShelfSettings_DisplayFlag */
+  short popup_width_units = 0;
+  short popup_height_units = 0;
+  /** Maximum number of brushes kept in the Recent pseudo-catalog. */
+  short recent_max_count = 20;
+  short popup_view_flag = 0; /* #eUserAssetShelfPopupViewFlag */
+  char _pad[4] = {};
 };
 
 /**
@@ -1058,6 +1128,7 @@ struct UserDef {
   ListBaseT<bUserMenu> user_menus = {nullptr, nullptr};
   ListBaseT<bUserAssetLibrary> asset_libraries = {nullptr, nullptr};
   ListBaseT<bUserExtensionRepo> extension_repos = {nullptr, nullptr};
+  ListBaseT<bUserAssetBrowserSettings> asset_browser_settings = {nullptr, nullptr};
   ListBaseT<bUserAssetShelfSettings> asset_shelves_settings = {nullptr, nullptr};
 
   char keyconfigstr[64] = "Blender";

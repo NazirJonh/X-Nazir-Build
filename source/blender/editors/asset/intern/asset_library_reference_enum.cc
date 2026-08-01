@@ -33,12 +33,11 @@ int library_reference_to_enum_value(const AssetLibraryReference *library)
     return library->type;
   }
 
-  /* Note that the path isn't checked for validity here. If an invalid library path is used, the
-   * Asset Browser can give a nice hint on what's wrong. */
-  const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
-      &U, library->custom_library_index);
+  /* Resolve by identity, not by the stored index: the index may be stale, and the enum value must
+   * describe the list as it is right now (that is what the menu items were built from). */
+  const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(&U, library);
   if (user_library) {
-    return ASSET_LIBRARY_CUSTOM + library->custom_library_index;
+    return ASSET_LIBRARY_CUSTOM + BLI_findindex(&U.asset_libraries, user_library);
   }
 
   return ASSET_LIBRARY_LOCAL;
@@ -46,7 +45,7 @@ int library_reference_to_enum_value(const AssetLibraryReference *library)
 
 static bool custom_library_is_valid(const bUserAssetLibrary *user_library)
 {
-  if (user_library->flag & ASSET_LIBRARY_DISABLED) {
+  if (!BKE_preferences_asset_library_is_effectively_enabled(user_library)) {
     return false;
   }
   if (!user_library->name[0]) {
@@ -86,27 +85,123 @@ AssetLibraryReference library_reference_from_enum_value(int value)
     library.custom_library_index = -1;
   }
   else if (custom_library_is_valid(user_library)) {
-    library.custom_library_index = value - ASSET_LIBRARY_CUSTOM;
-    library.type = ASSET_LIBRARY_CUSTOM;
+    BKE_preferences_asset_library_reference_set(&U, &library, user_library);
   }
   return library;
 }
 
-static void rna_enum_add_custom_libraries(EnumPropertyItem **item,
-                                          int *totitem,
-                                          const bool include_remote_libraries)
+/* Single point of truth for whether a leaf library should appear in a selector, used both when
+ * emitting the item and when deciding if a folder's subtree has anything to show. Keeping the two
+ * in sync avoids ever drawing an empty folder heading. */
+static bool custom_leaf_passes_filter(const bUserAssetLibrary &user_library,
+                                      const bool include_remote_libraries,
+                                      const bool exclude_image_libraries,
+                                      const bool only_image_libraries)
 {
-  for (const auto [i, user_library] : U.asset_libraries.enumerate()) {
-    if (!include_remote_libraries && (user_library.flag & ASSET_LIBRARY_USE_REMOTE_URL)) {
+  /* Folders are containers, never selectable leaves. */
+  if (user_library.type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+    return false;
+  }
+  if (!include_remote_libraries && (user_library.flag & ASSET_LIBRARY_USE_REMOTE_URL)) {
+    return false;
+  }
+  if (!custom_library_is_valid(&user_library)) {
+    return false;
+  }
+  /* Libraries set up via "Add Image Library" only ever contain image assets, so they never
+   * contribute anything to UI surfaces that filter on a different asset type (e.g. the brush
+   * shelf); skip listing them there rather than showing a library that always looks empty. A
+   * plain, untagged library is still a valid brush source, so this is an exclusion, not a
+   * requirement. */
+  if (exclude_image_libraries && (user_library.flag & ASSET_LIBRARY_IS_IMAGE_LIBRARY)) {
+    return false;
+  }
+  /* Texture-only surfaces (image grid, Texture asset shelf) go the other way: only libraries
+   * explicitly tagged "Add Image Library" are shown at all. Image indexing itself is opt-in
+   * (#image_library_needs_reindex()), so an untagged library -- Local, Brush, or otherwise --
+   * can never actually contain a discoverable image asset there; listing it would just be a
+   * picker option that always resolves to an empty grid. */
+  if (only_image_libraries && !(user_library.flag & ASSET_LIBRARY_IS_IMAGE_LIBRARY)) {
+    return false;
+  }
+  return true;
+}
+
+/* Whether the folder's subtree contains at least one visible leaf under the current filter.
+ * Recurses into nested folders. Used to prune folders that would otherwise show an empty heading. */
+static bool folder_subtree_has_visible_leaf(const bUserAssetLibrary *folder,
+                                            const bool include_remote_libraries,
+                                            const bool exclude_image_libraries,
+                                            const bool only_image_libraries)
+{
+  for (const bUserAssetLibrary &lib : U.asset_libraries) {
+    if (lib.parent != folder) {
       continue;
     }
-    if (!custom_library_is_valid(&user_library)) {
+    if (lib.type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      if (folder_subtree_has_visible_leaf(
+              &lib, include_remote_libraries, exclude_image_libraries, only_image_libraries))
+      {
+        return true;
+      }
+    }
+    else if (custom_leaf_passes_filter(
+                 lib, include_remote_libraries, exclude_image_libraries, only_image_libraries))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Emit the children of `parent` (nullptr for the root level) in listbase order, mirroring the
+ * Preferences tree (#build_user_items_recursive). Folders become non-selectable section headings
+ * followed by their contents; empty folders are skipped entirely. Folders never nest inside other
+ * folders (enforced in #BKE_preferences_asset_library_reorder and folder creation), so the
+ * hierarchy is at most one level deep -- no folder heading ever appears under another. */
+static void add_custom_libraries_recursive(EnumPropertyItem **item,
+                                           int *totitem,
+                                           const bUserAssetLibrary *parent,
+                                           const bool include_remote_libraries,
+                                           const bool exclude_image_libraries,
+                                           const bool only_image_libraries)
+{
+  for (const auto [i, user_library] : U.asset_libraries.enumerate()) {
+    if (user_library.parent != parent) {
+      continue;
+    }
+
+    if (user_library.type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      if (!folder_subtree_has_visible_leaf(&user_library,
+                                           include_remote_libraries,
+                                           exclude_image_libraries,
+                                           only_image_libraries))
+      {
+        continue;
+      }
+      /* NOTE: A heading has value 0 and an empty identifier. Value 0 numerically equals
+       * #ASSET_LIBRARY_ALL, but the empty identifier makes the item a non-selectable label (see
+       * #ui_def_but_rna__menu), so get/set never resolve it -- no collision. */
+      const EnumPropertyItem heading = RNA_ENUM_ITEM_HEADING(user_library.name, nullptr);
+      RNA_enum_item_add(item, totitem, &heading);
+
+      add_custom_libraries_recursive(item,
+                                     totitem,
+                                     &user_library,
+                                     include_remote_libraries,
+                                     exclude_image_libraries,
+                                     only_image_libraries);
+      continue;
+    }
+
+    if (!custom_leaf_passes_filter(
+            user_library, include_remote_libraries, exclude_image_libraries, only_image_libraries))
+    {
       continue;
     }
 
     AssetLibraryReference library_reference;
-    library_reference.type = ASSET_LIBRARY_CUSTOM;
-    library_reference.custom_library_index = i;
+    BKE_preferences_asset_library_reference_set(&U, &library_reference, &user_library);
 
     const int enum_value = library_reference_to_enum_value(&library_reference);
     EnumPropertyItem tmp = {
@@ -121,11 +216,28 @@ static void rna_enum_add_custom_libraries(EnumPropertyItem **item,
   }
 }
 
+static void rna_enum_add_custom_libraries(EnumPropertyItem **item,
+                                          int *totitem,
+                                          const bool include_remote_libraries,
+                                          const bool exclude_image_libraries,
+                                          const bool only_image_libraries)
+{
+  /* Walk the folder hierarchy from the root so the selector order matches the Preferences tree. */
+  add_custom_libraries_recursive(item,
+                                 totitem,
+                                 /*parent=*/nullptr,
+                                 include_remote_libraries,
+                                 exclude_image_libraries,
+                                 only_image_libraries);
+}
+
 const EnumPropertyItem *library_reference_to_rna_enum_itemf(
     const bool include_readonly,
     const bool include_current_file,
     const bool include_remote_libraries,
-    const bool include_separate_online_essentials)
+    const bool include_separate_online_essentials,
+    const bool exclude_image_libraries,
+    const bool only_image_libraries)
 {
   EnumPropertyItem *item = nullptr;
   int totitem = 0;
@@ -151,7 +263,11 @@ const EnumPropertyItem *library_reference_to_rna_enum_itemf(
   {
     EnumPropertyItem *custom_item = nullptr;
     int tot_custom_item = 0;
-    rna_enum_add_custom_libraries(&custom_item, &tot_custom_item, include_remote_libraries);
+    rna_enum_add_custom_libraries(&custom_item,
+                                  &tot_custom_item,
+                                  include_remote_libraries,
+                                  exclude_image_libraries,
+                                  only_image_libraries);
 
     /* Add separator if needed. */
     if ((tot_custom_item > 0) && (include_readonly || include_current_file)) {
@@ -167,7 +283,7 @@ const EnumPropertyItem *library_reference_to_rna_enum_itemf(
   return item;
 }
 
-const EnumPropertyItem *custom_libraries_rna_enum_itemf()
+const EnumPropertyItem *custom_libraries_rna_enum_itemf(const bool only_image_libraries)
 {
   EnumPropertyItem *item = nullptr;
   int totitem = 0;
@@ -176,7 +292,9 @@ const EnumPropertyItem *custom_libraries_rna_enum_itemf()
       &item,
       &totitem,
       /* This function should return local/on-disk libraries only, so skip remote ones. */
-      /*include_remote_libraries=*/false);
+      /*include_remote_libraries=*/false,
+      /*exclude_image_libraries=*/false,
+      only_image_libraries);
 
   RNA_enum_item_end(&item, &totitem);
   return item;

@@ -282,10 +282,33 @@ std::unique_ptr<AbstractViewItemDragController> AbstractViewItem::create_drag_co
   return nullptr;
 }
 
+std::unique_ptr<AbstractViewItemDragController> AbstractViewItem::create_drag_controller(
+    const wmEvent * /*event*/) const
+{
+  return create_drag_controller();
+}
+
+bool AbstractViewItem::supports_drag() const
+{
+  return create_drag_controller() != nullptr;
+}
+
 std::unique_ptr<DropTargetInterface> AbstractViewItem::create_item_drop_target()
 {
   /* There's no drop target (and hence no drop support) by default. */
   return nullptr;
+}
+
+std::optional<rctf> AbstractViewItem::win_rect_in_region(const ARegion &region) const
+{
+  ButtonViewItem *item_but = view_item_button();
+  if (!item_but) {
+    return std::nullopt;
+  }
+
+  rctf win_rect;
+  block_to_window_rctf(&region, item_but->block, &win_rect, &item_but->rect);
+  return win_rect;
 }
 
 std::optional<std::string> AbstractViewItem::debug_name() const
@@ -431,7 +454,7 @@ void view_item_begin_rename(AbstractViewItem &item)
 
 bool view_item_supports_drag(const AbstractViewItem &item)
 {
-  return item.create_drag_controller() != nullptr;
+  return item.supports_drag();
 }
 
 bool view_item_popup_keep_open(const AbstractViewItem &item)
@@ -439,10 +462,10 @@ bool view_item_popup_keep_open(const AbstractViewItem &item)
   return item.get_view().get_popup_keep_open();
 }
 
-bool view_item_drag_start(bContext &C, AbstractViewItem &item)
+bool view_item_drag_start(bContext &C, AbstractViewItem &item, const wmEvent *event)
 {
   const std::unique_ptr<AbstractViewItemDragController> drag_controller =
-      item.create_drag_controller();
+      item.create_drag_controller(event);
   if (!drag_controller) {
     return false;
   }

@@ -44,8 +44,10 @@ set(SRC
   intern/armature_selection.cc
   intern/armature_update.cc
   intern/asset.cc
+  intern/asset_browser_settings.cc
   intern/asset_edit.cc
   intern/asset_weak_reference.cc
+  intern/asset_shelf_catalog_state.cc
   intern/attribute.cc
   intern/attribute_access.cc
   intern/attribute_legacy_convert.cc

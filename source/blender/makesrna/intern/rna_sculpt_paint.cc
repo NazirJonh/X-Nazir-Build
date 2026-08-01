@@ -22,6 +22,8 @@
 
 #include "BKE_paint.hh"
 
+#include "ED_asset_shelf.hh"
+
 #include "WM_api.hh"
 #include "WM_types.hh"
 
@@ -290,6 +292,21 @@ static bool rna_Paint_brush_poll(PointerRNA *ptr, PointerRNA value)
   const Brush *brush = static_cast<Brush *>(value.data);
 
   return (brush == nullptr) || (paint->runtime->ob_mode & brush->ob_mode) != 0;
+}
+
+static bool rna_Paint_brush_asset_is_favorite_get(PointerRNA *ptr)
+{
+  const Paint *paint = static_cast<Paint *>(ptr->data);
+  if (!paint->brush_asset_reference || !paint->runtime) {
+    return false;
+  }
+  /* Favorites are stored per brush asset shelf, which is keyed by the paint mode. */
+  const char *shelf_idname = ed::asset::shelf::brush_shelf_idname_from_paint_mode(
+      paint->runtime->paint_mode);
+  if (!shelf_idname) {
+    return false;
+  }
+  return ed::asset::shelf::shelf_asset_lists_is_favorite(shelf_idname, *paint->brush_asset_reference);
 }
 
 static void rna_Sculpt_update(bContext *C, PointerRNA * /*ptr*/)
@@ -691,6 +708,23 @@ static void rna_def_paint_curve_visibility_flag(StructRNA *srna,
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
+static void rna_def_color_picker_palette(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "ColorPickerPalette", nullptr);
+  RNA_def_struct_sdna(srna, "ColorPickerPalette");
+  RNA_def_struct_ui_text(
+      srna, "Color Picker Palette", "Palette associated with a specific color picker");
+
+  prop = RNA_def_property(srna, "palette", PROP_POINTER, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_struct_type(prop, "Palette");
+  RNA_def_property_ui_text(prop, "Palette", "Palette used by this color picker");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
 static void rna_def_paint(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -714,6 +748,14 @@ static void rna_def_paint(BlenderRNA *brna)
                            "Brush Asset Reference",
                            "A weak reference to the matching brush asset, used e.g. to restore "
                            "the last used brush on file load");
+
+  prop = RNA_def_property(srna, "brush_asset_is_favorite", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_boolean_funcs(prop, "rna_Paint_brush_asset_is_favorite_get", nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Brush Asset Is Favorite",
+      "The active brush asset is in the brush shelf's Favorites list for the current mode");
 
   prop = RNA_def_property(srna, "palette", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_EDITABLE);
@@ -2017,6 +2059,7 @@ void RNA_def_sculpt_paint(BlenderRNA *brna)
   /* *** Non-Animated *** */
   RNA_define_animate_sdna(false);
   rna_def_paint_curve(brna);
+  rna_def_color_picker_palette(brna);
   rna_def_paint(brna);
   rna_def_unified_paint_settings(brna);
   rna_def_mesh_automasking_settings(brna);

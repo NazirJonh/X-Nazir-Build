@@ -499,8 +499,7 @@ Vector<AssetLibraryReference> all_valid_asset_library_refs()
       continue;
     }
     AssetLibraryReference library_ref{};
-    library_ref.custom_library_index = i;
-    library_ref.type = ASSET_LIBRARY_CUSTOM;
+    BKE_preferences_asset_library_reference_set(&U, &library_ref, &asset_library);
     result.append(library_ref);
   }
 

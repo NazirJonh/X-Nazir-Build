@@ -7,6 +7,7 @@
  */
 
 #include <fmt/format.h>
+#include <memory>
 
 #include "AS_asset_representation.hh"
 #include "AS_remote_library.hh"
@@ -28,6 +29,8 @@
 
 #include "UI_interface.hh"
 
+#include "interface_drop_image.hh"
+
 namespace blender::ui {
 
 /* -------------------------------------------------------------------- */
@@ -45,7 +48,7 @@ static bool view_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
   }
 
   const char *disabled_info = "";
-  const bool can_drop = drop_target->can_drop(*drag, &disabled_info);
+  const bool can_drop = drop_target->can_drop(*C, *drag, &disabled_info);
 
   if (disabled_info) {
     drag->drop_state.disabled_info = disabled_info;
@@ -59,14 +62,28 @@ static std::string view_drop_tooltip(bContext *C,
                                      wmDropBox * /*drop*/)
 {
   const wmWindow *win = CTX_wm_window(C);
-  const ARegion *region = CTX_wm_region(C);
+  ARegion *region = CTX_wm_region(C);
   std::unique_ptr<DropTargetInterface> drop_target = region_views_find_drop_target_at(region, xy);
 
   if (drop_target == nullptr) {
     return {};
   }
 
-  return drop_target_tooltip(*region, *drop_target, *drag, *win->runtime->eventstate);
+  return drop_target_tooltip(*C, *region, *drop_target, *drag, *win->runtime->eventstate);
+}
+
+static void view_drop_draw_droptip(bContext *C, wmWindow *win, wmDrag *drag, const int xy[2])
+{
+  /* Views with a small scaled preview icon (e.g. Favorites reorder in the asset shelf, see
+   * #WM_event_drag_preview_icon) want the compact layout instead of the default one, so the
+   * view's own drop location hint underneath the cursor stays visible. */
+  if (ELEM(drag->type, WM_DRAG_GRID_ITEM_REORDER_ASSET, WM_DRAG_GRID_ITEM_REORDER_PY) &&
+      drag->preview_icon_id)
+  {
+    WM_drag_draw_compact_preview_fn(C, win, drag, xy);
+    return;
+  }
+  WM_drag_draw_default_fn(C, win, drag, xy);
 }
 
 /** \} */
@@ -159,6 +176,25 @@ static std::string drop_material_tooltip(bContext *C,
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Button Drop Target Lookup
+ * \{ */
+
+std::unique_ptr<DropTargetInterface> region_but_find_drop_target_at(bContext *C,
+                                                                    const ARegion *region,
+                                                                    const wmEvent *event)
+{
+  /* Dispatch to per-widget drop-target providers. Extend as more button types gain drop support. */
+  if (std::unique_ptr<DropTargetInterface> target = brush_texture_slot_drop_target_get(
+          C, region, event))
+  {
+    return target;
+  }
+  return nullptr;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Add User Interface Drop Boxes
  * \{ */
 
@@ -169,6 +205,7 @@ void dropboxes_ui()
   wmDropBox *dropbox = WM_dropbox_add(
       lb, "UI_OT_view_drop", view_drop_poll, nullptr, nullptr, view_drop_tooltip);
   dropbox->on_event_while_hover = region_view_scroll_at_borders;
+  dropbox->draw_droptip = view_drop_draw_droptip;
 
   WM_dropbox_add(lb,
                  "UI_OT_drop_name",
@@ -182,6 +219,9 @@ void dropboxes_ui()
                  drop_material_copy,
                  WM_drag_free_imported_drag_ID,
                  drop_material_tooltip);
+
+  /* Register texture/image drop functionality for template_id_preview */
+  DROP_IMAGE_register_dropboxes();
 }
 
 /** \} */

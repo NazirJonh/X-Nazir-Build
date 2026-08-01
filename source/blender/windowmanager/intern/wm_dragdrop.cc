@@ -13,6 +13,7 @@
 
 #include "AS_asset_representation.hh"
 
+#include "DNA_ID.h"
 #include "DNA_asset_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
@@ -406,9 +407,10 @@ static std::unique_ptr<bContextStore> wm_drop_ui_context_create(const bContext *
   return std::make_unique<bContextStore>(*but_context);
 }
 
-void WM_event_drag_image(wmDrag *drag, const ImBuf *imb, float scale)
+void WM_event_drag_image(wmDrag *drag, const ImBuf *imb, float scale, bool free_imb)
 {
   drag->imb = imb;
+  drag->imb_is_owned = free_imb;
   drag->imbuf_scale = scale;
 }
 
@@ -431,10 +433,11 @@ void WM_event_drag_path_override_poin_data_with_space_file_paths(const bContext 
   drag->poin = WM_drag_create_path_data(paths);
 }
 
-void WM_event_drag_preview_icon(wmDrag *drag, int icon_id)
+void WM_event_drag_preview_icon(wmDrag *drag, int icon_id, float scale)
 {
   BLI_assert_msg(!drag->imb, "Drag image and preview are mutually exclusive");
   drag->preview_icon_id = icon_id;
+  drag->preview_icon_scale = scale;
 }
 
 void WM_drag_data_free(eWM_DragDataType dragtype, void *poin)
@@ -467,6 +470,18 @@ void WM_drag_data_free(eWM_DragDataType dragtype, void *poin)
       bke::node_interface::item_reference_free(item_reference);
       break;
     }
+    case WM_DRAG_GRID_ITEM_REORDER_ASSET: {
+      MEM_delete(static_cast<wmDragGridItemReorderAsset *>(poin));
+      break;
+    }
+    case WM_DRAG_GRID_ITEM_REORDER_PY: {
+      MEM_delete(static_cast<wmDragGridItemReorderPy *>(poin));
+      break;
+    }
+    case WM_DRAG_GRID_ITEM_PY: {
+      MEM_delete(static_cast<wmDragGridItemPy *>(poin));
+      break;
+    }
     default:
       MEM_delete_void(poin);
       break;
@@ -480,6 +495,11 @@ void WM_drag_free(wmDrag *drag)
   }
   if (drag->flags & WM_DRAG_FREE_DATA) {
     WM_drag_data_free(drag->type, drag->poin);
+  }
+  if (drag->imb_is_owned && drag->imb) {
+    /* Preview image buffer generated for this drag (e.g. an external image file). */
+    IMB_freeImBuf(const_cast<ImBuf *>(drag->imb));
+    drag->imb = nullptr;
   }
   drag->drop_state.ui_context.reset();
   drag->ids.free_no_destruct();
@@ -615,6 +635,22 @@ static wmDropBox *wm_dropbox_active(bContext *C, wmDrag *drag, const wmEvent *ev
   bScreen *screen = WM_window_get_active_screen(win);
   ScrArea *area = BKE_screen_find_area_xy(screen, SPACE_TYPE_ANY, event->xy);
   wmDropBox *drop = nullptr;
+
+  /* Temporary popup regions are stored directly on the screen rather than in an area. They are
+   * also appended after regular regions, so search them back-to-front to find the topmost popup. */
+  for (ARegion *region = static_cast<ARegion *>(screen->regionbase.last); region;
+       region = region->prev)
+  {
+    if (region->regiontype != RGN_TYPE_TEMPORARY || !region->runtime->visible ||
+        !ED_region_contains_xy(region, event->xy))
+    {
+      continue;
+    }
+    drop = dropbox_active(C, &region->runtime->handlers, drag, event);
+    if (drop) {
+      return drop;
+    }
+  }
 
   if (area) {
     ARegion *region = ED_area_find_region_xy_visual(area, RGN_TYPE_ANY, event->xy);
@@ -952,6 +988,41 @@ wmDragAssetCatalog *WM_drag_get_asset_catalog_data(const wmDrag *drag)
   return static_cast<wmDragAssetCatalog *>(drag->poin);
 }
 
+wmDragAssetLibrary *WM_drag_get_asset_library_data(const wmDrag *drag)
+{
+  if (drag->type != WM_DRAG_ASSET_LIBRARY) {
+    return nullptr;
+  }
+
+  return static_cast<wmDragAssetLibrary *>(drag->poin);
+}
+
+const wmDragGridItemReorderAsset *WM_drag_get_grid_item_reorder_asset_data(const wmDrag *drag)
+{
+  if (drag->type != WM_DRAG_GRID_ITEM_REORDER_ASSET) {
+    return nullptr;
+  }
+
+  return static_cast<const wmDragGridItemReorderAsset *>(drag->poin);
+}
+
+const wmDragGridItemReorderPy *WM_drag_get_grid_item_reorder_py_data(const wmDrag *drag)
+{
+  if (drag->type != WM_DRAG_GRID_ITEM_REORDER_PY) {
+    return nullptr;
+  }
+
+  return static_cast<const wmDragGridItemReorderPy *>(drag->poin);
+}
+
+const wmDragGridItemPy *WM_drag_get_grid_item_py_data(const wmDrag *drag)
+{
+  if (drag->type != WM_DRAG_GRID_ITEM_PY) {
+    return nullptr;
+  }
+  return static_cast<const wmDragGridItemPy *>(drag->poin);
+}
+
 void WM_drag_add_asset_list_item(wmDrag *drag, const asset_system::AssetRepresentation *asset)
 {
   BLI_assert(drag->type == WM_DRAG_ASSET_LIST);
@@ -986,6 +1057,15 @@ const ListBaseT<wmDragAssetListItem> *WM_drag_asset_list_get(const wmDrag *drag)
   return &drag->asset_items;
 }
 
+static bool wm_drag_external_asset_exists_on_disk(const asset_system::AssetRepresentation &asset)
+{
+  /* Standalone image files are not stored inside a .blend. */
+  if (asset.get_id_type() == ID_IM) {
+    return BLI_is_file(asset.full_path().c_str());
+  }
+  return BLI_is_file(asset.full_library_path().c_str());
+}
+
 std::optional<bool> wm_drag_asset_path_exists(const wmDrag *drag)
 {
   if (!ELEM(drag->type, WM_DRAG_ASSET, WM_DRAG_ASSET_LIST)) {
@@ -993,7 +1073,11 @@ std::optional<bool> wm_drag_asset_path_exists(const wmDrag *drag)
   }
 
   if (const wmDragAsset *asset_drag = WM_drag_get_asset_data(drag, 0)) {
-    return BLI_is_file(asset_drag->asset->full_library_path().c_str());
+    const asset_system::AssetRepresentation &asset = *asset_drag->asset;
+    if (asset.local_id()) {
+      return true;
+    }
+    return wm_drag_external_asset_exists_on_disk(asset);
   }
 
   if (const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(drag)) {
@@ -1008,7 +1092,7 @@ std::optional<bool> wm_drag_asset_path_exists(const wmDrag *drag)
 
     for (wmDragAssetListItem &asset_item : *asset_drags) {
       if (!asset_item.is_external ||
-          BLI_is_file(asset_item.asset_data.external_info->asset->full_library_path().c_str()))
+          wm_drag_external_asset_exists_on_disk(*asset_item.asset_data.external_info->asset))
       {
         return true;
       }
@@ -1178,6 +1262,28 @@ const std::string WM_drag_get_item_name(wmDrag *drag)
       const wmDragAsset *asset_drag = WM_drag_get_asset_data(drag, 0);
       return asset_drag->asset->get_name();
     }
+    case WM_DRAG_GRID_ITEM_REORDER_ASSET: {
+      const wmDragGridItemReorderAsset *reorder_drag = WM_drag_get_grid_item_reorder_asset_data(
+          drag);
+      if (reorder_drag) {
+        return reorder_drag->display_name;
+      }
+      break;
+    }
+    case WM_DRAG_GRID_ITEM_REORDER_PY: {
+      const wmDragGridItemReorderPy *reorder_drag = WM_drag_get_grid_item_reorder_py_data(drag);
+      if (reorder_drag) {
+        return reorder_drag->source_identifier;
+      }
+      break;
+    }
+    case WM_DRAG_GRID_ITEM_PY: {
+      const wmDragGridItemPy *py_drag = WM_drag_get_grid_item_py_data(drag);
+      if (py_drag) {
+        return py_drag->source_identifier;
+      }
+      break;
+    }
     case WM_DRAG_PATH: {
       const wmDragPath *path_drag_data = static_cast<const wmDragPath *>(drag->poin);
       return path_drag_data->tooltip;
@@ -1242,7 +1348,7 @@ static void wm_drag_draw_icon(bContext * /*C*/, wmWindow * /*win*/, wmDrag *drag
                 col);
   }
   else if (drag->preview_icon_id) {
-    const int size = wm_drag_preview_icon_size_get();
+    const int size = round_fl_to_int(wm_drag_preview_icon_size_get() * drag->preview_icon_scale);
     x = xy[0] - (size / 2);
     y = xy[1] - (size / 2);
 
@@ -1347,6 +1453,45 @@ static void wm_drag_draw_tooltip(bContext *C, wmWindow *win, wmDrag *drag, const
   }
 }
 
+/**
+ * Compact alternative to the generic layout (icon straddling the cursor, name below it, tooltip
+ * above): keeps the whole label stack above the cursor, with the icon and item name on one line,
+ * so whatever is underneath the cursor (e.g. a view's own drop location hint, see
+ * #AbstractGridView::draw_drop_linehint) stays visible. Intended for drags with a small scaled
+ * preview icon (see #WM_event_drag_preview_icon's \a scale); callers opt into this via their
+ * dropbox's #wmDropBox.draw_droptip instead of the default drag drawing.
+ */
+static void wm_drag_draw_compact_preview(bContext * /*C*/,
+                                         wmWindow *win,
+                                         wmDrag *drag,
+                                         const int xy[2])
+{
+  const int size = round_fl_to_int(wm_drag_preview_icon_size_get() * drag->preview_icon_scale);
+  const int padding = 4 * UI_SCALE_FAC;
+  const int iconsize = UI_ICON_SIZE;
+
+  int row_x = xy[0] - (size / 2);
+  int row_y = xy[1] + padding;
+  if (row_y + size + padding + iconsize >= WM_window_native_pixel_y(win)) {
+    /* Not enough room above the cursor for the icon row plus tooltip: draw below instead. */
+    row_y = xy[1] - padding - size;
+  }
+
+  ui::icon_draw_preview(row_x, row_y, drag->preview_icon_id, 1.0f, 0.8f, size);
+  wm_drag_draw_item_name(drag, row_x + size + padding, row_y + (size - iconsize) / 2);
+
+  const int tooltip_y = row_y + size + padding;
+  const StringRef tooltip = drag->drop_state.tooltip;
+  const bool has_disabled_info = drag->drop_state.disabled_info &&
+                                 drag->drop_state.disabled_info.value()[0];
+  if (!tooltip.is_empty()) {
+    wm_drop_operator_draw(tooltip, row_x, tooltip_y);
+  }
+  else if (has_disabled_info) {
+    wm_drop_redalert_draw(*drag->drop_state.disabled_info, row_x, tooltip_y);
+  }
+}
+
 static void wm_drag_draw_default(bContext *C, wmWindow *win, wmDrag *drag, const int xy[2])
 {
   int xy_tmp[2] = {UNPACK2(xy)};
@@ -1381,6 +1526,11 @@ static void wm_drag_draw_default(bContext *C, wmWindow *win, wmDrag *drag, const
 void WM_drag_draw_default_fn(bContext *C, wmWindow *win, wmDrag *drag, const int xy[2])
 {
   wm_drag_draw_default(C, win, drag, xy);
+}
+
+void WM_drag_draw_compact_preview_fn(bContext *C, wmWindow *win, wmDrag *drag, const int xy[2])
+{
+  wm_drag_draw_compact_preview(C, win, drag, xy);
 }
 
 void wm_drags_draw(bContext *C, wmWindow *win)

@@ -11,16 +11,19 @@
 
 #include <fmt/format.h>
 
+#include "AS_asset_catalog.hh"
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 #include "AS_remote_library.hh"
 
+#include "BKE_asset.hh"
 #include "BKE_asset_edit.hh"
 #include "BKE_blendfile.hh"
 #include "BKE_bpath.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_icons.hh"
+#include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_preferences.h"
@@ -29,13 +32,24 @@
 #include "BKE_screen.hh"
 
 #include "BLI_fnmatch.h"
+#include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
 #include "BLI_rect.h"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_uuid.h"
+
+#include "DNA_image_types.h"
+#include "DNA_screen_types.h"
+#include "DNA_userdef_types.h"
 
 #include "ED_asset.hh"
+#include "ED_asset_image_library.hh"
+#include "ED_asset_image_utils.hh"
+#include "ED_asset_library.hh"
+#include "ED_asset_list.hh"
 #include "ED_screen.hh"
+#include "asset_shelf.hh"
 /* XXX needs access to the file list, should all be done via the asset system in future. */
 #include "ED_asset_menu_utils.hh"
 #include "ED_fileselect.hh"
@@ -56,6 +70,7 @@
 #include "WM_api.hh"
 
 #include "DNA_space_types.h"
+#include "DNA_uuid_types.h"
 
 #include "GPU_immediate.hh"
 
@@ -103,11 +118,11 @@ static IDVecStats asset_operation_get_id_vec_stats_from_ids(const Span<PointerRN
 static const char *asset_operation_unsupported_type_msg(const bool is_single)
 {
   const char *msg_single = N_(
-      "Data-block does not support asset operations - must be a "
-      "Brush, Collection, Node Group, Object, Pose Action, Scene, or World");
+      "Data-block does not support asset operations - must be "
+      "a " ED_ASSET_TYPE_IDS_NON_EXPERIMENTAL_UI_STRING);
   const char *msg_multiple = N_(
-      "No data-block selected that supports asset operations - select at least one "
-      "Brush, Collection, Node Group, Object, Pose Action, Scene, or World");
+      "No data-block selected that supports asset operations - select at least "
+      "one " ED_ASSET_TYPE_IDS_NON_EXPERIMENTAL_UI_STRING);
   return is_single ? msg_single : msg_multiple;
 }
 
@@ -208,6 +223,130 @@ static bool asset_mark_poll(bContext *C, const Span<PointerRNA> ids)
   }
 
   return true;
+}
+
+static wmOperatorStatus asset_image_import_mark_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+
+  /* Resolve the optional target catalog from its UUID string property. */
+  bUUID catalog_id;
+  bool has_catalog = false;
+  {
+    char catalog_id_str[UUID_STRING_SIZE];
+    RNA_string_get(op->ptr, "catalog_id", catalog_id_str);
+    has_catalog = (catalog_id_str[0] != '\0') &&
+                  BLI_uuid_parse_string(&catalog_id, catalog_id_str);
+  }
+
+  /* The catalog's simple name is a cached display string stored alongside the UUID. */
+  std::string catalog_simple_name;
+  if (has_catalog) {
+    if (SpaceFile *sfile = CTX_wm_space_file(C)) {
+      if (asset_system::AssetLibrary *library = ED_fileselect_active_asset_library_get(sfile)) {
+        if (const asset_system::AssetCatalog *catalog =
+                library->catalog_service().find_catalog(catalog_id))
+        {
+          catalog_simple_name = catalog->simple_name;
+        }
+      }
+    }
+  }
+
+  char dir[FILE_MAX];
+  RNA_string_get(op->ptr, "directory", dir);
+
+  int marked_num = 0;
+  bool changed = false;
+  RNA_BEGIN (op->ptr, itemptr, "files") {
+    char name[FILE_MAX];
+    RNA_string_get(&itemptr, "name", name);
+
+    char filepath[FILE_MAX];
+    BLI_path_join(filepath, sizeof(filepath), dir, name);
+
+    /* Only image files are relevant; other file types in the drag are ignored. */
+    if ((ED_path_extension_type(filepath) & FILE_TYPE_IMAGE) == 0) {
+      continue;
+    }
+
+    Image *image = BKE_image_load_exists(bmain, filepath, nullptr);
+    if (image == nullptr) {
+      BKE_reportf(op->reports, RPT_WARNING, "Could not load image \"%s\"", filepath);
+      continue;
+    }
+    /* #BKE_image_load_exists takes a loan on the user count regardless of whether the block was
+     * newly created or already existed. Release it unconditionally: below, #mark_id sets a fake
+     * user instead of a real reference, so without this the block would end up with `us == 2`
+     * for a single fake user. */
+    id_us_min(&image->id);
+
+    if (image->id.asset_data == nullptr) {
+      if (mark_id(&image->id)) {
+        generate_preview(C, &image->id);
+        marked_num++;
+        changed = true;
+      }
+    }
+
+    /* Assign (or re-assign) the catalog, also for images that were already assets. */
+    if (has_catalog && image->id.asset_data != nullptr) {
+      BKE_asset_metadata_catalog_id_set(
+          image->id.asset_data, catalog_id, catalog_simple_name.c_str());
+      changed = true;
+    }
+  }
+  RNA_END;
+
+  if (!changed) {
+    BKE_report(op->reports, RPT_WARNING, "No images to mark as assets were dropped");
+    return OPERATOR_CANCELLED;
+  }
+
+  if (marked_num == 1) {
+    BKE_report(op->reports, RPT_INFO, "1 image is now an asset");
+  }
+  else if (marked_num > 1) {
+    BKE_reportf(op->reports, RPT_INFO, "%d images are now assets", marked_num);
+  }
+
+  /* Rebuild the Current File asset library so the new assets appear immediately. */
+  if (SpaceFile *sfile = CTX_wm_space_file(C)) {
+    if (const FileAssetSelectParams *params = ED_fileselect_get_asset_params(sfile)) {
+      refresh_asset_library(C, params->asset_library_ref);
+    }
+  }
+  WM_main_add_notifier(NC_ID | NA_EDITED, nullptr);
+  WM_main_add_notifier(NC_ASSET | ND_ASSET_LIST | NA_ADDED, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+static void ASSET_OT_image_import_mark(wmOperatorType *ot)
+{
+  ot->name = "Import Images as Assets";
+  ot->description =
+      "Load dropped image files and mark them as assets, optionally assigning them to a catalog";
+  ot->idname = "ASSET_OT_image_import_mark";
+
+  ot->exec = asset_image_import_mark_exec;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+
+  PropertyRNA *prop;
+  prop = RNA_def_string_dir_path(
+      ot->srna, "directory", nullptr, FILE_MAX, "Directory", "Directory of the image files");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_collection_runtime(ot->srna, "files", RNA_OperatorFileListElement, "Files", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_string(ot->srna,
+                        "catalog_id",
+                        nullptr,
+                        UUID_STRING_SIZE,
+                        "Catalog UUID",
+                        "UUID of the catalog to assign the new assets to");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
 static void ASSET_OT_mark(wmOperatorType *ot)
@@ -450,9 +589,25 @@ static bool asset_library_refresh_poll(bContext *C)
 static void do_asset_library_refresh(bContext *C)
 {
   const AssetLibraryReference *library = CTX_wm_asset_library_ref(C);
+  if (!library) {
+    return;
+  }
+
+  /* For custom on-disk libraries, update the image index before clearing the list so
+   * that the next read job picks up any files added, moved or deleted since the last
+   * scan.  The index write is atomic and fast for unchanged libraries. */
+  if (library->type == ASSET_LIBRARY_CUSTOM) {
+    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_from_ref(&U, library);
+    if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
+      image_library_scan_and_index(user_lib->dirpath);
+      image_library_invalidate_cached_previews(user_lib->dirpath);
+    }
+  }
+
   /* Handles both global asset list storage and asset browsers. */
   list::clear(library, C);
   WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
+  list::tag_refresh_visible_asset_browsers(*library, C);
 }
 
 struct AssetLibraryAndRef {
@@ -522,7 +677,6 @@ static wmOperatorStatus asset_library_reload_listing_exec(bContext *C, wmOperato
    * thing on top of regular refreshing (otherwise it would be weird to use the refresh button for
    * this). */
   do_asset_library_refresh(C);
-
   return OPERATOR_FINISHED;
 }
 
@@ -1040,8 +1194,7 @@ static const bUserAssetLibrary *selected_asset_library(wmOperator *op)
 {
   const int enum_value = RNA_enum_get(op->ptr, "asset_library_reference");
   const AssetLibraryReference lib_ref = library_reference_from_enum_value(enum_value);
-  const bUserAssetLibrary *lib = BKE_preferences_asset_library_find_index(
-      &U, lib_ref.custom_library_index);
+  const bUserAssetLibrary *lib = BKE_preferences_asset_library_find_from_ref(&U, &lib_ref);
   return lib;
 }
 
@@ -1790,6 +1943,42 @@ static void ASSET_OT_assets_download(wmOperatorType *ot)
 }
 
 /* -------------------------------------------------------------------- */
+/** \name Set Asset Shelf Popup Size as Default
+ * \{ */
+
+static wmOperatorStatus asset_shelf_popup_set_default_size_exec(bContext *C, wmOperator * /*op*/)
+{
+  PointerRNA shelf_ptr = CTX_data_pointer_get_type(C, "asset_shelf", RNA_AssetShelf);
+  AssetShelf *shelf = static_cast<AssetShelf *>(shelf_ptr.data);
+  if (!shelf || shelf->idname[0] == '\0') {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Copy this file's current popup size (and the other stored view options) into the Preferences,
+   * so new files and files without their own per-`.blend` override open at this size. */
+  BKE_preferences_asset_shelf_popup_view_store(&U,
+                                               shelf->idname,
+                                               shelf->settings.preview_size,
+                                               short(shelf->settings.display_flag),
+                                               shelf->settings.popup_width_units,
+                                               shelf->settings.popup_height_units,
+                                               shelf->settings.recent_max_count);
+  U.runtime.is_dirty = true;
+  return OPERATOR_FINISHED;
+}
+
+static void ASSET_OT_shelf_popup_set_default_size(wmOperatorType *ot)
+{
+  ot->name = "Set Popup Size as Default";
+  ot->description = "Use the current popup size as the default for new files";
+  ot->idname = "ASSET_OT_shelf_popup_set_default_size";
+
+  ot->exec = asset_shelf_popup_set_default_size_exec;
+
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+/** \} */
 
 static wmOperatorStatus asset_download_exec(bContext *C, wmOperator *op)
 {
@@ -1837,6 +2026,7 @@ static void ASSET_OT_asset_download(wmOperatorType *ot)
 
 void operatortypes_asset()
 {
+  WM_operatortype_append(ASSET_OT_shelf_popup_set_default_size);
   WM_operatortype_append(ASSET_OT_mark);
   WM_operatortype_append(ASSET_OT_mark_single);
   WM_operatortype_append(ASSET_OT_clear);
@@ -1857,6 +2047,45 @@ void operatortypes_asset()
 
   WM_operatortype_append(ASSET_OT_assets_download);
   WM_operatortype_append(ASSET_OT_asset_download);
+
+  WM_operatortype_append(ASSET_OT_image_import_mark);
+
+  WM_operatortype_append(shelf::ASSETSHELF_OT_asset_favorite_toggle);
+  WM_operatortype_append(shelf::ASSETSHELF_OT_asset_favorite_reorder);
+  WM_operatortype_append(shelf::ASSETSHELF_OT_asset_favorite_reorder_to);
+  WM_operatortype_append(shelf::ASSETSHELF_OT_asset_recent_clear);
+  WM_operatortype_append(shelf::ASSETSHELF_OT_asset_favorites_clear);
 }
+
+namespace list {
+
+void library_refresh(bContext *C, const AssetLibraryReference *library_reference)
+{
+  if (!C) {
+    return;
+  }
+
+  /* Callers with an explicit library (e.g. after drag-drop) run the same logic as the operator
+   * without relying on context poll or #CTX_wm_asset_library_ref. */
+  if (library_reference) {
+    list::clear(library_reference, C);
+    WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
+    list::tag_refresh_visible_asset_browsers(*library_reference, C);
+    return;
+  }
+
+  wmOperatorType *ot = WM_operatortype_find("ASSET_OT_library_refresh", false);
+  if (ot && WM_operator_poll(C, ot)) {
+    const wmOperatorStatus status = WM_operator_name_call(
+        C, "ASSET_OT_library_refresh", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+    if (ELEM(status, OPERATOR_FINISHED, OPERATOR_RUNNING_MODAL)) {
+      return;
+    }
+  }
+
+  do_asset_library_refresh(C);
+}
+
+}  // namespace list
 
 }  // namespace blender::ed::asset

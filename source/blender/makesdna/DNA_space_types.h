@@ -22,6 +22,7 @@
 /* Hum ... Not really nice... but needed for spacebuts. */
 #include "DNA_vec_defaults.h"
 #include "DNA_view2d_types.h"
+#include "DNA_view3d_types.h" /* ImageGridSlotDNA */
 #include "DNA_viewer_path_types.h"
 
 namespace blender {
@@ -467,6 +468,9 @@ struct FileAssetSelectParams {
    * catalog to show. */
   bUUID catalog_id;
 
+  /** Persistent collapsed state of catalog paths in the asset browser catalog tree. */
+  ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
+
   eFileAssetImportMethod import_method = FILE_ASSET_IMPORT_LINK;
   eFileAssetImportFlags import_flags = {};
 
@@ -666,6 +670,12 @@ struct SpaceImage {
   /* Storage for sub-space types. */
   eSpaceImage_Mode mode_prev = SI_MODE_VIEW;
 
+  /** Paint-slot filter mode for the image browser popover (#TEMPLATE_ID_FILTER_*). */
+  char image_filter_mode = 0;
+  /** Slot type filter used when image_filter_mode includes the slot bit. */
+  char image_filter_slot_type = 0;
+  char _pad_filter[6] = {};
+
   char pin = 0;
 
   eSpaceImage_PixelRoundMode pixel_round_mode = SI_PIXEL_ROUND_DISABLED;
@@ -699,6 +709,15 @@ struct SpaceImage {
 
   MaskSpaceInfo mask_info;
   SpaceImageOverlay overlay;
+
+  /** Brush-texture image grid state — mirrors #View3D::image_grid /
+   * #image_grid_mask / #image_grid_preview_size (see #ImageGridOwner). */
+  short image_grid_preview_size = 0;
+  char _pad_image_grid[6] = {};
+  ImageGridSlotDNA image_grid;
+  ImageGridSlotDNA image_grid_mask;
+  /** Opaque lazy-cache anchor, same role as #View3D_Runtime::image_grid_state. */
+  void *image_grid_runtime = nullptr;
 };
 
 /** \} */
@@ -899,7 +918,13 @@ struct SpaceNode {
   struct bGPdata *gpd = nullptr;
 
   eSpaceNode_Gizmo_Flag gizmo_flag = {};
-  char _pad2[7] = {};
+
+  /** Paint-slot filter mode for the image browser popover (#TEMPLATE_ID_FILTER_*). Mirrors
+   * #SpaceImage. */
+  char image_filter_mode = 0;
+  /** Slot type filter used when image_filter_mode includes the slot bit. */
+  char image_filter_slot_type = 0;
+  char _pad2[5] = {};
 
   SpaceNodeOverlay overlay;
 

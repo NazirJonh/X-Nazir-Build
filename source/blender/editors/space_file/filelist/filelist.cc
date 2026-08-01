@@ -43,6 +43,7 @@
 #include "BKE_preferences.h"
 #include "BKE_preview_image.hh"
 
+#include "DNA_ID.h"
 #include "DNA_asset_types.h"
 #include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
@@ -191,10 +192,9 @@ static bool filelist_compare_asset_libraries(const AssetLibraryReference *librar
   }
   if (library_a->type == ASSET_LIBRARY_CUSTOM) {
     /* Don't only check the index, also check that it's valid. */
-    bUserAssetLibrary *library_ptr_a = BKE_preferences_asset_library_find_index(
-        &U, library_a->custom_library_index);
-    return (library_ptr_a != nullptr) &&
-           (library_a->custom_library_index == library_b->custom_library_index);
+    bUserAssetLibrary *library_ptr_a = BKE_preferences_asset_library_find_from_ref(&U, library_a);
+    bUserAssetLibrary *library_ptr_b = BKE_preferences_asset_library_find_from_ref(&U, library_b);
+    return (library_ptr_a != nullptr) && (library_ptr_a == library_ptr_b);
   }
 
   return true;
@@ -738,6 +738,29 @@ void filelist_online_asset_preview_request(const bContext *C, FileDirEntry *entr
   }
 }
 
+void filelist_on_disk_image_asset_preview_request(const bContext *C, FileDirEntry *entry)
+{
+  if (!entry->asset || entry->preview_icon_id) {
+    return;
+  }
+  if (entry->asset->is_online_only() || entry->asset->local_id()) {
+    return;
+  }
+  if (entry->asset->get_id_type() != ID_IM) {
+    return;
+  }
+  if (!filelist_file_preview_load_poll(entry)) {
+    return;
+  }
+
+  entry->asset->ensure_previewable(*C, CTX_wm_reports(C));
+  const PreviewImage *preview = entry->asset->get_preview();
+  if (!preview || !preview->runtime->icon_id) {
+    return;
+  }
+  entry->preview_icon_id = preview->runtime->icon_id;
+}
+
 /**
  * \return True if a new preview request was pushed, false otherwise (e.g. because the preview is
  * already loaded, invalid or not supported).
@@ -956,6 +979,8 @@ void filelist_clear_ex(FileList *filelist,
   if (do_asset_library) {
     filelist_clear_asset_library(filelist);
   }
+
+  filelist->flags &= ~(FL_IS_READY | FL_IS_PENDING);
 }
 
 static void filelist_clear_main_files(FileList *filelist,

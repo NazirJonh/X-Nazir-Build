@@ -21,6 +21,8 @@ set(SRC
   intern/asset_catalog.cc
   intern/asset_filter.cc
   intern/asset_import.cc
+  intern/asset_image_library.cc
+  intern/asset_image_utils.cc
   intern/asset_indexer.cc
   intern/asset_indexer_remote_file_status.cc
   intern/asset_indexer_remote_listing.cc
@@ -33,6 +35,8 @@ set(SRC
   intern/asset_ops.cc
   intern/asset_shelf.cc
   intern/asset_shelf_asset_view.cc
+  intern/asset_shelf_asset_lists.cc
+  intern/asset_shelf_asset_lists_ops.cc
   intern/asset_shelf_catalog_selector.cc
   intern/asset_shelf_popover.cc
   intern/asset_shelf_regiondata.cc
@@ -41,6 +45,8 @@ set(SRC
   intern/asset_type.cc
   intern/asset_ui_utils.cc
 
+  ED_asset_image_library.hh
+  ED_asset_image_utils.hh
   ED_asset_catalog.hh
   ED_asset_filter.hh
   ED_asset_import.hh
@@ -56,6 +62,7 @@ set(SRC
   intern/asset_indexer_remote_listing.hh
   intern/asset_library_reference.hh
   intern/asset_shelf.hh
+  intern/asset_shelf_asset_lists.hh
 )
 
 set(LIB
@@ -81,3 +88,17 @@ blender_add_lib(bf_editor_asset "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
 
 # RNA_prototypes.hh
 add_dependencies(bf_editor_asset bf_rna)
+
+if(WITH_GTESTS)
+  set(TEST_SRC
+    intern/tests/asset_shelf_asset_lists_test.cc
+  )
+  set(TEST_INC
+    # The test includes "asset_shelf_asset_lists.hh", which lives next to the sources it tests, not
+    # in the module root that `INC` starts with.
+    intern
+  )
+  set(TEST_LIB
+  )
+  blender_add_test_suite_lib(editor_asset "${TEST_SRC}" "${INC};${TEST_INC}" "${INC_SYS}" "${LIB};${TEST_LIB}")
+endif()

@@ -567,6 +567,15 @@ struct ARegionRuntime {
 
   /** Dummy panel used in popups so they can support layout panels. */
   Panel *popup_block_panel = nullptr;
+
+  /**
+   * Set during a panels layout pass (by the drawing code, e.g. the image-grid template) to request
+   * that #ED_region_panels_layout_ex keep the current scroll offset even when the content
+   * overflows the region. Used while a resize-grip is shrinking the content, so the panel area
+   * above the grip does not drift as #View2D::tot shrinks. Consumed (reset to false) at the end of
+   * the same layout pass — it must never persist across passes.
+   */
+  bool keep_scroll_offset_on_resize = false;
 };
 
 }  // namespace bke
@@ -612,6 +621,23 @@ struct uiListType {
 
   /** RNA integration. */
   ExtensionRNA rna_ext;
+};
+
+/** Registered Python grid provider type (no file persistence). */
+struct uiGridType {
+  uiGridType *next, *prev;
+
+  char idname[BKE_ST_MAXNAME];
+  char activate_operator[BKE_ST_MAXNAME];
+  char drag_operator[BKE_ST_MAXNAME];
+  char reorder_operator[BKE_ST_MAXNAME];
+
+  ExtensionRNA rna_ext;
+};
+
+/** Ephemeral instance used when dispatching Python #UIGrid callbacks. */
+struct uiGrid {
+  uiGridType *type = nullptr;
 };
 
 /* Header types. */
@@ -701,10 +727,20 @@ enum AssetShelfTypeFlag {
    * highlighting the asset as active.
    */
   ASSET_SHELF_TYPE_FLAG_ACTIVATE_FOR_CONTEXT_MENU = (1 << 3),
+  /**
+   * Scroll the active asset into the center of the grid the first time it is shown (e.g. a
+   * context-aware active asset set via #AssetShelfType.get_active_asset_from_context), instead of
+   * relying on the default top-of-grid scroll position.
+   */
+  ASSET_SHELF_TYPE_FLAG_CENTER_ACTIVE_ASSET_ON_OPEN = (1 << 4),
 };
 ENUM_OPERATORS(AssetShelfTypeFlag);
 
 #define ASSET_SHELF_PREVIEW_SIZE_DEFAULT 48
+
+/** Default width (in UI units) of the asset popover grid area when no user preference is stored.
+ */
+#define ASSET_SHELF_POPUP_WIDTH_UNITS_DEFAULT 60
 
 struct AssetShelfType {
   /** Unique name. */
@@ -727,6 +763,14 @@ struct AssetShelfType {
   std::string activate_operator;
   /** Operator to call when dragging a grid view item. */
   std::string drag_operator;
+  /** Operator to call to reorder a grid view item via Shift+drag. Empty means no reorder
+   * affordance is offered for this shelf type. */
+  std::string reorder_operator;
+  /** Operator to call from the item context menu's direction-based reorder entries (Move
+   * Left/Right, Reorder to Front/Back). Empty means those entries aren't offered for this shelf
+   * type. Separate from #reorder_operator because it uses a different calling convention (a
+   * "direction" enum instead of a target identifier and drop location). */
+  std::string reorder_direction_operator;
 
   AssetShelfTypeFlag flag;
 
@@ -750,6 +794,45 @@ struct AssetShelfType {
                             ui::Layout &layout);
 
   const AssetWeakReference *(*get_active_asset)(const AssetShelfType *shelf_type);
+  /* Like #get_active_asset but with context (e.g. image grid brush texture slot in popover).
+   * When set, asset shelf grid build prefers this over #get_active_asset. */
+  const AssetWeakReference *(*get_active_asset_from_context)(const AssetShelfType *shelf_type,
+                                                             const bContext *C);
+
+  /**
+   * Optional fallback equality check for #AssetViewItem::should_be_active(), used when the
+   * active asset weak reference does not equal a grid item's own weak reference by identity.
+   * Needed by shelf types whose #get_active_asset_from_context returns a reference in a
+   * different addressing scheme than #AssetRepresentation::make_weak_reference() (e.g.
+   * "Image/<id-name>" for a brush texture localized from an asset, vs. the library-relative
+   * asset path). \a local_id is the grid item's own local ID (never null when this is called).
+   */
+  bool (*active_asset_name_fallback_matches)(const AssetShelfType *shelf_type,
+                                             const ID *local_id,
+                                             const AssetWeakReference &active_asset);
+
+  /**
+   * Called while building a grid tile, to let this shelf type read any extra
+   * #activate_operator parameters it needs from the layout context (as set up via
+   * #setup_popover_layout) — e.g. a target ID's session UID and an auxiliary flag for a
+   * texture-slot-aware activate operator. Optional; most shelf types' #activate_operator needs
+   * no parameters beyond the asset itself.
+   */
+  void (*grid_tile_activate_extra_params)(const ui::Layout &layout,
+                                          uint32_t &r_session_uid,
+                                          bool &r_use_mask_slot);
+
+  /**
+   * Called once before the browse popover block is created (e.g. to sync shelf state).
+   * Set by the shelf owner module; avoids a direct dependency from bf_editor_interface on
+   * bf_editor_space_view3d.
+   */
+  void (*pre_popover_invoke)(bContext &C, AssetShelfType *shelf_type);
+  /**
+   * Called on every popover refresh to push layout context members required by the shelf's
+   * activate operator (e.g. brush target pointer for the image-texture shelf).
+   */
+  void (*setup_popover_layout)(bContext &C, ui::Layout &layout);
 
   /** RNA integration. */
   ExtensionRNA rna_ext;

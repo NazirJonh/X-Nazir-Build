@@ -293,6 +293,18 @@ class AbstractViewItem {
    */
   virtual std::unique_ptr<AbstractViewItemDragController> create_drag_controller() const;
   /**
+   * Like #create_drag_controller(), but may inspect \a event (e.g. modifier keys) to choose a
+   * different drag controller. The default implementation ignores the event and calls the
+   * overload above.
+   */
+  virtual std::unique_ptr<AbstractViewItemDragController> create_drag_controller(
+      const wmEvent *event) const;
+  /**
+   * Whether the item should enter #BUTTON_STATE_WAIT_DRAG on press (may be true even when the
+   * no-event #create_drag_controller() is null, e.g. modifier-gated drags).
+   */
+  virtual bool supports_drag() const;
+  /**
    * If an item wants to support dropping data into it, it has to return a drop target here.
    * That is an object implementing #DropTargetInterface.
    *
@@ -300,6 +312,12 @@ class AbstractViewItem {
    *       around currently. So it can not contain persistent state.
    */
   virtual std::unique_ptr<DropTargetInterface> create_item_drop_target();
+
+  /**
+   * Window-space rectangle of this item's #ButtonType::ViewItem button, or unset when the button
+   * is not available (e.g. filtered / not built). Used by drop targets that need hit geometry.
+   */
+  std::optional<rctf> win_rect_in_region(const ARegion &region) const;
 
   /**
    * View types should implement this to return some name or identifier of the item, which is

@@ -23,6 +23,8 @@ class BrushAssetShelf:
         'ACTIVATE_FOR_CONTEXT_MENU',
     }
     bl_activate_operator = "BRUSH_OT_asset_activate"
+    bl_reorder_operator = "ASSETSHELF_OT_asset_favorite_reorder_to"
+    bl_reorder_direction_operator = "ASSETSHELF_OT_asset_favorite_reorder"
     filter_brush = True
     brush_type_prop = None
     mode_prop = None
@@ -411,6 +413,8 @@ class BrushSelectPanel(BrushPanel):
 
         col = row.column()
         col.menu("VIEW3D_MT_brush_context_menu", icon='DOWNARROW_HLT', text="")
+        favorite_icon = 'SOLO_ON' if settings.brush_asset_is_favorite else 'SOLO_OFF'
+        col.operator("assetshelf.asset_favorite_toggle", text="", icon=favorite_icon)
 
 
 class ColorPalettePanel(BrushPanel):
@@ -445,7 +449,7 @@ class ColorPalettePanel(BrushPanel):
 
         layout.template_ID(settings, "palette", new="palette.new")
         if settings.palette:
-            layout.template_palette(settings, "palette")
+            layout.template_palette(settings, "palette", show_empty_message=True, show_sort_buttons=True)
 
 
 class ClonePanel(BrushPanel):
@@ -503,7 +507,12 @@ class ClonePanel(BrushPanel):
 
             clone_text = mesh.uv_layer_clone.name if mesh.uv_layer_clone else ""
             col.label(text="Source Clone Image")
-            col.template_ID(settings, "clone_image")
+            mat = ob.active_material if ob else None
+            col.template_ID_browser(
+                settings, "clone_image",
+                new="image.new", open="image.open",
+                material=mat,
+            )
             col.label(text="Source Clone UV Map")
             col.menu("VIEW3D_MT_tools_projectpaint_clone", text=clone_text, translate=False)
 
@@ -512,16 +521,28 @@ class TextureMaskPanel(BrushPanel):
     bl_label = "Texture Mask"
     bl_options = {'DEFAULT_CLOSED'}
 
+    def draw_header_preset(self, context):
+        tool_settings = context.tool_settings
+        prop_name = (
+            "mask_texture_grid_display_view3d" if context.space_data.type == 'VIEW_3D' else
+            "mask_texture_grid_display_image_editor"
+        )
+        self.layout.prop_menu_enum(tool_settings, prop_name, text="", icon='DOWNARROW_HLT')
+
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
 
-        brush = context.tool_settings.image_paint.brush
+        tool_settings = context.tool_settings
+        brush = tool_settings.image_paint.brush
         mask_tex_slot = brush.mask_texture_slot
 
-        col = layout.column()
-        col.template_ID_preview(mask_tex_slot, "texture", new="texture.new", rows=3, cols=8)
+        draw_brush_texture_image_grid(
+            layout, mask_tex_slot,
+            tool_settings.mask_texture_grid_display_image_editor,
+            self.is_popover,
+        )
 
         # map_mode
         layout.row().prop(mask_tex_slot, "mask_map_mode", text="Mask Mapping")
@@ -1568,6 +1589,33 @@ def draw_color_settings(context, layout, brush, color_type=False):
             col.prop(brush, "gradient_stroke_mode", text="Gradient Mapping")
             if brush.gradient_stroke_mode in {'SPACING_REPEAT', 'SPACING_CLAMP'}:
                 col.prop(brush, "grad_spacing")
+
+
+def draw_brush_texture_image_grid(layout, tex_slot, display_mode, is_popover=False):
+    """
+    Draw either the compact asset image grid or the legacy ID preview list,
+    per the panel's `*_grid_display_*` tool setting.
+    """
+    col = layout.column()
+    if display_mode == 'ASSET_GRID':
+        col.template_asset_image_grid(tex_slot, "texture", is_popover=is_popover)
+    else:
+        col.template_ID_preview(tex_slot, "texture", new="texture.new", rows=3, cols=8)
+    return col
+
+
+def draw_brush_texture_properties(layout, brush, sculpt, *, default_closed=True):
+    header, panel = layout.panel("brush_texture_properties", default_closed=default_closed)
+    header.label(text="Properties")
+    if panel:
+        brush_texture_settings(panel, brush, sculpt)
+
+
+def draw_brush_mask_texture_properties(layout, brush, *, default_closed=True):
+    header, panel = layout.panel("brush_mask_texture_properties", default_closed=default_closed)
+    header.label(text="Properties")
+    if panel:
+        brush_mask_texture_settings(panel, brush)
 
 
 # Used in both the View3D toolbar and texture properties

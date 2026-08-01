@@ -318,7 +318,7 @@ void AssetList::remap_id(ID * /*id_old*/, ID * /*id_new*/) const
 /** \name Runtime asset list cache
  * \{ */
 
-static void clear(const AssetLibraryReference *library_reference, wmWindowManager *wm);
+void clear(const AssetLibraryReference *library_reference, wmWindowManager *wm);
 static void on_save_post(Main *main, PointerRNA **pointers, int num_pointers, void *arg);
 
 /**
@@ -377,11 +377,12 @@ static std::optional<eFileSelectType> asset_library_reference_to_fileselect_type
     case ASSET_LIBRARY_ONLINE_ESSENTIALS:
       return FILE_ASSET_LIBRARY_ESSENTIALS;
     case ASSET_LIBRARY_CUSTOM: {
-      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_index(
-          &U, library_reference.custom_library_index);
+      const bUserAssetLibrary *user_library = BKE_preferences_asset_library_find_from_ref(
+          &U, &library_reference);
       if (!user_library) {
-        /* The caller should make sure the passed library reference is valid. */
-        BLI_assert_unreachable();
+        /* Not a caller bug: a reference can legitimately name a library that is gone (renamed, or
+         * the file came from another machine). Callers that can explain this to the user gate on
+         * #library_reference_ensure_resolved(); everyone else simply fetches nothing. */
         return std::nullopt;
       }
 
@@ -419,7 +420,7 @@ void asset_reading_region_listen_fn(const wmRegionListenerParams *params)
 
   switch (wmn->category) {
     case NC_ASSET:
-      if (ELEM(wmn->data, ND_ASSET_LIST_READING, ND_ASSET_LIST_PREVIEW)) {
+      if (ELEM(wmn->data, ND_ASSET_LIST_READING, ND_ASSET_LIST_PREVIEW, ND_ASSET_CATALOGS)) {
         ED_region_tag_refresh_ui(region);
       }
       if (ELEM(wmn->action, NA_DOWNLOAD_FINISHED)) {
@@ -507,6 +508,38 @@ static void foreach_visible_asset_browser_showing_library(
           }
         }
       }
+    }
+  }
+}
+
+void tag_refresh_visible_asset_browsers(const AssetLibraryReference &library_reference,
+                                        const bContext *C)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (!wm) {
+    return;
+  }
+
+  /* Tag each matching area for refresh so file_refresh() re-runs on next draw.
+   * foreach_visible_asset_browser_showing_library iterates const ScrArea and therefore cannot
+   * call ED_area_tag_refresh, so the loop is inlined here with a mutable area reference. */
+  for (const wmWindow &win : wm->windows) {
+    const bScreen *screen = WM_window_get_active_screen(&win);
+    for (ScrArea &area : screen->areabase) {
+      if (area.spacetype != SPACE_FILE) {
+        continue;
+      }
+      const SpaceFile *sfile = reinterpret_cast<const SpaceFile *>(area.spacedata.first);
+      if (sfile->browse_mode != FILE_BROWSE_MODE_ASSETS) {
+        continue;
+      }
+      if (!sfile->asset_params) {
+        continue;
+      }
+      if (sfile->asset_params->asset_library_ref != library_reference) {
+        continue;
+      }
+      ED_area_tag_refresh(&area);
     }
   }
 }

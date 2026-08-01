@@ -42,6 +42,12 @@ int userpref_ui_asset_libraries_count();
 std::optional<int> userpref_ui_asset_libraries_index_from_user_library(
     const bUserAssetLibrary &user_library);
 
+/**
+ * The user asset library backing the active item in the Preferences list, or null when the active
+ * item is a built-in entry (All / Essentials) or out of range.
+ */
+bUserAssetLibrary *userpref_ui_active_asset_library();
+
 /** \} */
 
 /* `userpref_ops.cc` */

@@ -52,6 +52,7 @@ struct ViewLayer;
 struct bContext;
 struct rcti;
 struct uiListType;
+struct uiGridType;
 struct WorkSpace;
 struct WorkSpaceLayout;
 struct wmDrag;
@@ -1521,6 +1522,14 @@ void WM_uilisttype_to_full_list_id(const uiListType *ult,
  */
 const char *WM_uilisttype_list_id_get(const uiListType *ult, uiList *list);
 
+/* `wm_uigrid_type.cc` */
+
+void WM_uigridtype_init();
+uiGridType *WM_uigridtype_find(StringRef idname, bool quiet);
+bool WM_uigridtype_add(uiGridType *ugt);
+void WM_uigridtype_remove_ptr(Main *bmain, uiGridType *ugt);
+void WM_uigridtype_free();
+
 /* `wm_menu_type.cc` */
 
 /**
@@ -1691,13 +1700,20 @@ wmDrag *WM_drag_data_create(
  * Invoke dragging using the given \a drag data.
  */
 void WM_event_start_prepared_drag(bContext *C, wmDrag *drag);
-void WM_event_drag_image(wmDrag *drag, const ImBuf *imb, float scale);
+/**
+ * Set an image buffer to draw around the cursor during the drag.
+ *
+ * \param free_imb: When true, \a drag takes ownership of \a imb and frees it in #WM_drag_free.
+ * Pass true for buffers generated specifically for this drag (e.g. previews of external image
+ * files); leave false for buffers borrowed from an existing data-block.
+ */
+void WM_event_drag_image(wmDrag *drag, const ImBuf *imb, float scale, bool free_imb = false);
 /**
  * Overrides the `drag.poin` event to include all selected files in the space file where the event
  * started.
  */
 void WM_event_drag_path_override_poin_data_with_space_file_paths(const bContext *, wmDrag *drag);
-void WM_event_drag_preview_icon(wmDrag *drag, int icon_id);
+void WM_event_drag_preview_icon(wmDrag *drag, int icon_id, float scale = 1.0f);
 void WM_drag_free(wmDrag *drag);
 void WM_drag_data_free(eWM_DragDataType dragtype, void *poin);
 void WM_drag_free_list(ListBaseT<wmDrag> *lb);
@@ -1728,6 +1744,12 @@ void WM_dropbox_update_ot();
 
 void WM_drag_draw_item_name_fn(bContext *C, wmWindow *win, wmDrag *drag, const int xy[2]);
 void WM_drag_draw_default_fn(bContext *C, wmWindow *win, wmDrag *drag, const int xy[2]);
+/**
+ * Compact preview layout (small icon + name on one line, stacked above the cursor) for dropboxes
+ * that want an alternative to #WM_drag_draw_default_fn -- e.g. so a view's own drop location hint
+ * underneath stays visible. See #wm_drag_draw_compact_preview.
+ */
+void WM_drag_draw_compact_preview_fn(bContext *C, wmWindow *win, wmDrag *drag, const int xy[2]);
 /**
  * `spaceid` / `regionid` are zero for window drop maps.
  */
@@ -1780,6 +1802,12 @@ ID *WM_drag_get_local_ID_or_import_from_asset(const bContext *C, const wmDrag *d
 void WM_drag_free_imported_drag_ID(Main *bmain, wmDrag *drag, wmDropBox *drop);
 
 wmDragAssetCatalog *WM_drag_get_asset_catalog_data(const wmDrag *drag);
+
+wmDragAssetLibrary *WM_drag_get_asset_library_data(const wmDrag *drag);
+
+const wmDragGridItemReorderAsset *WM_drag_get_grid_item_reorder_asset_data(const wmDrag *drag);
+const wmDragGridItemReorderPy *WM_drag_get_grid_item_reorder_py_data(const wmDrag *drag);
+const wmDragGridItemPy *WM_drag_get_grid_item_py_data(const wmDrag *drag);
 
 /**
  * \note Does not store \a asset in any way, so it's fine to pass a temporary.
@@ -1940,6 +1968,8 @@ void *WM_jobs_customdata_from_type(wmWindowManager *wm, const void *owner, int j
 bool WM_jobs_is_running(const wmJob *wm_job);
 bool WM_jobs_is_stopped(const wmWindowManager *wm, const void *owner);
 void *WM_jobs_customdata_get(wmJob *wm_job);
+/** Stop flag for the worker; valid until the job is freed. */
+const bool *WM_jobs_stop_flag(wmJob *wm_job);
 void WM_jobs_customdata_set(wmJob *wm_job, void *customdata, void (*free)(void *));
 void WM_jobs_timer(wmJob *wm_job,
                    double time_step,

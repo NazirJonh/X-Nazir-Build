@@ -7,13 +7,23 @@
  */
 
 #include "BKE_context.hh"
+#include "BKE_global.hh"
 #include "BKE_main.hh"
+#include "BKE_preferences.h"
+
+#include "AS_asset_library.hh"
 
 #include "BLI_listbase.h"
 #include "BLI_string.h"
 
+#include "DNA_ID.h"
+#include "DNA_userdef_types.h"
+
 #include "WM_api.hh"
 #include "WM_types.hh"
+
+#include "ED_asset_image_library.hh"
+#include "ED_asset_list.hh"
 
 #include "../filelist.hh"
 #include "filelist_intern.hh"
@@ -21,9 +31,38 @@
 
 namespace blender {
 
+static void filelist_readjob_ensure_image_libraries_indexed_for_all()
+{
+  for (bUserAssetLibrary &user_lib : U.asset_libraries) {
+    if ((user_lib.flag & ASSET_LIBRARY_IS_IMAGE_LIBRARY) == 0) {
+      continue;
+    }
+    if (!BKE_preferences_asset_library_is_effectively_enabled(&user_lib)) {
+      continue;
+    }
+    if (!user_lib.dirpath[0]) {
+      continue;
+    }
+    if (!ed::asset::image_library_needs_reindex(user_lib.dirpath)) {
+      continue;
+    }
+    ed::asset::image_library_scan_and_index(user_lib.dirpath);
+  }
+}
+
 static void filelist_readjob_initjob(void *flrjv)
 {
   FileListReadJob *flrj = static_cast<FileListReadJob *>(flrjv);
+  if (flrj->filelist->asset_library_ref) {
+    /* All Libraries nests every custom root, including image libraries. Index those on the main
+     * thread before the worker walks them — the single-library ensure below only sees one root. */
+    if (flrj->filelist->asset_library_ref->type == ASSET_LIBRARY_ALL) {
+      filelist_readjob_ensure_image_libraries_indexed_for_all();
+    }
+    else {
+      filelist_readjob_ensure_image_library_indexed(flrj);
+    }
+  }
   if (flrj->filelist->start_job_fn) {
     flrj->filelist->start_job_fn(flrj);
   }
@@ -119,6 +158,24 @@ static void filelist_readjob_update(void *flrjv)
     flrj->filelist->flags |= (FL_NEED_SORTING | FL_NEED_FILTERING);
   }
 
+  if (new_entries_num) {
+    int image_entries = 0;
+    for (const FileListInternEntry &entry : new_entries) {
+      if (entry.blentype == ID_IM) {
+        image_entries++;
+      }
+    }
+
+    if (image_entries > 0 && flrj->filelist->asset_library_ref &&
+        flrj->filelist->asset_library_ref->type != ASSET_LIBRARY_ALL)
+    {
+      /* The read-job worker may discover image assets after the combined All Libraries list was
+       * fetched. Invalidate All on the main-thread update, not from the worker callback. */
+      const AssetLibraryReference all_library_ref = asset_system::all_library_reference();
+      ed::asset::list::clear(&all_library_ref, flrj->wm);
+    }
+  }
+
   /* if no new_entries_num, this is NOP */
   BLI_movelisttolist(&fl_intern->entries, &new_entries);
   flrj->filelist->filelist.entries_num = std::max(entries_num, 0) + new_entries_num;
@@ -136,6 +193,15 @@ static void filelist_readjob_timer_step(void *flrjv)
 static void filelist_readjob_endjob(void *flrjv)
 {
   FileListReadJob *flrj = static_cast<FileListReadJob *>(flrjv);
+
+  /* Canceled jobs (#filelist_readjob_stop) must not resurrect partial entries into the filelist.
+   * That would clear #FL_FORCE_RESET semantics and leave stale UI until a manual refresh. */
+  if (flrj->stop && *flrj->stop) {
+    flrj->filelist->flags &= ~FL_IS_PENDING;
+    WM_reports_from_reports_move(flrj->wm, &flrj->reports);
+    BKE_reports_free(&flrj->reports);
+    return;
+  }
 
   /* In case there would be some dangling update... */
   filelist_readjob_update(flrjv);
@@ -227,6 +293,7 @@ static void filelist_readjob_start_ex(FileList *filelist,
   if (force_blocking_read || no_threads) {
     /* Single threaded execution. Just directly call the callbacks. */
     wmJobWorkerStatus worker_status = {};
+    flrj->stop = &worker_status.stop;
     filelist_readjob_startjob(flrj, &worker_status);
     filelist_readjob_endjob(flrj);
     filelist_readjob_free(flrj);
@@ -252,6 +319,7 @@ static void filelist_readjob_start_ex(FileList *filelist,
                     filelist_readjob_initjob,
                     filelist_readjob_update,
                     filelist_readjob_endjob);
+  flrj->stop = WM_jobs_stop_flag(wm_job);
 
   /* start the job */
   WM_jobs_start(CTX_wm_manager(C), wm_job);

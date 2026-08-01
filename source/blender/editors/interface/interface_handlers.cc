@@ -64,6 +64,7 @@
 #include "ED_undo.hh"
 
 #include "UI_abstract_view.hh"
+#include "UI_grid_view.hh"
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
 #include "UI_string_search.hh"
@@ -91,6 +92,35 @@
 namespace blender::ui {
 
 static CLG_LogRef LOG = {"ui.handler"};
+
+/* -------------------------------------------------------------------- */
+/** \name Pre-Button Region Handlers
+ *
+ * Editor-registered handlers tried before button activation so embedded custom views (e.g. the
+ * brush texture image grid) can intercept events without the generic UI layer depending on a
+ * specific space. See #region_pre_button_handler_add.
+ * \{ */
+
+static Vector<RegionPreButtonHandlerFn> g_region_pre_button_handlers;
+
+void region_pre_button_handler_add(RegionPreButtonHandlerFn fn)
+{
+  if (fn && !g_region_pre_button_handlers.contains(fn)) {
+    g_region_pre_button_handlers.append(fn);
+  }
+}
+
+static int region_pre_button_handlers_call(bContext *C, const wmEvent *event, ARegion *region)
+{
+  for (const RegionPreButtonHandlerFn fn : g_region_pre_button_handlers) {
+    if (fn(C, event, region) == WM_UI_HANDLER_BREAK) {
+      return WM_UI_HANDLER_BREAK;
+    }
+  }
+  return WM_UI_HANDLER_CONTINUE;
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Feature Defines
@@ -2280,7 +2310,7 @@ static bool but_drag_init(bContext *C, Button *but, HandleButtonData *data, cons
     else if (but->type == ButtonType::ViewItem) {
       const auto *view_item_but = static_cast<ButtonViewItem *>(but);
       if (view_item_but->view_item) {
-        return view_item_drag_start(*C, *view_item_but->view_item);
+        return view_item_drag_start(*C, *view_item_but->view_item, event);
       }
     }
     else {
@@ -4779,6 +4809,15 @@ static void numedit_apply(bContext *C, Block *block, Button *but, HandleButtonDa
   }
 
   ED_region_tag_redraw(data->region);
+  /* Scrollbar/grip of a scroll-clip window: a redraw alone would re-use the stale button
+   * geometry, the grid rows need a UI refresh to be rebuilt at the new scroll offset. */
+  if (ELEM(but->type, ButtonType::Scroll, ButtonType::Grip)) {
+    if (but->grid_scroll_clip_owner && but->grid_scroll_clip_owner->scroll_clip_enabled() &&
+        (but->drawflag & BUT_GRID_SCROLL_CLIP))
+    {
+      ED_region_tag_refresh_ui(data->region);
+    }
+  }
 }
 
 static void but_extra_operator_icon_apply(bContext *C, Button *but, ButtonExtraOpIcon *op_icon)
@@ -4883,7 +4922,9 @@ static void block_open_begin(bContext *C, Button *but, HandleButtonData *data)
   }
 
   if (func || handlefunc) {
-    data->menu = popup_block_create(C, data->region, but, func, handlefunc, arg, nullptr, false);
+    const bool can_refresh = (handlefunc == block_func_COLOR);
+    data->menu = popup_block_create(
+        C, data->region, but, func, handlefunc, arg, nullptr, can_refresh);
     if (but->block->handle) {
       data->menu->popup = but->block->handle->popup;
     }
@@ -5704,7 +5745,9 @@ static void force_activate_view_item_but(bContext *C,
   ED_region_tag_redraw_no_rebuild(region);
   ED_region_tag_refresh_ui(region);
 
-  if (close_popup && !view_item_popup_keep_open(*but->view_item)) {
+  const bool will_close = close_popup && !view_item_popup_keep_open(*but->view_item);
+
+  if (will_close) {
     popup_menu_close_from_but(but);
   }
 }
@@ -5725,7 +5768,20 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
 
           if (block_is_popup_any(but->block)) {
             /* TODO(!147047): This should be handled in selection operator. */
-            force_activate_view_item_but(C, data->region, view_item_but, false);
+            /* For select-on-click items, defer activation to KM_CLICK in
+             * handle_view_item_event so drag-to-scroll does not trigger selection on press. */
+            const bool supports_drag = view_item_supports_drag(*view_item_but->view_item);
+            const bool shift_drag = supports_drag && (event->modifier & KM_SHIFT);
+            if (!view_item_but->view_item->is_select_on_click() && !shift_drag) {
+              force_activate_view_item_but(C, data->region, view_item_but, false);
+            }
+            /* Popovers return BREAK before the non-popup path sets WAIT_DRAG; item DnD (e.g.
+             * Shift+reorder in the asset shelf Favorites grid) still needs the drag threshold. */
+            if (supports_drag) {
+              button_activate_state(C, but, BUTTON_STATE_WAIT_DRAG);
+              data->dragstartx = event->xy[0];
+              data->dragstarty = event->xy[1];
+            }
             return WM_UI_HANDLER_BREAK;
           }
 
@@ -5739,6 +5795,33 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
            * registered to add custom activate or drag operators (the pose library does this for
            * example). */
           return WM_UI_HANDLER_CONTINUE;
+        case KM_RELEASE:
+          if (block_is_popup_any(but->block) && view_item_but->view_item->is_select_on_click()) {
+            /* Popup handlers normally consume events (return `WM_UI_HANDLER_BREAK`), preventing
+             * the WM from synthesizing `KM_CLICK`. Activate on `KM_RELEASE` as a substitute.
+             * Drag-to-scroll releases are filtered upstream by returning `WM_UI_HANDLER_BREAK`
+             * before this handler is reached, so reaching here usually means a genuine tap —
+             * close the popup (unless the view opts to stay open via #set_popup_keep_open).
+             * The exception is #popup_handler() itself returning `WM_UI_HANDLER_CONTINUE` for a
+             * `LEFTMOUSE`/`KM_RELEASE` while a WM drag is active, so the release can still reach
+             * `EVT_DROP` conversion; the grid-item reorder case below handles that exception.
+             *
+             * That assumption does not hold for a grid-item Shift+drag reorder started on a
+             * *different* item and released over this one: the source button already exited
+             * (#but_drag_init calls #button_activate_state EXIT as soon as its own drag
+             * threshold is crossed) and the reorder drop is handled entirely outside the button
+             * system (#GridItemReorderDropTarget::on_drop), so nothing upstream consumes this
+             * release for the item under the cursor -- it reaches this HIGHLIGHT-state handler
+             * as if it were a plain tap on the drop target, wrongly re-activating and closing
+             * the popup right after the drop's own activation already ran. Reuse the WM's own
+             * click/drag threshold test against the press position to tell the two apart, the
+             * same test used to decide whether to synthesize `KM_CLICK` in the first place. */
+            if (!WM_event_drag_test(event, event->prev_press_xy)) {
+              force_activate_view_item_but(C, data->region, view_item_but, true);
+              return WM_UI_HANDLER_BREAK;
+            }
+          }
+          break;
         case KM_DBL_CLICK:
           if (view_item_can_rename(*view_item_but->view_item)) {
             data->cancel = true;
@@ -5752,6 +5835,30 @@ static int do_but_VIEW_ITEM(bContext *C, Button *but, HandleButtonData *data, co
     }
   }
   else if (data->state == BUTTON_STATE_WAIT_DRAG) {
+    /* Select-on-click items in a popup enter WAIT_DRAG on *every* press, not just Shift-held ones
+     * (see #AssetViewItem::supports_drag()), so the drag-threshold state machine can recognize a
+     * later Shift-held move as the start of a reorder drag. A plain tap that never crosses that
+     * threshold would then depend on #do_but_EXIT's WAIT_DRAG handling falling through to
+     * #WM_UI_HANDLER_CONTINUE and the WM synthesizing a #KM_CLICK from the unhandled release to
+     * trigger selection -- that synthesis does not reliably reach this button (observed: no
+     * #KM_CLICK for these items in practice, selection silently never happens). Reuse
+     * #but_drag_init's own threshold formula to detect "released without a real drag" here and
+     * activate directly, the same way the #BUTTON_STATE_HIGHLIGHT / #KM_RELEASE path above does
+     * for items that don't support dragging at all. */
+    if (block_is_popup_any(but->block) && view_item_but->view_item->is_select_on_click() &&
+        event->type == LEFTMOUSE && event->val == KM_RELEASE)
+    {
+      const int drag_threshold = min_ii(
+          WM_event_drag_threshold(event),
+          int((UI_UNIT_Y / 2) * block_to_window_scale(data->region, but->block)));
+      if (abs(data->dragstartx - event->xy[0]) + abs(data->dragstarty - event->xy[1]) <=
+          drag_threshold)
+      {
+        force_activate_view_item_but(C, data->region, view_item_but, true);
+        button_activate_state(C, but, BUTTON_STATE_EXIT);
+        return WM_UI_HANDLER_BREAK;
+      }
+    }
     /* Let "default" button handling take care of the drag logic. */
     return do_but_EXIT(C, but, data, event);
   }
@@ -6924,6 +7031,12 @@ static int do_but_GRIP(
       if (event->type == LEFTMOUSE) {
         data->dragstartx = event->xy[0];
         data->dragstarty = event->xy[1];
+        if (but->grip_2d) {
+          /* Capture both axis origins up front; the 2D branch writes the pointers directly rather
+           * than going through #numedit_apply (which only handles a single value). */
+          data->origvec[0] = float(*reinterpret_cast<short *>(but->poin));
+          data->origvec[1] = but->poin2 ? float(*reinterpret_cast<short *>(but->poin2)) : 0.0f;
+        }
         button_activate_state(C, but, BUTTON_STATE_NUM_EDITING);
         retval = WM_UI_HANDLER_BREAK;
       }
@@ -6944,8 +7057,41 @@ static int do_but_GRIP(
       int dragstartx = data->dragstartx;
       int dragstarty = data->dragstarty;
       window_to_block(data->region, block, &dragstartx, &dragstarty);
-      data->value = data->origvalue + (horizontal ? mx - dragstartx : dragstarty - my);
-      numedit_apply(C, block, but, data);
+      if (but->grip_2d) {
+        /* Corner grip: drive both axes at once. Values are in UI units; the block-space pixel
+         * delta maps ~1:1 to window pixels for an unzoomed popover. Broad sanity clamps only; the
+         * consumer clamps precisely to the window at draw time. Dragging right grows #poin (X),
+         * dragging down grows #poin2 (Y). */
+        const int dx = mx - dragstartx;
+        /* Grip at the bottom edge: dragging down (my decreases) grows the height. A #grip_2d_flip_y
+         * grip sits at the top edge (popover opened upward), so dragging up grows it instead. */
+        const int dy = but->grip_2d_flip_y ? (my - dragstarty) : (dragstarty - my);
+        /* Width range from the button's hard limits when set (e.g. a narrow sidebar grip), else a
+         * broad sanity range with the precise window clamp left to the consumer's draw. */
+        const bool has_w_range = but->hardmin < but->hardmax;
+        const int w_min = has_w_range ? int(but->hardmin) : 15;
+        const int w_max = has_w_range ? int(but->hardmax) : 300;
+        const int w = std::clamp(int(data->origvec[0]) + dx / UI_UNIT_X, w_min, w_max);
+        /* Keep the primary value in sync: on release the grip goes through #apply_but_NUM, which
+         * writes #data->value back into #poin. Without this it would overwrite the dragged width
+         * with the stale pre-drag #origvalue (the vertical axis in #poin2 is unaffected, which is
+         * why only the width would snap back). */
+        data->value = w;
+        *reinterpret_cast<short *>(but->poin) = short(w);
+        if (but->poin2) {
+          const int h = std::clamp(int(data->origvec[1]) + dy / UI_UNIT_Y, 3, 300);
+          *reinterpret_cast<short *>(but->poin2) = short(h);
+        }
+        /* Let the owner react to the live change (e.g. persist the new size). The 2D branch does
+         * not go through #numedit_apply, so fire the callback explicitly. */
+        if (but->apply_func) {
+          but->apply_func(*C);
+        }
+      }
+      else {
+        data->value = data->origvalue + (horizontal ? mx - dragstartx : dragstarty - my);
+        numedit_apply(C, block, but, data);
+      }
       if (block_is_popup_any(block)) {
         ED_region_tag_refresh_ui(data->region);
       }
@@ -10084,10 +10230,22 @@ wmOperator *context_active_operator_get(const bContext *C)
   return nullptr;
 }
 
+/* Resolve the searchbox handling data of \a but, accounting for semi-modal search fields whose
+ * state lives in #Button.semi_modal_state (with #Button.active null outside the semi-modal scope).
+ */
+static const HandleButtonData *button_handle_data_get(const Button *but)
+{
+  return but->semi_modal_state ? but->semi_modal_state : but->active;
+}
+
 ARegion *region_searchbox_region_get(const ARegion *button_region)
 {
-  Button *but = region_active_but_get(button_region);
-  return (but != nullptr) ? but->active->searchbox : nullptr;
+  const Button *but = region_active_but_get(button_region);
+  if (but == nullptr) {
+    return nullptr;
+  }
+  const HandleButtonData *data = button_handle_data_get(but);
+  return data ? data->searchbox : nullptr;
 }
 
 void context_update_anim_flag(const bContext *C)
@@ -10200,7 +10358,12 @@ static int handle_button_over(bContext *C, const wmEvent *event, ARegion *region
     Button *but = but_find_open_event(region, event);
     if (but) {
       button_activate_init(C, region, but, BUTTON_ACTIVATE_OVER);
-      do_button(C, but->block, but, event);
+      /* Semi-modal buttons (e.g. a search field with #BUT2_FORCE_SEMI_MODAL_ACTIVE) are not
+       * activated the normal way; their handling state lives in #Button.semi_modal_state and
+       * #Button.active stays null. Skip #do_button to avoid dereferencing a null active. */
+      if (but->active) {
+        do_button(C, but->block, but, event);
+      }
     }
   }
 
@@ -10926,10 +11089,37 @@ static int handle_view_item_event(bContext *C,
     case MOUSEMOVE:
       if (event->xy[0] != event->prev_xy[0] || event->xy[1] != event->prev_xy[1]) {
         region_views_clear_search_highlight(region);
+
+        /* Suppress the hover tooltip of the view item under the cursor during grid-item
+         * Shift-drag reorder: it visually competes with the drag's own drop-location feedback
+         * (line hint + "Move before/after" label), making it harder to see where the item will
+         * land. #button_tooltip_timer_reset() already skips arming new tooltips while any drag is
+         * active, but force-clear here too in case one was already scheduled for this button. */
+        if (wmWindowManager *wm = CTX_wm_manager(C)) {
+          for (const wmDrag &drag : wm->runtime->drags) {
+            if (!ELEM(drag.type,
+                      WM_DRAG_GRID_ITEM_REORDER_ASSET,
+                      WM_DRAG_GRID_ITEM_REORDER_PY))
+            {
+              continue;
+            }
+            if (Button *hovered = view_item_find_mouse_over(region, event->xy)) {
+              button_tooltip_timer_remove(C, hovered);
+            }
+            break;
+          }
+        }
       }
       break;
     case LEFTMOUSE:
       if (event->modifier == 0) {
+        /* A drag started from a view item may be followed by a synthesized KM_CLICK after the
+         * modifier is released. Do not turn that click into a second item activation. */
+        wmWindowManager *wm = CTX_wm_manager(C);
+        if (event->val == KM_CLICK && wm && !wm->runtime->drags.is_empty()) {
+          return WM_UI_HANDLER_BREAK;
+        }
+
         /* Only bother finding the active view item button if the active button isn't already a
          * view item. */
         auto *view_but = static_cast<ButtonViewItem *>(
@@ -10938,7 +11128,9 @@ static int handle_view_item_event(bContext *C,
                 view_item_find_mouse_over(region, event->xy));
 
         if (view_but) {
-          if (view_item_supports_drag(*view_but->view_item)) {
+          if (view_item_supports_drag(*view_but->view_item) ||
+              view_but->view_item->is_select_on_click())
+          {
             if (event->val != KM_CLICK) {
               break;
             }
@@ -11192,30 +11384,6 @@ static char menu_scroll_test(Block *block, int2 xy)
   return 0;
 }
 
-static void menu_scroll_apply_offset_y(ARegion *region, Block *block, float dy)
-{
-  BLI_assert(dy != 0.0f);
-
-  /* remember scroll offset for refreshes */
-  const float prev_scroll = block->handle->scrolloffset;
-  block->handle->scrolloffset = std::clamp(
-      block->handle->scrolloffset + dy, block->handle->scrollmin, block->handle->scrollmax);
-  dy = block->handle->scrolloffset - prev_scroll;
-  /* Apply popup scroll delta to layout panels too. */
-  layout_panel_popup_scroll_apply(block->panel, dy);
-
-  /* apply scroll offset */
-  for (Button &bt : block->buttons()) {
-    bt.rect.ymin += dy;
-    bt.rect.ymax += dy;
-  }
-
-  /* set flags again */
-  popup_block_scrolltest(block);
-
-  ED_region_tag_redraw(region);
-}
-
 /** Scroll to activated button. */
 static bool menu_scroll_to_but(ARegion *region, Block *block, Button *but_target)
 {
@@ -11231,7 +11399,7 @@ static bool menu_scroll_to_but(ARegion *region, Block *block, Button *but_target
     }
   }
   if (dy != 0.0f) {
-    menu_scroll_apply_offset_y(region, block, dy);
+    popup_block_scroll_apply_offset_y(region, block, dy);
     return true;
   }
   return false;
@@ -11251,7 +11419,7 @@ static bool menu_scroll_to_y(ARegion *region, Block *block, int y)
     dy = UI_UNIT_Y / block->aspect; /* scroll to the bottom */
   }
   if (dy != 0.0f) {
-    menu_scroll_apply_offset_y(region, block, dy);
+    popup_block_scroll_apply_offset_y(region, block, dy);
     return true;
   }
   return false;
@@ -11488,7 +11656,7 @@ static int handle_menu_mmb_event(bContext *C,
     const int delta = (menu->mmb_panning_last_y - event->xy[1]) *
                       (event->flag & WM_EVENT_SCROLL_INVERT ? 1 : -1);
     if (delta) {
-      menu_scroll_apply_offset_y(region, block, delta);
+      popup_block_scroll_apply_offset_y(region, block, delta);
       menu->mmb_panning_last_y = event->xy[1];
     }
     retval = WM_UI_HANDLER_BREAK;
@@ -11624,7 +11792,10 @@ static int handle_menu_event(bContext *C,
     }
   }
   else if (event->type == TIMER && event->customdata == menu->scrolltimer) {
-    if (!menu_scroll_test(block, {mx, my})) {
+    if (popup_block_fixed_grid_scrolltimer_step(C, menu, block, my)) {
+      /* Fixed-viewport grid (e.g. image browser) edge auto-scroll. */
+    }
+    else if (!menu_scroll_test(block, {mx, my})) {
       WM_event_timer_remove(CTX_wm_manager(C), win, menu->scrolltimer);
       menu->scrolltimer = nullptr;
     }
@@ -11641,11 +11812,17 @@ static int handle_menu_event(bContext *C,
       }
 
       /* add menu scroll timer, if needed */
-      if (menu_scroll_test(block, {mx, my})) {
+      if (menu_scroll_test(block, {mx, my}) ||
+          popup_block_fixed_grid_autoscroll_at_pointer(menu, block, my))
+      {
         if (menu->scrolltimer == nullptr) {
           menu->scrolltimer = WM_event_timer_add(
               CTX_wm_manager(C), CTX_wm_window(C), TIMER, MENU_SCROLL_INTERVAL);
         }
+      }
+      else if (menu->scrolltimer) {
+        WM_event_timer_remove(CTX_wm_manager(C), win, menu->scrolltimer);
+        menu->scrolltimer = nullptr;
       }
     }
 
@@ -11728,7 +11905,7 @@ static int handle_menu_event(bContext *C,
           else if (block->flag & (BLOCK_CLIPTOP | BLOCK_CLIPBOTTOM)) {
             const float dy = event->xy[1] - event->prev_xy[1];
             if (dy != 0.0f) {
-              menu_scroll_apply_offset_y(region, block, dy);
+              popup_block_scroll_apply_offset_y(region, block, dy);
 
               if (but) {
                 but->active->cancel = true;
@@ -12663,32 +12840,44 @@ static int handle_menus_recursive(bContext *C,
           C, event, submenu, level + 1, is_parent_inside || inside, is_menu, false);
     }
   }
-  else if (!but && event->val == KM_PRESS && event->type == LEFTMOUSE) {
+  else if (event->val == KM_PRESS && event->type == LEFTMOUSE) {
     for (Block &block : menu->region->runtime->uiblocks) {
+      /* A layout-panel header is normally toggled only when no button is active (the `!but` case
+       * below). The color picker popup keeps its color buttons active, so allow toggling its
+       * palette sub-panel as a special case while leaving all other menus' behavior unchanged. */
+      const bool is_color_picker = block.color_pickers.list.first != nullptr;
+      if (but && !is_color_picker) {
+        continue;
+      }
       if (block.panel) {
         int mx = event->xy[0];
         int my = event->xy[1];
         window_to_block(menu->region, &block, &mx, &my);
-        if (!IN_RANGE(float(mx), block.rect.xmin, block.rect.xmax)) {
-          break;
-        }
-        LayoutPanelHeader *header = layout_panel_header_under_mouse(*block.panel, my);
-        if (header) {
-          ED_region_tag_redraw(menu->region);
-          ED_region_tag_refresh_ui(menu->region);
-          ARegion *prev_region_popup = CTX_wm_region_popup(C);
-          /* Set the current context popup region so the handler context can access to it. */
-          CTX_wm_region_popup_set(C, menu->region);
-          panel_drag_collapse_handler_add(C, !layout_panel_toggle_open(C, header));
-          /* Restore previous popup region. */
-          CTX_wm_region_popup_set(C, prev_region_popup);
-          retval = WM_UI_HANDLER_BREAK;
+        if (IN_RANGE(float(mx), block.rect.xmin, block.rect.xmax)) {
+          LayoutPanelHeader *header = layout_panel_header_under_mouse(*block.panel, my);
+          if (header) {
+            ARegion *prev_region_popup = CTX_wm_region_popup(C);
+            /* Set the current context popup region so the handler context can access it. */
+            CTX_wm_region_popup_set(C, menu->region);
+            const bool new_state = layout_panel_toggle_open(C, header);
+            /* Restore previous popup region. */
+            CTX_wm_region_popup_set(C, prev_region_popup);
+            ED_region_tag_redraw(menu->region);
+            ED_region_tag_refresh_ui(menu->region);
+            panel_drag_collapse_handler_add(C, !new_state);
+            retval = WM_UI_HANDLER_BREAK;
+            break;
+          }
         }
       }
     }
   }
 
   /* now handle events for our own menu */
+
+  if (retval == WM_UI_HANDLER_CONTINUE) {
+    retval = region_pre_button_handlers_call(C, event, menu->region);
+  }
 
   if (retval == WM_UI_HANDLER_CONTINUE) {
     retval = handle_region_semi_modal_buttons(C, event, menu->region);
@@ -12799,6 +12988,10 @@ static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/
         button_tooltip_timer_remove(C, but);
       }
     }
+  }
+
+  if (retval == WM_UI_HANDLER_CONTINUE) {
+    retval = region_pre_button_handlers_call(C, event, region);
   }
 
   if (retval == WM_UI_HANDLER_CONTINUE) {
@@ -13011,8 +13204,16 @@ static int handler_region_menu(bContext *C, const wmEvent *event, void * /*userd
       }
     }
     else {
-      /* handle events for the activated button */
-      retval = handle_button_event(C, event, but);
+      /* Run pre-button handlers (e.g. drag-scroll) before default button handling, even while a
+       * button is in a modal state (e.g. #BUTTON_STATE_WAIT_RELEASE). Without this, LMB
+       * drag-scroll over items in non-popup regions (e.g. Asset Browser) is bypassed once the
+       * button is pressed, because this window-level modal handler routes events straight to
+       * #handle_button_event. */
+      retval = region_pre_button_handlers_call(C, event, region);
+      if (retval == WM_UI_HANDLER_CONTINUE) {
+        /* handle events for the activated button */
+        retval = handle_button_event(C, event, but);
+      }
     }
   }
 
@@ -13059,7 +13260,23 @@ static int popup_handler(bContext *C, const wmEvent *event, void *userdata)
   ARegion *region_popup = CTX_wm_region_popup(C);
   CTX_wm_region_popup_set(C, menu->region);
 
-  if (event->type == EVT_DROP || event->val == KM_DBL_CLICK) {
+  wmWindowManager *wm = CTX_wm_manager(C);
+  const bool has_active_drag = wm && !wm->runtime->drags.is_empty();
+
+  /* Popups are handled entirely by this window-level modal handler and never reach
+   * #wm_event_do_region_handlers() for their own region, so drag-and-drop hover polling
+   * (e.g. view/list item reorder drop targets) needs to be triggered here explicitly,
+   * mirroring what that function does for regular area regions. */
+  if (has_active_drag) {
+    ARegion *region_prev = CTX_wm_region(C);
+    CTX_wm_region_set(C, menu->region);
+    wm_drags_handle_events(C, event);
+    CTX_wm_region_set(C, region_prev);
+  }
+
+  if (event->type == EVT_DROP || event->val == KM_DBL_CLICK ||
+      (has_active_drag && event->type == LEFTMOUSE && event->val == KM_RELEASE))
+  {
     /* EVT_DROP:
      *   If we're handling drop event we'll want it to be handled by popup callee as well,
      *   so it'll be possible to perform such operations as opening .blend files by dropping
@@ -13067,6 +13284,12 @@ static int popup_handler(bContext *C, const wmEvent *event, void *userdata)
      * KM_DBL_CLICK:
      *   Continue in case of double click so wm_handlers_do calls handler again with KM_PRESS
      *   event. This is needed to ensure correct button handling for fast clicking (#47532).
+     * LEFTMOUSE release with an active WM drag:
+     *   This event is not yet #EVT_DROP at this point (the conversion happens later, in
+     *   #wm_event_drag_and_drop_test()). Continue so it can reach that conversion and then be
+     *   dispatched to the popup region's drop-box handlers, otherwise a drag started on a view
+     *   item inside a popup/popover (e.g. Shift-drag reorder in the asset shelf Favorites grid)
+     *   would never be able to drop.
      */
 
     retval = WM_UI_HANDLER_CONTINUE;

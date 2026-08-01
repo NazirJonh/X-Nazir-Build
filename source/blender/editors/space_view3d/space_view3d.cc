@@ -44,6 +44,7 @@
 
 #include "ED_asset_shelf.hh"
 #include "ED_geometry.hh"
+#include "ED_image_grid.hh"
 #include "ED_info.hh"
 #include "ED_object.hh"
 #include "ED_outliner.hh"
@@ -52,6 +53,7 @@
 #include "ED_space_api.hh"
 #include "ED_transform.hh"
 #include "ED_undo.hh"
+#include "ED_view3d.hh"
 
 #include "GPU_matrix.hh"
 
@@ -282,6 +284,11 @@ static void view3d_free(SpaceLink *sl)
   }
 
   BKE_viewer_path_clear(&vd->viewer_path);
+
+  for (ImageGridSlotDNA *slot : {&vd->image_grid, &vd->image_grid_mask}) {
+    ed::image_grid::image_grid_slot_dna_free(*slot);
+  }
+  ed::image_grid::image_grid_state_remove(ed::image_grid::ImageGridOwner::from(*vd));
 }
 
 /* spacetype; init callback */
@@ -319,6 +326,9 @@ static SpaceLink *view3d_duplicate(SpaceLink *sl)
   }
 
   BKE_viewer_path_copy(&v3dn->viewer_path, &v3do->viewer_path);
+
+  ed::image_grid::image_grid_slot_dna_duplicate(v3dn->image_grid, v3do->image_grid);
+  ed::image_grid::image_grid_slot_dna_duplicate(v3dn->image_grid_mask, v3do->image_grid_mask);
 
   /* copy or clear inside new stuff */
 
@@ -1425,6 +1435,15 @@ static void space_view3d_listener(const wmSpaceTypeListenerParams *params)
 
   /* context changes */
   switch (wmn->category) {
+    case NC_WINDOW:
+      /* #rna_AssetShelf_register() fires this notifier whenever any asset shelf Python class
+       * (re)registers, replacing its #AssetShelfType with a fresh one that lacks the image-grid
+       * popover hooks (#image_grid_shelf_sync_register() re-applies them). Without this, a user
+       * who never draws the N-Panel image-grid template (the only other place that re-applies
+       * them) and instead opens the browse popover via hotkey gets an unregistered shelf type: no
+       * active-asset highlighting or #ASSET_SHELF_TYPE_FLAG_CENTER_ACTIVE_ASSET_ON_OPEN. */
+      ed::view3d::image_grid_shelf_sync_register();
+      break;
     case NC_SCENE:
       switch (wmn->data) {
         case ND_WORLD: {
@@ -1573,6 +1592,8 @@ static void view3d_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
   BKE_screen_view3d_do_versions_250(v3d, &sl->regionbase);
 
   BKE_viewer_path_blend_read_data(reader, &v3d->viewer_path);
+  ed::image_grid::image_grid_slot_dna_blend_read(reader, v3d->image_grid);
+  ed::image_grid::image_grid_slot_dna_blend_read(reader, v3d->image_grid_mask);
 }
 
 static void view3d_space_blend_write(BlendWriter *writer, SpaceLink *sl)
@@ -1587,6 +1608,8 @@ static void view3d_space_blend_write(BlendWriter *writer, SpaceLink *sl)
   BKE_screen_view3d_shading_blend_write(writer, &v3d->shading);
 
   BKE_viewer_path_blend_write(writer, &v3d->viewer_path);
+  ed::image_grid::image_grid_slot_dna_blend_write(writer, v3d->image_grid);
+  ed::image_grid::image_grid_slot_dna_blend_write(writer, v3d->image_grid_mask);
 }
 
 void ED_spacetype_view3d()
@@ -1680,6 +1703,8 @@ void ED_spacetype_view3d()
   art->init = view3d_header_region_init;
   art->draw = view3d_header_region_draw;
   BLI_addhead(&st->regiontypes, art);
+  image_grid_catalog_selector_panel_register(art);
+  image_grid_display_panel_register(art);
 
   /* regions: asset shelf */
   art = MEM_new_zeroed<ARegionType>("spacetype view3d asset shelf region");

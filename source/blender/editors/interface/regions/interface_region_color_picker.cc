@@ -11,27 +11,42 @@
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
+#include <string>
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_brush_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
 
 #include "BLI_listbase.h"
 #include "BLI_rect.h"
+#include "BLI_string.h"
+#include "BLI_string_ref.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
 
 #include "BKE_context.hh"
+#include "BKE_paint.hh"
+#include "BKE_paint_types.hh"
+#include "BKE_screen.hh"
+
+#include "ED_screen.hh"
 
 #include "UI_interface_c.hh"
 #include "WM_api.hh"
 #include "WM_types.hh"
 
 #include "RNA_access.hh"
+#include "RNA_path.hh"
+#include "RNA_prototypes.hh"
 
 #include "BLT_translation.hh"
 
 #include "IMB_colormanagement.hh"
+
+#include "UI_interface_layout.hh"
 
 #include "interface_intern.hh"
 
@@ -667,12 +682,91 @@ static void colorpicker_square(
   hsv_but->custom_data = cpicker;
 }
 
+/* Request a rebuild of the color picker popup so its layout (e.g. the palette swatch grid and the
+ * overall popup height) updates after a palette change. Routes through the standard popup refresh
+ * primitive (#RGN_REFRESH_UI -> #popup_block_refresh) - the same path the grid popups use - rather
+ * than a bespoke return-value path. Requires the popup to be created with `can_refresh` (see the
+ * `block_func_COLOR` case in #block_open_begin). */
+static void colorpicker_popup_tag_refresh(Block *block)
+{
+  if (block->handle && block->handle->region) {
+    ED_region_tag_redraw(block->handle->region);
+    ED_region_tag_refresh_ui(block->handle->region);
+  }
+}
+
+/* Build an RNA pointer to the paint settings for `mode`, used to expose the active palette in the
+ * color picker popup. Returns a null pointer (`ptr.data == nullptr`) when the mode has no paint
+ * settings allocated. */
+static PointerRNA paint_palette_settings_ptr_get(Scene &scene, const PaintMode mode)
+{
+  ToolSettings &ts = *scene.toolsettings;
+  switch (mode) {
+    case PaintMode::Sculpt:
+      return RNA_pointer_create_discrete(&scene.id, RNA_Sculpt, ts.sculpt);
+    case PaintMode::Vertex:
+      return RNA_pointer_create_discrete(&scene.id, RNA_VertexPaint, ts.vpaint);
+    case PaintMode::Weight:
+      return RNA_pointer_create_discrete(&scene.id, RNA_VertexPaint, ts.wpaint);
+    case PaintMode::Texture2D:
+    case PaintMode::Texture3D:
+      return RNA_pointer_create_discrete(&scene.id, RNA_ImagePaint, &ts.imapaint);
+    case PaintMode::GPencil:
+      return RNA_pointer_create_discrete(&scene.id, RNA_GpPaint, ts.gp_paint);
+    case PaintMode::VertexGPencil:
+      return RNA_pointer_create_discrete(&scene.id, RNA_GpVertexPaint, ts.gp_vertexpaint);
+    case PaintMode::SculptGPencil:
+      return RNA_pointer_create_discrete(&scene.id, RNA_GpSculptPaint, ts.gp_sculptpaint);
+    case PaintMode::WeightGPencil:
+      return RNA_pointer_create_discrete(&scene.id, RNA_GpWeightPaint, ts.gp_weightpaint);
+    case PaintMode::SculptCurves:
+      return RNA_pointer_create_discrete(&scene.id, RNA_CurvesSculpt, ts.curves_sculpt);
+    case PaintMode::Invalid:
+      break;
+  }
+  return PointerRNA_NULL;
+}
+
+/* Build a stable identifier for the color picker that opened from `but`, combining the edited
+ * data-block name and the property's RNA path. Used to key per-popup state (palette assignment and
+ * the sub-panel's expanded/collapsed state). Returns an empty string when the button has no RNA
+ * property to derive a stable key from. */
+static std::string colorpicker_popup_key_get(const Button *but)
+{
+  std::string key;
+  if (but && but->rnapoin.owner_id && but->rnaprop) {
+    if (const std::optional<std::string> path = RNA_path_from_ID_to_property(&but->rnapoin,
+                                                                             but->rnaprop))
+    {
+      key += but->rnapoin.owner_id->name;
+      key += *path;
+    }
+  }
+  return key;
+}
+
+/* Find (or lazily create) the per-color-picker palette association for `key`. A freshly created
+ * entry defaults to `default_palette` (the tool's active palette), so a picker that has never been
+ * assigned a palette matches the previous behavior. */
+static ColorPickerPalette *colorpicker_palette_entry_ensure(ToolSettings &ts,
+                                                            const StringRefNull key,
+                                                            Palette *default_palette)
+{
+  for (ColorPickerPalette &cpp : ts.color_picker_palettes) {
+    if (cpp.key && key == cpp.key) {
+      return &cpp;
+    }
+  }
+  ColorPickerPalette *cpp = MEM_new<ColorPickerPalette>(__func__);
+  cpp->key = BLI_strdupn(key.c_str(), key.size());
+  cpp->palette = default_palette;
+  BLI_addtail(&ts.color_picker_palettes, cpp);
+  return cpp;
+}
+
 /* a HS circle, V slider, rgb/hsv/hex sliders */
-static void block_colorpicker(const bContext * /*C*/,
-                              Block *block,
-                              Button *from_but,
-                              float rgba_scene_linear[4],
-                              bool show_picker)
+static void block_colorpicker(
+    bContext *C, Block *block, Button *from_but, float rgba_scene_linear[4], bool show_picker)
 {
   /* ePickerType */
   Button *bt;
@@ -1072,6 +1166,96 @@ static void block_colorpicker(const bContext * /*C*/,
   }
 
   colorpicker_hide_reveal(block);
+
+  /* Add a Color Palette section when the picker is opened in a paint mode. */
+  if (C) {
+    Scene *scene = CTX_data_scene(C);
+    const PaintMode mode = scene ? BKE_paintmode_get_active_from_context(C) : PaintMode::Invalid;
+    /* Use the already-allocated paint settings; do not allocate here, as this runs while building
+     * the block (allocating during draw would be a side effect on scene data). */
+    Paint *paint = (mode != PaintMode::Invalid) ?
+                       BKE_paint_get_active_from_paintmode(scene, mode) :
+                       nullptr;
+
+    if (paint != nullptr) {
+      /* Each color picker keeps its own palette, stored per data-path in the tool settings and
+       * independent of the tool's active palette (#Paint::palette). Fall back to the shared paint
+       * settings when the button has no RNA property to derive a stable key from. */
+      const std::string key = colorpicker_popup_key_get(from_but);
+      ColorPickerPalette *palette_entry = nullptr;
+      PointerRNA palette_ptr;
+      if (!key.empty()) {
+        palette_entry = colorpicker_palette_entry_ensure(
+            *scene->toolsettings, key, paint->palette);
+        palette_ptr = RNA_pointer_create_discrete(
+            &scene->id, RNA_ColorPickerPalette, palette_entry);
+      }
+      else {
+        palette_ptr = paint_palette_settings_ptr_get(*scene, mode);
+      }
+      Palette *active_palette = palette_entry ? palette_entry->palette : paint->palette;
+
+      /* The color wheel/square is placed above `y == 0`, so the block's top does not coincide with
+       * the layout coordinate origin. Layout panels (the palette sub-panel added below) assume
+       * `block->rect.ymax` is that origin (block top at `y == 0`), as in standard popovers. Shift
+       * all existing widgets down so the content top aligns with `y == 0`; otherwise the palette
+       * header backdrop and its click region are offset upwards by the picker height. */
+      float content_top = 0.0f;
+      for (const Button &but : block->buttons()) {
+        if (but.rect.ymax > content_top) {
+          content_top = but.rect.ymax;
+        }
+      }
+      if (content_top > 0.0f) {
+        block_translate(block, 0.0f, -content_top);
+        yco -= content_top;
+      }
+
+      /* Move y position to place palette below hex field. */
+      yco -= UI_UNIT_Y;
+
+      const uiStyle *style = style_get_dpi();
+      Layout &palette_layout = block_layout(
+          block, LayoutDirection::Vertical, LayoutType::Panel, 0, yco, picker_width, 0, 0, style);
+
+      /* Collapsible Color Palette sub-panel. */
+      PanelLayout palette_panel = palette_layout.panel(C, "color_palette", false);
+      palette_panel.header->label(IFACE_("Color Palette"), ICON_COLOR);
+
+      if (palette_panel.body) {
+        /* Expose the picker's palette as the "palette" context member, so the swatch operators
+         * (add/delete/move/sort) and the "New" button act on it instead of the tool's active
+         * palette. */
+        if (active_palette) {
+          PointerRNA active_palette_ptr = RNA_id_pointer_create(&active_palette->id);
+          palette_panel.body->context_ptr_set("palette", &active_palette_ptr);
+        }
+
+        /* Palette ID selector (choose/create/browse palettes). */
+        Layout &palette_selector = palette_panel.body->column(true);
+        const int64_t but_count_before = int64_t(block->buttons_ptrs.size());
+        template_id(&palette_selector, C, &palette_ptr, "palette", "palette.new", nullptr, nullptr);
+        /* When the active palette changes, rebuild the popup so the swatch grid and popup
+         * height update to match the new palette's contents. The palette ID selector buttons set
+         * their own internal callbacks via #template_id, so use `apply_func` (which runs in
+         * addition to those) rather than overriding them. */
+        for (int64_t i = but_count_before; i < int64_t(block->buttons_ptrs.size()); i++) {
+          block->buttons_ptrs[i]->apply_func = [block](bContext & /*C*/) {
+            colorpicker_popup_tag_refresh(block);
+          };
+        }
+
+        /* Color swatches, only when a palette is assigned. */
+        if (active_palette) {
+          template_palette(palette_panel.body,
+                           &palette_ptr,
+                           "palette",
+                           false,  /* show_empty_message */
+                           false); /* show_sort_buttons */
+        }
+      }
+    }
+  }
 }
 
 static int colorpicker_wheel_cb(const bContext * /*C*/, Block *block, const wmEvent *event)
@@ -1148,6 +1332,15 @@ Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but)
 
   block = block_begin(C, handle->region, __func__, EmbossType::Emboss);
 
+  /* Give each color picker its own persistent layout-panel state (notably the Color Palette
+   * sub-panel's expanded/collapsed state) by keying the dummy popup panel on the edited property's
+   * data path. Color pickers on different properties then remember their state independently. Falls
+   * back to a shared key when the button has no RNA property. */
+  const std::string key = colorpicker_popup_key_get(but);
+  const std::string popup_panel_idname = key.empty() ? std::string("color_picker_popup") :
+                                                       "color_picker_popup:" + key;
+  popup_dummy_panel_set(handle->region, block, popup_panel_idname);
+
   if (button_is_color_gamma(but)) {
     block->is_color_gamma_picker = true;
   }
@@ -1156,7 +1349,7 @@ Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but)
 
   block_colorpicker(C, block, but, handle->retvec, true);
 
-  block->flag = BLOCK_LOOP | BLOCK_KEEP_OPEN | BLOCK_OUT_1 | BLOCK_MOVEMOUSE_QUIT;
+  block->flag = BLOCK_LOOP | BLOCK_KEEP_OPEN | BLOCK_OUT_1 | BLOCK_MOVEMOUSE_QUIT | BLOCK_POPUP;
   block_theme_style_set(block, BLOCK_THEME_STYLE_POPUP);
   block_bounds_set_normal(block, 0.5 * UI_UNIT_X);
 
@@ -1172,6 +1365,48 @@ ColorPicker *block_colorpicker_create(Block *block)
   BLI_addhead(&block->color_pickers.list, cpicker);
 
   return cpicker;
+}
+
+static bool colorpicker_rgb_get_from_region(const ARegion *region, float r_rgb[3])
+{
+  for (const Block &block : region->runtime->uiblocks) {
+    for (const ColorPicker &cpicker : block.color_pickers.list) {
+      if (cpicker.is_init) {
+        float rgb[3];
+        color_picker_hsv_to_rgb(cpicker.hsv_perceptual, rgb);
+        perceptual_to_scene_linear_space(block.is_color_gamma_picker, rgb);
+        copy_v3_v3(r_rgb, rgb);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool colorpicker_active_rgb_get(const bContext *C, float r_rgb[3])
+{
+  /* Prefer the popup region the caller is acting within (set while handling a button inside the
+   * color picker popup), then the current region. This targets the picker the user is interacting
+   * with instead of relying on screen iteration order. */
+  if (const ARegion *region = CTX_wm_region_popup(C)) {
+    if (colorpicker_rgb_get_from_region(region, r_rgb)) {
+      return true;
+    }
+  }
+  if (const ARegion *region = CTX_wm_region(C)) {
+    if (colorpicker_rgb_get_from_region(region, r_rgb)) {
+      return true;
+    }
+  }
+  /* Fallback: color picker popups are temporary regions stored in `screen->regionbase`. */
+  if (const bScreen *screen = CTX_wm_screen(C)) {
+    for (const ARegion &region : screen->regionbase) {
+      if (colorpicker_rgb_get_from_region(&region, r_rgb)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /** \} */

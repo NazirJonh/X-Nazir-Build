@@ -137,7 +137,7 @@ const bUserAssetLibrary *get_asset_library_from_opptr(PointerRNA &ptr)
 {
   const int enum_value = RNA_enum_get(&ptr, "asset_library_reference");
   const AssetLibraryReference lib_ref = asset::library_reference_from_enum_value(enum_value);
-  return BKE_preferences_asset_library_find_index(&U, lib_ref.custom_library_index);
+  return BKE_preferences_asset_library_find_from_ref(&U, &lib_ref);
 }
 
 AssetLibraryReference get_asset_library_ref_from_opptr(PointerRNA &ptr)
@@ -160,7 +160,12 @@ std::optional<AssetLibraryReference> get_user_library_ref_for_save(
 
   /* Fallback to the first enabled on-disk user library. */
   for (const bUserAssetLibrary &asset_library : U.asset_libraries) {
-    if (asset_library.flag & (ASSET_LIBRARY_DISABLED | ASSET_LIBRARY_USE_REMOTE_URL)) {
+    if (asset_library.type == USER_ASSET_LIBRARY_ITEM_TYPE_FOLDER) {
+      continue;
+    }
+    if ((asset_library.flag & ASSET_LIBRARY_USE_REMOTE_URL) ||
+        !BKE_preferences_asset_library_is_effectively_enabled(&asset_library))
+    {
       continue;
     }
     return asset::user_library_to_library_ref(asset_library);

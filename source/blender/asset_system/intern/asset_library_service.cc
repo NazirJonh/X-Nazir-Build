@@ -605,7 +605,7 @@ bUserAssetLibrary *AssetLibraryService::find_custom_asset_library_from_library_r
   BLI_assert(library_reference.type == ASSET_LIBRARY_CUSTOM);
   BLI_assert(library_reference.custom_library_index >= 0);
 
-  return BKE_preferences_asset_library_find_index(&U, library_reference.custom_library_index);
+  return BKE_preferences_asset_library_find_from_ref(&U, &library_reference);
 }
 
 std::string AssetLibraryService::root_path_from_library_ref(

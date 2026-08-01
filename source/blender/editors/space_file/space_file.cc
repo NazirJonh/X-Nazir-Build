@@ -16,8 +16,13 @@
 #include "BLI_path_utils.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
+#include "BLI_uuid.h"
+
+#include "DNA_space_types.h"
+#include "DNA_uuid_types.h"
 
 #include "BKE_appdir.hh"
+#include "BKE_asset.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_lib_query.hh"
@@ -130,6 +135,9 @@ static void file_free(SpaceLink *sl)
   folder_history_list_free(sfile);
 
   MEM_SAFE_DELETE(sfile->params);
+  if (sfile->asset_params) {
+    BKE_asset_catalog_state_list_free(sfile->asset_params->catalog_states);
+  }
   MEM_SAFE_DELETE(sfile->asset_params);
   if (sfile->runtime != nullptr) {
     BKE_reports_free(&sfile->runtime->is_blendfile_readable_reports);
@@ -192,6 +200,10 @@ static SpaceLink *file_duplicate(SpaceLink *sl)
   if (sfileo->asset_params) {
     sfilen->asset_params = static_cast<FileAssetSelectParams *>(
         MEM_dupalloc(sfileo->asset_params));
+    /* The shallow copy aliases the original list; deep-copy the catalog collapsed states. */
+    sfilen->asset_params->catalog_states.clear_no_delete();
+    BKE_asset_catalog_state_list_duplicate(sfilen->asset_params->catalog_states,
+                                           sfileo->asset_params->catalog_states);
   }
 
   sfilen->folder_histories = folder_history_list_duplicate(&sfileo->folder_histories);
@@ -202,12 +214,15 @@ static SpaceLink *file_duplicate(SpaceLink *sl)
   return reinterpret_cast<SpaceLink *>(sfilen);
 }
 
-static void file_refresh(const bContext *C, ScrArea *area)
+static void file_refresh_ex(const bContext *C, SpaceFile *sfile, ScrArea *area)
 {
   using namespace blender::ed;
+  if (!sfile) {
+    return;
+  }
+
   wmWindowManager *wm = CTX_wm_manager(C);
   wmWindow *win = CTX_wm_window(C);
-  SpaceFile *sfile = CTX_wm_space_file(C);
   FileSelectParams *params = ED_fileselect_ensure_active_params(sfile);
   FileAssetSelectParams *asset_params = ED_fileselect_get_asset_params(sfile);
   FSMenu *fsmenu = ED_fsmenu_get();
@@ -341,7 +356,17 @@ static void file_refresh(const bContext *C, ScrArea *area)
     }
   }
 
-  ED_area_tag_redraw(area);
+  if (area) {
+    ED_area_tag_redraw(area);
+  }
+}
+
+static void file_refresh(const bContext *C, ScrArea *area)
+{
+  if (!area) {
+    return;
+  }
+  file_refresh_ex(C, reinterpret_cast<SpaceFile *>(area->spacedata.first), area);
 }
 
 void file_on_reload_callback_register(SpaceFile *sfile,
@@ -471,14 +496,17 @@ static void file_main_region_init(wmWindowManager *wm, ARegion *region)
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "File Browser", SPACE_FILE, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
 
-  keymap = WM_keymap_ensure(
-      wm->runtime->defaultconf, "File Browser Main", SPACE_FILE, RGN_TYPE_WINDOW);
-  WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
-
+  /* Asset-browser-specific overrides must be processed before the generic "File Browser Main"
+   * keymap so they can shadow it (e.g. select-on-click instead of select-on-press, which keeps the
+   * item under the cursor unselected while starting an LMB drag-scroll gesture). */
   keymap = WM_keymap_ensure(
       wm->runtime->defaultconf, "Asset Browser Main", SPACE_FILE, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
   keymap->poll = [](bContext *C) { return ED_operator_asset_browsing_active(C); };
+
+  keymap = WM_keymap_ensure(
+      wm->runtime->defaultconf, "File Browser Main", SPACE_FILE, RGN_TYPE_WINDOW);
+  WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
 }
 
 static void file_main_region_listener(const wmRegionListenerParams *listener_params)
@@ -500,6 +528,16 @@ static void file_main_region_listener(const wmRegionListenerParams *listener_par
       break;
     case NC_ID:
       if (ELEM(wmn->action, NA_SELECTED, NA_ACTIVATED, NA_RENAME)) {
+        ED_region_tag_redraw(region);
+      }
+      break;
+    case NC_ASSET:
+      if (ELEM(wmn->data,
+               ND_ASSET_LIST,
+               ND_ASSET_CATALOGS,
+               ND_ASSET_LIST_READING,
+               ND_ASSET_LIST_PREVIEW))
+      {
         ED_region_tag_redraw(region);
       }
       break;
@@ -609,7 +647,7 @@ static void file_main_region_draw(const bContext *C, ARegion *region)
   View2D *v2d = &region->v2d;
 
   if (file_main_region_needs_refresh_before_draw(sfile)) {
-    file_refresh(C, nullptr);
+    file_refresh(C, CTX_wm_area(C));
   }
 
   /* clear and setup matrix */
@@ -767,6 +805,21 @@ static void file_tools_region_listener(const wmRegionListenerParams *listener_pa
         ED_region_tag_redraw(region);
       }
       break;
+    case NC_SPACE:
+      if (ELEM(wmn->data, ND_SPACE_FILE_LIST, ND_SPACE_ASSET_PARAMS)) {
+        ED_region_tag_redraw(region);
+      }
+      break;
+    case NC_ASSET:
+      if (ELEM(wmn->data,
+               ND_ASSET_LIST,
+               ND_ASSET_LIST_READING,
+               ND_ASSET_LIST_PREVIEW,
+               ND_ASSET_CATALOGS))
+      {
+        ED_region_tag_redraw(region);
+      }
+      break;
   }
 }
 
@@ -866,7 +919,8 @@ static bool filepath_drop_poll(bContext *C, wmDrag *drag, const wmEvent * /*even
 {
   if (drag->type == WM_DRAG_PATH) {
     SpaceFile *sfile = CTX_wm_space_file(C);
-    if (sfile) {
+    /* In asset-browser mode dropped image files are handled by the image-asset dropbox below. */
+    if (sfile && !ED_fileselect_is_asset_browser(sfile)) {
       return true;
     }
   }
@@ -878,6 +932,61 @@ static void filepath_drop_copy(bContext * /*C*/, wmDrag *drag, wmDropBox *drop)
   RNA_string_set(drop->ptr, "filepath", WM_drag_get_single_path(drag));
 }
 
+static bool asset_image_drop_poll(bContext *C, wmDrag *drag, const wmEvent * /*event*/)
+{
+  if (drag->type != WM_DRAG_PATH) {
+    return false;
+  }
+  const SpaceFile *sfile = CTX_wm_space_file(C);
+  if (!sfile || !ED_fileselect_is_asset_browser(sfile) ||
+      !ED_fileselect_is_local_asset_library(sfile))
+  {
+    return false;
+  }
+  return WM_drag_has_path_file_type(drag, FILE_TYPE_IMAGE);
+}
+
+static void asset_image_drop_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
+{
+  /* Store only the image paths as `directory` + `files`. Assumes the dropped image files share a
+   * directory, which holds for a file-browser multi-selection and a single Explorer drop. */
+  const char *first_image = nullptr;
+  for (const std::string &path : WM_drag_get_paths(drag)) {
+    if (ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) {
+      first_image = path.c_str();
+      break;
+    }
+  }
+  if (first_image == nullptr) {
+    return;
+  }
+
+  char dir[FILE_MAX];
+  BLI_path_split_dir_part(first_image, dir, sizeof(dir));
+  RNA_string_set(drop->ptr, "directory", dir);
+
+  RNA_collection_clear(drop->ptr, "files");
+  for (const std::string &path : WM_drag_get_paths(drag)) {
+    if ((ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) == 0) {
+      continue;
+    }
+    char name[FILE_MAX];
+    BLI_path_split_file_part(path.c_str(), name, sizeof(name));
+    PointerRNA itemptr{};
+    RNA_collection_add(drop->ptr, "files", &itemptr);
+    RNA_string_set(&itemptr, "name", name);
+  }
+
+  /* When a specific catalog is active in the tree, assign the new assets to it. */
+  if (const FileAssetSelectParams *params = ED_fileselect_get_asset_params(CTX_wm_space_file(C))) {
+    if (params->asset_catalog_visibility == FILE_SHOW_ASSETS_FROM_CATALOG) {
+      char catalog_id_str[UUID_STRING_SIZE];
+      BLI_uuid_format(catalog_id_str, params->catalog_id);
+      RNA_string_set(drop->ptr, "catalog_id", catalog_id_str);
+    }
+  }
+}
+
 /* region dropbox definition */
 static void file_dropboxes()
 {
@@ -885,6 +994,12 @@ static void file_dropboxes()
 
   WM_dropbox_add(
       lb, "FILE_OT_filepath_drop", filepath_drop_poll, filepath_drop_copy, nullptr, nullptr);
+  WM_dropbox_add(lb,
+                 "ASSET_OT_image_import_mark",
+                 asset_image_drop_poll,
+                 asset_image_drop_copy,
+                 nullptr,
+                 nullptr);
 }
 
 static int file_space_subtype_get(ScrArea *area)
@@ -984,6 +1099,7 @@ static void file_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
       default:
         sfile->asset_params->import_method = FILE_ASSET_IMPORT_FOLLOW_PREFS;
     }
+    BKE_asset_catalog_state_list_blend_read_data(reader, sfile->asset_params->catalog_states);
   }
 }
 
@@ -1006,6 +1122,7 @@ static void file_space_blend_write(BlendWriter *writer, SpaceLink *sl)
   }
   if (sfile->asset_params) {
     writer->write_struct(sfile->asset_params);
+    BKE_asset_catalog_state_list_blend_write(writer, sfile->asset_params->catalog_states);
   }
 }
 

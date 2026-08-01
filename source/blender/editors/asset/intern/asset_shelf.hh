@@ -8,7 +8,10 @@
 
 #pragma once
 
+#include <optional>
+
 #include "BLI_function_ref.hh"
+#include "BLI_string_ref.hh"
 
 namespace blender {
 
@@ -22,6 +25,7 @@ struct bContext;
 struct BlendDataReader;
 struct BlendWriter;
 struct RegionAssetShelf;
+struct wmWindowManager;
 
 namespace asset_system {
 class AssetCatalogPath;
@@ -36,7 +40,9 @@ namespace ed::asset::shelf {
 void build_asset_view(ui::Layout &layout,
                       const AssetLibraryReference &library_ref,
                       const AssetShelf &shelf,
-                      const bContext &C);
+                      const bContext &C,
+                      std::optional<int> popup_grid_viewport_height_px = std::nullopt,
+                      std::optional<int> cols_hint = std::nullopt);
 
 void catalog_selector_panel_register(ARegionType *region_type);
 void popover_panel_register(ARegionType *region_type);
@@ -49,6 +55,21 @@ AssetShelfType *ensure_shelf_has_type(AssetShelf &shelf);
 AssetShelf *create_shelf_from_type(AssetShelfType &type);
 
 void library_selector_draw(const bContext *C, ui::Layout &layout, AssetShelf &shelf);
+
+/**
+ * Width in pixels a tab button needs to show \a name in full, as used by the shelf's catalog tabs
+ * and the popover's pinned library tabs. Shared so the two tab rows stay visually identical, and so
+ * a row can be measured (for wrapping) without building its buttons.
+ *
+ * \note Capping the result is the caller's call, not this function's: the shelf's catalog tabs sit
+ * in a single header row and cap it, the popover's tab row wraps instead and does not.
+ *
+ * \note This is *not* the only tab width formula in the tree: #template_ID_tabs (workspace and ID
+ * tabs) pads by a whole #UI_UNIT_X rather than the 0.3 each side used here. That is deliberate --
+ * those tabs are a different widget in a different host -- so do not "unify" the two without
+ * deciding which look wins.
+ */
+int tab_button_width(StringRefNull name);
 
 /**
  * Deep-copies \a shelf_regiondata into newly allocated memory. Must be freed using
@@ -71,6 +92,23 @@ void settings_blend_read_data(BlendDataReader *reader, AssetShelfSettings &setti
  * The library reference in \a settings will be updated and returned (for convenience).
  */
 AssetLibraryReference &settings_ensure_valid_library_ref(AssetShelfSettings &settings);
+/** True when the settings reference a custom library that no longer resolves at all (as opposed
+ * to one that resolves but is a folder or disabled, which falls back to "All" instead). */
+bool settings_library_is_missing(const AssetShelfSettings &settings);
+
+void settings_swap_asset_library(AssetShelf &shelf, const AssetLibraryReference &new_ref);
+void settings_catalog_commit_active(AssetShelf &shelf,
+                                    wmWindowManager *wm,
+                                    bool tag_file_modified);
+void settings_commit_catalog_states_for_file_save(AssetShelfSettings &settings);
+void settings_load_active_catalog_for_library(AssetShelfSettings &settings,
+                                              const AssetLibraryReference &library_ref);
+bool popup_library_catalog_settings_store(wmWindowManager &wm, const AssetShelf &shelf);
+void popup_library_catalog_settings_load(const wmWindowManager &wm,
+                                         const char *shelf_idname,
+                                         AssetShelfSettings &settings);
+void popup_shelf_sync_per_file_state_from_wm(const wmWindowManager &wm, AssetShelf &shelf);
+void popup_shelves_sync_per_file_state_from_wm(const wmWindowManager &wm);
 
 void settings_set_active_catalog(AssetShelfSettings &settings,
                                  const asset_system::AssetCatalogPath &path);
@@ -78,6 +116,10 @@ void settings_set_all_catalog_active(AssetShelfSettings &settings);
 bool settings_is_active_catalog(const AssetShelfSettings &settings,
                                 const asset_system::AssetCatalogPath &path);
 bool settings_is_all_catalog_active(const AssetShelfSettings &settings);
+void settings_set_recent_catalog_active(AssetShelfSettings &settings);
+bool settings_is_recent_catalog_active(const AssetShelfSettings &settings);
+void settings_set_favorites_catalog_active(AssetShelfSettings &settings);
+bool settings_is_favorites_catalog_active(const AssetShelfSettings &settings);
 /**
  * Clears the list of enabled catalogs in either the Preferences (if any) or the asset shelf
  * settings (if any), depending on the #ASSET_SHELF_TYPE_FLAG_STORE_CATALOGS_IN_PREFS flag.
@@ -91,6 +133,15 @@ void settings_set_catalog_path_enabled(AssetShelf &shelf,
 void settings_foreach_enabled_catalog_path(
     const AssetShelf &shelf,
     FunctionRef<void(const asset_system::AssetCatalogPath &catalog_path)> fn);
+
+/** Collapsed state of a catalog path in the shelf, or nullopt when not saved yet. */
+std::optional<bool> settings_get_catalog_path_collapsed(
+    const AssetShelfSettings &settings, const asset_system::AssetCatalogPath &path);
+
+/** Save the collapsed state of a catalog path in the shelf settings. */
+void settings_set_catalog_path_collapsed(AssetShelfSettings &settings,
+                                         const asset_system::AssetCatalogPath &path,
+                                         bool collapsed);
 
 }  // namespace ed::asset::shelf
 }  // namespace blender

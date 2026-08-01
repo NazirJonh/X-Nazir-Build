@@ -1278,11 +1278,21 @@ enum eWM_DragDataType : int8_t {
   WM_DRAG_COLOR,
   WM_DRAG_DATASTACK,
   WM_DRAG_ASSET_CATALOG,
+  /** Dragging an asset library or folder from Preferences. */
+  WM_DRAG_ASSET_LIBRARY,
   WM_DRAG_GREASE_PENCIL_LAYER,
   WM_DRAG_GREASE_PENCIL_GROUP,
   WM_DRAG_NODE_TREE_INTERFACE,
   WM_DRAG_BONE_COLLECTION,
   WM_DRAG_SHAPE_KEY,
+  /** Reorder an item within an asset-backed grid (Shift+drag) — the asset shelf's Favorites list
+   *  today, any future template_grid_view_asset consumer that opts in tomorrow. */
+  WM_DRAG_GRID_ITEM_REORDER_ASSET,
+  /** Reorder an item within a template_grid_view_custom / UIGrid grid (Shift+drag). */
+  WM_DRAG_GRID_ITEM_REORDER_PY,
+  /** Drag a template_grid_view_custom / UIGrid item via its bl_drag_operator (plain drag, not
+   *  the Shift+drag reorder gesture -- see WM_DRAG_GRID_ITEM_REORDER_PY). */
+  WM_DRAG_GRID_ITEM_PY,
 };
 
 enum eWM_DragFlags {
@@ -1304,8 +1314,41 @@ struct wmDragAsset {
   AssetImportSettings import_settings;
 };
 
+/** Drag data for reordering an item within an asset-backed grid (Shift+drag). */
+struct wmDragGridItemReorderAsset {
+  /** Instance-isolation key: AssetShelfType::idname. A drop target on a different shelf instance
+   * rejects this (see #GridItemReorderDropTarget::can_drop). */
+  std::string shelf_idname;
+  /** Not a raw AssetRepresentation* -- survives the asset list rebuilding between drag-start and
+   * drop (the previous wmDragBrushAssetFavorite carried a raw pointer with no such guarantee). */
+  AssetWeakReference source;
+  /** Snapshot of the asset UI name at drag-create time (for #WM_drag_get_item_name; resolving
+   * #source needs a #bContext that getter does not have). */
+  std::string display_name;
+};
+
+/** Drag data for reordering an item within a template_grid_view_custom / UIGrid grid
+ *  (Shift+drag). */
+struct wmDragGridItemReorderPy {
+  /** Instance-isolation key: the grid_id passed to template_grid_view_custom(). */
+  std::string grid_id;
+  std::string source_identifier;
+};
+
+/** Drag data for a plain (non-reorder) template_grid_view_custom / UIGrid item drag. */
+struct wmDragGridItemPy {
+  std::string source_identifier;
+};
+
 struct wmDragAssetCatalog {
   bUUID drag_catalog_id;
+};
+
+/** Drag data for asset library items from Preferences. */
+struct wmDragAssetLibrary {
+  /** Index into #UserDef.asset_libraries of the dragged item (see
+   * #BKE_preferences_asset_library_get_index). */
+  int library_index;
 };
 
 /**
@@ -1392,9 +1435,18 @@ struct wmDrag {
 
   /** If no small icon but imbuf should be drawn around cursor. */
   const ImBuf *imb;
+  /**
+   * When true, #imb is owned by this drag and freed in #WM_drag_free. Used for previews generated
+   * on the fly (e.g. external image files dragged from the OS), as opposed to borrowed image
+   * buffers that belong to an existing data-block.
+   */
+  bool imb_is_owned;
   float imbuf_scale;
   /** If #imb is not set, draw this as a big preview instead of the small #icon. */
   int preview_icon_id; /* BIFIconID */
+  /** Scale factor applied to the #preview_icon_id draw size (see #wm_drag_preview_icon_size_get).
+   * Set via #WM_event_drag_preview_icon(). */
+  float preview_icon_scale = 1.0f;
 
   wmDragActiveDropState drop_state;
 

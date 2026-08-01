@@ -4382,6 +4382,25 @@ void wm_event_do_handlers(bContext *C)
         }
 #endif
 
+        /* Temporary popup regions are stored directly on the screen instead of in an area. Dispatch
+         * the event to the topmost popup before regular area handling, so popovers can receive
+         * drag-and-drop events and consume events while they are open. */
+        for (ARegion *popup = static_cast<ARegion *>(screen->regionbase.last); popup;
+             popup = popup->prev)
+        {
+          if (popup->regiontype != RGN_TYPE_TEMPORARY || !popup->runtime->visible ||
+              !ED_region_contains_xy(popup, event->xy))
+          {
+            continue;
+          }
+
+          action |= wm_event_do_region_handlers(C, event, popup);
+          break;
+        }
+
+        /* NOTE: do not gate on #WM_HANDLER_BREAK here (from either the modal handlers above or the
+         * popup dispatch just above) -- mouse-move needs handled for every area regardless, see the
+         * matching NOTE inside the loop below. */
         ED_screen_areas_iter (&win, screen, area) {
           /* After restoring a screen from SCREENMAXIMIZED we have to wait
            * with the screen handling till the region coordinates are updated. */

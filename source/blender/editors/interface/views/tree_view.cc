@@ -6,6 +6,8 @@
  * \ingroup edinterface
  */
 
+#include <algorithm>
+
 #include "BKE_context.hh"
 
 #include "BLT_translation.hh"
@@ -207,12 +209,23 @@ AbstractViewItem *AbstractTreeView::navigate_down(AbstractViewItem *from)
   return next_item ? next_item : from;
 }
 
-void AbstractTreeView::set_default_rows(int default_rows)
+void AbstractTreeView::set_default_rows(int default_rows, bool allow_resize)
 {
   BLI_assert_msg(default_rows >= MIN_ROWS,
                  "Default value is smaller than the minimum rows. Limit is required to prevent "
                  "resizing below specific height.");
   custom_height_ = std::make_unique<int>(default_rows * padded_item_height());
+  allow_height_resize_ = allow_resize;
+}
+
+void AbstractTreeView::set_fixed_height_px(int height_px, bool allow_resize)
+{
+  /* Clamp to the minimum rows so the view never resizes below a usable height, matching
+   * #set_default_rows(). The stored value is snapped to whole item rows on draw
+   * (#tot_visible_row_count). */
+  const int min_px = MIN_ROWS * padded_item_height();
+  custom_height_ = std::make_unique<int>(std::max(height_px, min_px));
+  allow_height_resize_ = allow_resize;
 }
 
 std::optional<uiViewState> AbstractTreeView::persistent_state() const
@@ -240,7 +253,12 @@ std::optional<uiViewState> AbstractTreeView::persistent_state() const
 
 void AbstractTreeView::persistent_state_apply(const uiViewState &state)
 {
-  if (state.custom_height) {
+  /* Only restore a user-resized height when the view is actually user-resizable. A view given a
+   * fixed height (#set_fixed_height_px with `allow_resize=false`, e.g. the asset shelf popover's
+   * catalog tree bound to the grid height) must keep the height set each draw; otherwise the stale
+   * persisted value from the previous frame would override it and the tree would never follow a
+   * live height change. */
+  if (state.custom_height && allow_height_resize_) {
     set_default_rows(std::max(
         MIN_ROWS, round_fl_to_int(state.custom_height * UI_SCALE_FAC) / padded_item_height()));
   }
@@ -413,7 +431,14 @@ void AbstractTreeView::update_children_from_old(const AbstractView &old_view)
 {
   const AbstractTreeView &old_tree_view = dynamic_cast<const AbstractTreeView &>(old_view);
 
-  custom_height_ = old_tree_view.custom_height_;
+  /* Carry over a user-resized height across rebuilds, but only when the view is user-resizable.
+   * A fixed-height view (#set_fixed_height_px with `allow_resize=false`, e.g. the asset shelf
+   * popover's catalog tree bound to the grid height) sets its height fresh every draw; copying the
+   * previous frame's height here would override it, so the tree would not follow a live height
+   * change (only visible after a full reopen). */
+  if (allow_height_resize_) {
+    custom_height_ = old_tree_view.custom_height_;
+  }
   scroll_value_ = old_tree_view.scroll_value_;
   search_string_ = old_tree_view.search_string_;
   show_display_options_ = old_tree_view.show_display_options_;
@@ -489,6 +514,32 @@ void AbstractTreeView::scroll(ViewScrollDirection direction)
   }
   /* Scroll value will be sanitized/clamped when drawing. */
   *scroll_value_ += ((direction == ViewScrollDirection::UP) ? -1 : 1);
+}
+
+void AbstractTreeView::set_drag_scroll(const bool enable)
+{
+  drag_scroll_enabled_ = enable;
+}
+
+std::optional<TreeViewDragScrollHandle> AbstractTreeView::drag_scroll_handle()
+{
+  if (!drag_scroll_enabled_ || !this->supports_scrolling() || this->is_fully_visible()) {
+    return {};
+  }
+  const std::optional<int> visible_row_count = this->tot_visible_row_count();
+  if (!visible_row_count) {
+    /* #supports_scrolling() already implies a custom height, so this cannot happen; bail rather
+     * than hand out a handle whose #TreeViewDragScrollHandle::max_rows would be a guess. */
+    return {};
+  }
+
+  TreeViewDragScrollHandle handle;
+  handle.scroll_value = scroll_value_;
+  /* #is_fully_visible() above rules out a non-positive result; clamp anyway so a caller can divide
+   * and clamp by these without re-checking. */
+  handle.max_rows = std::max(0, last_tot_items_ - *visible_row_count);
+  handle.row_height = std::max(1, padded_item_height());
+  return handle;
 }
 
 void AbstractTreeView::scroll_active_into_view(bContext * /*C*/, bool scroll_active_to_center)
@@ -1032,116 +1083,121 @@ void TreeViewLayoutBuilder::build_from_tree(AbstractTreeView &tree_view)
       but_scroll->visual_height = *visible_row_count;
     }
 
-    block_layout_set_current(block, &col);
+    /* The bottom resize grip and filter row are omitted when the height is fixed externally (e.g.
+     * the asset shelf popover), which keeps the popover height stable; the scroll bar above still
+     * provides scrolling for overflow. */
+    if (tree_view.allow_height_resize_) {
+      block_layout_set_current(block, &col);
 
-    /* Bottom */
-    Layout &bottom = col.row(false);
-    block_emboss_set(block, EmbossType::None);
-    but = uiDefIconButBit(block,
-                          ButtonType::IconToggleN,
-                          1,
-                          ICON_DISCLOSURE_TRI_DOWN,
-                          0,
-                          0,
-                          UI_UNIT_X,
-                          UI_UNIT_Y * 0.5,
-                          tree_view.show_display_options_.get(),
-                          0,
-                          0,
-                          TIP_(""));
-    button_flag_disable(but, BUT_UNDO);
-    block_emboss_set(block, EmbossType::Emboss);
-    bottom.column(false);
-
-    uiDefIconButV(block,
-                  ButtonType::Grip,
-                  ICON_GRIP,
-                  0,
-                  0,
-                  UI_UNIT_X * 10,
-                  UI_UNIT_Y * 0.5f,
-                  tree_view.custom_height_.get(),
-                  0,
-                  0,
-                  "");
-
-    if (*tree_view.show_display_options_) {
-      Layout &filter_layout = col.row(true);
-      block_emboss_set(block, EmbossType::Emboss);
-      but = uiDefBut(block,
-                     ButtonType::Text,
-                     "",
-                     0,
-                     0,
-                     UI_UNIT_X * 10,
-                     UI_UNIT_Y,
-                     tree_view.search_string_.get(),
-                     0,
-                     UI_MAX_NAME_STR,
-                     "");
-      button_flag_enable(but, BUT_TEXTEDIT_UPDATE | BUT_VALUE_CLEAR);
-      button_flag_disable(but, BUT_UNDO);
-      def_but_icon(but, ICON_VIEWZOOM, UI_HAS_ICON);
-      button_placeholder_set(but, IFACE_("Search"));
-
-      but = uiDefIconButBit(
-          block,
-          ButtonType::Toggle,
-          1,
-          ICON_ARROW_LEFTRIGHT,
-          0,
-          0,
-          UI_UNIT_X,
-          UI_UNIT_Y,
-          tree_view.invert_search_filter_.get(),
-          0,
-          0,
-          TIP_("Invert search results (Show items that don't match the search string)"));
-      button_flag_disable(but, BUT_UNDO);
-
-      filter_layout.separator();
+      /* Bottom */
+      Layout &bottom = col.row(false);
+      block_emboss_set(block, EmbossType::None);
       but = uiDefIconButBit(block,
-                            ButtonType::Toggle,
+                            ButtonType::IconToggleN,
                             1,
-                            ICON_SORTALPHA,
+                            ICON_DISCLOSURE_TRI_DOWN,
                             0,
                             0,
                             UI_UNIT_X,
-                            UI_UNIT_Y,
-                            tree_view.sort_alpha_.get(),
+                            UI_UNIT_Y * 0.5,
+                            tree_view.show_display_options_.get(),
                             0,
                             0,
-                            TIP_("Sort items alphabetically"));
+                            TIP_(""));
       button_flag_disable(but, BUT_UNDO);
+      block_emboss_set(block, EmbossType::Emboss);
+      bottom.column(false);
 
-      int icon = ICON_SORT_DESC;
-      switch (*tree_view.invert_sort_type_) {
-        case TreeViewSortOrder::InvertRoot:
-          icon = ICON_DOWNARROW_HLT;
-          break;
-        case TreeViewSortOrder::InvertNested:
-          icon = ICON_SORT_ASC;
-          break;
-        default:
-          break;
+      uiDefIconButV(block,
+                    ButtonType::Grip,
+                    ICON_GRIP,
+                    0,
+                    0,
+                    UI_UNIT_X * 10,
+                    UI_UNIT_Y * 0.5f,
+                    tree_view.custom_height_.get(),
+                    0,
+                    0,
+                    "");
+
+      if (*tree_view.show_display_options_) {
+        Layout &filter_layout = col.row(true);
+        block_emboss_set(block, EmbossType::Emboss);
+        but = uiDefBut(block,
+                       ButtonType::Text,
+                       "",
+                       0,
+                       0,
+                       UI_UNIT_X * 10,
+                       UI_UNIT_Y,
+                       tree_view.search_string_.get(),
+                       0,
+                       UI_MAX_NAME_STR,
+                       "");
+        button_flag_enable(but, BUT_TEXTEDIT_UPDATE | BUT_VALUE_CLEAR);
+        button_flag_disable(but, BUT_UNDO);
+        def_but_icon(but, ICON_VIEWZOOM, UI_HAS_ICON);
+        button_placeholder_set(but, IFACE_("Search"));
+
+        but = uiDefIconButBit(
+            block,
+            ButtonType::Toggle,
+            1,
+            ICON_ARROW_LEFTRIGHT,
+            0,
+            0,
+            UI_UNIT_X,
+            UI_UNIT_Y,
+            tree_view.invert_search_filter_.get(),
+            0,
+            0,
+            TIP_("Invert search results (Show items that don't match the search string)"));
+        button_flag_disable(but, BUT_UNDO);
+
+        filter_layout.separator();
+        but = uiDefIconButBit(block,
+                              ButtonType::Toggle,
+                              1,
+                              ICON_SORTALPHA,
+                              0,
+                              0,
+                              UI_UNIT_X,
+                              UI_UNIT_Y,
+                              tree_view.sort_alpha_.get(),
+                              0,
+                              0,
+                              TIP_("Sort items alphabetically"));
+        button_flag_disable(but, BUT_UNDO);
+
+        int icon = ICON_SORT_DESC;
+        switch (*tree_view.invert_sort_type_) {
+          case TreeViewSortOrder::InvertRoot:
+            icon = ICON_DOWNARROW_HLT;
+            break;
+          case TreeViewSortOrder::InvertNested:
+            icon = ICON_SORT_ASC;
+            break;
+          default:
+            break;
+        }
+
+        but = uiDefIconBut(block,
+                           ButtonType::Toggle,
+                           icon,
+                           0,
+                           0,
+                           UI_UNIT_X,
+                           UI_UNIT_Y,
+                           nullptr,
+                           0,
+                           0,
+                           TIP_("Reverse the order of items"));
+        button_func_set(but, set_sort_order_fn, nullptr, tree_view.invert_sort_type_.get());
+        button_func_pushed_state_set(but, [&](const ui::Button & /*button*/) {
+          return *tree_view.invert_sort_type_ != TreeViewSortOrder::None;
+        });
+        button_flag_disable(but, BUT_UNDO);
       }
-
-      but = uiDefIconBut(block,
-                         ButtonType::Toggle,
-                         icon,
-                         0,
-                         0,
-                         UI_UNIT_X,
-                         UI_UNIT_Y,
-                         nullptr,
-                         0,
-                         0,
-                         TIP_("Reverse the order of items"));
-      button_func_set(but, set_sort_order_fn, nullptr, tree_view.invert_sort_type_.get());
-      button_func_pushed_state_set(but, [&](const ui::Button & /*button*/) {
-        return *tree_view.invert_sort_type_ != TreeViewSortOrder::None;
-      });
-      button_flag_disable(but, BUT_UNDO);
     }
   }
 
@@ -1253,6 +1309,16 @@ void TreeViewBuilder::build_tree_view(const bContext &C,
   }
 
   tree_view.build_tree();
+
+  /* Drag-scroll and select-on-press are incompatible: a press would commit the selection before
+   * a drag is even detectable, and the arbitration's later #UI_region_free_active_but_all cannot
+   * roll back an already executed `activate()`. Views that opt into drag-scroll (see
+   * #AbstractTreeView::set_drag_scroll) must therefore make all of their items select-on-click,
+   * rather than relying on every item-building call site to opt in individually. */
+  if (tree_view.drag_scroll_enabled_) {
+    tree_view.foreach_item([](AbstractTreeViewItem &item) { item.select_on_click_set(); });
+  }
+
   tree_view.update_from_old(block);
   tree_view.change_state_delayed();
 

@@ -17,6 +17,7 @@
 
 #include "wm_draw.hh"
 
+#include "ED_asset_shelf.hh"
 #include "ED_screen.hh"
 
 #include "interface_regions_intern.hh"
@@ -40,6 +41,10 @@ void region_temp_remove(bContext *C, bScreen *screen, ARegion *region)
 
   BLI_assert(region->regiontype == RGN_TYPE_TEMPORARY);
   BLI_assert(BLI_findindex(&screen->regionbase, region) != -1);
+
+  /* Drop any D7 asset-shelf popup stamp before the region pointer is freed. */
+  ed::asset::shelf::shelf_popup_region_unbind(*region);
+
   if (win) {
     wm_draw_region_clear(win, region);
   }

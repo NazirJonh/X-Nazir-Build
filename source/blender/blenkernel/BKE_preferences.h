@@ -8,16 +8,24 @@
 
 #pragma once
 
+#include <optional>
+
 #include "BLI_compiler_attrs.h"
 #include "BLI_sys_types.h"
 
 namespace blender {
 
+struct AssetCatalogState;
+struct AssetLibraryReference;
+struct BlendDataReader;
 struct BlendWriter;
 struct UserDef;
+struct bUserAssetBrowserSettings;
 struct bUserExtensionRepo;
 struct bUserAssetLibrary;
 struct bUserAssetShelfSettings;
+/* Fixed underlying type, so this matches #DNA_asset_types.h exactly and can be forward-declared. */
+enum eAssetLibraryType : short;
 class StringRef;
 struct EnumPropertyItem;
 
@@ -96,6 +104,36 @@ struct bUserAssetLibrary *BKE_preferences_asset_library_find_by_name(const struc
     ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
 
 /**
+ * Resolve \a ref to the #bUserAssetLibrary it refers to.
+ *
+ * Uses #AssetLibraryReference.custom_library_name (the persistent identity), falling back to
+ * #AssetLibraryReference.custom_library_index only for references written before that field
+ * existed.
+ *
+ * Prefer this over #BKE_preferences_asset_library_find_index() for anything holding an
+ * #AssetLibraryReference: the index is a position in #UserDef.asset_libraries and shifts whenever
+ * the list is reordered or an entry removed.
+ *
+ * \return null if \a ref is not #ASSET_LIBRARY_CUSTOM, or if the library it names is gone.
+ */
+struct bUserAssetLibrary *BKE_preferences_asset_library_find_from_ref(
+    const struct UserDef *userdef, const struct AssetLibraryReference *ref)
+    ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Point \a r_ref at \a user_library. Type, name (the identity) and index (its cache) are set
+ * together, so the two can never disagree.
+ *
+ * This is the only supported way to build a custom library reference. It cannot construct a
+ * reference to a library that does not exist, which is what makes "a custom reference without a
+ * name can only come from a legacy file" an invariant.
+ */
+void BKE_preferences_asset_library_reference_set(const struct UserDef *userdef,
+                                                 struct AssetLibraryReference *r_ref,
+                                                 const struct bUserAssetLibrary *user_library)
+    ATTR_NONNULL();
+
+/**
  * Return the bUserAssetLibrary that contains the given file/directory path. The given path can be
  * the library's top-level directory, or any path inside that directory.
  *
@@ -121,6 +159,129 @@ bool BKE_preferences_asset_library_is_valid(const UserDef *userdef,
                                             const bool check_directory_exists) ATTR_NONNULL();
 
 void BKE_preferences_asset_library_default_add(struct UserDef *userdef) ATTR_NONNULL();
+
+/**
+ * Create a new folder for organizing asset libraries.
+ * \param parent: Parent folder (nullptr for root level).
+ */
+struct bUserAssetLibrary *BKE_preferences_asset_library_folder_add(
+    struct UserDef *userdef, const char *name, struct bUserAssetLibrary *parent) ATTR_NONNULL(1);
+
+/**
+ * Move an asset library or folder to a different parent folder.
+ * \param library: The library or folder to move.
+ * \param new_parent: The new parent folder (nullptr for root level).
+ */
+void BKE_preferences_asset_library_move_to_folder(struct UserDef *userdef,
+                                                  struct bUserAssetLibrary *library,
+                                                  struct bUserAssetLibrary *new_parent)
+    ATTR_NONNULL(1, 2);
+
+/**
+ * Check if the library is a folder (container for other libraries).
+ */
+bool BKE_preferences_asset_library_is_folder(const struct bUserAssetLibrary *library)
+    ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Check if the library can be deleted.
+ * Folders can only be deleted if they are empty.
+ */
+bool BKE_preferences_asset_library_can_delete(const struct UserDef *userdef,
+                                              const struct bUserAssetLibrary *library)
+    ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
+
+/** Where to move an asset library or folder relative to the target. */
+enum eBKE_AssetLibraryMoveLocation {
+  /** Move into the target folder (target must be a folder). */
+  ASSET_LIBRARY_MOVE_INTO = 0,
+  /** Move immediately before the target. */
+  ASSET_LIBRARY_MOVE_BEFORE = 1,
+  /** Move immediately after the target. */
+  ASSET_LIBRARY_MOVE_AFTER = 2,
+};
+
+/**
+ * Reorder an asset library or folder within its parent.
+ * When moving a folder, all its descendants move with it.
+ */
+bool BKE_preferences_asset_library_reorder(UserDef *userdef,
+                                           bUserAssetLibrary *library,
+                                           bUserAssetLibrary *target,
+                                           eBKE_AssetLibraryMoveLocation location)
+    ATTR_NONNULL(1, 2, 3);
+
+/**
+ * Pin or unpin \a library, which controls whether it appears as a tab at the top of the asset
+ * shelf popover. Maintains the dense ordering of #bUserAssetLibrary.pin_order; a newly pinned
+ * library is appended last.
+ */
+void BKE_preferences_asset_library_pin_set(struct UserDef *userdef,
+                                           struct bUserAssetLibrary *library,
+                                           bool pinned) ATTR_NONNULL();
+
+/**
+ * Move \a library to \a new_index among the pinned libraries, renumbering the others to keep the
+ * order dense. \a new_index is clamped to the valid range.
+ *
+ * \note Unrelated to #BKE_preferences_asset_library_reorder, which reorders the Preferences folder
+ * tree.
+ *
+ * \return false if \a library is not pinned, or is already at \a new_index.
+ */
+bool BKE_preferences_asset_library_pin_reorder(struct UserDef *userdef,
+                                               struct bUserAssetLibrary *library,
+                                               int new_index) ATTR_NONNULL();
+
+/** \return the number of libraries carrying #ASSET_LIBRARY_IS_PINNED. */
+int BKE_preferences_asset_library_pinned_count(const struct UserDef *userdef)
+    ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * \return whether the built-in library \a type has a pin of its own at all.
+ *
+ * False for #ASSET_LIBRARY_ALL (always shown, so there is nothing to toggle) and for
+ * #ASSET_LIBRARY_CUSTOM (a custom library carries #ASSET_LIBRARY_IS_PINNED on its own
+ * #bUserAssetLibrary instead). Ask this before offering a pin toggle for a built-in.
+ */
+bool BKE_preferences_asset_builtin_pin_supported(eAssetLibraryType type) ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * \return whether the built-in library \a type is currently pinned, i.e. shown as a tab at the top
+ * of the asset shelf popover. False for a \a type that cannot be pinned.
+ */
+bool BKE_preferences_asset_builtin_pin_get(const struct UserDef *userdef, eAssetLibraryType type)
+    ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Pin or unpin the built-in library \a type. Does nothing for a \a type that cannot be pinned.
+ *
+ * \note Unrelated to #bUserAssetLibrary.pin_order: the built-in tabs are fixed in place and take no
+ * part in that ordering, so nothing has to be compacted here.
+ */
+void BKE_preferences_asset_builtin_pin_set(struct UserDef *userdef,
+                                           eAssetLibraryType type,
+                                           bool pinned) ATTR_NONNULL();
+
+/**
+ * Restore parent pointers from parent_name strings in the asset library hierarchy.
+ *
+ * This function must be called after reading UserDef from a file to reconstruct
+ * the parent-child relationships between asset libraries. It restores the runtime
+ * parent pointers from the parent_name strings that are saved in the DNA.
+ *
+ * Also performs cycle detection and breaks cycles if found (defensive programming).
+ *
+ * \param userdef: The UserDef structure with asset libraries.
+ */
+void BKE_preferences_asset_library_restore_hierarchy(UserDef *userdef);
+
+/**
+ * Return true only if the library and every ancestor folder are enabled.
+ * Walks the #bUserAssetLibrary.parent chain checking #ASSET_LIBRARY_DISABLED.
+ */
+bool BKE_preferences_asset_library_is_effectively_enabled(
+    const struct bUserAssetLibrary *library) ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
 
 /** \} */
 
@@ -219,7 +380,85 @@ bool BKE_preferences_asset_shelf_settings_ensure_catalog_path_enabled(UserDef *u
                                                                       const char *shelf_idname,
                                                                       const char *catalog_path);
 
+/**
+ * Read the popup-shelf view preferences (preview size, display flags, popup width, height and
+ * recent brush limit) stored for the given shelf type. Fields whose stored value is 0
+ * ("not set") are left untouched in the outputs, so callers can pre-seed them with the shelf
+ * type's defaults.
+ */
+void BKE_preferences_asset_shelf_popup_view_load(const UserDef *userdef,
+                                                 const char *shelf_idname,
+                                                 short *r_preview_size,
+                                                 short *r_display_flag,
+                                                 short *r_width_units,
+                                                 short *r_height_units,
+                                                 short *r_recent_max_count);
+
+/**
+ * Persist the popup-shelf view preferences for the given shelf type. Creates the per-type
+ * settings entry in the Preferences when missing. Caller is responsible for tagging the
+ * Preferences as dirty (`U.runtime.is_dirty`).
+ */
+void BKE_preferences_asset_shelf_popup_view_store(UserDef *userdef,
+                                                  const char *shelf_idname,
+                                                  short preview_size,
+                                                  short display_flag,
+                                                  short width_units,
+                                                  short height_units,
+                                                  short recent_max_count);
+
 const EnumPropertyItem *BKE_preferences_active_section_itemf(const UserDef *userdef, bool *r_free);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name #bUserAssetBrowserSettings
+ *
+ * Per-library persistent collapse state of asset catalog paths in the asset browser.
+ * \{ */
+
+/**
+ * A stable, position-independent identifier for the library \a ref refers to: "local", "all",
+ * "essentials", "online_essentials", or the custom library's (unique) name. "default" when \a ref
+ * names nothing.
+ *
+ * Use as a map key or a settings key. Unlike #AssetLibraryReference.custom_library_index it does
+ * not change when the Preferences list is reordered.
+ */
+const char *BKE_preferences_asset_library_identifier_from_ref(
+    const struct UserDef *userdef, const struct AssetLibraryReference *ref)
+    ATTR_WARN_UNUSED_RESULT;
+
+bUserAssetBrowserSettings *BKE_preferences_asset_browser_settings_get(
+    const UserDef *userdef, const char *library_identifier);
+/**
+ * Resolve (and lazily create) the settings entry for the given asset library reference.
+ */
+bUserAssetBrowserSettings *BKE_preferences_asset_browser_settings_get_from_library_ref(
+    UserDef *userdef, const AssetLibraryReference *library_ref);
+/** Collapsed state for a catalog path in a library, or nullopt when not saved yet. */
+std::optional<bool> BKE_preferences_asset_browser_settings_is_catalog_collapsed(
+    const UserDef *userdef, const char *library_identifier, const char *catalog_path);
+void BKE_preferences_asset_browser_settings_set_catalog_collapsed(UserDef *userdef,
+                                                                  const char *library_identifier,
+                                                                  const char *catalog_path,
+                                                                  bool collapsed);
+/**
+ * Move the settings entry keyed by \a old_name over to \a new_name, so renaming a custom library
+ * keeps its saved catalog collapse state instead of silently orphaning it.
+ *
+ * Entries outlive the library they were created for (removing a library does not remove them), so
+ * \a new_name may already be taken by leftovers; those are dropped in favor of the live library.
+ */
+void BKE_preferences_asset_browser_settings_rename_library(UserDef *userdef,
+                                                           const char *old_name,
+                                                           const char *new_name);
+
+void BKE_preferences_asset_browser_settings_blend_write(BlendWriter *writer,
+                                                        const bUserAssetBrowserSettings *settings);
+void BKE_preferences_asset_browser_settings_blend_read_data(BlendDataReader *reader,
+                                                            bUserAssetBrowserSettings *settings);
+
 /** \} */
 
 }  // namespace blender

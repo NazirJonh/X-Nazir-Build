@@ -2380,6 +2380,44 @@ static void UI_OT_button_string_clear(wmOperatorType *ot)
   ot->flag = OPTYPE_INTERNAL;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Palette Swatch Size Toggle Operator
+ * \{ */
+
+/* Session-only display preference shared by all #template_palette instances. Kept here (rather
+ * than in DNA/RNA) because it is transient UI state with no need for persistence. */
+static bool palette_large_swatches = false;
+
+bool palette_swatch_size_large_get()
+{
+  return palette_large_swatches;
+}
+
+static wmOperatorStatus palette_swatch_size_toggle_exec(bContext *C, wmOperator * /*op*/)
+{
+  palette_large_swatches = !palette_large_swatches;
+
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+    ED_region_tag_refresh_ui(region);
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+static void UI_OT_palette_swatch_size_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Palette Swatch Size";
+  ot->idname = "UI_OT_palette_swatch_size_toggle";
+  ot->description = "Toggle between normal and large palette color swatches";
+
+  ot->poll = ED_operator_regionactive;
+  ot->exec = palette_swatch_size_toggle_exec;
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+/** \} */
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -2621,8 +2659,12 @@ static AbstractView *get_view_focused(bContext *C)
 
 static bool view_focused_poll(bContext *C)
 {
-  const AbstractView *view = get_view_focused(C);
-  return view != nullptr;
+  if (get_view_focused(C)) {
+    return true;
+  }
+  /* Fallback for context menus: the cursor may be over the popup rather than the view itself. */
+  const ARegion *region = CTX_wm_region(C);
+  return region && region_views_find_active_item(region, nullptr) != nullptr;
 }
 
 static wmOperatorStatus view_start_filter_invoke(bContext *C,
@@ -2631,6 +2673,9 @@ static wmOperatorStatus view_start_filter_invoke(bContext *C,
 {
   const ARegion *region = CTX_wm_region(C);
   const AbstractView *hovered_view = region_view_find_at(region, event->xy, 0);
+  if (!hovered_view) {
+    return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
 
   if (!hovered_view->begin_filtering(*C)) {
     return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
@@ -2701,6 +2746,63 @@ static void UI_OT_view_drop(wmOperatorType *ot)
 
   ot->invoke = view_drop_invoke;
   ot->poll = view_drop_poll;
+
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name UI Button Drop Operator
+ * \{ */
+
+static bool button_drop_poll(bContext *C)
+{
+  const wmWindow *win = CTX_wm_window(C);
+  if (!(win && win->runtime->eventstate)) {
+    return false;
+  }
+  const ARegion *region = CTX_wm_region(C);
+  if (region == nullptr) {
+    return false;
+  }
+  return region_but_find_drop_target_at(C, region, win->runtime->eventstate) != nullptr;
+}
+
+static wmOperatorStatus button_drop_invoke(bContext *C, wmOperator * /*op*/, const wmEvent *event)
+{
+  if (event->custom != EVT_DATA_DRAGDROP) {
+    return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
+
+  ARegion *region = CTX_wm_region(C);
+  std::unique_ptr<DropTargetInterface> drop_target = region_but_find_drop_target_at(
+      C, region, event);
+  if (!drop_target) {
+    return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
+
+  if (!drop_target_apply_drop(*C,
+                              *region,
+                              *event,
+                              *drop_target,
+                              *static_cast<const ListBaseT<wmDrag> *>(event->customdata)))
+  {
+    return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
+
+  ED_region_tag_redraw(region);
+  return OPERATOR_FINISHED;
+}
+
+static void UI_OT_button_drop(wmOperatorType *ot)
+{
+  ot->name = "Button Drop";
+  ot->idname = "UI_OT_button_drop";
+  ot->description = "Drag and drop onto a button";
+
+  ot->invoke = button_drop_invoke;
+  ot->poll = button_drop_poll;
 
   ot->flag = OPTYPE_INTERNAL;
 }
@@ -2789,12 +2891,14 @@ static void UI_OT_view_scroll(wmOperatorType *ot)
 
 static bool view_item_rename_poll(bContext *C)
 {
-  const AbstractView *view = get_view_focused(C);
-  if (view == nullptr) {
+  const ARegion *region = CTX_wm_region(C);
+  if (!region) {
     return false;
   }
-
-  const ARegion *region = CTX_wm_region(C);
+  /* When the cursor is over a context menu (not directly over the view), `get_view_focused`
+   * returns null. Fall back to any active item in the region so rename works from context menus.
+   */
+  const AbstractView *view = get_view_focused(C);
   const AbstractViewItem *active_item = region_views_find_active_item(region, view);
   return active_item != nullptr && view_item_can_rename(*active_item);
 }
@@ -2978,6 +3082,18 @@ static wmOperatorStatus view_item_delete_invoke(bContext *C,
 {
   AbstractView *view = get_view_focused(C);
 
+  if (!view) {
+    /* Fallback for context menus: find the view from the active item in the region. */
+    const ARegion *region = CTX_wm_region(C);
+    if (Button *active_but = region ? region_views_find_active_item_but(region) : nullptr) {
+      view = &static_cast<ButtonViewItem *>(active_but)->view_item->get_view();
+    }
+  }
+
+  if (!view) {
+    return OPERATOR_CANCELLED;
+  }
+
   view->foreach_view_item([&](AbstractViewItem &item) {
     if (!item.is_filtered_visible()) {
       return;
@@ -3024,6 +3140,9 @@ static wmOperatorStatus ui_view_item_navigate_invoke(bContext *C,
   ARegion &region = *CTX_wm_region(C);
   const Direction direction = Direction(RNA_enum_get(op->ptr, "direction"));
   AbstractView *view = get_view_focused(C);
+  if (!view) {
+    return OPERATOR_CANCELLED;
+  }
 
   AbstractViewItem *from = view->find_active_or_visible_item();
   AbstractViewItem *next_item = nullptr;
@@ -3104,6 +3223,9 @@ static wmOperatorStatus ui_view_item_focus_invoke(bContext *C,
 {
   ARegion *region = CTX_wm_region(C);
   AbstractView *view = get_view_focused(C);
+  if (!view) {
+    return OPERATOR_CANCELLED;
+  }
 
   view->scroll_active_into_view(C, true);
   ED_region_tag_redraw(region);
@@ -3217,11 +3339,13 @@ void operatortypes_ui()
   WM_operatortype_append(UI_OT_reloadtranslation);
   WM_operatortype_append(UI_OT_button_execute);
   WM_operatortype_append(UI_OT_button_string_clear);
+  WM_operatortype_append(UI_OT_palette_swatch_size_toggle);
 
   WM_operatortype_append(UI_OT_list_start_filter);
 
   WM_operatortype_append(UI_OT_view_start_filter);
   WM_operatortype_append(UI_OT_view_drop);
+  WM_operatortype_append(UI_OT_button_drop);
   WM_operatortype_append(UI_OT_view_scroll);
   WM_operatortype_append(UI_OT_view_item_rename);
   WM_operatortype_append(UI_OT_view_item_select);
@@ -3235,6 +3359,8 @@ void operatortypes_ui()
   WM_operatortype_append(UI_OT_override_idtemplate_reset);
   WM_operatortype_append(UI_OT_override_idtemplate_clear);
   override_idtemplate_menu();
+
+  WM_operatortype_append(UI_OT_id_browser_set_library);
 
   /* external */
   WM_operatortype_append(UI_OT_eyedropper_color);

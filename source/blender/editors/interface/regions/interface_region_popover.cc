@@ -49,6 +49,40 @@
 
 namespace blender::ui {
 
+/** Map #PopupAttachDirection to #Block::direction (primary open direction). */
+static int popover_direction_from_attach(const PopupAttachDirection attach_dir)
+{
+  switch (attach_dir) {
+    case PopupAttachDirection::Horizontal:
+      return UI_DIR_LEFT;
+    case PopupAttachDirection::VerticalAlignLeft:
+      return UI_DIR_DOWN;
+    case PopupAttachDirection::VerticalAlignRight:
+      return UI_DIR_DOWN | UI_DIR_RIGHT;
+    case PopupAttachDirection::Vertical:
+      return UI_DIR_DOWN | UI_DIR_CENTER_X;
+  }
+  BLI_assert_unreachable();
+  return UI_DIR_DOWN | UI_DIR_CENTER_X;
+}
+
+/** Same as #popover_direction_from_attach, but opening upward when there is no room below. */
+static int popover_direction_from_attach_flip_up(const PopupAttachDirection attach_dir)
+{
+  switch (attach_dir) {
+    case PopupAttachDirection::Horizontal:
+      return UI_DIR_LEFT;
+    case PopupAttachDirection::VerticalAlignLeft:
+      return UI_DIR_UP;
+    case PopupAttachDirection::VerticalAlignRight:
+      return UI_DIR_UP | UI_DIR_RIGHT;
+    case PopupAttachDirection::Vertical:
+      return UI_DIR_UP | UI_DIR_CENTER_X;
+  }
+  BLI_assert_unreachable();
+  return UI_DIR_UP | UI_DIR_CENTER_X;
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Popup Menu with Callback or String
  * \{ */
@@ -58,6 +92,12 @@ struct Popover {
   Layout *layout;
   Button *but;
   ARegion *butregion;
+
+  /* Snapshot of pup->but->context taken the first time the popover block is created.
+   * pup->but becomes a dangling pointer after the parent block redraws (e.g. N-panel
+   * refresh triggered by async asset loading), so subsequent refreshes of the popover
+   * must use this copy instead of reading pup->but->context directly. */
+  bContextStore *saved_but_context;
 
   /* Needed for keymap removal. */
   wmWindow *window;
@@ -102,10 +142,16 @@ static void popover_create_block(bContext *C,
 
   pup->layout->operator_context_set(opcontext);
 
-  if (pup->but) {
-    if (pup->but->context) {
-      pup->layout->context_copy(pup->but->context);
-    }
+  if (pup->saved_but_context) {
+    /* On refresh pup->but is a dangling pointer; use the previously saved snapshot. */
+    pup->layout->context_copy(pup->saved_but_context);
+  }
+  else if (pup->but && pup->but->context) {
+    /* First call: capture a snapshot before pup->but becomes dangling after the parent block
+     * redraws (e.g. N-panel refresh triggered by async asset loading). */
+    pup->saved_but_context = MEM_new<bContextStore>(__func__);
+    pup->saved_but_context->entries = pup->but->context->entries;
+    pup->layout->context_copy(pup->saved_but_context);
   }
 }
 
@@ -139,10 +185,9 @@ static Block *block_func_POPOVER(bContext *C, PopupBlockHandle *handle, void *ar
   const ButtonMenu *popover_button = pup->but && pup->but->type == ButtonType::Popover ?
                                          static_cast<ButtonMenu *>(pup->but) :
                                          nullptr;
-  const int direction = (popover_button && (popover_button->popup_attach_direction ==
-                                            PopupAttachDirection::Horizontal)) ?
-                            UI_DIR_LEFT :
-                            UI_DIR_DOWN | UI_DIR_CENTER_X;
+  const PopupAttachDirection attach_dir = popover_button ? popover_button->popup_attach_direction :
+                                                           PopupAttachDirection::Vertical;
+  const int direction = popover_direction_from_attach(attach_dir);
   block_direction_set(block, direction);
 
   const int block_margin = U.widget_unit / 2;
@@ -178,13 +223,13 @@ static Block *block_func_POPOVER(bContext *C, PopupBlockHandle *handle, void *ar
       if (region && region->panels.first && (direction & UI_DIR_DOWN)) {
         /* For regions with panels, prefer to open to top so we can
          * see the values of the buttons below changing. */
-        block_direction_set(block, UI_DIR_UP | UI_DIR_CENTER_X);
+        block_direction_set(block, popover_direction_from_attach_flip_up(attach_dir));
       }
       /* Prefer popover from header to be positioned into the editor. */
       else if (region) {
         if (RGN_TYPE_IS_HEADER_ANY(region->regiontype)) {
           if (RGN_ALIGN_ENUM_FROM_MASK(region->alignment) == RGN_ALIGN_BOTTOM) {
-            block_direction_set(block, UI_DIR_UP | UI_DIR_CENTER_X);
+            block_direction_set(block, popover_direction_from_attach_flip_up(attach_dir));
           }
         }
       }
@@ -256,6 +301,7 @@ static void block_free_func_POPOVER(void *arg_pup)
     wmWindow *window = pup->window;
     WM_event_remove_keymap_handler(&window->runtime->modalhandlers, pup->keymap);
   }
+  MEM_SAFE_DELETE(pup->saved_but_context);
   MEM_delete(pup);
 }
 

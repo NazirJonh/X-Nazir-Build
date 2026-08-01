@@ -8,6 +8,7 @@
 #include "BLI_string_utf8.h"
 
 #include "DNA_brush_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
@@ -31,6 +32,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_prototypes.hh"
 
 #include "ED_asset.hh"
 #include "ED_asset_library.hh"
@@ -46,9 +48,44 @@
 #include "WM_api.hh"
 #include "WM_toolsystem.hh"
 
+#include "intern/asset_shelf_asset_lists.hh"
+
 #include "paint_intern.hh"
 
 namespace blender::ed::sculpt_paint {
+
+/**
+ * Return the identifier of the brush asset shelf the current context is keyed by, or null when the
+ * context is not in a brush mode at all.
+ *
+ * #BKE_paintmode_get_active_from_context() cannot answer this on its own: it falls back to
+ * #PaintMode::Texture2D for every context it does not recognize (Object mode, no active object, an
+ * Image Editor that is not painting), so it never reports #PaintMode::Invalid there. Reject those
+ * contexts first, then the paint mode it returns is trustworthy.
+ */
+static const char *brush_shelf_idname_from_context(const bContext *C)
+{
+  if (const SpaceImage *sima = CTX_wm_space_image(C)) {
+    /* 2D painting is available whatever the active object does (it may even be absent), but only
+     * while the Image Editor is in paint mode. That is also all #IMAGE_AST_brush_paint polls
+     * for. */
+    if (sima->mode != SI_MODE_PAINT) {
+      return nullptr;
+    }
+  }
+  else {
+    /* Every other space keys the brush shelf off the active object's mode. */
+    const Object *ob = CTX_data_active_object(C);
+    const eObjectMode brush_modes = OB_MODE_ALL_PAINT | OB_MODE_ALL_PAINT_GPENCIL |
+                                    OB_MODE_SCULPT_CURVES;
+    if (!ob || !(ob->mode & brush_modes)) {
+      return nullptr;
+    }
+  }
+
+  const PaintMode mode = BKE_paintmode_get_active_from_context(C);
+  return asset::shelf::brush_shelf_idname_from_paint_mode(mode);
+}
 
 static wmOperatorStatus brush_asset_activate_exec(bContext *C, wmOperator *op)
 {
@@ -100,6 +137,15 @@ static wmOperatorStatus brush_asset_activate_exec(bContext *C, wmOperator *op)
   Brush *brush = reinterpret_cast<Brush *>(
       bke::asset_edit_id_from_weak_reference(*bmain, ID_BR, brush_asset_reference));
 
+  /* Prefer an existing local copy that was made local from this asset (e.g. a brush localized to
+   * hold an assigned image texture). Re-activating then keeps those edits instead of switching to
+   * a pristine re-link of the source asset, which would silently drop the texture. */
+  if (brush) {
+    if (ID *local = bke::asset_edit_id_find_local(*bmain, brush->id)) {
+      brush = reinterpret_cast<Brush *>(local);
+    }
+  }
+
   /* Activate brush through tool system rather than calling #BKE_paint_brush_set() directly, to let
    * the tool system switch tools if necessary, and update which brush was the last recently used
    * one for the current tool. */
@@ -116,6 +162,13 @@ static wmOperatorStatus brush_asset_activate_exec(bContext *C, wmOperator *op)
     /* If we aren't toggling, clear the previous reference so that we don't swap back to an
      * incorrect "previous" asset */
     BKE_paint_previous_asset_reference_clear(paint);
+  }
+
+  /* Record for the shelf's "Recent" pseudo-catalog. Keyed by the paint mode, not by whether a shelf
+   * popover happens to be open right now, as this operator can also be run from search, a hotkey or
+   * Python with no popover in the context at all. */
+  if (const char *shelf_idname = brush_shelf_idname_from_context(C)) {
+    asset::shelf::shelf_asset_lists_record_recent(shelf_idname, brush_asset_reference);
   }
 
   WM_main_add_notifier(NC_ASSET | NA_ACTIVATED, nullptr);
@@ -279,7 +332,19 @@ static wmOperatorStatus brush_asset_save_as_invoke(bContext *C,
                                                    const wmEvent * /*event*/)
 {
   Paint *paint = BKE_paint_get_active_from_context(C);
-  const AssetWeakReference &brush_weak_ref = *paint->brush_asset_reference;
+  AssetWeakReference brush_weak_ref = *paint->brush_asset_reference;
+
+  /* The active brush may be a local copy made local from an asset (e.g. to receive a texture
+   * from the image grid), whose local reference does not resolve to any asset library. Map it
+   * back to the source asset so the dialog still defaults from it. */
+  if (brush_weak_ref.asset_library_type == ASSET_LIBRARY_LOCAL) {
+    if (std::optional<AssetWeakReference> source = bke::asset_edit_local_to_source_weak_reference(
+            *CTX_data_main(C), brush_weak_ref))
+    {
+      brush_weak_ref = *source;
+    }
+  }
+
   const asset_system::AssetRepresentation *asset = asset::find_asset_from_weak_ref(
       *C, brush_weak_ref, op->reports);
   if (!asset) {
@@ -325,7 +390,9 @@ static const EnumPropertyItem *rna_asset_library_reference_itemf(bContext * /*C*
       /*include_readonly=*/false,
       /*include_current_file=*/true,
       /*include_remote_libraries=*/false,
-      /*include_separate_online_essentials=*/false);
+      /*include_separate_online_essentials=*/false,
+      /* A library dedicated to images can never take a brush asset. */
+      /*exclude_image_libraries=*/true);
   if (!items) {
     *r_free = false;
     return nullptr;
@@ -475,12 +542,10 @@ static bool brush_asset_edit_metadata_poll(bContext *C)
     return false;
   }
   if (!ID_IS_ASSET(&brush->id)) {
-    BLI_assert_unreachable();
     return false;
   }
   const AssetWeakReference *brush_weak_ref = paint->brush_asset_reference;
   if (!brush_weak_ref) {
-    BLI_assert_unreachable();
     return false;
   }
   const asset_system::AssetRepresentation *asset = asset::find_asset_from_weak_ref(
@@ -492,7 +557,6 @@ static bool brush_asset_edit_metadata_poll(bContext *C)
   const std::optional<AssetLibraryReference> library_ref =
       asset->owner_asset_library().library_reference();
   if (!library_ref) {
-    BLI_assert_unreachable();
     return false;
   }
   if (asset->owner_asset_library().is_read_only()) {
@@ -664,12 +728,10 @@ static std::optional<AssetLibraryReference> get_asset_library_reference(const bC
                                                                         const Brush &brush)
 {
   if (!ID_IS_ASSET(&brush.id)) {
-    BLI_assert_unreachable();
     return std::nullopt;
   }
   const AssetWeakReference *brush_weak_ref = paint.brush_asset_reference;
   if (!brush_weak_ref) {
-    BLI_assert_unreachable();
     return std::nullopt;
   }
   const asset_system::AssetRepresentation *asset = asset::find_asset_from_weak_ref(
@@ -692,7 +754,6 @@ static bool brush_asset_save_poll(bContext *C)
   const std::optional<AssetLibraryReference> library_ref = get_asset_library_reference(
       *C, *paint, *brush);
   if (!library_ref) {
-    BLI_assert_unreachable();
     return false;
   }
 
@@ -755,7 +816,6 @@ static bool brush_asset_revert_poll(bContext *C)
   const std::optional<AssetLibraryReference> library_ref = get_asset_library_reference(
       *C, *paint, *brush);
   if (!library_ref) {
-    BLI_assert_unreachable();
     return false;
   }
   if (library_ref->type == ASSET_LIBRARY_LOCAL) {

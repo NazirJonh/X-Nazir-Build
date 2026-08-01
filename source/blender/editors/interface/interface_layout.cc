@@ -39,6 +39,7 @@
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
+#include "UI_grid_view.hh"
 #include "UI_interface_layout.hh"
 
 #include "ED_id_management.hh"
@@ -182,6 +183,7 @@ struct LayoutInternal {
   static void layout_move(Layout *layout, int delta_xmin, int delta_xmax);
   static void layout_space_set(Layout *layout, int space);
   static int layout_space_get(Layout *layout);
+  static Layout *child_items_layout_get(Layout *layout);
 };
 
 Item::Item(ItemType type) : type_{type} {}
@@ -551,6 +553,11 @@ void LayoutInternal::layout_space_set(Layout *layout, int space)
 int LayoutInternal::layout_space_get(Layout *layout)
 {
   return layout->space_;
+}
+
+Layout *LayoutInternal::child_items_layout_get(Layout *layout)
+{
+  return layout->child_items_layout_;
 }
 
 /** \} */
@@ -5574,6 +5581,32 @@ static void item_flag(Layout *litem, int flag)
   }
 }
 
+/* Shift every descendant button of a scroll-clip window vertically, flag it for clipping in
+ * #block_draw, and clear #Button::alignnr so #block_align_calc cannot stitch grid tiles and
+ * desync them from the fixed clip window. Recurses into sub-layouts so nested grid tiles (overlap
+ * rows, overlay icons) move together with their tile. */
+static void layout_scroll_clip_apply_buttons(Layout *layout,
+                                             const int offset_px,
+                                             AbstractGridView *owner)
+{
+  for (Item *item : layout->items()) {
+    if (item->type() == ItemType::Button) {
+      Button *but = static_cast<ButtonItem *>(item)->but;
+      but->rect.ymin += offset_px;
+      but->rect.ymax += offset_px;
+      but->drawflag |= BUT_GRID_SCROLL_CLIP;
+      but->grid_scroll_clip_owner = owner;
+      but->alignnr = 0;
+    }
+    else {
+      layout_scroll_clip_apply_buttons(static_cast<Layout *>(item), offset_px, owner);
+    }
+  }
+  if (Layout *child_items = LayoutInternal::child_items_layout_get(layout)) {
+    layout_scroll_clip_apply_buttons(child_items, offset_px, owner);
+  }
+}
+
 void Layout::resolve()
 {
 
@@ -5604,6 +5637,27 @@ void Layout::resolve()
       continue;
     }
     static_cast<Layout *>(subitem)->resolve();
+  }
+
+  /* Scroll-clip window: descendants are now positioned, so shift them by the scroll offset, flag
+   * them for clipping, and clamp this layout's reported height to the visible window. The clamp
+   * runs after the parent already positioned this item by its (fixed) estimated height, so the
+   * surrounding layout (e.g. grip/Browse below the grid) is unaffected by the buffer rows that
+   * overflow the window. */
+  if (view_scroll_clip_height_ > 0) {
+    const int top = y_ + h_;
+    layout_scroll_clip_apply_buttons(this, view_scroll_clip_offset_, view_scroll_clip_owner_);
+    h_ = view_scroll_clip_height_;
+    y_ = top - h_;
+
+    rctf clip_rect;
+    clip_rect.xmin = float(x_);
+    clip_rect.xmax = float(x_ + w_);
+    clip_rect.ymin = float(y_);
+    clip_rect.ymax = float(y_ + h_);
+
+    BLI_assert(view_scroll_clip_owner_);
+    view_scroll_clip_owner_->scroll_clip_set(clip_rect);
   }
 }
 
@@ -6351,6 +6405,14 @@ Layout *uiItemsAlertBox(Block *block, const int size, const AlertIcon icon)
 LayoutRoot *Layout::root() const
 {
   return root_;
+};
+int Layout::box_padding_px() const
+{
+  /* Match #LayoutItemBx::estimate_impl(): header layouts get no box padding. */
+  if (this->root()->type == LayoutType::Header) {
+    return 0;
+  }
+  return this->root()->style->boxspace;
 };
 const bContextStore *Layout::context() const
 {

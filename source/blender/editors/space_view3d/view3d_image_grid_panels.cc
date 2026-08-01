@@ -8,14 +8,18 @@
 
 #include "BLI_listbase.h"
 #include "BLI_string_utf8.h"
+#include "BLI_vector.hh"
 
 #include "AS_asset_catalog_tree.hh"
 #include "AS_asset_library.hh"
 
 #include "BKE_context.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_screen.hh"
 
 #include "BLT_translation.hh"
+
+#include "DNA_userdef_types.h"
 
 #include "ED_asset_list.hh"
 #include "ED_image_grid.hh"
@@ -24,6 +28,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
@@ -35,6 +40,9 @@
 #include "WM_types.hh"
 
 #include "view3d_intern.hh"
+
+#include <string>
+#include <utility>
 
 namespace blender {
 
@@ -350,6 +358,153 @@ void image_grid_catalog_selector_panel_register(ARegionType *region_type)
   pt->description = N_("Select the asset library and catalog to display in the image grid");
   pt->draw = image_grid_catalog_selector_draw;
   pt->listener = ed::asset::list::asset_reading_region_listen_fn;
+  BLI_addtail(&region_type->paneltypes, pt);
+  WM_paneltype_add(pt);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Name-match filter (Map Types only)
+ * \{ */
+
+static wmOperatorStatus image_grid_name_match_enabled_toggle_exec(bContext *C, wmOperator * /*op*/)
+{
+  const std::optional<ed::image_grid::ImageGridOwner> owner =
+      ed::image_grid::image_grid_owner_from_context(*C);
+  if (!owner) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool is_mask_slot = ed::view3d::image_grid_is_mask_slot_from_context(*C);
+  ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
+                                                                             is_mask_slot);
+  state.filter.name_match.enabled = !state.filter.name_match.enabled;
+  ed::image_grid::image_grid_state_persist(*owner, state, is_mask_slot);
+  ed::view3d::image_grid_notify_change(*C, is_mask_slot);
+  return OPERATOR_FINISHED;
+}
+
+void VIEW3D_OT_image_grid_name_match_enabled_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Image Grid Name Match Filter";
+  ot->idname = "VIEW3D_OT_image_grid_name_match_enabled_toggle";
+  ot->description = "Enable or disable name matching for the image grid";
+  ot->exec = image_grid_name_match_enabled_toggle_exec;
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+static wmOperatorStatus image_grid_name_match_map_type_toggle_exec(bContext *C, wmOperator *op)
+{
+  const std::optional<ed::image_grid::ImageGridOwner> owner =
+      ed::image_grid::image_grid_owner_from_context(*C);
+  if (!owner) {
+    return OPERATOR_CANCELLED;
+  }
+
+  char identifier[64];
+  RNA_string_get(op->ptr, "identifier", identifier);
+
+  const bool is_mask_slot = ed::view3d::image_grid_is_mask_slot_from_context(*C);
+  ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
+                                                                             is_mask_slot);
+  BKE_name_match_filter_toggle_map_type(state.filter.name_match, identifier);
+  ed::image_grid::image_grid_state_persist(*owner, state, is_mask_slot);
+  ed::view3d::image_grid_notify_change(*C, is_mask_slot);
+  return OPERATOR_FINISHED;
+}
+
+void VIEW3D_OT_image_grid_name_match_map_type_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Image Grid Name Match Map Type";
+  ot->idname = "VIEW3D_OT_image_grid_name_match_map_type_toggle";
+  ot->description = "Toggle a map type in the image grid name matching filter";
+  ot->exec = image_grid_name_match_map_type_toggle_exec;
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_string(ot->srna, "identifier", nullptr, 64, "Identifier", "");
+}
+
+static wmOperatorStatus image_grid_name_match_clear_exec(bContext *C, wmOperator * /*op*/)
+{
+  const std::optional<ed::image_grid::ImageGridOwner> owner =
+      ed::image_grid::image_grid_owner_from_context(*C);
+  if (!owner) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool is_mask_slot = ed::view3d::image_grid_is_mask_slot_from_context(*C);
+  ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
+                                                                             is_mask_slot);
+  BKE_name_match_filter_clear_selection(state.filter.name_match);
+  ed::image_grid::image_grid_state_persist(*owner, state, is_mask_slot);
+  ed::view3d::image_grid_notify_change(*C, is_mask_slot);
+  return OPERATOR_FINISHED;
+}
+
+void VIEW3D_OT_image_grid_name_match_clear(wmOperatorType *ot)
+{
+  ot->name = "Clear Image Grid Name Match Filter";
+  ot->idname = "VIEW3D_OT_image_grid_name_match_clear";
+  ot->description = "Clear active name matching map-type selections on the image grid";
+  ot->exec = image_grid_name_match_clear_exec;
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+static void image_grid_name_match_filter_panel_draw(const bContext *C, Panel *panel)
+{
+  const std::optional<ed::image_grid::ImageGridOwner> owner =
+      ed::image_grid::image_grid_owner_from_context(*C);
+  if (!owner) {
+    return;
+  }
+
+  const bool is_mask_slot = ed::view3d::image_grid_is_mask_slot_from_context(*C);
+  ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
+                                                                             is_mask_slot);
+  ui::Layout &layout = *panel->layout;
+
+  /* Builtins are seeded once at defaults/versioning/homefile-read time
+   * (#BKE_name_matching_userdef_ensure_defaults) and, since built-in rows can't be removed (see
+   * #BKE_name_matching_map_type_remove), the list is guaranteed well-formed here without
+   * re-checking on every redraw. */
+  Vector<std::pair<std::string, std::string>> map_type_rows;
+  for (const bUserNameMatchMapType &map_type : U.name_match_map_types) {
+    if (map_type.identifier[0] != '\0') {
+      map_type_rows.append(
+          {map_type.identifier, map_type.name[0] != '\0' ? map_type.name : map_type.identifier});
+    }
+  }
+
+  layout.enabled_set(state.filter.name_match.enabled);
+  layout.label(IFACE_("Map Types"), ICON_NONE);
+  for (const auto &[identifier, name] : map_type_rows) {
+    const bool active = BKE_name_match_filter_map_type_is_active(state.filter.name_match,
+                                                                  identifier);
+    ui::Layout &row = layout.row(false);
+    PointerRNA props = row.op("VIEW3D_OT_image_grid_name_match_map_type_toggle",
+                              name,
+                              active ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT);
+    if (props.type != nullptr) {
+      RNA_string_set(&props, "identifier", identifier.c_str());
+    }
+  }
+  layout.separator();
+  layout.op("VIEW3D_OT_image_grid_name_match_clear", IFACE_("Clear Filter"), ICON_X);
+}
+
+void image_grid_name_match_filter_panel_register(ARegionType *region_type)
+{
+  if (WM_paneltype_find("VIEW3D_PT_image_grid_name_match_filter", true)) {
+    return;
+  }
+
+  PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
+  STRNCPY_UTF8(pt->idname, "VIEW3D_PT_image_grid_name_match_filter");
+  STRNCPY_UTF8(pt->label, N_("Name Match Filter"));
+  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  pt->description = N_("Select map types for name matching in the image grid");
+  pt->draw = image_grid_name_match_filter_panel_draw;
   BLI_addtail(&region_type->paneltypes, pt);
   WM_paneltype_add(pt);
 }

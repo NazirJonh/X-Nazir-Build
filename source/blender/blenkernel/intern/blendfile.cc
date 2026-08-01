@@ -58,6 +58,7 @@
 #include "BKE_main.hh"
 #include "BKE_main_idmap.hh"
 #include "BKE_main_namemap.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_preferences.h"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -1576,6 +1577,8 @@ UserDef *BKE_blendfile_userdef_from_defaults()
   BKE_studiolight_default(userdef->light_param, userdef->light_ambient);
 
   BKE_preferences_asset_library_default_add(userdef);
+
+  BKE_name_matching_userdef_ensure_defaults(userdef);
 
   BKE_preferences_extension_repo_add_defaults_all(userdef);
 

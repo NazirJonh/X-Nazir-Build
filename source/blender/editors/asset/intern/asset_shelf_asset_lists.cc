@@ -285,6 +285,28 @@ bool shelf_supports_asset_lists(const StringRef idname)
   return shelf_idname_is_brush_shelf(idname) || idname == ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME;
 }
 
+bool shelf_supports_name_match_filter(const StringRef idname)
+{
+  return idname == ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME;
+}
+
+bool shelf_name_match_filter_includes_map_types(const StringRef idname)
+{
+  return idname == ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME;
+}
+
+bool shelf_name_match_filter_includes_tags(const StringRef /*idname*/)
+{
+  /* Filter Tags is fully implemented (DNA, RNA, BKE CRUD, Preferences operators) but hidden from
+   * the selector UI for now -- there's no producer of tag-based map-type assignment yet, so
+   * exposing a "Tags" section here would just be an empty list. The intended producer is a
+   * planned drag-and-drop workflow: assets without a name affix Blender can match (`_normal`,
+   * `_BaseColor`, ...) get their map type assigned by hand and recorded as an #AssetMetaData tag
+   * instead, and this filter (see #NameMatchFilterState::active_filter_tags) already knows how to
+   * match on that. Flip this to re-enable the selector once that producer lands. */
+  return false;
+}
+
 namespace {
 
 /** Process-local D7 stamp: temporary popup region → shelf type idname. */

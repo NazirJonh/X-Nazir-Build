@@ -15,6 +15,7 @@
 
 #include "BLI_math_base.h"
 #include "BLI_math_rotation.h"
+#include "BLI_string.h"
 #include "BLI_string_utf8_symbols.h"
 #ifdef WIN32
 #  include "BLI_winstuff.h"
@@ -24,6 +25,7 @@
 #include "BLT_lang.hh"
 #include "BLT_translation.hh"
 
+#include "BKE_name_matching.hh"
 #include "BKE_studiolight.h"
 
 #include "RNA_define.hh"
@@ -266,6 +268,7 @@ static const EnumPropertyItem rna_enum_preferences_extension_repo_source_type_it
 #  include "BKE_image.hh"
 #  include "BKE_main.hh"
 #  include "BKE_mesh_runtime.hh"
+#  include "BKE_name_matching.hh"
 #  include "BKE_object.hh"
 #  include "BKE_paint.hh"
 #  include "BKE_preferences.h"
@@ -287,6 +290,7 @@ static const EnumPropertyItem rna_enum_preferences_extension_repo_source_type_it
 
 #  include "ED_asset_library.hh"
 #  include "ED_asset_list.hh"
+#  include "ED_asset_name_matching.hh"
 #  include "ED_screen.hh"
 
 #  include "UI_interface.hh"
@@ -788,6 +792,123 @@ static void rna_userdef_asset_library_remove(bContext *C, ReportList *reports, P
   USERDEF_TAG_DIRTY;
 }
 
+static bool rna_NameMatchMapType_is_builtin_get(PointerRNA *ptr)
+{
+  const bUserNameMatchMapType *map_type = static_cast<const bUserNameMatchMapType *>(ptr->data);
+  return (map_type->flag & USER_NAME_MATCH_MAP_TYPE_BUILTIN) != 0;
+}
+
+static int rna_NameMatchMapType_identifier_editable(const PointerRNA *ptr, const char ** /*r_info*/)
+{
+  const bUserNameMatchMapType *map_type = static_cast<const bUserNameMatchMapType *>(ptr->data);
+  return (map_type->flag & USER_NAME_MATCH_MAP_TYPE_BUILTIN) ? 0 : PROP_EDITABLE;
+}
+
+static void rna_NameMatchMapType_identifier_set(PointerRNA *ptr, const char *value)
+{
+  bUserNameMatchMapType *map_type = static_cast<bUserNameMatchMapType *>(ptr->data);
+  const std::string old_identifier = map_type->identifier;
+  BKE_name_matching_map_type_identifier_set(&U, map_type, value);
+  /* Keep selections in open shelves/grids pointing at this map type (see
+   * #name_match_map_type_id_replace); the stored identifier is what they reference. */
+  ed::asset::name_match_map_type_id_replace(*G_MAIN, old_identifier, map_type->identifier);
+}
+
+static bUserNameMatchMapType *rna_NameMatchMapTypeCollection_new(ReportList *reports,
+                                                                  const char *name,
+                                                                  const char *identifier)
+{
+  bUserNameMatchMapType *map_type = BKE_name_matching_map_type_add(
+      &U, name ? name : "", identifier ? identifier : "", 0);
+  if (map_type == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Could not add map type (empty, duplicate, or comma in identifier)");
+    return nullptr;
+  }
+  USERDEF_TAG_DIRTY;
+  return map_type;
+}
+
+static void rna_NameMatchMapTypeCollection_remove(ReportList *reports, PointerRNA *ptr)
+{
+  bUserNameMatchMapType *map_type = static_cast<bUserNameMatchMapType *>(ptr->data);
+  const std::string identifier = map_type->identifier;
+  if (!BKE_name_matching_map_type_remove(&U, map_type)) {
+    BKE_report(reports, RPT_ERROR, "Cannot remove built-in or unknown map type");
+    return;
+  }
+  /* Drop the now dangling selections, otherwise the hosts holding them would resolve to nothing
+   * and silently show every asset instead of filtering. */
+  ed::asset::name_match_map_type_id_replace(*G_MAIN, identifier, "");
+  ptr->invalidate();
+  USERDEF_TAG_DIRTY;
+}
+
+static void rna_NameMatchToken_value_set(PointerRNA *ptr, const char *value)
+{
+  bUserNameMatchToken *token = static_cast<bUserNameMatchToken *>(ptr->data);
+  /* #bUserNameMatchToken has no back-pointer to its owning map type; the token lists are short
+   * (a handful of map types with a handful of tokens each), so a linear search is cheap enough. */
+  for (bUserNameMatchMapType &map_type : U.name_match_map_types) {
+    if (BLI_findindex(&map_type.tokens, token) != -1) {
+      BKE_name_matching_token_set_value(&map_type, token, value);
+      return;
+    }
+  }
+}
+
+static bUserNameMatchToken *rna_NameMatchTokenCollection_new(bUserNameMatchMapType *map_type)
+{
+  /* Route through #BKE_name_matching_token_add so a placeholder can never land as a
+   * case-insensitive duplicate of an existing token (its own uniqueness contract), unlike
+   * #BLI_uniquename's case-sensitive clash check. */
+  bUserNameMatchToken *token = BKE_name_matching_token_add(map_type, "Token");
+  for (int suffix = 1; token == nullptr && suffix < 1000; suffix++) {
+    char candidate[sizeof(bUserNameMatchToken::value)];
+    SNPRINTF(candidate, "Token.%03d", suffix);
+    token = BKE_name_matching_token_add(map_type, candidate);
+  }
+  USERDEF_TAG_DIRTY;
+  return token;
+}
+
+static void rna_NameMatchTokenCollection_remove(bUserNameMatchMapType *map_type,
+                                                ReportList *reports,
+                                                PointerRNA *token_ptr)
+{
+  bUserNameMatchToken *token = static_cast<bUserNameMatchToken *>(token_ptr->data);
+  if (BLI_findindex(&map_type->tokens, token) == -1) {
+    BKE_report(reports, RPT_ERROR, "Token not found");
+    return;
+  }
+  BKE_name_matching_token_remove(map_type, token);
+  token_ptr->invalidate();
+  USERDEF_TAG_DIRTY;
+}
+
+static bUserNameMatchFilterTag *rna_NameMatchFilterTagCollection_new(ReportList *reports,
+                                                                     const char *name)
+{
+  bUserNameMatchFilterTag *tag = BKE_name_matching_filter_tag_add(&U, name ? name : "");
+  if (tag == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Could not add filter tag (empty or duplicate name)");
+    return nullptr;
+  }
+  USERDEF_TAG_DIRTY;
+  return tag;
+}
+
+static void rna_NameMatchFilterTagCollection_remove(ReportList *reports, PointerRNA *ptr)
+{
+  bUserNameMatchFilterTag *tag = static_cast<bUserNameMatchFilterTag *>(ptr->data);
+  if (BLI_findindex(&U.name_match_filter_tags, tag) == -1) {
+    BKE_report(reports, RPT_ERROR, "Filter tag not found");
+    return;
+  }
+  BKE_name_matching_filter_tag_remove(&U, tag);
+  ptr->invalidate();
+  USERDEF_TAG_DIRTY;
+}
+
 static bUserExtensionRepo *rna_userdef_extension_repo_new(const char *name,
                                                           const char *module,
                                                           const char *custom_directory,
@@ -1009,6 +1130,11 @@ static PointerRNA rna_UserDef_filepaths_get(PointerRNA *ptr)
 static PointerRNA rna_UserDef_asset_libraries_get(PointerRNA *ptr)
 {
   return RNA_pointer_create_with_parent(*ptr, RNA_PreferencesAssetLibraries, ptr->data);
+}
+
+static PointerRNA rna_UserDef_name_matching_get(PointerRNA *ptr)
+{
+  return RNA_pointer_create_with_parent(*ptr, RNA_PreferencesNameMatching, ptr->data);
 }
 
 static PointerRNA rna_UserDef_extensions_get(PointerRNA *ptr)
@@ -7609,6 +7735,163 @@ static void rna_def_userdef_filepaths(BlenderRNA *brna)
   RNA_def_property_update(prop, 0, "rna_userdef_asset_library_pin_update");
 }
 
+static void rna_def_userdef_name_matching(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  /* --- Token --- */
+  srna = RNA_def_struct(brna, "NameMatchToken", nullptr);
+  RNA_def_struct_sdna(srna, "bUserNameMatchToken");
+  RNA_def_struct_ui_text(
+      srna, "Name Match Token", "Abbreviation or segment matched against asset names");
+
+  prop = RNA_def_property(srna, "value", PROP_STRING, PROP_NONE);
+  RNA_def_property_ui_text(prop, "Value", "Token text matched as a delimited name segment");
+  /* #BKE_name_matching_token_add rejects empty values and case-insensitive duplicates at
+   * creation; route rename through the same check (#BKE_name_matching_token_set_value) so the
+   * invariant also holds after the token is renamed via this property. */
+  RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_NameMatchToken_value_set");
+  RNA_def_struct_name_property(srna, prop);
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  /* --- Map Type --- */
+  srna = RNA_def_struct(brna, "NameMatchMapType", nullptr);
+  RNA_def_struct_sdna(srna, "bUserNameMatchMapType");
+  RNA_def_struct_ui_text(
+      srna, "Name Match Map Type", "Map type with tokens used for asset name matching");
+
+  prop = RNA_def_property(srna, "identifier", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "identifier");
+  RNA_def_property_ui_text(
+      prop, "Identifier", "Stable identifier (read-only for built-in map types)");
+  RNA_def_property_editable_func(prop, "rna_NameMatchMapType_identifier_editable");
+  /* Keeps identifiers unique on rename (#BKE_name_matching_map_type_add only guarantees it at
+   * creation), uniquifying on clash the same way #rna_userdef_asset_library_name_set does. */
+  RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_NameMatchMapType_identifier_set");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_property_ui_text(prop, "Name", "Display name");
+  RNA_def_struct_name_property(srna, prop);
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "is_builtin", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_NameMatchMapType_is_builtin_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Built-in", "Built-in map types cannot be removed from Preferences");
+
+  prop = RNA_def_property(srna, "tokens", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "tokens", nullptr);
+  RNA_def_property_struct_type(prop, "NameMatchToken");
+  RNA_def_property_ui_text(prop, "Tokens", "Name segments that match this map type");
+  RNA_def_property_srna(prop, "NameMatchTokenCollection");
+  {
+    StructRNA *srna_collection = RNA_def_struct(brna, "NameMatchTokenCollection", nullptr);
+    RNA_def_struct_sdna(srna_collection, "bUserNameMatchMapType");
+    RNA_def_struct_ui_text(srna_collection, "Name Match Tokens", "Collection of name match tokens");
+
+    func = RNA_def_function(srna_collection, "new", "rna_NameMatchTokenCollection_new");
+    RNA_def_function_ui_description(func, "Add a new token");
+    parm = RNA_def_pointer(func, "token", "NameMatchToken", "", "Newly added token");
+    RNA_def_function_return(func, parm);
+
+    func = RNA_def_function(srna_collection, "remove", "rna_NameMatchTokenCollection_remove");
+    RNA_def_function_flag(func, FUNC_USE_REPORTS);
+    RNA_def_function_ui_description(func, "Remove a token");
+    parm = RNA_def_pointer(func, "token", "NameMatchToken", "", "Token to remove");
+    RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+    RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  }
+
+  /* --- Filter Tag --- */
+  srna = RNA_def_struct(brna, "NameMatchFilterTag", nullptr);
+  RNA_def_struct_sdna(srna, "bUserNameMatchFilterTag");
+  RNA_def_struct_ui_text(srna, "Name Match Filter Tag", "Filter tag for asset include matching");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_property_ui_text(prop, "Name", "Tag name");
+  RNA_def_struct_name_property(srna, prop);
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  /* --- Preferences nested --- */
+  srna = RNA_def_struct(brna, "PreferencesNameMatching", nullptr);
+  RNA_def_struct_sdna(srna, "UserDef");
+  RNA_def_struct_nested(brna, srna, "Preferences");
+  RNA_def_struct_ui_text(srna,
+                         "Name Matching",
+                         "Map types and filter tags for asset shelf name matching");
+
+  prop = RNA_def_property(srna, "map_types", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "name_match_map_types", nullptr);
+  RNA_def_property_struct_type(prop, "NameMatchMapType");
+  RNA_def_property_ui_text(prop, "Map Types", "Core and custom map types");
+  RNA_def_property_srna(prop, "NameMatchMapTypeCollection");
+  {
+    StructRNA *srna_collection = RNA_def_struct(brna, "NameMatchMapTypeCollection", nullptr);
+    RNA_def_struct_ui_text(
+        srna_collection, "Name Match Map Types", "Collection of name match map types");
+
+    func = RNA_def_function(srna_collection, "new", "rna_NameMatchMapTypeCollection_new");
+    RNA_def_function_flag(func, FUNC_NO_SELF | FUNC_USE_REPORTS);
+    RNA_def_function_ui_description(func, "Add a custom map type");
+    RNA_def_string(func, "name", nullptr, sizeof(bUserNameMatchMapType::name), "Name", "");
+    RNA_def_string(
+        func, "identifier", nullptr, sizeof(bUserNameMatchMapType::identifier), "Identifier", "");
+    parm = RNA_def_pointer(func, "map_type", "NameMatchMapType", "", "Newly added map type");
+    RNA_def_function_return(func, parm);
+
+    func = RNA_def_function(srna_collection, "remove", "rna_NameMatchMapTypeCollection_remove");
+    RNA_def_function_flag(func, FUNC_NO_SELF | FUNC_USE_REPORTS);
+    RNA_def_function_ui_description(func, "Remove a custom map type");
+    parm = RNA_def_pointer(func, "map_type", "NameMatchMapType", "", "Map type to remove");
+    RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+    RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  }
+
+  prop = RNA_def_property(srna, "filter_tags", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "name_match_filter_tags", nullptr);
+  RNA_def_property_struct_type(prop, "NameMatchFilterTag");
+  RNA_def_property_ui_text(prop, "Filter Tags", "User-defined filter tags");
+  RNA_def_property_srna(prop, "NameMatchFilterTagCollection");
+  {
+    StructRNA *srna_collection = RNA_def_struct(brna, "NameMatchFilterTagCollection", nullptr);
+    RNA_def_struct_ui_text(
+        srna_collection, "Name Match Filter Tags", "Collection of name match filter tags");
+
+    func = RNA_def_function(srna_collection, "new", "rna_NameMatchFilterTagCollection_new");
+    RNA_def_function_flag(func, FUNC_NO_SELF | FUNC_USE_REPORTS);
+    RNA_def_function_ui_description(func, "Add a filter tag");
+    RNA_def_string(func, "name", nullptr, sizeof(bUserNameMatchFilterTag::name), "Name", "");
+    parm = RNA_def_pointer(func, "tag", "NameMatchFilterTag", "", "Newly added filter tag");
+    RNA_def_function_return(func, parm);
+
+    func = RNA_def_function(srna_collection, "remove", "rna_NameMatchFilterTagCollection_remove");
+    RNA_def_function_flag(func, FUNC_NO_SELF | FUNC_USE_REPORTS);
+    RNA_def_function_ui_description(func, "Remove a filter tag");
+    parm = RNA_def_pointer(func, "tag", "NameMatchFilterTag", "", "Filter tag to remove");
+    RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+    RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  }
+
+  prop = RNA_def_property(srna, "active_map_type", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "active_name_match_map_type");
+  RNA_def_property_ui_text(
+      prop, "Active Map Type", "Index of the map type being edited in the Preferences UI");
+  RNA_def_property_update(prop, 0, "rna_userdef_ui_update");
+
+  prop = RNA_def_property(srna, "active_filter_tag", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "active_name_match_filter_tag");
+  RNA_def_property_ui_text(
+      prop, "Active Filter Tag", "Index of the filter tag being edited in the Preferences UI");
+  RNA_def_property_update(prop, 0, "rna_userdef_ui_update");
+}
+
 static void rna_def_userdef_asset_libraries(BlenderRNA *brna)
 {
   StructRNA *srna = RNA_def_struct(brna, "PreferencesAssetLibraries", nullptr);
@@ -7974,6 +8257,13 @@ void RNA_def_userdef(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Asset Libraries", "Setup for custom and builtin asset libraries");
 
+  prop = RNA_def_property(srna, "name_matching", PROP_POINTER, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_NEVER_NULL);
+  RNA_def_property_struct_type(prop, "PreferencesNameMatching");
+  RNA_def_property_pointer_funcs(prop, "rna_UserDef_name_matching_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(
+      prop, "Name Matching", "Map types and filter tags for asset shelf name matching");
+
   prop = RNA_def_property(srna, "extensions", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_NEVER_NULL);
   RNA_def_property_struct_type(prop, "PreferencesExtensions");
@@ -8049,6 +8339,7 @@ void RNA_def_userdef(BlenderRNA *brna)
   rna_def_userdef_keymap(brna);
   rna_def_userdef_filepaths(brna);
   rna_def_userdef_asset_libraries(brna);
+  rna_def_userdef_name_matching(brna);
   rna_def_userdef_extensions(brna);
   rna_def_userdef_system(brna);
   rna_def_userdef_addon(brna);

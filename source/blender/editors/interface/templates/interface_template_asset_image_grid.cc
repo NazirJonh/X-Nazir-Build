@@ -1054,6 +1054,23 @@ static void draw_header_row(Layout &layout,
       row, C, "VIEW3D_PT_image_grid_catalog_selector", ICON_COLLAPSEMENU, is_mask_slot);
   /* Display settings: preview thumbnail size (shared between texture and mask grids). */
   image_grid_header_popover(row, C, "VIEW3D_PT_image_grid_display", ICON_IMGDISPLAY, is_mask_slot);
+  /* Name-match filter: master toggle + Map Types popover (no Tags). */
+  {
+    Layout &nm_row = row.row(true);
+    const bool enabled = state.filter.name_match.enabled;
+    PointerRNA props = nm_row.op("VIEW3D_OT_image_grid_name_match_enabled_toggle",
+                                 "",
+                                 enabled ? ICON_FILTER_FILLED : ICON_FILTER);
+    UNUSED_VARS(props);
+    /* Outliner-style disclosure (#ICON_DOWNARROW_HLT). Keep the popover button square so
+     * #popover_widget_type uses MenuIconRadio (icon only). Widening like catalog/display
+     * (#image_grid_header_popover at 1.6u) would add the geometric menu arrow on top and
+     * produce a double chevron. */
+    Layout &popover_row = nm_row.row(false);
+    popover_row.emboss_set(EmbossType::Emboss);
+    popover_row.context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
+    popover_row.popover(&C, "VIEW3D_PT_image_grid_name_match_filter", "", ICON_DOWNARROW_HLT);
+  }
 }
 
 static void build_image_grid(Layout &layout,

@@ -1271,6 +1271,11 @@ static void rna_uiTemplateGridPreviewSize(Layout *layout, bContext *C, PointerRN
   ui::template_grid_preview_size(layout, C, settings);
 }
 
+static void rna_uiTemplateGridNameMatchFilter(Layout *layout, bContext *C, PointerRNA *settings)
+{
+  ui::template_grid_name_match_filter(layout, C, settings);
+}
+
 static void rna_uiTemplateGridViewAsset(Layout *layout,
                                         bContext *C,
                                         const char *grid_id,
@@ -2153,6 +2158,14 @@ void RNA_api_ui_layout(StructRNA *srna)
 
   func = RNA_def_function(srna, "template_grid_preview_size", "rna_uiTemplateGridPreviewSize");
   RNA_def_function_ui_description(func, "Preview tile size control for a reusable grid view");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+
+  func = RNA_def_function(
+      srna, "template_grid_name_match_filter", "rna_uiTemplateGridNameMatchFilter");
+  RNA_def_function_ui_description(func,
+                                  "Name matching filter toggle and popover for a reusable grid view");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);
   parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);

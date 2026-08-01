@@ -290,6 +290,9 @@ void view3d_operatortypes()
   WM_operatortype_append(VIEW3D_OT_image_grid_browse_assets);
   WM_operatortype_append(VIEW3D_OT_image_shelf_activate_asset);
   WM_operatortype_append(VIEW3D_OT_image_grid_refresh_library);
+  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_enabled_toggle);
+  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_map_type_toggle);
+  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_clear);
 
   /* Invert the UI→view3d dependency: register the image-grid focus interceptor (numpad-period
    * focus-active) with the generic UI layer instead of having #interface_handlers call into view3d

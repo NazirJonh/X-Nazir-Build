@@ -27,6 +27,9 @@ void userpref_panels_register(ARegionType &region_type);
 
 void userpref_asset_libraries_panel_draw(const bContext *C, Panel *panel);
 
+void userpref_name_matching_panel_register(ARegionType &region_type);
+void userpref_name_matching_operatortypes();
+
 /* `userpref_asset_libraries_list.cc */
 
 /* -------------------------------------------------------------------- */

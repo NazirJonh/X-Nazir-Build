@@ -31,6 +31,8 @@ void userpref_panels_register(ARegionType &region_type)
   panel_type->region_type = RGN_TYPE_WINDOW;
   panel_type->draw = userpref_asset_libraries_panel_draw;
   BLI_addtail(&region_type.paneltypes, panel_type);
+
+  userpref_name_matching_panel_register(region_type);
 }
 
 }  // namespace blender

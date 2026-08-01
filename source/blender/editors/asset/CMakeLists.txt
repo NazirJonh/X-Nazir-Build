@@ -32,6 +32,7 @@ set(SRC
   intern/asset_list.cc
   intern/asset_mark_clear.cc
   intern/asset_menu_utils.cc
+  intern/asset_name_matching_sync.cc
   intern/asset_ops.cc
   intern/asset_shelf.cc
   intern/asset_shelf_asset_view.cc
@@ -54,6 +55,7 @@ set(SRC
   ED_asset_library.hh
   ED_asset_list.hh
   ED_asset_mark_clear.hh
+  ED_asset_name_matching.hh
   ED_asset_shelf.hh
   ED_asset_temp_id_consumer.hh
   ED_asset_type.hh

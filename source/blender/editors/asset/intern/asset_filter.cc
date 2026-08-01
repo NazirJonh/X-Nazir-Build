@@ -11,7 +11,10 @@
 #include "BKE_idtype.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_set.hh"
+#include "BLI_string.h"
 
+#include "DNA_ID.h"
 #include "DNA_asset_types.h"
 
 #include "AS_asset_catalog_tree.hh"
@@ -19,6 +22,11 @@
 
 #include "ED_asset_filter.hh"
 #include "ED_asset_list.hh"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <string>
 
 namespace blender::ed::asset {
 
@@ -185,6 +193,42 @@ AssetItemTree build_filtered_all_catalog_tree(
           std::move(assets_per_path),
           std::move(unassigned_assets),
           dirty};
+}
+
+Vector<std::string> collect_unique_asset_tag_names(const AssetLibraryReference &library_ref,
+                                                   const bContext & /*C*/)
+{
+  /* Case-insensitive uniqueness with first-seen spelling preserved. */
+  Set<std::string> lower_seen;
+  Vector<std::string> tags;
+
+  list::iterate(library_ref, [&](asset_system::AssetRepresentation &asset) {
+    if (ID *local_id = asset.local_id()) {
+      if (local_id->asset_data == nullptr) {
+        return true;
+      }
+    }
+
+    const AssetMetaData &meta = asset.get_metadata();
+    for (const AssetTag &tag : meta.tags) {
+      if (tag.name[0] == '\0') {
+        continue;
+      }
+      std::string lower = tag.name;
+      for (char &c : lower) {
+        c = char(std::tolower(static_cast<unsigned char>(c)));
+      }
+      if (lower_seen.add(lower)) {
+        tags.append(tag.name);
+      }
+    }
+    return true;
+  });
+
+  std::sort(tags.begin(), tags.end(), [](const std::string &a, const std::string &b) {
+    return BLI_strcasecmp(a.c_str(), b.c_str()) < 0;
+  });
+  return tags;
 }
 
 }  // namespace blender::ed::asset

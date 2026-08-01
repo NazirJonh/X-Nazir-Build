@@ -261,11 +261,17 @@ void IMAGE_GRID_OT_drop_import(wmOperatorType *ot);
 void VIEW3D_OT_image_grid_browse_assets(wmOperatorType *ot); /* unreferenced, left as-is */
 void VIEW3D_OT_image_shelf_activate_asset(wmOperatorType *ot);
 void VIEW3D_OT_image_grid_refresh_library(wmOperatorType *ot); /* unreferenced, left as-is */
+void VIEW3D_OT_image_grid_name_match_enabled_toggle(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_name_match_map_type_toggle(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_name_match_clear(wmOperatorType *ot);
 
 /** Register the global popover panel for the image-grid catalog selector. */
 void image_grid_catalog_selector_panel_register(ARegionType *region_type);
 
 /** Register the global popover panel for the image-grid display settings. */
 void image_grid_display_panel_register(ARegionType *region_type);
+
+/** Register the global popover panel for the image-grid name-match filter. */
+void image_grid_name_match_filter_panel_register(ARegionType *region_type);
 
 }  // namespace blender

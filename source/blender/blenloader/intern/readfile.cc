@@ -4077,6 +4077,12 @@ static BHead *read_userdef(BlendFileData *bfd, FileData *fd, BHead *bhead)
     BKE_preferences_asset_browser_settings_blend_read_data(reader, &browser_settings);
   }
 
+  BLO_read_struct_list(reader, bUserNameMatchMapType, &user->name_match_map_types);
+  for (bUserNameMatchMapType &map_type : user->name_match_map_types) {
+    BLO_read_struct_list(reader, bUserNameMatchToken, &map_type.tokens);
+  }
+  BLO_read_struct_list(reader, bUserNameMatchFilterTag, &user->name_match_filter_tags);
+
   /* XXX */
   user->uifonts.first = user->uifonts.last = nullptr;
 

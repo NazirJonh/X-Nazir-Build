@@ -22,6 +22,8 @@
 #include "RNA_enum_types.hh"
 #include "rna_internal.hh"
 
+#include "ED_asset_shelf.hh"
+
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
@@ -1630,6 +1632,92 @@ static void rna_AssetShelf_recent_max_count_update(Main * /*bmain*/,
   WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
 }
 
+static AssetNameMatchIdLink *rna_AssetShelf_name_match_map_types_new(AssetShelf *shelf,
+                                                                    ReportList *reports,
+                                                                    const char *id)
+{
+  if (shelf->type == nullptr ||
+      !ed::asset::shelf::shelf_supports_name_match_filter(shelf->type->idname))
+  {
+    BKE_report(reports, RPT_ERROR, "This asset shelf does not support the name matching filter");
+    return nullptr;
+  }
+  if (id == nullptr || id[0] == '\0') {
+    BKE_report(reports, RPT_ERROR, "Map type identifier must not be empty");
+    return nullptr;
+  }
+  AssetNameMatchIdLink *link = ed::asset::shelf::settings_name_match_map_type_activate(
+      shelf->settings, id);
+  if (link == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Map type identifier already active");
+    return nullptr;
+  }
+  WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+  return link;
+}
+
+static void rna_AssetShelf_name_match_map_types_remove(AssetShelf *shelf,
+                                                      ReportList *reports,
+                                                      PointerRNA *link_ptr)
+{
+  const AssetNameMatchIdLink *link = static_cast<const AssetNameMatchIdLink *>(link_ptr->data);
+  if (!ed::asset::shelf::settings_name_match_map_type_deactivate(shelf->settings, link->id)) {
+    BKE_report(reports, RPT_ERROR, "Active map type not found");
+    return;
+  }
+  link_ptr->invalidate();
+  WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+}
+
+static void rna_AssetShelf_name_match_map_types_clear(AssetShelf *shelf)
+{
+  ed::asset::shelf::settings_name_match_map_type_clear(shelf->settings);
+  WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+}
+
+static AssetNameMatchTagLink *rna_AssetShelf_name_match_tags_new(AssetShelf *shelf,
+                                                                ReportList *reports,
+                                                                const char *name)
+{
+  if (shelf->type == nullptr ||
+      !ed::asset::shelf::shelf_supports_name_match_filter(shelf->type->idname))
+  {
+    BKE_report(reports, RPT_ERROR, "This asset shelf does not support the name matching filter");
+    return nullptr;
+  }
+  if (name == nullptr || name[0] == '\0') {
+    BKE_report(reports, RPT_ERROR, "Filter tag name must not be empty");
+    return nullptr;
+  }
+  AssetNameMatchTagLink *link = ed::asset::shelf::settings_name_match_tag_activate(
+      shelf->settings, name);
+  if (link == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Filter tag already active");
+    return nullptr;
+  }
+  WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+  return link;
+}
+
+static void rna_AssetShelf_name_match_tags_remove(AssetShelf *shelf,
+                                                  ReportList *reports,
+                                                  PointerRNA *link_ptr)
+{
+  const AssetNameMatchTagLink *link = static_cast<const AssetNameMatchTagLink *>(link_ptr->data);
+  if (!ed::asset::shelf::settings_name_match_tag_deactivate(shelf->settings, link->name)) {
+    BKE_report(reports, RPT_ERROR, "Active filter tag not found");
+    return;
+  }
+  link_ptr->invalidate();
+  WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+}
+
+static void rna_AssetShelf_name_match_tags_clear(AssetShelf *shelf)
+{
+  ed::asset::shelf::settings_name_match_tag_clear(shelf->settings);
+  WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+}
+
 static void rna_Panel_bl_description_set(PointerRNA *ptr, const char *value)
 {
   Panel *data = static_cast<Panel *>(ptr->data);
@@ -3083,6 +3171,109 @@ static void rna_def_asset_shelf(BlenderRNA *brna)
   RNA_def_property_update(
       prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_AssetShelf_popup_settings_update");
 
+  prop = RNA_def_property(srna, "filter_name_match_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "settings.display_flag", ASSETSHELF_FILTER_NAME_MATCH_ENABLED);
+  RNA_def_property_ui_text(prop,
+                           "Name Matching Filter",
+                           "Enable filtering assets by map type and tags");
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_AssetShelf_popup_settings_update");
+
+  /* Active Name Matching filter selection (process memory for popup shelves). */
+  {
+    StructRNA *srna_item;
+    FunctionRNA *func;
+    PropertyRNA *parm;
+
+    srna_item = RNA_def_struct(brna, "AssetShelfNameMatchMapType", nullptr);
+    RNA_def_struct_sdna(srna_item, "AssetNameMatchIdLink");
+    RNA_def_struct_ui_text(
+        srna_item, "Asset Shelf Name Match Map Type", "Active map type identifier for name matching");
+    prop = RNA_def_property(srna_item, "identifier", PROP_STRING, PROP_NONE);
+    RNA_def_property_string_sdna(prop, nullptr, "id");
+    RNA_def_property_ui_text(prop, "Identifier", "Map type identifier from Preferences");
+    RNA_def_struct_name_property(srna_item, prop);
+    RNA_def_property_update(prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+
+    srna_item = RNA_def_struct(brna, "AssetShelfNameMatchTag", nullptr);
+    RNA_def_struct_sdna(srna_item, "AssetNameMatchTagLink");
+    RNA_def_struct_ui_text(
+        srna_item, "Asset Shelf Name Match Tag", "Active filter tag for name matching");
+    prop = RNA_def_property(srna_item, "name", PROP_STRING, PROP_NONE);
+    RNA_def_property_string_sdna(prop, nullptr, "name");
+    RNA_def_property_ui_text(prop, "Name", "Filter tag name");
+    RNA_def_struct_name_property(srna_item, prop);
+    RNA_def_property_update(prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+
+    prop = RNA_def_property(srna, "filter_name_match_map_types", PROP_COLLECTION, PROP_NONE);
+    RNA_def_property_collection_sdna(prop, nullptr, "settings.filter_name_match_map_types", nullptr);
+    RNA_def_property_struct_type(prop, "AssetShelfNameMatchMapType");
+    RNA_def_property_ui_text(
+        prop, "Name Match Map Types", "Active map type identifiers for include filtering");
+    RNA_def_property_srna(prop, "AssetShelfNameMatchMapTypes");
+    RNA_def_property_update(prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+    {
+      StructRNA *srna_collection = RNA_def_struct(brna, "AssetShelfNameMatchMapTypes", nullptr);
+      RNA_def_struct_sdna(srna_collection, "AssetShelf");
+      RNA_def_struct_ui_text(srna_collection,
+                             "Asset Shelf Name Match Map Types",
+                             "Active map types for name matching");
+
+      func = RNA_def_function(
+          srna_collection, "new", "rna_AssetShelf_name_match_map_types_new");
+      RNA_def_function_flag(func, FUNC_USE_REPORTS);
+      RNA_def_function_ui_description(func, "Activate a map type by identifier");
+      RNA_def_string(func, "id", nullptr, sizeof(AssetNameMatchIdLink::id), "Identifier", "");
+      parm = RNA_def_pointer(
+          func, "item", "AssetShelfNameMatchMapType", "", "Newly activated map type");
+      RNA_def_function_return(func, parm);
+
+      func = RNA_def_function(
+          srna_collection, "remove", "rna_AssetShelf_name_match_map_types_remove");
+      RNA_def_function_flag(func, FUNC_USE_REPORTS);
+      RNA_def_function_ui_description(func, "Deactivate a map type");
+      parm = RNA_def_pointer(func, "item", "AssetShelfNameMatchMapType", "", "");
+      RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+      RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+      func = RNA_def_function(
+          srna_collection, "clear", "rna_AssetShelf_name_match_map_types_clear");
+      RNA_def_function_ui_description(func, "Clear all active map types");
+    }
+
+    prop = RNA_def_property(srna, "filter_name_match_tags", PROP_COLLECTION, PROP_NONE);
+    RNA_def_property_collection_sdna(prop, nullptr, "settings.filter_name_match_tags", nullptr);
+    RNA_def_property_struct_type(prop, "AssetShelfNameMatchTag");
+    RNA_def_property_ui_text(
+        prop, "Name Match Tags", "Active filter tags for include filtering");
+    RNA_def_property_srna(prop, "AssetShelfNameMatchTags");
+    RNA_def_property_update(prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+    {
+      StructRNA *srna_collection = RNA_def_struct(brna, "AssetShelfNameMatchTags", nullptr);
+      RNA_def_struct_sdna(srna_collection, "AssetShelf");
+      RNA_def_struct_ui_text(
+          srna_collection, "Asset Shelf Name Match Tags", "Active tags for name matching");
+
+      func = RNA_def_function(srna_collection, "new", "rna_AssetShelf_name_match_tags_new");
+      RNA_def_function_flag(func, FUNC_USE_REPORTS);
+      RNA_def_function_ui_description(func, "Activate a filter tag");
+      RNA_def_string(func, "name", nullptr, sizeof(AssetNameMatchTagLink::name), "Name", "");
+      parm = RNA_def_pointer(func, "item", "AssetShelfNameMatchTag", "", "Newly activated tag");
+      RNA_def_function_return(func, parm);
+
+      func = RNA_def_function(srna_collection, "remove", "rna_AssetShelf_name_match_tags_remove");
+      RNA_def_function_flag(func, FUNC_USE_REPORTS);
+      RNA_def_function_ui_description(func, "Deactivate a filter tag");
+      parm = RNA_def_pointer(func, "item", "AssetShelfNameMatchTag", "", "");
+      RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+      RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+      func = RNA_def_function(srna_collection, "clear", "rna_AssetShelf_name_match_tags_clear");
+      RNA_def_function_ui_description(func, "Clear all active filter tags");
+    }
+  }
+
   prop = RNA_def_property(srna, "show_names", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "settings.display_flag", ASSETSHELF_SHOW_NAMES);
   RNA_def_property_ui_text(prop,
@@ -3292,6 +3483,22 @@ static void rna_def_grid_view_settings(BlenderRNA *brna)
                            "Filter by Type",
                            "Comma-separated ID type names to show, e.g. \"Image,Material\" "
                            "(empty = show all types)");
+
+  prop = RNA_def_property(srna, "filter_name_match_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_boolean_default(prop, false);
+  RNA_def_property_update(prop, NC_ASSET | ND_ASSET_LIST, nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Name Match Filter",
+                           "Enable name-matching include filter for map types");
+
+  prop = RNA_def_property(srna, "filter_name_match_map_types", PROP_STRING, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_update(prop, NC_ASSET | ND_ASSET_LIST, nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Name Match Map Types",
+                           "Comma-separated map-type identifiers to include "
+                           "(empty = no selection)");
 }
 
 void RNA_def_ui(BlenderRNA *brna)

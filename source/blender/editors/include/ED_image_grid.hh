@@ -17,6 +17,7 @@
 #include <string>
 
 #include "BLI_function_ref.hh"
+#include "BLI_set.hh"
 
 #include "ED_view3d.hh"
 
@@ -75,6 +76,13 @@ bool image_grid_library_is_missing(ImageGridOwner owner, bool is_mask_slot);
 void image_grid_state_remove(ImageGridOwner owner);
 void image_grid_foreach_live_library_ref(ImageGridOwner owner,
                                          blender::FunctionRef<void(AssetLibraryReference &)> fn);
+/**
+ * Run \a fn on the active name-match map-type ID set of every runtime state this owner already has
+ * (never creates one), so a map type removed or renamed in the Preferences does not stay selected
+ * in a grid that is currently open.
+ */
+void image_grid_foreach_live_name_match_ids(
+    ImageGridOwner owner, blender::FunctionRef<void(blender::Set<std::string> &)> fn);
 std::string image_grid_session_id(ImageGridOwner owner, bool is_mask_slot, bool is_popover);
 void image_grid_reset_scroll(ImageGridOwner owner, bool is_mask_slot);
 

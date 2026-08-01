@@ -22,10 +22,13 @@
 #include "BLI_path_utils.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
 #include "MEM_guardedalloc.h"
+
+#include <algorithm>
 
 #include "BKE_asset.hh"
 #include "BKE_asset_edit.hh"
@@ -355,6 +358,29 @@ void image_grid_state_persist(const ImageGridOwner owner,
       BKE_asset_catalog_path_list_add_path(libcat_state->enabled_catalog_paths, path.c_str());
     }
     BLI_addtail(&library_catalog_states, libcat_state);
+  }
+
+  slot.filter_name_match_enabled = state.filter.name_match.enabled ? 1 : 0;
+  if (!BLI_listbase_head_is_plausible(&slot.filter_name_match_map_types)) {
+    slot.filter_name_match_map_types.clear_no_delete();
+  }
+  while (AssetNameMatchIdLink *link = static_cast<AssetNameMatchIdLink *>(
+             BLI_pophead(&slot.filter_name_match_map_types)))
+  {
+    MEM_delete(link);
+  }
+  /* #Set has no stable iteration order; sort before writing so the same active selection
+   * round-trips to the same on-disk order instead of shuffling on every save. */
+  Vector<std::string> sorted_ids;
+  sorted_ids.reserve(state.filter.name_match.active_map_type_ids.size());
+  for (const std::string &id : state.filter.name_match.active_map_type_ids) {
+    sorted_ids.append(id);
+  }
+  std::sort(sorted_ids.begin(), sorted_ids.end());
+  for (const std::string &id : sorted_ids) {
+    AssetNameMatchIdLink *link = MEM_new<AssetNameMatchIdLink>(__func__);
+    STRNCPY_UTF8(link->id, id.c_str());
+    BLI_addtail(&slot.filter_name_match_map_types, link);
   }
 }
 

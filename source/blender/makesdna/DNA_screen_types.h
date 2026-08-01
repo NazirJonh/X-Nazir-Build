@@ -870,6 +870,8 @@ enum AssetShelfSettings_DisplayFlag : short {
   ASSETSHELF_FILTER_FAVORITES_ONLY = (1 << 1),
   /** Hide the per-tile favorite star on brush asset shelves. Off by default (stars are shown). */
   ASSETSHELF_HIDE_FAVORITE_ICON = (1 << 2),
+  /** Master on/off for name-matching include filtering (map types and tags). */
+  ASSETSHELF_FILTER_NAME_MATCH_ENABLED = (1 << 3),
 };
 ENUM_OPERATORS(AssetShelfSettings_DisplayFlag)
 
@@ -901,6 +903,11 @@ struct AssetShelfSettings {
 
   /** For filtering assets displayed in the asset view. */
   char search_string[64] = "";
+
+  /** Active Name Matching map-type identifiers (#AssetNameMatchIdLink). */
+  ListBaseT<AssetNameMatchIdLink> filter_name_match_map_types = {nullptr, nullptr};
+  /** Active Name Matching filter tags (#AssetNameMatchTagLink). */
+  ListBaseT<AssetNameMatchTagLink> filter_name_match_tags = {nullptr, nullptr};
 
   /** Persistent collapsed state of catalog paths in this shelf's catalog tree. */
   ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};

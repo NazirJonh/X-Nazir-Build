@@ -260,6 +260,23 @@ struct AssetCatalogPathLink {
 };
 
 /**
+ * Active Name Matching map-type identifier selected on an #AssetShelfSettings
+ * (Preferences map type #bUserNameMatchMapType.identifier).
+ */
+struct AssetNameMatchIdLink {
+  struct AssetNameMatchIdLink *next = nullptr, *prev = nullptr;
+  char id[/*MAX_NAME*/ 64] = "";
+};
+
+/**
+ * Active Name Matching filter tag selected on an #AssetShelfSettings.
+ */
+struct AssetNameMatchTagLink {
+  struct AssetNameMatchTagLink *next = nullptr, *prev = nullptr;
+  char name[/*MAX_NAME*/ 64] = "";
+};
+
+/**
  * Persistent collapsed/expanded state of a single asset catalog path in a tree view.
  * Kept separate from #AssetCatalogPathLink so existing enabled-catalog lists and their on-disk
  * format are untouched.

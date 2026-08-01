@@ -13,6 +13,8 @@
 
 #include "interface_grid_view.hh"
 
+#include "BKE_name_matching.hh"
+
 #include "AS_asset_library.hh"
 #include "BLI_set.hh"
 #include "RNA_types.hh"
@@ -39,6 +41,7 @@ class AssetGridDataSource : public GridDataSource {
   AssetLibraryReference library_ref_;
   Set<std::string> enabled_catalogs_;
   Set<short> filter_id_types_;
+  NameMatchFilterState name_match_;
   std::string activate_operator_;
   std::string drag_operator_;
 
@@ -46,6 +49,7 @@ class AssetGridDataSource : public GridDataSource {
   AssetGridDataSource(const AssetLibraryReference &library_ref,
                       Set<std::string> enabled_catalogs,
                       Set<short> filter_id_types,
+                      NameMatchFilterState name_match,
                       std::string activate_operator,
                       std::string drag_operator = "");
 

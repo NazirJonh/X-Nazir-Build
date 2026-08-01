@@ -1668,6 +1668,8 @@ void ED_operatortypes_userpref()
   WM_operatortype_append(PREFERENCES_OT_asset_library_pin_set);
   WM_operatortype_append(PREFERENCES_OT_asset_library_pin_reorder);
 
+  userpref_name_matching_operatortypes();
+
   WM_operatortype_append(PREFERENCES_OT_extension_repo_add);
   WM_operatortype_append(PREFERENCES_OT_extension_repo_remove);
   WM_operatortype_append(PREFERENCES_OT_extension_url_drop);

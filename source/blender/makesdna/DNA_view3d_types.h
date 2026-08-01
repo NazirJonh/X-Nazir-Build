@@ -748,6 +748,13 @@ struct ImageGridSlotDNA {
   ListBaseT<AssetCatalogPathLink> enabled_catalog_paths_legacy = {nullptr, nullptr};
   /** Per-asset-library catalog selection for the image grid (empty paths = show all). */
   ListBaseT<ImageGridLibraryCatalogState> library_catalog_states = {nullptr, nullptr};
+  /**
+   * Name Matching master toggle (0/1). Old files: zero → off.
+   */
+  char filter_name_match_enabled = 0;
+  char _pad_name_match[7] = {};
+  /** Active map-type identifiers (#AssetNameMatchIdLink). Empty = no selection. */
+  ListBaseT<AssetNameMatchIdLink> filter_name_match_map_types = {nullptr, nullptr};
 };
 
 struct View3D_Runtime {

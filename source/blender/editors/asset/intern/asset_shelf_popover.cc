@@ -6,6 +6,7 @@
  * \ingroup edasset
  */
 
+#include <cctype>
 #include <optional>
 #include <string>
 
@@ -16,17 +17,24 @@
 
 #include "BKE_callbacks.hh"
 #include "BKE_context.hh"
+#include "BKE_global.hh"
 #include "BKE_main.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_preferences.h"
 #include "BKE_screen.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_set.hh"
+#include "BLI_string.h"
 #include "BLI_string_utf8.h"
 
 #include "BLT_translation.hh"
 
+#include "DNA_asset_types.h"
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
+
+#include "MEM_guardedalloc.h"
 
 #include "UI_grid_view.hh"
 #include "UI_interface.hh"
@@ -42,6 +50,7 @@
 #include "ED_screen.hh"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
 #include "RNA_prototypes.hh"
 
 #include "WM_api.hh"
@@ -179,6 +188,13 @@ void popup_shelves_foreach_library_ref(FunctionRef<void(AssetLibraryReference &)
 {
   for (AssetShelf *shelf : StaticPopupShelves::shelves()) {
     fn(shelf->settings.asset_library_reference);
+  }
+}
+
+void popup_shelves_foreach_settings(FunctionRef<void(AssetShelfSettings &)> fn)
+{
+  for (AssetShelf *shelf : StaticPopupShelves::shelves()) {
+    fn(shelf->settings);
   }
 }
 
@@ -986,6 +1002,7 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
   layout.context_ptr_set("asset_library_reference", &library_ref_ptr);
 
   layout.context_ptr_set("asset_shelf", &shelf_ptr);
+  layout.context_string_set("asset_shelf_idname", shelf->idname);
 
   /* Asset grid viewport height, derived from the window so the popover fits on screen (see
    * #ui::popup_grid_fixed_viewport_units). The raw pixel height is used (not snapped to whole tile
@@ -1076,25 +1093,50 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
   ui::Layout &controls = header_row.row(true);
   controls.fixed_size_set(true);
   controls.alignment_set(ui::LayoutAlign::Right);
-  /* Only meaningful on shelves with favorites lists, and greyed out while the "Favorites"
-   * pseudo-catalog is itself active, since that view is already favorites-only. */
-  if (shelf_supports_asset_lists(shelf->type->idname)) {
+
+  const bool show_favorites_filter = shelf_supports_asset_lists(shelf->type->idname);
+  const bool show_name_match_filter = shelf->type &&
+                                      shelf_supports_name_match_filter(shelf->type->idname);
+  if (show_favorites_filter || show_name_match_filter) {
     controls.label(IFACE_("Filter:"), ICON_NONE);
+    /* Detach the label from the filter buttons it introduces. */
     controls.separator();
-    ui::Layout &favorites_only_row = controls.row(true);
-    /* #fixed_size_set() / #alignment_set() don't propagate from #controls to this nested row (it
-     * exists only to scope #enabled_set() to this one button, see below), so without repeating them
-     * here this button would size differently from the preset buttons that follow. */
-    favorites_only_row.fixed_size_set(true);
-    favorites_only_row.alignment_set(ui::LayoutAlign::Right);
-    favorites_only_row.enabled_set(!settings_is_favorites_catalog_active(shelf->settings));
-    favorites_only_row.prop(&shelf_ptr,
-                            "filter_favorites_only",
-                            ui::ITEM_R_TOGGLE,
-                            IFACE_("Only Favorite"),
-                            ICON_SOLO_ON);
-    /* Detach the favorites filter (a view toggle) from the "Size:" group that follows, which is a
-     * different kind of control -- otherwise they read as one merged button group. */
+
+    if (show_favorites_filter) {
+      ui::Layout &favorites_row = controls.row(true);
+      favorites_row.fixed_size_set(true);
+      favorites_row.alignment_set(ui::LayoutAlign::Right);
+      favorites_row.enabled_set(!settings_is_favorites_catalog_active(shelf->settings));
+      favorites_row.prop(&shelf_ptr,
+                         "filter_favorites_only",
+                         ui::ITEM_R_TOGGLE,
+                         IFACE_("Only Favorite"),
+                         ICON_SOLO_ON);
+      favorites_row.enabled_set(true);
+    }
+
+    if (show_name_match_filter) {
+      if (show_favorites_filter) {
+        /* Keep the name-match toggle separate from "Only Favorite". */
+        controls.separator();
+      }
+      ui::Layout &name_match_row = controls.row(true);
+      name_match_row.fixed_size_set(true);
+      name_match_row.alignment_set(ui::LayoutAlign::Right);
+      name_match_row.context_ptr_set("asset_shelf", &shelf_ptr);
+      name_match_row.context_string_set("asset_shelf_idname", shelf->idname);
+      const bool filter_enabled = settings_name_match_filter_enabled(shelf->settings);
+      name_match_row.prop(&shelf_ptr,
+                          "filter_name_match_enabled",
+                          ui::ITEM_R_TOGGLE | ui::ITEM_R_ICON_ONLY,
+                          "",
+                          filter_enabled ? ICON_FILTER_FILLED : ICON_FILTER);
+      /* Outliner-style disclosure; keep row compact so the popover stays icon-only (no second
+       * geometric menu arrow from #popover_widget_type). */
+      name_match_row.popover(C, "ASSETSHELF_PT_popover_name_match", "", ICON_DOWNARROW_HLT);
+    }
+
+    /* Detach the filter controls from the "Size:" controls that follow. */
     controls.separator();
   }
   controls.label(IFACE_("Size:"), ICON_NONE);
@@ -1234,6 +1276,213 @@ static bool popover_display_panel_poll(const bContext *C, PanelType * /*panel_ty
   return shelf_ptr.data != nullptr;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Name Matching filter selector
+ * \{ */
+
+/**
+ * Resolve the popup #AssetShelf for the name-match filter UI. Nested popovers inherit a copied
+ * button context where the `asset_shelf` #PointerRNA can go stale after the parent block
+ * refreshes. The stamped parent popup region and `asset_shelf_idname` are the reliable keys
+ * (#popup_shelf_get_or_create).
+ */
+static AssetShelf *popover_name_match_shelf_from_context(const bContext *C)
+{
+  auto resolve_from_idname = [&](const StringRef idname) -> AssetShelf * {
+    if (!shelf_supports_name_match_filter(idname)) {
+      return nullptr;
+    }
+    if (AssetShelfType *shelf_type = type_find_from_idname(idname)) {
+      return popup_shelf_get_or_create(*C, *shelf_type);
+    }
+    return nullptr;
+  };
+
+  if (const std::optional<StringRefNull> idname = CTX_data_string_get(C, "asset_shelf_idname")) {
+    if (AssetShelf *shelf = resolve_from_idname(*idname)) {
+      return shelf;
+    }
+  }
+
+  const wmWindow *win = CTX_wm_window(C);
+  if (win == nullptr) {
+    return nullptr;
+  }
+
+  if (const ARegion *region = CTX_wm_region_popup(C) ? CTX_wm_region_popup(C) : CTX_wm_region(C)) {
+    if (const std::optional<StringRefNull> stamped = shelf_popup_region_idname_get(*region)) {
+      if (AssetShelf *shelf = resolve_from_idname(*stamped)) {
+        return shelf;
+      }
+    }
+  }
+
+  /* Nested name-match popover: the arrow button lives in the parent asset-shelf popover region,
+   * which carries the D7 stamp. The nested region itself is a fresh temporary without one. */
+  const bScreen *screen = WM_window_get_active_screen(win);
+  for (const ScrArea &area : screen->areabase) {
+    for (const ARegion &region : area.regionbase) {
+      if (region.regiontype != RGN_TYPE_TEMPORARY) {
+        continue;
+      }
+      if (!ui::region_popup_has_panel(&region, "ASSETSHELF_PT_popover_panel")) {
+        continue;
+      }
+      if (const std::optional<StringRefNull> stamped = shelf_popup_region_idname_get(region)) {
+        if (AssetShelf *shelf = resolve_from_idname(*stamped)) {
+          return shelf;
+        }
+      }
+    }
+  }
+
+  return nullptr;
+}
+
+static wmOperatorStatus name_match_map_type_toggle_exec(bContext *C, wmOperator *op)
+{
+  AssetShelf *shelf = popover_name_match_shelf_from_context(C);
+  if (shelf == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  char identifier[64];
+  RNA_string_get(op->ptr, "identifier", identifier);
+  settings_name_match_map_type_toggle(shelf->settings, identifier);
+  WM_event_add_notifier(C, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+static void ASSETSHELF_OT_name_match_map_type_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Name Match Map Type";
+  ot->idname = "ASSETSHELF_OT_name_match_map_type_toggle";
+  ot->description = "Toggle a map type in the asset shelf name matching filter";
+  ot->exec = name_match_map_type_toggle_exec;
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_string(ot->srna, "identifier", nullptr, 64, "Identifier", "");
+}
+
+static wmOperatorStatus name_match_tag_toggle_exec(bContext *C, wmOperator *op)
+{
+  AssetShelf *shelf = popover_name_match_shelf_from_context(C);
+  if (shelf == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  char name[64];
+  RNA_string_get(op->ptr, "name", name);
+  settings_name_match_tag_toggle(shelf->settings, name);
+  WM_event_add_notifier(C, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+static void ASSETSHELF_OT_name_match_tag_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Name Match Tag";
+  ot->idname = "ASSETSHELF_OT_name_match_tag_toggle";
+  ot->description = "Toggle a tag in the asset shelf name matching filter";
+  ot->exec = name_match_tag_toggle_exec;
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_string(ot->srna, "name", nullptr, 64, "Name", "");
+}
+
+static wmOperatorStatus name_match_clear_exec(bContext *C, wmOperator * /*op*/)
+{
+  AssetShelf *shelf = popover_name_match_shelf_from_context(C);
+  if (shelf == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  settings_name_match_filter_clear(shelf->settings);
+  WM_event_add_notifier(C, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+static void ASSETSHELF_OT_name_match_clear(wmOperatorType *ot)
+{
+  ot->name = "Clear Name Match Filter";
+  ot->idname = "ASSETSHELF_OT_name_match_clear";
+  ot->description = "Clear active name matching filters on the asset shelf";
+  ot->exec = name_match_clear_exec;
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+static void popover_name_match_panel_draw(const bContext *C, Panel *panel)
+{
+  ui::Layout &layout = *panel->layout;
+
+  AssetShelf *shelf = popover_name_match_shelf_from_context(C);
+  if (shelf == nullptr || shelf->type == nullptr) {
+    return;
+  }
+
+  layout.enabled_set(settings_name_match_filter_enabled(shelf->settings));
+
+  /* Preferences map types are seeded once at defaults/versioning/homefile-read time and, since
+   * built-in rows can't be removed, stay valid for the session -- no per-draw repair needed. */
+  const StringRef idname = shelf->type->idname;
+  if (shelf_name_match_filter_includes_map_types(idname)) {
+    layout.label(IFACE_("Map Types"), ICON_NONE);
+    for (const bUserNameMatchMapType &map_type : U.name_match_map_types) {
+      const bool active = settings_name_match_map_type_is_active(shelf->settings,
+                                                                 map_type.identifier);
+      ui::Layout &row = layout.row(false);
+      PointerRNA props = row.op("ASSETSHELF_OT_name_match_map_type_toggle",
+                                map_type.name,
+                                active ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT);
+      if (props.type != nullptr) {
+        RNA_string_set(&props, "identifier", map_type.identifier);
+      }
+    }
+    layout.separator();
+  }
+
+  if (shelf_name_match_filter_includes_tags(idname)) {
+    layout.label(IFACE_("Tags"), ICON_NONE);
+    Set<std::string> shown_tags_lower;
+    auto append_tag_row = [&](const char *tag_name) {
+      if (tag_name == nullptr || tag_name[0] == '\0') {
+        return;
+      }
+      std::string lower = tag_name;
+      for (char &c : lower) {
+        c = char(std::tolower(static_cast<unsigned char>(c)));
+      }
+      if (!shown_tags_lower.add(lower)) {
+        return;
+      }
+      const bool active = settings_name_match_tag_is_active(shelf->settings, tag_name);
+      ui::Layout &row = layout.row(false);
+      PointerRNA props = row.op("ASSETSHELF_OT_name_match_tag_toggle",
+                                tag_name,
+                                active ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT);
+      if (props.type != nullptr) {
+        RNA_string_set(&props, "name", tag_name);
+      }
+    };
+
+    for (const bUserNameMatchFilterTag &tag : U.name_match_filter_tags) {
+      append_tag_row(tag.name);
+    }
+    for (const std::string &tag_name :
+         collect_unique_asset_tag_names(shelf->settings.asset_library_reference, *C))
+    {
+      append_tag_row(tag_name.c_str());
+    }
+    layout.separator();
+  }
+
+  layout.op("ASSETSHELF_OT_name_match_clear", IFACE_("Clear Filter"), ICON_X);
+}
+
+static bool popover_name_match_panel_poll(const bContext *C, PanelType * /*panel_type*/)
+{
+  AssetShelf *shelf = popover_name_match_shelf_from_context(C);
+  return shelf && shelf->type && shelf_supports_name_match_filter(shelf->type->idname);
+}
+
 static void asset_shelf_popover_listen(const wmRegionListenerParams *params)
 {
   const wmNotifier *wmn = params->notifier;
@@ -1317,6 +1566,24 @@ void popover_panel_register(ARegionType *region_type)
     BLI_addtail(&region_type->paneltypes, pt);
     WM_paneltype_add(pt);
   }
+
+  /* Name Matching filter selector (opened from the “V” button). */
+  {
+    PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
+    STRNCPY_UTF8(pt->idname, "ASSETSHELF_PT_popover_name_match");
+    STRNCPY_UTF8(pt->label, N_("Name Matching"));
+    STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+    pt->description = N_("Filter assets by map type and tags");
+    pt->draw = popover_name_match_panel_draw;
+    pt->poll = popover_name_match_panel_poll;
+    pt->ui_units_x = 12;
+    BLI_addtail(&region_type->paneltypes, pt);
+    WM_paneltype_add(pt);
+  }
+
+  WM_operatortype_append(ASSETSHELF_OT_name_match_map_type_toggle);
+  WM_operatortype_append(ASSETSHELF_OT_name_match_tag_toggle);
+  WM_operatortype_append(ASSETSHELF_OT_name_match_clear);
 
   /* Context menu for the pinned library tabs. Registered here with the panels because it shares
    * their lifetime; #WM_menutype_find is what the tab looks it up with. */

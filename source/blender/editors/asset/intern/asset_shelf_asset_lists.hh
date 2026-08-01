@@ -120,6 +120,11 @@ bool shelf_idname_is_brush_shelf(StringRef idname);
 /** True if \a idname supports Recent/Favorites asset lists (brush shelves and image texture). */
 bool shelf_supports_asset_lists(StringRef idname);
 
+bool shelf_supports_name_match_filter(StringRef idname);
+bool shelf_name_match_filter_includes_map_types(StringRef idname);
+/** Always false for now: Filter Tags is implemented but intentionally hidden from the UI. */
+bool shelf_name_match_filter_includes_tags(StringRef idname);
+
 /**
  * Process-local binding of a temporary popup #ARegion to the asset-shelf type idname currently
  * drawing into it (D7). Bind overwrites; unbind removes. #shelf_popup_region_idname_get returns a

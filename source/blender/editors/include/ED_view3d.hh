@@ -20,6 +20,8 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
 
+#include "BKE_name_matching.hh"
+
 #include "DNA_asset_types.h"
 #include "DNA_scene_types.h"
 
@@ -1514,6 +1516,8 @@ struct ImageGridFilter {
    * ordered membership from #shelf_asset_lists_recent / #shelf_asset_lists_favorites.
    */
   ImageGridShelfCatalogMode catalog_mode = ImageGridShelfCatalogMode::All;
+  /** Name Matching include-filter (persisted on #ImageGridSlotDNA). */
+  blender::NameMatchFilterState name_match;
 };
 
 /**

@@ -462,6 +462,7 @@ void template_grid_view_asset(Layout *layout,
   const AssetLibraryReference lib_ref = grid_settings::library_ref_get(*settings_ptr);
   Set<std::string> catalogs = grid_settings::enabled_catalogs_get(*settings_ptr);
   Set<short> filter_id_types = grid_settings::filter_id_types_get(*settings_ptr);
+  NameMatchFilterState name_match = grid_settings::name_match_filter_get(*settings_ptr);
   const int preview_size = grid_settings::preview_size_get(*settings_ptr);
 
   const int tile_w = preview_tile_size_x(preview_size);
@@ -472,6 +473,7 @@ void template_grid_view_asset(Layout *layout,
   auto source = std::make_unique<AssetGridDataSource>(lib_ref,
                                                       std::move(catalogs),
                                                       std::move(filter_id_types),
+                                                      std::move(name_match),
                                                       activate_operator ? activate_operator : "",
                                                       drag_operator ? drag_operator : "");
 

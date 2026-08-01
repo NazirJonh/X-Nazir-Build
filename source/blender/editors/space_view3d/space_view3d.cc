@@ -1705,6 +1705,7 @@ void ED_spacetype_view3d()
   BLI_addhead(&st->regiontypes, art);
   image_grid_catalog_selector_panel_register(art);
   image_grid_display_panel_register(art);
+  image_grid_name_match_filter_panel_register(art);
 
   /* regions: asset shelf */
   art = MEM_new_zeroed<ARegionType>("spacetype view3d asset shelf region");

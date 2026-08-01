@@ -34,6 +34,7 @@
 #include "BKE_idprop.hh"
 #include "BKE_keyconfig.h"
 #include "BKE_main.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_preferences.h"
 
 #include "BLO_readfile.hh"
@@ -1779,6 +1780,21 @@ void blo_do_versions_userdef(UserDef *userdef)
   if (!USER_VERSION_ATLEAST(502, 42)) {
     userdef->asset_flag |= USER_ASSETS_USE_ONLINE_ESSENTIALS;
   }
+
+  if (!USER_VERSION_ATLEAST(502, 49)) {
+    /* Free rather than forget: prefs saved with an early (pre-release) version of these DNA
+     * fields may already hold real user-authored map types/tokens, and clear_no_delete() would
+     * both leak them and silently discard custom entries. */
+    BKE_name_matching_userdef_free(userdef);
+    userdef->active_name_match_map_type = 0;
+    userdef->active_name_match_filter_tag = 0;
+  }
+
+  /* Seed core Principled BSDF map types when the list is empty.
+   * Call unconditionally (not version-gated): #BKE_name_matching_userdef_ensure_defaults is
+   * idempotent, and prefs may already be at the current subversion with an empty list
+   * (e.g. saved before seeding landed). */
+  BKE_name_matching_userdef_ensure_defaults(userdef);
 
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning

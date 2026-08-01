@@ -7,12 +7,17 @@
 
 #include "interface_grid_view_sources.hh"
 
+#include "BKE_name_matching.hh"
+
 #include "AS_asset_catalog_path.hh"
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 
+#include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_vector.hh"
+
+#include "DNA_asset_types.h"
 
 #include "ED_asset.hh"
 #include "ED_asset_list.hh"
@@ -192,17 +197,35 @@ static bool asset_passes_catalog_filter(const asset_system::AssetRepresentation 
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Name-match filter helpers
+ * \{ */
+
+static bool asset_passes_name_match(const NameMatchResolvedFilter &resolved,
+                                    const asset_system::AssetRepresentation &asset)
+{
+  Vector<StringRef> metadata_tags;
+  for (const AssetTag &tag : asset.get_metadata().tags) {
+    metadata_tags.append(tag.name);
+  }
+  return BKE_name_match_resolved_asset_passes(resolved, asset.get_name(), metadata_tags);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name AssetGridDataSource
  * \{ */
 
 AssetGridDataSource::AssetGridDataSource(const AssetLibraryReference &library_ref,
                                          Set<std::string> enabled_catalogs,
                                          Set<short> filter_id_types,
+                                         NameMatchFilterState name_match,
                                          std::string activate_operator,
                                          std::string drag_operator)
     : library_ref_(library_ref),
       enabled_catalogs_(std::move(enabled_catalogs)),
       filter_id_types_(std::move(filter_id_types)),
+      name_match_(std::move(name_match)),
       activate_operator_(std::move(activate_operator)),
       drag_operator_(std::move(drag_operator))
 {
@@ -220,6 +243,8 @@ int AssetGridDataSource::item_count(const bContext & /*C*/) const
   const Vector<asset_system::AssetCatalogFilter> filters =
       filter_enabled ? build_catalog_filters(enabled_catalogs_, *library) :
                        Vector<asset_system::AssetCatalogFilter>{};
+  const NameMatchResolvedFilter name_match_resolved = BKE_name_match_filter_resolve(name_match_,
+                                                                                    U);
 
   int count = 0;
   ed::asset::list::iterate(library_ref_, [&](asset_system::AssetRepresentation &asset) -> bool {
@@ -229,6 +254,9 @@ int AssetGridDataSource::item_count(const bContext & /*C*/) const
       }
     }
     if (!filter_id_types_.is_empty() && !filter_id_types_.contains(asset.get_id_type())) {
+      return true;
+    }
+    if (!asset_passes_name_match(name_match_resolved, asset)) {
       return true;
     }
     count++;
@@ -253,6 +281,8 @@ void AssetGridDataSource::build_window(const bContext &C,
   const Vector<asset_system::AssetCatalogFilter> filters =
       filter_enabled ? build_catalog_filters(enabled_catalogs_, *library) :
                        Vector<asset_system::AssetCatalogFilter>{};
+  const NameMatchResolvedFilter name_match_resolved = BKE_name_match_filter_resolve(name_match_,
+                                                                                    U);
 
   int filtered_index = 0;
   ed::asset::list::iterate(library_ref_, [&](asset_system::AssetRepresentation &asset) -> bool {
@@ -262,6 +292,9 @@ void AssetGridDataSource::build_window(const bContext &C,
       }
     }
     if (!filter_id_types_.is_empty() && !filter_id_types_.contains(asset.get_id_type())) {
+      return true;
+    }
+    if (!asset_passes_name_match(name_match_resolved, asset)) {
       return true;
     }
 

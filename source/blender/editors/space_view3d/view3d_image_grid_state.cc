@@ -17,6 +17,7 @@
 #include "AS_asset_representation.hh"
 
 #include "BLI_map.hh"
+#include "BLI_listbase.h"
 #include "BLI_set.hh"
 #include "BLI_vector.hh"
 #include "BLI_vector_set.hh"
@@ -25,6 +26,7 @@
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
 #include "BKE_main.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_preferences.h"
 
 #include "MEM_guardedalloc.h"
@@ -400,20 +402,47 @@ int image_grid_foreach_filtered_item(
     const ImageGridUIState &state,
     blender::FunctionRef<bool(const ImageGridFilteredItem &, int)> fn)
 {
+  int out_index = 0;
+  const NameMatchResolvedFilter name_match_resolved = BKE_name_match_filter_resolve(
+      state.filter.name_match, U);
+  auto gate = [&](const ImageGridFilteredItem &item, int /*inner*/) -> bool {
+    StringRef name;
+    Vector<StringRef> tags;
+    if (item.asset != nullptr) {
+      for (const AssetTag &tag : item.asset->get_metadata().tags) {
+        tags.append(tag.name);
+      }
+      name = item.asset->get_name();
+    }
+    else if (item.image != nullptr) {
+      name = item.image->id.name + 2;
+    }
+    else {
+      return fn(item, out_index++);
+    }
+    if (!BKE_name_match_resolved_asset_passes(name_match_resolved, name, tags)) {
+      return true;
+    }
+    return fn(item, out_index++);
+  };
+
   if (state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent) {
-    return image_grid_foreach_membership_item(
+    image_grid_foreach_membership_item(
         bmain,
         ed::asset::shelf::shelf_asset_lists_recent(IMAGE_TEXTURE_SHELF_IDNAME),
-        fn);
+        gate);
+    return out_index;
   }
   if (state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites) {
-    return image_grid_foreach_membership_item(
+    image_grid_foreach_membership_item(
         bmain,
         ed::asset::shelf::shelf_asset_lists_favorites(IMAGE_TEXTURE_SHELF_IDNAME),
-        fn);
+        gate);
+    return out_index;
   }
-  return image_grid_foreach_filtered_item(
-      bmain, state.filter.lib_ref, state.filter.enabled_catalog_paths, fn);
+  image_grid_foreach_filtered_item(
+      bmain, state.filter.lib_ref, state.filter.enabled_catalog_paths, gate);
+  return out_index;
 }
 
 /** \} */
@@ -448,6 +477,8 @@ struct ImageGridOwnerDNAFields {
   short &catalog_mode;
   ListBaseT<AssetCatalogPathLink> &legacy_enabled_catalog_paths;
   ListBaseT<ImageGridLibraryCatalogState> &library_catalog_states;
+  char &filter_name_match_enabled;
+  ListBaseT<AssetNameMatchIdLink> &filter_name_match_map_types;
 };
 
 static ImageGridOwnerDNAFields image_grid_owner_dna_fields(const ImageGridOwner owner,
@@ -457,7 +488,9 @@ static ImageGridOwnerDNAFields image_grid_owner_dna_fields(const ImageGridOwner 
   return {slot.library_ref,
           slot.catalog_mode,
           slot.enabled_catalog_paths_legacy,
-          slot.library_catalog_states};
+          slot.library_catalog_states,
+          slot.filter_name_match_enabled,
+          slot.filter_name_match_map_types};
 }
 
 static void image_grid_catalog_load_from_view3d_dna(ImageGridUIState &state,
@@ -531,6 +564,16 @@ static void image_grid_init_state_from_owner_dna(ImageGridUIState &state,
   }
 
   image_grid_catalog_load_from_view3d_dna(state, owner, dna);
+
+  state.filter.name_match.enabled = (dna.filter_name_match_enabled != 0);
+  state.filter.name_match.active_map_type_ids.clear();
+  if (BLI_listbase_head_is_plausible(&dna.filter_name_match_map_types)) {
+    for (const AssetNameMatchIdLink &link : dna.filter_name_match_map_types) {
+      if (link.id[0] != '\0') {
+        state.filter.name_match.active_map_type_ids.add(link.id);
+      }
+    }
+  }
 
   const view3d::ImageGridShelfCatalogMode dna_mode =
       view3d::ImageGridShelfCatalogMode(dna.catalog_mode);
@@ -637,6 +680,16 @@ void image_grid_foreach_live_library_ref(const ImageGridOwner owner,
   }
   fn(image_grid_state_get(owner, false).filter.lib_ref);
   fn(image_grid_state_get(owner, true).filter.lib_ref);
+}
+
+void image_grid_foreach_live_name_match_ids(
+    const ImageGridOwner owner, blender::FunctionRef<void(blender::Set<std::string> &)> fn)
+{
+  if (!owner.runtime_state_slot()) {
+    return;
+  }
+  fn(image_grid_state_get(owner, false).filter.name_match.active_map_type_ids);
+  fn(image_grid_state_get(owner, true).filter.name_match.active_map_type_ids);
 }
 
 }  // namespace blender::ed::image_grid

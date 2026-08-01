@@ -24,6 +24,7 @@
 #include "BLI_listbase.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
+#include "BLI_utildefines.h"
 
 #include "asset_library_reference.hh"
 
@@ -37,12 +38,29 @@
 #include "WM_api.hh"
 
 #include "ED_asset_library.hh"
+#include "ED_asset_shelf.hh"
 
 #include "asset_shelf.hh"
+
+#include <cstddef>
 
 namespace blender {
 
 using namespace blender::ed::asset;
+
+namespace {
+/** Safe even if \a list's head is garbage (see #BLI_listbase_head_is_plausible): falls back to forgetting
+ * the (untrusted) items rather than dereferencing them. */
+template<typename T> void free_name_match_list_safe(ListBaseT<T> &list)
+{
+  if (BLI_listbase_head_is_plausible(&list)) {
+    list.free_no_destruct();
+  }
+  else {
+    list.clear_no_delete();
+  }
+}
+}  // namespace
 
 AssetShelfSettings::AssetShelfSettings() = default;
 
@@ -68,6 +86,12 @@ AssetShelfSettings &AssetShelfSettings::operator=(const AssetShelfSettings &othe
   if (this->library_catalog_states != other.library_catalog_states) {
     BKE_asset_shelf_library_catalog_state_list_free(this->library_catalog_states);
   }
+  if (this->filter_name_match_map_types != other.filter_name_match_map_types) {
+    free_name_match_list_safe(this->filter_name_match_map_types);
+  }
+  if (this->filter_name_match_tags != other.filter_name_match_tags) {
+    free_name_match_list_safe(this->filter_name_match_tags);
+  }
   if (this->active_catalog_path != other.active_catalog_path) {
     MEM_SAFE_DELETE(this->active_catalog_path);
   }
@@ -90,6 +114,19 @@ AssetShelfSettings &AssetShelfSettings::operator=(const AssetShelfSettings &othe
   BKE_asset_shelf_library_catalog_state_list_duplicate(this->library_catalog_states,
                                                        other.library_catalog_states);
 
+  this->filter_name_match_map_types = {nullptr, nullptr};
+  for (const AssetNameMatchIdLink &link : other.filter_name_match_map_types) {
+    AssetNameMatchIdLink *copy = MEM_new<AssetNameMatchIdLink>(__func__);
+    STRNCPY_UTF8(copy->id, link.id);
+    BLI_addtail(&this->filter_name_match_map_types, copy);
+  }
+  this->filter_name_match_tags = {nullptr, nullptr};
+  for (const AssetNameMatchTagLink &link : other.filter_name_match_tags) {
+    AssetNameMatchTagLink *copy = MEM_new<AssetNameMatchTagLink>(__func__);
+    STRNCPY_UTF8(copy->name, link.name);
+    BLI_addtail(&this->filter_name_match_tags, copy);
+  }
+
   return *this;
 }
 
@@ -98,6 +135,8 @@ AssetShelfSettings::~AssetShelfSettings()
   BKE_asset_catalog_path_list_free(enabled_catalog_paths);
   BKE_asset_catalog_state_list_free(catalog_states);
   BKE_asset_shelf_library_catalog_state_list_free(library_catalog_states);
+  free_name_match_list_safe(filter_name_match_map_types);
+  free_name_match_list_safe(filter_name_match_tags);
   MEM_SAFE_DELETE(active_catalog_path);
 }
 
@@ -130,6 +169,8 @@ void settings_blend_write(BlendWriter *writer, const AssetShelfSettings &setting
   BKE_asset_catalog_path_list_blend_write(writer, settings.enabled_catalog_paths);
   BKE_asset_catalog_state_list_blend_write(writer, settings.catalog_states);
   library_catalog_state_list_blend_write(writer, settings.library_catalog_states);
+  writer->write_struct_list(&settings.filter_name_match_map_types);
+  writer->write_struct_list(&settings.filter_name_match_tags);
   writer->write_string(settings.active_catalog_path);
 }
 
@@ -138,7 +179,26 @@ void settings_blend_read_data(BlendDataReader *reader, AssetShelfSettings &setti
   BKE_asset_catalog_path_list_blend_read_data(reader, settings.enabled_catalog_paths);
   BKE_asset_catalog_state_list_blend_read_data(reader, settings.catalog_states);
   library_catalog_state_list_blend_read_data(reader, settings.library_catalog_states);
+  BLO_read_struct_list(reader, AssetNameMatchIdLink, &settings.filter_name_match_map_types);
+  BLO_read_struct_list(reader, AssetNameMatchTagLink, &settings.filter_name_match_tags);
   BLO_read_string(reader, &settings.active_catalog_path);
+
+  /* Older files may leave garbage list heads where these fields did not exist yet. */
+  if (!BLI_listbase_head_is_plausible(&settings.filter_name_match_map_types)) {
+    settings.filter_name_match_map_types.clear_no_delete();
+  }
+  if (!BLI_listbase_head_is_plausible(&settings.filter_name_match_tags)) {
+    settings.filter_name_match_tags.clear_no_delete();
+  }
+
+  /* Preserve filtering for shelves that already had criteria before the master toggle existed. */
+  if ((BLI_listbase_head_is_plausible(&settings.filter_name_match_map_types) &&
+       !settings.filter_name_match_map_types.is_empty()) ||
+      (BLI_listbase_head_is_plausible(&settings.filter_name_match_tags) &&
+       !settings.filter_name_match_tags.is_empty()))
+  {
+    settings.display_flag |= ASSETSHELF_FILTER_NAME_MATCH_ENABLED;
+  }
 
   /* New in 5.x: per-library catalog map. Empty list in older files is intentional; migrate the
    * legacy single-library #active_catalog_path (including Recent/Favorites sentinels). */
@@ -608,6 +668,153 @@ void settings_set_catalog_path_collapsed(AssetShelfSettings &settings,
 {
   BKE_asset_catalog_state_set_collapsed(settings.catalog_states, path.c_str(), collapsed);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Name Matching Filter
+ * \{ */
+
+bool settings_name_match_map_type_is_active(const AssetShelfSettings &settings,
+                                            const char *identifier)
+{
+  if (identifier == nullptr || identifier[0] == '\0' ||
+      !BLI_listbase_head_is_plausible(&settings.filter_name_match_map_types))
+  {
+    return false;
+  }
+  return BLI_findstring(&settings.filter_name_match_map_types,
+                        identifier,
+                        offsetof(AssetNameMatchIdLink, id)) != nullptr;
+}
+
+AssetNameMatchIdLink *settings_name_match_map_type_activate(AssetShelfSettings &settings,
+                                                            const char *identifier)
+{
+  if (identifier == nullptr || identifier[0] == '\0' ||
+      settings_name_match_map_type_is_active(settings, identifier))
+  {
+    return nullptr;
+  }
+  if (!BLI_listbase_head_is_plausible(&settings.filter_name_match_map_types)) {
+    settings.filter_name_match_map_types.clear_no_delete();
+  }
+  AssetNameMatchIdLink *link = MEM_new<AssetNameMatchIdLink>(__func__);
+  STRNCPY_UTF8(link->id, identifier);
+  BLI_addtail(&settings.filter_name_match_map_types, link);
+  settings.display_flag |= ASSETSHELF_FILTER_NAME_MATCH_ENABLED;
+  return link;
+}
+
+bool settings_name_match_map_type_deactivate(AssetShelfSettings &settings,
+                                             const char *identifier)
+{
+  if (identifier == nullptr || identifier[0] == '\0' ||
+      !BLI_listbase_head_is_plausible(&settings.filter_name_match_map_types))
+  {
+    return false;
+  }
+  AssetNameMatchIdLink *link = static_cast<AssetNameMatchIdLink *>(BLI_findstring(
+      &settings.filter_name_match_map_types, identifier, offsetof(AssetNameMatchIdLink, id)));
+  if (link == nullptr) {
+    return false;
+  }
+  BLI_freelinkN(&settings.filter_name_match_map_types, link);
+  return true;
+}
+
+void settings_name_match_map_type_toggle(AssetShelfSettings &settings, const char *identifier)
+{
+  if (!settings_name_match_map_type_deactivate(settings, identifier)) {
+    settings_name_match_map_type_activate(settings, identifier);
+  }
+}
+
+void settings_name_match_map_type_clear(AssetShelfSettings &settings)
+{
+  free_name_match_list_safe(settings.filter_name_match_map_types);
+}
+
+bool settings_name_match_tag_is_active(const AssetShelfSettings &settings, const char *name)
+{
+  if (name == nullptr || name[0] == '\0' ||
+      !BLI_listbase_head_is_plausible(&settings.filter_name_match_tags))
+  {
+    return false;
+  }
+  for (const AssetNameMatchTagLink &link : settings.filter_name_match_tags) {
+    if (BLI_strcasecmp(link.name, name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+AssetNameMatchTagLink *settings_name_match_tag_activate(AssetShelfSettings &settings,
+                                                        const char *name)
+{
+  if (name == nullptr || name[0] == '\0' || settings_name_match_tag_is_active(settings, name)) {
+    return nullptr;
+  }
+  if (!BLI_listbase_head_is_plausible(&settings.filter_name_match_tags)) {
+    settings.filter_name_match_tags.clear_no_delete();
+  }
+  AssetNameMatchTagLink *link = MEM_new<AssetNameMatchTagLink>(__func__);
+  STRNCPY_UTF8(link->name, name);
+  BLI_addtail(&settings.filter_name_match_tags, link);
+  settings.display_flag |= ASSETSHELF_FILTER_NAME_MATCH_ENABLED;
+  return link;
+}
+
+bool settings_name_match_tag_deactivate(AssetShelfSettings &settings, const char *name)
+{
+  if (name == nullptr || name[0] == '\0' ||
+      !BLI_listbase_head_is_plausible(&settings.filter_name_match_tags))
+  {
+    return false;
+  }
+  for (AssetNameMatchTagLink &link : settings.filter_name_match_tags.items_mutable()) {
+    if (BLI_strcasecmp(link.name, name) == 0) {
+      BLI_freelinkN(&settings.filter_name_match_tags, &link);
+      return true;
+    }
+  }
+  return false;
+}
+
+void settings_name_match_tag_toggle(AssetShelfSettings &settings, const char *name)
+{
+  if (!settings_name_match_tag_deactivate(settings, name)) {
+    settings_name_match_tag_activate(settings, name);
+  }
+}
+
+void settings_name_match_tag_clear(AssetShelfSettings &settings)
+{
+  free_name_match_list_safe(settings.filter_name_match_tags);
+}
+
+bool settings_name_match_filter_enabled(const AssetShelfSettings &settings)
+{
+  return (settings.display_flag & ASSETSHELF_FILTER_NAME_MATCH_ENABLED) != 0;
+}
+
+bool settings_name_match_filter_is_active(const AssetShelfSettings &settings)
+{
+  if (!settings_name_match_filter_enabled(settings)) {
+    return false;
+  }
+  return (BLI_listbase_head_is_plausible(&settings.filter_name_match_map_types) &&
+         !settings.filter_name_match_map_types.is_empty()) ||
+         (BLI_listbase_head_is_plausible(&settings.filter_name_match_tags) &&
+          !settings.filter_name_match_tags.is_empty());
+}
+
+void settings_name_match_filter_clear(AssetShelfSettings &settings)
+{
+  settings_name_match_map_type_clear(settings);
+  settings_name_match_tag_clear(settings);
+}
+
+/** \} */
 
 }  // namespace ed::asset::shelf
 }  // namespace blender

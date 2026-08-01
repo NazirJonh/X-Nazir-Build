@@ -5,7 +5,8 @@
  * \ingroup edinterface
  *
  * Composable header widgets for reusable grid views: asset-library dropdown, catalog filter
- * popover, and preview-size control. Each operates on a #GridViewSettings #PointerRNA.
+ * popover, name-match filter popover, and preview-size control. Each operates on a
+ * #GridViewSettings #PointerRNA.
  */
 
 #include "interface_grid_view_settings_utils.hh"
@@ -17,8 +18,10 @@
 #include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
+#include "BLI_vector.hh"
 
 #include "BKE_context.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_preferences.h"
 #include "BKE_screen.hh"
 
@@ -34,7 +37,11 @@
 #include "MEM_guardedalloc.h"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
 #include "RNA_prototypes.hh"
+
+#include <string>
+#include <utility>
 
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
@@ -55,6 +62,8 @@ namespace blender::ui {
 
 static void grid_catalog_selector_panel_register();
 static void grid_preview_size_panel_register();
+static void grid_name_match_operators_register();
+static void grid_name_match_filter_panel_register();
 
 static void ensure_grid_panels_registered()
 {
@@ -64,8 +73,10 @@ static void ensure_grid_panels_registered()
     return;
   }
   done = true;
+  grid_name_match_operators_register();
   grid_catalog_selector_panel_register();
   grid_preview_size_panel_register();
+  grid_name_match_filter_panel_register();
 }
 
 /** \} */
@@ -327,6 +338,128 @@ static void grid_preview_size_panel_register()
   pt->description = N_("Adjust preview tile size for the grid");
   pt->draw = grid_preview_size_panel_draw;
   /* Not bound to any region type list — popovers are located via the global type registry. */
+  WM_paneltype_add(pt);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Name-match filter (toggle + popover; map types only)
+ * \{ */
+
+static PointerRNA grid_view_settings_from_context(const bContext *C)
+{
+  return CTX_data_pointer_get(C, "grid_view_settings");
+}
+
+static wmOperatorStatus name_match_map_type_toggle_exec(bContext *C, wmOperator *op)
+{
+  PointerRNA settings = grid_view_settings_from_context(C);
+  if (settings.data == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  char identifier[64];
+  RNA_string_get(op->ptr, "identifier", identifier);
+  grid_settings::name_match_settings_toggle_map_type(settings, identifier);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+    ED_region_tag_refresh_ui(region);
+  }
+  return OPERATOR_FINISHED;
+}
+
+static void GRIDVIEW_OT_name_match_map_type_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Name Match Map Type";
+  ot->idname = "GRIDVIEW_OT_name_match_map_type_toggle";
+  ot->description = "Toggle a map type in the grid view name matching filter";
+  ot->exec = name_match_map_type_toggle_exec;
+  ot->flag = OPTYPE_INTERNAL;
+
+  RNA_def_string(ot->srna, "identifier", nullptr, 64, "Identifier", "");
+}
+
+static wmOperatorStatus name_match_clear_exec(bContext *C, wmOperator * /*op*/)
+{
+  PointerRNA settings = grid_view_settings_from_context(C);
+  if (settings.data == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  grid_settings::name_match_settings_clear_selection(settings);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+    ED_region_tag_refresh_ui(region);
+  }
+  return OPERATOR_FINISHED;
+}
+
+static void GRIDVIEW_OT_name_match_clear(wmOperatorType *ot)
+{
+  ot->name = "Clear Name Match Filter";
+  ot->idname = "GRIDVIEW_OT_name_match_clear";
+  ot->description = "Clear active name matching map-type selections on the grid view";
+  ot->exec = name_match_clear_exec;
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+static void grid_name_match_operators_register()
+{
+  if (WM_operatortype_find("GRIDVIEW_OT_name_match_map_type_toggle", false)) {
+    return;
+  }
+  WM_operatortype_append(GRIDVIEW_OT_name_match_map_type_toggle);
+  WM_operatortype_append(GRIDVIEW_OT_name_match_clear);
+}
+
+static void grid_name_match_panel_draw(const bContext *C, Panel *panel)
+{
+  PointerRNA settings = CTX_data_pointer_get(C, "grid_view_settings");
+  if (settings.data == nullptr) {
+    return;
+  }
+
+  Layout &layout = *panel->layout;
+  /* Builtins are seeded once at defaults/versioning/homefile-read time
+   * (#BKE_name_matching_userdef_ensure_defaults) and, since built-in rows can't be removed (see
+   * #BKE_name_matching_map_type_remove), the list is guaranteed well-formed here without
+   * re-checking on every redraw. */
+  Vector<std::pair<std::string, std::string>> map_type_rows;
+  for (const bUserNameMatchMapType &map_type : U.name_match_map_types) {
+    if (map_type.identifier[0] != '\0') {
+      map_type_rows.append(
+          {map_type.identifier, map_type.name[0] != '\0' ? map_type.name : map_type.identifier});
+    }
+  }
+
+  const NameMatchFilterState state = grid_settings::name_match_filter_get(settings);
+  layout.enabled_set(state.enabled);
+  layout.label(IFACE_("Map Types"), ICON_NONE);
+  for (const auto &[identifier, name] : map_type_rows) {
+    const bool active = BKE_name_match_filter_map_type_is_active(state, identifier);
+    Layout &row = layout.row(false);
+    PointerRNA props = row.op("GRIDVIEW_OT_name_match_map_type_toggle",
+                              name,
+                              active ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT);
+    if (props.type != nullptr) {
+      RNA_string_set(&props, "identifier", identifier.c_str());
+    }
+  }
+  layout.separator();
+  layout.op("GRIDVIEW_OT_name_match_clear", IFACE_("Clear Filter"), ICON_X);
+}
+
+static void grid_name_match_filter_panel_register()
+{
+  if (WM_paneltype_find("GRIDVIEW_PT_name_match_filter", true)) {
+    return;
+  }
+
+  PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
+  STRNCPY_UTF8(pt->idname, "GRIDVIEW_PT_name_match_filter");
+  STRNCPY_UTF8(pt->label, N_("Name Match Filter"));
+  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  pt->description = N_("Select map types for name matching in the grid");
+  pt->draw = grid_name_match_panel_draw;
   WM_paneltype_add(pt);
 }
 
@@ -838,6 +971,26 @@ void template_grid_preview_size(Layout *layout, bContext *C, PointerRNA *setting
   Block *block = row.block();
   Button *but = block->buttons_ptrs.last().get();
   but->rect.xmax = but->rect.xmin + short(1.6f * UI_UNIT_X);
+}
+
+void template_grid_name_match_filter(Layout *layout, bContext *C, PointerRNA *settings_ptr)
+{
+  if (!layout || !C || !settings_ptr || !settings_ptr->data) {
+    return;
+  }
+
+  ensure_grid_panels_registered();
+
+  const NameMatchFilterState state = grid_settings::name_match_filter_get(*settings_ptr);
+  Layout &row = layout->row(true);
+  row.context_ptr_set("grid_view_settings", settings_ptr);
+  row.prop(settings_ptr,
+           "filter_name_match_enabled",
+           ITEM_R_TOGGLE | ITEM_R_ICON_ONLY,
+           "",
+           state.enabled ? ICON_FILTER_FILLED : ICON_FILTER);
+  /* Outliner-style disclosure on a square icon button; see Host B name-match popover note. */
+  row.popover(C, "GRIDVIEW_PT_name_match_filter", "", ICON_DOWNARROW_HLT);
 }
 
 /** \} */

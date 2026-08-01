@@ -2647,6 +2647,7 @@ void template_asset_image_grid(
 void template_grid_library_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
 void template_grid_catalog_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
 void template_grid_preview_size(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+void template_grid_name_match_filter(Layout *layout, bContext *C, PointerRNA *settings_ptr);
 
 /**
  * Reusable asset-library grid. Activating an item runs \a activate_operator with standard asset

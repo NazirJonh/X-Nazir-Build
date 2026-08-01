@@ -14,6 +14,7 @@
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -21,6 +22,7 @@
 #include "DNA_asset_types.h"
 
 #include "BKE_idtype.hh"
+#include "BKE_name_matching.hh"
 
 #include "RNA_access.hh"
 
@@ -227,6 +229,63 @@ inline void filter_id_types_set(PointerRNA &settings, const Set<short> &idcodes)
     first = false;
   }
   RNA_string_set(&settings, "filter_id_types", joined.c_str());
+}
+
+inline std::string name_match_map_types_join(const Set<std::string> &ids)
+{
+  /* #Set has no stable iteration order, so sort first -- otherwise the same active selection
+   * could serialize to a different string on every save, which is needless diff noise for
+   * scripts/version control and defeats simple string-equality checks on the stored property. */
+  Vector<std::string> sorted_ids;
+  sorted_ids.reserve(ids.size());
+  for (const std::string &id : ids) {
+    sorted_ids.append(id);
+  }
+  std::sort(sorted_ids.begin(), sorted_ids.end());
+
+  std::string joined;
+  bool first = true;
+  for (const std::string &id : sorted_ids) {
+    if (!first) {
+      joined += ',';
+    }
+    joined += id;
+    first = false;
+  }
+  return joined;
+}
+
+inline NameMatchFilterState name_match_filter_get(PointerRNA &settings)
+{
+  NameMatchFilterState state;
+  state.enabled = RNA_boolean_get(&settings, "filter_name_match_enabled");
+  for (std::string &id :
+       split_comma_separated(RNA_string_get(&settings, "filter_name_match_map_types")))
+  {
+    state.active_map_type_ids.add(std::move(id));
+  }
+  return state;
+}
+
+inline void name_match_filter_set(PointerRNA &settings, const NameMatchFilterState &state)
+{
+  RNA_boolean_set(&settings, "filter_name_match_enabled", state.enabled);
+  RNA_string_set(
+      &settings, "filter_name_match_map_types", name_match_map_types_join(state.active_map_type_ids).c_str());
+}
+
+inline void name_match_settings_toggle_map_type(PointerRNA &settings, const StringRef identifier)
+{
+  NameMatchFilterState state = name_match_filter_get(settings);
+  blender::BKE_name_match_filter_toggle_map_type(state, identifier);
+  name_match_filter_set(settings, state);
+}
+
+inline void name_match_settings_clear_selection(PointerRNA &settings)
+{
+  NameMatchFilterState state = name_match_filter_get(settings);
+  blender::BKE_name_match_filter_clear_selection(state);
+  name_match_filter_set(settings, state);
 }
 
 }  // namespace blender::ui::grid_settings

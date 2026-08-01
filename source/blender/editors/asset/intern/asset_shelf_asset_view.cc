@@ -13,7 +13,9 @@
 
 #include "BKE_asset_edit.hh"
 #include "BKE_context.hh"
+#include "BKE_global.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_screen.hh"
 
 #include "BLI_fnmatch.h"
@@ -33,6 +35,7 @@
 #include "DNA_ID.h"
 #include "DNA_asset_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_userdef_types.h"
 
 #include "ED_asset.hh"
 #include "ED_asset_menu_utils.hh"
@@ -238,6 +241,35 @@ void AssetView::build_items()
   const bool favorites_only = (shelf_.settings.display_flag & ASSETSHELF_FILTER_FAVORITES_ONLY) !=
                               0;
 
+  /* Bridge the shelf's own DNA storage (ListBaseT, independent from the Generic Grid API's CSV
+   * representation and the View3D image grid's ListBaseT) into the shared runtime filter state so
+   * resolution and matching go through the one implementation used by every host
+   * (#BKE_name_match_filter_resolve / #BKE_name_match_resolved_asset_passes). Each source list is
+   * guarded independently: a corrupt head in one must not skip the (possibly valid) other, and
+   * must never be dereferenced by #BLI_listbase_is_empty or range-for. */
+  NameMatchFilterState name_match;
+  name_match.enabled = settings_name_match_filter_enabled(shelf_.settings);
+  if (name_match.enabled && BLI_listbase_head_is_plausible(&shelf_.settings.filter_name_match_map_types)) {
+    for (const AssetNameMatchIdLink &link : shelf_.settings.filter_name_match_map_types) {
+      name_match.active_map_type_ids.add(link.id);
+    }
+  }
+  if (name_match.enabled && BLI_listbase_head_is_plausible(&shelf_.settings.filter_name_match_tags)) {
+    for (const AssetNameMatchTagLink &link : shelf_.settings.filter_name_match_tags) {
+      name_match.active_filter_tags.add(link.name);
+    }
+  }
+  const NameMatchResolvedFilter name_match_resolved = BKE_name_match_filter_resolve(name_match, U);
+
+  auto asset_passes_name_match = [&](const asset_system::AssetRepresentation &asset) -> bool {
+    Vector<StringRef> metadata_tags;
+    for (const AssetTag &tag : asset.get_metadata().tags) {
+      metadata_tags.append(tag.name);
+    }
+    return BKE_name_match_resolved_asset_passes(
+        name_match_resolved, asset.get_name(), metadata_tags);
+  };
+
   list::iterate(library_ref_, [&](asset_system::AssetRepresentation &asset) {
     if (!shelf::type_asset_poll(*shelf_.type, asset)) {
       /* Skip this asset. */
@@ -247,6 +279,10 @@ void AssetView::build_items()
     const AssetMetaData &asset_data = asset.get_metadata();
     if (catalog_filter_ && !catalog_filter_->contains(asset_data.catalog_id)) {
       /* Skip this asset. */
+      return true;
+    }
+
+    if (!asset_passes_name_match(asset)) {
       return true;
     }
 

@@ -11,6 +11,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 
 #include "DNA_listBase.h"
 
@@ -76,6 +77,13 @@ AssetItemTree build_filtered_all_catalog_tree(
     const AssetFilterSettings &filter_settings,
     FunctionRef<bool(const AssetMetaData &)> meta_data_filter = {},
     const std::optional<StringRef> skip_prefix = std::nullopt);
+
+/**
+ * Collect unique metadata tag names from assets in \a library_ref.
+ * First-seen casing is preserved; uniqueness is case-insensitive. Result is sorted.
+ */
+Vector<std::string> collect_unique_asset_tag_names(const AssetLibraryReference &library_ref,
+                                                   const bContext &C);
 
 }  // namespace ed::asset
 }  // namespace blender

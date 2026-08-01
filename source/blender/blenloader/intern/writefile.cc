@@ -1245,6 +1245,16 @@ static void write_userdef(BlendWriter *writer, const UserDef *userdef)
     BKE_preferences_asset_browser_settings_blend_write(writer, &browser_settings);
   }
 
+  for (const bUserNameMatchMapType &map_type : userdef->name_match_map_types) {
+    writer->write_struct(&map_type);
+    for (const bUserNameMatchToken &token : map_type.tokens) {
+      writer->write_struct(&token);
+    }
+  }
+  for (const bUserNameMatchFilterTag &tag : userdef->name_match_filter_tags) {
+    writer->write_struct(&tag);
+  }
+
   for (const uiStyle &style : userdef->uistyles) {
     writer->write_struct(&style);
   }

@@ -224,6 +224,7 @@ set(SRC
   intern/multires_subdiv.cc
   intern/multires_unsubdivide.cc
   intern/multires_versioning.cc
+  intern/name_matching.cc
   intern/nla.cc
   intern/node.cc
   intern/node_enum_definition.cc
@@ -470,6 +471,7 @@ set(SRC
   BKE_modifier.hh
   BKE_movieclip.hh
   BKE_multires.hh
+  BKE_name_matching.hh
   BKE_nla.hh
   BKE_node.hh
   BKE_node_enum.hh
@@ -755,6 +757,7 @@ if(WITH_GTESTS)
     intern/armature_deform_test.cc
     intern/armature_test.cc
     intern/asset_metadata_test.cc
+    intern/name_matching_filter_test.cc
     intern/attribute_storage_test.cc
     intern/bake_items_serialize_test.cc
     intern/bpath_test.cc

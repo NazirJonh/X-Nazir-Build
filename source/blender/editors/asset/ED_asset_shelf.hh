@@ -20,6 +20,8 @@ namespace blender {
 struct ARegion;
 struct ARegionType;
 struct AssetLibraryReference;
+struct AssetNameMatchIdLink;
+struct AssetNameMatchTagLink;
 struct AssetShelf;
 struct AssetShelfSettings;
 struct AssetShelfType;
@@ -118,6 +120,12 @@ void ensure_asset_library_fetched(const bContext &C, const AssetShelfType &shelf
 void popup_shelves_foreach_library_ref(FunctionRef<void(AssetLibraryReference &)> fn);
 
 /**
+ * Run \a fn on the settings of every popup shelf, for the same reason as
+ * #popup_shelves_foreach_library_ref: they are unreachable from a #Main walk.
+ */
+void popup_shelves_foreach_settings(FunctionRef<void(AssetShelfSettings &)> fn);
+
+/**
  * Return the static popup #AssetShelf instance for \a shelf_type, creating it if
  * #type_poll_for_popup passes. Used by UI outside the default asset-shelf popover panel.
  */
@@ -174,6 +182,53 @@ void settings_set_favorites_catalog_active(AssetShelfSettings &settings);
 bool settings_is_recent_catalog_active(const AssetShelfSettings &settings);
 bool settings_is_favorites_catalog_active(const AssetShelfSettings &settings);
 
+/**
+ * Corrupted-head-safe queries and mutators for #AssetShelfSettings::filter_name_match_map_types
+ * and #filter_name_match_tags, shared by the Python RNA API (`rna_ui.cc`) and the popover's
+ * toggle buttons (`asset_shelf_popover.cc`) so both stay consistent about how a garbage list head
+ * (see #BLI_listbase_head_is_plausible) and identifier/name uniqueness are handled.
+ */
+bool settings_name_match_map_type_is_active(const AssetShelfSettings &settings,
+                                            const char *identifier);
+/**
+ * \return the new link, or nullptr if \a identifier is empty or already active.
+ * \note Also turns on #settings_name_match_filter_enabled (the master toggle), so activating a
+ * map type through the Python API works without the caller having to flip that separately.
+ */
+AssetNameMatchIdLink *settings_name_match_map_type_activate(AssetShelfSettings &settings,
+                                                            const char *identifier);
+/** \return true if a link matching \a identifier was found and removed. */
+bool settings_name_match_map_type_deactivate(AssetShelfSettings &settings,
+                                             const char *identifier);
+/** Activates \a identifier if inactive, deactivates it if active. */
+void settings_name_match_map_type_toggle(AssetShelfSettings &settings, const char *identifier);
+/** Deactivate every active map type. */
+void settings_name_match_map_type_clear(AssetShelfSettings &settings);
+
+bool settings_name_match_tag_is_active(const AssetShelfSettings &settings, const char *name);
+/**
+ * \return the new link, or nullptr if \a name is empty or already active.
+ * \note Also turns on #settings_name_match_filter_enabled (the master toggle); see
+ * #settings_name_match_map_type_activate.
+ */
+AssetNameMatchTagLink *settings_name_match_tag_activate(AssetShelfSettings &settings,
+                                                        const char *name);
+/** \return true if a link matching \a name (case-insensitive) was found and removed. */
+bool settings_name_match_tag_deactivate(AssetShelfSettings &settings, const char *name);
+/** Activates \a name if inactive, deactivates it if active. */
+void settings_name_match_tag_toggle(AssetShelfSettings &settings, const char *name);
+/** Deactivate every active filter tag. */
+void settings_name_match_tag_clear(AssetShelfSettings &settings);
+
+/** True if the shelf's name-matching master toggle (#ASSETSHELF_FILTER_NAME_MATCH_ENABLED) is on.
+ * Activating a map type or tag (#settings_name_match_map_type_activate /
+ * #settings_name_match_tag_activate) turns this on as a side effect; it does not by itself mean
+ * anything is currently being filtered -- see #settings_name_match_filter_is_active for that. */
+bool settings_name_match_filter_enabled(const AssetShelfSettings &settings);
+/** True if the master toggle is on AND at least one map type or tag is active in either list. */
+bool settings_name_match_filter_is_active(const AssetShelfSettings &settings);
+void settings_name_match_filter_clear(AssetShelfSettings &settings);
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -203,6 +258,21 @@ bool shelf_idname_is_brush_shelf(StringRef idname);
 
 /** True if \a idname supports Recent/Favorites asset lists (brush shelves and image texture). */
 bool shelf_supports_asset_lists(StringRef idname);
+
+/**
+ * True if \a idname supports the Name Matching filter selector (image texture shelf only).
+ * Independent of #shelf_supports_asset_lists.
+ */
+bool shelf_supports_name_match_filter(StringRef idname);
+
+/** True if the Name Matching selector should include Map Types (image texture shelf only). */
+bool shelf_name_match_filter_includes_map_types(StringRef idname);
+
+/**
+ * True if the Name Matching selector should include Filter Tags. Always false for now: the
+ * feature is implemented (data, RNA, Preferences operators) but intentionally hidden from the UI.
+ */
+bool shelf_name_match_filter_includes_tags(StringRef idname);
 
 /**
  * Process-local binding of a temporary popup #ARegion to the asset-shelf type idname currently

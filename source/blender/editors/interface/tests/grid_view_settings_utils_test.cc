@@ -53,4 +53,18 @@ TEST(grid_view_settings, catalogs_split_tokens_deduplicate_without_ub)
   EXPECT_EQ(out.size(), 1);
 }
 
+TEST(grid_view_settings, name_match_map_types_join_split_round_trip)
+{
+  Set<std::string> in;
+  in.add("BASE_COLOR");
+  in.add("NORMAL");
+  Set<std::string> out;
+  for (std::string &s : split_comma_separated(name_match_map_types_join(in))) {
+    out.add(std::move(s));
+  }
+  EXPECT_EQ(out.size(), 2);
+  EXPECT_TRUE(out.contains("BASE_COLOR"));
+  EXPECT_TRUE(out.contains("NORMAL"));
+}
+
 }  // namespace blender::ui::grid_settings::tests

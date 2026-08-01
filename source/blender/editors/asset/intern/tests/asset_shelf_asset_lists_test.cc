@@ -223,6 +223,18 @@ TEST(asset_shelf_asset_lists, shelf_supports_asset_lists_brush_and_image)
   EXPECT_FALSE(shelf_supports_asset_lists("VIEW3D_AST_something_else"));
 }
 
+TEST(asset_shelf_asset_lists, shelf_supports_name_match_filter)
+{
+  EXPECT_TRUE(shelf_supports_name_match_filter("VIEW3D_AST_image_texture"));
+  EXPECT_TRUE(shelf_name_match_filter_includes_map_types("VIEW3D_AST_image_texture"));
+
+  EXPECT_FALSE(shelf_supports_name_match_filter("VIEW3D_AST_brush_sculpt"));
+  EXPECT_FALSE(shelf_name_match_filter_includes_map_types("VIEW3D_AST_brush_sculpt"));
+
+  EXPECT_FALSE(shelf_supports_name_match_filter("VIEW3D_AST_something_else"));
+  EXPECT_FALSE(shelf_name_match_filter_includes_map_types("VIEW3D_AST_something_else"));
+}
+
 TEST(asset_shelf_asset_lists, lists_from_json_skips_malformed_entries)
 {
   auto root = std::make_shared<io::serialize::DictionaryValue>();

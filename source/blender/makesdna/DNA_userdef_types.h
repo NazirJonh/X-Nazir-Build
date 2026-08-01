@@ -935,6 +935,39 @@ struct bUserAssetBrowserSettings {
   ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
 };
 
+/** #bUserNameMatchMapType.flag */
+enum eUserNameMatchMapType_Flag : short {
+  /** Core map type seeded by Blender; row is not removable. */
+  USER_NAME_MATCH_MAP_TYPE_BUILTIN = (1 << 0),
+};
+ENUM_OPERATORS(eUserNameMatchMapType_Flag)
+
+/** Token / abbreviation for a #bUserNameMatchMapType (e.g. "N", "nor", "BaseColor"). */
+struct bUserNameMatchToken {
+  struct bUserNameMatchToken *next = nullptr, *prev = nullptr;
+  char value[/*MAX_NAME*/ 64] = "";
+};
+
+/**
+ * Map type for image asset name matching (Preferences → Name Matching).
+ * Built-in rows use stable #identifier values such as "BASE_COLOR"; custom rows use
+ * caller-assigned identifiers.
+ */
+struct bUserNameMatchMapType {
+  struct bUserNameMatchMapType *next = nullptr, *prev = nullptr;
+  char identifier[/*MAX_NAME*/ 64] = "";
+  char name[/*MAX_NAME*/ 64] = "";
+  short flag = 0; /* #eUserNameMatchMapType_Flag */
+  char _pad[6] = {};
+  ListBaseT<bUserNameMatchToken> tokens = {nullptr, nullptr};
+};
+
+/** User-authored filter tag for name-match include filtering. */
+struct bUserNameMatchFilterTag {
+  struct bUserNameMatchFilterTag *next = nullptr, *prev = nullptr;
+  char name[/*MAX_NAME*/ 64] = "";
+};
+
 /**
  * Settings for an asset shelf, stored in the Preferences. Most settings are still stored in the
  * asset shelf instance in #AssetShelfSettings. This is just for the options that should be shared
@@ -1130,6 +1163,15 @@ struct UserDef {
   ListBaseT<bUserExtensionRepo> extension_repos = {nullptr, nullptr};
   ListBaseT<bUserAssetBrowserSettings> asset_browser_settings = {nullptr, nullptr};
   ListBaseT<bUserAssetShelfSettings> asset_shelves_settings = {nullptr, nullptr};
+  /** Preferences → Assets → Name Matching: map types (core + custom). */
+  ListBaseT<bUserNameMatchMapType> name_match_map_types = {nullptr, nullptr};
+  /** Preferences → Assets → Name Matching: filter tags. */
+  ListBaseT<bUserNameMatchFilterTag> name_match_filter_tags = {nullptr, nullptr};
+  /** Index of the map type being edited in the Preferences UI. */
+  short active_name_match_map_type = 0;
+  /** Index of the filter tag being edited in the Preferences UI. */
+  short active_name_match_filter_tag = 0;
+  char _pad_name_match[4] = {};
 
   char keyconfigstr[64] = "Blender";
 

@@ -19,6 +19,7 @@ set(INC_SYS
 
 set(SRC
   intern/asset_catalog.cc
+  intern/asset_catalog_validation.cc
   intern/asset_filter.cc
   intern/asset_import.cc
   intern/asset_image_library.cc
@@ -32,6 +33,7 @@ set(SRC
   intern/asset_list.cc
   intern/asset_mark_clear.cc
   intern/asset_menu_utils.cc
+  intern/asset_browser_name_match.cc
   intern/asset_name_matching_sync.cc
   intern/asset_ops.cc
   intern/asset_shelf.cc
@@ -93,6 +95,9 @@ add_dependencies(bf_editor_asset bf_rna)
 
 if(WITH_GTESTS)
   set(TEST_SRC
+    intern/tests/asset_browser_name_match_test.cc
+    intern/tests/asset_catalog_test.cc
+    intern/tests/asset_catalog_validation_test.cc
     intern/tests/asset_shelf_asset_lists_test.cc
   )
   set(TEST_INC

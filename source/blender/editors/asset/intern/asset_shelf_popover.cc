@@ -48,6 +48,7 @@
 #include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
 #include "ED_screen.hh"
+#include "ED_view3d.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -124,7 +125,15 @@ AssetShelf *popup_shelf_get_or_create(const bContext &C, AssetShelfType &shelf_t
   /* #create_shelf_from_type zero-initializes the settings, so the DNA member default doesn't
    * apply here. Seed an explicit default before the user preferences may override it. */
   new_shelf->settings.popup_width_units = ASSET_SHELF_POPUP_WIDTH_UNITS_DEFAULT;
-  new_shelf->settings.recent_max_count = SHELF_ASSET_LISTS_RECENT_MAX;
+  if (shelf_idname_is_brush_shelf(shelf_type.idname)) {
+    new_shelf->settings.recent_max_count = U.asset_shelf_recent_brushes_max;
+  }
+  else if (STREQ(shelf_type.idname, ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME)) {
+    new_shelf->settings.recent_max_count = U.asset_shelf_recent_images_max;
+  }
+  else {
+    new_shelf->settings.recent_max_count = SHELF_ASSET_LISTS_RECENT_MAX;
+  }
 
   /* Overlay the user's persisted popup view preferences on top of the type defaults. The load is a
    * no-op unless the user has explicitly stored preferences for this shelf type. */
@@ -155,8 +164,8 @@ void popup_shelves_sync_per_file_state_from_wm(const wmWindowManager &wm)
 namespace {
 
 /* Popup shelves live in #StaticPopupShelves, not in the loaded #Main. After a successful file read
- * the per-`.blend` catalog snapshots are on #wmWindowManager; sync them into every popup shelf
- * so UI state cannot leak across files. #bmain->wm.first is the WM ID stored in the file. */
+ * re-apply the UserDef popup catalog snapshot into every popup shelf so process-global UI state
+ * matches preferences. #bmain->wm.first is the WM ID stored in the file. */
 static void popup_shelves_on_blend_load_post(Main *bmain,
                                              PointerRNA ** /*pointers*/,
                                              const int /*num_pointers*/,
@@ -179,8 +188,18 @@ struct PopupShelvesBlendLoadPostCallback {
   }
 };
 
-/* Lifetime matches the process; see #asset_list.cc on_save_callback_store. */
-static PopupShelvesBlendLoadPostCallback popup_shelves_blend_load_post_callback;
+/**
+ * Wrapper for Construct on First Use idiom, to avoid the Static Initialization Order Fiasco
+ * (mirrors #asset_list.cc's `libraries_map()`): a plain namespace-scope static object whose
+ * constructor calls #BKE_callback_add() directly can run before #BKE_callback_global_init(),
+ * depending on translation-unit init order, hitting its `callbacks_initialized` assert. Lifetime
+ * matches the process.
+ */
+static void ensure_blend_load_post_callback_registered()
+{
+  static PopupShelvesBlendLoadPostCallback popup_shelves_blend_load_post_callback;
+  (void)popup_shelves_blend_load_post_callback;
+}
 
 }  // namespace
 
@@ -291,7 +310,7 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
                                                                          ICON_RECOVER_LAST);
       recent_item.set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem &) {
         settings_set_recent_catalog_active(shelf_.settings);
-        settings_catalog_commit_active(shelf_, CTX_wm_manager(&C), true);
+        settings_catalog_commit_active(shelf_);
         send_redraw_notifier(C);
       });
       recent_item.set_is_active_fn(
@@ -301,7 +320,7 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
           IFACE_("Favorites"), ICON_SOLO_ON);
       favorites_item.set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem &) {
         settings_set_favorites_catalog_active(shelf_.settings);
-        settings_catalog_commit_active(shelf_, CTX_wm_manager(&C), true);
+        settings_catalog_commit_active(shelf_);
         send_redraw_notifier(C);
       });
       favorites_item.set_is_active_fn(
@@ -311,7 +330,7 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
     auto &all_item = this->add_tree_item<ui::BasicTreeViewItem>(IFACE_("All"));
     all_item.set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem &) {
       settings_set_all_catalog_active(shelf_.settings);
-      settings_catalog_commit_active(shelf_, CTX_wm_manager(&C), true);
+      settings_catalog_commit_active(shelf_);
       send_redraw_notifier(C);
     });
     all_item.set_is_active_fn(
@@ -346,7 +365,7 @@ class AssetCatalogTreeView : public ui::AbstractTreeView {
 
     view_item.set_on_activate_fn([this, catalog_path](bContext &C, ui::BasicTreeViewItem &) {
       settings_set_active_catalog(shelf_.settings, catalog_path);
-      settings_catalog_commit_active(shelf_, CTX_wm_manager(&C), true);
+      settings_catalog_commit_active(shelf_);
       send_redraw_notifier(C);
     });
     view_item.set_is_active_fn([this, catalog_path]() {
@@ -927,7 +946,11 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
     shelf->settings.popup_width_units = width_units;
     shelf->settings.popup_height_units = height_units;
     shelf->settings.popup_catalog_width_units = catalog_width_units;
+    /* Sync above may have rewritten #library_catalog_states; allow revalidation to apply them. */
+    shelf->catalog_validated = 0;
   }
+
+  shelf_ensure_catalog_revalidated(*shelf);
 
   /* Catalog tree column width, resizable via the vertical grip between the columns. */
   const int catalog_units = std::clamp(int(shelf->settings.popup_catalog_width_units) > 0 ?
@@ -1248,12 +1271,9 @@ static void popover_display_panel_draw(const bContext *C, Panel *panel)
   col.prop(&shelf_ptr, "preview_size", UI_ITEM_NONE, IFACE_("Preview Size"), ICON_NONE);
 
   AssetShelf *shelf = static_cast<AssetShelf *>(shelf_ptr.data);
-  if (shelf && shelf->type && shelf::shelf_supports_asset_lists(shelf->type->idname)) {
-    col.prop(&shelf_ptr,
-             "recent_max_count",
-             UI_ITEM_NONE,
-             IFACE_("Recent Brushes"),
-             ICON_NONE);
+  const bool supports_asset_lists = shelf && shelf->type &&
+                                    shelf::shelf_supports_asset_lists(shelf->type->idname);
+  if (supports_asset_lists) {
     col.prop(&shelf_ptr,
              "show_favorite_icons",
              UI_ITEM_NONE,
@@ -1262,8 +1282,27 @@ static void popover_display_panel_draw(const bContext *C, Panel *panel)
   }
 
   col.prop(&shelf_ptr, "show_names", UI_ITEM_NONE, IFACE_("Show Names"), ICON_NONE);
-  col.prop(&shelf_ptr, "popup_width_units", UI_ITEM_NONE, IFACE_("Popup Width"), ICON_NONE);
-  col.prop(&shelf_ptr, "popup_height_units", UI_ITEM_NONE, IFACE_("Popup Height"), ICON_NONE);
+
+  if (supports_asset_lists) {
+    const bool is_image_shelf = STREQ(shelf->type->idname, ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME);
+    col.prop(&shelf_ptr,
+             "recent_max_count",
+             UI_ITEM_NONE,
+             is_image_shelf ? IFACE_("Recent Images") : IFACE_("Recent Brushes"),
+             ICON_NONE);
+  }
+
+  if (ui::Layout *popup_size_panel = layout.panel(
+          C, "asset_shelf_popup_size", true, IFACE_("Popup Size")))
+  {
+    ui::Layout &popup_size_col = popup_size_panel->column(false);
+    popup_size_col.use_property_split_set(true);
+    popup_size_col.use_property_decorate_set(false);
+    popup_size_col.prop(
+        &shelf_ptr, "popup_width_units", UI_ITEM_NONE, IFACE_("Popup Width"), ICON_NONE);
+    popup_size_col.prop(
+        &shelf_ptr, "popup_height_units", UI_ITEM_NONE, IFACE_("Popup Height"), ICON_NONE);
+  }
 
   /* Store the current per-file size as the global default for new files (the interactive grip and
    * the fields above only change this file's remembered size). */
@@ -1418,13 +1457,20 @@ static void popover_name_match_panel_draw(const bContext *C, Panel *panel)
     return;
   }
 
-  layout.enabled_set(settings_name_match_filter_enabled(shelf->settings));
+  /* Keep the popover interactive while the filter is disabled. Selecting a map type or tag
+   * enables the filter, whereas disabling the whole panel would mark all descendants disabled. */
+  layout.enabled_set(true);
+  const bool filter_enabled = settings_name_match_filter_enabled(shelf->settings);
 
   /* Preferences map types are seeded once at defaults/versioning/homefile-read time and, since
    * built-in rows can't be removed, stay valid for the session -- no per-draw repair needed. */
   const StringRef idname = shelf->type->idname;
   if (shelf_name_match_filter_includes_map_types(idname)) {
-    layout.label(IFACE_("Map Types"), ICON_NONE);
+    {
+      ui::Layout &label_row = layout.row(false);
+      label_row.enabled_set(filter_enabled);
+      label_row.label(IFACE_("Map Types"), ICON_NONE);
+    }
     for (const bUserNameMatchMapType &map_type : U.name_match_map_types) {
       const bool active = settings_name_match_map_type_is_active(shelf->settings,
                                                                  map_type.identifier);
@@ -1474,7 +1520,15 @@ static void popover_name_match_panel_draw(const bContext *C, Panel *panel)
     layout.separator();
   }
 
+  /* Always interactive: clearing the map-type/tag selection should not require the filter to be
+   * enabled first, matching the "always clickable" map type buttons above. */
   layout.op("ASSETSHELF_OT_name_match_clear", IFACE_("Clear Filter"), ICON_X);
+  layout.separator();
+  PointerRNA preferences_props = layout.op(
+      "SCREEN_OT_userpref_show", IFACE_("Open Preferences..."), ICON_PREFERENCES);
+  if (preferences_props.type != nullptr) {
+    RNA_enum_set(&preferences_props, "section", USER_SECTION_ASSETS);
+  }
 }
 
 static bool popover_name_match_panel_poll(const bContext *C, PanelType * /*panel_type*/)
@@ -1495,6 +1549,11 @@ static void asset_shelf_popover_listen(const wmRegionListenerParams *params)
        * window). A popup only rebuilds on #RGN_REFRESH_UI, so tagging a redraw is not enough. */
       if (ELEM(wmn->data, ND_ASSET_LIST_READING, ND_ASSET_LIST_PREVIEW, ND_ASSET_CATALOGS)) {
         ED_region_tag_refresh_ui(region);
+        if (wmn->data == ND_ASSET_LIST_READING) {
+          for (AssetShelf *shelf : StaticPopupShelves::shelves()) {
+            shelf->catalog_validated = 0;
+          }
+        }
       }
       /* A brush activated from outside the popover (hotkey, Python, brush context menu, another
        * window) changes the Recent pseudo-catalog; rebuild so an open popover reflects it. */
@@ -1522,6 +1581,8 @@ static void asset_shelf_popover_listen(const wmRegionListenerParams *params)
 
 void popover_panel_register(ARegionType *region_type)
 {
+  ensure_blend_load_post_callback_registered();
+
   /* Uses global paneltype registry to allow usage as popover. So only register this once (may be
    * called from multiple spaces). */
   if (WM_paneltype_find("ASSETSHELF_PT_popover_panel", true)) {
@@ -1559,7 +1620,7 @@ void popover_panel_register(ARegionType *region_type)
     pt->draw = popover_display_panel_draw;
     pt->poll = popover_display_panel_poll;
     /* Default popover width (10 UI units) is too narrow for the property-split labels
-     * (Preview Size, Recent Brushes, etc.). Give the panel more room so the value fields are
+     * (Preview Size, Recent Brushes/Images, etc.). Give the panel more room so the value fields are
      * readable and not clipped. */
     pt->ui_units_x = 14;
     /* No listener needed — the parent popover handles redraws. */

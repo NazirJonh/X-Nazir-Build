@@ -541,6 +541,17 @@ enum {
    * of overflowing the visible area.
    */
   BUT_GRID_SCROLL_CLIP = 1 << 28,
+
+  /**
+   * Skip the #ButtonType::Menu refresh in #but_update_ex (interface.cc, reached via
+   * #button_update) that regenerates #Button.str/drawstr (and, when the current enum item has an
+   * icon, #Button.icon) from the bound RNA enum's current value on every redraw of a #BLOCK_LOOP
+   * popup. Set by a caller that intentionally shows different text than the bound property's
+   * literal value (e.g. the ID Browser's Recent/Favorites pseudo-selection, which the property
+   * itself cannot represent — see #blender::ui::grid_settings::CatalogMode) after writing its own
+   * #Button.str/drawstr.
+   */
+  BUT_MENU_KEEP_LABEL = 1 << 29,
 };
 
 enum class ButPointerType : uint8_t {
@@ -2258,6 +2269,15 @@ int preview_tile_size_x(const int size_px = 96);
 int preview_tile_size_y(const int size_px = 96);
 int preview_tile_size_y_no_label(const int size_px = 96);
 
+/**
+ * Scale factor for the label of a preview tile. Smaller previews use a smaller label so more
+ * tiles fit vertically. The factor is shared by preview tile layout and drawing code.
+ */
+constexpr int PREVIEW_TILE_TEXT_SCALE_THRESHOLD = 56;
+constexpr int PREVIEW_TILE_TEXT_MIN_HEIGHT = 8;
+constexpr int PREVIEW_TILE_TEXT_MIN_POINTS = 6;
+float preview_tile_text_scale(const int preview_size_px);
+
 /* Autocomplete
  *
  * Tab complete helper functions, for use in uiButCompleteFunc callbacks.
@@ -2633,12 +2653,23 @@ void template_id_browser(Layout *layout,
                          const char *unlinkop,
                          const char *filter_type = nullptr);
 
+/** Pointer to #wmWindowManager::id_browser_grid_view_settings (the ID browser's grid settings). */
+PointerRNA id_browser_grid_settings_ptr(wmWindowManager &wm);
 /**
- * Switch the asset library browsed by the ID browser popover (stored on the #wmWindowManager) to
- * the one identified by \a library_enum_value (see #ed::asset::library_reference_from_enum_value).
- * Also resets the library-specific catalog filter and grid scroll, and flags the file modified.
- * Returns true if the library actually changed. Shared by #UI_OT_id_browser_set_library and the
- * `WindowManager.id_browser_asset_library_reference` RNA property.
+ * Return the browsed asset library by value from #wmWindowManager::id_browser_grid_view_settings,
+ * resolved against the current Preferences (see #ed::asset::library_reference_ensure_resolved).
+ */
+AssetLibraryReference id_browser_library_ref_get(wmWindowManager &wm);
+/** Store an ID Browser asset library reference in its grid settings. */
+void id_browser_library_ref_set(wmWindowManager &wm, const AssetLibraryReference &library_ref);
+/**
+ * Switch the asset library browsed by the ID browser popover (writes
+ * #wmWindowManager::id_browser_grid_view_settings) to the one identified by \a library_enum_value
+ * (see #ed::asset::library_reference_from_enum_value). Also resets grid scroll and flags the file
+ * modified; per-library catalog memory in #UserDef is left intact so switching libraries restores
+ * the remembered filter. Returns true if the library actually
+ * changed. Shared by #UI_OT_id_browser_set_library and the thin façade RNA property
+ * `WindowManager.id_browser_asset_library_reference`.
  */
 bool id_browser_set_asset_library(wmWindowManager &wm, int library_enum_value);
 /**
@@ -2661,8 +2692,16 @@ void template_asset_image_grid(
     Layout *layout, bContext *C, PointerRNA *ptr, const char *propname, bool is_popover = false);
 
 /** Reusable grid view header widgets operating on #GridViewSettings. */
-void template_grid_library_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
-void template_grid_catalog_selector(Layout *layout, bContext *C, PointerRNA *settings_ptr);
+void template_grid_library_selector(Layout *layout,
+                                    bContext *C,
+                                    PointerRNA *ptr,
+                                    StringRefNull prop_name = "asset_library_reference",
+                                    bool embed_in_parent_row = false,
+                                    bool show_refresh = true);
+void template_grid_catalog_selector(Layout *layout,
+                                    bContext *C,
+                                    PointerRNA *settings_ptr,
+                                    bool embed_in_parent_row = false);
 void template_grid_preview_size(Layout *layout, bContext *C, PointerRNA *settings_ptr);
 void template_grid_name_match_filter(Layout *layout, bContext *C, PointerRNA *settings_ptr);
 

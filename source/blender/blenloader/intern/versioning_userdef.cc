@@ -1796,6 +1796,45 @@ void blo_do_versions_userdef(UserDef *userdef)
    * (e.g. saved before seeding landed). */
   BKE_name_matching_userdef_ensure_defaults(userdef);
 
+  /* Ensure asset shelf preview size presets are within the valid range [24, 256].
+   * Values may be 0 (or otherwise invalid) when loaded from an older Blender
+   * version that did not include these fields. Applied unconditionally since
+   * 0 and out-of-range values are never valid. */
+  if (userdef->asset_shelf_preview_size_small == 0) {
+    userdef->asset_shelf_preview_size_small = 32;
+  }
+  else {
+    CLAMP(userdef->asset_shelf_preview_size_small, 24, 256);
+  }
+  if (userdef->asset_shelf_preview_size_medium == 0) {
+    userdef->asset_shelf_preview_size_medium = 56;
+  }
+  else {
+    CLAMP(userdef->asset_shelf_preview_size_medium, 24, 256);
+  }
+  if (userdef->asset_shelf_preview_size_large == 0) {
+    userdef->asset_shelf_preview_size_large = 96;
+  }
+  else {
+    CLAMP(userdef->asset_shelf_preview_size_large, 24, 256);
+  }
+
+  /* Ensure asset shelf recent items maximum counts are within the valid range [1, 200].
+   * Default is 20 if they are 0 (e.g. when loading preferences saved by an older version). */
+  if (userdef->asset_shelf_recent_brushes_max == 0) {
+    userdef->asset_shelf_recent_brushes_max = 20;
+  }
+  else {
+    CLAMP(userdef->asset_shelf_recent_brushes_max, 1, 200);
+  }
+  if (userdef->asset_shelf_recent_images_max == 0) {
+    userdef->asset_shelf_recent_images_max = 20;
+  }
+  else {
+    CLAMP(userdef->asset_shelf_recent_images_max, 1, 200);
+  }
+
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a USER_VERSION_ATLEAST check.

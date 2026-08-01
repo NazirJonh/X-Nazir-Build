@@ -587,6 +587,29 @@ static bool has_single_asset_drag(const wmWindowManager &wm)
   return false;
 }
 
+/**
+ * The Asset Browser starts an #WM_DRAG_ASSET_LIST alongside the single-item
+ * #WM_DRAG_ASSET drag. Both are needed by drop targets for acceptance and drop handling, but they
+ * represent one user gesture and must not produce two visual drag previews/tooltips.
+ *
+ * #WM_DRAG_ASSET is the canonical presentation drag: it represents the item shown next to the
+ * cursor. #WM_DRAG_ASSET_LIST is a secondary functional drag: it carries the selected-assets list
+ * for targets that support multi-asset operations. It must remain in the active drag list so that
+ * polling and dropping continue to see it; only its duplicate visual presentation is suppressed.
+ *
+ * This policy is intentionally based on the current Asset Browser drag pair instead of adding a
+ * primary/secondary relationship to every #wmDrag. A general relationship would be useful if
+ * another feature created several related drags, or if a secondary drag had to inherit preview,
+ * tooltip, cursor, or disabled-state data from a primary drag. In that case, introduce an explicit
+ * drag-group/role in #wmDrag rather than extending this type-based special case. Possible future
+ * uses include a single visual drag with separate payload drags for a selection, metadata, or a
+ * preview/cache operation.
+ */
+static bool wm_drag_is_secondary_asset_list(const wmWindowManager &wm, const wmDrag &drag)
+{
+  return drag.type == WM_DRAG_ASSET_LIST && has_single_asset_drag(wm);
+}
+
 static bool drag_global_poll(const bContext *C,
                              const wmDrag *drag,
                              std::string * /*r_status_info*/,
@@ -1260,7 +1283,22 @@ const std::string WM_drag_get_item_name(wmDrag *drag)
     }
     case WM_DRAG_ASSET: {
       const wmDragAsset *asset_drag = WM_drag_get_asset_data(drag, 0);
-      return asset_drag->asset->get_name();
+      return asset_drag ? asset_drag->asset->get_name() : "";
+    }
+    case WM_DRAG_ASSET_LIST: {
+      const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(drag);
+      if (!asset_drags || asset_drags->is_empty()) {
+        break;
+      }
+      const wmDragAssetListItem &item = *static_cast<const wmDragAssetListItem *>(
+          asset_drags->first);
+      if (item.is_external) {
+        return item.asset_data.external_info->asset->get_name();
+      }
+      if (item.asset_data.local_id) {
+        return item.asset_data.local_id->name + 2;
+      }
+      break;
     }
     case WM_DRAG_GRID_ITEM_REORDER_ASSET: {
       const wmDragGridItemReorderAsset *reorder_drag = WM_drag_get_grid_item_reorder_asset_data(
@@ -1334,6 +1372,11 @@ static void wm_drag_draw_icon(bContext * /*C*/, wmWindow * /*win*/, wmDrag *drag
     x = xy[0] - (wm_drag_imbuf_icon_width_get(drag) / 2);
     y = xy[1] - (wm_drag_imbuf_icon_height_get(drag) / 2);
 
+    const uchar *pixels = drag->imb->byte_data();
+    if (pixels == nullptr || drag->imb->x <= 0 || drag->imb->y <= 0) {
+      return;
+    }
+
     const float col[4] = {1.0f, 1.0f, 1.0f, 0.65f}; /* This blends texture. */
     PixelBitmapDrawer drawer(GPU_SHADER_3D_IMAGE_COLOR);
     drawer.draw(x,
@@ -1342,7 +1385,7 @@ static void wm_drag_draw_icon(bContext * /*C*/, wmWindow * /*win*/, wmDrag *drag
                 drag->imb->y,
                 gpu::TextureFormat::UNORM_8_8_8_8,
                 false,
-                drag->imb->byte_data(),
+                pixels,
                 drag->imbuf_scale,
                 drag->imbuf_scale,
                 col);
@@ -1557,6 +1600,13 @@ void wm_drags_draw(bContext *C, wmWindow *win)
   /* Should we support multi-line drag draws? Maybe not, more types mixed won't work well. */
   GPU_blend(GPU_BLEND_ALPHA);
   for (wmDrag &drag : wm->runtime->drags) {
+    /* Keep the secondary asset-list drag active for polling and drop handling, but present the
+     * paired asset gesture only once. See #wm_drag_is_secondary_asset_list() for why this is a
+     * presentation policy rather than removal of a drag from the functional pipeline. */
+    if (wm_drag_is_secondary_asset_list(*wm, drag)) {
+      continue;
+    }
+
     if (drag.drop_state.active_dropbox) {
       CTX_wm_area_set(C, drag.drop_state.area_from);
       CTX_wm_region_set(C, drag.drop_state.region_from);

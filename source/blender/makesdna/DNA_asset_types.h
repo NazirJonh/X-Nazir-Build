@@ -259,6 +259,12 @@ struct AssetCatalogPathLink {
   char *path = nullptr;
 };
 
+/** One #bUUID entry in a per-domain enabled-catalog set (see #bUserAssetCatalogMemory). */
+struct AssetCatalogUUIDLink {
+  struct AssetCatalogUUIDLink *next = nullptr, *prev = nullptr;
+  bUUID catalog_id;
+};
+
 /**
  * Active Name Matching map-type identifier selected on an #AssetShelfSettings
  * (Preferences map type #bUserNameMatchMapType.identifier).

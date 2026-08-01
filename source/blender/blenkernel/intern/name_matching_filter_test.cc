@@ -63,4 +63,68 @@ TEST(name_match_filter_state, asset_passes_empty_or_disabled)
   BKE_name_matching_userdef_free(&userdef);
 }
 
+TEST(name_match_filter_resolve, synthetic_map_tag_or_with_tokens)
+{
+  UserDef userdef = {};
+  BKE_name_matching_userdef_ensure_defaults(&userdef);
+
+  NameMatchFilterState state;
+  state.enabled = true;
+  state.active_map_type_ids.add("NORMAL");
+
+  /* Asset tagged map:normal (lower-case) must pass NORMAL filter via synthetic tag. */
+  {
+    Vector<StringRef> meta_lower = {"map:normal"};
+    EXPECT_TRUE(
+        BKE_name_match_filter_asset_passes(state, userdef, "no_tokens_here", meta_lower));
+  }
+
+  /* Asset tagged MAP:NORMAL (upper-case) must also pass. */
+  {
+    Vector<StringRef> meta_upper = {"MAP:NORMAL"};
+    EXPECT_TRUE(
+        BKE_name_match_filter_asset_passes(state, userdef, "no_tokens_here", meta_upper));
+  }
+
+  /* Wrong map type tag must NOT pass NORMAL-only filter. */
+  {
+    Vector<StringRef> meta_rough = {"map:ROUGHNESS"};
+    EXPECT_FALSE(
+        BKE_name_match_filter_asset_passes(state, userdef, "no_tokens_here", meta_rough));
+  }
+
+  /* With BASE_COLOR also active, either tag passes. */
+  state.active_map_type_ids.add("BASE_COLOR");
+  {
+    Vector<StringRef> meta_upper = {"MAP:NORMAL"};
+    EXPECT_TRUE(
+        BKE_name_match_filter_asset_passes(state, userdef, "no_tokens_here", meta_upper));
+  }
+
+  /* Filename BaseColor token must NOT satisfy NORMAL-only filter. */
+  {
+    NameMatchFilterState normal_only;
+    normal_only.enabled = true;
+    normal_only.active_map_type_ids.add("NORMAL");
+    EXPECT_FALSE(
+        BKE_name_match_filter_asset_passes(normal_only, userdef, "Wood_BaseColor.png", {}));
+  }
+
+  BKE_name_matching_userdef_free(&userdef);
+}
+
+TEST(name_match_filter_resolve, unknown_active_id_adds_nothing)
+{
+  UserDef userdef = {};
+  BKE_name_matching_userdef_ensure_defaults(&userdef);
+  NameMatchFilterState state;
+  state.enabled = true;
+  state.active_map_type_ids.add("NOT_A_REAL_MAP");
+  NameMatchResolvedFilter resolved = BKE_name_match_filter_resolve(state, userdef);
+  EXPECT_TRUE(resolved.token_lists.is_empty());
+  EXPECT_TRUE(resolved.filter_tags.is_empty());
+  EXPECT_FALSE(resolved.active);
+  BKE_name_matching_userdef_free(&userdef);
+}
+
 }  // namespace blender::tests

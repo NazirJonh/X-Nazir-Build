@@ -15,12 +15,13 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_function_ref.hh"
-#include "BLI_set.hh"
 
 #include "RNA_access.hh"
 #include "RNA_types.hh"
 
 #include "UI_interface_layout.hh"
+
+#include "interface_grid_view_settings_utils.hh"
 
 struct Image;
 struct Main;
@@ -139,36 +140,51 @@ void id_browser_add_popover_button(Layout &row,
  * reset (#blender::ui::grid_view_session_reset_scroll), so the two cannot drift apart. */
 constexpr StringRef id_browser_grid_session_key = "id_browser_grid";
 
+/** Pointer to #wmWindowManager::id_browser_grid_view_settings (the ID browser's grid settings). */
+PointerRNA id_browser_grid_settings_ptr(wmWindowManager &wm);
 /**
- * Return the browsed asset library, first resolving it against the current Preferences (see
- * #blender::ed::asset::library_reference_ensure_resolved). Use instead of reading
- * #wmWindowManager::id_browser_asset_library_ref directly: it is stored in DNA, so its cached
- * members can go stale (renamed/reordered library) or the library can be gone entirely.
+ * Return the browsed asset library by value from #id_browser_grid_view_settings, first resolving
+ * it against the current Preferences (see #blender::ed::asset::library_reference_ensure_resolved).
  */
-const AssetLibraryReference &id_browser_library_ref_ensure_valid(wmWindowManager &wm);
+AssetLibraryReference id_browser_library_ref_get(wmWindowManager &wm);
+/** Store an ID Browser asset library reference in its grid settings. */
+void id_browser_library_ref_set(wmWindowManager &wm, const AssetLibraryReference &library_ref);
 /** True when the browsed library no longer exists in the Preferences (§5). */
 bool id_browser_library_is_missing(wmWindowManager &wm);
-/** Enabled catalog paths of the ID browser, as a set (the DNA list is the source of truth). */
-Set<std::string> id_browser_catalog_paths_get(const wmWindowManager &wm);
-/** Replace the ID browser's enabled catalog list with \a paths. */
-void id_browser_catalog_paths_set(wmWindowManager &wm, const Set<std::string> &paths);
 /** UI name of the browsed asset library ("Current File", "All Libraries", custom name, ...). */
 const char *id_browser_library_ui_name(const AssetLibraryReference &lib_ref);
 /**
- * Iterate assets of \a lib_ref whose ID type is \a idcode and which pass the catalog filter.
- * An empty \a enabled_catalog_paths means "all catalogs". Iteration stops early when \a fn
- * returns false.
+ * Iterate assets of \a lib_ref whose ID type is \a idcode and which pass the catalog filter stored
+ * in #UserDef.catalog_memory for domain #"id_browser". Iteration stops early when \a fn returns
+ * false.
  */
 void id_browser_foreach_asset(const bContext &C,
                               const AssetLibraryReference &lib_ref,
                               short idcode,
-                              const Set<std::string> &enabled_catalog_paths,
                               FunctionRef<bool(asset_system::AssetRepresentation &)> fn);
+
 /**
- * Register the `UI_PT_id_browser_catalog_selector` popover panel (catalog checkbox tree).
- * Idempotent; safe to call every time #id_browser_popover_register runs.
+ * Synthetic per-idcode shelf idname the ID browser uses to key into the Recent/Favorites asset
+ * list registry (`ED_asset_shelf.hh`'s `shelf_asset_lists_*` functions) -- the ID browser has no
+ * real #AssetShelf of its own. One list per browsed ID type (e.g. Recent Materials is independent
+ * of Recent Images).
  */
-void id_browser_catalog_selector_register();
+std::string id_browser_shelf_idname(short idcode);
+/**
+ * Enter Recent or Favorites membership mode: points the library at #ASSET_LIBRARY_ALL, writes the
+ * mode via #BKE_asset_catalog_memory_set_mode (domain #"id_browser", never clears catalog_id_set),
+ * and resets scroll. \a mode must be #CatalogMode::Recent or #CatalogMode::Favorites.
+ */
+void id_browser_set_membership(wmWindowManager &wm, grid_settings::CatalogMode mode);
+/**
+ * Iterate the ID browser's Recent or Favorites list (idcode-filtered), in list order (most
+ * recent/favorited first). \a mode must be #CatalogMode::Recent or #CatalogMode::Favorites.
+ * Iteration stops early when \a fn returns false.
+ */
+void id_browser_foreach_membership_asset(const bContext &C,
+                                         grid_settings::CatalogMode mode,
+                                         short idcode,
+                                         FunctionRef<bool(asset_system::AssetRepresentation &)> fn);
 
 }  // namespace ui
 }  // namespace blender

@@ -11,6 +11,7 @@
 #include "DNA_image_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_texture_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
 
 #include "AS_asset_catalog.hh"
@@ -23,6 +24,7 @@
 #include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
+#include "BLI_uuid.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
@@ -31,6 +33,7 @@
 #include <algorithm>
 
 #include "BKE_asset.hh"
+#include "BKE_asset_catalog_memory.hh"
 #include "BKE_asset_edit.hh"
 #include "BKE_context.hh"
 #include "BKE_lib_id.hh"
@@ -57,6 +60,43 @@
 #include "view3d_intern.hh"
 
 namespace blender::ed::view3d {
+
+/** Domain key for #bUserAssetCatalogMemory entries owned by the View3D Image Grid. */
+constexpr const char *image_grid_catalog_memory_domain = "image_grid";
+
+static bool image_grid_catalog_path_enabled_for_library(
+    const AssetLibraryReference &lib_ref, const std::optional<std::string> &asset_catalog_path)
+{
+  if (BKE_asset_catalog_memory_get_mode(&U, lib_ref, image_grid_catalog_memory_domain) !=
+      ASSET_CATALOG_MEMORY_SET)
+  {
+    return true;
+  }
+  const Vector<bUUID> enabled_ids = BKE_asset_catalog_memory_get_set(
+      &U, lib_ref, image_grid_catalog_memory_domain);
+  if (enabled_ids.is_empty()) {
+    return true;
+  }
+  if (!asset_catalog_path) {
+    return false;
+  }
+  const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(lib_ref);
+  if (!library) {
+    /* Library still loading: keep the asset hidden rather than flashing an unfiltered list. */
+    return false;
+  }
+  const asset_system::AssetCatalog *catalog = library->catalog_service().find_catalog_by_path(
+      asset_catalog_path->c_str());
+  if (!catalog) {
+    return false;
+  }
+  for (const bUUID &id : enabled_ids) {
+    if (BLI_uuid_equal(id, catalog->catalog_id)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 static int image_grid_cols_clamp(const int cols)
 {
@@ -226,6 +266,9 @@ bool image_grid_asset_is_visible_in_state(const ImageGridUIState &state,
   {
     return state.filter.lib_ref.type == ASSET_LIBRARY_ALL;
   }
+  if (state.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
+    return image_grid_catalog_path_enabled_for_library(asset_lib_ref, asset_catalog_path);
+  }
   if (!(state.filter.lib_ref == asset_lib_ref)) {
     return false;
   }
@@ -296,6 +339,66 @@ bool image_grid_filter_matches_shelf(const ImageGridUIState &state, const AssetS
     return false;
   }
 
+  if (state.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
+    /* "Active filter" means a non-empty per-library SET entry, matching Decision 1's "empty =
+     * show all" rule -- an absent or ALL-mode entry does not count. */
+    AssetLibraryReference filtered_library_ref{};
+    Vector<bUUID> filtered_ids;
+    int filtered_library_count = 0;
+    for (asset_system::AssetLibrary *library : image_grid_all_mode_libraries()) {
+      const std::optional<AssetLibraryReference> lib_ref_opt = library->library_reference();
+      if (!lib_ref_opt) {
+        continue;
+      }
+      const AssetLibraryReference lib_ref = *lib_ref_opt;
+      if (BKE_asset_catalog_memory_get_mode(&U, lib_ref, image_grid_catalog_memory_domain) !=
+          ASSET_CATALOG_MEMORY_SET)
+      {
+        continue;
+      }
+      Vector<bUUID> ids = BKE_asset_catalog_memory_get_set(
+          &U, lib_ref, image_grid_catalog_memory_domain);
+      if (ids.is_empty()) {
+        continue;
+      }
+      ++filtered_library_count;
+      if (filtered_library_count > 1) {
+        /* More than one library has an active filter -- grid state cannot be represented by a
+         * single shelf catalog selection, so report "not synced" rather than a partial match. */
+        return false;
+      }
+      filtered_library_ref = lib_ref;
+      filtered_ids = std::move(ids);
+    }
+    if (filtered_library_count == 0) {
+      /* No library has an active filter: shelf must also be showing All with no restriction. */
+      return image_grid_catalog_path_from_shelf(shelf) == std::nullopt &&
+             shelf.settings.asset_library_reference.type == ASSET_LIBRARY_ALL;
+    }
+    if (!(shelf.settings.asset_library_reference == filtered_library_ref)) {
+      return false;
+    }
+    const std::optional<std::string> shelf_catalog_path = image_grid_catalog_path_from_shelf(
+        shelf);
+    if (!shelf_catalog_path) {
+      return false;
+    }
+    const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
+        filtered_library_ref);
+    if (!library) {
+      return false;
+    }
+    const asset_system::AssetCatalog *catalog = library->catalog_service().find_catalog_by_path(
+        shelf_catalog_path->c_str());
+    if (!catalog) {
+      return false;
+    }
+    if (filtered_ids.size() != 1) {
+      return false;
+    }
+    return BLI_uuid_equal(filtered_ids[0], catalog->catalog_id);
+  }
+
   if (!(state.filter.lib_ref == shelf.settings.asset_library_reference)) {
     return false;
   }
@@ -325,12 +428,15 @@ void image_grid_state_persist(const ImageGridOwner owner,
 
   const bool membership = state.filter.catalog_mode == view3d::ImageGridShelfCatalogMode::Recent ||
                           state.filter.catalog_mode == view3d::ImageGridShelfCatalogMode::Favorites;
-  /* Membership never commits into #enabled_catalogs_by_library (would wipe saved filters for
-   * #ASSET_LIBRARY_ALL). Keep the in-memory map and rewrite DNA from it as-is. */
+  /* Membership never commits the working catalog set into UserDef (would wipe saved filters for
+   * real libraries via an empty #ASSET_LIBRARY_ALL write). Mode is written from membership entry
+   * points via #BKE_asset_catalog_memory_set_mode; filter edits call #image_grid_catalog_commit_active
+   * / #BKE_asset_catalog_memory_set_set. Keep the guard so persist cannot defeat that invariant. */
   if (!membership) {
     view3d::image_grid_catalog_commit_active(state);
   }
 
+  /* Clear legacy DNA catalog lists — UserDef (domain #"image_grid") is the source of truth. */
   while (ImageGridLibraryCatalogState *libcat_state = static_cast<ImageGridLibraryCatalogState *>(
              BLI_pophead(&library_catalog_states)))
   {
@@ -339,26 +445,6 @@ void image_grid_state_persist(const ImageGridOwner owner,
   }
 
   BKE_asset_catalog_path_list_free(legacy_enabled_catalog_paths);
-
-  for (const auto item : state.filter.enabled_catalogs_by_library.items()) {
-    const Set<std::string> &paths = item.value;
-    if (paths.is_empty()) {
-      continue;
-    }
-
-    const AssetLibraryReference lib_ref = view3d::image_grid_library_ref_from_key(item.key);
-    if (item.key != "local" && lib_ref.type == ASSET_LIBRARY_LOCAL) {
-      /* A custom library named by this identifier no longer exists in the Preferences -- its
-       * catalog filter is stale and meaningless to keep. */
-      continue;
-    }
-    ImageGridLibraryCatalogState *libcat_state = MEM_new<ImageGridLibraryCatalogState>(__func__);
-    libcat_state->library_ref = lib_ref;
-    for (const std::string &path : paths) {
-      BKE_asset_catalog_path_list_add_path(libcat_state->enabled_catalog_paths, path.c_str());
-    }
-    BLI_addtail(&library_catalog_states, libcat_state);
-  }
 
   slot.filter_name_match_enabled = state.filter.name_match.enabled ? 1 : 0;
   if (!BLI_listbase_head_is_plausible(&slot.filter_name_match_map_types)) {
@@ -437,9 +523,17 @@ static void image_grid_pending_apply_slot(bContext &C, ImageGridUIState &state)
       state.pending.catalog_mode == ImageGridShelfCatalogMode::Favorites)
   {
     /* Do not write Recent/Favorites sentinels into #enabled_catalog_paths, and do not commit the
-     * cleared filter into the per-library map (would wipe saved All-library catalog filters). */
+     * cleared filter into the per-library set (would wipe saved catalog filters). Mode-only write
+     * via #BKE_asset_catalog_memory_set_mode preserves catalog_id_set (rev-4 guard). */
     state.filter.catalog_mode = state.pending.catalog_mode;
     state.filter.enabled_catalog_paths.clear();
+    BKE_asset_catalog_memory_set_mode(
+        &U,
+        state.filter.lib_ref,
+        image_grid_catalog_memory_domain,
+        (state.pending.catalog_mode == ImageGridShelfCatalogMode::Recent) ?
+            ASSET_CATALOG_MEMORY_RECENT :
+            ASSET_CATALOG_MEMORY_FAVORITES);
   }
   else {
     state.filter.enabled_catalog_paths.clear();
@@ -705,12 +799,12 @@ void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState 
    * catalog tree / selector, and only restore the pseudo-catalog sentinel. */
   if (state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent) {
     ed::asset::shelf::settings_set_recent_catalog_active(shelf.settings);
-    ed::asset::shelf::settings_catalog_commit_active(shelf, nullptr, false);
+    ed::asset::shelf::settings_catalog_commit_active(shelf);
     return;
   }
   if (state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites) {
     ed::asset::shelf::settings_set_favorites_catalog_active(shelf.settings);
-    ed::asset::shelf::settings_catalog_commit_active(shelf, nullptr, false);
+    ed::asset::shelf::settings_catalog_commit_active(shelf);
     return;
   }
 
@@ -728,7 +822,7 @@ void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState 
   else {
     ed::asset::shelf::settings_set_all_catalog_active(shelf.settings);
   }
-  ed::asset::shelf::settings_catalog_commit_active(shelf, nullptr, false);
+  ed::asset::shelf::settings_catalog_commit_active(shelf);
 }
 
 AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,

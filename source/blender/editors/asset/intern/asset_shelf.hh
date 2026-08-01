@@ -97,16 +97,17 @@ AssetLibraryReference &settings_ensure_valid_library_ref(AssetShelfSettings &set
 bool settings_library_is_missing(const AssetShelfSettings &settings);
 
 void settings_swap_asset_library(AssetShelf &shelf, const AssetLibraryReference &new_ref);
-void settings_catalog_commit_active(AssetShelf &shelf,
-                                    wmWindowManager *wm,
-                                    bool tag_file_modified);
+void settings_catalog_commit_active(AssetShelf &shelf);
 void settings_commit_catalog_states_for_file_save(AssetShelfSettings &settings);
 void settings_load_active_catalog_for_library(AssetShelfSettings &settings,
                                               const AssetLibraryReference &library_ref);
-bool popup_library_catalog_settings_store(wmWindowManager &wm, const AssetShelf &shelf);
-void popup_library_catalog_settings_load(const wmWindowManager &wm,
-                                         const char *shelf_idname,
-                                         AssetShelfSettings &settings);
+/**
+ * Re-run #settings_load_active_catalog_for_library once per library after async load, gated by
+ * #AssetShelf::catalog_validated (same intent as #SpaceFile_Runtime::catalog_validated).
+ */
+void shelf_ensure_catalog_revalidated(AssetShelf &shelf);
+void popup_library_catalog_settings_store(const AssetShelf &shelf);
+void popup_library_catalog_settings_load(AssetShelf &shelf);
 void popup_shelf_sync_per_file_state_from_wm(const wmWindowManager &wm, AssetShelf &shelf);
 void popup_shelves_sync_per_file_state_from_wm(const wmWindowManager &wm);
 

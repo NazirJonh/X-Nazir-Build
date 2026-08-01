@@ -228,6 +228,14 @@ struct Button : NonMovable {
   short strwidth = 0;
   short alignnr = 0;
   int ofs = 0, pos = 0, selsta = 0, selend = 0;
+  /**
+   * The preview tile's icon size in pixels, set by #PreviewGridItem for #ButtonType::PreviewTile
+   * buttons. Used by #widget_preview_tile to pass the unscaled preview size to
+   * #draw_preview_item_stateless, so that label font scaling for small previews (< 56 px) only
+   * depends on the icon footprint and not the full tile (which includes the label rect). Zero
+   * when the button isn't a preview tile, or the caller has no preview-size information.
+   */
+  int preview_size_px = 0;
 
   /**
    * Optional color for monochrome icon. Also used as text
@@ -1603,14 +1611,19 @@ void draw_menu_item(const uiFontStyle *fstyle,
                     int *r_xmax);
 void draw_preview_item(const uiFontStyle *fstyle,
                        rcti *rect,
-                       float zoom,
+                       const float zoom,
                        const char *name,
                        int iconid,
                        int but_flag,
-                       FontStyleAlign text_align);
+                       FontStyleAlign text_align,
+                       int preview_size_px);
 /**
  * Version of #draw_preview_item() that does not draw the menu background and item text based on
  * state. It just draws the preview and text directly.
+ *
+ * \param preview_size_px: The unscaled preview icon size in pixels. Used to scale the label font
+ * down for small previews (less than 56 px) so more items fit vertically. Pass 0 to disable
+ * font scaling (e.g. for menus where the rect is sized to fit the text, not the icon).
  */
 void draw_preview_item_stateless(const uiFontStyle *fstyle,
                                  rcti *rect,
@@ -1618,7 +1631,8 @@ void draw_preview_item_stateless(const uiFontStyle *fstyle,
                                  int iconid,
                                  const uchar text_col[4],
                                  FontStyleAlign text_align,
-                                 const bool add_padding);
+                                 const bool add_padding,
+                                 int preview_size_px);
 
 #define UI_TEXT_MARGIN_X 0.4f
 #define UI_POPUP_MARGIN (UI_SCALE_FAC * 12)

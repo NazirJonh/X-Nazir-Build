@@ -10,7 +10,6 @@
 
 #include "DNA_windowmanager_enums.h" /* Own enums. */
 
-#include "DNA_asset_types.h"  /* for #AssetLibraryReference, #AssetCatalogPathLink */
 #include "DNA_listBase.h"
 #include "DNA_screen_types.h" /* for #ScrAreaMap */
 #include "DNA_xr_types.h"     /* for #XrSessionSettings */
@@ -127,8 +126,6 @@ struct wmWindowManager {
    * #AssetShelfPopupSize.
    */
   ListBaseT<AssetShelfPopupSize> asset_shelf_popup_sizes = {nullptr, nullptr};
-  /** Per-`.blend` per-library catalog selection for popup asset shelves. See #AssetShelfPopupLibraryCatalogs. */
-  ListBaseT<AssetShelfPopupLibraryCatalogs> asset_shelf_popup_library_catalogs = {nullptr, nullptr};
 
   /** Set on file read. */
   eWM_InitFlag init_flag = {};
@@ -173,14 +170,6 @@ struct wmWindowManager {
    */
   char id_browser_source = 0;
   char _pad2[1] = {};
-
-  /**
-   * Asset library browsed when #id_browser_source is #ID_BROWSER_SOURCE_ASSET_LIBRARY.
-   * A zeroed `type` (from a file written before this field existed) is invalid — see do-versions.
-   */
-  AssetLibraryReference id_browser_asset_library_ref;
-  /** Catalogs the asset source is narrowed to. An empty list means "all catalogs". */
-  ListBaseT<AssetCatalogPathLink> id_browser_enabled_catalog_paths = {nullptr, nullptr};
 
   // #ifdef WITH_XR_OPENXR
   wmXrData xr;

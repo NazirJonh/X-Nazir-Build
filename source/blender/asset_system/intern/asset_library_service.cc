@@ -130,6 +130,75 @@ AssetLibrary *AssetLibraryService::get_asset_library(
   return nullptr;
 }
 
+AssetLibrary *AssetLibraryService::find_loaded_asset_library(
+    const Main *bmain, const AssetLibraryReference &library_reference)
+{
+  const eAssetLibraryType type = eAssetLibraryType(library_reference.type);
+
+  switch (type) {
+    case ASSET_LIBRARY_ESSENTIALS: {
+      const StringRefNull root_path = essentials_directory_path();
+      if (root_path.is_empty()) {
+        return nullptr;
+      }
+      return this->lookup_loaded_asset_library_on_disk(type, root_path);
+    }
+    case ASSET_LIBRARY_ONLINE_ESSENTIALS:
+      return online_essentials_library_.get();
+    case ASSET_LIBRARY_LOCAL: {
+      const std::string root_path = bmain ? AS_asset_library_find_suitable_root_path_from_main(
+                                                bmain) :
+                                            "";
+      if (root_path.empty()) {
+        /* File wasn't saved yet, so the "Current File" library lives in memory only. */
+        return current_file_library_.get();
+      }
+      return this->lookup_loaded_asset_library_on_disk(type, root_path);
+    }
+    case ASSET_LIBRARY_ALL:
+      return all_library_.get();
+    case ASSET_LIBRARY_CUSTOM: {
+      const bUserAssetLibrary *custom_library = find_custom_asset_library_from_library_ref(
+          library_reference);
+      if (!custom_library) {
+        return nullptr;
+      }
+
+      if (custom_library->flag & ASSET_LIBRARY_USE_REMOTE_URL) {
+        if (is_online_essentials_url(custom_library->remote_url)) {
+          return online_essentials_library_.get();
+        }
+        if (!custom_library->remote_url[0]) {
+          return nullptr;
+        }
+        std::scoped_lock lock{remote_libraries_mutex_};
+        std::unique_ptr<PreferencesRemoteAssetLibrary> *lib_uptr_ptr =
+            remote_libraries_.lookup_ptr(StringRefNull(custom_library->remote_url));
+        return lib_uptr_ptr ? lib_uptr_ptr->get() : nullptr;
+      }
+
+      if (!custom_library->dirpath[0]) {
+        return nullptr;
+      }
+      return this->lookup_loaded_asset_library_on_disk(type, custom_library->dirpath);
+    }
+  }
+
+  return nullptr;
+}
+
+AssetLibrary *AssetLibraryService::lookup_loaded_asset_library_on_disk(
+    const eAssetLibraryType library_type, StringRefNull root_path)
+{
+  const std::string normalized_root_path = utils::normalize_directory_path(root_path);
+  if (normalized_root_path.empty()) {
+    return nullptr;
+  }
+
+  std::scoped_lock lock{on_disk_libraries_mutex_};
+  return this->lookup_on_disk_library(library_type, normalized_root_path);
+}
+
 AssetLibrary *AssetLibraryService::get_online_essentials_asset_library()
 {
   if (online_essentials_library_) {

@@ -32,6 +32,8 @@
 #include "ED_fileselect.hh"
 #include "ED_undo.hh"
 
+#include "intern/asset_library_reference.hh"
+
 #include "RNA_access.hh"
 
 #include "UI_interface_layout.hh"
@@ -216,6 +218,20 @@ AssetCatalogTreeView::AssetCatalogTreeView(asset_system::AssetLibrary *library,
 
 void AssetCatalogTreeView::build_tree()
 {
+  if (space_file_.runtime) {
+    SpaceFile_Runtime &runtime = *space_file_.runtime;
+    if (!(runtime.catalog_validated_library_ref == params_->asset_library_ref)) {
+      runtime.catalog_validated_library_ref = params_->asset_library_ref;
+      runtime.catalog_validated = false;
+    }
+    if (!runtime.catalog_validated) {
+      /* Re-run the same restore-and-validate logic used on explicit library switch -- idempotent
+       * if the library was already loaded and validated the first time. */
+      ED_fileselect_asset_library_reference_set(params_, params_->asset_library_ref);
+      runtime.catalog_validated = true;
+    }
+  }
+
   AssetCatalogTreeViewAllItem &all_item = add_all_item();
   all_item.uncollapse_by_default();
 
@@ -249,7 +265,7 @@ AssetCatalogTreeViewAllItem &AssetCatalogTreeView::add_all_item()
 
   AssetCatalogTreeViewAllItem &item = add_tree_item<AssetCatalogTreeViewAllItem>(IFACE_("All"));
   item.set_on_activate_fn([params](bContext & /*C*/, ui::BasicTreeViewItem & /*item*/) {
-    params->asset_catalog_visibility = FILE_SHOW_ASSETS_ALL_CATALOGS;
+    ED_fileselect_asset_catalog_set_all(params);
     WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
   });
   item.set_is_active_fn(
@@ -265,6 +281,9 @@ void AssetCatalogTreeView::add_unassigned_item()
       IFACE_("Unassigned"), ICON_FILE_HIDDEN);
 
   item.set_on_activate_fn([params](bContext & /*C*/, ui::BasicTreeViewItem & /*item*/) {
+    /* Not a catalog selection (no catalog_id changes) -- #ED_fileselect_asset_catalog_set_all
+     * would wrongly narrow #asset_catalog_visibility to #FILE_SHOW_ASSETS_ALL_CATALOGS and clear
+     * the remembered catalog memory. "Unassigned" isn't persisted there. */
     params->asset_catalog_visibility = FILE_SHOW_ASSETS_WITHOUT_CATALOG;
     WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
   });
@@ -274,8 +293,7 @@ void AssetCatalogTreeView::add_unassigned_item()
 
 void AssetCatalogTreeView::activate_catalog_by_id(CatalogID catalog_id)
 {
-  params_->asset_catalog_visibility = FILE_SHOW_ASSETS_FROM_CATALOG;
-  params_->catalog_id = catalog_id;
+  ED_fileselect_asset_catalog_set(params_, catalog_id);
   WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
 }
 
@@ -475,6 +493,16 @@ bool AssetCatalogDropTarget::can_drop(bContext & /*C*/,
   }
 
   if (drag.type == WM_DRAG_PATH) {
+    const AssetCatalogTreeView &tree_view = this->get_view<AssetCatalogTreeView>();
+    if (!tree_view.params_ ||
+        tree_view.params_->asset_library_ref.type != ASSET_LIBRARY_LOCAL)
+    {
+      if (r_disabled_hint) {
+        *r_disabled_hint = RPT_(
+            "Image import into catalogs is only available while browsing Current File");
+      }
+      return false;
+    }
     const asset_system::AssetLibrary &library = get_asset_library();
     if (!can_modify_catalogs(library, r_disabled_hint)) {
       return false;
@@ -550,36 +578,16 @@ bool AssetCatalogDropTarget::on_drop(bContext *C, const ui::DragInfo &drag_info)
     const wmDrag &drag = drag_info.drag_data;
     PointerRNA props = WM_operator_properties_create("ASSET_OT_image_import_mark");
 
-    const char *first_image = nullptr;
-    for (const std::string &path : WM_drag_get_paths(&drag)) {
-      if (ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) {
-        first_image = path.c_str();
-        break;
-      }
-    }
-    if (first_image != nullptr) {
-      char dir[FILE_MAX];
-      BLI_path_split_dir_part(first_image, dir, sizeof(dir));
-      RNA_string_set(&props, "directory", dir);
+    file_asset_image_import_fill_images_from_drag(&props, &drag);
 
-      for (const std::string &path : WM_drag_get_paths(&drag)) {
-        if ((ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) == 0) {
-          continue;
-        }
-        char name[FILE_MAX];
-        BLI_path_split_file_part(path.c_str(), name, sizeof(name));
-        PointerRNA itemptr{};
-        RNA_collection_add(&props, "files", &itemptr);
-        RNA_string_set(&itemptr, "name", name);
-      }
-
-      char catalog_id_str[UUID_STRING_SIZE];
-      BLI_uuid_format(catalog_id_str, catalog_item_.get_catalog_id());
-      RNA_string_set(&props, "catalog_id", catalog_id_str);
-    }
+    /* Lock the catalog field to the drop target. */
+    char catalog_id_str[UUID_STRING_SIZE];
+    BLI_uuid_format(catalog_id_str, catalog_item_.get_catalog_id());
+    RNA_string_set(&props, "catalog_id", catalog_id_str);
+    RNA_boolean_set(&props, "catalog_locked", true);
 
     const wmOperatorStatus status = WM_operator_name_call(
-        C, "ASSET_OT_image_import_mark", wm::OpCallContext::ExecDefault, &props, nullptr);
+        C, "ASSET_OT_image_import_mark", wm::OpCallContext::InvokeDefault, &props, nullptr);
     WM_operator_properties_free(&props);
     return (status & OPERATOR_FINISHED) != 0;
   }
@@ -931,6 +939,13 @@ void file_ensure_updated_catalog_filter_data(AssetCatalogFilterSettings *filter_
 bool file_is_asset_visible_in_catalog_filter_settings(
     const AssetCatalogFilterSettings *filter_settings, const AssetMetaData *asset_data)
 {
+  if (!filter_settings->catalog_filter) {
+    /* The catalog filter data hasn't been built yet (e.g. the asset library reference doesn't
+     * currently resolve to a loaded library, see #prepare_filter_asset_library()). Nothing to
+     * filter on, so don't hide the asset. */
+    return true;
+  }
+
   switch (filter_settings->asset_catalog_visibility) {
     case FILE_SHOW_ASSETS_WITHOUT_CATALOG:
       return !filter_settings->catalog_filter->is_known(asset_data->catalog_id);

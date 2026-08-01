@@ -890,8 +890,8 @@ ENUM_OPERATORS(AssetShelf_InstanceFlag);
 struct AssetShelfLibraryCatalogState {
   struct AssetShelfLibraryCatalogState *next = nullptr, *prev = nullptr;
   AssetLibraryReference library_ref;
-  /** Owned heap string (serialized separately). Null/empty means All for this library. */
-  const char *active_catalog_path = nullptr;
+  /** Nil (all-zero) UUID means All for this library. */
+  bUUID active_catalog_id;
 };
 
 struct AssetShelfSettings {
@@ -924,7 +924,7 @@ struct AssetShelfSettings {
    * (#LEFT_COL_WIDTH_UNITS). Set interactively by the vertical grip between the columns. */
   short popup_catalog_width_units = 0;
   char _pad1[4] = {};
-  /** Per-asset-library active catalog (empty path = All for that library). */
+  /** Per-asset-library active catalog (nil UUID = All for that library). */
   ListBaseT<AssetShelfLibraryCatalogState> library_catalog_states = {nullptr, nullptr};
 
 #if defined(__cplusplus) && !defined(DNA_NO_EXTERNAL_CONSTRUCTORS)
@@ -955,17 +955,6 @@ struct AssetShelfPopupSize {
   short flag = 0;
 };
 
-/**
- * Per-`.blend` per-library active catalog for a popup asset shelf, keyed by #AssetShelfType.idname.
- * Popup shelves are not stored in #RegionAssetShelf, so their #AssetShelfSettings::library_catalog_states
- * are mirrored here on #wmWindowManager (see #asset_shelf_popup_library_catalogs).
- */
-struct AssetShelfPopupLibraryCatalogs {
-  struct AssetShelfPopupLibraryCatalogs *next = nullptr, *prev = nullptr;
-  char idname[/*MAX_NAME*/ 64] = "";
-  ListBaseT<AssetShelfLibraryCatalogState> library_catalog_states = {nullptr, nullptr};
-};
-
 struct AssetShelf {
   DNA_DEFINE_CXX_METHODS(AssetShelf)
 
@@ -983,7 +972,15 @@ struct AssetShelf {
   short preferred_row_count = 0;
   AssetShelf_InstanceFlag instance_flag = {};
   short is_popup = 0;
-  char _pad[2] = {};
+  /**
+   * Runtime only (same intent as #SpaceFile_Runtime::catalog_validated): one-shot gate so the
+   * shelf rebuild/layout path re-runs #settings_load_active_catalog_for_library after an async
+   * library load. Written with the struct but not meaningful across sessions.
+   */
+  char catalog_validated = 0;
+  char _pad[1] = {};
+  /** Runtime: #catalog_validated applies to this library reference. */
+  AssetLibraryReference catalog_validated_library_ref;
 };
 
 /**

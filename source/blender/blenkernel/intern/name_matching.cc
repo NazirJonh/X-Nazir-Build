@@ -263,6 +263,12 @@ NameMatchResolvedFilter BKE_name_match_filter_resolve(const NameMatchFilterState
     if (!tokens.is_empty()) {
       resolved.token_lists.append(std::move(tokens));
     }
+    /* Synthetic filter tag so drag-assigned `map:<identifier>` metadata participates
+     * in the same include-OR as filename tokens. The string is owned by `resolved` because
+     * it is built from `map_type->identifier` (stable, in UserDef) but prefixed with "map:",
+     * which is a temporary. Store in owned_strings so the StringRef remains valid. */
+    resolved.owned_strings.append(std::string("map:") + map_type->identifier);
+    resolved.filter_tags.append(resolved.owned_strings.last());
   }
   /* Filter tags need no #UserDef lookup: they're compared directly against asset metadata tags
    * (and, as a fallback, name-segment-matched), so the strings themselves are the resolved form. */
@@ -502,6 +508,9 @@ void BKE_name_matching_userdef_ensure_defaults(UserDef *userdef)
   add_builtin("AO", "Ambient Occlusion", {"AO", "ao", "occlusion"});
   add_builtin("EMISSION", "Emission", {"E", "emit", "emission", "emissive"});
   add_builtin("ALPHA", "Opacity / Alpha", {"A", "alpha", "opacity", "transparency"});
+  add_builtin("MASK", "Mask", {"mask"});
+  add_builtin("PATTERNS", "Patterns", {"pattern", "patterns"});
+  add_builtin("GRUNGE", "Grunge", {"grunge"});
   add_builtin("SPECULAR", "Specular", {"S", "spec", "specular"});
 }
 

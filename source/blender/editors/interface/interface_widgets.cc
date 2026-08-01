@@ -4936,7 +4936,8 @@ static void widget_preview_tile(Button *but,
                               icon,
                               wcol->text,
                               UI_STYLE_TEXT_CENTER,
-                              !(but->drawflag & BUT_NO_PREVIEW_PADDING));
+                              !(but->drawflag & BUT_NO_PREVIEW_PADDING),
+                              but->preview_size_px);
 }
 
 static void widget_optionbut(uiWidgetColors *wcol,
@@ -6424,11 +6425,19 @@ void draw_preview_item_stateless(const uiFontStyle *fstyle,
                                  int iconid,
                                  const uchar text_col[4],
                                  FontStyleAlign text_align,
-                                 const bool add_padding)
+                                 const bool add_padding,
+                                 int preview_size_px)
 {
   rcti trect = *rect;
-  const float text_size = UI_UNIT_Y;
+  float text_size = UI_UNIT_Y;
   const bool has_text = !name.is_empty();
+
+  /* Use preview_size_px (the unscaled icon size) when available, because rect already includes the
+   * label rect in tiles that show a label (e.g. Asset Shelf). */
+  const int preview_height = (preview_size_px > 0) ? preview_size_px : BLI_rcti_size_y(rect);
+  if (const float scale_factor = preview_tile_text_scale(preview_height); scale_factor < 1.0f) {
+    text_size = std::max(text_size * scale_factor, float(PREVIEW_TILE_TEXT_MIN_HEIGHT));
+  }
 
   float alpha = 1.0f;
 
@@ -6460,11 +6469,19 @@ void draw_preview_item_stateless(const uiFontStyle *fstyle,
 
     memcpy(drawstr, name.data(), name.size());
     drawstr[name.size()] = '\0';
-    text_clip_middle_ex(fstyle, drawstr, okwidth, minwidth, max_len, '\0');
+
+    /* Create a modifiable copy of font style to scale font size. */
+    uiFontStyle fs_scaled = *fstyle;
+    if (const float scale_factor = preview_tile_text_scale(preview_height); scale_factor < 1.0f) {
+      fs_scaled.points = std::max(int(fs_scaled.points * scale_factor),
+                                  PREVIEW_TILE_TEXT_MIN_POINTS);
+    }
+
+    text_clip_middle_ex(&fs_scaled, drawstr, okwidth, minwidth, max_len, '\0');
 
     FontStyleDrawParams params{};
     params.align = text_align;
-    fontstyle_draw(fstyle, &trect, drawstr, sizeof(drawstr), text_col, &params);
+    fontstyle_draw(&fs_scaled, &trect, drawstr, sizeof(drawstr), text_col, &params);
   }
 }
 
@@ -6474,7 +6491,8 @@ void draw_preview_item(const uiFontStyle *fstyle,
                        const char *name,
                        int iconid,
                        int but_flag,
-                       FontStyleAlign text_align)
+                       FontStyleAlign text_align,
+                       int preview_size_px)
 {
   WidgetType *wt = widget_type(WidgetStyle::MenuItemUnpadded);
 
@@ -6485,7 +6503,8 @@ void draw_preview_item(const uiFontStyle *fstyle,
   wt->state(wt, &state, EmbossType::Undefined);
   wt->draw(&wt->wcol, rect, &STATE_INFO_NULL, 0, zoom);
 
-  draw_preview_item_stateless(fstyle, rect, name, iconid, wt->wcol.text, text_align, true);
+  draw_preview_item_stateless(
+      fstyle, rect, name, iconid, wt->wcol.text, text_align, true, preview_size_px);
 }
 
 /** \} */

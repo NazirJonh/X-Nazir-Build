@@ -519,7 +519,7 @@ enum eFileAssetImportFlags : short {
 ENUM_OPERATORS(eFileAssetImportFlags)
 
 enum eFileSel_AssetParams_Flag : int {
-  // FILE_ASSETS_FLAG_DEPRECATED_1 = (1 << 0), /* Not cleared! */
+  FILE_ASSET_FILTER_NAME_MATCH_ENABLED = (1 << 0),
 };
 ENUM_OPERATORS(eFileSel_AssetParams_Flag)
 

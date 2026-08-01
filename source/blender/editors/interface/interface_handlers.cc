@@ -4950,6 +4950,19 @@ static void block_open_begin(bContext *C, Button *but, HandleButtonData *data)
     if (but->block->handle) {
       data->menu->popup = but->block->handle->popup;
     }
+
+    /* When a #ButtonType::Menu button (from #Layout::prop_with_popover) opens a panel-drawn
+     * popover instead of drawing its own menu, nothing inside that panel ever sets this
+     * button's own #PopupBlockHandle.retvalue -- the panel writes to the RNA property directly
+     * through its own, separate popup. Left at its default 0, closing this popover with
+     * `RETURN_OK`/`RETURN_UPDATE` (#handle_button_return_submenu) would re-apply that 0 to the
+     * property as if it were a real choice, silently overwriting whatever the panel set. Seed it
+     * with the value already on the property so such a close is a no-op instead. */
+    if (but->type == ButtonType::Menu && but->rnaprop &&
+        RNA_property_type(but->rnaprop) == PROP_ENUM)
+    {
+      data->menu->retvalue = RNA_property_enum_get(&but->rnapoin, but->rnaprop);
+    }
   }
 
 #ifdef USE_ALLSELECT
@@ -13155,9 +13168,28 @@ static int handler_region_menu(bContext *C, const wmEvent *event, void * /*userd
   ARegion *region = region_popup ? region_popup : CTX_wm_region(C);
   int retval = WM_UI_HANDLER_CONTINUE;
 
+  wmWindowManager *wm = CTX_wm_manager(C);
+  const bool has_active_drag = wm && !wm->runtime->drags.is_empty();
+  bool pass_drag_release = false;
+
   Button *but = region_find_active_but(region);
 
   if (but) {
+    /* Button-attached popovers do not install #popup_handler(), unlike popovers opened from a
+     * keymap. Forward active drags to the attached popup region explicitly so view drop targets
+     * (notably Shift+drag Favorites reordering) receive hover polling and the final drop event. */
+    ARegion *drag_region = region_popup;
+    if (!drag_region && but->active && but->active->menu) {
+      drag_region = but->active->menu->region;
+    }
+    if (has_active_drag && drag_region) {
+      ARegion *region_prev = CTX_wm_region(C);
+      CTX_wm_region_set(C, drag_region);
+      wm_drags_handle_events(C, event);
+      CTX_wm_region_set(C, region_prev);
+      pass_drag_release = event->type == LEFTMOUSE && event->val == KM_RELEASE;
+    }
+
     bScreen *screen = CTX_wm_screen(C);
     Button *but_other;
 
@@ -13242,6 +13274,12 @@ static int handler_region_menu(bContext *C, const wmEvent *event, void * /*userd
     if (event->val == KM_DBL_CLICK) {
       return WM_UI_HANDLER_CONTINUE;
     }
+  }
+
+  if (pass_drag_release) {
+    /* Let wm_event_drag_and_drop_test() convert this release into EVT_DROP. The button handler
+     * above may otherwise consume it and prevent the drop target's on_drop() from running. */
+    return WM_UI_HANDLER_CONTINUE;
   }
 
   /* we block all events, this is modal interaction */

@@ -8,6 +8,7 @@
  * Internal and external APIs for #AssetShelfSettings.
  */
 
+#include "AS_asset_catalog.hh"
 #include "AS_asset_catalog_path.hh"
 #include "AS_asset_library.hh"
 
@@ -24,11 +25,13 @@
 #include "BLI_listbase.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
+#include "BLI_uuid.h"
 #include "BLI_utildefines.h"
 
 #include "asset_library_reference.hh"
 
 #include "BKE_asset.hh"
+#include "BKE_asset_catalog_memory.hh"
 #include "BKE_asset_shelf.hh"
 #include "BKE_global.hh"
 #include "BKE_main.hh"
@@ -37,12 +40,16 @@
 
 #include "WM_api.hh"
 
+#include "ED_asset_catalog.hh"
 #include "ED_asset_library.hh"
+#include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
 
 #include "asset_shelf.hh"
 
 #include <cstddef>
+#include <optional>
+#include <string>
 
 namespace blender {
 
@@ -150,10 +157,6 @@ void library_catalog_state_list_blend_write(BlendWriter *writer,
                                             const ListBaseT<AssetShelfLibraryCatalogState> &list);
 void library_catalog_state_list_blend_read_data(BlendDataReader *reader,
                                                ListBaseT<AssetShelfLibraryCatalogState> &list);
-void library_catalog_state_list_migrate_legacy_active_path(
-    ListBaseT<AssetShelfLibraryCatalogState> &list,
-    const AssetLibraryReference &library_ref,
-    const char *active_catalog_path);
 
 void settings_commit_catalog_states_for_file_save(AssetShelfSettings &settings)
 {
@@ -199,12 +202,6 @@ void settings_blend_read_data(BlendDataReader *reader, AssetShelfSettings &setti
   {
     settings.display_flag |= ASSETSHELF_FILTER_NAME_MATCH_ENABLED;
   }
-
-  /* New in 5.x: per-library catalog map. Empty list in older files is intentional; migrate the
-   * legacy single-library #active_catalog_path (including Recent/Favorites sentinels). */
-  library_catalog_state_list_migrate_legacy_active_path(settings.library_catalog_states,
-                                                        settings.asset_library_reference,
-                                                        settings.active_catalog_path);
 
   /* Older files didn't store the recent-brush limit; default it to 20 instead of 0. */
   if (settings.recent_max_count <= 0) {
@@ -351,29 +348,63 @@ bool settings_is_favorites_catalog_active(const AssetShelfSettings &settings)
 
 namespace {
 
-void apply_active_catalog_path(AssetShelfSettings &settings, const StringRef path)
+/**
+ * Resolve the working #AssetShelfSettings::active_catalog_path for permanent per-library memory.
+ *
+ * - Returns a nil UUID when the working selection is All / Recent / Favorites (clear memory).
+ * - Returns a non-nil UUID when path→UUID lookup succeeds (update memory).
+ * - Returns nullopt when a real catalog path is selected but path→UUID cannot run yet (library not
+ *   loaded) or the path is not found — leave any existing #AssetShelfLibraryCatalogState entry
+ *   unchanged. Old path-based commit stored the path without needing a loaded library; wiping the
+ *   remembered UUID on a transient unload would regress that.
+ */
+std::optional<bUUID> active_catalog_id_for_commit(const AssetShelfSettings &settings,
+                                                  const AssetLibraryReference &library_ref)
 {
-  if (path.is_empty()) {
+  if (settings_is_all_catalog_active(settings) || settings_is_recent_catalog_active(settings) ||
+      settings_is_favorites_catalog_active(settings))
+  {
+    return BLI_uuid_nil();
+  }
+  if (!settings.active_catalog_path || !settings.active_catalog_path[0]) {
+    return BLI_uuid_nil();
+  }
+
+  const asset_system::AssetLibrary *library = list::library_get_once_available(library_ref);
+  if (!library) {
+    return std::nullopt;
+  }
+  const asset_system::AssetCatalog *catalog = library->catalog_service().find_catalog_by_path(
+      asset_system::AssetCatalogPath(settings.active_catalog_path));
+  if (!catalog) {
+    return std::nullopt;
+  }
+  return catalog->catalog_id;
+}
+
+void apply_active_catalog_id(AssetShelfSettings &settings,
+                             const AssetLibraryReference &library_ref,
+                             const bUUID catalog_id)
+{
+  if (BLI_uuid_is_nil(catalog_id)) {
     settings_set_all_catalog_active(settings);
     return;
   }
-  if (path == catalog_sentinel_recent) {
-    settings_set_recent_catalog_active(settings);
-    return;
-  }
-  if (path == catalog_sentinel_favorites) {
-    settings_set_favorites_catalog_active(settings);
-    return;
-  }
-  settings_set_active_catalog(settings, asset_system::AssetCatalogPath(path));
-}
 
-std::string active_catalog_path_as_string(const AssetShelfSettings &settings)
-{
-  if (settings_is_all_catalog_active(settings)) {
-    return {};
+  const asset_system::AssetLibrary *library = list::library_get_once_available(library_ref);
+  if (library) {
+    if (const asset_system::AssetCatalog *catalog = library->catalog_service().find_catalog(
+            asset_system::CatalogID(catalog_id)))
+    {
+      settings_set_active_catalog(settings, catalog->path);
+      return;
+    }
   }
-  return settings.active_catalog_path;
+
+  /* Library not loaded yet (optimistic apply): working selection stays path-based and cannot hold
+   * a bare UUID. Leave All until the catalog tree is available; remembered UUID remains in
+   * #library_catalog_states for a later load/revalidate. */
+  settings_set_all_catalog_active(settings);
 }
 
 }  // namespace
@@ -402,11 +433,15 @@ void library_catalog_state_list_commit_active(
     const AssetShelfSettings &settings,
     const AssetLibraryReference &library_ref)
 {
-  const std::string path = active_catalog_path_as_string(settings);
+  const std::optional<bUUID> catalog_id = active_catalog_id_for_commit(settings, library_ref);
+  if (!catalog_id) {
+    /* Path selected but unresolved — keep any existing remembered UUID. */
+    return;
+  }
+
   AssetShelfLibraryCatalogState *state = library_catalog_state_find(list, library_ref);
-  if (path.empty()) {
+  if (BLI_uuid_is_nil(*catalog_id)) {
     if (state) {
-      MEM_SAFE_DELETE(state->active_catalog_path);
       BLI_freelinkN(&list, state);
     }
     return;
@@ -416,8 +451,7 @@ void library_catalog_state_list_commit_active(
     state->library_ref = library_ref;
     BLI_addtail(&list, state);
   }
-  MEM_SAFE_DELETE(state->active_catalog_path);
-  state->active_catalog_path = BLI_strdup(path.c_str());
+  state->active_catalog_id = *catalog_id;
 }
 
 void library_catalog_state_list_load_active(ListBaseT<AssetShelfLibraryCatalogState> &list,
@@ -425,28 +459,20 @@ void library_catalog_state_list_load_active(ListBaseT<AssetShelfLibraryCatalogSt
                                             const AssetLibraryReference &library_ref)
 {
   const AssetShelfLibraryCatalogState *state = library_catalog_state_find(list, library_ref);
-  if (state && state->active_catalog_path && state->active_catalog_path[0] != '\0') {
-    apply_active_catalog_path(settings, state->active_catalog_path);
+  if (!state || BLI_uuid_is_nil(state->active_catalog_id)) {
+    settings_set_all_catalog_active(settings);
     return;
   }
-  settings_set_all_catalog_active(settings);
-}
 
-void library_catalog_state_list_migrate_legacy_active_path(
-    ListBaseT<AssetShelfLibraryCatalogState> &list,
-    const AssetLibraryReference &library_ref,
-    const char *active_catalog_path)
-{
-  if (!list.is_empty()) {
-    return;
+  switch (ED_asset_catalog_validate(library_ref, state->active_catalog_id)) {
+    case AssetCatalogValidation::Valid:
+    case AssetCatalogValidation::LibraryNotYetLoaded:
+      apply_active_catalog_id(settings, library_ref, state->active_catalog_id);
+      break;
+    case AssetCatalogValidation::NotFound:
+      settings_set_all_catalog_active(settings);
+      break;
   }
-  if (!active_catalog_path || active_catalog_path[0] == '\0') {
-    return;
-  }
-  AssetShelfLibraryCatalogState *state = MEM_new<AssetShelfLibraryCatalogState>(__func__);
-  state->library_ref = library_ref;
-  state->active_catalog_path = BLI_strdup(active_catalog_path);
-  BLI_addtail(&list, state);
 }
 
 void library_catalog_state_list_blend_write(BlendWriter *writer,
@@ -463,85 +489,150 @@ void library_catalog_state_list_blend_read_data(BlendDataReader *reader,
 
 namespace {
 
-static const char *library_catalog_path_or_empty(const char *path)
+/** Write a remembered catalog UUID into the per-instance list (Task 7 commit takes settings). */
+static void library_catalog_state_list_set_active_id(
+    ListBaseT<AssetShelfLibraryCatalogState> &list,
+    const AssetLibraryReference &library_ref,
+    const bUUID catalog_id)
 {
-  return (path && path[0]) ? path : "";
+  AssetShelfLibraryCatalogState *state = library_catalog_state_find(list, library_ref);
+  if (BLI_uuid_is_nil(catalog_id)) {
+    if (state) {
+      BLI_freelinkN(&list, state);
+    }
+    return;
+  }
+  if (!state) {
+    state = MEM_new<AssetShelfLibraryCatalogState>(__func__);
+    state->library_ref = library_ref;
+    BLI_addtail(&list, state);
+  }
+  state->active_catalog_id = catalog_id;
 }
 
-static bool library_catalog_state_lists_equal(
-    const ListBaseT<AssetShelfLibraryCatalogState> &a,
-    const ListBaseT<AssetShelfLibraryCatalogState> &b)
+static std::string popup_domain_for_shelf_type(const AssetShelfType &shelf_type)
 {
-  int count_a = 0;
-  for (const AssetShelfLibraryCatalogState &state_a : a) {
-    const AssetShelfLibraryCatalogState *state_b = library_catalog_state_find(b, state_a.library_ref);
-    if (!state_b) {
-      return false;
-    }
-    if (!STREQ(library_catalog_path_or_empty(state_a.active_catalog_path),
-                library_catalog_path_or_empty(state_b->active_catalog_path)))
-    {
-      return false;
-    }
-    count_a++;
-  }
-  int count_b = 0;
-  for (const AssetShelfLibraryCatalogState &state_b : b) {
-    (void)state_b;
-    count_b++;
-  }
-  return count_a == count_b;
+  return "asset_shelf_popup:" + std::string(shelf_type.idname);
 }
 
 }  // namespace
 
-bool popup_library_catalog_settings_store(wmWindowManager &wm, const AssetShelf &shelf)
+void popup_library_catalog_settings_store(const AssetShelf &shelf)
 {
-  const AssetShelfPopupLibraryCatalogs *existing = static_cast<
-      const AssetShelfPopupLibraryCatalogs *>(BLI_findstring(&wm.asset_shelf_popup_library_catalogs,
-                                                             shelf.idname,
-                                                             offsetof(AssetShelfPopupLibraryCatalogs,
-                                                                      idname)));
-  if (existing &&
-      library_catalog_state_lists_equal(existing->library_catalog_states,
-                                        shelf.settings.library_catalog_states))
-  {
-    return false;
-  }
-
-  AssetShelfPopupLibraryCatalogs *entry = const_cast<AssetShelfPopupLibraryCatalogs *>(existing);
-  if (!entry) {
-    entry = MEM_new<AssetShelfPopupLibraryCatalogs>(__func__);
-    STRNCPY_UTF8(entry->idname, shelf.idname);
-    BLI_addtail(&wm.asset_shelf_popup_library_catalogs, entry);
-  }
-  BKE_asset_shelf_library_catalog_state_list_free(entry->library_catalog_states);
-  BKE_asset_shelf_library_catalog_state_list_duplicate(entry->library_catalog_states,
-                                                       shelf.settings.library_catalog_states);
-  return true;
-}
-
-void popup_library_catalog_settings_load(const wmWindowManager &wm,
-                                         const char *shelf_idname,
-                                         AssetShelfSettings &settings)
-{
-  const AssetShelfPopupLibraryCatalogs *entry = static_cast<const AssetShelfPopupLibraryCatalogs *>(
-      BLI_findstring(&wm.asset_shelf_popup_library_catalogs,
-                     shelf_idname,
-                     offsetof(AssetShelfPopupLibraryCatalogs, idname)));
-  BKE_asset_shelf_library_catalog_state_list_free(settings.library_catalog_states);
-  if (!entry) {
+  if (!shelf.is_popup || !shelf.type) {
     return;
   }
-  BKE_asset_shelf_library_catalog_state_list_duplicate(settings.library_catalog_states,
-                                                       entry->library_catalog_states);
+  const std::string domain = popup_domain_for_shelf_type(*shelf.type);
+  const AssetLibraryReference &current_ref = shelf.settings.asset_library_reference;
+  const bool membership = settings_is_recent_catalog_active(shelf.settings) ||
+                          settings_is_favorites_catalog_active(shelf.settings);
+
+  for (const AssetShelfLibraryCatalogState &state : shelf.settings.library_catalog_states) {
+    if (membership && state.library_ref == current_ref) {
+      /* Recent/Favorites is not a UUID -- the mode write below covers the current library
+       * instead of a stale #active_catalog_id left over from before membership was entered. */
+      continue;
+    }
+    if (BLI_uuid_is_nil(state.active_catalog_id)) {
+      BKE_asset_catalog_memory_set_all(&U, state.library_ref, domain);
+    }
+    else {
+      BKE_asset_catalog_memory_set_single(
+          &U, state.library_ref, domain, state.active_catalog_id);
+    }
+  }
+
+  if (membership) {
+    /* Mode-only write (rev-4 independence guard, same as image_grid/id_browser): never touches
+     * #single_catalog_id / #catalog_id_set, so leaving Recent/Favorites restores whichever
+     * catalog was last remembered for this library. */
+    BKE_asset_catalog_memory_set_mode(&U,
+                                      current_ref,
+                                      domain,
+                                      settings_is_recent_catalog_active(shelf.settings) ?
+                                          ASSET_CATALOG_MEMORY_RECENT :
+                                          ASSET_CATALOG_MEMORY_FAVORITES);
+  }
+  /* Commit removes the list entry for All; still must clear any prior UserDef SINGLE for the
+   * current library or the next open restores the old catalog. */
+  else if (!library_catalog_state_find(shelf.settings.library_catalog_states, current_ref)) {
+    BKE_asset_catalog_memory_set_all(&U, current_ref, domain);
+  }
+  U.runtime.is_dirty = true;
 }
 
-void popup_shelf_sync_per_file_state_from_wm(const wmWindowManager &wm, AssetShelf &shelf)
+static void popup_library_catalog_settings_load_for_library(
+    AssetShelf &shelf, const AssetLibraryReference &library_ref)
 {
-  popup_library_catalog_settings_load(wm, shelf.idname, shelf.settings);
+  if (!shelf.is_popup || !shelf.type) {
+    return;
+  }
+  const std::string domain = popup_domain_for_shelf_type(*shelf.type);
+  const eAssetCatalogMemoryMode mode = BKE_asset_catalog_memory_get_mode(&U, library_ref, domain);
+  switch (mode) {
+    case ASSET_CATALOG_MEMORY_SINGLE: {
+      const std::optional<bUUID> remembered = BKE_asset_catalog_memory_get_single(
+          &U, library_ref, domain);
+      if (remembered) {
+        library_catalog_state_list_set_active_id(
+            shelf.settings.library_catalog_states, library_ref, *remembered);
+      }
+      break;
+    }
+    case ASSET_CATALOG_MEMORY_ALL:
+      /* Includes "no UserDef entry" (get_mode default). Clear any stale instance UUID. */
+      library_catalog_state_list_set_active_id(
+          shelf.settings.library_catalog_states, library_ref, BLI_uuid_nil());
+      break;
+    case ASSET_CATALOG_MEMORY_SET:
+      /* Popup domain's per-instance list only ever holds ALL/SINGLE. */
+      break;
+    case ASSET_CATALOG_MEMORY_RECENT:
+    case ASSET_CATALOG_MEMORY_FAVORITES:
+      /* Not a UUID -- #popup_library_membership_restore applies these directly to the working
+       * settings after the UUID-based restore below has run. */
+      break;
+  }
+}
+
+/**
+ * Apply a remembered Recent/Favorites mode directly to the working settings. Must run *after*
+ * #library_catalog_state_list_load_active / #settings_load_active_catalog_for_library, which
+ * otherwise unconditionally resolve the per-instance UUID entry and would clobber this back to
+ * All -- those functions have no notion of the Recent/Favorites pseudo-catalogs.
+ */
+static void popup_library_membership_restore(AssetShelf &shelf,
+                                              const AssetLibraryReference &library_ref)
+{
+  if (!shelf.is_popup || !shelf.type) {
+    return;
+  }
+  const std::string domain = popup_domain_for_shelf_type(*shelf.type);
+  switch (BKE_asset_catalog_memory_get_mode(&U, library_ref, domain)) {
+    case ASSET_CATALOG_MEMORY_RECENT:
+      settings_set_recent_catalog_active(shelf.settings);
+      break;
+    case ASSET_CATALOG_MEMORY_FAVORITES:
+      settings_set_favorites_catalog_active(shelf.settings);
+      break;
+    case ASSET_CATALOG_MEMORY_ALL:
+    case ASSET_CATALOG_MEMORY_SINGLE:
+    case ASSET_CATALOG_MEMORY_SET:
+      break;
+  }
+}
+
+void popup_library_catalog_settings_load(AssetShelf &shelf)
+{
+  popup_library_catalog_settings_load_for_library(shelf, shelf.settings.asset_library_reference);
+}
+
+void popup_shelf_sync_per_file_state_from_wm(const wmWindowManager & /*wm*/, AssetShelf &shelf)
+{
+  popup_library_catalog_settings_load(shelf);
   settings_load_active_catalog_for_library(shelf.settings,
                                            shelf.settings.asset_library_reference);
+  popup_library_membership_restore(shelf, shelf.settings.asset_library_reference);
 }
 
 void settings_load_active_catalog_for_library(AssetShelfSettings &settings,
@@ -550,20 +641,42 @@ void settings_load_active_catalog_for_library(AssetShelfSettings &settings,
   library_catalog_state_list_load_active(settings.library_catalog_states, settings, library_ref);
 }
 
-void settings_catalog_commit_active(AssetShelf &shelf,
-                                    wmWindowManager *wm,
-                                    const bool tag_file_modified)
+void shelf_ensure_catalog_revalidated(AssetShelf &shelf)
+{
+  const AssetLibraryReference &library_ref = shelf.settings.asset_library_reference;
+  if (!(shelf.catalog_validated_library_ref == library_ref)) {
+    shelf.catalog_validated_library_ref = library_ref;
+    shelf.catalog_validated = 0;
+  }
+  if (shelf.catalog_validated) {
+    return;
+  }
+  if (settings_is_recent_catalog_active(shelf.settings) ||
+      settings_is_favorites_catalog_active(shelf.settings))
+  {
+    /* Not a catalog-UUID selection -- nothing to validate against the (possibly still loading)
+     * library. #settings_load_active_catalog_for_library has no notion of Recent/Favorites and
+     * would clobber the active pseudo-catalog back to All the moment any
+     * #ND_ASSET_LIST_READING notifier fires while the popover is open. */
+    shelf.catalog_validated = 1;
+    return;
+  }
+  /* Idempotent once the library is loaded; while still indexing, #apply_active_catalog_id leaves
+   * All and listeners clear #catalog_validated so this runs again after load completes. */
+  settings_load_active_catalog_for_library(shelf.settings, library_ref);
+  shelf.catalog_validated = 1;
+}
+
+void settings_catalog_commit_active(AssetShelf &shelf)
 {
   AssetShelfSettings &settings = shelf.settings;
   library_catalog_state_list_commit_active(settings.library_catalog_states,
                                            settings,
                                            settings.asset_library_reference);
-  if (!shelf.is_popup || !wm) {
+  if (!shelf.is_popup) {
     return;
   }
-  if (popup_library_catalog_settings_store(*wm, shelf) && tag_file_modified) {
-    WM_file_tag_modified();
-  }
+  popup_library_catalog_settings_store(shelf);
 }
 
 void settings_swap_asset_library(AssetShelf &shelf, const AssetLibraryReference &new_ref)
@@ -575,9 +688,21 @@ void settings_swap_asset_library(AssetShelf &shelf, const AssetLibraryReference 
   library_catalog_state_list_commit_active(shelf.settings.library_catalog_states,
                                            shelf.settings,
                                            old_ref);
+  if (shelf.is_popup) {
+    /* Persist old library into UserDef before leaving it (commit may have removed an All entry). */
+    popup_library_catalog_settings_store(shelf);
+  }
   shelf.settings.asset_library_reference = new_ref;
+  if (shelf.is_popup) {
+    /* Instance list is not a full UserDef mirror; pull remembered catalog for the target library. */
+    popup_library_catalog_settings_load_for_library(shelf, new_ref);
+  }
   library_catalog_state_list_load_active(
       shelf.settings.library_catalog_states, shelf.settings, new_ref);
+  if (shelf.is_popup) {
+    /* Must run after the UUID-based restore above -- see #popup_library_membership_restore. */
+    popup_library_membership_restore(shelf, new_ref);
+  }
 }
 
 static bool use_enabled_catalogs_from_prefs(const AssetShelf &shelf)

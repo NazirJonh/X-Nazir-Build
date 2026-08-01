@@ -10,6 +10,8 @@
 
 #include "ED_asset.hh"
 
+#include "IMB_imbuf.hh"
+
 #include "WM_api.hh"
 
 #include "interface_intern.hh"
@@ -113,7 +115,10 @@ void button_drag_start(bContext *C, Button *but)
   but->dragpoin = nullptr;
 
   if (but->imb) {
-    WM_event_drag_image(drag, but->imb, but->imb_scale);
+    /* The source image can belong to a file-list preview cache, which may be rebuilt while the
+     * drag is in progress. Keep an independent buffer for the lifetime of the drag. */
+    ImBuf *drag_image = IMB_dupImBuf(but->imb);
+    WM_event_drag_image(drag, drag_image, but->imb_scale, true);
   }
   else if (but->drag_preview_icon_id) {
     WM_event_drag_preview_icon(drag, but->drag_preview_icon_id);

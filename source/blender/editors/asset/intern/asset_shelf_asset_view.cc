@@ -539,7 +539,10 @@ void AssetViewItem::build_grid_tile(const bContext &C, ui::Layout &layout) const
   overlap.ui_units_x_set(grid_style.tile_width / UI_UNIT_X);
   overlap.ui_units_y_set(grid_style.tile_height / UI_UNIT_Y);
 
-  ui::PreviewGridItem::build_grid_tile_button(overlap.column(true), preview_id);
+  /* #AssetView::set_preview_size_px() stores the unscaled preview size on the grid style; the
+   * tile button forwards it to #draw_preview_item_stateless so label scaling depends on the icon
+   * footprint, not the full tile (icon + label). */
+  this->build_grid_tile_button(overlap.column(true), preview_id);
 
   /* #LayoutOverlap anchors its children to the top and the overlay row right-aligns them, which
    * leaves the overlays flush against two edges of the tile. Inset them from the corner by a
@@ -905,6 +908,7 @@ void build_asset_view(ui::Layout &layout,
       pseudo_filter_from_shelf_settings(shelf.settings, shelf.type->idname));
   asset_view->set_favorites(favorites_from_shelf(shelf.type->idname));
   asset_view->set_tile_size(tile_width, tile_height);
+  asset_view->set_preview_size_px(shelf.settings.preview_size);
   if (cols_hint) {
     /* Popover snaps its width to whole columns; forcing the column count here keeps the grid from
      * computing one fewer column due to float rounding at the boundary (which would leave a gap). */

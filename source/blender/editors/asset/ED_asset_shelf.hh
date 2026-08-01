@@ -161,14 +161,12 @@ AssetLibraryReference &settings_ensure_valid_library_ref(AssetShelfSettings &set
  * to one that resolves but is a folder or disabled, which falls back to "All" instead). */
 bool settings_library_is_missing(const AssetShelfSettings &settings);
 void settings_swap_asset_library(AssetShelf &shelf, const AssetLibraryReference &new_ref);
-void settings_catalog_commit_active(AssetShelf &shelf,
-                                    wmWindowManager *wm,
-                                    bool tag_file_modified = true);
+void settings_catalog_commit_active(AssetShelf &shelf);
 void settings_load_active_catalog_for_library(AssetShelfSettings &settings,
                                               const AssetLibraryReference &library_ref);
-bool popup_library_catalog_settings_store(wmWindowManager &wm, const AssetShelf &shelf);
+void popup_library_catalog_settings_store(const AssetShelf &shelf);
 void popup_shelf_sync_per_file_state_from_wm(const wmWindowManager &wm, AssetShelf &shelf);
-/** Re-apply per-`.blend` catalog state from \a wm for every process-global popup shelf. */
+/** Re-apply UserDef popup catalog snapshot for every process-global popup shelf. */
 void popup_shelves_sync_per_file_state_from_wm(const wmWindowManager &wm);
 void settings_set_active_catalog(AssetShelfSettings &settings,
                                  const asset_system::AssetCatalogPath &path);
@@ -256,7 +254,16 @@ const char *brush_shelf_idname_from_paint_mode(PaintMode mode);
 /** True if \a idname is one of the brush asset shelves from #brush_shelf_idname_from_paint_mode(). */
 bool shelf_idname_is_brush_shelf(StringRef idname);
 
-/** True if \a idname supports Recent/Favorites asset lists (brush shelves and image texture). */
+/**
+ * Prefix for the synthetic per-idcode idnames the ID Browser (`interface_template_id_browser*.cc`)
+ * uses to key into the Recent/Favorites asset-list registry below. The ID Browser has no real
+ * #AssetShelf, so it fabricates one idname per browsed ID type (e.g. `"ID_BROWSER_IM"`) instead of
+ * registering an #AssetShelfType.
+ */
+constexpr const char *ID_BROWSER_SHELF_IDNAME_PREFIX = "ID_BROWSER_";
+
+/** True if \a idname supports Recent/Favorites asset lists (brush shelves, image texture, and any
+ * #ID_BROWSER_SHELF_IDNAME_PREFIX-prefixed ID Browser idname). */
 bool shelf_supports_asset_lists(StringRef idname);
 
 /**
@@ -302,6 +309,9 @@ int shelf_asset_lists_recent_max_count_get(StringRef shelf_idname);
 
 /** Set the in-memory limit for \a shelf_idname and trim the cached Recent list. */
 void shelf_asset_lists_recent_max_count_set(StringRef shelf_idname, int recent_max_count);
+
+/** Re-trim Recent lists after the global Preferences limits change. */
+void shelf_asset_lists_recent_max_preferences_changed();
 
 void shelf_asset_lists_record_recent(StringRef shelf_idname, const AssetWeakReference &weak_ref);
 bool shelf_asset_lists_is_favorite(StringRef shelf_idname, const AssetWeakReference &weak_ref);

@@ -703,7 +703,8 @@ static void searchbox_region_draw_fn(const bContext *C, ARegion *region)
                           data->items.names[a],
                           data->items.icons[a],
                           but_flag,
-                          UI_STYLE_TEXT_LEFT);
+                          UI_STYLE_TEXT_LEFT,
+                          /* preview_size_px: */ 0);
       }
 
       /* indicate more */

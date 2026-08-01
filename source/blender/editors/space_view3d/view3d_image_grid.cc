@@ -39,12 +39,14 @@
 #include "BLT_translation.hh"
 
 #include "ED_asset_image_library.hh"
+#include "ED_asset_image_utils.hh"
 #include "ED_asset_import.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_mark_clear.hh"
 #include "ED_asset_menu_utils.hh"
 #include "ED_asset_shelf.hh"
+#include "ED_fileselect.hh"
 #include "ED_image_grid.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
@@ -91,6 +93,11 @@ void image_grid_notify_change(bContext &C, const bool is_mask_slot)
 
   ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, is_mask_slot);
   ed::asset::list::storage_fetch(&state.filter.lib_ref, &C);
+  if (state.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
+    /* #storage_fetch() above only warms the built-in merged All list, not each real library's own
+     * #AssetList that #image_grid_all_mode_libraries() needs -- see #image_grid_fetch_all_mode_libraries(). */
+    image_grid_fetch_all_mode_libraries(C);
+  }
   WM_event_add_notifier(&C, NC_ASSET | ND_ASSET_LIST, nullptr);
   WM_event_add_notifier(&C, NC_ID | NA_EDITED, nullptr);
 
@@ -452,42 +459,6 @@ static Brush *brush_ensure_local_for_texture(bContext &C, Brush &brush)
   return local_brush;
 }
 
-/* -------------------------------------------------------------------- */
-/** \name Asset→Image Resolution and Brush Assignment Helpers
- * \{ */
-
-/**
- * Resolve an asset representation to a loaded #Image using the canonical three-step order:
- * 1. Already-loaded local ID.
- * 2. Import from a .blend library via #asset_local_id_ensure_imported.
- * 3. Load from disk for direct-file assets stored outside a .blend library.
- *
- * Returns nullptr when none of the steps succeeds.
- */
-static Image *image_grid_resolve_image_from_asset(Main &bmain,
-                                                  const asset_system::AssetRepresentation &asset)
-{
-  if (ID *local_id = asset.local_id()) {
-    return id_cast<Image *>(local_id);
-  }
-  if (!asset.full_library_path().empty()) {
-    ID *imported_id = ed::asset::asset_local_id_ensure_imported(bmain, asset);
-    if (imported_id && GS(imported_id->name) == ID_IM) {
-      return id_cast<Image *>(imported_id);
-    }
-    return nullptr;
-  }
-  Image *image = BKE_image_load_exists(&bmain, asset.full_path().c_str(), nullptr);
-  if (image) {
-    /* #BKE_image_load_exists takes a loan on the user count regardless of whether the block was
-     * newly created or already existed (see the FIXME at its definition); every caller of this
-     * function routes the result into #brush_texture_for_image, which always counts the real
-     * reference (`tex->ima`) with #id_us_plus, so release the loan here unconditionally. */
-    id_us_min(&image->id);
-  }
-  return image;
-}
-
 /**
  * Find or create a #Tex wrapping \a image, assign it to the appropriate #MTex slot of \a brush,
  * invalidate paint overlays, and send #NC_BRUSH / #NC_ID notifiers.
@@ -607,6 +578,42 @@ bool image_grid_assign_dropped_image(bContext &C, const PointerRNA &target_ptr, 
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Set Library
+ * \{ */
+
+bool image_grid_set_library(bContext &C,
+                            ed::image_grid::ImageGridOwner owner,
+                            const bool is_mask_slot,
+                            const AssetLibraryReference &new_ref)
+{
+  ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, is_mask_slot);
+
+  const bool in_membership = state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent ||
+                             state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites;
+  const bool same_lib = ed::asset::library_reference_to_enum_value(&new_ref) ==
+                        ed::asset::library_reference_to_enum_value(&state.filter.lib_ref);
+  if (same_lib && !in_membership) {
+    return false;
+  }
+
+  const AssetLibraryReference old_lib_ref = state.filter.lib_ref;
+  /* Same library while in Recent/Favorites: exit membership and restore that library's saved
+   * catalog filter via #image_grid_catalog_swap_library (skips committing empty membership paths). */
+  image_grid_catalog_swap_library(state, old_lib_ref, new_ref);
+  image_grid_catalog_commit_active(state);
+  ed::image_grid::image_grid_reset_scroll(owner, is_mask_slot);
+  image_grid_pending_clear(state);
+
+  ed::image_grid::image_grid_state_persist(owner, state, is_mask_slot);
+  image_grid_prepare_browse_shelf(C, state, "VIEW3D_AST_image_texture");
+
+  image_grid_notify_change(C);
+  return true;
+}
+
+/** \} */
+
 }  // namespace blender::ed::view3d
 
 namespace blender {
@@ -668,11 +675,11 @@ static Image *image_grid_resolve_image(bContext &C, wmOperator &op)
       return true;
     }
 
-    found_image = image_grid_resolve_image_from_asset(*bmain, asset);
+    found_image = ed::asset::resolve_image_from_asset(*bmain, asset);
     return false;
   });
 
-  /* All resolution paths in #image_grid_resolve_image_from_asset return an #Image owned by
+  /* All resolution paths in #ed::asset::resolve_image_from_asset return an #Image owned by
    * `bmain` (local, imported, or loaded from disk), so the result is already valid. */
   return found_image;
 }
@@ -931,7 +938,7 @@ static wmOperatorStatus image_shelf_activate_asset_exec(bContext *C, wmOperator 
     return OPERATOR_CANCELLED;
   }
 
-  Image *image = image_grid_resolve_image_from_asset(*bmain, *asset);
+  Image *image = ed::asset::resolve_image_from_asset(*bmain, *asset);
   if (!image) {
     BKE_report(op->reports, RPT_ERROR, "Could not load image asset");
     return OPERATOR_CANCELLED;
@@ -1097,31 +1104,11 @@ static wmOperatorStatus image_grid_set_library_exec(bContext *C, wmOperator *op)
 
   const int enum_value = RNA_enum_get(op->ptr, "asset_library_reference");
   const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(enum_value);
-
   const bool is_mask_slot = image_grid_is_mask_slot_from_context(*C);
-  const ed::image_grid::ImageGridOwner owner = *owner_opt;
-  ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, is_mask_slot);
 
-  const bool in_membership = state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent ||
-                             state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites;
-  const bool same_lib =
-      enum_value == ed::asset::library_reference_to_enum_value(&state.filter.lib_ref);
-  if (same_lib && !in_membership) {
+  if (!image_grid_set_library(*C, *owner_opt, is_mask_slot, new_ref)) {
     return OPERATOR_CANCELLED;
   }
-
-  const AssetLibraryReference old_lib_ref = state.filter.lib_ref;
-  /* Same library while in Recent/Favorites: exit membership and restore that library's saved
-   * catalog filter via #image_grid_catalog_swap_library (skips committing empty membership paths). */
-  image_grid_catalog_swap_library(state, old_lib_ref, new_ref);
-  image_grid_catalog_commit_active(state);
-  ed::image_grid::image_grid_reset_scroll(owner, is_mask_slot);
-  image_grid_pending_clear(state);
-
-  ed::image_grid::image_grid_state_persist(owner, state, is_mask_slot);
-  image_grid_prepare_browse_shelf(*C, state, "VIEW3D_AST_image_texture");
-
-  image_grid_notify_change(*C);
   return OPERATOR_FINISHED;
 }
 
@@ -1576,7 +1563,7 @@ static void image_grid_configure_asset_browser(SpaceFile &sfile,
     asset_params->import_flags = FILE_ASSET_IMPORT_INSTANCE_COLLECTIONS_ON_LINK;
   }
 
-  asset_params->asset_library_ref = library_ref;
+  ED_fileselect_asset_library_reference_set(asset_params, library_ref);
 
   FileSelectParams *params = &asset_params->base_params;
   params->filter_id = FILTER_ID_IM;

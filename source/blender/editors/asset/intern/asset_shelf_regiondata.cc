@@ -96,6 +96,7 @@ void regiondata_blend_read_data(BlendDataReader *reader, RegionAssetShelf **shel
   BLO_read_struct_list(reader, AssetShelf, &(*shelf_regiondata)->shelves);
   for (AssetShelf &shelf : (*shelf_regiondata)->shelves) {
     shelf.type = nullptr;
+    shelf.catalog_validated = 0;
     settings_blend_read_data(reader, shelf.settings);
   }
 }

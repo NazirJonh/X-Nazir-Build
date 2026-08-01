@@ -935,6 +935,54 @@ struct bUserAssetBrowserSettings {
   ListBaseT<AssetCatalogState> catalog_states = {nullptr, nullptr};
 };
 
+/** #bUserAssetCatalogMemory.mode */
+enum eAssetCatalogMemoryMode : int8_t {
+  /** No narrowing ("All"). Default state for an absent entry. */
+  ASSET_CATALOG_MEMORY_ALL = 0,
+  /** #bUserAssetCatalogMemory::single_catalog_id is the active catalog. */
+  ASSET_CATALOG_MEMORY_SINGLE = 1,
+  /** #bUserAssetCatalogMemory::catalog_id_set lists the enabled catalogs. */
+  ASSET_CATALOG_MEMORY_SET = 2,
+  /** ID Browser / Image Grid "Recent" pseudo-catalog is active. */
+  ASSET_CATALOG_MEMORY_RECENT = 3,
+  /** ID Browser / Image Grid "Favorites" pseudo-catalog is active. */
+  ASSET_CATALOG_MEMORY_FAVORITES = 4,
+};
+
+/**
+ * Per-(library, domain) remembered catalog selection, stored in the user preferences so it
+ * persists across sessions and blend files. `domain` distinguishes independent consumers that
+ * share the same library (Asset Browser, ID Browser, Image Grid, one entry per AssetShelfType
+ * for popup shelves) so switching libraries in one does not affect another's memory.
+ *
+ * `mode` only selects which payload is currently active for filtering. `single_catalog_id` and
+ * `catalog_id_set` are independently persisted and are never cleared by a mode change -- only by
+ * an explicit call that overwrites that specific field. See
+ * docs/superpowers/specs/2026-08-08-per-library-catalog-memory-design.md Section A for the full
+ * invariant table and rationale (this independence is required to match existing Image Grid
+ * behavior, which must not lose its saved catalog filter when switching to Recent/Favorites).
+ */
+struct bUserAssetCatalogMemory {
+  struct bUserAssetCatalogMemory *next = nullptr, *prev = nullptr;
+
+  /** Asset library identifier (see BKE_preferences_asset_library_identifier_from_ref). */
+  char library_identifier[/*MAX_NAME*/ 64] = "";
+  /** "asset_browser", "id_browser", "image_grid", or "asset_shelf_popup:<AssetShelfType.idname>". */
+  char domain[96] = "";
+
+  eAssetCatalogMemoryMode mode = ASSET_CATALOG_MEMORY_ALL;
+  char _pad0[7] = {};
+  bUUID single_catalog_id;
+  ListBaseT<AssetCatalogUUIDLink> catalog_id_set = {nullptr, nullptr};
+
+#if defined(__cplusplus) && !defined(DNA_NO_EXTERNAL_CONSTRUCTORS)
+  bUserAssetCatalogMemory() = default;
+  bUserAssetCatalogMemory(const bUserAssetCatalogMemory &other);
+  bUserAssetCatalogMemory &operator=(const bUserAssetCatalogMemory &other);
+  ~bUserAssetCatalogMemory();
+#endif
+};
+
 /** #bUserNameMatchMapType.flag */
 enum eUserNameMatchMapType_Flag : short {
   /** Core map type seeded by Blender; row is not removable. */
@@ -1162,6 +1210,7 @@ struct UserDef {
   ListBaseT<bUserAssetLibrary> asset_libraries = {nullptr, nullptr};
   ListBaseT<bUserExtensionRepo> extension_repos = {nullptr, nullptr};
   ListBaseT<bUserAssetBrowserSettings> asset_browser_settings = {nullptr, nullptr};
+  ListBaseT<bUserAssetCatalogMemory> catalog_memory = {nullptr, nullptr};
   ListBaseT<bUserAssetShelfSettings> asset_shelves_settings = {nullptr, nullptr};
   /** Preferences → Assets → Name Matching: map types (core + custom). */
   ListBaseT<bUserNameMatchMapType> name_match_map_types = {nullptr, nullptr};
@@ -1361,10 +1410,20 @@ struct UserDef {
   eUserpref_RenderDisplayType render_display_type = USER_RENDER_DISPLAY_WINDOW;
   eUserpref_TempSpaceDisplayType filebrowser_display_type = USER_TEMP_SPACE_DISPLAY_WINDOW;
   eUserpref_TempSpaceDisplayType preferences_display_type = USER_TEMP_SPACE_DISPLAY_WINDOW;
-  char _pad18[7] = {};
+  char _pad18[5] = {};
 
   eUserpref_SeqProxySetup sequencer_proxy_setup = USER_SEQ_PROXY_SETUP_AUTOMATIC;
-  short _pad1 = {};
+  /** Default maximum number of brushes kept in asset shelf Recent lists. */
+  short asset_shelf_recent_brushes_max = 20;
+  /** Default maximum number of images kept in the image asset shelf Recent list. */
+  short asset_shelf_recent_images_max = 20;
+  /** Default preview size for Asset Shelf "Small" preset (in pixels). */
+  short asset_shelf_preview_size_small = 32;
+  /** Default preview size for Asset Shelf "Medium" preset (in pixels). */
+  short asset_shelf_preview_size_medium = 56;
+  /** Default preview size for Asset Shelf "Large" preset (in pixels). */
+  short asset_shelf_preview_size_large = 96;
+  char _pad19[2] = {};
 
   float collection_instance_empty_size = 1.0f;
   eTextEdit_Flags text_flag = {};

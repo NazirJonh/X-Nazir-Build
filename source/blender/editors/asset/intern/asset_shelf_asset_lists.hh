@@ -136,8 +136,8 @@ void shelf_popup_region_unbind(const ARegion &region);
 std::optional<StringRefNull> shelf_popup_region_idname_get(const ARegion &region);
 
 /**
- * Return the maximum number of Recent entries configured for \a shelf_idname. Falls back to
- * #SHELF_ASSET_LISTS_RECENT_MAX when the user has never stored a per-shelf limit.
+ * Return the maximum number of Recent entries configured for \a shelf_idname. Falls back to the
+ * global Preferences default, then to #SHELF_ASSET_LISTS_RECENT_MAX when no per-shelf limit is stored.
  */
 int shelf_asset_lists_recent_max_count_get(StringRef shelf_idname);
 
@@ -146,6 +146,9 @@ int shelf_asset_lists_recent_max_count_get(StringRef shelf_idname);
  * The caller is responsible for persisting the value to User Preferences.
  */
 void shelf_asset_lists_recent_max_count_set(StringRef shelf_idname, int recent_max_count);
+
+/** Re-trim Recent lists after the global Preferences limits change. */
+void shelf_asset_lists_recent_max_preferences_changed();
 
 /**
  * Record \a weak_ref as the most-recently-used brush asset for \a shelf_idname, trimming to the

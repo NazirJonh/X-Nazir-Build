@@ -880,6 +880,25 @@ class USERPREF_PT_system_memory(SystemPanel, CenterAlignMixIn, Panel):
         col.prop(system, "geometry_nodes_stack_limit")
 
 
+class USERPREF_PT_system_asset_shelf(SystemPanel, CenterAlignMixIn, Panel):
+    bl_label = "Asset Shelf"
+
+    def draw_centered(self, context, layout):
+        prefs = context.preferences
+        edit = prefs.edit
+
+        layout.prop(edit, "asset_shelf_recent_brushes_max", text="Recent Brushes")
+        layout.prop(edit, "asset_shelf_recent_images_max", text="Recent Images")
+
+        layout.separator()
+
+        layout.label(text="Preview Size Presets:")
+        col = layout.column(align=True)
+        col.prop(edit, "asset_shelf_preview_size_small", text="Small")
+        col.prop(edit, "asset_shelf_preview_size_medium", text="Medium")
+        col.prop(edit, "asset_shelf_preview_size_large", text="Large")
+
+
 class USERPREF_PT_system_video_sequencer(SystemPanel, CenterAlignMixIn, Panel):
     bl_label = "Video Sequencer"
 
@@ -3085,6 +3104,7 @@ classes = (
     USERPREF_PT_system_os_settings,
     USERPREF_PT_system_network,
     USERPREF_PT_system_memory,
+    USERPREF_PT_system_asset_shelf,
     USERPREF_PT_system_video_sequencer,
     USERPREF_PT_system_sound,
 

@@ -29,6 +29,7 @@
 #include "BKE_addon.h"
 #include "BKE_appdir.hh"
 #include "BKE_asset.hh"
+#include "BKE_asset_catalog_memory.hh"
 #include "BKE_blender.hh"           /* own include */
 #include "BKE_blender_user_menu.hh" /* own include */
 #include "BKE_blender_version.h"    /* own include */
@@ -397,6 +398,8 @@ void BKE_blender_userdef_data_free(UserDef *userdef, bool clear_fonts)
     MEM_delete(&settings);
   }
   userdef->asset_browser_settings.clear_no_delete();
+
+  BKE_asset_catalog_memory_list_free(userdef->catalog_memory);
 
   BKE_name_matching_userdef_free(userdef);
 

@@ -388,6 +388,13 @@ static void region_view_scroll_at_borders_apply(ARegion *region,
       return;
     }
   }
+  /* Non-fixed-viewport grid views (e.g. the sidebar brush texture grid, which scrolls via its own
+   * session-based View2D offset instead) do not implement the generic #AbstractView::scroll() -
+   * calling it would hit its "Unsupported for this view type" assert. Only views that actually
+   * advertise support get the generic scroll fallback. */
+  if (!view.supports_scrolling()) {
+    return;
+  }
   view.scroll(scroll_dir);
   ED_region_tag_redraw(region);
 }

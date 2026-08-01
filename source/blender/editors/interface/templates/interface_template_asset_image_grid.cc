@@ -20,6 +20,7 @@
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 
+#include "BLI_listbase.h"
 #include "BLI_math_base.h"
 
 #include "BKE_context.hh"
@@ -44,6 +45,7 @@
 #include <fmt/format.h>
 
 #include "ED_asset.hh"
+#include "ED_asset_image_utils.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_render.hh"
@@ -551,6 +553,30 @@ static int image_grid_drag_image_file_count(const wmDrag &drag)
 }
 
 /**
+ * First image-typed item in a #WM_DRAG_ASSET_LIST drag, or nullptr. The Asset Browser starts both
+ * a #WM_DRAG_ASSET (single item) and a #WM_DRAG_ASSET_LIST drag for the same interaction, and
+ * #drop_target_apply_drop() applies whichever happens to be first in the shared drag list.
+ */
+static const wmDragAssetListItem *first_image_item_in_list(const wmDrag &drag)
+{
+  const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
+  if (!asset_drags) {
+    return nullptr;
+  }
+  for (const wmDragAssetListItem &item : *asset_drags) {
+    const ID_Type item_idtype = item.is_external ?
+                                    item.asset_data.external_info->asset->get_id_type() :
+                                    (item.asset_data.local_id ?
+                                         GS(item.asset_data.local_id->name) :
+                                         ID_Type(0));
+    if (item_idtype == ID_IM) {
+      return &item;
+    }
+  }
+  return nullptr;
+}
+
+/**
  * View-level drop target for the brush texture image grid. Dropping a single image assigns it to
  * the slot the grid is bound to (same as dropping on the slot button). Dropping several image files
  * opens the batch-import menu (see #IMAGE_GRID_OT_drop_import), wired in a later step.
@@ -565,8 +591,14 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
   bool can_drop(bContext & /*C*/, const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
   {
     /* Local image data-block or image asset (imported on drop). */
-    if (WM_drag_is_ID_type(&drag, ID_IM)) {
+    if (WM_drag_is_ID_type(&drag, ID_IM) || drag.type == WM_DRAG_ASSET) {
       return true;
+    }
+    /* The Asset Browser drags a #WM_DRAG_ASSET_LIST alongside the single-item #WM_DRAG_ASSET
+     * above (multi-select support); both must be accepted since #drop_target_apply_drop()
+     * requires every drag in the shared list to pass this check, applying whichever is first. */
+    if (drag.type == WM_DRAG_ASSET_LIST) {
+      return first_image_item_in_list(drag) != nullptr;
     }
     /* One or more image files from the file browser or the OS. */
     if (drag.type == WM_DRAG_PATH) {
@@ -609,15 +641,34 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
   bool drop_single_image(bContext *C, const ui::DragInfo &drag_info) const
   {
     const wmDrag &drag = drag_info.drag_data;
+    Main *bmain = CTX_data_main(C);
 
     /* Resolve a local image, importing the asset first if the drag came from the asset browser. */
     Image *image = nullptr;
     if (ID *image_id = WM_drag_get_local_ID_or_import_from_asset(C, &drag, ID_IM)) {
       image = id_cast<Image *>(image_id);
     }
+    else if (drag.type == WM_DRAG_ASSET) {
+      /* #WM_drag_get_local_ID_or_import_from_asset() only handles blend-library assets; on-disk
+       * image libraries have no blend-library import method and fall through here. */
+      if (wmDragAsset *asset_drag = WM_drag_get_asset_data(&drag, ID_IM)) {
+        image = ed::asset::resolve_image_from_asset(*bmain, *asset_drag->asset);
+      }
+    }
+    else if (drag.type == WM_DRAG_ASSET_LIST) {
+      if (const wmDragAssetListItem *item = first_image_item_in_list(drag)) {
+        if (item->is_external) {
+          image = ed::asset::resolve_image_from_asset(*bmain,
+                                                      *item->asset_data.external_info->asset);
+        }
+        else {
+          image = id_cast<Image *>(item->asset_data.local_id);
+        }
+      }
+    }
     else if (drag.type == WM_DRAG_PATH) {
       if (const char *path = WM_drag_get_single_path(&drag)) {
-        image = BKE_image_load_exists(CTX_data_main(C), path, nullptr);
+        image = BKE_image_load_exists(bmain, path, nullptr);
         if (image) {
           /* #BKE_image_load_exists takes a loan on the user count regardless of whether the
            * block was newly created or already existed; the sole consumer
@@ -1035,6 +1086,62 @@ static void image_grid_library_selector_menu_draw(bContext * /*C*/, Layout *layo
   MEM_delete(items);
 }
 
+/* Ctrl-Wheel cycling for the library-selector button (#button_supports_cycling /
+ * #do_but_BLOCK): steps through the same library list the menu draws, in the same order, and
+ * applies the change through #image_grid_set_library (shared with #IMAGE_GRID_OT_set_library so
+ * behavior matches picking an entry from the menu). */
+static bool image_grid_library_selector_menu_step(bContext *C, int direction, void *arg)
+{
+  const bool is_mask_slot = POINTER_AS_INT(arg) != 0;
+
+  const std::optional<ed::image_grid::ImageGridOwner> owner_opt =
+      ed::image_grid::image_grid_owner_from_context(*C);
+  if (!owner_opt) {
+    return false;
+  }
+  const ed::image_grid::ImageGridOwner owner = *owner_opt;
+  const ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner,
+                                                                                   is_mask_slot);
+
+  const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
+      /*include_readonly=*/true,
+      /*include_current_file=*/true,
+      /*include_remote_libraries=*/false,
+      /*include_separate_online_essentials=*/false,
+      /*exclude_image_libraries=*/false,
+      /*only_image_libraries=*/true);
+  if (!items) {
+    return false;
+  }
+
+  /* Real library entries only, same order as the menu (folder headings/separators skipped). */
+  Vector<int> values;
+  for (const EnumPropertyItem *item = items; item->identifier; item++) {
+    if (item->identifier[0]) {
+      values.append(item->value);
+    }
+  }
+  MEM_delete(items);
+
+  if (values.is_empty()) {
+    return false;
+  }
+
+  const int current_value = ed::asset::library_reference_to_enum_value(&state.filter.lib_ref);
+  int current_index = 0;
+  for (const int i : values.index_range()) {
+    if (values[i] == current_value) {
+      current_index = i;
+      break;
+    }
+  }
+  const int next_index = mod_i(current_index + direction, int(values.size()));
+  const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(
+      values[next_index]);
+
+  return ed::view3d::image_grid_set_library(*C, owner, is_mask_slot, new_ref);
+}
+
 static void draw_header_row(Layout &layout,
                             ed::view3d::ImageGridUIState &state,
                             const bContext &C,
@@ -1045,16 +1152,34 @@ static void draw_header_row(Layout &layout,
   Layout &row = layout.row(true);
   /* Library selector: a vertical menu of asset libraries (the operator's enum dropdown lays folder
    * headings out as side-by-side columns; this reads top to bottom). */
-  row.menu_fn(ed::view3d::image_grid_library_selector_label(state),
-              ICON_ASSET_MANAGER,
-              image_grid_library_selector_menu_draw,
-              POINTER_FROM_INT(is_mask_slot ? 1 : 0));
+  {
+    Block *block = row.block();
+    const int64_t buttons_num_before = block->buttons_ptrs.size();
+    row.menu_fn(ed::view3d::image_grid_library_selector_label(state),
+                ICON_ASSET_MANAGER,
+                image_grid_library_selector_menu_draw,
+                POINTER_FROM_INT(is_mask_slot ? 1 : 0));
+    /* Wire Ctrl-Wheel cycling (#button_supports_cycling / #do_but_BLOCK): a plain #menu_fn button
+     * has no RNA enum property to step through, so it is skipped unless a #menu_step_func is set
+     * explicitly. #button_type_set_menu_from_pulldown matches the type this button would get in a
+     * Panel/Toolbar layout (#Layout::item_menu) and avoids the `Menu` assert in
+     * #button_menu_step_poll. #Layout::item_menu already performs that conversion itself when the
+     * layout root is Panel/Toolbar (the N-panel sidebar case), leaving the button as
+     * #ButtonType::Menu already; only convert here for other roots (e.g. the popover) where it is
+     * still #ButtonType::Pulldown, otherwise #button_type_set_menu_from_pulldown's own precondition
+     * assert fails on the already-converted button. */
+    if (block->buttons_ptrs.size() != buttons_num_before) {
+      Button *but = block->buttons_ptrs.last().get();
+      button_func_menu_step_set(but, image_grid_library_selector_menu_step);
+      if (but->type == ButtonType::Pulldown) {
+        button_type_set_menu_from_pulldown(but);
+      }
+    }
+  }
   /* Catalog selector: opens a popover with the catalog tree of the active library. */
   image_grid_header_popover(
       row, C, "VIEW3D_PT_image_grid_catalog_selector", ICON_COLLAPSEMENU, is_mask_slot);
-  /* Display settings: preview thumbnail size (shared between texture and mask grids). */
-  image_grid_header_popover(row, C, "VIEW3D_PT_image_grid_display", ICON_IMGDISPLAY, is_mask_slot);
-  /* Name-match filter: master toggle + Map Types popover (no Tags). */
+    /* Name-match filter: master toggle + Map Types popover (no Tags). */
   {
     Layout &nm_row = row.row(true);
     const bool enabled = state.filter.name_match.enabled;
@@ -1071,6 +1196,8 @@ static void draw_header_row(Layout &layout,
     popover_row.context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
     popover_row.popover(&C, "VIEW3D_PT_image_grid_name_match_filter", "", ICON_DOWNARROW_HLT);
   }
+  /* Display settings: preview thumbnail size (shared between texture and mask grids). */
+  image_grid_header_popover(row, C, "VIEW3D_PT_image_grid_display", ICON_IMGDISPLAY, is_mask_slot);
 }
 
 static void build_image_grid(Layout &layout,
@@ -1214,6 +1341,11 @@ void template_asset_image_grid(
   if (!prop || RNA_property_type(prop) != PROP_POINTER) {
     return;
   }
+
+  /* Expose the texture-slot pointer to the whole template (tiles included), not just the
+   * New/Open/Browse row below, so widget drop-target lookups (e.g. #brush_texture_slot_drop_target_get)
+   * can identify this slot regardless of where in the grid the pointer lands. */
+  layout->context_ptr_set("image_grid_target", ptr);
 
   const bool is_mask_slot = ed::view3d::image_grid_slot_is_mask(*ptr);
   ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, is_mask_slot);

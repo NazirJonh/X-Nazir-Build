@@ -8,6 +8,7 @@
 
 #include <cstdlib>
 
+#include "DNA_asset_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
 
@@ -1508,19 +1509,13 @@ static int rna_AssetShelf_asset_library_get(PointerRNA *ptr)
   return ed::asset::library_reference_to_enum_value(&shelf->settings.asset_library_reference);
 }
 
-static void rna_AssetShelf_asset_library_update(bContext *C, PointerRNA *ptr)
+static void rna_AssetShelf_asset_library_update(bContext * /*C*/, PointerRNA *ptr)
 {
   AssetShelf *shelf = static_cast<AssetShelf *>(ptr->data);
-  if (!shelf->is_popup || !C) {
+  if (!shelf->is_popup) {
     return;
   }
-  wmWindowManager *wm = CTX_wm_manager(C);
-  if (!wm) {
-    return;
-  }
-  if (ed::asset::shelf::popup_library_catalog_settings_store(*wm, *shelf)) {
-    WM_file_tag_modified();
-  }
+  ed::asset::shelf::popup_library_catalog_settings_store(*shelf);
 }
 
 static void rna_AssetShelf_asset_library_set(PointerRNA *ptr, int value)
@@ -1543,19 +1538,76 @@ static int rna_AssetShelf_preview_size_preset_get(PointerRNA *ptr)
 {
   const AssetShelf *shelf = static_cast<const AssetShelf *>(ptr->data);
   const int size = shelf->settings.preview_size;
-  if (size <= 48) {
-    return 32;
+  
+  /* Use user preferences for size thresholds */
+  const int small_size = U.asset_shelf_preview_size_small;
+  const int medium_size = U.asset_shelf_preview_size_medium;
+  const int large_size = U.asset_shelf_preview_size_large;
+  
+  /* Find the midpoint between small and medium */
+  const int small_medium_threshold = (small_size + medium_size) / 2;
+  /* Find the midpoint between medium and large */
+  const int medium_large_threshold = (medium_size + large_size) / 2;
+  
+  if (size <= small_medium_threshold) {
+    return small_size;
   }
-  if (size <= 82) {
-    return 56;
+  if (size <= medium_large_threshold) {
+    return medium_size;
   }
-  return 96;
+  return large_size;
 }
 
 static void rna_AssetShelf_preview_size_preset_set(PointerRNA *ptr, int value)
 {
   AssetShelf *shelf = static_cast<AssetShelf *>(ptr->data);
   shelf->settings.preview_size = value;
+}
+
+static const EnumPropertyItem *rna_AssetShelf_preview_size_preset_itemf(bContext * /*C*/,
+                                                                         PointerRNA * /*ptr*/,
+                                                                         PropertyRNA * /*prop*/,
+                                                                         bool *r_free)
+{
+  EnumPropertyItem *items = nullptr;
+  int totitem = 0;
+
+  EnumPropertyItem tmp = {0};
+  
+  /* Small */
+  tmp.value = U.asset_shelf_preview_size_small;
+  tmp.identifier = "SMALL";
+  tmp.icon = ICON_SHORTDISPLAY;
+  tmp.name = "Small";
+  char small_desc[64];
+  SNPRINTF(small_desc, "Small preview size (%d px)", U.asset_shelf_preview_size_small);
+  tmp.description = small_desc;
+  RNA_enum_item_add(&items, &totitem, &tmp);
+  
+  /* Medium */
+  tmp.value = U.asset_shelf_preview_size_medium;
+  tmp.identifier = "MEDIUM";
+  tmp.icon = ICON_IMGDISPLAY;
+  tmp.name = "Medium";
+  char medium_desc[64];
+  SNPRINTF(medium_desc, "Medium preview size (%d px)", U.asset_shelf_preview_size_medium);
+  tmp.description = medium_desc;
+  RNA_enum_item_add(&items, &totitem, &tmp);
+  
+  /* Large */
+  tmp.value = U.asset_shelf_preview_size_large;
+  tmp.identifier = "LARGE";
+  tmp.icon = ICON_LONGDISPLAY;
+  tmp.name = "Large";
+  char large_desc[64];
+  SNPRINTF(large_desc, "Large preview size (%d px)", U.asset_shelf_preview_size_large);
+  tmp.description = large_desc;
+  RNA_enum_item_add(&items, &totitem, &tmp);
+
+  RNA_enum_item_end(&items, &totitem);
+  *r_free = true;
+
+  return items;
 }
 
 /**
@@ -3306,15 +3358,16 @@ static void rna_def_asset_shelf(BlenderRNA *brna)
   RNA_def_property_int_sdna(prop, nullptr, "settings.recent_max_count");
   RNA_def_property_range(prop, 1, 200);
   RNA_def_property_ui_text(
-      prop, "Recent Brushes", "Maximum number of brushes kept in the Recent list");
+      prop, "Recent Items", "Maximum number of assets kept in the Recent list");
   RNA_def_property_update(
       prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_AssetShelf_recent_max_count_update");
 
   {
+    /* Base enum items - will be overridden by itemf function with values from user preferences */
     static const EnumPropertyItem preview_size_preset_items[] = {
-        {32, "SMALL", ICON_SHORTDISPLAY, "Small", "Small preview size (32 px)"},
-        {56, "MEDIUM", ICON_IMGDISPLAY, "Medium", "Medium preview size (56 px)"},
-        {96, "LARGE", ICON_LONGDISPLAY, "Large", "Large preview size (96 px)"},
+        {32, "SMALL", ICON_SHORTDISPLAY, "Small", "Small preview size"},
+        {56, "MEDIUM", ICON_IMGDISPLAY, "Medium", "Medium preview size"},
+        {96, "LARGE", ICON_LONGDISPLAY, "Large", "Large preview size"},
         {0, nullptr, 0, nullptr, nullptr},
     };
     prop = RNA_def_property(srna, "preview_size_preset", PROP_ENUM, PROP_NONE);
@@ -3322,7 +3375,7 @@ static void rna_def_asset_shelf(BlenderRNA *brna)
     RNA_def_property_enum_funcs(prop,
                                 "rna_AssetShelf_preview_size_preset_get",
                                 "rna_AssetShelf_preview_size_preset_set",
-                                nullptr);
+                                "rna_AssetShelf_preview_size_preset_itemf");
     RNA_def_property_ui_text(
         prop, "Preview Size", "Size of the asset preview thumbnails as a preset");
     RNA_def_property_update(
@@ -3460,6 +3513,7 @@ static void rna_def_grid_view_settings(BlenderRNA *brna)
   prop = RNA_def_property(srna, "asset_library_reference", PROP_ENUM, PROP_NONE);
   RNA_def_property_flag(prop, PROP_IDPROPERTY);
   RNA_def_property_enum_items(prop, rna_enum_asset_library_type_items);
+  RNA_def_property_enum_default(prop, ASSET_LIBRARY_LOCAL);
   RNA_def_property_enum_funcs(prop, nullptr, nullptr, "rna_asset_library_ui_reference_itemf");
   RNA_def_property_ui_text(prop, "Asset Library", "Asset library shown in the grid");
 

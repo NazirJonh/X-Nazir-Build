@@ -10,6 +10,7 @@
 
 #include "BLI_function_ref.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_vector.hh"
 #include "DNA_asset_types.h"
 
 namespace blender {
@@ -24,6 +25,7 @@ struct StringPropertySearchVisitParams;
 namespace asset_system {
 class AssetCatalog;
 class AssetCatalogPath;
+class AssetLibrary;
 class AssetRepresentation;
 }  // namespace asset_system
 
@@ -76,6 +78,36 @@ const EnumPropertyItem *library_reference_to_rna_enum_itemf(
  * their on-disk location is just a cache.
  */
 const EnumPropertyItem *custom_libraries_rna_enum_itemf(bool only_image_libraries = false);
+
+/**
+ * The real libraries that #ASSET_LIBRARY_ALL currently expands to, in the same order as
+ * #library_reference_to_rna_enum_itemf (already-loaded custom/on-disk libraries in Preferences
+ * order first, then any other loaded library the itemf call excluded, so the result stays
+ * complete even for libraries outside the given filter flags). Only *loaded* libraries are
+ * returned -- this reflects what is available to filter right now, not every configured library
+ * (use #Main + Preferences iteration for that).
+ *
+ * \param exclude_image_libraries, only_image_libraries: same meaning as on
+ * #library_reference_to_rna_enum_itemf.
+ */
+Vector<asset_system::AssetLibrary *> all_mode_libraries(bool exclude_image_libraries,
+                                                        bool only_image_libraries);
+
+/**
+ * Request every real library behind #ASSET_LIBRARY_ALL to start loading, regardless of current
+ * load state -- unlike #all_mode_libraries() (which only reports already-loaded libraries), this
+ * is what makes them loaded in the first place. Without this, a UI surface that only ever queries
+ * #all_mode_libraries() for the merged "All" reference never requests any real library's
+ * #AssetList, so that query stays incomplete until the user separately selects a real library
+ * elsewhere. Cheap to call every redraw: the underlying fetch early-outs unless a list is new or
+ * stale.
+ *
+ * \param exclude_image_libraries, only_image_libraries: same meaning as on
+ * #library_reference_to_rna_enum_itemf.
+ */
+void fetch_all_mode_libraries(const bContext &C,
+                              bool exclude_image_libraries,
+                              bool only_image_libraries);
 
 /**
  * Find the catalog with the given path in the library. Creates it in case it doesn't exist.

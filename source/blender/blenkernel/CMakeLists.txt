@@ -45,6 +45,7 @@ set(SRC
   intern/armature_update.cc
   intern/asset.cc
   intern/asset_browser_settings.cc
+  intern/asset_catalog_memory.cc
   intern/asset_edit.cc
   intern/asset_weak_reference.cc
   intern/asset_shelf_catalog_state.cc
@@ -329,6 +330,7 @@ set(SRC
   BKE_appdir.hh
   BKE_armature.hh
   BKE_asset.hh
+  BKE_asset_catalog_memory.hh
   BKE_asset_edit.hh
   BKE_attribute.h
   BKE_attribute.hh
@@ -756,7 +758,9 @@ if(WITH_GTESTS)
     intern/anim_data_test.cc
     intern/armature_deform_test.cc
     intern/armature_test.cc
+    intern/asset_catalog_memory_test.cc
     intern/asset_metadata_test.cc
+    intern/asset_map_tag_test.cc
     intern/name_matching_filter_test.cc
     intern/attribute_storage_test.cc
     intern/bake_items_serialize_test.cc

@@ -1138,6 +1138,7 @@ static void but_update_old_active_from_new(Button *oldbut, Button *but)
   oldbut->icon = but->icon;
   oldbut->iconadd = but->iconadd;
   oldbut->alignnr = but->alignnr;
+  oldbut->preview_size_px = but->preview_size_px;
 
   oldbut->text_direction = but->text_direction;
 
@@ -4424,7 +4425,7 @@ static void but_update_ex(Button *but, const bool validate)
     case ButtonType::Menu:
       if (BLI_rctf_size_x(&but->rect) >= (UI_UNIT_X * 2)) {
         /* only needed for menus in popup blocks that don't recreate buttons on redraw */
-        if (but->block->flag & BLOCK_LOOP) {
+        if ((but->block->flag & BLOCK_LOOP) && !(but->drawflag & BUT_MENU_KEEP_LABEL)) {
           if (but->rnaprop && (RNA_property_type(but->rnaprop) == PROP_ENUM)) {
             const int value_enum = RNA_property_enum_get(&but->rnapoin, but->rnaprop);
 
@@ -4437,7 +4438,13 @@ static void but_update_ex(Button *but, const bool validate)
                     &item))
             {
               but->str = item.name;
-              but->icon = item.icon;
+              /* Keep a button-level icon when the active enum item has none. Asset-library
+               * selectors pass #ICON_ASSET_MANAGER to #Layout::prop, but their enum items use
+               * #ICON_NONE — overwriting here would clear that decorative icon in #BLOCK_LOOP
+               * popovers (e.g. the ID browser). */
+              if (item.icon != ICON_NONE) {
+                but->icon = item.icon;
+              }
             }
           }
         }
@@ -5563,11 +5570,26 @@ int preview_tile_size_x(const int size_px)
   return round_fl_to_int((size_px / 20.0f) * UI_UNIT_X + 2.0f * pad);
 }
 
+float preview_tile_text_scale(const int preview_size_px)
+{
+  if (preview_size_px >= PREVIEW_TILE_TEXT_SCALE_THRESHOLD) {
+    return 1.0f;
+  }
+  return float(preview_size_px) / PREVIEW_TILE_TEXT_SCALE_THRESHOLD;
+}
+
 int preview_tile_size_y(const int size_px)
 {
-  const float font_height = UI_UNIT_Y;
+  float font_height = UI_UNIT_Y;
   /* Add some extra padding to make things less tight vertically. */
-  const float pad = PREVIEW_TILE_PAD;
+  float pad = PREVIEW_TILE_PAD;
+
+  /* Scale down font height and padding for small preview sizes to fit more items vertically.
+   * This applies to Asset Browser and Asset Shelf. */
+  if (const float scale_factor = preview_tile_text_scale(size_px); scale_factor < 1.0f) {
+    font_height = std::max(font_height * scale_factor, float(PREVIEW_TILE_TEXT_MIN_HEIGHT));
+    pad = std::max(pad * scale_factor, 1.0f);
+  }
 
   return round_fl_to_int(preview_tile_size_y_no_label(size_px) + font_height + pad);
 }

@@ -19,6 +19,7 @@
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_name_matching.hh"
 
@@ -31,6 +32,7 @@ namespace blender {
 struct ARegion;
 struct AssetShelf;
 namespace asset_system {
+class AssetLibrary;
 class AssetRepresentation;
 }
 struct BMEdge;
@@ -1507,10 +1509,11 @@ struct ImageGridFilter {
    */
   blender::Set<std::string> enabled_catalog_paths;
   /**
-   * Per-asset-library catalog filters (session), keyed by
-   * #BKE_preferences_asset_library_identifier_from_ref(). Synced to #View3D DNA on persist.
+   * Library section keys the user has expanded in the All Libraries catalog selector.
+   * Keyed by #image_grid_library_key(). Absence means collapsed (default). Session-only —
+   * not written to DNA or Preferences.
    */
-  blender::Map<std::string, blender::Set<std::string>> enabled_catalogs_by_library;
+  blender::Set<std::string> expanded_library_section_keys;
   /**
    * Follow mode for the image-texture shelf. #Recent / #Favorites use #ASSET_LIBRARY_ALL and
    * ordered membership from #shelf_asset_lists_recent / #shelf_asset_lists_favorites.
@@ -1590,7 +1593,10 @@ struct ImageGridUIState {
 bool image_grid_is_mask_slot_from_context(const bContext &C);
 /** True when #ImageGridUIState::filter's library no longer exists in the Preferences (§5). */
 void image_grid_state_reset_catalog(ImageGridUIState &state);
-/** Store #enabled_catalog_paths into #enabled_catalogs_by_library for the current library. */
+/**
+ * Store #enabled_catalog_paths into #BKE_asset_catalog_memory_set_set / #_set_all for the current
+ * library (domain #"image_grid").
+ */
 void image_grid_catalog_commit_active(ImageGridUIState &state);
 /**
  * Exit Recent/Favorites membership (or clear a normal catalog filter) to "show all" for the
@@ -1598,6 +1604,13 @@ void image_grid_catalog_commit_active(ImageGridUIState &state);
  * do not wipe saved per-library catalog filters for #ASSET_LIBRARY_ALL.
  */
 void image_grid_filter_set_show_all(ImageGridUIState &state);
+/**
+ * Clear every library's saved catalog filter at once -- the global "All" item at the top of the
+ * catalog-selector tree in All-Libraries mode. Distinct from #image_grid_filter_set_show_all(),
+ * which only clears the currently active library's filter (meaningless when #ImageGridFilter::
+ * lib_ref is #ASSET_LIBRARY_ALL, since that library has no per-library filter of its own).
+ */
+void image_grid_filter_set_show_all_for_all_libraries(ImageGridUIState &state);
 /**
  * Enter Recent or Favorites membership: set #lib_ref to #ASSET_LIBRARY_ALL, clear catalog paths,
  * and set #catalog_mode. Commits the previous library's catalog filter first when leaving a
@@ -1609,6 +1622,28 @@ void image_grid_filter_set_membership(ImageGridUIState &state,
 void image_grid_catalog_swap_library(ImageGridUIState &state,
                                      const AssetLibraryReference &old_lib_ref,
                                      const AssetLibraryReference &new_lib_ref);
+/**
+ * Position-independent identifier for \a lib_ref, stable across a Preferences reorder (same key
+ * #BKE_preferences_asset_library_identifier_from_ref returns for catalog-memory lookup).
+ */
+std::string image_grid_library_key(const AssetLibraryReference &lib_ref);
+/**
+ * Loaded libraries that contribute to #ASSET_LIBRARY_ALL filtering / All-mode catalog sections.
+ * Ordered like the image-grid library selector (#library_reference_to_rna_enum_itemf with the same
+ * flags as #rna_image_grid_library_itemf): Current File, Essentials, then Preferences image
+ * libraries in listbase/folder order. Membership still comes from #AssetLibrary::foreach_loaded
+ * (same remote-library experimental gate; skip libraries with no #library_reference()). Loaded
+ * libraries that are not in that selector (e.g. a still-cached non-image library) are appended
+ * after the selector-ordered entries so filtering stays complete.
+ */
+blender::Vector<asset_system::AssetLibrary *> image_grid_all_mode_libraries();
+/**
+ * Kick off (or refresh) an #ed::asset::list::storage_fetch() for every real library that
+ * #image_grid_all_mode_libraries() would enumerate, regardless of whether it is loaded yet.
+ * Needed because #ASSET_LIBRARY_ALL's own #storage_fetch() only warms the unrelated built-in
+ * merged file-list, not each real library's own #AssetList.
+ */
+void image_grid_fetch_all_mode_libraries(const bContext &C);
 void image_grid_notify_change(bContext &C, bool is_mask_slot = false);
 
 /**
@@ -1646,8 +1681,7 @@ bool image_grid_filter_matches_shelf(const ImageGridUIState &state, const AssetS
 void image_grid_catalog_sanitize_selection(ImageGridUIState &state);
 
 /**
- * Reverse of the stable #enabled_catalogs_by_library map key: reconstruct the full reference an
- * identifier names. Returns a default (#ASSET_LIBRARY_LOCAL) reference when \a key names a custom
+ * Reverse of #image_grid_library_key(): reconstruct the full reference an identifier names. Returns a default (#ASSET_LIBRARY_LOCAL) reference when \a key names a custom
  * library no longer present in the Preferences; callers must compare against \a key itself (not
  * the returned type) to distinguish that case from a legitimate "local" lookup.
  */

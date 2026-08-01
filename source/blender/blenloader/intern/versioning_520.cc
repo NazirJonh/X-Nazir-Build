@@ -999,17 +999,6 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
    * This is a pre-release feature, so files written before that change simply reset the image
    * grid's persisted library/catalog/row state to defaults instead of being migrated. */
 
-  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 46)) {
-    /* `id_browser_asset_library_ref` was added zeroed; `type == 0` is not a valid
-     * #eAssetLibraryType (#ASSET_LIBRARY_LOCAL is 1). Materialize the intended default. */
-    for (wmWindowManager &wm : bmain->wm) {
-      if (wm.id_browser_asset_library_ref.type == 0) {
-        wm.id_browser_asset_library_ref.type = ASSET_LIBRARY_LOCAL;
-        wm.id_browser_asset_library_ref.custom_library_index = -1;
-      }
-    }
-  }
-
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 47)) {
     /* image_grid library selection: migrate the type/index pair into a real reference. */
     for (bScreen &screen : bmain->screens) {
@@ -1030,6 +1019,31 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
              * that guess into every file on disk is exactly what the spec's §2 rejects.
              * #library_reference_ensure_resolved() back-fills lazily, only for references that are
              * actually used. */
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 50)) {
+    /* Asset Browser tool header: hosts the buttons row (Import Settings, type filters, search,
+     * display mode, ...) once the area is too narrow to share the main header line with the
+     * View/Select/Library/Catalog/Asset menus. Existence is driven entirely by
+     * file_tool_header_region_poll() (space_file.cc) via #RGN_FLAG_POLL_FAILED -- deliberately
+     * *not* setting #RGN_FLAG_HIDDEN here, which is a separate, independent flag poll() never
+     * touches; a region left with it set would stay hidden forever regardless of poll(). */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype != SPACE_FILE) {
+            continue;
+          }
+          ListBaseT<ARegion> *regionbase = (&sl == area.spacedata.first) ? &area.regionbase :
+                                                                           &sl.regionbase;
+          ARegion *tool_header = do_versions_add_region_if_not_found(
+              regionbase, RGN_TYPE_TOOL_HEADER, "Asset Browser Tool Header", RGN_TYPE_HEADER);
+          if (tool_header) {
+            tool_header->alignment = RGN_ALIGN_TOP;
           }
         }
       }

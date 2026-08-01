@@ -12,10 +12,14 @@
  */
 
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
+
+#include "AS_asset_library.hh"
 
 #include "BKE_preferences.h"
 
 #include "DNA_userdef_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "UI_resources.hh"
 
@@ -23,6 +27,7 @@
 #include "RNA_enum_types.hh"
 
 #include "ED_asset_library.hh"
+#include "ED_asset_list.hh"
 
 namespace blender::ed::asset {
 
@@ -67,13 +72,23 @@ AssetLibraryReference library_reference_from_enum_value(int value)
 
   /* Simple case: Predefined repository, just set the value. */
   if (value < ASSET_LIBRARY_CUSTOM) {
+    /* Callers are expected to pass a value that came from the asset library enum, so an unknown
+     * builtin is a bug in the caller and must be caught in debug builds. Release builds still
+     * fall back to a valid library rather than storing a garbage type, mirroring the "custom
+     * library not found" fallback below. */
+    if (!ELEM(value,
+              ASSET_LIBRARY_ALL,
+              ASSET_LIBRARY_LOCAL,
+              ASSET_LIBRARY_ESSENTIALS,
+              ASSET_LIBRARY_ONLINE_ESSENTIALS))
+    {
+      BLI_assert_unreachable();
+      library.type = ASSET_LIBRARY_ALL;
+      library.custom_library_index = -1;
+      return library;
+    }
     library.type = eAssetLibraryType(value);
     library.custom_library_index = -1;
-    BLI_assert(ELEM(value,
-                    ASSET_LIBRARY_ALL,
-                    ASSET_LIBRARY_LOCAL,
-                    ASSET_LIBRARY_ESSENTIALS,
-                    ASSET_LIBRARY_ONLINE_ESSENTIALS));
     return library;
   }
 
@@ -298,6 +313,87 @@ const EnumPropertyItem *custom_libraries_rna_enum_itemf(const bool only_image_li
 
   RNA_enum_item_end(&item, &totitem);
   return item;
+}
+
+Vector<asset_system::AssetLibrary *> all_mode_libraries(const bool exclude_image_libraries,
+                                                        const bool only_image_libraries)
+{
+  const bool skip_remote_libraries = !USER_EXPERIMENTAL_TEST(&U, use_remote_asset_libraries);
+
+  Map<std::string, asset_system::AssetLibrary *> loaded_by_key;
+  asset_system::AssetLibrary::foreach_loaded(
+      [&](asset_system::AssetLibrary &library) {
+        if (skip_remote_libraries && library.remote_url().has_value()) {
+          return;
+        }
+        const std::optional<AssetLibraryReference> lib_ref = library.library_reference();
+        if (!lib_ref.has_value()) {
+          return;
+        }
+        loaded_by_key.add(BKE_preferences_asset_library_identifier_from_ref(&U, &*lib_ref),
+                          &library);
+      },
+      /*include_all_library=*/false);
+
+  Vector<asset_system::AssetLibrary *> libraries;
+  Set<std::string> emitted;
+
+  const EnumPropertyItem *items = library_reference_to_rna_enum_itemf(
+      /*include_readonly=*/true,
+      /*include_current_file=*/true,
+      /*include_remote_libraries=*/false,
+      /*include_separate_online_essentials=*/false,
+      exclude_image_libraries,
+      only_image_libraries);
+  if (items) {
+    for (const EnumPropertyItem *item = items; item->identifier; item++) {
+      if (item->identifier[0] == '\0') {
+        continue; /* Separator or folder heading. */
+      }
+      if (item->value == ASSET_LIBRARY_ALL) {
+        continue;
+      }
+      const AssetLibraryReference ref = library_reference_from_enum_value(item->value);
+      const std::string key = BKE_preferences_asset_library_identifier_from_ref(&U, &ref);
+      if (asset_system::AssetLibrary *const *library = loaded_by_key.lookup_ptr(key)) {
+        libraries.append(*library);
+        emitted.add(key);
+      }
+    }
+    MEM_delete(items);
+  }
+
+  /* Keep filtering complete for loaded libraries outside the selector's own filter flags. */
+  for (const auto item : loaded_by_key.items()) {
+    if (!emitted.contains(item.key)) {
+      libraries.append(item.value);
+    }
+  }
+  return libraries;
+}
+
+void fetch_all_mode_libraries(const bContext &C,
+                              const bool exclude_image_libraries,
+                              const bool only_image_libraries)
+{
+  const EnumPropertyItem *items = library_reference_to_rna_enum_itemf(
+      /*include_readonly=*/true,
+      /*include_current_file=*/true,
+      /*include_remote_libraries=*/false,
+      /*include_separate_online_essentials=*/false,
+      exclude_image_libraries,
+      only_image_libraries);
+  if (!items) {
+    return;
+  }
+  for (const EnumPropertyItem *item = items; item->identifier; item++) {
+    if (item->identifier[0] == '\0' || item->value == ASSET_LIBRARY_ALL) {
+      continue;
+    }
+    const AssetLibraryReference ref = library_reference_from_enum_value(item->value);
+    list::storage_fetch(&ref, &C);
+  }
+  MEM_delete(items);
 }
 
 }  // namespace blender::ed::asset

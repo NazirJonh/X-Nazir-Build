@@ -41,6 +41,8 @@
 #include "WM_keymap.hh"
 #include "WM_types.hh"
 
+#include "ED_asset_shelf.hh"
+
 namespace blender {
 
 const EnumPropertyItem rna_enum_preference_section_items[] = {
@@ -336,6 +338,24 @@ static void rna_userdef_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *
 {
   WM_main_add_notifier(NC_WINDOW, nullptr);
   USERDEF_TAG_DIRTY;
+}
+
+static void rna_UserDef_asset_shelf_recent_brushes_max_update(Main * /*bmain*/,
+                                                              Scene * /*scene*/,
+                                                              PointerRNA * /*ptr*/)
+{
+  ed::asset::shelf::shelf_asset_lists_recent_max_preferences_changed();
+  USERDEF_TAG_DIRTY;
+  WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+}
+
+static void rna_UserDef_asset_shelf_recent_images_max_update(Main * /*bmain*/,
+                                                             Scene * /*scene*/,
+                                                             PointerRNA * /*ptr*/)
+{
+  ed::asset::shelf::shelf_asset_lists_recent_max_preferences_changed();
+  USERDEF_TAG_DIRTY;
+  WM_main_add_notifier(NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
 }
 
 static void rna_userdef_update_compact_tabs(Main *bmain, Scene *scene, PointerRNA *ptr)
@@ -6054,6 +6074,53 @@ static void rna_def_userdef_edit(BlenderRNA *brna)
       prop,
       "Connect Movie Strips by Default",
       "Connect newly added movie strips by default if they have multiple channels");
+
+  prop = RNA_def_property(srna, "asset_shelf_recent_brushes_max", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "asset_shelf_recent_brushes_max");
+  RNA_def_property_range(prop, 1, 200);
+  RNA_def_property_ui_text(
+      prop,
+      "Recent Brushes",
+      "Maximum number of brushes kept in asset shelf Recent lists");
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_UserDef_asset_shelf_recent_brushes_max_update");
+
+  prop = RNA_def_property(srna, "asset_shelf_recent_images_max", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "asset_shelf_recent_images_max");
+  RNA_def_property_range(prop, 1, 200);
+  RNA_def_property_ui_text(
+      prop,
+      "Recent Images",
+      "Maximum number of images kept in the image asset shelf Recent list");
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, "rna_UserDef_asset_shelf_recent_images_max_update");
+
+  prop = RNA_def_property(srna, "asset_shelf_preview_size_small", PROP_INT, PROP_PIXEL);
+  RNA_def_property_int_sdna(prop, nullptr, "asset_shelf_preview_size_small");
+  RNA_def_property_range(prop, 24, 256);
+  RNA_def_property_ui_text(
+      prop,
+      "Small Preview Size",
+      "Preview size (in pixels) for Asset Shelf \"Small\" preset button");
+  RNA_def_property_update(prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+
+  prop = RNA_def_property(srna, "asset_shelf_preview_size_medium", PROP_INT, PROP_PIXEL);
+  RNA_def_property_int_sdna(prop, nullptr, "asset_shelf_preview_size_medium");
+  RNA_def_property_range(prop, 24, 256);
+  RNA_def_property_ui_text(
+      prop,
+      "Medium Preview Size",
+      "Preview size (in pixels) for Asset Shelf \"Medium\" preset button");
+  RNA_def_property_update(prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
+
+  prop = RNA_def_property(srna, "asset_shelf_preview_size_large", PROP_INT, PROP_PIXEL);
+  RNA_def_property_int_sdna(prop, nullptr, "asset_shelf_preview_size_large");
+  RNA_def_property_range(prop, 24, 256);
+  RNA_def_property_ui_text(
+      prop,
+      "Large Preview Size",
+      "Preview size (in pixels) for Asset Shelf \"Large\" preset button");
+  RNA_def_property_update(prop, NC_SPACE | ND_REGIONS_ASSET_SHELF, nullptr);
 
   /* duplication linking */
   prop = RNA_def_property(srna, "use_duplicate_mesh", PROP_BOOLEAN, PROP_NONE);

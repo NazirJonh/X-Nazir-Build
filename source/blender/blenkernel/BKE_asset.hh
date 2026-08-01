@@ -9,8 +9,10 @@
 #pragma once
 
 #include <optional>
+#include <string>
 
 #include "BLI_compiler_attrs.h"
+#include "BLI_string_ref.hh"
 
 #include "DNA_asset_types.h"
 #include "DNA_screen_types.h"
@@ -122,5 +124,28 @@ std::optional<bool> BKE_asset_catalog_state_get_collapsed(
 /** Drop entries whose last-used time is older than `max_age_seconds`. */
 void BKE_asset_catalog_state_cleanup_old(ListBaseT<AssetCatalogState> &catalog_state_list,
                                          uint32_t max_age_seconds);
+
+/* --------------------------------------------------------------------------
+ * Map-tag namespace helpers (`map:` prefix).
+ * These are type-agnostic: they work with any AssetMetaData, not just images.
+ * -------------------------------------------------------------------------- */
+
+/**
+ * Returns true when \a tag_name starts with `"map:"` (case-insensitive).
+ * An empty string returns false.
+ */
+bool BKE_asset_metadata_tag_is_map_tag(StringRef tag_name);
+
+/** Remove all tags whose name starts with `"map:"` (case-insensitive). */
+void BKE_asset_metadata_map_tags_clear(AssetMetaData *asset_data);
+
+/**
+ * Ensure a tag `"map:" + map_type_identifier` exists on \a asset_data.
+ * Caller is responsible for calling #BKE_asset_metadata_map_tags_clear first if
+ * the old map type must be replaced.
+ * \return The tag, or nullptr when \a map_type_identifier is empty.
+ */
+AssetTag *BKE_asset_metadata_map_tag_ensure(AssetMetaData *asset_data,
+                                            StringRef map_type_identifier);
 
 }  // namespace blender

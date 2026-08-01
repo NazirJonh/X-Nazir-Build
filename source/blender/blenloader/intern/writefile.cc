@@ -125,6 +125,7 @@
 #include "BKE_main_namemap.hh"
 #include "BKE_node.hh"
 #include "BKE_packedFile.hh"
+#include "BKE_asset_catalog_memory.hh"
 #include "BKE_preferences.h"
 #include "BKE_report.hh"
 #include "BKE_workspace.hh"
@@ -649,6 +650,7 @@ static void mywrite_id_begin(WriteData *wd, ID *id)
 {
   BLI_assert(wd->is_writing_id == false);
   wd->is_writing_id = true;
+  wd->validation_data.current_id = id;
 
   BLI_assert(wd->validation_data.per_id_addresses_set.is_empty());
 
@@ -718,6 +720,7 @@ static void mywrite_id_end(WriteData *wd, ID * /*id*/)
 
   wd->validation_data.per_id_addresses_set.clear();
   wd->per_id_written_shared_addresses.clear();
+  wd->validation_data.current_id = nullptr;
 
   BLI_assert(wd->is_writing_id == true);
   wd->is_writing_id = false;
@@ -736,7 +739,10 @@ static void mywrite_id_end(WriteData *wd, ID * /*id*/)
  * \note Currently only checks that #BLO_CODE_DATA blocks written as part of an ID data never match
  * an already written one for the same ID.
  */
-static bool write_at_address_validate(WriteData *wd, const int filecode, const void *address)
+static bool write_at_address_validate(WriteData *wd,
+                                      const int filecode,
+                                      const void *address,
+                                      const int struct_nr)
 {
   /* Skip in undo case. */
   if (wd->use_memfile) {
@@ -745,9 +751,19 @@ static bool write_at_address_validate(WriteData *wd, const int filecode, const v
 
   if (wd->is_writing_id && filecode == BLO_CODE_DATA) {
     if (!wd->validation_data.per_id_addresses_set.add(address)) {
+      const ID *id = wd->validation_data.current_id;
+      /* #DNA_struct_identifier() takes a mutable #SDNA because it lazily builds the alias data,
+       * which is a cache; it does not change what is written. */
+      const char *struct_name = (struct_nr >= 0) ? DNA_struct_identifier(
+                                                        const_cast<SDNA *>(wd->sdna), struct_nr) :
+                                                    "<unknown>";
       CLOG_ERROR(&LOG,
-                 "Same identifier (old address) used several times for a same ID, skipping this "
-                 "block to avoid critical corruption of the Blender file.");
+                 "Same identifier (old address) used several times for a same ID (id=%s, "
+                 "struct=%s, address=%p), skipping this block to avoid critical corruption of "
+                 "the Blender file.",
+                 id ? id->name : "<unknown>",
+                 struct_name,
+                 address);
       return false;
     }
   }
@@ -878,7 +894,7 @@ static void writestruct_at_address_nr(WriteData *wd,
     return;
   }
 
-  if (!write_at_address_validate(wd, filecode, adr)) {
+  if (!write_at_address_validate(wd, filecode, adr, struct_nr)) {
     return;
   }
 
@@ -987,7 +1003,8 @@ static void writedata(
     return;
   }
 
-  if (!write_at_address_validate(wd, filecode, adr)) {
+  /* Raw data, not a DNA struct, so there is no struct name to report. */
+  if (!write_at_address_validate(wd, filecode, adr, /*struct_nr=*/-1)) {
     return;
   }
 
@@ -1244,6 +1261,7 @@ static void write_userdef(BlendWriter *writer, const UserDef *userdef)
   for (const bUserAssetBrowserSettings &browser_settings : userdef->asset_browser_settings) {
     BKE_preferences_asset_browser_settings_blend_write(writer, &browser_settings);
   }
+  BKE_asset_catalog_memory_list_blend_write(writer, userdef->catalog_memory);
 
   for (const bUserNameMatchMapType &map_type : userdef->name_match_map_types) {
     writer->write_struct(&map_type);

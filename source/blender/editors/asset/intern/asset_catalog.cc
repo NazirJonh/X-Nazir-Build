@@ -12,6 +12,8 @@
 
 #include "BKE_main.hh"
 
+#include "BLI_string.h"
+#include "BLI_string_ref.hh"
 #include "BLI_string_utils.hh"
 
 #include "RNA_access.hh"
@@ -20,6 +22,8 @@
 #include "ED_asset_image_library.hh"
 
 #include "WM_api.hh"
+
+#include "DNA_userdef_types.h"
 
 namespace blender::ed::asset {
 
@@ -116,6 +120,9 @@ void catalog_rename(AssetLibrary *library,
   }
 
   AssetCatalog *catalog = catalog_service.find_catalog(catalog_id);
+  if (!catalog) {
+    return;
+  }
 
   const AssetCatalogPath new_path = catalog->path.parent() / StringRef(new_name);
   const AssetCatalogPath clean_new_path = new_path.cleanup();
@@ -240,6 +247,42 @@ void catalogs_set_save_catalogs_when_file_is_saved(const bool should_save)
 bool catalogs_get_save_catalogs_when_file_is_saved()
 {
   return asset_system::AssetLibrary::save_catalogs_when_file_is_saved;
+}
+
+/* --------------------------------------------------------------------------
+ * Root catalog name validation helpers.
+ * -------------------------------------------------------------------------- */
+
+CatalogNameValidateResult ED_asset_catalog_root_name_sanitize(const StringRef input,
+                                                              std::string &r_sanitized)
+{
+  /* Trim leading and trailing ASCII spaces. */
+  std::string s = std::string(input.trim());
+
+  if (s.empty()) {
+    return CatalogNameValidateResult::Empty;
+  }
+  /* Reject reserved path component names. */
+  if (s == "." || s == "..") {
+    return CatalogNameValidateResult::InvalidChars;
+  }
+  /* Reject any path separator characters — a root catalog name must be a single component. */
+  if (s.find('/') != std::string::npos || s.find('\\') != std::string::npos) {
+    return CatalogNameValidateResult::InvalidChars;
+  }
+  /* Reject names that are too long to fit in a catalog's simple_name field. */
+  if (s.size() >= MAX_NAME) {
+    return CatalogNameValidateResult::TooLong;
+  }
+  r_sanitized = std::move(s);
+  return CatalogNameValidateResult::Ok;
+}
+
+bool ED_asset_catalog_root_path_exists(const AssetLibrary &library,
+                                       const StringRef sanitized_name)
+{
+  const AssetCatalogPath path(sanitized_name);
+  return library.catalog_service().find_catalog_by_path(path) != nullptr;
 }
 
 }  // namespace blender::ed::asset

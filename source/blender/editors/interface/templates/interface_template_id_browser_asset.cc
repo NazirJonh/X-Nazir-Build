@@ -8,27 +8,26 @@
  * Asset-library source for the ID browser popover (see #interface_template_id_browser.cc).
  *
  * Kept separate from the ID browser itself because none of this is needed for the default
- * blend-data source. The state lives on the #wmWindowManager (not on a space), so the same
- * library/catalog selection applies wherever the popover is opened from.
+ * blend-data source. Library/catalog/name-match state lives in
+ * #wmWindowManager::id_browser_grid_view_settings (not on a space), so the same selection applies
+ * wherever the popover is opened from.
  */
 
 #include <optional>
 
 #include "AS_asset_catalog.hh"
-#include "AS_asset_catalog_tree.hh"
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 
-#include "BKE_asset.hh"
+#include "BKE_asset_catalog_memory.hh"
 #include "BKE_context.hh"
+#include "BKE_idtype.hh"
 #include "BKE_preferences.h"
-#include "BKE_screen.hh"
 
-#include "BLI_listbase_iterator.hh"
-#include "BLI_set.hh"
-#include "BLI_string_utf8.h"
+#include "BLI_map.hh"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
+#include "BLI_vector_set.hh"
 
 #include "BLT_translation.hh"
 
@@ -39,7 +38,13 @@
 
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
+#include "ED_asset_shelf.hh"
 #include "ED_screen.hh"
+
+/* Recent/Favorites asset-list registry (#ShelfAssetRef, #shelf_asset_lists_recent/favorites).
+ * Internal to `editors/asset/`, but already reused outside it the same way (see
+ * `view3d_image_grid_state.cc`, `brush_asset_ops.cc`) for the same Recent/Favorites feature. */
+#include "../../asset/intern/asset_shelf_asset_lists.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -50,37 +55,20 @@
 
 #include "UI_grid_view.hh"
 #include "UI_interface.hh"
-#include "UI_interface_c.hh"
-#include "UI_interface_layout.hh"
-#include "UI_resources.hh"
-#include "UI_tree_view.hh"
 
-#include "interface_grid_view.hh"
+#include "interface_grid_view_settings_utils.hh"
 #include "interface_templates_intern.hh"
 
 namespace blender::ui {
 
 /* -------------------------------------------------------------------- */
-/** \name Catalog selection state (wmWindowManager)
+/** \name Grid settings access
  * \{ */
 
-Set<std::string> id_browser_catalog_paths_get(const wmWindowManager &wm)
+PointerRNA id_browser_grid_settings_ptr(wmWindowManager &wm)
 {
-  Set<std::string> paths;
-  for (const AssetCatalogPathLink &link : wm.id_browser_enabled_catalog_paths) {
-    if (link.path != nullptr) {
-      paths.add(link.path);
-    }
-  }
-  return paths;
-}
-
-void id_browser_catalog_paths_set(wmWindowManager &wm, const Set<std::string> &paths)
-{
-  BKE_asset_catalog_path_list_free(wm.id_browser_enabled_catalog_paths);
-  for (const std::string &path : paths) {
-    BKE_asset_catalog_path_list_add_path(wm.id_browser_enabled_catalog_paths, path.c_str());
-  }
+  PointerRNA wm_ptr = RNA_id_pointer_create(&wm.id);
+  return RNA_pointer_get(&wm_ptr, "id_browser_grid_view_settings");
 }
 
 /** \} */
@@ -89,15 +77,33 @@ void id_browser_catalog_paths_set(wmWindowManager &wm, const Set<std::string> &p
 /** \name Library display
  * \{ */
 
-const AssetLibraryReference &id_browser_library_ref_ensure_valid(wmWindowManager &wm)
+AssetLibraryReference id_browser_library_ref_get(wmWindowManager &wm)
 {
-  ed::asset::library_reference_ensure_resolved(wm.id_browser_asset_library_ref);
-  return wm.id_browser_asset_library_ref;
+  PointerRNA settings = id_browser_grid_settings_ptr(wm);
+  AssetLibraryReference ref{};
+  if (settings.data) {
+    ref = grid_settings::library_ref_get(settings);
+  }
+  else {
+    ref.type = ASSET_LIBRARY_LOCAL;
+    ref.custom_library_index = -1;
+  }
+  ed::asset::library_reference_ensure_resolved(ref);
+  return ref;
+}
+
+void id_browser_library_ref_set(wmWindowManager &wm, const AssetLibraryReference &library_ref)
+{
+  PointerRNA settings = id_browser_grid_settings_ptr(wm);
+  if (settings.data != nullptr) {
+    grid_settings::library_ref_set(settings, library_ref);
+  }
 }
 
 bool id_browser_library_is_missing(wmWindowManager &wm)
 {
-  return ed::asset::library_reference_ensure_resolved(wm.id_browser_asset_library_ref) ==
+  AssetLibraryReference ref = id_browser_library_ref_get(wm);
+  return ed::asset::library_reference_ensure_resolved(ref) ==
          ed::asset::LibraryRefStatus::Missing;
 }
 
@@ -128,33 +134,187 @@ const char *id_browser_library_ui_name(const AssetLibraryReference &lib_ref)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Recent / Favorites membership
+ * \{ */
+
+std::string id_browser_shelf_idname(const short idcode)
+{
+  return std::string(ed::asset::shelf::ID_BROWSER_SHELF_IDNAME_PREFIX) +
+        BKE_idtype_idcode_to_name(idcode);
+}
+
+void id_browser_set_membership(wmWindowManager &wm, const grid_settings::CatalogMode mode)
+{
+  PointerRNA settings = id_browser_grid_settings_ptr(wm);
+  if (settings.data == nullptr) {
+    return;
+  }
+  /* Recent/Favorites are membership lists spanning every loaded library (mirrors
+   * #image_grid_filter_set_membership), not a per-library catalog filter, so the library selector
+   * is pointed at #ASSET_LIBRARY_ALL to keep #id_browser_library_is_missing() and the header label
+   * consistent with what #id_browser_foreach_membership_asset actually iterates. */
+  grid_settings::library_ref_set(settings, asset_system::all_library_reference());
+  grid_settings::catalog_mode_set_membership(settings, mode);
+  grid_view_session_reset_scroll(id_browser_grid_session_key);
+  WM_file_tag_modified();
+
+}
+
+void id_browser_foreach_membership_asset(const bContext &C,
+                                         const grid_settings::CatalogMode mode,
+                                         const short idcode,
+                                         FunctionRef<bool(asset_system::AssetRepresentation &)> fn)
+{
+  BLI_assert(ELEM(mode, grid_settings::CatalogMode::Recent, grid_settings::CatalogMode::Favorites));
+
+  const std::string shelf_idname = id_browser_shelf_idname(idcode);
+  const Span<ed::asset::shelf::ShelfAssetRef> membership =
+      (mode == grid_settings::CatalogMode::Recent) ?
+          ed::asset::shelf::shelf_asset_lists_recent(shelf_idname) :
+          ed::asset::shelf::shelf_asset_lists_favorites(shelf_idname);
+  if (membership.is_empty()) {
+    return;
+  }
+
+  /* Park matches at their list index, then emit in list order (most-recent/favorite-order first),
+   * not asset-library iteration order. Mirrors #image_grid_foreach_membership_item
+   * (view3d_image_grid_state.cc), the same pattern for the Image Grid's Recent/Favorites. */
+  VectorSet<ed::asset::shelf::ShelfAssetRef> ordered;
+  ordered.add_multiple(membership);
+
+  Vector<asset_system::AssetRepresentation *> ordered_assets(ordered.size(), nullptr);
+
+  const AssetLibraryReference all_lib_ref = asset_system::all_library_reference();
+  ed::asset::list::storage_fetch(&all_lib_ref, &C);
+  const ID_Type id_type = ID_Type(idcode);
+  ed::asset::list::iterate(all_lib_ref, [&](asset_system::AssetRepresentation &asset) {
+    if (asset.get_id_type() != id_type) {
+      return true;
+    }
+    const ed::asset::shelf::ShelfAssetRef ref = ed::asset::shelf::ShelfAssetRef::from_weak_reference(
+        asset.make_weak_reference());
+    const int64_t index = ordered.index_of_try(ref);
+    if (index < 0) {
+      return true;
+    }
+    ordered_assets[index] = &asset;
+    return true;
+  });
+
+  for (asset_system::AssetRepresentation *asset : ordered_assets) {
+    if (asset != nullptr && !fn(*asset)) {
+      break;
+    }
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Asset iteration
  * \{ */
+
+/**
+ * Drop catalog UUIDs that no longer exist in \a library (catalog renamed or removed elsewhere);
+ * otherwise a stale id would silently filter everything out with no way to see why.
+ */
+static void id_browser_catalog_selection_sanitize(const AssetLibraryReference &lib_ref,
+                                                   const asset_system::AssetLibrary &library)
+{
+  if (BKE_asset_catalog_memory_get_mode(&U, lib_ref, grid_settings::id_browser_catalog_memory_domain) !=
+      ASSET_CATALOG_MEMORY_SET)
+  {
+    return;
+  }
+
+  const Vector<bUUID> enabled_ids = BKE_asset_catalog_memory_get_set(
+      &U, lib_ref, grid_settings::id_browser_catalog_memory_domain);
+  if (enabled_ids.is_empty()) {
+    return;
+  }
+
+  Vector<bUUID> valid_ids;
+  for (const bUUID &catalog_id : enabled_ids) {
+    if (library.catalog_service().find_catalog(asset_system::CatalogID(catalog_id))) {
+      valid_ids.append(catalog_id);
+    }
+  }
+
+  if (valid_ids.size() == enabled_ids.size()) {
+    return;
+  }
+
+  if (valid_ids.is_empty()) {
+    BKE_asset_catalog_memory_set_all(&U, lib_ref, grid_settings::id_browser_catalog_memory_domain);
+  }
+  else {
+    BKE_asset_catalog_memory_set_set(
+        &U, lib_ref, grid_settings::id_browser_catalog_memory_domain, valid_ids.as_span());
+  }
+  /* Preferences-only write (#BKE_asset_catalog_memory_set_all/_set_set already flag
+   * #UserDef.runtime.is_dirty) -- this does not touch blend-file data, so the file itself must
+   * not be marked modified. */
+}
+
+static bool catalog_id_in_span(const Span<bUUID> ids, const bUUID &catalog_id)
+{
+  for (const bUUID &id : ids) {
+    if (BLI_uuid_equal(id, catalog_id)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 void id_browser_foreach_asset(const bContext &C,
                               const AssetLibraryReference &lib_ref,
                               const short idcode,
-                              const Set<std::string> &enabled_catalog_paths,
                               FunctionRef<bool(asset_system::AssetRepresentation &)> fn)
 {
   /* Asynchronous: the first draw may see an empty list. The block's asset listener (see
    * #id_browser_popover_draw) redraws the popover once the library is read. */
   ed::asset::list::storage_fetch(&lib_ref, &C);
 
-  const bool catalog_filtering_enabled = !enabled_catalog_paths.is_empty();
+  const bool all_libraries = lib_ref.type == ASSET_LIBRARY_ALL;
 
-  /* Build catalog filters once from the enabled paths; reused for every asset. */
+  Vector<bUUID> catalog_ids;
+  const eAssetCatalogMemoryMode mode = BKE_asset_catalog_memory_get_mode(
+      &U, lib_ref, grid_settings::id_browser_catalog_memory_domain);
+  if (!all_libraries && mode == ASSET_CATALOG_MEMORY_SET) {
+    catalog_ids = BKE_asset_catalog_memory_get_set(
+        &U, lib_ref, grid_settings::id_browser_catalog_memory_domain);
+  }
+
+  if (!all_libraries && !catalog_ids.is_empty() && ed::asset::list::is_loaded(&lib_ref)) {
+    if (const asset_system::AssetLibrary *library =
+            ed::asset::list::library_get_once_available(lib_ref))
+    {
+      id_browser_catalog_selection_sanitize(lib_ref, *library);
+      if (BKE_asset_catalog_memory_get_mode(
+              &U, lib_ref, grid_settings::id_browser_catalog_memory_domain) ==
+          ASSET_CATALOG_MEMORY_SET)
+      {
+        catalog_ids = BKE_asset_catalog_memory_get_set(
+            &U, lib_ref, grid_settings::id_browser_catalog_memory_domain);
+      }
+      else {
+        catalog_ids.clear();
+      }
+    }
+  }
+
+  const bool catalog_filtering_enabled = !all_libraries && !catalog_ids.is_empty();
+
+  /* Build catalog filters once from the enabled UUIDs; reused for every asset. */
   Vector<asset_system::AssetCatalogFilter> catalog_filters;
   if (catalog_filtering_enabled) {
     if (const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
             lib_ref))
     {
-      for (const std::string &path : enabled_catalog_paths) {
-        const asset_system::AssetCatalog *catalog =
-            library->catalog_service().find_catalog_by_path(path.c_str());
-        if (catalog != nullptr) {
+      for (const bUUID &catalog_id : catalog_ids) {
+        if (library->catalog_service().find_catalog(asset_system::CatalogID(catalog_id))) {
           catalog_filters.append(
-              library->catalog_service().create_catalog_filter(catalog->catalog_id));
+              library->catalog_service().create_catalog_filter(asset_system::CatalogID(catalog_id)));
         }
       }
     }
@@ -162,6 +322,36 @@ void id_browser_foreach_asset(const bContext &C,
      * filtered out. Show nothing until the catalogs are known. */
     if (catalog_filters.is_empty()) {
       return;
+    }
+  }
+
+  /* Precompute once per call rather than per asset: #BKE_asset_catalog_memory_get_mode /
+   * #_get_set walk #UserDef.catalog_memory and heap-allocate a #Vector, which used to happen for
+   * every asset that reached this branch when filtering across #ASSET_LIBRARY_ALL (thousands of
+   * redundant list walks + allocations per redraw on a large multi-library setup). */
+  Map<std::string, Vector<bUUID>> all_libraries_catalog_ids_by_library;
+  if (all_libraries) {
+    for (asset_system::AssetLibrary *library :
+        ed::asset::all_mode_libraries(/*exclude_image_libraries=*/false,
+                                      /*only_image_libraries=*/false))
+    {
+      const std::optional<AssetLibraryReference> per_lib_ref = library->library_reference();
+      if (!per_lib_ref) {
+        continue;
+      }
+      if (BKE_asset_catalog_memory_get_mode(
+              &U, *per_lib_ref, grid_settings::id_browser_catalog_memory_domain) !=
+          ASSET_CATALOG_MEMORY_SET)
+      {
+        continue;
+      }
+      Vector<bUUID> ids = BKE_asset_catalog_memory_get_set(
+          &U, *per_lib_ref, grid_settings::id_browser_catalog_memory_domain);
+      if (ids.is_empty()) {
+        continue;
+      }
+      all_libraries_catalog_ids_by_library.add(
+          BKE_preferences_asset_library_identifier_from_ref(&U, &*per_lib_ref), std::move(ids));
     }
   }
 
@@ -181,6 +371,25 @@ void id_browser_foreach_asset(const bContext &C,
       }
       if (!in_catalog) {
         return true;
+      }
+    }
+    if (all_libraries) {
+      /* Catalog ids are only unique within a library, so filtering across #ASSET_LIBRARY_ALL
+       * must resolve each asset's *actual* source library rather than trusting the merged "All"
+       * pseudo-library's own catalog id space. Mirrors
+       * #image_grid_asset_is_visible_in_state (view3d_image_shelf_sync.cc). */
+      const std::optional<AssetLibraryReference> asset_lib_ref =
+          asset.owner_asset_library().library_reference();
+      if (!asset_lib_ref.has_value()) {
+        return true;
+      }
+      if (const Vector<bUUID> *per_lib_ids = all_libraries_catalog_ids_by_library.lookup_ptr(
+              BKE_preferences_asset_library_identifier_from_ref(&U, &*asset_lib_ref)))
+      {
+        const AssetMetaData &metadata = asset.get_metadata();
+        if (!catalog_id_in_span(*per_lib_ids, metadata.catalog_id)) {
+          return true;
+        }
       }
     }
     return fn(asset);
@@ -226,18 +435,21 @@ const EnumPropertyItem *id_browser_library_rna_itemf(const bContext *C, bool *r_
 
 bool id_browser_set_asset_library(wmWindowManager &wm, const int library_enum_value)
 {
+  PointerRNA settings = id_browser_grid_settings_ptr(wm);
+  if (settings.data == nullptr) {
+    return false;
+  }
   const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(
       library_enum_value);
-  const AssetLibraryReference &old_ref = wm.id_browser_asset_library_ref;
+  const AssetLibraryReference old_ref = grid_settings::library_ref_get(settings);
   if (new_ref.type == old_ref.type && new_ref.custom_library_index == old_ref.custom_library_index)
   {
     return false;
   }
 
-  wm.id_browser_asset_library_ref = new_ref;
-  /* Catalog paths are library-specific; a path from the previous library would silently filter
-   * everything out. Reset to "all catalogs" (see the spec: one list, cleared on library change). */
-  id_browser_catalog_paths_set(wm, {});
+  grid_settings::library_ref_set(settings, new_ref);
+  /* Per-library catalog filters live in #UserDef.catalog_memory (domain #"id_browser"); switching
+   * libraries restores that library's remembered mode/set rather than clearing a shared path list. */
   grid_view_session_reset_scroll(id_browser_grid_session_key);
   WM_file_tag_modified();
   return true;
@@ -284,337 +496,6 @@ void UI_OT_id_browser_set_library(wmOperatorType *ot)
   PropertyRNA *prop = RNA_def_enum(
       ot->srna, "asset_library_reference", rna_enum_dummy_NULL_items, 0, "Asset Library", "");
   RNA_def_enum_funcs(prop, rna_id_browser_library_itemf);
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Catalog Selector Popover
- * \{ */
-
-/**
- * Tree view listing catalogs of the browsed asset library. Individual catalogs can be enabled or
- * disabled via checkboxes. An empty selection means "show all" (see #id_browser_foreach_asset).
- */
-class IDBrowserCatalogSelectorTree : public AbstractTreeView {
-  wmWindowManager &wm_;
-  /* Full catalog tree shared from the library's catalog service. Using a shared_ptr avoids
-   * copying the tree (which has raw parent pointers) and ensures the data stays alive for the
-   * lifetime of this view. */
-  std::shared_ptr<const asset_system::AssetCatalogTree> catalog_tree_;
-  /* Read once per tree build rather than once per item: #build_tree() visits every catalog item,
-   * and re-walking the DNA list (and allocating a new #Set) for each of them is wasted work on
-   * every redraw. */
-  const Set<std::string> enabled_catalog_paths_;
-
- public:
-  class AllItem;
-  class Item;
-
-  IDBrowserCatalogSelectorTree(const asset_system::AssetLibrary &library, wmWindowManager &wm)
-      : wm_(wm), enabled_catalog_paths_(id_browser_catalog_paths_get(wm))
-  {
-    /* Use the full catalog tree of the library rather than a filtered tree built from catalog IDs
-     * of loaded assets: the filtered approach shows nothing when assets have no catalog
-     * assignment (nil UUID), the common case after a plain "Mark as Asset". Showing all
-     * registered catalogs lets the user navigate to any catalog regardless of current asset
-     * assignments. */
-    catalog_tree_ = library.catalog_service().catalog_tree();
-  }
-
-  void build_tree() override;
-
-  /**
-   * Enable or disable a single catalog path against the stored set (add/remove), rather than
-   * rebuilding the whole set from the tree's items. See the doc comment above the definition for
-   * why a rebuild is unsafe.
-   */
-  void update_enabled_catalog_path(bContext &C, const std::string &catalog_path, bool enabled);
-
-  static Item &build_catalog_items_recursive(
-      TreeViewOrItem &parent,
-      const asset_system::AssetCatalogTreeItem &catalog_item,
-      wmWindowManager &wm,
-      const Set<std::string> &enabled_catalog_paths);
-
-  /** Activatable item that clears the catalog filter (shows all assets). */
-  class AllItem : public BasicTreeViewItem {
-    wmWindowManager &wm_;
-    /* Derived once from the tree's enabled-paths snapshot; see #enabled_catalog_paths_. */
-    bool is_active_;
-
-   public:
-    AllItem(wmWindowManager &wm, const Set<std::string> &enabled_catalog_paths)
-        : BasicTreeViewItem(IFACE_("All")), wm_(wm), is_active_(enabled_catalog_paths.is_empty())
-    {
-      set_on_activate_fn([this](bContext &C, BasicTreeViewItem & /*item*/) {
-        id_browser_catalog_paths_set(wm_, {});
-        grid_view_session_reset_scroll(id_browser_grid_session_key);
-        WM_file_tag_modified();
-        WM_event_add_notifier(&C, NC_ASSET | ND_ASSET_LIST, nullptr);
-        if (ARegion *region = CTX_wm_region(&C)) {
-          ED_region_tag_redraw(region);
-          ED_region_tag_refresh_ui(region);
-        }
-      });
-      set_is_active_fn([this]() -> bool { return is_active_; });
-    }
-  };
-
-  /** Checkbox item for an individual catalog path. */
-  class Item : public BasicTreeViewItem {
-    const asset_system::AssetCatalogTreeItem &catalog_item_;
-    /* Is the catalog path enabled in this redraw? Set on construction, updated by the UI (which
-     * gets a pointer to it). The UI needs it as char. This #Item outlives the redraw via the
-     * tree view owned by the block (see #block_add_view), so the button's stored pointer stays
-     * valid for as long as the block (and its buttons) are alive. */
-    char catalog_path_enabled_ = 0;
-    /* A tree component with no catalog of its own (nil #CatalogID) only exists to hold child
-     * catalogs (see #AssetCatalogTree's insertion logic: non-leaf path components get a nil ID
-     * unless some catalog is registered at that exact path). There is nothing to filter by, so
-     * such an item must not get a togglable checkbox. */
-    bool has_catalog_ = false;
-
-   public:
-    Item(const asset_system::AssetCatalogTreeItem &catalog_item,
-         wmWindowManager & /*wm*/,
-         const Set<std::string> &enabled_catalog_paths)
-        : BasicTreeViewItem(catalog_item.get_name()),
-          catalog_item_(catalog_item),
-          catalog_path_enabled_(
-              enabled_catalog_paths.contains(catalog_item.catalog_path().str()) ? 1 : 0),
-          has_catalog_(!BLI_uuid_is_nil(catalog_item.get_catalog_id()))
-    {
-      if (!has_catalog_) {
-        /* Tree-only grouping node: nothing to filter by, so nothing to toggle (matches #build_row,
-         * which omits the checkbox for these). */
-        disable_activatable();
-        return;
-      }
-      /* Clicking anywhere in the row toggles the catalog, not just the checkbox — precise checkbox
-       * hits are hard with a stylus. The checkbox (#build_row) keeps its own click handling; it and
-       * the row's full-width #AbstractTreeViewItem::add_treerow_button are separate buttons, and
-       * per-pixel hit-testing resolves to whichever is topmost, so a checkbox click is never also
-       * counted as a row click. */
-      set_on_activate_fn([this](bContext &C, BasicTreeViewItem & /*item*/) {
-        IDBrowserCatalogSelectorTree &tree = dynamic_cast<IDBrowserCatalogSelectorTree &>(
-            get_tree_view());
-        tree.update_enabled_catalog_path(C, catalog_path().str(), !is_catalog_path_enabled());
-      });
-    }
-
-    bool is_catalog_path_enabled() const
-    {
-      return catalog_path_enabled_ != 0;
-    }
-
-    bool has_enabled_in_subtree()
-    {
-      bool has_enabled = false;
-      foreach_item_recursive(
-          [&has_enabled](const AbstractTreeViewItem &abstract_item) {
-            const Item *item = dynamic_cast<const Item *>(&abstract_item);
-            if (item && item->is_catalog_path_enabled()) {
-              has_enabled = true;
-            }
-          },
-          IterOptions::SkipFiltered);
-      return has_enabled;
-    }
-
-    asset_system::AssetCatalogPath catalog_path() const
-    {
-      return catalog_item_.catalog_path();
-    }
-
-    void build_row(Layout &row) override
-    {
-      row.emboss_set(EmbossType::Emboss);
-
-      Layout &subrow = row.row(false);
-      /* This item itself has no checkbox to reflect (see #has_catalog_ below); fall back to
-       * whether any of its child catalogs are enabled, so the hierarchy still hints at what is
-       * filtered. */
-      subrow.active_set(has_catalog_ ? bool(catalog_path_enabled_) : has_enabled_in_subtree());
-      subrow.label(catalog_item_.get_name(), ICON_NONE);
-
-      if (!has_catalog_) {
-        /* Tree-only node: nothing to filter by, so no checkbox (see #has_catalog_). */
-        return;
-      }
-
-      IDBrowserCatalogSelectorTree &tree = dynamic_cast<IDBrowserCatalogSelectorTree &>(
-          get_tree_view());
-      Block *block = row.block();
-      block_layout_set_current(block, &row);
-
-      Button *toggle_but = uiDefButV(block,
-                                     ButtonType::Checkbox,
-                                     "",
-                                     0,
-                                     0,
-                                     short(UI_UNIT_X),
-                                     short(UI_UNIT_Y),
-                                     &catalog_path_enabled_,
-                                     0,
-                                     0,
-                                     TIP_("Toggle catalog visibility in the ID browser"));
-      button_func_set(toggle_but, [&tree, this](bContext &C) {
-        /* By the time this runs, #catalog_path_enabled_ already reflects the new checkbox
-         * state (the button writes to it directly via #uiDefButV). */
-        tree.update_enabled_catalog_path(C, catalog_path().str(), is_catalog_path_enabled());
-      });
-      if (!is_catalog_path_enabled() && has_enabled_in_subtree()) {
-        button_drawflag_enable(toggle_but, BUT_INDETERMINATE);
-      }
-      button_flag_disable(toggle_but, BUT_UNDO);
-    }
-  };
-};
-
-/*
- * The tree is rebuilt from #AssetCatalogTree, which for #ASSET_LIBRARY_ALL is filled in
- * incrementally as sub-libraries finish loading asynchronously (see
- * #id_browser_catalog_selector_draw). That means the tree can legitimately have no item for a
- * catalog the user already enabled from a sub-library that has not loaded yet. Rebuilding the
- * whole enabled-set from "which tree items are checked" would silently drop those paths the
- * moment any other checkbox is toggled. Applying only the one path that changed, on top of the
- * currently stored set, leaves paths with no tree item untouched.
- */
-void IDBrowserCatalogSelectorTree::update_enabled_catalog_path(bContext &C,
-                                                                const std::string &catalog_path,
-                                                                const bool enabled)
-{
-  Set<std::string> enabled_paths = id_browser_catalog_paths_get(wm_);
-  if (enabled) {
-    enabled_paths.add(catalog_path);
-  }
-  else {
-    enabled_paths.remove(catalog_path);
-  }
-  id_browser_catalog_paths_set(wm_, enabled_paths);
-  grid_view_session_reset_scroll(id_browser_grid_session_key);
-
-  WM_file_tag_modified();
-  WM_event_add_notifier(&C, NC_ASSET | ND_ASSET_LIST, nullptr);
-  if (ARegion *region = CTX_wm_region(&C)) {
-    ED_region_tag_redraw(region);
-    ED_region_tag_refresh_ui(region);
-  }
-}
-
-void IDBrowserCatalogSelectorTree::build_tree()
-{
-  add_tree_item<AllItem>(wm_, enabled_catalog_paths_).uncollapse_by_default();
-
-  if (!catalog_tree_ || catalog_tree_->is_empty()) {
-    return;
-  }
-
-  catalog_tree_->foreach_root_item([this](const asset_system::AssetCatalogTreeItem &cat_item) {
-    Item &item = build_catalog_items_recursive(*this, cat_item, wm_, enabled_catalog_paths_);
-    item.uncollapse_by_default();
-  });
-}
-
-IDBrowserCatalogSelectorTree::Item &IDBrowserCatalogSelectorTree::build_catalog_items_recursive(
-    TreeViewOrItem &parent,
-    const asset_system::AssetCatalogTreeItem &catalog_item,
-    wmWindowManager &wm,
-    const Set<std::string> &enabled_catalog_paths)
-{
-  Item &item = parent.add_tree_item<Item>(catalog_item, wm, enabled_catalog_paths);
-
-  catalog_item.foreach_child([&](const asset_system::AssetCatalogTreeItem &child) {
-    build_catalog_items_recursive(item, child, wm, enabled_catalog_paths);
-  });
-
-  return item;
-}
-
-/**
- * Drop catalog paths that no longer exist in \a library (catalog renamed or removed elsewhere);
- * otherwise a stale path would silently filter everything out with no way to see why.
- */
-static void id_browser_catalog_selection_sanitize(wmWindowManager &wm,
-                                                   const asset_system::AssetLibrary &library)
-{
-  const Set<std::string> enabled_paths = id_browser_catalog_paths_get(wm);
-  if (enabled_paths.is_empty()) {
-    return;
-  }
-
-  Set<std::string> valid_paths;
-  for (const std::string &path : enabled_paths) {
-    if (library.catalog_service().find_catalog_by_path(path.c_str())) {
-      valid_paths.add(path);
-    }
-  }
-
-  if (valid_paths == enabled_paths) {
-    return;
-  }
-
-  id_browser_catalog_paths_set(wm, valid_paths);
-  WM_file_tag_modified();
-}
-
-static void id_browser_catalog_selector_draw(const bContext *C, Panel *panel)
-{
-  wmWindowManager *wm = CTX_wm_manager(C);
-  if (wm == nullptr) {
-    return;
-  }
-
-  Layout &layout = *panel->layout;
-  layout.operator_context_set(wm::OpCallContext::InvokeDefault);
-
-  if (id_browser_library_is_missing(*wm)) {
-    layout.label(IFACE_("Library not found"), ICON_ERROR);
-    return;
-  }
-  const AssetLibraryReference &lib_ref = id_browser_library_ref_ensure_valid(*wm);
-  ed::asset::list::storage_fetch(&lib_ref, C);
-
-  asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(lib_ref);
-  if (library == nullptr) {
-    layout.label(IFACE_("Loading\xe2\x80\xa6"), ICON_NONE);
-    return;
-  }
-
-  /* Drop paths that no longer exist in the library (catalog renamed or removed elsewhere);
-   * otherwise a stale path would filter everything out with no way to see why. Gated on the
-   * library being fully loaded: for #ASSET_LIBRARY_ALL, catalogs arrive as sub-libraries finish
-   * loading, so a non-null library here does not mean its catalog set is complete yet. Sanitizing
-   * against an incomplete set would permanently delete paths belonging to a sub-library that
-   * simply has not loaded yet (mirrors #id_browser_foreach_asset, which shows nothing rather than
-   * act on incomplete catalog data). */
-  if (ed::asset::list::is_loaded(&lib_ref)) {
-    id_browser_catalog_selection_sanitize(*wm, *library);
-  }
-
-  Block *block = layout.block();
-  AbstractTreeView *tree_view = block_add_view(
-      *block,
-      "id_browser_catalog_selector",
-      std::make_unique<IDBrowserCatalogSelectorTree>(*library, *wm));
-  TreeViewBuilder::build_tree_view(*C, *tree_view, layout);
-}
-
-void id_browser_catalog_selector_register()
-{
-  if (WM_paneltype_find("UI_PT_id_browser_catalog_selector", true)) {
-    return;
-  }
-  PanelType *pt = MEM_new_zeroed<PanelType>(__func__);
-  STRNCPY_UTF8(pt->idname, "UI_PT_id_browser_catalog_selector");
-  STRNCPY_UTF8(pt->label, N_("Catalog Selector"));
-  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
-  pt->description = N_("Narrow the asset list down to the selected catalogs");
-  pt->draw = id_browser_catalog_selector_draw;
-  /* Redraw while the asset library is being read (previews/catalogs arrive asynchronously). */
-  pt->listener = ed::asset::list::asset_reading_region_listen_fn;
-  WM_paneltype_add(pt);
 }
 
 /** \} */

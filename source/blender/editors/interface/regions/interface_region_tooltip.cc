@@ -1062,6 +1062,16 @@ static ImBuf *get_brush_asset_preview_imbuf(
     return nullptr;
   }
 
+  /* #AssetRepresentation::ensure_previewable() only guarantees *some* size is loaded: its own
+   * early-out checks the asset's single, size-agnostic `runtime->icon_id`, so once any consumer
+   * (e.g. an asset shelf tile, which only ever needs #ICON_SIZE_ICON) has triggered that, later
+   * callers needing the bigger #ICON_SIZE_PREVIEW never get it -- #BKE_previewimg_is_finished()
+   * only reports "not currently rendering", which is trivially true for a size that was simply
+   * never requested (`w`/`h`/`rect` all stay zeroed). #BKE_previewimg_ensure() is the actual,
+   * per-size (blocking) load call; safe to call here since this only runs once per tooltip
+   * hover, not per redraw. */
+  BKE_previewimg_ensure(preview, ICON_SIZE_PREVIEW);
+
   ImBuf *ibuf = BKE_previewimg_to_imbuf(preview, ICON_SIZE_PREVIEW);
   if (!ibuf) {
     return nullptr;

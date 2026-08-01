@@ -40,26 +40,36 @@ TEST(name_matching, include_or_and_empty_passthrough)
   /* Empty actives → pass. */
   EXPECT_TRUE(BLI_name_matching_asset_passes_include_filter("x", {}, {}, {}));
 
-  const StringRef normal_tokens[] = {"N", "nor", "norm", "normal"};
-  const Span<StringRef> map_lists_match[] = {Span(normal_tokens)};
+  StringRef normal_tokens[] = {"N", "nor", "norm", "normal"};
+  Span<StringRef> map_lists_match[] = {Span<StringRef>(normal_tokens, ARRAY_SIZE(normal_tokens))};
   EXPECT_TRUE(BLI_name_matching_asset_passes_include_filter(
-      "Wood_Normal.png.001", {}, Span(map_lists_match), {}));
+      "Wood_Normal.png.001", {}, Span<Span<StringRef>>(map_lists_match, ARRAY_SIZE(map_lists_match)), {}));
 
-  const StringRef roughness_tokens[] = {"R", "rough", "roughness"};
-  const Span<StringRef> map_lists_no_match[] = {Span(roughness_tokens)};
+  StringRef roughness_tokens[] = {"R", "rough", "roughness"};
+  Span<StringRef> map_lists_no_match[] = {
+      Span<StringRef>(roughness_tokens, ARRAY_SIZE(roughness_tokens))};
   EXPECT_FALSE(BLI_name_matching_asset_passes_include_filter(
-      "Wood_Normal.png.001", {}, Span(map_lists_no_match), {}));
+      "Wood_Normal.png.001",
+      {},
+      Span<Span<StringRef>>(map_lists_no_match, ARRAY_SIZE(map_lists_no_match)),
+      {}));
 
   /* OR: map type misses, but active filter tag matches metadata. */
-  const StringRef metadata_tags[] = {"tileable"};
-  const StringRef active_tags[] = {"tileable"};
+  StringRef metadata_tags[] = {"tileable"};
+  StringRef active_tags[] = {"tileable"};
   EXPECT_TRUE(BLI_name_matching_asset_passes_include_filter(
-      "Wood_Normal.png.001", Span(metadata_tags), Span(map_lists_no_match), Span(active_tags)));
+      "Wood_Normal.png.001",
+      Span<StringRef>(metadata_tags, ARRAY_SIZE(metadata_tags)),
+      Span<Span<StringRef>>(map_lists_no_match, ARRAY_SIZE(map_lists_no_match)),
+      Span<StringRef>(active_tags, ARRAY_SIZE(active_tags))));
 
   /* OR: filter tag segment-matches normalized name. */
-  const StringRef active_name_tags[] = {"Wood"};
+  StringRef active_name_tags[] = {"Wood"};
   EXPECT_TRUE(BLI_name_matching_asset_passes_include_filter(
-      "Wood_Normal.png.001", {}, Span(map_lists_no_match), Span(active_name_tags)));
+      "Wood_Normal.png.001",
+      {},
+      Span<Span<StringRef>>(map_lists_no_match, ARRAY_SIZE(map_lists_no_match)),
+      Span<StringRef>(active_name_tags, ARRAY_SIZE(active_name_tags))));
 }
 
 TEST(name_matching, empty_token_never_matches)

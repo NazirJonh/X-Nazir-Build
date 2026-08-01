@@ -126,14 +126,42 @@ def register():
     properties_paint_common.register()
 
     from bpy.props import (
+        BoolProperty,
+        CollectionProperty,
         EnumProperty,
         PointerProperty,
         StringProperty,
     )
     from bpy.types import (
         GridViewSettings,
+        PropertyGroup,
         WindowManager,
     )
+
+    class GridViewCatalogPath(PropertyGroup):
+        path: StringProperty()
+
+    class GridViewLibraryCatalogs(PropertyGroup):
+        library_key: StringProperty()
+        paths: CollectionProperty(type=GridViewCatalogPath)
+
+    class GridViewExpandedKey(PropertyGroup):
+        key: StringProperty()
+
+    class GridViewCatalogItemState(PropertyGroup):
+        key: StringProperty()
+        expanded: BoolProperty(default=False)
+
+    globals().update({
+        "GridViewCatalogPath": GridViewCatalogPath,
+        "GridViewLibraryCatalogs": GridViewLibraryCatalogs,
+        "GridViewExpandedKey": GridViewExpandedKey,
+        "GridViewCatalogItemState": GridViewCatalogItemState,
+    })
+
+    for cls in (GridViewCatalogPath, GridViewLibraryCatalogs, GridViewExpandedKey,
+                GridViewCatalogItemState):
+        register_class(cls)
 
     # space_userprefs.py
     def addon_filter_items(_self, _context):
@@ -189,6 +217,14 @@ def register():
     # elsewhere (e.g. on their own PropertyGroup) instead of sharing this one.
     WindowManager.grid_view_settings = PointerProperty(type=GridViewSettings)
 
+    GridViewSettings.enabled_catalogs_by_library = CollectionProperty(type=GridViewLibraryCatalogs)
+    GridViewSettings.expanded_library_sections = CollectionProperty(type=GridViewExpandedKey)
+    GridViewSettings.expanded_catalog_items = CollectionProperty(type=GridViewCatalogItemState)
+
+    # Dedicated ID Browser settings — must not share library/catalog/name-match
+    # with the default template-grid settings object.
+    WindowManager.id_browser_grid_view_settings = PointerProperty(type=GridViewSettings)
+
     bpy.app.handlers.translation_update_post.append(translation_update)
 
     # done...
@@ -196,6 +232,21 @@ def register():
 
 def unregister():
     from bpy.utils import unregister_class
+    from bpy.types import (
+        GridViewSettings,
+        WindowManager,
+    )
+
+    del WindowManager.id_browser_grid_view_settings
+    del WindowManager.grid_view_settings
+    del GridViewSettings.expanded_catalog_items
+    del GridViewSettings.expanded_library_sections
+    del GridViewSettings.enabled_catalogs_by_library
+
+    for cls in reversed((GridViewCatalogItemState, GridViewExpandedKey,
+                         GridViewLibraryCatalogs, GridViewCatalogPath)):
+        if cls.is_registered:
+            unregister_class(cls)
 
     properties_paint_common.unregister()
 

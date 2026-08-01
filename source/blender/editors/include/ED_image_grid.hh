@@ -96,3 +96,18 @@ void image_grid_slot_dna_blend_read(blender::BlendDataReader *reader, ImageGridS
 void image_grid_slot_dna_blend_write(blender::BlendWriter *writer, const ImageGridSlotDNA &slot);
 
 }  // namespace blender::ed::image_grid
+
+namespace blender::ed::view3d {
+
+/**
+ * Switch the grid's active library to \a new_ref: exits Recent/Favorites membership if needed,
+ * restores the target library's saved catalog filter, resets scroll, persists state, and notifies
+ * listeners. Returns false (no-op) when \a new_ref is already active and not in membership.
+ * Shared by #IMAGE_GRID_OT_set_library and Ctrl-Wheel cycling on the header library selector.
+ */
+bool image_grid_set_library(bContext &C,
+                            ed::image_grid::ImageGridOwner owner,
+                            bool is_mask_slot,
+                            const AssetLibraryReference &new_ref);
+
+}  // namespace blender::ed::view3d

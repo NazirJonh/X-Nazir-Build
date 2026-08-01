@@ -26,10 +26,10 @@
 #include "BKE_preview_image.hh"
 #include "BKE_screen.hh"
 #include "BKE_wm_runtime.hh"
+#include "BKE_name_matching.hh"
 
 #include "BLI_listbase.h"
 #include "BLI_rect.h"
-#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 
@@ -41,6 +41,7 @@
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 #include "DNA_space_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 
 #include "RNA_access.hh"
@@ -49,6 +50,7 @@
 #include "ED_asset.hh"
 #include "ED_asset_import.hh"
 #include "ED_asset_list.hh"
+#include "ED_asset_menu_utils.hh"
 #include "ED_screen.hh"
 
 #include "IMB_imbuf.hh"
@@ -57,6 +59,10 @@
 #include "UI_grid_view.hh"
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
+#include "UI_interface_icons.hh"
+#include "BLI_vector.hh"
+
+#include "interface_grid_view_settings_utils.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
 
@@ -65,6 +71,11 @@
 
 #include "interface_intern.hh"
 #include "interface_templates_intern.hh"
+
+/* #shelf_asset_lists_record_recent / #ShelfAssetRef for the Recent list write-on-activate below.
+ * See #interface_template_id_browser_asset.cc for the read side and why this internal header is
+ * reused across modules the same way. */
+#include "../../asset/intern/asset_shelf_asset_lists.hh"
 
 namespace blender::ui {
 
@@ -103,10 +114,6 @@ static void id_browser_popover_register()
   pt->draw = id_browser_popover_draw;
   pt->poll = id_browser_popover_poll;
   WM_paneltype_add(pt);
-
-  /* Registered together so callers only need to trigger #id_browser_popover_register (the entry
-   * point below); the catalog selector is a separate popover opened from within the ID browser. */
-  id_browser_catalog_selector_register();
 }
 
 /** \} */
@@ -137,6 +144,26 @@ static SpaceLink *image_browser_active_space(const bContext *C, StructRNA **r_sr
   return nullptr;
 }
 
+/**
+ * Raw pointer to the space's `image_filter_mode` DNA field. Each of the three space types
+ * re-declares its own field (rather than sharing one through #SpaceLink), so the concrete type is
+ * needed to address it; used for a direct bit-toggle button (#uiDefButBit) instead of going
+ * through RNA, since the "All" toggle flips a single bit without disturbing the others.
+ */
+static char *image_filter_mode_pointer(SpaceLink *sl)
+{
+  switch (sl->spacetype) {
+    case SPACE_IMAGE:
+      return &reinterpret_cast<SpaceImage *>(sl)->image_filter_mode;
+    case SPACE_NODE:
+      return &reinterpret_cast<SpaceNode *>(sl)->image_filter_mode;
+    case SPACE_VIEW3D:
+      return &reinterpret_cast<View3D *>(sl)->image_filter_mode;
+    default:
+      return nullptr;
+  }
+}
+
 bool image_id_passes_paint_filter(Main &bmain,
                                   const Image &image,
                                   const int filter_mode,
@@ -164,6 +191,53 @@ bool image_id_passes_paint_filter(Main &bmain,
     return false;
   }
   return true;
+}
+
+/** Compact image-filter-mode radio on row 2; fixed intrinsic width so labels do not stretch. */
+static void id_browser_image_filter_mode_button(Layout &parent,
+                                                PointerRNA *space_ptr,
+                                                const char *identifier,
+                                                const char *label,
+                                                const int icon,
+                                                const bool active)
+{
+  Layout &item = parent.row(false);
+  /* Non-Expand alignment is required for #text_icon_width_ex() to size the button from its
+   * actual text/icon instead of falling back to a fixed 10 `UI_UNIT_X` width (see
+   * `layout_vary_direction()` in `interface_layout.cc`). */
+  item.alignment_set(LayoutAlign::Left);
+  item.fixed_size_set(true);
+  item.active_set(active);
+  item.prop_enum(space_ptr, "image_filter_mode", identifier, IFACE_(label), icon);
+}
+
+/**
+ * "Slot" filter button, drawn as a direct bit toggle on the `image_filter_mode` DNA field instead
+ * of going through #id_browser_image_filter_mode_button's exact-value #prop_enum. That keeps this
+ * button's pressed state tied to whether #TEMPLATE_ID_FILTER_SLOT_TYPE is set at all, regardless of
+ * the independent #TEMPLATE_ID_FILTER_CURRENT_MATERIAL bit the "All" toggle flips (row 2) — so
+ * toggling that control never makes this button (and the slot-type row it gates) look deselected.
+ */
+static void id_browser_slot_type_filter_button(Layout &parent, char *filter_mode_poin)
+{
+  Layout &item = parent.row(false);
+  item.fixed_size_set(true);
+  Block *block = item.block();
+  /* #ButtonType::ButToggle, not #ButtonType::IconToggle: the latter auto-advances the drawn icon
+   * by one (#button_icon, #but->iconadd) whenever the button is pressed and has no `rnaprop` —
+   * meant for consecutive on/off icon pairs, which this single fixed icon is not. */
+  uiDefIconButBit<char>(block,
+                        ButtonType::ButToggle,
+                        TEMPLATE_ID_FILTER_SLOT_TYPE,
+                        ICON_NODE_TEXTURE,
+                        0,
+                        0,
+                        short(UI_UNIT_X),
+                        short(UI_UNIT_Y),
+                        filter_mode_poin,
+                        0.0f,
+                        0.0f,
+                        TIP_("Show images used by a specific paint slot type"));
 }
 
 /**
@@ -314,6 +388,51 @@ class IDBrowserGridItem : public PreviewGridItem {
     return label;
   }
 
+  /**
+   * Overlay favorite star, top-right of the tile (mirrors #AssetViewItem::build_grid_tile's star
+   * in `asset_shelf_asset_view.cc`, minus the online/download indicators this browser has no use
+   * for). Reuses #ASSETSHELF_OT_asset_favorite_toggle: its poll/exec resolve the shelf idname from
+   * context ("asset_shelf_idname", set on \a overlap below), and the ID Browser's synthetic
+   * per-idcode idname (#id_browser_shelf_idname) is accepted by #shelf_supports_asset_lists() the
+   * same way a real asset-shelf idname is.
+   */
+  void build_favorite_star(Layout &overlap) const
+  {
+    const short idcode = short(asset_->get_id_type());
+    const std::string shelf_idname = id_browser_shelf_idname(idcode);
+    const bool is_favorite = ed::asset::shelf::shelf_asset_lists_is_favorite(
+        shelf_idname, asset_->make_weak_reference());
+    /* A favorite always shows its star so the state is visible at a glance; a non-favorite only
+     * reveals it on hover, keeping the grid uncluttered otherwise. */
+    if (!is_favorite && !this->is_hovered()) {
+      return;
+    }
+
+    Layout &overlay_row = overlap.column(false).row(true);
+    overlay_row.alignment_set(LayoutAlign::Right);
+    overlay_row.context_string_set("asset_shelf_idname", shelf_idname);
+
+    Block *overlay_block = overlay_row.block();
+    block_layout_set_current(overlay_block, &overlay_row);
+    Button *favorite_but = uiDefIconButO(overlay_block,
+                                         ButtonType::But,
+                                         "ASSETSHELF_OT_asset_favorite_toggle",
+                                         wm::OpCallContext::ExecDefault,
+                                         is_favorite ? ICON_SOLO_ON : ICON_SOLO_OFF,
+                                         0,
+                                         0,
+                                         short(ICON_DEFAULT_WIDTH_SCALE),
+                                         short(ICON_DEFAULT_HEIGHT_SCALE),
+                                         std::nullopt);
+    PointerRNA *favorite_opptr = button_operator_ptr_ensure(favorite_but);
+    ed::asset::operator_asset_reference_props_set(*asset_, *favorite_opptr);
+    /* The star sits on top of the preview image, which can be any color: draw it as a white icon
+     * over a dark circle, like the equivalent asset-shelf star. */
+    button_pushbutton_draw_as_overlay_set(favorite_but, true);
+    button_pushbutton_overlay_alpha_factor_set(favorite_but, this->is_hovered() ? 1.0f : 0.8f);
+
+  }
+
   void build_grid_tile(const bContext &C, Layout &layout) const override
   {
     if (kind_ == IDBrowserItemKind::Asset) {
@@ -324,7 +443,10 @@ class IDBrowserGridItem : public PreviewGridItem {
 
     if (!list_mode_) {
       if (kind_ == IDBrowserItemKind::Asset) {
-        this->build_grid_tile_button(layout, this->asset_preview_icon_id());
+        /* Overlap layout so the favorite star can sit on top of the preview button. */
+        Layout &overlap = layout.overlap();
+        this->build_grid_tile_button(overlap.column(true), this->asset_preview_icon_id());
+        this->build_favorite_star(overlap);
       }
       else {
         PreviewGridItem::build_grid_tile(C, layout);
@@ -383,6 +505,26 @@ class IDBrowserGridItem : public PreviewGridItem {
   }
 };
 
+static bool id_browser_asset_passes_name_match(const NameMatchResolvedFilter &resolved,
+                                               const asset_system::AssetRepresentation &asset)
+{
+  Vector<StringRef> metadata_tags;
+  for (const AssetTag &tag : asset.get_metadata().tags) {
+    metadata_tags.append(tag.name);
+  }
+  return BKE_name_match_resolved_asset_passes(resolved, asset.get_name(), metadata_tags);
+}
+
+static NameMatchFilterState id_browser_name_match_state_from_wm(wmWindowManager &wm)
+{
+  PointerRNA wm_ptr = RNA_id_pointer_create(&wm.id);
+  PointerRNA settings_ptr = RNA_pointer_get(&wm_ptr, "id_browser_grid_view_settings");
+  if (settings_ptr.data == nullptr) {
+    return {};
+  }
+  return grid_settings::name_match_filter_get(settings_ptr);
+}
+
 class IDBrowserView : public AbstractGridView {
   PointerRNA target_ptr_;
   PropertyRNA *target_prop_;
@@ -398,8 +540,9 @@ class IDBrowserView : public AbstractGridView {
    * bitfield-sized DNA enum and comparing against it directly is simplest. */
   int source_;
   AssetLibraryReference asset_library_ref_;
-  Set<std::string> enabled_catalog_paths_;
+  grid_settings::CatalogMode catalog_mode_;
   short idcode_;
+  NameMatchFilterState name_match_;
 
  public:
   IDBrowserView(PointerRNA target_ptr,
@@ -411,8 +554,9 @@ class IDBrowserView : public AbstractGridView {
                 const bool list_mode,
                 const int source,
                 const AssetLibraryReference &asset_library_ref,
-                Set<std::string> enabled_catalog_paths,
-                const short idcode)
+                const grid_settings::CatalogMode catalog_mode,
+                const short idcode,
+                NameMatchFilterState name_match)
       : target_ptr_(target_ptr),
         target_prop_(target_prop),
         bmain_(bmain),
@@ -422,8 +566,9 @@ class IDBrowserView : public AbstractGridView {
         list_mode_(list_mode),
         source_(source),
         asset_library_ref_(asset_library_ref),
-        enabled_catalog_paths_(std::move(enabled_catalog_paths)),
-        idcode_(idcode)
+        catalog_mode_(catalog_mode),
+        idcode_(idcode),
+        name_match_(std::move(name_match))
   {
   }
 
@@ -432,28 +577,37 @@ class IDBrowserView : public AbstractGridView {
     const PointerRNA active_ptr = RNA_property_pointer_get(&target_ptr_, target_prop_);
     const ID *active_id = active_ptr.data ? static_cast<ID *>(active_ptr.data) : nullptr;
 
+    const NameMatchResolvedFilter name_match_resolved = BKE_name_match_filter_resolve(
+        name_match_, U);
+
     if (source_ == ID_BROWSER_SOURCE_ASSET_LIBRARY) {
-      id_browser_foreach_asset(
-          *context_,
-          asset_library_ref_,
-          idcode_,
-          enabled_catalog_paths_,
-          [&](asset_system::AssetRepresentation &asset) -> bool {
-            /* The script-defined filter takes an `ID &`, so it can only be applied to assets that
-             * already have a local ID. Assets that are not imported yet are shown — hiding them
-             * would silently hide exactly what this source exists to show. The built-in paint-slot
-             * filter (#IDBrowserFilter::paint_mode/material/slot_type) is not applied here: it
-             * needs a local #Image, which an unimported asset does not have. */
-            if (filter_.custom != nullptr) {
-              if (ID *local_id = asset.local_id()) {
-                if (!id_filter_type_poll(*filter_.custom, *context_, *local_id)) {
-                  return true;
-                }
-              }
+      /* The script-defined filter takes an `ID &`, so it can only be applied to assets that
+       * already have a local ID. Assets that are not imported yet are shown — hiding them
+       * would silently hide exactly what this source exists to show. The built-in paint-slot
+       * filter (#IDBrowserFilter::paint_mode/material/slot_type) is not applied here: it
+       * needs a local #Image, which an unimported asset does not have. */
+      auto add_if_passes = [&](asset_system::AssetRepresentation &asset) -> bool {
+        if (filter_.custom != nullptr) {
+          if (ID *local_id = asset.local_id()) {
+            if (!id_filter_type_poll(*filter_.custom, *context_, *local_id)) {
+              return true;
             }
-            this->add_asset_item(asset, active_id);
-            return true;
-          });
+          }
+        }
+        if (!id_browser_asset_passes_name_match(name_match_resolved, asset)) {
+          return true;
+        }
+        this->add_asset_item(asset, active_id);
+        return true;
+      };
+
+      if (ELEM(catalog_mode_, grid_settings::CatalogMode::Recent, grid_settings::CatalogMode::Favorites))
+      {
+        id_browser_foreach_membership_asset(*context_, catalog_mode_, idcode_, add_if_passes);
+      }
+      else {
+        id_browser_foreach_asset(*context_, asset_library_ref_, idcode_, add_if_passes);
+      }
       return;
     }
 
@@ -462,6 +616,9 @@ class IDBrowserView : public AbstractGridView {
         continue;
       }
       const StringRef name = id.name + 2;
+      if (!BKE_name_match_resolved_asset_passes(name_match_resolved, name, {})) {
+        continue;
+      }
       const int preview_icon = id_icon_get(context_, &id, !list_mode_);
       IDBrowserGridItem &item = this->add_item<IDBrowserGridItem>(
           name, name, preview_icon, &id, list_mode_);
@@ -535,6 +692,11 @@ class IDBrowserView : public AbstractGridView {
           if (id == nullptr || GS(id->name) != idcode) {
             return;
           }
+          /* Record every selection (not just from Recent/Favorites mode) as the most-recently-used
+           * asset for this ID type, same as the Image Grid's shelf-driven Recent list. */
+          const std::string record_shelf_idname = id_browser_shelf_idname(idcode);
+          ed::asset::shelf::shelf_asset_lists_record_recent(record_shelf_idname,
+                                                            asset_ptr->make_weak_reference());
           PointerRNA value = RNA_id_pointer_create(id);
           PointerRNA ptr = target_ptr;
           RNA_property_pointer_set(&ptr, target_prop, value, nullptr);
@@ -591,8 +753,9 @@ static void build_id_grid(const bContext &C,
   }
 
   if (source == ID_BROWSER_SOURCE_ASSET_LIBRARY && id_browser_library_is_missing(*wm)) {
+    const AssetLibraryReference lib_ref = id_browser_library_ref_get(*wm);
     layout.label(fmt::format(fmt::runtime(IFACE_("Library \"{}\" not found")),
-                             wm->id_browser_asset_library_ref.custom_library_name)
+                             lib_ref.custom_library_name)
                      .c_str(),
                  ICON_ERROR);
     return;
@@ -628,6 +791,16 @@ static void build_id_grid(const bContext &C,
   const bool list_mode = RNA_enum_get(&wm_ptr, "id_browser_view_mode") ==
                          IMAGE_BROWSER_VIEW_LIST;
 
+  NameMatchFilterState name_match = id_browser_name_match_state_from_wm(*wm);
+
+  grid_settings::CatalogMode catalog_mode = grid_settings::CatalogMode::All;
+  if (source == ID_BROWSER_SOURCE_ASSET_LIBRARY) {
+    PointerRNA settings_ptr = id_browser_grid_settings_ptr(*wm);
+    if (settings_ptr.data != nullptr) {
+      catalog_mode = grid_settings::catalog_mode_get(settings_ptr);
+    }
+  }
+
   std::unique_ptr<IDBrowserView> view = std::make_unique<IDBrowserView>(
       target_ptr,
       target_prop,
@@ -637,9 +810,10 @@ static void build_id_grid(const bContext &C,
       filter,
       list_mode,
       source,
-      id_browser_library_ref_ensure_valid(*wm),
-      id_browser_catalog_paths_get(*wm),
-      idcode);
+      id_browser_library_ref_get(*wm),
+      catalog_mode,
+      idcode,
+      std::move(name_match));
 
   if (list_mode) {
     /* Pack the row width into as many equal columns as fit (each at least
@@ -743,13 +917,13 @@ static void id_browser_add_resize_grip(Layout &layout, wmWindowManager &wm, cons
  *
  * #ed::asset::list::asset_reading_region_listen_fn only reacts to #ND_ASSET_LIST_READING,
  * #ND_ASSET_LIST_PREVIEW and #ND_ASSET_CATALOGS (the asynchronous library-loading notifiers). The
- * catalog selector and #UI_OT_id_browser_set_library instead send plain #ND_ASSET_LIST on every
- * synchronous filter change (see #id_browser_set_library_exec,
- * #IDBrowserCatalogSelectorTree::update_enabled_catalog_path). That notifier reaches this block's
- * region like any other (#ED_region_do_listen -> #block_listen -> this listener), but without
- * handling it here nothing would tag this popover for a rebuild: the catalog selector is a
- * separate nested popup region and only tags *its own* region on click, so the browser behind it
- * would stay stale until an unrelated event (e.g. a mouse-move) happened to redraw it. Mirrors
+ * #GRIDVIEW_PT_catalog_selector and #UI_OT_id_browser_set_library instead send plain #ND_ASSET_LIST
+ * on every synchronous filter change (see #id_browser_set_library_exec,
+ * #GridCatalogSelectorTree::update_enabled_catalogs_from_items, and #GridCatalogSelectorTree::AllItem
+ * activate). The catalog selector is a separate nested popup region and tags *its own* region for
+ * redraw, but #ND_ASSET_LIST is what reaches this block's region (#ED_region_do_listen ->
+ * #block_listen -> this listener) so the ID browser grid behind the popover rebuilds without
+ * waiting for an unrelated event. Mirrors
  * #image_grid_block_listener (interface_template_asset_image_grid.cc), which the equivalent
  * View3D grid template already listens with.
  */
@@ -833,10 +1007,10 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   Layout &layout = *panel->layout;
   layout.ui_units_x_set(float(popover_units_x));
 
-  if (asset_source) {
-    /* The asset library and its previews are read asynchronously, and the catalog filter can
-     * change from the nested catalog-selector popup; without this listener the popover would stay
-     * stale until an unrelated event redrew it. See #id_browser_asset_block_listen. */
+  if (asset_source || show_paint_filters) {
+    /* Asset library async load / catalog changes, and GridViewSettings name-match updates
+     * (NC_ASSET | ND_ASSET_LIST). Without this listener Blend Data mode would not rebuild the
+     * grid when map types are toggled from the nested popover. See #id_browser_asset_block_listen. */
     block_add_dynamic_listener(layout.block(), id_browser_asset_block_listen);
   }
 
@@ -858,16 +1032,22 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   /* #Layout::separator uses 6px*UI_SCALE_FAC steps; convert 0.5 #UI_UNIT_Y to that factor. */
   const float half_unit_gap_factor = (0.5f * UI_UNIT_Y) / (6.0f * UI_SCALE_FAC);
 
-  /* Row 1: source toggle on the left, view-mode toggle pushed to the right of the same row (saves
-   * one header row vs. a dedicated view-mode row). #separator_spacer is unsupported in popups, so
-   * split the row and right-align the view-mode group. */
-  Layout &filter_row = header.split(0.6f, false);
-  Layout &source_row = filter_row.row(true);
-  source_row.prop_enum(&wm_ptr, "id_browser_source", "BLEND_DATA", "", ICON_NONE);
-  source_row.prop_enum(&wm_ptr, "id_browser_source", "ASSET_LIBRARY", "", ICON_NONE);
+  /* Row 1: source toggle on the left, view-mode toggle pushed to the right of the same row.
+   * #separator_spacer is unsupported in popups, so a Right-aligned, fixed-size group is used
+   * instead: the resolver's "ignore min flag" override (see #LayoutRow::resolve_impl) treats a
+   * Right/Center-aligned fixed-size child of an Expand row as free space to consume, which is what
+   * pushes it to the row's right edge. */
+  Layout &filter_row = header.row(false);
+  filter_row.alignment_set(LayoutAlign::Expand);
+
+  Layout &source_toggle = filter_row.row(true);
+  source_toggle.fixed_size_set(true);
+  source_toggle.prop_enum(&wm_ptr, "id_browser_source", "BLEND_DATA", "", ICON_NONE);
+  source_toggle.prop_enum(&wm_ptr, "id_browser_source", "ASSET_LIBRARY", "", ICON_NONE);
 
   Layout &view_mode_row = filter_row.row(true);
   view_mode_row.alignment_set(LayoutAlign::Right);
+  view_mode_row.fixed_size_set(true);
   view_mode_row.prop_enum(&wm_ptr, "id_browser_view_mode", "GRID", "", ICON_NONE);
   view_mode_row.prop_enum(&wm_ptr, "id_browser_view_mode", "LIST", "", ICON_NONE);
 
@@ -875,42 +1055,164 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
    * evenly spaced groups instead of one packed block. */
   header.separator(half_unit_gap_factor);
 
-  /* Row 2, source-dependent: the asset source needs a library picker and catalog filter; the
-   * blend-data source keeps the paint filters (moved down from row 1 to make room for the source
-   * toggle above). */
-  Layout &source_options = header.row(true);
-  if (asset_source) {
-    /* The library selector's itemf narrows the list to image libraries via the browsed target
-     * (id_browser_ptr/prop). The popover carries these on the draw context stack (used by
-     * #build_id_grid), but a button's nested menu only inherits the layout's stored context store,
-     * so re-assert them here or the menu itemf would fall back to listing every library. */
-    source_options.context_ptr_set("id_browser_ptr", &target_ptr);
-    if (prop_name) {
-      source_options.context_string_set("id_browser_prop", *prop_name);
-    }
-    /* Columnar dropdown (libraries grouped by folder, first column pinned to the button width),
-     * shared with the asset shelf / grid / file-browser pickers. Backed by the WM's
-     * `id_browser_asset_library_reference` enum, whose set mirrors #UI_OT_id_browser_set_library. */
-    template_asset_library_column_selector(
-        source_options, C, &wm_ptr, "id_browser_asset_library_reference", ICON_ASSET_MANAGER);
-    source_options.popover(C, "UI_PT_id_browser_catalog_selector", "", ICON_COLLAPSEMENU);
-  }
-  else if (show_paint_filters) {
-    source_options.prop_enum(&space_ptr, "image_filter_mode", "ALL", "", ICON_NONE);
-    Layout &mat_sub = source_options.row(true);
-    mat_sub.active_set(has_material);
-    mat_sub.prop_enum(&space_ptr, "image_filter_mode", "CURRENT_MATERIAL", "", ICON_NONE);
-    source_options.prop_enum(&space_ptr, "image_filter_mode", "SLOT_TYPE", "", ICON_NONE);
-    Layout &both_sub = source_options.row(true);
-    both_sub.active_set(has_material);
-    both_sub.prop_enum(
-        &space_ptr, "image_filter_mode", "CURRENT_MATERIAL_AND_SLOT_TYPE", "", ICON_NONE);
+  /* Row 2, source-dependent: the asset source needs a library picker, catalog filter and the
+   * name-match filter; the blend-data source keeps the paint filter-mode buttons, the slot-type
+   * dropdown and its "All" material-restriction toggle (shown when "Slot" is active), with the
+   * name-match filter last. */
+  if (asset_source || show_paint_filters) {
+    PointerRNA settings_ptr = RNA_pointer_get(&wm_ptr, "id_browser_grid_view_settings");
 
-    /* Slot-type selector on the same row as the mode toggles above (rather than a row of its own)
-     * when the current mode narrows by slot type. */
-    const int mode = RNA_enum_get(&space_ptr, "image_filter_mode");
-    if (mode & TEMPLATE_ID_FILTER_SLOT_TYPE) {
-      source_options.prop(&space_ptr, "image_filter_slot_type", eUI_Item_Flag(0), "", ICON_NONE);
+    if (asset_source) {
+      Layout &source_options_row = header.row(false);
+      source_options_row.alignment_set(LayoutAlign::Expand);
+
+      Layout &source_options = source_options_row.row(true);
+      source_options.context_ptr_set("id_browser_ptr", &target_ptr);
+      if (prop_name) {
+        source_options.context_string_set("id_browser_prop", *prop_name);
+      }
+      source_options.context_ptr_set("grid_view_settings", &settings_ptr);
+      /* Only the ID Browser's vertical library menu shows Recent/Favorites (see
+       * #grid_library_selector_menu_draw); other #template_grid_library_selector callers leave
+       * this context key unset and stay unaffected. */
+      source_options.context_int_set("grid_library_selector_show_recent_favorites", 1);
+
+      /* Thin WM RNA property: side-effecting set + image-library itemf. */
+      template_grid_library_selector(&source_options,
+                                     const_cast<bContext *>(C),
+                                     &wm_ptr,
+                                     "id_browser_asset_library_reference",
+                                     /*embed_in_parent_row=*/true,
+                                     /*show_refresh=*/true);
+
+      /* The closed dropdown otherwise shows "All Libraries" while Recent/Favorites is active:
+       * #id_browser_set_membership stores the mode under #ASSET_LIBRARY_ALL in
+       * #UserDef.catalog_memory (read here via #catalog_mode_get), not on the enum property the
+       * button above is bound to -- from that property's point of view the library is simply
+       * #ASSET_LIBRARY_ALL (see #id_browser_set_membership's comment on why). Override the
+       * button's own label/icon after the fact so the closed state still communicates which
+       * pseudo-catalog is showing. */
+      if (settings_ptr.data != nullptr) {
+        const grid_settings::CatalogMode catalog_mode = grid_settings::catalog_mode_get(
+            settings_ptr);
+        if (ELEM(catalog_mode, grid_settings::CatalogMode::Recent, grid_settings::CatalogMode::Favorites))
+        {
+          PropertyRNA *lib_prop = RNA_struct_find_property(&wm_ptr,
+                                                            "id_browser_asset_library_reference");
+          for (const std::unique_ptr<Button> &but_ptr : source_options.block()->buttons_ptrs) {
+            Button *but = but_ptr.get();
+            if (but->rnaprop != lib_prop || but->type != ButtonType::Menu) {
+              continue;
+            }
+            const bool is_recent = catalog_mode == grid_settings::CatalogMode::Recent;
+            but->str = is_recent ? IFACE_("Recent") : IFACE_("Favorites");
+            but->drawstr = but->str;
+            but->icon = is_recent ? ICON_RECOVER_LAST : ICON_SOLO_ON;
+            /* Without this, #but_update_ex (interface.cc, reached via #button_update) would
+             * immediately regenerate #str/drawstr from the bound enum's actual current value
+             * (#ASSET_LIBRARY_ALL) on the next refresh pass of this #BLOCK_LOOP popup, reverting
+             * the override above while leaving the icon alone (its own regeneration is
+             * conditional on the enum item having a non-#ICON_NONE icon, which library items
+             * never do). */
+            button_drawflag_enable(but, BUT_MENU_KEEP_LABEL);
+            break;
+          }
+        }
+      }
+
+      Layout &catalog_btn = source_options.row(true);
+      catalog_btn.fixed_size_set(true);
+      /* The library selector is already present in the ID Browser header. Keep the shared
+       * catalog popover focused on catalogs instead of showing a duplicate library row. */
+      catalog_btn.context_int_set("grid_catalog_selector_show_library_row", 0);
+      template_grid_catalog_selector(&catalog_btn,
+                                     const_cast<bContext *>(C),
+                                     &settings_ptr,
+                                     /*embed_in_parent_row=*/true);
+
+      if (settings_ptr.data != nullptr) {
+        Layout &name_match_row = source_options_row.row(true);
+        name_match_row.alignment_set(LayoutAlign::Right);
+        name_match_row.fixed_size_set(true);
+        template_grid_name_match_filter(
+            &name_match_row, const_cast<bContext *>(C), &settings_ptr);
+      }
+    }
+    else {
+      /* Full-width row so the name-match filter lands at the row's end. */
+      Layout &source_options_row = header.row(false);
+      source_options_row.alignment_set(LayoutAlign::Expand);
+
+      /* #show_paint_filters guarantees `sl` (and therefore `space_ptr`) is valid here. */
+      char *filter_mode_poin = image_filter_mode_pointer(sl);
+
+      Layout &paint_filters = source_options_row.row(true);
+      paint_filters.fixed_size_set(true);
+      id_browser_image_filter_mode_button(
+          paint_filters, &space_ptr, "ALL", "All", ICON_NONE, true);
+      id_browser_image_filter_mode_button(
+          paint_filters, &space_ptr, "CURRENT_MATERIAL", "", ICON_MATERIAL, has_material);
+      id_browser_slot_type_filter_button(paint_filters, filter_mode_poin);
+
+      const int mode = RNA_enum_get(&space_ptr, "image_filter_mode");
+      const bool show_slot_type = (mode & TEMPLATE_ID_FILTER_SLOT_TYPE) != 0;
+      if (show_slot_type) {
+        /* #LayoutAlign::Center on a fixed-size child of an Expand+fixed parent is treated as
+         * free space by #LayoutRow::resolve_impl (same trick as the view-mode group on row 1).
+         * With name-match kept fixed (not Right) below, this group alone absorbs the gap between
+         * the paint filters and the name-match icon and centers the menu+"All" as the popover
+         * width changes. `align=true` keeps menu and toggle on one embossed height. */
+        Layout &slot_type_row = source_options_row.row(true);
+        slot_type_row.alignment_set(LayoutAlign::Center);
+        slot_type_row.fixed_size_set(true);
+
+        /* Fixed width instead of letting the dropdown stretch to fill the row: its content
+         * ("Base Color", "Roughness", ...) does not need the full remaining space. */
+        Layout &slot_type_dropdown = slot_type_row.row(true);
+        slot_type_dropdown.fixed_size_set(true);
+        slot_type_dropdown.ui_units_x_set(5.0f);
+        slot_type_dropdown.prop(
+            &space_ptr, "image_filter_slot_type", eUI_Item_Flag(0), "", ICON_NONE);
+
+        /* "All" is a parameter nested inside the "Slot" filter: pressed (the default, since the
+         * DNA field starts zeroed) means #TEMPLATE_ID_FILTER_CURRENT_MATERIAL is off and every
+         * material's images are shown; releasing it restricts to the active material's slots.
+         * #ButtonType::ToggleN is pressed when the underlying bit is *off* (see
+         * #button_is_pushed_ex), matching that default, and matches the embossed menu height.
+         * Flips the bit directly on the DNA field (bypassing RNA/#prop_enum) so it never touches
+         * #TEMPLATE_ID_FILTER_SLOT_TYPE — toggling it can therefore never deselect
+         * #id_browser_slot_type_filter_button or hide this row. */
+        Layout &material_toggle = slot_type_row.row(true);
+        material_toggle.fixed_size_set(true);
+        material_toggle.active_set(has_material);
+        Block *toggle_block = material_toggle.block();
+        uiDefButBit<char>(toggle_block,
+                          ButtonType::ToggleN,
+                          TEMPLATE_ID_FILTER_CURRENT_MATERIAL,
+                          IFACE_("All"),
+                          0,
+                          0,
+                          short(2.5f * UI_UNIT_X),
+                          short(UI_UNIT_Y),
+                          filter_mode_poin,
+                          0.0f,
+                          0.0f,
+                          TIP_("Show images used by slots of this type in any material, not just "
+                               "the active one"));
+      }
+
+      if (settings_ptr.data != nullptr) {
+        Layout &name_match_row = source_options_row.row(true);
+        name_match_row.fixed_size_set(true);
+        /* When the slot-type group is present it already absorbs the free space (Center above).
+         * Right-aligning name-match too would split that space and break centering — only push
+         * name-match to the trailing edge when it is the sole free child of this row. */
+        if (!show_slot_type) {
+          name_match_row.alignment_set(LayoutAlign::Right);
+        }
+        template_grid_name_match_filter(
+            &name_match_row, const_cast<bContext *>(C), &settings_ptr);
+      }
     }
   }
 
@@ -943,9 +1245,9 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   layout.separator(half_unit_gap_factor);
 
   /* Header/gap height consumed before the grid, kept in sync with the layout built above: the
-   * source + view-mode row, the 0.5-unit separator, the source-options row (paint filters,
-   * including any inline slot-type selector, or library/catalog), the 0.5-unit separator, the
-   * search row, and the 0.5-unit gaps above and below the grid. */
+   * source + view-mode + name-match row, the 0.5-unit separator, the source-options row (paint
+   * filters, including any inline slot-type selector, or library/catalog), the 0.5-unit separator,
+   * the search row, and the 0.5-unit gaps above and below the grid. */
   const float non_grid_units = 1.0f + 0.5f + 1.0f + 0.5f + 1.0f + 0.5f + 0.5f;
   const bool list_mode = RNA_enum_get(&wm_ptr, "id_browser_view_mode") ==
                          IMAGE_BROWSER_VIEW_LIST;

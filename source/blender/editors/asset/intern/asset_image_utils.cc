@@ -11,12 +11,16 @@
 
 #include "BKE_asset.hh"
 #include "BKE_global.hh"
+#include "BKE_image.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_preview_image.hh"
 
 #include "AS_asset_catalog.hh"
 #include "AS_asset_library.hh"
+#include "AS_asset_representation.hh"
 
+#include "ED_asset_import.hh"
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_mark_clear.hh"
@@ -68,6 +72,28 @@ bool image_mark_as_asset(Image *image)
   BKE_previewimg_id_ensure(id);
 
   return true;
+}
+
+Image *resolve_image_from_asset(Main &bmain,
+                                const asset_system::AssetRepresentation &asset)
+{
+  if (ID *local_id = asset.local_id()) {
+    return id_cast<Image *>(local_id);
+  }
+  if (!asset.full_library_path().empty()) {
+    ID *imported_id = asset_local_id_ensure_imported(bmain, asset);
+    if (imported_id && GS(imported_id->name) == ID_IM) {
+      return id_cast<Image *>(imported_id);
+    }
+    return nullptr;
+  }
+
+  Image *image = BKE_image_load_exists(&bmain, asset.full_path().c_str(), nullptr);
+  if (image) {
+    /* BKE_image_load_exists takes a temporary user reference. */
+    id_us_min(&image->id);
+  }
+  return image;
 }
 
 }  // namespace blender::ed::asset

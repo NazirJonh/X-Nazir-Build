@@ -121,6 +121,9 @@ static ImBuf *DROP_IMAGE_scale_image_buffer(ImBuf *ibuf, int max_size)
 
   /* Check if scaling is needed */
   if (ibuf->x <= max_size && ibuf->y <= max_size) {
+    if (!ibuf->byte_data() && ibuf->float_data()) {
+      IMB_byte_from_float(ibuf);
+    }
     return ibuf;
   }
 
@@ -131,6 +134,9 @@ static ImBuf *DROP_IMAGE_scale_image_buffer(ImBuf *ibuf, int max_size)
   /* Create new scaled buffer */
   ImBuf *scaled_ibuf = IMB_scale_into_new(ibuf, new_width, new_height, IMBScaleFilter::Bilinear, false);
   if (scaled_ibuf) {
+    if (!scaled_ibuf->byte_data() && scaled_ibuf->float_data()) {
+      IMB_byte_from_float(scaled_ibuf);
+    }
     return scaled_ibuf;
   }
   else {
@@ -170,6 +176,9 @@ ImBuf *DROP_IMAGE_load_and_scale_preview(const char *filepath, int max_size)
     IMB_freeImBuf(ibuf); // Free original if scaled
   }
   
+  if (result && !result->byte_data() && result->float_data()) {
+    IMB_byte_from_float(result);
+  }
   return result;
 }
 
@@ -207,6 +216,9 @@ ImBuf *DROP_IMAGE_load_and_scale_preview_from_id(Image *image, int max_size)
     IMB_freeImBuf(preview_copy); // Free original if scaled
   }
   
+  if (result && !result->byte_data() && result->float_data()) {
+    IMB_byte_from_float(result);
+  }
   return result;
 }
 

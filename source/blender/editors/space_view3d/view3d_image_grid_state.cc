@@ -16,13 +16,14 @@
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
 
-#include "BLI_map.hh"
 #include "BLI_listbase.h"
 #include "BLI_set.hh"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 #include "BLI_vector_set.hh"
 
 #include "BKE_asset.hh"
+#include "BKE_asset_catalog_memory.hh"
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
 #include "BKE_main.hh"
@@ -42,8 +43,6 @@
 
 #include "view3d_intern.hh"
 
-#include <fmt/format.h>
-
 namespace blender::ed::view3d {
 
 static_assert(int(ImageGridShelfCatalogMode::All) == IMAGE_GRID_CATALOG_MODE_ALL);
@@ -51,11 +50,80 @@ static_assert(int(ImageGridShelfCatalogMode::CatalogPath) == IMAGE_GRID_CATALOG_
 static_assert(int(ImageGridShelfCatalogMode::Recent) == IMAGE_GRID_CATALOG_MODE_RECENT);
 static_assert(int(ImageGridShelfCatalogMode::Favorites) == IMAGE_GRID_CATALOG_MODE_FAVORITES);
 
-/* Position-independent map key, so a Preferences reorder cannot re-attach one library's catalog
- * filter to another. */
-static std::string image_grid_library_key(const AssetLibraryReference &lib_ref)
+/** Domain key for #bUserAssetCatalogMemory entries owned by the View3D Image Grid. */
+constexpr const char *image_grid_catalog_memory_domain = "image_grid";
+
+static Vector<bUUID> image_grid_paths_to_catalog_ids(const AssetLibraryReference &lib_ref,
+                                                     const Set<std::string> &paths)
+{
+  Vector<bUUID> ids;
+  if (paths.is_empty()) {
+    return ids;
+  }
+  const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(lib_ref);
+  if (!library) {
+    return ids;
+  }
+  for (const std::string &path : paths) {
+    if (asset_system::AssetCatalog *catalog = library->catalog_service().find_catalog_by_path(
+            path.c_str()))
+    {
+      ids.append(catalog->catalog_id);
+    }
+  }
+  return ids;
+}
+
+static Set<std::string> image_grid_catalog_ids_to_paths(const AssetLibraryReference &lib_ref,
+                                                       const Span<bUUID> ids)
+{
+  Set<std::string> paths;
+  if (ids.is_empty()) {
+    return paths;
+  }
+  const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(lib_ref);
+  if (!library) {
+    return paths;
+  }
+  for (const bUUID &catalog_id : ids) {
+    if (const asset_system::AssetCatalog *catalog = library->catalog_service().find_catalog(
+            asset_system::CatalogID(catalog_id)))
+    {
+      paths.add(catalog->path.str());
+    }
+  }
+  return paths;
+}
+
+static Set<std::string> image_grid_remembered_catalog_paths(const AssetLibraryReference &lib_ref)
+{
+  if (BKE_asset_catalog_memory_get_mode(&U, lib_ref, image_grid_catalog_memory_domain) !=
+      ASSET_CATALOG_MEMORY_SET)
+  {
+    return {};
+  }
+  return image_grid_catalog_ids_to_paths(
+      lib_ref,
+      BKE_asset_catalog_memory_get_set(&U, lib_ref, image_grid_catalog_memory_domain));
+}
+
+std::string image_grid_library_key(const AssetLibraryReference &lib_ref)
 {
   return BKE_preferences_asset_library_identifier_from_ref(&U, &lib_ref);
+}
+
+blender::Vector<asset_system::AssetLibrary *> image_grid_all_mode_libraries()
+{
+  /* Same flags as #rna_image_grid_library_itemf / the library selector menu. */
+  return ed::asset::all_mode_libraries(/*exclude_image_libraries=*/false,
+                                       /*only_image_libraries=*/true);
+}
+
+void image_grid_fetch_all_mode_libraries(const bContext &C)
+{
+  /* Same flags as #image_grid_all_mode_libraries() / #rna_image_grid_library_itemf. */
+  ed::asset::fetch_all_mode_libraries(
+      C, /*exclude_image_libraries=*/false, /*only_image_libraries=*/true);
 }
 
 /* Reverse of #image_grid_library_key(): reconstruct the reference an identifier names.
@@ -90,33 +158,27 @@ AssetLibraryReference image_grid_library_ref_from_key(const std::string &key)
   return ref;
 }
 
-static AssetLibraryReference image_grid_library_ref_from_filter(
-    const ImageGridLibraryCatalogState &libcat_state)
-{
-  return libcat_state.library_ref;
-}
-
 static void image_grid_catalog_load_active(ImageGridUIState &state,
                                            const AssetLibraryReference &lib_ref)
 {
   state.filter.enabled_catalog_paths.clear();
-  if (const Set<std::string> *paths = state.filter.enabled_catalogs_by_library.lookup_ptr(
-          image_grid_library_key(lib_ref)))
-  {
-    state.filter.enabled_catalog_paths = *paths;
-  }
+  state.filter.enabled_catalog_paths = image_grid_remembered_catalog_paths(lib_ref);
 }
 
 void image_grid_catalog_commit_active(ImageGridUIState &state)
 {
-  const std::string key = image_grid_library_key(state.filter.lib_ref);
   if (state.filter.enabled_catalog_paths.is_empty()) {
-    state.filter.enabled_catalogs_by_library.remove(key);
+    BKE_asset_catalog_memory_set_all(&U, state.filter.lib_ref, image_grid_catalog_memory_domain);
+    return;
   }
-  else {
-    state.filter.enabled_catalogs_by_library.add_overwrite(key,
-                                                           state.filter.enabled_catalog_paths);
+  const Vector<bUUID> ids = image_grid_paths_to_catalog_ids(state.filter.lib_ref,
+                                                            state.filter.enabled_catalog_paths);
+  if (ids.is_empty()) {
+    /* Library still loading or paths invalid — do not clobber a previously saved set. */
+    return;
   }
+  BKE_asset_catalog_memory_set_set(
+      &U, state.filter.lib_ref, image_grid_catalog_memory_domain, ids.as_span());
 }
 
 void image_grid_filter_set_show_all(ImageGridUIState &state)
@@ -140,13 +202,38 @@ void image_grid_filter_set_show_all(ImageGridUIState &state)
   image_grid_catalog_commit_active(state);
 }
 
+void image_grid_filter_set_show_all_for_all_libraries(ImageGridUIState &state)
+{
+  const bool leaving_membership =
+      state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent ||
+      state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites;
+  for (asset_system::AssetLibrary *library : image_grid_all_mode_libraries()) {
+    if (const std::optional<AssetLibraryReference> lib_ref = library->library_reference()) {
+      BKE_asset_catalog_memory_set_all(&U, *lib_ref, image_grid_catalog_memory_domain);
+    }
+  }
+  state.filter.enabled_catalog_paths.clear();
+  if (!leaving_membership) {
+    state.filter.catalog_mode = ImageGridShelfCatalogMode::All;
+    /* Also clear membership mode stored under #ASSET_LIBRARY_ALL. */
+    BKE_asset_catalog_memory_set_all(
+        &U, asset_system::all_library_reference(), image_grid_catalog_memory_domain);
+  }
+  /* Membership (Recent/Favorites) already implies #ASSET_LIBRARY_ALL with no catalog
+   * restriction; leaving it here would re-show every library's assets anyway, so #catalog_mode
+   * intentionally keeps its Recent/Favorites value rather than being forced back to All -- this
+   * mirrors #image_grid_filter_set_show_all()'s membership-exit branch, which restores rather
+   * than overwrites. Do not call #BKE_asset_catalog_memory_set_all on #ASSET_LIBRARY_ALL while
+   * membership is active (would clear RECENT/FAVORITES mode). */
+}
+
 void image_grid_filter_set_membership(ImageGridUIState &state,
                                       const ImageGridShelfCatalogMode membership_mode)
 {
   BLI_assert(membership_mode == ImageGridShelfCatalogMode::Recent ||
              membership_mode == ImageGridShelfCatalogMode::Favorites);
   /* Mirror #image_grid_pending_schedule_from_asset: membership browses across all libraries and
-   * must not commit empty paths into the per-library map. */
+   * must not commit empty paths into the per-library set. */
   if (state.filter.catalog_mode != ImageGridShelfCatalogMode::Recent &&
       state.filter.catalog_mode != ImageGridShelfCatalogMode::Favorites)
   {
@@ -155,6 +242,13 @@ void image_grid_filter_set_membership(ImageGridUIState &state,
   state.filter.lib_ref = asset_system::all_library_reference();
   state.filter.enabled_catalog_paths.clear();
   state.filter.catalog_mode = membership_mode;
+  /* Writes ONLY the mode field — never touches catalog_id_set (rev-4 membership guard). */
+  BKE_asset_catalog_memory_set_mode(
+      &U,
+      state.filter.lib_ref,
+      image_grid_catalog_memory_domain,
+      (membership_mode == ImageGridShelfCatalogMode::Recent) ? ASSET_CATALOG_MEMORY_RECENT :
+                                                               ASSET_CATALOG_MEMORY_FAVORITES);
 }
 
 void image_grid_catalog_swap_library(ImageGridUIState &state,
@@ -212,8 +306,7 @@ bool image_grid_is_mask_slot_from_context(const bContext &C)
 void image_grid_state_reset_catalog(ImageGridUIState &state)
 {
   state.filter.enabled_catalog_paths.clear();
-  state.filter.enabled_catalogs_by_library.remove(
-      image_grid_library_key(state.filter.lib_ref));
+  BKE_asset_catalog_memory_set_all(&U, state.filter.lib_ref, image_grid_catalog_memory_domain);
   state.filter.catalog_mode = ImageGridShelfCatalogMode::All;
 }
 
@@ -440,6 +533,29 @@ int image_grid_foreach_filtered_item(
         gate);
     return out_index;
   }
+  if (state.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
+    bool continue_iter = true;
+    auto stop_tracking_gate = [&](const ImageGridFilteredItem &item, int inner) -> bool {
+      if (!continue_iter) {
+        return false;
+      }
+      continue_iter = gate(item, inner);
+      return continue_iter;
+    };
+    const Set<std::string> empty_set;
+    for (asset_system::AssetLibrary *library : image_grid_all_mode_libraries()) {
+      const AssetLibraryReference lib_ref = *library->library_reference();
+      const Set<std::string> per_lib_paths = image_grid_remembered_catalog_paths(lib_ref);
+      image_grid_foreach_filtered_item(bmain,
+                                       lib_ref,
+                                       per_lib_paths.is_empty() ? empty_set : per_lib_paths,
+                                       stop_tracking_gate);
+      if (!continue_iter) {
+        break;
+      }
+    }
+    return out_index;
+  }
   image_grid_foreach_filtered_item(
       bmain, state.filter.lib_ref, state.filter.enabled_catalog_paths, gate);
   return out_index;
@@ -475,8 +591,6 @@ static ImageGridStatesPerView3D &image_grid_states_ensure(const ImageGridOwner o
 struct ImageGridOwnerDNAFields {
   AssetLibraryReference &library_ref;
   short &catalog_mode;
-  ListBaseT<AssetCatalogPathLink> &legacy_enabled_catalog_paths;
-  ListBaseT<ImageGridLibraryCatalogState> &library_catalog_states;
   char &filter_name_match_enabled;
   ListBaseT<AssetNameMatchIdLink> &filter_name_match_map_types;
 };
@@ -487,67 +601,8 @@ static ImageGridOwnerDNAFields image_grid_owner_dna_fields(const ImageGridOwner 
   ImageGridSlotDNA &slot = owner.slot_dna(is_mask_slot);
   return {slot.library_ref,
           slot.catalog_mode,
-          slot.enabled_catalog_paths_legacy,
-          slot.library_catalog_states,
           slot.filter_name_match_enabled,
           slot.filter_name_match_map_types};
-}
-
-static void image_grid_catalog_load_from_view3d_dna(ImageGridUIState &state,
-                                                    const ImageGridOwner /*owner*/,
-                                                    const ImageGridOwnerDNAFields &dna)
-{
-  state.filter.enabled_catalogs_by_library.clear();
-
-  for (ImageGridLibraryCatalogState *libcat_state =
-           static_cast<ImageGridLibraryCatalogState *>(dna.library_catalog_states.first);
-       libcat_state;
-       libcat_state = libcat_state->next)
-  {
-    const AssetLibraryReference lib_ref = view3d::image_grid_library_ref_from_filter(
-        *libcat_state);
-    Set<std::string> paths;
-    for (AssetCatalogPathLink *path_link =
-             static_cast<AssetCatalogPathLink *>(libcat_state->enabled_catalog_paths.first);
-         path_link;
-         path_link = path_link->next)
-    {
-      if (path_link->path && path_link->path[0] != '\0') {
-        paths.add(path_link->path);
-      }
-    }
-    if (!paths.is_empty()) {
-      state.filter.enabled_catalogs_by_library.add_overwrite(
-          view3d::image_grid_library_key(lib_ref), std::move(paths));
-    }
-  }
-
-  /* Files saved before per-library filters: migrate the legacy single list. */
-  if (state.filter.enabled_catalogs_by_library.is_empty()) {
-    Set<std::string> legacy_paths;
-    for (AssetCatalogPathLink *path_link =
-             static_cast<AssetCatalogPathLink *>(dna.legacy_enabled_catalog_paths.first);
-         path_link;
-         path_link = path_link->next)
-    {
-      if (path_link->path && path_link->path[0] != '\0') {
-        legacy_paths.add(path_link->path);
-      }
-    }
-    if (!legacy_paths.is_empty()) {
-      AssetLibraryReference lib_ref{};
-      if (dna.library_ref.type != 0) {
-        lib_ref = dna.library_ref;
-      }
-      else {
-        lib_ref = asset_system::current_file_library_reference();
-      }
-      state.filter.enabled_catalogs_by_library.add_overwrite(
-          view3d::image_grid_library_key(lib_ref), std::move(legacy_paths));
-    }
-  }
-
-  view3d::image_grid_catalog_load_active(state, state.filter.lib_ref);
 }
 
 static void image_grid_init_state_from_owner_dna(ImageGridUIState &state,
@@ -563,7 +618,9 @@ static void image_grid_init_state_from_owner_dna(ImageGridUIState &state,
     state.filter.lib_ref = asset_system::current_file_library_reference();
   }
 
-  image_grid_catalog_load_from_view3d_dna(state, owner, dna);
+  /* Catalog filters come only from UserDef (domain #"image_grid"). Old blend-file DNA path lists
+   * are intentionally dropped — no DNA→UserDef migration. Persist clears those DNA lists. */
+  view3d::image_grid_catalog_load_active(state, state.filter.lib_ref);
 
   state.filter.name_match.enabled = (dna.filter_name_match_enabled != 0);
   state.filter.name_match.active_map_type_ids.clear();
@@ -584,6 +641,12 @@ static void image_grid_init_state_from_owner_dna(ImageGridUIState &state,
     state.filter.lib_ref = asset_system::all_library_reference();
     state.filter.enabled_catalog_paths.clear();
     state.filter.catalog_mode = dna_mode;
+    BKE_asset_catalog_memory_set_mode(
+        &U,
+        state.filter.lib_ref,
+        view3d::image_grid_catalog_memory_domain,
+        (dna_mode == view3d::ImageGridShelfCatalogMode::Recent) ? ASSET_CATALOG_MEMORY_RECENT :
+                                                                  ASSET_CATALOG_MEMORY_FAVORITES);
   }
   else {
     view3d::image_grid_catalog_sanitize_selection(state);

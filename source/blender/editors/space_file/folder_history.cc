@@ -189,7 +189,7 @@ ListBaseT<FileFolderHistory> folder_history_list_duplicate(ListBaseT<FileFolderH
   ListBaseT<FileFolderHistory> histories = {nullptr};
 
   for (FileFolderHistory &history : *listbase) {
-    FileFolderHistory *history_new = MEM_dupalloc(&history);
+    FileFolderHistory *history_new = MEM_new<FileFolderHistory>(__func__, history);
     history_new->folders_prev = folderlist_duplicate(&history.folders_prev);
     history_new->folders_next = folderlist_duplicate(&history.folders_next);
     BLI_addtail(&histories, history_new);

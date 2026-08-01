@@ -731,6 +731,8 @@ bool image_library_foreach_image(const char *library_root,
   for (const ImageLibraryIndexEntry &entry : index->entries) {
     char image_name[FILE_MAX];
     BLI_path_split_file_part(entry.relative_path.c_str(), image_name, sizeof(image_name));
+    /* Remove file extension from the display name. */
+    BLI_path_extension_strip(image_name);
 
     if (!callback(
             userdata, library_root, entry.relative_path.c_str(), image_name, entry.catalog_id))

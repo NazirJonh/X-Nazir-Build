@@ -14,11 +14,14 @@
 
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
+#include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
+#include "BLI_vector.hh"
 
 #include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_uuid_types.h"
 
 #include "BKE_appdir.hh"
@@ -42,6 +45,7 @@
 
 #include "ED_asset.hh"
 #include "ED_asset_indexer.hh"
+#include "ED_asset_name_matching.hh"
 #include "ED_fileselect.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
@@ -61,6 +65,12 @@
 
 namespace blender {
 
+/* Below this area width, the asset browser buttons row (Import Settings, type filters, search,
+ * display mode, ...) moves off the main header into the #RGN_TYPE_TOOL_HEADER region instead of
+ * squeezing into the same line as the View/Select/Library/Catalog/Asset menus. Scaled with the
+ * interface, since what has to fit is buttons, not pixels. */
+#define FILE_TOOL_HEADER_COLLAPSE_WIDTH (500.0f * UI_SCALE_FAC)
+
 /* ******************** default callbacks for file space ***************** */
 
 static SpaceLink *file_create(const ScrArea * /*area*/, const Scene * /*scene*/)
@@ -76,6 +86,17 @@ static SpaceLink *file_create(const ScrArea * /*area*/, const Scene * /*scene*/)
   BLI_addtail(&sfile->regionbase, region);
   region->regiontype = RGN_TYPE_HEADER;
   /* Ignore user preference "USER_HEADER_BOTTOM" here (always show top for new types). */
+  region->alignment = RGN_ALIGN_TOP;
+
+  /* Tool header: hosts the asset browser buttons row (Import Settings, type filters, search,
+   * display mode, ...) once the Asset Browser is too narrow for it to share the main header
+   * line with the View/Select/Library/Catalog/Asset menus. Visibility is entirely driven by
+   * file_tool_header_region_poll() below (#RGN_FLAG_POLL_FAILED) -- deliberately *not*
+   * #RGN_FLAG_HIDDEN here, which is a separate, independent flag that poll() never touches; a
+   * region created with it set would stay effectively hidden forever regardless of poll(). */
+  region = BKE_area_region_new();
+  BLI_addtail(&sfile->regionbase, region);
+  region->regiontype = RGN_TYPE_TOOL_HEADER;
   region->alignment = RGN_ALIGN_TOP;
 
   /* Tools region */
@@ -137,6 +158,8 @@ static void file_free(SpaceLink *sl)
   MEM_SAFE_DELETE(sfile->params);
   if (sfile->asset_params) {
     BKE_asset_catalog_state_list_free(sfile->asset_params->catalog_states);
+    blender::ed::asset::ED_asset_browser_name_match_map_types_free(
+        sfile->asset_params->filter_name_match_map_types);
   }
   MEM_SAFE_DELETE(sfile->asset_params);
   if (sfile->runtime != nullptr) {
@@ -157,7 +180,7 @@ static void file_init(wmWindowManager * /*wm*/, ScrArea *area)
   }
 
   if (sfile->runtime == nullptr) {
-    sfile->runtime = MEM_new_zeroed<SpaceFile_Runtime>(__func__);
+    sfile->runtime = MEM_new<SpaceFile_Runtime>(__func__);
     BKE_reports_init(&sfile->runtime->is_blendfile_readable_reports, RPT_STORE);
   }
   /* Validate the params right after file read. */
@@ -179,7 +202,7 @@ static void file_exit(wmWindowManager *wm, ScrArea *area)
 static SpaceLink *file_duplicate(SpaceLink *sl)
 {
   SpaceFile *sfileo = reinterpret_cast<SpaceFile *>(sl);
-  SpaceFile *sfilen = MEM_dupalloc(reinterpret_cast<SpaceFile *>(sl));
+  SpaceFile *sfilen = MEM_new<SpaceFile>(__func__, *sfileo);
 
   /* clear or remove stuff from old */
   sfilen->op = nullptr; /* file window doesn't own operators */
@@ -195,21 +218,24 @@ static SpaceLink *file_duplicate(SpaceLink *sl)
   }
 
   if (sfileo->params) {
-    sfilen->params = MEM_dupalloc(sfileo->params);
+    sfilen->params = MEM_new<FileSelectParams>(__func__, *sfileo->params);
   }
   if (sfileo->asset_params) {
-    sfilen->asset_params = static_cast<FileAssetSelectParams *>(
-        MEM_dupalloc(sfileo->asset_params));
+    sfilen->asset_params = MEM_new<FileAssetSelectParams>(__func__, *sfileo->asset_params);
     /* The shallow copy aliases the original list; deep-copy the catalog collapsed states. */
     sfilen->asset_params->catalog_states.clear_no_delete();
     BKE_asset_catalog_state_list_duplicate(sfilen->asset_params->catalog_states,
                                            sfileo->asset_params->catalog_states);
+    sfilen->asset_params->filter_name_match_map_types.clear_no_delete();
+    blender::ed::asset::ED_asset_browser_name_match_map_types_copy(
+        sfilen->asset_params->filter_name_match_map_types,
+        sfileo->asset_params->filter_name_match_map_types);
   }
 
   sfilen->folder_histories = folder_history_list_duplicate(&sfileo->folder_histories);
 
   if (sfileo->layout) {
-    sfilen->layout = MEM_dupalloc(sfileo->layout);
+    sfilen->layout = MEM_new<FileLayout>(__func__, *sfileo->layout);
   }
   return reinterpret_cast<SpaceLink *>(sfilen);
 }
@@ -283,6 +309,21 @@ static void file_refresh_ex(const bContext *C, SpaceFile *sfile, ScrArea *area)
         eFileSel_Params_AssetCatalogVisibility(asset_params->asset_catalog_visibility),
         &asset_params->catalog_id);
   }
+  if (ED_fileselect_is_asset_browser(sfile) && asset_params && sfile->files) {
+    Vector<StringRef> ids;
+    if (BLI_listbase_head_is_plausible(&asset_params->filter_name_match_map_types)) {
+      for (const AssetNameMatchIdLink &link : asset_params->filter_name_match_map_types) {
+        if (link.id[0] != '\0') {
+          ids.append(link.id);
+        }
+      }
+    }
+    const bool enabled = (asset_params->asset_flags & FILE_ASSET_FILTER_NAME_MATCH_ENABLED) != 0;
+    filelist_set_asset_name_match_filter(sfile->files, enabled, ids.as_span());
+  }
+  else if (sfile->files) {
+    filelist_set_asset_name_match_filter(sfile->files, false, {});
+  }
 
   if (ED_fileselect_is_asset_browser(sfile)) {
     const bool use_asset_indexer = !USER_DEVELOPER_TOOL_TEST(&U, no_asset_indexing);
@@ -299,6 +340,15 @@ static void file_refresh_ex(const bContext *C, SpaceFile *sfile, ScrArea *area)
 
   if (filelist_needs_force_reset(sfile->files)) {
     filelist_readjob_stop(sfile->files, wm);
+    /* #filelist_clear_from_reset_tag frees the #FileDirEntry array below, but a tooltip may
+     * still be scheduled (timer pending) or open for a button that captured a raw pointer into
+     * it (see #file_but_tooltip_func_set, file_draw.cc) -- e.g. hovering an asset tile while an
+     * unrelated operator (mode toggle, library reload, ...) tags this list for a full reset.
+     * That tooltip has no way to know its data just went stale, so clear it here rather than let
+     * it dereference freed memory when it (re)draws. */
+    if (win) {
+      WM_tooltip_clear(const_cast<bContext *>(C), win);
+    }
     filelist_clear_from_reset_tag(sfile->files);
   }
 
@@ -539,6 +589,17 @@ static void file_main_region_listener(const wmRegionListenerParams *listener_par
                ND_ASSET_LIST_PREVIEW))
       {
         ED_region_tag_redraw(region);
+        if (wmn->data == ND_ASSET_LIST_READING) {
+          /* Library finished loading (or is progressing) -- force a full rebuild so the catalog
+           * tree gets a chance to re-validate a previously-optimistic restored selection. */
+          ED_region_tag_refresh_ui(region);
+          if (ScrArea *area = listener_params->area) {
+            SpaceFile *sfile = static_cast<SpaceFile *>(area->spacedata.first);
+            if (sfile && sfile->runtime) {
+              sfile->runtime->catalog_validated = false;
+            }
+          }
+        }
       }
       break;
   }
@@ -771,6 +832,15 @@ static bool file_tool_props_region_poll(const RegionPollParams *params)
   return (sfile->browse_mode == FILE_BROWSE_MODE_ASSETS) || (sfile->op != nullptr);
 }
 
+static bool file_tool_header_region_poll(const RegionPollParams *params)
+{
+  const SpaceFile *sfile = static_cast<SpaceFile *>(params->area->spacedata.first);
+  if (sfile->browse_mode != FILE_BROWSE_MODE_ASSETS) {
+    return false;
+  }
+  return float(params->area->winx) < FILE_TOOL_HEADER_COLLAPSE_WIDTH;
+}
+
 static bool file_execution_region_poll(const RegionPollParams *params)
 {
   const SpaceFile *sfile = static_cast<SpaceFile *>(params->area->spacedata.first);
@@ -818,6 +888,17 @@ static void file_tools_region_listener(const wmRegionListenerParams *listener_pa
                ND_ASSET_CATALOGS))
       {
         ED_region_tag_redraw(region);
+        if (wmn->data == ND_ASSET_LIST_READING) {
+          /* Catalog tree lives in this region; refresh so #AssetCatalogTreeView::build_tree can
+           * revalidate an optimistic remembered catalog once the library finishes loading. */
+          ED_region_tag_refresh_ui(region);
+          if (ScrArea *area = listener_params->area) {
+            SpaceFile *sfile = static_cast<SpaceFile *>(area->spacedata.first);
+            if (sfile && sfile->runtime) {
+              sfile->runtime->catalog_validated = false;
+            }
+          }
+        }
       }
       break;
   }
@@ -938,48 +1019,41 @@ static bool asset_image_drop_poll(bContext *C, wmDrag *drag, const wmEvent * /*e
     return false;
   }
   const SpaceFile *sfile = CTX_wm_space_file(C);
-  if (!sfile || !ED_fileselect_is_asset_browser(sfile) ||
-      !ED_fileselect_is_local_asset_library(sfile))
-  {
+  if (!sfile || !ED_fileselect_is_asset_browser(sfile)) {
     return false;
   }
   return WM_drag_has_path_file_type(drag, FILE_TYPE_IMAGE);
 }
 
-static void asset_image_drop_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
+void file_asset_image_import_fill_images_from_drag(PointerRNA *op_ptr, const wmDrag *drag)
 {
-  /* Store only the image paths as `directory` + `files`. Assumes the dropped image files share a
-   * directory, which holds for a file-browser multi-selection and a single Explorer drop. */
-  const char *first_image = nullptr;
-  for (const std::string &path : WM_drag_get_paths(drag)) {
-    if (ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) {
-      first_image = path.c_str();
-      break;
-    }
-  }
-  if (first_image == nullptr) {
-    return;
-  }
-
-  char dir[FILE_MAX];
-  BLI_path_split_dir_part(first_image, dir, sizeof(dir));
-  RNA_string_set(drop->ptr, "directory", dir);
-
-  RNA_collection_clear(drop->ptr, "files");
+  RNA_collection_clear(op_ptr, "images");
   for (const std::string &path : WM_drag_get_paths(drag)) {
     if ((ED_path_extension_type(path.c_str()) & FILE_TYPE_IMAGE) == 0) {
       continue;
     }
-    char name[FILE_MAX];
-    BLI_path_split_file_part(path.c_str(), name, sizeof(name));
+    char abs[FILE_MAX];
+    BLI_strncpy(abs, path.c_str(), sizeof(abs));
+    BLI_path_abs(abs, BKE_main_blendfile_path_from_global());
+    BLI_path_normalize(abs);
     PointerRNA itemptr{};
-    RNA_collection_add(drop->ptr, "files", &itemptr);
-    RNA_string_set(&itemptr, "name", name);
+    RNA_collection_add(op_ptr, "images", &itemptr);
+    RNA_string_set(&itemptr, "filepath", abs);
+    /* map_type defaults to NONE (0); invoke guesses from filename. */
   }
+}
 
-  /* When a specific catalog is active in the tree, assign the new assets to it. */
+static void asset_image_drop_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
+{
+  file_asset_image_import_fill_images_from_drag(drop->ptr, drag);
+
+  RNA_boolean_set(drop->ptr, "catalog_locked", false);
+
+  /* When Current File is browsed and filtered to a catalog, preselect it in the dialog. */
   if (const FileAssetSelectParams *params = ED_fileselect_get_asset_params(CTX_wm_space_file(C))) {
-    if (params->asset_catalog_visibility == FILE_SHOW_ASSETS_FROM_CATALOG) {
+    if (params->asset_library_ref.type == ASSET_LIBRARY_LOCAL &&
+        params->asset_catalog_visibility == FILE_SHOW_ASSETS_FROM_CATALOG)
+    {
       char catalog_id_str[UUID_STRING_SIZE];
       BLI_uuid_format(catalog_id_str, params->catalog_id);
       RNA_string_set(drop->ptr, "catalog_id", catalog_id_str);
@@ -1100,6 +1174,8 @@ static void file_space_blend_read_data(BlendDataReader *reader, SpaceLink *sl)
         sfile->asset_params->import_method = FILE_ASSET_IMPORT_FOLLOW_PREFS;
     }
     BKE_asset_catalog_state_list_blend_read_data(reader, sfile->asset_params->catalog_states);
+    blender::ed::asset::ED_asset_browser_name_match_map_types_blend_read(
+        reader, sfile->asset_params->filter_name_match_map_types);
   }
 }
 
@@ -1123,6 +1199,8 @@ static void file_space_blend_write(BlendWriter *writer, SpaceLink *sl)
   if (sfile->asset_params) {
     writer->write_struct(sfile->asset_params);
     BKE_asset_catalog_state_list_blend_write(writer, sfile->asset_params->catalog_states);
+    blender::ed::asset::ED_asset_browser_name_match_map_types_blend_write(
+        writer, sfile->asset_params->filter_name_match_map_types);
   }
 }
 
@@ -1174,6 +1252,22 @@ void ED_spacetype_file()
   art->init = file_header_region_init;
   art->draw = file_header_region_draw;
   // art->listener = file_header_region_listener;
+  BLI_addhead(&st->regiontypes, art);
+  file_header_panels_register(art);
+
+  /* regions: tool header (asset browser buttons row, only shown once too narrow to share
+   * the main header line with the View/Select/Library/Catalog/Asset menus). Existence is
+   * entirely poll()-driven (#RGN_FLAG_POLL_FAILED), same pattern as #RGN_TYPE_TOOL_PROPS
+   * above -- deliberately *not* a #RGN_FLAG_DYNAMIC_SIZE region: that mechanism (see
+   * #ED_region_header_layout) only ever resizes a header's *width*, never its height, so it
+   * cannot make a top-aligned horizontal bar like this one collapse on its own. */
+  art = MEM_new_zeroed<ARegionType>("spacetype file tool header region");
+  art->regionid = RGN_TYPE_TOOL_HEADER;
+  art->prefsizey = HEADERY;
+  art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D | ED_KEYMAP_HEADER;
+  art->poll = file_tool_header_region_poll;
+  art->init = file_header_region_init;
+  art->draw = file_header_region_draw;
   BLI_addhead(&st->regiontypes, art);
 
   /* regions: ui */

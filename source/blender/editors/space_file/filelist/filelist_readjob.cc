@@ -92,7 +92,7 @@ static void filelist_readjob_startjob(void *flrjv, wmJobWorkerStatus *worker_sta
     std::scoped_lock lock(flrj->lock);
     BLI_assert((flrj->tmp_filelist == nullptr) && flrj->filelist);
 
-    flrj->tmp_filelist = MEM_dupalloc(flrj->filelist);
+    flrj->tmp_filelist = MEM_new<FileList>(__func__, *flrj->filelist);
 
     flrj->tmp_filelist->filelist.entries.clear_no_delete();
     flrj->tmp_filelist->filelist.entries_num = FILEDIR_NBR_ENTRIES_UNSET;
@@ -220,6 +220,18 @@ static void filelist_readjob_free(void *flrjv)
   //  printf("END filelist reading (%d files)\n", flrj->filelist->filelist.entries_num);
 
   if (flrj->tmp_filelist) {
+    /* Canceled jobs leave entries in the worker queue. At this point the worker and the WM job
+     * are fully stopped, so it is safe to move those entries to their owning list and release them
+     * without changing the job's lifecycle from inside #filelist_readjob_endjob(). */
+    {
+      std::scoped_lock lock(flrj->lock);
+      BLI_movelisttolist(&flrj->tmp_filelist->filelist_intern.entries,
+                         &flrj->tmp_filelist->filelist.entries);
+      flrj->tmp_filelist->filelist.entries_num = 0;
+      filelist_clear_ex(flrj->tmp_filelist, true, false, false);
+      flrj->tmp_filelist->filelist.entries_num = 0;
+    }
+
     /* tmp_filelist shall never ever be filtered! */
     BLI_assert(flrj->tmp_filelist->filelist.entries_num == 0);
     BLI_assert(flrj->tmp_filelist->filelist.entries.is_empty());

@@ -9,6 +9,7 @@
  * Helpers to read/write #GridViewSettings RNA properties from a #PointerRNA.
  */
 
+#include "BLI_map.hh"
 #include "BLI_set.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_utildefines.h"
@@ -20,13 +21,17 @@
 #include <utility>
 
 #include "DNA_asset_types.h"
+#include "DNA_userdef_types.h"
 
+#include "BKE_asset_catalog_memory.hh"
 #include "BKE_idtype.hh"
 #include "BKE_name_matching.hh"
 
 #include "RNA_access.hh"
 
 #include "ED_asset_library.hh"
+
+#include "AS_asset_library.hh"
 
 namespace blender::ui::grid_settings {
 
@@ -137,12 +142,70 @@ inline Vector<std::string> catalogs_split(const std::string &str)
   return tokens;
 }
 
+/**
+ * Serialize a per-library catalog-path filter map. Library entries are joined by `\x1e`; within
+ * an entry, the library key and its #catalogs_join-encoded path set are separated by `\x1f`.
+ * Neither separator can appear in a library key (see #BKE_preferences_asset_library_identifier_from_ref)
+ * or in #catalogs_join's output, so no further escaping is needed. An entry whose path set is
+ * empty is skipped entirely -- absence and "empty" both mean "show all for this library", so there
+ * is nothing to gain from writing it out.
+ */
+inline std::string catalogs_by_library_join(const Map<std::string, Set<std::string>> &by_library)
+{
+  std::string joined;
+  bool first = true;
+  for (const auto &item : by_library.items()) {
+    if (item.value.is_empty()) {
+      continue;
+    }
+    if (!first) {
+      joined += '\x1e';
+    }
+    joined += item.key;
+    joined += '\x1f';
+    joined += catalogs_join(item.value);
+    first = false;
+  }
+  return joined;
+}
+
+/**
+ * Inverse of #catalogs_by_library_join. A segment without a `\x1f` separator is malformed
+ * (hand-edited or truncated data) and is skipped rather than mis-parsed.
+ */
+inline Map<std::string, Set<std::string>> catalogs_by_library_split(const std::string &str)
+{
+  Map<std::string, Set<std::string>> result;
+  size_t start = 0;
+  while (start <= str.size()) {
+    const size_t end = str.find('\x1e', start);
+    const std::string segment = str.substr(start, (end == std::string::npos) ? end : end - start);
+    const size_t sep = segment.find('\x1f');
+    if (sep != std::string::npos) {
+      const std::string key = segment.substr(0, sep);
+      Set<std::string> paths;
+      for (std::string &path : catalogs_split(segment.substr(sep + 1))) {
+        paths.add(std::move(path));
+      }
+      if (!key.empty() && !paths.is_empty()) {
+        result.add_overwrite(key, std::move(paths));
+      }
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+  return result;
+}
+
 /** Parse the serialized catalog paths. An empty result means "show all". A malformed string with
  * repeated tokens is merged (Set::add), never #Set::add_new which is UB on a duplicate key. */
 inline Set<std::string> enabled_catalogs_get(PointerRNA &settings)
 {
+  const std::string raw = RNA_string_get(&settings, "enabled_catalogs");
   Set<std::string> result;
-  for (std::string &path : catalogs_split(RNA_string_get(&settings, "enabled_catalogs"))) {
+  for (std::string &path : catalogs_split(raw)) {
     result.add(std::move(path));
   }
   return result;
@@ -181,6 +244,115 @@ inline void catalog_path_set_enabled(PointerRNA &settings,
 inline void enabled_catalogs_clear(PointerRNA &settings)
 {
   RNA_string_set(&settings, "enabled_catalogs", "");
+}
+
+/** Domain string for ID Browser entries in #UserDef.catalog_memory. */
+constexpr const char *id_browser_catalog_memory_domain = "id_browser";
+
+inline bool is_library_section_expanded(PointerRNA &settings, StringRef library_key)
+{
+  RNA_BEGIN(&settings, item, "expanded_library_sections") {
+    if (RNA_string_get(&item, "key") == library_key) {
+      return true;
+    }
+  }
+  RNA_END;
+  return false;
+}
+
+inline void library_section_set_expanded(PointerRNA &settings,
+                                         StringRef library_key,
+                                         const bool expanded)
+{
+  Vector<std::string> keys;
+  RNA_BEGIN(&settings, item, "expanded_library_sections") {
+    const std::string key = RNA_string_get(&item, "key");
+    if (!key.empty() && key != library_key) {
+      keys.append(key);
+    }
+  }
+  RNA_END;
+  if (expanded) {
+    keys.append(std::string(library_key));
+  }
+  RNA_collection_clear(&settings, "expanded_library_sections");
+  for (const std::string &key : keys) {
+    PointerRNA item;
+    RNA_collection_add(&settings, "expanded_library_sections", &item);
+    RNA_string_set(&item, "key", key.c_str());
+  }
+}
+
+inline bool is_catalog_item_expanded(PointerRNA &settings, StringRef catalog_key)
+{
+  RNA_BEGIN(&settings, item, "expanded_catalog_items") {
+    if (RNA_string_get(&item, "key") == catalog_key && RNA_boolean_get(&item, "expanded")) {
+      return true;
+    }
+  }
+  RNA_END;
+  return false;
+}
+
+inline void catalog_item_set_expanded(PointerRNA &settings,
+                                      StringRef catalog_key,
+                                      const bool expanded)
+{
+  Vector<std::pair<std::string, bool>> items;
+  RNA_BEGIN(&settings, item, "expanded_catalog_items") {
+    const std::string key = RNA_string_get(&item, "key");
+    if (!key.empty() && key != catalog_key) {
+      items.append({key, RNA_boolean_get(&item, "expanded")});
+    }
+  }
+  RNA_END;
+  items.append({std::string(catalog_key), expanded});
+  RNA_collection_clear(&settings, "expanded_catalog_items");
+  for (const auto &item_value : items) {
+    PointerRNA item;
+    RNA_collection_add(&settings, "expanded_catalog_items", &item);
+    RNA_string_set(&item, "key", item_value.first.c_str());
+    RNA_boolean_set(&item, "expanded", item_value.second);
+  }
+}
+
+/**
+ * Catalog-filtering mode of the ID Browser. Backed by #BKE_asset_catalog_memory_get_mode for the
+ * current #GridViewSettings library reference and domain #"id_browser". Recent/Favorites are
+ * stored under #ASSET_LIBRARY_ALL (callers set that library before entering membership).
+ */
+enum class CatalogMode { All, CatalogPath, Recent, Favorites };
+
+inline CatalogMode catalog_mode_get(PointerRNA &settings)
+{
+  const AssetLibraryReference library_ref = library_ref_get(settings);
+  switch (BKE_asset_catalog_memory_get_mode(&U, library_ref, id_browser_catalog_memory_domain)) {
+    case ASSET_CATALOG_MEMORY_RECENT:
+      return CatalogMode::Recent;
+    case ASSET_CATALOG_MEMORY_FAVORITES:
+      return CatalogMode::Favorites;
+    case ASSET_CATALOG_MEMORY_SET:
+      return CatalogMode::CatalogPath;
+    case ASSET_CATALOG_MEMORY_ALL:
+    case ASSET_CATALOG_MEMORY_SINGLE:
+      return CatalogMode::All;
+  }
+  return CatalogMode::All;
+}
+
+/** Enter Recent or Favorites membership mode. Writes only the mode field for #ASSET_LIBRARY_ALL
+ * (never clears #catalog_id_set). Leaving membership is #BKE_asset_catalog_memory_set_all or a
+ * catalog toggle that calls #BKE_asset_catalog_memory_set_set. */
+inline void catalog_mode_set_membership(PointerRNA & /*settings*/, const CatalogMode mode)
+{
+  BLI_assert(ELEM(mode, CatalogMode::Recent, CatalogMode::Favorites));
+  const AssetLibraryReference all_ref = asset_system::all_library_reference();
+  BKE_asset_catalog_memory_set_mode(
+      &U,
+      all_ref,
+      id_browser_catalog_memory_domain,
+      (mode == CatalogMode::Recent) ? ASSET_CATALOG_MEMORY_RECENT :
+                                      ASSET_CATALOG_MEMORY_FAVORITES);
 }
 
 /**

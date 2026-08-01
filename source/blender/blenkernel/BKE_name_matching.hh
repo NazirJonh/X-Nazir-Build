@@ -16,6 +16,8 @@
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 
+#include <string>
+
 namespace blender {
 
 struct UserDef;
@@ -71,6 +73,10 @@ bool BKE_name_match_filter_asset_passes(const NameMatchFilterState &state,
 struct NameMatchResolvedFilter {
   bool active = false;
   Vector<Vector<StringRef>> token_lists;
+  /** Owning storage for synthetic `map:<identifier>` filter-tag strings injected during resolve.
+   * StringRefs in #filter_tags may point here when the source string is not stable for the
+   * lifetime of the resolved filter (e.g. a locally built `std::string`). */
+  Vector<std::string> owned_strings;
   Vector<StringRef> filter_tags;
 };
 

@@ -33,6 +33,7 @@
 #include "BLI_string.h"
 #include "BLI_task.h"
 #include "BLI_threads.h"
+#include "BLI_vector.hh"
 
 #include "BKE_asset.hh"
 #include "BKE_blendfile.hh"
@@ -178,6 +179,29 @@ void filelist_set_asset_catalog_filter_options(
   if (needs_update) {
     filelist_tag_needs_filtering(filelist);
   }
+}
+
+void filelist_set_asset_name_match_filter(FileList *filelist,
+                                          const bool enabled,
+                                          const Span<StringRef> map_type_ids)
+{
+  FileListFilter &filter = filelist->filter_data;
+  Vector<std::string> next_ids;
+  next_ids.reserve(map_type_ids.size());
+  for (const StringRef id : map_type_ids) {
+    if (!id.is_empty()) {
+      next_ids.append(std::string(id));
+    }
+  }
+  const bool changed = (filter.name_match_enabled != enabled) ||
+                       (filter.name_match_map_type_ids != next_ids);
+  if (!changed) {
+    return;
+  }
+  filter.name_match_enabled = enabled;
+  filter.name_match_map_type_ids = std::move(next_ids);
+  filter.name_match_resolved.reset();
+  filelist_tag_needs_filtering(filelist);
 }
 
 /**
@@ -946,6 +970,20 @@ void filelist_settype(FileList *filelist, short type)
   filelist->flags |= FL_FORCE_RESET;
 }
 
+static void filelist_filter_data_clear(FileListFilter &filter)
+{
+  file_delete_asset_catalog_filter_settings(&filter.asset_catalog_filter);
+  filter.name_match_map_type_ids.clear();
+  filter.name_match_resolved.reset();
+  filter.name_match_enabled = false;
+  filter.filter = 0;
+  filter.filter_id = 0;
+  filter.filter_glob[0] = '\0';
+  filter.filter_search[0] = '\0';
+  filter.flags = 0;
+  filter.asset_catalog_filter = nullptr;
+}
+
 static void filelist_clear_asset_library(FileList *filelist)
 {
   /* The AssetLibraryService owns the AssetLibrary pointer, so no need for us to free it. */
@@ -1056,7 +1094,7 @@ void filelist_free(FileList *filelist)
 
   MEM_SAFE_DELETE(filelist->asset_library_ref);
 
-  memset(&filelist->filter_data, 0, sizeof(filelist->filter_data));
+  filelist_filter_data_clear(filelist->filter_data);
 
   filelist->flags &= ~(FL_NEED_SORTING | FL_NEED_FILTERING);
 

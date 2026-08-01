@@ -284,4 +284,30 @@ void file_tools_region_panels_register(ARegionType *art)
   BLI_addtail(&art->paneltypes, pt);
 }
 
+void file_header_panels_register(ARegionType *art)
+{
+  /* Same Library selector + catalog tree as #FILE_PT_asset_catalog_buttons (the TOOLS region
+   * sidebar panel) above -- reuses #file_panel_asset_catalog_buttons_draw as-is, just exposed
+   * as a header popover (`layout.popover(panel="FILE_PT_asset_catalog_selector_popover")` from
+   * Python) for when the TOOLS region itself is collapsed.
+   *
+   * Popover use requires #WM_paneltype_add() on top of the usual #BLI_addtail() -- panels are
+   * normally only found via their owning region's local #ARegionType.paneltypes list, but
+   * #UILayout.popover() resolves by idname through a separate global registry
+   * (#WM_paneltype_find(), wm_panel_type.cc) that only #WM_paneltype_add() populates. See
+   * #blender::ed::asset::catalog_selector_panel_register() (asset_shelf_catalog_selector.cc)
+   * for the same pattern used by the asset shelf's own catalog-selector popover. */
+  PanelType *pt = MEM_new_zeroed<PanelType>("spacetype file asset catalog selector popover");
+  STRNCPY_UTF8(pt->idname, "FILE_PT_asset_catalog_selector_popover");
+  STRNCPY_UTF8(pt->label, N_("Catalog Selector"));
+  STRNCPY_UTF8(pt->translation_context, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  pt->region_type = RGN_TYPE_HEADER;
+  pt->flag = PANEL_TYPE_NO_HEADER;
+  pt->ui_units_x = 15;
+  pt->poll = file_panel_asset_browsing_poll;
+  pt->draw = file_panel_asset_catalog_buttons_draw;
+  BLI_addtail(&art->paneltypes, pt);
+  WM_paneltype_add(pt);
+}
+
 }  // namespace blender

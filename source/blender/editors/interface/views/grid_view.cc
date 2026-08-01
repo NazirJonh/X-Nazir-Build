@@ -206,6 +206,11 @@ void AbstractGridView::set_tile_size(int tile_width, int tile_height)
   style_.tile_height = tile_height;
 }
 
+void AbstractGridView::set_preview_size_px(const int preview_size_px)
+{
+  style_.preview_size_px = preview_size_px;
+}
+
 void AbstractGridView::set_cols_per_row_hint(const int cols)
 {
   cols_per_row_hint_ = std::max(cols, 0);
@@ -1227,7 +1232,16 @@ static int grid_handle_drag_scroll_event(bContext *C, const wmEvent *event, AReg
       if (total_dx + total_dy < drag_threshold) {
         return WM_UI_HANDLER_CONTINUE; /* Below threshold: neither scroll nor DnD yet. */
       }
-      if (total_dx > total_dy) {
+      bool horizontal_gesture = total_dx > total_dy;
+      if (region->regiontype == RGN_TYPE_WINDOW) {
+        const SpaceFile *sfile = CTX_wm_space_file(C);
+        if (sfile && ED_fileselect_is_asset_browser(sfile)) {
+          /* Asset Browser DnD commonly starts with a slightly diagonal movement. Give the
+           * horizontal intent a small margin over vertical touch scrolling. */
+          horizontal_gesture = float(total_dx) >= float(total_dy) * 0.8f;
+        }
+      }
+      if (horizontal_gesture) {
         /* Horizontal-dominant: the gesture belongs to the button (item DnD / box select). */
         drag = {};
         return WM_UI_HANDLER_CONTINUE;
@@ -2232,7 +2246,8 @@ PreviewGridItem::PreviewGridItem(StringRef identifier, StringRef label, int prev
 }
 
 void PreviewGridItem::build_grid_tile_button(Layout &layout,
-                                             BIFIconID override_preview_icon_id) const
+                                             BIFIconID override_preview_icon_id,
+                                             int preview_size_px) const
 {
   const GridViewStyle &style = this->get_view().get_style();
   Block *block = layout.block();
@@ -2259,6 +2274,11 @@ void PreviewGridItem::build_grid_tile_button(Layout &layout,
                /* NOLINTNEXTLINE: bugprone-suspicious-enum-usage */
                UI_HAS_ICON | BUT_ICON_PREVIEW);
   but->emboss = EmbossType::None;
+  /* Forward the unscaled preview size to the widget code so that small previews (< 56 px) can
+   * scale the label font down based on the icon footprint, not the full tile (which includes
+   * the label rect in tiles like the Asset Shelf that always show a name). The explicit argument
+   * wins; otherwise fall back to the view style (set by the Asset Shelf). */
+  but->preview_size_px = preview_size_px != 0 ? preview_size_px : style.preview_size_px;
 }
 
 void PreviewGridItem::build_grid_tile(const bContext & /*C*/, Layout &layout) const

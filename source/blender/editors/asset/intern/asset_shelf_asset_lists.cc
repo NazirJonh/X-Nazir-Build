@@ -26,6 +26,7 @@
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
 
+#include "ED_asset_shelf.hh"
 #include "ED_view3d.hh"
 
 namespace blender::ed::asset::shelf {
@@ -282,7 +283,8 @@ bool shelf_idname_is_brush_shelf(const StringRef idname)
 
 bool shelf_supports_asset_lists(const StringRef idname)
 {
-  return shelf_idname_is_brush_shelf(idname) || idname == ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME;
+  return shelf_idname_is_brush_shelf(idname) || idname == ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME ||
+         idname.startswith(ID_BROWSER_SHELF_IDNAME_PREFIX);
 }
 
 bool shelf_supports_name_match_filter(const StringRef idname)
@@ -411,7 +413,31 @@ int shelf_asset_lists_recent_max_count_get(const StringRef shelf_idname)
   {
     return settings->recent_max_count;
   }
+  if (shelf_idname_is_brush_shelf(shelf_idname)) {
+    return std::max(1, int(U.asset_shelf_recent_brushes_max));
+  }
+  if (shelf_idname == ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME) {
+    return std::max(1, int(U.asset_shelf_recent_images_max));
+  }
   return SHELF_ASSET_LISTS_RECENT_MAX;
+}
+
+static void shelf_asset_lists_recent_max_trim_supported_shelves()
+{
+  for (const char *idname : brush_shelf_idname_table) {
+    if (idname) {
+      shelf_asset_lists_recent_max_count_set(idname,
+                                             shelf_asset_lists_recent_max_count_get(idname));
+    }
+  }
+  shelf_asset_lists_recent_max_count_set(ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME,
+                                         shelf_asset_lists_recent_max_count_get(
+                                             ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME));
+}
+
+void shelf_asset_lists_recent_max_preferences_changed()
+{
+  shelf_asset_lists_recent_max_trim_supported_shelves();
 }
 
 void shelf_asset_lists_recent_max_count_set(const StringRef shelf_idname, const int recent_max_count)

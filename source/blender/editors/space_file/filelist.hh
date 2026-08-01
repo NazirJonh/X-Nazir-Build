@@ -11,6 +11,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "BLI_span.hh"
+#include "BLI_string_ref.hh"
+
 #include "DNA_space_types.h"
 struct BlendHandle;
 namespace blender {
@@ -76,6 +79,9 @@ void filelist_set_asset_catalog_filter_options(
     FileList *filelist,
     eFileSel_Params_AssetCatalogVisibility catalog_visibility,
     const bUUID *catalog_id);
+void filelist_set_asset_name_match_filter(FileList *filelist,
+                                          bool enabled,
+                                          Span<StringRef> map_type_ids);
 bool filelist_needs_filtering(FileList *filelist);
 void filelist_tag_needs_filtering(FileList *filelist);
 void filelist_filter(FileList *filelist);

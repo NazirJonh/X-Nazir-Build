@@ -88,6 +88,10 @@ struct GridViewStyle {
   GridViewStyle(int width, int height);
   int tile_width = 0;
   int tile_height = 0;
+  /** The unscaled preview icon size in pixels, used by the widget code to scale the label font
+   * down for small previews (< 56 px). Set via #AbstractGridView::set_preview_size_px; 0 when
+   * the host doesn't track it. */
+  int preview_size_px = 0;
 };
 
 class AbstractGridView : public AbstractView {
@@ -179,6 +183,14 @@ class AbstractGridView : public AbstractView {
   }
 
   void set_tile_size(int tile_width, int tile_height);
+  /**
+   * Unscaled preview icon size in pixels. Forwarded to #PreviewGridItem tile buttons so label font
+   * scaling for small previews (< 56 px) depends on the icon footprint, not the full tile height
+   * (which includes the label rect in hosts like the Asset Shelf). 0 = no explicit size (callers
+   * that size tiles to the icon only, e.g. the Asset Browser image grid, keep using the button
+   * rect).
+   */
+  void set_preview_size_px(int preview_size_px);
   /** Fixed column count (e.g. from #template_asset_image_grid `cols`). 0 = guess from layout
    * width. */
   void set_cols_per_row_hint(int cols);
@@ -491,7 +503,8 @@ class PreviewGridItem : public AbstractGridViewItem {
   void build_grid_tile(const bContext &C, Layout &layout) const override;
 
   void build_grid_tile_button(Layout &layout,
-                              BIFIconID override_preview_icon_id = ICON_NONE) const;
+                              BIFIconID override_preview_icon_id = ICON_NONE,
+                              int preview_size_px = 0) const;
 
   /**
    * Set a custom callback to execute when activating this view item. This way users don't have to

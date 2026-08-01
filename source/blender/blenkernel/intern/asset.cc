@@ -235,4 +235,31 @@ void BKE_asset_metadata_read(BlendDataReader *reader, AssetMetaData *asset_data)
   BLI_assert(asset_data->tags.count() == asset_data->tot_tags);
 }
 
+/* Map-tag namespace helpers (`map:` prefix) ----------------------- */
+
+bool BKE_asset_metadata_tag_is_map_tag(const StringRef tag_name)
+{
+  return tag_name.size() >= 4 && BLI_strncasecmp(tag_name.data(), "map:", 4) == 0;
+}
+
+void BKE_asset_metadata_map_tags_clear(AssetMetaData *asset_data)
+{
+  for (AssetTag *tag = static_cast<AssetTag *>(asset_data->tags.first), *next; tag; tag = next) {
+    next = tag->next;
+    if (BKE_asset_metadata_tag_is_map_tag(tag->name)) {
+      BKE_asset_metadata_tag_remove(asset_data, tag);
+    }
+  }
+}
+
+AssetTag *BKE_asset_metadata_map_tag_ensure(AssetMetaData *asset_data,
+                                            const StringRef map_type_identifier)
+{
+  if (map_type_identifier.is_empty()) {
+    return nullptr;
+  }
+  const std::string name = "map:" + std::string(map_type_identifier);
+  return BKE_asset_metadata_tag_ensure(asset_data, name.c_str()).tag;
+}
+
 }  // namespace blender

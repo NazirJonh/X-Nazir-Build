@@ -349,6 +349,27 @@ static void asset_shelf_region_listen(const wmRegionListenerParams *params)
       break;
     case NC_ASSET:
       ED_region_tag_redraw(region);
+      if (wmn->data == ND_ASSET_LIST_READING) {
+        /* Library finished loading (or is progressing) -- force a full rebuild so catalog
+         * filter state can re-validate a previously-optimistic restored selection. */
+        ED_region_tag_refresh_ui(region);
+        /* #region may be the shelf's header region, not the main shelf region that owns
+         * #RegionAssetShelf -- look up the actual shelf region via the area instead of assuming
+         * #region is it (this is also called from #header_region_listen). */
+        if (ARegion *shelf_region = params->area ?
+                                         BKE_area_find_region_type(params->area,
+                                                                    RGN_TYPE_ASSET_SHELF) :
+                                         nullptr)
+        {
+          if (RegionAssetShelf *shelf_regiondata =
+                  RegionAssetShelf::get_from_asset_shelf_region(*shelf_region))
+          {
+            if (AssetShelf *shelf = shelf_regiondata->active_shelf) {
+              shelf->catalog_validated = 0;
+            }
+          }
+        }
+      }
       break;
   }
 }
@@ -357,6 +378,20 @@ void region_listen(const wmRegionListenerParams *params)
 {
   if (list::listen(params->notifier)) {
     ED_region_tag_redraw_no_rebuild(params->region);
+    /* #list::listen() claims #ND_ASSET_LIST_READING, so #asset_shelf_region_listen is skipped.
+     * Still need #ED_region_tag_refresh_ui here or permanent shelves never revalidate. */
+    if (params->notifier->category == NC_ASSET &&
+        params->notifier->data == ND_ASSET_LIST_READING)
+    {
+      ED_region_tag_refresh_ui(params->region);
+      if (RegionAssetShelf *shelf_regiondata =
+              RegionAssetShelf::get_from_asset_shelf_region(*params->region))
+      {
+        if (AssetShelf *shelf = shelf_regiondata->active_shelf) {
+          shelf->catalog_validated = 0;
+        }
+      }
+    }
   }
   /* If the asset list didn't catch the notifier, let the region itself listen. */
   else {
@@ -578,6 +613,7 @@ void region_layout(const bContext *C, ARegion *region)
   }
 
   settings_ensure_valid_library_ref(active_shelf->settings);
+  shelf_ensure_catalog_revalidated(*active_shelf);
 
   ui::Block *block = block_begin(C, region, __func__, ui::EmbossType::Emboss);
 
@@ -883,7 +919,7 @@ static void add_catalog_tabs(AssetShelf &shelf, ui::Layout &layout)
     ui::Button *recent_but = add_tab_button(*block, IFACE_("Recent"));
     button_func_set(recent_but, [&shelf, &shelf_settings](bContext &C) {
       settings_set_recent_catalog_active(shelf_settings);
-      settings_catalog_commit_active(shelf, CTX_wm_manager(&C), true);
+      settings_catalog_commit_active(shelf);
       send_redraw_notifier(C);
     });
     button_func_pushed_state_set(recent_but, [&shelf_settings](const ui::Button &) -> bool {
@@ -893,7 +929,7 @@ static void add_catalog_tabs(AssetShelf &shelf, ui::Layout &layout)
     ui::Button *favorites_but = add_tab_button(*block, IFACE_("Favorites"));
     button_func_set(favorites_but, [&shelf, &shelf_settings](bContext &C) {
       settings_set_favorites_catalog_active(shelf_settings);
-      settings_catalog_commit_active(shelf, CTX_wm_manager(&C), true);
+      settings_catalog_commit_active(shelf);
       send_redraw_notifier(C);
     });
     button_func_pushed_state_set(favorites_but, [&shelf_settings](const ui::Button &) -> bool {
@@ -906,7 +942,7 @@ static void add_catalog_tabs(AssetShelf &shelf, ui::Layout &layout)
     ui::Button *but = add_tab_button(*block, IFACE_("All"));
     button_func_set(but, [&shelf, &shelf_settings](bContext &C) {
       settings_set_all_catalog_active(shelf_settings);
-      settings_catalog_commit_active(shelf, CTX_wm_manager(&C), true);
+      settings_catalog_commit_active(shelf);
       send_redraw_notifier(C);
     });
     button_func_pushed_state_set(but, [&shelf_settings](const ui::Button &) -> bool {
@@ -922,7 +958,7 @@ static void add_catalog_tabs(AssetShelf &shelf, ui::Layout &layout)
 
     button_func_set(but, [&shelf, &shelf_settings, path](bContext &C) {
       settings_set_active_catalog(shelf_settings, path);
-      settings_catalog_commit_active(shelf, CTX_wm_manager(&C), true);
+      settings_catalog_commit_active(shelf);
       send_redraw_notifier(C);
     });
     button_func_pushed_state_set(but, [&shelf_settings, path](const ui::Button &) -> bool {

@@ -18,7 +18,14 @@
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
+#include "BKE_global.hh"
 #include "BKE_idtype.hh"
+#include "BKE_name_matching.hh"
+
+#include "DNA_ID.h"
+#include "DNA_asset_types.h"
+
+#include "ED_asset_name_matching.hh"
 
 #include "../file_intern.hh"
 #include "../filelist.hh"
@@ -164,9 +171,26 @@ static AssetMetaData *filelist_file_internal_get_asset_data(const FileListIntern
   return nullptr;
 }
 
+/** Image assets must report #ID_IM via #AssetRepresentation::get_id_type() (local Main, external
+ * .blend, on-disk image library, essentials, remote). Non-image types (e.g. Material, Brush) must
+ * not. Entries without a resolvable asset are hidden before name-match runs. */
+static bool filelist_asset_is_image(const asset_system::AssetRepresentation &asset)
+{
+  return asset.get_id_type() == ID_IM;
+}
+
 void prepare_filter_asset_library(const FileList *filelist, FileListFilter *filter)
 {
-  /* Not used yet for the asset view template. */
+  filter->name_match_resolved.reset();
+  if (filter->name_match_enabled) {
+    NameMatchFilterState state;
+    state.enabled = true;
+    for (const std::string &id : filter->name_match_map_type_ids) {
+      state.active_map_type_ids.add(id);
+    }
+    filter->name_match_resolved = BKE_name_match_filter_resolve(state, U);
+  }
+
   if (!filter->asset_catalog_filter) {
     return;
   }
@@ -207,6 +231,29 @@ bool is_filtered_asset(FileListInternEntry *file, FileListFilter *filter)
   }
   if (asset_system::skip_experimental_asset_catalog(asset_data.catalog_id)) {
     return false;
+  }
+
+  if (filter->name_match_enabled) {
+    const bool is_image = filelist_asset_is_image(*asset);
+    const bool stored_nonempty = !filter->name_match_map_type_ids.is_empty();
+    const NameMatchResolvedFilter resolved = filter->name_match_resolved.value_or(
+        NameMatchResolvedFilter{});
+
+    /* Asset metadata normally has only a few tags. Keep the common case allocation-free while
+     * still supporting unusually large tag lists. */
+    Vector<StringRef, 4> tag_names;
+    for (const AssetTag &tag : asset_data.tags) {
+      tag_names.append(tag.name);
+    }
+    if (!ed::asset::ED_asset_browser_name_match_entry_visible(true,
+                                                              is_image,
+                                                              stored_nonempty,
+                                                              resolved,
+                                                              asset->get_name(),
+                                                              tag_names.as_span()))
+    {
+      return false;
+    }
   }
 
   /* The actual string search is handled for the whole list at once, to allow sorting of the

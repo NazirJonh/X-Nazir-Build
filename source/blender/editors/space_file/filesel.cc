@@ -6,7 +6,9 @@
  * \ingroup spfile
  */
 
+#include <algorithm>
 #include <cstring>
+#include <optional>
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -38,6 +40,7 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
+#include "BLI_uuid.h"
 
 #include "BLT_date_string.hh"
 #include "BLT_lang.hh"
@@ -45,6 +48,7 @@
 
 #include "BKE_appdir.hh"
 #include "BKE_asset.hh"
+#include "BKE_asset_catalog_memory.hh"
 #include "BKE_context.hh"
 #include "BKE_idtype.hh"
 #include "BKE_main.hh"
@@ -54,6 +58,7 @@
 
 #include "BLF_api.hh"
 
+#include "ED_asset_catalog.hh"
 #include "ED_fileselect.hh"
 #include "ED_screen.hh"
 
@@ -546,9 +551,53 @@ void ED_fileselect_activate_asset_catalog(const SpaceFile *sfile, const bUUID ca
   }
 
   FileAssetSelectParams *params = ED_fileselect_get_asset_params(sfile);
-  params->asset_catalog_visibility = FILE_SHOW_ASSETS_FROM_CATALOG;
-  params->catalog_id = catalog_id;
+  ED_fileselect_asset_catalog_set(params, catalog_id);
   WM_main_add_notifier(NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
+}
+
+void ED_fileselect_asset_catalog_set(FileAssetSelectParams *params, bUUID catalog_id)
+{
+  params->catalog_id = catalog_id;
+  params->asset_catalog_visibility = FILE_SHOW_ASSETS_FROM_CATALOG;
+  BKE_asset_catalog_memory_set_single(
+      &U, params->asset_library_ref, "asset_browser", catalog_id);
+}
+
+void ED_fileselect_asset_catalog_set_all(FileAssetSelectParams *params)
+{
+  /* Keep #catalog_id in sync with #asset_catalog_visibility -- #rna_FileAssetSelectParams_catalog_id_get
+   * reads #catalog_id unconditionally (not gated on visibility), so a stale non-nil UUID here would
+   * leak the previously-selected catalog through `FileAssetSelectParams.catalog_id` even while
+   * showing "All". */
+  params->catalog_id = BLI_uuid_nil();
+  params->asset_catalog_visibility = FILE_SHOW_ASSETS_ALL_CATALOGS;
+  BKE_asset_catalog_memory_set_all(&U, params->asset_library_ref, "asset_browser");
+}
+
+void ED_fileselect_asset_library_reference_set(FileAssetSelectParams *params,
+                                               const AssetLibraryReference &new_ref)
+{
+  params->asset_library_ref = new_ref;
+
+  const std::optional<bUUID> remembered = BKE_asset_catalog_memory_get_single(
+      &U, new_ref, "asset_browser");
+  if (!remembered) {
+    ED_fileselect_asset_catalog_set_all(params);
+    return;
+  }
+
+  using ed::asset::AssetCatalogValidation;
+  switch (ed::asset::ED_asset_catalog_validate(new_ref, *remembered)) {
+    case AssetCatalogValidation::Valid:
+    case AssetCatalogValidation::LibraryNotYetLoaded:
+      /* Apply optimistically; if the library isn't loaded yet, the region listener added in
+       * Task 6 triggers a one-time revalidation once it finishes loading. */
+      ED_fileselect_asset_catalog_set(params, *remembered);
+      break;
+    case AssetCatalogValidation::NotFound:
+      ED_fileselect_asset_catalog_set_all(params);
+      break;
+  }
 }
 
 int ED_fileselect_asset_import_method_get(const SpaceFile *sfile, const FileDirEntry *file)
@@ -1103,10 +1152,11 @@ void ED_fileselect_init_layout(SpaceFile *sfile, ARegion *region)
   layout->text_line_height = file_font_pointsize();
   layout->text_lines_count = 1;
   layout->offset_top = 0;
+  layout->is_asset_browser = ED_fileselect_is_asset_browser(sfile);
 
   if (params->display == FILE_IMGDISPLAY) {
     /* More compact spacing for asset browser. */
-    const float pad_fac = ED_fileselect_is_asset_browser(sfile) ? 0.15f : 0.3f;
+    const float pad_fac = layout->is_asset_browser ? 0.15f : 0.3f;
     /* Matches preview_tile_size_x()/_y() by default. */
     layout->prv_w = (float(params->thumbnail_size) / 20.0f) * UI_UNIT_X;
     layout->prv_h = (float(params->thumbnail_size) / 20.0f) * UI_UNIT_Y;
@@ -1117,6 +1167,17 @@ void ED_fileselect_init_layout(SpaceFile *sfile, ARegion *region)
     layout->prv_border_y = pad_fac * UI_UNIT_Y;
     layout->tile_w = layout->prv_w + 2 * layout->prv_border_x;
     layout->text_lines_count = 2;
+
+    if (layout->is_asset_browser) {
+      const float scale_factor = ui::preview_tile_text_scale(params->thumbnail_size);
+      if (scale_factor < 1.0f) {
+        layout->text_line_height = std::max(
+            int(layout->text_line_height * scale_factor), ui::PREVIEW_TILE_TEXT_MIN_HEIGHT);
+        /* Reduce vertical padding for smaller thumbnails. */
+        layout->tile_border_y = std::max(layout->tile_border_y * scale_factor, 1.0f);
+      }
+    }
+
     layout->tile_h = layout->prv_h + 2 * layout->prv_border_y +
                      layout->text_lines_count * layout->text_line_height;
     layout->width = int(BLI_rctf_size_x(&v2d->cur) - 2 * layout->tile_border_x);

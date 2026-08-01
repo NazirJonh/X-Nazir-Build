@@ -8,6 +8,7 @@
 
 #include "AS_asset_representation.hh"
 
+#include "BKE_asset_catalog_memory.hh"
 #include "BKE_context.hh"
 #include "BKE_main.hh"
 #include "BKE_preferences.h"
@@ -29,6 +30,7 @@
 #include "DNA_workspace_types.h"
 
 #include "RNA_access.hh"
+#include "UI_interface_c.hh"
 #include "WM_api.hh"
 
 #include "AS_asset_catalog.hh"
@@ -92,7 +94,9 @@ LibraryRefStatus library_reference_ensure_resolved(AssetLibraryReference &librar
 void foreach_library_reference(Main &bmain, FunctionRef<void(AssetLibraryReference &)> fn)
 {
   for (wmWindowManager &wm : bmain.wm) {
-    fn(wm.id_browser_asset_library_ref);
+    AssetLibraryReference library_ref = ui::id_browser_library_ref_get(wm);
+    fn(library_ref);
+    ui::id_browser_library_ref_set(wm, library_ref);
   }
 
   for (WorkSpace &workspace : bmain.workspaces) {
@@ -155,6 +159,7 @@ void library_references_rename(Main &bmain,
    * library identifier string (see #BKE_preferences_asset_library_identifier_from_ref), which for
    * a custom library *is* its name. It lives in the Preferences, out of reach of the walk below. */
   BKE_preferences_asset_browser_settings_rename_library(&U, old_name.c_str(), new_name.c_str());
+  BKE_asset_catalog_memory_rename_library(&U, old_name.c_str(), new_name.c_str());
 
   foreach_library_reference(bmain, [&](AssetLibraryReference &library_ref) {
     if (library_ref.type != ASSET_LIBRARY_CUSTOM) {

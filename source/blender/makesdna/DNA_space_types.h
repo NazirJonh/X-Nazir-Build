@@ -475,6 +475,7 @@ struct FileAssetSelectParams {
   eFileAssetImportFlags import_flags = {};
 
   eFileSel_AssetParams_Flag asset_flags = {};
+  ListBaseT<AssetNameMatchIdLink> filter_name_match_map_types = {nullptr, nullptr};
 };
 
 /**

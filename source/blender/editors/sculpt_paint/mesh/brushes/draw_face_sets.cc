@@ -380,11 +380,22 @@ void do_draw_face_sets_brush(const Depsgraph &depsgraph,
    * (non-Draw-Face-Sets) brush path in #face_set, dispatched internally by pbvh type. BMesh falls
    * through to normal drawing until dyntopo is supported (see the early return in
    * #apply_from_color_texture). */
-  if (supports_texture_data_modes && face_set::brush_texture_data_mode_is_alpha(brush)) {
+  const bool defer_texture_data = ELEM(brush.stroke_method,
+                                       BRUSH_STROKE_ANCHORED,
+                                       BRUSH_STROKE_DRAG_DOT);
+  if (defer_texture_data && supports_texture_data_modes &&
+      (face_set::brush_texture_data_mode_is_alpha(brush) ||
+       face_set::brush_uses_color_texture(brush)))
+  {
+    return;
+  }
+  if (supports_texture_data_modes && !defer_texture_data &&
+      face_set::brush_texture_data_mode_is_alpha(brush)) {
     face_set::apply_from_texture(depsgraph, object, brush, node_mask);
     return;
   }
-  if (supports_texture_data_modes && face_set::brush_uses_color_texture(brush)) {
+  if (supports_texture_data_modes && !defer_texture_data &&
+      face_set::brush_uses_color_texture(brush)) {
     face_set::apply_from_color_texture(depsgraph, object, brush, node_mask);
     return;
   }

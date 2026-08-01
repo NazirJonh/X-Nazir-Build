@@ -9,7 +9,6 @@
 
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -3489,6 +3488,27 @@ bool node_in_sphere(const bke::pbvh::Node &node,
   return math::distance_squared(location, nearest) < radius_sq;
 }
 
+/**
+ * Same test as #node_in_sphere, but the AABB and the query point are both weighted by
+ * #StrokeCache.position_scale before clamping -- the same per-axis correction
+ * #position_scale_normalized applies to per-vertex falloff distances. Unlike padding the raw
+ * local-space radius by `1 / min_axis` (isotropic, so it over-covers every axis to guarantee the
+ * most-compressed one), this reproduces the true anisotropic falloff volume almost exactly, so it
+ * neither drops border geometry nor gathers nodes the falloff will zero out anyway.
+ */
+static bool node_in_scaled_sphere(const bke::pbvh::Node &node,
+                                  const float3 &scaled_location,
+                                  const float3 &position_scale,
+                                  const float radius_sq,
+                                  const bool original)
+{
+  const Bounds<float3> &bounds = original ? node.bounds_orig() : node.bounds();
+  const float3 scaled_min = bounds.min * position_scale;
+  const float3 scaled_max = bounds.max * position_scale;
+  const float3 nearest = math::clamp(scaled_location, scaled_min, scaled_max);
+  return math::distance_squared(scaled_location, nearest) < radius_sq;
+}
+
 bool node_in_cylinder(const DistRayAABB_Precalc &ray_dist_precalc,
                       const bke::pbvh::Node &node,
                       const float radius_sq,
@@ -4451,6 +4471,39 @@ static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgra
     /* A cube tip reaches past the radius at the corners. */
     radius_scale = std::max(radius_scale, float(M_SQRT2));
   }
+  else if (face_set::brush_texture_data_mode_is_active(brush) && ss.cache &&
+           ss.cache->non_uniform_scale_active &&
+           brush.falloff_shape == PAINT_FALLOFF_SHAPE_SPHERE)
+  {
+    /* Face Sets/Color From Texture is a discrete, single-shot per-face assignment measured
+     * against the exact same #StrokeCache.position_scale-weighted distance the per-vertex falloff
+     * below uses (see #calc_brush_distances_squared), instead of the isotropic `radius / min_axis`
+     * padding the generic branch below applies. That padding exists to guarantee coverage for
+     * *accumulating* falloff brushes without tearing the mesh at the node-search boundary (see the
+     * comment below); FST has no such accumulation to protect, and on strongly non-uniformly scaled
+     * secondary objects the isotropic padding inflates the node search area (and therefore the
+     * O(faces) texture sampling cost) by up to `1 / min_axis` squared for no benefit. Testing nodes
+     * directly against the true falloff volume avoids both the over-inclusion and the risk of
+     * under-covering the compressed axis that a flat skip of the padding would introduce. */
+    const float3 &position_scale = ss.cache->position_scale;
+    const float3 scaled_location = ss.cache->location_symm * position_scale;
+    float radius_sq = math::square(ss.cache->radius);
+    if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) {
+      radius_sq *= 2.0f;
+    }
+    result = {bke::pbvh::search_nodes(
+                  pbvh,
+                  memory,
+                  [&](const bke::pbvh::Node &node) {
+                    if (node_fully_masked_or_hidden(node)) {
+                      return false;
+                    }
+                    return node_in_scaled_sphere(
+                        node, scaled_location, position_scale, radius_sq, use_original);
+                  }),
+              std::nullopt,
+              std::nullopt};
+  }
   else {
     /* Node culling uses a raw local-space sphere (#node_in_sphere), but whenever the
      * non-uniform-scale correction is active the per-vertex falloff is measured through
@@ -4507,6 +4560,12 @@ static undo::NodeDataFlag texture_data_undo_flags(const Brush &brush, const Obje
     flags |= undo::NodeDataFlag::Color;
   }
   return flags;
+}
+
+static bool texture_data_is_deferred(const Brush &brush)
+{
+  return ELEM(brush.stroke_method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT) &&
+         face_set::brush_texture_data_mode_is_active(brush);
 }
 
 static void push_undo_nodes(const Depsgraph &depsgraph,
@@ -4936,7 +4995,8 @@ static void do_brush_action(const Depsgraph &depsgraph,
     }
   }
 
-  if (!use_pixels && brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+  if (!use_pixels && !texture_data_is_deferred(brush) &&
+      brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
       face_set::brush_texture_data_mode_is_active(brush) &&
       (face_set::brush_texture_data_writes_face_sets(brush) ||
        face_set::brush_texture_data_writes_color(brush)))
@@ -5105,6 +5165,38 @@ using BrushActionFunc = void (*)(const Depsgraph &depsgraph,
                                  Object &ob,
                                  const Brush &brush,
                                  PaintModeSettings &paint_mode_settings);
+
+static void apply_deferred_texture_data(const Depsgraph &depsgraph,
+                                        const Scene & /*scene*/,
+                                        Sculpt &sd,
+                                        Object &ob,
+                                        const Brush &brush,
+                                        PaintModeSettings & /*paint_mode_settings*/)
+{
+  if (!texture_data_is_deferred(brush) ||
+      (!face_set::brush_texture_data_writes_face_sets(brush) &&
+       !face_set::brush_texture_data_writes_color(brush)))
+  {
+    return;
+  }
+
+  IndexMaskMemory memory;
+  layers::base_view_dc_update(depsgraph, ob);
+  const brushes::CursorSampleResult cursor_sample_result = calc_brush_node_mask(
+      depsgraph, ob, brush, memory);
+  const IndexMask node_mask = cursor_sample_result.node_mask;
+  if (node_mask.is_empty()) {
+    return;
+  }
+
+  push_undo_nodes(depsgraph, ob, brush, node_mask);
+  if (face_set::brush_texture_data_mode_is_alpha(brush)) {
+    face_set::apply_from_texture(depsgraph, ob, brush, node_mask);
+  }
+  else if (face_set::brush_texture_data_mode_is_color(brush)) {
+    face_set::apply_from_color_texture(depsgraph, ob, brush, node_mask);
+  }
+}
 
 static void do_tiled(const Depsgraph &depsgraph,
                      const Scene &scene,
@@ -8850,6 +8942,7 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
     /* `stroke_object_override` + `obact_override` restore `this->object` and `vc.obact`
      * to the primary object at the end of each iteration. */
   }
+
 }
 
 static void brush_exit_tex(Sculpt &sd)
@@ -8977,6 +9070,29 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     mask_brush_toggle_off(&sd.paint, ss.cache);
     /* Refresh the brush pointer in case we switched brush in the toggle function. */
     brush = BKE_paint_brush(&sd.paint);
+  }
+
+  /* Anchored and Drag Dot strokes restore their mesh between steps and only settle on the final
+   * brush position here. Apply texture-as-data after that final position is known, otherwise the
+   * Face Sets and color attribute follow an intermediate stroke position. */
+  if (!is_cancel && stroke_started && texture_data_is_deferred(*brush)) {
+    const Scene &scene = *this->scene;
+    for (Object *object_ptr : objects) {
+      Object &object = *object_ptr;
+      SculptSession *object_ss = object.runtime->sculpt_session;
+      if (!object_ss || !object_ss->cache) {
+        continue;
+      }
+
+      detail::ScopedStrokeObjectOverride stroke_object_override(*this, object);
+      ScopedObactOverride obact_override(this->vc, object);
+      do_symmetrical_brush_actions(*this->depsgraph,
+                                   scene,
+                                   sd,
+                                   object,
+                                   apply_deferred_texture_data,
+                                   *this->paint_mode_settings_);
+    }
   }
 
   this->layer_recording_finish(is_cancel, stroke_started, brush);

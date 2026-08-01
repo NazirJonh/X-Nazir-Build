@@ -23,6 +23,7 @@
 #include "DEG_depsgraph.hh"
 
 #include "../paint_intern.hh"
+#include "sculpt_face_set.hh"
 #include "sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint {
@@ -485,8 +486,9 @@ bool MultiObjectStrokeContext::process_secondary(Object &ob,
                                                  const float3 &primary_world_view_direction,
                                                  const Span<MirroredDaub> symm_daubs) const
 {
-  bool has_location = stroke_cache_set_location_from_world_sphere(
+  bool main_hit = stroke_cache_set_location_from_world_sphere(
       ob, cache, paint, brush, primary_world_center, primary_world_view_direction);
+  bool has_location = main_hit;
 
   /* Shared symmetry: also process this object if its geometry lies under a mirrored daub, even
    * though the main daub misses it. The cache is still set up from the main center -- the mirror
@@ -502,10 +504,10 @@ bool MultiObjectStrokeContext::process_secondary(Object &ob,
      * already tested above at the plain radius; it is never snapped, so it must not be widened.
      * (It is the same center, round-tripped through the reference-space transforms, so re-testing
      * it here was redundant even before the snap.) */
-    const float snap_multiplier = mirror_snap_search_multiplier(paint, brush);
+    const float mirror_snap_multiplier = mirror_snap_search_multiplier(paint, brush);
     for (const MirroredDaub &daub : symm_daubs.drop_front(1)) {
       if (object_geometry_intersects_world_sphere(
-              ob, cache, paint, brush, daub.center, daub.view_direction, snap_multiplier))
+              ob, cache, paint, brush, daub.center, daub.view_direction, mirror_snap_multiplier))
       {
         stroke_cache_apply_world_center(ob, cache, paint, brush, primary_world_center);
         has_location = true;

@@ -14,7 +14,6 @@
 #include "sculpt_automask.hh"
 #include "sculpt_color.hh"
 
-#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <queue>
@@ -3464,6 +3463,38 @@ static void texture_data_write_vert_color(const Brush &brush,
 
 /** \} */
 
+/** Cached per-vertex result of #sculpt_apply_texture, keyed by vertex index. */
+struct FaceTextureVertSample {
+  float value = 0.0f;
+  float4 rgba = float4(0.0f);
+};
+
+/**
+ * Mesh faces share corners with every other face around a vertex (six, on average, for a closed
+ * triangle mesh), so sampling per corner without caching resamples the same vertex position
+ * repeatedly. \a vert_cache is scoped to a single PBVH node by the caller, so this only
+ * deduplicates within a node -- cheap to keep on the stack and still removes most of the
+ * redundancy, since #sample_face_texture_avg is only ever called per-node.
+ */
+static const FaceTextureVertSample &sample_vert_texture_cached(
+    SculptSession &ss,
+    const Brush &brush,
+    const Span<float3> &positions_eval,
+    const int vert_index,
+    const int thread_id,
+    Map<int, FaceTextureVertSample> &vert_cache)
+{
+  return vert_cache.lookup_or_add_cb(vert_index, [&]() {
+    FaceTextureVertSample sample;
+    sculpt_apply_texture(
+        ss, brush, positions_eval[vert_index], thread_id, &sample.value, sample.rgba);
+    if (brush.flag2 & BRUSH_TEXTURE_INVERT_ALPHA) {
+      sample.value = 1.0f - sample.value;
+    }
+    return sample;
+  });
+}
+
 static float sample_face_texture_avg(SculptSession &ss,
                                      const Brush &brush,
                                      const Mesh &mesh,
@@ -3474,7 +3505,8 @@ static float sample_face_texture_avg(SculptSession &ss,
                                      const GroupedSpan<int> vert_to_face_map,
                                      const int face_index,
                                      bke::GSpanAttributeWriter *color_attribute,
-                                     const int thread_id)
+                                     const int thread_id,
+                                     Map<int, FaceTextureVertSample> &vert_cache)
 {
   const IndexRange face_corners = faces[face_index];
   float sum = 0.0f;
@@ -3482,23 +3514,15 @@ static float sample_face_texture_avg(SculptSession &ss,
 
   for (const int corner : face_corners) {
     const int vert_index = corner_verts[corner];
-    float texture_value;
-    float4 texture_rgba;
-    sculpt_apply_texture(
-        ss, brush, positions_eval[vert_index], thread_id, &texture_value, texture_rgba);
+    const FaceTextureVertSample &sample = sample_vert_texture_cached(
+        ss, brush, positions_eval, vert_index, thread_id, vert_cache);
 
-    if (brush.flag2 & BRUSH_TEXTURE_INVERT_ALPHA) {
-      texture_value = 1.0f - texture_value;
-    }
-
-    sum += texture_value;
+    sum += sample.value;
     num_verts++;
 
     if (color_attribute) {
       float3 write_rgb;
-      if (texture_data_color_from_alpha_mask(
-              brush, mesh, face_set_id, texture_value, write_rgb))
-      {
+      if (texture_data_color_from_alpha_mask(brush, mesh, face_set_id, sample.value, write_rgb)) {
         texture_data_write_vert_color(brush,
                                       faces,
                                       corner_verts,
@@ -4005,6 +4029,9 @@ static void apply_from_texture_mesh(const Depsgraph &depsgraph,
 
         const int thread_id = BLI_task_parallel_thread_id(nullptr);
         bke::GSpanAttributeWriter *col_attr_ptr = color_attribute ? &color_attribute : nullptr;
+        /* Adjacent faces in \a face_indices share corners, so caching per node (rather than per
+         * face) turns the repeated #sculpt_apply_texture calls at a shared vertex into one. */
+        Map<int, FaceTextureVertSample> vert_cache;
         for (const int i_face : face_indices.index_range()) {
           if (factors[i_face] == 0.0f) {
             continue;
@@ -4021,7 +4048,8 @@ static void apply_from_texture_mesh(const Depsgraph &depsgraph,
                                                     vert_to_face_map,
                                                     face_indices[i_face],
                                                     col_attr_ptr,
-                                                    thread_id);
+                                                    thread_id,
+                                                    vert_cache);
           if (write_face_sets && avg > brush.texture_threshold) {
             face_sets.span[face_indices[i_face]] = face_set_id;
           }

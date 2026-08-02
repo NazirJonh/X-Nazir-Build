@@ -676,7 +676,7 @@ struct View3DOverlay {
   float wireframe_threshold = 1.0f;
   float wireframe_opacity = 1.0f;
   float retopology_offset = 0.01f;
-  float face_sets_opacity = 1.0f;
+  float face_sets_opacity = 0.6f;
 
   /** Grease pencil settings. */
   float gpencil_paper_opacity = 0.5f;

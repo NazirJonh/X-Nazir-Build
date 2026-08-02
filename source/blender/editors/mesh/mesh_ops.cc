@@ -34,6 +34,10 @@ void ED_operatortypes_mesh()
   WM_operatortype_append(MESH_OT_select_ungrouped);
   WM_operatortype_append(MESH_OT_hide);
   WM_operatortype_append(MESH_OT_reveal);
+  WM_operatortype_append(MESH_OT_face_set_hide_active);
+  WM_operatortype_append(MESH_OT_face_set_hide_inactive);
+  WM_operatortype_append(MESH_OT_face_set_show_all);
+  WM_operatortype_append(MESH_OT_face_set_isolate);
   WM_operatortype_append(MESH_OT_select_face_by_sides);
   WM_operatortype_append(MESH_OT_select_by_pole_count);
   WM_operatortype_append(MESH_OT_select_loose);

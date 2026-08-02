@@ -3910,6 +3910,7 @@ bool EDBM_select_interior_faces(BMEditMesh *em)
 struct DelimitData {
   eCustomDataType cd_loop_type;
   int cd_loop_offset;
+  int cd_face_set_offset;
 };
 
 static bool select_linked_delimit_test(BMEdge *e, int delimit, const DelimitData *delimit_data)
@@ -3954,6 +3955,19 @@ static bool select_linked_delimit_test(BMEdge *e, int delimit, const DelimitData
     }
   }
 
+  if (delimit & BMO_DELIM_FACE_SET) {
+    if (e->l && e->l->radial_next != e->l) {
+      const int face_set_1 = BM_ELEM_CD_GET_INT(e->l->f, delimit_data->cd_face_set_offset);
+      BMLoop *l_iter = e->l->radial_next;
+      do {
+        const int face_set_2 = BM_ELEM_CD_GET_INT(l_iter->f, delimit_data->cd_face_set_offset);
+        if (face_set_1 != face_set_2) {
+          return true;
+        }
+      } while ((l_iter = l_iter->radial_next) != e->l);
+    }
+  }
+
   return false;
 }
 
@@ -3989,6 +4003,12 @@ static void select_linked_delimit_validate(BMesh *bm, int *delimit)
       (*delimit) &= ~BMO_DELIM_UV;
     }
   }
+
+  if ((*delimit) & BMO_DELIM_FACE_SET) {
+    if (!CustomData_has_layer_named(&bm->pdata, CD_PROP_INT32, ".sculpt_face_set")) {
+      (*delimit) &= ~BMO_DELIM_FACE_SET;
+    }
+  }
 }
 
 static void select_linked_delimit_begin(BMesh *bm, int delimit)
@@ -4000,6 +4020,14 @@ static void select_linked_delimit_begin(BMesh *bm, int delimit)
     delimit_data.cd_loop_offset = CustomData_get_offset(&bm->ldata, delimit_data.cd_loop_type);
     if (delimit_data.cd_loop_offset == -1) {
       delimit &= ~BMO_DELIM_UV;
+    }
+  }
+
+  if (delimit & BMO_DELIM_FACE_SET) {
+    delimit_data.cd_face_set_offset = CustomData_get_offset_named(
+        &bm->pdata, CD_PROP_INT32, ".sculpt_face_set");
+    if (delimit_data.cd_face_set_offset == -1) {
+      delimit &= ~BMO_DELIM_FACE_SET;
     }
   }
 

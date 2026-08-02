@@ -31,6 +31,7 @@ const EnumPropertyItem rna_enum_mesh_delimit_mode_items[] = {
     {BMO_DELIM_SEAM, "SEAM", 0, "Seam", "Delimit by edge seams"},
     {BMO_DELIM_SHARP, "SHARP", 0, "Sharp", "Delimit by sharp edges"},
     {BMO_DELIM_UV, "UV", 0, "UVs", "Delimit by UV coordinates"},
+    {BMO_DELIM_FACE_SET, "FACE_SET", 0, "Face Sets", "Delimit by face sets"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

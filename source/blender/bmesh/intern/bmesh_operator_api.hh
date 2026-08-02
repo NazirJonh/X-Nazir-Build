@@ -547,6 +547,7 @@ enum BMO_Delimit {
   BMO_DELIM_SEAM = 1 << 2,
   BMO_DELIM_SHARP = 1 << 3,
   BMO_DELIM_UV = 1 << 4,
+  BMO_DELIM_FACE_SET = 1 << 5,
 };
 ENUM_OPERATORS(BMO_Delimit)
 

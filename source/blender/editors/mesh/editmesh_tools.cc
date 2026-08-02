@@ -2660,6 +2660,391 @@ void MESH_OT_reveal(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Face Set Visibility Operators
+ * \{ */
+
+static int edbm_face_set_get_active(BMEditMesh *em)
+{
+  BMesh *bm = em->bm;
+  BMFace *active_face = BM_mesh_active_face_get(bm, false, false);
+  if (!active_face) {
+    return -1;
+  }
+
+  const int cd_offset = CustomData_get_offset_named(&bm->pdata, CD_PROP_INT32, ".sculpt_face_set");
+  if (cd_offset == -1) {
+    return -1;
+  }
+
+  return BM_ELEM_CD_GET_INT(active_face, cd_offset);
+}
+
+static int edbm_face_set_get_under_cursor(bContext *C, Object *ob, const int mval[2])
+{
+  uint face_index;
+  if (!ED_mesh_pick_face(C, ob, mval, ED_MESH_PICK_DEFAULT_FACE_DIST, &face_index)) {
+    return -1;
+  }
+
+  BMEditMesh *em = BKE_editmesh_from_object(ob);
+  BMesh *bm = em->bm;
+
+  const int cd_offset = CustomData_get_offset_named(&bm->pdata, CD_PROP_INT32, ".sculpt_face_set");
+  if (cd_offset == -1) {
+    return -1;
+  }
+
+  BMFace *face = BM_face_at_index(bm, face_index);
+  if (!face) {
+    return -1;
+  }
+
+  return BM_ELEM_CD_GET_INT(face, cd_offset);
+}
+
+static bool edbm_face_set_poll_with_overlay(bContext *C)
+{
+  if (!ED_operator_editmesh(C)) {
+    return false;
+  }
+
+  const View3D *v3d = CTX_wm_view3d(C);
+  if (!v3d) {
+    CTX_wm_operator_poll_msg_set(C, "Face Set operators require a 3D viewport");
+    return false;
+  }
+
+  if (!(v3d->overlay.edit_flag & V3D_OVERLAY_EDIT_FACE_SETS)) {
+    CTX_wm_operator_poll_msg_set(C, "Face Set operators require the Face Sets overlay to be enabled");
+    return false;
+  }
+
+  return true;
+}
+
+static wmOperatorStatus edbm_face_set_hide_active_exec(bContext *C, wmOperator *op)
+{
+  const Main *bmain = CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  bool changed = false;
+
+  const Vector<Object *> objects = BKE_view_layer_array_from_objects_in_edit_mode_unique_data(
+      *bmain, scene, view_layer, CTX_wm_view3d(C));
+
+  for (Object *obedit : objects) {
+    BMEditMesh *em = BKE_editmesh_from_object(obedit);
+    BMesh *bm = em->bm;
+
+    const int target_face_set = RNA_struct_property_is_set(op->ptr, "face_set_id") ?
+                                     RNA_int_get(op->ptr, "face_set_id") :
+                                     edbm_face_set_get_active(em);
+    if (target_face_set == -1) {
+      continue;
+    }
+
+    const int cd_offset = CustomData_get_offset_named(&bm->pdata, CD_PROP_INT32, ".sculpt_face_set");
+    if (cd_offset == -1) {
+      continue;
+    }
+
+    BMIter iter;
+    BMFace *face;
+    bool obedit_changed = false;
+    BM_ITER_MESH (face, &iter, bm, BM_FACES_OF_MESH) {
+      if (BM_ELEM_CD_GET_INT(face, cd_offset) == target_face_set) {
+        BM_elem_hide_set(bm, (BMElem *)face, true);
+        obedit_changed = true;
+      }
+    }
+
+    if (obedit_changed) {
+      EDBM_selectmode_flush(em);
+      EDBMUpdate_Params params{};
+      params.calc_looptris = true;
+      params.calc_normals = false;
+      params.is_destructive = false;
+      EDBM_update(id_cast<Mesh *>(obedit->data), &params);
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    return OPERATOR_CANCELLED;
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus edbm_face_set_hide_active_invoke(bContext *C,
+                                                          wmOperator *op,
+                                                          const wmEvent *event)
+{
+  Object *obedit = CTX_data_edit_object(C);
+  if (!obedit) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const int face_set_id = edbm_face_set_get_under_cursor(C, obedit, event->mval);
+  if (face_set_id == -1) {
+    return OPERATOR_CANCELLED;
+  }
+
+  RNA_int_set(op->ptr, "face_set_id", face_set_id);
+
+  return edbm_face_set_hide_active_exec(C, op);
+}
+
+void MESH_OT_face_set_hide_active(wmOperatorType *ot)
+{
+  /* identifiers */
+  ot->name = "Hide Active Face Set";
+  ot->idname = "MESH_OT_face_set_hide_active";
+  ot->description = "Hide all faces in the face set under the cursor";
+
+  /* API callbacks. */
+  ot->exec = edbm_face_set_hide_active_exec;
+  ot->invoke = edbm_face_set_hide_active_invoke;
+  ot->poll = edbm_face_set_poll_with_overlay;
+
+  /* flags */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
+
+  /* properties */
+  RNA_def_int(ot->srna, "face_set_id", -1, -1, INT_MAX, "Face Set ID", "Face set to hide", -1, INT_MAX);
+}
+
+static wmOperatorStatus edbm_face_set_hide_inactive_exec(bContext *C, wmOperator *op)
+{
+  const Main *bmain = CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  bool changed = false;
+
+  const Vector<Object *> objects = BKE_view_layer_array_from_objects_in_edit_mode_unique_data(
+      *bmain, scene, view_layer, CTX_wm_view3d(C));
+
+  for (Object *obedit : objects) {
+    BMEditMesh *em = BKE_editmesh_from_object(obedit);
+    BMesh *bm = em->bm;
+
+    const int target_face_set = RNA_struct_property_is_set(op->ptr, "face_set_id") ?
+                                     RNA_int_get(op->ptr, "face_set_id") :
+                                     edbm_face_set_get_active(em);
+    if (target_face_set == -1) {
+      continue;
+    }
+
+    const int cd_offset = CustomData_get_offset_named(&bm->pdata, CD_PROP_INT32, ".sculpt_face_set");
+    if (cd_offset == -1) {
+      continue;
+    }
+
+    BMIter iter;
+    BMFace *face;
+    bool obedit_changed = false;
+    BM_ITER_MESH (face, &iter, bm, BM_FACES_OF_MESH) {
+      if (BM_ELEM_CD_GET_INT(face, cd_offset) != target_face_set) {
+        BM_elem_hide_set(bm, (BMElem *)face, true);
+        obedit_changed = true;
+      }
+    }
+
+    if (obedit_changed) {
+      EDBM_selectmode_flush(em);
+      EDBMUpdate_Params params{};
+      params.calc_looptris = true;
+      params.calc_normals = false;
+      params.is_destructive = false;
+      EDBM_update(id_cast<Mesh *>(obedit->data), &params);
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    return OPERATOR_CANCELLED;
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus edbm_face_set_hide_inactive_invoke(bContext *C,
+                                                            wmOperator *op,
+                                                            const wmEvent *event)
+{
+  Object *obedit = CTX_data_edit_object(C);
+  if (!obedit) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const int face_set_id = edbm_face_set_get_under_cursor(C, obedit, event->mval);
+  if (face_set_id == -1) {
+    return OPERATOR_CANCELLED;
+  }
+
+  RNA_int_set(op->ptr, "face_set_id", face_set_id);
+
+  return edbm_face_set_hide_inactive_exec(C, op);
+}
+
+void MESH_OT_face_set_hide_inactive(wmOperatorType *ot)
+{
+  /* identifiers */
+  ot->name = "Hide Inactive Face Sets";
+  ot->idname = "MESH_OT_face_set_hide_inactive";
+  ot->description = "Hide all faces not in the face set under the cursor";
+
+  /* API callbacks. */
+  ot->exec = edbm_face_set_hide_inactive_exec;
+  ot->invoke = edbm_face_set_hide_inactive_invoke;
+  ot->poll = edbm_face_set_poll_with_overlay;
+
+  /* flags */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
+
+  /* properties */
+  RNA_def_int(
+      ot->srna, "face_set_id", -1, -1, INT_MAX, "Face Set ID", "Face set to keep visible", -1, INT_MAX);
+}
+
+static wmOperatorStatus edbm_face_set_show_all_exec(bContext *C, wmOperator *op)
+{
+  const bool select = RNA_boolean_get(op->ptr, "select");
+  const Main *bmain = CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+
+  const Vector<Object *> objects = BKE_view_layer_array_from_objects_in_edit_mode_unique_data(
+      *bmain, scene, view_layer, CTX_wm_view3d(C));
+
+  for (Object *obedit : objects) {
+    BMEditMesh *em = BKE_editmesh_from_object(obedit);
+
+    if (EDBM_mesh_reveal(em, select)) {
+      EDBMUpdate_Params params{};
+      params.calc_looptris = true;
+      params.calc_normals = false;
+      params.is_destructive = false;
+      EDBM_update(id_cast<Mesh *>(obedit->data), &params);
+    }
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+void MESH_OT_face_set_show_all(wmOperatorType *ot)
+{
+  /* identifiers */
+  ot->name = "Show All Face Sets";
+  ot->idname = "MESH_OT_face_set_show_all";
+  ot->description = "Show all hidden face sets";
+
+  /* API callbacks. */
+  ot->exec = edbm_face_set_show_all_exec;
+  ot->poll = ED_operator_editmesh;
+
+  /* flags */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_boolean(ot->srna, "select", true, "Select", "");
+}
+
+static wmOperatorStatus edbm_face_set_isolate_exec(bContext *C, wmOperator *op)
+{
+  const Main *bmain = CTX_data_main(C);
+  const Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  bool changed = false;
+
+  const Vector<Object *> objects = BKE_view_layer_array_from_objects_in_edit_mode_unique_data(
+      *bmain, scene, view_layer, CTX_wm_view3d(C));
+
+  for (Object *obedit : objects) {
+    BMEditMesh *em = BKE_editmesh_from_object(obedit);
+    BMesh *bm = em->bm;
+
+    const int target_face_set = RNA_struct_property_is_set(op->ptr, "face_set_id") ?
+                                     RNA_int_get(op->ptr, "face_set_id") :
+                                     edbm_face_set_get_active(em);
+    if (target_face_set == -1) {
+      continue;
+    }
+
+    const int cd_offset = CustomData_get_offset_named(&bm->pdata, CD_PROP_INT32, ".sculpt_face_set");
+    if (cd_offset == -1) {
+      continue;
+    }
+
+    bool obedit_changed = EDBM_mesh_reveal(em, false);
+
+    BMIter iter;
+    BMFace *face;
+    BM_ITER_MESH (face, &iter, bm, BM_FACES_OF_MESH) {
+      if (BM_ELEM_CD_GET_INT(face, cd_offset) != target_face_set) {
+        BM_elem_hide_set(bm, (BMElem *)face, true);
+        obedit_changed = true;
+      }
+    }
+
+    if (obedit_changed) {
+      EDBM_selectmode_flush(em);
+      EDBMUpdate_Params params{};
+      params.calc_looptris = true;
+      params.calc_normals = false;
+      params.is_destructive = false;
+      EDBM_update(id_cast<Mesh *>(obedit->data), &params);
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    return OPERATOR_CANCELLED;
+  }
+
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus edbm_face_set_isolate_invoke(bContext *C,
+                                                      wmOperator *op,
+                                                      const wmEvent *event)
+{
+  Object *obedit = CTX_data_edit_object(C);
+  if (!obedit) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const int face_set_id = edbm_face_set_get_under_cursor(C, obedit, event->mval);
+  if (face_set_id == -1) {
+    return OPERATOR_CANCELLED;
+  }
+
+  RNA_int_set(op->ptr, "face_set_id", face_set_id);
+
+  return edbm_face_set_isolate_exec(C, op);
+}
+
+void MESH_OT_face_set_isolate(wmOperatorType *ot)
+{
+  /* identifiers */
+  ot->name = "Isolate Face Set";
+  ot->idname = "MESH_OT_face_set_isolate";
+  ot->description = "Show only the face set under the cursor, hiding all others";
+
+  /* API callbacks. */
+  ot->exec = edbm_face_set_isolate_exec;
+  ot->invoke = edbm_face_set_isolate_invoke;
+  ot->poll = edbm_face_set_poll_with_overlay;
+
+  /* flags */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
+
+  /* properties */
+  RNA_def_int(ot->srna, "face_set_id", -1, -1, INT_MAX, "Face Set ID", "Face set to isolate", -1, INT_MAX);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Recalculate Normals Operator
  * \{ */
 

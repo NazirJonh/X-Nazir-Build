@@ -1252,6 +1252,14 @@ class ShowHideMenu:
         layout.operator("{:s}.hide".format(self._operator_name), text="Hide Selected").unselected = False
         layout.operator("{:s}.hide".format(self._operator_name), text="Hide Unselected").unselected = True
 
+        if self._operator_name == "mesh":
+            layout.separator()
+            layout.label(text="Face Sets:")
+            layout.operator("mesh.face_set_hide_active", text="Hide Active Face Set")
+            layout.operator("mesh.face_set_hide_inactive", text="Hide Inactive Face Sets")
+            layout.operator("mesh.face_set_show_all", text="Show All Face Sets")
+            layout.operator("mesh.face_set_isolate", text="Isolate Face Set")
+
 
 # Standard transforms which apply to all cases (mix-in class, not used directly).
 class VIEW3D_MT_transform_base:

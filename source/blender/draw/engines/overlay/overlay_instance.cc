@@ -893,6 +893,9 @@ void Instance::draw_v3d(Manager &manager, View &view)
 
     regular.sculpts.draw_on_render(resources.render_fb, manager, view);
     infront.sculpts.draw_on_render(resources.render_in_front_fb, manager, view);
+
+    regular.meshes.draw_on_render(resources.render_fb, manager, view);
+    infront.meshes.draw_on_render(resources.render_in_front_fb, manager, view);
   }
   {
     /* Overlay Line prepass. */

@@ -5478,6 +5478,21 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Sculpt Show Face Sets", "");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  prop = RNA_def_property(srna, "show_face_sets", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "overlay.edit_flag", V3D_OVERLAY_EDIT_FACE_SETS);
+  RNA_def_property_ui_text(prop,
+                           "Face Sets",
+                           "Display face sets with individual colors in edit mode overlay");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  prop = RNA_def_property(srna, "face_sets_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "overlay.face_sets_opacity");
+  RNA_def_property_ui_text(prop, "Face Sets Opacity", "Opacity of face sets overlay in edit mode");
+  RNA_def_property_range(prop, 0.1f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.1f, 1.0f, 0.1f, 2);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   /* grease pencil paper settings */
   prop = RNA_def_property(srna, "show_annotation", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag2", V3D_SHOW_ANNOTATION);

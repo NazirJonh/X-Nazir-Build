@@ -303,6 +303,9 @@ gpu::IndexBufPtr extract_points_subdiv(const MeshRenderData &mr,
 gpu::VertBufPtr extract_edit_data(const MeshRenderData &mr);
 gpu::VertBufPtr extract_edit_data_subdiv(const MeshRenderData &mr,
                                          const DRWSubdivCache &subdiv_cache);
+gpu::VertBufPtr extract_edit_face_set(const MeshRenderData &mr);
+gpu::VertBufPtr extract_edit_face_set_subdiv(const MeshRenderData &mr,
+                                             const DRWSubdivCache &subdiv_cache);
 
 gpu::VertBufPtr extract_tangents(const MeshRenderData &mr,
                                  const MeshBatchCache &cache,

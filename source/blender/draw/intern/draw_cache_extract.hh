@@ -81,6 +81,7 @@ enum class VBOType : int8_t {
   SculptData,
   Orco,
   EditData,
+  EditFaceSet,
   EditUVData,
   EditUVStretchArea,
   EditUVStretchAngle,
@@ -154,6 +155,7 @@ struct MeshBatchList {
   gpu::Batch *surface_weights;
   /* Edit mode */
   gpu::Batch *edit_triangles;
+  gpu::Batch *edit_face_sets;
   gpu::Batch *edit_vertices;
   gpu::Batch *edit_edges;
   gpu::Batch *edit_vnor;
@@ -200,6 +202,7 @@ enum DRWBatchFlag : uint64_t {
   MBC_SURFACE = (1u << MBC_BATCH_INDEX(surface)),
   MBC_SURFACE_WEIGHTS = (1u << MBC_BATCH_INDEX(surface_weights)),
   MBC_EDIT_TRIANGLES = (1u << MBC_BATCH_INDEX(edit_triangles)),
+  MBC_EDIT_FACE_SETS = (1u << MBC_BATCH_INDEX(edit_face_sets)),
   MBC_EDIT_VERTICES = (1u << MBC_BATCH_INDEX(edit_vertices)),
   MBC_EDIT_EDGES = (1u << MBC_BATCH_INDEX(edit_edges)),
   MBC_EDIT_VNOR = (1u << MBC_BATCH_INDEX(edit_vnor)),

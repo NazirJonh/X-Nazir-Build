@@ -64,6 +64,7 @@ static void ensure_dependency_data(MeshRenderData &mr,
                                ibo_requests.contains(IBOType::Points) ||
                                vbo_requests.contains(VBOType::Position) ||
                                vbo_requests.contains(VBOType::EditData) ||
+                               vbo_requests.contains(VBOType::EditFaceSet) ||
                                vbo_requests.contains(VBOType::VertexNormal) ||
                                vbo_requests.contains(VBOType::IndexVert) ||
                                vbo_requests.contains(VBOType::IndexEdge) ||
@@ -251,6 +252,9 @@ void mesh_buffer_cache_create_requested(TaskGraph & /*task_graph*/,
       case VBOType::EditData:
         created_vbos[i] = extract_edit_data(mr);
         break;
+      case VBOType::EditFaceSet:
+        created_vbos[i] = extract_edit_face_set(mr);
+        break;
       case VBOType::EditUVData:
         created_vbos[i] = extract_edituv_data(mr);
         break;
@@ -419,6 +423,9 @@ void mesh_buffer_cache_create_requested_subdiv(MeshBatchCache &cache,
   }
   if (vbos_to_create.contains(VBOType::EditData)) {
     buffers.vbos.add_new(VBOType::EditData, extract_edit_data_subdiv(mr, subdiv_cache));
+  }
+  if (vbos_to_create.contains(VBOType::EditFaceSet)) {
+    buffers.vbos.add_new(VBOType::EditFaceSet, extract_edit_face_set_subdiv(mr, subdiv_cache));
   }
   if (vbos_to_create.contains(VBOType::Tangents)) {
     buffers.vbos.add_new(VBOType::Tangents, extract_tangents_subdiv(mr, subdiv_cache, cache));

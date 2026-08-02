@@ -104,7 +104,7 @@ void main()
 
   final_color.a *= (occluded) ? alpha : 1.0f;
 
-#if !defined(FACE)
+#if !defined(FACE) && !defined(FACE_SETS)
   /* Facing based color blend */
   float3 view_normal = normalize(drw_normal_object_to_view(vnor) + 1e-4f);
   float3 view_vec = (drw_view().winmat[3][3] == 0.0f) ? normalize(view_pos) :

@@ -829,6 +829,13 @@ gpu::Batch *DRW_mesh_batch_cache_get_edit_triangles(Mesh &mesh)
   return DRW_batch_request(&cache.batch.edit_triangles);
 }
 
+gpu::Batch *DRW_mesh_batch_cache_get_edit_face_sets(Mesh &mesh)
+{
+  MeshBatchCache &cache = *mesh_batch_cache_get(mesh);
+  cache.batch_requested |= MBC_EDIT_FACE_SETS;
+  return DRW_batch_request(&cache.batch.edit_face_sets);
+}
+
 gpu::Batch *DRW_mesh_batch_cache_get_edit_edges(Mesh &mesh)
 {
   MeshBatchCache &cache = *mesh_batch_cache_get(mesh);
@@ -1408,6 +1415,18 @@ void DRW_mesh_batch_cache_create_requested(TaskGraph &task_graph,
       }
       else {
         init_empty_dummy_batch(*cache.batch.edit_triangles);
+      }
+    }
+    if (batches_to_create & MBC_EDIT_FACE_SETS) {
+      if (edit_mapping_valid) {
+        batch_info.append({*cache.batch.edit_face_sets,
+                           GPU_PRIM_TRIS,
+                           list,
+                           IBOType::Tris,
+                           {VBOType::Position, VBOType::EditFaceSet}});
+      }
+      else {
+        init_empty_dummy_batch(*cache.batch.edit_face_sets);
       }
     }
     if (batches_to_create & MBC_EDIT_VERTICES) {

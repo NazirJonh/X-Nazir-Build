@@ -659,6 +659,8 @@ set(GLSL_SRC
   engines/overlay/shaders/overlay_edit_mesh_analysis_vert.glsl
   engines/overlay/shaders/overlay_edit_mesh_common_lib.glsl
   engines/overlay/shaders/overlay_edit_mesh_depth_vert.glsl
+  engines/overlay/shaders/overlay_edit_mesh_face_sets_frag.glsl
+  engines/overlay/shaders/overlay_edit_mesh_face_sets_vert.glsl
   engines/overlay/shaders/overlay_edit_mesh_frag.glsl
   engines/overlay/shaders/overlay_edit_mesh_normal_vert.glsl
   engines/overlay/shaders/overlay_edit_mesh_skin_root_vert.glsl

@@ -38,6 +38,9 @@ GPU_SHADER_INTERFACE_END()
 GPU_SHADER_INTERFACE_INFO(overlay_edit_nopersp_color_iface)
 NO_PERSPECTIVE(float4, final_color)
 GPU_SHADER_INTERFACE_END()
+GPU_SHADER_INTERFACE_INFO(overlay_edit_mesh_face_sets_iface)
+FLAT(float4, face_set_color)
+GPU_SHADER_INTERFACE_END()
 
 /* -------------------------------------------------------------------- */
 /** \name Edit Mesh
@@ -74,6 +77,24 @@ ADDITIONAL_INFO(draw_globals)
 GPU_SHADER_CREATE_END()
 
 CREATE_INFO_VARIANT(overlay_edit_mesh_depth_clipped, overlay_edit_mesh_depth, drw_clipped)
+
+GPU_SHADER_CREATE_INFO(overlay_edit_mesh_face_sets)
+DO_STATIC_COMPILATION()
+VERTEX_IN(0, float3, pos)
+VERTEX_IN(1, float4, face_set_color_in)
+VERTEX_OUT(overlay_edit_mesh_face_sets_iface)
+PUSH_CONSTANT(float, retopology_offset)
+PUSH_CONSTANT(bool, retopology_enabled)
+PUSH_CONSTANT(float, face_sets_opacity)
+FRAGMENT_OUT(0, float4, frag_color)
+VERTEX_SOURCE("overlay_edit_mesh_face_sets_vert.glsl")
+FRAGMENT_SOURCE("overlay_edit_mesh_face_sets_frag.glsl")
+ADDITIONAL_INFO(draw_view)
+ADDITIONAL_INFO(draw_modelmat)
+ADDITIONAL_INFO(draw_globals)
+GPU_SHADER_CREATE_END()
+
+CREATE_INFO_VARIANT(overlay_edit_mesh_face_sets_clipped, overlay_edit_mesh_face_sets, drw_clipped)
 
 GPU_SHADER_INTERFACE_INFO(overlay_edit_mesh_vert_iface)
 SMOOTH(float4, final_color)

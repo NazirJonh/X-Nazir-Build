@@ -333,6 +333,7 @@ enum eView3DOverlay_EditFlag : int {
   V3D_OVERLAY_EDIT_FACE_ANG = (1 << 17),
   V3D_OVERLAY_EDIT_FACE_AREA = (1 << 18),
   V3D_OVERLAY_EDIT_INDICES = (1 << 19),
+  V3D_OVERLAY_EDIT_FACE_SETS = (1 << 20),
 
   /* Deprecated. */
   // V3D_OVERLAY_EDIT_CU_HANDLES = (1 << 20),
@@ -675,6 +676,7 @@ struct View3DOverlay {
   float wireframe_threshold = 1.0f;
   float wireframe_opacity = 1.0f;
   float retopology_offset = 0.01f;
+  float face_sets_opacity = 1.0f;
 
   /** Grease pencil settings. */
   float gpencil_paper_opacity = 0.5f;
@@ -694,6 +696,7 @@ struct View3DOverlay {
 
   /** Curves sculpt mode settings. */
   float sculpt_curves_cage_opacity = 0;
+  char _pad[4] = {};
 };
 
 struct View3D_Runtime {

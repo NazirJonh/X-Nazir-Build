@@ -138,6 +138,10 @@ Vector<SculptBatch> sculpt_batches_get(const Object *ob, SculptBatchFeature feat
 
   attrs.append(pbvh::CustomRequest::Position);
   attrs.append(pbvh::CustomRequest::Normal);
+  if (features & SCULPT_BATCH_WIREFRAME) {
+    attrs.append(pbvh::CustomRequest::EdgeFac);
+    attrs.append(pbvh::CustomRequest::SubdivisionLevel);
+  }
   if (features & SCULPT_BATCH_MASK) {
     attrs.append(pbvh::CustomRequest::Mask);
   }

@@ -22,6 +22,11 @@ GPU_SHADER_INTERFACE_INFO(overlay_wireframe_iface)
 SMOOTH(float4, final_color)
 FLAT(float2, edge_start)
 NO_PERSPECTIVE(float2, edge_pos)
+/* subdiv_level is passed as flat uint from vertex to fragment to avoid undefined interpolation. */
+FLAT(uint, subdiv_level_iface)
+/* Adaptive Multires wireframe per-edge fade factor. Kept flat so the whole edge fades uniformly
+ * while `final_color` retains its smooth facing gradient. Always 1.0 for non-Multires draws. */
+FLAT(float, multires_fade_iface)
 GPU_SHADER_INTERFACE_END()
 
 GPU_SHADER_CREATE_INFO(overlay_wireframe_base)
@@ -38,6 +43,9 @@ SAMPLER(0, sampler2DDepth, depth_tx)
 VERTEX_IN(0, float3, pos)
 VERTEX_IN(1, float3, nor)
 VERTEX_IN(2, float, wd) /* wire-data. */
+VERTEX_IN(3, uint, subdiv_level)
+UNIFORM_BUF(2, OVERLAY_MultiresWireData, multires_wire_buf)
+SPECIALIZATION_CONSTANT(bool, use_multires_wireframe, false)
 VERTEX_OUT(overlay_wireframe_iface)
 VERTEX_SOURCE("overlay_wireframe_vert.glsl")
 FRAGMENT_SOURCE("overlay_wireframe_frag.glsl")

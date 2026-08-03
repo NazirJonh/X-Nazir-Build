@@ -8,9 +8,25 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
+#include <memory>
+#include <optional>
+
+#include "BKE_modifier.hh"
+#include "BKE_multires.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_bvh.hh"
+#include "BKE_subdiv_ccg.hh"
+#include "BLI_bounds_types.hh"
+#include "BLI_math_matrix.hh"
+#include "BLI_math_vector.hh"
+#include "BLI_vector.hh"
+#include "DNA_modifier_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_volume_types.h"
 
+#include "DRW_gpu_wrapper.hh"
 #include "DRW_render.hh"
 #include "draw_common.hh"
 #include "draw_sculpt.hh"
@@ -37,6 +53,8 @@ class Wireframe : Overlay {
     PassMain::Sub *mesh_ps_ = nullptr;
     /* Variant for meshes that force drawing all edges. */
     PassMain::Sub *mesh_all_edges_ps_ = nullptr;
+    /* Adaptive wireframe for Multires objects. */
+    PassMain::Sub *mesh_multires_ps_ = nullptr;
     PassMain::Sub *points_ps_ = nullptr;
     PassMain::Sub *pointcloud_ps_ = nullptr;
   } colored, non_colored;
@@ -48,6 +66,27 @@ class Wireframe : Overlay {
   /* Force display of wireframe on surface objects, regardless of the object display settings. */
   bool show_wire_ = false;
 
+  /* Per-object Multires wireframe data. One UBO per object — sharing a single
+   * UBO across all multires objects in the scene caused later-processed
+   * objects to overwrite earlier ones, so every draw command (which is
+   * deferred) ended up reading the last object's parameters instead of its
+   * own.
+   *
+   * The pool is *persistent* and reused across frames: `begin_sync` only resets
+   * the in-use counter, and `object_sync` hands out (and grows on demand) an
+   * existing `UniformBuffer` rather than allocating a new one. Destroying the
+   * buffers every frame was unsafe — `bind_ubo` stores a `gpu::UniformBuf **`
+   * into the (deferred) draw command that is only dereferenced at submit time,
+   * so freeing the `UniformBuffer` in the next `begin_sync` left the pass with a
+   * dangling pointer and crashed in the descriptor-set update. Keeping the
+   * objects alive matches the standard draw-manager pattern (persistent buffers,
+   * updated in place). `unique_ptr` keeps each `UniformBuffer` address stable
+   * even when the Vector reallocates, so bound UBO pointers stay valid. */
+  using MultiresWireUBO = draw::UniformBuffer<OVERLAY_MultiresWireData>;
+  Vector<std::unique_ptr<MultiresWireUBO>> multires_wire_ubo_pool_;
+  /* Number of pool entries handed out in the current frame. Reset in `begin_sync`. */
+  int multires_wire_ubo_used_ = 0;
+
  public:
   void begin_sync(Resources &res, const State &state) final
   {
@@ -55,6 +94,11 @@ class Wireframe : Overlay {
     if (!enabled_) {
       return;
     }
+
+    /* Reset the per-frame hand-out counter. The pool itself is kept alive (see
+     * the field comment): entries are reused across frames so the `bind_ubo`
+     * pointers recorded into deferred draw commands never dangle. */
+    multires_wire_ubo_used_ = 0;
 
     show_wire_ = state.is_wireframe_mode || state.show_wireframes();
 
@@ -82,10 +126,15 @@ class Wireframe : Overlay {
       res.select_bind(pass);
 
       auto shader_pass =
-          [&](gpu::Shader *shader, const char *name, bool use_coloring, float wire_threshold) {
+          [&](gpu::Shader *shader,
+              const char *name,
+              bool use_coloring,
+              float wire_threshold,
+              bool use_multires = false) {
             auto &sub = pass.sub(name);
             if (res.shaders->wireframe_mesh.get() == shader) {
               sub.specialize_constant(shader, "use_custom_depth_bias", do_smooth_lines);
+              sub.specialize_constant(shader, "use_multires_wireframe", use_multires);
             }
             sub.shader_set(shader);
             sub.bind_texture("depth_tx", depth_tex);
@@ -103,6 +152,8 @@ class Wireframe : Overlay {
         overlay::ShaderModule &sh = *res.shaders;
         ps.mesh_ps_ = shader_pass(sh.wireframe_mesh.get(), "Mesh", use_color, wire_threshold);
         ps.mesh_all_edges_ps_ = shader_pass(sh.wireframe_mesh.get(), "Wire", use_color, 1.0f);
+        ps.mesh_multires_ps_ = shader_pass(
+            sh.wireframe_mesh.get(), "MeshMultires", use_color, wire_threshold, true);
         ps.points_ps_ = shader_pass(sh.wireframe_points.get(), "Points", use_color, 1.0f);
         ps.pointcloud_ps_ = shader_pass(
             sh.wireframe_points_with_radius.get(), "PtCloud", use_color, 1.0f);
@@ -178,12 +229,55 @@ class Wireframe : Overlay {
 
         const bool bypass_mode_check = wireframe_no_overlay || !edit_wires_overlap_all;
 
+        ModifierData *mmd_md = BKE_modifiers_findby_type(ob_ref.object, eModifierType_Multires);
+        const MultiresModifierData *mmd = reinterpret_cast<const MultiresModifierData *>(mmd_md);
+        const bool is_pbvh = BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object, state.rv3d);
+        const bool use_multires_wire = mmd != nullptr &&
+                                       BKE_modifier_is_enabled(
+                                           state.scene, mmd_md, eModifierMode_Realtime);
+        int effective_max_level = mmd ? mmd->lvl : 0;
+        int effective_min_level = 0;
+        MultiresWireUBO *object_ubo = nullptr;
+
+        if (use_multires_wire) {
+          if (is_pbvh) {
+            const SculptSession *ss = ob_ref.object->runtime->sculpt_session;
+            if (ss && ss->subdiv_ccg) {
+              effective_max_level = ss->subdiv_ccg->level;
+              const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss->subdiv_ccg);
+              const int grid_depth = BKE_multires_grid_depth_from_grid_size(key.grid_size);
+              effective_min_level = std::max(0, effective_max_level - grid_depth);
+            }
+          }
+          const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(*ob_ref.object);
+          float object_diameter = 1.0f;
+          if (const auto bounds = mesh.bounds_min_max()) {
+            const float3 world_diagonal = math::transform_direction(
+                ob_ref.object->object_to_world(), bounds->max - bounds->min);
+            object_diameter = math::length(world_diagonal);
+          }
+          if (multires_wire_ubo_used_ == multires_wire_ubo_pool_.size()) {
+            multires_wire_ubo_pool_.append(std::make_unique<MultiresWireUBO>());
+          }
+          object_ubo = multires_wire_ubo_pool_[multires_wire_ubo_used_++].get();
+          (*object_ubo).object_diameter = object_diameter;
+          (*object_ubo).wire_level_max = float(effective_max_level);
+          (*object_ubo).wire_level_min = float(effective_min_level);
+          (*object_ubo).level_reveal_extra = is_pbvh ? 1.0f : 0.0f;
+          object_ubo->push_update();
+        }
+
         if (show_surface_wire) {
-          if (BKE_sculptsession_use_pbvh_draw_for_display(ob_ref.object, state.rv3d)) {
+          if (is_pbvh) {
             ResourceHandleRange handle = manager.unique_handle(ob_ref);
+            PassMain::Sub *mesh_pass = use_multires_wire ? coloring.mesh_multires_ps_ :
+                                                           coloring.mesh_all_edges_ps_;
+            if (use_multires_wire) {
+              mesh_pass->bind_ubo("multires_wire_buf", &(*object_ubo));
+            }
 
             for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, SCULPT_BATCH_WIREFRAME)) {
-              coloring.mesh_all_edges_ps_->draw(batch.batch, handle);
+              mesh_pass->draw(batch.batch, handle);
             }
           }
           else if (!in_edit_mode || bypass_mode_check) {
@@ -191,8 +285,23 @@ class Wireframe : Overlay {
              * Otherwise the wireframe will conflict with the edit cage drawing and produce
              * unpleasant aliasing. */
             gpu::Batch *geom = DRW_cache_mesh_face_wireframe_get(ob_ref.object);
-            (all_edges ? coloring.mesh_all_edges_ps_ : coloring.mesh_ps_)
-                ->draw(geom, manager.unique_handle(ob_ref), res.select_id(ob_ref).get());
+
+            PassMain::Sub *mesh_pass;
+            if (use_multires_wire) {
+              if (all_edges) {
+                /* Force-all-edges mode: use the standard pass (shader does not read the UBO). */
+                mesh_pass = coloring.mesh_all_edges_ps_;
+              }
+              else {
+                mesh_pass = coloring.mesh_multires_ps_;
+                /* See note in the PBVH branch for why `&(*object_ubo)` is required here. */
+                mesh_pass->bind_ubo("multires_wire_buf", &(*object_ubo));
+              }
+            }
+            else {
+              mesh_pass = all_edges ? coloring.mesh_all_edges_ps_ : coloring.mesh_ps_;
+            }
+            mesh_pass->draw(geom, manager.unique_handle(ob_ref), res.select_id(ob_ref).get());
           }
         }
 

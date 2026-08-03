@@ -396,6 +396,22 @@ void BKE_multires_subdiv_mesh_settings_init(bke::subdiv::ToMeshSettings *mesh_se
 /* General helpers. */
 
 /**
+ * Number of binary subdivisions that produce a ptex/grid with `grid_size` samples per side
+ * (`grid_size == (1 << depth) + 1` for a fully subdivided grid). Maps a grid coordinate to the
+ * subdivision level at which it first appears, and is shared by the analytic Object-Mode edge
+ * tagging (#BKE_multires_tag_edge_levels) and the Sculpt-Mode grid path
+ * (#fill_subdivision_levels_grids) so both derive identical levels.
+ */
+inline int BKE_multires_grid_depth_from_grid_size(const int grid_size)
+{
+  int grid_depth = 0;
+  while ((1 << grid_depth) < (grid_size - 1)) {
+    grid_depth++;
+  }
+  return grid_depth;
+}
+
+/**
  * For a given partial derivatives of a PTEX face get tangent matrix for displacement.
  *
  * Corner needs to be known to properly "rotate" partial derivatives when the
@@ -428,6 +444,9 @@ void multires_do_versions_simple_to_catmull_clark(Object *object, MultiresModifi
  * well-conditioned tangent space produced by #BKE_multires_construct_tangent_matrix.
  */
 void multires_do_versions_tangent_space_conversion(Object *object, MultiresModifierData *mmd);
+
+/** Compute per-edge subdivision levels for an evaluated Multires mesh. */
+void BKE_multires_tag_edge_levels(const Mesh &coarse_mesh, int resolution, Mesh &subdiv_mesh);
 
 }  // namespace blender
 

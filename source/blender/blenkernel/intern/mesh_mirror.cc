@@ -331,6 +331,8 @@ Mesh *BKE_mesh_mirror_apply_mirror_on_axis_for_modifier(MirrorModifierData *mmd,
     MutableBoundedBitSpan dst = result->runtime->subsurf_optimal_display_edges;
     dst.take_front(src.size()).copy_from(src);
     dst.take_back(src.size()).copy_from(src);
+    result->runtime->subsurf_use_optimal_display_filter =
+        mesh->runtime->subsurf_use_optimal_display_filter;
   }
 
   bke::MutableAttributeAccessor attributes = result->attributes_for_write();

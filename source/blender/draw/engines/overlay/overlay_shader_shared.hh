@@ -146,6 +146,25 @@ struct [[host_shared]] OVERLAY_GridData {
   uint _pad1;
 };
 
+struct [[host_shared]] OVERLAY_MultiresWireData {
+  /* World-space diameter of the object, accounting for object scale.
+   * Used to derive per-level world cell size: `cell_world = object_diameter / (1 << level)`. */
+  float object_diameter;
+  /* Maximum subdivision level present in the data (`effective_max_level`).
+   * Stored as float for std140 uniformity with the other fields; value is always integral. */
+  float wire_level_max;
+  /* Minimum subdiv_level value written to the VBO (= level_offset in PBVH grids fill).
+   * Non-zero in Sculpt Mode when total_level > grid_depth. The shader normalises raw VBO
+   * levels by subtracting this so that level 0 always means "coarsest visible edge". */
+  float wire_level_min;
+  /* Extra amount added to the computed `wire_level` in the vertex shader. Each unit shifts
+   * the whole reveal schedule down by one subdivision level (equivalent to the camera being
+   * 2x closer for visibility purposes), so the wireframe exposes one deeper level of detail
+   * at the same camera distance. Used to reveal more detail in Sculpt Mode (PBVH path) than
+   * in Object Mode. 0.0 in Object Mode. */
+  float level_reveal_extra;
+};
+
 #ifdef GPU_SHADER
 /* Keep the same values as in `draw_cache_impl_curves.cc` */
 #  define EDIT_CURVES_NURBS_CONTROL_POINT (1u)

@@ -1570,10 +1570,13 @@ Mesh *subdiv_to_mesh(Subdiv *subdiv, const ToMeshSettings *settings, const Mesh 
    * calculating them here. The work may have been pointless anyway if the mesh is deformed or
    * changed afterwards. */
 
-  /* Move the optimal display edge array to the final bit vector. */
+  /* Move the optimal-display edge flags to the result mesh. Only populated when Optimal Display is
+   * enabled; the filter flag controls whether the IBO extractor uses them to hide subdivision
+   * edges. */
   if (!subdiv_context.subdiv_display_edges.is_empty()) {
     result->runtime->subsurf_optimal_display_edges = BitVector<>(
         subdiv_context.subdiv_display_edges);
+    result->runtime->subsurf_use_optimal_display_filter = settings->use_optimal_display;
   }
 
   if (coarse_mesh->verts_no_face().is_empty()) {

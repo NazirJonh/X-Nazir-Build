@@ -988,4 +988,147 @@ void multiresModifier_ensure_external_read(Mesh *mesh, const MultiresModifierDat
   multires_ensure_external_read(mesh, mmd->totlvl);
 }
 
+/* Subdivision level of the grid line at coordinate `coord` inside a ptex grid whose finest
+ * resolution has `grid_depth` binary subdivisions (a line is at level 0 on the grid boundary and
+ * at `grid_depth` on the odd coordinates that only appear at the finest level). This is the
+ * inverse trailing-zeros relation used analytically by #fill_subdivision_levels_grids, so
+ * Object-Mode edge levels match the Sculpt-Mode (PBVH grids) values bit-for-bit. */
+static uint8_t multires_coord_level(const int coord, const int grid_depth)
+{
+  if (coord <= 0) {
+    return 0;
+  }
+  int trailing_zeros = 0;
+  while (((coord >> trailing_zeros) & 1) == 0) {
+    trailing_zeros++;
+  }
+  return uint8_t(std::max(0, grid_depth - trailing_zeros));
+}
+
+/* Assign levels to the inner edges of a quad (regular) ptex grid, mirroring the emission order of
+ * #subdiv_foreach_edges_all_patches_regular so `edge` stays in sync with the evaluated-mesh edge
+ * indices. Returns the edge index past this face's block. */
+static int multires_tag_edges_regular(MutableSpan<uint8_t> levels, int edge, const int resolution)
+{
+  /* For a quad the ptex resolution equals the mesh resolution, so the level offset is zero. */
+  const int grid_depth = BKE_multires_grid_depth_from_grid_size(resolution);
+  const int inner = resolution - 2;
+  /* Bottom inner row of horizontal edges (grid row y == 1). */
+  const uint8_t row1_level = multires_coord_level(1, grid_depth);
+  for (int i = 0; i < inner - 1; i++) {
+    levels[edge++] = row1_level;
+  }
+  for (int row = 0; row < resolution - 3; row++) {
+    /* Vertical column edges: level follows the column coordinate x (1 .. inner). */
+    for (int x = 1; x <= inner; x++) {
+      levels[edge++] = multires_coord_level(x, grid_depth);
+    }
+    /* Horizontal edges of the next inner row (grid row y == row + 2). */
+    const uint8_t row_level = multires_coord_level(row + 2, grid_depth);
+    for (int i = 0; i < inner - 1; i++) {
+      levels[edge++] = row_level;
+    }
+  }
+  /* Connectors from the inner grid to the boundary, four sides. Each connector shares the
+   * coordinate `i + 1` along its axis (opposite sides are symmetric, hence the same level), so the
+   * level matches the column/row coordinate. */
+  for (int corner = 0; corner < 4; corner++) {
+    for (int i = 0; i < inner; i++) {
+      levels[edge++] = multires_coord_level(i + 1, grid_depth);
+    }
+  }
+  return edge;
+}
+
+/* Assign levels to the inner edges of a non-quad (special) coarse face, mirroring the emission
+ * order of #subdiv_foreach_edges_all_patches_special. Each of the `corners_num` ptex grids has
+ * resolution `(resolution >> 1) + 1`; lines internal to a ptex (its spokes and center) only appear
+ * from the first subdivision onward, which `level_offset` accounts for. */
+static int multires_tag_edges_special(MutableSpan<uint8_t> levels,
+                                       int edge,
+                                       const int resolution,
+                                       const int corners_num)
+{
+  const int total_grid_depth = BKE_multires_grid_depth_from_grid_size(resolution);
+  const int ptex_resolution = (resolution >> 1) + 1;
+  const int ptex_inner_resolution = ptex_resolution - 2;
+  const int grid_depth = BKE_multires_grid_depth_from_grid_size(ptex_resolution);
+  const int level_offset = total_grid_depth - grid_depth;
+  /* Inner ptex edges, per ptex grid. */
+  for (int corner = 0; corner < corners_num; corner++) {
+    const uint8_t row1_level = uint8_t(level_offset + multires_coord_level(1, grid_depth));
+    for (int i = 0; i < ptex_inner_resolution; i++) {
+      levels[edge++] = row1_level;
+    }
+    for (int row = 0; row < ptex_inner_resolution - 1; row++) {
+      for (int x = 1; x <= ptex_inner_resolution + 1; x++) {
+        levels[edge++] = uint8_t(level_offset + multires_coord_level(x, grid_depth));
+      }
+      const uint8_t row_level = uint8_t(level_offset + multires_coord_level(row + 2, grid_depth));
+      for (int i = 0; i < ptex_inner_resolution; i++) {
+        levels[edge++] = row_level;
+      }
+    }
+  }
+  /* Connections between adjacent ptex grids: a horizontal rung at grid row `row + 1`. */
+  for (int corner = 0; corner < corners_num; corner++) {
+    for (int row = 0; row < ptex_inner_resolution; row++) {
+      levels[edge++] = uint8_t(level_offset + multires_coord_level(row + 1, grid_depth));
+    }
+  }
+  /* Edges radiating from the center lie on a ptex spoke (a boundary coordinate), so the coordinate
+   * level is zero and the edge level is exactly `level_offset`. */
+  if (ptex_resolution >= 3) {
+    for (int corner = 0; corner < corners_num; corner++) {
+      levels[edge++] = uint8_t(level_offset +
+                               multires_coord_level(ptex_resolution - 1, grid_depth));
+    }
+  }
+  /* Connectors from each ptex grid to the coarse-edge boundary. */
+  for (int corner = 0; corner < corners_num; corner++) {
+    for (int i = 0; i < ptex_resolution - 1; i++) {
+      levels[edge++] = uint8_t(level_offset + multires_coord_level(i + 1, grid_depth));
+    }
+    if (ptex_resolution >= 3) {
+      for (int i = 0; i < ptex_resolution - 2; i++) {
+        levels[edge++] = uint8_t(level_offset + multires_coord_level(i + 1, grid_depth));
+      }
+    }
+  }
+  return edge;
+}
+
+void BKE_multires_tag_edge_levels(const Mesh &coarse_mesh, const int resolution, Mesh &subdiv_mesh)
+{
+  bke::MeshRuntime &runtime = *subdiv_mesh.runtime;
+  Array<uint8_t> &levels = runtime.subsurf_edge_subdivision_level;
+  levels.reinitialize(subdiv_mesh.edges_num);
+
+  if (resolution < 3) {
+    /* No subdivision happened, every edge is a coarse-mesh edge. */
+    levels.fill(0);
+    return;
+  }
+
+  /* Coarse-edge (boundary) edges occupy the first block and lie on coarse-mesh edge lines, which
+   * never fade (level 0). The inner edges of each coarse face follow, in face order, matching the
+   * deterministic layout from #subdiv_foreach_ctx_init_offsets. */
+  const int num_subdiv_edges_per_coarse_edge = resolution - 1;
+  const int edge_inner_offset = coarse_mesh.edges_num * num_subdiv_edges_per_coarse_edge;
+  levels.as_mutable_span().take_front(edge_inner_offset).fill(0);
+
+  const OffsetIndices faces = coarse_mesh.faces();
+  int edge = edge_inner_offset;
+  for (const int face_i : faces.index_range()) {
+    if (faces[face_i].size() == 4) {
+      edge = multires_tag_edges_regular(levels, edge, resolution);
+    }
+    else {
+      edge = multires_tag_edges_special(levels, edge, resolution, int(faces[face_i].size()));
+    }
+  }
+  BLI_assert(edge == subdiv_mesh.edges_num);
+  UNUSED_VARS_NDEBUG(edge);
+}
+
 }  // namespace blender

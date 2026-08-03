@@ -136,6 +136,9 @@ static Mesh *multires_as_mesh(const MultiresModifierData *mmd,
   }
   bke::subdiv::displacement_attach_from_multires(subdiv, mesh, mmd);
   result = bke::subdiv::subdiv_to_mesh(subdiv, &mesh_settings, mesh);
+  /* Tag per-edge subdivision levels for the adaptive wireframe overlay. Use the resolution that
+   * was actually used to evaluate the mesh so the analytic edge layout matches `result` exactly. */
+  BKE_multires_tag_edge_levels(*mesh, mesh_settings.resolution, *result);
   return result;
 }
 

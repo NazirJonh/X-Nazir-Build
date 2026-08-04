@@ -29,6 +29,7 @@
 #include "DNA_brush_enums.h"
 #include "DNA_meshdata_types.h"
 #include "DNA_object_enums.h"
+#include "DNA_scene_enums.h"
 
 namespace blender {
 
@@ -59,6 +60,25 @@ namespace filter {
 struct Cache;
 }
 struct StrokeCache;
+
+struct VDMStampData {
+  float3 location;
+  float4x4 brush_local_mat;
+  float4x4 brush_local_mat_inv;
+  /**
+   * Equivalent to `StrokeCache::plane_offset` at the time of the dab.
+   *
+   * Used by `sculpt_apply_texture()` to keep tiled strokes stable:
+   * it samples the texture at `(brush_point - plane_offset)`.
+   */
+  float3 plane_offset;
+  float radius;
+  float bstrength;
+  ePaintSymmetryFlags mirror_symmetry_pass;
+  int radial_symmetry_pass;
+  float4x4 symm_rot_mat;
+  float4x4 symm_rot_mat_inv;
+};
 }  // namespace ed::sculpt_paint
 struct GHash;
 struct GridPaintMask;
@@ -684,6 +704,7 @@ struct SculptSession : NonCopyable, NonMovable {
   ImagePool *tex_pool = nullptr;
 
   ed::sculpt_paint::StrokeCache *cache = nullptr;
+  Vector<ed::sculpt_paint::VDMStampData> vdm_stamps;
   ed::sculpt_paint::filter::Cache *filter_cache = nullptr;
   ed::sculpt_paint::expand::Cache *expand_cache = nullptr;
 

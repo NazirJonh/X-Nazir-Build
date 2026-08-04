@@ -119,6 +119,7 @@ set(SRC
   mesh/sculpt_smooth.cc
   mesh/sculpt_transform.cc
   mesh/sculpt_trim.cc
+  mesh/sculpt_vdm_insert_mesh.cc
   mesh/sculpt_undo.cc
 
   paint_cursor.hh

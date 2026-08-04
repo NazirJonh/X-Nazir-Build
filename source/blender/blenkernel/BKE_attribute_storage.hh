@@ -20,6 +20,8 @@
 
 namespace blender {
 
+inline constexpr bool VDM_PERF_LOG_ENABLED = false;
+
 struct Attribute;
 struct BlendDataReader;
 struct BlendWriter;
@@ -49,6 +51,8 @@ class Attribute {
     /** The number of elements in the array. */
     int64_t size;
     ImplicitSharingPtr<> sharing_info;
+    /** Allocated capacity in elements; 0 means capacity equals size. */
+    int64_t capacity = 0;
     static ArrayData from_value(const GPointer &value, int64_t domain_size);
     static ArrayData from_default_value(const CPPType &type, int64_t domain_size);
     static ArrayData from_uninitialized(const CPPType &type, int64_t domain_size);
@@ -189,6 +193,12 @@ class AttributeStorage : public blender::AttributeStorage {
    * initialization for trivial types).
    */
   void resize(AttrDomain domain, int64_t new_size);
+
+  /**
+   * Grow array attributes to the given per-domain sizes in a single pass over all attributes.
+   * Preserves existing elements and default-initializes new elements at the end.
+   */
+  void grow_domains(int64_t point_num, int64_t edge_num, int64_t face_num, int64_t corner_num);
 
   /**
    * Read data owned by the #AttributeStorage struct. This works by converting the DNA-specific

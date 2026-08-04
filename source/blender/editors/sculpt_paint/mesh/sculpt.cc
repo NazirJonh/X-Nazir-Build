@@ -4797,6 +4797,50 @@ static void do_brush_action(const Depsgraph &depsgraph,
 
   update_brush_local_mat(depsgraph, sd, ob, node_mask);
 
+  /* Capture an insert-mesh stamp for the current symmetry pass.
+   *
+   * Regular stroke: only on the first dab — position, orientation and scale are fixed at the
+   * moment the stroke begins.
+   * Anchored stroke: update on every dab so that the stamp always reflects the final dragged-out
+   * radius and position when the mouse button is released. The existing entry for the same
+   * symmetry pass is replaced; a new one is appended when first seen. */
+  if (brush_uses_insert_mesh(brush) && !ss.multires_modifier) {
+    const bool is_anchored = (brush.stroke_method == BRUSH_STROKE_ANCHORED);
+    if (is_anchored || ss.cache->first_time) {
+      VDMStampData stamp;
+      stamp.location = ss.cache->location_symm;
+      stamp.brush_local_mat = ss.cache->brush_local_mat;
+      stamp.brush_local_mat_inv = ss.cache->brush_local_mat_inv;
+      stamp.plane_offset = ss.cache->plane_offset;
+      stamp.radius = ss.cache->radius;
+      stamp.bstrength = ss.cache->bstrength;
+      stamp.mirror_symmetry_pass = ss.cache->mirror_symmetry_pass;
+      stamp.radial_symmetry_pass = ss.cache->radial_symmetry_pass;
+      stamp.symm_rot_mat = ss.cache->symm_rot_mat;
+      stamp.symm_rot_mat_inv = ss.cache->symm_rot_mat_inv;
+
+      if (is_anchored) {
+        /* Replace the existing stamp for this symmetry pass if one already exists. */
+        bool found = false;
+        for (VDMStampData &existing : ss.vdm_stamps) {
+          if (existing.mirror_symmetry_pass == stamp.mirror_symmetry_pass &&
+              existing.radial_symmetry_pass == stamp.radial_symmetry_pass)
+          {
+            existing = stamp;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          ss.vdm_stamps.append(stamp);
+        }
+      }
+      else {
+        ss.vdm_stamps.append(stamp);
+      }
+    }
+  }
+
   if (brush.deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM) {
     if (!ss.cache->cloth_sim) {
       ss.cache->cloth_sim = cloth::brush_simulation_create(
@@ -4815,6 +4859,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
   switch (brush.sculpt_brush_type) {
     case SCULPT_BRUSH_TYPE_DRAW: {
       if (brush_uses_vector_displacement(brush)) {
+        /* Run the VDM Draw brush normally. In VDM Insert Mesh mode this deformation is
+         * a preview; the original mesh is restored at stroke end before the stamp object
+         * is created (see #SculptPaintStroke::done). */
         brushes::do_draw_vector_displacement_brush(depsgraph, sd, ob, node_mask);
       }
       else {
@@ -7154,6 +7201,7 @@ struct SculptPaintStroke final : public PaintStroke {
   bool test_cancel() override;
   void update_step(wmOperator *op, PointerRNA *itemptr) override;
   void done(bool is_cancel, bool stroke_started) override;
+  void post_done(bContext *C, bool is_cancel, bool stroke_started) override;
 };
 
 bool SculptPaintStroke::get_location(float out[3], const float mouse[2], bool force_original)
@@ -8884,6 +8932,12 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       continue;
     }
 
+    /* Insert Mesh stamps and preview live on the primary only; skip secondaries before
+     * propagating state or running brush action. */
+    if (brush_uses_insert_mesh(brush) && &ob != primary_ob) {
+      continue;
+    }
+
     /* Push shared per-stroke state from the primary object (captured at the end of its
      * iteration) onto this secondary BEFORE the brush action runs so the brush does not
      * independently lazy-allocate a divergent value. Never runs for the primary itself
@@ -9039,6 +9093,11 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   /* Finished without a usable cache: still roll back any layer-recording / eraser / temporary-
    * active state #test_start may have armed (I1). */
   if (!any_stroke_cache) {
+    for (Object *object_ptr : objects) {
+      if (object_ptr->runtime->sculpt_session) {
+        object_ptr->runtime->sculpt_session->vdm_stamps.clear();
+      }
+    }
     this->layer_recording_finish(true, false, BKE_paint_brush(&sd.paint));
     brush_exit_tex(sd);
     return;
@@ -9119,17 +9178,45 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   /* Clear status bar message set during stroke. */
   ED_workspace_status_text(this->evil_C, nullptr);
 
-  if (!is_cancel && stroke_started) {
+  const bool insert_mesh_success = !is_cancel && stroke_started && brush &&
+                                   brush_uses_insert_mesh(*brush) &&
+                                   !ss.vdm_stamps.is_empty();
+
+  if (insert_mesh_success) {
+    undo::restore_position_from_undo_step(*this->depsgraph, ob);
+    if (bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob)) {
+      bke::pbvh::update_normals(*this->depsgraph, ob, *pbvh);
+    }
+    /* Do not publish sculpt position undo for discarded preview. */
+    undo::discard_init_step();
+  }
+  else if (!is_cancel && stroke_started) {
     stroke_undo_end(*paint_mode_settings_, this->multi_.mode_objects, brush);
   }
   else if (is_cancel && stroke_started) {
     undo::discard_init_step();
   }
 
+  if (is_cancel || !stroke_started) {
+    for (Object *object_ptr : objects) {
+      if (object_ptr->runtime->sculpt_session) {
+        object_ptr->runtime->sculpt_session->vdm_stamps.clear();
+      }
+    }
+  }
+
+  const bool insert_into_target = insert_mesh_success &&
+                                  (brush->flag2 & BRUSH_INSERT_INTO_ACTIVE);
+  const bool skip_primary_flush = insert_into_target;
+
   /* Flush final geometry updates and send redraw notifiers for every object that was in
    * sculpt mode during this stroke, not just the primary (active) object. */
   for (Object *object_ptr : objects) {
     Object &ob_iter = *object_ptr;
+    if (skip_primary_flush && &ob_iter == &ob) {
+      /* Operator frees primary PBVH; skip flush/notifier for primary only. */
+      continue;
+    }
 
     UpdateType update_type;
     if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
@@ -9149,6 +9236,36 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   }
 
   brush_exit_tex(sd);
+}
+
+void SculptPaintStroke::post_done(bContext *C, const bool is_cancel, const bool stroke_started)
+{
+  if (is_cancel || !stroke_started) {
+    return;
+  }
+  bool has_stamps = false;
+  for (Object *object_ptr : this->multi_.mode_objects) {
+    if (object_ptr->runtime->sculpt_session &&
+        !object_ptr->runtime->sculpt_session->vdm_stamps.is_empty())
+    {
+      has_stamps = true;
+      break;
+    }
+  }
+  if (!has_stamps) {
+    return;
+  }
+  const wmOperatorStatus status = WM_operator_name_call(
+      C, "SCULPT_OT_insert_mesh", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+  /* Poll-fail returns OPERATOR_PASS_THROUGH / 0; cancel returns OPERATOR_CANCELLED. Only a
+   * finished exec consumes stamps — otherwise clear so D9 cannot leave orphans. */
+  if (!(status & OPERATOR_FINISHED)) {
+    for (Object *object_ptr : this->multi_.mode_objects) {
+      if (object_ptr->runtime->sculpt_session) {
+        object_ptr->runtime->sculpt_session->vdm_stamps.clear();
+      }
+    }
+  }
 }
 
 void SculptPaintStroke::redraw(bool /*final*/) {}

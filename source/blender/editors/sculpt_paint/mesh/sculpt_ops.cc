@@ -2102,6 +2102,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_mask_extract);
   WM_operatortype_append(SCULPT_OT_face_set_extract);
   WM_operatortype_append(SCULPT_OT_paint_mask_slice);
+  WM_operatortype_append(SCULPT_OT_insert_mesh);
 
   WM_operatortype_append(layers::SCULPT_OT_layer_add);
   WM_operatortype_append(layers::SCULPT_OT_layer_remove);

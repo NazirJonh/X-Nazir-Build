@@ -349,6 +349,12 @@ struct Brush {
 
   float texture_sample_bias = 0; /* value to added to texture samples */
 
+  /** Grid-resolution level for the VDM insert-mesh stamp. See #eBrushVDMInsertQuality. */
+  eBrushVDMInsertQuality vdm_insert_quality = BRUSH_VDM_INSERT_QUALITY_MEDIUM;
+  /** Base-shape / black-cropping algorithm for the VDM insert-mesh stamp. See
+   * #eBrushVDMInsertMethod. */
+  eBrushVDMInsertMethod vdm_insert_method = BRUSH_VDM_INSERT_METHOD_CONFORM;
+
   /** How texture affects brush behavior. #eBrushTextureDataMode. */
   int texture_data_mode = BRUSH_TEXTURE_DATA_MODE_NONE;
   /** Alpha threshold for binary texture mode. Range [0..1], default 0.5. */

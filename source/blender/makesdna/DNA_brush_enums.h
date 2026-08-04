@@ -431,8 +431,29 @@ enum eBrushFlags2 : int {
   BRUSH_TEXTURE_INVERT_ALPHA = (1 << 13),
   /** Disable Face Set assignment in texture-as-data-source mode. */
   BRUSH_DISABLE_FACE_SET_WRITE = (1 << 14),
+  BRUSH_INSERT_MESH = (1 << 15),
+  BRUSH_INSERT_INTO_ACTIVE = (1 << 16),
 };
 ENUM_OPERATORS(eBrushFlags2)
+
+/** #Brush.vdm_insert_quality: grid-resolution level for the VDM insert-mesh stamp.
+ * MEDIUM is 0 so files saved before this setting existed keep the previous behavior. */
+enum eBrushVDMInsertQuality : int {
+  BRUSH_VDM_INSERT_QUALITY_MEDIUM = 0,
+  BRUSH_VDM_INSERT_QUALITY_LOW = 1,
+  BRUSH_VDM_INSERT_QUALITY_HIGH = 2,
+};
+
+/** #Brush.vdm_insert_method: how the VDM insert-mesh stamp's base and black-texel cropping are
+ * built. CONFORM is 0 so files saved before this setting existed keep the previous behavior. */
+enum eBrushVDMInsertMethod : int {
+  /** Base follows the target mesh's surface under the footprint; black texels are cropped by a
+   * border-reachable flood fill blended by how black each texel is. */
+  BRUSH_VDM_INSERT_METHOD_CONFORM = 0,
+  /** Base sits on the flat brush plane; black texels are cropped by a plain border-ring average,
+   * with no per-texel black detection. Kept for stamps that rely on the older, simpler behavior. */
+  BRUSH_VDM_INSERT_METHOD_FLAT = 1,
+};
 
 /** #Brush.texture_data_mode */
 enum eBrushTextureDataMode {

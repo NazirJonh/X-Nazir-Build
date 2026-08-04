@@ -1649,6 +1649,17 @@ def brush_texture_settings(layout, brush, sculpt, tex_slot=None):
             col = layout.column()
             col.active = tex_slot.map_mode == 'AREA_PLANE'
             col.prop(brush, "use_color_as_displacement", text="Vector Displacement")
+            # Insert Mesh is not supported on multires objects, so it is hidden entirely
+            # rather than merely disabled.
+            if not any(m.type == 'MULTIRES' for m in sculpt.modifiers):
+                col.prop(brush, "use_insert_mesh", text="Insert Mesh")
+                sub = col.column()
+                sub.active = brush.use_insert_mesh
+                sub.prop(brush, "use_insert_into_active", text="Into Target Mesh")
+                row = sub.row()
+                row.prop(brush, "vdm_insert_quality", text="Quality", expand=True)
+                row = sub.row()
+                row.prop(brush, "vdm_insert_method", text="Method", expand=True)
 
 
 def brush_mask_texture_settings(layout, brush):

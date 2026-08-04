@@ -279,6 +279,12 @@ struct PaintStroke : NonCopyable, NonMovable {
    */
   virtual void done(bool is_cancel, bool stroke_started) = 0;
 
+  /**
+   * Called from #PaintStroke::done after #done returns. Used to run work that must execute outside
+   * TBB-isolated regions created during stroke cleanup (e.g. VDM insert mesh).
+   */
+  virtual void post_done(bContext * /*C*/, bool /*is_cancel*/, bool /*stroke_started*/) {}
+
   /* TODO: This can probably be private, but `paint_image_ops_paint` depends on this */
   bool update(bContext *C,
               const Brush &brush,

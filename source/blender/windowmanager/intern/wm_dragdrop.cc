@@ -65,6 +65,7 @@
 #include "WM_types.hh"
 #include "wm.hh"
 #include "wm_event_system.hh"
+#include "wm_event_types.hh"
 #include "wm_window.hh"
 
 #include <fmt/format.h>
@@ -700,12 +701,34 @@ void wm_drop_end(bContext *C, wmDrag * /*drag*/, wmDropBox * /*drop*/)
   CTX_store_set(C, nullptr);
 }
 
-void wm_drags_handle_events(bContext *C, const wmEvent *event)
+bool wm_drags_handle_events(bContext *C, const wmEvent *event)
 {
-  if (!ELEM(event->type, TIMER, MOUSEMOVE, EVT_DROP)) {
-    return;
-  }
   const wmWindowManager *wm = CTX_wm_manager(C);
+  bool handled = false;
+
+  if (!ELEM(event->type, TIMER, MOUSEMOVE, EVT_DROP)) {
+    /* Forward keyboard/button events to active dropboxes that register an event handler.
+     * This lets drop-box overlays react to keys (e.g. S for scale, R for rotate) without
+     * going through the full drag-update path. */
+    if (ISKEYBOARD_OR_BUTTON(event->type)) {
+      const ARegion *region = CTX_wm_region(C);
+      for (wmDrag &drag : wm->runtime->drags) {
+        if (region != drag.drop_state.region_from) {
+          continue;
+        }
+        if (wmDropBox *dropbox = drag.drop_state.active_dropbox) {
+          if (dropbox->on_event_while_hover) {
+            dropbox->on_event_while_hover(C, *dropbox, event);
+          }
+          if (dropbox->on_event_while_hover_handled) {
+            handled |= dropbox->on_event_while_hover_handled(C, *dropbox, event);
+          }
+        }
+      }
+    }
+    return handled;
+  }
+
   const ARegion *region = CTX_wm_region(C);
 
   /* Make sure the timer event belongs to an active dropbox in the currently handled region, skip
@@ -723,7 +746,7 @@ void wm_drags_handle_events(bContext *C, const wmEvent *event)
         }
       }
       if (!has_drag_timer) {
-        return;
+        return handled;
       }
     }
   }
@@ -738,6 +761,9 @@ void wm_drags_handle_events(bContext *C, const wmEvent *event)
       if (dropbox->on_event_while_hover) {
         dropbox->on_event_while_hover(C, *dropbox, event);
       }
+      if (dropbox->on_event_while_hover_handled) {
+        handled |= dropbox->on_event_while_hover_handled(C, *dropbox, event);
+      }
     }
   }
 
@@ -746,6 +772,8 @@ void wm_drags_handle_events(bContext *C, const wmEvent *event)
   if (!wm->runtime->drags.is_empty() && ELEM(event->type, MOUSEMOVE, EVT_DROP)) {
     WM_cursor_modal_set(CTX_wm_window(C), any_active ? WM_CURSOR_DEFAULT : WM_CURSOR_STOP);
   }
+
+  return handled;
 }
 
 wm::OpCallContext wm_drop_operator_context_get(const wmDropBox * /*drop*/)

@@ -1464,6 +1464,8 @@ struct wmDropBox {
    * it.
    */
   void (*on_event_while_hover)(bContext *C, wmDropBox &dropbox, const wmEvent *event);
+  /** Optional event handler which can prevent further keymap processing for this event. */
+  bool (*on_event_while_hover_handled)(bContext *C, wmDropBox &dropbox, const wmEvent *event);
   /** Custom data for drawing. */
   void *draw_data;
 

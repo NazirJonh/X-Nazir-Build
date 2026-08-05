@@ -98,6 +98,9 @@ void calc_face_indices_grids(const SubdivCCG &subdiv_ccg,
  */
 bool create_face_sets_mesh(Object &object);
 
+int find_next_available_id(Object &object);
+void initialize_none_to_id(Mesh *mesh, int new_id);
+
 /**
  * Ensures that the sculpt face set attribute exists on the mesh.
  *

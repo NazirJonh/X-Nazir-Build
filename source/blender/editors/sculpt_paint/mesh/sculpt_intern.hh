@@ -949,6 +949,10 @@ void modal_keymap(wmKeyConfig *keyconf);
 
 }  // namespace ed::sculpt_paint::expand
 
+namespace ed::sculpt_paint::asset_drop {
+void SCULPT_OT_mesh_asset_drop(wmOperatorType *ot);
+}
+
 namespace ed::sculpt_paint::project {
 void SCULPT_OT_project_line_gesture(wmOperatorType *ot);
 }

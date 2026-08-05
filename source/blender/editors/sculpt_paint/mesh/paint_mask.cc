@@ -353,6 +353,21 @@ static Span<int> get_hidden_verts(const bke::pbvh::MeshNode &node,
   return indices;
 }
 
+static void clear_mask_draw_nodes(bke::pbvh::Tree &pbvh,
+                                  MutableSpan<bke::pbvh::MeshNode> nodes,
+                                  const IndexMask &node_mask)
+{
+  node_mask.foreach_index([&](const int i) {
+    BKE_pbvh_node_fully_masked_set(nodes[i], false);
+    BKE_pbvh_node_fully_unmasked_set(nodes[i], true);
+  });
+  /* Mask VBOs store values for every face-corner, including shared verts from neighboring
+   * nodes. After a geometry join (e.g. sculpt asset drop) boundary nodes can have unmasked
+   * unique verts while still displaying masked shared verts — so always invalidate the full
+   * requested node set when the attribute is removed or missing. */
+  pbvh.tag_masks_changed(node_mask);
+}
+
 static bool try_remove_mask_mesh(const Depsgraph &depsgraph,
                                  Object &object,
                                  const IndexMask &node_mask)
@@ -363,6 +378,8 @@ static bool try_remove_mask_mesh(const Depsgraph &depsgraph,
   bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
   const VArraySpan mask = *attributes.lookup<float>(".sculpt_mask", bke::AttrDomain::Point);
   if (mask.is_empty()) {
+    /* Attribute already gone, but PBVH mask VBOs may still be stale. */
+    clear_mask_draw_nodes(pbvh, nodes, node_mask);
     return true;
   }
 
@@ -397,12 +414,14 @@ static bool try_remove_mask_mesh(const Depsgraph &depsgraph,
     return false;
   }
 
+  /* Use #all_verts so boundary nodes that only reference masked verts through shared corners
+   * are included in the undo step (mask draw VBOs use face corners, not unique verts alone). */
   IndexMaskMemory memory;
   const IndexMask changed_nodes = IndexMask::from_predicate(
       node_mask,
       memory,
       [&](const int i) {
-        const Span<int> verts = nodes[i].verts();
+        const Span<int> verts = nodes[i].all_verts();
         return std::any_of(
             verts.begin(), verts.end(), [&](const int i) { return mask[i] != 0.0f; });
       },
@@ -410,11 +429,9 @@ static bool try_remove_mask_mesh(const Depsgraph &depsgraph,
 
   undo::push_nodes(depsgraph, object, changed_nodes, undo::Type::Mask);
   attributes.remove(".sculpt_mask");
-  changed_nodes.foreach_index([&](const int i) {
-    BKE_pbvh_node_fully_masked_set(nodes[i], false);
-    BKE_pbvh_node_fully_unmasked_set(nodes[i], true);
-  });
-  pbvh.tag_masks_changed(changed_nodes);
+  /* Removing the attribute clears mask for the whole mesh — refresh every requested node so
+   * join-boundary VBOs cannot keep a stale dark overlay. */
+  clear_mask_draw_nodes(pbvh, nodes, node_mask);
   return true;
 }
 

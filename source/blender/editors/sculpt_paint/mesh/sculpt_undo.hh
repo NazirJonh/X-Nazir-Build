@@ -79,6 +79,9 @@ void push_begin_ex(const Scene &scene, Object &ob, const char *name);
 void push_end(Object &ob);
 void push_end_ex(Object &ob, bool use_nested_undo);
 
+void geometry_begin(const Scene &scene, Object &ob, const wmOperator *op);
+void geometry_end(Object &ob);
+
 void restore_from_bmesh_enter_geometry(const StepData &step_data, Mesh &mesh);
 bool has_bmesh_log_entry();
 

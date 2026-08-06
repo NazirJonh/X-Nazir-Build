@@ -24,6 +24,7 @@
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
+#include "BLI_utildefines.h"
 
 #include "BLO_readfile.hh"
 
@@ -34,6 +35,7 @@
 #include "DNA_collection_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_enums.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
@@ -741,6 +743,68 @@ bool preview_try_pull(SculptDropPreviewRuntime &rt)
   return true;
 }
 
+/** Same validity rule as #ed::sculpt_paint::is_symmetry_iteration_valid (kept local to avoid
+ * pulling sculpt editor internals into space_view3d). */
+static bool drop_preview_symmetry_iteration_valid(const char i, const char symm)
+{
+  return i == 0 || (symm & i && (symm != 5 || i != 3) && (symm != 6 || !ELEM(i, 3, 5)));
+}
+
+static float4x4 drop_preview_symmetry_flip_matrix(const ePaintSymmetryFlags symmpass)
+{
+  float4x4 flip = float4x4::identity();
+  if (symmpass & PAINT_SYMM_X) {
+    flip[0][0] = -1.0f;
+  }
+  if (symmpass & PAINT_SYMM_Y) {
+    flip[1][1] = -1.0f;
+  }
+  if (symmpass & PAINT_SYMM_Z) {
+    flip[2][2] = -1.0f;
+  }
+  return flip;
+}
+
+static float4x4 drop_preview_world_matrix_for_symmetry_pass(const Object &active_ob_eval,
+                                                           const float4x4 &snap_world,
+                                                           const ePaintSymmetryFlags symmpass)
+{
+  if (symmpass == PAINT_SYMM_NONE) {
+    return snap_world;
+  }
+  const float4x4 local = active_ob_eval.world_to_object() * snap_world;
+  const float4x4 local_flipped = drop_preview_symmetry_flip_matrix(symmpass) * local;
+  return active_ob_eval.object_to_world() * local_flipped;
+}
+
+static void drop_preview_draw_item(const PreviewItemGPU &item,
+                                   const float m_drop[4][4],
+                                   const float color[4],
+                                   const float edge_color[4])
+{
+  if (!item.batch_tris) {
+    return;
+  }
+
+  float m_item[4][4];
+  mul_m4_m4m4(m_item, m_drop, item.local_to_drop.ptr());
+
+  GPU_matrix_push();
+  GPU_matrix_mul(m_item);
+
+  GPU_batch_program_set_builtin(item.batch_tris, GPU_SHADER_3D_UNIFORM_COLOR);
+  GPU_batch_uniform_4fv(item.batch_tris, "color", color);
+  GPU_batch_draw(item.batch_tris);
+
+  if (item.batch_edges) {
+    GPU_batch_program_set_builtin(item.batch_edges, GPU_SHADER_3D_UNIFORM_COLOR);
+    GPU_batch_uniform_4fv(item.batch_edges, "color", edge_color);
+    GPU_batch_draw(item.batch_edges);
+  }
+
+  GPU_matrix_pop();
+}
+
 void preview_draw_paint_cursor(bContext *C,
                                const int2 &xy,
                                const float2 & /*tilt*/,
@@ -846,28 +910,39 @@ void preview_draw_paint_cursor(bContext *C,
   GPU_depth_mask(false);
   GPU_face_culling(GPU_CULL_NONE);
 
-  for (const PreviewItemGPU &item : rt.items) {
-    if (!item.batch_tris) {
+  /* Mirror preview through the active sculpt mesh's symmetry flags (same math as the drop
+   * operator). Reuse GPU batches; only the world matrix changes per pass. */
+  const Object *active_ob = CTX_data_active_object(C);
+  const ePaintSymmetryFlags symm =
+      (active_ob && active_ob->type == OB_MESH) ?
+          ePaintSymmetryFlags(id_cast<const Mesh *>(active_ob->data)->symmetry) :
+          PAINT_SYMM_NONE;
+  const Object *active_ob_eval = nullptr;
+  if (symm != PAINT_SYMM_NONE) {
+    Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+    active_ob_eval = DEG_get_evaluated(depsgraph, active_ob);
+  }
+
+  const float4x4 snap_world = float4x4(m_drop);
+
+  for (int symmpass = 0; symmpass <= int(symm); symmpass++) {
+    if (!drop_preview_symmetry_iteration_valid(char(symmpass), char(symm))) {
       continue;
     }
 
-    float m_item[4][4];
-    mul_m4_m4m4(m_item, m_drop, item.local_to_drop.ptr());
-
-    GPU_matrix_push();
-    GPU_matrix_mul(m_item);
-
-    GPU_batch_program_set_builtin(item.batch_tris, GPU_SHADER_3D_UNIFORM_COLOR);
-    GPU_batch_uniform_4fv(item.batch_tris, "color", color);
-    GPU_batch_draw(item.batch_tris);
-
-    if (item.batch_edges) {
-      GPU_batch_program_set_builtin(item.batch_edges, GPU_SHADER_3D_UNIFORM_COLOR);
-      GPU_batch_uniform_4fv(item.batch_edges, "color", edge_color);
-      GPU_batch_draw(item.batch_edges);
+    float m_drop_pass[4][4];
+    if (symmpass == 0 || active_ob_eval == nullptr) {
+      copy_m4_m4(m_drop_pass, m_drop);
+    }
+    else {
+      const float4x4 world_mat = drop_preview_world_matrix_for_symmetry_pass(
+          *active_ob_eval, snap_world, ePaintSymmetryFlags(symmpass));
+      copy_m4_m4(m_drop_pass, world_mat.ptr());
     }
 
-    GPU_matrix_pop();
+    for (const PreviewItemGPU &item : rt.items) {
+      drop_preview_draw_item(item, m_drop_pass, color, edge_color);
+    }
   }
 
   GPU_shader_unbind();

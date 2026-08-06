@@ -15,6 +15,10 @@
  *   mesh objects are still merged together into a single new object (not touching the active
  *   sculpt mesh) rather than being kept as separate objects.
  *
+ * When the active sculpt mesh has mirror symmetry (X/Y/Z) enabled, Join appends a mirrored copy
+ * of the dropped geometry for each valid symmetry pass (same local-space flip as Trim). Separate
+ * places one object per pass, with world matrices mirrored through the active object's axes.
+ *
  * Every path here uses a plain #ED_undo_push rather than the sculpt-mode geometry undo type
  * (#ed::sculpt_paint::undo::geometry_begin/geometry_end): all paths can add, duplicate, or remove
  * a whole object (or collection), which that undo type cannot represent since it only diffs the
@@ -32,6 +36,7 @@
 #include "GEO_join_geometries.hh"
 
 #include "BLI_index_mask.hh"
+#include "BLI_math_bits.h"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_vector.hh"
 
@@ -51,6 +56,8 @@
 #include "DNA_collection_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_enums.h"
+#include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
 
 #include "DEG_depsgraph.hh"
@@ -97,6 +104,57 @@ static bool snap_matrix_get(wmOperator &op, float4x4 &r_matrix)
   }
   RNA_property_float_get_array(op.ptr, prop, r_matrix.base_ptr());
   return true;
+}
+
+/** Reflection matrix for one sculpt mirror-symmetry pass (object-local axes). */
+static float4x4 symmetry_flip_matrix(const ePaintSymmetryFlags symmpass)
+{
+  float4x4 flip = float4x4::identity();
+  if (symmpass & PAINT_SYMM_X) {
+    flip[0][0] = -1.0f;
+  }
+  if (symmpass & PAINT_SYMM_Y) {
+    flip[1][1] = -1.0f;
+  }
+  if (symmpass & PAINT_SYMM_Z) {
+    flip[2][2] = -1.0f;
+  }
+  return flip;
+}
+
+/**
+ * Mirror a world-space placement through the active object's local symmetry axes.
+ * Pass 0 (#PAINT_SYMM_NONE) returns `snap_world` unchanged.
+ */
+static float4x4 world_matrix_for_symmetry_pass(const Object &active_ob_eval,
+                                              const float4x4 &snap_world,
+                                              const ePaintSymmetryFlags symmpass)
+{
+  if (symmpass == PAINT_SYMM_NONE) {
+    return snap_world;
+  }
+  const float4x4 local = active_ob_eval.world_to_object() * snap_world;
+  const float4x4 local_flipped = symmetry_flip_matrix(symmpass) * local;
+  return active_ob_eval.object_to_world() * local_flipped;
+}
+
+/**
+ * Mirror mesh vertices already expressed in the active sculpt object's local space.
+ * Odd numbers of axis flips reverse face winding, so faces are flipped to keep normals outward.
+ */
+static void mesh_flip_positions_for_symmetry(Mesh &mesh, const ePaintSymmetryFlags symmpass)
+{
+  if (symmpass == PAINT_SYMM_NONE) {
+    return;
+  }
+  MutableSpan<float3> positions = mesh.vert_positions_for_write();
+  for (float3 &co : positions) {
+    co = symmetry_flip(co, symmpass);
+  }
+  mesh.tag_positions_changed();
+  if (count_bits_i(uint(symmpass) & uint(PAINT_SYMM_AXIS_ALL)) % 2 == 1) {
+    bke::mesh_flip_faces(mesh, IndexMask(mesh.faces_num));
+  }
 }
 
 /** \} */
@@ -251,15 +309,35 @@ static void join_asset_into_active(Object &active_ob,
   /* Vertex count of the active mesh before the join; the appended asset vertices start here. */
   const int existing_verts_num = sculpt_mesh.verts_num;
 
-  bke::GeometrySet joined = geometry::join_geometries(
-      {bke::GeometrySet::from_mesh(&sculpt_mesh, bke::GeometryOwnershipType::ReadOnly),
-       bke::GeometrySet::from_mesh(&asset_mesh, bke::GeometryOwnershipType::ReadOnly)},
-      {});
+  /* Mirror-symmetry copies share the primary mesh's prepared face-set IDs (same as Trim repeating
+   * the shape per pass). Pass 0 is `asset_mesh` itself. */
+  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(active_ob);
+  Vector<Mesh *> symmetry_copies;
+  Vector<bke::GeometrySet> geosets;
+  geosets.append(bke::GeometrySet::from_mesh(&sculpt_mesh, bke::GeometryOwnershipType::ReadOnly));
+  geosets.append(bke::GeometrySet::from_mesh(&asset_mesh, bke::GeometryOwnershipType::ReadOnly));
+
+  for (int symmpass = 1; symmpass <= int(symm); symmpass++) {
+    if (!is_symmetry_iteration_valid(char(symmpass), char(symm))) {
+      continue;
+    }
+    Mesh *copy = BKE_mesh_copy_for_eval(asset_mesh);
+    mesh_flip_positions_for_symmetry(*copy, ePaintSymmetryFlags(symmpass));
+    symmetry_copies.append(copy);
+    geosets.append(bke::GeometrySet::from_mesh(copy, bke::GeometryOwnershipType::ReadOnly));
+  }
+
+  bke::GeometrySet joined = geometry::join_geometries(geosets.as_span(), {});
   Mesh *result = joined.get_component_for_write<bke::MeshComponent>().release();
   BKE_mesh_nomain_to_mesh(result, &sculpt_mesh, &active_ob);
 
-  /* Mask the pre-existing geometry so only the dropped asset is left sculptable. Skipped
-   * entirely when the user disabled Mask during hover, leaving any existing mask untouched. */
+  for (Mesh *copy : symmetry_copies) {
+    BKE_id_free(nullptr, copy);
+  }
+
+  /* Mask the pre-existing geometry so only the dropped asset (all symmetry sides) is left
+   * sculptable. Skipped entirely when the user disabled Mask during hover, leaving any existing
+   * mask untouched. */
   if (apply_mask) {
     mask_existing_geometry(sculpt_mesh, existing_verts_num);
   }
@@ -308,6 +386,7 @@ static bool sculpt_mesh_asset_drop_poll(bContext *C)
  * transform (via #BKE_object_apply_mat4) instead of being baked into the mesh, so the mesh only
  * needs the collection-center offset:
  *   `translate(-collection_center) * ob.object_to_world`
+ * With sculpt mirror symmetry, Separate creates one merged object per valid symmetry pass.
  *
  * `snap_matrix` carries the surface orientation + user rotation + user scale set during hover.
  * `collection_center` is the mean of evaluated object origins so the whole collection lands at
@@ -333,12 +412,11 @@ static wmOperatorStatus sculpt_collection_drop_exec(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
+  Scene *scene = CTX_data_scene(C);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
-  /* Use the evaluated active object's transform: the original (non-evaluated) transform can be
-   * stale if it is driven by a constraint, driver, or an animated parent. Only needed when
-   * joining; a separate object is placed directly at `snap_matrix`. */
-  const Object *active_ob_eval = join_to_active ? DEG_get_evaluated(depsgraph, &active_ob) :
-                                                  nullptr;
+  /* Evaluated active transform: original can be stale under constraints/drivers/animation. Needed
+   * for join baking and for mirroring separate-object placement through the sculpt symmetry axes. */
+  const Object *active_ob_eval = DEG_get_evaluated(depsgraph, &active_ob);
 
   /* Compute collection center as the mean of evaluated mesh-object origins. */
   float3 collection_center{0.0f};
@@ -431,17 +509,31 @@ static wmOperatorStatus sculpt_collection_drop_exec(bContext *C,
 
   Object *target_ob = &active_ob;
   Mesh *target_mesh = nullptr;
+  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(active_ob);
 
   if (join_to_active) {
     target_mesh = id_cast<Mesh *>(active_ob.data);
 
-    /* Prepend the sculpt mesh so it participates in the join. */
+    /* Merge the collection into one active-local mesh, then mirror that whole shape per symmetry
+     * pass (same idea as single-object join). */
+    bke::GeometrySet dropped_joined = geometry::join_geometries(geosets.as_span(), {});
+    Mesh *dropped_mesh = dropped_joined.get_component_for_write<bke::MeshComponent>().release();
+
+    Vector<Mesh *> symmetry_copies;
     Vector<bke::GeometrySet> all_geosets;
-    all_geosets.reserve(1 + geosets.size());
     all_geosets.append(
         bke::GeometrySet::from_mesh(target_mesh, bke::GeometryOwnershipType::ReadOnly));
-    for (bke::GeometrySet &gs : geosets) {
-      all_geosets.append(std::move(gs));
+    all_geosets.append(
+        bke::GeometrySet::from_mesh(dropped_mesh, bke::GeometryOwnershipType::ReadOnly));
+
+    for (int symmpass = 1; symmpass <= int(symm); symmpass++) {
+      if (!is_symmetry_iteration_valid(char(symmpass), char(symm))) {
+        continue;
+      }
+      Mesh *copy = BKE_mesh_copy_for_eval(*dropped_mesh);
+      mesh_flip_positions_for_symmetry(*copy, ePaintSymmetryFlags(symmpass));
+      symmetry_copies.append(copy);
+      all_geosets.append(bke::GeometrySet::from_mesh(copy, bke::GeometryOwnershipType::ReadOnly));
     }
 
     /* Vertex count of the active mesh before the join; the appended collection vertices start
@@ -451,6 +543,11 @@ static wmOperatorStatus sculpt_collection_drop_exec(bContext *C,
     bke::GeometrySet joined = geometry::join_geometries(all_geosets.as_span(), {});
     Mesh *result = joined.get_component_for_write<bke::MeshComponent>().release();
     BKE_mesh_nomain_to_mesh(result, target_mesh, &active_ob);
+
+    BKE_id_free(nullptr, dropped_mesh);
+    for (Mesh *copy : symmetry_copies) {
+      BKE_id_free(nullptr, copy);
+    }
 
     /* Mask the pre-existing geometry so only the dropped collection is left sculptable. Skipped
      * entirely when the user disabled Mask during hover, leaving any existing mask untouched. */
@@ -463,32 +560,81 @@ static wmOperatorStatus sculpt_collection_drop_exec(bContext *C,
     DEG_id_tag_update(&active_ob.id, ID_RECALC_GEOMETRY);
   }
   else {
-    /* Build a new, separate object holding the merged collection geometry, placed directly at
-     * `snap_matrix` (or the identity, when no snap was in effect and the meshes already carry
-     * their own world-space transform). The active sculpt object and mesh are left untouched. */
+    /* Build merged collection geometry once, then place one separate object per symmetry pass.
+     * Mirrored sides reuse linked mesh data; object matrices carry the reflection. */
     bke::GeometrySet joined = geometry::join_geometries(geosets.as_span(), {});
     Mesh *result = joined.get_component_for_write<bke::MeshComponent>().release();
 
-    Object *new_ob = BKE_object_add_only_object(bmain, OB_MESH, collection->id.name + 2);
-    new_ob->data = static_cast<ID *>(
-        BKE_object_obdata_add_from_type(bmain, OB_MESH, new_ob->id.name + 2));
-    LayerCollection *layer_collection = BKE_layer_collection_get_active(&view_layer);
-    BKE_collection_viewlayer_object_add(bmain, &view_layer, layer_collection->collection, new_ob);
-
-    target_mesh = id_cast<Mesh *>(new_ob->data);
-    BKE_mesh_nomain_to_mesh(result, target_mesh, new_ob);
-
-    if (snap_matrix) {
-      BKE_object_apply_mat4(new_ob, snap_matrix->ptr(), false, true);
+    float4x4 placement = float4x4::identity();
+    const bool has_placement = snap_matrix != nullptr;
+    if (has_placement) {
+      placement = *snap_matrix;
     }
 
-    BKE_mesh_batch_cache_dirty_tag(target_mesh, BKE_MESH_BATCH_DIRTY_ALL);
-    DEG_id_tag_update(&new_ob->id, ID_RECALC_GEOMETRY | ID_RECALC_TRANSFORM);
+    Object *first_ob = nullptr;
+    Base *first_base = nullptr;
+
+    for (int symmpass = 0; symmpass <= int(symm); symmpass++) {
+      if (!is_symmetry_iteration_valid(char(symmpass), char(symm))) {
+        continue;
+      }
+
+      Object *new_ob = nullptr;
+      if (first_ob == nullptr) {
+        new_ob = BKE_object_add_only_object(bmain, OB_MESH, collection->id.name + 2);
+        new_ob->data = static_cast<ID *>(
+            BKE_object_obdata_add_from_type(bmain, OB_MESH, new_ob->id.name + 2));
+        LayerCollection *layer_collection = BKE_layer_collection_get_active(&view_layer);
+        BKE_collection_viewlayer_object_add(
+            bmain, &view_layer, layer_collection->collection, new_ob);
+
+        target_mesh = id_cast<Mesh *>(new_ob->data);
+        BKE_mesh_nomain_to_mesh(result, target_mesh, new_ob);
+        result = nullptr;
+
+        BKE_view_layer_synced_ensure(*bmain, scene, &view_layer);
+        first_base = BKE_view_layer_base_find(&view_layer, new_ob);
+        first_ob = new_ob;
+        target_ob = new_ob;
+      }
+      else {
+        /* Linked duplicate: share mesh data; reflection lives in the object matrix. */
+        if (!first_base) {
+          BKE_report(op->reports, RPT_ERROR, "Failed to find view layer base for symmetry duplicate");
+          if (result) {
+            BKE_id_free(nullptr, result);
+          }
+          for (Mesh *m : temp_meshes) {
+            BKE_id_free(nullptr, m);
+          }
+          return OPERATOR_CANCELLED;
+        }
+        Base *dupe_base = ed::object::add_duplicate(
+            bmain, scene, &view_layer, first_base, eDupli_ID_Flags{});
+        if (!dupe_base) {
+          continue;
+        }
+        new_ob = dupe_base->object;
+      }
+
+      if (has_placement) {
+        const float4x4 world_mat = world_matrix_for_symmetry_pass(
+            *active_ob_eval, placement, ePaintSymmetryFlags(symmpass));
+        BKE_object_apply_mat4(new_ob, world_mat.ptr(), false, true);
+      }
+
+      BKE_mesh_batch_cache_dirty_tag(id_cast<Mesh *>(new_ob->data), BKE_MESH_BATCH_DIRTY_ALL);
+      DEG_id_tag_update(&new_ob->id, ID_RECALC_GEOMETRY | ID_RECALC_TRANSFORM);
+    }
+
+    if (result) {
+      BKE_id_free(nullptr, result);
+    }
 
     /* Mask the active sculpt mesh's pre-existing geometry entirely, mirroring the single-object
-     * separate path: the dropped-in geometry lives in its own object here, so "everything except
-     * the new geometry" is the whole active sculpt object. Skipped when Mask was disabled during
-     * hover. */
+     * separate path: the dropped-in geometry lives in its own object(s) here, so "everything
+     * except the new geometry" is the whole active sculpt object. Skipped when Mask was disabled
+     * during hover. */
     if (apply_mask) {
       Mesh &active_mesh = *id_cast<Mesh *>(active_ob.data);
       mask_existing_geometry(active_mesh, active_mesh.verts_num);
@@ -496,8 +642,6 @@ static wmOperatorStatus sculpt_collection_drop_exec(bContext *C,
       BKE_mesh_batch_cache_dirty_tag(&active_mesh, BKE_MESH_BATCH_DIRTY_ALL);
       DEG_id_tag_update(&active_ob.id, ID_RECALC_GEOMETRY);
     }
-
-    target_ob = new_ob;
   }
 
   for (Mesh *m : temp_meshes) {
@@ -626,27 +770,74 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
    * For a local asset (`keep_source`) the looked-up object is the original already living in the
    * scene, so create a linked duplicate and place that instead — moving the original would
    * displace the user's existing object. A freshly imported external asset is already a new
-   * object, so it is placed directly. Mirrors #OBJECT_OT_add_named. */
-  Object *place_ob = asset_ob;
-  if (keep_source) {
-    BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
-    if (Base *base = BKE_view_layer_base_find(view_layer, asset_ob)) {
-      /* Linked (`dupflag == 0`): the duplicate shares the original's data. Otherwise fall back to
-       * the user's preferences for a full independent copy, matching #OBJECT_OT_add_named. */
-      const bool linked = RNA_boolean_get(op->ptr, "linked");
-      const eDupli_ID_Flags dupflag = linked ? eDupli_ID_Flags{} : eDupli_ID_Flags(U.dupflag);
-      if (Base *dupe_base = ed::object::add_duplicate(
-              bmain, const_cast<Scene *>(scene), view_layer, base, dupflag))
-      {
-        place_ob = dupe_base->object;
+   * object, so it is placed directly. Mirrors #OBJECT_OT_add_named.
+   *
+   * With sculpt mirror symmetry enabled, one object is placed per valid symmetry pass (pass 0
+   * uses the carrier / first duplicate; further passes are additional duplicates whose world
+   * matrices are mirrored through the active sculpt object's local axes). */
+  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(*active_ob);
+  const Object *active_ob_eval = DEG_get_evaluated(depsgraph, active_ob);
+  const Object *asset_eval = DEG_get_evaluated(depsgraph, asset_ob);
+
+  float4x4 placement = float4x4::identity();
+  bool has_placement = has_snap;
+  if (has_snap) {
+    placement = snap_matrix;
+  }
+  else {
+    /* No snap matrix: mirror the asset's own world transform the same way Join uses it. */
+    placement = asset_eval->object_to_world();
+    has_placement = true;
+  }
+
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  Base *source_base = BKE_view_layer_base_find(view_layer, asset_ob);
+  const bool linked = RNA_boolean_get(op->ptr, "linked");
+  const eDupli_ID_Flags dupflag = linked ? eDupli_ID_Flags{} : eDupli_ID_Flags(U.dupflag);
+
+  Object *place_ob = nullptr;
+  bool used_original = false;
+
+  for (int symmpass = 0; symmpass <= int(symm); symmpass++) {
+    if (!is_symmetry_iteration_valid(char(symmpass), char(symm))) {
+      continue;
+    }
+
+    Object *ob = nullptr;
+    if (!used_original && !keep_source) {
+      /* Imported carrier: place it for the first valid pass. */
+      ob = asset_ob;
+      used_original = true;
+    }
+    else {
+      if (!source_base) {
+        BKE_report(op->reports, RPT_ERROR, "Dropped asset has no view layer base to duplicate");
+        return OPERATOR_CANCELLED;
       }
+      Base *dupe_base = ed::object::add_duplicate(
+          bmain, const_cast<Scene *>(scene), view_layer, source_base, dupflag);
+      if (!dupe_base) {
+        BKE_report(op->reports, RPT_ERROR, "Failed to duplicate dropped asset");
+        return OPERATOR_CANCELLED;
+      }
+      ob = dupe_base->object;
+    }
+
+    if (has_placement) {
+      const float4x4 world_mat = world_matrix_for_symmetry_pass(
+          *active_ob_eval, placement, ePaintSymmetryFlags(symmpass));
+      BKE_object_apply_mat4(ob, world_mat.ptr(), false, true);
+      DEG_id_tag_update(&ob->id, ID_RECALC_TRANSFORM);
+    }
+
+    if (place_ob == nullptr) {
+      place_ob = ob;
     }
   }
 
-  /* The snap matrix already is the desired world placement, so apply it directly. */
-  if (has_snap) {
-    BKE_object_apply_mat4(place_ob, snap_matrix.ptr(), false, true);
-    DEG_id_tag_update(&place_ob->id, ID_RECALC_TRANSFORM);
+  if (place_ob == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Failed to place dropped asset");
+    return OPERATOR_CANCELLED;
   }
 
   /* The dropped asset stays in its own object here, so "mask everything except the new geometry"

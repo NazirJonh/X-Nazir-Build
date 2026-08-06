@@ -567,6 +567,9 @@ bool foreach_recorded_eval_position_mesh(
  */
 bool foreach_recorded_grids(const Object &object, FunctionRef<void(Span<int> grids)> fn);
 
+void geometry_begin(const Scene &scene, Object &ob, const wmOperator *op);
+void geometry_end(Object &ob);
+
 void restore_from_bmesh_enter_geometry(const StepData &step_data, Mesh &mesh);
 bool has_bmesh_log_entry(const Object &ob);
 

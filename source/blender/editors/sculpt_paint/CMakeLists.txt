@@ -91,6 +91,7 @@ set(SRC
   mesh/paint_vertex_weight_utils.cc
   mesh/paint_weight.cc
   mesh/sculpt.cc
+  mesh/sculpt_asset_drop.cc
   mesh/sculpt_automasking.cc
   mesh/sculpt_boundary.cc
   mesh/sculpt_cloth.cc

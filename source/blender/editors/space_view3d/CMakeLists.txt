@@ -61,6 +61,7 @@ set(SRC
   view3d_ops.cc
   view3d_placement.cc
   view3d_project.cc
+  view3d_sculpt_drop_preview.cc
   view3d_select.cc
   view3d_snap.cc
   view3d_utils.cc

@@ -4175,7 +4175,9 @@ static eHandlerActionFlag wm_event_do_region_handlers(bContext *C, wmEvent *even
   if (!wm->runtime->drags.is_empty()) {
     /* Does polls for drop regions and checks #uiButs. */
     /* Need to be here to make sure region context is true. */
-    wm_drags_handle_events(C, event);
+    if (wm_drags_handle_events(C, event)) {
+      return WM_HANDLER_BREAK;
+    }
   }
 
   return wm_handlers_do(

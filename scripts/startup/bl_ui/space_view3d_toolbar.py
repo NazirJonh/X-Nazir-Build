@@ -438,6 +438,10 @@ class SelectPaintSlotHelper:
     # texture_paint_slots (sculpt Canvas / Image Editor PaintModeSettings).
     use_material_paint_channels = False
 
+    def draw_header(self, context):
+        layout = self.layout
+        layout.prop(self.get_mode_settings(context), self.canvas_source_attr_name, text="")
+
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
@@ -448,8 +452,9 @@ class SelectPaintSlotHelper:
 
         ob = context.active_object
 
-        layout.prop(mode_settings, self.canvas_source_attr_name, text="Mode")
-        layout.separator()
+        if self.is_popover:
+            layout.prop(mode_settings, self.canvas_source_attr_name, text="Mode")
+            layout.separator()
 
         have_image = False
         canvas_source = getattr(mode_settings, self.canvas_source_attr_name)
@@ -589,7 +594,12 @@ class VIEW3D_PT_slots_projectpaint(SelectPaintSlotHelper, View3DPanel, Panel):
 
 
 class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
-    bl_label = "Canvas"
+    bl_label = ""
+
+    def draw_header(self, context):
+        layout = self.layout
+        layout.label(text="Canvas")
+        layout.prop(self.get_mode_settings(context), self.canvas_source_attr_name, text="")
     use_material_paint_channels = True
 
     @classmethod

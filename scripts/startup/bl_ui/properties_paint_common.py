@@ -1165,65 +1165,75 @@ def draw_material_paint_channels(layout, brush, paint_mode, *, show_custom, show
     # C descriptor table without needing a matching edit here.
     channels = {channel.channel: channel for channel in material_paint.channels}
 
-    channel = channels['BASE_COLOR']
-    row = col.row(align=True)
-    row.prop(channel, "use", text="")
-    row.label(text=channel.name)
-    sub = row.row(align=True)
-    sub.active = channel.use
-    sub.prop(material_paint, "base_color", text="")
-    sub.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
-    if show_missing_fn is not None and show_missing_fn('BASE_COLOR'):
-        row.label(text="Missing", icon='ERROR')
+    # Use one aligned row with EXPAND alignment so the buttons fill the available panel width.
+    # Labels may be clipped in narrow panels; the short labels below keep the controls readable.
+    toggle_ids = ['BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL']
+    if show_custom:
+        toggle_ids.append('CUSTOM')
+    toggle_labels = {
+        'BASE_COLOR': "Color",
+        'METALLIC': "Metal",
+        'ROUGHNESS': "Rough",
+        'SPECULAR': "Spec",
+        'NORMAL': "Normal",
+        'CUSTOM': "Custom",
+    }
 
-    # Base Color is the only blendable channel: the blend modes are defined on colors. The scalar
-    # channels below are data, not light, and always interpolate with Mix. The brush-level Blend
-    # setting does not apply to material paint at all.
-    row = col.row(align=True)
-    row.active = channel.use
-    row.prop(channel, "blend", text="Blend")
+    toggle_box = col.box()
+    toggle_box.use_property_split = False
+    toggle_box.use_property_decorate = False
+    toggle_row = toggle_box.row(align=True)
+    toggle_row.use_property_split = False
+    toggle_row.use_property_decorate = False
+    toggle_row.scale_y = 1.3
+    for channel_id in toggle_ids:
+        channel = channels[channel_id]
+        toggle_row.prop(channel, "use", text=toggle_labels[channel_id], toggle=True)
+        if show_missing_fn is not None and show_missing_fn(channel_id):
+            toggle_row.label(text="", icon='ERROR')
+        if channel_id != toggle_ids[-1]:
+            toggle_row.separator(factor=0.25)
+
+    # Value rows are only drawn for enabled channels, so a disabled channel does not clutter the
+    # panel with a grayed-out row.
+    channel = channels['BASE_COLOR']
+    if channel.use:
+        row = col.row(align=True)
+        row.prop(material_paint, "base_color", text="")
+        row.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
+
+        # Base Color is the only blendable channel: the blend modes are defined on colors. The
+        # scalar channels below are data, not light, and always interpolate with Mix. The
+        # brush-level Blend setting does not apply to material paint at all.
+        row = col.row(align=True)
+        row.prop(channel, "blend", text="Blend")
 
     for channel_id in ('METALLIC', 'ROUGHNESS', 'SPECULAR'):
         channel = channels[channel_id]
-        row = col.row(align=True)
-        row.prop(channel, "use", text="")
-        row.label(text=channel.name)
-        sub = row.row(align=True)
-        sub.active = channel.use
-        sub.prop(channel, "value", index=0, text="", slider=True)
-        if show_missing_fn is not None and show_missing_fn(channel_id):
-            row.label(text="Missing", icon='ERROR')
+        if channel.use:
+            row = col.row(align=True)
+            row.prop(channel, "value", index=0, text=channel.name, slider=True)
 
     # Normal: XYZ tangent vector; the blend mode is always NORMAL_MIX, since any other mode would
     # produce non-unit tangents. Hence no blend dropdown on this row.
     channel = channels['NORMAL']
-    row = col.row(align=True)
-    row.prop(channel, "use", text="")
-    row.label(text=channel.name)
-    sub = row.row(align=True)
-    sub.active = channel.use
-    sub.prop(channel, "value", text="")
-    if show_missing_fn is not None and show_missing_fn('NORMAL'):
-        row.label(text="Missing", icon='ERROR')
+    if channel.use:
+        row = col.row(align=True)
+        row.prop(channel, "value", text=channel.name)
 
     if show_custom:
         channel = channels['CUSTOM']
-        row = col.row(align=True)
-        row.prop(channel, "use", text="")
-        row.label(text=channel.name)
-        sub = row.row(align=True)
-        sub.active = channel.use
-        sub.prop(channel, "value", index=0, text="")
+        if channel.use:
+            row = col.row(align=True)
+            row.prop(channel, "value", index=0, text=channel.name)
 
-        row = col.row(align=True)
-        row.active = channel.use
-        row.prop(paint_mode, "material_paint_custom_attr", text="Name")
+            row = col.row(align=True)
+            row.prop(paint_mode, "material_paint_custom_attr", text="Name")
 
-        # Unlike the fixed channels, the custom channel targets an arbitrary float attribute, so
-        # the range its painted values are clamped to is user-defined.
-        row = col.row(align=True)
-        row.active = channel.use
-        row.prop(paint_mode, "channel_custom_range", text="Range")
+            # Unlike the fixed channels, the custom channel targets an arbitrary float attribute,
+            # so the range its painted values are clamped to is user-defined.
+            row = col.row(align=True)
+            row.prop(paint_mode, "channel_custom_range", text="Range")
 
 
 def brush_shared_settings(layout, context, brush, popover=False):

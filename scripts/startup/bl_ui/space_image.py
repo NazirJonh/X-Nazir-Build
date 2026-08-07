@@ -1252,7 +1252,7 @@ class IMAGE_PT_paint_select(Panel, ImagePaintPanel, BrushSelectPanel):
 class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
     bl_context = ".paint_common_2d"
     bl_category = "Tool"
-    bl_label = "Canvas"
+    bl_label = ""
 
     @classmethod
     def poll(cls, context):
@@ -1282,7 +1282,8 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
         elif paint.canvas_image:
             label = paint.canvas_image.name
 
-        self.bl_label = label
+        self.layout.label(text="Canvas")
+        self.layout.prop(paint, "canvas_source", text="")
 
     def draw(self, context):
         layout = self.layout
@@ -1293,8 +1294,9 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
         mode_settings = context.tool_settings.paint_mode
         ob = context.active_object
 
-        layout.prop(mode_settings, "canvas_source", text="Mode")
-        layout.separator()
+        if self.is_popover:
+            layout.prop(mode_settings, "canvas_source", text="Mode")
+            layout.separator()
 
         have_image = False
         canvas_source = mode_settings.canvas_source

@@ -8845,12 +8845,17 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Tool"
-    bl_label = "Canvas"
+    bl_label = ""
 
     @classmethod
     def poll(cls, context):
         ob = context.active_object
         return ob is not None and ob.mode in {'TEXTURE_PAINT', 'SCULPT'}
+
+    def draw_header(self, context):
+        layout = self.layout
+        layout.label(text="Canvas")
+        layout.prop(context.tool_settings.paint_mode, "canvas_source", text="")
 
     def draw(self, context):
         layout = self.layout
@@ -8858,7 +8863,9 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
         layout.use_property_decorate = False
 
         paint = context.tool_settings.paint_mode
-        layout.prop(paint, "canvas_source", text="Mode")
+        if self.is_popover:
+            layout.prop(paint, "canvas_source", text="Mode")
+            layout.separator()
 
         if paint.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}:
             settings = UnifiedPaintPanel.paint_settings(context)

@@ -49,6 +49,7 @@
 
 #include "curves/sculpt_intern.hh"
 #include "mesh/paint_hide.hh"
+#include "mesh/paint_material_attribute.hh"
 #include "mesh/paint_mask.hh"
 #include "mesh/sculpt_intern.hh"
 
@@ -677,6 +678,10 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_face_select_loop);
 
   WM_operatortype_append(PAINT_OT_face_vert_reveal);
+
+  /* material attributes (Poly Paint) */
+  WM_operatortype_append(PAINT_OT_material_attribute_add);
+  WM_operatortype_append(PAINT_OT_material_attribute_remove);
 
   /* partial visibility */
   WM_operatortype_append(hide::PAINT_OT_hide_show_all);

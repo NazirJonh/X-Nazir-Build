@@ -610,14 +610,14 @@ class DATA_PT_material_attributes(MeshButtonsPanel, Panel):
             row = col.row(align=True)
             row.label(text=label)
             if attr_name in mesh.attributes:
-                row.operator("mesh.material_attribute_remove", text="", icon='X').channel = channel
+                row.operator("paint.material_attribute_remove", text="", icon='X').channel = channel
             else:
-                row.operator("mesh.material_attribute_add", text="", icon='ADD').channel = channel
+                row.operator("paint.material_attribute_add", text="", icon='ADD').channel = channel
 
         # The custom channel is named per scene, so it always offers the add popup.
         row = col.row(align=True)
         row.label(text="Custom")
-        row.operator("mesh.material_attribute_add", text="", icon='ADD').channel = 'CUSTOM'
+        row.operator("paint.material_attribute_add", text="", icon='ADD').channel = 'CUSTOM'
 
 
 # `attribute` is list of attributes in current UI list

@@ -20,28 +20,30 @@
 
 #ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
 
-#  include <cstdio>
 #  include <cstdint>
-#  include <cstdlib>
 
 #  include "atomic_ops.h"
 #  include "BLI_string.h"
 #  include "BLI_time.h"
 #  include "BLI_utildefines.h"
 
+#  include "CLG_log.h"
+
 namespace blender::bke::paint_material_channel_perf {
 
 /**
  * Section timers are cheap (a couple of `now_seconds()` calls) and always collected. The actual
- * `printf` + `fflush` reporting is not: at 5 enabled Material channels a single dab emits ~50
- * synchronous console writes, and a drag stroke fires a dab per mouse-move sample. Left
- * unconditionally on, the logging itself is enough to stutter the viewport. Gate it behind an
- * env var so profiling stays opt-in.
+ * report is not: at 5 enabled Material channels a single dab emits ~50 log lines, and a drag
+ * stroke fires a dab per mouse-move sample. Left unconditionally on, the logging itself is enough
+ * to stutter the viewport. #CLOG_INFO already gates on the category's runtime log level (enable
+ * with `--log "bke.paint_channel_perf"`), so the report only formats and writes when the category
+ * has been switched on.
  */
+inline CLG_LogRef LOG = {"bke.paint_channel_perf"};
+
 inline bool logging_enabled()
 {
-  static const bool enabled = (std::getenv("BLENDER_PAINT_CHANNEL_PERF_LOG") != nullptr);
-  return enabled;
+  return CLOG_CHECK(&LOG, CLG_LEVEL_INFO);
 }
 
 enum class Section : int {
@@ -220,12 +222,11 @@ inline void stroke_eval_rebuild()
 inline void print_section_ms(const char *label, const uint64_t us, const char *extra = nullptr)
 {
   if (extra && extra[0]) {
-    printf("    %s: %.3f ms (%s)\n", label, double(us) / 1000.0, extra);
+    CLOG_INFO(&LOG, "    %s: %.3f ms (%s)", label, double(us) / 1000.0, extra);
   }
   else {
-    printf("    %s: %.3f ms\n", label, double(us) / 1000.0);
+    CLOG_INFO(&LOG, "    %s: %.3f ms", label, double(us) / 1000.0);
   }
-  fflush(stdout);
 }
 
 inline void dab_end_log()
@@ -236,12 +237,12 @@ inline void dab_end_log()
   const GlobalStats &stats = global_stats();
   const DabStats &dab = stats.dab;
 
-  printf("[paint_channel_perf] dab=%llu targets=%d symmetry=%d eval_rebuilds=%llu\n",
-         unsigned long long(dab.dab_index),
-         dab.target_count,
-         dab.symmetry_passes,
-         unsigned long long(stats.stroke_eval_rebuild_count));
-  fflush(stdout);
+  CLOG_INFO(&LOG,
+           "dab=%llu targets=%d symmetry=%d eval_rebuilds=%llu",
+           unsigned long long(dab.dab_index),
+           dab.target_count,
+           dab.symmetry_passes,
+           unsigned long long(stats.stroke_eval_rebuild_count));
 
   print_section_ms("do_brush_action total",
                    dab.section_us[int(Section::DoBrushActionTotal)]);
@@ -264,13 +265,13 @@ inline void dab_end_log()
 
   for (int i = 0; i < dab.target_count; i++) {
     const TargetStats &target = dab.targets[i];
-    printf("  target[%d] %s %dx%d: %.3f ms\n",
-           i,
-           target.name[0] ? target.name : "?",
-           target.res_x,
-           target.res_y,
-           double(target.section_us[int(Section::TargetTotal)]) / 1000.0);
-    fflush(stdout);
+    CLOG_INFO(&LOG,
+             "  target[%d] %s %dx%d: %.3f ms",
+             i,
+             target.name[0] ? target.name : "?",
+             target.res_x,
+             target.res_y,
+             double(target.section_us[int(Section::TargetTotal)]) / 1000.0);
 
     {
       char extra[64];
@@ -311,18 +312,21 @@ inline void stroke_begin_targets_log(const int target_count,
   if (!logging_enabled()) {
     return;
   }
-  printf("[paint_channel_perf] stroke_begin targets=%d", target_count);
-  for (int i = 0; i < target_count; i++) {
+  char targets_desc[512] = "";
+  size_t pos = 0;
+  for (int i = 0; i < target_count && pos < sizeof(targets_desc); i++) {
     const char *name = (target_names && target_names[i]) ? target_names[i] : "?";
+    int written = 0;
     if (res_x && res_y) {
-      printf(" [%s %dx%d]", name, res_x[i], res_y[i]);
+      written = BLI_snprintf_rlen(
+          targets_desc + pos, sizeof(targets_desc) - pos, " [%s %dx%d]", name, res_x[i], res_y[i]);
     }
     else {
-      printf(" [%s]", name);
+      written = BLI_snprintf_rlen(targets_desc + pos, sizeof(targets_desc) - pos, " [%s]", name);
     }
+    pos += size_t(max_ii(written, 0));
   }
-  printf("\n");
-  fflush(stdout);
+  CLOG_INFO(&LOG, "stroke_begin targets=%d%s", target_count, targets_desc);
 }
 
 }  // namespace blender::bke::paint_material_channel_perf

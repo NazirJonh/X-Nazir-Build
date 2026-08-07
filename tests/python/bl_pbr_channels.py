@@ -130,10 +130,10 @@ def test_vertex_attribute_paint_undo_redo():
     assert painted is not None and painted > 0.5, f"stroke did not paint, got {painted}"
 
     bpy.ops.ed.undo()
-    # The attribute is created as part of the stroke's undo step, so undo may remove it outright.
-    # Either way nothing painted may survive.
+    # The attribute did not exist before the stroke, so the stroke's undo step created it;
+    # undoing the stroke removes it again instead of leaving a zero-valued attribute behind.
     undone = _max_attribute_value(bpy.context.active_object.data, METALLIC_ATTRIBUTE)
-    assert undone is None or undone < 0.05, f"undo left painted metallic behind: {undone}"
+    assert undone is None, f"undo left the stroke-created {METALLIC_ATTRIBUTE} attribute behind: {undone}"
 
     bpy.ops.ed.redo()
     redone = _max_attribute_value(bpy.context.active_object.data, METALLIC_ATTRIBUTE)

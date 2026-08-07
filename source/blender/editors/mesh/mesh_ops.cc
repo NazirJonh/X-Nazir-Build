@@ -197,10 +197,6 @@ void ED_operatortypes_mesh()
   WM_operatortype_append(MESH_OT_circularize);
   WM_operatortype_append(MESH_OT_flatten);
   WM_operatortype_append(MESH_OT_space_edge_loops_evenly);
-
-  /* Material attributes (Poly Paint). */
-  WM_operatortype_append(MESH_OT_material_attribute_add);
-  WM_operatortype_append(MESH_OT_material_attribute_remove);
 }
 
 #if 0 /* UNUSED, remove? */

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /** \file
- * \ingroup edmesh
+ * \ingroup edsculpt
  *
  * Operators managing the mesh attributes painted by Material Paint (Poly Paint). They work in
  * Object and Sculpt mode, not only in Edit Mode.
@@ -34,11 +34,9 @@
 
 #include "BLT_translation.hh"
 
-#include "mesh_intern.hh" /* own include */
+#include "paint_material_attribute.hh" /* own include */
 
-namespace blender {
-
-namespace ed::mesh {
+namespace blender::ed::sculpt_paint {
 
 /* -------------------------------------------------------------------- */
 /** \name Material Attribute Operators (Poly Paint)
@@ -166,13 +164,13 @@ static wmOperatorStatus material_attribute_remove_exec(bContext *C, wmOperator *
 
 /** \} */
 
-}  // namespace ed::mesh
+}  // namespace blender::ed::sculpt_paint
 
-void MESH_OT_material_attribute_add(wmOperatorType *ot)
+void blender::ed::sculpt_paint::PAINT_OT_material_attribute_add(wmOperatorType *ot)
 {
-  using namespace blender::ed::mesh;
+  using namespace blender::ed::sculpt_paint;
   ot->name = "Add Material Attribute";
-  ot->idname = "MESH_OT_material_attribute_add";
+  ot->idname = "PAINT_OT_material_attribute_add";
   ot->description = "Add the mesh attribute a material paint channel is stored in";
 
   ot->exec = material_attribute_add_exec;
@@ -195,11 +193,11 @@ void MESH_OT_material_attribute_add(wmOperatorType *ot)
                  "Attribute name, used by the Custom channel only");
 }
 
-void MESH_OT_material_attribute_remove(wmOperatorType *ot)
+void blender::ed::sculpt_paint::PAINT_OT_material_attribute_remove(wmOperatorType *ot)
 {
-  using namespace blender::ed::mesh;
+  using namespace blender::ed::sculpt_paint;
   ot->name = "Remove Material Attribute";
-  ot->idname = "MESH_OT_material_attribute_remove";
+  ot->idname = "PAINT_OT_material_attribute_remove";
   ot->description = "Remove the mesh attribute a material paint channel is stored in";
 
   ot->exec = material_attribute_remove_exec;
@@ -220,5 +218,3 @@ void MESH_OT_material_attribute_remove(wmOperatorType *ot)
                  "Name",
                  "Attribute name, used by the Custom channel only");
 }
-
-}  // namespace blender

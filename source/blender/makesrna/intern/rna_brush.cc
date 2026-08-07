@@ -1221,6 +1221,37 @@ static std::optional<eMaterialPaintChannel> rna_BrushMaterialPaintChannel_channe
   return eMaterialPaintChannel(index);
 }
 
+static int rna_BrushMaterialPaintChannel_channel_get_rna(PointerRNA *ptr)
+{
+  if (const std::optional<eMaterialPaintChannel> channel =
+          rna_BrushMaterialPaintChannel_channel_get(ptr))
+  {
+    return int(*channel);
+  }
+  return PAINT_MATERIAL_CHANNEL_METALLIC;
+}
+
+static void rna_BrushMaterialPaintChannel_name_get(PointerRNA *ptr, char *value)
+{
+  if (const std::optional<eMaterialPaintChannel> channel =
+          rna_BrushMaterialPaintChannel_channel_get(ptr))
+  {
+    strcpy(value, BKE_paint_material_channel_info(*channel).ui_name);
+    return;
+  }
+  value[0] = '\0';
+}
+
+static int rna_BrushMaterialPaintChannel_name_length(PointerRNA *ptr)
+{
+  if (const std::optional<eMaterialPaintChannel> channel =
+          rna_BrushMaterialPaintChannel_channel_get(ptr))
+  {
+    return int(strlen(BKE_paint_material_channel_info(*channel).ui_name));
+  }
+  return 0;
+}
+
 static void rna_BrushMaterialPaintChannel_value_range(
     PointerRNA *ptr, float *min, float *max, float *softmin, float *softmax)
 {
@@ -2382,6 +2413,27 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   srna = RNA_def_struct(brna, "BrushMaterialPaintChannel", nullptr);
   RNA_def_struct_sdna(srna, "BrushMaterialPaintChannel");
   RNA_def_struct_ui_text(srna, "Material Paint Channel", "Per-channel material paint settings");
+
+  /* Read-only: identifies which row of the descriptor table (#BKE_paint_material_channels) this
+   * entry mirrors, so Python (and any other RNA consumer) can iterate #channels and branch on
+   * \a channel / \a name instead of hard-coding indices that would silently drift from the table
+   * if a channel is ever added, removed, or reordered. */
+  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_BrushMaterialPaintChannel_channel_get_rna", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Channel", "Which material paint channel this entry configures");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_BrushMaterialPaintChannel_name_get",
+                                "rna_BrushMaterialPaintChannel_name_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Name", "UI name of this material paint channel");
+  RNA_def_struct_name_property(srna, prop);
 
   prop = RNA_def_property(srna, "use", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "use", 1);

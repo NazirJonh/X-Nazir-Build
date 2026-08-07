@@ -83,6 +83,7 @@ set(SRC
   mesh/paint_image_2d_curve_mask.cc
   mesh/paint_image_ops_paint.cc
   mesh/paint_image_proj.cc
+  mesh/paint_material_attribute.cc
   mesh/paint_mask.cc
   mesh/paint_vertex.cc
   mesh/paint_vertex_color_ops.cc
@@ -128,6 +129,7 @@ set(SRC
 
   mesh/mesh_brush_common.hh
   mesh/paint_hide.hh
+  mesh/paint_material_attribute.hh
   mesh/paint_mask.hh
   mesh/sculpt_automask.hh
   mesh/sculpt_boundary.hh

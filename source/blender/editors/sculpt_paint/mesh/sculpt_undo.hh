@@ -63,19 +63,26 @@ struct StepData;
  * against it.
  * \param material_store_color: When \a type is #Type::Material, also snapshot the active color
  * attribute into the same undo nodes (Material Paint Base Color alongside scalars).
+ * \param material_created_attribute_names: Subset of \a material_attribute_names that the current
+ * stroke itself created (didn't exist before it started). Fixed by the first push of a step, same
+ * as \a material_attribute_names. Undoing the step removes these attributes instead of leaving a
+ * zero-valued one behind; redoing does not recreate them (the Add Attribute operator, or another
+ * stroke, does that).
  */
 void push_node(const Depsgraph &depsgraph,
                const Object &object,
                const bke::pbvh::Node *node,
                undo::Type type,
                Span<StringRef> material_attribute_names = {},
-               bool material_store_color = false);
+               bool material_store_color = false,
+               Span<StringRef> material_created_attribute_names = {});
 void push_nodes(const Depsgraph &depsgraph,
                 Object &object,
                 const IndexMask &node_mask,
                 undo::Type type,
                 Span<StringRef> material_attribute_names = {},
-                bool material_store_color = false);
+                bool material_store_color = false,
+                Span<StringRef> material_created_attribute_names = {});
 
 /**
  * Pushes an undo step using the operator name. This is necessary for

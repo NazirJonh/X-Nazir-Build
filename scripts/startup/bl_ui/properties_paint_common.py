@@ -1160,13 +1160,17 @@ def draw_material_paint_channels(layout, brush, paint_mode, *, show_custom, show
         return
 
     col = layout.column(align=True)
-    channels = material_paint.channels
+    # Keyed by the read-only `channel` identifier (mirrors BKE_paint_material_channels), not by
+    # index, so this panel keeps working if a channel is ever added, removed, or reordered in the
+    # C descriptor table without needing a matching edit here.
+    channels = {channel.channel: channel for channel in material_paint.channels}
 
+    channel = channels['BASE_COLOR']
     row = col.row(align=True)
-    row.prop(channels[0], "use", text="")
-    row.label(text="Base Color")
+    row.prop(channel, "use", text="")
+    row.label(text=channel.name)
     sub = row.row(align=True)
-    sub.active = channels[0].use
+    sub.active = channel.use
     sub.prop(material_paint, "base_color", text="")
     sub.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
     if show_missing_fn is not None and show_missing_fn('BASE_COLOR'):
@@ -1176,20 +1180,14 @@ def draw_material_paint_channels(layout, brush, paint_mode, *, show_custom, show
     # channels below are data, not light, and always interpolate with Mix. The brush-level Blend
     # setting does not apply to material paint at all.
     row = col.row(align=True)
-    row.active = channels[0].use
-    row.prop(channels[0], "blend", text="Blend")
+    row.active = channel.use
+    row.prop(channel, "blend", text="Blend")
 
-    scalar_channels = (
-        (1, "Metallic", 'METALLIC'),
-        (2, "Roughness", 'ROUGHNESS'),
-        (3, "Specular", 'SPECULAR'),
-    )
-
-    for index, label, channel_id in scalar_channels:
-        channel = channels[index]
+    for channel_id in ('METALLIC', 'ROUGHNESS', 'SPECULAR'):
+        channel = channels[channel_id]
         row = col.row(align=True)
         row.prop(channel, "use", text="")
-        row.label(text=label)
+        row.label(text=channel.name)
         sub = row.row(align=True)
         sub.active = channel.use
         sub.prop(channel, "value", index=0, text="", slider=True)
@@ -1198,10 +1196,10 @@ def draw_material_paint_channels(layout, brush, paint_mode, *, show_custom, show
 
     # Normal: XYZ tangent vector; the blend mode is always NORMAL_MIX, since any other mode would
     # produce non-unit tangents. Hence no blend dropdown on this row.
-    channel = channels[4]
+    channel = channels['NORMAL']
     row = col.row(align=True)
     row.prop(channel, "use", text="")
-    row.label(text="Normal")
+    row.label(text=channel.name)
     sub = row.row(align=True)
     sub.active = channel.use
     sub.prop(channel, "value", text="")
@@ -1209,10 +1207,10 @@ def draw_material_paint_channels(layout, brush, paint_mode, *, show_custom, show
         row.label(text="Missing", icon='ERROR')
 
     if show_custom:
-        channel = channels[5]
+        channel = channels['CUSTOM']
         row = col.row(align=True)
         row.prop(channel, "use", text="")
-        row.label(text="Custom")
+        row.label(text=channel.name)
         sub = row.row(align=True)
         sub.active = channel.use
         sub.prop(channel, "value", index=0, text="")

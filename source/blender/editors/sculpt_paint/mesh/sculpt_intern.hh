@@ -9,6 +9,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 
 #include "BKE_brush.hh"
 #include "BKE_bvhutils.hh"
@@ -466,6 +467,11 @@ struct StrokeCache {
   float multiplane_scrape_angle = 0.0f;
 
   Vector<paint::image::ImagePaintTarget> image_paint_targets;
+
+  /** Poly Paint: point float attributes created by #brush_stroke_init for this stroke (as
+   * opposed to attributes that already existed). Undo removes these on Undo instead of leaving
+   * a zeroed attribute behind; see #StepData::material_created_attribute_names. */
+  Vector<std::string> material_created_attribute_names;
 
   StrokeCache();
   ~StrokeCache();

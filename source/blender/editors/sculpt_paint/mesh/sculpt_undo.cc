@@ -224,6 +224,10 @@ struct StepData {
    */
   bool material_store_color = false;
 
+  /** Poly Paint: subset of #material_attribute_names that the stroke itself created. Undoing the
+   * step removes these attributes instead of leaving a zero-valued one behind. */
+  Vector<std::string> material_created_attribute_names;
+
   /* TODO: Combine the three structs into a variant, since they specify data that is only valid
    * within a single mode. */
   struct {
@@ -1117,7 +1121,10 @@ static void refine_subdiv(Depsgraph *depsgraph,
   bke::subdiv::eval_refine_from_mesh(subdiv, id_cast<const Mesh *>(object.data), deformed_verts);
 }
 
-static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
+static void restore_list(bContext *C,
+                         Depsgraph *depsgraph,
+                         StepData &step_data,
+                         const bool is_undo)
 {
   PRF_scope(ProfileCategory::Editor);
   const Main *bmain = CTX_data_main(C);
@@ -1433,6 +1440,17 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         return;
       }
 
+      /* The attribute was created as a side effect of this stroke; redoing the stroke should
+       * bring it back before the swap below reads/writes it, since #restore_material_attribute
+       * deliberately never creates an attribute itself (see its comment). */
+      if (!is_undo) {
+        for (const std::string &attr_name : step_data.material_created_attribute_names) {
+          bool created = false;
+          BKE_paint_mesh_material_attribute_ensure(
+              *id_cast<Mesh *>(object.data), attr_name, &created);
+        }
+      }
+
       const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
 
       const Mesh &mesh = *id_cast<const Mesh *>(object.data);
@@ -1451,6 +1469,15 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       }
       if (step_data.material_store_color) {
         pbvh.tag_attribute_changed(changed_nodes, mesh.active_color_attribute);
+      }
+      /* Undoing the stroke should undo the attribute's creation too, rather than leave a
+       * zero-valued attribute behind. */
+      if (is_undo && !step_data.material_created_attribute_names.is_empty()) {
+        bke::MutableAttributeAccessor attributes =
+            id_cast<Mesh *>(object.data)->attributes_for_write();
+        for (const std::string &attr_name : step_data.material_created_attribute_names) {
+          attributes.remove(attr_name);
+        }
       }
       break;
     }
@@ -1628,7 +1655,8 @@ static void store_mask_grids(const SubdivCCG &subdiv_ccg, Node &unode)
 static void material_step_data_ensure(StepData &step_data,
                                       const Type type,
                                       const Span<StringRef> attribute_names,
-                                      const bool store_color)
+                                      const bool store_color,
+                                      const Span<StringRef> created_attribute_names)
 {
   if (type != Type::Material) {
     return;
@@ -1637,6 +1665,9 @@ static void material_step_data_ensure(StepData &step_data,
   if (step_data.nodes.is_empty() && step_data.material_attribute_names.is_empty()) {
     for (const StringRef name : attribute_names) {
       step_data.material_attribute_names.append(name);
+    }
+    for (const StringRef name : created_attribute_names) {
+      step_data.material_created_attribute_names.append(name);
     }
     step_data.material_store_color = store_color;
     return;
@@ -1996,7 +2027,8 @@ void push_node(const Depsgraph &depsgraph,
                const bke::pbvh::Node *node,
                const Type type,
                const Span<StringRef> material_attribute_names,
-               const bool material_store_color)
+               const bool material_store_color,
+               const Span<StringRef> material_created_attribute_names)
 {
   SculptSession &ss = *object.runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
@@ -2008,7 +2040,11 @@ void push_node(const Depsgraph &depsgraph,
   StepData *step_data = get_step_data();
   BLI_assert(ELEM(step_data->type, Type::None, type));
   step_data->type = type;
-  material_step_data_ensure(*step_data, type, material_attribute_names, material_store_color);
+  material_step_data_ensure(*step_data,
+                            type,
+                            material_attribute_names,
+                            material_store_color,
+                            material_created_attribute_names);
 
   bool newly_added;
   Node *unode = ensure_node(*step_data, *node, newly_added);
@@ -2038,7 +2074,8 @@ void push_nodes(const Depsgraph &depsgraph,
                 const IndexMask &node_mask,
                 const Type type,
                 const Span<StringRef> material_attribute_names,
-                const bool material_store_color)
+                const bool material_store_color,
+                const Span<StringRef> material_created_attribute_names)
 {
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *object.runtime->sculpt_session;
@@ -2055,7 +2092,11 @@ void push_nodes(const Depsgraph &depsgraph,
   StepData *step_data = get_step_data();
   BLI_assert(ELEM(step_data->type, Type::None, type));
   step_data->type = type;
-  material_step_data_ensure(*step_data, type, material_attribute_names, material_store_color);
+  material_step_data_ensure(*step_data,
+                            type,
+                            material_attribute_names,
+                            material_store_color,
+                            material_created_attribute_names);
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
@@ -2375,7 +2416,7 @@ static void step_decode_undo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoS
 {
   BLI_assert(us->step.is_applied == true);
 
-  restore_list(C, depsgraph, us->data);
+  restore_list(C, depsgraph, us->data, true);
   us->step.is_applied = false;
 }
 
@@ -2383,7 +2424,7 @@ static void step_decode_redo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoS
 {
   BLI_assert(us->step.is_applied == false);
 
-  restore_list(C, depsgraph, us->data);
+  restore_list(C, depsgraph, us->data, false);
   us->step.is_applied = true;
 }
 

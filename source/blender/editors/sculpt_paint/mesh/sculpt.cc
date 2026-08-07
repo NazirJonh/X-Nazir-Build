@@ -3371,12 +3371,17 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
          * color attribute in the same Material undo step so one Undo restores Color + floats.
          * Base-Color-only strokes use Type::Color (no float names). */
         if (!names.is_empty()) {
+          Vector<StringRef, PAINT_MATERIAL_CHANNEL_NUM> created_names;
+          for (const std::string &name : ss.cache->material_created_attribute_names) {
+            created_names.append(name);
+          }
           undo::push_nodes(depsgraph,
                            ob,
                            node_mask,
                            undo::Type::Material,
                            names.as_span(),
-                           base_color_enabled);
+                           base_color_enabled,
+                           created_names.as_span());
         }
         else if (base_color_enabled) {
           undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Color);
@@ -5322,15 +5327,18 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
         if (!BKE_paint_material_channel_is_enabled(brush_paint, paint_mode_init, info.channel)) {
           continue;
         }
+        /* Normal is map-only (Image Texture -> Normal Map); the paint apply path never writes
+         * a vertex attribute for it, so creating one here would leave it unused. */
+        if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+          continue;
+        }
 
         bool created = false;
+        const std::string attr_name = BKE_paint_material_channel_attribute_name(paint_mode_init,
+                                                                                 info.channel);
         const MaterialPaintAttributeStatus status =
             info.is_color ? BKE_paint_mesh_material_color_attribute_ensure(mesh, &created) :
-                            BKE_paint_mesh_material_attribute_ensure(
-                                mesh,
-                                BKE_paint_material_channel_attribute_name(paint_mode_init,
-                                                                         info.channel),
-                                &created);
+                            BKE_paint_mesh_material_attribute_ensure(mesh, attr_name, &created);
 
         if (status != MaterialPaintAttributeStatus::Ok) {
           /* Without this the channel would just silently not paint. */
@@ -5343,6 +5351,11 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
         }
 
         any_created |= created;
+        if (created && !info.is_color) {
+          /* Undo should remove the attribute again rather than leave a zeroed one behind; see
+           * #StepData::material_created_attribute_names. */
+          ss.cache->material_created_attribute_names.append(attr_name);
+        }
         if (info.is_color) {
           /* Always activate the color attribute when Base Color is enabled, so Workbench and the
            * undo snapshot target what the stroke writes (even if the attribute already existed). */

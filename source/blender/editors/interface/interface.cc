@@ -4112,6 +4112,7 @@ static void but_update_ex(Button *but, const bool validate)
     case ButtonType::Num:
     case ButtonType::Scroll:
     case ButtonType::NumSlider:
+    case ButtonType::MaterialPaintValue:
       if (validate) {
         UI_GET_BUT_VALUE_INIT(but, value);
         if (value < double(but->hardmin)) {

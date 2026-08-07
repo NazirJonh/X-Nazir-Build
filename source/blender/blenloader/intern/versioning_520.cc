@@ -565,6 +565,23 @@ static void version_material_paint_base_color_blend_from_brush(Main &bmain)
   }
 }
 
+static void version_material_paint_channel_height_defaults(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    if (brush.material_paint == nullptr) {
+      continue;
+    }
+    BrushMaterialPaintChannel &height =
+        brush.material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT];
+    /* Trailing DNA growth should zero-fill; set explicit defaults for clarity. */
+    height.use = 0;
+    height.value[0] = 0.0f;
+    height.value[1] = 0.0f;
+    height.value[2] = 0.0f;
+    height.blend = 0;
+  }
+}
+
 static void version_solid_color_width_height_defaults(Main &bmain)
 {
   for (Scene &scene : bmain.scenes) {
@@ -959,6 +976,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 48)) {
     version_material_paint_base_color_blend_from_brush(*bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 49)) {
+    version_material_paint_channel_height_defaults(*bmain);
   }
 
   /**

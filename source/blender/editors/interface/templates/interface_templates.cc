@@ -17,6 +17,8 @@
 
 #include "RNA_access.hh"
 
+#include "WM_api.hh"
+
 #include "UI_interface_layout.hh"
 #include "interface_intern.hh"
 #include "interface_templates_intern.hh"
@@ -286,7 +288,6 @@ void template_path_builder(Layout *layout,
 void template_node_socket(Layout *layout, bContext * /*C*/, const float color[4])
 {
   Block *block = layout->block();
-  block_align_begin(block);
 
   /* XXX using explicit socket colors is not quite ideal.
    * Eventually it should be possible to use theme colors for this purpose,
@@ -294,8 +295,33 @@ void template_node_socket(Layout *layout, bContext * /*C*/, const float color[4]
   Button *but = uiDefBut(
       block, ButtonType::NodeSocket, "", 0, 0, UI_UNIT_X, UI_UNIT_Y, nullptr, 0, 0, "");
   rgba_float_to_uchar(but->col, color);
+}
 
-  block_align_end(block);
+void template_node_socket_menu(Layout *layout,
+                               bContext * /*C*/,
+                               const float color[4],
+                               const char *menu_id)
+{
+  Block *block = layout->block();
+
+  if (!menu_id || !menu_id[0]) {
+    template_node_socket(layout, nullptr, color);
+    return;
+  }
+
+  MenuType *mt = WM_menutype_find(menu_id, false);
+  if (!mt) {
+    template_node_socket(layout, nullptr, color);
+    return;
+  }
+
+  /* Match node socket link buttons: socket dot inside a menu button, merged with value fields. */
+  Button *but = uiDefIconMenuBut(
+      block, item_menutype_func, mt, ICON_NONE, 0, 0, UI_UNIT_X, UI_UNIT_Y, "");
+  button_type_set_menu_from_pulldown(but);
+  but->flag |= BUT_NODE_LINK;
+  button_drawflag_enable(but, BUT_ICON_LEFT);
+  rgba_float_to_uchar(but->col, color);
 }
 
 /** \} */

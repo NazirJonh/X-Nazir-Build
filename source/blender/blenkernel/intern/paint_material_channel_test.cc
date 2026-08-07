@@ -206,7 +206,8 @@ TEST_F(PaintMaterialChannelTest, channel_blend_mode_only_base_color_is_blendable
   for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_METALLIC,
                                               PAINT_MATERIAL_CHANNEL_ROUGHNESS,
                                               PAINT_MATERIAL_CHANNEL_SPECULAR,
-                                              PAINT_MATERIAL_CHANNEL_CUSTOM})
+                                              PAINT_MATERIAL_CHANNEL_CUSTOM,
+                                              PAINT_MATERIAL_CHANNEL_HEIGHT})
   {
     EXPECT_EQ(BKE_paint_material_channel_blend_mode(brush_paint, channel, false), IMB_BLEND_MIX)
         << "scalar channel " << BKE_paint_material_channel_info(channel).ui_name
@@ -656,6 +657,79 @@ TEST_F(PaintMaterialChannelTest, principled_image_target_follows_actcol)
   EXPECT_TRUE(BKE_paint_principled_channel_image_get(
       *ob, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &resolved, &resolved_iuser));
   EXPECT_EQ(resolved, image_b);
+}
+
+TEST(material_paint_value_ramp_math, gradient_mode)
+{
+  EXPECT_EQ(BKE_paint_material_value_gradient_mode(0.0f, 1.0f),
+            MaterialPaintValueGradientMode::Unipolar);
+  EXPECT_EQ(BKE_paint_material_value_gradient_mode(-1.0f, 1.0f),
+            MaterialPaintValueGradientMode::Bipolar);
+}
+
+TEST(material_paint_value_ramp_math, unipolar_endpoints)
+{
+  float rgb[3];
+  BKE_paint_material_value_gradient_color(0.0f, 1.0f, 0.0f, rgb);
+  EXPECT_FLOAT_EQ(rgb[0], 0.0f);
+  EXPECT_FLOAT_EQ(rgb[1], 0.0f);
+  EXPECT_FLOAT_EQ(rgb[2], 0.0f);
+  BKE_paint_material_value_gradient_color(0.0f, 1.0f, 1.0f, rgb);
+  EXPECT_FLOAT_EQ(rgb[0], 1.0f);
+  EXPECT_FLOAT_EQ(rgb[1], 1.0f);
+  EXPECT_FLOAT_EQ(rgb[2], 1.0f);
+}
+
+TEST(material_paint_value_ramp_math, bipolar_center_black)
+{
+  float rgb[3];
+  BKE_paint_material_value_gradient_color(-1.0f, 1.0f, 0.5f, rgb);
+  EXPECT_FLOAT_EQ(rgb[0], 0.0f);
+  EXPECT_FLOAT_EQ(rgb[1], 0.0f);
+  EXPECT_FLOAT_EQ(rgb[2], 0.0f);
+  BKE_paint_material_value_gradient_color(-1.0f, 1.0f, 0.0f, rgb);
+  EXPECT_FLOAT_EQ(rgb[0], 1.0f);
+  BKE_paint_material_value_gradient_color(-1.0f, 1.0f, 1.0f, rgb);
+  EXPECT_FLOAT_EQ(rgb[0], 1.0f);
+}
+
+TEST(material_paint_value_ramp_math, t_value_roundtrip)
+{
+  EXPECT_FLOAT_EQ(BKE_paint_material_value_from_t(0.0f, 1.0f, 0.25f), 0.25f);
+  EXPECT_FLOAT_EQ(BKE_paint_material_t_from_value(0.0f, 1.0f, 0.25f), 0.25f);
+  EXPECT_FLOAT_EQ(BKE_paint_material_value_from_t(-1.0f, 1.0f, 0.5f), 0.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_material_t_from_value(-1.0f, 1.0f, 0.0f), 0.5f);
+}
+
+TEST(material_paint_value_ramp_math, invert_mirror)
+{
+  EXPECT_FLOAT_EQ(BKE_paint_material_value_invert(0.0f, 1.0f, 0.25f), 0.75f);
+  EXPECT_FLOAT_EQ(BKE_paint_material_value_invert(-1.0f, 1.0f, -0.3f), 0.3f);
+  EXPECT_FLOAT_EQ(BKE_paint_material_value_invert(-1.0f, 1.0f, 0.0f), 0.0f);
+}
+
+TEST(material_paint_channel, height_descriptor)
+{
+  const MaterialPaintChannelInfo &info =
+      BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  EXPECT_STREQ(info.ui_name, "Height");
+  EXPECT_STREQ(info.attribute_name, "material_height");
+  EXPECT_EQ(info.socket_name, nullptr);
+  EXPECT_FLOAT_EQ(info.value_min, -1.0f);
+  EXPECT_FLOAT_EQ(info.value_max, 1.0f);
+  EXPECT_FALSE(info.is_color);
+  EXPECT_EQ(BKE_paint_material_channels().size(), PAINT_MATERIAL_CHANNEL_NUM);
+}
+
+TEST(material_paint_channel, height_from_attribute_name)
+{
+  EXPECT_EQ(BKE_paint_material_channel_from_attribute_name("material_height"),
+            PAINT_MATERIAL_CHANNEL_HEIGHT);
+}
+
+TEST(material_paint_channel, height_default_value)
+{
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_HEIGHT), 0.0f);
 }
 
 }  // namespace blender

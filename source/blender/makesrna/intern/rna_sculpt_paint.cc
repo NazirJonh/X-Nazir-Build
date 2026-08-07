@@ -41,6 +41,7 @@ const EnumPropertyItem rna_enum_material_paint_channel_items[] = {
      0,
      "Custom",
      "User-named float attribute, vertex painting only"},
+    {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", "Scalar height/displacement channel"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

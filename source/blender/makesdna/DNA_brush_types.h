@@ -184,7 +184,7 @@ struct BrushMaterialPaint {
   DNA_DEFINE_CXX_METHODS(BrushMaterialPaint)
 
   /** Indexed by #eMaterialPaintChannel. */
-  BrushMaterialPaintChannel channels[/*PAINT_MATERIAL_CHANNEL_NUM*/ 6] = {};
+  BrushMaterialPaintChannel channels[/*PAINT_MATERIAL_CHANNEL_NUM*/ 7] = {};
   /** RGB written by the Base Color channel when not synced with the brush color. */
   float base_color[3] = {1.0f, 1.0f, 1.0f};
   char use_sync_base_color_with_brush = 1;

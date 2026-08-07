@@ -570,6 +570,11 @@ enum class ButtonType : int8_t {
   Pulldown,
   Roundbox,
   ColorBand,
+  /**
+   * Horizontal scalar value ramp for material paint (one handle, unipolar/bipolar fill).
+   * Bound to an RNA float (array index) like #ButtonType::NumSlider.
+   */
+  MaterialPaintValue,
   /** Sphere widget (used to input a unit-vector, aka normal). */
   Unitvec,
   Curve,
@@ -2555,6 +2560,14 @@ void template_preview(Layout *layout,
                       const char *preview_id);
 void template_color_ramp(Layout *layout, PointerRNA *ptr, StringRefNull propname, bool expand);
 /**
+ * One-handle gradient value slider for material-paint scalar channels.
+ * Binds to float property \a propname at \a index on \a ptr (typically channel `value`).
+ */
+void template_material_paint_value_slider(Layout *layout,
+                                          PointerRNA *ptr,
+                                          StringRefNull propname,
+                                          int index);
+/**
  * \param icon_scale: Scale of the icon, 1x == button height.
  */
 void template_icon(Layout *layout, int icon_value, float icon_scale);
@@ -2668,6 +2681,10 @@ void template_component_menu(Layout *layout,
                              StringRefNull propname,
                              StringRef name);
 void template_node_socket(Layout *layout, bContext *C, const float color[4]);
+void template_node_socket_menu(Layout *layout,
+                               bContext *C,
+                               const float color[4],
+                               const char *menu_id);
 
 /**
  * Draw the main CacheFile properties and operators (file path, scale, etc.), that is those which

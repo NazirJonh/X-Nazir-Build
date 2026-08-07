@@ -64,6 +64,7 @@ set(SRC
   templates/interface_template_color_management.cc
   templates/interface_template_color_picker.cc
   templates/interface_template_color_ramp.cc
+  templates/interface_template_material_paint_value_slider.cc
   templates/interface_template_component_menu.cc
   templates/interface_template_constraint.cc
   templates/interface_template_curve_mapping.cc

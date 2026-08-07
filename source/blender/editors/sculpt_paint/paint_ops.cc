@@ -42,6 +42,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 
 #include "IMB_colormanagement.hh"
 
@@ -49,8 +50,8 @@
 
 #include "curves/sculpt_intern.hh"
 #include "mesh/paint_hide.hh"
-#include "mesh/paint_material_attribute.hh"
 #include "mesh/paint_mask.hh"
+#include "mesh/paint_material_attribute.hh"
 #include "mesh/sculpt_intern.hh"
 
 namespace blender {
@@ -539,6 +540,45 @@ static wmOperatorStatus material_paint_brush_ensure_exec(bContext *C, wmOperator
   return OPERATOR_FINISHED;
 }
 
+static wmOperatorStatus material_channel_value_invert_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active material paint brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  const eMaterialPaintChannel channel_id = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
+  BrushMaterialPaintChannel &channel = brush->material_paint->channels[channel_id];
+
+  const Scene *scene = CTX_data_scene(C);
+  const PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
+  const float2 range = BKE_paint_material_channel_range(mode_settings, channel_id);
+  channel.value[0] = BKE_paint_material_value_invert(range[0], range[1], channel.value[0]);
+
+  BKE_brush_tag_unsaved_changes(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_channel_value_invert(wmOperatorType *ot)
+{
+  ot->name = "Invert Value";
+  ot->idname = "PAINT_OT_material_channel_value_invert";
+  ot->description = "Invert this channel's value within its range (min + max - value)";
+  ot->exec = material_channel_value_invert_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  ot->prop = RNA_def_enum(ot->srna,
+                          "channel",
+                          rna_enum_material_paint_channel_items,
+                          PAINT_MATERIAL_CHANNEL_METALLIC,
+                          "Channel",
+                          "Material paint channel to invert");
+}
+
 void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot)
 {
   ot->name = "Enable Material Paint Channels for Brush";
@@ -629,6 +669,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_from_view);
   WM_operatortype_append(PAINT_OT_brush_colors_flip);
   WM_operatortype_append(PAINT_OT_material_paint_brush_ensure);
+  WM_operatortype_append(PAINT_OT_material_channel_value_invert);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 

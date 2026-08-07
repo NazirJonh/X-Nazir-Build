@@ -206,7 +206,7 @@ def test_brush_material_paint_lazy_init():
     assert result == {'FINISHED'}, f"ensure operator failed: {result}"
 
     assert brush.material_paint is not None
-    assert len(brush.material_paint.channels) == 6
+    assert len(brush.material_paint.channels) == 7
 
 
 def test_metallic_paint_erase_restores_default():

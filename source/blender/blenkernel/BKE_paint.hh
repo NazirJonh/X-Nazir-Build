@@ -791,6 +791,30 @@ float2 BKE_paint_material_channel_range(const PaintModeSettings &settings,
                                         eMaterialPaintChannel channel);
 
 /**
+ * Gradient shape for the scalar material-paint value ramp widget.
+ * Unipolar: [0,1] black→white. Bipolar: [-1,1] white→black→white.
+ */
+enum class MaterialPaintValueGradientMode {
+  Unipolar, /* [0,1] black→white */
+  Bipolar,  /* [-1,1] white→black→white */
+};
+
+MaterialPaintValueGradientMode BKE_paint_material_value_gradient_mode(float value_min,
+                                                                      float value_max);
+
+/** t in [0,1] → RGB in [0,1]. */
+void BKE_paint_material_value_gradient_color(float value_min,
+                                             float value_max,
+                                             float t,
+                                             float r_rgb[3]);
+
+float BKE_paint_material_value_from_t(float value_min, float value_max, float t);
+float BKE_paint_material_t_from_value(float value_min, float value_max, float value);
+
+/** value' = clamp(min+max-value, min, max) after computing mirror. */
+float BKE_paint_material_value_invert(float value_min, float value_max, float value);
+
+/**
  * Returns the mesh attribute name for \a channel: the descriptor name for the fixed channels and
  * #PaintModeSettings.material_paint_custom_attr for Custom. May be empty for an unconfigured
  * Custom channel.

@@ -82,6 +82,7 @@ static const char *material_props_uniform_name(const eMaterialPaintChannel chann
     case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
     case PAINT_MATERIAL_CHANNEL_NORMAL:
     case PAINT_MATERIAL_CHANNEL_CUSTOM:
+    case PAINT_MATERIAL_CHANNEL_HEIGHT:
       return nullptr;
   }
   return nullptr;

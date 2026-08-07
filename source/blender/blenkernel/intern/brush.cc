@@ -822,6 +822,8 @@ void BKE_brush_material_paint_ensure(Brush *brush)
   settings->channels[PAINT_MATERIAL_CHANNEL_NORMAL].value[1] = 0.0f;
   settings->channels[PAINT_MATERIAL_CHANNEL_NORMAL].value[2] = 1.0f;
   settings->channels[PAINT_MATERIAL_CHANNEL_CUSTOM].value[0] = 0.5f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].value[0] = 0.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 0;
   copy_v3_fl(settings->base_color, 1.0f);
   settings->use_sync_base_color_with_brush = 1;
   brush->material_paint = settings;

@@ -1323,6 +1323,7 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
                         )
 
                 draw_material_paint_channels(
+                    context,
                     layout,
                     getattr(settings, "brush", None),
                     mode_settings,

@@ -468,7 +468,7 @@ struct Material {
    * Cached Principled-socket image resolution for material paint channels.
    * Must be refreshed via #BKE_paint_material_channel_cache_invalidate before using after edits.
    */
-  MaterialPaintChannelCache paint_channel_cache[/*PAINT_MATERIAL_CHANNEL_NUM*/ 6] = {};
+  MaterialPaintChannelCache paint_channel_cache[/*PAINT_MATERIAL_CHANNEL_NUM*/ 7] = {};
 
   /** Runtime cache for GLSL materials. */
   ListBaseT<LinkData> gpumaterial = {nullptr, nullptr};

@@ -2482,6 +2482,9 @@ static void apply_but(
     case ButtonType::HsvCircle:
       apply_but_VEC(C, but, data);
       break;
+    case ButtonType::MaterialPaintValue:
+      apply_but_NUM(C, but, data);
+      break;
     case ButtonType::ColorBand:
       apply_but_COLORBAND(C, but, data);
       break;
@@ -8039,6 +8042,31 @@ static bool numedit_but_COLORBAND(Button *but, HandleButtonData *data, int mx)
   return changed;
 }
 
+static bool numedit_but_MATERIAL_PAINT_VALUE(Button *but, HandleButtonData *data, const int mx)
+{
+  float x1 = 0.0f;
+  float sizex = 0.0f;
+  button_material_paint_value_track_x(but->rect, &x1, &sizex);
+  if (sizex <= 0.0f) {
+    return false;
+  }
+
+  /* Inverse of handle placement: x = x1 + t*(sizex-1) + 1. */
+  const float track = max_ff(sizex - 1.0f, 0.0f);
+  const float t = (track > 0.0f) ? std::clamp((float(mx) - x1 - 1.0f) / track, 0.0f, 1.0f) :
+                                   0.0f;
+  const float value = BKE_paint_material_value_from_t(but->softmin, but->softmax, t);
+
+  data->draglastx = mx;
+
+  if (value != float(data->value)) {
+    data->value = double(value);
+    data->dragchange = true;
+    return true;
+  }
+  return false;
+}
+
 static int do_but_COLORBAND(
     bContext *C, Block *block, Button *but, HandleButtonData *data, const wmEvent *event)
 {
@@ -8104,6 +8132,55 @@ static int do_but_COLORBAND(
       if (event->val == KM_PRESS) {
         data->dragcbd->pos = data->dragfstart;
         BKE_colorband_update_sort(data->coba);
+        data->cancel = true;
+        data->escapecancel = true;
+        button_activate_state(C, but, BUTTON_STATE_EXIT);
+      }
+    }
+    return WM_UI_HANDLER_BREAK;
+  }
+
+  return WM_UI_HANDLER_CONTINUE;
+}
+
+static int do_but_MATERIAL_PAINT_VALUE(
+    bContext *C, Block *block, Button *but, HandleButtonData *data, const wmEvent *event)
+{
+  int mx = event->xy[0];
+  int my = event->xy[1];
+  window_to_block(data->region, block, &mx, &my);
+
+  if (data->state == BUTTON_STATE_HIGHLIGHT) {
+    if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
+      data->dragstartx = mx;
+      data->dragstarty = my;
+      data->draglastx = mx;
+      data->draglasty = my;
+
+      button_activate_state(C, but, BUTTON_STATE_NUM_EDITING);
+
+      /* Click-to-set, then continue as a drag. */
+      if (numedit_but_MATERIAL_PAINT_VALUE(but, data, mx)) {
+        numedit_apply(C, block, but, data);
+      }
+
+      return WM_UI_HANDLER_BREAK;
+    }
+  }
+  else if (data->state == BUTTON_STATE_NUM_EDITING) {
+    if (event->type == MOUSEMOVE) {
+      if (mx != data->draglastx || my != data->draglasty) {
+        if (numedit_but_MATERIAL_PAINT_VALUE(but, data, mx)) {
+          numedit_apply(C, block, but, data);
+        }
+      }
+    }
+    else if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+      button_activate_state(C, but, BUTTON_STATE_EXIT);
+    }
+    else if (ELEM(event->type, EVT_ESCKEY, RIGHTMOUSE)) {
+      if (event->val == KM_PRESS) {
+        data->value = data->origvalue;
         data->cancel = true;
         data->escapecancel = true;
         button_activate_state(C, but, BUTTON_STATE_EXIT);
@@ -9187,6 +9264,9 @@ static int do_button(bContext *C, Block *block, Button *but, const wmEvent *even
       break;
     case ButtonType::ColorBand:
       retval = do_but_COLORBAND(C, block, but, data, event);
+      break;
+    case ButtonType::MaterialPaintValue:
+      retval = do_but_MATERIAL_PAINT_VALUE(C, block, but, data, event);
       break;
     case ButtonType::Curve:
       retval = do_but_CURVE(C, block, but, data, event);

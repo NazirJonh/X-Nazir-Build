@@ -8871,7 +8871,7 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
             settings = UnifiedPaintPanel.paint_settings(context)
             brush = settings.brush if settings else None
             draw_material_paint_channels(
-                layout, brush, paint,
+                context, layout, brush, paint,
                 show_custom=(paint.canvas_source == 'MATERIAL_PAINT'),
             )
 

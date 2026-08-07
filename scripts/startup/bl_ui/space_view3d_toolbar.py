@@ -481,6 +481,7 @@ class SelectPaintSlotHelper:
                         )
 
                 draw_material_paint_channels(
+                    context,
                     layout,
                     getattr(settings, "brush", None),
                     mode_settings,

@@ -1204,10 +1204,12 @@ enum eMaterialPaintChannel : int8_t {
   PAINT_MATERIAL_CHANNEL_NORMAL = 4,
   /** User-named float attribute, vertex painting only. */
   PAINT_MATERIAL_CHANNEL_CUSTOM = 5,
+  /** Scalar height/displacement channel. */
+  PAINT_MATERIAL_CHANNEL_HEIGHT = 6,
 };
 
 /** Number of #eMaterialPaintChannel values. Sizes the per-channel arrays in DNA. */
-#define PAINT_MATERIAL_CHANNEL_NUM 6
+#define PAINT_MATERIAL_CHANNEL_NUM 7
 
 struct MeshAutomaskingSettings {
   DNA_DEFINE_CXX_METHODS(MeshAutomaskingSettings)

@@ -2888,6 +2888,7 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false},
     /* Custom targets a user-named attribute and has no Principled socket, so it is vertex-only. */
     {PAINT_MATERIAL_CHANNEL_CUSTOM, "Custom", nullptr, nullptr, 0.0f, 1.0f, false},
+    {PAINT_MATERIAL_CHANNEL_HEIGHT, "Height", "material_height", nullptr, -1.0f, 1.0f, false},
 };
 
 static_assert(ARRAY_SIZE(material_paint_channels) == PAINT_MATERIAL_CHANNEL_NUM,
@@ -2941,6 +2942,77 @@ float2 BKE_paint_material_channel_range(const PaintModeSettings &settings,
   return float2(info.value_min, info.value_max);
 }
 
+MaterialPaintValueGradientMode BKE_paint_material_value_gradient_mode(const float value_min,
+                                                                      const float value_max)
+{
+  /* A range that straddles zero has a meaningful "neutral" value to call out (e.g. a
+   * height/displacement channel); a range on one side of zero (e.g. [0,1] factors) does not. */
+  if (value_min < 0.0f && value_max > 0.0f) {
+    return MaterialPaintValueGradientMode::Bipolar;
+  }
+  return MaterialPaintValueGradientMode::Unipolar;
+}
+
+void BKE_paint_material_value_gradient_color(const float value_min,
+                                             const float value_max,
+                                             const float t,
+                                             float r_rgb[3])
+{
+  if (BKE_paint_material_value_gradient_mode(value_min, value_max) ==
+      MaterialPaintValueGradientMode::Bipolar)
+  {
+    /* Zero sits wherever it falls in [value_min, value_max], not necessarily at the midpoint. */
+    const float t_zero = BKE_paint_material_t_from_value(value_min, value_max, 0.0f);
+    if (t <= t_zero) {
+      /* White → black. */
+      const float u = (t_zero > 0.0f) ? (t / t_zero) : 0.0f;
+      const float v = 1.0f - u;
+      r_rgb[0] = v;
+      r_rgb[1] = v;
+      r_rgb[2] = v;
+    }
+    else {
+      /* Black → white. */
+      const float u = (t_zero < 1.0f) ? ((t - t_zero) / (1.0f - t_zero)) : 0.0f;
+      r_rgb[0] = u;
+      r_rgb[1] = u;
+      r_rgb[2] = u;
+    }
+    return;
+  }
+  /* Unipolar (and defensive fallback): black → white. */
+  r_rgb[0] = t;
+  r_rgb[1] = t;
+  r_rgb[2] = t;
+}
+
+float BKE_paint_material_value_from_t(const float value_min, const float value_max, const float t)
+{
+  if (value_max == value_min) {
+    return value_min;
+  }
+  const float t_clamped = math::clamp(t, 0.0f, 1.0f);
+  return value_min + t_clamped * (value_max - value_min);
+}
+
+float BKE_paint_material_t_from_value(const float value_min,
+                                      const float value_max,
+                                      const float value)
+{
+  if (value_max == value_min) {
+    return 0.0f;
+  }
+  const float value_clamped = math::clamp(value, value_min, value_max);
+  return (value_clamped - value_min) / (value_max - value_min);
+}
+
+float BKE_paint_material_value_invert(const float value_min,
+                                      const float value_max,
+                                      const float value)
+{
+  return math::clamp(value_min + value_max - value, value_min, value_max);
+}
+
 float BKE_paint_material_channel_value(const BrushMaterialPaint &brush_paint,
                                        const PaintModeSettings &mode_settings,
                                        const eMaterialPaintChannel channel)
@@ -2990,6 +3062,8 @@ float BKE_paint_material_channel_default_value(const eMaterialPaintChannel chann
       return 1.0f;
     case PAINT_MATERIAL_CHANNEL_CUSTOM:
       return 0.5f;
+    case PAINT_MATERIAL_CHANNEL_HEIGHT:
+      return 0.0f;
   }
   BLI_assert_unreachable();
   return 0.0f;

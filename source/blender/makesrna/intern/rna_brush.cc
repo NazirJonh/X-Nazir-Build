@@ -8,6 +8,8 @@
 
 #include <cstdlib>
 
+#include <fmt/format.h>
+
 #include "DNA_brush_types.h"
 #include "DNA_gpencil_legacy_types.h"
 #include "DNA_scene_types.h"
@@ -1221,6 +1223,23 @@ static std::optional<eMaterialPaintChannel> rna_BrushMaterialPaintChannel_channe
   return eMaterialPaintChannel(index);
 }
 
+/**
+ * The generic ID-to-property path walk cannot address collection elements reached through a
+ * fixed-array iterator (#rna_BrushMaterialPaint_channels_begin) on its own, so every property on
+ * a #BrushMaterialPaintChannel needs this explicit path func — otherwise `path_from_id()` (and
+ * anything else that resolves a full RNA path, such as the color eyedropper operator) raises
+ * "found, but does not support path creation" for any property on a channel entry.
+ */
+static std::optional<std::string> rna_BrushMaterialPaintChannel_path(const PointerRNA *ptr)
+{
+  const std::optional<eMaterialPaintChannel> channel = rna_BrushMaterialPaintChannel_channel_get(
+      ptr);
+  if (!channel) {
+    return std::nullopt;
+  }
+  return fmt::format("material_paint.channels[{}]", int(*channel));
+}
+
 static int rna_BrushMaterialPaintChannel_channel_get_rna(PointerRNA *ptr)
 {
   if (const std::optional<eMaterialPaintChannel> channel =
@@ -1267,6 +1286,42 @@ static void rna_BrushMaterialPaintChannel_value_range(
   }
   *min = *softmin = range_min;
   *max = *softmax = range_max;
+}
+
+/**
+ * Normal tangent XYZ is stored in [-1, 1] per component; the UI color picker uses the usual
+ * normal-map encoding in [0, 1] (flat tangent +Z is #8080FF).
+ *
+ * Declared on #BrushMaterialPaintChannel so it is reachable from the Normal channel's entry in
+ * #BrushMaterialPaint.channels; every other channel's entry shares the same RNA struct but reads
+ * back zero and ignores writes, since \a values is never meaningful for a scalar channel.
+ */
+static void rna_BrushMaterialPaintChannel_normal_color_get(PointerRNA *ptr, float *values)
+{
+  const BrushMaterialPaintChannel *channel = static_cast<const BrushMaterialPaintChannel *>(
+      ptr->data);
+  const std::optional<eMaterialPaintChannel> channel_id =
+      rna_BrushMaterialPaintChannel_channel_get(ptr);
+  if (!channel_id || *channel_id != PAINT_MATERIAL_CHANNEL_NORMAL) {
+    zero_v3(values);
+    return;
+  }
+  for (int i = 0; i < 3; i++) {
+    values[i] = (channel->value[i] + 1.0f) * 0.5f;
+  }
+}
+
+static void rna_BrushMaterialPaintChannel_normal_color_set(PointerRNA *ptr, const float *values)
+{
+  BrushMaterialPaintChannel *channel = static_cast<BrushMaterialPaintChannel *>(ptr->data);
+  const std::optional<eMaterialPaintChannel> channel_id =
+      rna_BrushMaterialPaintChannel_channel_get(ptr);
+  if (!channel_id || *channel_id != PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return;
+  }
+  for (int i = 0; i < 3; i++) {
+    channel->value[i] = values[i] * 2.0f - 1.0f;
+  }
 }
 
 }  // namespace blender
@@ -2412,6 +2467,7 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
 
   srna = RNA_def_struct(brna, "BrushMaterialPaintChannel", nullptr);
   RNA_def_struct_sdna(srna, "BrushMaterialPaintChannel");
+  RNA_def_struct_path_func(srna, "rna_BrushMaterialPaintChannel_path");
   RNA_def_struct_ui_text(srna, "Material Paint Channel", "Per-channel material paint settings");
 
   /* Read-only: identifies which row of the descriptor table (#BKE_paint_material_channels) this
@@ -2448,6 +2504,20 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
   RNA_def_property_ui_text(
       prop, "Value", "Paint value (scalar channels use X; Normal uses XYZ tangent)");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "normal_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_BrushMaterialPaintChannel_normal_color_get",
+                               "rna_BrushMaterialPaintChannel_normal_color_set",
+                               nullptr);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Color",
+      "Normal tangent as RGB; flat tangent +Z is #8080FF. Only valid on the Normal channel's "
+      "entry in BrushMaterialPaint.channels; reads as black and ignores writes elsewhere");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
 
   /* Stored per channel, but only ever read for Base Color: the blend modes are color operations,

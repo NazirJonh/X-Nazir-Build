@@ -263,8 +263,9 @@ const char *DRW_material_paint_vertex_input_alias(const StringRef attribute_name
     case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
     case PAINT_MATERIAL_CHANNEL_NORMAL:
     case PAINT_MATERIAL_CHANNEL_CUSTOM:
+    case PAINT_MATERIAL_CHANNEL_HEIGHT:
       /* Base Color travels through the regular color attribute path, Normal is map-only, and
-       * Custom has no shader input of its own. */
+       * Custom/Height have no shader input of their own. */
       return nullptr;
   }
   return nullptr;

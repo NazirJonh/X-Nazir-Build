@@ -798,6 +798,15 @@ class DisplayPanel(BrushPanel):
                 )
 
 
+class PAINT_MT_material_paint_channel_socket(Menu):
+    bl_label = "Material Paint Channel"
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.label(text="Material Paint Channel", icon='INFO')
+        layout.label(text="Painted values feed the material's Principled BSDF inputs.")
+
+
 class VIEW3D_MT_tools_projectpaint_clone(Menu):
     bl_label = "Clone Layer"
 
@@ -1131,20 +1140,179 @@ def brush_settings(layout, context, brush, popover=False):
             layout.prop(brush.curves_sculpt_settings, "minimum_length")
 
 
-def draw_material_paint_channels(layout, brush, paint_mode, *, show_custom, show_missing_fn=None):
+# PAINT_OT_material_channel_value_invert is implemented in C
+# (source/blender/editors/sculpt_paint/paint_ops.cc) so it can read the channel's value range
+# from BKE_paint_material_channel_range, the single source of truth also used by the RNA "value"
+# range callback and by the Custom channel's user-defined range.
+
+# Display order for Material Paint toggles and channel panels (independent of DNA enum indices).
+_MATERIAL_PAINT_CHANNEL_UI_ORDER = (
+    'BASE_COLOR',
+    'METALLIC',
+    'ROUGHNESS',
+    'NORMAL',
+    'HEIGHT',
+    'SPECULAR',
+)
+_MATERIAL_PAINT_SOCKET_COLOR_FLOAT = (0.63, 0.63, 0.63, 1.0)
+_MATERIAL_PAINT_SOCKET_COLOR_VECTOR = (0.39, 0.39, 0.78, 1.0)
+_MATERIAL_PAINT_SOCKET_COLOR_RGBA = (0.78, 0.78, 0.16, 1.0)
+
+
+def _material_paint_channel_socket_color(channel_id):
+    """Socket color matching Principled BSDF socket colors."""
+    if channel_id == 'BASE_COLOR':
+        return _MATERIAL_PAINT_SOCKET_COLOR_RGBA
+    if channel_id == 'NORMAL':
+        return _MATERIAL_PAINT_SOCKET_COLOR_VECTOR
+    # Metallic / Roughness / Specular / Height / Custom — float sockets.
+    return _MATERIAL_PAINT_SOCKET_COLOR_FLOAT
+
+
+def _material_paint_channel_socket_icon_draw(layout, channel_id):
+    """Colored socket button matching the Principled BSDF socket for this channel.
+
+    Routed through ``menu=`` (instead of the plain, background-less socket) so the button is
+    drawn as a real node-link socket: a menu button carrying #BUT_NODE_LINK, which gets the
+    normal button background/border merged with the adjacent value field. A background-less
+    socket here would leave light-colored swatches (e.g. white Base Color) with no visible
+    border against the panel background.
+    """
+    layout.template_node_socket(
+        color=_material_paint_channel_socket_color(channel_id),
+        menu="PAINT_MT_material_paint_channel_socket",
+    )
+
+
+def _material_paint_channel_color_eyedropper_path(context, data, prop):
+    """RNA path string for ``ui.eyedropper_color.prop_data_path``, resolved from context.
+
+    Built from the *actual* property location (``data.path_from_id(prop)``, relative to the
+    owning Brush ID) rather than a hardcoded channel-index table, so it stays correct if
+    material paint channels are ever added, removed, or reordered.
+    """
+    settings = UnifiedPaintPanel.paint_settings(context)
+    brush = getattr(settings, "brush", None) if settings else None
+    if brush is None or brush.material_paint is None:
+        return None
+    return "{:s}.brush.{:s}".format(settings.path_from_id(), data.path_from_id(prop))
+
+
+def _material_paint_channel_color_eyedropper_draw(layout, context, data, prop):
+    path = _material_paint_channel_color_eyedropper_path(context, data, prop)
+    if path is None:
+        return
+    eye = layout.operator("ui.eyedropper_color", text="", icon='EYEDROPPER')
+    eye.prop_data_path = path
+
+
+def _draw_material_paint_subpanel_header(
+    header,
+    context,
+    channel_id,
+    channel,
+    prop=None,
+    prop_data=None,
+    color_picker_after_socket=False,
+    **prop_kwargs,
+):
+    """Panel header: label | socket button | optional value/color field (Principled-style split)."""
+    header.use_property_split = True
+    header.use_property_decorate = False
+    row = header.row(align=True)
+    # Match UI_ITEM_PROP_SEP_DIVIDE (0.4) used by property split labels in the Properties editor.
+    split = row.split(factor=0.4, align=True)
+    split.label(text=channel.name)
+    data = prop_data if prop_data is not None else channel
+    if prop is not None and color_picker_after_socket:
+        # Color channels: socket + color strip merged; eyedropper fused to color strip.
+        controls = split.row(align=True)
+        _material_paint_channel_socket_icon_draw(controls, channel_id)
+        if "text" not in prop_kwargs:
+            prop_kwargs["text"] = ""
+        controls.prop(data, prop, **prop_kwargs)
+        _material_paint_channel_color_eyedropper_draw(controls, context, data, prop)
+    else:
+        value_row = split.row(align=True)
+        _material_paint_channel_socket_icon_draw(value_row, channel_id)
+        if prop is not None:
+            if "text" not in prop_kwargs:
+                prop_kwargs["text"] = ""
+            value_row.prop(data, prop, **prop_kwargs)
+
+
+def _draw_material_paint_value_ramp(layout, context, channel, channel_id):
+    # One subpanel per scalar ramp channel; open by default.
+    # Header: socket color + channel name + numeric Value. Body: gradient + Invert.
+    header, panel = layout.panel(
+        "material_paint_value_%s" % channel_id.lower(),
+        default_closed=False,
+    )
+    _draw_material_paint_subpanel_header(header, context, channel_id, channel, "value", index=0)
+    if not panel:
+        return
+    panel.separator()
+    row = panel.row(align=True)
+    row.template_material_paint_value_slider(channel, "value", index=0)
+    row.operator(
+        "paint.material_channel_value_invert", text="", icon='ARROW_LEFTRIGHT',
+    ).channel = channel_id
+    panel.separator()
+
+
+def _draw_material_paint_base_color_panel(layout, context, channel, material_paint):
+    header, panel = layout.panel(
+        "material_paint_value_base_color",
+        default_closed=False,
+    )
+    _draw_material_paint_subpanel_header(
+        header,
+        context,
+        'BASE_COLOR',
+        channel,
+        "base_color",
+        prop_data=material_paint,
+        color_picker_after_socket=True,
+    )
+    if not panel:
+        return
+    panel.use_property_split = False
+    row = panel.row(align=True)
+    row.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
+    # Base Color is the only blendable channel.
+    row = panel.row(align=True)
+    row.prop(channel, "blend", text="Blend")
+
+
+def _draw_material_paint_normal_panel(layout, context, channel):
+    header, _panel = layout.panel(
+        "material_paint_value_normal",
+        default_closed=False,
+    )
+    # normal_color maps tangent XYZ [-1, 1] to RGB [0, 1]; default flat +Z is #8080FF.
+    _draw_material_paint_subpanel_header(
+        header, context, 'NORMAL', channel, "normal_color", color_picker_after_socket=True,
+    )
+
+
+def draw_material_paint_channels(
+        context, layout, brush, paint_mode, *, show_custom, show_missing_fn=None):
     """Draw Material / Material Paint channel enable + value rows.
 
     Used by View3D Canvas and Image Editor Paint Canvas panels. Only Base Color has a blend
     mode; the scalar channels always use Mix. The brush-level Blend setting is not what drives
     these strokes.
 
+    :arg context: Current ``Context``, used to resolve the active brush's RNA path for the
+        color eyedropper.
     :arg layout: Layout to draw into.
     :arg brush: Active paint ``Brush``, or ``None``.
     :arg paint_mode: ``PaintModeSettings`` RNA data-block (Custom name/range only).
     :arg show_custom: When True, draw the Custom channel (Material Paint mode).
     :arg show_missing_fn: Optional ``callable(channel_id) -> bool``. When it
         returns True for a channel id (``'BASE_COLOR'`` / ``'METALLIC'`` /
-        ``'ROUGHNESS'`` / ``'SPECULAR'`` / ``'NORMAL'``), a Missing indicator is shown on that row.
+        ``'ROUGHNESS'`` / ``'SPECULAR'`` / ``'NORMAL'`` / ``'HEIGHT'``), a Missing
+        indicator is shown on that row.
     """
     if brush is None:
         layout.label(text="No active brush", icon='INFO')
@@ -1159,15 +1327,11 @@ def draw_material_paint_channels(layout, brush, paint_mode, *, show_custom, show
         )
         return
 
-    col = layout.column(align=True)
-    # Keyed by the read-only `channel` identifier (mirrors BKE_paint_material_channels), not by
-    # index, so this panel keeps working if a channel is ever added, removed, or reordered in the
-    # C descriptor table without needing a matching edit here.
     channels = {channel.channel: channel for channel in material_paint.channels}
 
     # Use one aligned row with EXPAND alignment so the buttons fill the available panel width.
     # Labels may be clipped in narrow panels; the short labels below keep the controls readable.
-    toggle_ids = ['BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL']
+    toggle_ids = list(_MATERIAL_PAINT_CHANNEL_UI_ORDER)
     if show_custom:
         toggle_ids.append('CUSTOM')
     toggle_labels = {
@@ -1176,16 +1340,13 @@ def draw_material_paint_channels(layout, brush, paint_mode, *, show_custom, show
         'ROUGHNESS': "Rough",
         'SPECULAR': "Spec",
         'NORMAL': "Normal",
+        'HEIGHT': "Height",
         'CUSTOM': "Custom",
     }
 
-    toggle_box = col.box()
-    toggle_box.use_property_split = False
-    toggle_box.use_property_decorate = False
-    toggle_row = toggle_box.row(align=True)
+    toggle_row = layout.row(align=True)
     toggle_row.use_property_split = False
     toggle_row.use_property_decorate = False
-    toggle_row.scale_y = 1.3
     for channel_id in toggle_ids:
         channel = channels[channel_id]
         toggle_row.prop(channel, "use", text=toggle_labels[channel_id], toggle=True)
@@ -1194,45 +1355,60 @@ def draw_material_paint_channels(layout, brush, paint_mode, *, show_custom, show
         if channel_id != toggle_ids[-1]:
             toggle_row.separator(factor=0.25)
 
+    if any(channels[channel_id].use for channel_id in toggle_ids):
+        layout.separator()
+
+    # layout.panel() sections need a non-aligned column: align=True sets space_y to 0, so
+    # consecutive panel headers/bodies stack with no gap (unlike bl_parent_id sub-panels).
+    channel_col = layout.column(align=False)
+    channel_panel_sep = False
+
+    def _channel_panel_sep():
+        nonlocal channel_panel_sep
+        if channel_panel_sep:
+            channel_col.separator()
+        channel_panel_sep = True
+
     # Value rows are only drawn for enabled channels, so a disabled channel does not clutter the
     # panel with a grayed-out row.
     channel = channels['BASE_COLOR']
     if channel.use:
-        row = col.row(align=True)
-        row.prop(material_paint, "base_color", text="")
-        row.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
+        _channel_panel_sep()
+        _draw_material_paint_base_color_panel(channel_col, context, channel, material_paint)
 
-        # Base Color is the only blendable channel: the blend modes are defined on colors. The
-        # scalar channels below are data, not light, and always interpolate with Mix. The
-        # brush-level Blend setting does not apply to material paint at all.
-        row = col.row(align=True)
-        row.prop(channel, "blend", text="Blend")
-
-    for channel_id in ('METALLIC', 'ROUGHNESS', 'SPECULAR'):
+    for channel_id in ('METALLIC', 'ROUGHNESS'):
         channel = channels[channel_id]
         if channel.use:
-            row = col.row(align=True)
-            row.prop(channel, "value", index=0, text=channel.name, slider=True)
+            _channel_panel_sep()
+            _draw_material_paint_value_ramp(channel_col, context, channel, channel_id)
 
-    # Normal: XYZ tangent vector; the blend mode is always NORMAL_MIX, since any other mode would
-    # produce non-unit tangents. Hence no blend dropdown on this row.
+    # Normal: tangent vector as a single color (#8080FF = flat +Z); blend is always NORMAL_MIX.
     channel = channels['NORMAL']
     if channel.use:
-        row = col.row(align=True)
-        row.prop(channel, "value", text=channel.name)
+        _channel_panel_sep()
+        _draw_material_paint_normal_panel(channel_col, context, channel)
+
+    for channel_id in ('HEIGHT', 'SPECULAR'):
+        channel = channels[channel_id]
+        if channel.use:
+            _channel_panel_sep()
+            _draw_material_paint_value_ramp(channel_col, context, channel, channel_id)
 
     if show_custom:
         channel = channels['CUSTOM']
         if channel.use:
-            row = col.row(align=True)
+            _channel_panel_sep()
+            row = channel_col.row(align=True)
+            row.use_property_split = False
+            _material_paint_channel_socket_icon_draw(row, 'CUSTOM')
             row.prop(channel, "value", index=0, text=channel.name)
 
-            row = col.row(align=True)
+            row = channel_col.row(align=True)
             row.prop(paint_mode, "material_paint_custom_attr", text="Name")
 
             # Unlike the fixed channels, the custom channel targets an arbitrary float attribute,
             # so the range its painted values are clamped to is user-defined.
-            row = col.row(align=True)
+            row = channel_col.row(align=True)
             row.prop(paint_mode, "channel_custom_range", text="Range")
 
 
@@ -2072,6 +2248,7 @@ def brush_basic_grease_pencil_vertex_settings(layout, context, brush, *, compact
 
 
 classes = (
+    PAINT_MT_material_paint_channel_socket,
     VIEW3D_MT_tools_projectpaint_clone,
 )
 

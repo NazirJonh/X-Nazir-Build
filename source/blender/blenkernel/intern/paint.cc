@@ -3102,6 +3102,63 @@ void BKE_pbr_normal_blend_mix(const float current_packed[3],
   BKE_pbr_normal_pack(blended, is_float, r_packed);
 }
 
+bool BKE_paint_material_normal_from_sample(const float rgb[3], float r_normal[3])
+{
+  const float3 unpacked = float3(rgb[0], rgb[1], rgb[2]) * 2.0f - 1.0f;
+  const float length = math::length(unpacked);
+  /* Chosen well above float noise but far below any meaningful normal length. */
+  if (length < 1e-6f) {
+    return false;
+  }
+  copy_v3_v3(r_normal, unpacked / length);
+  return true;
+}
+
+bool BKE_paint_material_channel_has_source(const BrushMaterialPaintChannel &channel)
+{
+  return channel.source_mtex.tex != nullptr;
+}
+
+void BKE_paint_material_channel_effective_mtex(const BrushMaterialPaint &brush_paint,
+                                               const BrushMaterialPaintChannel &channel,
+                                               MTex &r_mtex)
+{
+  /* Shallow copy: keeps the channel's own #Tex (and its user-facing image identity) while
+   * mapping below is overwritten with the shared one. */
+  r_mtex = dna::shallow_copy(channel.source_mtex);
+  const MTex &shared = brush_paint.shared_source_mapping;
+  r_mtex.brush_map_mode = shared.brush_map_mode;
+  copy_v3_v3(r_mtex.size, shared.size);
+  copy_v3_v3(r_mtex.ofs, shared.ofs);
+  r_mtex.rot = shared.rot;
+}
+
+bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
+                                         const PaintModeSettings &mode_settings,
+                                         MTex &r_mtex)
+{
+  static const eMaterialPaintChannel priority[] = {
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      PAINT_MATERIAL_CHANNEL_METALLIC,
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+      PAINT_MATERIAL_CHANNEL_NORMAL,
+      PAINT_MATERIAL_CHANNEL_HEIGHT,
+      PAINT_MATERIAL_CHANNEL_SPECULAR,
+  };
+  for (const eMaterialPaintChannel channel : priority) {
+    if (!BKE_paint_material_channel_is_enabled(brush_paint, mode_settings, channel)) {
+      continue;
+    }
+    const BrushMaterialPaintChannel &paint_channel = brush_paint.channels[channel];
+    if (BKE_paint_material_channel_has_source(paint_channel)) {
+      BKE_paint_material_channel_effective_mtex(brush_paint, paint_channel, r_mtex);
+      return true;
+    }
+  }
+  r_mtex = dna::shallow_copy(MTex());
+  return false;
+}
+
 std::optional<eMaterialPaintChannel> BKE_paint_material_channel_from_attribute_name(
     const StringRef attribute_name)
 {
@@ -3211,8 +3268,7 @@ static bool paint_material_channel_image_resolve_uncached(Material *ma,
     }
 
     /* Normal maps are typically Image Texture → Normal Map → Principled.Normal. */
-    if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && from_node->type_legacy == SH_NODE_NORMAL_MAP)
-    {
+    if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && from_node->type_legacy == SH_NODE_NORMAL_MAP) {
       bNodeSocket *color_in = bke::node_find_socket(*from_node, SOCK_IN, "Color"_ustr);
       if (color_in == nullptr) {
         return false;
@@ -3303,6 +3359,7 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
 bool BKE_paint_principled_channel_image_ensure(Main &bmain,
                                                Object &ob,
                                                eMaterialPaintChannel channel,
+                                               int image_size,
                                                Image **r_image,
                                                ImageUser **r_iuser)
 {
@@ -3351,17 +3408,22 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
     color[1] = 0.5f;
     color[2] = 1.0f;
   }
-  Image *image = BKE_image_add_generated(
-      &bmain, 1024, 1024, image_name, 24, false, IMA_GENTYPE_BLANK, color, false, true, false);
+  /* Scalar / Normal channels feed non-color Principled inputs; reading them through sRGB would
+   * silently skew every painted value. Only the Base Color map stays in the default (sRGB) color
+   * space. */
+  Image *image = BKE_image_add_generated(&bmain,
+                                         image_size,
+                                         image_size,
+                                         image_name,
+                                         24,
+                                         false,
+                                         IMA_GENTYPE_BLANK,
+                                         color,
+                                         false,
+                                         !info.is_color,
+                                         false);
   if (image == nullptr) {
     return false;
-  }
-
-  /* Scalar / Normal channels feed non-color Principled inputs; reading them through sRGB would
-   * silently skew every painted value. Only the Base Color map stays in the default color space. */
-  if (!info.is_color) {
-    STRNCPY(image->colorspace_settings.name,
-            IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA));
   }
 
   bNode *tex_node = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_IMAGE);
@@ -3410,9 +3472,7 @@ bool BKE_paint_material_face_matches_active_slot(const Object &ob, const int fac
 }
 
 Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
-    Object &ob,
-    const PaintModeSettings &mode_settings,
-    const BrushMaterialPaint *brush_paint)
+    Object &ob, const PaintModeSettings &mode_settings, const BrushMaterialPaint *brush_paint)
 {
   Vector<PaintMaterialImageTarget> targets;
   if (brush_paint == nullptr) {
@@ -3445,9 +3505,12 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     }
     else if (target.is_normal_channel) {
       const float2 range = BKE_paint_material_channel_range(mode_settings, info.channel);
-      target.color[0] = math::clamp(brush_paint->channels[info.channel].value[0], range.x, range.y);
-      target.color[1] = math::clamp(brush_paint->channels[info.channel].value[1], range.x, range.y);
-      target.color[2] = math::clamp(brush_paint->channels[info.channel].value[2], range.x, range.y);
+      target.color[0] = math::clamp(
+          brush_paint->channels[info.channel].value[0], range.x, range.y);
+      target.color[1] = math::clamp(
+          brush_paint->channels[info.channel].value[1], range.x, range.y);
+      target.color[2] = math::clamp(
+          brush_paint->channels[info.channel].value[2], range.x, range.y);
       normalize_v3(target.color);
       target.value = 0.0f;
     }
@@ -3460,8 +3523,8 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
 }
 
 MaterialPaintAttributeStatus BKE_paint_mesh_material_attribute_ensure(Mesh &mesh,
-                                                                     const StringRef attr_name,
-                                                                     bool *r_created)
+                                                                      const StringRef attr_name,
+                                                                      bool *r_created)
 {
   if (r_created) {
     *r_created = false;
@@ -3493,14 +3556,14 @@ MaterialPaintAttributeStatus BKE_paint_mesh_material_attribute_ensure(Mesh &mesh
 }
 
 MaterialPaintAttributeStatus BKE_paint_mesh_material_color_attribute_ensure(Mesh &mesh,
-                                                                           bool *r_created)
+                                                                            bool *r_created)
 {
   if (r_created) {
     *r_created = false;
   }
 
-  const StringRef attr_name = BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_BASE_COLOR)
-                                  .attribute_name;
+  const StringRef attr_name =
+      BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_BASE_COLOR).attribute_name;
   bke::MutableAttributeAccessor attrs = mesh.attributes_for_write();
 
   if (attrs.contains(attr_name)) {

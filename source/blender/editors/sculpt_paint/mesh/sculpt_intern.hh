@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -44,6 +45,9 @@ struct SculptBoundary;
 }
 namespace cloth {
 struct SimulationData;
+}
+namespace material {
+class ChannelSourceSampler;
 }
 namespace pose {
 struct IKChain;
@@ -337,6 +341,14 @@ struct StrokeCache {
   float3 view_normal_symm = float3(0);
   float3 view_origin = float3(0);
   float3 view_origin_symm = float3(0);
+  /* Camera right/up axes in object space. A View-mapped Normal-channel source texture is
+   * sampled in this screen-aligned basis, not object space: painting projects the sample's
+   * right/up components onto the destination surface's own tangent plane (its "outward" axis is
+   * the surface normal, not #view_normal), so a neutral sample stays neutral regardless of the
+   * surface's orientation to the camera. See ChannelSourceSampler::color() and
+   * sculpt_paint_image.cc's apply_paint_channel(). */
+  float3 view_right = float3(0);
+  float3 view_up = float3(0);
 
   /**
    * The primary direction of influence for a brush stroke.
@@ -394,6 +406,13 @@ struct StrokeCache {
     Array<float4> mix_colors;
     Array<float4> prev_colors;
   } paint_brush;
+
+  /**
+   * Source texture sampling for material paint channels, built once per stroke so the image pool
+   * is acquired and released exactly once. Non-null when the brush has material_paint; inactive
+   * (no usable sources) is reported via #ChannelSourceSampler::is_active.
+   */
+  std::unique_ptr<material::ChannelSourceSampler> material_source_sampler;
 
   /* Pose brush */
   std::unique_ptr<pose::IKChain> pose_ik_chain;
@@ -808,6 +827,80 @@ IndexMask gather_nodes(const bke::pbvh::Tree &pbvh,
 const float *brush_frontface_normal_from_falloff_shape(const SculptSession &ss,
                                                        char falloff_shape);
 void cube_tip_init(const Sculpt &sd, const Object &ob, const Brush &brush, float mat[4][4]);
+
+/**
+ * Sample \a mtex at \a brush_point using the brush's stroke state.
+ *
+ * \a brush_point is in object space for every map mode: this maps it to whatever coordinate
+ * system the mode needs — object space for 3D, the brush local matrix for Area, and region
+ * space for the view-relative modes.
+ *
+ * \a pool owns ImBuf acquires for this sample path (stroke-local for channel sources; typically
+ * #SculptSession.tex_pool for the brush texture). Passed last so callers that already supply
+ * outputs can append the pool without reshuffling mid-argument lists.
+ *
+ * \a area_local_mat overrides #StrokeCache.brush_local_mat for #MTEX_MAP_MODE_AREA. Callers
+ * sampling a texture other than the brush's own (e.g. a material paint channel's source, whose
+ * rotation may differ from the brush's) must pass their own matrix from
+ * #material::calc_area_local_mat; null reuses the brush's matrix as before.
+ */
+void sculpt_apply_texture(const SculptSession &ss,
+                          const Brush &brush,
+                          const MTex &mtex,
+                          const float brush_point[3],
+                          int thread_id,
+                          float *r_value,
+                          float4 &r_rgba,
+                          ImagePool *pool,
+                          const float4x4 *area_local_mat = nullptr);
+
+namespace material {
+
+/**
+ * The part of texture-sample coordinate derivation that depends only on \a brush_point and the
+ * stroke's view/symmetry state, not on any particular #MTex. #sculpt_apply_texture recomputes
+ * this from scratch on every call; when several #MTex slots (e.g. one per material paint channel)
+ * are sampled at the same point, building this once with #sculpt_texel_sample_context and passing
+ * it to the matching #sculpt_apply_texture overload avoids repeating that work per slot.
+ */
+struct TexelSampleContext {
+  /** \a brush_point minus the stroke's plane offset; used as-is by #MTEX_MAP_MODE_3D. */
+  float3 point;
+  /** #point after radial-symmetry rotation and mirror flip; used by #MTEX_MAP_MODE_AREA before
+   * its own brush-local-matrix multiply, and as the input to the view projection below. */
+  float3 symm_point;
+  /** #symm_point projected to region space; used by every mode except #MTEX_MAP_MODE_3D and
+   * #MTEX_MAP_MODE_AREA (i.e. #MTEX_MAP_MODE_VIEW, #MTEX_MAP_MODE_TILED,
+   * #MTEX_MAP_MODE_RANDOM). */
+  float2 view_point_2d;
+};
+
+/** Build the shared coordinate context for \a brush_point once, to be reused across multiple
+ * #sculpt_apply_texture calls at the same point (see #TexelSampleContext). */
+TexelSampleContext sculpt_texel_sample_context(const SculptSession &ss,
+                                               const float brush_point[3]);
+
+/**
+ * The #MTEX_MAP_MODE_AREA local-space matrix for \a rotation, i.e. #StrokeCache.brush_local_mat
+ * built for a texture rotation other than the brush's own #MTex.rot. Depends on the current
+ * dab's location and motion direction, so must be recomputed every dab the same as
+ * #StrokeCache.brush_local_mat itself — never cache this across dabs.
+ */
+float4x4 calc_area_local_mat(const Object &ob, float rotation);
+
+}  // namespace material
+
+/** Same as the \a brush_point overload above, but reusing a #material::TexelSampleContext already
+ * built for this point instead of recomputing it. */
+void sculpt_apply_texture(const SculptSession &ss,
+                          const Brush &brush,
+                          const MTex &mtex,
+                          const material::TexelSampleContext &ctx,
+                          int thread_id,
+                          float *r_value,
+                          float4 &r_rgba,
+                          ImagePool *pool,
+                          const float4x4 *area_local_mat = nullptr);
 
 /** Sample the brush's texture value. */
 void sculpt_apply_texture(const SculptSession &ss,

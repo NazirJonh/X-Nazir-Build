@@ -1380,6 +1380,19 @@ struct PaintModeSettings {
   float channel_custom_range[2] = {0.0f, 1.0f};
   /** Attribute name painted by #PAINT_MATERIAL_CHANNEL_CUSTOM. */
   char material_paint_custom_attr[64] = {};
+
+  /** Width/height (in pixels) used for newly auto-created per-channel material paint images.
+   * \see ePaintNewChannelImageSize. */
+  int new_channel_image_size = 4096;
+  char _pad1[4] = {};
+};
+
+/** #PaintModeSettings::new_channel_image_size */
+enum ePaintNewChannelImageSize : int {
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_1K = 1024,
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_2K = 2048,
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_4K = 4096,
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_8K = 8192,
 };
 
 /** \} */

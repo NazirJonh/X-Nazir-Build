@@ -610,19 +610,13 @@ class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
         if tool is None:
             return False
 
-        is_paint_tool = False
-        if tool.use_brushes:
-            brush = context.tool_settings.sculpt.brush
-            if brush:
-                is_paint_tool = brush.sculpt_brush_type in {'PAINT', 'SMEAR'}
-        else:
-            # TODO: The property use_paint_canvas doesn't work anymore since its associated
-            # C++ function 'rna_WorkSpaceTool_use_paint_canvas_get' passes in a nullptr for
-            # the bContext. This property should be fixed in the future, but will require
-            # some extensive refactoring. For now, use the workaround above.
-            is_paint_tool = tool.use_paint_canvas
+        # Material Paint channels only work with the Paint brush type; Smear, other sculpt
+        # brushes, and non-brush tools have no material-channel sampling/blending behind them.
+        if not tool.use_brushes:
+            return False
 
-        return is_paint_tool
+        brush = context.tool_settings.sculpt.brush
+        return brush is not None and brush.sculpt_brush_type == 'PAINT'
 
     def get_mode_settings(self, context):
         return context.tool_settings.paint_mode

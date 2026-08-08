@@ -579,6 +579,48 @@ void PAINT_OT_material_channel_value_invert(wmOperatorType *ot)
                           "Material paint channel to invert");
 }
 
+static wmOperatorStatus material_channel_source_clear_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active material paint brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  const eMaterialPaintChannel channel_id = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
+  BrushMaterialPaintChannel &channel = brush->material_paint->channels[channel_id];
+
+  /* Drop the whole Tex, not just its image: this also recovers a source left in a broken state
+   * (e.g. its image was deleted from Main), which the source_image pointer alone cannot express
+   * since it already reads as unset. */
+  if (channel.source_mtex.tex != nullptr) {
+    id_us_min(&channel.source_mtex.tex->id);
+    channel.source_mtex.tex = nullptr;
+  }
+
+  BKE_brush_tag_unsaved_changes(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_channel_source_clear(wmOperatorType *ot)
+{
+  ot->name = "Clear Source";
+  ot->idname = "PAINT_OT_material_channel_source_clear";
+  ot->description = "Remove this channel's source texture, including one left in a broken state";
+  ot->exec = material_channel_source_clear_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  ot->prop = RNA_def_enum(ot->srna,
+                          "channel",
+                          rna_enum_material_paint_channel_items,
+                          PAINT_MATERIAL_CHANNEL_METALLIC,
+                          "Channel",
+                          "Material paint channel whose source texture should be cleared");
+}
+
 void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot)
 {
   ot->name = "Enable Material Paint Channels for Brush";
@@ -670,6 +712,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_brush_colors_flip);
   WM_operatortype_append(PAINT_OT_material_paint_brush_ensure);
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);
+  WM_operatortype_append(PAINT_OT_material_channel_source_clear);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 

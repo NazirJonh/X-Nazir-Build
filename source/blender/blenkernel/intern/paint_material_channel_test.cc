@@ -6,6 +6,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BKE_brush.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_idtype.hh"
 #include "BKE_lib_id.hh"
@@ -17,7 +18,9 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_texture.h"
 
+#include "BLI_index_range.hh"
 #include "BLI_math_constants.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
@@ -30,6 +33,7 @@
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_texture_types.h"
 
 /* For #IMB_BlendMode, which #BKE_paint_material_channel_blend_mode returns as a `short`. */
 #include "IMB_imbuf.hh"
@@ -730,6 +734,70 @@ TEST(material_paint_channel, height_from_attribute_name)
 TEST(material_paint_channel, height_default_value)
 {
   EXPECT_FLOAT_EQ(BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_HEIGHT), 0.0f);
+}
+
+TEST_F(PaintMaterialChannelTest, source_mtex_defaults)
+{
+  Brush *brush = BKE_brush_add(bmain, "SourceDefaults", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+
+  for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    const MTex &mtex = brush->material_paint->channels[i].source_mtex;
+    /* A zeroed MTex would sample nothing: size 0 collapses the texture and map mode 0 is not a
+     * valid brush mapping. The in-class DNA initializers must survive brush creation. */
+    EXPECT_EQ(mtex.tex, nullptr);
+    EXPECT_EQ(mtex.brush_map_mode, MTEX_MAP_MODE_VIEW);
+    EXPECT_FLOAT_EQ(mtex.size[0], 1.0f);
+    EXPECT_FLOAT_EQ(mtex.size[1], 1.0f);
+    EXPECT_FLOAT_EQ(mtex.size[2], 1.0f);
+  }
+}
+
+TEST_F(PaintMaterialChannelTest, normal_from_sample_flat)
+{
+  /* #8080FF, the neutral tangent normal stored by every normal map. */
+  const float rgb[3] = {0.5f, 0.5f, 1.0f};
+  float normal[3];
+  EXPECT_TRUE(BKE_paint_material_normal_from_sample(rgb, normal));
+  EXPECT_NEAR(normal[0], 0.0f, 1e-5f);
+  EXPECT_NEAR(normal[1], 0.0f, 1e-5f);
+  EXPECT_NEAR(normal[2], 1.0f, 1e-5f);
+}
+
+TEST_F(PaintMaterialChannelTest, normal_from_sample_is_normalized)
+{
+  /* An off-axis sample whose unpacked vector is not unit length. */
+  const float rgb[3] = {1.0f, 1.0f, 1.0f};
+  float normal[3];
+  EXPECT_TRUE(BKE_paint_material_normal_from_sample(rgb, normal));
+  EXPECT_NEAR(len_v3(normal), 1.0f, 1e-5f);
+}
+
+TEST_F(PaintMaterialChannelTest, normal_from_sample_degenerate_rejected)
+{
+  /* Mid gray unpacks to the zero vector; normalizing it would produce NaN, so callers must be
+   * told to fall back to the channel's slider value instead. */
+  const float rgb[3] = {0.5f, 0.5f, 0.5f};
+  float normal[3];
+  EXPECT_FALSE(BKE_paint_material_normal_from_sample(rgb, normal));
+}
+
+TEST_F(PaintMaterialChannelTest, channel_has_source_follows_tex_pointer)
+{
+  Brush *brush = BKE_brush_add(bmain, "HasSource", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+  BrushMaterialPaintChannel &channel =
+      brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS];
+
+  EXPECT_FALSE(BKE_paint_material_channel_has_source(channel));
+
+  Tex *tex = BKE_texture_add(bmain, "SourceTex");
+  tex->type = TEX_IMAGE;
+  channel.source_mtex.tex = tex;
+  EXPECT_TRUE(BKE_paint_material_channel_has_source(channel));
+
+  channel.source_mtex.tex = nullptr;
+  EXPECT_FALSE(BKE_paint_material_channel_has_source(channel));
 }
 
 }  // namespace blender

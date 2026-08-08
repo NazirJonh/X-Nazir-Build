@@ -973,7 +973,7 @@ class VIEW3D_HT_header(Header):
                 paint = tool_settings.sculpt
                 brush = paint.brush
                 if brush:
-                    is_paint_tool = brush.sculpt_brush_type in {'PAINT', 'SMEAR'}
+                    is_paint_tool = brush.sculpt_brush_type == 'PAINT'
             else:
                 is_paint_tool = tool and tool.use_paint_canvas
 
@@ -8850,7 +8850,14 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
     @classmethod
     def poll(cls, context):
         ob = context.active_object
-        return ob is not None and ob.mode in {'TEXTURE_PAINT', 'SCULPT'}
+        if ob is None or ob.mode not in {'TEXTURE_PAINT', 'SCULPT'}:
+            return False
+        if ob.mode == 'SCULPT':
+            # Material Paint channels only work with the Paint brush type; deformation brushes
+            # (Grab, Smooth, etc.) have no material-channel sampling/blending behind them.
+            brush = context.tool_settings.sculpt.brush
+            return brush is not None and brush.sculpt_brush_type == 'PAINT'
+        return True
 
     def draw_header(self, context):
         layout = self.layout

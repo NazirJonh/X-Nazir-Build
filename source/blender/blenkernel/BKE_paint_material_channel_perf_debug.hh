@@ -16,7 +16,7 @@
 #pragma once
 
 /* Uncomment to compile in multi-channel paint performance instrumentation. */
-// #define PAINT_MATERIAL_CHANNEL_PERF_DEBUG 1
+#define PAINT_MATERIAL_CHANNEL_PERF_DEBUG 0
 
 #ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
 

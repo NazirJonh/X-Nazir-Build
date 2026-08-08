@@ -41,6 +41,7 @@ struct BlendWriter;
 struct Brush;
 struct BrushColorJitterSettings;
 struct BrushMaterialPaint;
+struct BrushMaterialPaintChannel;
 struct CurveMapping;
 struct Depsgraph;
 struct EnumPropertyItem;
@@ -69,6 +70,7 @@ struct Main;
 struct Material;
 struct Mesh;
 struct MDeformVert;
+struct MTex;
 struct MultiresModifierData;
 struct Object;
 struct Paint;
@@ -642,9 +644,7 @@ bool BKE_object_sculpt_use_dyntopo(const Object *object);
  * Create a key that can be used to compare with previous ones to identify changes.
  * The resulting 'string' is owned by the caller.
  */
-std::string BKE_paint_canvas_key_get(PaintModeSettings *settings,
-                                     Object *ob,
-                                     const Brush *brush);
+std::string BKE_paint_canvas_key_get(PaintModeSettings *settings, Object *ob, const Brush *brush);
 
 /**
  * Layout key for PBVH pixel encoding of \a image: seam margin and each tile's
@@ -759,7 +759,8 @@ short BKE_paint_material_channel_blend_mode(const BrushMaterialPaint &brush_pain
  */
 float BKE_paint_material_channel_default_value(eMaterialPaintChannel channel);
 
-/** True for color-managed channels; false for data channels (Metallic, Roughness, Specular, Normal). */
+/** True for color-managed channels; false for data channels (Metallic, Roughness, Specular,
+ * Normal). */
 inline bool BKE_paint_material_channel_is_color(eMaterialPaintChannel channel)
 {
   return channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
@@ -782,6 +783,57 @@ void BKE_pbr_normal_blend_mix(const float current_packed[3],
                               float t,
                               bool is_float,
                               float r_packed[3]);
+
+/**
+ * Unpack a tangent-space normal sampled from a source normal map.
+ *
+ * Normal maps store `n * 0.5 + 0.5`, so the sample is mapped back to `[-1, 1]` and normalized:
+ * a non-unit tangent normal breaks shading, the same reason #BKE_pbr_normal_blend_mix
+ * renormalizes.
+ *
+ * \param rgb: the sampled color, expected in `[0, 1]`. Alpha is not used.
+ * \param r_normal: the unit tangent normal, only written when this returns true.
+ * \return false when the unpacked vector is degenerate (a mid-gray or black sample), in which
+ * case the caller must fall back to the channel's own value rather than normalize a zero vector.
+ */
+bool BKE_paint_material_normal_from_sample(const float rgb[3], float r_normal[3]);
+
+/**
+ * Whether \a channel has a source texture assigned at all.
+ *
+ * This only reflects the pointer. Whether the source can actually be sampled (its image may be
+ * missing or fail to load) is decided once per stroke by the paint code, not here.
+ */
+bool BKE_paint_material_channel_has_source(const BrushMaterialPaintChannel &channel);
+
+/**
+ * Fills \a r_mtex with \a channel's own source #Tex combined with \a brush_paint's mapping
+ * shared by every channel (see #BrushMaterialPaint.shared_source_mapping: map_mode, size,
+ * offset, angle). Sampling and cursor-preview code read mapping through this instead of
+ * #BrushMaterialPaintChannel.source_mtex directly, so every channel's texture samples with
+ * identical mapping and multi-channel patterns (a Base Color texture with a matching
+ * Normal/Roughness texture) stay aligned.
+ *
+ * Out-parameter rather than a return value: #MTex disables copy/move (see
+ * #DNA_DEFINE_CXX_METHODS) so callers own the storage and this only ever assigns into it via
+ * #dna::shallow_copy.
+ */
+void BKE_paint_material_channel_effective_mtex(const BrushMaterialPaint &brush_paint,
+                                               const BrushMaterialPaintChannel &channel,
+                                               MTex &r_mtex);
+
+/**
+ * Fills \a r_mtex with the effective #MTex (see #BKE_paint_material_channel_effective_mtex) to
+ * preview in the brush cursor overlay for \a brush_paint, chosen by the priority a user painting
+ * a pattern expects: Base Color if enabled and sourced, else the first of Metallic, Roughness,
+ * Normal, Height, Specular that is.
+ *
+ * \return false when no enabled channel has a source, in which case \a r_mtex is zeroed and the
+ * cursor should fall back to the brush's own texture.
+ */
+bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
+                                         const PaintModeSettings &mode_settings,
+                                         MTex &r_mtex);
 
 /**
  * Returns the valid value range for \a channel: the descriptor range for the fixed channels and
@@ -866,11 +918,14 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
  * Does nothing and returns false when there is no material, no node tree, no Principled
  * BSDF, no matching socket, or the socket is already driven by something other than a
  * (missing/invalid) Image Texture. Channels without a socket (Custom) always return false.
+ * \param image_size: Width and height (in pixels) used for a newly created image. Ignored when
+ * the channel already resolves to an existing image.
  * \return true when \a r_image and \a r_iuser were set.
  */
 bool BKE_paint_principled_channel_image_ensure(Main &bmain,
                                                Object &ob,
                                                eMaterialPaintChannel channel,
+                                               int image_size,
                                                Image **r_image,
                                                ImageUser **r_iuser);
 
@@ -896,9 +951,7 @@ struct PaintMaterialImageTarget {
  * When \a brush_paint is null, returns an empty list (no channels enabled).
  */
 Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
-    Object &ob,
-    const PaintModeSettings &mode_settings,
-    const BrushMaterialPaint *brush_paint);
+    Object &ob, const PaintModeSettings &mode_settings, const BrushMaterialPaint *brush_paint);
 
 /**
  * Whether a face with \a face_material_index should receive image writes while painting
@@ -924,8 +977,8 @@ enum class MaterialPaintAttributeStatus {
  * \param r_created: when non-null, set to true only if a new attribute was added by this call.
  */
 MaterialPaintAttributeStatus BKE_paint_mesh_material_attribute_ensure(Mesh &mesh,
-                                                                     StringRef attr_name,
-                                                                     bool *r_created = nullptr);
+                                                                      StringRef attr_name,
+                                                                      bool *r_created = nullptr);
 
 /**
  * Ensure the material Base Color attribute `"Color"` exists on the mesh.

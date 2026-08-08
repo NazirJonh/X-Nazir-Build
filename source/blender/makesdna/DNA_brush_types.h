@@ -171,13 +171,21 @@ struct BrushMaterialPaintChannel {
 
   /**
    * Paint value. Scalar channels use \a value[0]; Normal uses the full XYZ tangent
-   * (default flat tangent). Unused for Base Color (Base Color follows #BrushMaterialPaint.base_color).
+   * (default flat tangent). Unused for Base Color (Base Color follows
+   * #BrushMaterialPaint.base_color).
    */
   float value[3] = {0.0f, 0.0f, 1.0f};
   /** #IMB_BlendMode. */
   short blend = 0;
   char use = 0;
   char _pad[1] = {};
+
+  /**
+   * Source texture sampled instead of `value` / base color. Inactive when `tex` is null.
+   * Sampled through the same brush mapping machinery as #Brush.mtex, so all brush map modes
+   * work without extra coordinate handling.
+   */
+  struct MTex source_mtex;
 };
 
 struct BrushMaterialPaint {
@@ -189,6 +197,14 @@ struct BrushMaterialPaint {
   float base_color[3] = {1.0f, 1.0f, 1.0f};
   char use_sync_base_color_with_brush = 1;
   char _pad[3] = {};
+  /**
+   * Mapping (map_mode, size, angle) shared by every channel's source texture, so multi-channel
+   * patterns (e.g. a Base Color texture with a matching Normal/Roughness texture) stay aligned
+   * instead of drifting apart because one channel's mapping was tweaked independently.
+   * #MTex.tex is never set here; each channel keeps its own source texture identity in
+   * #BrushMaterialPaintChannel.source_mtex.tex, only reading mapping from here at paint time.
+   */
+  struct MTex shared_source_mapping;
 };
 
 /** Max number of propagation steps for automasking settings. */

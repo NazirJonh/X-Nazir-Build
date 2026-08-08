@@ -111,6 +111,29 @@ struct PixelNode {
      * Only the first two coordinates are stored. The third should be recalculated
      */
     Vector<float2, 0> delta_barycentric_coords;
+
+    /**
+     * Object-space tangent of each UV primitive, derived from its UV parametrization (constant
+     * across the flat triangle): `T_m` in the `n_T = (n_W.T_m, n_W.B_m, n_W.N_m)` change of basis
+     * used to re-express a Normal channel's source sample in the destination surface's own
+     * tangent space.
+     */
+    Vector<float3, 0> tangents;
+
+    /** Object-space vertices of each UV primitive, in mesh triangle order. */
+    Vector<float3, 0> triangle_positions;
+
+    /** UV vertices of each UV primitive, in mesh triangle order. */
+    Vector<float2, 0> triangle_uvs;
+
+    /**
+     * Handedness of each UV primitive's parametrization: -1 when the triangle is mirrored in UV
+     * space relative to its geometric winding, +1 otherwise. `B_m = bitangent_sign * cross(N, T)`
+     * (glTF/standard tangent-space convention). UV layouts commonly reuse mirrored islands to
+     * save space; without flipping the bitangent to match, those islands decode a Normal-map
+     * sample with the wrong handedness.
+     */
+    Vector<float, 0> bitangent_signs;
   } uv_primitives;
 
   PixelNode()
@@ -182,6 +205,10 @@ struct PixelNode {
     tiles.clear();
     uv_primitives.tri_indices.clear();
     uv_primitives.delta_barycentric_coords.clear();
+    uv_primitives.tangents.clear();
+    uv_primitives.triangle_positions.clear();
+    uv_primitives.triangle_uvs.clear();
+    uv_primitives.bitangent_signs.clear();
     undo_regions.clear();
   }
 };

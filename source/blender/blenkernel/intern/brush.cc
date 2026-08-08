@@ -241,6 +241,15 @@ static void brush_foreach_id(ID *id, LibraryForeachIDData *data)
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, BKE_texture_mtex_foreach_id(data, &brush->mtex));
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data,
                                           BKE_texture_mtex_foreach_id(data, &brush->mask_mtex));
+  /* Each channel owns its own source texture; without this the user count is never updated and
+   * remapping, library overrides and unused-data purging all miss them. */
+  if (brush->material_paint) {
+    for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+      BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(
+          data,
+          BKE_texture_mtex_foreach_id(data, &brush->material_paint->channels[i].source_mtex));
+    }
+  }
 }
 
 static void brush_foreach_working_space_color(ID *id, const IDTypeForeachColorFunctionCallback &fn)

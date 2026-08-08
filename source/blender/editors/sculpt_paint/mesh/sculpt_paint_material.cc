@@ -24,18 +24,55 @@
 #include "BLI_execution_mode.hh"
 #include "BLI_math_color.hh"
 #include "BLI_math_vector.hh"
+#include "BLI_task.h"
 #include "BLI_task.hh"
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 
+#include "BLI_time.h"
+
+#include <atomic>
+#include <cstdio>
+
 #include "mesh_brush_common.hh"
+#include "paint_material_source.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_color.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_paint_material.hh"
 
 namespace blender::ed::sculpt_paint::material {
+
+/* WORKAROUND: temporary printf profiling, paired with the one in paint_material_source.cc, to
+ * see where time goes *within* a single #do_paint_material_brush call (one call per brush dab
+ * per channel per symmetry pass, so many more data points per stroke than the sampler's one
+ * per-stroke summary). Remove once the perf work is done. */
+#define PBR_PAINT_MATERIAL_PROFILE 1
+
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+namespace {
+struct MaterialPaintProfile {
+  std::atomic<int64_t> vert_num{0};
+  std::atomic<int64_t> active_vert_num{0};
+  std::atomic<double> factors_seconds{0.0};
+  std::atomic<double> automask_seconds{0.0};
+  std::atomic<double> sample_and_blend_seconds{0.0};
+
+  void reset()
+  {
+    vert_num.store(0);
+    active_vert_num.store(0);
+    factors_seconds.store(0.0);
+    automask_seconds.store(0.0);
+    sample_and_blend_seconds.store(0.0);
+  }
+};
+}  // namespace
+
+static MaterialPaintProfile g_scalar_profile;
+static MaterialPaintProfile g_color_profile;
+#endif
 
 /* -------------------------------------------------------------------- */
 /** \name Local Data Structures
@@ -44,6 +81,11 @@ namespace blender::ed::sculpt_paint::material {
 struct MaterialPaintLocalData {
   Vector<float> factors;
   Vector<float> distances;
+
+  /** Undecoded Base Color source samples for the active (factor > 0) verts of one node, batch-
+   * decoded to scene-linear in one call instead of per-vertex. See the raster engine's identical
+   * pattern in sculpt_paint_image.cc / #ChannelSourceSampler::color for why. */
+  Vector<float3> raw_source_colors;
 };
 
 /** \} */
@@ -86,6 +128,8 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
                                  const Span<float3> vert_normals,
                                  const MeshAttributeData &attribute_data,
                                  const Brush &brush,
+                                 const ChannelSourceSampler *sampler,
+                                 const eMaterialPaintChannel channel,
                                  const float target_value,
                                  const float2 value_range,
                                  const IMB_BlendMode blend_mode,
@@ -95,6 +139,7 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
 {
   SculptSession &ss = *object.runtime->sculpt_session;
   const StrokeCache &cache = *ss.cache;
+  const int thread_id = BLI_task_parallel_thread_id(nullptr);
 
   const Span<int> verts = node.verts();
 
@@ -104,6 +149,9 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
   const MutableSpan<float> factors = tls.factors;
   const MutableSpan<float> distances = tls.distances;
 
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+  const double factors_start = BLI_time_now_seconds();
+#endif
   calc_factors_common_mesh_indexed(depsgraph,
                                    brush,
                                    object,
@@ -113,10 +161,19 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
                                    node,
                                    factors,
                                    distances);
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+  g_scalar_profile.factors_seconds.fetch_add(BLI_time_now_seconds() - factors_start);
+  const double automask_start = BLI_time_now_seconds();
+#endif
 
   if (cache.automasking) {
     auto_mask::calc_vert_factors(depsgraph, object, *cache.automasking, node, verts, factors);
   }
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+  g_scalar_profile.automask_seconds.fetch_add(BLI_time_now_seconds() - automask_start);
+  const double sample_start = BLI_time_now_seconds();
+  int64_t active_num = 0;
+#endif
 
   for (const int i : verts.index_range()) {
     const float factor = factors[i];
@@ -124,9 +181,22 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
       continue;
     }
     const int vert = verts[i];
-    const float blended = apply_scalar_blend(attribute[vert], target_value, factor, blend_mode);
+    /* A source texture replaces the slider value; the brush falloff still rides in the blend
+     * alpha, so the stroke shape is unchanged. */
+    const float target = sampler != nullptr ?
+                             sampler->scalar(channel, vert_positions[vert], thread_id) :
+                             target_value;
+    const float blended = apply_scalar_blend(attribute[vert], target, factor, blend_mode);
     attribute[vert] = math::clamp(blended, value_range.x, value_range.y);
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+    active_num++;
+#endif
   }
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+  g_scalar_profile.sample_and_blend_seconds.fetch_add(BLI_time_now_seconds() - sample_start);
+  g_scalar_profile.vert_num.fetch_add(verts.size());
+  g_scalar_profile.active_vert_num.fetch_add(active_num);
+#endif
 }
 
 static void do_paint_color_task(const Depsgraph &depsgraph,
@@ -138,6 +208,7 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
                                 const GroupedSpan<int> vert_to_face_map,
                                 const MeshAttributeData &attribute_data,
                                 const Brush &brush,
+                                const ChannelSourceSampler *sampler,
                                 const float3 &target_rgb,
                                 const IMB_BlendMode blend_mode,
                                 bke::pbvh::MeshNode &node,
@@ -146,6 +217,7 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
 {
   SculptSession &ss = *object.runtime->sculpt_session;
   const StrokeCache &cache = *ss.cache;
+  const int thread_id = BLI_task_parallel_thread_id(nullptr);
 
   const Span<int> verts = node.verts();
 
@@ -155,6 +227,9 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
   const MutableSpan<float> factors = tls.factors;
   const MutableSpan<float> distances = tls.distances;
 
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+  const double factors_start = BLI_time_now_seconds();
+#endif
   calc_factors_common_mesh_indexed(depsgraph,
                                    brush,
                                    object,
@@ -164,16 +239,52 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
                                    node,
                                    factors,
                                    distances);
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+  g_color_profile.factors_seconds.fetch_add(BLI_time_now_seconds() - factors_start);
+  const double automask_start = BLI_time_now_seconds();
+#endif
 
   if (cache.automasking) {
     auto_mask::calc_vert_factors(depsgraph, object, *cache.automasking, node, verts, factors);
   }
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+  g_color_profile.automask_seconds.fetch_add(BLI_time_now_seconds() - automask_start);
+  const double sample_start = BLI_time_now_seconds();
+  int64_t active_num = 0;
+#endif
 
+  /* Base Color's source is typically a byte (non-scene-linear) image; decoding it one
+   * #IMB_colormanagement_colorspace_to_scene_linear_v3 call per vertex is the dominant cost of
+   * painting that channel (confirmed by profiling the raster engine's identical decode). Gather
+   * the active verts' raw samples first and decode the whole node in one batched call instead. */
+  const bool batch_decode_color = sampler != nullptr &&
+                                  sampler->needs_linear_conversion(
+                                      PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (batch_decode_color) {
+    tls.raw_source_colors.resize(0);
+    tls.raw_source_colors.reserve(verts.size());
+    for (const int i : verts.index_range()) {
+      if (factors[i] <= 0.0f) {
+        continue;
+      }
+      tls.raw_source_colors.append(sampler->color(PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                   vert_positions[verts[i]],
+                                                   thread_id,
+                                                   /*decode_linear=*/false));
+    }
+    ChannelSourceSampler::decode_linear_batch(
+        tls.raw_source_colors, sampler->colorspace(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  }
+
+  int decoded_i = 0;
   for (const int i : verts.index_range()) {
     const float factor = factors[i];
     if (factor <= 0.0f) {
       continue;
     }
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+    active_num++;
+#endif
 
     const float4 current = color::color_vert_get(faces,
                                                  corner_verts,
@@ -181,8 +292,14 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
                                                  color_attribute.span,
                                                  color_attribute.domain,
                                                  verts[i]);
+    const float3 target = batch_decode_color ? tls.raw_source_colors[decoded_i++] :
+                          sampler != nullptr ?
+                              sampler->color(PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                             vert_positions[verts[i]],
+                                             thread_id) :
+                              target_rgb;
     /* Alpha carries brush falloff for IMB blend modes (same convention as color paint). */
-    const float4 paint_color(target_rgb.x, target_rgb.y, target_rgb.z, factor);
+    const float4 paint_color(target.x, target.y, target.z, factor);
     float4 result;
     IMB_blend_color_float(result, current, paint_color, blend_mode);
     color::color_vert_set(faces,
@@ -193,6 +310,11 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
                           result,
                           color_attribute.span);
   }
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+  g_color_profile.sample_and_blend_seconds.fetch_add(BLI_time_now_seconds() - sample_start);
+  g_color_profile.vert_num.fetch_add(verts.size());
+  g_color_profile.active_vert_num.fetch_add(active_num);
+#endif
 }
 
 /** \} */
@@ -230,6 +352,8 @@ static void paint_scalar_channel(const Depsgraph &depsgraph,
                                  const IndexMask &node_mask,
                                  const Brush &brush,
                                  const StringRef attr_name,
+                                 const ChannelSourceSampler *sampler,
+                                 const eMaterialPaintChannel channel,
                                  const float target_value,
                                  const float2 value_range,
                                  const IMB_BlendMode blend_mode,
@@ -256,6 +380,8 @@ static void paint_scalar_channel(const Depsgraph &depsgraph,
                              vert_normals,
                              attribute_data,
                              brush,
+                             sampler,
+                             channel,
                              target_value,
                              value_range,
                              blend_mode,
@@ -277,6 +403,7 @@ static void paint_base_color_channel(
     const Brush &brush,
     const BrushMaterialPaint &brush_paint,
     const PaintModeSettings &mode_settings,
+    const ChannelSourceSampler *sampler,
     const IMB_BlendMode blend_mode,
     const Span<float3> vert_positions,
     const Span<float3> vert_normals,
@@ -320,6 +447,7 @@ static void paint_base_color_channel(
                             vert_to_face_map,
                             attribute_data,
                             brush,
+                            sampler,
                             target_rgb,
                             blend_mode,
                             nodes[i],
@@ -358,10 +486,23 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
     return;
   }
 
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+  const double step_start = BLI_time_now_seconds();
+  g_scalar_profile.reset();
+  g_color_profile.reset();
+#endif
+
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
   bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
 
   const bool invert = ss.cache->toggle_settings.invert;
+
+  /* Erasing pulls the channel back to its neutral value and must not read a source texture. */
+  const ChannelSourceSampler *sampler = invert ? nullptr :
+                                                 ss.cache->material_source_sampler.get();
+  const ChannelSourceSampler *active_sampler = (sampler != nullptr && sampler->is_active()) ?
+                                                   sampler :
+                                                   nullptr;
 
   const Span<float3> vert_positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
   const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, ob);
@@ -386,6 +527,7 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
                                brush,
                                brush_paint,
                                settings,
+                               active_sampler,
                                channel_blend_mode,
                                vert_positions,
                                vert_normals,
@@ -415,6 +557,8 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
                          node_mask,
                          brush,
                          BKE_paint_material_channel_attribute_name(settings, info.channel),
+                         active_sampler,
+                         info.channel,
                          target_value,
                          range,
                          channel_blend_mode,
@@ -426,6 +570,28 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
                          nodes,
                          all_tls);
   }
+
+#ifdef PBR_PAINT_MATERIAL_PROFILE
+  const double step_seconds = BLI_time_now_seconds() - step_start;
+  /* One line per brush dab step per symmetry pass: cheap enough to leave on for a whole stroke
+   * and shows the factors/automasking/sample+blend split, which the per-stroke sampler summary
+   * cannot. */
+  printf(
+      "[pbr_paint] do_paint_material_brush step: total=%.3fms | scalar verts=%lld/%lld "
+      "factors=%.3fms automask=%.3fms sample+blend=%.3fms | color verts=%lld/%lld "
+      "factors=%.3fms automask=%.3fms sample+blend=%.3fms\n",
+      step_seconds * 1000.0,
+      static_cast<long long>(g_scalar_profile.active_vert_num.load()),
+      static_cast<long long>(g_scalar_profile.vert_num.load()),
+      g_scalar_profile.factors_seconds.load() * 1000.0,
+      g_scalar_profile.automask_seconds.load() * 1000.0,
+      g_scalar_profile.sample_and_blend_seconds.load() * 1000.0,
+      static_cast<long long>(g_color_profile.active_vert_num.load()),
+      static_cast<long long>(g_color_profile.vert_num.load()),
+      g_color_profile.factors_seconds.load() * 1000.0,
+      g_color_profile.automask_seconds.load() * 1000.0,
+      g_color_profile.sample_and_blend_seconds.load() * 1000.0);
+#endif
 }
 
 /** \} */

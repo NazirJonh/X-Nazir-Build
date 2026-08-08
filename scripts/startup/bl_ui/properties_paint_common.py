@@ -1206,6 +1206,11 @@ def _material_paint_channel_color_eyedropper_draw(layout, context, data, prop):
     eye.prop_data_path = path
 
 
+def _material_paint_channel_has_source(channel):
+    """True when a source image or any assigned texture (including procedural) drives the channel."""
+    return channel.source_image is not None or channel.source_texture_slot.texture is not None
+
+
 def _draw_material_paint_subpanel_header(
     header,
     context,
@@ -1214,6 +1219,7 @@ def _draw_material_paint_subpanel_header(
     prop=None,
     prop_data=None,
     color_picker_after_socket=False,
+    value_active=True,
     **prop_kwargs,
 ):
     """Panel header: label | socket button | optional value/color field (Principled-style split)."""
@@ -1227,6 +1233,7 @@ def _draw_material_paint_subpanel_header(
     if prop is not None and color_picker_after_socket:
         # Color channels: socket + color strip merged; eyedropper fused to color strip.
         controls = split.row(align=True)
+        controls.active = value_active
         _material_paint_channel_socket_icon_draw(controls, channel_id)
         if "text" not in prop_kwargs:
             prop_kwargs["text"] = ""
@@ -1234,6 +1241,7 @@ def _draw_material_paint_subpanel_header(
         _material_paint_channel_color_eyedropper_draw(controls, context, data, prop)
     else:
         value_row = split.row(align=True)
+        value_row.active = value_active
         _material_paint_channel_socket_icon_draw(value_row, channel_id)
         if prop is not None:
             if "text" not in prop_kwargs:
@@ -1241,26 +1249,85 @@ def _draw_material_paint_subpanel_header(
             value_row.prop(data, prop, **prop_kwargs)
 
 
+def _draw_material_paint_source_texture(panel, channel):
+    """Draw the per-channel source image.
+
+    The source replaces the channel's fixed value while painting, so the value row is drawn
+    inactive whenever a source is set. Mapping (Mapping mode / Size / Angle) is shared by every
+    channel instead of being configured per channel; see #_draw_material_paint_shared_mapping.
+    """
+    slot = channel.source_texture_slot
+
+    row = panel.row(align=True)
+    row.template_ID(channel, "source_image", new="image.new", open="image.open")
+
+    texture = slot.texture
+    if texture is not None and channel.source_image is None:
+        if texture.type == 'IMAGE':
+            # IMAGE texture without an image cannot be sampled. `source_image` already reads as
+            # unset in this state, so `template_ID`'s own unlink button never appears; offer an
+            # explicit way to drop the broken slot instead.
+            row.label(text="", icon='ERROR')
+            row.operator(
+                "paint.material_channel_source_clear", text="", icon='X',
+            ).channel = channel.channel
+            return
+        # Procedural textures are usable as-is.
+
+    elif channel.source_image is None:
+        return
+
+    # Data channels must not be color managed; a color space here silently shifts the values.
+    if channel.source_image is not None and channel.channel != 'BASE_COLOR':
+        colorspace = channel.source_image.colorspace_settings.name
+        if colorspace != "Non-Color":
+            panel.label(text="Source is color managed", icon='INFO')
+
+
+def _draw_material_paint_shared_mapping(layout, material_paint):
+    """Mapping shared by every channel's source texture: Mapping mode, Size (X/Y only), Angle.
+
+    Drawn once, in the Transform panel above the channel toggles, instead of once per channel.
+    Multi-channel patterns (a Base Color texture with a matching Normal/Roughness texture meant
+    to tile together) need identical mapping to stay aligned, so there is deliberately no
+    per-channel override and no Offset control.
+    """
+    slot = material_paint.shared_texture_slot
+    col = layout.column(align=True)
+    col.prop(slot, "map_mode", text="Mapping")
+    col.prop(material_paint, "shared_mapping_size_x", text="Size X", slider=True)
+    col.prop(material_paint, "shared_mapping_size_y", text="Size Y", slider=True)
+    if slot.has_texture_angle:
+        col.prop(slot, "angle", text="Angle")
+
+
 def _draw_material_paint_value_ramp(layout, context, channel, channel_id):
     # One subpanel per scalar ramp channel; open by default.
     # Header: socket color + channel name + numeric Value. Body: gradient + Invert.
+    has_source = _material_paint_channel_has_source(channel)
     header, panel = layout.panel(
         "material_paint_value_%s" % channel_id.lower(),
         default_closed=False,
     )
-    _draw_material_paint_subpanel_header(header, context, channel_id, channel, "value", index=0)
+    _draw_material_paint_subpanel_header(
+        header, context, channel_id, channel, "value", index=0, value_active=not has_source,
+    )
     if not panel:
         return
     panel.separator()
-    row = panel.row(align=True)
-    row.template_material_paint_value_slider(channel, "value", index=0)
-    row.operator(
-        "paint.material_channel_value_invert", text="", icon='ARROW_LEFTRIGHT',
-    ).channel = channel_id
+    col = panel.column(align=True)
+    _draw_material_paint_source_texture(col, channel)
+    if not has_source:
+        row = col.row(align=True)
+        row.template_material_paint_value_slider(channel, "value", index=0)
+        row.operator(
+            "paint.material_channel_value_invert", text="", icon='ARROW_LEFTRIGHT',
+        ).channel = channel_id
     panel.separator()
 
 
 def _draw_material_paint_base_color_panel(layout, context, channel, material_paint):
+    has_source = _material_paint_channel_has_source(channel)
     header, panel = layout.panel(
         "material_paint_value_base_color",
         default_closed=False,
@@ -1273,10 +1340,14 @@ def _draw_material_paint_base_color_panel(layout, context, channel, material_pai
         "base_color",
         prop_data=material_paint,
         color_picker_after_socket=True,
+        value_active=not has_source,
     )
     if not panel:
         return
     panel.use_property_split = False
+    panel.separator()
+    _draw_material_paint_source_texture(panel, channel)
+    panel.separator()
     row = panel.row(align=True)
     row.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
     # Base Color is the only blendable channel.
@@ -1285,14 +1356,26 @@ def _draw_material_paint_base_color_panel(layout, context, channel, material_pai
 
 
 def _draw_material_paint_normal_panel(layout, context, channel):
-    header, _panel = layout.panel(
+    has_source = _material_paint_channel_has_source(channel)
+    header, panel = layout.panel(
         "material_paint_value_normal",
         default_closed=False,
     )
     # normal_color maps tangent XYZ [-1, 1] to RGB [0, 1]; default flat +Z is #8080FF.
     _draw_material_paint_subpanel_header(
-        header, context, 'NORMAL', channel, "normal_color", color_picker_after_socket=True,
+        header,
+        context,
+        'NORMAL',
+        channel,
+        "normal_color",
+        color_picker_after_socket=True,
+        value_active=not has_source,
     )
+    if not panel:
+        return
+    panel.separator()
+    _draw_material_paint_source_texture(panel, channel)
+    panel.separator()
 
 
 def draw_material_paint_channels(
@@ -1320,11 +1403,17 @@ def draw_material_paint_channels(
 
     material_paint = brush.material_paint
     if material_paint is None:
-        layout.operator(
+        # Resolution only matters for images not created yet; once channels exist, this control
+        # does nothing (there is no live-resize), so it is offered alongside the button that
+        # creates them instead of as a permanent row above.
+        row = layout.row(align=True)
+        row.operator(
             "paint.material_paint_brush_ensure",
-            text="Enable PBR Channels for Brush",
+            text="PBR Paint",
             icon='ADD',
         )
+        if paint_mode is not None:
+            row.prop(paint_mode, "new_channel_image_size", text="")
         return
 
     channels = {channel.channel: channel for channel in material_paint.channels}
@@ -1339,10 +1428,25 @@ def draw_material_paint_channels(
         'METALLIC': "Metal",
         'ROUGHNESS': "Rough",
         'SPECULAR': "Spec",
-        'NORMAL': "Normal",
+        'NORMAL': "NRM",
         'HEIGHT': "Height",
         'CUSTOM': "Custom",
     }
+
+    # Transform (shared source-texture mapping) is drawn before the channel toggles, so it reads
+    # as a setup step rather than being buried under whichever channel panels happen to be open.
+    if any(
+        channels[channel_id].use and _material_paint_channel_has_source(channels[channel_id])
+        for channel_id in toggle_ids if channel_id != 'CUSTOM'
+    ):
+        header, panel = layout.panel(
+            "material_paint_transform",
+            default_closed=False,
+        )
+        header.label(text="Transform")
+        if panel:
+            _draw_material_paint_shared_mapping(panel, material_paint)
+        layout.separator()
 
     toggle_row = layout.row(align=True)
     toggle_row.use_property_split = False

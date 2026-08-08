@@ -20,10 +20,12 @@
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_texture_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_xr_types.h"
 
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
@@ -582,6 +584,27 @@ static void version_material_paint_channel_height_defaults(Main &bmain)
   }
 }
 
+static void version_material_paint_channel_source_mtex_defaults(Main &bmain)
+{
+  /* Files saved by earlier revisions of this branch have a zeroed `source_mtex`: size 0 and an
+   * invalid brush map mode, which would make sampling silently return nothing. Preserve any
+   * already-linked Tex; only mapping defaults need repair. */
+  for (Brush &brush : bmain.brushes) {
+    if (brush.material_paint == nullptr) {
+      continue;
+    }
+    for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+      MTex &mtex = brush.material_paint->channels[i].source_mtex;
+      if (!is_zero_v3(mtex.size) && mtex.brush_map_mode <= MTEX_MAP_MODE_STENCIL) {
+        continue;
+      }
+      Tex *tex = mtex.tex;
+      mtex = blender::dna::shallow_copy(MTex());
+      mtex.tex = tex;
+    }
+  }
+}
+
 static void version_solid_color_width_height_defaults(Main &bmain)
 {
   for (Scene &scene : bmain.scenes) {
@@ -980,6 +1003,11 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 49)) {
     version_material_paint_channel_height_defaults(*bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 50)) {
+    /* Files saved during development of this branch may have zeroed source_mtex fields. */
+    version_material_paint_channel_source_mtex_defaults(*bmain);
   }
 
   /**

@@ -8,6 +8,7 @@ blender -b --factory-startup --python tests/python/bl_pbr_channels.py
 
 import os
 import sys
+import unittest
 
 import bpy
 
@@ -274,6 +275,127 @@ def test_metallic_paint_erase_restores_default():
     )
 
 
+class TestChannelSourceImage(unittest.TestCase):
+    def setUp(self):
+        self.brush = bpy.data.brushes.new("SourceTest", mode='SCULPT')
+        bpy.context.tool_settings.sculpt.brush = self.brush
+        bpy.ops.paint.material_paint_brush_ensure()
+        self.channels = {c.channel: c for c in self.brush.material_paint.channels}
+
+    def tearDown(self):
+        bpy.data.brushes.remove(self.brush)
+
+    def test_assign_creates_image_texture(self):
+        image = bpy.data.images.new("SourceImage", 4, 4)
+        channel = self.channels['ROUGHNESS']
+        channel.source_image = image
+
+        self.assertIsNotNone(channel.source_texture_slot.texture)
+        self.assertEqual(channel.source_texture_slot.texture.type, 'IMAGE')
+        self.assertEqual(channel.source_image, image)
+
+    def test_reassign_same_image_reuses_texture(self):
+        image = bpy.data.images.new("SourceImage", 4, 4)
+        channel = self.channels['ROUGHNESS']
+        channel.source_image = image
+        first = channel.source_texture_slot.texture
+        channel.source_image = image
+
+        self.assertIs(channel.source_texture_slot.texture, first)
+
+    def test_same_image_in_two_channels_gets_two_textures(self):
+        image = bpy.data.images.new("SourceImage", 4, 4)
+        self.channels['ROUGHNESS'].source_image = image
+        self.channels['METALLIC'].source_image = image
+
+        self.assertIsNot(
+            self.channels['ROUGHNESS'].source_texture_slot.texture,
+            self.channels['METALLIC'].source_texture_slot.texture,
+        )
+
+    def test_clearing_removes_texture_not_just_image(self):
+        image = bpy.data.images.new("SourceImage", 4, 4)
+        channel = self.channels['ROUGHNESS']
+        channel.source_image = image
+        channel.source_image = None
+
+        # Leaving an empty Tex behind would keep the source nominally active and make the
+        # engine paint zeros instead of the slider value.
+        self.assertIsNone(channel.source_texture_slot.texture)
+        self.assertIsNone(channel.source_image)
+
+    def test_assign_over_procedural_texture_replaces_it(self):
+        procedural = bpy.data.textures.new("Procedural", type='CLOUDS')
+        channel = self.channels['ROUGHNESS']
+        channel.source_texture_slot.texture = procedural
+
+        image = bpy.data.images.new("SourceImage", 4, 4)
+        channel.source_image = image
+
+        self.assertEqual(channel.source_texture_slot.texture.type, 'IMAGE')
+        self.assertIsNot(channel.source_texture_slot.texture, procedural)
+        # The user's procedural texture must not be mutated in place.
+        self.assertEqual(procedural.type, 'CLOUDS')
+
+
+class TestChannelSourceLifecycle(unittest.TestCase):
+    def setUp(self):
+        self.brush = bpy.data.brushes.new("LifecycleTest", mode='SCULPT')
+        bpy.context.tool_settings.sculpt.brush = self.brush
+        bpy.ops.paint.material_paint_brush_ensure()
+        self.channels = {c.channel: c for c in self.brush.material_paint.channels}
+
+    def tearDown(self):
+        if self.brush.name in bpy.data.brushes:
+            bpy.data.brushes.remove(self.brush)
+
+    def test_copying_brush_shares_source_texture(self):
+        image = bpy.data.images.new("SourceImage", 4, 4)
+        self.channels['ROUGHNESS'].source_image = image
+        texture = self.channels['ROUGHNESS'].source_texture_slot.texture
+        users_before = texture.users
+
+        copy = self.brush.copy()
+        try:
+            copied = {c.channel: c for c in copy.material_paint.channels}
+            # A shallow DNA copy shares the Tex, so the copy must register as another user.
+            self.assertIs(copied['ROUGHNESS'].source_texture_slot.texture, texture)
+            self.assertEqual(texture.users, users_before + 1)
+        finally:
+            bpy.data.brushes.remove(copy)
+
+        self.assertEqual(texture.users, users_before)
+
+    def test_removing_brush_releases_source_texture(self):
+        image = bpy.data.images.new("SourceImage", 4, 4)
+        self.channels['ROUGHNESS'].source_image = image
+        texture = self.channels['ROUGHNESS'].source_texture_slot.texture
+        users_before = texture.users
+
+        bpy.data.brushes.remove(self.brush)
+
+        self.assertEqual(texture.users, users_before - 1)
+
+    def test_source_survives_save_and_reload(self):
+        import tempfile
+
+        image = bpy.data.images.new("SourceImage", 4, 4)
+        self.channels['ROUGHNESS'].source_image = image
+        brush_name = self.brush.name
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "source_roundtrip.blend")
+            bpy.ops.wm.save_as_mainfile(filepath=path)
+            bpy.ops.wm.open_mainfile(filepath=path)
+
+            reloaded = bpy.data.brushes[brush_name]
+            channels = {c.channel: c for c in reloaded.material_paint.channels}
+            slot = channels['ROUGHNESS'].source_texture_slot
+            self.assertIsNotNone(slot.texture)
+            self.assertEqual(slot.texture.type, 'IMAGE')
+            self.assertIsNotNone(channels['ROUGHNESS'].source_image)
+
+
 if __name__ == "__main__":
     test_brush_material_paint_lazy_init()
     test_metallic_paint_erase_restores_default()
@@ -281,4 +403,13 @@ if __name__ == "__main__":
     test_vertex_attribute_paint_undo_redo()
     test_scalar_channel_ignores_blend_mode()
     test_custom_channel_without_name_is_inert()
+
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    suite.addTests(loader.loadTestsFromTestCase(TestChannelSourceImage))
+    suite.addTests(loader.loadTestsFromTestCase(TestChannelSourceLifecycle))
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    if not result.wasSuccessful():
+        sys.exit(1)
+
     print("bl_pbr_channels: OK")

@@ -1845,8 +1845,12 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       }
       Image *channel_image;
       ImageUser *channel_iuser;
-      BKE_paint_principled_channel_image_ensure(
-          *bmain, *ob, info.channel, &channel_image, &channel_iuser);
+      BKE_paint_principled_channel_image_ensure(*bmain,
+                                                *ob,
+                                                info.channel,
+                                                paint_mode.new_channel_image_size,
+                                                &channel_image,
+                                                &channel_iuser);
     }
 
     const Vector<PaintMaterialImageTarget> targets = BKE_paint_material_image_targets_get(

@@ -393,17 +393,21 @@ static EnumPropertyItem rna_enum_gpencil_brush_modes_items[] = {
 
 #  include "RNA_access.hh"
 
+#  include "DNA_image_types.h"
+
 #  include "BKE_brush.hh"
 #  include "BKE_colorband.hh"
 #  include "BKE_context.hh"
+#  include "BKE_global.hh"
 #  include "BKE_gpencil_legacy.h"
 #  include "BKE_icons.hh"
 #  include "BKE_layer.hh"
+#  include "BKE_lib_id.hh"
 #  include "BKE_material.hh"
-#  include "BKE_paint.hh"
 #  include "BKE_paint.hh"
 #  include "BKE_paint_types.hh"
 #  include "BKE_preview_image.hh"
+#  include "BKE_texture.h"
 
 #  include "BLI_math_vector_types.hh"
 
@@ -1176,6 +1180,44 @@ static void rna_BrushMaterialPaint_base_color_update(bContext *C, PointerRNA *pt
   rna_BrushMaterialPaint_update(CTX_data_main(C), CTX_data_scene(C), ptr);
 }
 
+/* #MTex (and so #BrushMaterialPaint, which embeds one) is not standard-layout because of
+ * #DNA_DEFINE_CXX_METHODS, so `offsetof(BrushMaterialPaint, shared_source_mapping.size[0])`
+ * cannot be generated for a plain sdna-bound property (MSVC rejects it in the generated RNA
+ * struct initializer). Read/write the field through explicit accessors instead. */
+static float rna_BrushMaterialPaint_shared_mapping_size_x_get(PointerRNA *ptr)
+{
+  const BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
+  return brush_paint->shared_source_mapping.size[0];
+}
+
+static void rna_BrushMaterialPaint_shared_mapping_size_x_set(PointerRNA *ptr, float value)
+{
+  BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
+  brush_paint->shared_source_mapping.size[0] = value;
+}
+
+static float rna_BrushMaterialPaint_shared_mapping_size_y_get(PointerRNA *ptr)
+{
+  const BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
+  return brush_paint->shared_source_mapping.size[1];
+}
+
+static void rna_BrushMaterialPaint_shared_mapping_size_y_set(PointerRNA *ptr, float value)
+{
+  BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
+  brush_paint->shared_source_mapping.size[1] = value;
+}
+
+/* The shared mapping's #MTex.tex is always null (see #BrushMaterialPaint.shared_source_mapping),
+ * so #BKE_paint_invalidate_overlay_tex's tex-identity match against the brush's own mtex/mask_mtex
+ * cannot be relied on here; force the cursor overlay's cached preview texture to rebuild instead
+ * of leaving it stale until something unrelated (e.g. a viewport resize) happens to invalidate it. */
+static void rna_BrushMaterialPaint_shared_mapping_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  BKE_paint_invalidate_overlay_all();
+  rna_BrushMaterialPaint_update(bmain, scene, ptr);
+}
+
 static void rna_BrushMaterialPaint_sync_base_color_update(bContext *C, PointerRNA *ptr)
 {
   Brush *brush = reinterpret_cast<Brush *>(ptr->owner_id);
@@ -1185,7 +1227,8 @@ static void rna_BrushMaterialPaint_sync_base_color_update(bContext *C, PointerRN
   rna_BrushMaterialPaint_update(CTX_data_main(C), CTX_data_scene(C), ptr);
 }
 
-static void rna_BrushMaterialPaint_channels_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+static void rna_BrushMaterialPaint_channels_begin(CollectionPropertyIterator *iter,
+                                                  PointerRNA *ptr)
 {
   BrushMaterialPaint *settings = static_cast<BrushMaterialPaint *>(ptr->data);
   rna_iterator_array_begin(iter,
@@ -1322,6 +1365,84 @@ static void rna_BrushMaterialPaintChannel_normal_color_set(PointerRNA *ptr, cons
   for (int i = 0; i < 3; i++) {
     channel->value[i] = values[i] * 2.0f - 1.0f;
   }
+}
+
+static PointerRNA rna_BrushMaterialPaintChannel_source_image_get(PointerRNA *ptr)
+{
+  BrushMaterialPaintChannel *channel = static_cast<BrushMaterialPaintChannel *>(ptr->data);
+  Tex *tex = channel->source_mtex.tex;
+  /* A procedural texture assigned through `source_texture_slot` has no image to report. */
+  if (tex == nullptr || tex->type != TEX_IMAGE) {
+    return PointerRNA_NULL;
+  }
+  return RNA_id_pointer_create(reinterpret_cast<ID *>(tex->ima));
+}
+
+static void rna_BrushMaterialPaintChannel_source_mtex_reset_mapping(MTex &mtex)
+{
+  /* A freshly attached Tex should start from sane default mapping rather than inheriting
+   * whatever the slot's previous (possibly procedural) texture left behind. */
+  Tex *tex = mtex.tex;
+  mtex = dna::shallow_copy(MTex());
+  mtex.tex = tex;
+}
+
+static void rna_BrushMaterialPaintChannel_source_image_set(PointerRNA *ptr,
+                                                           PointerRNA value,
+                                                           ReportList * /*reports*/)
+{
+  Brush *brush = reinterpret_cast<Brush *>(ptr->owner_id);
+  BrushMaterialPaintChannel *channel = static_cast<BrushMaterialPaintChannel *>(ptr->data);
+  MTex &mtex = channel->source_mtex;
+  Image *image = static_cast<Image *>(value.data);
+
+  if (image == nullptr) {
+    /* Drop the whole Tex, not just its image: an empty Tex would leave the source nominally
+     * active and make the paint engine sample zeros instead of using the slider value. */
+    if (mtex.tex != nullptr) {
+      /* The Tex's own refcount (below) is independent from the Image user-count this property
+       * reports; drop the image reference explicitly, matching the id_us_plus() done wherever
+       * this property assigns one, or RNA's user-count consistency check asserts. Clear the
+       * field too so freeing the now-orphaned Tex later does not decrement it a second time. */
+      if (mtex.tex->type == TEX_IMAGE && mtex.tex->ima != nullptr) {
+        id_us_min(&mtex.tex->ima->id);
+        mtex.tex->ima = nullptr;
+      }
+      id_us_min(&mtex.tex->id);
+      mtex.tex = nullptr;
+    }
+    BKE_brush_tag_unsaved_changes(brush);
+    return;
+  }
+
+  /* Each channel owns its own Tex so the same image can carry different mapping per channel. */
+  if (mtex.tex != nullptr && mtex.tex->type == TEX_IMAGE) {
+    if (mtex.tex->ima != image) {
+      id_us_min(reinterpret_cast<ID *>(mtex.tex->ima));
+      mtex.tex->ima = image;
+      id_us_plus(&image->id);
+    }
+    /* The slot already carries a valid image mapping; swapping the image alone must not touch
+     * the user's mapping settings (including an intentional zero scale). */
+    BKE_brush_tag_unsaved_changes(brush);
+    return;
+  }
+
+  /* Either there is no Tex yet, or it is procedural and belongs to the user; replace the slot
+   * rather than mutating a texture that may be shared elsewhere. */
+  Main *bmain = G_MAIN;
+  Tex *tex = BKE_texture_add(bmain, image->id.name + 2);
+  tex->type = TEX_IMAGE;
+  tex->ima = image;
+  id_us_plus(&image->id);
+
+  if (mtex.tex != nullptr) {
+    id_us_min(&mtex.tex->id);
+  }
+  mtex.tex = tex;
+  rna_BrushMaterialPaintChannel_source_mtex_reset_mapping(mtex);
+  /* BKE_texture_add returns the texture with one user already; the MTex slot is that user. */
+  BKE_brush_tag_unsaved_changes(brush);
 }
 
 }  // namespace blender
@@ -2479,8 +2600,7 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_enum_funcs(
       prop, "rna_BrushMaterialPaintChannel_channel_get_rna", nullptr, nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(
-      prop, "Channel", "Which material paint channel this entry configures");
+  RNA_def_property_ui_text(prop, "Channel", "Which material paint channel this entry configures");
 
   prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
   RNA_def_property_string_funcs(prop,
@@ -2500,7 +2620,8 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "value");
   RNA_def_property_array(prop, 3);
   /* Per-channel: 0..1 for Metallic/Roughness/Specular/Custom, -1..1 for the Normal tangent. */
-  RNA_def_property_float_funcs(prop, nullptr, nullptr, "rna_BrushMaterialPaintChannel_value_range");
+  RNA_def_property_float_funcs(
+      prop, nullptr, nullptr, "rna_BrushMaterialPaintChannel_value_range");
   RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
   RNA_def_property_ui_text(
       prop, "Value", "Paint value (scalar channels use X; Normal uses XYZ tangent)");
@@ -2534,6 +2655,30 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_COLOR);
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
 
+  prop = RNA_def_property(srna, "source_texture_slot", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "BrushTextureSlot");
+  RNA_def_property_pointer_sdna(prop, nullptr, "source_mtex");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Source Texture Slot", "Mapping settings for this channel's source texture");
+
+  /* The user picks an Image; the Tex wrapper that carries the brush mapping is created and
+   * owned behind this property, so the UI never has to expose a Texture data-block. */
+  prop = RNA_def_property(srna, "source_image", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Image");
+  /* Virtual properties (get+set funcs) never get PROP_ID_REFCOUNT auto-set from Image's
+   * STRUCT_ID_REFCOUNT; the setter does its own id_us_plus()/id_us_min(), so this must be set
+   * explicitly or RNA_property_pointer_set's user-count consistency check asserts. */
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_BrushMaterialPaintChannel_source_image_get",
+                                 "rna_BrushMaterialPaintChannel_source_image_set",
+                                 nullptr,
+                                 nullptr);
+  RNA_def_property_ui_text(
+      prop, "Source Image", "Image sampled for this channel instead of its fixed value");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
   srna = RNA_def_struct(brna, "BrushMaterialPaint", nullptr);
   RNA_def_struct_sdna(srna, "BrushMaterialPaint");
   RNA_def_struct_path_func(srna, "rna_BrushMaterialPaint_path");
@@ -2554,6 +2699,41 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
                                     nullptr);
   RNA_def_property_ui_text(prop, "Channels", "Per-channel enable, value, and blend settings");
 
+  /* Shared by every channel's source texture (see #BrushMaterialPaint.shared_source_mapping),
+   * so this is the only mapping control the UI needs to draw once instead of once per channel. */
+  prop = RNA_def_property(srna, "shared_texture_slot", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "BrushTextureSlot");
+  RNA_def_property_pointer_sdna(prop, nullptr, "shared_source_mapping");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Shared Texture Mapping",
+      "Mapping settings shared by every channel's source texture, so multi-channel patterns "
+      "stay aligned");
+
+  /* #shared_texture_slot exposes the generic Brush Texture Slot "scale" (soft range -100..100,
+   * meant for stencils/procedurals); the Transform panel wants a plain 0..1 slider instead, so
+   * these two narrow scalar properties read/write the same underlying size[0]/size[1] fields. */
+  prop = RNA_def_property(srna, "shared_mapping_size_x", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_BrushMaterialPaint_shared_mapping_size_x_get",
+                               "rna_BrushMaterialPaint_shared_mapping_size_x_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Size X", "Horizontal scale of every channel's shared source-texture mapping");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_shared_mapping_update");
+
+  prop = RNA_def_property(srna, "shared_mapping_size_y", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_BrushMaterialPaint_shared_mapping_size_y_get",
+                               "rna_BrushMaterialPaint_shared_mapping_size_y_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Size Y", "Vertical scale of every channel's shared source-texture mapping");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_shared_mapping_update");
+
   prop = RNA_def_property(srna, "base_color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_float_sdna(prop, nullptr, "base_color");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
@@ -2565,9 +2745,8 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   prop = RNA_def_property(srna, "use_sync_base_color_with_brush", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "use_sync_base_color_with_brush", 1);
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
-  RNA_def_property_ui_text(prop,
-                           "Sync with Brush",
-                           "Keep the base color channel synchronized with the brush color");
+  RNA_def_property_ui_text(
+      prop, "Sync with Brush", "Keep the base color channel synchronized with the brush color");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_sync_base_color_update");
 }
 
@@ -4332,7 +4511,6 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "MeshAutomaskingSettings");
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Mesh Automasking Settings", nullptr);
-
 }
 
 /**

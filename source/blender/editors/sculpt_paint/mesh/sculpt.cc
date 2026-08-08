@@ -88,6 +88,7 @@
 #include "ED_view3d.hh"
 
 #include "../paint_intern.hh"
+#include "paint_material_source.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_boundary.hh"
 #include "sculpt_cloth.hh"
@@ -942,6 +943,28 @@ static bool brush_uses_topology_rake(const SculptSession &ss, const Brush &brush
          (ss.bm != nullptr);
 }
 
+/** Whether any material paint channel source on \a brush uses #MTEX_MAP_MODE_AREA, which (like
+ * the brush's own #MTex below) needs #StrokeCache.sculpt_normal to build its local matrix. */
+static bool material_paint_uses_area_mapping(const Brush &brush)
+{
+  if (brush.material_paint == nullptr) {
+    return false;
+  }
+  const BrushMaterialPaint &brush_paint = *brush.material_paint;
+  /* Mapping mode is shared by every channel's source texture (#BrushMaterialPaint.
+   * shared_source_mapping); per-channel #source_mtex only carries the texture identity now. */
+  if (brush_paint.shared_source_mapping.brush_map_mode != MTEX_MAP_MODE_AREA) {
+    return false;
+  }
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    const BrushMaterialPaintChannel &channel = brush_paint.channels[info.channel];
+    if (BKE_paint_material_channel_has_source(channel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Test whether the #StrokeCache.sculpt_normal needs update in #do_brush_action
  */
@@ -963,7 +986,8 @@ static int sculpt_brush_needs_normal(const SculptSession &ss, const Brush &brush
                SCULPT_BRUSH_TYPE_THUMB) ||
           (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_SCENE_PROJECT &&
            brush.project_ray_direction_type == BRUSH_PROJECT_RAY_DIRECTION_PLANE_NORMAL) ||
-          (mask_tex->tex && mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA)) ||
+          (mask_tex->tex && mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA) ||
+          material_paint_uses_area_mapping(brush)) ||
          brush_uses_topology_rake(ss, brush) || BKE_brush_has_cube_tip(&brush, PaintMode::Sculpt);
 }
 
@@ -2482,6 +2506,110 @@ static float brush_strength(const Sculpt &sd,
   return 0.0f;
 }
 
+namespace material {
+
+TexelSampleContext sculpt_texel_sample_context(const SculptSession &ss, const float brush_point[3])
+{
+  const StrokeCache &cache = *ss.cache;
+
+  TexelSampleContext ctx;
+  sub_v3_v3v3(ctx.point, brush_point, cache.plane_offset);
+
+  /* If the active area is being applied for symmetry, flip it across the symmetry axis and
+   * rotate it back to the original position in order to project it. This insures that the brush
+   * texture will be oriented correctly. */
+  float3 point = ctx.point;
+  if (cache.radial_symmetry_pass) {
+    mul_m4_v3(cache.symm_rot_mat_inv.ptr(), point);
+  }
+  ctx.symm_point = symmetry_flip(point, cache.mirror_symmetry_pass);
+
+  ctx.view_point_2d = ED_view3d_project_float_v2_m4(
+      cache.vc->region, ctx.symm_point, cache.projection_mat);
+  return ctx;
+}
+
+}  // namespace material
+
+void sculpt_apply_texture(const SculptSession &ss,
+                          const Brush &brush,
+                          const MTex &mtex,
+                          const material::TexelSampleContext &ctx,
+                          const int thread_id,
+                          float *r_value,
+                          float4 &r_rgba,
+                          ImagePool *pool,
+                          const float4x4 *area_local_mat)
+{
+  const StrokeCache &cache = *ss.cache;
+
+  if (!mtex.tex) {
+    *r_value = 1.0f;
+    copy_v4_fl(r_rgba, 1.0f);
+    return;
+  }
+
+  if (mtex.brush_map_mode == MTEX_MAP_MODE_3D) {
+    /* Get strength by feeding the vertex location directly into a texture. */
+    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, &mtex, ctx.point, r_rgba, 0, pool);
+  }
+  else if (mtex.brush_map_mode == MTEX_MAP_MODE_AREA) {
+    /* Similar to fixed mode, but projects from brush angle
+     * rather than view direction. */
+    const float4x4 &local_mat = area_local_mat ? *area_local_mat : cache.brush_local_mat;
+    float3 symm_point = ctx.symm_point;
+    mul_m4_v3(local_mat.ptr(), symm_point);
+
+    float x = symm_point[0];
+    float y = symm_point[1];
+
+    x *= mtex.size[0];
+    y *= mtex.size[1];
+
+    x += mtex.ofs[0];
+    y += mtex.ofs[1];
+
+    paint_get_tex_pixel(&mtex, x, y, pool, thread_id, r_value, r_rgba);
+
+    add_v3_fl(r_rgba, brush.texture_sample_bias);  // v3 -> Ignore alpha
+    *r_value -= brush.texture_sample_bias;
+  }
+  else {
+    /* Still no symmetry supported for other paint modes.
+     * Sculpt does it DIY. */
+    const float point_3d[3] = {ctx.view_point_2d[0], ctx.view_point_2d[1], 0.0f};
+    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, &mtex, point_3d, r_rgba, 0, pool);
+  }
+}
+
+void sculpt_apply_texture(const SculptSession &ss,
+                          const Brush &brush,
+                          const MTex &mtex,
+                          const float brush_point[3],
+                          const int thread_id,
+                          float *r_value,
+                          float4 &r_rgba,
+                          ImagePool *pool,
+                          const float4x4 *area_local_mat)
+{
+  /* Avoid paying for #sculpt_texel_sample_context (a view-projection matrix multiply) on the
+   * common no-texture path, e.g. the mask-texture wrapper below when the brush has none set. */
+  if (!mtex.tex) {
+    *r_value = 1.0f;
+    copy_v4_fl(r_rgba, 1.0f);
+    return;
+  }
+  sculpt_apply_texture(ss,
+                       brush,
+                       mtex,
+                       material::sculpt_texel_sample_context(ss, brush_point),
+                       thread_id,
+                       r_value,
+                       r_rgba,
+                       pool,
+                       area_local_mat);
+}
+
 void sculpt_apply_texture(const SculptSession &ss,
                           const Brush &brush,
                           const float brush_point[3],
@@ -2489,62 +2617,8 @@ void sculpt_apply_texture(const SculptSession &ss,
                           float *r_value,
                           float4 &r_rgba)
 {
-  const StrokeCache &cache = *ss.cache;
   const MTex *mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
-
-  if (!mtex->tex) {
-    *r_value = 1.0f;
-    copy_v4_fl(r_rgba, 1.0f);
-    return;
-  }
-
-  float point[3];
-  sub_v3_v3v3(point, brush_point, cache.plane_offset);
-
-  if (mtex->brush_map_mode == MTEX_MAP_MODE_3D) {
-    /* Get strength by feeding the vertex location directly into a texture. */
-    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, mtex, point, r_rgba, 0, ss.tex_pool);
-  }
-  else {
-    /* If the active area is being applied for symmetry, flip it
-     * across the symmetry axis and rotate it back to the original
-     * position in order to project it. This insures that the
-     * brush texture will be oriented correctly. */
-    if (cache.radial_symmetry_pass) {
-      mul_m4_v3(cache.symm_rot_mat_inv.ptr(), point);
-    }
-    float3 symm_point = symmetry_flip(point, cache.mirror_symmetry_pass);
-
-    /* Still no symmetry supported for other paint modes.
-     * Sculpt does it DIY. */
-    if (mtex->brush_map_mode == MTEX_MAP_MODE_AREA) {
-      /* Similar to fixed mode, but projects from brush angle
-       * rather than view direction. */
-
-      mul_m4_v3(cache.brush_local_mat.ptr(), symm_point);
-
-      float x = symm_point[0];
-      float y = symm_point[1];
-
-      x *= mtex->size[0];
-      y *= mtex->size[1];
-
-      x += mtex->ofs[0];
-      y += mtex->ofs[1];
-
-      paint_get_tex_pixel(mtex, x, y, ss.tex_pool, thread_id, r_value, r_rgba);
-
-      add_v3_fl(r_rgba, brush.texture_sample_bias);  // v3 -> Ignore alpha
-      *r_value -= brush.texture_sample_bias;
-    }
-    else {
-      const float2 point_2d = ED_view3d_project_float_v2_m4(
-          cache.vc->region, symm_point, cache.projection_mat);
-      const float point_3d[3] = {point_2d[0], point_2d[1], 0.0f};
-      *r_value = BKE_brush_sample_tex_3d(
-          cache.paint, &brush, mtex, point_3d, r_rgba, 0, ss.tex_pool);
-    }
-  }
+  sculpt_apply_texture(ss, brush, *mtex, brush_point, thread_id, r_value, r_rgba, ss.tex_pool);
 }
 
 void calc_vertex_displacement(const SculptSession &ss, const Brush &brush, float translation[3])
@@ -2709,7 +2783,13 @@ static float3 calc_sculpt_normal(const Depsgraph &depsgraph,
   const SculptSession &ss = *ob.runtime->sculpt_session;
   switch (brush.sculpt_plane) {
     case SCULPT_DISP_DIR_AREA:
-      return calc_area_normal(depsgraph, brush, ob, node_mask).value_or(float3(0));
+      /* WORKAROUND: `calc_area_normal` returns nullopt when this dab's vertices don't accumulate
+       * a usable normal (e.g. the view-facing filter in #calc_area_normal_and_center_node_mesh
+       * rejects all of them). Falling back to a zero vector here used to leave
+       * #StrokeCache.sculpt_normal zeroed, which made #calc_brush_local_mat's Area Plane frame
+       * (used by material paint channel sources) collapse to a singular matrix. #view_normal is
+       * always a valid unit vector and is the same fallback #SCULPT_DISP_DIR_VIEW uses below. */
+      return calc_area_normal(depsgraph, brush, ob, node_mask).value_or(ss.cache->view_normal);
     case SCULPT_DISP_DIR_VIEW:
       return ss.cache->view_normal;
     case SCULPT_DISP_DIR_X:
@@ -2846,6 +2926,18 @@ static void calc_brush_local_mat(const float rotation,
   invert_m4_m4(local_mat, tmat);
 }
 
+namespace material {
+
+float4x4 calc_area_local_mat(const Object &ob, const float rotation)
+{
+  float4x4 local_mat;
+  float4x4 local_mat_inv_unused;
+  calc_brush_local_mat(rotation, ob, local_mat.ptr(), local_mat_inv_unused.ptr());
+  return local_mat;
+}
+
+}  // namespace material
+
 float3 tilt_apply_to_normal(const Object &object,
                             const float4x4 &view_inverse,
                             const float3 &normal,
@@ -2889,6 +2981,11 @@ static void update_brush_local_mat(const Sculpt &sd, Object &ob)
     const MTex *mask_tex = BKE_brush_mask_texture_get(brush, OB_MODE_SCULPT);
     calc_brush_local_mat(
         mask_tex->rot, ob, cache->brush_local_mat.ptr(), cache->brush_local_mat_inv.ptr());
+    /* Material paint channel sources have their own rotation, which #cache->brush_local_mat
+     * above (built from the brush's own #MTex) does not account for. */
+    if (cache->material_source_sampler) {
+      cache->material_source_sampler->update_area_local_mats(ob);
+    }
   }
 }
 
@@ -2922,12 +3019,10 @@ static bool sculpt_pbvh_update_pixels(const Depsgraph &depsgraph,
    * the first target's tile layout already matches (Material maps of equal size). */
   paint::image::ImageData &image_data = *cache.image_paint_targets[0].data;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
-  const StringRef uv_map_name = BKE_paint_canvas_uvmap_name_get(&paint_mode_settings, &ob)
-                                    .value_or("");
+  const StringRef uv_map_name =
+      BKE_paint_canvas_uvmap_name_get(&paint_mode_settings, &ob).value_or("");
   const std::string layout_key = BKE_paint_pixels_layout_key_get(
-      *image_data.image,
-      *image_data.image_user,
-      uv_map_name);
+      *image_data.image, *image_data.image_user, uv_map_name);
   const bool need_rebuild = pbvh.pixels_ == nullptr || pbvh.pixels_->flags.dirty ||
                             pbvh.pixels_->layout_key != layout_key;
 
@@ -3494,10 +3589,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
                           SCULPT_use_image_paint_brush(paint_mode_settings, ob, &brush);
   double perf_dab_start = 0.0;
   if (perf_trace) {
-    const int symmetry_passes = ss.cache ?
-                                    (ss.cache->radial_symmetry_pass + 1) *
-                                    (ss.cache->mirror_symmetry_pass + 1) :
-                                    1;
+    const int symmetry_passes = ss.cache ? (ss.cache->radial_symmetry_pass + 1) *
+                                               (ss.cache->mirror_symmetry_pass + 1) :
+                                           1;
     paint_material_channel_perf::dab_begin(symmetry_passes);
     perf_dab_start = paint_material_channel_perf::now_seconds();
   }
@@ -3527,8 +3621,8 @@ static void do_brush_action(const Depsgraph &depsgraph,
       if (perf_trace) {
         paint_material_channel_perf::add_section_us(
             paint_material_channel_perf::Section::DoBrushActionTotal,
-            paint_material_channel_perf::seconds_to_us(
-                paint_material_channel_perf::now_seconds() - perf_dab_start));
+            paint_material_channel_perf::seconds_to_us(paint_material_channel_perf::now_seconds() -
+                                                       perf_dab_start));
         paint_material_channel_perf::dab_end_log();
       }
 #endif
@@ -3546,8 +3640,8 @@ static void do_brush_action(const Depsgraph &depsgraph,
     if (perf_trace) {
       paint_material_channel_perf::add_section_us(
           paint_material_channel_perf::Section::DoBrushActionTotal,
-          paint_material_channel_perf::seconds_to_us(
-              paint_material_channel_perf::now_seconds() - perf_dab_start));
+          paint_material_channel_perf::seconds_to_us(paint_material_channel_perf::now_seconds() -
+                                                     perf_dab_start));
       paint_material_channel_perf::dab_end_log();
     }
 #endif
@@ -3813,8 +3907,8 @@ static void do_brush_action(const Depsgraph &depsgraph,
   if (perf_trace) {
     paint_material_channel_perf::add_section_us(
         paint_material_channel_perf::Section::DoBrushActionTotal,
-        paint_material_channel_perf::seconds_to_us(
-            paint_material_channel_perf::now_seconds() - perf_dab_start));
+        paint_material_channel_perf::seconds_to_us(paint_material_channel_perf::now_seconds() -
+                                                   perf_dab_start));
     paint_material_channel_perf::dab_end_log();
   }
 #endif
@@ -5299,9 +5393,9 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   brush_init_tex(sd, ss);
 
   const PaintModeSettings &paint_mode_init = tool_settings->paint_mode;
-  const bool needs_color_attributes =
-      brush_type_is_paint(brush->sculpt_brush_type) &&
-      paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE;
+  const bool needs_color_attributes = brush_type_is_paint(brush->sculpt_brush_type) &&
+                                      paint_mode_init.canvas_source ==
+                                          PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE;
 
   if (needs_color_attributes) {
     BKE_sculpt_color_layer_create_if_needed(&ob);
@@ -5335,7 +5429,7 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
 
         bool created = false;
         const std::string attr_name = BKE_paint_material_channel_attribute_name(paint_mode_init,
-                                                                                 info.channel);
+                                                                                info.channel);
         const MaterialPaintAttributeStatus status =
             info.is_color ? BKE_paint_mesh_material_color_attribute_ensure(mesh, &created) :
                             BKE_paint_mesh_material_attribute_ensure(mesh, attr_name, &created);
@@ -5358,10 +5452,16 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
         }
         if (info.is_color) {
           /* Always activate the color attribute when Base Color is enabled, so Workbench and the
-           * undo snapshot target what the stroke writes (even if the attribute already existed). */
+           * undo snapshot target what the stroke writes (even if the attribute already existed).
+           */
           BKE_id_attributes_active_color_set(&mesh.id, info.attribute_name);
         }
       }
+
+      /* Built here, alongside the per-stroke attribute creation, so the image pool lives exactly
+       * as long as the stroke does. */
+      ss.cache->material_source_sampler = std::make_unique<material::ChannelSourceSampler>(
+          ss, *brush, brush_paint, paint_mode_init);
     }
     if (any_created) {
       DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
@@ -5387,13 +5487,20 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
         }
         Image *image;
         ImageUser *iuser;
-        if (!BKE_paint_principled_channel_image_ensure(*bmain, ob, info.channel, &image, &iuser)) {
+        if (!BKE_paint_principled_channel_image_ensure(
+                *bmain, ob, info.channel, paint_mode_init.new_channel_image_size, &image, &iuser))
+        {
           BKE_reportf(op->reports,
                       RPT_WARNING,
                       TIP_("%s channel has no paintable image texture on the active material"),
                       IFACE_(info.ui_name));
         }
       }
+
+      /* Same stroke-scoped sampler as Material Paint: raster image targets also sample per-channel
+       * sources through StrokeCache::material_source_sampler. */
+      ss.cache->material_source_sampler = std::make_unique<material::ChannelSourceSampler>(
+          ss, *brush, brush_paint, paint_mode_init);
     }
   }
 
@@ -5961,10 +6068,16 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
   /* Cache projection matrix. */
   cache->projection_mat = ED_view3d_ob_project_mat_get(cache->vc->rv3d, &ob);
 
+  const float3 x_axis(1.0f, 0.0f, 0.0f);
+  const float3 y_axis(0.0f, 1.0f, 0.0f);
   const float3 z_axis(0.0f, 0.0f, 1.0f);
   ob.runtime->world_to_object = math::invert(ob.object_to_world());
-  cache->view_normal = math::normalize(math::transform_direction(
-      ob.world_to_object() * float4x4(cache->vc->rv3d->viewinv), z_axis));
+  const float4x4 view_to_object = ob.world_to_object() * float4x4(cache->vc->rv3d->viewinv);
+  cache->view_normal = math::normalize(math::transform_direction(view_to_object, z_axis));
+  /* Camera right/up, in the same object space as #view_normal: together they are the basis a
+   * View-mapped brush texture (e.g. a Normal-map decal) is authored in. */
+  cache->view_right = math::normalize(math::transform_direction(view_to_object, x_axis));
+  cache->view_up = math::normalize(math::transform_direction(view_to_object, y_axis));
   cache->view_origin = math::transform_point(ob.world_to_object(),
                                              float3(cache->vc->rv3d->viewinv[3]));
 

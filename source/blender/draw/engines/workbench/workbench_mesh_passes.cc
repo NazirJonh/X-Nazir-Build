@@ -123,25 +123,18 @@ void OpaquePass::sync(const SceneState &scene_state, SceneResources &resources)
       uint8_t(StencilBits::OBJECT), 0xFF, uint8_t(StencilBits::OBJECT_IN_FRONT));
   gbuffer_ps_.init_subpasses(ePipelineType::OPAQUE, scene_state.lighting_type, clip);
 
-  deferred_ps_.init();
-  deferred_ps_.state_set(DRW_STATE_WRITE_COLOR);
-  deferred_ps_.shader_set(ShaderCache::get().resolve_get(scene_state.lighting_type,
-                                                         scene_state.draw_cavity,
-                                                         scene_state.draw_curvature,
-                                                         scene_state.draw_shadows));
-  deferred_ps_.push_constant("force_shadowing", false);
-  deferred_ps_.bind_ubo(WB_WORLD_SLOT, resources.world_buf);
-  deferred_ps_.bind_texture(WB_MATCAP_SLOT, resources.matcap_tx);
-  deferred_ps_.bind_texture("normal_tx", &gbuffer_normal_tx);
-  deferred_ps_.bind_texture("material_tx", &gbuffer_material_tx);
-  deferred_ps_.bind_texture("depth_tx", &resources.depth_tx);
-  deferred_ps_.bind_texture("stencil_tx", &deferred_ps_stencil_tx);
-  resources.cavity.setup_resolve_pass(deferred_ps_, resources);
-  deferred_ps_.draw_procedural(GPU_PRIM_TRIS, 1, 3);
+  /* Poly Paint: #deferred_ps_ (the fullscreen composite draw) is deliberately built in #draw(),
+   * not here, unlike the two gbuffer passes above. #sync() runs in `begin_sync()`, before any
+   * object has been synced this frame, so #SceneResources::material_ext_needed - set from each
+   * synced object's material props - is not known yet. #draw() runs after every object_sync call
+   * for the frame, so the shader variant selected there (#ShaderCache::resolve_get) can correctly
+   * reflect whether this frame actually has a Poly Paint object needing full-precision material
+   * data, instead of being one frame late. */
 }
 
 void OpaquePass::draw(Manager &manager,
                       View &view,
+                      const SceneState &scene_state,
                       SceneResources &resources,
                       int2 resolution,
                       ShadowPass *shadow_pass)
@@ -156,6 +149,20 @@ void OpaquePass::draw(Manager &manager,
                                gpu::TextureFormat::SFLOAT_16_16,
                                GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_ATTACHMENT);
 
+  /* Poly Paint: only acquired in frames with at least one object needing full-precision
+   * Roughness/Metallic/Specular (see #SceneResources::material_ext_needed), so frames without one
+   * pay no extra VRAM or bandwidth for it. */
+  const bool use_material_ext = resources.material_ext_needed;
+  if (use_material_ext) {
+    gbuffer_material_ext_tx.acquire_2d(resolution,
+                                       gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                       GPU_TEXTURE_USAGE_SHADER_READ |
+                                           GPU_TEXTURE_USAGE_ATTACHMENT);
+  }
+  GPUAttachment material_ext_attachment = use_material_ext ?
+                                             GPU_ATTACHMENT_TEXTURE(gbuffer_material_ext_tx) :
+                                             GPU_ATTACHMENT_NONE;
+
   GPUAttachment object_id_attachment = GPU_ATTACHMENT_NONE;
   if (resources.object_id_tx.is_valid()) {
     object_id_attachment = GPU_ATTACHMENT_TEXTURE(resources.object_id_tx);
@@ -165,7 +172,8 @@ void OpaquePass::draw(Manager &manager,
     gbuffer_in_front_fb.ensure(GPU_ATTACHMENT_TEXTURE(resources.depth_tx),
                                GPU_ATTACHMENT_TEXTURE(gbuffer_material_tx),
                                GPU_ATTACHMENT_TEXTURE(gbuffer_normal_tx),
-                               object_id_attachment);
+                               object_id_attachment,
+                               material_ext_attachment);
     gbuffer_in_front_fb.bind();
 
     manager.submit(gbuffer_in_front_ps_, view);
@@ -179,7 +187,8 @@ void OpaquePass::draw(Manager &manager,
     gbuffer_fb.ensure(GPU_ATTACHMENT_TEXTURE(resources.depth_tx),
                       GPU_ATTACHMENT_TEXTURE(gbuffer_material_tx),
                       GPU_ATTACHMENT_TEXTURE(gbuffer_normal_tx),
-                      object_id_attachment);
+                      object_id_attachment,
+                      material_ext_attachment);
     gbuffer_fb.bind();
 
     manager.submit(gbuffer_ps_, view);
@@ -210,11 +219,50 @@ void OpaquePass::draw(Manager &manager,
     /** Don't override the shadow debug output. */
     deferred_fb.ensure(GPU_ATTACHMENT_NONE, GPU_ATTACHMENT_TEXTURE(resources.color_tx));
     deferred_fb.bind();
+
+    /* Poly Paint: built here rather than in #sync(), which runs before any object is synced this
+     * frame and so cannot know #use_material_ext yet (see the comment on #sync()'s removed block
+     * above). */
+    deferred_ps_.init();
+    deferred_ps_.state_set(DRW_STATE_WRITE_COLOR);
+    gpu::Shader *deferred_sh = ShaderCache::get().resolve_get(scene_state.lighting_type,
+                                                              scene_state.draw_cavity,
+                                                              scene_state.draw_curvature,
+                                                              scene_state.draw_shadows);
+    /* #use_material_ext is a specialization constant (one compiled shader, runtime-set value),
+     * not a permutation axis like the ones #resolve_get selects between above: unlike those,
+     * whether this frame needs it is only known once every object has been synced (see the
+     * comment above), too late for the #ShaderCache lookup-by-name #resolve_get performs. */
+    deferred_ps_.specialize_constant(deferred_sh, "use_material_ext", use_material_ext);
+    deferred_ps_.shader_set(deferred_sh);
+    deferred_ps_.push_constant("force_shadowing", false);
+    deferred_ps_.bind_ubo(WB_WORLD_SLOT, resources.world_buf);
+    deferred_ps_.bind_texture(WB_MATCAP_SLOT, resources.matcap_tx);
+    deferred_ps_.bind_texture("normal_tx", &gbuffer_normal_tx);
+    deferred_ps_.bind_texture("material_tx", &gbuffer_material_tx);
+    deferred_ps_.bind_texture("depth_tx", &resources.depth_tx);
+    deferred_ps_.bind_texture("stencil_tx", &deferred_ps_stencil_tx);
+    /* Poly Paint: material_ext_tx has no `condition()` in the shader (see the comment on it in
+     * #Resources), so it is always sampled and must always be bound to something, even in frames
+     * that do not need it - #use_material_ext being false there means its content is never read
+     * for anything, so a cheap placeholder is enough. */
+    if (use_material_ext) {
+      deferred_ps_.bind_texture("material_ext_tx", &gbuffer_material_ext_tx);
+    }
+    else {
+      deferred_ps_.bind_texture("material_ext_tx", resources.dummy_texture_tx);
+    }
+    resources.cavity.setup_resolve_pass(deferred_ps_, resources);
+    deferred_ps_.draw_procedural(GPU_PRIM_TRIS, 1, 3);
+
     manager.submit(deferred_ps_, view);
   }
 
   gbuffer_normal_tx.release();
   gbuffer_material_tx.release();
+  if (use_material_ext) {
+    gbuffer_material_ext_tx.release();
+  }
 }
 
 bool OpaquePass::is_empty() const

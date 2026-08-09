@@ -389,6 +389,9 @@ class Instance : public DrawEngine {
       material_props = material_props_usage_get(*scene_state_.scene, *ob_ref.object);
     }
     const bool use_material_props = material_props.any();
+    /* Poly Paint: read by #OpaquePass::draw to decide whether the full-precision material_ext
+     * G-buffer texture is worth allocating this frame at all. */
+    resources_.material_ext_needed |= use_material_props;
 
     if (object_state.use_per_material_batches) {
       const int material_count = BKE_object_material_used_with_fallback_eval(*ob_ref.object);
@@ -487,6 +490,9 @@ class Instance : public DrawEngine {
     if (material_props.any()) {
       features |= SCULPT_BATCH_MATERIAL_PROPS;
     }
+    /* Poly Paint: read by #OpaquePass::draw to decide whether the full-precision material_ext
+     * G-buffer texture is worth allocating this frame at all. */
+    resources_.material_ext_needed |= material_props.any();
 
     if (object_state.use_per_material_batches) {
       for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, features)) {
@@ -637,8 +643,12 @@ class Instance : public DrawEngine {
     GPU_framebuffer_multi_clear(resources_.clear_fb, clear_colors);
     GPU_framebuffer_clear_depth_stencil(resources_.clear_fb, 1.0f, 0x00);
 
-    opaque_ps_.draw(
-        manager, view_, resources_, resolution, scene_state_.draw_shadows ? &shadow_ps_ : nullptr);
+    opaque_ps_.draw(manager,
+                    view_,
+                    scene_state_,
+                    resources_,
+                    resolution,
+                    scene_state_.draw_shadows ? &shadow_ps_ : nullptr);
     transparent_ps_.draw(manager, view_, resources_, resolution);
     transparent_depth_ps_.draw(manager, view_, resources_);
 

@@ -29,6 +29,14 @@ struct Resources {
   [[compilation_constant]] bool use_cavity;
   [[compilation_constant]] bool use_curvature;
   [[compilation_constant]] bool use_shadow;
+  /* Poly Paint: a specialization constant (one compiled shader, value set per frame via
+   * #PassBase::specialize_constant), not a permutation like the constants above - whether this
+   * frame needs it is only known once every object has been synced (see
+   * #SceneResources::material_ext_needed), too late for #ShaderCache::resolve_get's
+   * lookup-by-permutation-name to select a differently-compiled variant. False for every frame
+   * without an object needing full-precision Roughness/Metallic/Specular, so #material_ext_tx is
+   * not even sampled and this behaves exactly like it did before Poly Paint added the texture. */
+  [[specialization_constant(false)]] bool use_material_ext;
 
   [[legacy_info]] ShaderCreateInfo draw_view;
   [[sampler(3)]] sampler2DDepth depth_tx;
@@ -36,6 +44,13 @@ struct Resources {
   [[sampler(5)]] sampler2D material_tx;
 
   [[sampler(6), condition(use_curvature)]] usampler2D object_id_tx;
+
+  /* Poly Paint: unlike the sampler above, this cannot use `condition()` - that only works for a
+   * #compilation_constant (a real permutation axis baked into the resource list at compile time),
+   * and #use_material_ext is a #specialization_constant instead (see the comment on it above), so
+   * this slot is always part of the compiled shader. The frames that do not need it bind a
+   * harmless placeholder texture instead of leaving the slot unbound. */
+  [[sampler(7)]] sampler2D material_ext_tx;
 
   [[sampler(8), condition(use_shadow)]] usampler2D stencil_tx;
 
@@ -85,7 +100,21 @@ struct FragOut {
   }
   else if (srt.lighting_mode == WORKBENCH_LIGHTING_STUDIO) [[static_branch]] {
     float roughness = 0.0f, metallic = 0.0f, specular = 0.0f;
-    workbench::float_triplet_decode(mat_data.a, roughness, metallic, specular);
+    /* Poly Paint: #use_material_ext is a specialization constant (see the comment on it in
+     * #Resources), not a #compilation_constant like #lighting_mode above, so this is a plain
+     * runtime branch rather than `[[static_branch]]`. */
+    if (srt.use_material_ext) {
+      /* Bypass the 11-bit packed triplet entirely for frames that carry the full-precision
+       * buffer, so painted Metallic/Roughness/Specular gradients stay smooth instead of banding
+       * at #TARGET_BITCOUNT's discrete levels. */
+      float3 ext = texture(srt.material_ext_tx, uv).rgb;
+      roughness = ext.x;
+      metallic = ext.y;
+      specular = ext.z;
+    }
+    else {
+      workbench::float_triplet_decode(mat_data.a, roughness, metallic, specular);
+    }
     color.rgb = workbench::get_world_lighting(
         srt.world, base_color, roughness, metallic, specular, N, V);
   }

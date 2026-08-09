@@ -80,7 +80,8 @@ void float_triplet_decode(float data, float &v1, float &v2, float &v3)
   int idata = int(data);
   v1 = float(idata & v1_mask) * (1.0f / float(v1_mask));
   v2 = float((idata >> int(ROUGHNESS_BITS)) & v2_mask) * (1.0f / float(v2_mask));
-  v3 = float(idata >> int(ROUGHNESS_BITS + METALLIC_BITS)) * (1.0f / float(v3_mask));
+  v3 = float((idata >> int(ROUGHNESS_BITS + METALLIC_BITS)) & v3_mask) *
+       (1.0f / float(v3_mask));
 }
 
 }  // namespace workbench

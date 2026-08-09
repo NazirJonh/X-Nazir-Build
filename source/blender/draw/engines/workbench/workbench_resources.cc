@@ -109,6 +109,10 @@ void SceneResources::load_jitter_tx(int total_samples)
 
 void SceneResources::init(const SceneState &scene_state, const DRWContext *ctx)
 {
+  /* Poly Paint: reset every frame; #Instance::object_sync (via #mesh_sync/#sculpt_sync) sets it
+   * again for this frame as objects are synced. */
+  material_ext_needed = false;
+
   const View3DShading &shading = scene_state.shading;
 
   world_buf.viewport_size = ctx->viewport_size_get();

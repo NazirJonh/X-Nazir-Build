@@ -330,6 +330,15 @@ struct OpaqueOut {
   [[frag_color(0)]] float4 material;
   [[frag_color(1)]] float2 normal;
   [[frag_color(2)]] uint object_id;
+  /* Poly Paint: full-precision Roughness/Metallic/Specular, alongside the same three values
+   * packed into `material.a` at #TARGET_BITCOUNT precision (see #float_triplet_encode). Written
+   * unconditionally by every object, painted or not - the cost is a few cheap ALU ops, not a
+   * shader permutation - but the framebuffer attachment behind this output only exists in frames
+   * that have at least one object needing the extra precision (see
+   * #SceneResources::material_ext_needed), the same way `object_id` above is always written yet
+   * its attachment is only bound when #SceneResources::object_id_tx is valid. An unbound
+   * attachment silently discards the write, so this is safe either way. */
+  [[frag_color(3)]] float4 material_ext;
 };
 
 [[fragment]] void frag_opaque([[resource_table]] Resources &srt,
@@ -342,6 +351,7 @@ struct OpaqueOut {
 
   frag_out.material = float4(
       v_out.color, float_triplet_encode(v_out.roughness, v_out.metallic, v_out.specular));
+  frag_out.material_ext = float4(v_out.roughness, v_out.metallic, v_out.specular, 0.0f);
 
   if (srt.use_texture) [[static_branch]] {
     frag_out.material.rgb = color::image_color(srt.texture, v_out.uv);

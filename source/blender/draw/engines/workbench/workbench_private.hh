@@ -243,6 +243,16 @@ struct SceneResources {
 
   TextureFromPool object_id_tx = "wb_object_id_tx";
 
+  /**
+   * Poly Paint: set during #Instance::object_sync (via #mesh_sync/#sculpt_sync) whenever the
+   * synced object has at least one vertex-painted material channel visible in the shader (see
+   * #material_props_usage_get). Read once per frame by #OpaquePass::draw to decide whether the
+   * full-precision material_ext G-buffer texture is worth allocating this frame at all - kept
+   * false (the default, reset every frame in #SceneResources::init) for every frame without such
+   * an object, so those frames pay no extra VRAM or bandwidth for it.
+   */
+  bool material_ext_needed = false;
+
   TextureRef color_tx;
   TextureRef depth_tx;
   TextureRef depth_in_front_tx;
@@ -332,6 +342,8 @@ class OpaquePass {
  public:
   TextureFromPool gbuffer_normal_tx = {"gbuffer_normal_tx"};
   TextureFromPool gbuffer_material_tx = {"gbuffer_material_tx"};
+  /** Poly Paint: only acquired/attached in frames where #SceneResources::material_ext_needed. */
+  TextureFromPool gbuffer_material_ext_tx = {"gbuffer_material_ext_tx"};
 
   Texture shadow_depth_stencil_tx = {"shadow_depth_stencil_tx"};
   gpu::Texture *deferred_ps_stencil_tx = nullptr;
@@ -348,6 +360,7 @@ class OpaquePass {
   void sync(const SceneState &scene_state, SceneResources &resources);
   void draw(Manager &manager,
             View &view,
+            const SceneState &scene_state,
             SceneResources &resources,
             int2 resolution,
             class ShadowPass *shadow_pass);

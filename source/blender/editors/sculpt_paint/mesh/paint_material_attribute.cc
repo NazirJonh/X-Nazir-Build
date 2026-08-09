@@ -11,6 +11,7 @@
 
 #include <string>
 
+#include "BKE_attribute.h"
 #include "BKE_attribute.hh"
 #include "BKE_context.hh"
 #include "BKE_mesh.hh"
@@ -96,10 +97,20 @@ static wmOperatorStatus material_attribute_add_exec(bContext *C, wmOperator *op)
   const eMaterialPaintChannel channel = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
 
+  if (!info.supports_vertex_paint) {
+    /* Normal/Height/Emission are texture-map-only channels: creating a vertex attribute for them
+     * would just leave dead data the vertex canvas never writes. */
+    BKE_reportf(op->reports,
+               RPT_ERROR,
+               "%s channel has no per-vertex storage",
+               IFACE_(info.ui_name));
+    return OPERATOR_CANCELLED;
+  }
+
   const std::string attr_name = material_attribute_name_get(C, op);
   bool created = false;
   const MaterialPaintAttributeStatus status =
-      info.is_color ? BKE_paint_mesh_material_color_attribute_ensure(*mesh, &created) :
+      info.is_color ? BKE_paint_mesh_material_color_attribute_ensure(*mesh, channel, &created) :
                       BKE_paint_mesh_material_attribute_ensure(*mesh, attr_name, &created);
 
   if (status != MaterialPaintAttributeStatus::Ok) {
@@ -141,6 +152,9 @@ static wmOperatorStatus material_attribute_remove_exec(bContext *C, wmOperator *
     return OPERATOR_CANCELLED;
   }
 
+  const eMaterialPaintChannel channel = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+
   const std::string attr_name = material_attribute_name_get(C, op);
   if (attr_name.empty()) {
     BKE_report(op->reports, RPT_ERROR, "No attribute name given");
@@ -148,9 +162,44 @@ static wmOperatorStatus material_attribute_remove_exec(bContext *C, wmOperator *
   }
 
   bke::MutableAttributeAccessor attrs = mesh->attributes_for_write();
-  if (!attrs.contains(attr_name)) {
+  const std::optional<bke::AttributeMetaData> meta_data = attrs.lookup_meta_data(attr_name);
+  if (!meta_data) {
     BKE_reportf(op->reports, RPT_ERROR, "Attribute '%s' does not exist", attr_name.c_str());
     return OPERATOR_CANCELLED;
+  }
+
+  /* Refuse to remove an attribute that does not match what this channel would have created:
+   * a Custom name colliding with an unrelated geometry-nodes attribute, or a fixed channel whose
+   * attribute was repurposed to a different type, must not be silently deleted by this operator. */
+  const bool domain_ok = info.is_color ? ELEM(meta_data->domain,
+                                             bke::AttrDomain::Point,
+                                             bke::AttrDomain::Corner) :
+                                         meta_data->domain == bke::AttrDomain::Point;
+  const bool type_ok = info.is_color ?
+                           ELEM(meta_data->data_type,
+                                bke::AttrType::ColorFloat,
+                                bke::AttrType::ColorByte) :
+                           meta_data->data_type == bke::AttrType::Float;
+  if (!domain_ok || !type_ok) {
+    BKE_reportf(op->reports,
+               RPT_ERROR,
+               "Attribute '%s' is not a %s material paint attribute",
+               attr_name.c_str(),
+               info.is_color ? "color" : "scalar");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Removing the active/default color attribute out from under the mesh would leave those
+   * references dangling; clear them first the same way #BKE_id_attributes_active_color_set
+   * updates them, rather than leaving stale names Undo and the draw engines have to guard
+   * against. */
+  if (info.is_color) {
+    if (BKE_id_attributes_active_color_name(&mesh->id) == StringRef(attr_name)) {
+      BKE_id_attributes_active_color_clear(&mesh->id);
+    }
+    if (BKE_id_attributes_default_color_name(&mesh->id) == StringRef(attr_name)) {
+      BKE_id_attributes_default_color_set(&mesh->id, std::nullopt);
+    }
   }
 
   if (!attrs.remove(attr_name)) {

@@ -700,6 +700,14 @@ struct MaterialPaintChannelInfo {
    * is determined by `attribute_name`, not by an implicit "must be Base Color" assumption.
    */
   bool is_color;
+  /**
+   * True when the channel can be painted into a per-vertex mesh attribute in
+   * #PAINT_CANVAS_SOURCE_MATERIAL_PAINT mode. Channels that only make sense as a texture map
+   * (Normal, Height), that have no fixed storage (Custom) or that nothing displays per-vertex
+   * (Emission) are map-only: they stay available for #PAINT_CANVAS_SOURCE_MATERIAL, but the
+   * vertex canvas never creates, paints or snapshots an attribute for them.
+   */
+  bool supports_vertex_paint;
 };
 
 /**
@@ -1002,13 +1010,14 @@ MaterialPaintAttributeStatus BKE_paint_mesh_material_attribute_ensure(Mesh &mesh
                                                                       bool *r_created = nullptr);
 
 /**
- * Ensure the material Base Color attribute `"Color"` exists on the mesh.
- * Accepts an existing Point-domain ColorFloat or ColorByte; otherwise creates a ColorFloat named
- * `"Color"` and sets it as the active and default color attribute.
+ * Ensure the color attribute of \a channel (which must have `is_color` set) exists on the mesh.
+ * Accepts an existing Point- or Corner-domain ColorFloat or ColorByte; otherwise creates a
+ * Point-domain ColorFloat. Only #PAINT_MATERIAL_CHANNEL_BASE_COLOR is additionally made the
+ * active and default color attribute.
  * \param r_created: when non-null, set to true only if a new attribute was added by this call.
  */
 MaterialPaintAttributeStatus BKE_paint_mesh_material_color_attribute_ensure(
-    Mesh &mesh, bool *r_created = nullptr);
+    Mesh &mesh, eMaterialPaintChannel channel, bool *r_created = nullptr);
 
 /**
  * Human-readable reason for a non-#MaterialPaintAttributeStatus::Ok status, for operator reports.

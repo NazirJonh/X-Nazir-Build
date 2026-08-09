@@ -1402,6 +1402,19 @@ struct PaintModeSettings {
    * excludes Custom.
    */
   int visible_material_channels = 0;
+
+  /**
+   * Bitmask of #eMaterialPaintChannel values controlling which channels the
+   * #PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color) canvas actually displays in the 3D
+   * Viewport, independent of both #BrushMaterialPaintChannel.use (whether strokes currently write
+   * to the channel) and #visible_material_channels (whether the channel is shown in the Paint PBR
+   * list and participates in strokes at all): a channel can keep painted data and stay hidden from
+   * shading, or be actively painted while a previous pass's data on another channel keeps
+   * displaying. #PAINT_MATERIAL_CHANNEL_CUSTOM has no shader representation and is not
+   * represented in this bitmask.
+   */
+  int material_shader_visible_channels = 0;
+  char _pad2[4] = {};
 };
 
 /** #PaintModeSettings::new_channel_image_size */

@@ -2857,41 +2857,61 @@ void BKE_paint_face_set_overlay_color_get(const int face_set, const int seed, uc
  * presence of these attributes.
  */
 static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
-    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "Base Color", "Color", "Base Color", 0.0f, 1.0f, true},
+    {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+     "Base Color",
+     "Color",
+     "Base Color",
+     0.0f,
+     1.0f,
+     true,
+     true},
     {PAINT_MATERIAL_CHANNEL_METALLIC,
      "Metallic",
      "material_metallic",
      "Metallic",
      0.0f,
      1.0f,
-     false},
+     false,
+     true},
     {PAINT_MATERIAL_CHANNEL_ROUGHNESS,
      "Roughness",
      "material_roughness",
      "Roughness",
      0.0f,
      1.0f,
-     false},
+     false,
+     true},
     {PAINT_MATERIAL_CHANNEL_SPECULAR,
      "Specular",
      "material_specular",
      "Specular IOR Level",
      0.0f,
      1.0f,
-     false},
+     false,
+     true},
+    /* Normal is authored as a tangent-space map (Image Texture -> Normal Map); a per-vertex float
+     * cannot represent it, so the vertex canvas skips it. */
     {PAINT_MATERIAL_CHANNEL_NORMAL,
      "Normal",
      "material_paint_normal",
      "Normal",
      -1.0f,
      1.0f,
+     false,
      false},
     /* Custom targets a user-named attribute and has no Principled socket, so it is vertex-only. */
-    {PAINT_MATERIAL_CHANNEL_CUSTOM, "Custom", nullptr, nullptr, 0.0f, 1.0f, false},
-    {PAINT_MATERIAL_CHANNEL_HEIGHT, "Height", "material_height", nullptr, -1.0f, 1.0f, false},
-    {PAINT_MATERIAL_CHANNEL_ALPHA, "Alpha", "material_alpha", "Alpha", 0.0f, 1.0f, false},
+    {PAINT_MATERIAL_CHANNEL_CUSTOM, "Custom", nullptr, nullptr, 0.0f, 1.0f, false, true},
+    {PAINT_MATERIAL_CHANNEL_HEIGHT,
+     "Height",
+     "material_height",
+     nullptr,
+     -1.0f,
+     1.0f,
+     false,
+     false},
+    {PAINT_MATERIAL_CHANNEL_ALPHA, "Alpha", "material_alpha", "Alpha", 0.0f, 1.0f, false, true},
     /* AO has no Principled BSDF socket (same treatment as Custom). */
-    {PAINT_MATERIAL_CHANNEL_AO, "AO", "material_ao", nullptr, 0.0f, 1.0f, false},
+    {PAINT_MATERIAL_CHANNEL_AO, "AO", "material_ao", nullptr, 0.0f, 1.0f, false, true},
     /* Emission is a color channel; is_color routes it through the generic color-attribute path. */
     {PAINT_MATERIAL_CHANNEL_EMISSION,
      "Emission",
@@ -2899,7 +2919,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      "Emission Color",
      0.0f,
      1.0f,
-     true},
+     true,
+     false},
 };
 
 static_assert(ARRAY_SIZE(material_paint_channels) == PAINT_MATERIAL_CHANNEL_NUM,
@@ -2935,6 +2956,14 @@ bool BKE_paint_material_channel_is_enabled(const BrushMaterialPaint &brush_paint
 {
   BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
   if (brush_paint.channels[channel].use == 0) {
+    return false;
+  }
+  /* The vertex canvas stores one float (or color) per vertex; map-only channels have no such
+   * representation. Gating here keeps every caller (stroke init, undo push, paint, draw) from
+   * preparing state for a channel that would never be written. */
+  if (mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT &&
+      !BKE_paint_material_channel_info(channel).supports_vertex_paint)
+  {
     return false;
   }
   /* Custom is gated by the draw-time `show_custom` argument, not this bitmask. */
@@ -3604,15 +3633,18 @@ MaterialPaintAttributeStatus BKE_paint_mesh_material_attribute_ensure(Mesh &mesh
   return MaterialPaintAttributeStatus::Ok;
 }
 
-MaterialPaintAttributeStatus BKE_paint_mesh_material_color_attribute_ensure(Mesh &mesh,
-                                                                            bool *r_created)
+MaterialPaintAttributeStatus BKE_paint_mesh_material_color_attribute_ensure(
+    Mesh &mesh, const eMaterialPaintChannel channel, bool *r_created)
 {
   if (r_created) {
     *r_created = false;
   }
 
-  const StringRef attr_name =
-      BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_BASE_COLOR).attribute_name;
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  BLI_assert(info.is_color);
+  /* Each color channel owns its attribute; using Base Color's name for every one of them would
+   * silently make separate channels share (and overwrite) the same storage. */
+  const StringRef attr_name = info.attribute_name;
   bke::MutableAttributeAccessor attrs = mesh.attributes_for_write();
 
   if (attrs.contains(attr_name)) {
@@ -3636,8 +3668,12 @@ MaterialPaintAttributeStatus BKE_paint_mesh_material_color_attribute_ensure(Mesh
     return MaterialPaintAttributeStatus::CreationFailed;
   }
 
-  BKE_id_attributes_active_color_set(&mesh.id, attr_name);
-  BKE_id_attributes_default_color_set(&mesh.id, attr_name);
+  if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    /* Only Base Color is the mesh's color: making a secondary color channel the active/default
+     * color attribute would redirect vertex color display and rendering to it. */
+    BKE_id_attributes_active_color_set(&mesh.id, attr_name);
+    BKE_id_attributes_default_color_set(&mesh.id, attr_name);
+  }
 
   if (r_created) {
     *r_created = true;

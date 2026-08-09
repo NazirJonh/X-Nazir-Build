@@ -3460,7 +3460,8 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
     /* Only the PAINT brush routes to Material attrs or image canvases; Smear/Blur are
      * no-ops on those canvases (see #do_brush_action) and need no undo push there. */
     if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-        paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT)
+        paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT &&
+        bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Mesh)
     {
       /* Exactly the attributes #do_paint_material_brush will write, derived from the same
        * helper so the two can never disagree about what the stroke touches. */
@@ -5414,7 +5415,8 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
    * Painting itself only tags the attribute data dirty; the push-constants that enable reading
    * them are refreshed during a full object sync, which the geometry tag below forces. */
   if (brush_type_is_paint(brush->sculpt_brush_type) &&
-      paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT && ob.type == OB_MESH)
+      paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT &&
+      material::paint_supported_on_object(*CTX_data_scene(C), ob))
   {
     Mesh &mesh = *id_cast<Mesh *>(ob.data);
     bool any_created = false;
@@ -5428,18 +5430,13 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
         if (!BKE_paint_material_channel_is_enabled(brush_paint, paint_mode_init, info.channel)) {
           continue;
         }
-        /* Normal is map-only (Image Texture -> Normal Map); the paint apply path never writes
-         * a vertex attribute for it, so creating one here would leave it unused. */
-        if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-          continue;
-        }
-
         bool created = false;
         const std::string attr_name = BKE_paint_material_channel_attribute_name(paint_mode_init,
                                                                                 info.channel);
         const MaterialPaintAttributeStatus status =
-            info.is_color ? BKE_paint_mesh_material_color_attribute_ensure(mesh, &created) :
-                            BKE_paint_mesh_material_attribute_ensure(mesh, attr_name, &created);
+            info.is_color ?
+                BKE_paint_mesh_material_color_attribute_ensure(mesh, info.channel, &created) :
+                BKE_paint_mesh_material_attribute_ensure(mesh, attr_name, &created);
 
         if (status != MaterialPaintAttributeStatus::Ok) {
           /* Without this the channel would just silently not paint. */
@@ -5457,10 +5454,11 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
            * #StepData::material_created_attribute_names. */
           ss.cache->material_created_attribute_names.append(attr_name);
         }
-        if (info.is_color) {
+        if (info.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
           /* Always activate the color attribute when Base Color is enabled, so Workbench and the
            * undo snapshot target what the stroke writes (even if the attribute already existed).
-           */
+           * Only Base Color: the undo Color snapshot follows the active color attribute, so
+           * pointing it at a secondary color channel would make Undo restore the wrong layer. */
           BKE_id_attributes_active_color_set(&mesh.id, info.attribute_name);
         }
       }
@@ -5562,6 +5560,13 @@ static void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
        * See #129069. */
       ss.cache->layer_displacement_factor = {};
       ss.cache->paint_brush.mix_colors = {};
+      /* Poly Paint: same reasoning as #paint_brush.mix_colors above - the accumulated coverage
+       * must restart from empty when the anchor point moves, not keep compositing onto coverage
+       * built up at the previous anchor position. */
+      ss.cache->material_mix_base_color = {};
+      for (Array<float4> &mix_scalars : ss.cache->material_mix_scalars) {
+        mix_scalars = {};
+      }
     }
   }
 }

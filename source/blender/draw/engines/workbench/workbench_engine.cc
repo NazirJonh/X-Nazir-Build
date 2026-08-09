@@ -94,22 +94,35 @@ static const char *material_props_uniform_name(const eMaterialPaintChannel chann
 }
 
 /**
- * Detects the material paint attributes present on \a ob.
+ * Detects the material paint attributes present on \a ob that are also currently shown by
+ * #PaintModeSettings.material_shader_visible_channels.
  *
  * Presence alone is not enough: the shader reads these as float point attributes, and an unrelated
- * attribute that merely shares the name (a face-domain color, say) must not switch shading.
+ * attribute that merely shares the name (a face-domain color, say) must not switch shading. The
+ * shader-visible bitmask is deliberately independent of #BrushMaterialPaintChannel.use (whether
+ * strokes currently write to the channel): a channel keeps its painted data and displays it
+ * whether or not it is actively being painted, and can be hidden from display without losing that
+ * data or affecting painting.
  */
-static MaterialPropsUsage material_props_usage_get(const Object &ob)
+static MaterialPropsUsage material_props_usage_get(const Scene &scene, const Object &ob)
 {
   MaterialPropsUsage usage;
   if (ob.type != OB_MESH) {
     return usage;
   }
 
+  const int shader_visible_channels = scene.toolsettings ?
+                                          scene.toolsettings->paint_mode
+                                              .material_shader_visible_channels :
+                                          0;
+
   const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(ob);
   const bke::AttributeAccessor attributes = mesh.attributes();
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (material_props_uniform_name(info.channel) == nullptr) {
+      continue;
+    }
+    if ((shader_visible_channels & (1 << info.channel)) == 0) {
       continue;
     }
     const std::optional<bke::AttributeMetaData> meta_data = attributes.lookup_meta_data(
@@ -373,7 +386,7 @@ class Instance : public DrawEngine {
     if (object_state.color_type != V3D_SHADING_TEXTURE_COLOR &&
         object_state.color_type != V3D_SHADING_VERTEX_COLOR)
     {
-      material_props = material_props_usage_get(*ob_ref.object);
+      material_props = material_props_usage_get(*scene_state_.scene, *ob_ref.object);
     }
     const bool use_material_props = material_props.any();
 
@@ -469,7 +482,8 @@ class Instance : public DrawEngine {
 
     /* Only request the extra vertex buffers when the mesh actually carries painted channels;
      * every sculpt object would pay for them otherwise. */
-    const MaterialPropsUsage material_props = material_props_usage_get(*ob_ref.object);
+    const MaterialPropsUsage material_props = material_props_usage_get(*scene_state_.scene,
+                                                                       *ob_ref.object);
     if (material_props.any()) {
       features |= SCULPT_BATCH_MATERIAL_PROPS;
     }

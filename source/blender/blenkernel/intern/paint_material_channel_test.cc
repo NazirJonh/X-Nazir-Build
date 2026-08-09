@@ -6,6 +6,8 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BKE_attribute.h"
+#include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_idtype.hh"
@@ -475,6 +477,35 @@ TEST_F(PaintMaterialChannelTest, hidden_channel_is_not_enabled_for_painting)
       brush_paint, mode_settings, PAINT_MATERIAL_CHANNEL_METALLIC));
 }
 
+TEST_F(PaintMaterialChannelTest, vertex_canvas_restricts_to_supported_channels)
+{
+  /* The Material Paint (vertex color) canvas has no per-vertex representation for Normal,
+   * Height, Emission or Custom-without-a-name; #PAINT_CANVAS_SOURCE_MATERIAL must still enable
+   * them since it paints into an image/socket, not a vertex attribute. */
+  PaintModeSettings mode_settings{};
+  mode_settings.visible_material_channels = paint_material_channel_test_default_visibility();
+  BLI_strncpy(mode_settings.material_paint_custom_attr,
+             "my_attr",
+             sizeof(mode_settings.material_paint_custom_attr));
+  BrushMaterialPaint brush_paint{};
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    brush_paint.channels[info.channel].use = 1;
+  }
+
+  mode_settings.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    EXPECT_TRUE(BKE_paint_material_channel_is_enabled(brush_paint, mode_settings, info.channel))
+        << info.ui_name;
+  }
+
+  mode_settings.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL_PAINT;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    EXPECT_EQ(BKE_paint_material_channel_is_enabled(brush_paint, mode_settings, info.channel),
+             info.supports_vertex_paint)
+        << info.ui_name;
+  }
+}
+
 TEST_F(PaintMaterialChannelTest, alpha_write_and_mask_modes)
 {
   PaintModeSettings mode_settings{};
@@ -543,13 +574,41 @@ TEST_F(PaintMaterialChannelTest, EnsureMaterialColorAttribute)
   Object *ob = add_mesh_object("Mesh");
   Mesh &mesh = *id_cast<Mesh *>(ob->data);
   bool created = false;
-  EXPECT_EQ(BKE_paint_mesh_material_color_attribute_ensure(mesh, &created),
-            MaterialPaintAttributeStatus::Ok);
+  EXPECT_EQ(
+      BKE_paint_mesh_material_color_attribute_ensure(
+          mesh, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &created),
+      MaterialPaintAttributeStatus::Ok);
   EXPECT_TRUE(created);
   created = false;
-  EXPECT_EQ(BKE_paint_mesh_material_color_attribute_ensure(mesh, &created),
-            MaterialPaintAttributeStatus::Ok);
+  EXPECT_EQ(
+      BKE_paint_mesh_material_color_attribute_ensure(
+          mesh, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &created),
+      MaterialPaintAttributeStatus::Ok);
   EXPECT_FALSE(created);
+}
+
+TEST_F(PaintMaterialChannelTest, EnsureMaterialColorAttributeEmissionOwnStorage)
+{
+  /* Regression test: Emission is a color channel (is_color = true) but must not alias Base
+   * Color's "Color" attribute, and must not become the mesh's active color attribute. */
+  Object *ob = add_mesh_object("Mesh");
+  Mesh &mesh = *id_cast<Mesh *>(ob->data);
+  bool created = false;
+  EXPECT_EQ(BKE_paint_mesh_material_color_attribute_ensure(
+                mesh, PAINT_MATERIAL_CHANNEL_EMISSION, &created),
+            MaterialPaintAttributeStatus::Ok);
+  EXPECT_TRUE(created);
+
+  const StringRef base_color_name =
+      BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_BASE_COLOR).attribute_name;
+  const StringRef emission_name =
+      BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_EMISSION).attribute_name;
+  EXPECT_NE(base_color_name, emission_name);
+
+  bke::AttributeAccessor attrs = mesh.attributes();
+  EXPECT_TRUE(attrs.contains(emission_name));
+  EXPECT_FALSE(attrs.contains(base_color_name));
+  EXPECT_NE(BKE_id_attributes_active_color_name(&mesh.id), emission_name);
 }
 
 TEST_F(PaintMaterialChannelTest, EnsureMaterialAttributeReportsConflicts)

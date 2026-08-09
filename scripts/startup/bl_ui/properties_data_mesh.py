@@ -589,11 +589,16 @@ class DATA_PT_material_attributes(MeshButtonsPanel, Panel):
     }
 
     # Channels shown as fixed rows, with their UI label. The attribute names come from the
-    # channel table in C, so they are never spelled out here.
+    # channel table in C, so they are never spelled out here. Base Color is not listed: it is the
+    # mesh's active/default color attribute, already managed by the Color Attributes panel.
+    # Normal, Height, Emission and Custom are omitted: they are map-only (Normal, Height,
+    # Emission) or need a user-provided name (Custom), so they use the Custom row below instead.
     _fixed_channels = (
         ('METALLIC', "Metallic"),
         ('ROUGHNESS', "Roughness"),
         ('SPECULAR', "Specular"),
+        ('AO', "AO"),
+        ('ALPHA', "Alpha"),
     )
 
     def draw(self, context):

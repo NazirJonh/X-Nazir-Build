@@ -95,24 +95,37 @@ struct MaterialPaintLocalData {
  * \{ */
 
 /**
- * Applies \a blend_mode to a single scalar.
+ * Composites \a target (expanded to gray, scaled by \a factor) onto the per-stroke coverage
+ * accumulator \a mix, always with Mix regardless of the channel's configured blend mode - mirrors
+ * #blend_color_mix_float's use for #StrokeCache::paint_brush.mix_colors. \a mix and the returned
+ * value are pre-multiplied (RGB already scaled by alpha), matching the "pre-multiplied alpha float
+ * blending modes" convention documented in BLI_math_color_blend.h/math_color_blend_inline.cc.
+ */
+static float4 accumulate_scalar_coverage(const float4 &mix, const float target, const float factor)
+{
+  const float4 paint(target * factor, target * factor, target * factor, factor);
+  float4 result;
+  IMB_blend_color_float(result, mix, paint, IMB_BLEND_MIX);
+  return result;
+}
+
+/**
+ * Applies \a blend_mode to a single scalar, blending \a current (expanded to an opaque gray)
+ * against the accumulated coverage \a target_mix (already pre-multiplied by its own alpha, as
+ * built up by #accumulate_scalar_coverage - see the same block comment there).
  *
  * The IMB blend modes are defined on RGBA colors. Rather than reimplementing each one, the scalar
  * is expanded to a gray color and run through #IMB_blend_color_float, so a channel always blends
  * exactly like the equivalent gray value would in Base Color. This keeps every brush blend mode
  * working instead of silently falling back to Mix for the unimplemented ones.
- *
- * \param factor: brush falloff, passed as alpha the same way color painting does.
  */
 static float apply_scalar_blend(const float current,
-                                const float target,
-                                const float factor,
+                                const float4 &target_mix,
                                 const IMB_BlendMode blend_mode)
 {
   const float4 current_color(current, current, current, 1.0f);
-  const float4 target_color(target, target, target, factor);
   float4 result;
-  IMB_blend_color_float(result, current_color, target_color, blend_mode);
+  IMB_blend_color_float(result, current_color, target_mix, blend_mode);
   return result.x;
 }
 
@@ -130,12 +143,14 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
                                  const Brush &brush,
                                  const ChannelSourceSampler *sampler,
                                  const eMaterialPaintChannel channel,
+                                 const StringRef attr_name,
                                  const float target_value,
                                  const float2 value_range,
                                  const IMB_BlendMode blend_mode,
                                  const Span<float> alpha_cache,
                                  bke::pbvh::MeshNode &node,
                                  MaterialPaintLocalData &tls,
+                                 const MutableSpan<float4> mix_scalars,
                                  MutableSpan<float> attribute)
 {
   SculptSession &ss = *object.runtime->sculpt_session;
@@ -176,6 +191,12 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
   int64_t active_num = 0;
 #endif
 
+  /* The value from before this stroke touched this vertex, frozen for the whole stroke (see
+   * #orig_material_scalar_data_lookup_mesh); every dab blends against this instead of the
+   * live (already-dab-modified) #attribute, so overlapping dabs within one stroke converge
+   * smoothly instead of visibly banding wherever their falloffs overlap. */
+  const Span<float> orig = *orig_material_scalar_data_lookup_mesh(object, node, attr_name);
+
   for (const int i : verts.index_range()) {
     const float factor = factors[i];
     if (factor <= 0.0f) {
@@ -191,8 +212,9 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
     const float alpha_factor = (!alpha_cache.is_empty() && channel != PAINT_MATERIAL_CHANNEL_ALPHA) ?
                                    alpha_cache[vert] :
                                    1.0f;
-    const float blended = apply_scalar_blend(
-        attribute[vert], target, factor * alpha_factor, blend_mode);
+    float4 &mix = mix_scalars[vert];
+    mix = accumulate_scalar_coverage(mix, target, factor * alpha_factor);
+    const float blended = apply_scalar_blend(orig[i], mix, blend_mode);
     attribute[vert] = math::clamp(blended, value_range.x, value_range.y);
 #ifdef PBR_PAINT_MATERIAL_PROFILE
     active_num++;
@@ -221,6 +243,7 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
                                 const Span<float> alpha_cache,
                                 bke::pbvh::MeshNode &node,
                                 MaterialPaintLocalData &tls,
+                                const MutableSpan<float4> mix_colors,
                                 bke::GSpanAttributeWriter &color_attribute)
 {
   SculptSession &ss = *object.runtime->sculpt_session;
@@ -283,6 +306,20 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
                                               sampler->colorspace(channel));
   }
 
+  /* The color from before this stroke touched this vertex, frozen for the whole stroke; every
+   * dab blends against this instead of the live (already-dab-modified) color attribute, so
+   * overlapping dabs within one stroke converge smoothly instead of visibly banding wherever
+   * their falloffs overlap - mirrors #sculpt_paint_color.cc's do_paint_task's use of
+   * #orig_color_data_get_mesh.
+   *
+   * A stroke that paints Base Color together with at least one scalar channel pushes a single
+   * #Type::Material undo step covering both (see #push_undo_nodes); a Base-Color-only stroke
+   * pushes a plain #Type::Color step instead, so #orig_material_color_data_lookup_mesh (which
+   * only recognizes #Type::Material) misses it and #orig_color_data_get_mesh is needed instead. */
+  const std::optional<Span<float4>> orig_material = orig_material_color_data_lookup_mesh(object,
+                                                                                          node);
+  const Span<float4> orig = orig_material ? *orig_material : orig_color_data_get_mesh(object, node);
+
   int decoded_i = 0;
   for (const int i : verts.index_range()) {
     const float factor = factors[i];
@@ -293,24 +330,29 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
     active_num++;
 #endif
 
-    const float4 current = color::color_vert_get(faces,
-                                                 corner_verts,
-                                                 vert_to_face_map,
-                                                 color_attribute.span,
-                                                 color_attribute.domain,
-                                                 verts[i]);
+    const int vert = verts[i];
     const float3 target = batch_decode_color ? tls.raw_source_colors[decoded_i++] :
                           sampler != nullptr ?
-                              sampler->color(channel, vert_positions[verts[i]], thread_id) :
+                              sampler->color(channel, vert_positions[vert], thread_id) :
                               target_rgb;
     /* Alpha does not mask its own write; only every other channel's write is scaled. */
     const float alpha_factor = (!alpha_cache.is_empty() && channel != PAINT_MATERIAL_CHANNEL_ALPHA) ?
-                                   alpha_cache[verts[i]] :
+                                   alpha_cache[vert] :
                                    1.0f;
-    /* Alpha carries brush falloff for IMB blend modes (same convention as color paint). */
-    const float4 paint_color(target.x, target.y, target.z, factor * alpha_factor);
+    /* Alpha carries brush falloff for IMB blend modes (same convention as color paint); the RGB
+     * must be pre-multiplied by that same alpha, since every blend_color_*_float mode expects a
+     * pre-multiplied second color (see the "pre-multiplied alpha float blending modes" block
+     * comment in BLI_math_color_blend.h/math_color_blend_inline.cc). */
+    const float total_factor = factor * alpha_factor;
+    const float4 paint_color(target.x * total_factor,
+                             target.y * total_factor,
+                             target.z * total_factor,
+                             total_factor);
+    float4 &mix = mix_colors[vert];
+    IMB_blend_color_float(mix, mix, paint_color, IMB_BLEND_MIX);
+
     float4 result;
-    IMB_blend_color_float(result, current, paint_color, blend_mode);
+    IMB_blend_color_float(result, orig[i], mix, blend_mode);
     color::color_vert_set(faces,
                           corner_verts,
                           vert_to_face_map,
@@ -332,14 +374,24 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
 /** \name Entry Point: Material Painting
  * \{ */
 
+bool paint_supported_on_object(const Scene &scene, Object &ob)
+{
+  if (ob.type != OB_MESH) {
+    return false;
+  }
+  if (BKE_object_sculpt_use_dyntopo(&ob)) {
+    return false;
+  }
+  return BKE_sculpt_multires_active(&scene, &ob) == nullptr;
+}
+
 Vector<StringRef, PAINT_MATERIAL_CHANNEL_NUM> enabled_scalar_attribute_names(
     const BrushMaterialPaint &brush_paint, const PaintModeSettings &mode_settings)
 {
   Vector<StringRef, PAINT_MATERIAL_CHANNEL_NUM> names;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (info.is_color || info.channel == PAINT_MATERIAL_CHANNEL_NORMAL ||
-        !BKE_paint_material_channel_writes_to_target(
-            brush_paint, mode_settings, info.channel))
+    if (info.is_color || !info.supports_vertex_paint ||
+        !BKE_paint_material_channel_writes_to_target(brush_paint, mode_settings, info.channel))
     {
       continue;
     }
@@ -382,6 +434,13 @@ static void paint_scalar_channel(const Depsgraph &depsgraph,
     return;
   }
 
+  const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  Array<float4> &mix_scalars = ss.cache->material_mix_scalars[channel];
+  if (mix_scalars.is_empty()) {
+    mix_scalars = Array<float4>(mesh.verts_num, float4(0));
+  }
+
   const MutableSpan<float> values = attribute.span;
   node_mask.foreach_index(
       [&](const int i) {
@@ -393,12 +452,14 @@ static void paint_scalar_channel(const Depsgraph &depsgraph,
                              brush,
                              sampler,
                              channel,
+                             attr_name,
                              target_value,
                              value_range,
                              blend_mode,
                              alpha_cache,
                              nodes[i],
                              tls.local(),
+                             mix_scalars,
                              values);
       },
       exec_mode::grain_size(1));
@@ -475,11 +536,16 @@ static void paint_color_channel(
     return;
   }
 
-  const SculptSession &ss = *ob.runtime->sculpt_session;
+  SculptSession &ss = *ob.runtime->sculpt_session;
   const float3 target_rgb = (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) ?
                                 BKE_paint_material_base_color_get(
                                     brush_paint, sd.paint, brush, ss.cache->toggle_settings.invert) :
                                 float3(brush_paint.channels[channel].value);
+
+  Array<float4> &mix_colors = ss.cache->material_mix_base_color;
+  if (mix_colors.is_empty()) {
+    mix_colors = Array<float4>(mesh.verts_num, float4(0));
+  }
 
   const OffsetIndices<int> faces = mesh.faces();
   const Span<int> corner_verts = mesh.corner_verts();
@@ -503,6 +569,7 @@ static void paint_color_channel(
                             alpha_cache,
                             nodes[i],
                             tls.local(),
+                            mix_colors,
                             color_attribute);
       },
       exec_mode::grain_size(1));

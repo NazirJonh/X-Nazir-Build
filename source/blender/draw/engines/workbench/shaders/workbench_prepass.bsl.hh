@@ -103,11 +103,17 @@ struct VertOut {
   [[smooth]] float2 uv;
   [[smooth]] float alpha;
   [[flat]] int object_id;
-  [[flat]] float roughness;
-  [[flat]] float metallic;
+  /* Poly Paint: roughness/metallic/specular can now vary per vertex (painted attributes), unlike
+   * the material-uniform values every non-mesh vertex shader below still writes here, so these
+   * must be smooth-interpolated rather than flat. #flat took the provoking vertex's value for the
+   * whole triangle, which is a no-op for a uniform value but turns a painted gradient into
+   * visible per-triangle steps following the mesh's triangulation. Interpolating identical
+   * per-vertex values (the non-mesh paths) is a no-op, so this is safe for every producer. */
+  [[smooth]] float roughness;
+  [[smooth]] float metallic;
   /** Poly Paint: dielectric F0, see #get_world_lighting. Defaults to 0.5f (neutral, no override)
    * for every vertex shader below; only #vert_mesh may override it per-vertex. */
-  [[flat]] float specular;
+  [[smooth]] float specular;
 };
 
 struct MeshIn {

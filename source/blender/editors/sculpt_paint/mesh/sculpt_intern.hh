@@ -25,6 +25,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
 #include "BLI_span.hh"
+#include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 
 #include "IMB_colormanagement.hh"
@@ -422,6 +423,23 @@ struct StrokeCache {
    * when Alpha is disabled or the stroke is an erase.
    */
   Array<float> material_alpha_cache;
+
+  /**
+   * Poly Paint: per-vertex accumulated coverage for Base Color and each enabled scalar channel,
+   * mirroring #paint_brush.mix_colors. Each dab composites into these buffers with Mix (regardless
+   * of the channel's own configured blend mode), and the buffer is then blended once per dab
+   * against the stroke's *original* (pre-stroke) value using the configured blend mode - see
+   * #do_paint_color_task and #do_paint_scalar_task. Blending a dab directly onto the live
+   * (already-modified-by-earlier-dabs) attribute instead would make a stroke of many overlapping
+   * dabs (a slow drag, or a soft brush stamped repeatedly) visibly darken/lighten in rings wherever
+   * dabs overlap, since applying Mix N times does not converge to the same result as applying it
+   * once with the dabs' combined coverage.
+   *
+   * Mesh-wide and lazily allocated on first use, like #paint_brush.mix_colors; #material_mix_scalars
+   * is indexed directly by #eMaterialPaintChannel, one entry per channel.
+   */
+  Array<float4> material_mix_base_color;
+  Array<Array<float4>> material_mix_scalars{PAINT_MATERIAL_CHANNEL_NUM};
 
   /* Pose brush */
   std::unique_ptr<pose::IKChain> pose_ik_chain;
@@ -1001,6 +1019,23 @@ inline Span<float4> orig_color_data_get_mesh(const Object &object, const bke::pb
 {
   return *orig_color_data_lookup_mesh(object, node);
 }
+
+/**
+ * Poly Paint: the value of the point float attribute \a attribute_name from before this stroke,
+ * for #Type::Material undo steps. `std::nullopt` when the current undo step is not a Material
+ * step, or does not cover \a attribute_name (the channel was not enabled for this stroke).
+ */
+std::optional<Span<float>> orig_material_scalar_data_lookup_mesh(const Object &object,
+                                                                 const bke::pbvh::MeshNode &node,
+                                                                 StringRef attribute_name);
+
+/**
+ * Poly Paint: the mesh's active color attribute value from before this stroke, for #Type::Material
+ * undo steps that also cover Base Color (see #StepData::material_store_color). `std::nullopt`
+ * otherwise, including for plain #Type::Color steps - use #orig_color_data_lookup_mesh for those.
+ */
+std::optional<Span<float4>> orig_material_color_data_lookup_mesh(const Object &object,
+                                                                 const bke::pbvh::MeshNode &node);
 
 std::optional<Span<int>> orig_face_set_data_lookup_mesh(const Object &object,
                                                         const bke::pbvh::MeshNode &node);

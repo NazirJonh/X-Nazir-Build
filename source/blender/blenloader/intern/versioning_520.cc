@@ -641,6 +641,26 @@ static void version_material_paint_channel_visibility_defaults(Main &bmain)
   }
 }
 
+static void version_material_paint_channel_shader_visibility_defaults(Main &bmain)
+{
+  /* Every vertex-storable channel visible by default, matching the shading behavior before this
+   * bitmask existed (display was driven purely by whether the channel's attribute was present).
+   * CUSTOM has no shader representation and is not part of this bitmask. */
+  const int default_shader_visible = (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
+                                     (1 << PAINT_MATERIAL_CHANNEL_METALLIC) |
+                                     (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
+                                     (1 << PAINT_MATERIAL_CHANNEL_SPECULAR) |
+                                     (1 << PAINT_MATERIAL_CHANNEL_AO) |
+                                     (1 << PAINT_MATERIAL_CHANNEL_ALPHA);
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    ts->paint_mode.material_shader_visible_channels = default_shader_visible;
+  }
+}
+
 /**
  * `PaintModeSettings::new_channel_image_size` was added with a C++ default member initializer
  * (4096), but that initializer only applies to freshly constructed structs; files saved before
@@ -1101,6 +1121,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 54)) {
     /* Narrow the default visible set from the initial 7-channel rollout to four core channels. */
     version_material_paint_channel_visibility_defaults(*bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 55)) {
+    version_material_paint_channel_shader_visibility_defaults(*bmain);
   }
 
   /**

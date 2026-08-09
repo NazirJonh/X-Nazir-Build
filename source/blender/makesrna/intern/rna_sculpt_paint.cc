@@ -1520,6 +1520,23 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "but are skipped until shown again");
   RNA_def_property_enum_sdna(prop, nullptr, "visible_material_channels");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  const int default_shader_visible_material_channels =
+      (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) | (1 << PAINT_MATERIAL_CHANNEL_METALLIC) |
+      (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) | (1 << PAINT_MATERIAL_CHANNEL_SPECULAR) |
+      (1 << PAINT_MATERIAL_CHANNEL_AO) | (1 << PAINT_MATERIAL_CHANNEL_ALPHA);
+  prop = RNA_def_enum_flag(srna,
+                           "material_shader_visible_channels",
+                           rna_enum_visible_material_paint_channel_items,
+                           default_shader_visible_material_channels,
+                           "Shader Visible Channels",
+                           "Which material paint channels the Material Paint (vertex color) "
+                           "canvas displays in the 3D Viewport, independent of whether the "
+                           "channel is enabled for painting or shown in the Paint PBR list: a "
+                           "channel keeps its painted data and can be hidden from shading, or "
+                           "shown, without either affecting painting");
+  RNA_def_property_enum_sdna(prop, nullptr, "material_shader_visible_channels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 static void rna_def_image_paint(BlenderRNA *brna)

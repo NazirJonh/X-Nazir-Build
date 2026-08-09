@@ -154,9 +154,24 @@ eV3DShadingColorType ED_paint_shading_color_override(bContext *C,
 
       break;
     }
-    case PAINT_CANVAS_SOURCE_MATERIAL_PAINT:
-      color_type = V3D_SHADING_MATERIAL_COLOR;
+    case PAINT_CANVAS_SOURCE_MATERIAL_PAINT: {
+      /* Base Color paints into the mesh's active color attribute, which Workbench only reads for
+       * the base surface color when shading is in Vertex Color mode (see
+       * #Workbench::get_material): under Material Color mode the material's own Base Color node
+       * is shown instead, and the scalar channels (Metallic/Roughness/...) are overlaid on top of
+       * it via push constants instead. So Base Color needs the same shading override the other
+       * canvases get above, or a painted "Color" attribute would never be visible.
+       *
+       * Driven by #PaintModeSettings.material_shader_visible_channels, not by whether Base Color
+       * is currently enabled for painting: display and painting are independent, so toggling
+       * Base Color's paint-enable off must not hide already-painted colors, and toggling it on
+       * must not force them to display before the corresponding shader-visible toggle is on. */
+      const bool base_color_shader_visible = (settings->material_shader_visible_channels &
+                                             (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR)) != 0;
+      color_type = base_color_shader_visible ? V3D_SHADING_VERTEX_COLOR :
+                                              V3D_SHADING_MATERIAL_COLOR;
       break;
+    }
   }
 
   return color_type;

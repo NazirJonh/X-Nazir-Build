@@ -2267,6 +2267,9 @@ static size_t node_size_in_bytes(const Node &node)
   size += node.grid_hidden.all_bits().size() / 8;
   size += node.face_sets.as_span().size_in_bytes();
   size += node.face_indices.as_span().size_in_bytes();
+  for (const Array<float, 0> &scalar : node.material_scalars) {
+    size += scalar.as_span().size_in_bytes();
+  }
   return size;
 }
 
@@ -2756,6 +2759,33 @@ std::optional<Span<float4>> orig_color_data_lookup_mesh(const Object & /*object*
 {
   const undo::Node *unode = undo::get_node(&node, undo::Type::Color);
   if (!unode) {
+    return std::nullopt;
+  }
+  return unode->col.as_span();
+}
+
+std::optional<Span<float>> orig_material_scalar_data_lookup_mesh(const Object & /*object*/,
+                                                                 const bke::pbvh::MeshNode &node,
+                                                                 const StringRef attribute_name)
+{
+  const undo::Node *unode = undo::get_node(&node, undo::Type::Material);
+  if (!unode) {
+    return std::nullopt;
+  }
+  const undo::StepData &step_data = *undo::get_step_data();
+  for (const int attr_i : step_data.material_attribute_names.index_range()) {
+    if (step_data.material_attribute_names[attr_i] == attribute_name) {
+      return unode->material_scalars[attr_i].as_span();
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<Span<float4>> orig_material_color_data_lookup_mesh(const Object & /*object*/,
+                                                                 const bke::pbvh::MeshNode &node)
+{
+  const undo::Node *unode = undo::get_node(&node, undo::Type::Material);
+  if (!unode || !undo::get_step_data()->material_store_color) {
     return std::nullopt;
   }
   return unode->col.as_span();

@@ -1162,6 +1162,18 @@ _MATERIAL_PAINT_CHANNEL_UI_ORDER = (
     'HEIGHT',
     'SPECULAR',
 )
+# Channels the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color) canvas can store: one float (or
+# color) per vertex has no meaningful representation for a texture-map-only channel. Must match
+# #MaterialPaintChannelInfo.supports_vertex_paint in source/blender/blenkernel/intern/paint.cc.
+# CUSTOM is vertex-only and is handled separately via the `show_custom` argument below, not here.
+_MATERIAL_PAINT_VERTEX_CHANNELS = {
+    'BASE_COLOR',
+    'METALLIC',
+    'ROUGHNESS',
+    'SPECULAR',
+    'AO',
+    'ALPHA',
+}
 # Max width per channel toggle (Blender UI units). grid_flow uses this to fit as many buttons
 # as possible on each row and wrap the rest; without a fixed cell width every toggle expands to
 # the full panel width and stacks vertically.
@@ -1457,16 +1469,42 @@ def _draw_material_paint_emission_panel(layout, context, channel):
 
 
 def draw_material_paint_visibility_popover(_context, layout, paint_mode_settings):
-    """Popover body: checkboxes for which channels appear in the Paint PBR list.
+    """Popover body: checkboxes for which channels appear in the Paint PBR list, plus (for the
+    Material Paint vertex color canvas) a second checkbox for whether each channel's painted data
+    is displayed in the 3D Viewport.
 
-    Independent of each channel's `use` (paint-enabled) flag — hiding a channel here does not
-    clear its value or source texture, but it removes the channel from the UI and skips it during
-    painting until shown again. CUSTOM is deliberately not listed: it has its own separate
-    `show_custom` draw-time gate, not part of this bitmask.
+    The "Paint PBR list" checkbox is independent of each channel's `use` (paint-enabled) flag -
+    hiding a channel here does not clear its value or source texture, but it removes the channel
+    from the UI and skips it during painting until shown again.
+
+    The "Shader" checkbox (Material Paint only) is independent of both of the above: painting and
+    display are separate concerns; a channel can keep its painted data hidden from shading, or
+    display data from a previous session while currently disabled for painting. CUSTOM is
+    deliberately not listed in either bitmask: it has its own separate `show_custom` draw-time
+    gate for the paint list, and no shader representation at all.
     """
+    is_vertex_paint = paint_mode_settings.canvas_source == 'MATERIAL_PAINT'
+    channel_ids = _MATERIAL_PAINT_CHANNEL_UI_ORDER
+    if is_vertex_paint:
+        channel_ids = [
+            identifier for identifier in channel_ids
+            if identifier in _MATERIAL_PAINT_VERTEX_CHANNELS
+        ]
+
+    if is_vertex_paint:
+        header = layout.row(align=True)
+        header.label(text="")
+        header.label(text="List")
+        header.label(text="Shader")
+
     col = layout.column()
-    for identifier in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
-        col.prop_enum(paint_mode_settings, "visible_material_channels", identifier)
+    for identifier in channel_ids:
+        row = col.row(align=True)
+        row.prop_enum(paint_mode_settings, "visible_material_channels", identifier)
+        if is_vertex_paint:
+            row.prop_enum(
+                paint_mode_settings, "material_shader_visible_channels", identifier, text="",
+            )
 
 
 def draw_material_paint_visibility_chevron(context, layout, paint_mode_settings, *, panel=None):
@@ -1503,14 +1541,16 @@ def draw_material_paint_channels(
     if material_paint is None:
         # Resolution only matters for images not created yet; once channels exist, this control
         # does nothing (there is no live-resize), so it is offered alongside the button that
-        # creates them instead of as a permanent row above.
+        # creates them instead of as a permanent row above. The Material Paint (vertex color)
+        # canvas has no images at all - every channel is a per-vertex attribute - so the control
+        # is meaningless there.
         row = layout.row(align=True)
         row.operator(
             "paint.material_paint_brush_ensure",
             text="PBR Paint",
             icon='ADD',
         )
-        if paint_mode is not None:
+        if paint_mode is not None and not show_custom:
             row.prop(paint_mode, "new_channel_image_size", text="")
         return
 
@@ -1518,10 +1558,15 @@ def draw_material_paint_channels(
 
     # Use one aligned grid_flow so channel toggles wrap when the panel is too narrow.
     # Labels may be clipped in very tight cells; the short labels below keep controls readable.
+    # `show_custom` is only passed True for the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color)
+    # canvas, so it also selects the vertex-storable channel subset here.
+    channel_ids = _MATERIAL_PAINT_CHANNEL_UI_ORDER
+    if show_custom:
+        channel_ids = [
+            channel_id for channel_id in channel_ids if channel_id in _MATERIAL_PAINT_VERTEX_CHANNELS
+        ]
     visible = set(paint_mode.visible_material_channels)
-    toggle_ids = [
-        channel_id for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER if channel_id in visible
-    ]
+    toggle_ids = [channel_id for channel_id in channel_ids if channel_id in visible]
     if show_custom:
         toggle_ids.append('CUSTOM')
     toggle_labels = {
@@ -1590,22 +1635,33 @@ def draw_material_paint_channels(
             channel_col, context, channel, 'ALPHA', material_paint,
         )
 
-    # Normal: tangent vector as a single color (#8080FF = flat +Z); blend is always NORMAL_MIX.
-    channel = channels['NORMAL']
-    if channel.use and 'NORMAL' in visible:
-        _channel_panel_sep()
-        _draw_material_paint_normal_panel(channel_col, context, channel)
-
-    channel = channels['EMISSION']
-    if channel.use and 'EMISSION' in visible:
-        _channel_panel_sep()
-        _draw_material_paint_emission_panel(channel_col, context, channel)
-
-    for channel_id in ('HEIGHT', 'SPECULAR'):
-        channel = channels[channel_id]
-        if channel.use and channel_id in visible:
+    # Normal, Emission and Height are texture-map-only channels: a vertex canvas has no per-vertex
+    # storage for them (see `_MATERIAL_PAINT_VERTEX_CHANNELS`), so skip them for Material Paint.
+    # Their `use`/visibility bits can still be set from a prior Material (image) canvas session,
+    # so this must be an explicit `not show_custom` guard, not just membership in `channel_ids`.
+    if not show_custom:
+        # Normal: tangent vector as a single color (#8080FF = flat +Z); blend is always
+        # NORMAL_MIX.
+        channel = channels['NORMAL']
+        if channel.use and 'NORMAL' in visible:
             _channel_panel_sep()
-            _draw_material_paint_value_ramp(channel_col, context, channel, channel_id)
+            _draw_material_paint_normal_panel(channel_col, context, channel)
+
+        channel = channels['EMISSION']
+        if channel.use and 'EMISSION' in visible:
+            _channel_panel_sep()
+            _draw_material_paint_emission_panel(channel_col, context, channel)
+
+    channel = channels['SPECULAR']
+    if channel.use and 'SPECULAR' in visible:
+        _channel_panel_sep()
+        _draw_material_paint_value_ramp(channel_col, context, channel, 'SPECULAR')
+
+    if not show_custom:
+        channel = channels['HEIGHT']
+        if channel.use and 'HEIGHT' in visible:
+            _channel_panel_sep()
+            _draw_material_paint_value_ramp(channel_col, context, channel, 'HEIGHT')
 
     if show_custom:
         channel = channels['CUSTOM']

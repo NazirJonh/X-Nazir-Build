@@ -33,6 +33,11 @@ struct PointCloud;
 
 namespace blender::bke {
 
+/** Per-point float3 attribute on the control curve, set by the editor at each point's placement
+ * (`paintcurve_geom_set_surface_normal()`), normalized. Shared here so the core build can read it
+ * without depending on the editor module -- see #curve_patch_build_from_control_curve. */
+constexpr const char *CURVE_PATCH_ATTR_SURFACE_NORMAL = "paintcurve_surface_normal";
+
 /* -------------------------------------------------------------------- */
 /** \name Build Parameters
  * \{ */

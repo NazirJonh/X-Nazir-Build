@@ -14,10 +14,12 @@
  */
 
 #include "BLI_math_base.h"
+#include "BLI_math_vector.hh"
 /* `BKE_curves.hh` only forward-declares the virtual array types, and the tessellation below reads
- * the `radius` attribute through a #VArraySpan. */
+ * the `radius` and `paintcurve_surface_normal` attributes through a #VArraySpan. */
 #include "BLI_virtual_array.hh"
 
+#include "BKE_attribute.hh"
 #include "BKE_curve_patch.hh"
 
 /* TEMPORARY diagnostic for the seam at a surface fold. Forces the wrap to a SINGLE window while
@@ -139,7 +141,30 @@ void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
    * tangents are computed inside the build, so shifting the points afterwards would leave them
    * describing the previous curve, the one still hovering above the mesh. */
   Array<float3> evaluated_positions(control_curve.evaluated_positions());
+
+  /* Seeded from the control curve's OWN per-point normal (set by the editor at each point's
+   * placement -- works identically on Mesh and Grids/CCG, unlike the shrinkwrap below which only
+   * exists for Mesh). This is what lets windowed frames build on Multires: without it,
+   * `evaluated_normals` used to stay entirely empty off Mesh, `CurvePatchSpline::normals_3d`
+   * followed suit, and #curve_patch_frames_partition refused to run -- silently collapsing every
+   * Multires patch onto the single-window path with its one frozen `plane_normal`, which clips
+   * anything more than ~72 degrees off the direction the patch happened to be drawn from. */
+  const AttributeAccessor control_attrs = control_curve.attributes();
+  const VArray<float3> control_normals = *control_attrs.lookup_or_default<float3>(
+      CURVE_PATCH_ATTR_SURFACE_NORMAL, AttrDomain::Point, float3(0.0f, 0.0f, 1.0f));
   Array<float3> evaluated_normals(evaluated_positions.size(), float3(0.0f));
+  control_curve.interpolate_to_evaluated(VArraySpan(control_normals),
+                                         evaluated_normals.as_mutable_span());
+  for (float3 &normal : evaluated_normals) {
+    /* Interpolation between two unit vectors is not itself unit length; renormalize, falling
+     * back to the frozen plane like the shrinkwrap path already does for a degenerate result. */
+    const float len = math::length(normal);
+    normal = len > 1e-6f ? normal / len : params.plane_normal;
+  }
+
+  /* Mesh only: refines both position and normal against the actual surface via the BVH snapshot.
+   * Grids/CCG has no snapshot (see #curve_patch_session_publish), so the curve keeps the positions
+   * and normals it already has from the control points above. */
   if (r_geometry.surface.ready) {
     curve_patch_surface_shrinkwrap(r_geometry.surface,
                                    params.radius,
@@ -151,8 +176,7 @@ void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
 
   curve_patch_geometry_build(evaluated_positions.as_span(),
                              evaluated_radii.as_span(),
-                             r_geometry.surface.ready ? evaluated_normals.as_span() :
-                                                        Span<float3>(),
+                             evaluated_normals.as_span(),
                              cyclic,
                              params,
                              stamp_texture_weights_cdf,
@@ -190,8 +214,11 @@ void curve_patch_geometry_build(const Span<float3> evaluated_positions,
   }
 
   /* Rebuild the ribbon UV LUT the relief action samples in place of
-   * `CurvePatchSpline::closest_point()`. */
-  if (r_geometry.surface.ready) {
+   * `CurvePatchSpline::closest_point()`. Gated on the spline actually carrying per-point normals
+   * rather than on `surface.ready`: windowing itself only reads `spline.normals_3d` (see
+   * #curve_patch_frames_build), which now comes from the control curve on every object type, Mesh
+   * or Grids/CCG alike -- the Mesh-only BVH snapshot above only refines it further. */
+  if (!r_geometry.spline.normals_3d.is_empty()) {
     curve_patch_spline_smooth_normals(r_geometry.spline, curve_patch_smooth_length(params));
     CurvePatchFramesParams frame_params;
     frame_params.min_window_length = 2.0f * params.radius;

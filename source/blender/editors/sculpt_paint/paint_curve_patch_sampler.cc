@@ -100,9 +100,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
    * in the same canonical space `plane_normal` was frozen in. */
   /* The normal comes from the SNAPSHOT when there is one: the shrinkwrap and the window planes
    * were built against the pristine surface, whereas the live `normals[idx]` already carries the
-   * relief this patch applied -- the culling would end up depending on its own result. On the
-   * single-window path and on Grids (where there is no snapshot) the live normal stays, as
-   * before.
+   * relief this patch applied -- the culling would end up depending on its own result. On Grids
+   * (where there is no snapshot to refine against) the live normal stays, as before -- windowing
+   * itself still runs there off the control curve's own per-point normals.
    *
    * `surface.vert_normals` is indexed by MESH VERTEX, so it may only be consulted when `idx` is
    * one. A pixel source (see `CurvePatchSourceGeometry::indices_are_mesh_verts`) numbers its

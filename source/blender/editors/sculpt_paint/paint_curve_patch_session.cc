@@ -157,7 +157,10 @@ static bool session_item_is_buildable(const CurvePatchItem &item)
   if (item.geometry.spline.is_empty()) {
     return false;
   }
-  return item.geometry.surface.ready ? item.geometry.frames.ready : item.geometry.ribbon.ready;
+  /* `curve_patch_geometry_build()` populates exactly one of the two -- windowed frames whenever the
+   * spline carries per-point normals (Mesh AND Grids/CCG alike now), the whole-curve ribbon LUT
+   * otherwise -- so checking either covers both without having to mirror that internal choice here. */
+  return item.geometry.frames.ready || item.geometry.ribbon.ready;
 }
 
 static void curve_patch_apply_effect_action(const Depsgraph &depsgraph,
@@ -622,7 +625,9 @@ bool curve_patch_session_publish(Object &ob,
 
   /* Mesh only: the snapshot and `bvhtree_from_mesh_corner_tris_ex` are tied to mesh topology
    * (faces / corner_verts / corner_tris), which CCG does not have. On Grids `surface.ready` stays
-   * false and the relief takes the previous single-window path. */
+   * false, so positions/normals are never shrinkwrapped onto a BVH -- but windowed frames still
+   * build off the control curve's own per-point normals (see #curve_patch_build_from_control_curve),
+   * so Grids gets the same windowing Mesh does, just without the extra surface snap/refinement. */
   /* Cleared rather than assumed empty: this session object may be reused from a previous patch, and
    * a stale window set left over from a Mesh object would otherwise still be sampled on a Grids one.
    * The snapshot holds a copy of every vertex position plus a BVH, so it is also worth tens of

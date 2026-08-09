@@ -833,8 +833,18 @@ void BKE_brush_material_paint_ensure(Brush *brush)
   settings->channels[PAINT_MATERIAL_CHANNEL_CUSTOM].value[0] = 0.5f;
   settings->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].value[0] = 0.0f;
   settings->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 0;
+  /* Neutral = fully opaque / no masking; masking only activates once the user opts in via use. */
+  settings->channels[PAINT_MATERIAL_CHANNEL_ALPHA].value[0] = 1.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_ALPHA].use = 0;
+  /* Neutral = fully lit / no occlusion. */
+  settings->channels[PAINT_MATERIAL_CHANNEL_AO].value[0] = 1.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_EMISSION].value[0] = 0.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_EMISSION].value[1] = 0.0f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_EMISSION].value[2] = 0.0f;
   copy_v3_fl(settings->base_color, 1.0f);
   settings->use_sync_base_color_with_brush = 1;
+  settings->use_alpha_map = 1;
+  settings->use_alpha_stroke_mask = 1;
   brush->material_paint = settings;
 }
 

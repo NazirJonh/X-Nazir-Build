@@ -2889,6 +2889,17 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
     /* Custom targets a user-named attribute and has no Principled socket, so it is vertex-only. */
     {PAINT_MATERIAL_CHANNEL_CUSTOM, "Custom", nullptr, nullptr, 0.0f, 1.0f, false},
     {PAINT_MATERIAL_CHANNEL_HEIGHT, "Height", "material_height", nullptr, -1.0f, 1.0f, false},
+    {PAINT_MATERIAL_CHANNEL_ALPHA, "Alpha", "material_alpha", "Alpha", 0.0f, 1.0f, false},
+    /* AO has no Principled BSDF socket (same treatment as Custom). */
+    {PAINT_MATERIAL_CHANNEL_AO, "AO", "material_ao", nullptr, 0.0f, 1.0f, false},
+    /* Emission is a color channel; is_color routes it through the generic color-attribute path. */
+    {PAINT_MATERIAL_CHANNEL_EMISSION,
+     "Emission",
+     "material_emission",
+     "Emission Color",
+     0.0f,
+     1.0f,
+     true},
 };
 
 static_assert(ARRAY_SIZE(material_paint_channels) == PAINT_MATERIAL_CHANNEL_NUM,
@@ -2926,8 +2937,38 @@ bool BKE_paint_material_channel_is_enabled(const BrushMaterialPaint &brush_paint
   if (brush_paint.channels[channel].use == 0) {
     return false;
   }
+  /* Custom is gated by the draw-time `show_custom` argument, not this bitmask. */
+  if (channel != PAINT_MATERIAL_CHANNEL_CUSTOM) {
+    if ((mode_settings.visible_material_channels & (1 << channel)) == 0) {
+      return false;
+    }
+  }
   /* A channel without a fixed attribute name is only usable once the user has named one. */
   return !BKE_paint_material_channel_attribute_name(mode_settings, channel).is_empty();
+}
+
+bool BKE_paint_material_channel_writes_to_target(const BrushMaterialPaint &brush_paint,
+                                                 const PaintModeSettings &mode_settings,
+                                                 const eMaterialPaintChannel channel)
+{
+  if (!BKE_paint_material_channel_is_enabled(brush_paint, mode_settings, channel)) {
+    return false;
+  }
+  if (channel == PAINT_MATERIAL_CHANNEL_ALPHA) {
+    return brush_paint.use_alpha_map != 0;
+  }
+  return true;
+}
+
+bool BKE_paint_material_channel_masks_stroke(const BrushMaterialPaint &brush_paint,
+                                             const PaintModeSettings &mode_settings)
+{
+  if (!BKE_paint_material_channel_is_enabled(
+          brush_paint, mode_settings, PAINT_MATERIAL_CHANNEL_ALPHA))
+  {
+    return false;
+  }
+  return brush_paint.use_alpha_stroke_mask != 0;
 }
 
 float2 BKE_paint_material_channel_range(const PaintModeSettings &settings,
@@ -3063,6 +3104,14 @@ float BKE_paint_material_channel_default_value(const eMaterialPaintChannel chann
     case PAINT_MATERIAL_CHANNEL_CUSTOM:
       return 0.5f;
     case PAINT_MATERIAL_CHANNEL_HEIGHT:
+      return 0.0f;
+    case PAINT_MATERIAL_CHANNEL_ALPHA:
+      /* Neutral = fully opaque / no masking. */
+      return 1.0f;
+    case PAINT_MATERIAL_CHANNEL_AO:
+      /* Neutral = fully lit / no occlusion. */
+      return 1.0f;
+    case PAINT_MATERIAL_CHANNEL_EMISSION:
       return 0.0f;
   }
   BLI_assert_unreachable();
@@ -3483,7 +3532,7 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
       /* Vertex-only channel, it has no map to paint into. */
       continue;
     }
-    if (!BKE_paint_material_channel_is_enabled(*brush_paint, mode_settings, info.channel)) {
+    if (!BKE_paint_material_channel_writes_to_target(*brush_paint, mode_settings, info.channel)) {
       continue;
     }
 

@@ -17,6 +17,8 @@ from bl_ui.properties_paint_common import (
     brush_settings_advanced,
     draw_color_settings,
     draw_material_paint_channels,
+    draw_material_paint_visibility_chevron,
+    draw_material_paint_visibility_popover,
     ClonePanel,
     BrushSelectPanel,
     TextureMaskPanel,
@@ -1249,6 +1251,18 @@ class IMAGE_PT_paint_select(Panel, ImagePaintPanel, BrushSelectPanel):
     bl_category = "Tool"
 
 
+class IMAGE_PT_material_paint_channel_visibility(Panel):
+    bl_label = "Visible Channels"
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    def draw(self, context):
+        draw_material_paint_visibility_popover(
+            context, self.layout, context.tool_settings.paint_mode,
+        )
+
+
 class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
     bl_context = ".paint_common_2d"
     bl_category = "Tool"
@@ -1283,7 +1297,11 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
             label = paint.canvas_image.name
 
         self.layout.label(text="PBR Paint")
-        self.layout.prop(paint, "canvas_source", text="")
+        row = self.layout.row(align=True)
+        row.prop(paint, "canvas_source", text="")
+        draw_material_paint_visibility_chevron(
+            context, row, paint, panel="IMAGE_PT_material_paint_channel_visibility",
+        )
 
     def draw(self, context):
         layout = self.layout
@@ -1315,7 +1333,7 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
                     if has_image_fn is not None:
                         have_image = any(
                             has_image_fn(channel)
-                            for channel in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL')
+                            for channel in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL', 'ALPHA', 'EMISSION')
                         )
 
                 draw_material_paint_channels(
@@ -2000,6 +2018,7 @@ classes = (
     IMAGE_PT_udim_tiles,
     IMAGE_PT_view_display,
     IMAGE_PT_paint_select,
+    IMAGE_PT_material_paint_channel_visibility,
     IMAGE_PT_paint_canvas,
     IMAGE_PT_paint_settings,
     IMAGE_PT_paint_color,

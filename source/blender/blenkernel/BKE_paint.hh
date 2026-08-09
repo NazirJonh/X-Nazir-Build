@@ -694,7 +694,11 @@ struct MaterialPaintChannelInfo {
   /** Inclusive value range of the scalar channels. */
   float value_min;
   float value_max;
-  /** True for the RGB channel, which is written to a color attribute rather than a float one. */
+  /**
+   * True for channels written through the generic color-attribute path (not specifically Base
+   * Color). All `is_color = true` channels share the same write path; which attribute gets written
+   * is determined by `attribute_name`, not by an implicit "must be Base Color" assumption.
+   */
   bool is_color;
 };
 
@@ -708,12 +712,29 @@ Span<MaterialPaintChannelInfo> BKE_paint_material_channels();
 const MaterialPaintChannelInfo &BKE_paint_material_channel_info(eMaterialPaintChannel channel);
 
 /**
- * Returns whether \a channel is enabled on \a brush_paint.
- * Custom additionally requires a non-empty attribute name on \a mode_settings.
+ * Returns whether \a channel is active for painting: `use` is set, the channel is listed in
+ * #PaintModeSettings.visible_material_channels (Custom is exempt — it uses the draw-time
+ * `show_custom` gate instead), and a non-empty attribute name is available on \a mode_settings.
  */
 bool BKE_paint_material_channel_is_enabled(const BrushMaterialPaint &brush_paint,
                                            const PaintModeSettings &mode_settings,
                                            eMaterialPaintChannel channel);
+
+/**
+ * Returns whether \a channel's painted values are written to its target map/attribute this stroke.
+ * For Alpha, additionally requires #BrushMaterialPaint.use_alpha_map; other channels follow
+ * #BKE_paint_material_channel_is_enabled.
+ */
+bool BKE_paint_material_channel_writes_to_target(const BrushMaterialPaint &brush_paint,
+                                                 const PaintModeSettings &mode_settings,
+                                                 eMaterialPaintChannel channel);
+
+/**
+ * Returns whether the enabled Alpha channel should mask other channels' writes this stroke
+ * (#BrushMaterialPaint.use_alpha_stroke_mask).
+ */
+bool BKE_paint_material_channel_masks_stroke(const BrushMaterialPaint &brush_paint,
+                                             const PaintModeSettings &mode_settings);
 
 /**
  * Returns the scalar paint value for \a channel from \a brush_paint, clamped to the channel range

@@ -1206,10 +1206,16 @@ enum eMaterialPaintChannel : int8_t {
   PAINT_MATERIAL_CHANNEL_CUSTOM = 5,
   /** Scalar height/displacement channel. */
   PAINT_MATERIAL_CHANNEL_HEIGHT = 6,
+  /** Alpha channel; masks stroke write strength across all other active channels. */
+  PAINT_MATERIAL_CHANNEL_ALPHA = 7,
+  /** Ambient Occlusion scalar channel. */
+  PAINT_MATERIAL_CHANNEL_AO = 8,
+  /** Emission color channel (RGB, routes through the generic color-attribute path). */
+  PAINT_MATERIAL_CHANNEL_EMISSION = 9,
 };
 
 /** Number of #eMaterialPaintChannel values. Sizes the per-channel arrays in DNA. */
-#define PAINT_MATERIAL_CHANNEL_NUM 7
+#define PAINT_MATERIAL_CHANNEL_NUM 10
 
 struct MeshAutomaskingSettings {
   DNA_DEFINE_CXX_METHODS(MeshAutomaskingSettings)
@@ -1384,7 +1390,18 @@ struct PaintModeSettings {
   /** Width/height (in pixels) used for newly auto-created per-channel material paint images.
    * \see ePaintNewChannelImageSize. */
   int new_channel_image_size = 4096;
-  char _pad1[4] = {};
+
+  /**
+   * Bitmask of #eMaterialPaintChannel values controlling which channels are shown in the Paint
+   * PBR channel list and participate in strokes. Independent of each channel's
+   * #BrushMaterialPaintChannel.use: hiding a channel here does not clear its value or source
+   * texture, but the channel is omitted from the UI and skipped during painting until shown
+   * again. #PAINT_MATERIAL_CHANNEL_CUSTOM is deliberately not represented in this bitmask; it
+   * keeps its own separate `show_custom` UI gate (draw-time argument, not stored state),
+   * matching how the preview-priority list (#BKE_paint_material_preview_mtex_get) already
+   * excludes Custom.
+   */
+  int visible_material_channels = 0;
 };
 
 /** #PaintModeSettings::new_channel_image_size */

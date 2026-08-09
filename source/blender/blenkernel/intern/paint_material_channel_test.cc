@@ -40,6 +40,15 @@
 
 namespace blender {
 
+static int paint_material_channel_test_default_visibility()
+{
+  return (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) | (1 << PAINT_MATERIAL_CHANNEL_METALLIC) |
+         (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) | (1 << PAINT_MATERIAL_CHANNEL_SPECULAR) |
+         (1 << PAINT_MATERIAL_CHANNEL_NORMAL) | (1 << PAINT_MATERIAL_CHANNEL_HEIGHT) |
+         (1 << PAINT_MATERIAL_CHANNEL_ALPHA) | (1 << PAINT_MATERIAL_CHANNEL_AO) |
+         (1 << PAINT_MATERIAL_CHANNEL_EMISSION);
+}
+
 class PaintMaterialChannelTest : public bke::BlenderGTestBase {
  public:
   Main *bmain = nullptr;
@@ -137,6 +146,7 @@ TEST(pbr_normal, blend_mix_renormalizes)
 TEST_F(PaintMaterialChannelTest, channel_helpers)
 {
   PaintModeSettings mode_settings{};
+  mode_settings.visible_material_channels = paint_material_channel_test_default_visibility();
   BrushMaterialPaint brush_paint{};
   brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
   brush_paint.channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].use = 0;
@@ -200,9 +210,12 @@ TEST_F(PaintMaterialChannelTest, channel_blend_mode_only_base_color_is_blendable
     brush_paint.channels[info.channel].blend = IMB_BLEND_MUL;
   }
 
-  /* Base Color is a color, so the blend modes apply to it and it uses what it stores. */
+  /* Base Color and Emission are color channels, so blend modes apply to them. */
   EXPECT_EQ(BKE_paint_material_channel_blend_mode(
                 brush_paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false),
+            IMB_BLEND_MUL);
+  EXPECT_EQ(BKE_paint_material_channel_blend_mode(
+                brush_paint, PAINT_MATERIAL_CHANNEL_EMISSION, false),
             IMB_BLEND_MUL);
 
   /* The scalar channels are data: blending them as if they were light is meaningless, so they
@@ -257,8 +270,9 @@ TEST_F(PaintMaterialChannelTest, channel_table_is_indexable)
     EXPECT_EQ(&BKE_paint_material_channel_info(channels[i].channel), &channels[i]);
   }
 
-  /* Exactly one color channel, and only the vertex-only channel lacks a socket. */
+  /* Base Color and Emission are color channels; only the vertex-only channel lacks a socket. */
   EXPECT_TRUE(BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_BASE_COLOR).is_color);
+  EXPECT_TRUE(BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_EMISSION).is_color);
   EXPECT_STREQ(BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_NORMAL).ui_name, "Normal");
   EXPECT_STREQ(BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_NORMAL).attribute_name,
                "material_paint_normal");
@@ -284,6 +298,7 @@ TEST_F(PaintMaterialChannelTest, channel_from_attribute_name)
 TEST_F(PaintMaterialChannelTest, custom_channel_range_clamps_value)
 {
   PaintModeSettings mode_settings{};
+  mode_settings.visible_material_channels = paint_material_channel_test_default_visibility();
   BrushMaterialPaint brush_paint{};
   brush_paint.channels[PAINT_MATERIAL_CHANNEL_CUSTOM].use = 1;
   BLI_strncpy(mode_settings.material_paint_custom_attr,
@@ -445,9 +460,50 @@ TEST_F(PaintMaterialChannelTest, no_material_or_no_principled_not_found)
       *ob, PAINT_MATERIAL_CHANNEL_CUSTOM, &resolved_image, &resolved_iuser));
 }
 
+TEST_F(PaintMaterialChannelTest, hidden_channel_is_not_enabled_for_painting)
+{
+  PaintModeSettings mode_settings{};
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
+  mode_settings.visible_material_channels = (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+
+  EXPECT_FALSE(BKE_paint_material_channel_is_enabled(
+      brush_paint, mode_settings, PAINT_MATERIAL_CHANNEL_METALLIC));
+
+  mode_settings.visible_material_channels |= (1 << PAINT_MATERIAL_CHANNEL_METALLIC);
+  EXPECT_TRUE(BKE_paint_material_channel_is_enabled(
+      brush_paint, mode_settings, PAINT_MATERIAL_CHANNEL_METALLIC));
+}
+
+TEST_F(PaintMaterialChannelTest, alpha_write_and_mask_modes)
+{
+  PaintModeSettings mode_settings{};
+  mode_settings.visible_material_channels = paint_material_channel_test_default_visibility();
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].use = 1;
+
+  brush_paint.use_alpha_map = 1;
+  brush_paint.use_alpha_stroke_mask = 0;
+  EXPECT_TRUE(BKE_paint_material_channel_writes_to_target(
+      brush_paint, mode_settings, PAINT_MATERIAL_CHANNEL_ALPHA));
+  EXPECT_FALSE(BKE_paint_material_channel_masks_stroke(brush_paint, mode_settings));
+
+  brush_paint.use_alpha_map = 0;
+  brush_paint.use_alpha_stroke_mask = 1;
+  EXPECT_FALSE(BKE_paint_material_channel_writes_to_target(
+      brush_paint, mode_settings, PAINT_MATERIAL_CHANNEL_ALPHA));
+  EXPECT_TRUE(BKE_paint_material_channel_masks_stroke(brush_paint, mode_settings));
+
+  brush_paint.use_alpha_map = 1;
+  EXPECT_TRUE(BKE_paint_material_channel_writes_to_target(
+      brush_paint, mode_settings, PAINT_MATERIAL_CHANNEL_ALPHA));
+  EXPECT_TRUE(BKE_paint_material_channel_masks_stroke(brush_paint, mode_settings));
+}
+
 TEST_F(PaintMaterialChannelTest, BaseColorEnabledAndName)
 {
   PaintModeSettings mode_settings;
+  mode_settings.visible_material_channels = (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   BrushMaterialPaint brush_paint;
   brush_paint.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].use = 1;
   EXPECT_TRUE(BKE_paint_material_channel_is_enabled(
@@ -734,6 +790,58 @@ TEST(material_paint_channel, height_from_attribute_name)
 TEST(material_paint_channel, height_default_value)
 {
   EXPECT_FLOAT_EQ(BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_HEIGHT), 0.0f);
+}
+
+TEST(material_paint_channel, alpha_descriptor)
+{
+  const MaterialPaintChannelInfo &info =
+      BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_ALPHA);
+  EXPECT_STREQ(info.ui_name, "Alpha");
+  EXPECT_STREQ(info.attribute_name, "material_alpha");
+  EXPECT_STREQ(info.socket_name, "Alpha");
+  EXPECT_FLOAT_EQ(info.value_min, 0.0f);
+  EXPECT_FLOAT_EQ(info.value_max, 1.0f);
+  EXPECT_FALSE(info.is_color);
+}
+
+TEST(material_paint_channel, alpha_default_value)
+{
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_ALPHA), 1.0f);
+}
+
+TEST(material_paint_channel, ao_descriptor)
+{
+  const MaterialPaintChannelInfo &info =
+      BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_AO);
+  EXPECT_STREQ(info.ui_name, "AO");
+  EXPECT_STREQ(info.attribute_name, "material_ao");
+  EXPECT_EQ(info.socket_name, nullptr);
+  EXPECT_FLOAT_EQ(info.value_min, 0.0f);
+  EXPECT_FLOAT_EQ(info.value_max, 1.0f);
+  EXPECT_FALSE(info.is_color);
+}
+
+TEST(material_paint_channel, ao_default_value)
+{
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_AO), 1.0f);
+}
+
+TEST(material_paint_channel, emission_descriptor)
+{
+  const MaterialPaintChannelInfo &info =
+      BKE_paint_material_channel_info(PAINT_MATERIAL_CHANNEL_EMISSION);
+  EXPECT_STREQ(info.ui_name, "Emission");
+  EXPECT_STREQ(info.attribute_name, "material_emission");
+  EXPECT_STREQ(info.socket_name, "Emission Color");
+  EXPECT_FLOAT_EQ(info.value_min, 0.0f);
+  EXPECT_FLOAT_EQ(info.value_max, 1.0f);
+  EXPECT_TRUE(info.is_color);
+}
+
+TEST(material_paint_channel, emission_default_value)
+{
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_EMISSION),
+                  0.0f);
 }
 
 TEST_F(PaintMaterialChannelTest, source_mtex_defaults)

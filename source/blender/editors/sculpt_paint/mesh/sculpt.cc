@@ -2985,6 +2985,13 @@ static void update_brush_local_mat(const Sculpt &sd, Object &ob)
      * above (built from the brush's own #MTex) does not account for. */
     if (cache->material_source_sampler) {
       cache->material_source_sampler->update_area_local_mats(ob);
+      /* Invalidate; #do_paint_material_brush refills before this dab's channel passes run, once
+       * it has node_mask/nodes in scope. Sized here since a fresh stroke's vertex count is only
+       * known once, not resized per dab. */
+      if (cache->material_alpha_cache.is_empty()) {
+        const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+        cache->material_alpha_cache.reinitialize(mesh.verts_num);
+      }
     }
   }
 }

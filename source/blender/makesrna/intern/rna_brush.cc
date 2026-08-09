@@ -1227,6 +1227,29 @@ static void rna_BrushMaterialPaint_sync_base_color_update(bContext *C, PointerRN
   rna_BrushMaterialPaint_update(CTX_data_main(C), CTX_data_scene(C), ptr);
 }
 
+static void rna_BrushMaterialPaint_use_alpha_map_set(PointerRNA *ptr, bool value)
+{
+  BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
+  brush_paint->use_alpha_map = value ? 1 : 0;
+  if (brush_paint->use_alpha_map == 0 && brush_paint->use_alpha_stroke_mask == 0) {
+    brush_paint->use_alpha_stroke_mask = 1;
+  }
+}
+
+static void rna_BrushMaterialPaint_use_alpha_stroke_mask_set(PointerRNA *ptr, bool value)
+{
+  BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
+  brush_paint->use_alpha_stroke_mask = value ? 1 : 0;
+  if (brush_paint->use_alpha_map == 0 && brush_paint->use_alpha_stroke_mask == 0) {
+    brush_paint->use_alpha_map = 1;
+  }
+}
+
+static void rna_BrushMaterialPaint_alpha_mode_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  rna_BrushMaterialPaint_update(bmain, scene, ptr);
+}
+
 static void rna_BrushMaterialPaint_channels_begin(CollectionPropertyIterator *iter,
                                                   PointerRNA *ptr)
 {
@@ -1365,6 +1388,30 @@ static void rna_BrushMaterialPaintChannel_normal_color_set(PointerRNA *ptr, cons
   for (int i = 0; i < 3; i++) {
     channel->value[i] = values[i] * 2.0f - 1.0f;
   }
+}
+
+static void rna_BrushMaterialPaintChannel_emission_color_get(PointerRNA *ptr, float *values)
+{
+  const BrushMaterialPaintChannel *channel = static_cast<const BrushMaterialPaintChannel *>(
+      ptr->data);
+  const std::optional<eMaterialPaintChannel> channel_id =
+      rna_BrushMaterialPaintChannel_channel_get(ptr);
+  if (!channel_id || *channel_id != PAINT_MATERIAL_CHANNEL_EMISSION) {
+    zero_v3(values);
+    return;
+  }
+  copy_v3_v3(values, channel->value);
+}
+
+static void rna_BrushMaterialPaintChannel_emission_color_set(PointerRNA *ptr, const float *values)
+{
+  BrushMaterialPaintChannel *channel = static_cast<BrushMaterialPaintChannel *>(ptr->data);
+  const std::optional<eMaterialPaintChannel> channel_id =
+      rna_BrushMaterialPaintChannel_channel_get(ptr);
+  if (!channel_id || *channel_id != PAINT_MATERIAL_CHANNEL_EMISSION) {
+    return;
+  }
+  copy_v3_v3(channel->value, values);
 }
 
 static PointerRNA rna_BrushMaterialPaintChannel_source_image_get(PointerRNA *ptr)
@@ -2657,6 +2704,20 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       "entry in BrushMaterialPaint.channels; reads as black and ignores writes elsewhere");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
 
+  prop = RNA_def_property(srna, "emission_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_BrushMaterialPaintChannel_emission_color_get",
+                               "rna_BrushMaterialPaintChannel_emission_color_set",
+                               nullptr);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Color",
+      "Emission color. Only valid on the Emission channel's entry in BrushMaterialPaint.channels; "
+      "reads as black and ignores writes elsewhere");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
   /* Stored per channel, but only ever read for Base Color: the blend modes are color operations,
    * and applying them to the scalar channels would compute a photometric result for a quantity
    * that has none. See #BKE_paint_material_channel_blend_mode. */
@@ -2774,6 +2835,25 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Sync with Brush", "Keep the base color channel synchronized with the brush color");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_sync_base_color_update");
+
+  prop = RNA_def_property(srna, "use_alpha_map", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_alpha_map", 1);
+  RNA_def_property_boolean_funcs(prop, nullptr, "rna_BrushMaterialPaint_use_alpha_map_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Alpha Map",
+      "Write stroke values into the material's Alpha map when the Alpha channel is enabled");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_alpha_mode_update");
+
+  prop = RNA_def_property(srna, "use_alpha_stroke_mask", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_alpha_stroke_mask", 1);
+  RNA_def_property_boolean_funcs(prop, nullptr, "rna_BrushMaterialPaint_use_alpha_stroke_mask_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Brush Mask",
+      "Sample Alpha to mask other active channels' writes during this stroke when the Alpha "
+      "channel is enabled");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_alpha_mode_update");
 }
 
 static void rna_def_brush(BlenderRNA *brna)

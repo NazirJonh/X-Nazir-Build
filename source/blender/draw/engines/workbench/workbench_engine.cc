@@ -83,6 +83,11 @@ static const char *material_props_uniform_name(const eMaterialPaintChannel chann
     case PAINT_MATERIAL_CHANNEL_NORMAL:
     case PAINT_MATERIAL_CHANNEL_CUSTOM:
     case PAINT_MATERIAL_CHANNEL_HEIGHT:
+    case PAINT_MATERIAL_CHANNEL_ALPHA:
+    case PAINT_MATERIAL_CHANNEL_AO:
+    case PAINT_MATERIAL_CHANNEL_EMISSION:
+      /* General attribute path for the initial implementation; no dedicated GPU uniform fast
+       * path yet (deferred, see design spec). */
       return nullptr;
   }
   return nullptr;

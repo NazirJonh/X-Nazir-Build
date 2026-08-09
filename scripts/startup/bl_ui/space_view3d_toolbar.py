@@ -30,6 +30,7 @@ from bl_ui.properties_paint_common import (
     brush_settings_advanced,
     draw_color_settings,
     draw_material_paint_channels,
+    draw_material_paint_visibility_chevron,
 )
 from bl_ui.utils import PresetPanel
 
@@ -342,7 +343,9 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
     def draw_header(self, context):
         layout = self.layout
         layout.label(text="Paint PBR")
-        layout.prop(context.tool_settings.paint_mode, "canvas_source", text="")
+        row = layout.row(align=True)
+        row.prop(context.tool_settings.paint_mode, "canvas_source", text="")
+        draw_material_paint_visibility_chevron(context, row, context.tool_settings.paint_mode)
 
     def draw(self, context):
         layout = self.layout
@@ -485,7 +488,10 @@ class SelectPaintSlotHelper:
 
     def draw_header(self, context):
         layout = self.layout
-        layout.prop(self.get_mode_settings(context), self.canvas_source_attr_name, text="")
+        mode_settings = self.get_mode_settings(context)
+        row = layout.row(align=True)
+        row.prop(mode_settings, self.canvas_source_attr_name, text="")
+        draw_material_paint_visibility_chevron(context, row, mode_settings)
 
     def draw(self, context):
         layout = self.layout
@@ -518,7 +524,7 @@ class SelectPaintSlotHelper:
                     if has_image_fn is not None:
                         have_image = any(
                             has_image_fn(channel)
-                            for channel in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL')
+                            for channel in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL', 'ALPHA', 'EMISSION')
                         )
 
                 draw_material_paint_channels(
@@ -636,9 +642,8 @@ class VIEW3D_PT_slots_projectpaint(SelectPaintSlotHelper, View3DPanel, Panel):
 
 class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
     bl_label = ""
-    # Wide enough for draw_material_paint_channels' socket/value split rows and the channel
-    # toggle row (up to 6 toggles, each with its own "missing texture" icon); the default
-    # popover width clips them.
+    # Wide enough for draw_material_paint_channels' socket/value split rows; channel toggles
+    # wrap via grid_flow when the popover is narrower than the full toggle strip.
     bl_ui_units_x = 16
 
     def draw_header(self, context):

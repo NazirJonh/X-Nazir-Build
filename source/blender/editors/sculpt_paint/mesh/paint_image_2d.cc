@@ -1840,7 +1840,7 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       if (info.socket_name == nullptr) {
         continue;
       }
-      if (!BKE_paint_material_channel_is_enabled(brush_paint, paint_mode, info.channel)) {
+      if (!BKE_paint_material_channel_writes_to_target(brush_paint, paint_mode, info.channel)) {
         continue;
       }
       Image *channel_image;

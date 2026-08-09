@@ -203,11 +203,15 @@ struct BrushMaterialPaint {
   DNA_DEFINE_CXX_METHODS(BrushMaterialPaint)
 
   /** Indexed by #eMaterialPaintChannel. */
-  BrushMaterialPaintChannel channels[/*PAINT_MATERIAL_CHANNEL_NUM*/ 7] = {};
+  BrushMaterialPaintChannel channels[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
   /** RGB written by the Base Color channel when not synced with the brush color. */
   float base_color[3] = {1.0f, 1.0f, 1.0f};
   char use_sync_base_color_with_brush = 1;
-  char _pad[3] = {};
+  /** When the Alpha channel is enabled, write stroke values into the Alpha map. */
+  char use_alpha_map = 1;
+  /** When the Alpha channel is enabled, sample Alpha to mask other channels' writes this stroke. */
+  char use_alpha_stroke_mask = 1;
+  char _pad = 0;
   /**
    * Mapping (map_mode, size, angle) shared by every channel's source texture, so multi-channel
    * patterns (e.g. a Base Color texture with a matching Normal/Roughness texture) stay aligned

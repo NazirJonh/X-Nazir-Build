@@ -40,7 +40,11 @@ ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
 {
   bool any_source = false;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (!BKE_paint_material_channel_is_enabled(brush_paint, settings, info.channel)) {
+    const bool channel_enabled = BKE_paint_material_channel_is_enabled(
+        brush_paint, settings, info.channel);
+    const bool alpha_masks = info.channel == PAINT_MATERIAL_CHANNEL_ALPHA &&
+                             BKE_paint_material_channel_masks_stroke(brush_paint, settings);
+    if (!channel_enabled && !alpha_masks) {
       continue;
     }
     const BrushMaterialPaintChannel &channel = brush_paint.channels[info.channel];
@@ -284,13 +288,16 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                                    const bool decode_linear) const
 {
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  /* Base Color is currently the only non-Normal channel that samples as a color; any other
+  const bool is_base_color = channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const bool is_emission = channel == PAINT_MATERIAL_CHANNEL_EMISSION;
+  /* Base Color and Emission are the non-Normal channels that sample as a color; any other
    * channel reaching here would need its own fallback rather than silently reusing Base Color's.
    */
-  BLI_assert(is_normal || channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  BLI_assert(is_normal || is_base_color || is_emission);
   const float3 fallback = is_normal ? float3(brush_paint_.channels[channel].value) :
-                                      BKE_paint_material_base_color_get(
-                                          brush_paint_, *ss_.cache->paint, brush_, false);
+                          is_base_color ? BKE_paint_material_base_color_get(
+                                              brush_paint_, *ss_.cache->paint, brush_, false) :
+                                          float3(brush_paint_.channels[channel].value);
 
   const ChannelSource &source = sources_[channel];
   if (!source.usable) {
@@ -323,10 +330,13 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                                    const bool decode_linear) const
 {
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  BLI_assert(is_normal || channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const bool is_base_color = channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const bool is_emission = channel == PAINT_MATERIAL_CHANNEL_EMISSION;
+  BLI_assert(is_normal || is_base_color || is_emission);
   const float3 fallback = is_normal ? float3(brush_paint_.channels[channel].value) :
-                                      BKE_paint_material_base_color_get(
-                                          brush_paint_, *ss_.cache->paint, brush_, false);
+                          is_base_color ? BKE_paint_material_base_color_get(
+                                              brush_paint_, *ss_.cache->paint, brush_, false) :
+                                          float3(brush_paint_.channels[channel].value);
 
   const ChannelSource &source = sources_[channel];
   if (!source.usable) {

@@ -668,6 +668,7 @@ static void apply_paint_channel(ImageData &image_data,
                                 const eMaterialPaintChannel channel,
                                 const bool is_color_channel,
                                 const bool is_normal_channel,
+                                const bool alpha_masking_active,
                                 const float3 &view_right,
                                 const float3 & /*view_up*/,
                                 const ARegion *region,
@@ -759,6 +760,22 @@ static void apply_paint_channel(ImageData &image_data,
 
           threading::parallel_for(IndexRange(row_size), 512, [&](const IndexRange range) {
             Span<float> factors = row_factors.slice(range);
+            if (alpha_masking_active && channel != PAINT_MATERIAL_CHANNEL_ALPHA &&
+                sampler != nullptr && !row_contexts.is_empty())
+            {
+              PaintLocalData &tls_factors = all_tls.local();
+              tls_factors.factors.resize(range.size());
+              const Span<material::TexelSampleContext> contexts = row_contexts.slice(range);
+              const int thread_id = BLI_task_parallel_thread_id(nullptr);
+              for (const int i : range.index_range()) {
+                const float alpha = math::clamp(
+                    sampler->scalar(PAINT_MATERIAL_CHANNEL_ALPHA, contexts[i], thread_id),
+                    0.0f,
+                    1.0f);
+                tls_factors.factors[i] = factors[i] * alpha;
+              }
+              factors = tls_factors.factors;
+            }
             /* Chunk may still be all-zero even though the row has some nonzero factor
              * elsewhere; skip it exactly like the un-cached path used to. */
             if (std::ranges::all_of(factors, [](const float factor) { return factor == 0.0f; })) {
@@ -1253,6 +1270,11 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
   const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, ob);
 
+  const bool alpha_masking_active = !cache.toggle_settings.invert && active_sampler != nullptr &&
+                                    brush->material_paint != nullptr &&
+                                    BKE_paint_material_channel_masks_stroke(
+                                        *brush->material_paint, paint_mode_settings);
+
   /* Brush falloff/hardness/strength/texture factors are channel-independent: computed once per
    * dab against the shared pixel-node encoding and reused by every enabled Material channel,
    * instead of being re-evaluated per channel (Base Color, Normal, Roughness, ...). Recomputed
@@ -1387,6 +1409,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                 target.channel,
                                 target.is_color_channel,
                                 target.is_normal_channel,
+                                alpha_masking_active,
                                 cache.view_right,
                                 cache.view_up,
                                 cache.vc->region,

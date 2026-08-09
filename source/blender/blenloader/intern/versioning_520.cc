@@ -584,6 +584,63 @@ static void version_material_paint_channel_height_defaults(Main &bmain)
   }
 }
 
+static void version_material_paint_channel_alpha_ao_emission_defaults(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    if (brush.material_paint == nullptr) {
+      continue;
+    }
+    BrushMaterialPaintChannel &alpha =
+        brush.material_paint->channels[PAINT_MATERIAL_CHANNEL_ALPHA];
+    /* Trailing DNA growth should zero-fill; set explicit defaults for clarity. */
+    alpha.use = 0;
+    alpha.value[0] = 1.0f;
+    alpha.value[1] = 0.0f;
+    alpha.value[2] = 0.0f;
+    alpha.blend = 0;
+    brush.material_paint->use_alpha_map = 1;
+    brush.material_paint->use_alpha_stroke_mask = 1;
+
+    BrushMaterialPaintChannel &ao = brush.material_paint->channels[PAINT_MATERIAL_CHANNEL_AO];
+    ao.use = 0;
+    ao.value[0] = 1.0f;
+    ao.value[1] = 0.0f;
+    ao.value[2] = 0.0f;
+    ao.blend = 0;
+
+    BrushMaterialPaintChannel &emission =
+        brush.material_paint->channels[PAINT_MATERIAL_CHANNEL_EMISSION];
+    emission.use = 0;
+    emission.value[0] = 0.0f;
+    emission.value[1] = 0.0f;
+    emission.value[2] = 0.0f;
+    emission.blend = 0;
+  }
+}
+
+/**
+ * #PaintModeSettings::visible_material_channels was added with a zero in-class default, which
+ * is indistinguishable from "user hid every channel" at read time. Gated purely on file version
+ * (never on the field's value) so a user's deliberate all-hidden choice made after upgrading is
+ * never clobbered by a later load of the same file.
+ */
+static void version_material_paint_channel_visibility_defaults(Main &bmain)
+{
+  /* BASE_COLOR, METALLIC, ROUGHNESS, NORMAL only; other channels are hidden until enabled
+   * in the Visible Channels popover. CUSTOM is not part of this bitmask. */
+  const int default_visible = (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
+                              (1 << PAINT_MATERIAL_CHANNEL_METALLIC) |
+                              (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
+                              (1 << PAINT_MATERIAL_CHANNEL_NORMAL);
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    ts->paint_mode.visible_material_channels = default_visible;
+  }
+}
+
 /**
  * `PaintModeSettings::new_channel_image_size` was added with a C++ default member initializer
  * (4096), but that initializer only applies to freshly constructed structs; files saved before
@@ -1031,6 +1088,19 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 51)) {
     version_material_paint_channel_image_size_defaults(*bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 52)) {
+    version_material_paint_channel_alpha_ao_emission_defaults(*bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 53)) {
+    version_material_paint_channel_visibility_defaults(*bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 54)) {
+    /* Narrow the default visible set from the initial 7-channel rollout to four core channels. */
+    version_material_paint_channel_visibility_defaults(*bmain);
   }
 
   /**

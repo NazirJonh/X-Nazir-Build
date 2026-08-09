@@ -42,6 +42,29 @@ const EnumPropertyItem rna_enum_material_paint_channel_items[] = {
      "Custom",
      "User-named float attribute, vertex painting only"},
     {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", "Scalar height/displacement channel"},
+    {PAINT_MATERIAL_CHANNEL_ALPHA,
+     "ALPHA",
+     0,
+     "Alpha",
+     "Scalar alpha channel; also masks writes to other active channels while enabled"},
+    {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", "Ambient occlusion channel"},
+    {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", "Emission color channel"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Bit-flag values for #PaintModeSettings.visible_material_channels. Must not reuse
+ * #rna_enum_material_paint_channel_items: that table stores channel indices (0..9), while
+ * PROP_ENUM_FLAG requires each item to be a unique power-of-two bit. */
+static const EnumPropertyItem rna_enum_visible_material_paint_channel_items[] = {
+    {1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1481,6 +1504,21 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "New Channel Image Size",
                            "Width and height used for material paint channel images that "
                            "are auto-created when a channel is enabled");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  const int default_visible_material_channels = (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
+                                                (1 << PAINT_MATERIAL_CHANNEL_METALLIC) |
+                                                (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
+                                                (1 << PAINT_MATERIAL_CHANNEL_NORMAL);
+  prop = RNA_def_enum_flag(srna,
+                           "visible_material_channels",
+                           rna_enum_visible_material_paint_channel_items,
+                           default_visible_material_channels,
+                           "Visible Channels",
+                           "Which material paint channels are shown in the Paint PBR channel "
+                           "list and painted during strokes; hidden channels keep their settings "
+                           "but are skipped until shown again");
+  RNA_def_property_enum_sdna(prop, nullptr, "visible_material_channels");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 

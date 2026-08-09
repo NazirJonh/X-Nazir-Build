@@ -414,6 +414,15 @@ struct StrokeCache {
    */
   std::unique_ptr<material::ChannelSourceSampler> material_source_sampler;
 
+  /**
+   * Per-vertex Alpha channel factor for masking writes to other active material paint channels
+   * during a stroke. Memory persists for the stroke, but *values* are dab-scoped: recomputed
+   * every dab (see #update_brush_local_mat), because #ChannelSourceSampler::update_area_local_mats
+   * (also per-dab) can change what Alpha's source samples to at a fixed vertex position. Empty
+   * when Alpha is disabled or the stroke is an erase.
+   */
+  Array<float> material_alpha_cache;
+
   /* Pose brush */
   std::unique_ptr<pose::IKChain> pose_ik_chain;
 

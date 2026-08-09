@@ -133,6 +133,7 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
                                  const float target_value,
                                  const float2 value_range,
                                  const IMB_BlendMode blend_mode,
+                                 const Span<float> alpha_cache,
                                  bke::pbvh::MeshNode &node,
                                  MaterialPaintLocalData &tls,
                                  MutableSpan<float> attribute)
@@ -186,7 +187,12 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
     const float target = sampler != nullptr ?
                              sampler->scalar(channel, vert_positions[vert], thread_id) :
                              target_value;
-    const float blended = apply_scalar_blend(attribute[vert], target, factor, blend_mode);
+    /* Alpha does not mask its own write; only every other channel's write is scaled. */
+    const float alpha_factor = (!alpha_cache.is_empty() && channel != PAINT_MATERIAL_CHANNEL_ALPHA) ?
+                                   alpha_cache[vert] :
+                                   1.0f;
+    const float blended = apply_scalar_blend(
+        attribute[vert], target, factor * alpha_factor, blend_mode);
     attribute[vert] = math::clamp(blended, value_range.x, value_range.y);
 #ifdef PBR_PAINT_MATERIAL_PROFILE
     active_num++;
@@ -209,8 +215,10 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
                                 const MeshAttributeData &attribute_data,
                                 const Brush &brush,
                                 const ChannelSourceSampler *sampler,
+                                const eMaterialPaintChannel channel,
                                 const float3 &target_rgb,
                                 const IMB_BlendMode blend_mode,
+                                const Span<float> alpha_cache,
                                 bke::pbvh::MeshNode &node,
                                 MaterialPaintLocalData &tls,
                                 bke::GSpanAttributeWriter &color_attribute)
@@ -258,8 +266,7 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
    * painting that channel (confirmed by profiling the raster engine's identical decode). Gather
    * the active verts' raw samples first and decode the whole node in one batched call instead. */
   const bool batch_decode_color = sampler != nullptr &&
-                                  sampler->needs_linear_conversion(
-                                      PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+                                  sampler->needs_linear_conversion(channel);
   if (batch_decode_color) {
     tls.raw_source_colors.resize(0);
     tls.raw_source_colors.reserve(verts.size());
@@ -267,13 +274,13 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
       if (factors[i] <= 0.0f) {
         continue;
       }
-      tls.raw_source_colors.append(sampler->color(PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      tls.raw_source_colors.append(sampler->color(channel,
                                                    vert_positions[verts[i]],
                                                    thread_id,
                                                    /*decode_linear=*/false));
     }
-    ChannelSourceSampler::decode_linear_batch(
-        tls.raw_source_colors, sampler->colorspace(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+    ChannelSourceSampler::decode_linear_batch(tls.raw_source_colors,
+                                              sampler->colorspace(channel));
   }
 
   int decoded_i = 0;
@@ -294,12 +301,14 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
                                                  verts[i]);
     const float3 target = batch_decode_color ? tls.raw_source_colors[decoded_i++] :
                           sampler != nullptr ?
-                              sampler->color(PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                             vert_positions[verts[i]],
-                                             thread_id) :
+                              sampler->color(channel, vert_positions[verts[i]], thread_id) :
                               target_rgb;
+    /* Alpha does not mask its own write; only every other channel's write is scaled. */
+    const float alpha_factor = (!alpha_cache.is_empty() && channel != PAINT_MATERIAL_CHANNEL_ALPHA) ?
+                                   alpha_cache[verts[i]] :
+                                   1.0f;
     /* Alpha carries brush falloff for IMB blend modes (same convention as color paint). */
-    const float4 paint_color(target.x, target.y, target.z, factor);
+    const float4 paint_color(target.x, target.y, target.z, factor * alpha_factor);
     float4 result;
     IMB_blend_color_float(result, current, paint_color, blend_mode);
     color::color_vert_set(faces,
@@ -329,7 +338,8 @@ Vector<StringRef, PAINT_MATERIAL_CHANNEL_NUM> enabled_scalar_attribute_names(
   Vector<StringRef, PAINT_MATERIAL_CHANNEL_NUM> names;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (info.is_color || info.channel == PAINT_MATERIAL_CHANNEL_NORMAL ||
-        !BKE_paint_material_channel_is_enabled(brush_paint, mode_settings, info.channel))
+        !BKE_paint_material_channel_writes_to_target(
+            brush_paint, mode_settings, info.channel))
     {
       continue;
     }
@@ -357,6 +367,7 @@ static void paint_scalar_channel(const Depsgraph &depsgraph,
                                  const float target_value,
                                  const float2 value_range,
                                  const IMB_BlendMode blend_mode,
+                                 const Span<float> alpha_cache,
                                  const Span<float3> vert_positions,
                                  const Span<float3> vert_normals,
                                  const MeshAttributeData &attribute_data,
@@ -385,6 +396,7 @@ static void paint_scalar_channel(const Depsgraph &depsgraph,
                              target_value,
                              value_range,
                              blend_mode,
+                             alpha_cache,
                              nodes[i],
                              tls.local(),
                              values);
@@ -395,16 +407,52 @@ static void paint_scalar_channel(const Depsgraph &depsgraph,
   attribute.finish();
 }
 
-static void paint_base_color_channel(
+/**
+ * Fills #StrokeCache.material_alpha_cache for every vertex touched by \a node_mask this dab, so
+ * the channel-painting passes below can read a precomputed Alpha factor instead of resampling
+ * Alpha's source once per channel per vertex. Each PBVH node owns a disjoint set of vertices via
+ * #bke::pbvh::MeshNode::verts() (the same iteration #do_paint_scalar_task already uses for its
+ * writes), so concurrent nodes never write the same cache slot — no synchronization needed.
+ *
+ * No-op (and the cache is left empty) when \a sampler is null, matching how erase/invert and a
+ * disabled Alpha channel are already handled by the caller.
+ */
+static void precompute_alpha_cache(Object &ob,
+                                   const IndexMask &node_mask,
+                                   const ChannelSourceSampler *sampler,
+                                   const Span<float3> vert_positions,
+                                   MutableSpan<bke::pbvh::MeshNode> nodes,
+                                   Array<float> &alpha_cache)
+{
+  if (sampler == nullptr) {
+    return;
+  }
+
+  node_mask.foreach_index(
+      [&](const int i) {
+        const int thread_id = BLI_task_parallel_thread_id(nullptr);
+        bke::pbvh::MeshNode &node = nodes[i];
+        for (const int vert : node.verts()) {
+          const float value = sampler->scalar(
+              PAINT_MATERIAL_CHANNEL_ALPHA, vert_positions[vert], thread_id);
+          alpha_cache[vert] = math::clamp(value, 0.0f, 1.0f);
+        }
+      },
+      exec_mode::grain_size(1));
+}
+
+static void paint_color_channel(
     const Depsgraph &depsgraph,
     const Sculpt &sd,
     Object &ob,
     const IndexMask &node_mask,
     const Brush &brush,
     const BrushMaterialPaint &brush_paint,
+    const eMaterialPaintChannel channel,
     const PaintModeSettings &mode_settings,
     const ChannelSourceSampler *sampler,
     const IMB_BlendMode blend_mode,
+    const Span<float> alpha_cache,
     const Span<float3> vert_positions,
     const Span<float3> vert_normals,
     const MeshAttributeData &attribute_data,
@@ -414,8 +462,7 @@ static void paint_base_color_channel(
     threading::EnumerableThreadSpecific<MaterialPaintLocalData> &tls)
 {
   const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
-  const StringRef attr_name = BKE_paint_material_channel_attribute_name(
-      mode_settings, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const StringRef attr_name = BKE_paint_material_channel_attribute_name(mode_settings, channel);
 
   bke::GSpanAttributeWriter color_attribute = attributes.lookup_for_write_span(attr_name);
   if (!color_attribute) {
@@ -429,8 +476,10 @@ static void paint_base_color_channel(
   }
 
   const SculptSession &ss = *ob.runtime->sculpt_session;
-  const float3 target_rgb = BKE_paint_material_base_color_get(
-      brush_paint, sd.paint, brush, ss.cache->toggle_settings.invert);
+  const float3 target_rgb = (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) ?
+                                BKE_paint_material_base_color_get(
+                                    brush_paint, sd.paint, brush, ss.cache->toggle_settings.invert) :
+                                float3(brush_paint.channels[channel].value);
 
   const OffsetIndices<int> faces = mesh.faces();
   const Span<int> corner_verts = mesh.corner_verts();
@@ -448,8 +497,10 @@ static void paint_base_color_channel(
                             attribute_data,
                             brush,
                             sampler,
+                            channel,
                             target_rgb,
                             blend_mode,
+                            alpha_cache,
                             nodes[i],
                             tls.local(),
                             color_attribute);
@@ -511,8 +562,18 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
   threading::EnumerableThreadSpecific<MaterialPaintLocalData> all_tls;
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
 
+  const bool alpha_masking_active = !invert && active_sampler != nullptr &&
+                                    BKE_paint_material_channel_masks_stroke(brush_paint, settings);
+  if (alpha_masking_active) {
+    precompute_alpha_cache(
+        ob, node_mask, active_sampler, vert_positions, nodes, ss.cache->material_alpha_cache);
+  }
+  const Span<float> alpha_cache = alpha_masking_active ?
+                                      ss.cache->material_alpha_cache.as_span() :
+                                      Span<float>();
+
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (!BKE_paint_material_channel_is_enabled(brush_paint, settings, info.channel)) {
+    if (!BKE_paint_material_channel_writes_to_target(brush_paint, settings, info.channel)) {
       continue;
     }
 
@@ -520,22 +581,24 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
         BKE_paint_material_channel_blend_mode(brush_paint, info.channel, invert));
 
     if (info.is_color) {
-      paint_base_color_channel(depsgraph,
-                               sd,
-                               ob,
-                               node_mask,
-                               brush,
-                               brush_paint,
-                               settings,
-                               active_sampler,
-                               channel_blend_mode,
-                               vert_positions,
-                               vert_normals,
-                               attribute_data,
-                               attributes,
-                               pbvh,
-                               nodes,
-                               all_tls);
+      paint_color_channel(depsgraph,
+                          sd,
+                          ob,
+                          node_mask,
+                          brush,
+                          brush_paint,
+                          info.channel,
+                          settings,
+                          active_sampler,
+                          channel_blend_mode,
+                          alpha_cache,
+                          vert_positions,
+                          vert_normals,
+                          attribute_data,
+                          attributes,
+                          pbvh,
+                          nodes,
+                          all_tls);
       continue;
     }
 
@@ -562,6 +625,7 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
                          target_value,
                          range,
                          channel_blend_mode,
+                         alpha_cache,
                          vert_positions,
                          vert_normals,
                          attribute_data,

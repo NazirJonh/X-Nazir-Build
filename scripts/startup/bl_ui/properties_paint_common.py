@@ -1156,21 +1156,40 @@ _MATERIAL_PAINT_CHANNEL_UI_ORDER = (
     'METALLIC',
     'ROUGHNESS',
     'NORMAL',
+    'ALPHA',
+    'AO',
+    'EMISSION',
     'HEIGHT',
     'SPECULAR',
 )
+# Max width per channel toggle (Blender UI units). grid_flow uses this to fit as many buttons
+# as possible on each row and wrap the rest; without a fixed cell width every toggle expands to
+# the full panel width and stacks vertically.
+_MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X = 2
 _MATERIAL_PAINT_SOCKET_COLOR_FLOAT = (0.63, 0.63, 0.63, 1.0)
 _MATERIAL_PAINT_SOCKET_COLOR_VECTOR = (0.39, 0.39, 0.78, 1.0)
 _MATERIAL_PAINT_SOCKET_COLOR_RGBA = (0.78, 0.78, 0.16, 1.0)
 
 
+def _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels):
+    """Draw channel enable toggles in wrapped rows of fixed-max-width buttons."""
+    # align=False keeps each toggle as its own button; align=True would merge neighbors into one bar.
+    flow = layout.grid_flow(row_major=True, columns=0, even_columns=False, even_rows=False, align=False)
+    flow.use_property_split = False
+    flow.use_property_decorate = False
+    for channel_id in toggle_ids:
+        col = flow.column(align=False)
+        col.ui_units_x = _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X
+        col.prop(channels[channel_id], "use", text=toggle_labels[channel_id], toggle=True)
+
+
 def _material_paint_channel_socket_color(channel_id):
     """Socket color matching Principled BSDF socket colors."""
-    if channel_id == 'BASE_COLOR':
+    if channel_id in ('BASE_COLOR', 'EMISSION'):
         return _MATERIAL_PAINT_SOCKET_COLOR_RGBA
     if channel_id == 'NORMAL':
         return _MATERIAL_PAINT_SOCKET_COLOR_VECTOR
-    # Metallic / Roughness / Specular / Height / Custom — float sockets.
+    # Metallic / Roughness / Specular / Height / Alpha / AO / Custom — float sockets.
     return _MATERIAL_PAINT_SOCKET_COLOR_FLOAT
 
 
@@ -1265,7 +1284,6 @@ def _draw_material_paint_source_texture(panel, channel):
 
     row = panel.row(align=True)
     row.template_ID(channel, "source_image", new="image.new", open="image.open")
-    panel.separator()
 
     texture = slot.texture
     if texture is not None and channel.source_image is None:
@@ -1332,6 +1350,32 @@ def _draw_material_paint_value_ramp(layout, context, channel, channel_id):
     panel.separator()
 
 
+def _draw_material_paint_alpha_panel(layout, context, channel, channel_id, material_paint):
+    has_source = _material_paint_channel_has_source(channel)
+    header, panel = layout.panel(
+        "material_paint_value_%s" % channel_id.lower(),
+        default_closed=False,
+    )
+    _draw_material_paint_subpanel_header(
+        header, context, channel_id, channel, "value", index=0, value_active=not has_source,
+    )
+    if not panel:
+        return
+    panel.separator()
+    col = panel.column(heading="Use For:", align=True)
+    col.prop(material_paint, "use_alpha_map", text="Alpha Map")
+    col.prop(material_paint, "use_alpha_stroke_mask", text="Brush Mask")
+    col = panel.column(align=True)
+    _draw_material_paint_source_texture(col, channel)
+    if not has_source:
+        row = col.row(align=True)
+        row.template_material_paint_value_slider(channel, "value", index=0)
+        row.operator(
+            "paint.material_channel_value_invert", text="", icon='ARROW_LEFTRIGHT',
+        ).channel = channel_id
+    panel.separator()
+
+
 def _draw_material_paint_base_color_panel(layout, context, channel, material_paint):
     has_source = _material_paint_channel_has_source(channel)
     header, panel = layout.panel(
@@ -1381,7 +1425,51 @@ def _draw_material_paint_normal_panel(layout, context, channel):
         return
     panel.separator()
     _draw_material_paint_source_texture(panel, channel)
+
+
+def _draw_material_paint_emission_panel(layout, context, channel):
+    has_source = _material_paint_channel_has_source(channel)
+    header, panel = layout.panel(
+        "material_paint_value_emission",
+        default_closed=False,
+    )
+    _draw_material_paint_subpanel_header(
+        header,
+        context,
+        'EMISSION',
+        channel,
+        "emission_color",
+        color_picker_after_socket=True,
+        value_active=not has_source,
+    )
+    if not panel:
+        return
     panel.separator()
+    _draw_material_paint_source_texture(panel, channel)
+
+
+def draw_material_paint_visibility_popover(_context, layout, paint_mode_settings):
+    """Popover body: checkboxes for which channels appear in the Paint PBR list.
+
+    Independent of each channel's `use` (paint-enabled) flag — hiding a channel here does not
+    clear its value or source texture, but it removes the channel from the UI and skips it during
+    painting until shown again. CUSTOM is deliberately not listed: it has its own separate
+    `show_custom` draw-time gate, not part of this bitmask.
+    """
+    col = layout.column()
+    for identifier in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
+        col.prop_enum(paint_mode_settings, "visible_material_channels", identifier)
+
+
+def draw_material_paint_visibility_chevron(context, layout, paint_mode_settings, *, panel=None):
+    """Chevron icon button opening the channel-visibility popover, for Paint PBR headers."""
+    if panel is None:
+        panel = "PAINT_PT_material_paint_channel_visibility"
+    layout.popover(
+        panel=panel,
+        text="",
+        icon='DOWNARROW_HLT',
+    )
 
 
 def draw_material_paint_channels(
@@ -1420,9 +1508,12 @@ def draw_material_paint_channels(
 
     channels = {channel.channel: channel for channel in material_paint.channels}
 
-    # Use one aligned row with EXPAND alignment so the buttons fill the available panel width.
-    # Labels may be clipped in narrow panels; the short labels below keep the controls readable.
-    toggle_ids = list(_MATERIAL_PAINT_CHANNEL_UI_ORDER)
+    # Use one aligned grid_flow so channel toggles wrap when the panel is too narrow.
+    # Labels may be clipped in very tight cells; the short labels below keep controls readable.
+    visible = set(paint_mode.visible_material_channels)
+    toggle_ids = [
+        channel_id for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER if channel_id in visible
+    ]
     if show_custom:
         toggle_ids.append('CUSTOM')
     toggle_labels = {
@@ -1430,8 +1521,11 @@ def draw_material_paint_channels(
         'METALLIC': "Metal",
         'ROUGHNESS': "Rough",
         'SPECULAR': "Spec",
-        'NORMAL': "NRM",
+        'NORMAL': "Normal",
         'HEIGHT': "Height",
+        'ALPHA': "Alpha",
+        'AO': "AO",
+        'EMISSION': "Emit",
         'CUSTOM': "Custom",
     }
 
@@ -1450,14 +1544,8 @@ def draw_material_paint_channels(
             _draw_material_paint_shared_mapping(panel, material_paint)
         layout.separator()
 
-    toggle_row = layout.row(align=True)
-    toggle_row.use_property_split = False
-    toggle_row.use_property_decorate = False
-    for channel_id in toggle_ids:
-        channel = channels[channel_id]
-        toggle_row.prop(channel, "use", text=toggle_labels[channel_id], toggle=True)
-        if channel_id != toggle_ids[-1]:
-            toggle_row.separator(factor=0.25)
+    # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.
+    _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels)
 
     if any(channels[channel_id].use for channel_id in toggle_ids):
         layout.separator()
@@ -1476,25 +1564,37 @@ def draw_material_paint_channels(
     # Value rows are only drawn for enabled channels, so a disabled channel does not clutter the
     # panel with a grayed-out row.
     channel = channels['BASE_COLOR']
-    if channel.use:
+    if channel.use and 'BASE_COLOR' in visible:
         _channel_panel_sep()
         _draw_material_paint_base_color_panel(channel_col, context, channel, material_paint)
 
-    for channel_id in ('METALLIC', 'ROUGHNESS'):
+    for channel_id in ('METALLIC', 'ROUGHNESS', 'AO'):
         channel = channels[channel_id]
-        if channel.use:
+        if channel.use and channel_id in visible:
             _channel_panel_sep()
             _draw_material_paint_value_ramp(channel_col, context, channel, channel_id)
 
+    channel = channels['ALPHA']
+    if channel.use and 'ALPHA' in visible:
+        _channel_panel_sep()
+        _draw_material_paint_alpha_panel(
+            channel_col, context, channel, 'ALPHA', material_paint,
+        )
+
     # Normal: tangent vector as a single color (#8080FF = flat +Z); blend is always NORMAL_MIX.
     channel = channels['NORMAL']
-    if channel.use:
+    if channel.use and 'NORMAL' in visible:
         _channel_panel_sep()
         _draw_material_paint_normal_panel(channel_col, context, channel)
 
+    channel = channels['EMISSION']
+    if channel.use and 'EMISSION' in visible:
+        _channel_panel_sep()
+        _draw_material_paint_emission_panel(channel_col, context, channel)
+
     for channel_id in ('HEIGHT', 'SPECULAR'):
         channel = channels[channel_id]
-        if channel.use:
+        if channel.use and channel_id in visible:
             _channel_panel_sep()
             _draw_material_paint_value_ramp(channel_col, context, channel, channel_id)
 
@@ -2366,8 +2466,21 @@ def brush_basic_grease_pencil_vertex_settings(layout, context, brush, *, compact
             layout.prop(gp_settings, "vertex_mode", text="Stroke Mode")
 
 
+class PAINT_PT_material_paint_channel_visibility(bpy.types.Panel):
+    bl_label = "Visible Channels"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    def draw(self, context):
+        draw_material_paint_visibility_popover(
+            context, self.layout, context.tool_settings.paint_mode,
+        )
+
+
 classes = (
     PAINT_MT_material_paint_channel_socket,
+    PAINT_PT_material_paint_channel_visibility,
     VIEW3D_MT_tools_projectpaint_clone,
 )
 

@@ -7560,6 +7560,7 @@ class VIEW3D_PT_overlay_sculpt(Panel):
     bl_context = ".sculpt_mode"
     bl_region_type = 'HEADER'
     bl_label = "Sculpt"
+    bl_ui_units_x = 12
 
     @classmethod
     def poll(cls, context):
@@ -7591,6 +7592,35 @@ class VIEW3D_PT_overlay_sculpt(Panel):
         if use_debug:
             row = layout.row(align=True)
             row.prop(sculpt, "show_bvh_nodes")
+
+        # Channel Display Section (only for the Paint brush, which writes vertex colors
+        # through the same channel-masked path as Vertex Paint Mode).
+        brush = sculpt.brush if sculpt else None
+        is_paint_brush = brush and brush.sculpt_brush_type == 'PAINT'
+
+        if is_paint_brush:
+            layout.separator()
+            layout.label(text="Channel Display:")
+
+            # Count active RGB channels.
+            active_channels = sum([
+                overlay.show_vertex_paint_r,
+                overlay.show_vertex_paint_g,
+                overlay.show_vertex_paint_b,
+            ])
+
+            # Grayscale toggle: only enabled when a single channel is active.
+            row = layout.row()
+            row.active = (active_channels == 1)
+            row.prop(overlay, "show_vertex_paint_grayscale", text="Grayscale Mode")
+
+            # Channel Display Toggle Buttons.
+            row = layout.row(align=True)
+            row.prop(overlay, "show_vertex_paint_r", text="Red", icon='RGB_RED', toggle=True)
+            row.prop(overlay, "show_vertex_paint_g", text="Green", icon='RGB_GREEN', toggle=True)
+            row.prop(overlay, "show_vertex_paint_b", text="Blue", icon='RGB_BLUE', toggle=True)
+            row.separator()
+            row.prop(overlay, "show_vertex_paint_a", text="Alpha", icon='IMAGE_ALPHA', toggle=True)
 
 
 class VIEW3D_PT_overlay_sculpt_curves(Panel):

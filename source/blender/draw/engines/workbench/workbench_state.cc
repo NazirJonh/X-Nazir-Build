@@ -19,6 +19,8 @@
 #include "DNA_world_types.h"
 #include "DNA_view3d_types.h"
 #include "DNA_view3d_enums.h"
+#include "DNA_brush_enums.h"
+#include "DNA_brush_types.h"
 
 #include "ED_paint.hh"
 #include "ED_view3d.hh"
@@ -260,12 +262,20 @@ void SceneState::init(const DRWContext *context,
                               PAINT_DEBUG_SHOW_BVH_NODES) != 0 :
                              false;
 
-  /* Apply the vertex paint channel display only when the active object is in vertex paint mode.
-   * Outside that mode the mask stays neutral (all channels, no grayscale) so that regular
-   * color-attribute display in the workbench engine is left unchanged. */
+  /* Apply the vertex paint channel display when the active object is in Vertex Paint Mode, or
+   * in Sculpt Mode with the Paint brush active (the only sculpt brush that writes vertex
+   * colors through the same channel-masked path as Vertex Paint Mode, see #paint_vertex.cc and
+   * #sculpt_paint_color.cc). Outside those cases the mask stays neutral (all channels, no
+   * grayscale) so that regular color-attribute display in the workbench engine is left
+   * unchanged. */
   const bool is_vertex_paint_mode = context &&
                                     (context->object_mode & OB_MODE_VERTEX_PAINT) != 0;
-  if (is_vertex_paint_mode && context->v3d) {
+  const bool is_sculpt_paint_brush = context && (context->object_mode & OB_MODE_SCULPT) != 0 &&
+                                     scene->toolsettings->sculpt &&
+                                     scene->toolsettings->sculpt->paint.brush &&
+                                     scene->toolsettings->sculpt->paint.brush->sculpt_brush_type ==
+                                         SCULPT_BRUSH_TYPE_PAINT;
+  if ((is_vertex_paint_mode || is_sculpt_paint_brush) && context->v3d) {
     const int channel_flag = context->v3d->overlay.vertex_paint_channel_flag;
     vertex_paint_channel_mask = float4((channel_flag & V3D_OVERLAY_VPAINT_SHOW_R) ? 1.0f : 0.0f,
                                        (channel_flag & V3D_OVERLAY_VPAINT_SHOW_G) ? 1.0f : 0.0f,

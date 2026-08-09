@@ -1414,6 +1414,91 @@ static void rna_BrushMaterialPaintChannel_emission_color_set(PointerRNA *ptr, co
   copy_v3_v3(channel->value, values);
 }
 
+static bool rna_BrushMaterialPaintChannel_is_scalar_channel(const eMaterialPaintChannel channel)
+{
+  return ELEM(channel,
+              PAINT_MATERIAL_CHANNEL_METALLIC,
+              PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+              PAINT_MATERIAL_CHANNEL_SPECULAR,
+              PAINT_MATERIAL_CHANNEL_HEIGHT,
+              PAINT_MATERIAL_CHANNEL_ALPHA,
+              PAINT_MATERIAL_CHANNEL_AO,
+              PAINT_MATERIAL_CHANNEL_CUSTOM);
+}
+
+static void rna_BrushMaterialPaintChannel_scalar_value_range(const eMaterialPaintChannel channel,
+                                                             float *r_min,
+                                                             float *r_max)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  *r_min = info.value_min;
+  *r_max = info.value_max;
+}
+
+static float rna_BrushMaterialPaintChannel_t_from_value_color(const float value_min,
+                                                              const float value_max,
+                                                              const float gray)
+{
+  if (BKE_paint_material_value_gradient_mode(value_min, value_max) ==
+      MaterialPaintValueGradientMode::Unipolar)
+  {
+    return gray;
+  }
+  float t_best = 0.0f;
+  float err_best = FLT_MAX;
+  for (int i = 0; i <= 64; i++) {
+    const float t = float(i) / 64.0f;
+    float rgb[3];
+    BKE_paint_material_value_gradient_color(value_min, value_max, t, rgb);
+    const float err = fabsf(rgb[0] - gray);
+    if (err < err_best) {
+      err_best = err;
+      t_best = t;
+    }
+  }
+  return t_best;
+}
+
+/**
+ * Scalar ramp channels expose their paint value as a grayscale color matching the value-gradient
+ * widget (black→white, or white→black→white for bipolar ranges such as Height).
+ *
+ * Declared on #BrushMaterialPaintChannel for scalar entries in #BrushMaterialPaint.channels;
+ * color channels (Base Color, Normal, Emission) read as black and ignore writes.
+ */
+static void rna_BrushMaterialPaintChannel_value_color_get(PointerRNA *ptr, float *values)
+{
+  const BrushMaterialPaintChannel *channel = static_cast<const BrushMaterialPaintChannel *>(
+      ptr->data);
+  const std::optional<eMaterialPaintChannel> channel_id =
+      rna_BrushMaterialPaintChannel_channel_get(ptr);
+  if (!channel_id || !rna_BrushMaterialPaintChannel_is_scalar_channel(*channel_id)) {
+    zero_v3(values);
+    return;
+  }
+  float value_min;
+  float value_max;
+  rna_BrushMaterialPaintChannel_scalar_value_range(*channel_id, &value_min, &value_max);
+  const float t = BKE_paint_material_t_from_value(value_min, value_max, channel->value[0]);
+  BKE_paint_material_value_gradient_color(value_min, value_max, t, values);
+}
+
+static void rna_BrushMaterialPaintChannel_value_color_set(PointerRNA *ptr, const float *values)
+{
+  BrushMaterialPaintChannel *channel = static_cast<BrushMaterialPaintChannel *>(ptr->data);
+  const std::optional<eMaterialPaintChannel> channel_id =
+      rna_BrushMaterialPaintChannel_channel_get(ptr);
+  if (!channel_id || !rna_BrushMaterialPaintChannel_is_scalar_channel(*channel_id)) {
+    return;
+  }
+  float value_min;
+  float value_max;
+  rna_BrushMaterialPaintChannel_scalar_value_range(*channel_id, &value_min, &value_max);
+  const float gray = (values[0] + values[1] + values[2]) / 3.0f;
+  const float t = rna_BrushMaterialPaintChannel_t_from_value_color(value_min, value_max, gray);
+  channel->value[0] = BKE_paint_material_value_from_t(value_min, value_max, t);
+}
+
 static PointerRNA rna_BrushMaterialPaintChannel_source_image_get(PointerRNA *ptr)
 {
   BrushMaterialPaintChannel *channel = static_cast<BrushMaterialPaintChannel *>(ptr->data);
@@ -2716,6 +2801,21 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       "Color",
       "Emission color. Only valid on the Emission channel's entry in BrushMaterialPaint.channels; "
       "reads as black and ignores writes elsewhere");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "value_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_BrushMaterialPaintChannel_value_color_get",
+                               "rna_BrushMaterialPaintChannel_value_color_set",
+                               nullptr);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Value Color",
+      "Scalar paint value as a grayscale color matching the value-gradient ramp. Only valid on "
+      "scalar channel entries in BrushMaterialPaint.channels; reads as black and ignores writes "
+      "elsewhere");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
 
   /* Stored per channel, but only ever read for Base Color: the blend modes are color operations,

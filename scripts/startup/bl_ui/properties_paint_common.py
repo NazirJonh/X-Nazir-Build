@@ -1257,20 +1257,27 @@ def _draw_material_paint_subpanel_header(
     if prop is not None and color_picker_after_socket:
         # Color channels: socket + color strip merged; eyedropper fused to color strip.
         controls = split.row(align=True)
-        controls.active = value_active
         _material_paint_channel_socket_icon_draw(controls, channel_id)
+        value_controls = controls.row(align=True)
+        value_controls.active = value_active
         if "text" not in prop_kwargs:
             prop_kwargs["text"] = ""
-        controls.prop(data, prop, **prop_kwargs)
-        _material_paint_channel_color_eyedropper_draw(controls, context, data, prop)
+        value_controls.prop(data, prop, **prop_kwargs)
+        _material_paint_channel_color_eyedropper_draw(value_controls, context, data, prop)
     else:
         value_row = split.row(align=True)
-        value_row.active = value_active
         _material_paint_channel_socket_icon_draw(value_row, channel_id)
         if prop is not None:
+            controls = value_row.row(align=True)
+            controls.active = value_active
+            if prop == "value":
+                # Scalar channels: gradient-matched grayscale swatch beside a value slider.
+                controls.prop(data, "value_color", text="")
             if "text" not in prop_kwargs:
                 prop_kwargs["text"] = ""
-            value_row.prop(data, prop, **prop_kwargs)
+            if prop == "value":
+                prop_kwargs["slider"] = True
+            controls.prop(data, prop, **prop_kwargs)
 
 
 def _draw_material_paint_source_texture(panel, channel):
@@ -1311,7 +1318,8 @@ def _draw_material_paint_source_texture(panel, channel):
 def _draw_material_paint_shared_mapping(layout, material_paint):
     """Mapping shared by every channel's source texture: Mapping mode, Size (X/Y only), Angle.
 
-    Drawn once, in the Transform panel above the channel toggles, instead of once per channel.
+    Drawn once, in the Image Transform Settings panel above the channel toggles, instead of once per
+    channel.
     Multi-channel patterns (a Base Color texture with a matching Normal/Roughness texture meant
     to tile together) need identical mapping to stay aligned, so there is deliberately no
     per-channel override and no Offset control.
@@ -1327,7 +1335,7 @@ def _draw_material_paint_shared_mapping(layout, material_paint):
 
 def _draw_material_paint_value_ramp(layout, context, channel, channel_id):
     # One subpanel per scalar ramp channel; open by default.
-    # Header: socket color + channel name + numeric Value. Body: gradient + Invert.
+    # Header: socket + value color swatch + numeric value. Body: gradient + Invert.
     has_source = _material_paint_channel_has_source(channel)
     header, panel = layout.panel(
         "material_paint_value_%s" % channel_id.lower(),
@@ -1529,20 +1537,21 @@ def draw_material_paint_channels(
         'CUSTOM': "Custom",
     }
 
-    # Transform (shared source-texture mapping) is drawn before the channel toggles, so it reads
-    # as a setup step rather than being buried under whichever channel panels happen to be open.
-    if any(
+    # Shared source-texture mapping is drawn before the channel toggles so it reads as a setup step
+    # rather than being buried under whichever channel panels happen to be open.
+    has_source_mapping = any(
         channels[channel_id].use and _material_paint_channel_has_source(channels[channel_id])
         for channel_id in toggle_ids if channel_id != 'CUSTOM'
-    ):
-        header, panel = layout.panel(
-            "material_paint_transform",
-            default_closed=False,
-        )
-        header.label(text="Transform")
-        if panel:
-            _draw_material_paint_shared_mapping(panel, material_paint)
-        layout.separator()
+    )
+    header, panel = layout.panel(
+        "material_paint_transform",
+        default_closed=True,
+    )
+    header.label(text="Image Transform Settings")
+    if panel:
+        panel.active = has_source_mapping
+        _draw_material_paint_shared_mapping(panel, material_paint)
+    layout.separator()
 
     # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.
     _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels)
@@ -1605,7 +1614,9 @@ def draw_material_paint_channels(
             row = channel_col.row(align=True)
             row.use_property_split = False
             _material_paint_channel_socket_icon_draw(row, 'CUSTOM')
-            row.prop(channel, "value", index=0, text=channel.name)
+            controls = row.row(align=True)
+            controls.prop(channel, "value_color", text="")
+            controls.prop(channel, "value", index=0, text=channel.name, slider=True)
 
             row = channel_col.row(align=True)
             row.prop(paint_mode, "material_paint_custom_attr", text="Name")

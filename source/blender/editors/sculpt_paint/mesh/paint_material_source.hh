@@ -60,6 +60,13 @@ class ChannelSourceSampler {
      */
     bool do_linear_conversion = false;
     const ocio::ColorSpace *colorspace = nullptr;
+    /**
+     * True for the Normal channel when its source is authored in the DirectX tangent-space
+     * convention (green channel flipped relative to OpenGL). Resolved once here from
+     * #BrushMaterialPaintChannel.normal_space so #color does not re-read the DNA flag on every
+     * texel/vertex sample of a stroke.
+     */
+    bool flip_green_channel = false;
   };
 
   const SculptSession &ss_;

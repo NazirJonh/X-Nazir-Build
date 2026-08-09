@@ -2586,6 +2586,22 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  /* Matches the Shader Editor's Normal Map node convention naming (OpenGL/DirectX differ by
+   * whether the green channel points up or down in tangent space). */
+  static const EnumPropertyItem prop_normal_source_color_space_items[] = {
+      {BRUSH_MATERIAL_PAINT_NORMAL_SPACE_OPENGL,
+       "OPENGL",
+       0,
+       "OpenGL",
+       "Green channel points up (+Y); default convention for most texture sources"},
+      {BRUSH_MATERIAL_PAINT_NORMAL_SPACE_DIRECTX,
+       "DIRECTX",
+       0,
+       "DirectX",
+       "Green channel points down (-Y); flip it back to OpenGL convention while sampling"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   srna = RNA_def_struct(brna, "BrushMaterialPaintChannel", nullptr);
   RNA_def_struct_sdna(srna, "BrushMaterialPaintChannel");
   RNA_def_struct_path_func(srna, "rna_BrushMaterialPaintChannel_path");
@@ -2678,6 +2694,16 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Source Image", "Image sampled for this channel instead of its fixed value");
   RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "normal_source_color_space", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "normal_space");
+  RNA_def_property_enum_items(prop, prop_normal_source_color_space_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Color Space",
+      "Tangent-space convention of the Normal channel's source image. Only used by the Normal "
+      "channel's entry in BrushMaterialPaint.channels");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
 
   srna = RNA_def_struct(brna, "BrushMaterialPaint", nullptr);
   RNA_def_struct_sdna(srna, "BrushMaterialPaint");

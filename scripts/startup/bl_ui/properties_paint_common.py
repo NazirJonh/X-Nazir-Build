@@ -924,8 +924,13 @@ def brush_settings(layout, context, brush, popover=False):
             layout.separator()
 
         if capabilities.has_color:
+            material_paint = brush.material_paint
+            synced_with_material_paint = (
+                material_paint is None or material_paint.use_sync_base_color_with_brush
+            )
             ups = UnifiedPaintPanel.paint_settings(context).unified_paint_settings
             row = layout.row(align=True)
+            row.active = synced_with_material_paint
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
             row.separator()
@@ -1260,6 +1265,7 @@ def _draw_material_paint_source_texture(panel, channel):
 
     row = panel.row(align=True)
     row.template_ID(channel, "source_image", new="image.new", open="image.open")
+    panel.separator()
 
     texture = slot.texture
     if texture is not None and channel.source_image is None:
@@ -1277,11 +1283,11 @@ def _draw_material_paint_source_texture(panel, channel):
     elif channel.source_image is None:
         return
 
-    # Data channels must not be color managed; a color space here silently shifts the values.
-    if channel.source_image is not None and channel.channel != 'BASE_COLOR':
-        colorspace = channel.source_image.colorspace_settings.name
-        if colorspace != "Non-Color":
-            panel.label(text="Source is color managed", icon='INFO')
+    # The Normal channel's source may be authored to either the OpenGL or DirectX tangent-space
+    # convention (green channel up vs. down); let the user pick, matching the Normal Map node in
+    # the Shader Editor. Color space is otherwise handled automatically and not user-facing here.
+    if channel.channel == 'NORMAL' and channel.source_image is not None:
+        panel.row(align=True).prop(channel, "normal_source_color_space", text="Color Space")
 
 
 def _draw_material_paint_shared_mapping(layout, material_paint):
@@ -1346,13 +1352,13 @@ def _draw_material_paint_base_color_panel(layout, context, channel, material_pai
         return
     panel.use_property_split = False
     panel.separator()
-    _draw_material_paint_source_texture(panel, channel)
-    panel.separator()
     row = panel.row(align=True)
     row.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
     # Base Color is the only blendable channel.
     row = panel.row(align=True)
     row.prop(channel, "blend", text="Blend")
+    panel.separator()
+    _draw_material_paint_source_texture(panel, channel)
 
 
 def _draw_material_paint_normal_panel(layout, context, channel):
@@ -1379,7 +1385,7 @@ def _draw_material_paint_normal_panel(layout, context, channel):
 
 
 def draw_material_paint_channels(
-        context, layout, brush, paint_mode, *, show_custom, show_missing_fn=None):
+        context, layout, brush, paint_mode, *, show_custom):
     """Draw Material / Material Paint channel enable + value rows.
 
     Used by View3D Canvas and Image Editor Paint Canvas panels. Only Base Color has a blend
@@ -1392,10 +1398,6 @@ def draw_material_paint_channels(
     :arg brush: Active paint ``Brush``, or ``None``.
     :arg paint_mode: ``PaintModeSettings`` RNA data-block (Custom name/range only).
     :arg show_custom: When True, draw the Custom channel (Material Paint mode).
-    :arg show_missing_fn: Optional ``callable(channel_id) -> bool``. When it
-        returns True for a channel id (``'BASE_COLOR'`` / ``'METALLIC'`` /
-        ``'ROUGHNESS'`` / ``'SPECULAR'`` / ``'NORMAL'`` / ``'HEIGHT'``), a Missing
-        indicator is shown on that row.
     """
     if brush is None:
         layout.label(text="No active brush", icon='INFO')
@@ -1454,8 +1456,6 @@ def draw_material_paint_channels(
     for channel_id in toggle_ids:
         channel = channels[channel_id]
         toggle_row.prop(channel, "use", text=toggle_labels[channel_id], toggle=True)
-        if show_missing_fn is not None and show_missing_fn(channel_id):
-            toggle_row.label(text="", icon='ERROR')
         if channel_id != toggle_ids[-1]:
             toggle_row.separator(factor=0.25)
 
@@ -1920,16 +1920,29 @@ def draw_color_settings(context, layout, brush, color_type=False):
 
     # Color wheel
     if brush.color_type == 'COLOR':
-        UnifiedPaintPanel.prop_unified_color_picker(layout, context, brush, "color", value_slider=True)
+        material_paint = brush.material_paint
+        # PBR Paint's Base Color channel becomes the color source once it stops mirroring the
+        # brush color; keep Color/Secondary Color visible but inert so the brush's own color
+        # cannot be mistaken for what strokes will actually paint.
+        synced_with_material_paint = (
+            material_paint is None or material_paint.use_sync_base_color_with_brush
+        )
+        if not synced_with_material_paint:
+            layout.label(text="Base Color (PBR Paint) is the color source", icon='INFO')
 
-        row = layout.row(align=True)
+        col = layout.column()
+        col.active = synced_with_material_paint
+
+        UnifiedPaintPanel.prop_unified_color_picker(col, context, brush, "color", value_slider=True)
+
+        row = col.row(align=True)
         UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
         UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
         row.separator()
         row.operator("paint.brush_colors_flip", icon='FILE_REFRESH', text="", emboss=False)
         row.prop(ups, "use_unified_color", text="", icon='BRUSHES_ALL')
 
-        draw_color_jitter_panel(layout, context, brush)
+        draw_color_jitter_panel(col, context, brush)
 
     # Gradient
     elif brush.color_type == 'GRADIENT':
@@ -2042,7 +2055,9 @@ def brush_basic_texpaint_settings(layout, context, brush, *, compact=False):
     capabilities = brush.image_paint_capabilities
 
     if capabilities.has_color:
+        material_paint = brush.material_paint
         row = layout.row(align=True)
+        row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
         row.ui_units_x = 4
         UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
         UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")

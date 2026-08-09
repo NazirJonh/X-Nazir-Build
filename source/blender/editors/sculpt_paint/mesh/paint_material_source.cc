@@ -50,6 +50,9 @@ ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
     ChannelSource &source = sources_[info.channel];
     BKE_paint_material_channel_effective_mtex(brush_paint, channel, source.effective_mtex);
     source.mtex = &source.effective_mtex;
+    /* Resolved once per stroke, from the DNA flag, instead of on every sample. */
+    source.flip_green_channel = info.channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
+                                channel.normal_space == BRUSH_MATERIAL_PAINT_NORMAL_SPACE_DIRECTX;
     any_source = true;
   }
 
@@ -246,7 +249,8 @@ static float3 finish_color_sample(const bool is_normal,
                                   const bool do_linear_conversion,
                                   const ocio::ColorSpace *colorspace,
                                   const float4 &rgba,
-                                  const bool decode_linear)
+                                  const bool decode_linear,
+                                  const bool flip_green)
 {
   if (!is_normal) {
     /* Base Color is the only color channel here; the Normal map below is tangent data and must
@@ -260,7 +264,9 @@ static float3 finish_color_sample(const bool is_normal,
   }
 
   float3 decal_normal;
-  const float rgb[3] = {rgba.x, rgba.y, rgba.z};
+  /* DirectX-convention normal maps store the green channel flipped relative to OpenGL; flip it
+   * back before unpacking so both conventions land in the same tangent-space basis. */
+  const float rgb[3] = {rgba.x, flip_green ? 1.0f - rgba.y : rgba.y, rgba.z};
   /* A degenerate sample cannot be normalized; the channel's own tangent is the safe answer. */
   if (!BKE_paint_material_normal_from_sample(rgb, decal_normal)) {
     return fallback;
@@ -302,8 +308,13 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                        rgba,
                        pool_,
                        area_local_mat_for(channel, source));
-  return finish_color_sample(
-      is_normal, fallback, source.do_linear_conversion, source.colorspace, rgba, decode_linear);
+  return finish_color_sample(is_normal,
+                             fallback,
+                             source.do_linear_conversion,
+                             source.colorspace,
+                             rgba,
+                             decode_linear,
+                             source.flip_green_channel);
 }
 
 float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
@@ -333,8 +344,13 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                        rgba,
                        pool_,
                        area_local_mat_for(channel, source));
-  return finish_color_sample(
-      is_normal, fallback, source.do_linear_conversion, source.colorspace, rgba, decode_linear);
+  return finish_color_sample(is_normal,
+                             fallback,
+                             source.do_linear_conversion,
+                             source.colorspace,
+                             rgba,
+                             decode_linear,
+                             source.flip_green_channel);
 }
 
 }  // namespace blender::ed::sculpt_paint::material

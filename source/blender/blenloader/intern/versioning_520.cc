@@ -584,6 +584,25 @@ static void version_material_paint_channel_height_defaults(Main &bmain)
   }
 }
 
+/**
+ * `PaintModeSettings::new_channel_image_size` was added with a C++ default member initializer
+ * (4096), but that initializer only applies to freshly constructed structs; files saved before
+ * this field existed have it zero-filled on read, which is not one of the enum's valid sizes and
+ * shows as a blank dropdown.
+ */
+static void version_material_paint_channel_image_size_defaults(Main &bmain)
+{
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    if (ts->paint_mode.new_channel_image_size == 0) {
+      ts->paint_mode.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_4K;
+    }
+  }
+}
+
 static void version_material_paint_channel_source_mtex_defaults(Main &bmain)
 {
   /* Files saved by earlier revisions of this branch have a zeroed `source_mtex`: size 0 and an
@@ -1008,6 +1027,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 50)) {
     /* Files saved during development of this branch may have zeroed source_mtex fields. */
     version_material_paint_channel_source_mtex_defaults(*bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 51)) {
+    version_material_paint_channel_image_size_defaults(*bmain);
   }
 
   /**

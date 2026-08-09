@@ -279,7 +279,9 @@ class _draw_tool_settings_context_mode:
         ups = paint.unified_paint_settings
 
         if capabilities.has_color:
+            material_paint = brush.material_paint
             row = layout.row(align=True)
+            row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
             row.ui_units_x = 4
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
@@ -1041,6 +1043,17 @@ class VIEW3D_HT_header(Header):
                 icon=VIEW3D_HT_header._texture_mask_icon(tool_settings.image_paint),
                 text="",
             )
+
+            canvas_source = tool_settings.paint_mode.canvas_source
+            # Mode identifiers MATERIAL/IMAGE coincide with icon names; others need a map.
+            match canvas_source:
+                case 'COLOR_ATTRIBUTE':
+                    canvas_icon = 'GROUP_VCOL'
+                case 'MATERIAL_PAINT':
+                    canvas_icon = 'MATERIAL_DATA'
+                case _:
+                    canvas_icon = canvas_source
+            layout.popover(panel="VIEW3D_PT_slots_paint_canvas", icon=canvas_icon)
         else:
             # Transform settings depending on tool header visibility
             VIEW3D_HT_header.draw_xform_template(layout, context)
@@ -8815,7 +8828,11 @@ class VIEW3D_PT_paint_texture_context_menu(Panel):
         capabilities = brush.image_paint_capabilities
 
         if capabilities.has_color:
+            material_paint = brush.material_paint
             split = layout.split(factor=0.1)
+            split.active = (
+                material_paint is None or material_paint.use_sync_base_color_with_brush
+            )
             UnifiedPaintPanel.prop_unified_color(split, context, brush, "color", text="")
             UnifiedPaintPanel.prop_unified_color_picker(split, context, brush, "color", value_slider=True)
             layout.prop(brush, "blend", text="")
@@ -8838,48 +8855,6 @@ class VIEW3D_PT_paint_texture_context_menu(Panel):
                 unified_name="use_unified_strength",
                 pressure_name="use_pressure_strength",
                 slider=True,
-            )
-
-
-class VIEW3D_PT_paint_canvas_npanel(Panel):
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Tool"
-    bl_label = ""
-
-    @classmethod
-    def poll(cls, context):
-        ob = context.active_object
-        if ob is None or ob.mode not in {'TEXTURE_PAINT', 'SCULPT'}:
-            return False
-        if ob.mode == 'SCULPT':
-            # Material Paint channels only work with the Paint brush type; deformation brushes
-            # (Grab, Smooth, etc.) have no material-channel sampling/blending behind them.
-            brush = context.tool_settings.sculpt.brush
-            return brush is not None and brush.sculpt_brush_type == 'PAINT'
-        return True
-
-    def draw_header(self, context):
-        layout = self.layout
-        layout.label(text="Canvas")
-        layout.prop(context.tool_settings.paint_mode, "canvas_source", text="")
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        layout.use_property_decorate = False
-
-        paint = context.tool_settings.paint_mode
-        if self.is_popover:
-            layout.prop(paint, "canvas_source", text="Mode")
-            layout.separator()
-
-        if paint.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}:
-            settings = UnifiedPaintPanel.paint_settings(context)
-            brush = settings.brush if settings else None
-            draw_material_paint_channels(
-                context, layout, brush, paint,
-                show_custom=(paint.canvas_source == 'MATERIAL_PAINT'),
             )
 
 
@@ -9028,7 +9003,11 @@ class VIEW3D_PT_sculpt_context_menu(Panel):
         capabilities = brush.sculpt_capabilities
 
         if capabilities.has_color:
+            material_paint = brush.material_paint
             split = layout.split(factor=0.1)
+            split.active = (
+                material_paint is None or material_paint.use_sync_base_color_with_brush
+            )
             UnifiedPaintPanel.prop_unified_color(split, context, brush, "color", text="")
             UnifiedPaintPanel.prop_unified_color_picker(split, context, brush, "color", value_slider=True)
             layout.prop(brush, "blend", text="")
@@ -9559,7 +9538,6 @@ classes = (
     VIEW3D_PT_context_properties,
     VIEW3D_PT_paint_vertex_context_menu,
     VIEW3D_PT_paint_texture_context_menu,
-    VIEW3D_PT_paint_canvas_npanel,
     VIEW3D_PT_paint_weight_context_menu,
     VIEW3D_PT_sculpt_automasking,
     VIEW3D_PT_sculpt_context_menu,

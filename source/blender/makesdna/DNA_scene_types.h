@@ -1389,6 +1389,8 @@ struct PaintModeSettings {
 
 /** #PaintModeSettings::new_channel_image_size */
 enum ePaintNewChannelImageSize : int {
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_256 = 256,
+  PAINT_NEW_CHANNEL_IMAGE_SIZE_512 = 512,
   PAINT_NEW_CHANNEL_IMAGE_SIZE_1K = 1024,
   PAINT_NEW_CHANNEL_IMAGE_SIZE_2K = 2048,
   PAINT_NEW_CHANNEL_IMAGE_SIZE_4K = 4096,

@@ -1282,7 +1282,7 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
         elif paint.canvas_image:
             label = paint.canvas_image.name
 
-        self.layout.label(text="Canvas")
+        self.layout.label(text="PBR Paint")
         self.layout.prop(paint, "canvas_source", text="")
 
     def draw(self, context):
@@ -1310,13 +1310,9 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
                         ob, "active_material_index", rows=2,
                     )
 
-                show_missing_fn = None
                 if canvas_source == 'MATERIAL' and ob:
                     has_image_fn = getattr(ob, "principled_paint_channel_has_image", None)
                     if has_image_fn is not None:
-                        def show_missing_fn(channel, *, _has_image_fn=has_image_fn):
-                            return not _has_image_fn(channel)
-
                         have_image = any(
                             has_image_fn(channel)
                             for channel in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL')
@@ -1328,7 +1324,6 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
                     getattr(settings, "brush", None),
                     mode_settings,
                     show_custom=(canvas_source == 'MATERIAL_PAINT'),
-                    show_missing_fn=show_missing_fn,
                 )
 
             case 'IMAGE':

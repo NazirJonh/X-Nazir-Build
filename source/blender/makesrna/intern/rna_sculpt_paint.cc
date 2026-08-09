@@ -1464,6 +1464,8 @@ static void rna_def_paint_mode(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   static const EnumPropertyItem new_channel_image_size_items[] = {
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_256, "SIZE_256", 0, "256 (256 x 256)", "256 x 256"},
+      {PAINT_NEW_CHANNEL_IMAGE_SIZE_512, "SIZE_512", 0, "512 (512 x 512)", "512 x 512"},
       {PAINT_NEW_CHANNEL_IMAGE_SIZE_1K, "SIZE_1K", 0, "1K (1024 x 1024)", "1024 x 1024"},
       {PAINT_NEW_CHANNEL_IMAGE_SIZE_2K, "SIZE_2K", 0, "2K (2048 x 2048)", "2048 x 2048"},
       {PAINT_NEW_CHANNEL_IMAGE_SIZE_4K, "SIZE_4K", 0, "4K (4096 x 4096)", "4096 x 4096"},
@@ -1474,6 +1476,7 @@ static void rna_def_paint_mode(BlenderRNA *brna)
   prop = RNA_def_property(srna, "new_channel_image_size", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "new_channel_image_size");
   RNA_def_property_enum_items(prop, new_channel_image_size_items);
+  RNA_def_property_enum_default(prop, PAINT_NEW_CHANNEL_IMAGE_SIZE_4K);
   RNA_def_property_ui_text(prop,
                            "New Channel Image Size",
                            "Width and height used for material paint channel images that "

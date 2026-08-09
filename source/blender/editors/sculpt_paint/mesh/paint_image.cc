@@ -865,6 +865,11 @@ static wmOperatorStatus brush_colors_flip_exec(bContext *C, wmOperator * /*op*/)
     return OPERATOR_CANCELLED;
   }
 
+  /* The swap above writes DNA directly (not through the RNA "color" property), so the usual
+   * #rna_Brush_color_update / #rna_UnifiedPaintSettings_color_update path that keeps Base Color
+   * in sync with the brush color never runs; do it explicitly here. */
+  BKE_brush_material_paint_base_color_sync_to_channel(paint, br);
+
   WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, br);
 
   return OPERATOR_FINISHED;

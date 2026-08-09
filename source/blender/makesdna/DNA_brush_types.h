@@ -166,6 +166,16 @@ struct BrushCurvesSculptSettings {
   struct CurveMapping *curve_parameter_falloff = nullptr;
 };
 
+/**
+ * Tangent-space convention of a Normal channel's source image, matching the Shader Editor's
+ * Normal Map node: OpenGL stores +Y (green) pointing up, DirectX stores it flipped.
+ * Meaningless for any channel other than #PAINT_MATERIAL_CHANNEL_NORMAL.
+ */
+enum eBrushMaterialPaintNormalSpace : int8_t {
+  BRUSH_MATERIAL_PAINT_NORMAL_SPACE_OPENGL = 0,
+  BRUSH_MATERIAL_PAINT_NORMAL_SPACE_DIRECTX = 1,
+};
+
 struct BrushMaterialPaintChannel {
   DNA_DEFINE_CXX_METHODS(BrushMaterialPaintChannel)
 
@@ -178,7 +188,8 @@ struct BrushMaterialPaintChannel {
   /** #IMB_BlendMode. */
   short blend = 0;
   char use = 0;
-  char _pad[1] = {};
+  /** #eBrushMaterialPaintNormalSpace. Only read for the Normal channel. */
+  char normal_space = 0;
 
   /**
    * Source texture sampled instead of `value` / base color. Inactive when `tex` is null.

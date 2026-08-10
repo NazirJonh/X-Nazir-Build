@@ -5427,7 +5427,9 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
     if (brush->material_paint != nullptr) {
       const BrushMaterialPaint &brush_paint = *brush->material_paint;
       for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-        if (!BKE_paint_material_channel_is_enabled(brush_paint, paint_mode_init, info.channel)) {
+        if (!BKE_paint_material_channel_writes_to_target(
+                brush_paint, paint_mode_init, info.channel))
+        {
           continue;
         }
         bool created = false;
@@ -5487,7 +5489,9 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
         if (info.socket_name == nullptr) {
           continue;
         }
-        if (!BKE_paint_material_channel_is_enabled(brush_paint, paint_mode_init, info.channel)) {
+        if (!BKE_paint_material_channel_writes_to_target(
+                brush_paint, paint_mode_init, info.channel))
+        {
           continue;
         }
         Image *image;

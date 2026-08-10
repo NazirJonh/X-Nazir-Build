@@ -208,7 +208,7 @@ struct BrushMaterialPaint {
   float base_color[3] = {1.0f, 1.0f, 1.0f};
   char use_sync_base_color_with_brush = 1;
   /** When the Alpha channel is enabled, write stroke values into the Alpha map. */
-  char use_alpha_map = 1;
+  char use_alpha_map = 0;
   /** When the Alpha channel is enabled, sample Alpha to mask other channels' writes this stroke. */
   char use_alpha_stroke_mask = 1;
   char _pad = 0;

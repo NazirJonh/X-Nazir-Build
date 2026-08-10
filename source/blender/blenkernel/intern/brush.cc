@@ -843,8 +843,9 @@ void BKE_brush_material_paint_ensure(Brush *brush)
   settings->channels[PAINT_MATERIAL_CHANNEL_EMISSION].value[2] = 0.0f;
   copy_v3_fl(settings->base_color, 1.0f);
   settings->use_sync_base_color_with_brush = 1;
-  settings->use_alpha_map = 1;
+  settings->use_alpha_map = 0;
   settings->use_alpha_stroke_mask = 1;
+  settings->shared_source_mapping.brush_map_mode = MTEX_MAP_MODE_AREA;
   brush->material_paint = settings;
 }
 

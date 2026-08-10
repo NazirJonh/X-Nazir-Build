@@ -127,7 +127,7 @@ static const EnumPropertyItem rna_enum_canvas_source_items[] = {
     {PAINT_CANVAS_SOURCE_MATERIAL_PAINT,
      "MATERIAL_PAINT",
      0,
-     "Material Paint",
+     "PolyPaint",
      "Paint per-vertex material attribute channels"},
     {0, nullptr, 0, nullptr, nullptr},
 };

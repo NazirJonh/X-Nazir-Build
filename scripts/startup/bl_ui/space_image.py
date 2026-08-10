@@ -1283,7 +1283,7 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
         if paint.canvas_source == 'MATERIAL':
             label = iface_("Material")
         elif paint.canvas_source == 'MATERIAL_PAINT':
-            label = iface_("Material Paint")
+            label = iface_("PolyPaint")
         elif paint.canvas_source == 'COLOR_ATTRIBUTE':
             if me:
                 active_color = me.color_attributes.active_color

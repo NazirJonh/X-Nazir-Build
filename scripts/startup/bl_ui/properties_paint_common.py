@@ -1518,6 +1518,35 @@ def draw_material_paint_visibility_chevron(context, layout, paint_mode_settings,
     )
 
 
+def material_paint_writable_channels(brush, paint_mode_settings):
+    """Channel identifiers \a brush actually writes to for the Material (image) canvas.
+
+    Mirrors #BKE_paint_material_channel_writes_to_target combined with the
+    `MaterialPaintChannelInfo.socket_name` gate that excludes Custom for the image canvas (see
+    `paint.cc`'s `BKE_paint_material_image_targets_get`): enabled, listed in
+    `visible_material_channels`, and - for Alpha only - `use_alpha_map`. Custom has no Principled
+    socket for this canvas and is excluded via `_MATERIAL_PAINT_CHANNEL_UI_ORDER`, which already
+    omits it. If the C++ conditions above change, update this function to match.
+
+    Returns ``None`` when there is no usable brush/channel configuration (distinct from an empty
+    set, which means a brush exists but currently writes no channels).
+    """
+    if brush is None or brush.material_paint is None:
+        return None
+    material_paint = brush.material_paint
+    channels = {channel.channel: channel for channel in material_paint.channels}
+    visible = set(paint_mode_settings.visible_material_channels)
+    writable = set()
+    for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
+        channel = channels.get(channel_id)
+        if channel is None or not channel.use or channel_id not in visible:
+            continue
+        if channel_id == 'ALPHA' and not material_paint.use_alpha_map:
+            continue
+        writable.add(channel_id)
+    return writable
+
+
 def draw_material_paint_channels(
         context, layout, brush, paint_mode, *, show_custom):
     """Draw Material / Material Paint channel enable + value rows.

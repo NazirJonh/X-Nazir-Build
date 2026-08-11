@@ -18,6 +18,7 @@ from bl_ui.properties_paint_common import (
     draw_color_settings,
     draw_material_paint_channels,
     draw_material_paint_visibility_chevron,
+    material_paint_writable_channels,
     draw_material_paint_visibility_popover,
     ClonePanel,
     BrushSelectPanel,
@@ -1344,6 +1345,9 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
                     show_custom=(canvas_source == 'MATERIAL_PAINT'),
                 )
 
+                if canvas_source == 'MATERIAL':
+                    self._draw_material_paint_brush_divergence(context, layout, settings, mode_settings)
+
             case 'IMAGE':
                 if ob:
                     mesh = ob.data
@@ -1385,6 +1389,60 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
         elif have_image:
             layout.separator()
             layout.operator("image.save_all_modified", text="Save All Images", icon='FILE_TICK')
+
+    @staticmethod
+    def _draw_material_paint_brush_divergence(context, layout, settings, mode_settings):
+        """Read-only note when the Image Paint and Sculpt brushes are configured to write
+        different Material Texture channels.
+
+        Compares brush *configuration* only (#material_paint_writable_channels), not confirmed
+        shared paint destinations - the Sculpt Mode area may have a different active object than
+        this Image Editor. Never resolves or creates images/nodes.
+        """
+        ob = context.active_object
+        if ob is None or ob.type != 'MESH':
+            layout.label(text="No active mesh object", icon='INFO')
+            return
+        if ob.active_material is None:
+            layout.label(text="No active material", icon='INFO')
+            return
+
+        image_paint_channels = material_paint_writable_channels(
+            getattr(settings, "brush", None), mode_settings,
+        )
+        sculpt_settings = context.tool_settings.sculpt
+        sculpt_channels = material_paint_writable_channels(
+            getattr(sculpt_settings, "brush", None) if sculpt_settings else None, mode_settings,
+        )
+
+        def _names(channels):
+            return ", ".join(sorted(c.replace('_', ' ').title() for c in channels)) or "None"
+
+        col = layout.column(align=True)
+
+        # Always report the Image Paint brush's own state first, whether or not it has one -
+        # missing brush is not painting-blocking information here, just context.
+        if image_paint_channels is None:
+            col.label(text="No active Image Paint brush", icon='INFO')
+        else:
+            col.label(text="Writes: %s" % _names(image_paint_channels))
+
+        if sculpt_channels is None:
+            # No Sculpt brush either: nothing further to compare against.
+            return
+
+        if image_paint_channels is None:
+            # No Image Paint brush selected, but Sculpt Mode already has a configured brush -
+            # this is the common case right after painting a Material Texture in Sculpt Mode, so
+            # surface what it writes instead of only reporting the Image Paint side as empty.
+            row = col.row(align=True)
+            row.label(text="Sculpt brush writes: %s" % _names(sculpt_channels), icon='INFO')
+            row.operator("paint.material_paint_brush_sync", text="Sync Brush", icon='UV_SYNC_SELECT')
+        elif sculpt_channels != image_paint_channels:
+            diff = sorted(c.replace('_', ' ').title() for c in (sculpt_channels ^ image_paint_channels))
+            row = col.row(align=True)
+            row.label(text="Sculpt brush configuration differs: %s" % ", ".join(diff), icon='ERROR')
+            row.operator("paint.material_paint_brush_sync", text="Sync Brush", icon='UV_SYNC_SELECT')
 
 
 class IMAGE_PT_paint_settings(Panel, ImagePaintPanel):

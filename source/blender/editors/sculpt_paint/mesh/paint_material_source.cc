@@ -29,8 +29,9 @@
 namespace blender::ed::sculpt_paint::material {
 
 /* WORKAROUND: temporary printf profiling to find where per-channel source-texture sampling
- * spends time on strokes with many source images. Remove once the perf work is done. */
-#define PBR_PAINT_SOURCE_PROFILE 0
+ * spends time on strokes with many source images. Remove once the perf work is done.
+ * Toggle all logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
+#include "paint_debug.hh"
 
 ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
                                            const Brush &brush,
@@ -66,7 +67,7 @@ ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
 
   pool_ = BKE_image_pool_new();
 
-#ifdef PBR_PAINT_SOURCE_PROFILE
+#if PBR_PAINT_SOURCE_PROFILE
   const double construct_start = BLI_time_now_seconds();
 #endif
 
@@ -91,20 +92,22 @@ ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
       /* Acquire may update ImageUser; keep a local copy so the const Tex on the brush is not
        * mutated through a const path. */
       ImageUser iuser = tex->iuser;
-#ifdef PBR_PAINT_SOURCE_PROFILE
+#if PBR_PAINT_SOURCE_PROFILE
       const double acquire_start = BLI_time_now_seconds();
 #endif
       ImBuf *ibuf = BKE_image_pool_acquire_ibuf(tex->ima, &iuser, pool_);
-#ifdef PBR_PAINT_SOURCE_PROFILE
+#if PBR_PAINT_SOURCE_PROFILE
       /* A slow acquire here means this image was not yet in the pool (first probe for it this
        * stroke, so a real decode happened); a fast one means another channel already pulled the
        * same image in and the pool served it from cache. Compare the two to see whether the
        * per-channel Tex duplication (each channel owns its own Tex/MTex even when pointing at
        * the same Image) is causing redundant decodes across channels. */
       const double acquire_seconds = BLI_time_now_seconds() - acquire_start;
-      printf("[pbr_paint] source probe: channel=%d image=%s acquire=%.3fms %s\n",
+      printf("[pbr_paint] source probe: channel=%d image=%s size=%dx%d acquire=%.3fms %s\n",
              i,
              tex->ima->id.name + 2,
+             ibuf != nullptr ? ibuf->x : 0,
+             ibuf != nullptr ? ibuf->y : 0,
              acquire_seconds * 1000.0,
              acquire_seconds > 0.001 ? "(likely decode)" : "(cache hit)");
       probed_image_num_++;
@@ -122,7 +125,7 @@ ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
     active_ |= source.usable;
   }
 
-#ifdef PBR_PAINT_SOURCE_PROFILE
+#if PBR_PAINT_SOURCE_PROFILE
   construct_seconds_ = BLI_time_now_seconds() - construct_start;
   printf("[pbr_paint] ChannelSourceSampler construct: %d image probe(s), %.3fms total\n",
          probed_image_num_,

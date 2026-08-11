@@ -55,6 +55,7 @@
 #include "BKE_key.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
@@ -5483,6 +5484,10 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   {
     Main *bmain = CTX_data_main(C);
     BKE_brush_material_paint_ensure(BKE_paint_brush(&sd.paint));
+    /* See the matching comment in paint_image_2d.cc's #paint_2d_new_stroke: without this,
+     * #Material.paint_channel_cache can keep pointing paint at an Image the Principled BSDF no
+     * longer reads from after an undo/redo or a manual node-tree edit. */
+    BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
     if (brush->material_paint != nullptr) {
       const BrushMaterialPaint &brush_paint = *brush->material_paint;
       for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
@@ -6415,6 +6420,27 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     mask_brush_toggle_off(&sd.paint, ss.cache);
     /* Refresh the brush pointer in case we switched brush in the toggle function. */
     brush = BKE_paint_brush(&sd.paint);
+  }
+
+  /* #flush_update_step/#flush_update_done for #UpdateType::Image only redraw regions; unlike
+   * paint_2d_new_stroke's Image Editor path, nothing here frees each target's cached GPU texture
+   * or tags it for shading recalc. #SCULPT_do_paint_brush_image only marks the CPU-side ImBuf
+   * dirty (#BKE_image_mark_dirty), so the painted pixels are correct and persist to disk, but the
+   * 3D Viewport/Shader Editor keep showing the pre-stroke GPU texture for any channel that wasn't
+   * also the one open in an Image Editor during the stroke, until something else (e.g. a file
+   * reload) forces a full GPU material rebuild. Must run before the cache holding the target list
+   * is freed below. */
+  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+      SCULPT_use_image_paint_brush(*paint_mode_settings_, ob, brush))
+  {
+    for (const paint::image::ImagePaintTarget &target : ss.cache->image_paint_targets) {
+      if (target.data == nullptr || target.data->image == nullptr) {
+        continue;
+      }
+      Image *image = target.data->image;
+      BKE_image_free_gputextures(image);
+      DEG_id_tag_update(&image->id, ID_RECALC_SHADING | ID_RECALC_PARAMETERS);
+    }
   }
 
   MEM_delete(ss.cache);

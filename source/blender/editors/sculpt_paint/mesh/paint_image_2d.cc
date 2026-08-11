@@ -21,11 +21,16 @@
 #include "BLI_math_color_blend.h"
 #include "BLI_stack.h"
 #include "BLI_task.h"
+#include "BLI_time.h"
+
+/* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
+#include "paint_debug.hh"
 
 #include "BKE_brush.hh"
 #include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -1833,6 +1838,15 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     BKE_brush_material_paint_ensure(brush);
     const BrushMaterialPaint &brush_paint = *brush->material_paint;
 
+    /* #Material.paint_channel_cache is only refreshed on writes made through this API (see its
+     * doc comment); anything that changes the node tree from outside it (undo/redo swapping in a
+     * different Main, manual node edits in the Shader Editor) leaves the cache pointing at a
+     * still-valid but no-longer-wired Image, so painting would keep writing into a map the
+     * material's Principled BSDF no longer reads from. A once-per-stroke invalidation is cheap
+     * (a handful of socket/link lookups) compared to the per-dab sampling cost already spent
+     * below, and removes that whole class of staleness. */
+    BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(ob, ob->actcol));
+
     /* Auto-create and wire up an Image Texture on the Principled BSDF for each enabled
      * channel that doesn't already resolve to one, matching the View3D Sculpt path. */
     Main *bmain = CTX_data_main(C);
@@ -1902,6 +1916,12 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
                                                             channel_blend,
                                                             primary == nullptr);
       if (state == nullptr) {
+        /* Surfaced rather than silently dropped: a channel quietly not painting is exactly the
+         * kind of no-op a user has no way to notice on their own. */
+        BKE_reportf(op->reports,
+                   RPT_WARNING,
+                   "Material Texture: %s channel failed to start (missing/unloadable image)",
+                   BKE_paint_material_channel_info(target.channel).ui_name);
         continue; /* Skip missing / unloadable maps. */
       }
       if (primary == nullptr) {
@@ -1933,7 +1953,11 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
 
 static void paint_2d_redraw_single(const bContext *C, ImagePaintState *s, bool final)
 {
+#if PBR_PAINT_IMAGE_UPDATE_PROFILE
+  const double perf_start = BLI_time_now_seconds();
+#endif
   bool had_redraw = false;
+  int redraw_tiles = 0;
   for (int i = 0; i < s->num_tiles; i++) {
     if (s->tiles[i].need_redraw) {
       ImBuf *ibuf = BKE_image_acquire_ibuf(s->image, &s->tiles[i].iuser, nullptr);
@@ -1944,17 +1968,21 @@ static void paint_2d_redraw_single(const bContext *C, ImagePaintState *s, bool f
 
       s->tiles[i].need_redraw = false;
       had_redraw = true;
+      redraw_tiles++;
     }
   }
 
   if (had_redraw) {
-    ED_imapaint_clear_partial_redraw();
+    /* Notify every editor showing this image (not just the current region), so a channel
+     * painted while a different image is displayed elsewhere still gets a live update signal. */
+    WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, s->image);
     if (s->sima == nullptr || !s->sima->lock) {
       ED_region_tag_redraw(CTX_wm_region(C));
     }
-    else {
-      WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, s->image);
-    }
+    /* Explicit flags rather than the legacy `0` ("tag everything") — the shading/material
+     * consumers of this image's pixels need to actually see a shading-relevant tag to rebuild
+     * their GPU material, not just any tag on the ID. */
+    DEG_id_tag_update(&s->image->id, ID_RECALC_SHADING | ID_RECALC_PARAMETERS);
   }
 
   if (final) {
@@ -1964,29 +1992,59 @@ static void paint_2d_redraw_single(const bContext *C, ImagePaintState *s, bool f
 
     /* compositor listener deals with updating */
     WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, s->image);
-    DEG_id_tag_update(&s->image->id, 0);
+    DEG_id_tag_update(&s->image->id, ID_RECALC_SHADING | ID_RECALC_PARAMETERS);
 
     /* Ideally, we shouldn't have to tag the object as needing to be recalculated if using this
      * paint mode, however, because the image isn't connected as part of the shader nodes, the draw
-     * code is unaware of the corresponding image tag. See #150957 for more details. */
+     * code is unaware of the corresponding image tag. See #150957 for more details.
+     *
+     * The Material Texture canvas (#PAINT_CANVAS_SOURCE_MATERIAL) hits the same symptom for a
+     * different reason: the image *is* wired into the Principled BSDF, but only the image that
+     * happens to be displayed in this Image Editor gets its GPU material/shading state refreshed
+     * as a side effect of the region redraw. A channel that was never opened in this editor (e.g.
+     * an "extra" channel painted alongside the primary one) would otherwise keep showing stale
+     * shading in the 3D Viewport/Shader Editor until something else forces a full GPU material
+     * rebuild (such as a file reload) even though the painted pixels were saved correctly. */
     const Scene *scene = CTX_data_scene(C);
     Object *object = CTX_data_active_object(C);
     if (object && object->type == OB_MESH && scene &&
-        scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_IMAGE)
+        (scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_IMAGE ||
+         scene->toolsettings->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL))
     {
       DEG_id_tag_update(&object->id, ID_RECALC_SHADING);
     }
   }
+
+#if PBR_PAINT_IMAGE_UPDATE_PROFILE
+  printf("[PBR-PERF] redraw_single image=%s final=%d tiles=%d elapsed=%.3f ms\n",
+         s->image ? s->image->id.name + 2 : "<null>",
+         int(final),
+         redraw_tiles,
+         (BLI_time_now_seconds() - perf_start) * 1000.0);
+#endif
 }
 
 void paint_2d_redraw(const bContext *C, void *ps, bool final)
 {
+#if PBR_PAINT_IMAGE_UPDATE_PROFILE
+  const double perf_start = BLI_time_now_seconds();
+#endif
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
 
   paint_2d_redraw_single(C, s, final);
   for (int i = 0; i < s->material_extra_states_num; i++) {
     paint_2d_redraw_single(C, s->material_extra_states[i], final);
   }
+  /* The dirty region is shared by all material-channel states. Clear it only after every image
+   * has consumed it; clearing it in paint_2d_redraw_single() makes extra channels miss their GPU
+   * update after the primary channel is processed. */
+  ED_imapaint_clear_partial_redraw();
+#if PBR_PAINT_IMAGE_UPDATE_PROFILE
+  printf("[PBR-PERF] redraw total final=%d states=%d elapsed=%.3f ms\n",
+         int(final),
+         1 + s->material_extra_states_num,
+         (BLI_time_now_seconds() - perf_start) * 1000.0);
+#endif
 }
 
 void paint_2d_stroke_done(void *ps)

@@ -38,6 +38,7 @@
 #include "ED_screen.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "RNA_access.hh"
@@ -631,6 +632,76 @@ void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
+static wmOperatorStatus material_paint_brush_sync_exec(bContext *C, wmOperator *op)
+{
+  Scene *scene = CTX_data_scene(C);
+  ToolSettings *ts = scene->toolsettings;
+  Paint *sculpt_paint = &ts->sculpt->paint;
+  Paint *image_paint = &ts->imapaint.paint;
+
+  /* The calling panel is in either the 3D Viewport (Sculpt Mode) or the Image Editor (Paint
+   * mode); #BKE_paint_get_active_from_context resolves to whichever one invoked the operator, so
+   * the other side is simply "the one that isn't this one." */
+  Paint *this_paint = BKE_paint_get_active_from_context(C);
+  Paint *other_paint = nullptr;
+  if (this_paint == sculpt_paint) {
+    other_paint = image_paint;
+  }
+  else if (this_paint == image_paint) {
+    other_paint = sculpt_paint;
+  }
+  else {
+    BKE_report(op->reports, RPT_ERROR, "Not called from Sculpt Mode or Image Editor Paint mode");
+    return OPERATOR_CANCELLED;
+  }
+
+  Brush *other_brush = BKE_paint_brush(other_paint);
+  if (other_brush == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "The other editor has no active brush to sync from");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Most brushes are restricted (#Brush.ob_mode) to the single paint mode they were authored
+   * for (e.g. a Sculpt Draw brush only has #OB_MODE_SCULPT set), so #BKE_paint_can_use_brush -
+   * checked inside #WM_toolsystem_activate_brush_and_tool - would otherwise refuse to activate a
+   * Sculpt brush in Image Paint or vice versa. Syncing is exactly a request to use this brush in
+   * both modes, so opt it in here rather than making the user find the matching "Image Paint" /
+   * "Sculpt" checkbox in Brush Settings first. */
+  if (!BKE_paint_can_use_brush(this_paint, other_brush)) {
+    other_brush->ob_mode |= this_paint->runtime->ob_mode;
+    BKE_brush_tag_unsaved_changes(other_brush);
+    BKE_reportf(op->reports,
+               RPT_INFO,
+               "Enabled this paint mode on brush \"%s\" so it could be synced here",
+               other_brush->id.name + 2);
+  }
+
+  /* Point both editors at the same Brush ID (rather than copying settings across two separate
+   * brushes) so their #BrushMaterialPaint channel configuration is the same data, not a
+   * snapshot that can drift again on the next edit. */
+  if (!WM_toolsystem_activate_brush_and_tool(C, this_paint, other_brush)) {
+    BKE_report(op->reports, RPT_WARNING, "Unable to activate brush, wrong object mode");
+    return OPERATOR_CANCELLED;
+  }
+
+  WM_main_add_notifier(NC_BRUSH | NA_SELECTED, other_brush);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_paint_brush_sync(wmOperatorType *ot)
+{
+  ot->name = "Sync Brush";
+  ot->idname = "PAINT_OT_material_paint_brush_sync";
+  ot->description =
+      "Use the same brush here as the other Material Texture editor (Sculpt Mode or Image "
+      "Editor Paint), so their channel settings share one Brush datablock instead of drifting "
+      "apart";
+  ot->exec = material_paint_brush_sync_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
 static void BRUSH_OT_stencil_reset_transform(wmOperatorType *ot)
 {
   /* identifiers */
@@ -711,6 +782,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_from_view);
   WM_operatortype_append(PAINT_OT_brush_colors_flip);
   WM_operatortype_append(PAINT_OT_material_paint_brush_ensure);
+  WM_operatortype_append(PAINT_OT_material_paint_brush_sync);
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);

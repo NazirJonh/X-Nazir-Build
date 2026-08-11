@@ -31,6 +31,7 @@ from bl_ui.properties_paint_common import (
     draw_color_settings,
     draw_material_paint_channels,
     draw_material_paint_visibility_chevron,
+    material_paint_writable_channels,
 )
 from bl_ui.utils import PresetPanel
 
@@ -535,6 +536,9 @@ class SelectPaintSlotHelper:
                     show_custom=(canvas_source == 'MATERIAL_PAINT'),
                 )
 
+                if canvas_source == 'MATERIAL' and ob is not None and ob.mode == 'SCULPT':
+                    self._draw_material_paint_brush_sync(context, layout, mode_settings)
+
             case 'MATERIAL':
                 if len(ob.material_slots) > 1:
                     layout.template_list(
@@ -605,6 +609,33 @@ class SelectPaintSlotHelper:
         elif have_image:
             layout.separator()
             layout.operator("image.save_all_modified", text="Save All Images", icon='FILE_TICK')
+
+    @staticmethod
+    def _draw_material_paint_brush_sync(context, layout, mode_settings):
+        """Read-only note plus a one-click fix when the Sculpt brush and the Image Editor's Image
+        Paint brush are configured to write different Material Texture channels.
+
+        Compares brush *configuration* only (#material_paint_writable_channels), not confirmed
+        shared paint destinations - the Image Editor may have a different active object than this
+        3D Viewport. Never resolves or creates images/nodes.
+        """
+        sculpt_channels = material_paint_writable_channels(
+            context.tool_settings.sculpt.brush, mode_settings,
+        )
+        image_paint_channels = material_paint_writable_channels(
+            context.tool_settings.image_paint.brush, mode_settings,
+        )
+        if sculpt_channels is None or image_paint_channels is None:
+            # Nothing to compare without a brush on both sides; "Sync Brush" needs one to copy
+            # from, so it would just error - do not offer it here.
+            return
+        if sculpt_channels == image_paint_channels:
+            return
+
+        diff = sorted(c.replace('_', ' ').title() for c in (sculpt_channels ^ image_paint_channels))
+        row = layout.row(align=True)
+        row.label(text="Image Editor brush differs: %s" % ", ".join(diff), icon='ERROR')
+        row.operator("paint.material_paint_brush_sync", text="Sync Brush", icon='UV_SYNC_SELECT')
 
 
 class VIEW3D_PT_slots_projectpaint(SelectPaintSlotHelper, View3DPanel, Panel):

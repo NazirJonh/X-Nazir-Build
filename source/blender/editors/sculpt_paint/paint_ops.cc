@@ -537,6 +537,16 @@ static wmOperatorStatus material_paint_brush_ensure_exec(bContext *C, wmOperator
     return OPERATOR_CANCELLED;
   }
   BKE_brush_material_paint_ensure(brush);
+
+  /* #BKE_brush_material_paint_ensure seeds Base Color to white because it has no #Paint to resolve
+   * the effective (unified or per-brush) color from. Pull the current color in here, otherwise the
+   * Base Color swatch contradicts the brush's own color swatch until the user next edits it. */
+  BKE_brush_material_paint_base_color_sync_to_channel(paint, brush);
+
+  /* Sync after the channel settings exist, so the paired editor adopts a brush that is already set
+   * up. No-op when sync is off or the canvas is not Material. */
+  BKE_paint_material_brush_sync(CTX_data_scene(C), paint);
+
   WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
   return OPERATOR_FINISHED;
 }
@@ -636,7 +646,7 @@ static wmOperatorStatus material_paint_brush_sync_exec(bContext *C, wmOperator *
 {
   Scene *scene = CTX_data_scene(C);
   ToolSettings *ts = scene->toolsettings;
-  Paint *sculpt_paint = &ts->sculpt->paint;
+  Paint *sculpt_paint = ts->sculpt != nullptr ? &ts->sculpt->paint : nullptr;
   Paint *image_paint = &ts->imapaint.paint;
 
   /* The calling panel is in either the 3D Viewport (Sculpt Mode) or the Image Editor (Paint
@@ -661,31 +671,25 @@ static wmOperatorStatus material_paint_brush_sync_exec(bContext *C, wmOperator *
     return OPERATOR_CANCELLED;
   }
 
-  /* Most brushes are restricted (#Brush.ob_mode) to the single paint mode they were authored
-   * for (e.g. a Sculpt Draw brush only has #OB_MODE_SCULPT set), so #BKE_paint_can_use_brush -
-   * checked inside #WM_toolsystem_activate_brush_and_tool - would otherwise refuse to activate a
-   * Sculpt brush in Image Paint or vice versa. Syncing is exactly a request to use this brush in
-   * both modes, so opt it in here rather than making the user find the matching "Image Paint" /
-   * "Sculpt" checkbox in Brush Settings first. */
+  /* This operator exists for when automatic sync is off, so it deliberately bypasses the flag
+   * gate in #BKE_paint_material_brush_sync and pulls the other editor's brush in here through the
+   * tool system, which also updates this editor's tool and bindings. */
   if (!BKE_paint_can_use_brush(this_paint, other_brush)) {
     other_brush->ob_mode |= this_paint->runtime->ob_mode;
     BKE_brush_tag_unsaved_changes(other_brush);
     BKE_reportf(op->reports,
-               RPT_INFO,
-               "Enabled this paint mode on brush \"%s\" so it could be synced here",
-               other_brush->id.name + 2);
+                RPT_INFO,
+                "Enabled this paint mode on brush \"%s\" so it could be synced here",
+                other_brush->id.name + 2);
   }
 
-  /* Point both editors at the same Brush ID (rather than copying settings across two separate
-   * brushes) so their #BrushMaterialPaint channel configuration is the same data, not a
-   * snapshot that can drift again on the next edit. */
   if (!WM_toolsystem_activate_brush_and_tool(C, this_paint, other_brush)) {
     BKE_report(op->reports, RPT_WARNING, "Unable to activate brush, wrong object mode");
     return OPERATOR_CANCELLED;
   }
 
-  WM_main_add_notifier(NC_BRUSH | NA_SELECTED, other_brush);
-  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  WM_event_add_notifier(C, NC_BRUSH | NA_SELECTED, other_brush);
+  WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
   return OPERATOR_FINISHED;
 }
 

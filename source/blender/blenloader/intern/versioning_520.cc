@@ -662,6 +662,23 @@ static void version_material_paint_channel_shader_visibility_defaults(Main &bmai
 }
 
 /**
+ * `PaintModeSettings::material_paint_flag` reuses bytes that were padding in older files, so it
+ * reads back as zero - indistinguishable from "the user turned brush sync off". Gated purely on
+ * file version (never on the field's value) so a deliberate opt-out made after upgrading survives
+ * later loads of the same file.
+ */
+static void version_material_paint_brush_sync_defaults(Main &bmain)
+{
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    ts->paint_mode.material_paint_flag |= PAINT_MATERIAL_BRUSH_SYNC;
+  }
+}
+
+/**
  * `PaintModeSettings::new_channel_image_size` was added with a C++ default member initializer
  * (4096), but that initializer only applies to freshly constructed structs; files saved before
  * this field existed have it zero-filled on read, which is not one of the enum's valid sizes and
@@ -1125,6 +1142,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 55)) {
     version_material_paint_channel_shader_visibility_defaults(*bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 56)) {
+    version_material_paint_brush_sync_defaults(*bmain);
   }
 
   /**

@@ -1187,6 +1187,17 @@ enum ePaintCanvasSource : char {
   PAINT_CANVAS_SOURCE_MATERIAL_PAINT = 3,
 };
 
+/** #PaintModeSettings::material_paint_flag */
+enum ePaintMaterialFlag : int {
+  /**
+   * Keep the Sculpt Mode and Image Editor paint brushes pointing at the same Brush ID, and mirror
+   * their #UnifiedPaintSettings, while the Material canvas is active. Enabled by default: with
+   * PBR Paint the user treats both editors as one painting session.
+   */
+  PAINT_MATERIAL_BRUSH_SYNC = (1 << 0),
+};
+ENUM_OPERATORS(ePaintMaterialFlag)
+
 /**
  * A material paint channel. Used as the index into the per-channel arrays of
  * #PaintModeSettings, so the values must stay contiguous and start at zero.
@@ -1414,7 +1425,9 @@ struct PaintModeSettings {
    * represented in this bitmask.
    */
   int material_shader_visible_channels = 0;
-  char _pad2[4] = {};
+
+  /** Bitmask of #ePaintMaterialFlag. */
+  ePaintMaterialFlag material_paint_flag = PAINT_MATERIAL_BRUSH_SYNC;
 };
 
 /** #PaintModeSettings::new_channel_image_size */

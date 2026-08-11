@@ -18,6 +18,7 @@ from bl_ui.properties_paint_common import (
     draw_color_settings,
     draw_material_paint_channels,
     draw_material_paint_visibility_chevron,
+    draw_material_paint_sync_toggle,
     material_paint_writable_channels,
     draw_material_paint_visibility_popover,
     ClonePanel,
@@ -1300,6 +1301,7 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
         self.layout.label(text="PBR Paint")
         row = self.layout.row(align=True)
         row.prop(paint, "canvas_source", text="")
+        draw_material_paint_sync_toggle(row, paint)
         draw_material_paint_visibility_chevron(
             context, row, paint, panel="IMAGE_PT_material_paint_channel_visibility",
         )
@@ -1345,7 +1347,8 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
                     show_custom=(canvas_source == 'MATERIAL_PAINT'),
                 )
 
-                if canvas_source == 'MATERIAL':
+                # See the matching gate in space_view3d_toolbar.py: dead UI while sync is on.
+                if canvas_source == 'MATERIAL' and not mode_settings.use_brush_sync:
                     self._draw_material_paint_brush_divergence(context, layout, settings, mode_settings)
 
             case 'IMAGE':

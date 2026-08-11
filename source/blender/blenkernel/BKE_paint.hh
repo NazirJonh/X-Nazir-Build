@@ -872,6 +872,32 @@ float2 BKE_paint_material_channel_range(const PaintModeSettings &settings,
                                         eMaterialPaintChannel channel);
 
 /**
+ * The #Paint that should mirror \a source while brush sync is active, or null when nothing should
+ * be synced.
+ *
+ * Returns null unless \a source is one of the Sculpt / Image Paint pair, brush sync is enabled and
+ * the canvas is #PAINT_CANVAS_SOURCE_MATERIAL. #PAINT_CANVAS_SOURCE_MATERIAL_PAINT is deliberately
+ * excluded: it writes per-vertex attributes the Image Editor never paints.
+ */
+Paint *BKE_paint_material_sync_target_get(Scene *scene, Paint *source);
+
+/**
+ * Make the paint mode paired with \a source use the same brush, palette and cavity curve.
+ *
+ * The brush is shared as one ID rather than copied, so its settings cannot drift apart. Does not
+ * touch the tool system: callers with a #bContext are responsible for the receiving side's tool
+ * bindings.
+ */
+void BKE_paint_material_brush_sync(Scene *scene, Paint *source);
+
+/**
+ * Mirror \a source's #UnifiedPaintSettings (size, strength, color, jitter) onto the paired paint
+ * mode. Kept separate from #BKE_paint_material_brush_sync because these change far more often than
+ * the active brush and are driven from a different callback.
+ */
+void BKE_paint_material_unified_settings_sync(Scene *scene, Paint *source);
+
+/**
  * Gradient shape for the scalar material-paint value ramp widget.
  * Unipolar: [0,1] black→white. Bipolar: [-1,1] white→black→white.
  */

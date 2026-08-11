@@ -336,6 +336,19 @@ bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *bru
     toolsystem_brush_type_binding_update(paint, paint_mode, active_tool->runtime->brush_type);
   }
 
+  /* With Material canvas brush sync on, the paired paint mode adopts the same brush. This is the
+   * single user-facing path for changing the active brush (asset shelf, toolbar, operators), so
+   * whichever editor the change came from becomes the source. */
+  if (Scene *scene = CTX_data_scene(C)) {
+    if (Paint *synced_paint = BKE_paint_material_sync_target_get(scene, paint)) {
+      BKE_paint_material_brush_sync(scene, paint);
+      /* The receiving editor's tool is not switched - that would require its space to be active -
+       * but its binding must follow the new brush, otherwise the next tool change there restores
+       * the previously remembered brush and silently undoes the sync. */
+      toolsystem_main_brush_binding_update_from_active(synced_paint);
+    }
+  }
+
   return true;
 }
 

@@ -77,6 +77,8 @@
 #include "BKE_scene.hh"
 #include "BKE_subdiv_ccg.hh"
 
+#include "WM_api.hh"
+
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
@@ -3694,6 +3696,114 @@ const char *BKE_paint_material_attribute_status_message(const MaterialPaintAttri
       return N_("Could not create the material paint attribute");
   }
   return "";
+}
+
+Paint *BKE_paint_material_sync_target_get(Scene *scene, Paint *source)
+{
+  if (scene == nullptr || scene->toolsettings == nullptr || source == nullptr) {
+    return nullptr;
+  }
+
+  ToolSettings *ts = scene->toolsettings;
+  const PaintModeSettings &mode_settings = ts->paint_mode;
+  if ((mode_settings.material_paint_flag & PAINT_MATERIAL_BRUSH_SYNC) == 0) {
+    return nullptr;
+  }
+  if (mode_settings.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL) {
+    return nullptr;
+  }
+
+  Paint *sculpt_paint = ts->sculpt != nullptr ? &ts->sculpt->paint : nullptr;
+  Paint *image_paint = &ts->imapaint.paint;
+  if (source == sculpt_paint) {
+    return image_paint;
+  }
+  if (source == image_paint) {
+    return sculpt_paint;
+  }
+  return nullptr;
+}
+
+static void paint_material_curve_replace(CurveMapping **dst, const CurveMapping *src)
+{
+  /* Both #Paint free their own curves, so the pointers must never be shared. */
+  BKE_curvemapping_free(*dst);
+  *dst = BKE_curvemapping_copy(src);
+}
+
+void BKE_paint_material_unified_settings_sync(Scene *scene, Paint *source)
+{
+  Paint *dst_paint = BKE_paint_material_sync_target_get(scene, source);
+  if (dst_paint == nullptr) {
+    return;
+  }
+
+  const UnifiedPaintSettings &src_ups = source->unified_paint_settings;
+  UnifiedPaintSettings &dst_ups = dst_paint->unified_paint_settings;
+
+  /* Assigning the struct would alias the three #CurveMapping pointers, so scalar fields are copied
+   * explicitly and the curves deep-copied below. */
+  dst_ups.size = src_ups.size;
+  dst_ups.unprojected_size = src_ups.unprojected_size;
+  dst_ups.alpha = src_ups.alpha;
+  dst_ups.weight = src_ups.weight;
+  copy_v3_v3(dst_ups.color, src_ups.color);
+  copy_v3_v3(dst_ups.secondary_color, src_ups.secondary_color);
+  dst_ups.color_jitter_flag = src_ups.color_jitter_flag;
+  copy_v3_v3(dst_ups.hsv_jitter, src_ups.hsv_jitter);
+  dst_ups.input_samples = src_ups.input_samples;
+  dst_ups.flag = src_ups.flag;
+
+  paint_material_curve_replace(&dst_ups.curve_rand_hue, src_ups.curve_rand_hue);
+  paint_material_curve_replace(&dst_ups.curve_rand_saturation, src_ups.curve_rand_saturation);
+  paint_material_curve_replace(&dst_ups.curve_rand_value, src_ups.curve_rand_value);
+
+  /* The deprecated sRGB fields are derived rather than copied: the color update callback refreshes
+   * them on the source only after this runs, so copying would leave the destination one edit
+   * behind in saved files. */
+  BKE_brush_color_sync_legacy(&dst_ups);
+}
+
+void BKE_paint_material_brush_sync(Scene *scene, Paint *source)
+{
+  Paint *dst_paint = BKE_paint_material_sync_target_get(scene, source);
+  if (dst_paint == nullptr) {
+    return;
+  }
+
+  Brush *src_brush = BKE_paint_brush(source);
+  if (src_brush == nullptr || src_brush->material_paint == nullptr) {
+    return;
+  }
+
+  /* Most brushes are restricted (#Brush.ob_mode) to the paint mode they were authored for, so
+   * #BKE_paint_brush_set would refuse a Sculpt brush in Image Paint. Sync is exactly a request to
+   * use this brush in both modes, so opt it in rather than making the user find the matching
+   * checkbox in Brush Settings first. */
+  BLI_assert(dst_paint->runtime != nullptr);
+  if (!BKE_paint_can_use_brush(dst_paint, src_brush)) {
+    src_brush->ob_mode |= dst_paint->runtime->ob_mode;
+    BKE_brush_tag_unsaved_changes(src_brush);
+  }
+
+  if (!BKE_paint_brush_set(dst_paint, src_brush)) {
+    /* The brush stays unusable in the receiving mode, so the two editors would keep different
+     * brushes. Mirroring the remaining settings on top of that would only obscure the mismatch. */
+    return;
+  }
+
+  if (dst_paint->palette != source->palette) {
+    id_us_min(id_cast<ID *>(dst_paint->palette));
+    dst_paint->palette = source->palette;
+    id_us_plus(id_cast<ID *>(dst_paint->palette));
+  }
+
+  paint_material_curve_replace(&dst_paint->cavity_curve, source->cavity_curve);
+
+  BKE_paint_material_unified_settings_sync(scene, source);
+
+  WM_main_add_notifier(NC_BRUSH | NA_SELECTED, src_brush);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 /** \} */

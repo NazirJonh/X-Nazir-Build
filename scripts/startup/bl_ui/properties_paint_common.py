@@ -1518,6 +1518,24 @@ def draw_material_paint_visibility_chevron(context, layout, paint_mode_settings,
     )
 
 
+def draw_material_paint_sync_toggle(layout, paint_mode_settings):
+    """Icon toggle for sharing one brush between Sculpt Mode and the Image Editor.
+
+    Only meaningful for the Material canvas - the other canvas sources are painted by a single
+    editor - so it is drawn next to the canvas source in the Paint PBR headers and hidden
+    elsewhere.
+    """
+    if paint_mode_settings.canvas_source != 'MATERIAL':
+        return
+    layout.prop(
+        paint_mode_settings,
+        "use_brush_sync",
+        text="",
+        icon='UV_SYNC_SELECT',
+        toggle=True,
+    )
+
+
 def material_paint_writable_channels(brush, paint_mode_settings):
     """Channel identifiers \a brush actually writes to for the Material (image) canvas.
 

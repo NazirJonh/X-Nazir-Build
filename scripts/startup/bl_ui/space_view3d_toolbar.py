@@ -31,6 +31,7 @@ from bl_ui.properties_paint_common import (
     draw_color_settings,
     draw_material_paint_channels,
     draw_material_paint_visibility_chevron,
+    draw_material_paint_sync_toggle,
     material_paint_writable_channels,
 )
 from bl_ui.utils import PresetPanel
@@ -346,6 +347,7 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
         layout.label(text="Paint PBR")
         row = layout.row(align=True)
         row.prop(context.tool_settings.paint_mode, "canvas_source", text="")
+        draw_material_paint_sync_toggle(row, context.tool_settings.paint_mode)
         draw_material_paint_visibility_chevron(context, row, context.tool_settings.paint_mode)
 
     def draw(self, context):
@@ -492,6 +494,7 @@ class SelectPaintSlotHelper:
         mode_settings = self.get_mode_settings(context)
         row = layout.row(align=True)
         row.prop(mode_settings, self.canvas_source_attr_name, text="")
+        draw_material_paint_sync_toggle(row, mode_settings)
         draw_material_paint_visibility_chevron(context, row, mode_settings)
 
     def draw(self, context):
@@ -536,7 +539,10 @@ class SelectPaintSlotHelper:
                     show_custom=(canvas_source == 'MATERIAL_PAINT'),
                 )
 
-                if canvas_source == 'MATERIAL' and ob is not None and ob.mode == 'SCULPT':
+                # With automatic sync on, the brushes cannot diverge, so the warning row would be
+                # dead UI; it is only useful once the user has opted out.
+                if (canvas_source == 'MATERIAL' and ob is not None and ob.mode == 'SCULPT' and
+                        not mode_settings.use_brush_sync):
                     self._draw_material_paint_brush_sync(context, layout, mode_settings)
 
             case 'MATERIAL':

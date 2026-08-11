@@ -506,6 +506,30 @@ static void rna_PaintModeSettings_canvas_source_update(bContext *C, PointerRNA *
     DEG_id_tag_update(&ob->id, 0);
     WM_main_add_notifier(NC_GEOM | ND_DATA, &ob->id);
   }
+
+  /* Switching to the Material canvas is the moment both editors start sharing a target, so align
+   * them right away instead of waiting for the next brush change. */
+  if (scene != nullptr && scene->toolsettings != nullptr && scene->toolsettings->sculpt != nullptr)
+  {
+    BKE_paint_material_brush_sync(scene, &scene->toolsettings->sculpt->paint);
+  }
+}
+
+static void rna_PaintModeSettings_brush_sync_update(bContext *C, PointerRNA * /*ptr*/)
+{
+  Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return;
+  }
+
+  /* Align immediately on enable so the user does not have to touch a brush first. Sculpt Mode is
+   * the source: PBR Paint is set up there, and the Image Editor is the follower in that workflow.
+   * The helpers no-op when the flag is off, so disabling needs no special case. */
+  ToolSettings *ts = scene->toolsettings;
+  if (ts->sculpt != nullptr) {
+    BKE_paint_material_brush_sync(scene, &ts->sculpt->paint);
+  }
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
 }
 
 /** \} */
@@ -605,12 +629,28 @@ static void rna_MeshAutomaskingSettings_update(bContext *C, PointerRNA *ptr)
   }
 }
 
-static void rna_UnifiedPaintSettings_update(bContext *C, PointerRNA * /*ptr*/)
+static void rna_UnifiedPaintSettings_update(bContext *C, PointerRNA *ptr)
 {
   const Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
   ViewLayer *view_layer = CTX_data_view_layer(C);
   Brush *br = BKE_paint_brush(BKE_paint_get_active(*bmain, scene, view_layer));
+
+  /* Every unified setting routes through this callback, so mirroring here covers size, strength,
+   * color and jitter in one place - including the radial control modal, which updates through RNA
+   * as well. The owning #Paint is found by address: #PointerRNA.data is the settings struct
+   * embedded in it. */
+  if (scene != nullptr && scene->toolsettings != nullptr) {
+    ToolSettings *ts = scene->toolsettings;
+    Paint *paints[2] = {ts->sculpt != nullptr ? &ts->sculpt->paint : nullptr, &ts->imapaint.paint};
+    for (Paint *paint : paints) {
+      if (paint != nullptr && &paint->unified_paint_settings == ptr->data) {
+        BKE_paint_material_unified_settings_sync(scene, paint);
+        break;
+      }
+    }
+  }
+
   /* TODO: Verify if tagging the brush for these settings being changed is correct. */
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
@@ -1463,6 +1503,16 @@ static void rna_def_paint_mode(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_ui_text(prop, "Source", "Source to select canvas from");
   RNA_def_property_update(prop, 0, "rna_PaintModeSettings_canvas_source_update");
+
+  prop = RNA_def_property(srna, "use_brush_sync", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "material_paint_flag", PAINT_MATERIAL_BRUSH_SYNC);
+  RNA_def_property_boolean_default(prop, true);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_ui_text(prop,
+                           "Sync Brush",
+                           "Use the same brush and brush settings in Sculpt Mode and the Image "
+                           "Editor while painting the Material canvas");
+  RNA_def_property_update(prop, 0, "rna_PaintModeSettings_brush_sync_update");
 
   prop = RNA_def_property(srna, "canvas_image", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_funcs(

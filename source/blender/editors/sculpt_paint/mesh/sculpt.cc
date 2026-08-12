@@ -2519,9 +2519,22 @@ void sculpt_apply_texture(const SculptSession &ss,
 
       float x = symm_point[0];
       float y = symm_point[1];
+      float size_x = mtex->size[0];
+      float size_y = mtex->size[1];
 
-      x *= mtex->size[0];
-      y *= mtex->size[1];
+      if (brush_uses_vector_displacement(brush)) {
+        if (brush.mtex.vdm_flag & MTEX_VDM_FLIP_X) {
+          x = -x;
+          size_x = fabsf(size_x);
+        }
+        if (brush.mtex.vdm_flag & MTEX_VDM_FLIP_Y) {
+          y = -y;
+          size_y = fabsf(size_y);
+        }
+      }
+
+      x *= size_x;
+      y *= size_y;
 
       x += mtex->ofs[0];
       y += mtex->ofs[1];
@@ -2550,9 +2563,27 @@ void calc_vertex_displacement(const SculptSession &ss, const Brush &brush, float
     translation[1] *= -1;
   }
 
+  if (brush_uses_vector_displacement(brush)) {
+    if (brush.mtex.vdm_flag & MTEX_VDM_FLIP_X) {
+      translation[0] *= -1;
+    }
+    if (brush.mtex.vdm_flag & MTEX_VDM_FLIP_Y) {
+      translation[1] *= -1;
+    }
+  }
+
   /* Apply texture size */
   for (int i = 0; i < 3; ++i) {
-    translation[i] *= math::safe_divide(1.0f, pow2f(brush.mtex.size[i]));
+    float size = brush.mtex.size[i];
+    if (brush_uses_vector_displacement(brush)) {
+      if (i == 0 && (brush.mtex.vdm_flag & MTEX_VDM_FLIP_X)) {
+        size = fabsf(size);
+      }
+      else if (i == 1 && (brush.mtex.vdm_flag & MTEX_VDM_FLIP_Y)) {
+        size = fabsf(size);
+      }
+    }
+    translation[i] *= math::safe_divide(1.0f, pow2f(size));
   }
 
   /* Transform vector to object space */

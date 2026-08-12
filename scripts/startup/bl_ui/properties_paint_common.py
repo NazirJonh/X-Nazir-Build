@@ -1631,6 +1631,11 @@ def brush_texture_settings(layout, brush, sculpt):
             col.active = tex_slot.map_mode == 'AREA_PLANE'
             col.prop(brush, "use_color_as_displacement", text="Vector Displacement")
 
+            if brush.use_color_as_displacement and tex_slot.map_mode == 'AREA_PLANE':
+                row = col.row(heading="VDM Flip", align=True)
+                row.prop(tex_slot, "vdm_flip_x", text="X", toggle=True)
+                row.prop(tex_slot, "vdm_flip_y", text="Y", toggle=True)
+
 
 def brush_mask_texture_settings(layout, brush):
     mask_tex_slot = brush.mask_texture_slot

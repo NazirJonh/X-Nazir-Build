@@ -394,7 +394,10 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
       }
     }
     else {
-    /* Zone + along-length coordinate in one call. With caps off this is the same formula, in the
+    /* Zone + along-length coordinate in one call. The local radius controls the projection's
+     * capture width, but must not control the texture's along-curve scale: changing a radius point
+     * should narrow the ribbon without re-phasing or shifting the texture. The patch's base radius
+     * is therefore used for the texture tile span. With caps off this is the same formula, in the
      * same operand order, that used to be inlined here -- the contract the regression test
      * `texture_zone_caps_disabled_matches_reference` pins down. That test compares against a
      * verbatim copy of the old formula to within `1e-5f` rather than bit-exactly, because the two
@@ -404,7 +407,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
     const CurvePatchTextureZoneSample zone_sample = bke::curve_patch_texture_zone_at(
         s,
         total_length,
-        falloff_radius_at_s,
+        item.params.radius,
         texture.caps_enabled,
         texture.world_cap_start,
         texture.world_cap_end,

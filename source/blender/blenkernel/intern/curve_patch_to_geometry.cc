@@ -113,10 +113,9 @@ Mesh *curve_patch_geometry_to_mesh(const CurvePatchGeometry &geometry,
   for (const int i : IndexRange(verts_num)) {
     const float u = grid.uv[i].x;
     const float s = grid.uv[i].y;
-    const float falloff_radius_at_s = geometry.spline.radius_at(s) * params.radius;
     const CurvePatchTextureZoneSample zone = curve_patch_texture_zone_at(s,
                                                                         total_length,
-                                                                        falloff_radius_at_s,
+                                                                        params.radius,
                                                                         caps_enabled,
                                                                         world_cap_start,
                                                                         world_cap_end,

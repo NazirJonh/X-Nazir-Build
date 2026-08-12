@@ -191,7 +191,7 @@ int ED_paint_curve_patch_control_curves_num(const Object *ob);
  * Returns nullptr when `ob` has no session or `index` is out of range.
  */
 const blender::bke::CurvesGeometry *ED_paint_curve_patch_control_curve_at(const Object *ob,
-                                                                            int index);
+                                                                           int index);
 
 void ED_paint_curve_screen_silhouettes_build(const ViewContext &vc,
                                              float2 mval_region,

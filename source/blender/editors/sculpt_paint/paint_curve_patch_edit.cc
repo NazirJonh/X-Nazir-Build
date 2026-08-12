@@ -36,6 +36,7 @@
  */
 
 #include <algorithm>
+#include <cfloat>
 #include <cstring>
 #include <optional>
 #include <utility>
@@ -325,7 +326,8 @@ static bool patch_find_closest_segment(const bke::CurvesGeometry &geom,
                                        const float threshold,
                                        int *r_segment_index,
                                        int *r_segment_index_next,
-                                       float *r_edge_t)
+                                       float *r_edge_t,
+                                       float *r_dist_sq = nullptr)
 {
   if (!paintcurve_geometry_is_valid(geom) || geom.points_num() < 2) {
     return false;
@@ -361,6 +363,9 @@ static bool patch_find_closest_segment(const bke::CurvesGeometry &geom,
   *r_segment_index = segment_index;
   *r_segment_index_next = segment_index_next;
   *r_edge_t = edge_t;
+  if (r_dist_sq) {
+    *r_dist_sq = best_dist_sq;
+  }
   return true;
 }
 
@@ -1055,7 +1060,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
        * A zero `radius_per_size` means the patch started with a zero brush size, which cannot happen
        * through the UI; guard anyway rather than collapse the patch to nothing. */
       const int brush_size = BKE_brush_size_get(&sd.paint, brush);
-      
+
       /* Check if any parameter changed by comparing against the ACTIVE patch. All patches share
        * the same brush-driven parameters, so we only need to check once. */
       CurvePatchItem &active_item = patch.active_item();
@@ -1232,24 +1237,35 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
         const float loc_fl[2] = {float(event_mval[0]), float(event_mval[1])};
 
+        /* Every hit-test below scans all patches and keeps the CLOSEST hit, not the first one
+         * found. Overlapping patches would otherwise give the click an arbitrary priority based
+         * on patch list order rather than what the user actually pointed at. */
+
         int best_patch = -1;
         int hit_radius = -1;
-        int hit_point = -1;
-        char best_selflag = 0;
-        int hit_segment = -1;
-        int hit_segment_next = -1;
-        float hit_segment_t = 0.0f;
+        float best_radius_dist = FLT_MAX;
+        Vector<PaintCurvePoint> best_screen_points;
 
         /* Radius handles take priority. */
         for (const int i : patch.patches.index_range()) {
           bke::CurvesGeometry &geom = patch.patches[i].control_curve;
           Vector<PaintCurvePoint> screen_points;
           paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
-          hit_radius = patch_find_radius_handle_at_pos(
+          const int hit = patch_find_radius_handle_at_pos(
               geom, screen_points.as_span(), loc_fl, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
-          if (hit_radius >= 0) {
+          if (hit < 0) {
+            continue;
+          }
+          PaintCurveRadiusHandleScreen handle;
+          paintcurve_radius_handle_screen_get_from_geometry(
+              geom, screen_points.data(), hit, &handle);
+          const float end[2] = {handle.end.x, handle.end.y};
+          const float dist = len_v2v2(loc_fl, end);
+          if (dist < best_radius_dist) {
+            best_radius_dist = dist;
             best_patch = i;
-            break;
+            hit_radius = hit;
+            best_screen_points = screen_points;
           }
         }
 
@@ -1257,25 +1273,39 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           patch.active_patch = best_patch;
           patch.edit.active_point = hit_radius;
           data.dragging_radius = true;
-          bke::CurvesGeometry &geom = patch.active_item().control_curve;
-          Vector<PaintCurvePoint> screen_points;
-          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
           paintcurve_radius_handle_screen_get_from_geometry(
-              geom, screen_points.data(), hit_radius, &data.radius_handle);
+              patch.active_item().control_curve,
+              best_screen_points.data(),
+              hit_radius,
+              &data.radius_handle);
           break;
         }
 
         /* Tests the pivot AND both Bezier tangent handles. */
+        int hit_point = -1;
+        char best_selflag = 0;
+        float best_point_dist = FLT_MAX;
+
         for (const int i : patch.patches.index_range()) {
           bke::CurvesGeometry &geom = patch.patches[i].control_curve;
           Vector<PaintCurvePoint> screen_points;
           paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
-          hit_point = paintcurve_find_in_screen_points(
+          char selflag = 0;
+          const int hit = paintcurve_find_in_screen_points(
               screen_points.as_span(), loc_fl, /*ignore_pivot=*/false,
-              PAINT_CURVE_POINT_SELECT_THRESHOLD, &best_selflag);
-          if (hit_point >= 0) {
+              PAINT_CURVE_POINT_SELECT_THRESHOLD, &selflag);
+          if (hit < 0) {
+            continue;
+          }
+          const float *hit_co = (selflag == SEL_F1)  ? screen_points[hit].bez.vec[0] :
+                                 (selflag == SEL_F3)  ? screen_points[hit].bez.vec[2] :
+                                                        screen_points[hit].bez.vec[1];
+          const float dist = len_v2v2(loc_fl, hit_co);
+          if (dist < best_point_dist) {
+            best_point_dist = dist;
             best_patch = i;
-            break;
+            hit_point = hit;
+            best_selflag = selflag;
           }
         }
 
@@ -1298,12 +1328,32 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         }
 
         /* No point/handle hit -- try the curve wire itself. */
+        int hit_segment = -1;
+        int hit_segment_next = -1;
+        float hit_segment_t = 0.0f;
+        float best_segment_dist_sq = FLT_MAX;
+
         for (const int i : patch.patches.index_range()) {
           bke::CurvesGeometry &geom = patch.patches[i].control_curve;
-          if (patch_find_closest_segment(geom, &vc, loc_fl, PAINT_CURVE_POINT_SELECT_THRESHOLD,
-                                         &hit_segment, &hit_segment_next, &hit_segment_t)) {
+          int segment_index = -1;
+          int segment_index_next = -1;
+          float edge_t = 0.0f;
+          float dist_sq = FLT_MAX;
+          if (patch_find_closest_segment(geom,
+                                         &vc,
+                                         loc_fl,
+                                         PAINT_CURVE_POINT_SELECT_THRESHOLD,
+                                         &segment_index,
+                                         &segment_index_next,
+                                         &edge_t,
+                                         &dist_sq) &&
+              dist_sq < best_segment_dist_sq)
+          {
+            best_segment_dist_sq = dist_sq;
             best_patch = i;
-            break;
+            hit_segment = segment_index;
+            hit_segment_next = segment_index_next;
+            hit_segment_t = edge_t;
           }
         }
 
@@ -1510,27 +1560,38 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
         const float loc_fl[2] = {float(event_mval[0]), float(event_mval[1])};
 
+        /* Scans all patches and keeps the CLOSEST hit, not the first found -- see the LEFTMOUSE
+         * handler above for why. */
         int best_patch = -1;
         int hit_point = -1;
+        float best_point_dist = FLT_MAX;
 
         for (const int i : patch.patches.index_range()) {
           const bke::CurvesGeometry &geom = patch.patches[i].control_curve;
-          if (paintcurve_geometry_is_valid(geom)) {
-            Vector<PaintCurvePoint> screen_points;
-            paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
-            char selflag = 0;
-            const int hit = paintcurve_find_in_screen_points(screen_points.as_span(),
-                                                             loc_fl,
-                                                             /*ignore_pivot=*/false,
-                                                             PAINT_CURVE_POINT_SELECT_THRESHOLD,
-                                                             &selflag);
-            /* A hit on either tangent handle counts as a hit on its point -- same as the pivot,
-             * since every menu entry acts on the whole point. */
-            if (hit >= 0) {
-              best_patch = i;
-              hit_point = hit;
-              break;
-            }
+          if (!paintcurve_geometry_is_valid(geom)) {
+            continue;
+          }
+          Vector<PaintCurvePoint> screen_points;
+          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+          char selflag = 0;
+          const int hit = paintcurve_find_in_screen_points(screen_points.as_span(),
+                                                           loc_fl,
+                                                           /*ignore_pivot=*/false,
+                                                           PAINT_CURVE_POINT_SELECT_THRESHOLD,
+                                                           &selflag);
+          /* A hit on either tangent handle counts as a hit on its point -- same as the pivot,
+           * since every menu entry acts on the whole point. */
+          if (hit < 0) {
+            continue;
+          }
+          const float *hit_co = (selflag == SEL_F1)  ? screen_points[hit].bez.vec[0] :
+                                 (selflag == SEL_F3)  ? screen_points[hit].bez.vec[2] :
+                                                        screen_points[hit].bez.vec[1];
+          const float dist = len_v2v2(loc_fl, hit_co);
+          if (dist < best_point_dist) {
+            best_point_dist = dist;
+            best_patch = i;
+            hit_point = hit;
           }
         }
 
@@ -1551,51 +1612,59 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         const float loc_fl[2] = {float(event_mval[0]), float(event_mval[1])};
 
         bool did_insert = false;
+        /* Scans all patches and keeps the CLOSEST hit, not the first found -- see the LEFTMOUSE
+         * handler above for why. */
         int best_patch = -1;
         int hit_segment_index = -1;
         int hit_segment_index_next = -1;
         float hit_edge_t = 0.0f;
+        float best_segment_dist_sq = FLT_MAX;
 
         for (const int i : patch.patches.index_range()) {
           bke::CurvesGeometry &geom = patch.patches[i].control_curve;
-          if (paintcurve_geometry_is_valid(geom) && geom.points_num() >= 2) {
-            Vector<PaintCurvePoint> screen_points;
-            paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+          if (!paintcurve_geometry_is_valid(geom) || geom.points_num() < 2) {
+            continue;
+          }
+          Vector<PaintCurvePoint> screen_points;
+          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
 
-            /* Do not insert when a control point is closer than the segment (matches
-             * #paintcurve_try_insert_point_at_mouse, paint_curve.cc:830-839). */
-            char point_selflag;
-            const bool near_point = paintcurve_find_in_screen_points(screen_points.as_span(),
-                                                                      loc_fl,
-                                                                      false,
-                                                                      PAINT_CURVE_HOVER_THRESHOLD,
-                                                                      &point_selflag) >= 0;
+          /* Do not insert when a control point is closer than the segment (matches
+           * #paintcurve_try_insert_point_at_mouse, paint_curve.cc:830-839). */
+          char point_selflag;
+          const bool near_point = paintcurve_find_in_screen_points(screen_points.as_span(),
+                                                                    loc_fl,
+                                                                    false,
+                                                                    PAINT_CURVE_HOVER_THRESHOLD,
+                                                                    &point_selflag) >= 0;
+          if (near_point) {
+            continue;
+          }
 
-            if (!near_point) {
-              int segment_index = -1;
-              int segment_index_next = -1;
-              float edge_t = 0.0f;
-              const bool found_segment = patch_find_closest_segment(
-                  geom,
-                  &vc,
-                  loc_fl,
-                  PAINT_CURVE_INSERT_SEGMENT_THRESHOLD,
-                  &segment_index,
-                  &segment_index_next,
-                  &edge_t);
+          int segment_index = -1;
+          int segment_index_next = -1;
+          float edge_t = 0.0f;
+          float dist_sq = FLT_MAX;
+          const bool found_segment = patch_find_closest_segment(
+              geom,
+              &vc,
+              loc_fl,
+              PAINT_CURVE_INSERT_SEGMENT_THRESHOLD,
+              &segment_index,
+              &segment_index_next,
+              &edge_t,
+              &dist_sq);
 
-              /* Clicks near segment endpoints extend the spline instead of subdividing it (same
-               * 0.1/0.9 bounds as #paintcurve_try_insert_point_at_mouse). */
-              if (found_segment && edge_t >= 0.1f && edge_t <= 0.9f &&
-                  geom.handle_positions_right().has_value() && geom.handle_positions_left().has_value())
-              {
-                best_patch = i;
-                hit_segment_index = segment_index;
-                hit_segment_index_next = segment_index_next;
-                hit_edge_t = edge_t;
-                break;
-              }
-            }
+          /* Clicks near segment endpoints extend the spline instead of subdividing it (same
+           * 0.1/0.9 bounds as #paintcurve_try_insert_point_at_mouse). */
+          if (found_segment && edge_t >= 0.1f && edge_t <= 0.9f &&
+              geom.handle_positions_right().has_value() && geom.handle_positions_left().has_value() &&
+              dist_sq < best_segment_dist_sq)
+          {
+            best_segment_dist_sq = dist_sq;
+            best_patch = i;
+            hit_segment_index = segment_index;
+            hit_segment_index_next = segment_index_next;
+            hit_edge_t = edge_t;
           }
         }
 
@@ -1646,7 +1715,11 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
         const float loc_fl[2] = {float(event_mval[0]), float(event_mval[1])};
-        
+
+        /* Unlike the hit tests above, this stops at the first patch with any hit (radius, point,
+         * or wire) rather than the globally closest one -- `patch_find_point_index_at_pos_for_delete`
+         * mixes those three hit kinds internally and does not report a comparable distance. Given
+         * the small selection threshold this rarely matters in practice for a delete action. */
         int best_patch = -1;
         int hit_point = -1;
         for (const int i : patch.patches.index_range()) {
@@ -1664,7 +1737,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
            * `BRUSH_OT_stencil_control` for axis constraints. */
           return OPERATOR_PASS_THROUGH;
         }
-        
+
         patch.active_patch = best_patch;
         patch.edit.active_point = hit_point;
         if (curve_patch_delete_active_point(*C, ob, patch, op->reports)) {

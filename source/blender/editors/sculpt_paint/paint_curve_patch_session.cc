@@ -728,7 +728,7 @@ static bool curve_patch_begin_editing(Object &ob,
   /* Rolled once, then frozen -- see `CurvePatchParams::stamp_seed`. This is the only place a real
    * RNG is touched; everything downstream hashes this seed. */
   RandomNumberGenerator rng = RandomNumberGenerator::from_random_seed();
-  
+
   /* Initialize params for ALL patches, not just the active one. Each patch gets its own plane_normal
    * fitted to its own curve, AND its own stamp_seed so each spline gets an independent texture
    * distribution (matching the single-spline behavior where the full texture fills the curve length).

@@ -1649,6 +1649,12 @@ def brush_texture_settings(layout, brush, sculpt, tex_slot=None):
             col = layout.column()
             col.active = tex_slot.map_mode == 'AREA_PLANE'
             col.prop(brush, "use_color_as_displacement", text="Vector Displacement")
+
+            if brush.use_color_as_displacement and tex_slot.map_mode == 'AREA_PLANE':
+                row = col.row(heading="VDM Flip", align=True)
+                row.prop(tex_slot, "vdm_flip_x", text="X", toggle=True)
+                row.prop(tex_slot, "vdm_flip_y", text="Y", toggle=True)
+
             # Insert Mesh is not supported on multires objects, so it is hidden entirely
             # rather than merely disabled.
             if not any(m.type == 'MULTIRES' for m in sculpt.modifiers):

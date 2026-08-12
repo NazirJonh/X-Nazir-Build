@@ -3220,11 +3220,25 @@ static SculptBrushTexSampleCoords sculpt_brush_texture_sample_coords_get(
     float3 area_point = symm_point;
     mul_m4_v3(cache.brush_local_mat.ptr(), area_point);
 
+    float size_x = coord_mtex->size[0];
+    float size_y = coord_mtex->size[1];
+
+    if (brush_uses_vector_displacement(brush)) {
+      if (coord_mtex->vdm_flag & MTEX_VDM_FLIP_X) {
+        area_point[0] = -area_point[0];
+        size_x = std::abs(size_x);
+      }
+      if (coord_mtex->vdm_flag & MTEX_VDM_FLIP_Y) {
+        area_point[1] = -area_point[1];
+        size_y = std::abs(size_y);
+      }
+    }
+
     /* Applied before scale and offset, to match #BKE_brush_sample_tex_3d where the correction
      * scales the raw coordinate and #MTex::size and #MTex::ofs are applied afterwards. */
     const float2 &aspect = cache.paint->runtime->tex_aspect_correction;
-    result.x = area_point[0] * aspect[0] * coord_mtex->size[0] + coord_mtex->ofs[0];
-    result.y = area_point[1] * aspect[1] * coord_mtex->size[1] + coord_mtex->ofs[1];
+    result.x = area_point[0] * aspect[0] * size_x + coord_mtex->ofs[0];
+    result.y = area_point[1] * aspect[1] * size_y + coord_mtex->ofs[1];
     result.valid = true;
     return result;
   }
@@ -3438,9 +3452,27 @@ void calc_vertex_displacement(const SculptSession &ss, const Brush &brush, float
     translation[1] *= -1;
   }
 
+  if (brush_uses_vector_displacement(brush)) {
+    if (brush.mtex.vdm_flag & MTEX_VDM_FLIP_X) {
+      translation[0] *= -1;
+    }
+    if (brush.mtex.vdm_flag & MTEX_VDM_FLIP_Y) {
+      translation[1] *= -1;
+    }
+  }
+
   /* Apply texture size */
   for (int i = 0; i < 3; ++i) {
-    translation[i] *= math::safe_divide(1.0f, pow2f(brush.mtex.size[i]));
+    float size = brush.mtex.size[i];
+    if (brush_uses_vector_displacement(brush)) {
+      if (i == 0 && (brush.mtex.vdm_flag & MTEX_VDM_FLIP_X)) {
+        size = std::abs(size);
+      }
+      else if (i == 1 && (brush.mtex.vdm_flag & MTEX_VDM_FLIP_Y)) {
+        size = std::abs(size);
+      }
+    }
+    translation[i] *= math::safe_divide(1.0f, pow2f(size));
   }
 
   /* Transform vector to object space */

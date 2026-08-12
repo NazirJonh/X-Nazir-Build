@@ -296,6 +296,13 @@ enum eMTex_BrushAngleMode : char {
 };
 ENUM_OPERATORS(eMTex_BrushAngleMode)
 
+/** #MTex::vdm_flag. */
+enum eMTex_VDM_Flag : char {
+  MTEX_VDM_FLIP_X = 1 << 0,
+  MTEX_VDM_FLIP_Y = 1 << 1,
+};
+ENUM_OPERATORS(eMTex_VDM_Flag)
+
 /** #MTex::mapping_flags. */
 enum eMTex_BrushMappingFlags : char {
   /** Preserve image aspect ratio in non-stencil mapping modes. */
@@ -315,7 +322,7 @@ struct MTex {
   short texco = TEXCO_UV, mapto = MAP_COL;
   eMTex_BlendType blendtype = MTEX_BLEND;
   eMTex_BrushMappingFlags mapping_flags = {};
-  char _pad2 = {};
+  eMTex_VDM_Flag vdm_flag = {};
   struct Object *object = nullptr;
   struct Tex *tex = nullptr;
   char uvname[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";

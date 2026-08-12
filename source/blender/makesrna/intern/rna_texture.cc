@@ -682,6 +682,24 @@ static void rna_def_mtex(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Output Node", "Which output node to use, for node-based textures");
   RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "vdm_flip_x", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "vdm_flag", MTEX_VDM_FLIP_X);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_ui_text(prop,
+                           "Flip X",
+                           "Mirror the VDM texture sampling on the X axis and invert the X "
+                           "component of the displacement vector");
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
+
+  prop = RNA_def_property(srna, "vdm_flip_y", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "vdm_flag", MTEX_VDM_FLIP_Y);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_ui_text(prop,
+                           "Flip Y",
+                           "Mirror the VDM texture sampling on the Y axis and invert the Y "
+                           "component of the displacement vector");
+  RNA_def_property_update(prop, 0, "rna_TextureSlot_update");
 }
 
 static void rna_def_filter_common(StructRNA *srna)

@@ -30,6 +30,8 @@
 #include "BKE_paint.hh"
 
 #include "ED_paint.hh"
+#include "ED_paint_curve_draw.hh"
+#include "ED_screen.hh"
 #include "ED_transform.hh"
 #include "ED_view3d.hh"
 
@@ -538,6 +540,13 @@ static void flushTransPaintCurve(TransInfo *t)
     }
     if (br) {
       BKE_brush_tag_unsaved_changes(br);
+    }
+
+    /* Tag paint curve overlay and viewport for immediate redraw during transform.
+     * Without this, the control points don't update visually until the transform completes. */
+    sculpt_paint::ED_paint_curve_overlay_tag_redraw_all(t->context);
+    if (t->region) {
+      ED_region_tag_redraw(t->region);
     }
   }
 }

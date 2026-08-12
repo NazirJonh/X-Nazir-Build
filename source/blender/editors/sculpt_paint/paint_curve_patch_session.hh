@@ -227,6 +227,9 @@ struct CurvePatchApplyState {
  * effect, the texture binding and `CurvePatchApplyState` all describe the mesh, which is shared.
  */
 struct CurvePatchItem {
+  /** Index of the source PaintCurve spline. -1 for procedurally-created curves. */
+  int source_curve_index = -1;
+
   /** The user-editable control curve. Not attached to any `Brush`/datablock -- a standalone
    * runtime `CurvesGeometry`, built fresh via `paintcurve_geometry_init_bezier()` (see
    * `paint_curve_geometry.cc:546`) at Curve Patch start. */
@@ -307,6 +310,9 @@ struct CurvePatchSession {
     return this->patches[this->active_patch];
   }
 };
+
+/** Return the patch corresponding to a PaintCurve spline, or -1 when no exact match exists. */
+int curve_patch_index_for_source_curve(const CurvePatchSession &session, int source_curve_index);
 
 /**
  * Set the build-quality switch on every patch.

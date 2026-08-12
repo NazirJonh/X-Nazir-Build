@@ -59,6 +59,16 @@
 
 namespace blender::ed::sculpt_paint {
 
+int curve_patch_index_for_source_curve(const CurvePatchSession &session, const int source_curve_index)
+{
+  for (const int i : session.patches.index_range()) {
+    if (session.patches[i].source_curve_index == source_curve_index) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 const bke::CurvesGeometry *ED_paint_curve_patch_active_control_curve(const Object *ob)
 {
   if (ob == nullptr || ob->runtime->sculpt_session == nullptr ||
@@ -71,6 +81,30 @@ const bke::CurvesGeometry *ED_paint_curve_patch_active_control_curve(const Objec
     return nullptr;
   }
   return &session.active_item().control_curve;
+}
+
+int ED_paint_curve_patch_control_curves_num(const Object *ob)
+{
+  if (ob == nullptr || ob->runtime->sculpt_session == nullptr ||
+      ob->runtime->sculpt_session->curve_patch_session == nullptr)
+  {
+    return 0;
+  }
+  return int(ob->runtime->sculpt_session->curve_patch_session->patches.size());
+}
+
+const bke::CurvesGeometry *ED_paint_curve_patch_control_curve_at(const Object *ob, const int index)
+{
+  if (ob == nullptr || ob->runtime->sculpt_session == nullptr ||
+      ob->runtime->sculpt_session->curve_patch_session == nullptr)
+  {
+    return nullptr;
+  }
+  const CurvePatchSession &session = *ob->runtime->sculpt_session->curve_patch_session;
+  if (index < 0 || index >= int(session.patches.size())) {
+    return nullptr;
+  }
+  return &session.patches[index].control_curve;
 }
 
 void curve_patch_restore_only(Object &ob, const CurvePatchSession &session)
@@ -693,13 +727,22 @@ static bool curve_patch_begin_editing(Object &ob,
   const float radius_per_size = brush_size > 0 ? frozen_radius / float(brush_size) : 0.0f;
   /* Rolled once, then frozen -- see `CurvePatchParams::stamp_seed`. This is the only place a real
    * RNG is touched; everything downstream hashes this seed. */
-  const uint32_t stamp_seed = RandomNumberGenerator::from_random_seed().get_uint32();
-  session->active_item().params = curve_patch_params_from_brush(brush,
-                                                                frozen_radius,
-                                                                radius_per_size,
-                                                                plane_normal,
-                                                                stamp_seed,
-                                                                brush.curve_patch.swap_axis != 0);
+  RandomNumberGenerator rng = RandomNumberGenerator::from_random_seed();
+  
+  /* Initialize params for ALL patches, not just the active one. Each patch gets its own plane_normal
+   * fitted to its own curve, AND its own stamp_seed so each spline gets an independent texture
+   * distribution (matching the single-spline behavior where the full texture fills the curve length).
+   * All patches share the same radius and brush settings. */
+  for (CurvePatchItem &item : session->patches) {
+    const float3 patch_plane_normal = curve_patch_plane_normal_from_curve(item.control_curve);
+    const uint32_t patch_stamp_seed = rng.get_uint32();
+    item.params = curve_patch_params_from_brush(brush,
+                                                 frozen_radius,
+                                                 radius_per_size,
+                                                 patch_plane_normal,
+                                                 patch_stamp_seed,
+                                                 brush.curve_patch.swap_axis != 0);
+  }
 
   /* `cache.vc` otherwise still points at the just-finished stroke's own `ViewContext`, torn down
    * together with that stroke's operator. Repoint it at this session's owned copy so every
@@ -775,19 +818,35 @@ bool curve_patch_start_from_anchor(const Depsgraph &depsgraph,
   }
 
   auto *session = MEM_new<CurvePatchSession>(__func__);
-  session->patches.resize(1);
-  session->active_patch = 0;
 
   float3 plane_normal = cache.sculpt_normal;
   if (const PaintCurve *paint_curve = brush.paint_curve) {
-    bke::CurvesGeometry control_curve = ED_paintcurve_control_curve_for_patch(*paint_curve, -1);
-    if (control_curve.points_num() >= 2) {
-      session->patches[0].control_curve = std::move(control_curve);
-      plane_normal = curve_patch_plane_normal_from_curve(session->patches[0].control_curve);
+    const int curves_num = paint_curve->geometry.wrap().curves_num();
+    for (int i = 0; i < curves_num; i++) {
+      bke::CurvesGeometry control_curve = ED_paintcurve_control_curve_for_patch(*paint_curve, i);
+      if (control_curve.points_num() >= 2) {
+        CurvePatchItem item;
+        item.source_curve_index = i;
+        item.control_curve = std::move(control_curve);
+        session->patches.append(std::move(item));
+      }
+    }
+
+    if (!session->patches.is_empty()) {
+      /* Keep the active patch synced with the source PaintCurve spline. The patch list intentionally
+       * excludes splines with fewer than two points, so its index is not the source spline index. */
+      session->active_patch = curve_patch_index_for_source_curve(*session, paint_curve->active_curve);
+      if (session->active_patch < 0) {
+        session->active_patch = 0;
+      }
+      plane_normal = curve_patch_plane_normal_from_curve(
+          session->patches[session->active_patch].control_curve);
     }
   }
 
-  if (session->patches[0].control_curve.points_num() < 2) {
+  if (session->patches.is_empty()) {
+    session->patches.resize(1);
+    session->active_patch = 0;
     /* The anchor click-to-release screen distance is often just a handful of pixels -- or zero,
      * for a plain click -- which used to seed a control curve far too short to be a useful starting
      * shape, and its direction (the raw drag vector) did not match the brush's texture Angle at all.

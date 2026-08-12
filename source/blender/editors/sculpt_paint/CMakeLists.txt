@@ -235,6 +235,7 @@ if(WITH_GTESTS)
     mesh/sculpt_undo_test.cc
     paint_curve_geometry_test.cc
     paint_curve_patch_sampler_test.cc
+    paint_curve_patch_session_test.cc
     roll_spline_test.cc
   )
   set(TEST_INC

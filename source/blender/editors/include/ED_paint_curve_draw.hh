@@ -180,6 +180,19 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
  */
 const blender::bke::CurvesGeometry *ED_paint_curve_patch_active_control_curve(const Object *ob);
 
+/**
+ * Returns the number of patches (splines) in the active Curve Patch session on `ob`.
+ * Returns 0 when there is no live session.
+ */
+int ED_paint_curve_patch_control_curves_num(const Object *ob);
+
+/**
+ * Returns the control curve of patch at `index` in the active Curve Patch session.
+ * Returns nullptr when `ob` has no session or `index` is out of range.
+ */
+const blender::bke::CurvesGeometry *ED_paint_curve_patch_control_curve_at(const Object *ob,
+                                                                            int index);
+
 void ED_paint_curve_screen_silhouettes_build(const ViewContext &vc,
                                              float2 mval_region,
                                              const Object *source_object,

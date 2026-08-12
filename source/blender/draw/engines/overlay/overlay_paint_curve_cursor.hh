@@ -178,18 +178,46 @@ class PaintCurveCursor : Overlay {
                                      (is_curves_edit || is_curve_stroke);
 
     if (is_curve_patch_active) {
-      if (const bke::CurvesGeometry *control_curve =
-              ed::sculpt_paint::ED_paint_curve_patch_active_control_curve(vc.obact))
-      {
-        ed::sculpt_paint::ED_paint_curve_screen_handles_build_from_geometry(vc,
-                                                                            *control_curve,
-                                                                            true,
-                                                                            sculpt,
-                                                                            true,
-                                                                            mval_region,
-                                                                            compute_hover,
-                                                                            show_insert_preview,
-                                                                            handles_);
+      const int curves_num =
+          ed::sculpt_paint::ED_paint_curve_patch_control_curves_num(vc.obact);
+
+      /* Draw all patches. Only the active patch shows hover highlights and insert preview.
+       * Non-active patches are drawn plain (no hover, no insert preview) so the user can
+       * still see and click them. */
+      handles_.points.clear();
+      handles_.radius_handles.clear();
+      handles_.segments.clear();
+      handles_.insert_preview = {};
+
+      const bke::CurvesGeometry *active_curve =
+          ed::sculpt_paint::ED_paint_curve_patch_active_control_curve(vc.obact);
+
+      for (int i = 0; i < curves_num; i++) {
+        const bke::CurvesGeometry *control_curve =
+            ed::sculpt_paint::ED_paint_curve_patch_control_curve_at(vc.obact, i);
+        if (control_curve == nullptr) {
+          continue;
+        }
+        const bool is_active = (control_curve == active_curve);
+        ed::sculpt_paint::PaintCurveScreenHandles tmp_handles;
+        ed::sculpt_paint::ED_paint_curve_screen_handles_build_from_geometry(
+            vc,
+            *control_curve,
+            true,
+            sculpt,
+            true,
+            mval_region,
+            is_active ? compute_hover : false,
+            is_active ? show_insert_preview : false,
+            tmp_handles);
+        /* Accumulate into the shared handles_ container. */
+        handles_.points.extend(tmp_handles.points);
+        handles_.radius_handles.extend(tmp_handles.radius_handles);
+        handles_.segments.extend(tmp_handles.segments);
+        /* Only keep insert_preview from the active patch. */
+        if (is_active) {
+          handles_.insert_preview = tmp_handles.insert_preview;
+        }
       }
     }
     else if (brush->stroke_method == BRUSH_STROKE_CURVE || is_curve_patch_stroke || is_curves_edit) {

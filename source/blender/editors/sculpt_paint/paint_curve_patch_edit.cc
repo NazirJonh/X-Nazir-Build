@@ -1055,29 +1055,46 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
        * A zero `radius_per_size` means the patch started with a zero brush size, which cannot happen
        * through the UI; guard anyway rather than collapse the patch to nothing. */
       const int brush_size = BKE_brush_size_get(&sd.paint, brush);
-      /* Only the ACTIVE patch follows the brush. A patch the user is not editing keeps the values
-       * frozen when its own curve started -- which is the whole reason `params` is per-item. */
-      CurvePatchItem &item = patch.active_item();
-      const float radius = item.params.radius_per_size > 0.0f ?
-                               item.params.radius_per_size * float(brush_size) :
-                               item.params.radius;
+      
+      /* Check if any parameter changed by comparing against the ACTIVE patch. All patches share
+       * the same brush-driven parameters, so we only need to check once. */
+      CurvePatchItem &active_item = patch.active_item();
+      const float radius = active_item.params.radius_per_size > 0.0f ?
+                               active_item.params.radius_per_size * float(brush_size) :
+                               active_item.params.radius;
       bke::CurvePatchParams live = curve_patch_params_from_brush(
           *brush,
           radius,
-          item.params.radius_per_size,
-          item.params.plane_normal,
-          item.params.stamp_seed,
-          brush_swap_axis_changed ? swap_axis : item.params.swap_axis);
+          active_item.params.radius_per_size,
+          active_item.params.plane_normal,
+          active_item.params.stamp_seed,
+          brush_swap_axis_changed ? swap_axis : active_item.params.swap_axis);
       /* Carried across rather than defaulted: this poll never runs inside the commit's
        * final-quality build, but making the compare depend on that would be a trap. */
-      live.final_quality = item.params.final_quality;
+      live.final_quality = active_item.params.final_quality;
 
-      if (live != item.params || alpha != data.last_synced_alpha ||
+      if (live != active_item.params || alpha != data.last_synced_alpha ||
           dir_in != data.last_synced_dir_in || symm != data.last_synced_symm || tex_changed ||
           color_changed || falloff_preset != data.last_synced_falloff_preset ||
           falloff_curve_ts != data.last_synced_falloff_curve_ts || multi_texture_changed)
       {
-        item.params = live;
+        /* Update params for ALL patches, not just the active one. Each patch keeps its own
+         * plane_normal, radius_per_size, stamp_seed, and final_quality, but all other parameters
+         * come from the brush and must be synchronized across all patches. */
+        for (CurvePatchItem &item : patch.patches) {
+          const float item_radius = item.params.radius_per_size > 0.0f ?
+                                        item.params.radius_per_size * float(brush_size) :
+                                        item.params.radius;
+          bke::CurvePatchParams item_live = curve_patch_params_from_brush(
+              *brush,
+              item_radius,
+              item.params.radius_per_size,
+              item.params.plane_normal,
+              item.params.stamp_seed,
+              brush_swap_axis_changed ? swap_axis : item.params.swap_axis);
+          item_live.final_quality = item.params.final_quality;
+          item.params = item_live;
+        }
         data.last_synced_alpha = alpha;
         data.last_synced_dir_in = dir_in;
         data.last_synced_symm = symm;
@@ -1211,73 +1228,95 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   switch (event->type) {
     case LEFTMOUSE:
       if (event->val == KM_PRESS) {
-        bke::CurvesGeometry &geom = patch.active_item().control_curve;
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
-        Vector<PaintCurvePoint> screen_points;
-        paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
-
         const float loc_fl[2] = {float(event_mval[0]), float(event_mval[1])};
 
-        /* Radius handles take priority over the pivot hit test, matching #PAINTCURVE_OT_slide's
-         * yield-to-slide_radius precedence (paint_curve.cc:2198-2207). */
-        const int radius_hit = patch_find_radius_handle_at_pos(
-            geom, screen_points.as_span(), loc_fl, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
-        if (radius_hit >= 0) {
-          patch.edit.active_point = radius_hit;
-          data.dragging_radius = true;
-          paintcurve_radius_handle_screen_get_from_geometry(
-              geom, screen_points.data(), radius_hit, &data.radius_handle);
-          break;
-        }
+        int best_patch = -1;
+        int hit_radius = -1;
+        int hit_point = -1;
+        char best_selflag = 0;
+        int hit_segment = -1;
+        int hit_segment_next = -1;
+        float hit_segment_t = 0.0f;
 
-        /* Tests the pivot AND both Bezier tangent handles (SEL_F1 = left, SEL_F2 = pivot,
-         * SEL_F3 = right), matching #PAINTCURVE_OT_slide's own combined hit test. */
-        char selflag = 0;
-        const int hit = paintcurve_find_in_screen_points(
-            screen_points.as_span(), loc_fl, /*ignore_pivot=*/false,
-            PAINT_CURVE_POINT_SELECT_THRESHOLD, &selflag);
-        if (hit < 0) {
-          /* No point/handle hit -- try the curve wire itself, matching Curve Edit's
-           * segment-slide affordance (#PAINTCURVE_OT_slide's `move_segment`): dragging a point on
-           * the wire between two control points reshapes that segment's curvature by solving for
-           * its two adjacent handles, without adding or moving any control point. */
-          int segment_index = -1;
-          int segment_index_next = -1;
-          float edge_t = 0.0f;
-          if (patch_find_closest_segment(geom,
-                                         &vc,
-                                         loc_fl,
-                                         PAINT_CURVE_POINT_SELECT_THRESHOLD,
-                                         &segment_index,
-                                         &segment_index_next,
-                                         &edge_t))
-          {
-            data.dragging_segment = true;
-            data.segment_index_a = segment_index;
-            data.segment_index_b = segment_index_next;
-            data.segment_t = edge_t;
+        /* Radius handles take priority. */
+        for (const int i : patch.patches.index_range()) {
+          bke::CurvesGeometry &geom = patch.patches[i].control_curve;
+          Vector<PaintCurvePoint> screen_points;
+          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+          hit_radius = patch_find_radius_handle_at_pos(
+              geom, screen_points.as_span(), loc_fl, PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS);
+          if (hit_radius >= 0) {
+            best_patch = i;
             break;
           }
+        }
 
-          /* A click that doesn't land on a point or the wire is simply not a drag start -- it
-           * does not commit or otherwise end the patch. Only Enter (commit) or Esc (cancel)
-           * does that. */
+        if (best_patch >= 0) {
+          patch.active_patch = best_patch;
+          patch.edit.active_point = hit_radius;
+          data.dragging_radius = true;
+          bke::CurvesGeometry &geom = patch.active_item().control_curve;
+          Vector<PaintCurvePoint> screen_points;
+          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+          paintcurve_radius_handle_screen_get_from_geometry(
+              geom, screen_points.data(), hit_radius, &data.radius_handle);
           break;
         }
 
-        patch.edit.active_point = hit;
-        if (selflag == SEL_F1 || selflag == SEL_F3) {
-          data.dragging_handle = true;
-          data.handle_is_left = (selflag == SEL_F1);
+        /* Tests the pivot AND both Bezier tangent handles. */
+        for (const int i : patch.patches.index_range()) {
+          bke::CurvesGeometry &geom = patch.patches[i].control_curve;
+          Vector<PaintCurvePoint> screen_points;
+          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+          hit_point = paintcurve_find_in_screen_points(
+              screen_points.as_span(), loc_fl, /*ignore_pivot=*/false,
+              PAINT_CURVE_POINT_SELECT_THRESHOLD, &best_selflag);
+          if (hit_point >= 0) {
+            best_patch = i;
+            break;
+          }
+        }
+
+        if (best_patch >= 0) {
+          patch.active_patch = best_patch;
+          patch.edit.active_point = hit_point;
+          if (best_selflag == SEL_F1 || best_selflag == SEL_F3) {
+            data.dragging_handle = true;
+            data.handle_is_left = (best_selflag == SEL_F1);
+          }
+          else {
+            data.dragging_point = true;
+            data.drag_start_mval = float2(loc_fl[0], loc_fl[1]);
+            bke::CurvesGeometry &geom = patch.active_item().control_curve;
+            for (int h = 0; h < 3; h++) {
+              data.point_initial_loc_3d[h] = paintcurve_geom_co(geom, hit_point, h);
+            }
+          }
           break;
         }
 
-        data.dragging_point = true;
-        data.drag_start_mval = float2(loc_fl[0], loc_fl[1]);
-        for (int h = 0; h < 3; h++) {
-          data.point_initial_loc_3d[h] = paintcurve_geom_co(geom, hit, h);
+        /* No point/handle hit -- try the curve wire itself. */
+        for (const int i : patch.patches.index_range()) {
+          bke::CurvesGeometry &geom = patch.patches[i].control_curve;
+          if (patch_find_closest_segment(geom, &vc, loc_fl, PAINT_CURVE_POINT_SELECT_THRESHOLD,
+                                         &hit_segment, &hit_segment_next, &hit_segment_t)) {
+            best_patch = i;
+            break;
+          }
         }
+
+        if (best_patch >= 0) {
+          patch.active_patch = best_patch;
+          data.dragging_segment = true;
+          data.segment_index_a = hit_segment;
+          data.segment_index_b = hit_segment_next;
+          data.segment_t = hit_segment_t;
+          break;
+        }
+
+        /* A click that doesn't land on a point or the wire is simply not a drag start. */
       }
       else if (event->val == KM_RELEASE &&
                (data.dragging_point || data.dragging_radius || data.dragging_handle ||
@@ -1467,27 +1506,39 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
        * control curve is a standalone `CurvesGeometry`. Ctrl+RMB keeps its insert/append meaning
        * below; plain RMB away from a point stays the no-op it has always been. */
       if (event->val == KM_PRESS && (event->modifier & KM_CTRL) == 0) {
-        const bke::CurvesGeometry &geom = patch.active_item().control_curve;
-        if (paintcurve_geometry_is_valid(geom)) {
-          Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
-          ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
-          Vector<PaintCurvePoint> screen_points;
-          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+        Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+        ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+        const float loc_fl[2] = {float(event_mval[0]), float(event_mval[1])};
 
-          const float loc_fl[2] = {float(event_mval[0]), float(event_mval[1])};
-          char selflag = 0;
-          const int hit = paintcurve_find_in_screen_points(screen_points.as_span(),
-                                                           loc_fl,
-                                                           /*ignore_pivot=*/false,
-                                                           PAINT_CURVE_POINT_SELECT_THRESHOLD,
-                                                           &selflag);
-          /* A hit on either tangent handle counts as a hit on its point -- same as the pivot,
-           * since every menu entry acts on the whole point. */
-          if (hit >= 0) {
-            patch.edit.active_point = hit;
-            curve_patch_edit_context_menu_open(C);
-            break;
+        int best_patch = -1;
+        int hit_point = -1;
+
+        for (const int i : patch.patches.index_range()) {
+          const bke::CurvesGeometry &geom = patch.patches[i].control_curve;
+          if (paintcurve_geometry_is_valid(geom)) {
+            Vector<PaintCurvePoint> screen_points;
+            paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+            char selflag = 0;
+            const int hit = paintcurve_find_in_screen_points(screen_points.as_span(),
+                                                             loc_fl,
+                                                             /*ignore_pivot=*/false,
+                                                             PAINT_CURVE_POINT_SELECT_THRESHOLD,
+                                                             &selflag);
+            /* A hit on either tangent handle counts as a hit on its point -- same as the pivot,
+             * since every menu entry acts on the whole point. */
+            if (hit >= 0) {
+              best_patch = i;
+              hit_point = hit;
+              break;
+            }
           }
+        }
+
+        if (best_patch >= 0) {
+          patch.active_patch = best_patch;
+          patch.edit.active_point = hit_point;
+          curve_patch_edit_context_menu_open(C);
+          break;
         }
         /* Plain RMB away from a control point must reach `BRUSH_OT_stencil_control` and the rest of
          * the paint keymap -- consuming the event on a miss left stencil adjustment (and its X/Y
@@ -1495,57 +1546,74 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         return OPERATOR_PASS_THROUGH;
       }
       if (event->val == KM_PRESS && (event->modifier & KM_CTRL)) {
-        bke::CurvesGeometry &geom = patch.active_item().control_curve;
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
         const float loc_fl[2] = {float(event_mval[0]), float(event_mval[1])};
 
         bool did_insert = false;
+        int best_patch = -1;
+        int hit_segment_index = -1;
+        int hit_segment_index_next = -1;
+        float hit_edge_t = 0.0f;
 
-        if (paintcurve_geometry_is_valid(geom) && geom.points_num() >= 2) {
-          Vector<PaintCurvePoint> screen_points;
-          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+        for (const int i : patch.patches.index_range()) {
+          bke::CurvesGeometry &geom = patch.patches[i].control_curve;
+          if (paintcurve_geometry_is_valid(geom) && geom.points_num() >= 2) {
+            Vector<PaintCurvePoint> screen_points;
+            paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
 
-          /* Do not insert when a control point is closer than the segment (matches
-           * #paintcurve_try_insert_point_at_mouse, paint_curve.cc:830-839). */
-          char point_selflag;
-          const bool near_point = paintcurve_find_in_screen_points(screen_points.as_span(),
-                                                                    loc_fl,
-                                                                    false,
-                                                                    PAINT_CURVE_HOVER_THRESHOLD,
-                                                                    &point_selflag) >= 0;
+            /* Do not insert when a control point is closer than the segment (matches
+             * #paintcurve_try_insert_point_at_mouse, paint_curve.cc:830-839). */
+            char point_selflag;
+            const bool near_point = paintcurve_find_in_screen_points(screen_points.as_span(),
+                                                                      loc_fl,
+                                                                      false,
+                                                                      PAINT_CURVE_HOVER_THRESHOLD,
+                                                                      &point_selflag) >= 0;
 
-          if (!near_point) {
-            int segment_index = -1;
-            int segment_index_next = -1;
-            float edge_t = 0.0f;
-            const bool found_segment = patch_find_closest_segment(
-                geom,
-                &vc,
-                loc_fl,
-                PAINT_CURVE_INSERT_SEGMENT_THRESHOLD,
-                &segment_index,
-                &segment_index_next,
-                &edge_t);
+            if (!near_point) {
+              int segment_index = -1;
+              int segment_index_next = -1;
+              float edge_t = 0.0f;
+              const bool found_segment = patch_find_closest_segment(
+                  geom,
+                  &vc,
+                  loc_fl,
+                  PAINT_CURVE_INSERT_SEGMENT_THRESHOLD,
+                  &segment_index,
+                  &segment_index_next,
+                  &edge_t);
 
-            /* Clicks near segment endpoints extend the spline instead of subdividing it (same
-             * 0.1/0.9 bounds as #paintcurve_try_insert_point_at_mouse). */
-            if (found_segment && edge_t >= 0.1f && edge_t <= 0.9f &&
-                geom.handle_positions_right().has_value() && geom.handle_positions_left().has_value())
-            {
-              /* CurvePatchEditState::control_curve is always a single spline (built via
-               * paintcurve_geometry_init_bezier), so the owning curve is always index 0. */
-              const int insert_index = paintcurve_geometry_insert_point_at_segment(
-                  geom, segment_index, segment_index_next, /*active_curve=*/0, edge_t);
-              if (insert_index >= 0) {
-                patch.edit.active_point = insert_index;
-                did_insert = true;
+              /* Clicks near segment endpoints extend the spline instead of subdividing it (same
+               * 0.1/0.9 bounds as #paintcurve_try_insert_point_at_mouse). */
+              if (found_segment && edge_t >= 0.1f && edge_t <= 0.9f &&
+                  geom.handle_positions_right().has_value() && geom.handle_positions_left().has_value())
+              {
+                best_patch = i;
+                hit_segment_index = segment_index;
+                hit_segment_index_next = segment_index_next;
+                hit_edge_t = edge_t;
+                break;
               }
             }
           }
         }
 
+        if (best_patch >= 0) {
+          patch.active_patch = best_patch;
+          bke::CurvesGeometry &geom = patch.active_item().control_curve;
+          /* CurvePatchEditState::control_curve is always a single spline (built via
+           * paintcurve_geometry_init_bezier), so the owning curve is always index 0. */
+          const int insert_index = paintcurve_geometry_insert_point_at_segment(
+              geom, hit_segment_index, hit_segment_index_next, /*active_curve=*/0, hit_edge_t);
+          if (insert_index >= 0) {
+            patch.edit.active_point = insert_index;
+            did_insert = true;
+          }
+        }
+
         if (!did_insert) {
+          bke::CurvesGeometry &geom = patch.active_item().control_curve;
           /* Append: extend the single spline at its end (or start it, if empty). Uses the same
            * placement chain as #paintcurve_point_add so points land on the surface here too;
            * `patch.active_item().params.plane_normal` only stands in when no real surface was hit. */
@@ -1575,18 +1643,30 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       break;
     case EVT_XKEY:
       if (event->val == KM_PRESS) {
-        bke::CurvesGeometry &geom = patch.active_item().control_curve;
         Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
         ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
         const float loc_fl[2] = {float(event_mval[0]), float(event_mval[1])};
-        const int hit = patch_find_point_index_at_pos_for_delete(geom, &vc, loc_fl);
-        if (hit < 0) {
+        
+        int best_patch = -1;
+        int hit_point = -1;
+        for (const int i : patch.patches.index_range()) {
+          bke::CurvesGeometry &geom = patch.patches[i].control_curve;
+          hit_point = patch_find_point_index_at_pos_for_delete(geom, &vc, loc_fl);
+          if (hit_point >= 0) {
+            best_patch = i;
+            break;
+          }
+        }
+
+        if (best_patch < 0) {
           /* Away from the control curve, X belongs to Sculpt/Texture Paint's primary/secondary color
            * swap (`PAINT_OT_brush_colors_flip`). During an active stencil RMB-drag it also reaches
            * `BRUSH_OT_stencil_control` for axis constraints. */
           return OPERATOR_PASS_THROUGH;
         }
-        patch.edit.active_point = hit;
+        
+        patch.active_patch = best_patch;
+        patch.edit.active_point = hit_point;
         if (curve_patch_delete_active_point(*C, ob, patch, op->reports)) {
           /* The removed point may have been the one under an in-flight drag; drop the drag state so
            * the next MOUSEMOVE does not index into geometry that no longer has it. */

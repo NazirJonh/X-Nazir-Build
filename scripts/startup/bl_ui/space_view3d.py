@@ -4103,7 +4103,7 @@ class VIEW3D_MT_face_sets(Menu):
 
 
 class VIEW3D_MT_sculpt_paint_curve_convert(Menu):
-    bl_label = "Convert to Curve Object"
+    bl_label = "Create Curves Object"
 
     def draw(self, context):
         layout = self.layout
@@ -4139,9 +4139,11 @@ class VIEW3D_MT_sculpt_paint_curves(Menu):
     def draw(self, context):
         layout = self.layout
 
+        layout.menu("VIEW3D_MT_sculpt_paint_curve_convert")
+
         props = layout.operator(
             "paintcurve.to_curve_object",
-            text="Create Curves Object from Selection",
+            text="Create Curves Object from Selection Point",
             icon='OUTLINER_OB_CURVE',
         )
         props.curve_type = 'CURVES'
@@ -4154,8 +4156,6 @@ class VIEW3D_MT_sculpt_paint_curves(Menu):
             icon='OUTLINER_OB_CURVE',
         )
         props.curve_type = 'CURVES'
-
-        layout.menu("VIEW3D_MT_sculpt_paint_curve_convert")
 
         layout.separator()
         layout.operator("paintcurve.duplicate")

@@ -218,6 +218,12 @@ void paintcurve_geometry_select_linked(bke::CurvesGeometry &geom);
 bool paintcurve_geometry_toggle_cyclic(bke::CurvesGeometry &geom, int curve_index);
 bool paintcurve_geometry_any_point_selected(const bke::CurvesGeometry &geom);
 /**
+ * Check if there is at least one spline with the minimum number of selected points.
+ * Returns true if any spline has at least `min_points` selected points.
+ */
+bool paintcurve_geometry_has_enough_selected_points_on_spline(const bke::CurvesGeometry &geom,
+                                                              int min_points);
+/**
  * Build a standalone geometry with only the selected points (one spline per contiguous run on each
  * source spline). Returns empty geometry when nothing is selected.
  */

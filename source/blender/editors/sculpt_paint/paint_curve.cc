@@ -3162,6 +3162,25 @@ static wmOperatorStatus paintcurve_to_curve_object_exec(bContext *C, wmOperator 
       RNA_enum_get(op->ptr, "curve_type"));
   const bool use_selection = RNA_boolean_get(op->ptr, "use_selection");
   const bool assign_as_source = RNA_boolean_get(op->ptr, "assign_as_source");
+  
+  /* When using selection mode, require at least 2 selected points on any spline
+   * to create valid curve segments. */
+  if (use_selection) {
+    Paint *paint = BKE_paint_get_active_from_context(C);
+    if (paint != nullptr) {
+      const Brush *brush = BKE_paint_brush_for_read(paint);
+      if (brush != nullptr && brush->paint_curve != nullptr) {
+        const bke::CurvesGeometry &geom = brush->paint_curve->geometry.wrap();
+        if (!paintcurve_geometry_has_enough_selected_points_on_spline(geom, 2)) {
+          BKE_report(op->reports,
+                     RPT_ERROR,
+                     "At least 2 selected points on one spline are required to create curves");
+          return OPERATOR_CANCELLED;
+        }
+      }
+    }
+  }
+  
   if (!ED_paintcurve_export_to_scene_object(
           C, op->reports, &dst_ob, curve_type, use_selection, assign_as_source))
   {

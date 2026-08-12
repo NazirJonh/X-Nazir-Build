@@ -488,6 +488,33 @@ bool paintcurve_geometry_any_point_selected(const bke::CurvesGeometry &geom)
   return false;
 }
 
+bool paintcurve_geometry_has_enough_selected_points_on_spline(const bke::CurvesGeometry &geom,
+                                                              int min_points)
+{
+  if (!paintcurve_geometry_is_valid(geom) || min_points < 1) {
+    return false;
+  }
+
+  const OffsetIndices<int> points_by_curve = geom.points_by_curve();
+  
+  /* Check each spline for the minimum number of selected points. */
+  for (const int curve_i : geom.curves_range()) {
+    const IndexRange points = points_by_curve[curve_i];
+    int selected_count = 0;
+    
+    for (const int point_i : points) {
+      if (paintcurve_geom_get_selection(geom, point_i) & 0x07) {
+        selected_count++;
+        if (selected_count >= min_points) {
+          return true;
+        }
+      }
+    }
+  }
+  
+  return false;
+}
+
 void paintcurve_foreach_bezier_segment_from_geometry(
     const bke::CurvesGeometry &geom, const FunctionRef<void(int point_index_a, int point_index_b)> fn)
 {

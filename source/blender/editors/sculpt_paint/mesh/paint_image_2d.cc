@@ -17,7 +17,6 @@
 
 #include "BLI_bitmap.h"
 #include "BLI_listbase.h"
-#include "BLI_math_base.h"
 #include "BLI_math_color.h"
 #include "BLI_math_color_blend.h"
 #include "BLI_stack.h"
@@ -823,10 +822,6 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
   painter->pool = BKE_image_pool_new();
 
-  /* Canvas rotation no longer needs a brush-rotation offset here: it is applied geometrically to
-   * the sample lattice in #brush_painter_2d_tex_mapping, so texture sampling below uses the plain
-   * (rake) brush rotation. */
-
   /* determine how can update based on textures used */
   if (cache->is_texbrush) {
     if (brush->mtex.brush_map_mode == MTEX_MAP_MODE_VIEW) {
@@ -1596,8 +1591,7 @@ void paint_2d_stroke(void *ps,
   ui::view2d_region_to_view(s->v2d, prev_mval[0], prev_mval[1], &old_uv[0], &old_uv[1]);
 
   float last_uv[2], start_uv[2];
-  const float origin[2] = {0.0f, 0.0f};
-  ui::view2d_region_to_view(s->v2d, origin[0], origin[1], &start_uv[0], &start_uv[1]);
+  ui::view2d_region_to_view(s->v2d, 0.0f, 0.0f, &start_uv[0], &start_uv[1]);
   if (painter->firsttouch) {
     /* paint exactly once on first touch */
     copy_v2_v2(last_uv, new_uv);

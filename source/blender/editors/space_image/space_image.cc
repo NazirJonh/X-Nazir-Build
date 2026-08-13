@@ -17,7 +17,6 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
-#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_string_utf8.h"
 #include "BLI_threads.h"
@@ -61,8 +60,6 @@
 #include "BLO_read_write.hh"
 
 #include "DRW_engine.hh"
-
-#include "GPU_matrix.hh"
 
 #include "image_intern.hh"
 
@@ -805,18 +802,10 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
     x = int(anchor[0]);
     y = int(anchor[1]);
 
-    GPU_matrix_push();
-    if (region->v2d.rotation != 0.0f) {
-      /* The canvas rotation is a screen-space rotation about the pivot's pixel position. */
-      float pivot_px[2];
-      ui::view2d_rotation_pivot_region(&region->v2d, pivot_px);
-      GPU_matrix_translate_2f(pivot_px[0], pivot_px[1]);
-      GPU_matrix_rotate_2d(-RAD2DEGF(region->v2d.rotation));
-      GPU_matrix_translate_2f(-pivot_px[0], -pivot_px[1]);
-    }
+    ui::view2d_matrix_push_rotation(&region->v2d);
     ED_region_render_region_draw(
         x, y, &render_region, zoomx, zoomy, sima->overlay.passepartout_alpha);
-    GPU_matrix_pop();
+    ui::view2d_matrix_pop_rotation();
   }
 
   draw_image_main_helpers(C, region);
@@ -842,17 +831,9 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
       x = int(anchor[0]);
       y = int(anchor[1]);
 
-      GPU_matrix_push();
-      if (region->v2d.rotation != 0.0f) {
-        /* The canvas rotation is a screen-space rotation about the pivot's pixel position. */
-        float pivot_px[2];
-        ui::view2d_rotation_pivot_region(&region->v2d, pivot_px);
-        GPU_matrix_translate_2f(pivot_px[0], pivot_px[1]);
-        GPU_matrix_rotate_2d(-RAD2DEGF(region->v2d.rotation));
-        GPU_matrix_translate_2f(-pivot_px[0], -pivot_px[1]);
-      }
+      ui::view2d_matrix_push_rotation(&region->v2d);
       ED_region_image_metadata_draw(x, y, ibuf, &frame, zoomx, zoomy);
-      GPU_matrix_pop();
+      ui::view2d_matrix_pop_rotation();
     }
     ED_space_image_release_buffer(sima, ibuf, lock);
   }

@@ -10,7 +10,6 @@
 
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
-#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_utildefines.h"
@@ -722,15 +721,7 @@ void ED_mask_draw_region(
       buf_col[3] = 1.0f;
     }
 
-    GPU_matrix_push();
-    if (region->v2d.rotation != 0.0f) {
-      /* The canvas rotation is a screen-space rotation about the pivot's pixel position. */
-      float pivot_px[2];
-      ui::view2d_rotation_pivot_region(&region->v2d, pivot_px);
-      GPU_matrix_translate_2f(pivot_px[0], pivot_px[1]);
-      GPU_matrix_rotate_2d(-RAD2DEGF(region->v2d.rotation));
-      GPU_matrix_translate_2f(-pivot_px[0], -pivot_px[1]);
-    }
+    ui::view2d_matrix_push_rotation(&region->v2d);
     GPU_matrix_translate_2f(x, y);
     GPU_matrix_scale_2f(zoomx, zoomy);
     if (stabmat) {
@@ -769,7 +760,7 @@ void ED_mask_draw_region(
                   1.0f,
                   nullptr);
     }
-    GPU_matrix_pop();
+    ui::view2d_matrix_pop_rotation();
 
     if (overlay_mode != MASK_OVERLAY_ALPHACHANNEL) {
       GPU_blend(GPU_BLEND_NONE);
@@ -780,15 +771,7 @@ void ED_mask_draw_region(
 
   /* apply transformation so mask editing tools will assume drawing from the
    * origin in normalized space */
-  GPU_matrix_push();
-  if (region->v2d.rotation != 0.0f) {
-    /* The canvas rotation is a screen-space rotation about the pivot's pixel position. */
-    float pivot_px[2];
-    ui::view2d_rotation_pivot_region(&region->v2d, pivot_px);
-    GPU_matrix_translate_2f(pivot_px[0], pivot_px[1]);
-    GPU_matrix_rotate_2d(-RAD2DEGF(region->v2d.rotation));
-    GPU_matrix_translate_2f(-pivot_px[0], -pivot_px[1]);
-  }
+  ui::view2d_matrix_push_rotation(&region->v2d);
   GPU_matrix_translate_2f(x + xofs, y + yofs);
   GPU_matrix_scale_2f(zoomx, zoomy);
   if (stabmat) {
@@ -809,7 +792,7 @@ void ED_mask_draw_region(
     ED_region_draw_cb_draw(C, region, REGION_DRAW_POST_VIEW);
   }
 
-  GPU_matrix_pop();
+  ui::view2d_matrix_pop_rotation();
 }
 
 void ED_mask_draw_frames(

@@ -424,10 +424,26 @@ void view2d_view_to_region(const View2D *v2d, float x, float y, int *r_region_x,
 void view2d_view_to_region_fl(
     const View2D *v2d, float x, float y, float *r_region_x, float *r_region_y) ATTR_NONNULL();
 void view2d_view_to_region_m4(const View2D *v2d, float matrix[4][4]) ATTR_NONNULL();
+/**
+ * \warning Axis-aligned (navigation frame). Under canvas rotation the image of a view rect is a
+ * rotated quad, which an #rcti cannot represent. Drawing code must project the four corners with
+ * #view2d_view_to_region_fl instead; only code that genuinely wants the un-rotated rect (scrollers,
+ * region layout) should use this.
+ */
 void view2d_view_to_region_rcti(const View2D *v2d, const rctf *rect_src, rcti *rect_dst)
     ATTR_NONNULL();
+/** \warning Axis-aligned (navigation frame), see #view2d_view_to_region_rcti. */
 bool view2d_view_to_region_rcti_clip(const View2D *v2d, const rctf *rect_src, rcti *rect_dst)
     ATTR_NONNULL();
+
+/* -------------------------------------------------------------------- */
+/** \name Canvas Rotation
+ *
+ * Building blocks shared by every path that has to reproduce #View2D.rotation: the GPU matrix
+ * stack, the DRW engines and the interactive tools. They are the single definition of the rotation
+ * convention - the display maps view space to screen as `Rot(-rotation)` about the pivot - so new
+ * consumers must be built from these rather than re-deriving the trigonometry.
+ * \{ */
 
 /** Pivot of #View2D.rotation converted to region (pixel) space via the axis-aligned mapping. */
 void view2d_rotation_pivot_region(const View2D *v2d, float r_pivot_px[2]) ATTR_NONNULL();
@@ -437,6 +453,19 @@ void view2d_rotate_region_point(const View2D *v2d, float xy[2], bool inverse) AT
 /** Aspect-correct model-view matrix that applies #View2D.rotation in screen space.
  * Identity when rotation is 0. Multiply into the GPU matrix after the ortho projection. */
 void view2d_view_rotation_matrix(const View2D *v2d, float r_mat[4][4]) ATTR_NONNULL();
+/**
+ * Push the GPU model-view matrix and pre-multiply the canvas rotation, expressed as a screen-space
+ * rotation about the pivot's pixel position.
+ *
+ * For code that draws in *region pixel* space (as opposed to the view space set up by
+ * #view2d_view_ortho, which already carries the rotation). Always pushes, so it must be paired with
+ * #view2d_matrix_pop_rotation even when the rotation is 0.
+ */
+void view2d_matrix_push_rotation(const View2D *v2d) ATTR_NONNULL();
+/** Counterpart of #view2d_matrix_push_rotation. */
+void view2d_matrix_pop_rotation();
+
+/** \} */
 
 /** \} */
 

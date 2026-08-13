@@ -317,9 +317,10 @@ static void image_view_all(SpaceImage *sima, ARegion *region, wmOperator *op)
   /* Under canvas rotation the content's screen-space bounds are the bounding box of the rotated
    * rect, which is larger than the axis-aligned one. Fit to that instead, or the corners overflow
    * the region. */
-  if (sima->rotation != 0.0f) {
-    const float c = fabsf(cosf(sima->rotation));
-    const float s = fabsf(sinf(sima->rotation));
+  const float rotation = region->v2d.rotation;
+  if (rotation != 0.0f) {
+    const float c = fabsf(cosf(rotation));
+    const float s = fabsf(sinf(rotation));
     const float w_rot = w * c + h * s;
     const float h_rot = w * s + h * c;
     w = w_rot;
@@ -1083,9 +1084,10 @@ static wmOperatorStatus image_view_selected_exec(bContext *C, wmOperator * /*op*
   /* Under canvas rotation the content's screen-space bounds are the bounding box of the rotated
    * rect, which is larger than the axis-aligned one. Fit to that instead, or the corners overflow
    * the region. */
-  if (sima->rotation != 0.0f) {
-    const float c = fabsf(cosf(sima->rotation));
-    const float s = fabsf(sinf(sima->rotation));
+  const float rotation = region->v2d.rotation;
+  if (rotation != 0.0f) {
+    const float c = fabsf(cosf(rotation));
+    const float s = fabsf(sinf(rotation));
     const float w = BLI_rctf_size_x(&bounds);
     const float h = BLI_rctf_size_y(&bounds);
     BLI_rctf_resize(&bounds, w * c + h * s, w * s + h * c);
@@ -1358,8 +1360,6 @@ static void image_filesel(bContext *C, wmOperator *op, const char *path)
   RNA_string_set(op->ptr, "filepath", path);
   WM_event_add_fileselect(C, op);
 }
-
-/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Open Image Operator

@@ -38,7 +38,6 @@ void draw_image_uv_custom_region(const ARegion *region, const rctf &custom_regio
 bool space_image_main_region_poll(bContext *C);
 bool space_image_poll(bContext *C);
 bool space_image_view_center_cursor_poll(bContext *C);
-bool space_image_rotation_poll(bContext *C);
 
 void IMAGE_OT_view_all(wmOperatorType *ot);
 void IMAGE_OT_view_pan(wmOperatorType *ot);
@@ -50,13 +49,16 @@ void IMAGE_OT_view_zoom_in(wmOperatorType *ot);
 void IMAGE_OT_view_zoom_out(wmOperatorType *ot);
 void IMAGE_OT_view_zoom_ratio(wmOperatorType *ot);
 void IMAGE_OT_view_zoom_border(wmOperatorType *ot);
+#ifdef WITH_INPUT_NDOF
+void IMAGE_OT_view_ndof(wmOperatorType *ot);
+#endif
+
+/* `image_rotation_ops.cc` */
+
 void IMAGE_OT_view_rotate_cw(wmOperatorType *ot);
 void IMAGE_OT_view_rotate_ccw(wmOperatorType *ot);
 void IMAGE_OT_view_rotate_reset(wmOperatorType *ot);
 void IMAGE_OT_view_rotate_interactive(wmOperatorType *ot);
-#ifdef WITH_INPUT_NDOF
-void IMAGE_OT_view_ndof(wmOperatorType *ot);
-#endif
 
 void IMAGE_OT_new(wmOperatorType *ot);
 /**

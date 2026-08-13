@@ -1869,6 +1869,47 @@ void view2d_view_rotation_matrix(const View2D *v2d, float r_mat[4][4])
   r_mat[3][1] = py - (b * s * px + c * py);
 }
 
+/**
+ * The canvas rotation expressed in *region pixel* space: `Rot(-rotation)` about the pivot's pixel
+ * position. Pixels are square by definition, so unlike #view2d_view_rotation_matrix this needs no
+ * aspect correction. Identity when the rotation is 0.
+ */
+static void view2d_rotation_matrix_region_px(const View2D *v2d, float r_mat[4][4])
+{
+  unit_m4(r_mat);
+  if (v2d->rotation == 0.0f) {
+    return;
+  }
+  float pivot_px[2];
+  view2d_rotation_pivot_region(v2d, pivot_px);
+
+  const float c = cosf(-v2d->rotation);
+  const float s = sinf(-v2d->rotation);
+  /* Column-major (`r_mat[col][row]`), so the translation lives in `r_mat[3][*]`. */
+  r_mat[0][0] = c;
+  r_mat[1][0] = -s;
+  r_mat[0][1] = s;
+  r_mat[1][1] = c;
+  r_mat[3][0] = pivot_px[0] - (c * pivot_px[0] - s * pivot_px[1]);
+  r_mat[3][1] = pivot_px[1] - (s * pivot_px[0] + c * pivot_px[1]);
+}
+
+void view2d_matrix_push_rotation(const View2D *v2d)
+{
+  GPU_matrix_push();
+  if (v2d->rotation == 0.0f) {
+    return;
+  }
+  float rot[4][4];
+  view2d_rotation_matrix_region_px(v2d, rot);
+  GPU_matrix_mul(rot);
+}
+
+void view2d_matrix_pop_rotation()
+{
+  GPU_matrix_pop();
+}
+
 bool view2d_view_to_region_segment_clip(const View2D *v2d,
                                         const float xy_a[2],
                                         const float xy_b[2],
@@ -1939,20 +1980,8 @@ void view2d_view_to_region_m4(const View2D *v2d, float matrix[4][4])
 
   /* Display frame: `Rot_{pivot_px}(-rotation) . A`. The rotation is applied *after* the
    * axis-aligned map, in pixel space, hence the pre-multiply. */
-  float pivot_px[2];
-  view2d_rotation_pivot_region(v2d, pivot_px);
-
-  const float c = cosf(-v2d->rotation);
-  const float s = sinf(-v2d->rotation);
   float rot[4][4];
-  unit_m4(rot);
-  rot[0][0] = c;
-  rot[1][0] = -s;
-  rot[0][1] = s;
-  rot[1][1] = c;
-  rot[3][0] = pivot_px[0] - (c * pivot_px[0] - s * pivot_px[1]);
-  rot[3][1] = pivot_px[1] - (s * pivot_px[0] + c * pivot_px[1]);
-
+  view2d_rotation_matrix_region_px(v2d, rot);
   mul_m4_m4_pre(matrix, rot);
 }
 

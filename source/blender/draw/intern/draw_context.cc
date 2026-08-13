@@ -16,7 +16,6 @@
 #include "BLI_map.hh"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix_types.hh"
-#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_string.h"
@@ -481,12 +480,9 @@ void DRWContext::acquire_data()
        * so post-multiplying viewmat by the rotation applies it in view space, exactly like the
        * ortho path. */
       if (v2d->rotation != 0.0f) {
-        float rotmat[4][4];
-        ui::view2d_view_rotation_matrix(v2d, rotmat);
-        float viewmat_copy[4][4];
-        copy_m4_m4(viewmat_copy, (float (*)[4])viewmat.ptr());
-
-        mul_m4_m4m4((float (*)[4])viewmat.ptr(), viewmat_copy, rotmat);
+        float4x4 rotmat;
+        ui::view2d_view_rotation_matrix(v2d, rotmat.ptr());
+        viewmat = viewmat * rotmat;
       }
 
       float4x4 winmat = float4x4::identity();

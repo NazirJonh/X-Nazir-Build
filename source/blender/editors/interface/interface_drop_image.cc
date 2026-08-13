@@ -403,7 +403,7 @@ class BrushTextureSlotDropTarget : public ui::DropTargetInterface {
   bool can_drop(bContext & /*C*/, const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
   {
     /* Local image data-block or image asset (imported on drop). */
-    if (WM_drag_is_ID_type(&drag, ID_IM) || drag.type == WM_DRAG_ASSET) {
+    if (WM_drag_is_ID_type(&drag, ID_IM)) {
       return true;
     }
     /* The Asset Browser drags a #WM_DRAG_ASSET_LIST alongside the #WM_DRAG_ASSET above; both must

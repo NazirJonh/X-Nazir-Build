@@ -45,7 +45,6 @@
 #include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
 #include "ED_image_grid.hh"
-#include "ED_view3d.hh"
 
 #include "AS_asset_catalog_path.hh"
 
@@ -59,10 +58,7 @@
 
 #include "view3d_intern.hh"
 
-namespace blender::ed::view3d {
-
-/** Domain key for #bUserAssetCatalogMemory entries owned by the View3D Image Grid. */
-constexpr const char *image_grid_catalog_memory_domain = "image_grid";
+namespace blender::ed::image_grid {
 
 static bool image_grid_catalog_path_enabled_for_library(
     const AssetLibraryReference &lib_ref, const std::optional<std::string> &asset_catalog_path)
@@ -189,7 +185,7 @@ void image_grid_pending_clear(ImageGridUIState &state)
   state.pending.lib_ref = {};
   state.pending.use_all_catalogs = false;
   state.pending.catalog_path.clear();
-  state.pending.catalog_mode = ImageGridShelfCatalogMode::All;
+  state.pending.catalog_mode = ImageGridCatalogMode::All;
   state.pending.focus_asset_identifier.clear();
   state.pending.focus_filtered_index = -1;
 }
@@ -261,8 +257,8 @@ bool image_grid_asset_is_visible_in_state(const ImageGridUIState &state,
                                           const std::optional<std::string> &asset_catalog_path)
 {
   /* Membership follow modes span #ASSET_LIBRARY_ALL; catalog-path visibility does not apply. */
-  if (state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent ||
-      state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites)
+  if (state.filter.catalog_mode == ImageGridCatalogMode::Recent ||
+      state.filter.catalog_mode == ImageGridCatalogMode::Favorites)
   {
     return state.filter.lib_ref.type == ASSET_LIBRARY_ALL;
   }
@@ -301,40 +297,40 @@ std::optional<std::string> image_grid_catalog_path_from_shelf(const AssetShelf &
   return std::nullopt;
 }
 
-ImageGridShelfCatalogMode image_grid_shelf_catalog_mode(const AssetShelf &shelf)
+ImageGridCatalogMode image_grid_shelf_catalog_mode(const AssetShelf &shelf)
 {
   if (ed::asset::shelf::settings_is_recent_catalog_active(shelf.settings)) {
-    return ImageGridShelfCatalogMode::Recent;
+    return ImageGridCatalogMode::Recent;
   }
   if (ed::asset::shelf::settings_is_favorites_catalog_active(shelf.settings)) {
-    return ImageGridShelfCatalogMode::Favorites;
+    return ImageGridCatalogMode::Favorites;
   }
   if (ed::asset::shelf::settings_is_all_catalog_active(shelf.settings)) {
-    return ImageGridShelfCatalogMode::All;
+    return ImageGridCatalogMode::All;
   }
-  return ImageGridShelfCatalogMode::CatalogPath;
+  return ImageGridCatalogMode::CatalogPath;
 }
 
 bool image_grid_filter_matches_shelf(const ImageGridUIState &state, const AssetShelf &shelf)
 {
-  const ImageGridShelfCatalogMode shelf_mode = image_grid_shelf_catalog_mode(shelf);
+  const ImageGridCatalogMode shelf_mode = image_grid_shelf_catalog_mode(shelf);
   switch (shelf_mode) {
-    case ImageGridShelfCatalogMode::Recent:
-      return state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent &&
+    case ImageGridCatalogMode::Recent:
+      return state.filter.catalog_mode == ImageGridCatalogMode::Recent &&
              state.filter.lib_ref.type == ASSET_LIBRARY_ALL &&
              state.filter.enabled_catalog_paths.is_empty();
-    case ImageGridShelfCatalogMode::Favorites:
-      return state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites &&
+    case ImageGridCatalogMode::Favorites:
+      return state.filter.catalog_mode == ImageGridCatalogMode::Favorites &&
              state.filter.lib_ref.type == ASSET_LIBRARY_ALL &&
              state.filter.enabled_catalog_paths.is_empty();
-    case ImageGridShelfCatalogMode::All:
-    case ImageGridShelfCatalogMode::CatalogPath:
+    case ImageGridCatalogMode::All:
+    case ImageGridCatalogMode::CatalogPath:
       break;
   }
 
   /* Pseudo follow must not look like All (empty catalog paths). */
-  if (state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent ||
-      state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites)
+  if (state.filter.catalog_mode == ImageGridCatalogMode::Recent ||
+      state.filter.catalog_mode == ImageGridCatalogMode::Favorites)
   {
     return false;
   }
@@ -410,10 +406,6 @@ bool image_grid_filter_matches_shelf(const ImageGridUIState &state, const AssetS
          state.filter.enabled_catalog_paths.contains(*shelf_catalog_path);
 }
 
-}  // namespace blender::ed::view3d
-
-namespace blender::ed::image_grid {
-
 void image_grid_state_persist(const ImageGridOwner owner,
                               ImageGridUIState &state,
                               const bool is_mask_slot)
@@ -426,14 +418,14 @@ void image_grid_state_persist(const ImageGridOwner owner,
   library_ref = state.filter.lib_ref;
   slot.catalog_mode = short(state.filter.catalog_mode);
 
-  const bool membership = state.filter.catalog_mode == view3d::ImageGridShelfCatalogMode::Recent ||
-                          state.filter.catalog_mode == view3d::ImageGridShelfCatalogMode::Favorites;
+  const bool membership = state.filter.catalog_mode == ImageGridCatalogMode::Recent ||
+                          state.filter.catalog_mode == ImageGridCatalogMode::Favorites;
   /* Membership never commits the working catalog set into UserDef (would wipe saved filters for
    * real libraries via an empty #ASSET_LIBRARY_ALL write). Mode is written from membership entry
    * points via #BKE_asset_catalog_memory_set_mode; filter edits call #image_grid_catalog_commit_active
    * / #BKE_asset_catalog_memory_set_set. Keep the guard so persist cannot defeat that invariant. */
   if (!membership) {
-    view3d::image_grid_catalog_commit_active(state);
+    image_grid_catalog_commit_active(state);
   }
 
   /* Clear legacy DNA catalog lists — UserDef (domain #"image_grid") is the source of truth. */
@@ -470,20 +462,16 @@ void image_grid_state_persist(const ImageGridOwner owner,
   }
 }
 
-}  // namespace blender::ed::image_grid
-
-namespace blender::ed::view3d {
-
 void image_grid_pending_schedule_from_asset(ImageGridUIState &state,
                                             const AssetLibraryReference &lib_ref,
                                             const std::optional<std::string> &catalog_path,
                                             const std::string &asset_identifier,
-                                            const ImageGridShelfCatalogMode catalog_mode)
+                                            const ImageGridCatalogMode catalog_mode)
 {
   state.pending.apply_after_popover = true;
   state.pending.catalog_mode = catalog_mode;
-  if (catalog_mode == ImageGridShelfCatalogMode::Recent ||
-      catalog_mode == ImageGridShelfCatalogMode::Favorites)
+  if (catalog_mode == ImageGridCatalogMode::Recent ||
+      catalog_mode == ImageGridCatalogMode::Favorites)
   {
     /* Membership modes always browse across all libraries (mirror AssetView). */
     state.pending.lib_ref = asset_system::all_library_reference();
@@ -519,8 +507,8 @@ static void image_grid_pending_apply_slot(bContext &C, ImageGridUIState &state)
   const AssetLibraryReference old_lib_ref = state.filter.lib_ref;
   image_grid_catalog_swap_library(state, old_lib_ref, state.pending.lib_ref);
 
-  if (state.pending.catalog_mode == ImageGridShelfCatalogMode::Recent ||
-      state.pending.catalog_mode == ImageGridShelfCatalogMode::Favorites)
+  if (state.pending.catalog_mode == ImageGridCatalogMode::Recent ||
+      state.pending.catalog_mode == ImageGridCatalogMode::Favorites)
   {
     /* Do not write Recent/Favorites sentinels into #enabled_catalog_paths, and do not commit the
      * cleared filter into the per-library set (would wipe saved catalog filters). Mode-only write
@@ -531,7 +519,7 @@ static void image_grid_pending_apply_slot(bContext &C, ImageGridUIState &state)
         &U,
         state.filter.lib_ref,
         image_grid_catalog_memory_domain,
-        (state.pending.catalog_mode == ImageGridShelfCatalogMode::Recent) ?
+        (state.pending.catalog_mode == ImageGridCatalogMode::Recent) ?
             ASSET_CATALOG_MEMORY_RECENT :
             ASSET_CATALOG_MEMORY_FAVORITES);
   }
@@ -539,10 +527,10 @@ static void image_grid_pending_apply_slot(bContext &C, ImageGridUIState &state)
     state.filter.enabled_catalog_paths.clear();
     if (!state.pending.use_all_catalogs && !state.pending.catalog_path.empty()) {
       state.filter.enabled_catalog_paths.add(state.pending.catalog_path);
-      state.filter.catalog_mode = ImageGridShelfCatalogMode::CatalogPath;
+      state.filter.catalog_mode = ImageGridCatalogMode::CatalogPath;
     }
     else {
-      state.filter.catalog_mode = ImageGridShelfCatalogMode::All;
+      state.filter.catalog_mode = ImageGridCatalogMode::All;
     }
     image_grid_catalog_commit_active(state);
   }
@@ -797,12 +785,12 @@ void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState 
   /* Recent/Favorites membership follows AssetView: ALL is only for asset enumeration on the grid.
    * Do not push that ALL #lib_ref onto the shelf library tab — keep the user's library for the
    * catalog tree / selector, and only restore the pseudo-catalog sentinel. */
-  if (state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent) {
+  if (state.filter.catalog_mode == ImageGridCatalogMode::Recent) {
     ed::asset::shelf::settings_set_recent_catalog_active(shelf.settings);
     ed::asset::shelf::settings_catalog_commit_active(shelf);
     return;
   }
-  if (state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites) {
+  if (state.filter.catalog_mode == ImageGridCatalogMode::Favorites) {
     ed::asset::shelf::settings_set_favorites_catalog_active(shelf.settings);
     ed::asset::shelf::settings_catalog_commit_active(shelf);
     return;
@@ -911,4 +899,4 @@ void image_grid_popover_layout_context_set(ui::Layout &layout,
 
 /** \} */
 
-}  // namespace blender::ed::view3d
+}  // namespace blender::ed::image_grid

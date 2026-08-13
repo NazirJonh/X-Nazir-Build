@@ -244,13 +244,12 @@ extern bool view3d_camera_border_hack_test;
 /* view3d_navigate_smoothview.cc */
 void view3d_smooth_free(RegionView3D *rv3d);
 
-/* view3d_image_grid.cc — operators (state + helpers declared in ED_view3d.hh)
+/* view3d_image_grid.cc — operators (state + helpers declared in ED_image_grid.hh)
  * view3d_image_grid_panels.cc — ImageGridCatalogSelectorTree + popover panel registration */
 
 void IMAGE_GRID_OT_set_library(wmOperatorType *ot);
 void IMAGE_GRID_OT_set_membership(wmOperatorType *ot);
 void IMAGE_GRID_OT_assign_texture(wmOperatorType *ot);
-void VIEW3D_OT_image_grid_set_catalog(wmOperatorType *ot); /* unreferenced, left as-is */
 void IMAGE_GRID_OT_mark_asset(wmOperatorType *ot);
 void IMAGE_GRID_OT_new(wmOperatorType *ot);
 void IMAGE_GRID_OT_open(wmOperatorType *ot);
@@ -258,9 +257,7 @@ void IMAGE_GRID_OT_assign_catalog(wmOperatorType *ot);
 void IMAGE_GRID_OT_copy_to_library(wmOperatorType *ot);
 void IMAGE_GRID_OT_move_to_library(wmOperatorType *ot);
 void IMAGE_GRID_OT_drop_import(wmOperatorType *ot);
-void VIEW3D_OT_image_grid_browse_assets(wmOperatorType *ot); /* unreferenced, left as-is */
 void VIEW3D_OT_image_shelf_activate_asset(wmOperatorType *ot);
-void VIEW3D_OT_image_grid_refresh_library(wmOperatorType *ot); /* unreferenced, left as-is */
 void VIEW3D_OT_image_grid_name_match_enabled_toggle(wmOperatorType *ot);
 void VIEW3D_OT_image_grid_name_match_map_type_toggle(wmOperatorType *ot);
 void VIEW3D_OT_image_grid_name_match_clear(wmOperatorType *ot);

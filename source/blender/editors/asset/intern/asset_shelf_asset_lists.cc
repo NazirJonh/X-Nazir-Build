@@ -27,7 +27,7 @@
 #include "DNA_userdef_types.h"
 
 #include "ED_asset_shelf.hh"
-#include "ED_view3d.hh"
+#include "ED_image_grid.hh"
 
 namespace blender::ed::asset::shelf {
 
@@ -283,18 +283,18 @@ bool shelf_idname_is_brush_shelf(const StringRef idname)
 
 bool shelf_supports_asset_lists(const StringRef idname)
 {
-  return shelf_idname_is_brush_shelf(idname) || idname == ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME ||
+  return shelf_idname_is_brush_shelf(idname) || idname == ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME ||
          idname.startswith(ID_BROWSER_SHELF_IDNAME_PREFIX);
 }
 
 bool shelf_supports_name_match_filter(const StringRef idname)
 {
-  return idname == ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME;
+  return idname == ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME;
 }
 
 bool shelf_name_match_filter_includes_map_types(const StringRef idname)
 {
-  return idname == ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME;
+  return idname == ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME;
 }
 
 bool shelf_name_match_filter_includes_tags(const StringRef /*idname*/)
@@ -416,7 +416,7 @@ int shelf_asset_lists_recent_max_count_get(const StringRef shelf_idname)
   if (shelf_idname_is_brush_shelf(shelf_idname)) {
     return std::max(1, int(U.asset_shelf_recent_brushes_max));
   }
-  if (shelf_idname == ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME) {
+  if (shelf_idname == ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME) {
     return std::max(1, int(U.asset_shelf_recent_images_max));
   }
   return SHELF_ASSET_LISTS_RECENT_MAX;
@@ -430,9 +430,9 @@ static void shelf_asset_lists_recent_max_trim_supported_shelves()
                                              shelf_asset_lists_recent_max_count_get(idname));
     }
   }
-  shelf_asset_lists_recent_max_count_set(ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME,
+  shelf_asset_lists_recent_max_count_set(ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME,
                                          shelf_asset_lists_recent_max_count_get(
-                                             ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME));
+                                             ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME));
 }
 
 void shelf_asset_lists_recent_max_preferences_changed()

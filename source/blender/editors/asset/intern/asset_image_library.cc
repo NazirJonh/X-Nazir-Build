@@ -446,19 +446,7 @@ static void scan_directory_recursive(const char *dir_abs,
  */
 static const bUserAssetLibrary *image_library_owner_of_root(const char *library_root_path)
 {
-  const bUserAssetLibrary *best = nullptr;
-  size_t best_len = 0;
-  for (const bUserAssetLibrary &user_lib : U.asset_libraries) {
-    if (!user_lib.dirpath[0] || !BLI_path_contains(user_lib.dirpath, library_root_path)) {
-      continue;
-    }
-    const size_t len = BLI_strnlen(user_lib.dirpath, sizeof(user_lib.dirpath));
-    if (len > best_len) {
-      best = &user_lib;
-      best_len = len;
-    }
-  }
-  return best;
+  return BKE_preferences_asset_library_deepest_containing_path(&U, library_root_path);
 }
 
 static asset_system::AssetLibrary *image_library_load_from_root(const char *library_root_path)
@@ -665,7 +653,7 @@ void image_library_notify_catalogs_changed(const bContext *C, const char *librar
     return;
   }
   asset_system::all_library_tag_catalogs_dirty();
-  if (bUserAssetLibrary *user_lib = BKE_preferences_asset_library_containing_path(
+  if (bUserAssetLibrary *user_lib = BKE_preferences_asset_library_deepest_containing_path(
           &U, library_root_path))
   {
     refresh_asset_library(C, *user_lib);

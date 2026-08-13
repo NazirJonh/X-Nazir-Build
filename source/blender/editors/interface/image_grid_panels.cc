@@ -7,7 +7,6 @@
  */
 
 #include "BLI_listbase.h"
-#include "BLI_map.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
@@ -27,7 +26,6 @@
 
 #include "ED_asset_list.hh"
 #include "ED_image_grid.hh"
-#include "ED_view3d.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -50,10 +48,7 @@
 
 namespace blender {
 
-using namespace ed::view3d;
-
-/** Domain key for #bUserAssetCatalogMemory entries owned by the View3D Image Grid. */
-constexpr const char *image_grid_catalog_memory_domain = "image_grid";
+using namespace ed::image_grid;
 
 static bool image_grid_catalog_id_in_span(const Span<bUUID> ids, const bUUID &catalog_id)
 {
@@ -81,6 +76,75 @@ static bool image_grid_catalog_id_enabled(const AssetLibraryReference &lib_ref,
       BKE_asset_catalog_memory_get_set(&U, lib_ref, image_grid_catalog_memory_domain), catalog_id);
 }
 
+static void image_grid_catalog_id_set_enabled(const AssetLibraryReference &lib_ref,
+                                              const bUUID catalog_id,
+                                              const bool enabled)
+{
+  blender::Vector<bUUID> ids;
+  if (image_grid_library_has_catalog_filter(lib_ref)) {
+    ids = BKE_asset_catalog_memory_get_set(&U, lib_ref, image_grid_catalog_memory_domain);
+  }
+  if (enabled) {
+    if (!image_grid_catalog_id_in_span(ids, catalog_id)) {
+      ids.append(catalog_id);
+    }
+  }
+  else {
+    for (int64_t i = ids.size() - 1; i >= 0; i--) {
+      if (BLI_uuid_equal(ids[i], catalog_id)) {
+        ids.remove_and_reorder(i);
+      }
+    }
+  }
+  if (ids.is_empty()) {
+    BKE_asset_catalog_memory_set_all(&U, lib_ref, image_grid_catalog_memory_domain);
+  }
+  else {
+    BKE_asset_catalog_memory_set_set(
+        &U, lib_ref, image_grid_catalog_memory_domain, ids.as_span());
+  }
+}
+
+static void image_grid_apply_catalog_item_toggle(bContext &C,
+                                                 ed::image_grid::ImageGridUIState &state,
+                                                 const AssetLibraryReference &library_ref,
+                                                 const std::string &library_key,
+                                                 const bUUID catalog_id,
+                                                 const std::string &catalog_path)
+{
+  if (!library_key.empty() || state.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
+    image_grid_catalog_id_set_enabled(
+        library_ref, catalog_id, !image_grid_catalog_id_enabled(library_ref, catalog_id));
+  }
+  else {
+    const bool was_membership =
+        state.filter.catalog_mode == ed::image_grid::ImageGridCatalogMode::Recent ||
+        state.filter.catalog_mode == ed::image_grid::ImageGridCatalogMode::Favorites;
+    if (!state.filter.enabled_catalog_paths.remove(catalog_path)) {
+      state.filter.enabled_catalog_paths.add(catalog_path);
+    }
+    state.filter.catalog_mode = state.filter.enabled_catalog_paths.is_empty() ?
+                                    ed::image_grid::ImageGridCatalogMode::All :
+                                    ed::image_grid::ImageGridCatalogMode::CatalogPath;
+    if (!(was_membership && state.filter.enabled_catalog_paths.is_empty())) {
+      ed::image_grid::image_grid_catalog_commit_active(state);
+    }
+  }
+
+  ed::image_grid::image_grid_focus_clear(state.viewport);
+  ed::image_grid::image_grid_pending_clear(state);
+
+  if (const std::optional<ed::image_grid::ImageGridOwner> owner =
+          ed::image_grid::image_grid_owner_from_context(C))
+  {
+    const bool is_mask_slot = ed::image_grid::image_grid_is_mask_slot_from_context(C);
+    ed::image_grid::image_grid_reset_scroll(*owner, is_mask_slot);
+    ed::image_grid::image_grid_state_persist(*owner, state, is_mask_slot);
+  }
+
+  ed::image_grid::image_grid_notify_change(C);
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Catalog Selector Popover
  * \{ */
@@ -98,7 +162,7 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
   };
 
   const bContext &C_;
-  ed::view3d::ImageGridUIState &state_;
+  ed::image_grid::ImageGridUIState &state_;
   /* Full catalog tree shared from the library's catalog service. Using a shared_ptr avoids
    * copying the tree (which has raw parent pointers) and ensures the data stays alive. Only
    * populated in single-library mode; see #library_sections_ for All-Libraries mode. */
@@ -118,7 +182,7 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
 
   /** Single-library mode constructor (unchanged behavior). */
   ImageGridCatalogSelectorTree(const bContext &C,
-                               ed::view3d::ImageGridUIState &state,
+                               ed::image_grid::ImageGridUIState &state,
                                const asset_system::AssetLibrary &library)
       : C_(C), state_(state)
   {
@@ -134,16 +198,16 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
   class AllLibrariesTag {
   };
   ImageGridCatalogSelectorTree(const bContext &C,
-                               ed::view3d::ImageGridUIState &state,
+                               ed::image_grid::ImageGridUIState &state,
                                AllLibrariesTag /*all_libraries*/)
       : C_(C), state_(state)
   {
-    for (asset_system::AssetLibrary *library : ed::view3d::image_grid_all_mode_libraries()) {
+    for (asset_system::AssetLibrary *library : ed::image_grid::image_grid_all_mode_libraries()) {
       const AssetLibraryReference &lib_ref = *library->library_reference();
       /* #AssetLibrary::name() is empty for built-ins (Current File / Essentials); use the same
        * UI labels as the library selector. */
-      library_sections_.append({ed::view3d::image_grid_library_key(lib_ref),
-                                std::string(ed::view3d::image_grid_library_ui_name(lib_ref)),
+      library_sections_.append({ed::image_grid::image_grid_library_key(lib_ref),
+                                std::string(ed::image_grid::image_grid_library_ui_name(lib_ref)),
                                 lib_ref,
                                 library->catalog_service().catalog_tree()});
     }
@@ -151,43 +215,41 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
 
   void build_tree() override;
 
-  void update_enabled_catalogs_from_items(bContext &C);
-
   static Item &build_catalog_items_recursive(
       ui::TreeViewOrItem &parent,
       const asset_system::AssetCatalogTreeItem &catalog_item,
-      ed::view3d::ImageGridUIState &state,
+      ed::image_grid::ImageGridUIState &state,
       const std::string &library_key,
       const AssetLibraryReference &library_ref);
 
   /** Activatable item that clears the catalog filter (shows all assets). */
   class AllItem : public ui::BasicTreeViewItem {
-    ed::view3d::ImageGridUIState &state_;
+    ed::image_grid::ImageGridUIState &state_;
 
    public:
-    AllItem(ed::view3d::ImageGridUIState &state)
+    AllItem(ed::image_grid::ImageGridUIState &state)
         : ui::BasicTreeViewItem(IFACE_("All")), state_(state)
     {
       this->set_on_activate_fn([this](bContext &C, ui::BasicTreeViewItem & /*item*/) {
         if (state_.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
-          ed::view3d::image_grid_filter_set_show_all_for_all_libraries(state_);
+          ed::image_grid::image_grid_filter_set_show_all_for_all_libraries(state_);
         }
         else {
-          ed::view3d::image_grid_filter_set_show_all(state_);
+          ed::image_grid::image_grid_filter_set_show_all(state_);
         }
         if (const std::optional<ed::image_grid::ImageGridOwner> owner =
                 ed::image_grid::image_grid_owner_from_context(C))
         {
-          const bool is_mask_slot = ed::view3d::image_grid_is_mask_slot_from_context(C);
+          const bool is_mask_slot = ed::image_grid::image_grid_is_mask_slot_from_context(C);
           ed::image_grid::image_grid_reset_scroll(*owner, is_mask_slot);
           ed::image_grid::image_grid_state_persist(*owner, state_, is_mask_slot);
         }
-        ed::view3d::image_grid_notify_change(C);
+        ed::image_grid::image_grid_notify_change(C);
       });
       this->set_is_active_fn([this]() -> bool {
         if (state_.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
           for (asset_system::AssetLibrary *library :
-               ed::view3d::image_grid_all_mode_libraries())
+               ed::image_grid::image_grid_all_mode_libraries())
           {
             if (const std::optional<AssetLibraryReference> lib_ref = library->library_reference())
             {
@@ -198,7 +260,7 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
           }
           return true;
         }
-        return state_.filter.catalog_mode == ed::view3d::ImageGridShelfCatalogMode::All &&
+        return state_.filter.catalog_mode == ed::image_grid::ImageGridCatalogMode::All &&
                state_.filter.enabled_catalog_paths.is_empty();
       });
     }
@@ -218,7 +280,7 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
    * per-library "All" (the common "no filter" case) would force its own section open on every
    * redraw and make collapsing impossible. */
   class LibrarySectionItem : public ui::BasicTreeViewItem {
-    ed::view3d::ImageGridUIState &state_;
+    ed::image_grid::ImageGridUIState &state_;
     std::string library_key_;
     AssetLibraryReference library_ref_{};
     /* "Showing all" state for this library, i.e. whether domain #"image_grid" has no SET mode
@@ -228,8 +290,23 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
      * reconstructs it from UserDef. */
     char showing_all_ = false;
 
+    struct ToggleArg {
+      ed::image_grid::ImageGridUIState *state;
+      AssetLibraryReference library_ref;
+    };
+
+    static void toggle_arg_free(void *argN)
+    {
+      MEM_delete(static_cast<ToggleArg *>(argN));
+    }
+
+    static void *toggle_arg_copy(const void *argN)
+    {
+      return MEM_new<ToggleArg>(__func__, *static_cast<const ToggleArg *>(argN));
+    }
+
    public:
-    LibrarySectionItem(ed::view3d::ImageGridUIState &state,
+    LibrarySectionItem(ed::image_grid::ImageGridUIState &state,
                        std::string library_key,
                        AssetLibraryReference library_ref,
                        std::string name)
@@ -278,23 +355,34 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
                                          0,
                                          0,
                                          TIP_("Show all catalogs from this library"));
-      ui::button_func_set(toggle_but, [this](bContext &C) {
-        BKE_asset_catalog_memory_set_all(&U, library_ref_, image_grid_catalog_memory_domain);
-        if (const std::optional<ed::image_grid::ImageGridOwner> owner =
-                ed::image_grid::image_grid_owner_from_context(C))
-        {
-          const bool is_mask_slot = ed::view3d::image_grid_is_mask_slot_from_context(C);
-          ed::image_grid::image_grid_reset_scroll(*owner, is_mask_slot);
-          ed::image_grid::image_grid_state_persist(*owner, state_, is_mask_slot);
-        }
-        ed::view3d::image_grid_notify_change(C);
-      });
+      ToggleArg *toggle_arg = MEM_new<ToggleArg>(__func__);
+      toggle_arg->state = &state_;
+      toggle_arg->library_ref = library_ref_;
+      ui::button_funcN_set(
+          toggle_but,
+          [](bContext *C, void *argN, void * /*arg2*/) {
+            auto *arg = static_cast<ToggleArg *>(argN);
+            BKE_asset_catalog_memory_set_all(&U, arg->library_ref, image_grid_catalog_memory_domain);
+            if (const std::optional<ed::image_grid::ImageGridOwner> owner =
+                    ed::image_grid::image_grid_owner_from_context(*C))
+            {
+              const bool is_mask_slot = ed::image_grid::image_grid_is_mask_slot_from_context(*C);
+              ed::image_grid::image_grid_reset_scroll(*owner, is_mask_slot);
+              ed::image_grid::image_grid_state_persist(*owner, *arg->state, is_mask_slot);
+            }
+            ed::image_grid::image_grid_notify_change(*C);
+          },
+          toggle_arg,
+          nullptr,
+          toggle_arg_free,
+          toggle_arg_copy);
       ui::button_flag_disable(toggle_but, ui::BUT_UNDO);
     }
   };
 
   /** Checkbox item for an individual catalog path. */
   class Item : public ui::BasicTreeViewItem {
+    ed::image_grid::ImageGridUIState &state_;
     const asset_system::AssetCatalogTreeItem &catalog_item_;
     /* Empty in single-library mode. In All-Libraries mode, the key of the library this catalog
      * belongs to -- read/written against #BKE_asset_catalog_memory_* (domain #"image_grid")
@@ -305,12 +393,31 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
      * gets a pointer to it). The UI needs it as char. */
     char catalog_path_enabled_ = false;
 
+    struct ToggleArg {
+      ed::image_grid::ImageGridUIState *state;
+      AssetLibraryReference library_ref;
+      bUUID catalog_id;
+      std::string library_key;
+      std::string catalog_path;
+    };
+
+    static void toggle_arg_free(void *argN)
+    {
+      MEM_delete(static_cast<ToggleArg *>(argN));
+    }
+
+    static void *toggle_arg_copy(const void *argN)
+    {
+      return MEM_new<ToggleArg>(__func__, *static_cast<const ToggleArg *>(argN));
+    }
+
    public:
     Item(const asset_system::AssetCatalogTreeItem &catalog_item,
-         ed::view3d::ImageGridUIState &state,
+         ed::image_grid::ImageGridUIState &state,
          std::string library_key,
          AssetLibraryReference library_ref)
         : ui::BasicTreeViewItem(catalog_item.get_name()),
+          state_(state),
           catalog_item_(catalog_item),
           library_key_(std::move(library_key)),
           library_ref_(library_ref),
@@ -318,12 +425,9 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
               Item::initial_enabled(catalog_item, state, library_key_, library_ref_) ? 1 : 0)
     {
       /* The checkbox (#build_row) is the only way to toggle this item. A row-wide activate
-       * handler that also toggled on click raced the checkbox's own click: toggling here calls
-       * #update_enabled_catalogs_from_items -> #image_grid_notify_change ->
-       * #ED_region_tag_refresh_ui, which can rebuild this popover's tree mid-click, so the
-       * checkbox's own release lands on a different (freshly rebuilt) button and toggles a
-       * second time. Matches upstream's #AssetCatalogSelectorTree::Item, which disables row
-       * activation for the same reason. */
+       * handler that also toggled on click raced the checkbox's own click: toggling rebuilds the
+       * popover tree mid-click, so the checkbox's own release would land on a freshly rebuilt
+       * button. Matches upstream's #AssetCatalogSelectorTree::Item. */
       disable_activatable();
     }
 
@@ -339,7 +443,7 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
 
    private:
     static bool initial_enabled(const asset_system::AssetCatalogTreeItem &catalog_item,
-                                const ed::view3d::ImageGridUIState &state,
+                                const ed::image_grid::ImageGridUIState &state,
                                 const std::string &library_key,
                                 const AssetLibraryReference &library_ref)
     {
@@ -381,8 +485,6 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
 
     void build_row(ui::Layout &row) override
     {
-      ImageGridCatalogSelectorTree &tree = dynamic_cast<ImageGridCatalogSelectorTree &>(
-          get_tree_view());
       ui::Block *block = row.block();
 
       row.emboss_set(ui::EmbossType::Emboss);
@@ -403,8 +505,27 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
                                          0,
                                          0,
                                          TIP_("Toggle catalog visibility in the image grid"));
-      ui::button_func_set(toggle_but,
-                          [&tree](bContext &C) { tree.update_enabled_catalogs_from_items(C); });
+      ToggleArg *toggle_arg = MEM_new<ToggleArg>(__func__);
+      toggle_arg->state = &state_;
+      toggle_arg->library_ref = library_ref_;
+      toggle_arg->catalog_id = catalog_item_.get_catalog_id();
+      toggle_arg->library_key = library_key_;
+      toggle_arg->catalog_path = catalog_item_.catalog_path().str();
+      ui::button_funcN_set(
+          toggle_but,
+          [](bContext *C, void *argN, void * /*arg2*/) {
+            auto *arg = static_cast<ToggleArg *>(argN);
+            image_grid_apply_catalog_item_toggle(*C,
+                                                 *arg->state,
+                                                 arg->library_ref,
+                                                 arg->library_key,
+                                                 arg->catalog_id,
+                                                 arg->catalog_path);
+          },
+          toggle_arg,
+          nullptr,
+          toggle_arg_free,
+          toggle_arg_copy);
       if (!is_catalog_path_enabled() && has_enabled_in_subtree()) {
         ui::button_drawflag_enable(toggle_but, ui::BUT_INDETERMINATE);
       }
@@ -412,71 +533,6 @@ class ImageGridCatalogSelectorTree : public ui::AbstractTreeView {
     }
   };
 };
-
-void ImageGridCatalogSelectorTree::update_enabled_catalogs_from_items(bContext &C)
-{
-  if (state_.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
-    /* Group changed checkboxes by owning library and write each group into its own
-     * per-library UserDef entry -- #image_grid_catalog_commit_active() only ever operates on the
-     * single active #ImageGridFilter::lib_ref entry, which is meaningless here since #lib_ref
-     * itself is #ASSET_LIBRARY_ALL, not a real library. */
-    blender::Map<std::string, blender::Vector<bUUID>> by_library;
-    foreach_item([&](ui::AbstractTreeViewItem &view_item) {
-      const Item *item = dynamic_cast<const Item *>(&view_item);
-      if (item && item->is_catalog_path_enabled()) {
-        by_library.lookup_or_add_default(item->library_key()).append(item->catalog_id());
-      }
-    });
-    /* Every library that currently has a saved filter but contributed no enabled item this
-     * redraw must have its entry cleared, not merely left un-updated, so unchecking a
-     * library's only remaining catalog actually clears it instead of leaving a stale
-     * now-checkbox-less entry behind. */
-    for (const LibrarySection &section : library_sections_) {
-      if (const blender::Vector<bUUID> *ids = by_library.lookup_ptr(section.key)) {
-        BKE_asset_catalog_memory_set_set(
-            &U, section.library_ref, image_grid_catalog_memory_domain, ids->as_span());
-      }
-      else {
-        BKE_asset_catalog_memory_set_all(
-            &U, section.library_ref, image_grid_catalog_memory_domain);
-      }
-    }
-  }
-  else {
-    const bool was_membership =
-        state_.filter.catalog_mode == ed::view3d::ImageGridShelfCatalogMode::Recent ||
-        state_.filter.catalog_mode == ed::view3d::ImageGridShelfCatalogMode::Favorites;
-    state_.filter.enabled_catalog_paths.clear();
-    foreach_item([this](ui::AbstractTreeViewItem &view_item) {
-      const Item *item = dynamic_cast<const Item *>(&view_item);
-      if (item && item->is_catalog_path_enabled()) {
-        state_.filter.enabled_catalog_paths.add(item->catalog_path().str());
-      }
-    });
-    state_.filter.catalog_mode = state_.filter.enabled_catalog_paths.is_empty() ?
-                                     ed::view3d::ImageGridShelfCatalogMode::All :
-                                     ed::view3d::ImageGridShelfCatalogMode::CatalogPath;
-    /* Leaving membership with no catalogs selected is "show all" — do not wipe saved ALL-library
-     * filters. Selecting real catalog paths commits normally. */
-    if (!(was_membership && state_.filter.enabled_catalog_paths.is_empty())) {
-      ed::view3d::image_grid_catalog_commit_active(state_);
-    }
-  }
-
-  /* Catalog changed — old focus position is stale; dismiss it so the grid does not snap. */
-  ed::view3d::image_grid_focus_clear(state_.viewport);
-  ed::view3d::image_grid_pending_clear(state_);
-
-  if (const std::optional<ed::image_grid::ImageGridOwner> owner =
-          ed::image_grid::image_grid_owner_from_context(C))
-  {
-    const bool is_mask_slot = ed::view3d::image_grid_is_mask_slot_from_context(C);
-    ed::image_grid::image_grid_reset_scroll(*owner, is_mask_slot);
-    ed::image_grid::image_grid_state_persist(*owner, state_, is_mask_slot);
-  }
-
-  ed::view3d::image_grid_notify_change(C);
-}
 
 void ImageGridCatalogSelectorTree::build_tree()
 {
@@ -517,7 +573,7 @@ void ImageGridCatalogSelectorTree::build_tree()
 ImageGridCatalogSelectorTree::Item &ImageGridCatalogSelectorTree::build_catalog_items_recursive(
     ui::TreeViewOrItem &parent,
     const asset_system::AssetCatalogTreeItem &catalog_item,
-    ed::view3d::ImageGridUIState &state,
+    ed::image_grid::ImageGridUIState &state,
     const std::string &library_key,
     const AssetLibraryReference &library_ref)
 {
@@ -580,13 +636,14 @@ static void image_grid_catalog_selector_draw(const bContext *C, Panel *panel)
     return;
   }
 
-  ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get_from_context(*C);
+  ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(
+      *owner, ed::image_grid::image_grid_is_mask_slot_from_context(*C));
 
   ui::Layout &layout = *panel->layout;
   layout.operator_context_set(wm::OpCallContext::InvokeDefault);
 
   if (ed::image_grid::image_grid_library_is_missing(
-          *owner, ed::view3d::image_grid_is_mask_slot_from_context(*C)))
+          *owner, ed::image_grid::image_grid_is_mask_slot_from_context(*C)))
   {
     layout.label(IFACE_("Library not found"), ICON_ERROR);
     return;
@@ -604,7 +661,7 @@ static void image_grid_catalog_selector_draw(const bContext *C, Panel *panel)
      * so a still-loading library simply has no section yet (see the spec's Phase 3/"Enumerating
      * the real libraries" note) rather than blocking the whole popover behind a single
      * "Loading…" label. */
-    ed::view3d::image_grid_catalog_sanitize_selection(state);
+    ed::image_grid::image_grid_catalog_sanitize_selection(state);
     tree = std::make_unique<ImageGridCatalogSelectorTree>(
         *C, state, ImageGridCatalogSelectorTree::AllLibrariesTag{});
   }
@@ -615,7 +672,7 @@ static void image_grid_catalog_selector_draw(const bContext *C, Panel *panel)
       layout.label(IFACE_("Loading\xe2\x80\xa6"), ICON_NONE);
       return;
     }
-    ed::view3d::image_grid_catalog_sanitize_selection(state);
+    ed::image_grid::image_grid_catalog_sanitize_selection(state);
     tree = std::make_unique<ImageGridCatalogSelectorTree>(*C, state, *library);
   }
 
@@ -655,12 +712,12 @@ static wmOperatorStatus image_grid_name_match_enabled_toggle_exec(bContext *C, w
     return OPERATOR_CANCELLED;
   }
 
-  const bool is_mask_slot = ed::view3d::image_grid_is_mask_slot_from_context(*C);
-  ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
+  const bool is_mask_slot = ed::image_grid::image_grid_is_mask_slot_from_context(*C);
+  ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
                                                                              is_mask_slot);
   state.filter.name_match.enabled = !state.filter.name_match.enabled;
   ed::image_grid::image_grid_state_persist(*owner, state, is_mask_slot);
-  ed::view3d::image_grid_notify_change(*C, is_mask_slot);
+  ed::image_grid::image_grid_notify_change(*C, is_mask_slot);
   return OPERATOR_FINISHED;
 }
 
@@ -684,12 +741,12 @@ static wmOperatorStatus image_grid_name_match_map_type_toggle_exec(bContext *C, 
   char identifier[64];
   RNA_string_get(op->ptr, "identifier", identifier);
 
-  const bool is_mask_slot = ed::view3d::image_grid_is_mask_slot_from_context(*C);
-  ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
+  const bool is_mask_slot = ed::image_grid::image_grid_is_mask_slot_from_context(*C);
+  ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
                                                                              is_mask_slot);
   BKE_name_match_filter_toggle_map_type(state.filter.name_match, identifier);
   ed::image_grid::image_grid_state_persist(*owner, state, is_mask_slot);
-  ed::view3d::image_grid_notify_change(*C, is_mask_slot);
+  ed::image_grid::image_grid_notify_change(*C, is_mask_slot);
   return OPERATOR_FINISHED;
 }
 
@@ -712,12 +769,12 @@ static wmOperatorStatus image_grid_name_match_clear_exec(bContext *C, wmOperator
     return OPERATOR_CANCELLED;
   }
 
-  const bool is_mask_slot = ed::view3d::image_grid_is_mask_slot_from_context(*C);
-  ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
+  const bool is_mask_slot = ed::image_grid::image_grid_is_mask_slot_from_context(*C);
+  ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
                                                                              is_mask_slot);
   BKE_name_match_filter_clear_selection(state.filter.name_match);
   ed::image_grid::image_grid_state_persist(*owner, state, is_mask_slot);
-  ed::view3d::image_grid_notify_change(*C, is_mask_slot);
+  ed::image_grid::image_grid_notify_change(*C, is_mask_slot);
   return OPERATOR_FINISHED;
 }
 
@@ -738,8 +795,8 @@ static void image_grid_name_match_filter_panel_draw(const bContext *C, Panel *pa
     return;
   }
 
-  const bool is_mask_slot = ed::view3d::image_grid_is_mask_slot_from_context(*C);
-  ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
+  const bool is_mask_slot = ed::image_grid::image_grid_is_mask_slot_from_context(*C);
+  ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner,
                                                                              is_mask_slot);
   ui::Layout &layout = *panel->layout;
 

@@ -43,7 +43,6 @@
 #include "ED_fileselect.hh"
 #include "ED_image_grid.hh"
 #include "ED_undo.hh"
-#include "ED_view3d.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -56,7 +55,7 @@
 
 #include "view3d_intern.hh"
 
-namespace blender::ed::view3d {
+namespace blender::ed::image_grid {
 
 /* -------------------------------------------------------------------- */
 /** \name Shared Helpers
@@ -478,11 +477,11 @@ static wmOperatorStatus image_grid_drop_import_invoke(bContext *C,
 
 /** \} */
 
-}  // namespace blender::ed::view3d
+}  // namespace blender::ed::image_grid
 
 namespace blender {
 
-using namespace ed::view3d;
+using namespace ed::image_grid;
 
 void IMAGE_GRID_OT_assign_catalog(wmOperatorType *ot)
 {
@@ -538,8 +537,8 @@ void IMAGE_GRID_OT_drop_import(wmOperatorType *ot)
       "Import images dropped onto the texture grid as temporary textures or as catalog assets";
   ot->idname = "IMAGE_GRID_OT_drop_import";
 
-  ot->exec = ed::view3d::image_grid_drop_import_exec;
-  ot->invoke = ed::view3d::image_grid_drop_import_invoke;
+  ot->exec = ed::image_grid::image_grid_drop_import_exec;
+  ot->invoke = ed::image_grid::image_grid_drop_import_invoke;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
@@ -553,8 +552,8 @@ void IMAGE_GRID_OT_drop_import(wmOperatorType *ot)
 
   prop = RNA_def_enum(ot->srna,
                       "mode",
-                      ed::view3d::image_grid_drop_import_mode_items,
-                      int(ed::view3d::ImageGridDropImportMode::Temporary),
+                      ed::image_grid::image_grid_drop_import_mode_items,
+                      int(ed::image_grid::ImageGridDropImportMode::Temporary),
                       "Mode",
                       "What to do with the dropped images");
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
@@ -563,10 +562,10 @@ void IMAGE_GRID_OT_drop_import(wmOperatorType *ot)
   prop = RNA_def_string(
       ot->srna, "catalog_path", nullptr, MAX_NAME, "Catalog", "Catalog path in the current file");
   RNA_def_property_string_search_func_runtime(
-      prop, ed::view3d::image_grid_visit_catalogs_for_search, PROP_STRING_SEARCH_SUGGESTION);
+      prop, ed::image_grid::image_grid_visit_catalogs_for_search, PROP_STRING_SEARCH_SUGGESTION);
 
   prop = RNA_def_property(ot->srna, "asset_library_reference", PROP_ENUM, PROP_NONE);
-  RNA_def_enum_funcs(prop, ed::view3d::rna_image_grid_catalog_library_itemf);
+  RNA_def_enum_funcs(prop, ed::image_grid::rna_image_grid_catalog_library_itemf);
   RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
 
   prop = RNA_def_boolean(

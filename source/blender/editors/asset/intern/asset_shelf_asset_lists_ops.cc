@@ -30,7 +30,7 @@
 #include "ED_asset.hh"
 #include "ED_asset_menu_utils.hh"
 #include "ED_asset_shelf.hh"
-#include "ED_view3d.hh"
+#include "ED_image_grid.hh"
 
 #include "BLT_translation.hh"
 
@@ -157,7 +157,7 @@ static bool active_asset_weak_ref_from_shelf(const bContext *C,
     return true;
   }
 
-  if (StringRef(shelf_idname) == ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME) {
+  if (StringRef(shelf_idname) == ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME) {
     AssetShelfType *type = type_find_from_idname(shelf_idname);
     if (type && type->get_active_asset_from_context) {
       if (const AssetWeakReference *weak_ref = type->get_active_asset_from_context(type, C)) {

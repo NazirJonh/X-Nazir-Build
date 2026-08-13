@@ -9,7 +9,7 @@
  * the same code instead of duplicating it.
  */
 
-#include "DNA_view3d_types.h"
+#include "DNA_image_grid_types.h"
 
 #include "BKE_asset.hh"
 

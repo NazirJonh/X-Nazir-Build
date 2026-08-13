@@ -35,7 +35,6 @@
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_image_grid.hh"
-#include "ED_view3d.hh"
 
 #include "intern/asset_shelf_asset_lists.hh"
 
@@ -43,15 +42,7 @@
 
 #include "view3d_intern.hh"
 
-namespace blender::ed::view3d {
-
-static_assert(int(ImageGridShelfCatalogMode::All) == IMAGE_GRID_CATALOG_MODE_ALL);
-static_assert(int(ImageGridShelfCatalogMode::CatalogPath) == IMAGE_GRID_CATALOG_MODE_CATALOG_PATH);
-static_assert(int(ImageGridShelfCatalogMode::Recent) == IMAGE_GRID_CATALOG_MODE_RECENT);
-static_assert(int(ImageGridShelfCatalogMode::Favorites) == IMAGE_GRID_CATALOG_MODE_FAVORITES);
-
-/** Domain key for #bUserAssetCatalogMemory entries owned by the View3D Image Grid. */
-constexpr const char *image_grid_catalog_memory_domain = "image_grid";
+namespace blender::ed::image_grid {
 
 static Vector<bUUID> image_grid_paths_to_catalog_ids(const AssetLibraryReference &lib_ref,
                                                      const Set<std::string> &paths)
@@ -184,8 +175,8 @@ void image_grid_catalog_commit_active(ImageGridUIState &state)
 void image_grid_filter_set_show_all(ImageGridUIState &state)
 {
   const bool leaving_membership =
-      state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent ||
-      state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites;
+      state.filter.catalog_mode == ImageGridCatalogMode::Recent ||
+      state.filter.catalog_mode == ImageGridCatalogMode::Favorites;
   if (leaving_membership) {
     /* Restore the already-current #lib_ref's (typically #ASSET_LIBRARY_ALL) saved catalog filter
      * instead of force-clearing it, so the catalog tree's "All" item leaves membership the same
@@ -193,20 +184,20 @@ void image_grid_filter_set_show_all(ImageGridUIState &state)
      * Never commits here -- committing empty paths would remove the saved filter for #lib_ref. */
     image_grid_catalog_load_active(state, state.filter.lib_ref);
     state.filter.catalog_mode = state.filter.enabled_catalog_paths.is_empty() ?
-                                    ImageGridShelfCatalogMode::All :
-                                    ImageGridShelfCatalogMode::CatalogPath;
+                                    ImageGridCatalogMode::All :
+                                    ImageGridCatalogMode::CatalogPath;
     return;
   }
   state.filter.enabled_catalog_paths.clear();
-  state.filter.catalog_mode = ImageGridShelfCatalogMode::All;
+  state.filter.catalog_mode = ImageGridCatalogMode::All;
   image_grid_catalog_commit_active(state);
 }
 
 void image_grid_filter_set_show_all_for_all_libraries(ImageGridUIState &state)
 {
   const bool leaving_membership =
-      state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent ||
-      state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites;
+      state.filter.catalog_mode == ImageGridCatalogMode::Recent ||
+      state.filter.catalog_mode == ImageGridCatalogMode::Favorites;
   for (asset_system::AssetLibrary *library : image_grid_all_mode_libraries()) {
     if (const std::optional<AssetLibraryReference> lib_ref = library->library_reference()) {
       BKE_asset_catalog_memory_set_all(&U, *lib_ref, image_grid_catalog_memory_domain);
@@ -214,7 +205,7 @@ void image_grid_filter_set_show_all_for_all_libraries(ImageGridUIState &state)
   }
   state.filter.enabled_catalog_paths.clear();
   if (!leaving_membership) {
-    state.filter.catalog_mode = ImageGridShelfCatalogMode::All;
+    state.filter.catalog_mode = ImageGridCatalogMode::All;
     /* Also clear membership mode stored under #ASSET_LIBRARY_ALL. */
     BKE_asset_catalog_memory_set_all(
         &U, asset_system::all_library_reference(), image_grid_catalog_memory_domain);
@@ -228,14 +219,14 @@ void image_grid_filter_set_show_all_for_all_libraries(ImageGridUIState &state)
 }
 
 void image_grid_filter_set_membership(ImageGridUIState &state,
-                                      const ImageGridShelfCatalogMode membership_mode)
+                                      const ImageGridCatalogMode membership_mode)
 {
-  BLI_assert(membership_mode == ImageGridShelfCatalogMode::Recent ||
-             membership_mode == ImageGridShelfCatalogMode::Favorites);
+  BLI_assert(membership_mode == ImageGridCatalogMode::Recent ||
+             membership_mode == ImageGridCatalogMode::Favorites);
   /* Mirror #image_grid_pending_schedule_from_asset: membership browses across all libraries and
    * must not commit empty paths into the per-library set. */
-  if (state.filter.catalog_mode != ImageGridShelfCatalogMode::Recent &&
-      state.filter.catalog_mode != ImageGridShelfCatalogMode::Favorites)
+  if (state.filter.catalog_mode != ImageGridCatalogMode::Recent &&
+      state.filter.catalog_mode != ImageGridCatalogMode::Favorites)
   {
     image_grid_catalog_commit_active(state);
   }
@@ -247,7 +238,7 @@ void image_grid_filter_set_membership(ImageGridUIState &state,
       &U,
       state.filter.lib_ref,
       image_grid_catalog_memory_domain,
-      (membership_mode == ImageGridShelfCatalogMode::Recent) ? ASSET_CATALOG_MEMORY_RECENT :
+      (membership_mode == ImageGridCatalogMode::Recent) ? ASSET_CATALOG_MEMORY_RECENT :
                                                                ASSET_CATALOG_MEMORY_FAVORITES);
 }
 
@@ -256,16 +247,16 @@ void image_grid_catalog_swap_library(ImageGridUIState &state,
                                      const AssetLibraryReference &new_lib_ref)
 {
   /* Leaving membership: do not commit empty membership paths (would wipe ALL-library filters). */
-  if (state.filter.catalog_mode != ImageGridShelfCatalogMode::Recent &&
-      state.filter.catalog_mode != ImageGridShelfCatalogMode::Favorites)
+  if (state.filter.catalog_mode != ImageGridCatalogMode::Recent &&
+      state.filter.catalog_mode != ImageGridCatalogMode::Favorites)
   {
     image_grid_catalog_commit_active(state);
   }
   state.filter.lib_ref = new_lib_ref;
   image_grid_catalog_load_active(state, new_lib_ref);
   state.filter.catalog_mode = state.filter.enabled_catalog_paths.is_empty() ?
-                                  ImageGridShelfCatalogMode::All :
-                                  ImageGridShelfCatalogMode::CatalogPath;
+                                  ImageGridCatalogMode::All :
+                                  ImageGridCatalogMode::CatalogPath;
 }
 
 void image_grid_catalog_sanitize_selection(ImageGridUIState &state)
@@ -293,8 +284,8 @@ void image_grid_catalog_sanitize_selection(ImageGridUIState &state)
 
   state.filter.enabled_catalog_paths = std::move(valid_paths);
   state.filter.catalog_mode = state.filter.enabled_catalog_paths.is_empty() ?
-                                  ImageGridShelfCatalogMode::All :
-                                  ImageGridShelfCatalogMode::CatalogPath;
+                                  ImageGridCatalogMode::All :
+                                  ImageGridCatalogMode::CatalogPath;
   image_grid_catalog_commit_active(state);
 }
 
@@ -307,7 +298,7 @@ void image_grid_state_reset_catalog(ImageGridUIState &state)
 {
   state.filter.enabled_catalog_paths.clear();
   BKE_asset_catalog_memory_set_all(&U, state.filter.lib_ref, image_grid_catalog_memory_domain);
-  state.filter.catalog_mode = ImageGridShelfCatalogMode::All;
+  state.filter.catalog_mode = ImageGridCatalogMode::All;
 }
 
 /* -------------------------------------------------------------------- */
@@ -519,14 +510,14 @@ int image_grid_foreach_filtered_item(
     return fn(item, out_index++);
   };
 
-  if (state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent) {
+  if (state.filter.catalog_mode == ImageGridCatalogMode::Recent) {
     image_grid_foreach_membership_item(
         bmain,
         ed::asset::shelf::shelf_asset_lists_recent(IMAGE_TEXTURE_SHELF_IDNAME),
         gate);
     return out_index;
   }
-  if (state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites) {
+  if (state.filter.catalog_mode == ImageGridCatalogMode::Favorites) {
     image_grid_foreach_membership_item(
         bmain,
         ed::asset::shelf::shelf_asset_lists_favorites(IMAGE_TEXTURE_SHELF_IDNAME),
@@ -563,11 +554,7 @@ int image_grid_foreach_filtered_item(
 
 /** \} */
 
-}  // namespace blender::ed::view3d
-
-namespace blender::ed::image_grid {
-
-struct ImageGridStatesPerView3D {
+struct ImageGridStatesPerOwner {
   ImageGridUIState texture;
   ImageGridUIState mask;
   bool texture_initialized = false;
@@ -579,13 +566,13 @@ struct ImageGridStatesPerView3D {
  * access. Keeping it on the owning space (instead of a global map keyed by raw pointer) ties its
  * lifetime to the owner and avoids aliasing when a freed space's address is reused.
  */
-static ImageGridStatesPerView3D &image_grid_states_ensure(const ImageGridOwner owner)
+static ImageGridStatesPerOwner &image_grid_states_ensure(const ImageGridOwner owner)
 {
   void *&slot = owner.runtime_state_slot();
   if (!slot) {
-    slot = MEM_new<ImageGridStatesPerView3D>(__func__);
+    slot = MEM_new<ImageGridStatesPerOwner>(__func__);
   }
-  return *static_cast<ImageGridStatesPerView3D *>(slot);
+  return *static_cast<ImageGridStatesPerOwner *>(slot);
 }
 
 struct ImageGridOwnerDNAFields {
@@ -620,7 +607,7 @@ static void image_grid_init_state_from_owner_dna(ImageGridUIState &state,
 
   /* Catalog filters come only from UserDef (domain #"image_grid"). Old blend-file DNA path lists
    * are intentionally dropped — no DNA→UserDef migration. Persist clears those DNA lists. */
-  view3d::image_grid_catalog_load_active(state, state.filter.lib_ref);
+  image_grid_catalog_load_active(state, state.filter.lib_ref);
 
   state.filter.name_match.enabled = (dna.filter_name_match_enabled != 0);
   state.filter.name_match.active_map_type_ids.clear();
@@ -632,10 +619,10 @@ static void image_grid_init_state_from_owner_dna(ImageGridUIState &state,
     }
   }
 
-  const view3d::ImageGridShelfCatalogMode dna_mode =
-      view3d::ImageGridShelfCatalogMode(dna.catalog_mode);
-  if (dna_mode == view3d::ImageGridShelfCatalogMode::Recent ||
-      dna_mode == view3d::ImageGridShelfCatalogMode::Favorites)
+  const ImageGridCatalogMode dna_mode =
+      ImageGridCatalogMode(dna.catalog_mode);
+  if (dna_mode == ImageGridCatalogMode::Recent ||
+      dna_mode == ImageGridCatalogMode::Favorites)
   {
     /* Membership: browse across all libraries; do not load catalog paths into the active filter. */
     state.filter.lib_ref = asset_system::all_library_reference();
@@ -644,21 +631,21 @@ static void image_grid_init_state_from_owner_dna(ImageGridUIState &state,
     BKE_asset_catalog_memory_set_mode(
         &U,
         state.filter.lib_ref,
-        view3d::image_grid_catalog_memory_domain,
-        (dna_mode == view3d::ImageGridShelfCatalogMode::Recent) ? ASSET_CATALOG_MEMORY_RECENT :
+        image_grid_catalog_memory_domain,
+        (dna_mode == ImageGridCatalogMode::Recent) ? ASSET_CATALOG_MEMORY_RECENT :
                                                                   ASSET_CATALOG_MEMORY_FAVORITES);
   }
   else {
-    view3d::image_grid_catalog_sanitize_selection(state);
+    image_grid_catalog_sanitize_selection(state);
     state.filter.catalog_mode = state.filter.enabled_catalog_paths.is_empty() ?
-                                    view3d::ImageGridShelfCatalogMode::All :
-                                    view3d::ImageGridShelfCatalogMode::CatalogPath;
+                                    ImageGridCatalogMode::All :
+                                    ImageGridCatalogMode::CatalogPath;
   }
 }
 
 ImageGridUIState &image_grid_state_get(const ImageGridOwner owner, const bool is_mask_slot)
 {
-  ImageGridStatesPerView3D &per_owner = image_grid_states_ensure(owner);
+  ImageGridStatesPerOwner &per_owner = image_grid_states_ensure(owner);
   ImageGridUIState &state = is_mask_slot ? per_owner.mask : per_owner.texture;
   bool &initialized = is_mask_slot ? per_owner.mask_initialized : per_owner.texture_initialized;
   if (!initialized) {
@@ -682,17 +669,6 @@ bool image_grid_library_is_missing(const ImageGridOwner owner, const bool is_mas
     return false;
   }
   return BKE_preferences_asset_library_find_from_ref(&U, &state.filter.lib_ref) == nullptr;
-}
-
-ImageGridUIState &image_grid_state_get_from_context(const bContext &C)
-{
-  /* Callers of this function only invoke it from a context where a grid is already known to be
-   * drawing (see #image_grid_owner_from_context callers upstream), so an owner always resolves
-   * here in practice; the assert documents that invariant instead of silently returning a
-   * dangling reference if it's ever violated. */
-  const std::optional<ImageGridOwner> owner = image_grid_owner_from_context(C);
-  BLI_assert(owner.has_value());
-  return image_grid_state_get(*owner, view3d::image_grid_is_mask_slot_from_context(C));
 }
 
 std::string image_grid_session_id(const ImageGridOwner owner,
@@ -728,7 +704,7 @@ void image_grid_state_remove(const ImageGridOwner owner)
   }
   void *&slot = owner.runtime_state_slot();
   if (slot) {
-    MEM_delete(static_cast<ImageGridStatesPerView3D *>(slot));
+    MEM_delete(static_cast<ImageGridStatesPerOwner *>(slot));
     slot = nullptr;
   }
 }

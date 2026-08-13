@@ -326,6 +326,24 @@ bUserAssetLibrary *BKE_preferences_asset_library_containing_path(const UserDef *
   return nullptr;
 }
 
+bUserAssetLibrary *BKE_preferences_asset_library_deepest_containing_path(const UserDef *userdef,
+                                                                         const char *path)
+{
+  bUserAssetLibrary *best = nullptr;
+  size_t best_len = 0;
+  for (bUserAssetLibrary &asset_lib_pref : userdef->asset_libraries) {
+    if (!asset_lib_pref.dirpath[0] || !BLI_path_contains(asset_lib_pref.dirpath, path)) {
+      continue;
+    }
+    const size_t len = BLI_strnlen(asset_lib_pref.dirpath, sizeof(asset_lib_pref.dirpath));
+    if (len > best_len) {
+      best = &asset_lib_pref;
+      best_len = len;
+    }
+  }
+  return best;
+}
+
 int BKE_preferences_asset_library_get_index(const UserDef *userdef,
                                             const bUserAssetLibrary *library)
 {

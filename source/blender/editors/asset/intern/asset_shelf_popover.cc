@@ -48,7 +48,7 @@
 #include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
 #include "ED_screen.hh"
-#include "ED_view3d.hh"
+#include "ED_image_grid.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -128,7 +128,7 @@ AssetShelf *popup_shelf_get_or_create(const bContext &C, AssetShelfType &shelf_t
   if (shelf_idname_is_brush_shelf(shelf_type.idname)) {
     new_shelf->settings.recent_max_count = U.asset_shelf_recent_brushes_max;
   }
-  else if (STREQ(shelf_type.idname, ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME)) {
+  else if (STREQ(shelf_type.idname, ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME)) {
     new_shelf->settings.recent_max_count = U.asset_shelf_recent_images_max;
   }
   else {
@@ -1284,7 +1284,7 @@ static void popover_display_panel_draw(const bContext *C, Panel *panel)
   col.prop(&shelf_ptr, "show_names", UI_ITEM_NONE, IFACE_("Show Names"), ICON_NONE);
 
   if (supports_asset_lists) {
-    const bool is_image_shelf = STREQ(shelf->type->idname, ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME);
+    const bool is_image_shelf = STREQ(shelf->type->idname, ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME);
     col.prop(&shelf_ptr,
              "recent_max_count",
              UI_ITEM_NONE,

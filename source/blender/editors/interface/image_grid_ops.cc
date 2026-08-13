@@ -38,7 +38,6 @@
 
 #include "BLT_translation.hh"
 
-#include "ED_asset_image_library.hh"
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_import.hh"
 #include "ED_asset_library.hh"
@@ -46,10 +45,8 @@
 #include "ED_asset_mark_clear.hh"
 #include "ED_asset_menu_utils.hh"
 #include "ED_asset_shelf.hh"
-#include "ED_fileselect.hh"
 #include "ED_image_grid.hh"
 #include "ED_screen.hh"
-#include "ED_view3d.hh"
 
 #include "BLI_string_utf8.h"
 
@@ -81,7 +78,7 @@
 
 #include "view3d_intern.hh"
 
-namespace blender::ed::view3d {
+namespace blender::ed::image_grid {
 
 void image_grid_notify_change(bContext &C, const bool is_mask_slot)
 {
@@ -157,12 +154,12 @@ const char *image_grid_library_ui_name(const AssetLibraryReference &lib_ref)
 const char *image_grid_library_selector_label(const ImageGridUIState &state)
 {
   switch (state.filter.catalog_mode) {
-    case ImageGridShelfCatalogMode::Recent:
+    case ImageGridCatalogMode::Recent:
       return IFACE_("Recent");
-    case ImageGridShelfCatalogMode::Favorites:
+    case ImageGridCatalogMode::Favorites:
       return IFACE_("Favorites");
-    case ImageGridShelfCatalogMode::All:
-    case ImageGridShelfCatalogMode::CatalogPath:
+    case ImageGridCatalogMode::All:
+    case ImageGridCatalogMode::CatalogPath:
       break;
   }
   return image_grid_library_ui_name(state.filter.lib_ref);
@@ -340,10 +337,6 @@ void image_grid_auto_focus_on_brush_change(bContext &C, const bool is_mask_slot)
 
 /** \} */
 
-}  // namespace blender::ed::view3d
-
-namespace blender::ed::image_grid {
-
 int image_grid_effective_rows(const ImageGridOwner owner, const bool is_mask_slot)
 {
   const int stored = owner.slot_dna(is_mask_slot).rows;
@@ -358,10 +351,6 @@ int image_grid_preview_size_get(const ImageGridOwner owner)
   }
   return ASSET_SHELF_PREVIEW_SIZE_DEFAULT;
 }
-
-}  // namespace blender::ed::image_grid
-
-namespace blender::ed::view3d {
 
 /**
  * Image paint expects a plain image texture (#TEX_IMAGE without a node tree or color ramp).
@@ -589,8 +578,8 @@ bool image_grid_set_library(bContext &C,
 {
   ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, is_mask_slot);
 
-  const bool in_membership = state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent ||
-                             state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites;
+  const bool in_membership = state.filter.catalog_mode == ImageGridCatalogMode::Recent ||
+                             state.filter.catalog_mode == ImageGridCatalogMode::Favorites;
   const bool same_lib = ed::asset::library_reference_to_enum_value(&new_ref) ==
                         ed::asset::library_reference_to_enum_value(&state.filter.lib_ref);
   if (same_lib && !in_membership) {
@@ -614,11 +603,11 @@ bool image_grid_set_library(bContext &C,
 
 /** \} */
 
-}  // namespace blender::ed::view3d
+}  // namespace blender::ed::image_grid
 
 namespace blender {
 
-using namespace ed::view3d;
+using namespace ed::image_grid;
 
 static const EnumPropertyItem *rna_image_grid_library_itemf(bContext *C,
                                                             PointerRNA *ptr,
@@ -956,7 +945,7 @@ static wmOperatorStatus image_shelf_activate_asset_exec(bContext *C, wmOperator 
             ed::image_grid::image_grid_owner_from_context(*C))
     {
       ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, use_mask_slot);
-      const ImageGridShelfCatalogMode shelf_mode = image_grid_shelf_catalog_mode(
+      const ImageGridCatalogMode shelf_mode = image_grid_shelf_catalog_mode(
           *image_texture_shelf);
       const std::optional<std::string> shelf_catalog_path = image_grid_catalog_path_from_shelf(
           *image_texture_shelf);
@@ -1007,65 +996,6 @@ void VIEW3D_OT_image_shelf_activate_asset(wmOperatorType *ot)
                          "Mask Texture Slot",
                          "Assign to the mask texture slot instead of the main texture slot");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE | PROP_HIDDEN);
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Set Catalog
- * \{ */
-
-static wmOperatorStatus image_grid_set_catalog_exec(bContext *C, wmOperator *op)
-{
-  View3D *v3d = CTX_wm_view3d(C);
-  if (!v3d) {
-    return OPERATOR_CANCELLED;
-  }
-
-  char path_buf[MAX_NAME];
-  RNA_string_get(op->ptr, "catalog_path", path_buf);
-
-  const bool is_mask_slot = image_grid_is_mask_slot_from_context(*C);
-  const ed::image_grid::ImageGridOwner owner = ed::image_grid::ImageGridOwner::from(*v3d);
-  ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner, is_mask_slot);
-  if (path_buf[0] == '\0') {
-    /* Empty path means "show all" — clear the filter set. */
-    image_grid_filter_set_show_all(state);
-  }
-  else {
-    /* Toggle the path in the enabled set. */
-    const bool was_membership = state.filter.catalog_mode == ImageGridShelfCatalogMode::Recent ||
-                                state.filter.catalog_mode == ImageGridShelfCatalogMode::Favorites;
-    const std::string path(path_buf);
-    if (!state.filter.enabled_catalog_paths.remove(path)) {
-      state.filter.enabled_catalog_paths.add(path);
-    }
-    state.filter.catalog_mode = state.filter.enabled_catalog_paths.is_empty() ?
-                                    ImageGridShelfCatalogMode::All :
-                                    ImageGridShelfCatalogMode::CatalogPath;
-    if (!(was_membership && state.filter.enabled_catalog_paths.is_empty())) {
-      image_grid_catalog_commit_active(state);
-    }
-  }
-  ed::image_grid::image_grid_reset_scroll(owner, is_mask_slot);
-  image_grid_pending_clear(state);
-
-  ed::image_grid::image_grid_state_persist(owner, state, is_mask_slot);
-  image_grid_notify_change(*C);
-  return OPERATOR_FINISHED;
-}
-
-void VIEW3D_OT_image_grid_set_catalog(wmOperatorType *ot)
-{
-  ot->name = "Set Image Grid Catalog";
-  ot->description = "Set the active asset catalog filter for the image grid";
-  ot->idname = "VIEW3D_OT_image_grid_set_catalog";
-
-  ot->exec = image_grid_set_catalog_exec;
-
-  ot->flag = OPTYPE_REGISTER;
-
-  RNA_def_string(ot->srna, "catalog_path", nullptr, MAX_NAME, "Catalog Path", "");
 }
 
 /** \} */
@@ -1134,12 +1064,12 @@ void IMAGE_GRID_OT_set_library(wmOperatorType *ot)
  * \{ */
 
 static const EnumPropertyItem image_grid_membership_items[] = {
-    {int(ImageGridShelfCatalogMode::Recent),
+    {int(ImageGridCatalogMode::Recent),
      "RECENT",
      ICON_RECOVER_LAST,
      "Recent",
      "Show recently used image assets"},
-    {int(ImageGridShelfCatalogMode::Favorites),
+    {int(ImageGridCatalogMode::Favorites),
      "FAVORITES",
      ICON_SOLO_ON,
      "Favorites",
@@ -1155,9 +1085,9 @@ static wmOperatorStatus image_grid_set_membership_exec(bContext *C, wmOperator *
     return OPERATOR_CANCELLED;
   }
 
-  const ImageGridShelfCatalogMode mode = ImageGridShelfCatalogMode(
+  const ImageGridCatalogMode mode = ImageGridCatalogMode(
       RNA_enum_get(op->ptr, "mode"));
-  if (mode != ImageGridShelfCatalogMode::Recent && mode != ImageGridShelfCatalogMode::Favorites) {
+  if (mode != ImageGridCatalogMode::Recent && mode != ImageGridCatalogMode::Favorites) {
     return OPERATOR_CANCELLED;
   }
 
@@ -1226,20 +1156,25 @@ static wmOperatorStatus image_grid_mark_asset_exec(bContext *C, wmOperator * /*o
 
   ed::asset::generate_preview(C, id);
 
-  ImageGridUIState &state = ed::image_grid::image_grid_state_get_from_context(*C);
-  if (!state.filter.enabled_catalog_paths.is_empty()) {
-    asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
-        asset_system::current_file_library_reference());
-    if (library) {
-      /* Assign the asset to the first enabled catalog path. If multiple catalogs are
-       * enabled, the first one encountered in set iteration is used. */
-      const std::string &path_str = *state.filter.enabled_catalog_paths.begin();
-      const asset_system::AssetCatalogPath cat_path =
-          asset_system::AssetCatalogPath::from_user_input(path_str.c_str());
-      const asset_system::AssetCatalog &catalog = ed::asset::library_ensure_catalogs_in_path(
-          *library, cat_path);
-      BKE_asset_metadata_catalog_id_set(
-          id->asset_data, catalog.catalog_id, catalog.simple_name.c_str());
+  const std::optional<ed::image_grid::ImageGridOwner> owner =
+      ed::image_grid::image_grid_owner_from_context(*C);
+  if (owner) {
+    ImageGridUIState &state = ed::image_grid::image_grid_state_get(
+        *owner, image_grid_is_mask_slot_from_context(*C));
+    if (!state.filter.enabled_catalog_paths.is_empty()) {
+      asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
+          asset_system::current_file_library_reference());
+      if (library) {
+        /* Assign the asset to the first enabled catalog path. If multiple catalogs are
+         * enabled, the first one encountered in set iteration is used. */
+        const std::string &path_str = *state.filter.enabled_catalog_paths.begin();
+        const asset_system::AssetCatalogPath cat_path =
+            asset_system::AssetCatalogPath::from_user_input(path_str.c_str());
+        const asset_system::AssetCatalog &catalog = ed::asset::library_ensure_catalogs_in_path(
+            *library, cat_path);
+        BKE_asset_metadata_catalog_id_set(
+            id->asset_data, catalog.catalog_id, catalog.simple_name.c_str());
+      }
     }
   }
 
@@ -1540,153 +1475,6 @@ void IMAGE_GRID_OT_open(wmOperatorType *ot)
                   true,
                   "Detect UDIMs",
                   "Detect selected UDIM files and load all matching tiles");
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Browse Assets
- * \{ */
-
-static void image_grid_configure_asset_browser(SpaceFile &sfile,
-                                               const AssetLibraryReference &library_ref)
-{
-  sfile.browse_mode = FILE_BROWSE_MODE_ASSETS;
-
-  UserDef U_default = {};
-  FileAssetSelectParams *asset_params = sfile.asset_params;
-  if (!asset_params) {
-    asset_params = MEM_new<FileAssetSelectParams>(__func__);
-    sfile.asset_params = asset_params;
-    asset_params->base_params.details_flags = U_default.file_space_data.details_flags;
-    asset_params->import_method = FILE_ASSET_IMPORT_FOLLOW_PREFS;
-    asset_params->import_flags = FILE_ASSET_IMPORT_INSTANCE_COLLECTIONS_ON_LINK;
-  }
-
-  ED_fileselect_asset_library_reference_set(asset_params, library_ref);
-
-  FileSelectParams *params = &asset_params->base_params;
-  params->filter_id = FILTER_ID_IM;
-  params->flag |= FILE_ASSETS_ONLY;
-}
-
-static bool image_grid_focus_asset_browser(bContext &C, const AssetLibraryReference &library_ref)
-{
-  wmWindowManager *wm = CTX_wm_manager(&C);
-  for (wmWindow &win : wm->windows) {
-    bScreen *screen = WM_window_get_active_screen(&win);
-    for (ScrArea &area : screen->areabase) {
-      if (area.spacetype != SPACE_FILE) {
-        continue;
-      }
-      SpaceFile *sfile = reinterpret_cast<SpaceFile *>(area.spacedata.first);
-      if (sfile->browse_mode != FILE_BROWSE_MODE_ASSETS) {
-        continue;
-      }
-
-      image_grid_configure_asset_browser(*sfile, library_ref);
-      ed::asset::list::storage_fetch(&library_ref, &C);
-
-      CTX_wm_window_set(&C, &win);
-      WM_window_set_active_screen(&win, nullptr, screen);
-      CTX_wm_area_set(&C, &area);
-
-      ED_area_tag_redraw(&area);
-      ED_area_tag_refresh(&area);
-      return true;
-    }
-  }
-  return false;
-}
-
-static wmOperatorStatus image_grid_browse_assets_exec(bContext *C, wmOperator *op)
-{
-  const int enum_value = RNA_enum_get(op->ptr, "asset_library_reference");
-  const AssetLibraryReference library_ref = ed::asset::library_reference_from_enum_value(
-      enum_value);
-
-  if (image_grid_focus_asset_browser(*C, library_ref)) {
-    return OPERATOR_FINISHED;
-  }
-
-  ScrArea *area = CTX_wm_area(C);
-  if (!area) {
-    return OPERATOR_CANCELLED;
-  }
-
-  ED_area_newspace(C, area, SPACE_FILE, false);
-  SpaceFile *sfile = reinterpret_cast<SpaceFile *>(area->spacedata.first);
-  image_grid_configure_asset_browser(*sfile, library_ref);
-  ed::asset::list::storage_fetch(&library_ref, C);
-  ED_area_tag_redraw(area);
-  ED_area_tag_refresh(area);
-
-  return OPERATOR_FINISHED;
-}
-
-void VIEW3D_OT_image_grid_browse_assets(wmOperatorType *ot)
-{
-  ot->name = "Browse Image Assets";
-  ot->description = "Open or focus the Asset Browser filtered to images";
-  ot->idname = "VIEW3D_OT_image_grid_browse_assets";
-
-  ot->exec = image_grid_browse_assets_exec;
-
-  ot->flag = OPTYPE_REGISTER;
-
-  PropertyRNA *prop = RNA_def_property(ot->srna, "asset_library_reference", PROP_ENUM, PROP_NONE);
-  RNA_def_enum_funcs(prop, rna_image_grid_library_itemf);
-  RNA_def_property_ui_text(prop, "Library", "Asset library to browse");
-}
-
-/* -------------------------------------------------------------------- */
-/** \name Refresh Image Grid Library
- * \{ */
-
-static bool image_grid_refresh_library_poll(bContext *C)
-{
-  const View3D *v3d = CTX_wm_view3d(C);
-  if (!v3d) {
-    return false;
-  }
-  const ImageGridUIState &state = ed::image_grid::image_grid_state_get(
-      ed::image_grid::ImageGridOwner::from(const_cast<View3D &>(*v3d)), false);
-  return state.filter.lib_ref.type != ASSET_LIBRARY_LOCAL;
-}
-
-static wmOperatorStatus image_grid_refresh_library_exec(bContext *C, wmOperator * /*op*/)
-{
-  View3D *v3d = CTX_wm_view3d(C);
-  if (!v3d) {
-    return OPERATOR_CANCELLED;
-  }
-
-  ImageGridUIState &state = ed::image_grid::image_grid_state_get(
-      ed::image_grid::ImageGridOwner::from(*v3d), false);
-
-  if (state.filter.lib_ref.type == ASSET_LIBRARY_CUSTOM) {
-    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_from_ref(
-        &U, &state.filter.lib_ref);
-    if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
-      ed::asset::image_library_scan_and_index(user_lib->dirpath);
-      ed::asset::image_library_invalidate_cached_previews(user_lib->dirpath);
-    }
-  }
-
-  ed::asset::list::clear(&state.filter.lib_ref, C);
-  WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
-  return OPERATOR_FINISHED;
-}
-
-void VIEW3D_OT_image_grid_refresh_library(wmOperatorType *ot)
-{
-  ot->name = "Refresh Image Grid Library";
-  ot->description =
-      "Rescan the image library for added, moved or deleted files and reload the image grid";
-  ot->idname = "VIEW3D_OT_image_grid_refresh_library";
-
-  ot->exec = image_grid_refresh_library_exec;
-  ot->poll = image_grid_refresh_library_poll;
 }
 
 /** \} */

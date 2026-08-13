@@ -31,6 +31,7 @@
 #include "ED_screen.hh"
 #include "ED_transform.hh"
 #include "ED_view3d.hh"
+#include "ED_image_grid.hh"
 
 #include "UI_interface_c.hh"
 
@@ -197,7 +198,7 @@ static void VIEW3D_OT_pastebuffer(wmOperatorType *ot)
  */
 static int view3d_image_grid_ui_event_handler(bContext *C, const wmEvent *event, ARegion *region)
 {
-  return ed::view3d::handle_image_grid_focus_active_event(C, event, region);
+  return ed::image_grid::handle_image_grid_focus_active_event(C, event, region);
 }
 
 void view3d_operatortypes()
@@ -279,7 +280,6 @@ void view3d_operatortypes()
   WM_operatortype_append(IMAGE_GRID_OT_set_library);
   WM_operatortype_append(IMAGE_GRID_OT_set_membership);
   WM_operatortype_append(IMAGE_GRID_OT_assign_texture);
-  WM_operatortype_append(VIEW3D_OT_image_grid_set_catalog);
   WM_operatortype_append(IMAGE_GRID_OT_mark_asset);
   WM_operatortype_append(IMAGE_GRID_OT_new);
   WM_operatortype_append(IMAGE_GRID_OT_open);
@@ -287,9 +287,7 @@ void view3d_operatortypes()
   WM_operatortype_append(IMAGE_GRID_OT_copy_to_library);
   WM_operatortype_append(IMAGE_GRID_OT_move_to_library);
   WM_operatortype_append(IMAGE_GRID_OT_drop_import);
-  WM_operatortype_append(VIEW3D_OT_image_grid_browse_assets);
   WM_operatortype_append(VIEW3D_OT_image_shelf_activate_asset);
-  WM_operatortype_append(VIEW3D_OT_image_grid_refresh_library);
   WM_operatortype_append(VIEW3D_OT_image_grid_name_match_enabled_toggle);
   WM_operatortype_append(VIEW3D_OT_image_grid_name_match_map_type_toggle);
   WM_operatortype_append(VIEW3D_OT_image_grid_name_match_clear);

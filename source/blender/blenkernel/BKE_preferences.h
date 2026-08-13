@@ -145,6 +145,17 @@ void BKE_preferences_asset_library_reference_set(const struct UserDef *userdef,
 struct bUserAssetLibrary *BKE_preferences_asset_library_containing_path(
     const struct UserDef *userdef, const char *path) ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
 
+/**
+ * Like #BKE_preferences_asset_library_containing_path, but when several libraries contain \a path
+ * (a library nested inside another), return the most specific match -- the one with the longest
+ * directory. First-match is wrong for nested libraries: the parent would steal the child's
+ * identity (type flags, image index, catalog refresh).
+ *
+ * Return NULL when no such asset library is found.
+ */
+struct bUserAssetLibrary *BKE_preferences_asset_library_deepest_containing_path(
+    const struct UserDef *userdef, const char *path) ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;
+
 int BKE_preferences_asset_library_get_index(const struct UserDef *userdef,
                                             const struct bUserAssetLibrary *library)
     ATTR_NONNULL() ATTR_WARN_UNUSED_RESULT;

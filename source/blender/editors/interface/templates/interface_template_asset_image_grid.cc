@@ -70,11 +70,10 @@
 
 #include "ED_asset_shelf.hh"
 #include "ED_image_grid.hh"
-#include "ED_view3d.hh"
 
 namespace blender::ui {
 
-using ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME;
+using ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME;
 
 /**
  * Upper bound on tiles built per redraw (16 rows × wide N-panel). The actual window is
@@ -224,7 +223,7 @@ class ImageAssetGridItem : public PreviewGridItem {
       if (target_ptr_.owner_id) {
         RNA_int_set(&op_ptr, "brush_session_uid", int(target_ptr_.owner_id->session_uid));
       }
-      RNA_boolean_set(&op_ptr, "use_mask_slot", ed::view3d::image_grid_slot_is_mask(target_ptr_));
+      RNA_boolean_set(&op_ptr, "use_mask_slot", ed::image_grid::image_grid_slot_is_mask(target_ptr_));
       RNA_boolean_set(&op_ptr, "is_popover", is_popover_);
 
       if (kind_ == ImageGridItemKind::BlendImage) {
@@ -319,7 +318,7 @@ class ImageAssetGridItem : public PreviewGridItem {
     }
 
     if (kind_ == ImageGridItemKind::Asset) {
-      return ed::view3d::image_grid_asset_represents_image(*asset_, *active_image);
+      return ed::image_grid::image_grid_asset_represents_image(*asset_, *active_image);
     }
 
     return false;
@@ -457,7 +456,7 @@ class ImageAssetGridItem : public PreviewGridItem {
   void set_grid_item_operator_props(const bContext &C, PointerRNA &props) const
   {
     RNA_boolean_set(
-        &props, "use_mask_slot", ed::view3d::image_grid_is_mask_slot_from_context(C) ? 1 : 0);
+        &props, "use_mask_slot", ed::image_grid::image_grid_is_mask_slot_from_context(C) ? 1 : 0);
     if (kind_ == ImageGridItemKind::Asset) {
       RNA_enum_set(&props,
                    "asset_library_reference",
@@ -591,7 +590,7 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
   bool can_drop(bContext & /*C*/, const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
   {
     /* Local image data-block or image asset (imported on drop). */
-    if (WM_drag_is_ID_type(&drag, ID_IM) || drag.type == WM_DRAG_ASSET) {
+    if (WM_drag_is_ID_type(&drag, ID_IM)) {
       return true;
     }
     /* The Asset Browser drags a #WM_DRAG_ASSET_LIST alongside the single-item #WM_DRAG_ASSET
@@ -631,7 +630,7 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
   /**
    * Assign one dropped image to the bound slot via the same brush-localizing path as
    * #IMAGE_GRID_OT_open and the grid's own tile click
-   * (#ed::view3d::image_grid_assign_dropped_image), not #BRUSH_OT_texture_slot_assign_image: that
+   * (#ed::image_grid::image_grid_assign_dropped_image), not #BRUSH_OT_texture_slot_assign_image: that
    * operator moves (or, for a pre-existing image, copies) the image into a linked brush's library
    * to keep the reference in the same undo domain - which for the common case of an asset-shelf
    * (linked) active brush left the dropped image showing as linked, and for a pre-existing image
@@ -682,7 +681,7 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
       return false;
     }
 
-    return ed::view3d::image_grid_assign_dropped_image(*C, target_ptr_, *image);
+    return ed::image_grid::image_grid_assign_dropped_image(*C, target_ptr_, *image);
   }
 
   /**
@@ -718,7 +717,7 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
         RNA_string_set(&itemptr, "name", name);
       }
     }
-    RNA_boolean_set(&props, "use_mask_slot", ed::view3d::image_grid_slot_is_mask(target_ptr_));
+    RNA_boolean_set(&props, "use_mask_slot", ed::image_grid::image_grid_slot_is_mask(target_ptr_));
 
     /* Invoke so the operator can present the mode menu / catalog dialog. */
     const wmOperatorStatus status = WM_operator_name_call(C,
@@ -739,7 +738,7 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
 
 class ImageAssetGridView : public AbstractGridView {
   const bContext &context_;
-  ed::view3d::ImageGridUIState &state_;
+  ed::image_grid::ImageGridUIState &state_;
   AssetLibraryReference library_ref_;
   PointerRNA target_ptr_;
   PropertyRNA *target_prop_ = nullptr;
@@ -750,7 +749,7 @@ class ImageAssetGridView : public AbstractGridView {
 
  public:
   ImageAssetGridView(const bContext &context,
-                     ed::view3d::ImageGridUIState &state,
+                     ed::image_grid::ImageGridUIState &state,
                      const AssetLibraryReference &library_ref,
                      const PointerRNA &target_ptr,
                      PropertyRNA *target_prop,
@@ -783,10 +782,10 @@ class ImageAssetGridView : public AbstractGridView {
         grip_height, this->get_style().tile_height, cols, IMAGE_GRID_MAX_ITEMS);
     const int last_index = first_index + item_window;
 
-    const int filtered_count = ed::view3d::image_grid_foreach_filtered_item(
+    const int filtered_count = ed::image_grid::image_grid_foreach_filtered_item(
         *bmain,
         state_,
-        [&](const ed::view3d::ImageGridFilteredItem &item, int filtered_index) -> bool {
+        [&](const ed::image_grid::ImageGridFilteredItem &item, int filtered_index) -> bool {
           if (filtered_index >= first_index && filtered_index < last_index) {
             if (item.asset) {
               this->add_item<ImageAssetGridItem>(
@@ -932,7 +931,7 @@ class ImageGridStateAccess : public GridStateAccess {
       if (const std::optional<ed::image_grid::ImageGridOwner> owner =
               ed::image_grid::image_grid_owner_from_context(C))
       {
-        ed::view3d::image_grid_focus_clear(
+        ed::image_grid::image_grid_focus_clear(
             ed::image_grid::image_grid_state_get(*owner, is_mask_slot).viewport);
       }
       if (ARegion *region = CTX_wm_region(&C)) {
@@ -976,10 +975,10 @@ class ImageGridStateAccess : public GridStateAccess {
 
 static void add_browse_image_button(Layout &layout,
                                     bContext &C,
-                                    ed::view3d::ImageGridUIState &state,
+                                    ed::image_grid::ImageGridUIState &state,
                                     PointerRNA &target_ptr)
 {
-  ed::view3d::image_grid_prepare_browse_shelf(C, state, IMAGE_TEXTURE_SHELF_IDNAME);
+  ed::image_grid::image_grid_prepare_browse_shelf(C, state, IMAGE_TEXTURE_SHELF_IDNAME);
 
   Layout &split = layout.split(0.55f, true);
   split.context_string_set("asset_shelf_idname", IMAGE_TEXTURE_SHELF_IDNAME);
@@ -1036,12 +1035,12 @@ static void image_grid_library_selector_menu_draw(bContext * /*C*/, Layout *layo
         "IMAGE_GRID_OT_set_membership", IFACE_("Recent"), ICON_RECOVER_LAST);
     RNA_enum_set(&recent_ptr,
                  "mode",
-                 int(ed::view3d::ImageGridShelfCatalogMode::Recent));
+                 int(ed::image_grid::ImageGridCatalogMode::Recent));
     PointerRNA favorites_ptr = col.op(
         "IMAGE_GRID_OT_set_membership", IFACE_("Favorites"), ICON_SOLO_ON);
     RNA_enum_set(&favorites_ptr,
                  "mode",
-                 int(ed::view3d::ImageGridShelfCatalogMode::Favorites));
+                 int(ed::image_grid::ImageGridCatalogMode::Favorites));
     col.separator();
   }
 
@@ -1100,7 +1099,7 @@ static bool image_grid_library_selector_menu_step(bContext *C, int direction, vo
     return false;
   }
   const ed::image_grid::ImageGridOwner owner = *owner_opt;
-  const ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner,
+  const ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(owner,
                                                                                    is_mask_slot);
 
   const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
@@ -1139,11 +1138,11 @@ static bool image_grid_library_selector_menu_step(bContext *C, int direction, vo
   const AssetLibraryReference new_ref = ed::asset::library_reference_from_enum_value(
       values[next_index]);
 
-  return ed::view3d::image_grid_set_library(*C, owner, is_mask_slot, new_ref);
+  return ed::image_grid::image_grid_set_library(*C, owner, is_mask_slot, new_ref);
 }
 
 static void draw_header_row(Layout &layout,
-                            ed::view3d::ImageGridUIState &state,
+                            ed::image_grid::ImageGridUIState &state,
                             const bContext &C,
                             const bool is_mask_slot)
 {
@@ -1155,7 +1154,7 @@ static void draw_header_row(Layout &layout,
   {
     Block *block = row.block();
     const int64_t buttons_num_before = block->buttons_ptrs.size();
-    row.menu_fn(ed::view3d::image_grid_library_selector_label(state),
+    row.menu_fn(ed::image_grid::image_grid_library_selector_label(state),
                 ICON_ASSET_MANAGER,
                 image_grid_library_selector_menu_draw,
                 POINTER_FROM_INT(is_mask_slot ? 1 : 0));
@@ -1202,7 +1201,7 @@ static void draw_header_row(Layout &layout,
 
 static void build_image_grid(Layout &layout,
                              const bContext &C,
-                             ed::view3d::ImageGridUIState &state,
+                             ed::image_grid::ImageGridUIState &state,
                              PointerRNA &ptr,
                              PropertyRNA *prop,
                              const bool is_mask_slot,
@@ -1283,7 +1282,7 @@ static void build_image_grid(Layout &layout,
 
   /* Focus: when a pending "scroll active texture into view" request applies to this layout the
    * helper returns the target row (-1 = nothing to do) and we set the session's pixel position. */
-  const int focus_row = ed::view3d::image_grid_apply_focus_scroll(
+  const int focus_row = ed::image_grid::image_grid_apply_focus_scroll(
       C, state, cols_est, effective_rows_hint);
   if (focus_row >= 0) {
     session.scroll_px = focus_row * max_ii(1, tile_h_hint);
@@ -1347,14 +1346,14 @@ void template_asset_image_grid(
    * can identify this slot regardless of where in the grid the pointer lands. */
   layout->context_ptr_set("image_grid_target", ptr);
 
-  const bool is_mask_slot = ed::view3d::image_grid_slot_is_mask(*ptr);
-  ed::view3d::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, is_mask_slot);
+  const bool is_mask_slot = ed::image_grid::image_grid_slot_is_mask(*ptr);
+  ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, is_mask_slot);
 
-  ed::view3d::image_grid_catalog_sanitize_selection(state);
-  ed::view3d::image_grid_pending_apply_if_ready(*C);
+  ed::image_grid::image_grid_catalog_sanitize_selection(state);
+  ed::image_grid::image_grid_pending_apply_if_ready(*C);
   /* Called inside the template redraw; NC_BRUSH already triggered this pass, so
    * #image_grid_notify_change must not be called here to avoid a recursive refresh. */
-  ed::view3d::image_grid_auto_focus_on_brush_change(*C, is_mask_slot);
+  ed::image_grid::image_grid_auto_focus_on_brush_change(*C, is_mask_slot);
 
   Block *block = layout->block();
 

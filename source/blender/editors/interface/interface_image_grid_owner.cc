@@ -5,12 +5,10 @@
  * \ingroup edinterface
  */
 
-#include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 #include "DNA_view3d_types.h"
 
 #include "BKE_context.hh"
-#include "BKE_screen.hh"
 #include "BLI_utildefines.h"
 
 #include "ED_image_grid.hh"
@@ -89,13 +87,6 @@ std::optional<ImageGridOwner> image_grid_owner_from_context(const bContext &C)
   }
   if (SpaceImage *sima = CTX_wm_space_image(&C)) {
     return ImageGridOwner::from(*sima);
-  }
-  bScreen *screen = CTX_wm_screen(&C);
-  if (!screen) {
-    return std::nullopt;
-  }
-  if (ScrArea *area = BKE_screen_find_big_area(screen, SPACE_VIEW3D, 0)) {
-    return ImageGridOwner::from(*static_cast<View3D *>(area->spacedata.first));
   }
   return std::nullopt;
 }

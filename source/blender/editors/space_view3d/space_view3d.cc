@@ -1442,7 +1442,7 @@ static void space_view3d_listener(const wmSpaceTypeListenerParams *params)
        * who never draws the N-Panel image-grid template (the only other place that re-applies
        * them) and instead opens the browse popover via hotkey gets an unregistered shelf type: no
        * active-asset highlighting or #ASSET_SHELF_TYPE_FLAG_CENTER_ACTIVE_ASSET_ON_OPEN. */
-      ed::view3d::image_grid_shelf_sync_register();
+      ed::image_grid::image_grid_shelf_sync_register();
       break;
     case NC_SCENE:
       switch (wmn->data) {

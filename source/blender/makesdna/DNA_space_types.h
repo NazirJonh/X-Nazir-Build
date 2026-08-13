@@ -12,6 +12,7 @@
 #include "DNA_asset_types.h"
 #include "DNA_color_types.h" /* for Histogram */
 #include "DNA_defs.h"
+#include "DNA_image_grid_types.h"
 #include "DNA_image_types.h" /* ImageUser */
 #include "DNA_listBase.h"
 #include "DNA_mask_types.h"
@@ -22,7 +23,6 @@
 /* Hum ... Not really nice... but needed for spacebuts. */
 #include "DNA_vec_defaults.h"
 #include "DNA_view2d_types.h"
-#include "DNA_view3d_types.h" /* ImageGridSlotDNA */
 #include "DNA_viewer_path_types.h"
 
 namespace blender {

@@ -17,7 +17,6 @@
 #include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
 #include "ED_image_grid.hh"
-#include "ED_view3d.hh"
 
 #include "BLI_listbase.h"
 #include "BLI_string_ref.hh"

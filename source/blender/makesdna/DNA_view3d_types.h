@@ -14,6 +14,7 @@
 
 #include "DNA_asset_types.h"
 #include "DNA_defs.h"
+#include "DNA_image_grid_types.h"
 #include "DNA_listBase.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_enums.h"
@@ -697,74 +698,14 @@ struct View3DOverlay {
   float sculpt_curves_cage_opacity = 0;
 };
 
-/** Per-library enabled catalog paths stored on #View3D for the sculpt image asset grid. */
-struct ImageGridLibraryCatalogState {
-  ImageGridLibraryCatalogState *next = nullptr, *prev = nullptr;
-  AssetLibraryReference library_ref;
-  /** Enabled catalog paths (empty = show all catalogs for this library). */
-  ListBaseT<AssetCatalogPathLink> enabled_catalog_paths = {nullptr, nullptr};
-};
-
-/**
- * Membership / catalog follow mode persisted on #ImageGridSlotDNA::catalog_mode.
- * Values match #blender::ed::view3d::ImageGridShelfCatalogMode (All / CatalogPath /
- * Recent / Favorites). Old files had zero padding here → #IMAGE_GRID_CATALOG_MODE_ALL.
- */
-typedef enum eImageGridCatalogMode {
-  IMAGE_GRID_CATALOG_MODE_ALL = 0,
-  IMAGE_GRID_CATALOG_MODE_CATALOG_PATH = 1,
-  IMAGE_GRID_CATALOG_MODE_RECENT = 2,
-  IMAGE_GRID_CATALOG_MODE_FAVORITES = 3,
-} eImageGridCatalogMode;
-
-/**
- * Persisted per-slot state for the sculpt/paint brush-texture image grid. #View3D keeps one
- * instance per independent slot (#View3D::image_grid, #View3D::image_grid_mask) instead of
- * duplicating each field per slot.
- */
-struct ImageGridSlotDNA {
-  /** Number of visible rows for the image grid. 0 = use default (1). */
-  short rows = 0;
-  /**
-   * #eImageGridCatalogMode. Uses former `_pad_rows` bytes so old .blend files (zero padding)
-   * load as #IMAGE_GRID_CATALOG_MODE_ALL without do_version.
-   */
-  short catalog_mode = IMAGE_GRID_CATALOG_MODE_ALL;
-  /** Struct padding: #library_ref is struct-typed and needs 8-byte native alignment. */
-  char _pad_rows[4] = {};
-  /** Asset library browsed by this slot. */
-  AssetLibraryReference library_ref;
-  /**
-   * Legacy library selection (migrated to #library_ref). Kept for do-version migration from files
-   * written before 5.2 subversion 47. 0 = unset, meaning "current file".
-   */
-  short library_type_legacy = 0;
-  char _pad_lib[2] = {};
-  int library_custom_index_legacy = 0;
-  /**
-   * Legacy per-view catalog filter (migrated to #library_catalog_states).
-   * Kept for do-version migration from files written before 5.2 subversion 40.
-   */
-  ListBaseT<AssetCatalogPathLink> enabled_catalog_paths_legacy = {nullptr, nullptr};
-  /** Per-asset-library catalog selection for the image grid (empty paths = show all). */
-  ListBaseT<ImageGridLibraryCatalogState> library_catalog_states = {nullptr, nullptr};
-  /**
-   * Name Matching master toggle (0/1). Old files: zero → off.
-   */
-  char filter_name_match_enabled = 0;
-  char _pad_name_match[7] = {};
-  /** Active map-type identifiers (#AssetNameMatchIdLink). Empty = no selection. */
-  ListBaseT<AssetNameMatchIdLink> filter_name_match_map_types = {nullptr, nullptr};
-};
-
 struct View3D_Runtime {
   /** Nkey panel stores stuff here. */
   void *properties_storage = nullptr;
   void (*properties_storage_free)(void *properties_storage) = nullptr;
   /**
-   * Per-View3D session state for the brush texture image grid template
-   * (#blender::ed::view3d::ImageGridStatesPerView3D). Created lazily, freed in #view3d_free, and
-   * reset on file read and space duplication. Opaque here to keep DNA free of C++ containers.
+   * Per-space session state for the brush texture image grid template. Created lazily, freed with
+   * the space, and reset on file read and space duplication. Opaque here to keep DNA free of C++
+   * containers. See #ImageGridSlotDNA in DNA_image_grid_types.h.
    */
   void *image_grid_state = nullptr;
   /** Runtime only flags. */
@@ -900,7 +841,7 @@ struct View3D {
    * default (48). */
   short image_grid_preview_size = 0;
   char _pad_image_grid[6] = {};
-  /** Brush-texture image grid state. */
+  /** Brush-texture image grid state (#ImageGridSlotDNA). */
   ImageGridSlotDNA image_grid;
   /** Mask-texture image grid state (independent library/catalog/row state from #image_grid). */
   ImageGridSlotDNA image_grid_mask;

@@ -91,7 +91,7 @@ const EnumPropertyItem rna_enum_asset_import_method_items[] = {
 #  include "BKE_screen.hh"
 
 #  include "ED_asset_shelf.hh"
-#  include "ED_view3d.hh"
+#  include "ED_image_grid.hh"
 
 #  include "RNA_prototypes.hh"
 
@@ -580,7 +580,7 @@ const EnumPropertyItem *rna_asset_library_ui_reference_itemf(bContext * /*C*/,
     const AssetShelf *shelf = static_cast<const AssetShelf *>(ptr->data);
     if (shelf->type) {
       exclude_image_libraries = ed::asset::shelf::shelf_idname_is_brush_shelf(shelf->type->idname);
-      only_image_libraries = STREQ(shelf->type->idname, ed::view3d::IMAGE_TEXTURE_SHELF_IDNAME);
+      only_image_libraries = STREQ(shelf->type->idname, ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME);
     }
   }
 

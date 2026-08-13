@@ -263,8 +263,6 @@ class GridCatalogSelectorTree : public AbstractTreeView {
 
   void build_tree() override;
 
-  void apply_catalog_toggle(bContext &C, const Item &toggled_item);
-
   static Item &build_catalog_items_recursive(
       TreeViewOrItem &parent,
       const asset_system::AssetCatalogTreeItem &catalog_item,
@@ -506,12 +504,14 @@ class GridCatalogSelectorTree : public AbstractTreeView {
     char catalog_path_enabled_ = false;
     bool expanded_ = false;
 
-    /* Same heap-owned-argument pattern and rationale as #LibrarySectionItem::ToggleArg -- see that
-     * class's comment. Not POD here: a catalog path (unlike a library key) has no length bound
-     * short enough for a fixed buffer, so this carries `std::string` members and pairs
-     * #button_funcN_set with custom free/copy functions (#expand_arg_free / #expand_arg_copy)
-     * instead of its POD-only defaults (#MEM_delete_void / #MEM_dupalloc_void), which do not run
-     * constructors/destructors and would leak or corrupt a non-trivial member. */
+    /* Chevron #ExpandArg is non-trivial (`std::string` catalog path) and uses custom free/copy.
+     * Checkbox #ToggleArg is heap-owned for the same popover-rebuild reason as
+     * #LibrarySectionItem::ToggleArg: do not capture `this` or the tree in #apply_func. */
+    struct ToggleArg {
+      AssetLibraryReference library_ref;
+      bUUID catalog_id;
+    };
+
     struct ExpandArg {
       ID *settings_owner_id;
       StructRNA *settings_type;
@@ -621,7 +621,6 @@ class GridCatalogSelectorTree : public AbstractTreeView {
 
     void build_row(Layout &row) override
     {
-      GridCatalogSelectorTree &tree = dynamic_cast<GridCatalogSelectorTree &>(get_tree_view());
       Block *block = row.block();
 
       /* Chevron first, under the ambient (flat, boxless) tree emboss -- matches the generic
@@ -685,8 +684,25 @@ class GridCatalogSelectorTree : public AbstractTreeView {
                                      0,
                                      0,
                                      TIP_("Toggle catalog visibility in the grid"));
-      button_func_set(toggle_but,
-                      [this, &tree](bContext &C) { tree.apply_catalog_toggle(C, *this); });
+      ToggleArg *toggle_arg = MEM_new<ToggleArg>(__func__);
+      toggle_arg->library_ref = library_ref_;
+      toggle_arg->catalog_id = catalog_item_.get_catalog_id();
+      button_funcN_set(
+          toggle_but,
+          [](bContext *C, void *argN, void * /*arg2*/) {
+            auto *arg = static_cast<ToggleArg *>(argN);
+            id_browser_catalog_id_set_enabled(
+                arg->library_ref,
+                arg->catalog_id,
+                !id_browser_catalog_id_enabled(arg->library_ref, arg->catalog_id));
+            WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST, nullptr);
+            if (ARegion *region = CTX_wm_region(C)) {
+              ED_region_tag_redraw(region);
+              ED_region_tag_refresh_ui(region);
+            }
+          },
+          toggle_arg,
+          nullptr);
       if (!is_catalog_path_enabled() && has_enabled_in_subtree()) {
         button_drawflag_enable(toggle_but, BUT_INDETERMINATE);
       }
@@ -694,26 +710,6 @@ class GridCatalogSelectorTree : public AbstractTreeView {
     }
   };
 };
-
-void GridCatalogSelectorTree::apply_catalog_toggle(bContext &C, const Item &toggled_item)
-{
-  /* Apply only the one item that changed on top of the currently-stored setting, instead of
-   * rebuilding it from every #Item currently present in the tree: #build_tree() only builds a
-   * section's or item's children while it is expanded (see the class comment on
-   * #LibrarySectionItem), so a rebuild-from-visible-items approach would silently drop the saved
-   * state of any catalog under a collapsed section or item. */
-  const AssetLibraryReference library_ref = all_libraries_mode_ ?
-                                                toggled_item.library_ref() :
-                                                grid_settings::library_ref_get(settings_);
-  id_browser_catalog_id_set_enabled(
-      library_ref, toggled_item.catalog_id(), toggled_item.is_catalog_path_enabled());
-  WM_event_add_notifier(&C, NC_ASSET | ND_ASSET_LIST, nullptr);
-
-  if (ARegion *region = CTX_wm_region(&C)) {
-    ED_region_tag_redraw(region);
-    ED_region_tag_refresh_ui(region);
-  }
-}
 
 void GridCatalogSelectorTree::build_tree()
 {

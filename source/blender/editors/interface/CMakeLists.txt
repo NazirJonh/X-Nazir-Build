@@ -126,6 +126,8 @@ set(SRC
   views/abstract_view.cc
   views/abstract_view_item.cc
   views/grid_view.cc
+  views/grid_view_input.cc
+  views/grid_view_layout.cc
   views/grid_view_session.cc
   views/grid_view_reorder.cc
   views/interface_view.cc
@@ -134,6 +136,7 @@ set(SRC
   buttons/interface_textbox.hh
   eyedroppers/eyedropper_intern.hh
   templates/interface_templates_intern.hh
+  views/grid_view_intern.hh
   interface_intern.hh
   regions/interface_regions_intern.hh
   view2d/view2d_intern.hh

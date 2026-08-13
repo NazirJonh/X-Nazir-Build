@@ -841,7 +841,8 @@ BrushCurvePatchTextureSlot *BKE_brush_curve_patch_texture_slot_add(Brush &brush)
 
 bool BKE_brush_curve_patch_texture_slot_remove(Brush &brush, BrushCurvePatchTextureSlot &slot)
 {
-  if (BLI_findindex(&brush.curve_patch.texture_slots, &slot) == -1) {
+  const int removed_index = BLI_findindex(&brush.curve_patch.texture_slots, &slot);
+  if (removed_index == -1) {
     return false;
   }
 
@@ -853,8 +854,21 @@ bool BKE_brush_curve_patch_texture_slot_remove(Brush &brush, BrushCurvePatchText
     slot.tex = nullptr;
   }
   BLI_freelinkN(&brush.curve_patch.texture_slots, &slot);
-  brush.curve_patch.texture_active_index = math::max(
-      0, brush.curve_patch.texture_active_index - 1);
+
+  /* Keep `texture_active_index` pointing at the same remaining slot. Decrement only when the
+   * removed entry sat before it (so the survivor shifted down); clamp when the active slot itself
+   * was the last entry. Unconditional decrement would move the UI selection when a later slot was
+   * deleted. */
+  const int new_count = int(brush.curve_patch.texture_slots.count());
+  if (new_count == 0) {
+    brush.curve_patch.texture_active_index = 0;
+  }
+  else if (removed_index < brush.curve_patch.texture_active_index) {
+    brush.curve_patch.texture_active_index -= 1;
+  }
+  else if (brush.curve_patch.texture_active_index >= new_count) {
+    brush.curve_patch.texture_active_index = new_count - 1;
+  }
   return true;
 }
 

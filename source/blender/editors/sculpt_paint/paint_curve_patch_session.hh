@@ -174,9 +174,17 @@ struct CurvePatchApplyState {
    * The modal passes events through whenever the cursor leaves its region, so an unrelated
    * operator can retopologize the object while a patch is live. Every key in the effect's snapshot
    * would then name a different element or none at all, and both restoring and committing would
-   * write against the wrong surface -- or past the end of the array. Comparing this count is the
-   * cheap detection for that. */
+   * write against the wrong surface -- or past the end of the array. #element_num plus
+   * #faces_num / #corners_num is the cheap detection for that. */
   int64_t element_num = 0;
+
+  /**
+   * Mesh topology counts sampled with #element_num. -1 means "not a mesh" (Grids / no snapshot).
+   * `element_num` alone misses Triangulate, Poke, and remesh that keep `verts_num` and change
+   * faces/corners -- ColorEffect already documents that the two counts move independently.
+   */
+  int64_t faces_num = -1;
+  int64_t corners_num = -1;
 
   /** Set when the check above fails. The patch is then unusable: its snapshot describes a mesh
    * that no longer exists, so it must be abandoned WITHOUT restoring (which would write stale

@@ -105,7 +105,10 @@ void BKE_brush_tag_unsaved_changes(Brush *brush);
 BrushCurvePatchTextureSlot *BKE_brush_curve_patch_texture_slot_add(Brush &brush);
 
 /**
- * Drop a slot, releasing the user it holds on its texture.
+ * Drop a slot, releasing the user it holds on its texture. Adjusts
+ * #BrushCurvePatchSettings.texture_active_index so it still names a remaining slot: unchanged when
+ * a later slot is removed, decremented when an earlier one is, clamped when the active slot was
+ * last, and 0 when the list is empty.
  *
  * \return false when `slot` is not in this brush's list, in which case nothing is changed.
  */

@@ -107,6 +107,22 @@ const bke::CurvesGeometry *ED_paint_curve_patch_control_curve_at(const Object *o
   return &session.patches[index].control_curve;
 }
 
+static bool curve_patch_apply_target_changed(Object &ob, const CurvePatchSession &session)
+{
+  if (session.effect->element_num(ob) != session.apply.element_num) {
+    return true;
+  }
+  if (session.apply.faces_num < 0) {
+    return false;
+  }
+  const Mesh *mesh = BKE_object_get_original_mesh(&ob);
+  if (mesh == nullptr) {
+    return true;
+  }
+  return int64_t(mesh->faces_num) != session.apply.faces_num ||
+         int64_t(mesh->corners_num) != session.apply.corners_num;
+}
+
 void curve_patch_restore_only(Object &ob, const CurvePatchSession &session)
 {
   /* Hoisted here from the three effects' own copies. It has to live at this level, not in
@@ -114,7 +130,7 @@ void curve_patch_restore_only(Object &ob, const CurvePatchSession &session)
    * modal's Esc branch both restore WITHOUT re-stamping first, so neither has raised
    * `CurvePatchApplyState::invalidated` even when the mesh changed underneath the session. Writing
    * the snapshot back in that state would put stale values into an unrelated mesh. */
-  if (session.effect->element_num(ob) != session.apply.element_num) {
+  if (curve_patch_apply_target_changed(ob, session)) {
     return;
   }
   session.effect->restore(ob, session);
@@ -433,8 +449,9 @@ void curve_patch_restore_and_restamp(const Scene &scene,
   /* Staleness guard, hoisted here from the hand-written copies in the effects: something
    * retopologized the object while the patch was live -- see `CurvePatchApplyState::element_num`.
    * Bail before touching positions: the snapshot's keys no longer name the elements they were taken
-   * from. */
-  if (session.effect->element_num(ob) != session.apply.element_num) {
+   * from. `faces_num` / `corners_num` catch edits that keep `verts_num` (Triangulate, Poke, some
+   * remesh). */
+  if (curve_patch_apply_target_changed(ob, session)) {
     session.apply.invalidated = true;
     BKE_report(reports,
                RPT_WARNING,
@@ -691,6 +708,12 @@ bool curve_patch_session_publish(Object &ob,
 
   ss.curve_patch_session = &session;
   session.apply.element_num = session.effect->element_num(ob);
+  session.apply.faces_num = -1;
+  session.apply.corners_num = -1;
+  if (mesh != nullptr) {
+    session.apply.faces_num = mesh->faces_num;
+    session.apply.corners_num = mesh->corners_num;
+  }
   return true;
 }
 

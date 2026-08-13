@@ -8,9 +8,11 @@
 
 #include "BKE_curve_patch.hh"
 
+#include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
 #include "BLI_kdopbvh.hh"
 #include "BLI_math_vector.hh"
+#include "BLI_offset_indices.hh"
 
 #include "BKE_mesh.hh"
 
@@ -18,11 +20,15 @@ namespace blender::bke {
 
 void CurvePatchSurfaceSnapshot::clear()
 {
-  /* The tree goes first: it holds spans into `positions`, so releasing the arrays while it is still
-   * alive would leave it pointing at freed memory for as long as this function runs. */
+  /* The tree goes first: it holds spans into `positions` and the topology arrays, so releasing
+   * those while it is still alive would leave it pointing at freed memory for as long as this
+   * function runs. */
   bvh = {};
   positions.reinitialize(0);
   vert_normals.reinitialize(0);
+  face_offsets.reinitialize(0);
+  corner_verts.reinitialize(0);
+  corner_tris.reinitialize(0);
   ready = false;
 }
 
@@ -34,10 +40,13 @@ bool curve_patch_surface_snapshot_build(const Mesh &mesh, CurvePatchSurfaceSnaps
   }
   r_snapshot.positions = mesh.vert_positions();
   r_snapshot.vert_normals = mesh.vert_normals();
+  r_snapshot.face_offsets = mesh.face_offsets();
+  r_snapshot.corner_verts = mesh.corner_verts();
+  r_snapshot.corner_tris = mesh.corner_tris();
   r_snapshot.bvh = bvhtree_from_mesh_corner_tris_ex(r_snapshot.positions,
-                                                    mesh.faces(),
-                                                    mesh.corner_verts(),
-                                                    mesh.corner_tris(),
+                                                    OffsetIndices<int>(r_snapshot.face_offsets.as_span()),
+                                                    r_snapshot.corner_verts,
+                                                    r_snapshot.corner_tris,
                                                     IndexMask(mesh.faces_num));
   r_snapshot.ready = r_snapshot.bvh.tree != nullptr;
   return r_snapshot.ready;

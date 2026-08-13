@@ -811,6 +811,15 @@ struct CurvePatchSurfaceSnapshot {
    * live normals already carry the relief the patch applied, so the culling would end up depending
    * on its own result. */
   Array<float3> vert_normals;
+  /**
+   * Topology the BVH callbacks index into. Copied rather than borrowed from the live mesh: the
+   * tree stores `Span`s (`BVHTreeFromMesh`), and a remesh / CustomData rebuild can free the live
+   * arrays while this snapshot is still queried. Counts may stay the same, so `verts_num` alone
+   * does not detect that.
+   */
+  Array<int> face_offsets;
+  Array<int> corner_verts;
+  Array<int3> corner_tris;
   BVHTreeFromMesh bvh;
   bool ready = false;
 

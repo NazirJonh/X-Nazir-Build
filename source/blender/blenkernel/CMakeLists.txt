@@ -771,6 +771,7 @@ if(WITH_GTESTS)
     intern/curve_patch_frames_test.cc
     intern/curve_patch_ribbon_test.cc
     intern/curve_patch_spline_test.cc
+    intern/curve_patch_surface_test.cc
     intern/curves_geometry_test.cc
     intern/deform_test.cc
     intern/fcurve_test.cc

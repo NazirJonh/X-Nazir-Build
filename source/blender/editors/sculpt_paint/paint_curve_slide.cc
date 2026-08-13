@@ -27,10 +27,10 @@
 #include "DNA_view3d_types.h"
 #include "DNA_workspace_types.h"
 
+#include "BLI_math_base.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_rotation.hh"
-#include "BLI_math_base.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_string_utf8.h"
@@ -53,8 +53,8 @@
 
 #include "ED_paint.hh"
 #include "ED_paint_curve_draw.hh"
-#include "ED_util_modal_multiwin.hh"
 #include "ED_screen.hh"
+#include "ED_util_modal_multiwin.hh"
 #include "ED_view3d.hh"
 
 #include "WM_api.hh"
@@ -298,8 +298,7 @@ static void paintcurve_slide_status_set(bContext *C, wmOperator *op, const Paint
   WorkspaceStatus status(C);
   ToolSettings *ts = CTX_data_tool_settings(C);
   if (pc != nullptr && paintcurve_uses_3d_geometry(pc) && ts != nullptr) {
-    status.item_bool(
-        IFACE_("Snap"), (ts->snap_flag & SCE_SNAP) != 0, ICON_SNAP_ON, ICON_SNAP_OFF);
+    status.item_bool(IFACE_("Snap"), (ts->snap_flag & SCE_SNAP) != 0, ICON_SNAP_ON, ICON_SNAP_OFF);
   }
   status.opmodal(IFACE_("Snap Angle"), op->type, PAINTCURVE_MODAL_SNAP_ANGLE);
   status.opmodal(IFACE_("Move Entire Point"), op->type, PAINTCURVE_MODAL_MOVE_ENTIRE);
@@ -921,14 +920,9 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
           const float3 &seg_co = geom.positions()[psd->segment_index];
           mul_v3_m4v3(prev_co_world, psd->ob_to_world, seg_co);
           /* `false`: no depth-buffer fallback inside a modal drag. */
-          if (snap_to_surface && paintcurve_surface_place(C,
-                                                          psd->snap_ctx,
-                                                          psd->vc,
-                                                          mval_fl,
-                                                          prev_co_world,
-                                                          false,
-                                                          hit_obj,
-                                                          hit_no_obj))
+          if (snap_to_surface &&
+              paintcurve_surface_place(
+                  C, psd->snap_ctx, psd->vc, mval_fl, prev_co_world, false, hit_obj, hit_no_obj))
           {
             mul_v3_m4v3(depth_world, psd->ob_to_world, hit_obj);
             paintcurve_snap_marker_update(C, psd->ob_to_world, hit_obj);
@@ -939,13 +933,13 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
             mul_v3_m4v3(depth_world, psd->ob_to_world, depth_point);
           }
           paintcurve_apply_segment_move_3d(geom,
-                                             psd->segment_index,
-                                             psd->segment_index_next,
-                                             psd->segment_t,
-                                             &psd->vc,
-                                             psd->world_to_ob,
-                                             mval_fl,
-                                             depth_world);
+                                           psd->segment_index,
+                                           psd->segment_index_next,
+                                           psd->segment_t,
+                                           &psd->vc,
+                                           psd->world_to_ob,
+                                           mval_fl,
+                                           depth_world);
           geom.tag_positions_changed();
         }
         else {
@@ -956,14 +950,8 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
             float hit_no_obj[3];
             float prev_co_world[3];
             paintcurve_get_prev_co_world(psd, prev_co_world);
-            if (paintcurve_surface_place(C,
-                                         psd->snap_ctx,
-                                         psd->vc,
-                                         mval_fl,
-                                         prev_co_world,
-                                         false,
-                                         hit_obj,
-                                         hit_no_obj))
+            if (paintcurve_surface_place(
+                    C, psd->snap_ctx, psd->vc, mval_fl, prev_co_world, false, hit_obj, hit_no_obj))
             {
               paintcurve_apply_surface_snap_to_point(geom, psd, hit_obj, hit_no_obj);
               snapped = true;
@@ -973,8 +961,14 @@ static wmOperatorStatus paintcurve_slide_modal(bContext *C, wmOperator *op, cons
 
           if (!snapped) {
             paintcurve_snap_marker_clear();
-            paintcurve_apply_handle_move_3d(
-                geom, pc, psd->point_index, &psd->vc, psd->ob_to_world, psd->world_to_ob, psd, mval_fl);
+            paintcurve_apply_handle_move_3d(geom,
+                                            pc,
+                                            psd->point_index,
+                                            &psd->vc,
+                                            psd->ob_to_world,
+                                            psd->world_to_ob,
+                                            psd,
+                                            mval_fl);
           }
 
           geom.tag_positions_changed();

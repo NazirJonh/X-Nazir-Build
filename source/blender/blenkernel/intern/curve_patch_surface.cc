@@ -43,11 +43,12 @@ bool curve_patch_surface_snapshot_build(const Mesh &mesh, CurvePatchSurfaceSnaps
   r_snapshot.face_offsets = mesh.face_offsets();
   r_snapshot.corner_verts = mesh.corner_verts();
   r_snapshot.corner_tris = mesh.corner_tris();
-  r_snapshot.bvh = bvhtree_from_mesh_corner_tris_ex(r_snapshot.positions,
-                                                    OffsetIndices<int>(r_snapshot.face_offsets.as_span()),
-                                                    r_snapshot.corner_verts,
-                                                    r_snapshot.corner_tris,
-                                                    IndexMask(mesh.faces_num));
+  r_snapshot.bvh = bvhtree_from_mesh_corner_tris_ex(
+      r_snapshot.positions,
+      OffsetIndices<int>(r_snapshot.face_offsets.as_span()),
+      r_snapshot.corner_verts,
+      r_snapshot.corner_tris,
+      IndexMask(mesh.faces_num));
   r_snapshot.ready = r_snapshot.bvh.tree != nullptr;
   return r_snapshot.ready;
 }

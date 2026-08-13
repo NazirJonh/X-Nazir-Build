@@ -132,9 +132,10 @@ ePaintOverlayControlFlags BKE_paint_get_overlay_flags();
  * Monotonic counter bumped whenever the active brush's primary texture is invalidated -- assigned,
  * cleared, its mapping edited, or the texture datablock itself edited -- via
  * #BKE_paint_invalidate_overlay_tex / #BKE_paint_invalidate_overlay_all. Unlike the reset-on-draw
- * overlay flags (which the paint cursor consumes), this only ever increases, so a poller can detect
- * "the brush texture changed" race-free by comparing against a previously stored value. Used by the
- * Curve Patch live editor to re-project the relief when the texture is edited mid-session.
+ * overlay flags (which the paint cursor consumes), this only ever increases, so a poller can
+ * detect "the brush texture changed" race-free by comparing against a previously stored value.
+ * Used by the Curve Patch live editor to re-project the relief when the texture is edited
+ * mid-session.
  */
 uint64_t BKE_paint_get_overlay_texture_edit_count();
 void BKE_paint_reset_overlay_invalid(ePaintOverlayControlFlags flag);
@@ -602,13 +603,13 @@ struct SculptSession : NonCopyable, NonMovable {
   std::optional<PersistentMultiresData> persistent_multires_data();
 
   /**
-   * The pool caching the #ImBuf handles every texture sample goes through, created on first use and
-   * living until the session ends.
+   * The pool caching the #ImBuf handles every texture sample goes through, created on first use
+   * and living until the session ends.
    *
-   * Ownership is the session's alone. A caller that samples a texture outside a stroke -- the Curve
-   * Patch apply, Expand -- calls this and frees nothing. While this was a plain field, every such
-   * caller had to create the pool for itself, and forgetting to do so dereferenced null in the
-   * sampler for a brush WITH a texture while a brush without one passed unharmed.
+   * Ownership is the session's alone. A caller that samples a texture outside a stroke -- the
+   * Curve Patch apply, Expand -- calls this and frees nothing. While this was a plain field, every
+   * such caller had to create the pool for itself, and forgetting to do so dereferenced null in
+   * the sampler for a brush WITH a texture while a brush without one passed unharmed.
    */
   ImagePool &tex_pool_ensure();
 

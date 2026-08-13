@@ -344,12 +344,12 @@ struct StrokeCache {
   /* Pre-rasterized UV lookup table for fast per-vertex evaluation. Built once per dab from the
    * subdivided grid; per-vertex cost = O(1). */
   static constexpr int ROLL_LUT_RES = 128;
-  Vector<float2> roll_lut_uv;         /* UV at each LUT pixel. */
-  Vector<float> roll_lut_dist_sq;     /* Best distance^2 (for rasterization). */
-  Vector<float3> roll_lut_tan;        /* Tangent at each LUT pixel. */
-  Vector<int> roll_lut_row;           /* Polyline row that wrote each pixel. */
-  float2 roll_lut_min = {};           /* 2D bounding box min. */
-  float2 roll_lut_inv_extent = {};    /* 1.0 / (max - min) * LUT_RES. */
+  Vector<float2> roll_lut_uv;      /* UV at each LUT pixel. */
+  Vector<float> roll_lut_dist_sq;  /* Best distance^2 (for rasterization). */
+  Vector<float3> roll_lut_tan;     /* Tangent at each LUT pixel. */
+  Vector<int> roll_lut_row;        /* Polyline row that wrote each pixel. */
+  float2 roll_lut_min = {};        /* 2D bounding box min. */
+  float2 roll_lut_inv_extent = {}; /* 1.0 / (max - min) * LUT_RES. */
   bool roll_lut_ready = false;
 
   /**
@@ -958,19 +958,18 @@ void do_brush_action(const Depsgraph &depsgraph,
  * \param forced_bstrength: If set, used as `cache.bstrength` instead of the value computed from
  * the live brush/paint settings. Used by callers (e.g. Curve Patch re-stamp) that need the
  * strength frozen to a value captured earlier, rather than reactive to live brush-panel edits. */
-void do_symmetrical_brush_actions(
-    const Depsgraph &depsgraph,
-    const Scene &scene,
-    Sculpt &sd,
-    Object &ob,
-    void (*action)(const Depsgraph &depsgraph,
-                   const Scene &scene,
-                   Sculpt &sd,
-                   Object &ob,
-                   const Brush &brush,
-                   PaintModeSettings &paint_mode_settings),
-    PaintModeSettings &paint_mode_settings,
-    std::optional<float> forced_bstrength = std::nullopt);
+void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
+                                  const Scene &scene,
+                                  Sculpt &sd,
+                                  Object &ob,
+                                  void (*action)(const Depsgraph &depsgraph,
+                                                 const Scene &scene,
+                                                 Sculpt &sd,
+                                                 Object &ob,
+                                                 const Brush &brush,
+                                                 PaintModeSettings &paint_mode_settings),
+                                  PaintModeSettings &paint_mode_settings,
+                                  std::optional<float> forced_bstrength = std::nullopt);
 
 /** Restores the mesh to its last-undo-step state for brush types that compute their deformation
  * as an offset from original coordinates (Grab/Elastic Deform/Thumb/Rotate), and for the
@@ -1100,7 +1099,7 @@ void SCULPT_OT_curve_patch_toggle_cyclic(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_switch_direction(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_stamp_reseed(wmOperatorType *ot);
 
-}
+}  // namespace ed::sculpt_paint
 
 namespace ed::sculpt_paint::expand {
 

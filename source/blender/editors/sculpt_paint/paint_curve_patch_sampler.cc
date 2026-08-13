@@ -175,15 +175,16 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
     }
 
     /* The ribbon's `u` is normalized across the half-width the LUT was BUILT with, which in Stamps
-     * mode is widened by the jitter amount (`CurvePatchGeometry::ribbon_radius`). So turning `u` back
-     * into a world-space lateral offset must use that widened scale, while the falloff radius above
-     * must stay UNWIDENED -- the widening only exists to give jittered stamps room inside the strip
-     * and must not enlarge the brush's actual reach. Using one value for both would simultaneously
-     * under-report `lateral` (widening the visible relief band as Jitter rises) and compress the
-     * stamp-space `du` below, squashing stamps toward the curve and clipping the very edge stamps
-     * the widening was meant to admit. The two are equal in Ribbon mode, where jitter never
-     * applies. */
-    const float lateral_scale_at_s = item.geometry.spline.radius_at(s) * item.geometry.ribbon_radius;
+     * mode is widened by the jitter amount (`CurvePatchGeometry::ribbon_radius`). So turning `u`
+     * back into a world-space lateral offset must use that widened scale, while the falloff radius
+     * above must stay UNWIDENED -- the widening only exists to give jittered stamps room inside
+     * the strip and must not enlarge the brush's actual reach. Using one value for both would
+     * simultaneously under-report `lateral` (widening the visible relief band as Jitter rises) and
+     * compress the stamp-space `du` below, squashing stamps toward the curve and clipping the very
+     * edge stamps the widening was meant to admit. The two are equal in Ribbon mode, where jitter
+     * never applies. */
+    const float lateral_scale_at_s = item.geometry.spline.radius_at(s) *
+                                     item.geometry.ribbon_radius;
 
     /* `normal_dist` is the vertex's signed offset along the anchor plane's normal from the
      * closest point on the curve -- how far it "lifts off" that plane. On a flat surface it is
@@ -220,8 +221,10 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * here and clipped exactly as before. On a closed curve `ribbon_end_margin` is set the same as
      * on an open one (Stamps mode assigns it unconditionally), so the guard is technically looser
      * there too -- but a cyclic LUT never reports an `s` outside `[0, total_length]` in the first
-     * place, so the extra slack never admits anything the sampler would otherwise have rejected. */
-    if (s < -item.geometry.ribbon_end_margin || s > total_length + item.geometry.ribbon_end_margin) {
+     * place, so the extra slack never admits anything the sampler would otherwise have rejected.
+     */
+    if (s < -item.geometry.ribbon_end_margin || s > total_length + item.geometry.ribbon_end_margin)
+    {
       return std::nullopt;
     }
 
@@ -266,10 +269,10 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
     float stamp_strength = 1.0f;
     /* RGBA of whichever stamp/zone texture actually won the intensity selection below. Declared in
      * the `branch_relief` scope (not inside either branch) because the final `CurvePatchSample`
-     * construction at the bottom reads it regardless of which branch produced it. Stays `{1,1,1,1}`
-     * when no texture is assigned -- the same default `paint_get_tex_pixel`'s callers below pre-
-     * initialize their local buffers to before the null-texture guard, so threading it through
-     * changes nothing for the no-texture case. */
+     * construction at the bottom reads it regardless of which branch produced it. Stays
+     * `{1,1,1,1}` when no texture is assigned -- the same default `paint_get_tex_pixel`'s callers
+     * below pre- initialize their local buffers to before the null-texture guard, so threading it
+     * through changes nothing for the no-texture case. */
     float tex_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     if (item.params.stamp_mode == CurvePatchStampMode::Stamps) {
       /* Find the stamps whose square could cover this vertex. The list is sorted by `center_v`,
@@ -283,19 +286,21 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
        * The per-stamp test below is done in the stamp's own frame and stays exact; this bound
        * only has to be conservative.
        *
-       * The bound itself is resolved once per restamp into `CurvePatchGeometry::stamp_search_reach`
-       * and shared with the seam wrap and the ribbon's end extension -- see that field's own
-       * comment for why the three must not be allowed to drift apart. */
+       * The bound itself is resolved once per restamp into
+       * `CurvePatchGeometry::stamp_search_reach` and shared with the seam wrap and the ribbon's
+       * end extension -- see that field's own comment for why the three must not be allowed to
+       * drift apart. */
       const float max_extent = item.geometry.stamp_search_reach;
-      auto lower = std::lower_bound(item.geometry.stamps.begin(),
-                                    item.geometry.stamps.end(),
-                                    s - max_extent,
-                                    [](const CurvePatchStamp &stamp, const float value) {
-                                      return stamp.center_v < value;
-                                    });
+      auto lower = std::lower_bound(
+          item.geometry.stamps.begin(),
+          item.geometry.stamps.end(),
+          s - max_extent,
+          [](const CurvePatchStamp &stamp, const float value) { return stamp.center_v < value; });
       bool hit = false;
       float best_abs = 0.0f;
-      for (auto it = lower; it != item.geometry.stamps.end() && it->center_v <= s + max_extent; ++it) {
+      for (auto it = lower; it != item.geometry.stamps.end() && it->center_v <= s + max_extent;
+           ++it)
+      {
         float local_v;
         float local_u;
         if (item.params.stamp_projection == CurvePatchStampProjection::Planar) {
@@ -394,59 +399,61 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
       }
     }
     else {
-    /* Zone + along-length coordinate in one call. The local radius controls the projection's
-     * capture width, but must not control the texture's along-curve scale: changing a radius point
-     * should narrow the ribbon without re-phasing or shifting the texture. The patch's base radius
-     * is therefore used for the texture tile span. With caps off this is the same formula, in the
-     * same operand order, that used to be inlined here -- the contract the regression test
-     * `texture_zone_caps_disabled_matches_reference` pins down. That test compares against a
-     * verbatim copy of the old formula to within `1e-5f` rather than bit-exactly, because the two
-     * live in different translation units and cross-TU float codegen need not reproduce identical
-     * bits for textually identical expressions; the operand-order guarantee is what keeps SINGLE
-     * mode's output unchanged, and it is verified by inspection. */
-    const CurvePatchTextureZoneSample zone_sample = bke::curve_patch_texture_zone_at(
-        s,
-        total_length,
-        item.params.radius,
-        texture.caps_enabled,
-        texture.world_cap_start,
-        texture.world_cap_end,
-        item.params.length_mode,
-        item.params.length_repeat,
-        item.geometry.spline.cyclic);
-    if (!zone_sample.valid) {
-      /* Two oversized caps squeezed the middle to nothing; leave that stretch untouched. */
-      return std::nullopt;
-    }
+      /* Zone + along-length coordinate in one call. The local radius controls the projection's
+       * capture width, but must not control the texture's along-curve scale: changing a radius
+       * point should narrow the ribbon without re-phasing or shifting the texture. The patch's
+       * base radius is therefore used for the texture tile span. With caps off this is the same
+       * formula, in the same operand order, that used to be inlined here -- the contract the
+       * regression test `texture_zone_caps_disabled_matches_reference` pins down. That test
+       * compares against a verbatim copy of the old formula to within `1e-5f` rather than
+       * bit-exactly, because the two live in different translation units and cross-TU float
+       * codegen need not reproduce identical bits for textually identical expressions; the
+       * operand-order guarantee is what keeps SINGLE mode's output unchanged, and it is verified
+       * by inspection. */
+      const CurvePatchTextureZoneSample zone_sample = bke::curve_patch_texture_zone_at(
+          s,
+          total_length,
+          item.params.radius,
+          texture.caps_enabled,
+          texture.world_cap_start,
+          texture.world_cap_end,
+          item.params.length_mode,
+          item.params.length_repeat,
+          item.geometry.spline.cyclic);
+      if (!zone_sample.valid) {
+        /* Two oversized caps squeezed the middle to nothing; leave that stretch untouched. */
+        return std::nullopt;
+      }
 
-    const MTex &zone_mtex = texture.caps_enabled ?
-                                texture.ribbon_zone_variants[int(zone_sample.zone)] :
-                                *mtex;
-    if (texture.caps_enabled && zone_mtex.tex == nullptr) {
-      /* An unassigned zone leaves its stretch of the ribbon alone, which is what makes a
-       * caps-only ribbon (no Middle texture) possible. */
-      return std::nullopt;
-    }
+      const MTex &zone_mtex = texture.caps_enabled ?
+                                  texture.ribbon_zone_variants[int(zone_sample.zone)] :
+                                  *mtex;
+      if (texture.caps_enabled && zone_mtex.tex == nullptr) {
+        /* An unassigned zone leaves its stretch of the ribbon alone, which is what makes a
+         * caps-only ribbon (no Middle texture) possible. */
+        return std::nullopt;
+      }
 
-    float tex_u = u;
-    float tex_v = zone_sample.v;
-    if (item.params.swap_axis) {
-      std::swap(tex_u, tex_v);
-    }
-    tex_u = tex_u * mtex_size.x + mtex_ofs.x;
-    tex_v = tex_v * mtex_size.y + mtex_ofs.y;
+      float tex_u = u;
+      float tex_v = zone_sample.v;
+      if (item.params.swap_axis) {
+        std::swap(tex_u, tex_v);
+      }
+      tex_u = tex_u * mtex_size.x + mtex_ofs.x;
+      tex_v = tex_v * mtex_size.y + mtex_ofs.y;
 
-    /* Mirrors the null-texture guard `sculpt_apply_texture()` used to apply: `RE_texture_evaluate()`
-     * returns `false` without writing its intensity output when `tex` is null, so calling
-     * `paint_get_tex_pixel()` unconditionally read an uninitialized `tex_value`. The RGBA buffer is
-     * the outer-scope `tex_rgba` (initialized to `{1,1,1,1}` above), so the null-texture case leaves
-     * a usable identity color for `ColorEffect` exactly as the no-texture branch intends. */
-    if (zone_mtex.tex != nullptr) {
+      /* Mirrors the null-texture guard `sculpt_apply_texture()` used to apply:
+       * `RE_texture_evaluate()` returns `false` without writing its intensity output when `tex` is
+       * null, so calling `paint_get_tex_pixel()` unconditionally read an uninitialized
+       * `tex_value`. The RGBA buffer is the outer-scope `tex_rgba` (initialized to `{1,1,1,1}`
+       * above), so the null-texture case leaves a usable identity color for `ColorEffect` exactly
+       * as the no-texture branch intends. */
+      if (zone_mtex.tex != nullptr) {
 #if CURVE_PATCH_PROFILING
-      dbg_tex_evals_++;
+        dbg_tex_evals_++;
 #endif
-      paint_get_tex_pixel(&zone_mtex, tex_u, tex_v, &tex_pool_, thread_id, &tex_value, tex_rgba);
-    }
+        paint_get_tex_pixel(&zone_mtex, tex_u, tex_v, &tex_pool_, thread_id, &tex_value, tex_rgba);
+      }
     }
 
     const float height = tex_value * stamp_strength * lateral_falloff * end_falloff * mask_factor *
@@ -512,17 +519,18 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
 
 float curve_patch_max_radius(const bke::CurvePatchGeometry &geometry)
 {
-  /* Largest world-space half-width anywhere on the curve. Drives the node/grid cull tube below, and
-   * serves as the fall-back supersampling kernel size for vertices that sit just outside the strip
-   * (where no local half-width is available because the ribbon reports no branch for them). */
+  /* Largest world-space half-width anywhere on the curve. Drives the node/grid cull tube below,
+   * and serves as the fall-back supersampling kernel size for vertices that sit just outside the
+   * strip (where no local half-width is available because the ribbon reports no branch for them).
+   */
   float max_radius = 0.0f;
   for (const float r : geometry.spline.radii) {
     max_radius = std::max(max_radius, r);
   }
   /* Scaled by the RIBBON's radius, not the (unwidened) frozen one: in Stamps mode a jittered stamp
-   * legitimately reaches `jitter_amount` further out than the frozen radius, and a node culled here
-   * never gets to run the per-vertex test that would have claimed it. Identical to the frozen radius
-   * in Ribbon mode, where the two values are equal. */
+   * legitimately reaches `jitter_amount` further out than the frozen radius, and a node culled
+   * here never gets to run the per-vertex test that would have claimed it. Identical to the frozen
+   * radius in Ribbon mode, where the two values are equal. */
   max_radius *= geometry.ribbon_radius;
   return max_radius;
 }
@@ -535,14 +543,14 @@ IndexMask curve_patch_cull_nodes(const CurvePatchItem &item,
                                  IndexMaskMemory &memory)
 {
   /* Node cull: `calc_brush_node_mask()` returns every node inside the whole-curve encompassing
-   * SPHERE, but the relief only lands in a thin tube along the polyline. On a long curve over a broad
-   * surface that sphere holds many nodes whose (up-facing) vertices each pay for `closest_point()`
-   * only to be rejected by the lateral falloff. Drop any node whose bounds fall entirely outside the
-   * falloff tube before the per-vertex walk. Conservative and result-identical: a displaced vertex
-   * must have `radial_dist < falloff_radius_at_s` for a non-zero falloff (`compute_vertex()`), i.e.
-   * it sits within `max_radius` of the polyline. Node centres are mapped into the same canonical
-   * space the sampler uses, so symmetry passes cull correctly. See #curve_patch_cull_tube_radius
-   * for where the margin comes from. */
+   * SPHERE, but the relief only lands in a thin tube along the polyline. On a long curve over a
+   * broad surface that sphere holds many nodes whose (up-facing) vertices each pay for
+   * `closest_point()` only to be rejected by the lateral falloff. Drop any node whose bounds fall
+   * entirely outside the falloff tube before the per-vertex walk. Conservative and
+   * result-identical: a displaced vertex must have `radial_dist < falloff_radius_at_s` for a
+   * non-zero falloff (`compute_vertex()`), i.e. it sits within `max_radius` of the polyline. Node
+   * centres are mapped into the same canonical space the sampler uses, so symmetry passes cull
+   * correctly. See #curve_patch_cull_tube_radius for where the margin comes from. */
   const float tube_radius = curve_patch_cull_tube_radius(item.geometry, max_radius);
   BitVector<> keep(pbvh.nodes_num(), false);
   auto cull_nodes = [&](const auto nodes) {
@@ -580,13 +588,13 @@ BitVector<> curve_patch_cull_grids(const CurvePatchItem &item,
    * key.grid_area, 1)` hits that floor once `grid_area` (vertices per grid, quadratic in the
    * Multires level) passes ~800, so at high subdivision a single surviving node can still bundle
    * many grids spanning far more surface than the falloff tube actually touches -- unlike a Mesh
-   * leaf, whose size is a flat constant (`leaf_limit = 2500`) regardless of density. Cull individual
-   * GRIDS within each surviving node the same way `cull_nodes` above culls whole nodes, before
-   * either PHASE 1's `compute_vertex()` walk or PHASE 2's whole-grid snapshot touches them. A plain
-   * min/max scan per grid is worth doing even though it is itself `O(grid_area)`: it is a handful of
-   * comparisons per vertex, versus `compute_vertex()`'s closest-point search, curve-falloff lookup,
-   * and texture sample -- culling a whole far-away grid this way is strictly cheaper than walking it
-   * with the real relief formula only to have every vertex rejected. */
+   * leaf, whose size is a flat constant (`leaf_limit = 2500`) regardless of density. Cull
+   * individual GRIDS within each surviving node the same way `cull_nodes` above culls whole nodes,
+   * before either PHASE 1's `compute_vertex()` walk or PHASE 2's whole-grid snapshot touches them.
+   * A plain min/max scan per grid is worth doing even though it is itself `O(grid_area)`: it is a
+   * handful of comparisons per vertex, versus `compute_vertex()`'s closest-point search,
+   * curve-falloff lookup, and texture sample -- culling a whole far-away grid this way is strictly
+   * cheaper than walking it with the real relief formula only to have every vertex rejected. */
   const float tube_radius = curve_patch_cull_tube_radius(item.geometry, max_radius);
   BitVector<> grid_keep;
   grid_keep.resize(subdiv_ccg.grids_num, false);

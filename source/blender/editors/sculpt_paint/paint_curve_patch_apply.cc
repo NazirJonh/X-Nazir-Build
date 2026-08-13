@@ -84,8 +84,8 @@ static void curve_patch_apply_release(SculptSession &ss)
 }
 
 /* Stand in for the `StrokeCache` an interactive patch inherits from its anchor stroke. Only the
- * fields the Curve Patch re-stamp and the symmetry machinery actually read are set; everything else
- * keeps the defaults `StrokeCache`'s own member initializers give it. */
+ * fields the Curve Patch re-stamp and the symmetry machinery actually read are set; everything
+ * else keeps the defaults `StrokeCache`'s own member initializers give it. */
 static void curve_patch_apply_cache_init(StrokeCache &cache,
                                          Object &ob,
                                          Sculpt &sd,
@@ -123,8 +123,8 @@ static void curve_patch_apply_cache_init(StrokeCache &cache,
   cache.scale = float3(max_scale / ob.scale[0], max_scale / ob.scale[1], max_scale / ob.scale[2]);
 
   /* Also from `stroke_cache_init()`: a Curve Patch reads original coordinates (it is recomputed
-   * from scratch on every re-stamp), except on the image canvas, which does not use the sculpt undo
-   * system that serves them. */
+   * from scratch on every re-stamp), except on the image canvas, which does not use the sculpt
+   * undo system that serves them. */
   cache.accum = effect_type == CurvePatchEffectType::Image;
   if (effect_type == CurvePatchEffectType::Image) {
     /* `ImageColorEffect` reaches its canvas exclusively through this handle and silently does
@@ -154,7 +154,8 @@ bool curve_patch_apply(const Scene &scene,
   /* Both are taken over below, and both belong to something still running -- a live stroke or an
    * interactive patch. */
   if (ss->cache != nullptr || ss->curve_patch_session != nullptr) {
-    BKE_report(reports, RPT_ERROR, "Curve Patch: a stroke or another patch is already in progress");
+    BKE_report(
+        reports, RPT_ERROR, "Curve Patch: a stroke or another patch is already in progress");
     return false;
   }
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
@@ -172,8 +173,8 @@ bool curve_patch_apply(const Scene &scene,
     BKE_report(reports, RPT_ERROR, "Curve Patch: no control curve to stamp");
     return false;
   }
-  /* Every curve is checked, not just the first: a caller that assembled the list itself must not be
-   * able to smuggle a degenerate one past the build and into an empty patch. */
+  /* Every curve is checked, not just the first: a caller that assembled the list itself must not
+   * be able to smuggle a degenerate one past the build and into an empty patch. */
   for (const bke::CurvesGeometry &curve : control_curves) {
     if (curve.points_num() < 2) {
       BKE_report(reports, RPT_ERROR, "Curve Patch: the control curve needs at least two points");
@@ -236,7 +237,8 @@ bool curve_patch_apply(const Scene &scene,
    * puts the pre-patch canvas tiles into the image effect's undo step at all. */
   session->effect->session_undo_begin();
 
-  curve_patch_restore_and_restamp(scene, depsgraph, sd, paint_mode_settings, ob, *session, reports);
+  curve_patch_restore_and_restamp(
+      scene, depsgraph, sd, paint_mode_settings, ob, *session, reports);
 
   /* `invalidated` means the element count changed underneath the session, which cannot happen in a
    * single synchronous call -- checked anyway, because committing in that state writes a stale
@@ -254,10 +256,10 @@ bool curve_patch_apply(const Scene &scene,
   ss->free_curve_patch_session = nullptr;
 
   if (applied && effect_type != CurvePatchEffectType::Image) {
-    /* No viewport flush was issued (a caller with no window manager has nothing to repaint), so the
-     * ID is tagged here instead -- the same pair #curve_patch_discard_on_session_end places. The
-     * image canvas is excluded because it is not the mesh that changed; `ImageColorEffect` marks
-     * its own image dirty as it writes. */
+    /* No viewport flush was issued (a caller with no window manager has nothing to repaint), so
+     * the ID is tagged here instead -- the same pair #curve_patch_discard_on_session_end places.
+     * The image canvas is excluded because it is not the mesh that changed; `ImageColorEffect`
+     * marks its own image dirty as it writes. */
     Mesh &mesh = *id_cast<Mesh *>(ob.data);
     BKE_mesh_batch_cache_dirty_tag(&mesh, BKE_MESH_BATCH_DIRTY_ALL);
     DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
@@ -287,8 +289,9 @@ static float3 curve_patch_curve_center(const bke::CurvesGeometry &curve)
   return (min + max) * 0.5f;
 }
 
-/* The paint curve this apply reads, named by the operator's `paint_curve` property or, when that is
- * empty, the active brush's own. Null with a report when neither resolves to something usable. */
+/* The paint curve this apply reads, named by the operator's `paint_curve` property or, when that
+ * is empty, the active brush's own. Null with a report when neither resolves to something usable.
+ */
 static const PaintCurve *curve_patch_apply_resolve_paint_curve(bContext *C,
                                                                wmOperator *op,
                                                                const Brush &brush)
@@ -319,9 +322,9 @@ static const PaintCurve *curve_patch_apply_resolve_paint_curve(bContext *C,
   return paint_curve;
 }
 
-/* AUTO is -1 rather than an extra #CurvePatchEffectType value: the enumeration names what an effect
- * IS, and "work it out from the brush" is not one of those. The remaining items mirror it exactly,
- * so the cast in the exec below is the whole conversion. */
+/* AUTO is -1 rather than an extra #CurvePatchEffectType value: the enumeration names what an
+ * effect IS, and "work it out from the brush" is not one of those. The remaining items mirror it
+ * exactly, so the cast in the exec below is the whole conversion. */
 static const EnumPropertyItem curve_patch_apply_effect_items[] = {
     {-1, "AUTO", 0, "Automatic", "Choose the target the way the interactive tool does"},
     {int(CurvePatchEffectType::Relief), "RELIEF", 0, "Relief", "Displace the mesh"},
@@ -396,8 +399,8 @@ static wmOperatorStatus curve_patch_apply_exec(bContext *C, wmOperator *op)
   BKE_sculpt_update_object_for_edit(&depsgraph, &ob, is_paint_brush);
 
   /* A negative value is the AUTO item: infer the target from the brush exactly as the interactive
-   * tool does. Anything else is the caller stating it outright, which `curve_patch_session_publish()`
-   * below still refuses if this object cannot carry it. */
+   * tool does. Anything else is the caller stating it outright, which
+   * `curve_patch_session_publish()` below still refuses if this object cannot carry it. */
   const int effect_choice = RNA_enum_get(op->ptr, "effect");
   std::optional<CurvePatchEffectType> effect_type;
   if (effect_choice < 0) {
@@ -415,8 +418,8 @@ static wmOperatorStatus curve_patch_apply_exec(bContext *C, wmOperator *op)
    * plenty of points in total and a single one in the spline that was asked for. */
   Vector<bke::CurvesGeometry> control_curves;
   if (RNA_boolean_get(op->ptr, "use_all_splines")) {
-    /* A short spline is skipped rather than fatal here: asking for every spline of a curve must not
-     * fail because one of them is a stray single point. The single-spline branch below still
+    /* A short spline is skipped rather than fatal here: asking for every spline of a curve must
+     * not fail because one of them is a stray single point. The single-spline branch below still
      * refuses, because there the caller named exactly which spline it wanted. */
     for (const int i : IndexRange(paint_curve->geometry.wrap().curves_num())) {
       bke::CurvesGeometry curve = ED_paintcurve_control_curve_for_patch(*paint_curve, i);
@@ -433,7 +436,8 @@ static wmOperatorStatus curve_patch_apply_exec(bContext *C, wmOperator *op)
     bke::CurvesGeometry curve = ED_paintcurve_control_curve_for_patch(
         *paint_curve, RNA_int_get(op->ptr, "spline_index"));
     if (curve.points_num() < 2) {
-      BKE_report(op->reports, RPT_ERROR, "Curve Patch: the chosen spline needs at least two points");
+      BKE_report(
+          op->reports, RPT_ERROR, "Curve Patch: the chosen spline needs at least two points");
       return OPERATOR_CANCELLED;
     }
     control_curves.append(std::move(curve));
@@ -441,8 +445,8 @@ static wmOperatorStatus curve_patch_apply_exec(bContext *C, wmOperator *op)
 
   /* One source for every build parameter a brush implies outside a stroke -- shared with the RNA
    * functions that read a patch back out without applying it. Resolved PER CURVE: the projection
-   * plane is fitted to the curve itself, so two splines lying on different faces get the plane each
-   * of them actually needs. */
+   * plane is fitted to the curve itself, so two splines lying on different faces get the plane
+   * each of them actually needs. */
   Vector<bke::CurvePatchParams> params;
   params.reserve(control_curves.size());
   for (const bke::CurvesGeometry &curve : control_curves) {
@@ -492,8 +496,8 @@ void SCULPT_OT_curve_patch_apply(wmOperatorType *ot)
   ot->idname = "SCULPT_OT_curve_patch_apply";
 
   ot->exec = curve_patch_apply_exec;
-  /* Deliberately NOT `sculpt_mode_poll_view3d()`: this operator never reads a region, and requiring
-   * one would rule out the background runs it exists for. */
+  /* Deliberately NOT `sculpt_mode_poll_view3d()`: this operator never reads a region, and
+   * requiring one would rule out the background runs it exists for. */
   ot->poll = sculpt_mode_poll;
 
   /* `OPTYPE_UNDO` is load-bearing, not decoration: `ReliefEffect::push_position_step()` closes the
@@ -551,7 +555,8 @@ void SCULPT_OT_curve_patch_apply(wmOperatorType *ot)
 namespace blender {
 
 /* Declared in `ED_paint.hh`, which puts the `ED_*` API in `blender` rather than in this file's own
- * `blender::ed::sculpt_paint` -- hence the separate namespace block, as in `paint_curve_sync.cc`. */
+ * `blender::ed::sculpt_paint` -- hence the separate namespace block, as in `paint_curve_sync.cc`.
+ */
 bke::CurvePatchParams ED_curve_patch_params_from_brush(const Paint &paint,
                                                        const Brush &brush,
                                                        const bke::CurvesGeometry &control_curve)

@@ -502,11 +502,11 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
   const eObjectMode mode_flag = OB_MODE_SCULPT;
   Mesh *mesh = BKE_mesh_from_object(&ob);
 
-  /* Last resort for a live Curve Patch: `SCULPT_OT_curve_patch_edit` owns it but is never consulted
-   * when the mode exits, so without this the cache would outlive the session that owns it. A no-op
-   * on the paths that already committed through #curve_patch_commit_on_session_end (Tab and the
-   * mode dropdown, see `sculpt_mode_toggle_exec()`); this only ever fires for the teardown paths
-   * that have no `bContext` to commit through -- `ed_object_mode_generic_exit_ex()`
+  /* Last resort for a live Curve Patch: `SCULPT_OT_curve_patch_edit` owns it but is never
+   * consulted when the mode exits, so without this the cache would outlive the session that owns
+   * it. A no-op on the paths that already committed through #curve_patch_commit_on_session_end
+   * (Tab and the mode dropdown, see `sculpt_mode_toggle_exec()`); this only ever fires for the
+   * teardown paths that have no `bContext` to commit through -- `ed_object_mode_generic_exit_ex()`
    * (`object_modes.cc`), reached by clicking another object in the viewport or Outliner. Placed
    * BEFORE the flushes below, while the session it restores through is still intact.
    * Object deletion never reaches this function; #BKE_sculptsession_free invokes the same discard
@@ -584,10 +584,10 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
   }
 
   if (is_mode_set) {
-    /* Commit a live Curve Patch instead of losing it, while the session, an evaluated depsgraph and
-     * this operator's `bContext` are all still intact -- `object_sculpt_mode_exit()` has none of
-     * those to offer, and its own `curve_patch_discard_on_session_end()` can only discard. Both Tab
-     * and the header's mode dropdown reach sculpt-mode exit through this operator
+    /* Commit a live Curve Patch instead of losing it, while the session, an evaluated depsgraph
+     * and this operator's `bContext` are all still intact -- `object_sculpt_mode_exit()` has none
+     * of those to offer, and its own `curve_patch_discard_on_session_end()` can only discard. Both
+     * Tab and the header's mode dropdown reach sculpt-mode exit through this operator
      * (`object_mode_op_string()`, `object_modes.cc`), so every deliberate way out of the mode
      * commits. The step this pushes is left parked for this operator's own `OPTYPE_UNDO`, which is
      * the contract `curve_patch_finish_commit()` expects. */

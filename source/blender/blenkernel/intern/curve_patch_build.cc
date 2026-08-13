@@ -43,9 +43,10 @@ void CurvePatchGeometry::clear()
   this->ribbon_end_margin = 0.0f;
 }
 
-/* Width of the normal-field smoothing. It arbitrates "`u` stays continuous" against "the strip hugs
- * the edge": wider means a smoother texture on an oblique crossing and a looser fit. A fraction of
- * the radius rather than a world-space constant, so the behavior does not depend on scene scale. */
+/* Width of the normal-field smoothing. It arbitrates "`u` stays continuous" against "the strip
+ * hugs the edge": wider means a smoother texture on an oblique crossing and a looser fit. A
+ * fraction of the radius rather than a world-space constant, so the behavior does not depend on
+ * scene scale. */
 static float curve_patch_smooth_length(const CurvePatchParams &params)
 {
   return params.radius * (params.final_quality ? 0.5f : 0.8f);
@@ -73,13 +74,13 @@ static void curve_patch_build_stamps(const CurvePatchParams &params,
   /* PLANAR tests candidate vertices against a rigid WORLD-space frame, but this reach is still an
    * ARC-LENGTH window. On a bend the chord is shorter than the arc, so a vertex inside a stamp's
    * world square can have an `s` outside this window and get silently clipped. The arc/chord ratio
-   * for a circular bend of turn angle theta across the stamp's reach is `(theta/2) / sin(theta/2)`;
-   * this bound is sized for turns up to a 180-degree hairpin, where the ratio reaches
-   * `PI / 2 ~= 1.571`, and 1.6 rounds that up. A curve that spirals tighter than a half-turn within
-   * roughly one stamp's reach exceeds what this bound was designed for and is out of scope here.
-   * The bound only has to be conservative within that scope: the per-stamp test in the relief's
-   * candidate loop is exact, so an over-wide window just costs a few extra candidates, while a
-   * too-narrow one silently clips stamps. */
+   * for a circular bend of turn angle theta across the stamp's reach is `(theta/2) /
+   * sin(theta/2)`; this bound is sized for turns up to a 180-degree hairpin, where the ratio
+   * reaches `PI / 2 ~= 1.571`, and 1.6 rounds that up. A curve that spirals tighter than a
+   * half-turn within roughly one stamp's reach exceeds what this bound was designed for and is out
+   * of scope here. The bound only has to be conservative within that scope: the per-stamp test in
+   * the relief's candidate loop is exact, so an over-wide window just costs a few extra
+   * candidates, while a too-narrow one silently clips stamps. */
   constexpr float PLANAR_BEND_SLACK = 1.6f;
   /* Resolve the one bound every consumer below shares. On top of the bend slack above, PLANAR also
    * adds `jitter_amount`: a stamp pushed sideways off the curve keeps a rigid frame, so its square
@@ -94,24 +95,24 @@ static void curve_patch_build_stamps(const CurvePatchParams &params,
   /* A closed curve has no ends to extend (see `ribbon_end_margin` below), so the stamp at the join
    * would lose the half that reaches into `v < 0` -- which on a loop is not outside the curve but
    * the stretch just before the join. Wrap those stamps around instead, so both halves are present
-   * and meet exactly at the seam. The bound must be the same one the per-vertex search window uses,
-   * hence the shared `stamp_search_reach`. */
+   * and meet exactly at the seam. The bound must be the same one the per-vertex search window
+   * uses, hence the shared `stamp_search_reach`. */
   if (r_geometry.spline.cyclic) {
     curve_patch_stamps_add_cyclic_wrap(
         r_geometry.stamps, r_geometry.spline.total_length(), r_geometry.stamp_search_reach);
   }
 
   /* Stamps pushed sideways by jitter would fall outside the ribbon and be clipped by the LUT's
-   * edge, so the strip has to cover the widest possible excursion. Only jitter needs this: the size
-   * randomization shrinks stamps and never grows them. The widened value flows into
+   * edge, so the strip has to cover the widest possible excursion. Only jitter needs this: the
+   * size randomization shrinks stamps and never grows them. The widened value flows into
    * `ribbon_source_hash()` as the `brush_radius` argument, so the cached LUT invalidates correctly
    * with no extra hashing. */
   r_geometry.ribbon_radius += params.jitter_amount;
 
-  /* The layout puts the first stamp's center exactly at `s == 0` and the last one at the last whole
-   * step before `total_length`, so an end stamp reaches past the curve's end by its own
-   * half-extent -- and the strip, which used to stop dead at that end, gave the overhanging half no
-   * UV at all and clipped it along a hard straight edge. Extend the strip by the farthest such
+  /* The layout puts the first stamp's center exactly at `s == 0` and the last one at the last
+   * whole step before `total_length`, so an end stamp reaches past the curve's end by its own
+   * half-extent -- and the strip, which used to stop dead at that end, gave the overhanging half
+   * no UV at all and clipped it along a hard straight edge. Extend the strip by the farthest such
    * reach instead of insetting the stamps, which would leave the ends of the curve visibly bare.
    *
    * #curve_patch_stamp_reach is a stamp's corner reach; `jitter_amount` covers a center jittered
@@ -134,7 +135,8 @@ void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
   Array<float> evaluated_radii(control_curve.evaluated_points_num());
   control_curve.interpolate_to_evaluated(VArraySpan(control_curve.radius()),
                                          evaluated_radii.as_mutable_span());
-  /* A control curve is always a single spline, so curve 0 carries the whole patch's cyclic state. */
+  /* A control curve is always a single spline, so curve 0 carries the whole patch's cyclic state.
+   */
   const bool cyclic = control_curve.curves_num() > 0 && control_curve.cyclic()[0];
 
   /* The polyline is pulled onto the pristine surface BEFORE the spline is built: arc lengths and
@@ -223,7 +225,7 @@ void curve_patch_geometry_build(const Span<float3> evaluated_positions,
     CurvePatchFramesParams frame_params;
     frame_params.min_window_length = 2.0f * params.radius;
     frame_params.turn_threshold_rad = params.final_quality ? float(M_PI) * 12.0f / 180.0f :
-                                                            float(M_PI) * 25.0f / 180.0f;
+                                                             float(M_PI) * 25.0f / 180.0f;
     frame_params.break_threshold_rad = float(M_PI) * 60.0f / 180.0f;
     /* Half a brush radius of shared stretch on each side of an interior join. Enough that the
      * handover happens well inside both windows' tables rather than on their outermost rows, and

@@ -168,8 +168,8 @@ class PaintCurveCursor : Overlay {
     }
 
     enabled_ = true;
-    const bool is_curves_edit =
-        ed::sculpt_paint::ED_paint_curve_is_curves_edit_tool(state.active_tool_idname);
+    const bool is_curves_edit = ed::sculpt_paint::ED_paint_curve_is_curves_edit_tool(
+        state.active_tool_idname);
 
     ViewContext vc = ed::sculpt_paint::ED_paint_curve_viewcontext_from_state(
         state.depsgraph,
@@ -197,9 +197,8 @@ class PaintCurveCursor : Overlay {
     }
 
     const int2 origin(state.region->winrct.xmin, state.region->winrct.ymin);
-    const float2 mval_region = state.cursor_mval_valid ?
-                                   float2(state.cursor_mval - origin) :
-                                   float2(-1.0e6f);
+    const float2 mval_region = state.cursor_mval_valid ? float2(state.cursor_mval - origin) :
+                                                         float2(-1.0e6f);
     ED_curve_patch_overlay_data_get(vc.obact, patch_overlay_);
     /* Non-empty overlay, not "session has an active item". A half-built session
      * (`active_patch` out of range with patches still present) still draws every spline;
@@ -255,9 +254,11 @@ class PaintCurveCursor : Overlay {
         }
       }
     }
-    else if (brush->stroke_method == BRUSH_STROKE_CURVE || is_curve_patch_stroke || is_curves_edit) {
+    else if (brush->stroke_method == BRUSH_STROKE_CURVE || is_curve_patch_stroke || is_curves_edit)
+    {
       /* Curve Edit uses the same paint-curve handle overlay as Stroke Method: Curve so Ctrl+RMB
-       * point creation and handle drags are visible while editing (silhouettes alone are not enough). */
+       * point creation and handle drags are visible while editing (silhouettes alone are not
+       * enough). */
       ed::sculpt_paint::ED_paint_curve_screen_handles_build(
           vc, *brush, sculpt, mval_region, compute_hover, show_insert_preview, handles_);
     }
@@ -265,13 +266,13 @@ class PaintCurveCursor : Overlay {
     if (is_curves_edit && state.is_space_v3d()) {
       const uint64_t key = ed::sculpt_paint::ED_paint_curve_silhouette_cache_key_hash(vc);
       ed::sculpt_paint::ED_paint_curve_screen_silhouettes_build_cached(vc,
-                                                                        mval_region,
-                                                                        source_object,
-                                                                        compute_hover,
-                                                                        key,
-                                                                        silhouette_cache_,
-                                                                        silhouette_cache_key_,
-                                                                        silhouettes_);
+                                                                       mval_region,
+                                                                       source_object,
+                                                                       compute_hover,
+                                                                       key,
+                                                                       silhouette_cache_,
+                                                                       silhouette_cache_key_,
+                                                                       silhouettes_);
 
       /* Rebuild the persistent silhouette GPU batches only when the projection cache changed
        * (view rotation, region resize, scene/geometry edit). On plain mouse-moves the key is
@@ -315,7 +316,8 @@ class PaintCurveCursor : Overlay {
 #if PAINT_CURVE_CURSOR_PROFILING
     /* DEBUG-pccursor: `screen` is the CPU-side projection. `ephemeral` is insert-preview /
      * snap-marker batches rebuilt every sync; `cached` is the handle/segment/radius GPU cache,
-     * which this measurement exists to judge. A cache only pays off if the GPU upload dominated. */
+     * which this measurement exists to judge. A cache only pays off if the GPU upload dominated.
+     */
     auto owned_count = [](const Vector<gpu::Batch *> &v) {
       int n = 0;
       for (gpu::Batch *b : v) {
@@ -335,14 +337,15 @@ class PaintCurveCursor : Overlay {
                                owned_count(handle_gpu_.radius_line) +
                                owned_count(handle_gpu_.radius_circle);
     const double prof_t_end = BLI_time_now_seconds();
-    printf("[DEBUG-pccursor] total=%.3fms | screen=%.3f batches=%.3f | points=%d ephemeral=%d "
-           "cached=%d\n",
-           (prof_t_end - prof_t0) * 1000.0,
-           (prof_t_build - prof_t0) * 1000.0,
-           (prof_t_end - prof_t_build) * 1000.0,
-           int(handles_.points.size()),
-           int(batches_.size()),
-           cached_batches);
+    printf(
+        "[DEBUG-pccursor] total=%.3fms | screen=%.3f batches=%.3f | points=%d ephemeral=%d "
+        "cached=%d\n",
+        (prof_t_end - prof_t0) * 1000.0,
+        (prof_t_build - prof_t0) * 1000.0,
+        (prof_t_end - prof_t_build) * 1000.0,
+        int(handles_.points.size()),
+        int(batches_.size()),
+        cached_batches);
     fflush(stdout);
 #endif
   }
@@ -400,7 +403,8 @@ class PaintCurveCursor : Overlay {
   }
 
   /** Geometry-only key: positions, handle types, polylines. Hover/selection/colors are push
-   * constants and must not invalidate the cache. Digest is 32-bit Murmur2A, see #handle_gpu_key_. */
+   * constants and must not invalidate the cache. Digest is 32-bit Murmur2A, see #handle_gpu_key_.
+   */
   uint64_t hash_handle_geometry() const
   {
     BLI_HashMurmur2A mm2;
@@ -455,8 +459,7 @@ class PaintCurveCursor : Overlay {
     gpu::VertBuf *vbo = GPU_vertbuf_create_with_format(format);
     GPU_vertbuf_data_alloc(*vbo, uint(verts.size()));
     GPU_vertbuf_attr_fill(vbo, 0, verts.data());
-    gpu::Batch *batch = GPU_batch_create_ex(
-        GPU_PRIM_LINE_STRIP, vbo, nullptr, GPU_BATCH_OWNS_VBO);
+    gpu::Batch *batch = GPU_batch_create_ex(GPU_PRIM_LINE_STRIP, vbo, nullptr, GPU_BATCH_OWNS_VBO);
     owner.append(batch);
     return batch;
   }
@@ -532,11 +535,10 @@ class PaintCurveCursor : Overlay {
       ensure_owned_strip(handle_gpu_.point_right, {right2, 2});
 
       const float w = 10.0f * 0.5f;
-      const float2 diamond[4] = {
-          {hd.position.x - w, hd.position.y},
-          {hd.position.x, hd.position.y + w},
-          {hd.position.x + w, hd.position.y},
-          {hd.position.x, hd.position.y - w}};
+      const float2 diamond[4] = {{hd.position.x - w, hd.position.y},
+                                 {hd.position.x, hd.position.y + w},
+                                 {hd.position.x + w, hd.position.y},
+                                 {hd.position.x, hd.position.y - w}};
       ensure_owned_strip_closed(handle_gpu_.point_diamond, {diamond, 4});
 
       auto make_endpoint = [&](const float2 &co, const int8_t htype, Vector<gpu::Batch *> &owner) {
@@ -547,11 +549,10 @@ class PaintCurveCursor : Overlay {
           ensure_owned_strip_closed(owner, {tri, 3});
         }
         else {
-          const float2 box[4] = {
-              {co.x - ew, co.y - ew},
-              {co.x + ew, co.y - ew},
-              {co.x + ew, co.y + ew},
-              {co.x - ew, co.y + ew}};
+          const float2 box[4] = {{co.x - ew, co.y - ew},
+                                 {co.x + ew, co.y - ew},
+                                 {co.x + ew, co.y + ew},
+                                 {co.x - ew, co.y + ew}};
           ensure_owned_strip_closed(owner, {box, 4});
         }
       };
@@ -604,8 +605,12 @@ class PaintCurveCursor : Overlay {
   static float4x4 paint_curve_ortho_mvp(const State &state)
   {
     const float ofs = -0.01f;
-    return math::projection::orthographic(
-        ofs, float(state.region->winx) + ofs, ofs, float(state.region->winy) + ofs, -100.0f, 100.0f);
+    return math::projection::orthographic(ofs,
+                                          float(state.region->winx) + ofs,
+                                          ofs,
+                                          float(state.region->winy) + ofs,
+                                          -100.0f,
+                                          100.0f);
   }
 
   static void polyline_workaround_push_constants(PassSimple &pass)
@@ -649,8 +654,8 @@ class PaintCurveCursor : Overlay {
 
     /* --- 2. Hover silhouette --- */
     if (silhouettes_.hover_object) {
-      if (const Vector<gpu::Batch *> *batches =
-              cached_silhouette_batches(silhouettes_.hover_object))
+      if (const Vector<gpu::Batch *> *batches = cached_silhouette_batches(
+              silhouettes_.hover_object))
       {
         float hover_col[4];
         ui::theme::get_color_type_4fv(TH_VERTEX_SELECT, SPACE_VIEW3D, hover_col);
@@ -692,8 +697,7 @@ class PaintCurveCursor : Overlay {
       ui::theme::get_color_type_4fv(TH_VERTEX_SELECT, SPACE_VIEW3D, hover_col);
       hover_col[3] = 1.0f;
       ps_.push_constant("lineWidth", 3.0f);
-      ps_.push_constant(
-          "color", float4(hover_col[0], hover_col[1], hover_col[2], hover_col[3]));
+      ps_.push_constant("color", float4(hover_col[0], hover_col[1], hover_col[2], hover_col[3]));
       for (const int i : IndexRange(handles_.segments.size())) {
         if (handle_gpu_.segments[i] && handles_.segments[i].hovered) {
           draw_strip(handle_gpu_.segments[i]);
@@ -822,12 +826,11 @@ class PaintCurveCursor : Overlay {
         const float4 underlay_col = rd.hovered ? float4(1.0f, 1.0f, 1.0f, 0.8f) :
                                                  float4(1.0f, 1.0f, 1.0f, 0.5f);
         const float hover_t = 0.65f;
-        const float4 circle_col = rd.hovered ?
-                                      float4(rd.color.x + (1.0f - rd.color.x) * hover_t,
-                                             rd.color.y + (1.0f - rd.color.y) * hover_t,
-                                             rd.color.z + (1.0f - rd.color.z) * hover_t,
-                                             1.0f) :
-                                      rd.color;
+        const float4 circle_col = rd.hovered ? float4(rd.color.x + (1.0f - rd.color.x) * hover_t,
+                                                      rd.color.y + (1.0f - rd.color.y) * hover_t,
+                                                      rd.color.z + (1.0f - rd.color.z) * hover_t,
+                                                      1.0f) :
+                                               rd.color;
         ps_.push_constant("lineWidth", 1.0f);
         ps_.push_constant("color", underlay_col);
         draw_strip(b);

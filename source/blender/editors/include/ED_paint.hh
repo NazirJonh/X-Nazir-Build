@@ -150,8 +150,9 @@ void ED_paintcurve_refresh_on_sculpt_mode_enter(bContext *C);
 /**
  * Stop syncing the intermediate paint curve back to the source object.
  *
- * Does NOT touch the curve itself: this runs from an RNA property assignment, where destroying user
- * data as a side effect is invisible from Python. Clearing the canvas is #PAINTCURVE_OT_clear.
+ * Does NOT touch the curve itself: this runs from an RNA property assignment, where destroying
+ * user data as a side effect is invisible from Python. Clearing the canvas is
+ * #PAINTCURVE_OT_clear.
  */
 void ED_paintcurve_detach_source(bContext *C);
 
@@ -168,8 +169,8 @@ void ED_paintcurve_flush_radius_transform(bContext *C, struct PaintCurve *pc);
  * never created. Call after changing point positions from outside the paint-curve operators; those
  * recompute for themselves.
  *
- * Pushes no undo step. A caller reached through RNA is covered by the global memfile undo, which is
- * how comparable RNA edits behave; #ED_paintcurve_undo_push_begin serves the modal operators.
+ * Pushes no undo step. A caller reached through RNA is covered by the global memfile undo, which
+ * is how comparable RNA edits behave; #ED_paintcurve_undo_push_begin serves the modal operators.
  */
 void ED_paintcurve_geometry_update_after_edit(struct PaintCurve *pc);
 
@@ -180,13 +181,11 @@ void ED_paintcurve_geometry_update_after_edit(struct PaintCurve *pc);
  * `radius` follows this codebase's paint-curve convention, where 1.0 means "full brush size" --
  * NOT #blender::bke::CurvesGeometry::radius()'s hair-oriented 0.01 default.
  *
- * The point gets AUTO bezier handles, unlike the ALIGN ones an interactive click leaves: a click is
- * the first half of a gesture that drags the handle out next, while a caller here supplies
+ * The point gets AUTO bezier handles, unlike the ALIGN ones an interactive click leaves: a click
+ * is the first half of a gesture that drags the handle out next, while a caller here supplies
  * positions and nothing else.
  */
-int ED_paintcurve_geometry_add_point(struct PaintCurve *pc,
-                                     const float position[3],
-                                     float radius);
+int ED_paintcurve_geometry_add_point(struct PaintCurve *pc, const float position[3], float radius);
 
 /** Drop every point and spline, leaving an empty but initialized geometry. */
 void ED_paintcurve_geometry_clear(struct PaintCurve *pc);
@@ -219,9 +218,9 @@ void ED_paintcurve_geometry_points_set(struct PaintCurve *pc,
  * geometry carrying every attribute of the original, with the bezier handle POSITION attributes
  * materialized, the auto/aligned handles recomputed, and a `radius` attribute guaranteed present.
  *
- * `spline_index` selects the spline; a negative one means the curve's own #PaintCurve.active_curve.
- * The index is clamped, so an out-of-range one yields the nearest existing spline rather than
- * nothing.
+ * `spline_index` selects the spline; a negative one means the curve's own
+ * #PaintCurve.active_curve. The index is clamped, so an out-of-range one yields the nearest
+ * existing spline rather than nothing.
  *
  * Neither materialization step is optional, and both fail silently when skipped. A curve whose
  * handle position attributes were never created evaluates to a bezier collapsed at the origin. A
@@ -237,8 +236,8 @@ bke::CurvesGeometry ED_paintcurve_control_curve_for_patch(const struct PaintCurv
 
 /**
  * The Curve Patch build parameters a brush implies for a patch driven from OUTSIDE a stroke: the
- * brush's own settings plus the four values a stroke would otherwise freeze -- world radius, radius
- * per unit of the Size slider, projection plane and stamp seed.
+ * brush's own settings plus the four values a stroke would otherwise freeze -- world radius,
+ * radius per unit of the Size slider, projection plane and stamp seed.
  *
  * The plane comes from `control_curve` itself (Newell's normal over its points as a closed loop,
  * the object's +Z when degenerate), which is what makes the result independent of any viewport and

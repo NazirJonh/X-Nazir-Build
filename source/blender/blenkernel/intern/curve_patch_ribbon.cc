@@ -145,8 +145,8 @@ static void ribbon_fix_border_self_intersections(const Span<float3> poly,
     }
 
     /* Gather the nearby later segments, highest index first. The original scan walked `j` downward
-     * from the far end and stopped at its first hit, so it always collapsed the WIDEST loop through
-     * `i`; sorting descending here keeps that choice identical. */
+     * from the far end and stopped at its first hit, so it always collapsed the WIDEST loop
+     * through `i`; sorting descending here keeps that choice identical. */
     candidates.clear();
     const int cx = cell_x_of(b2d[i]);
     const int cy = cell_y_of(b2d[i]);
@@ -160,7 +160,8 @@ static void ribbon_fix_border_self_intersections(const Span<float3> poly,
         }
       }
     }
-    std::sort(candidates.begin(), candidates.end(), [](const int a, const int b) { return a > b; });
+    std::sort(
+        candidates.begin(), candidates.end(), [](const int a, const int b) { return a > b; });
 
     for (const int j : candidates) {
       /* On a closed curve the last segment and the first are neighbours THROUGH the join, exactly
@@ -199,7 +200,8 @@ static void ribbon_fix_border_self_intersections(const Span<float3> poly,
             const float3 ab = poly[m + 1] - poly[m];
             const float ab_dot = math::dot(ab, ab);
             const float tp = (ab_dot > 1e-12f) ?
-                                 std::clamp(math::dot(orig[k] - poly[m], ab) / ab_dot, 0.0f, 1.0f) :
+                                 std::clamp(
+                                     math::dot(orig[k] - poly[m], ab) / ab_dot, 0.0f, 1.0f) :
                                  0.0f;
             const float3 proj = math::interpolate(poly[m], poly[m + 1], tp);
             min_dist_sq = std::min(min_dist_sq, math::distance_squared(orig[k], proj));
@@ -316,9 +318,9 @@ static void ribbon_fix_border_self_intersections(const Span<float3> poly,
  * Catmull-Clark subdivision of the ribbon grid, `rows x cols` -> `(2*rows-1) x (2*cols-1)`.
  * `pin_border_columns` selects the boundary rule; everything else is shared.
  *
- * Pinned (the first pass): every original vertex keeps its exact position except the center column,
- * which takes the 1D boundary rule ALONG the curve so cross-strip segments can curve near merge
- * points, and every vertical edge point is a plain midpoint. The borders therefore carry the
+ * Pinned (the first pass): every original vertex keeps its exact position except the center
+ * column, which takes the 1D boundary rule ALONG the curve so cross-strip segments can curve near
+ * merge points, and every vertical edge point is a plain midpoint. The borders therefore carry the
  * self-intersection collapse geometry through unchanged.
  *
  * Standard (the second pass): only the border columns stay pinned; interior vertices take the full
@@ -346,8 +348,8 @@ static void ribbon_subdivide(Vector<float3> &grid_pos,
     for (int c = 0; c < fC; c++) {
       fp[r * fC + c] = 0.25f * (grid_pos[oi(r, c)] + grid_pos[oi(r, c + 1)] +
                                 grid_pos[oi(r + 1, c)] + grid_pos[oi(r + 1, c + 1)]);
-      fu[r * fC + c] = 0.25f * (grid_uv[oi(r, c)] + grid_uv[oi(r, c + 1)] +
-                                grid_uv[oi(r + 1, c)] + grid_uv[oi(r + 1, c + 1)]);
+      fu[r * fC + c] = 0.25f * (grid_uv[oi(r, c)] + grid_uv[oi(r, c + 1)] + grid_uv[oi(r + 1, c)] +
+                                grid_uv[oi(r + 1, c + 1)]);
     }
   }
 
@@ -402,15 +404,15 @@ static void ribbon_subdivide(Vector<float3> &grid_pos,
     for (int c = 0; c < oC; c++) {
       if (pin_border_columns) {
         /* `c == 1` rather than "not a border column": the pinned pass runs only on the 3-column
-         * seed grid (`rows x 3` -> `(2*rows-1) x 5`), where the two are the same thing. Spelling it
-         * literally keeps this branch identical to the pass it replaces at every grid size. */
+         * seed grid (`rows x 3` -> `(2*rows-1) x 5`), where the two are the same thing. Spelling
+         * it literally keeps this branch identical to the pass it replaces at every grid size. */
         if (c == 1 && r > 0 && r < oR - 1) {
-          np[ni(2 * r, 2 * c)] = (1.0f / 8.0f) * (grid_pos[oi(r - 1, c)] +
-                                                  6.0f * grid_pos[oi(r, c)] +
-                                                  grid_pos[oi(r + 1, c)]);
-          nu[ni(2 * r, 2 * c)] = (1.0f / 8.0f) * (grid_uv[oi(r - 1, c)] +
-                                                  6.0f * grid_uv[oi(r, c)] +
-                                                  grid_uv[oi(r + 1, c)]);
+          np[ni(2 * r, 2 * c)] = (1.0f / 8.0f) *
+                                 (grid_pos[oi(r - 1, c)] + 6.0f * grid_pos[oi(r, c)] +
+                                  grid_pos[oi(r + 1, c)]);
+          nu[ni(2 * r, 2 * c)] = (1.0f / 8.0f) *
+                                 (grid_uv[oi(r - 1, c)] + 6.0f * grid_uv[oi(r, c)] +
+                                  grid_uv[oi(r + 1, c)]);
         }
         else {
           np[ni(2 * r, 2 * c)] = grid_pos[oi(r, c)];
@@ -424,11 +426,11 @@ static void ribbon_subdivide(Vector<float3> &grid_pos,
         nu[ni(2 * r, 2 * c)] = grid_uv[oi(r, c)];
       }
       else if (r == 0 || r == oR - 1) {
-        np[ni(2 * r, 2 * c)] = (1.0f / 8.0f) * (grid_pos[oi(r, c - 1)] + 6.0f * grid_pos[oi(r, c)] +
-                                                grid_pos[oi(r, c + 1)]);
-        nu[ni(2 * r, 2 * c)] = (1.0f / 8.0f) *
-                               (grid_uv[oi(r, c - 1)] + 6.0f * grid_uv[oi(r, c)] +
-                                grid_uv[oi(r, c + 1)]);
+        np[ni(2 * r, 2 * c)] = (1.0f / 8.0f) *
+                               (grid_pos[oi(r, c - 1)] + 6.0f * grid_pos[oi(r, c)] +
+                                grid_pos[oi(r, c + 1)]);
+        nu[ni(2 * r, 2 * c)] = (1.0f / 8.0f) * (grid_uv[oi(r, c - 1)] + 6.0f * grid_uv[oi(r, c)] +
+                                                grid_uv[oi(r, c + 1)]);
       }
       else {
         const float3 Q = 0.25f * (fp[(r - 1) * fC + (c - 1)] + fp[(r - 1) * fC + c] +
@@ -655,8 +657,8 @@ bool curve_patch_ribbon_grid_build(const CurvePatchSpline &spline,
   const int count = int(poly.size());
   const float3 plane_normal = math::normalize(spline.plane_normal);
 
-  /* The binormals live in the same index space as the polyline, so extending the ends has to extend
-   * them too -- by copying the outermost value, exactly as the radii do. */
+  /* The binormals live in the same index space as the polyline, so extending the ends has to
+   * extend them too -- by copying the outermost value, exactly as the radii do. */
   Vector<float3> binormals_ext;
   if (!binormals.is_empty() && extend) {
     binormals_ext.reserve(count);
@@ -810,9 +812,9 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                               const float end_margin_end,
                               const Span<float3> binormals)
 {
-  /* Nothing the ribbon depends on has changed, so the existing LUT is still exact. The modal editor
-   * re-stamps on events that never touch the curve (strength slider, Length mode, Repeats count),
-   * and those otherwise paid for a full rebuild each time. */
+  /* Nothing the ribbon depends on has changed, so the existing LUT is still exact. The modal
+   * editor re-stamps on events that never touch the curve (strength slider, Length mode, Repeats
+   * count), and those otherwise paid for a full rebuild each time. */
   const uint64_t source_hash = ribbon_source_hash(
       spline, brush_radius, high_quality, end_margin_start, end_margin_end, binormals);
   if (r_lut.ready && r_lut.source_hash == source_hash) {
@@ -865,8 +867,9 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
    * than a fraction of the largest half-width so the across-strip coordinate keeps sub-strip
    * precision on long thin curves, clamped to keep the per-restamp fill cost bounded.
    *
-   * The high-quality pass roughly doubles the density: its supersampled relief places samples a few
-   * percent of a strip-width apart, and the interactive table's pixels are coarser than that. */
+   * The high-quality pass roughly doubles the density: its supersampled relief places samples a
+   * few percent of a strip-width apart, and the interactive table's pixels are coarser than that.
+   */
   const float pixel_fraction = high_quality ? 0.075f : 0.15f;
   const int res_cap = high_quality ? 1024 : 512;
   const float max_extent = std::max(ext.x, ext.y);
@@ -1015,9 +1018,10 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
              * stability of the live stroke matters more. Curve Patch's LUT spans the WHOLE curve,
              * which makes age an arbitrary winner: the earlier leg's outer EDGE (|u| ~ 1) would
              * claim pixels that the later leg covers through its CENTER (|u| ~ 0), report a
-             * near-edge across-strip coordinate for them, and so drive `BKE_brush_curve_strength()`
-             * to ~0 -- punching a relief-free hole into the strip that should have been fully
-             * covered, bounded by a staircase along the LUT's own pixel grid.
+             * near-edge across-strip coordinate for them, and so drive
+             * `BKE_brush_curve_strength()` to ~0 -- punching a relief-free hole into the strip
+             * that should have been fully covered, bounded by a staircase along the LUT's own
+             * pixel grid.
              *
              * Rank the two legs by which covers the pixel more centrally instead. |u| varies
              * smoothly across the ribbon, so the ranking (and hence the boundary where it flips)
@@ -1099,8 +1103,7 @@ int CurvePatchRibbonLut::sample(const float3 &co, float2 r_uv[2]) const
 
   const int pixels[4] = {
       iy * RES + ix, iy * RES + ix + 1, (iy + 1) * RES + ix, (iy + 1) * RES + ix + 1};
-  const float pixel_weights[4] = {
-      (1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty};
+  const float pixel_weights[4] = {(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty};
 
   /* Collect every stretch of the curve recorded across the 2x2 neighborhood: both slots of all
    * four pixels. Which slot a given stretch occupies is NOT consistent between pixels -- the

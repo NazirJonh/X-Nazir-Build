@@ -553,9 +553,15 @@ void PaintStroke::add_step(bContext *C,
                          vc.obact->runtime->sculpt_session->cache) ?
                             vc.obact->runtime->sculpt_session->cache->sculpt_normal :
                             float3(0);
-      add_roll_point(
-          mval, mouse_out, location, sn, paint_runtime->pixel_radius, pressure, pen_flip_,
-          tilt_.x, tilt_.y);
+      add_roll_point(mval,
+                     mouse_out,
+                     location,
+                     sn,
+                     paint_runtime->pixel_radius,
+                     pressure,
+                     pen_flip_,
+                     tilt_.x,
+                     tilt_.y);
     }
     return;
   }
@@ -570,9 +576,15 @@ void PaintStroke::add_step(bContext *C,
                        vc.obact->runtime->sculpt_session->cache) ?
                           vc.obact->runtime->sculpt_session->cache->sculpt_normal :
                           float3(0);
-    add_roll_point(
-        mval, mouse_out, location, sn, paint_runtime->pixel_radius, pressure, pen_flip_, tilt_.x,
-        tilt_.y);
+    add_roll_point(mval,
+                   mouse_out,
+                   location,
+                   sn,
+                   paint_runtime->pixel_radius,
+                   pressure,
+                   pen_flip_,
+                   tilt_.x,
+                   tilt_.y);
   }
 
   if (need_roll_mapping_) {
@@ -608,8 +620,8 @@ void PaintStroke::add_step(bContext *C,
     const int half = roll_half_points();
 
     /* Wait until there are enough real spline segments ahead of the dab position to cover the full
-     * brush footprint (~1 brush radius forward). This also handles the num_points_ < 4 case (before
-     * any real segment exists), since half >= 5 for all spacing values. */
+     * brush footprint (~1 brush radius forward). This also handles the num_points_ < 4 case
+     * (before any real segment exists), since half >= 5 for all spacing values. */
     if (num_points_ < half) {
       ARegion *region = CTX_wm_region(C);
       if (region) {
@@ -891,8 +903,8 @@ int PaintStroke::space_stroke(bContext *C,
   int count = 0;
   /* Safety cap on iterations. paint_space_stroke_spacing() floors at FLT_EPSILON to avoid division
    * by zero (#129853), but that's not enough to prevent a multi-second hang when pen-lift pressure
-   * -> 0 with size_pressure on. Cap at a large but finite number -- for any realistic brush this is
-   * well above the dab count of a normal stroke. */
+   * -> 0 with size_pressure on. Cap at a large but finite number -- for any realistic brush this
+   * is well above the dab count of a normal stroke. */
   constexpr int max_dabs_per_event = 10000;
   while (length > 0.0f && count < max_dabs_per_event) {
     const float spacing = paint_space_stroke_spacing_variable(this->vc,
@@ -1539,9 +1551,8 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
                                     sizeof(float[2]));
     }
 
-    if (!do_roll_texture &&
-        ((br.mtex.brush_angle_mode & MTEX_ANGLE_RAKE) ||
-         (br.mask_mtex.brush_angle_mode & MTEX_ANGLE_RAKE)))
+    if (!do_roll_texture && ((br.mtex.brush_angle_mode & MTEX_ANGLE_RAKE) ||
+                             (br.mask_mtex.brush_angle_mode & MTEX_ANGLE_RAKE)))
     {
       do_rake = true;
       for (int j = 0; j < 2; j++) {

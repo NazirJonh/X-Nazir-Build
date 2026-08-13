@@ -72,8 +72,8 @@ class CurvePatchEffect {
    */
   virtual void session_undo_begin() {}
 
-  /** Count the snapshot keys index into, compared against `CurvePatchApplyState::element_num` every
-   * restamp to detect a mesh that changed underneath the session. */
+  /** Count the snapshot keys index into, compared against `CurvePatchApplyState::element_num`
+   * every restamp to detect a mesh that changed underneath the session. */
   virtual int64_t element_num(Object &ob) const = 0;
 
   /**
@@ -143,33 +143,26 @@ class CurvePatchEffect {
  * it: the Python API of Stage 5+ names the effect outright.
  */
 std::optional<CurvePatchEffectType> curve_patch_effect_type_for_brush(
-    const Brush &brush,
-    Object &ob,
-    PaintModeSettings &paint_mode_settings);
+    const Brush &brush, Object &ob, PaintModeSettings &paint_mode_settings);
 
 /** Build one effect of the named type. Null when the object cannot actually carry it -- no usable
  * color attribute, or an unresolvable canvas -- which the type alone cannot rule out. */
 std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(
-    CurvePatchEffectType type,
-    Object &ob,
-    PaintModeSettings &paint_mode_settings);
+    CurvePatchEffectType type, Object &ob, PaintModeSettings &paint_mode_settings);
 
 /** #curve_patch_effect_type_for_brush followed by #curve_patch_effect_create. Null when no effect
  * handles this brush; the caller then refuses to start a session. */
 std::unique_ptr<CurvePatchEffect> curve_patch_effect_create(
-    const Brush &brush,
-    Object &ob,
-    PaintModeSettings &paint_mode_settings);
+    const Brush &brush, Object &ob, PaintModeSettings &paint_mode_settings);
 
-/** Builds the vertex-color effect. Called only by #curve_patch_effect_create; returns null when the
- * mesh has no usable active color attribute. */
+/** Builds the vertex-color effect. Called only by #curve_patch_effect_create; returns null when
+ * the mesh has no usable active color attribute. */
 std::unique_ptr<CurvePatchEffect> curve_patch_effect_color_create(const Object &ob);
 
-/** Builds the image-canvas effect. Called only by #curve_patch_effect_create; returns null when the
- * brush's Paint Mode canvas cannot be resolved (`SCULPT_use_image_paint_brush()` already gates the
- * call, so this is a defensive re-check, not the primary guard). */
+/** Builds the image-canvas effect. Called only by #curve_patch_effect_create; returns null when
+ * the brush's Paint Mode canvas cannot be resolved (`SCULPT_use_image_paint_brush()` already gates
+ * the call, so this is a defensive re-check, not the primary guard). */
 std::unique_ptr<CurvePatchEffect> curve_patch_effect_image_create(
-    Object &ob,
-    PaintModeSettings &paint_mode_settings);
+    Object &ob, PaintModeSettings &paint_mode_settings);
 
 }  // namespace blender::ed::sculpt_paint

@@ -943,10 +943,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 47)) {
-    /* The Curve Patch brush settings were added with non-zero defaults, which a file written before
-     * they existed cannot carry -- every member reads back as zero. `length_repeat` doubles as the
-     * sentinel for "this brush predates the feature": the UI clamps it to 1..64, so no file that
-     * knew about the settings can store 0. */
+    /* The Curve Patch brush settings were added with non-zero defaults, which a file written
+     * before they existed cannot carry -- every member reads back as zero. `length_repeat` doubles
+     * as the sentinel for "this brush predates the feature": the UI clamps it to 1..64, so no file
+     * that knew about the settings can store 0. */
     const Brush defaults = {};
     for (Brush &brush : bmain->brushes) {
       if (brush.curve_patch.length_repeat != 0) {

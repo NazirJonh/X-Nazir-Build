@@ -144,10 +144,9 @@ static void brush_copy_data(Main * /*bmain*/,
   /* enable fake user by default */
   id_fake_user_set(&brush_dst->id);
 
-  /* Deep-copy the Curve Patch texture list. The `Tex` user counts inside it are handled generically
-   * by `brush_foreach_id()` during the copy, so nothing here calls `id_us_plus()`. */
-  BLI_duplicatelist(&brush_dst->curve_patch.texture_slots,
-                    &brush_src->curve_patch.texture_slots);
+  /* Deep-copy the Curve Patch texture list. The `Tex` user counts inside it are handled
+   * generically by `brush_foreach_id()` during the copy, so nothing here calls `id_us_plus()`. */
+  BLI_duplicatelist(&brush_dst->curve_patch.texture_slots, &brush_src->curve_patch.texture_slots);
 }
 
 static void brush_free_data(ID *id)
@@ -240,9 +239,10 @@ static void brush_foreach_id(ID *id, LibraryForeachIDData *data)
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->gpencil_settings->material, IDWALK_CB_USER);
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->gpencil_settings->material_alt, IDWALK_CB_USER);
   }
-  /* Registered directly rather than through `BKE_texture_mtex_foreach_id()`: that wrapper exists for
-   * the shared `MTex` struct, while these are plain `Tex` pointers owned by the brush. This is what
-   * gives them user counts, library override and ID remapping -- brush copy and free rely on it. */
+  /* Registered directly rather than through `BKE_texture_mtex_foreach_id()`: that wrapper exists
+   * for the shared `MTex` struct, while these are plain `Tex` pointers owned by the brush. This is
+   * what gives them user counts, library override and ID remapping -- brush copy and free rely on
+   * it. */
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->curve_patch.tex_start, IDWALK_CB_USER);
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->curve_patch.tex_middle, IDWALK_CB_USER);
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->curve_patch.tex_end, IDWALK_CB_USER);

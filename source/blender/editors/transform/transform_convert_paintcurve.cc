@@ -41,11 +41,11 @@
 
 namespace blender::ed::transform {
 
-/* `TransDataPaintCurve` itself now lives in `transform_convert.hh`: `transform_convert_curve_patch.cc`
- * populates the same struct for a live Curve Patch's active point, so every generic helper below that
- * only reads/writes its fields (`paintcurve_trans_data_is_pivot`, `paintcurve_snap_source_world_get`,
+/* `TransDataPaintCurve` itself now lives in `transform_convert.hh`:
+ * `transform_convert_curve_patch.cc` populates the same struct for a live Curve Patch's active
+ * point, so every generic helper below that only reads/writes its fields
+ * (`paintcurve_trans_data_is_pivot`, `paintcurve_snap_source_world_get`,
  * `paintcurve_center_median_3d_get`) works unchanged for both data sources. */
-
 
 /* -------------------------------------------------------------------- */
 /** \name Helpers
@@ -192,8 +192,10 @@ static void createTransPaintCurveVerts(bContext *C, TransInfo *t)
       total += 3; /* Pivot selected → left + pivot + right. */
     }
     else {
-      if (sel & 0x01) total++;
-      if (sel & 0x04) total++;
+      if (sel & 0x01)
+        total++;
+      if (sel & 0x04)
+        total++;
     }
   }
 
@@ -205,8 +207,8 @@ static void createTransPaintCurveVerts(bContext *C, TransInfo *t)
   TransData2D *td2d = tc->data_2d = MEM_new_array_zeroed<TransData2D>(total, "TransData2D");
   TransData *td = tc->data = MEM_new_array_zeroed<TransData>(total, "TransData");
   TransDataPaintCurve *tdpc = static_cast<TransDataPaintCurve *>(
-      tc->custom.type.data = MEM_new_array_zeroed<TransDataPaintCurve>(
-          total, "TransDataPaintCurve"));
+      tc->custom.type.data = MEM_new_array_zeroed<TransDataPaintCurve>(total,
+                                                                       "TransDataPaintCurve"));
   tc->custom.type.use_free = true;
 
   for (const int i : geom.points_range()) {
@@ -344,7 +346,7 @@ static void flushTransPaintCurve(TransInfo *t)
         const TransData *td = &td_arr[i];
         const float angle = t->values_final[0];
         const float *center = transdata_check_local_center(t, t->around) ? td->center :
-                                                                            t->center2d;
+                                                                           t->center2d;
         const float dx = td->iloc[0] - center[0];
         const float dy = td->iloc[1] - center[1];
         const float cos_a = cosf(angle);
@@ -421,8 +423,8 @@ static void flushTransPaintCurve(TransInfo *t)
         else {
           /* Median / bounding-box / cursor: use the centroid of all selected world positions. */
           zero_v3(center_world);
-          const TransDataPaintCurve *tdpc_all =
-              static_cast<const TransDataPaintCurve *>(tc->custom.type.data);
+          const TransDataPaintCurve *tdpc_all = static_cast<const TransDataPaintCurve *>(
+              tc->custom.type.data);
           for (int j = 0; j < tc->data_len; j++) {
             add_v3_v3(center_world, tdpc_all[j].co_orig_world);
           }
@@ -441,7 +443,7 @@ static void flushTransPaintCurve(TransInfo *t)
         const TransData *td = &td_arr[i];
         const float angle = t->values_final[0];
         const float *center = transdata_check_local_center(t, t->around) ? td->center :
-                                                                            t->center2d;
+                                                                           t->center2d;
         const float dx = td->iloc[0] - center[0];
         const float dy = td->iloc[1] - center[1];
         const float cos_a = cosf(angle);
@@ -465,8 +467,7 @@ static void flushTransPaintCurve(TransInfo *t)
        * parallel to view direction), which inverts the Z movement direction.
        * For Z-only constraint, detect this and flip the sign so that mouse-up always
        * moves the point in the +Z (world-up) direction. */
-      if ((t->con.mode & CON_APPLY) &&
-          (t->con.mode & CON_AXIS2) &&
+      if ((t->con.mode & CON_APPLY) && (t->con.mode & CON_AXIS2) &&
           !(t->con.mode & (CON_AXIS0 | CON_AXIS1)))
       {
         float angle = fabsf(angle_v3v3(t->spacemtx[2], t->viewinv[2]));
@@ -578,7 +579,8 @@ void paintcurve_center_median_3d_get(const TransInfo *t, float r_center[3])
     zero_v3(r_center);
     return;
   }
-  const TransDataPaintCurve *tdpc_arr = static_cast<const TransDataPaintCurve *>(tc->custom.type.data);
+  const TransDataPaintCurve *tdpc_arr = static_cast<const TransDataPaintCurve *>(
+      tc->custom.type.data);
   zero_v3(r_center);
   for (int i = 0; i < tc->data_len; i++) {
     add_v3_v3(r_center, tdpc_arr[i].co_orig_world);

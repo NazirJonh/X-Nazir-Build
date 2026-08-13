@@ -21,7 +21,8 @@
 
 namespace blender::bke {
 
-/* Hash channels, so the same stamp's size / angle / strength / two jitter axes stay independent. */
+/* Hash channels, so the same stamp's size / angle / strength / two jitter axes stay independent.
+ */
 enum {
   STAMP_HASH_SIZE = 0,
   STAMP_HASH_ANGLE = 1,
@@ -94,7 +95,8 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
   for (const int i : IndexRange(stamp_num)) {
     CurvePatchStamp stamp;
     const float s = float(i) * used_step;
-    stamp.center_v = s + jitter_amount * (2.0f * stamp_random(i, seed, STAMP_HASH_JITTER_V) - 1.0f);
+    stamp.center_v = s +
+                     jitter_amount * (2.0f * stamp_random(i, seed, STAMP_HASH_JITTER_V) - 1.0f);
     stamp.center_u = jitter_amount * (2.0f * stamp_random(i, seed, STAMP_HASH_JITTER_U) - 1.0f);
     /* Shrink only. Growing past the brush radius would make the visible patch wider than the brush
      * cursor promises and would force the ribbon to widen for the size setting too. The 0.05 floor
@@ -108,14 +110,15 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
     stamp.tex_index = curve_patch_stamp_pick_texture(texture_weights_cdf,
                                                      stamp_random(i, seed, STAMP_HASH_TEX));
 
-    /* `center_v` is jittered and routinely lands outside `[0, total_length]` -- the first stamp goes
-     * negative about half the time, the last overshoots. `evaluate()`/`tangent_at()` CLAMP, which
-     * would collapse those stamps' frames -- both position AND orientation -- onto the curve's
-     * endpoints instead of leaving them overhanging where the ribbon's `end_margin` extension renders
-     * them. Resolve a single `frame_s` first and sample both position and tangent from it, so the
-     * frame that ends up rotated is the same one that ends up placed. A loop has no ends, so wrap; an
-     * open curve clamps to the end and keeps that end's tangent for both the extrapolated position and
-     * the orientation, matching how the ribbon extends its own strip as a rigid straight continuation. */
+    /* `center_v` is jittered and routinely lands outside `[0, total_length]` -- the first stamp
+     * goes negative about half the time, the last overshoots. `evaluate()`/`tangent_at()` CLAMP,
+     * which would collapse those stamps' frames -- both position AND orientation -- onto the
+     * curve's endpoints instead of leaving them overhanging where the ribbon's `end_margin`
+     * extension renders them. Resolve a single `frame_s` first and sample both position and
+     * tangent from it, so the frame that ends up rotated is the same one that ends up placed. A
+     * loop has no ends, so wrap; an open curve clamps to the end and keeps that end's tangent for
+     * both the extrapolated position and the orientation, matching how the ribbon extends its own
+     * strip as a rigid straight continuation. */
     float frame_s = stamp.center_v;
     float3 frame_base;
     float3 tangent;
@@ -132,8 +135,8 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
 
     /* Freeze the stamp's rigid world frame. `side` uses `cross(T, plane_normal)`, matching the
      * ribbon's own convention (`curve_patch_ribbon_build()`: the `+B` side carries `u = +1`), so a
-     * stamp's `center_u` means the same direction in both projections. Getting this backwards would
-     * mirror every PLANAR stamp against its CURVE counterpart. */
+     * stamp's `center_u` means the same direction in both projections. Getting this backwards
+     * would mirror every PLANAR stamp against its CURVE counterpart. */
     float3 side = math::cross(tangent, spline.plane_normal);
     const float side_len = math::length(side);
     if (side_len > 1e-7f) {
@@ -151,9 +154,9 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
       }
       side = math::normalize(fallback);
     }
-    /* Re-derive the along-curve axis from `side` rather than reusing `tangent`: `cross(N, side)` is
-     * `tangent` projected into the anchor plane and re-normalized in one step, which is what makes
-     * the pair exactly orthonormal even where the curve tilts out of the plane. */
+    /* Re-derive the along-curve axis from `side` rather than reusing `tangent`: `cross(N, side)`
+     * is `tangent` projected into the anchor plane and re-normalized in one step, which is what
+     * makes the pair exactly orthonormal even where the curve tilts out of the plane. */
     const float3 tangent_in_plane = math::cross(spline.plane_normal, side);
     const float cos_a = std::cos(stamp.angle);
     const float sin_a = std::sin(stamp.angle);
@@ -166,9 +169,10 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
 
   /* Jitter along the curve can reorder neighbours; the relief binary-searches this list by
    * `center_v`, so restore the ordering rather than assume it. */
-  std::sort(r_stamps.begin(), r_stamps.end(), [](const CurvePatchStamp &a, const CurvePatchStamp &b) {
-    return a.center_v < b.center_v;
-  });
+  std::sort(
+      r_stamps.begin(), r_stamps.end(), [](const CurvePatchStamp &a, const CurvePatchStamp &b) {
+        return a.center_v < b.center_v;
+      });
 }
 
 void curve_patch_stamps_add_cyclic_wrap(Vector<CurvePatchStamp> &stamps,

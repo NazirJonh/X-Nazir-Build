@@ -81,18 +81,18 @@ bool curve_patch_frames_partition(const CurvePatchSpline &spline,
     if (end >= count - 1) {
       break;
     }
-    /* Half-overlap -- but only across a GRADUAL join. Across a break the windows meet edge to edge:
-     * each face's vertices are already rejected by orientation in the other's window, and an
+    /* Half-overlap -- but only across a GRADUAL join. Across a break the windows meet edge to
+     * edge: each face's vertices are already rejected by orientation in the other's window, and an
      * overlap would only make them compete. */
     const bool broke_on_edge = math::dot(spline.normals_3d[end], spline.normals_3d[begin]) <
                                break_cos;
     begin = broke_on_edge ? end : std::max(begin + 1, (begin + end) / 2);
   }
 
-  /* Grow every window past its boundaries so neighbours share a stretch to cross-fade over. Done as
-   * a separate pass AFTER `dominant_normal` has already run on the cut-out (core) ranges: the grown
-   * part of a window that crosses a break lies on the OTHER face, and letting it vote would drag a
-   * short window's projection plane toward the very average this design exists to avoid. */
+  /* Grow every window past its boundaries so neighbours share a stretch to cross-fade over. Done
+   * as a separate pass AFTER `dominant_normal` has already run on the cut-out (core) ranges: the
+   * grown part of a window that crosses a break lies on the OTHER face, and letting it vote would
+   * drag a short window's projection plane toward the very average this design exists to avoid. */
   if (have_lengths && params.overlap_length > 0.0f) {
     for (CurvePatchFrameRange &range : r_ranges) {
       int grown_begin = range.begin;
@@ -132,7 +132,8 @@ void curve_patch_frames_build(const CurvePatchSpline &spline,
   Vector<CurvePatchFrameRange> ranges;
   bool capped = false;
   if (!curve_patch_frames_partition(spline, params, ranges, capped)) {
-    /* No normals: a single window over the whole curve with the frozen plane -- current behavior. */
+    /* No normals: a single window over the whole curve with the frozen plane -- current behavior.
+     */
     ranges.clear();
     ranges.append({0, int(spline.poly_3d.size()) - 1, math::normalize(spline.plane_normal)});
   }
@@ -191,7 +192,8 @@ void curve_patch_frames_build(const CurvePatchSpline &spline,
     frame.s_end = spline.lengths_3d[range.end];
     frame.s_center = spline.lengths_3d[(range.begin + range.end) / 2];
     /* Ramp only where this window hands over to a neighbour. At a real end of the curve there is
-     * nobody to hand over to, so the weight stays 1 and the relief keeps full strength to the tip. */
+     * nobody to hand over to, so the weight stays 1 and the relief keeps full strength to the tip.
+     */
     frame.fade_start = (range.begin == 0) ? 0.0f : params.overlap_length;
     frame.fade_end = (range.end == last_index) ? 0.0f : params.overlap_length;
 
@@ -244,8 +246,8 @@ void curve_patch_frames_build(const CurvePatchSpline &spline,
 }
 
 /* Hermite ramp on `[0, 1]`, flat at both ends. Used for every blend weight below so a window's
- * contribution reaches zero with zero slope -- a linear ramp still leaves a visible crease where it
- * meets the flat region, which is the whole class of defect this blending exists to remove. */
+ * contribution reaches zero with zero slope -- a linear ramp still leaves a visible crease where
+ * it meets the flat region, which is the whole class of defect this blending exists to remove. */
 static float smoothstep01(const float t)
 {
   if (!(t > 0.0f)) {
@@ -257,8 +259,8 @@ static float smoothstep01(const float t)
   return t * t * (3.0f - 2.0f * t);
 }
 
-/* How much this window's opinion counts at global arc length `s`: full inside its own span, ramping
- * to nothing across each of its interior boundaries. */
+/* How much this window's opinion counts at global arc length `s`: full inside its own span,
+ * ramping to nothing across each of its interior boundaries. */
 static float frame_span_weight(const CurvePatchFrame &frame, const float s)
 {
   float weight = 1.0f;
@@ -274,9 +276,9 @@ static float frame_span_weight(const CurvePatchFrame &frame, const float s)
 /* How much this window's opinion counts for a vertex whose surface normal is `vertex_normal`.
  *
  * This replaces a hard `dot <= 0.3` rejection. The rejection was correct in intent -- a vertex on
- * the side face has no business being projected through the top face's plane -- but being binary it
- * put a step exactly where the two windows hand over, on top of the handover the span weight was
- * already smoothing. Both have to ramp or neither helps. */
+ * the side face has no business being projected through the top face's plane -- but being binary
+ * it put a step exactly where the two windows hand over, on top of the handover the span weight
+ * was already smoothing. Both have to ramp or neither helps. */
 static float frame_orientation_weight(const float3 &vertex_normal, const float3 &frame_normal)
 {
   constexpr float reject_below = 0.3f;
@@ -306,7 +308,8 @@ int CurvePatchFrameSet::sample(const float3 &co,
       continue;
     }
     /* Weighed PER WINDOW -- that is the whole point: a vertex on the side face weighs nothing in
-     * the top face's window and full in the side face's own, instead of being rejected globally. */
+     * the top face's window and full in the side face's own, instead of being rejected globally.
+     */
     const float orientation_weight = frame_orientation_weight(vertex_normal, frame.normal);
     if (!(orientation_weight > 0.0f)) {
       continue;
@@ -356,10 +359,8 @@ int CurvePatchFrameSet::sample(const float3 &co,
       if (groups.size() >= 2) {
         continue;
       }
-      groups.append({candidate.uv * candidate.weight,
-                     candidate.normal,
-                     candidate.weight,
-                     candidate.uv.y});
+      groups.append(
+          {candidate.uv * candidate.weight, candidate.normal, candidate.weight, candidate.uv.y});
     }
     else {
       groups[group].uv_sum += candidate.uv * candidate.weight;

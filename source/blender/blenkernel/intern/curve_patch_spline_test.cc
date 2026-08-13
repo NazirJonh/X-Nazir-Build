@@ -152,36 +152,36 @@ TEST(paint_curve_patch_spline, radius_at_clamps_out_of_range_s)
 TEST(paint_curve_patch_spline, tile_span_default_is_hybrid_min)
 {
   /* Short curve (shorter than one diameter): span == total_length. */
-  EXPECT_FLOAT_EQ(
-      curve_patch_texture_tile_span(CurvePatchLengthMode::Default, 1, 1.0f, 2.0f), 1.0f);
+  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Default, 1, 1.0f, 2.0f),
+                  1.0f);
   /* Long curve (longer than one diameter): span == 2 * radius. */
-  EXPECT_FLOAT_EQ(
-      curve_patch_texture_tile_span(CurvePatchLengthMode::Default, 1, 10.0f, 2.0f), 4.0f);
+  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Default, 1, 10.0f, 2.0f),
+                  4.0f);
 }
 
 TEST(paint_curve_patch_spline, tile_span_repeat_divides_length)
 {
-  EXPECT_FLOAT_EQ(
-      curve_patch_texture_tile_span(CurvePatchLengthMode::Repeat, 1, 10.0f, 2.0f), 10.0f);
-  EXPECT_FLOAT_EQ(
-      curve_patch_texture_tile_span(CurvePatchLengthMode::Repeat, 4, 10.0f, 2.0f), 2.5f);
+  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Repeat, 1, 10.0f, 2.0f),
+                  10.0f);
+  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Repeat, 4, 10.0f, 2.0f),
+                  2.5f);
 }
 
 TEST(paint_curve_patch_spline, tile_span_repeat_clamps_below_one)
 {
   /* A repeat count that somehow bypassed RNA's 1..64 range must not divide by zero. */
-  EXPECT_FLOAT_EQ(
-      curve_patch_texture_tile_span(CurvePatchLengthMode::Repeat, 0, 10.0f, 2.0f), 10.0f);
-  EXPECT_FLOAT_EQ(
-      curve_patch_texture_tile_span(CurvePatchLengthMode::Repeat, -5, 10.0f, 2.0f), 10.0f);
+  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Repeat, 0, 10.0f, 2.0f),
+                  10.0f);
+  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Repeat, -5, 10.0f, 2.0f),
+                  10.0f);
 }
 
 TEST(paint_curve_patch_spline, tile_span_stretch_is_total_length)
 {
-  EXPECT_FLOAT_EQ(
-      curve_patch_texture_tile_span(CurvePatchLengthMode::Stretch, 1, 10.0f, 2.0f), 10.0f);
-  EXPECT_FLOAT_EQ(
-      curve_patch_texture_tile_span(CurvePatchLengthMode::Stretch, 1, 0.5f, 2.0f), 0.5f);
+  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Stretch, 1, 10.0f, 2.0f),
+                  10.0f);
+  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Stretch, 1, 0.5f, 2.0f),
+                  0.5f);
 }
 
 TEST(paint_curve_patch_spline, tile_span_unknown_mode_falls_back_to_default)
@@ -239,9 +239,9 @@ TEST(paint_curve_patch_spline, tile_span_cyclic_snaps_to_whole_tiles)
                       CurvePatchLengthMode::Default, 1, 10.0f, 2.0f, /*cyclic=*/true),
                   10.0f / 3.0f);
   /* Repeat and Stretch already divide the length into whole tiles and must come out unchanged. */
-  EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(
-                      CurvePatchLengthMode::Repeat, 4, 10.0f, 2.0f, /*cyclic=*/true),
-                  2.5f);
+  EXPECT_FLOAT_EQ(
+      curve_patch_texture_tile_span(CurvePatchLengthMode::Repeat, 4, 10.0f, 2.0f, /*cyclic=*/true),
+      2.5f);
   EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(
                       CurvePatchLengthMode::Stretch, 1, 10.0f, 2.0f, /*cyclic=*/true),
                   10.0f);
@@ -463,8 +463,8 @@ TEST(paint_curve_patch_spline, stamp_pick_texture_zero_total_falls_back)
 
 TEST(paint_curve_patch_spline, stamp_pick_texture_respects_weights)
 {
-  /* Weights 3:1 -- the cumulative table is {3, 4}. Sampled with a DETERMINISTIC sweep rather than a
-   * generator so the assertion cannot flake. */
+  /* Weights 3:1 -- the cumulative table is {3, 4}. Sampled with a DETERMINISTIC sweep rather than
+   * a generator so the assertion cannot flake. */
   const float cdf[2] = {3.0f, 4.0f};
   int first = 0;
   for (const int i : IndexRange(1000)) {
@@ -513,8 +513,8 @@ TEST(paint_curve_patch_spline, stamp_pick_texture_never_picks_zero_weight_slot)
 
 /* Reference implementation of the pre-caps `v` formula, copied verbatim from the Ribbon branch of
  * the Curve Patch re-stamp as it stood before this feature. `curve_patch_texture_zone_at()` with
- * `caps_enabled == false` must reproduce it exactly, or the caps feature has silently changed every
- * existing Curve Patch. */
+ * `caps_enabled == false` must reproduce it exactly, or the caps feature has silently changed
+ * every existing Curve Patch. */
 static float reference_ribbon_v(const float s,
                                 const float total_length,
                                 const float radius,
@@ -524,9 +524,9 @@ static float reference_ribbon_v(const float s,
 {
   const float tile_span = curve_patch_texture_tile_span(
       length_mode, length_repeat, total_length, radius, cyclic);
-  float v = tile_span > 1e-8f ?
-                (cyclic ? s / tile_span * 2.0f - 1.0f : (s - total_length * 0.5f) / tile_span * 2.0f) :
-                0.0f;
+  float v = tile_span > 1e-8f ? (cyclic ? s / tile_span * 2.0f - 1.0f :
+                                          (s - total_length * 0.5f) / tile_span * 2.0f) :
+                                0.0f;
   if (length_mode == CurvePatchLengthMode::Repeat) {
     v -= 2.0f * std::floor((v + 1.0f) * 0.5f);
   }
@@ -535,9 +535,8 @@ static float reference_ribbon_v(const float s,
 
 TEST(paint_curve_patch_spline, texture_zone_caps_disabled_matches_reference)
 {
-  const CurvePatchLengthMode modes[3] = {CurvePatchLengthMode::Default,
-                                         CurvePatchLengthMode::Repeat,
-                                         CurvePatchLengthMode::Stretch};
+  const CurvePatchLengthMode modes[3] = {
+      CurvePatchLengthMode::Default, CurvePatchLengthMode::Repeat, CurvePatchLengthMode::Stretch};
   const float total_length = 7.5f;
   const float radius = 0.8f;
   for (const CurvePatchLengthMode mode : modes) {
@@ -562,9 +561,7 @@ TEST(paint_curve_patch_spline, texture_zone_caps_disabled_matches_reference)
          * identical bits even for textually identical expressions. The CONTRACT is "same formula,
          * same operand order" (verified by inspection -- see the report), not "same bits"; the
          * tolerance is a concession to the compiler, not a loosening of that contract. */
-        EXPECT_NEAR(sample.v,
-                    reference_ribbon_v(s, total_length, radius, mode, 3, cyclic),
-                    1e-5f);
+        EXPECT_NEAR(sample.v, reference_ribbon_v(s, total_length, radius, mode, 3, cyclic), 1e-5f);
       }
     }
   }
@@ -664,18 +661,19 @@ TEST(paint_curve_patch_spline, texture_zone_middle_value_with_caps)
   /* start_len = end_len = 2, middle_length = 10 - 2 - 2 = 6, middle_offset = 3 - 2 = 1,
    * tile_span = min(middle_length, 2 * radius) = min(6, 2) = 2,
    * v = (middle_offset - middle_length * 0.5) / tile_span * 2 = (1 - 3) / 2 * 2 = -2.0.
-   * (`s = 5` -- the curve's exact midpoint -- would be a weaker witness here: symmetry alone forces
-   * `v == 0` there regardless of whether `middle_offset`/`middle_length` are computed correctly.) */
+   * (`s = 5` -- the curve's exact midpoint -- would be a weaker witness here: symmetry alone
+   * forces `v == 0` there regardless of whether `middle_offset`/`middle_length` are computed
+   * correctly.) */
   EXPECT_NEAR(mid.v, -2.0f, 1e-5f);
 
   /* Witness for `middle_cyclic = false`. On the `total_length = 10, cap = 2, radius = 1` numbers
    * above this would be a WEAK witness for the open-tiling forcing alone: with `middle_length = 6`
    * and `radius = 1`, #curve_patch_texture_tile_span's own pre-cyclic span is `min(6, 2) = 2`, and
    * its cyclic whole-tile snap rounds `6 / 2 = 3` (already whole) to the SAME 3 tiles, leaving
-   * `tile_span == 2.0` either way -- so a caller that forgot to force `middle_cyclic = false` would
-   * still pass by coincidence. Using `total_length = 11` instead makes `middle_length = 7`, whose
-   * cyclic snap rounds `7 / 2 = 3.5` UP to 4 whole tiles and shrinks the span to `7 / 4 = 1.75`,
-   * `1.75 != 2.0` -- a real, checkable divergence between the open and cyclic tilings. */
+   * `tile_span == 2.0` either way -- so a caller that forgot to force `middle_cyclic = false`
+   * would still pass by coincidence. Using `total_length = 11` instead makes `middle_length = 7`,
+   * whose cyclic snap rounds `7 / 2 = 3.5` UP to 4 whole tiles and shrinks the span to `7 / 4
+   * = 1.75`, `1.75 != 2.0` -- a real, checkable divergence between the open and cyclic tilings. */
   const CurvePatchTextureZoneSample cyclic_off = curve_patch_texture_zone_at(
       /*s=*/3.0f,
       /*total_length=*/11.0f,
@@ -711,8 +709,8 @@ TEST(paint_curve_patch_spline, texture_zone_middle_value_with_caps)
 
 TEST(paint_curve_patch_spline, texture_zone_caps_shrink_proportionally)
 {
-  /* Caps asking for 6 + 3 on a curve of 3 must scale by 1/3 and keep their 2:1 ratio, collapsing the
-   * middle rather than letting either cap overrun the curve. */
+  /* Caps asking for 6 + 3 on a curve of 3 must scale by 1/3 and keep their 2:1 ratio, collapsing
+   * the middle rather than letting either cap overrun the curve. */
   const float total_length = 3.0f;
   const CurvePatchTextureZoneSample at_boundary = curve_patch_texture_zone_at(
       /*s=*/2.0f + 1e-3f,
@@ -887,8 +885,8 @@ TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_inherit_texture_index)
                             float3(4.0f, 4.0f, 0.0f),
                             float3(0.0f, 4.0f, 0.0f)};
   /* NOTE: the brief's Step 1 listing for this test omits the `radii` argument here (`Span(points,
-   * 4), true`), which would try to bind `true` to `Span<float> radii` and fail to compile. Fixed to
-   * match the established cyclic-build call pattern used throughout this file (e.g.
+   * 4), true`), which would try to bind `true` to `Span<float> radii` and fail to compile. Fixed
+   * to match the established cyclic-build call pattern used throughout this file (e.g.
    * `cyclic_wrap_keeps_the_list_sorted` above). */
   spline.build_from_positions(Span(points, 4), {}, true);
   const float cdf[2] = {1.0f, 2.0f};
@@ -906,9 +904,9 @@ TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_inherit_texture_index)
                            /*texture_weights_cdf=*/Span(cdf, 2),
                            /*r_stamps=*/stamps);
   const int real_num = stamps.size();
-  /* Snapshot the real stamps' `(center_v, tex_index)` BEFORE the wrap call, since it appends ghosts
-   * to this same vector and re-sorts it -- afterwards there is no way to tell a real stamp from a
-   * ghost by position in the array alone. */
+  /* Snapshot the real stamps' `(center_v, tex_index)` BEFORE the wrap call, since it appends
+   * ghosts to this same vector and re-sorts it -- afterwards there is no way to tell a real stamp
+   * from a ghost by position in the array alone. */
   const Vector<CurvePatchStamp> real_stamps = stamps;
   const float total_length = spline.total_length();
 
@@ -918,12 +916,12 @@ TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_inherit_texture_index)
   /* A ghost is a whole-struct copy of a real stamp with `center_v` displaced by exactly
    * `+total_length` (near the start) or `-total_length` (near the end) -- see
    * #curve_patch_stamps_add_cyclic_wrap. Reversing that displacement recovers the source's
-   * `center_v` and, matched back into the snapshot above, its `tex_index`: that is the actual claim
-   * this test exists to check (a regression where ghosts drew a FRESH `tex_index` instead of
-   * inheriting one would still leave every value in range, which is all the old assertion checked).
-   * Real stamps stay within `[0, total_length)` (`curve_patch_stamps_build` never places one AT the
-   * seam for a cyclic curve), so testing which side of that range a stamp falls on unambiguously
-   * tells ghost from real and picks the correct displacement to undo. */
+   * `center_v` and, matched back into the snapshot above, its `tex_index`: that is the actual
+   * claim this test exists to check (a regression where ghosts drew a FRESH `tex_index` instead of
+   * inheriting one would still leave every value in range, which is all the old assertion
+   * checked). Real stamps stay within `[0, total_length)` (`curve_patch_stamps_build` never places
+   * one AT the seam for a cyclic curve), so testing which side of that range a stamp falls on
+   * unambiguously tells ghost from real and picks the correct displacement to undo. */
   for (const CurvePatchStamp &stamp : stamps) {
     EXPECT_GE(stamp.tex_index, 0);
     EXPECT_LT(stamp.tex_index, 2);
@@ -969,7 +967,8 @@ TEST(paint_curve_patch_spline, smooth_normals_box_filter)
 {
   CurvePatchSpline spline;
   Vector<float3> points, normals;
-  /* A straight line along X of length 1.0, whose normal turns by 90 degrees exactly at the middle. */
+  /* A straight line along X of length 1.0, whose normal turns by 90 degrees exactly at the middle.
+   */
   for (const int i : IndexRange(11)) {
     points.append(float3(float(i) * 0.1f, 0.0f, 0.0f));
     normals.append(i < 5 ? float3(0.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f));
@@ -992,7 +991,8 @@ TEST(paint_curve_patch_spline, normal_at_is_continuous_over_a_break)
   CurvePatchSpline spline;
   Vector<float3> points, normals;
   /* The same 90-degree break as above. Sampled through it, the relief's depth reference must not
-   * step: a step here lands straight in `radial_dist` and shows as a hard seam across the strip. */
+   * step: a step here lands straight in `radial_dist` and shows as a hard seam across the strip.
+   */
   for (const int i : IndexRange(21)) {
     points.append(float3(float(i) * 0.1f, 0.0f, 0.0f));
     normals.append(i < 10 ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f));
@@ -1019,8 +1019,8 @@ TEST(paint_curve_patch_spline, normal_at_falls_back_to_plane_normal)
   spline.build_from_positions(Span(points, 3));
   spline.plane_normal = float3(0.0f, 0.0f, 2.0f);
 
-  /* No smoothed field (Grids, or a failed snapshot): every consumer has to see the frozen plane, so
-   * the single-window path reproduces its previous behavior exactly. Normalized, since callers
+  /* No smoothed field (Grids, or a failed snapshot): every consumer has to see the frozen plane,
+   * so the single-window path reproduces its previous behavior exactly. Normalized, since callers
    * project onto it. */
   EXPECT_V3_NEAR(spline.normal_at(1.0f), float3(0.0f, 0.0f, 1.0f), 1e-6f);
 }

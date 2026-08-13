@@ -55,8 +55,8 @@
 
 #include "ED_paint.hh"
 #include "ED_paint_curve_draw.hh"
-#include "ED_util_modal_multiwin.hh"
 #include "ED_screen.hh"
+#include "ED_util_modal_multiwin.hh"
 #include "ED_view3d.hh"
 
 #include "WM_api.hh"
@@ -118,11 +118,11 @@ static bool paintcurve_cycle_handle_type_at_point(bContext *C,
 }
 
 /**
- * When exactly one control point is selected, set #PaintCurve.active_curve and #PaintCurve.add_index
- * so the next added point extends from that end of the spline (start vs end).
+ * When exactly one control point is selected, set #PaintCurve.active_curve and
+ * #PaintCurve.add_index so the next added point extends from that end of the spline (start vs
+ * end).
  */
-bool paintcurve_update_add_index_from_selection(PaintCurve *pc,
-                                                       const bke::CurvesGeometry &geom)
+bool paintcurve_update_add_index_from_selection(PaintCurve *pc, const bke::CurvesGeometry &geom)
 {
   if (pc == nullptr || !paintcurve_geometry_is_valid(geom)) {
     return false;
@@ -173,7 +173,6 @@ static int8_t paintcurve_aligned_or_free_handle_type(const int8_t handle_type)
   return BEZIER_HANDLE_FREE;
 }
 
-
 bool paint_curve_poll(bContext *C)
 {
   Object *ob = CTX_data_active_object(C);
@@ -210,12 +209,13 @@ bool paint_curve_poll(bContext *C)
 
 /* Find the closest control-point handle in `screen_points` to `pos`.
  * When `ignore_pivot` is true, a click on the pivot (vec[1]) redirects to the nearer handle.
- * Returns the point index, or -1 if none is within `threshold`. Sets `*r_selflag` (SEL_F1/F2/F3). */
+ * Returns the point index, or -1 if none is within `threshold`. Sets `*r_selflag` (SEL_F1/F2/F3).
+ */
 int paintcurve_find_in_screen_points(const Span<PaintCurvePoint> screen_points,
-                                            const float pos[2],
-                                            const bool ignore_pivot,
-                                            const float threshold,
-                                            char *r_selflag)
+                                     const float pos[2],
+                                     const bool ignore_pivot,
+                                     const float threshold,
+                                     char *r_selflag)
 {
   int found_idx = -1;
   char found_flag = 0;
@@ -303,7 +303,6 @@ bool ED_paintcurve_cursor_on_selected_handle(bContext *C, const float mval[2])
   return false;
 }
 
-
 static char paintcurve_point_side_index(const BezTriple *bezt,
                                         const bool is_first,
                                         const char fallback)
@@ -326,7 +325,8 @@ static char paintcurve_point_side_index(const BezTriple *bezt,
 
 /******************* Operators *********************************/
 
-/** Safer than #WM_toolsystem_ref_from_context when the area tool runtime is briefly out of sync. */
+/** Safer than #WM_toolsystem_ref_from_context when the area tool runtime is briefly out of sync.
+ */
 static const bToolRef *paintcurve_tool_ref_from_context(bContext *C)
 {
   Main *bmain = CTX_data_main(C);
@@ -436,11 +436,8 @@ static bool paintcurve_wants_element_snap(bContext *C)
 }
 
 /** Ray-cast the active object's BVH. Also returns the surface normal when available. */
-static bool paintcurve_raycast_active_object(bContext *C,
-                                             const ViewContext &vc,
-                                             const float mval[2],
-                                             float r_hit_obj[3],
-                                             float r_no_obj[3])
+static bool paintcurve_raycast_active_object(
+    bContext *C, const ViewContext &vc, const float mval[2], float r_hit_obj[3], float r_no_obj[3])
 {
   if (vc.obact == nullptr || vc.obact->runtime->sculpt_session == nullptr ||
       vc.depsgraph == nullptr)
@@ -584,8 +581,7 @@ bool paintcurve_surface_place(bContext *C,
     const bool ok = ED_view3d_autodist(vc.region, vc.v3d, mval_i, world_co, nullptr);
     ED_view3d_depths_free(depths);
     if (ok) {
-      copy_v3_v3(r_co_obj,
-                 math::transform_point(vc.obact->world_to_object(), float3(world_co)));
+      copy_v3_v3(r_co_obj, math::transform_point(vc.obact->world_to_object(), float3(world_co)));
       return true;
     }
   }
@@ -892,13 +888,8 @@ bool paintcurve_try_insert_point_at_mouse(bContext *C,
 
   int segment_index = -1;
   float edge_t = 0.0f;
-  if (!paintcurve_find_insert_segment_from_geometry(pc->geometry.wrap(),
-                                                    pc->use_3d_space,
-                                                    &vc,
-                                                    loc_fl,
-                                                    &segment_index,
-                                                    nullptr,
-                                                    &edge_t))
+  if (!paintcurve_find_insert_segment_from_geometry(
+          pc->geometry.wrap(), pc->use_3d_space, &vc, loc_fl, &segment_index, nullptr, &edge_t))
   {
     return false;
   }
@@ -1067,8 +1058,7 @@ static wmOperatorStatus paintcurve_delete_point_exec(bContext *C, wmOperator *op
 
   if (!points_to_delete.is_empty()) {
     IndexMaskMemory memory;
-    const IndexMask delete_mask = IndexMask::from_indices<int>(points_to_delete.as_span(),
-                                                               memory);
+    const IndexMask delete_mask = IndexMask::from_indices<int>(points_to_delete.as_span(), memory);
     paintcurve_geometry_remove_points(geom, delete_mask);
     pc->active_curve = paintcurve_active_curve_get(pc);
 
@@ -1400,7 +1390,6 @@ void paintcurve_apply_point_surface_snap(bke::CurvesGeometry &geom,
   geom.calculate_bezier_aligned_handles();
 }
 
-
 static void paintcurve_update_edge_hit(const float point[2],
                                        const float point1[2],
                                        const float point2[2],
@@ -1497,14 +1486,8 @@ static void paintcurve_find_closest_on_bezier_segment(const ViewContext *vc,
 {
   float bezier_t = 0.0f;
   float segment_min_dist = 0.0f;
-  if (!paintcurve_bezier_param_at_screen_pos_on_segment(vc,
-                                                        pc,
-                                                        pos,
-                                                        point_index_a,
-                                                        point_index_b,
-                                                        screen_points,
-                                                        bezier_t,
-                                                        &segment_min_dist))
+  if (!paintcurve_bezier_param_at_screen_pos_on_segment(
+          vc, pc, pos, point_index_a, point_index_b, screen_points, bezier_t, &segment_min_dist))
   {
     return;
   }
@@ -1517,13 +1500,13 @@ static void paintcurve_find_closest_on_bezier_segment(const ViewContext *vc,
 }
 
 bool paintcurve_find_closest_segment(PaintCurve *pc,
-                                            const ViewContext *vc,
-                                            const Span<PaintCurvePoint> screen_points,
-                                            const float pos[2],
-                                            const float threshold,
-                                            int *r_segment_index,
-                                            int *r_segment_index_next,
-                                            float *r_edge_t)
+                                     const ViewContext *vc,
+                                     const Span<PaintCurvePoint> screen_points,
+                                     const float pos[2],
+                                     const float threshold,
+                                     int *r_segment_index,
+                                     int *r_segment_index_next,
+                                     float *r_edge_t)
 {
   if (screen_points.size() < 2) {
     return false;
@@ -1568,9 +1551,9 @@ bool paintcurve_find_closest_segment(PaintCurve *pc,
 
 /** Match #remove_handle_movement_constraints in editcurve_pen.cc. */
 static void paintcurve_remove_handle_movement_constraints(int8_t &type_left,
-                                                            int8_t &type_right,
-                                                            const bool adjust_left,
-                                                            const bool adjust_right)
+                                                          int8_t &type_right,
+                                                          const bool adjust_left,
+                                                          const bool adjust_right)
 {
   if (adjust_left) {
     if (type_left == BEZIER_HANDLE_VECTOR) {
@@ -1758,7 +1741,8 @@ static bool paintcurve_insert_point_at_segment(
   }
 
   /* Mirror the core's own handles-presence guard here so a failure never triggers an undo push,
-   * matching this function's original early-out ordering (before #ED_paintcurve_undo_push_begin). */
+   * matching this function's original early-out ordering (before #ED_paintcurve_undo_push_begin).
+   */
   if (!geom.handle_positions_right().has_value() || !geom.handle_positions_left().has_value()) {
     return false;
   }
@@ -1803,7 +1787,6 @@ static bool paintcurve_insert_point_at_segment(
   }
   return true;
 }
-
 
 static wmOperatorStatus paintcurve_draw_exec(bContext *C, wmOperator * /*op*/)
 {
@@ -1930,7 +1913,7 @@ static wmOperatorStatus paintcurve_to_curve_object_exec(bContext *C, wmOperator 
       RNA_enum_get(op->ptr, "curve_type"));
   const bool use_selection = RNA_boolean_get(op->ptr, "use_selection");
   const bool assign_as_source = RNA_boolean_get(op->ptr, "assign_as_source");
-  
+
   /* When using selection mode, require at least 2 selected points on any spline
    * to create valid curve segments. */
   if (use_selection) {
@@ -1948,7 +1931,7 @@ static wmOperatorStatus paintcurve_to_curve_object_exec(bContext *C, wmOperator 
       }
     }
   }
-  
+
   if (!ED_paintcurve_export_to_scene_object(
           C, op->reports, &dst_ob, curve_type, use_selection, assign_as_source))
   {
@@ -2051,9 +2034,7 @@ static wmOperatorStatus paintcurve_separate_to_curve_object_exec(bContext *C, wm
   Object *dst_ob = nullptr;
   const ePaintCurveExportCurveType curve_type = ePaintCurveExportCurveType(
       RNA_enum_get(op->ptr, "curve_type"));
-  if (!ED_paintcurve_export_to_scene_object(
-          C, op->reports, &dst_ob, curve_type, true, false))
-  {
+  if (!ED_paintcurve_export_to_scene_object(C, op->reports, &dst_ob, curve_type, true, false)) {
     ED_paintcurve_undo_push_end(C);
     return OPERATOR_CANCELLED;
   }
@@ -2162,7 +2143,8 @@ static wmOperatorStatus paintcurve_sculpt_pick_invoke(bContext *C,
                                                       wmOperator *op,
                                                       const wmEvent *event)
 {
-  /* Ctrl+RMB is reserved for inserting/extending the paint curve (#PAINTCURVE_OT_insert_or_add_point). */
+  /* Ctrl+RMB is reserved for inserting/extending the paint curve
+   * (#PAINTCURVE_OT_insert_or_add_point). */
   if (event->modifier & KM_CTRL) {
     return OPERATOR_PASS_THROUGH;
   }

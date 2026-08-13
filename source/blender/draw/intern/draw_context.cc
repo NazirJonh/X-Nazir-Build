@@ -51,8 +51,8 @@
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
 #include "BKE_subdiv_modifier.hh"
-#include "BKE_wm_runtime.hh"
 #include "BKE_volume.hh"
+#include "BKE_wm_runtime.hh"
 
 #include "DNA_camera_types.h"
 #include "DNA_mesh_types.h"
@@ -174,8 +174,7 @@ DRWContext::DRWContext(Mode mode_,
   if (C != nullptr) {
     const wmWindow *win = CTX_wm_window(C);
     if (win != nullptr && win->runtime != nullptr && win->runtime->eventstate != nullptr) {
-      this->cursor_mval = int2(win->runtime->eventstate->xy[0],
-                               win->runtime->eventstate->xy[1]);
+      this->cursor_mval = int2(win->runtime->eventstate->xy[0], win->runtime->eventstate->xy[1]);
       this->cursor_mval_valid = ELEM(this->mode, DRWContext::VIEWPORT, DRWContext::VIEWPORT_XR);
     }
     const ScrArea *area = CTX_wm_area(C);

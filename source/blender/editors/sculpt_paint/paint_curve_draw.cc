@@ -48,8 +48,8 @@
 #include "UI_resources.hh"
 
 #include "WM_api.hh"
-#include "WM_types.hh"
 #include "WM_toolsystem.hh"
+#include "WM_types.hh"
 
 #include "paint_curve_intern.hh"
 #include "paint_intern.hh"
@@ -103,9 +103,9 @@ static void paintcurve_theme_handle_color_draw(const int8_t handle_type,
 }
 
 static bool should_show_radius_handle_draw_from_geometry(const Sculpt *sculpt,
-                                                          const bke::CurvesGeometry &geom,
-                                                          const Span<PaintCurvePoint> points,
-                                                          const int point_index)
+                                                         const bke::CurvesGeometry &geom,
+                                                         const Span<PaintCurvePoint> points,
+                                                         const int point_index)
 {
   if (!sculpt || !sculpt->paint_curve_show_radius_handles) {
     return false;
@@ -170,9 +170,9 @@ static float paintcurve_polyline_distance_sq(const Span<float2> polyline, const 
 }
 
 static bool paintcurve_polyline_point_and_tangent_at_bezier_param(const Span<float2> polyline,
-                                                                const float bezier_t,
-                                                                float2 &r_point,
-                                                                float2 &r_tangent)
+                                                                  const float bezier_t,
+                                                                  float2 &r_point,
+                                                                  float2 &r_tangent)
 {
   if (polyline.size() < 2) {
     return false;
@@ -350,14 +350,14 @@ Paint *ED_paint_curve_resolve_active_paint(Depsgraph *depsgraph,
  * \{ */
 
 void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
-                                                        const bke::CurvesGeometry &geometry,
-                                                        const bool use_3d_space,
-                                                        const Sculpt *sculpt,
-                                                        const bool show_radius_handles,
-                                                        const float2 mval_region,
-                                                        const bool compute_segment_hover,
-                                                        const bool show_insert_preview,
-                                                        PaintCurveScreenHandles &r_out)
+                                                       const bke::CurvesGeometry &geometry,
+                                                       const bool use_3d_space,
+                                                       const Sculpt *sculpt,
+                                                       const bool show_radius_handles,
+                                                       const float2 mval_region,
+                                                       const bool compute_segment_hover,
+                                                       const bool show_insert_preview,
+                                                       PaintCurveScreenHandles &r_out)
 {
   r_out.points.clear();
   r_out.radius_handles.clear();
@@ -388,10 +388,11 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
   int slide_segment_point_a = -1;
   int slide_segment_point_b = -1;
   const bool slide_segment_active = paintcurve_slide_segment_active(&slide_segment_point_a,
-                                                                   &slide_segment_point_b);
+                                                                    &slide_segment_point_b);
   int64_t slide_segment_draw_index = -1;
-  const float segment_hover_threshold = show_insert_preview ? PAINT_CURVE_INSERT_SEGMENT_THRESHOLD :
-                                                              PAINT_CURVE_SEGMENT_HOVER_THRESHOLD;
+  const float segment_hover_threshold = show_insert_preview ?
+                                            PAINT_CURVE_INSERT_SEGMENT_THRESHOLD :
+                                            PAINT_CURVE_SEGMENT_HOVER_THRESHOLD;
   float hover_segment_dist_sq = square_f(segment_hover_threshold);
   const bool detect_segment_hover = compute_segment_hover || show_insert_preview;
 
@@ -446,52 +447,46 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
     }
   }
 
-  paintcurve_foreach_bezier_segment_from_geometry(geometry, [&](const int point_a, const int point_b) {
-    PaintCurveSegmentDrawData seg;
-    paintcurve_build_screen_segment_polyline_from_geometry(geometry,
-                                                           use_3d_space,
-                                                           &vc,
-                                                           point_a,
-                                                           point_b,
-                                                           screen_points,
-                                                           seg.polyline);
-    if (seg.polyline.size() < 2) {
-      return;
-    }
-    copy_v4_v4(seg.wire_color, wire_col);
-    seg.outline_color = float4(0.0f, 0.0f, 0.0f, 0.5f);
-    if (detect_segment_hover) {
-      const float dist_sq = paintcurve_polyline_distance_sq(seg.polyline, mval_region);
-      if (dist_sq < hover_segment_dist_sq) {
-        hover_segment_dist_sq = dist_sq;
-        hover_segment_index = r_out.segments.size();
-        hover_point_a = point_a;
-        hover_point_b = point_b;
-      }
-    }
-    if (slide_segment_active && point_a == slide_segment_point_a &&
-        point_b == slide_segment_point_b)
-    {
-      slide_segment_draw_index = r_out.segments.size();
-    }
-    r_out.segments.append(std::move(seg));
-  });
+  paintcurve_foreach_bezier_segment_from_geometry(
+      geometry, [&](const int point_a, const int point_b) {
+        PaintCurveSegmentDrawData seg;
+        paintcurve_build_screen_segment_polyline_from_geometry(
+            geometry, use_3d_space, &vc, point_a, point_b, screen_points, seg.polyline);
+        if (seg.polyline.size() < 2) {
+          return;
+        }
+        copy_v4_v4(seg.wire_color, wire_col);
+        seg.outline_color = float4(0.0f, 0.0f, 0.0f, 0.5f);
+        if (detect_segment_hover) {
+          const float dist_sq = paintcurve_polyline_distance_sq(seg.polyline, mval_region);
+          if (dist_sq < hover_segment_dist_sq) {
+            hover_segment_dist_sq = dist_sq;
+            hover_segment_index = r_out.segments.size();
+            hover_point_a = point_a;
+            hover_point_b = point_b;
+          }
+        }
+        if (slide_segment_active && point_a == slide_segment_point_a &&
+            point_b == slide_segment_point_b)
+        {
+          slide_segment_draw_index = r_out.segments.size();
+        }
+        r_out.segments.append(std::move(seg));
+      });
 
   if (compute_segment_hover) {
     const float mval[2] = {mval_region.x, mval_region.y};
     char point_selflag = 0;
-    hover_point_index = paintcurve_find_in_screen_points(screen_points.as_span(),
-                                                         mval,
-                                                         false,
-                                                         PAINT_CURVE_HOVER_THRESHOLD,
-                                                         &point_selflag);
+    hover_point_index = paintcurve_find_in_screen_points(
+        screen_points.as_span(), mval, false, PAINT_CURVE_HOVER_THRESHOLD, &point_selflag);
     if (hover_point_index >= 0 && point_selflag == SEL_F2 && !radius_handle_hovered) {
       r_out.points[hover_point_index].hovered_center = true;
     }
   }
 
   if (hover_segment_index >= 0 && compute_segment_hover && hover_point_index < 0 &&
-      !radius_handle_hovered) {
+      !radius_handle_hovered)
+  {
     r_out.segments[hover_segment_index].hovered = true;
   }
   else if (slide_segment_draw_index >= 0) {
@@ -504,8 +499,14 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
     float bezier_t = 0.0f;
     PaintCurveInsertPreviewDrawData preview;
     if (hover_point_a >= 0 && hover_point_b >= 0 &&
-        paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(
-            &vc, geometry, use_3d_space, mval, hover_point_a, hover_point_b, screen_points, bezier_t) &&
+        paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(&vc,
+                                                                       geometry,
+                                                                       use_3d_space,
+                                                                       mval,
+                                                                       hover_point_a,
+                                                                       hover_point_b,
+                                                                       screen_points,
+                                                                       bezier_t) &&
         paintcurve_polyline_point_and_tangent_at_bezier_param(
             hover_seg.polyline, bezier_t, preview.point, preview.tangent))
     {

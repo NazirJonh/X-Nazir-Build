@@ -78,11 +78,11 @@ float3 curve_patch_canonicalize(const CurvePatchStrokeContext &ctx, const float3
 /**
  * Radius of the tube around the control polyline that the relief can possibly reach.
  *
- * The `2.5x` factor is generous margin for the bounding-sphere approximation the culls make and for
- * slightly-stale node bounds; at the tube boundary the relief has tapered to ~0 anyway, so nothing
- * visible is ever culled. `ribbon_end_margin` is added because the ribbon's end extension reaches
- * that far past the polyline's own ends, and a node holding only the overhang of an end stamp would
- * otherwise be dropped before the per-element test could claim it.
+ * The `2.5x` factor is generous margin for the bounding-sphere approximation the culls make and
+ * for slightly-stale node bounds; at the tube boundary the relief has tapered to ~0 anyway, so
+ * nothing visible is ever culled. `ribbon_end_margin` is added because the ribbon's end extension
+ * reaches that far past the polyline's own ends, and a node holding only the overhang of an end
+ * stamp would otherwise be dropped before the per-element test could claim it.
  *
  * Both cull helpers derive their reach from THIS -- they were two verbatim copies of the
  * expression, and the sampler's own acceptance radius is what they have to stay conservative
@@ -113,8 +113,8 @@ struct CurvePatchSourceGeometry {
    *
    * Defaults to true so that the mesh-vertex targets keep their existing behavior; only a source
    * that knows its indices are foreign has to say so. See #CurvePatchSampler::sample, which uses
-   * this to decide whether `CurvePatchGeometry::surface.vert_normals` -- a per-mesh-vertex array --
-   * may be indexed at all.
+   * this to decide whether `CurvePatchGeometry::surface.vert_normals` -- a per-mesh-vertex array
+   * -- may be indexed at all.
    */
   bool indices_are_mesh_verts = true;
 };

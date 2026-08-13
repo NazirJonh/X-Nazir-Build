@@ -70,9 +70,7 @@ std::unique_ptr<ImageData> ImageData::init_active_image(Object &ob,
   return image_data;
 }
 
-void fetch_image_buffers(ImageData &image_data,
-                         bke::pbvh::Node & /*node*/,
-                         PixelNode &pixel_node)
+void fetch_image_buffers(ImageData &image_data, bke::pbvh::Node & /*node*/, PixelNode &pixel_node)
 {
   PRF_scope(ProfileCategory::Editor);
   for (const UDIMTilePixels &tile : pixel_node.tiles) {
@@ -541,9 +539,7 @@ static void push_undo(const PixelNode &node_data,
   }
 }
 
-void do_push_undo_tile(ImageData &image_data,
-                       bke::pbvh::Node & /*node*/,
-                       PixelNode &pixel_node)
+void do_push_undo_tile(ImageData &image_data, bke::pbvh::Node & /*node*/, PixelNode &pixel_node)
 {
   PRF_scope(ProfileCategory::Editor);
   for (const UDIMTilePixels &tile : pixel_node.tiles) {

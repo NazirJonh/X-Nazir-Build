@@ -808,11 +808,8 @@ ScrArea *ED_screen_area_of_region(bScreen *screen, const ARegion *region);
  * some other context's screen. Only ordinary windows with a real screen are a supported case --
  * temporary/popup windows are not a target for this query.
  */
-ARegion *ED_screen_area_region_under_cursor(wmWindow *win,
-                                            int space_type,
-                                            int region_type,
-                                            const int event_xy[2],
-                                            ScrArea **r_area);
+ARegion *ED_screen_area_region_under_cursor(
+    wmWindow *win, int space_type, int region_type, const int event_xy[2], ScrArea **r_area);
 
 /* `interface_region_hud.cc` */
 

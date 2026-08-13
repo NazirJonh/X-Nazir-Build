@@ -22,9 +22,9 @@ namespace blender::ed::sculpt_paint::tests {
 /** \name Symmetry Canonicalization
  *
  * The sampler and both node culls map world positions into the patch's canonical frame through the
- * same helper. They MUST agree: a cull that canonicalizes differently drops nodes the sampler would
- * have accepted, which shows up as relief missing from whole regions of a mirrored pass rather than
- * as anything obviously wrong.
+ * same helper. They MUST agree: a cull that canonicalizes differently drops nodes the sampler
+ * would have accepted, which shows up as relief missing from whole regions of a mirrored pass
+ * rather than as anything obviously wrong.
  * \{ */
 
 TEST(paint_curve_patch_sampler, canonicalize_is_identity_for_the_first_pass)
@@ -92,7 +92,8 @@ TEST(paint_curve_patch_sampler, canonicalize_applies_the_radial_rotation_after_t
 
 /** A geometry carrying only what the two reach helpers read: the per-point radius scalars, the
  * radius the ribbon was built with, and the end extension. Building it directly is the whole point
- * of both helpers taking a #bke::CurvePatchGeometry -- no sculpt session, no mesh, no Paint BVH. */
+ * of both helpers taking a #bke::CurvePatchGeometry -- no sculpt session, no mesh, no Paint BVH.
+ */
 static bke::CurvePatchGeometry geometry_with_reach(const Span<float> radii,
                                                    const float ribbon_radius,
                                                    const float ribbon_end_margin)

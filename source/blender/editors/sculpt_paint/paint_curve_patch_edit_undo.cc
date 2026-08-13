@@ -21,7 +21,8 @@
 namespace blender::ed::sculpt_paint {
 
 /* Deep enough for any realistic editing session; the snapshots are a handful of control points
- * each, so the cap exists to bound a pathological session rather than to save meaningful memory. */
+ * each, so the cap exists to bound a pathological session rather than to save meaningful memory.
+ */
 static constexpr int CURVE_PATCH_UNDO_STEPS_MAX = 64;
 
 /* Record the CURRENT state as a new step. Called after an action completes -- once per action, not

@@ -9,9 +9,9 @@
  *
  * This lives in the editor layer, not in blenkernel, for two reasons. It has to include
  * `DNA_brush_types.h` and `DNA_texture_types.h`, which would hand the core back the DNA dependency
- * the Stage 1/2 refactor removed; and the brush is not the only producer -- the modal editor's live
- * poll feeds the same conversion from a partly session-owned state, which is editor business by
- * definition.
+ * the Stage 1/2 refactor removed; and the brush is not the only producer -- the modal editor's
+ * live poll feeds the same conversion from a partly session-owned state, which is editor business
+ * by definition.
  */
 
 #include <algorithm>
@@ -133,7 +133,8 @@ bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,
   params.stamp_mode = stamp_mode_from_dna(settings.stamp_mode);
   params.stamp_projection = stamp_projection_from_dna(settings.stamp_projection);
   /* The DNA fields are percentages and the core takes fractions in `[0, 1]`. The division belongs
-   * here and only here, so that no consumer has to know which of the two conventions it is holding. */
+   * here and only here, so that no consumer has to know which of the two conventions it is
+   * holding. */
   params.stamp_size_random = float(settings.stamp_size_random) / 100.0f;
   params.stamp_strength_random = float(settings.stamp_strength_random) / 100.0f;
 
@@ -163,17 +164,12 @@ bke::CurvePatchParams curve_patch_params_live_overlay(const Brush &brush,
 {
   /* A zero `radius_per_size` means the patch started with a zero brush size, which cannot happen
    * through the UI; keep the captured world radius rather than collapse the patch to nothing. */
-  const float radius = frozen.radius_per_size > 0.0f ?
-                           frozen.radius_per_size * float(brush_size) :
-                           frozen.radius;
+  const float radius = frozen.radius_per_size > 0.0f ? frozen.radius_per_size * float(brush_size) :
+                                                       frozen.radius;
   const bool swap_axis = apply_brush_swap_axis ? (brush.curve_patch.swap_axis != 0) :
                                                  frozen.swap_axis;
-  bke::CurvePatchParams live = curve_patch_params_from_brush(brush,
-                                                             radius,
-                                                             frozen.radius_per_size,
-                                                             frozen.plane_normal,
-                                                             frozen.stamp_seed,
-                                                             swap_axis);
+  bke::CurvePatchParams live = curve_patch_params_from_brush(
+      brush, radius, frozen.radius_per_size, frozen.plane_normal, frozen.stamp_seed, swap_axis);
   live.final_quality = frozen.final_quality;
   return live;
 }
@@ -231,15 +227,14 @@ void curve_patch_texture_binding_from_brush(const Brush &brush,
 
   if (settings.ribbon_texture_source == BRUSH_CURVE_PATCH_TEX_MULTI) {
     r_binding.caps_enabled = true;
-    const Tex *zone_textures[3] = {
-        settings.tex_start, settings.tex_middle, settings.tex_end};
+    const Tex *zone_textures[3] = {settings.tex_start, settings.tex_middle, settings.tex_end};
     for (const int i : IndexRange(3)) {
       r_binding.ribbon_zone_variants[i] = dna::shallow_copy(mtex);
       r_binding.ribbon_zone_variants[i].tex = const_cast<Tex *>(zone_textures[i]);
     }
-    /* The UI stores cap lengths in brush DIAMETERS while `radius` is the ribbon's half-width, hence
-     * the factor of two. The BASE radius, not the per-point one: a zone boundary that moved with
-     * `radius_at_s` would not be a boundary at all. */
+    /* The UI stores cap lengths in brush DIAMETERS while `radius` is the ribbon's half-width,
+     * hence the factor of two. The BASE radius, not the per-point one: a zone boundary that moved
+     * with `radius_at_s` would not be a boundary at all. */
     r_binding.world_cap_start = settings.cap_start_length * 2.0f * radius;
     r_binding.world_cap_end = settings.cap_end_length * 2.0f * radius;
   }
@@ -251,7 +246,8 @@ namespace blender {
 
 /* Declared in `ED_paint.hh`, which puts the `ED_*` API in `blender` rather than in this file's own
  * `blender::ed::sculpt_paint` -- hence the separate namespace block. */
-Array<float> ED_curve_patch_stamp_texture_weights_from_brush(const Brush &brush, const float radius)
+Array<float> ED_curve_patch_stamp_texture_weights_from_brush(const Brush &brush,
+                                                             const float radius)
 {
   ed::sculpt_paint::CurvePatchTextureBinding binding;
   ed::sculpt_paint::curve_patch_texture_binding_from_brush(brush, radius, binding);

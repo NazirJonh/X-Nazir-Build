@@ -20,8 +20,8 @@
  * `read_image_pixels()`'s float overload converts the buffer to scene-linear IN PLACE and hands
  * back a span aliasing the image itself, so every pixel that was read must be written back or the
  * image is left holding half-converted data. PHASE 2 therefore rewrites each chunk whole, with the
- * unaccepted pixels carrying their unchanged originals -- exactly the invariant `do_paint_pixels()`
- * maintains by bailing out before the read when a whole chunk is rejected.
+ * unaccepted pixels carrying their unchanged originals -- exactly the invariant
+ * `do_paint_pixels()` maintains by bailing out before the read when a whole chunk is rejected.
  */
 
 #include <algorithm>
@@ -134,23 +134,24 @@ struct TileKey {
  * tile (a tile enters the map the moment ONE of its pixels is painted).
  *
  * Tile granularity rather than per-pixel keeps the map's overhead bounded the way
- * `ED_image_paint_tile_push()`'s own tiles already do; a per-pixel `Map` has no bound comparable to
- * `ColorEffect::orig_colors_`'s `verts_num`/`corners_num`. */
+ * `ED_image_paint_tile_push()`'s own tiles already do; a per-pixel `Map` has no bound comparable
+ * to `ColorEffect::orig_colors_`'s `verts_num`/`corners_num`. */
 struct TileSnapshot {
   Array<float4> pixels;
   BitVector<> captured;
   /** One bit per tile ROW, set whenever any slot in that row is captured. A pure summary of
    * `captured`, maintained beside it, so `restore()` can skip an untouched row in O(1) instead of
-   * testing its `tile_size` slots -- a tile enters the map on its FIRST painted pixel, so most rows
-   * of most tiles stay empty for the whole session.
+   * testing its `tile_size` slots -- a tile enters the map on its FIRST painted pixel, so most
+   * rows of most tiles stay empty for the whole session.
    *
    * A summary rather than `bits::any_bit_set()` over a row slice of `captured`: only row 0's slice
    * satisfies #is_bounded_span (`BLI_bit_span.hh:224-243` rejects an offset >= `BitsPerInt`), so
    * every later row would fall into `any_set_expr()`'s bit-at-a-time fallback
    * (`BLI_bit_span_ops.hh:100-110`) and test the same `tile_size` bits the loop already tests. */
   BitVector<> captured_rows;
-  /** Dense id assigned in creation order, used to build the `CurvePatchApplyState::pass_weight_accum`
-   * key. See #ImageColorEffect::apply_pass for why a dense id rather than the tile's coordinates. */
+  /** Dense id assigned in creation order, used to build the
+   * `CurvePatchApplyState::pass_weight_accum` key. See #ImageColorEffect::apply_pass for why a
+   * dense id rather than the tile's coordinates. */
   int slot_id = 0;
 };
 
@@ -189,7 +190,8 @@ class ImageColorEffect : public CurvePatchEffect {
    * the transaction in flight. Must be called before every `do_push_undo_tile()`. */
   void ensure_undo_step_live();
 
-  /** Raw pointer, not owned: `scene->toolsettings->paint_mode`, stable for the scene's lifetime. */
+  /** Raw pointer, not owned: `scene->toolsettings->paint_mode`, stable for the scene's lifetime.
+   */
   PaintModeSettings *paint_mode_settings_;
   /** `BKE_paint_canvas_key_get()`'s result at session start. One string covers both Single Image
    * and Texture Slots, so no separate per-mode identity check is needed. */
@@ -213,8 +215,8 @@ class ImageColorEffect : public CurvePatchEffect {
 
   /** Whether patch pixels are currently ON the canvas: set when `apply_pass()` writes a chunk,
    * cleared when `restore()` completes a full write-back. It is the destructor's "is this a commit
-   * or a cancel?" signal -- the effect is destroyed on both and is told neither. See the destructor
-   * for the four teardown paths and what this reads as on each. */
+   * or a cancel?" signal -- the effect is destroyed on both and is told neither. See the
+   * destructor for the four teardown paths and what this reads as on each. */
   bool patch_pixels_on_canvas_ = false;
 
 #if CURVE_PATCH_PROFILING
@@ -228,13 +230,13 @@ class ImageColorEffect : public CurvePatchEffect {
   double prof_phase1_ = 0.0;       /* Parallel sample + read-pixels (wall-clock elapsed). */
   double prof_phase2_ = 0.0;       /* Serial snapshot + mix + write-back. */
   /* PHASE 1 split, summed across threads (CPU-time; sums exceed `prof_phase1_`). */
-  double prof_p1_sample_ = 0.0;    /* Interpolation + patch sampling. */
-  double prof_p1_read_ = 0.0;      /* `read_image_pixels()` on accepted chunks. */
-  int64_t prof_candidates_ = 0;    /* Pixels sampled (vs the accepted `pixels` count). */
-  int64_t prof_culled_ = 0;        /* Pixels in chunks skipped by the broad-phase cull. */
-  int64_t prof_reached_lut_ = 0;   /* Passed cheap culls, reached the ribbon/frames LUT. */
+  double prof_p1_sample_ = 0.0;     /* Interpolation + patch sampling. */
+  double prof_p1_read_ = 0.0;       /* `read_image_pixels()` on accepted chunks. */
+  int64_t prof_candidates_ = 0;     /* Pixels sampled (vs the accepted `pixels` count). */
+  int64_t prof_culled_ = 0;         /* Pixels in chunks skipped by the broad-phase cull. */
+  int64_t prof_reached_lut_ = 0;    /* Passed cheap culls, reached the ribbon/frames LUT. */
   int64_t prof_reached_relief_ = 0; /* LUT returned >=1 branch. */
-  int64_t prof_tex_evals_ = 0;     /* paint_get_tex_pixel calls. */
+  int64_t prof_tex_evals_ = 0;      /* paint_get_tex_pixel calls. */
   int prof_pass_count_ = 0;
 #endif
 };
@@ -316,17 +318,17 @@ void ImageColorEffect::ensure_undo_step_live()
    * WHAT IT DOES NOT PROVE: that the step is the very allocation we opened. `UndoStep` carries no
    * identity beyond its type and a 64-byte name (`BKE_undo_system.hh:76-79`), and a freed step's
    * address can be reused, so pointer identity is not sound either. A foreign in-flight IMAGE step
-   * would pass this check and receive our tiles. That is deliberately preferred to the alternative,
-   * but it is NOT harmless, and the honest comparison is between two bad outcomes: reopening on a
-   * name mismatch would FREE a live foreign image-paint transaction outright, while sharing one
-   * mixes both strokes' "before" data into a single step AND, when this session ends, our
-   * destructor's `ED_image_undo_push_end()` commits the foreign stroke's step out from under it --
-   * so that stroke's next tile push hits the same broken lookup this guard exists to prevent. The
-   * name is no way out: `undo_system.cc:595-596` copies the pusher's name only into an EMPTY one,
-   * so an adopted step keeps ours and the name is unreliable in both directions.
+   * would pass this check and receive our tiles. That is deliberately preferred to the
+   * alternative, but it is NOT harmless, and the honest comparison is between two bad outcomes:
+   * reopening on a name mismatch would FREE a live foreign image-paint transaction outright, while
+   * sharing one mixes both strokes' "before" data into a single step AND, when this session ends,
+   * our destructor's `ED_image_undo_push_end()` commits the foreign stroke's step out from under
+   * it -- so that stroke's next tile push hits the same broken lookup this guard exists to
+   * prevent. The name is no way out: `undo_system.cc:595-596` copies the pusher's name only into
+   * an EMPTY one, so an adopted step keeps ours and the name is unreliable in both directions.
    *
-   * The reopen path has its own destructive case, for the same unavoidable reason: when `step_init`
-   * holds a live FOREIGN NON-image transaction, `ED_image_undo_push_begin()` frees it
+   * The reopen path has its own destructive case, for the same unavoidable reason: when
+   * `step_init` holds a live FOREIGN NON-image transaction, `ED_image_undo_push_begin()` frees it
    * (`undo_system.cc:491-494`). There is no API to open a step without displacing whatever is
    * there; a crash is the worse outcome.
    *
@@ -347,12 +349,13 @@ void ImageColorEffect::ensure_undo_step_live()
 
 ImageColorEffect::~ImageColorEffect()
 {
-  /* `CurvePatchSession` (which owns this effect through a `unique_ptr`) is destroyed on four paths,
-   * only some of which call `commit()`:
+  /* `CurvePatchSession` (which owns this effect through a `unique_ptr`) is destroyed on four
+   * paths, only some of which call `commit()`:
    * - `curve_patch_edit_finish()` (`paint_curve_patch_edit.cc:1614`) -- the PRIMARY one, serving
    *   both the modal's commit branch (`:1602`) and its Esc-cancel branch (`:1582`, which never
    *   calls `commit()`);
-   * - `curve_patch_commit_on_session_end()` (`paint_curve_patch_session.cc:115`), after `commit()`;
+   * - `curve_patch_commit_on_session_end()` (`paint_curve_patch_session.cc:115`), after
+   * `commit()`;
    * - `curve_patch_discard_on_session_end()` (`:169`), which never calls `commit()`;
    * - `curve_patch_begin_editing()`'s refusal branch (`:684`), which cannot reach this destructor
    *   at all: it is taken only when `curve_patch_effect_create()` returned null, so no
@@ -370,36 +373,37 @@ ImageColorEffect::~ImageColorEffect()
    * (`space_image/image_undo.cc:1139-1145`), so calling it without a matching open would push
    * whatever unrelated `step_init` happened to be in flight, or manufacture a spurious step.
    *
-   * Still exactly one close after `ensure_undo_step_live()` may have re-opened the step mid-session.
-   * That helper neither sets nor clears `undo_step_open_`, and it re-opens ONLY when our previous
-   * step is already gone -- freed by a foreign `push_init`, or adopted and committed by a foreign
-   * push (see its own comment). So at most one step of ours is ever in flight, this closes that
-   * last-opened one, and the earlier ones are already committed steps on the stack.
+   * Still exactly one close after `ensure_undo_step_live()` may have re-opened the step
+   * mid-session. That helper neither sets nor clears `undo_step_open_`, and it re-opens ONLY when
+   * our previous step is already gone -- freed by a foreign `push_init`, or adopted and committed
+   * by a foreign push (see its own comment). So at most one step of ours is ever in flight, this
+   * closes that last-opened one, and the earlier ones are already committed steps on the stack.
    *
-   * CLOSED TWO WAYS, because a step is only worth committing when it would actually undo something.
-   * `image_undosys_step_encode()` (`space_image/image_undo.cc:791-882`) pairs each pushed tile's
-   * "before" data with the buffer's CURRENT content, so a step whose pixels have since been put
-   * back encodes `pre == post`: pushing it costs the user a slot on the undo stack, truncates the
-   * redo branch (`undo_system.cc:606-611`) and silently swallows their next Ctrl+Z, while undoing
-   * nothing. `BKE_undosys_step_push_init_abort()` discards such a step instead.
+   * CLOSED TWO WAYS, because a step is only worth committing when it would actually undo
+   * something. `image_undosys_step_encode()` (`space_image/image_undo.cc:791-882`) pairs each
+   * pushed tile's "before" data with the buffer's CURRENT content, so a step whose pixels have
+   * since been put back encodes `pre == post`: pushing it costs the user a slot on the undo stack,
+   * truncates the redo branch (`undo_system.cc:606-611`) and silently swallows their next Ctrl+Z,
+   * while undoing nothing. `BKE_undosys_step_push_init_abort()` discards such a step instead.
    *
-   * The two flags below answer that question without the destructor being told which teardown it is
-   * on -- and it is told nothing. "`commit()` ran" would not answer it either: a patch whose mesh
-   * was invalidated skips `commit()` while leaving its pixels on the canvas. The four teardown paths
-   * read as:
+   * The two flags below answer that question without the destructor being told which teardown it
+   * is on -- and it is told nothing. "`commit()` ran" would not answer it either: a patch whose
+   * mesh was invalidated skips `commit()` while leaving its pixels on the canvas. The four
+   * teardown paths read as:
    * - modal commit (`paint_curve_patch_edit.cc:1602` -> `:1614`): the final re-stamp restored and
    *   then repainted, so pixels are on the canvas and the wave pushed their "before" data ->
    *   PUSHED, exactly as before this guard existed;
-   * - session-end commit (`paint_curve_patch_session.cc:108` -> `:115`): identical sequence -> PUSHED;
+   * - session-end commit (`paint_curve_patch_session.cc:108` -> `:115`): identical sequence ->
+   * PUSHED;
    * - modal cancel (`paint_curve_patch_edit.cc:1582` -> `:1614`): `curve_patch_restore_only()` ran
    *   and put every captured pixel back, so the step would encode `pre == post` -> ABORTED;
    * - session-end discard (`paint_curve_patch_session.cc:156` -> `:169`): same restore -> ABORTED.
    * Neither invalidated-mesh variant reaches a completed write-back, so both keep the flag set and
    * PUSH -- which is right, because their pixels really are still on the canvas and must stay
-   * undoable. `edit.cc:1599` skips the commit after `curve_patch_restore_and_restamp()` has already
-   * bailed out on its own element-count guard (`paint_curve_patch_session.cc:206-215`) BEFORE
-   * restoring anything, and `cache.cc:105`'s `curve_patch_restore_only()` reaches `restore()` only
-   * for it to return on the identical guard.
+   * undoable. `edit.cc:1599` skips the commit after `curve_patch_restore_and_restamp()` has
+   * already bailed out on its own element-count guard (`paint_curve_patch_session.cc:206-215`)
+   * BEFORE restoring anything, and `cache.cc:105`'s `curve_patch_restore_only()` reaches
+   * `restore()` only for it to return on the identical guard.
    *
    * The abort is guarded by the same "an IMAGE transaction is in flight" test
    * `ensure_undo_step_live()` uses, so a foreign NON-image transaction that took our slot is never
@@ -411,12 +415,13 @@ ImageColorEffect::~ImageColorEffect()
    * neither the pointer nor the name is sound). When the test fails there is nothing of ours left
    * to abort and nothing to do. The push branch is deliberately left unguarded, exactly as it was.
    *
-   * One knowingly accepted loss wherever the abort branch is taken: `fix_non_manifold_seam_bleeding()`
-   * writes pixels outside the patch that `restore()` does not capture (see the NOTE in `restore()`),
-   * so the discarded step would have been able to undo that residue and now cannot. This is not
-   * confined to cancellation -- a COMMIT whose final restamp accepted no pixels (the patch was
-   * dragged clear of the mesh) also lands here, with earlier restamps' residue still on the canvas.
-   * A dead step that eats the user's next Ctrl+Z is the worse of the two. */
+   * One knowingly accepted loss wherever the abort branch is taken:
+   * `fix_non_manifold_seam_bleeding()` writes pixels outside the patch that `restore()` does not
+   * capture (see the NOTE in `restore()`), so the discarded step would have been able to undo that
+   * residue and now cannot. This is not confined to cancellation -- a COMMIT whose final restamp
+   * accepted no pixels (the patch was dragged clear of the mesh) also lands here, with earlier
+   * restamps' residue still on the canvas. A dead step that eats the user's next Ctrl+Z is the
+   * worse of the two. */
   if (!undo_step_open_) {
     return;
   }
@@ -439,8 +444,8 @@ bool ImageColorEffect::canvas_matches(Object &ob) const
 /** Mirrors `ColorEffect::element_num()`'s Corner-domain case: a `PixelNode`'s pixel rows are built
  * from mesh triangles (`PixelData::vert_tris`), invalidated by exactly the topology edits
  * (Triangulate, Poke, ...) that already invalidate `corners_num`. This is a STABLE count compared
- * against `CurvePatchApplyState::element_num` every restamp -- it must NOT be the snapshot's size, which
- * grows across the session. */
+ * against `CurvePatchApplyState::element_num` every restamp -- it must NOT be the snapshot's size,
+ * which grows across the session. */
 int64_t ImageColorEffect::element_num(Object &ob) const
 {
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
@@ -466,7 +471,8 @@ int64_t ImageColorEffect::snapshot_size() const
  *
  * `write_image_pixels()` reads only `PackedPixelRow::start_image_coordinate`, so a row synthesized
  * from `start` addresses the intended run; the remaining fields are unused by it. It also converts
- * `values` IN PLACE, which is why every caller hands it a scratch copy rather than the snapshot. */
+ * `values` IN PLACE, which is why every caller hands it a scratch copy rather than the snapshot.
+ */
 void write_pixel_run(MutableSpan<float4> values,
                      ImBuf &image_buffer,
                      const TileColorspaceProcessor &processors,
@@ -493,8 +499,9 @@ void write_pixel_run(MutableSpan<float4> values,
 
 void ImageColorEffect::restore(Object &ob, const CurvePatchSession & /*patch*/)
 {
-  /* No `element_num` check of its own -- `curve_patch_restore_only()` performs it for every caller.
-   * The canvas check below is NOT redundant with it: a swapped canvas changes no mesh count.
+  /* No `element_num` check of its own -- `curve_patch_restore_only()` performs it for every
+   * caller. The canvas check below is NOT redundant with it: a swapped canvas changes no mesh
+   * count.
    *
    * Unlike the other two effects this one reads nothing else off the session either: the pixels it
    * writes back are addressed by its own tile snapshot, not by any PBVH node mask. */
@@ -533,13 +540,13 @@ void ImageColorEffect::restore(Object &ob, const CurvePatchSession & /*patch*/)
    * length) of each contiguous captured run that fed it. Reused across rows and tiles.
    *
    * A row's pixels are gathered so the whole row costs ONE colorspace call instead of one per run.
-   * On the common non-scene-linear canvas (every 8-bit sRGB texture) `processors.is_noop` is false,
-   * and a patch that touches N short runs in a row was otherwise issuing N separate OCIO calls of a
-   * few pixels each -- on the main thread, every restamp, for every tile ever touched. The result is
-   * unchanged: the transform is per-pixel, which the rest of this pipeline already relies on (both
-   * `read_image_pixels()` and `write_image_pixels()` apply it over runs of whatever length their
-   * caller happens to have, `mesh/sculpt_paint_image.cc:205-211` / `:247-250`), so batching moves
-   * only where the call boundary falls. */
+   * On the common non-scene-linear canvas (every 8-bit sRGB texture) `processors.is_noop` is
+   * false, and a patch that touches N short runs in a row was otherwise issuing N separate OCIO
+   * calls of a few pixels each -- on the main thread, every restamp, for every tile ever touched.
+   * The result is unchanged: the transform is per-pixel, which the rest of this pipeline already
+   * relies on (both `read_image_pixels()` and `write_image_pixels()` apply it over runs of
+   * whatever length their caller happens to have, `mesh/sculpt_paint_image.cc:205-211` /
+   * `:247-250`), so batching moves only where the call boundary falls. */
   Vector<float4> row_values;
   Vector<int2> row_runs;
 
@@ -562,8 +569,8 @@ void ImageColorEffect::restore(Object &ob, const CurvePatchSession & /*patch*/)
       continue;
     }
 
-    /* Re-acquire rather than reading `ImageData::buffers`: that map is populated per-restamp inside
-     * `apply_pass()`, and `restore()` runs FIRST in every restamp. Acquisition is reference
+    /* Re-acquire rather than reading `ImageData::buffers`: that map is populated per-restamp
+     * inside `apply_pass()`, and `restore()` runs FIRST in every restamp. Acquisition is reference
      * counted, so this returns the same `ImBuf` the paint path uses. */
     ImageUser tile_user = *image_data.image_user;
     tile_user.tile = key.tile_number;
@@ -673,9 +680,9 @@ void ImageColorEffect::restore(Object &ob, const CurvePatchSession & /*patch*/)
   /* Cleared only when EVERY captured pixel is back to its pre-patch value, so that nothing of the
    * patch is left on the canvas until the next `apply_pass()` puts it there.
    *
-   * Both ways of leaving a pixel painted must keep the flag set, because the destructor reads it to
-   * decide between committing the undo step and aborting it, and aborting one that still describes
-   * live painted pixels destroys the user's ability to undo them:
+   * Both ways of leaving a pixel painted must keep the flag set, because the destructor reads it
+   * to decide between committing the undo step and aborting it, and aborting one that still
+   * describes live painted pixels destroys the user's ability to undo them:
    * - every early return above leaves the canvas entirely as it found it (that is what keeps the
    *   invalidated-mesh teardown, where `restore()` returns on the element-count guard with the
    *   patch still painted, committing its step);
@@ -697,8 +704,8 @@ void ImageColorEffect::begin_restamp(const Depsgraph &depsgraph,
    * exist -- it only rebuilds nodes flagged `rebuild`, the same lazy behavior an ordinary stroke's
    * own per-dab call already relies on. */
 #if CURVE_PATCH_PROFILING
-  /* Reset every per-restamp accumulator here, at the head of the single hook the orchestrator calls
-   * once before the passes, so a restamp that later bails still starts each column clean. */
+  /* Reset every per-restamp accumulator here, at the head of the single hook the orchestrator
+   * calls once before the passes, so a restamp that later bails still starts each column clean. */
   prof_build_pixels_ = 0.0;
   prof_cull_ = 0.0;
   prof_fetch_undo_ = 0.0;
@@ -804,28 +811,28 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   const double prof_cull_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
 #endif
   const float max_radius = curve_patch_max_radius(item.geometry);
-  /* Broad-phase cull tube for the per-chunk reject in PHASE 1 below: the same tube (same margin) the
-   * node/grid culls use, so chunk rejection stays result-identical with them. */
+  /* Broad-phase cull tube for the per-chunk reject in PHASE 1 below: the same tube (same margin)
+   * the node/grid culls use, so chunk rejection stays result-identical with them. */
   const float cull_tube_radius = curve_patch_cull_tube_radius(item.geometry, max_radius);
   IndexMaskMemory culled_memory;
   const IndexMask node_mask = curve_patch_effect_node_mask(
       depsgraph, ob, brush, item, ctx, pbvh, max_radius, culled_memory);
 #if CURVE_PATCH_PROFILING
-  prof_cull_ += BLI_time_now_seconds() - prof_cull_t0;    /* DEBUG-cpatch-image */
-  const double prof_fetch_t0 = BLI_time_now_seconds();    /* DEBUG-cpatch-image */
+  prof_cull_ += BLI_time_now_seconds() - prof_cull_t0; /* DEBUG-cpatch-image */
+  const double prof_fetch_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
 #endif
 
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
   MutableSpan<bke::pbvh::pixels::PixelNode> pixel_nodes = pixel_data.nodes;
 
-  /* Fetch buffers and push the REAL undo tiles for every node this pass will touch -- the two calls
-   * `SCULPT_do_paint_brush_image()` makes before its own pixel loop, reused as-is.
+  /* Fetch buffers and push the REAL undo tiles for every node this pass will touch -- the two
+   * calls `SCULPT_do_paint_brush_image()` makes before its own pixel loop, reused as-is.
    * `do_push_undo_tile()` is a no-op for a tile already captured by this undo step.
    *
    * The push is conditional because the INITIAL PREVIEW RESTAMP's passes all run before
    * `session_undo_begin()` does. That restamp is driven synchronously from
-   * `curve_patch_begin_editing()` (`paint_curve_patch_session.cc:697`), and it reaches `apply_pass()`
-   * once per symmetry pass, not once in total: `do_symmetrical_brush_actions()`
+   * `curve_patch_begin_editing()` (`paint_curve_patch_session.cc:697`), and it reaches
+   * `apply_pass()` once per symmetry pass, not once in total: `do_symmetrical_brush_actions()`
    * (`mesh/sculpt.cc:3844-3861`) invokes the action once per valid mirror pass and again for each
    * radial pass, so with symmetry enabled several of them precede the hook. Every one of them sees
    * the spawning stroke's own about-to-be-aborted transaction as the one in flight, and pushing
@@ -835,9 +842,9 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * Skipping it loses no undo data, including in the no-drag case (anchor, then commit with no
    * intervening edit). Every path that can commit re-stamps at final quality FIRST --
    * `curve_patch_edit_finish()` (`paint_curve_patch_edit.cc:1591`) and
-   * `curve_patch_commit_on_session_end()` (`paint_curve_patch_session.cc:97`) -- and `restore()` runs
-   * first within each re-stamp, putting the pristine content back. So by the time this loop runs
-   * with a step open, the buffer holds the true pre-patch originals and they are what gets
+   * `curve_patch_commit_on_session_end()` (`paint_curve_patch_session.cc:97`) -- and `restore()`
+   * runs first within each re-stamp, putting the pristine content back. So by the time this loop
+   * runs with a step open, the buffer holds the true pre-patch originals and they are what gets
    * captured. The cancel paths need no push at all: they only `restore()`.
    *
    * ONE EXCEPTION, where the preview's pixels really are lost: if the Paint Mode canvas is swapped
@@ -845,18 +852,22 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * the preview's pixels stay on the old canvas -- neither restorable nor undoable. That is the
    * same exposure the canvas-swap guards accept everywhere else in this effect; the alternative is
    * writing patch data into an image the user has since pointed the canvas away from. */
-  node_mask.foreach_index(
-      [&](const int i) { paint::image::fetch_image_buffers(image_data, nodes[i], pixel_nodes[i]); });
+  node_mask.foreach_index([&](const int i) {
+    paint::image::fetch_image_buffers(image_data, nodes[i], pixel_nodes[i]);
+  });
   if (undo_step_open_ && !node_mask.is_empty()) {
     /* Re-validate before every push: the step opened at session start may have been taken by a
      * foreign undo push since the last restamp. See #ImageColorEffect::ensure_undo_step_live. */
     this->ensure_undo_step_live();
     node_mask.foreach_index(
-        [&](const int i) { paint::image::do_push_undo_tile(image_data, nodes[i], pixel_nodes[i]); },
+        [&](const int i) {
+          paint::image::do_push_undo_tile(image_data, nodes[i], pixel_nodes[i]);
+        },
         exec_mode::grain_size(1));
-    /* Recorded rather than inferred later: the destructor cannot ask the undo system how many tiles
-     * a step holds, and this is the only call that can put one there. Deliberately conservative --
-     * a node whose `PixelNode::undo_regions` are empty for these tiles contributes nothing
+    /* Recorded rather than inferred later: the destructor cannot ask the undo system how many
+     * tiles a step holds, and this is the only call that can put one there. Deliberately
+     * conservative -- a node whose `PixelNode::undo_regions` are empty for these tiles contributes
+     * nothing
      * (`mesh/sculpt_paint_image.cc:509-530`), so this can read true for a step that stayed empty.
      * That errs toward committing a harmless empty step; the opposite error would abort a step
      * holding real "before" data. */
@@ -867,25 +878,26 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
 #endif
 
   /* NOTE: This buffers a `float4` copy of every ACCEPTED chunk across the whole node mask before
-   * PHASE 2 begins, so peak extra memory scales with the painted area of this pass rather than with
-   * a fixed per-element snapshot the way `ColorEffect`'s `Vector<ColorWrite>` does. It is bounded
-   * (only chunks with at least one accepted pixel are kept) and freed at the end of the pass, but it
-   * is a different memory-scaling class -- recorded so the difference is not mistaken for an
-   * oversight. */
+   * PHASE 2 begins, so peak extra memory scales with the painted area of this pass rather than
+   * with a fixed per-element snapshot the way `ColorEffect`'s `Vector<ColorWrite>` does. It is
+   * bounded (only chunks with at least one accepted pixel are kept) and freed at the end of the
+   * pass, but it is a different memory-scaling class -- recorded so the difference is not mistaken
+   * for an oversight. */
   struct LocalData {
     Vector<ChunkWrite> chunks;
 #if CURVE_PATCH_PROFILING
     /* DEBUG-cpatch-image: per-thread CPU-time split of PHASE 1. `sample` is the barycentric
-     * position/normal/mask interpolation plus the patch sampling (`sampler.sample()` per candidate);
-     * `read` is `read_image_pixels()`, run only for accepted chunks. `candidates` is how many pixels
-     * were sampled at all -- compared against the reported `pixels` (accepted) it shows how much of
-     * PHASE 1 is spent on pixels the patch then rejects. Summed across threads after the parallel
-     * region, so the sums exceed the wall-clock `phase1`; their RATIO is the signal. */
+     * position/normal/mask interpolation plus the patch sampling (`sampler.sample()` per
+     * candidate); `read` is `read_image_pixels()`, run only for accepted chunks. `candidates` is
+     * how many pixels were sampled at all -- compared against the reported `pixels` (accepted) it
+     * shows how much of PHASE 1 is spent on pixels the patch then rejects. Summed across threads
+     * after the parallel region, so the sums exceed the wall-clock `phase1`; their RATIO is the
+     * signal. */
     double sample_time = 0.0;
     double read_time = 0.0;
     int64_t candidates = 0;
-    /* Pixels in chunks the broad-phase cull skipped entirely (never sampled). `candidates + culled`
-     * equals the pre-cull candidate total. */
+    /* Pixels in chunks the broad-phase cull skipped entirely (never sampled). `candidates +
+     * culled` equals the pre-cull candidate total. */
     int64_t culled = 0;
     /* sample() funnel, accumulated from the chunk's sampler after the sample loop. */
     int64_t reached_lut = 0;
@@ -895,9 +907,9 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   };
   threading::EnumerableThreadSpecific<LocalData> all_tls;
 
-  /* Resolved before the parallel region below, not inside it: the samplers are built per chunk, and
-   * letting several worker threads race to lazily create the session's pool would leak all but one
-   * of them. */
+  /* Resolved before the parallel region below, not inside it: the samplers are built per chunk,
+   * and letting several worker threads race to lazily create the session's pool would leak all but
+   * one of them. */
   ImagePool &tex_pool = ss.tex_pool_ensure();
 
 #if CURVE_PATCH_PROFILING
@@ -942,169 +954,172 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
 
           /* One 512-pixel chunk of one pixel row: broad-phase reject, then sample + read into
            * thread-local storage. Extracted into a lambda so the loop below can parallelize ACROSS
-           * rows without reindenting or altering this body; its `return`s still just skip the chunk.
-           * A pixel row is usually shorter than a 512-pixel within-row split, so the previous inner
-           * `parallel_for(row_size, 512)` ran as a single task and, with `nodes == 1`, PHASE 1
-           * executed essentially serially. */
+           * rows without reindenting or altering this body; its `return`s still just skip the
+           * chunk. A pixel row is usually shorter than a 512-pixel within-row split, so the
+           * previous inner `parallel_for(row_size, 512)` ran as a single task and, with `nodes ==
+           * 1`, PHASE 1 executed essentially serially. */
           auto process_chunk = [&](const bke::pbvh::pixels::PackedPixelRow &pixel_row,
                                    const IndexRange range,
                                    const int thread_id,
                                    LocalData &local) {
-              /* Broad-phase reject: skip this whole chunk when its 3D bounding sphere lies entirely
-               * outside the patch's falloff tube, before any per-pixel position/normal/mask work or
-               * `sample()` call. Within one `PackedPixelRow` (one UV primitive) a pixel's 3D position
-               * is affine in the pixel index, so the chunk's pixels lie on a straight segment and its
-               * bbox is exactly the bbox of its two end pixels -- no need to interpolate all of them.
-               * Same predicate (same `cull_tube_radius` margin, same canonicalization) as
-               * `curve_patch_cull_nodes`/`curve_patch_cull_grids`, so this is result-identical: any
-               * pixel `sample()` would accept sits within `max_radius` of the polyline. */
-              const int cull_tri_index =
-                  pixel_node.uv_primitives.tri_indices[pixel_row.uv_primitive_index];
-              const float2 cull_delta_bary =
+            /* Broad-phase reject: skip this whole chunk when its 3D bounding sphere lies entirely
+             * outside the patch's falloff tube, before any per-pixel position/normal/mask work or
+             * `sample()` call. Within one `PackedPixelRow` (one UV primitive) a pixel's 3D
+             * position is affine in the pixel index, so the chunk's pixels lie on a straight
+             * segment and its bbox is exactly the bbox of its two end pixels -- no need to
+             * interpolate all of them. Same predicate (same `cull_tube_radius` margin, same
+             * canonicalization) as `curve_patch_cull_nodes`/`curve_patch_cull_grids`, so this is
+             * result-identical: any pixel `sample()` would accept sits within `max_radius` of the
+             * polyline. */
+            const int cull_tri_index =
+                pixel_node.uv_primitives.tri_indices[pixel_row.uv_primitive_index];
+            const float2 cull_delta_bary =
+                pixel_node.uv_primitives.delta_barycentric_coords[pixel_row.uv_primitive_index];
+            const float2 cull_bary_first = pixel_row.start_barycentric_coord +
+                                           cull_delta_bary * float(range.start());
+            const float2 cull_bary_last = pixel_row.start_barycentric_coord +
+                                          cull_delta_bary *
+                                              float(range.start() + range.size() - 1);
+            const float3 cull_p_first = paint::image::calc_pixel_position(
+                positions, pixel_data.vert_tris, cull_tri_index, cull_bary_first);
+            const float3 cull_p_last = paint::image::calc_pixel_position(
+                positions, pixel_data.vert_tris, cull_tri_index, cull_bary_last);
+            const float3 cull_bbox_min = math::min(cull_p_first, cull_p_last);
+            const float3 cull_bbox_max = math::max(cull_p_first, cull_p_last);
+            const float3 cull_center = (cull_bbox_min + cull_bbox_max) * 0.5f;
+            const float cull_chunk_radius = math::distance(cull_center, cull_bbox_max);
+            const float3 cull_canonical = curve_patch_canonicalize(ctx, cull_center);
+            const float cull_reach = cull_tube_radius + cull_chunk_radius;
+            if (item.geometry.spline.distance_sq_to(cull_canonical) > cull_reach * cull_reach) {
+#if CURVE_PATCH_PROFILING
+              local.culled += range.size();
+#endif
+              return;
+            }
+#if CURVE_PATCH_PROFILING
+            local.candidates += range.size();
+            const double prof_sample_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
+#endif
+
+            /* Row-chunk-local position/normal arrays: the same interpolation
+             * `calc_pixel_row_positions()` performs, called a second time with vertex normals in
+             * place of vertex positions -- `calc_pixel_position()` is a generic barycentric
+             * interpolator that does not know it is "position". */
+            Array<float3> chunk_positions(range.size());
+            paint::image::calc_pixel_row_positions(
+                positions,
+                pixel_data.vert_tris,
+                pixel_node.uv_primitives.tri_indices,
+                pixel_node.uv_primitives.delta_barycentric_coords,
+                pixel_row,
+                range,
+                chunk_positions);
+            Array<float3> chunk_normals(range.size());
+            paint::image::calc_pixel_row_positions(
+                normals,
+                pixel_data.vert_tris,
+                pixel_node.uv_primitives.tri_indices,
+                pixel_node.uv_primitives.delta_barycentric_coords,
+                pixel_row,
+                range,
+                chunk_normals);
+
+            /* The sculpt mask has no `calc_pixel_row_positions()` counterpart (it is scalar), so
+             * interpolate it with the same weight convention `calc_pixel_position()` uses. */
+            Array<float> chunk_mask;
+            if (!mask.is_empty()) {
+              chunk_mask.reinitialize(range.size());
+              const int3 &verts =
+                  pixel_data.vert_tris[pixel_node.uv_primitives
+                                           .tri_indices[pixel_row.uv_primitive_index]];
+              const float m0 = mask[verts[0]];
+              const float m1 = mask[verts[1]];
+              const float m2 = mask[verts[2]];
+              const float2 first_bary = pixel_row.start_barycentric_coord;
+              const float2 delta_bary =
                   pixel_node.uv_primitives.delta_barycentric_coords[pixel_row.uv_primitive_index];
-              const float2 cull_bary_first =
-                  pixel_row.start_barycentric_coord + cull_delta_bary * float(range.start());
-              const float2 cull_bary_last =
-                  pixel_row.start_barycentric_coord +
-                  cull_delta_bary * float(range.start() + range.size() - 1);
-              const float3 cull_p_first = paint::image::calc_pixel_position(
-                  positions, pixel_data.vert_tris, cull_tri_index, cull_bary_first);
-              const float3 cull_p_last = paint::image::calc_pixel_position(
-                  positions, pixel_data.vert_tris, cull_tri_index, cull_bary_last);
-              const float3 cull_bbox_min = math::min(cull_p_first, cull_p_last);
-              const float3 cull_bbox_max = math::max(cull_p_first, cull_p_last);
-              const float3 cull_center = (cull_bbox_min + cull_bbox_max) * 0.5f;
-              const float cull_chunk_radius = math::distance(cull_center, cull_bbox_max);
-              const float3 cull_canonical = curve_patch_canonicalize(ctx, cull_center);
-              const float cull_reach = cull_tube_radius + cull_chunk_radius;
-              if (item.geometry.spline.distance_sq_to(cull_canonical) > cull_reach * cull_reach) {
-#if CURVE_PATCH_PROFILING
-                local.culled += range.size();
-#endif
-                return;
-              }
-#if CURVE_PATCH_PROFILING
-              local.candidates += range.size();
-              const double prof_sample_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
-#endif
-
-              /* Row-chunk-local position/normal arrays: the same interpolation
-               * `calc_pixel_row_positions()` performs, called a second time with vertex normals in
-               * place of vertex positions -- `calc_pixel_position()` is a generic barycentric
-               * interpolator that does not know it is "position". */
-              Array<float3> chunk_positions(range.size());
-              paint::image::calc_pixel_row_positions(
-                  positions,
-                  pixel_data.vert_tris,
-                  pixel_node.uv_primitives.tri_indices,
-                  pixel_node.uv_primitives.delta_barycentric_coords,
-                  pixel_row,
-                  range,
-                  chunk_positions);
-              Array<float3> chunk_normals(range.size());
-              paint::image::calc_pixel_row_positions(
-                  normals,
-                  pixel_data.vert_tris,
-                  pixel_node.uv_primitives.tri_indices,
-                  pixel_node.uv_primitives.delta_barycentric_coords,
-                  pixel_row,
-                  range,
-                  chunk_normals);
-
-              /* The sculpt mask has no `calc_pixel_row_positions()` counterpart (it is scalar), so
-               * interpolate it with the same weight convention `calc_pixel_position()` uses. */
-              Array<float> chunk_mask;
-              if (!mask.is_empty()) {
-                chunk_mask.reinitialize(range.size());
-                const int3 &verts = pixel_data.vert_tris[pixel_node.uv_primitives.tri_indices
-                                                             [pixel_row.uv_primitive_index]];
-                const float m0 = mask[verts[0]];
-                const float m1 = mask[verts[1]];
-                const float m2 = mask[verts[2]];
-                const float2 first_bary = pixel_row.start_barycentric_coord;
-                const float2 delta_bary =
-                    pixel_node.uv_primitives
-                        .delta_barycentric_coords[pixel_row.uv_primitive_index];
-                for (const int li : IndexRange(range.size())) {
-                  const float2 bary = first_bary + delta_bary * float(range.start() + li);
-                  chunk_mask[li] = m0 * bary.x + m1 * bary.y + m2 * (1.0f - bary.x - bary.y);
-                }
-              }
-
-              /* Cheap to construct per chunk: only references plus a handful of precomputed
-               * floats. Unlike `ColorEffect`, which shares one sampler over the whole mesh's
-               * pre-existing `vert_positions()` span, pixels have no pre-existing flat array --
-               * the chunk-local arrays above ARE the source, so the sampler is chunk-local too.
-               *
-               * `indices_are_mesh_verts` is false precisely because of that: the index handed to
-               * `sample()` is a slot in these chunk-local arrays, not a mesh vertex, so the
-               * sampler must not resolve it against the per-mesh-vertex normal snapshot. */
-              const CurvePatchSourceGeometry source{
-                  chunk_positions, chunk_normals, nullptr, /*indices_are_mesh_verts*/ false};
-              const CurvePatchSampler sampler(
-                  item, patch.texture, ctx, brush, source, chunk_mask, tex_pool);
-
-              Vector<AcceptedPixel> accepted;
               for (const int li : IndexRange(range.size())) {
-                const std::optional<CurvePatchSample> sample = sampler.sample(li, thread_id);
-                if (!sample) {
-                  continue;
-                }
-                accepted.append({li, sample->tex_color, sample->value, sample->weight});
+                const float2 bary = first_bary + delta_bary * float(range.start() + li);
+                chunk_mask[li] = m0 * bary.x + m1 * bary.y + m2 * (1.0f - bary.x - bary.y);
               }
-#if CURVE_PATCH_PROFILING
-              local.reached_lut += sampler.dbg_reached_lut();
-              local.reached_relief += sampler.dbg_reached_relief();
-              local.tex_evals += sampler.dbg_tex_evals();
-#endif
-              if (accepted.is_empty()) {
-                /* Bail out BEFORE the read. The float overload of `read_image_pixels()` converts
-                 * the image buffer in place, so a chunk that is read must also be written back. */
-#if CURVE_PATCH_PROFILING
-                local.sample_time += BLI_time_now_seconds() - prof_sample_t0; /* DEBUG-cpatch-image */
-#endif
-                return;
+            }
+
+            /* Cheap to construct per chunk: only references plus a handful of precomputed
+             * floats. Unlike `ColorEffect`, which shares one sampler over the whole mesh's
+             * pre-existing `vert_positions()` span, pixels have no pre-existing flat array --
+             * the chunk-local arrays above ARE the source, so the sampler is chunk-local too.
+             *
+             * `indices_are_mesh_verts` is false precisely because of that: the index handed to
+             * `sample()` is a slot in these chunk-local arrays, not a mesh vertex, so the
+             * sampler must not resolve it against the per-mesh-vertex normal snapshot. */
+            const CurvePatchSourceGeometry source{
+                chunk_positions, chunk_normals, nullptr, /*indices_are_mesh_verts*/ false};
+            const CurvePatchSampler sampler(
+                item, patch.texture, ctx, brush, source, chunk_mask, tex_pool);
+
+            Vector<AcceptedPixel> accepted;
+            for (const int li : IndexRange(range.size())) {
+              const std::optional<CurvePatchSample> sample = sampler.sample(li, thread_id);
+              if (!sample) {
+                continue;
               }
+              accepted.append({li, sample->tex_color, sample->value, sample->weight});
+            }
 #if CURVE_PATCH_PROFILING
-              local.sample_time += BLI_time_now_seconds() - prof_sample_t0; /* DEBUG-cpatch-image */
-              const double prof_read_t0 = BLI_time_now_seconds();           /* DEBUG-cpatch-image */
+            local.reached_lut += sampler.dbg_reached_lut();
+            local.reached_relief += sampler.dbg_reached_relief();
+            local.tex_evals += sampler.dbg_tex_evals();
+#endif
+            if (accepted.is_empty()) {
+          /* Bail out BEFORE the read. The float overload of `read_image_pixels()` converts
+           * the image buffer in place, so a chunk that is read must also be written back. */
+#if CURVE_PATCH_PROFILING
+              local.sample_time += BLI_time_now_seconds() -
+                                   prof_sample_t0; /* DEBUG-cpatch-image */
+#endif
+              return;
+            }
+#if CURVE_PATCH_PROFILING
+            local.sample_time += BLI_time_now_seconds() - prof_sample_t0; /* DEBUG-cpatch-image */
+            const double prof_read_t0 = BLI_time_now_seconds();           /* DEBUG-cpatch-image */
 #endif
 
-              Vector<float4> byte_storage;
-              MutableSpan<float4> scene_linear;
-              if (!float_buffer.is_empty()) {
-                scene_linear = paint::image::read_image_pixels(
-                    float_buffer, *processors, pixel_row, range, image_buffer->x);
-              }
-              else {
-                scene_linear = paint::image::read_image_pixels(
-                    byte_buffer, *processors, pixel_row, range, image_buffer->x, byte_storage);
-              }
+            Vector<float4> byte_storage;
+            MutableSpan<float4> scene_linear;
+            if (!float_buffer.is_empty()) {
+              scene_linear = paint::image::read_image_pixels(
+                  float_buffer, *processors, pixel_row, range, image_buffer->x);
+            }
+            else {
+              scene_linear = paint::image::read_image_pixels(
+                  byte_buffer, *processors, pixel_row, range, image_buffer->x, byte_storage);
+            }
 #if CURVE_PATCH_PROFILING
-              local.read_time += BLI_time_now_seconds() - prof_read_t0; /* DEBUG-cpatch-image */
+            local.read_time += BLI_time_now_seconds() - prof_read_t0; /* DEBUG-cpatch-image */
 #endif
 
-              ChunkWrite chunk;
-              chunk.tile_data = &tile_data;
-              chunk.tile_number = tile_data.tile_number;
-              chunk.image_buffer = image_buffer;
-              chunk.processors = processors;
-              chunk.pixel_row = pixel_row;
-              chunk.range = range;
-              /* Copied, not aliased: on the float path `scene_linear` points straight into the
-               * image buffer, which PHASE 2 overwrites. */
-              chunk.values.extend(scene_linear);
-              chunk.accepted = std::move(accepted);
-              chunk.node_index = i;
-              local.chunks.append(std::move(chunk));
+            ChunkWrite chunk;
+            chunk.tile_data = &tile_data;
+            chunk.tile_number = tile_data.tile_number;
+            chunk.image_buffer = image_buffer;
+            chunk.processors = processors;
+            chunk.pixel_row = pixel_row;
+            chunk.range = range;
+            /* Copied, not aliased: on the float path `scene_linear` points straight into the
+             * image buffer, which PHASE 2 overwrites. */
+            chunk.values.extend(scene_linear);
+            chunk.accepted = std::move(accepted);
+            chunk.node_index = i;
+            local.chunks.append(std::move(chunk));
           };
 
           /* Parallelize across ROWS, not within one row. Rows map to disjoint pixels, so this is
            * race-free for the same reason the reference `do_paint_pixels()`
            * (`mesh/sculpt_paint_image.cc`) parallelizes over its rows with the same in-place read.
-           * The 512-pixel chunking `read_image_pixels()` requires is kept, iterated serially within
-           * each row (a row spans at most the image width). `all_tls.local()` and the tex-pool
-           * `thread_id` are fetched once per row-range task -- one thread runs the whole task. */
+           * The 512-pixel chunking `read_image_pixels()` requires is kept, iterated serially
+           * within each row (a row spans at most the image width). `all_tls.local()` and the
+           * tex-pool `thread_id` are fetched once per row-range task -- one thread runs the whole
+           * task. */
           threading::parallel_for(
               tile_data.pixel_rows.index_range(), 8, [&](const IndexRange rows) {
                 const int thread_id = BLI_task_parallel_thread_id(nullptr);
@@ -1137,10 +1152,10 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   const double prof_phase2_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
 #endif
 
-  /* PHASE 2 (serial): the sole writer of the snapshot, of `patch.apply.pass_weight_accum` and of the
-   * image buffers. Follows `ColorEffect::apply_pass()`'s PHASE 2 step for step -- lazy per-slot
-   * snapshot capture, mix FROM the snapshot rather than from the live value, cross-pass blend,
-   * clamp, texture-alpha attenuation.
+  /* PHASE 2 (serial): the sole writer of the snapshot, of `patch.apply.pass_weight_accum` and of
+   * the image buffers. Follows `ColorEffect::apply_pass()`'s PHASE 2 step for step -- lazy
+   * per-slot snapshot capture, mix FROM the snapshot rather than from the live value, cross-pass
+   * blend, clamp, texture-alpha attenuation.
    *
    * Two things differ, both forced by the target rather than chosen. The snapshot is keyed by
    * `tile_size` x `tile_size` tile plus an in-tile offset instead of by a domain element index,
@@ -1154,11 +1169,11 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   const float3 brush_color = BKE_brush_color_get(&paint_settings, &brush);
   /* The RGB the patch paints is ALWAYS the brush's primary color; a brush texture contributes only
    * its intensity (already folded into `CurvePatchSample::value` by the sampler) and its alpha,
-   * which attenuates the mix below. `CurvePatchSample::tex_color`'s RGB is deliberately left unread
-   * until the color path grows real RGBA-texture support. */
+   * which attenuates the mix below. `CurvePatchSample::tex_color`'s RGB is deliberately left
+   * unread until the color path grows real RGBA-texture support. */
   const bool has_texture = brush.mtex.tex != nullptr;
-  /* The Strength slider, applied as a separate factor exactly as the ordinary paint pipeline does --
-   * `brush_strength()` leaves it out of `bstrength` for a Paint brush. See
+  /* The Strength slider, applied as a separate factor exactly as the ordinary paint pipeline does
+   * -- `brush_strength()` leaves it out of `bstrength` for a Paint brush. See
    * #curve_patch_color_mix_factor. */
   const float strength = BKE_brush_alpha_get(&paint_settings, &brush);
 
@@ -1205,14 +1220,14 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
         const float4 orig = snapshot.pixels[in_tile_offset];
 
         /* `pass_weight_accum` is `Map<int, float2>`, cleared once per restamp by the orchestrator
-         * before the first symmetry pass. The key must be unique per painted pixel across the whole
-         * canvas AND across UDIM tiles, and it has only 32 bits to do it in. Packing the tile's
-         * image-space coordinates cannot work: `tile_x << 22` already overflows a signed `int` at
-         * the maximum coordinate a `ushort2` pixel address permits, and coordinates alone would
-         * collide between two UDIM tiles, which each start at (0, 0). A dense per-tile id assigned
-         * in first-touch order sidesteps both: 20 bits of id (over a million snapshot tiles, far
-         * more than the snapshot's memory could hold) plus the 12 bits `tile_size * tile_size`
-         * needs exactly. */
+         * before the first symmetry pass. The key must be unique per painted pixel across the
+         * whole canvas AND across UDIM tiles, and it has only 32 bits to do it in. Packing the
+         * tile's image-space coordinates cannot work: `tile_x << 22` already overflows a signed
+         * `int` at the maximum coordinate a `ushort2` pixel address permits, and coordinates alone
+         * would collide between two UDIM tiles, which each start at (0, 0). A dense per-tile id
+         * assigned in first-touch order sidesteps both: 20 bits of id (over a million snapshot
+         * tiles, far more than the snapshot's memory could hold) plus the 12 bits `tile_size *
+         * tile_size` needs exactly. */
         BLI_assert(snapshot.slot_id < (1 << 20));
         const int accum_key = int((uint32_t(snapshot.slot_id) << 12) | uint32_t(in_tile_offset));
         /* TODO(I10): same Color/Image last-RGB + averaged-factor split as ColorEffect. Image is
@@ -1227,9 +1242,9 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                            orig.w);
       }
 
-      /* Write the chunk back WHOLE. The unaccepted pixels still hold the originals read in PHASE 1,
-       * so this both applies the patch and undoes the in-place scene-linear conversion the float
-       * read performed. */
+      /* Write the chunk back WHOLE. The unaccepted pixels still hold the originals read in PHASE
+       * 1, so this both applies the patch and undoes the in-place scene-linear conversion the
+       * float read performed. */
       const int64_t buffer_size = int64_t(chunk.image_buffer->x) * chunk.image_buffer->y;
       if (chunk.image_buffer->float_data()) {
         const MutableSpan<float4> dst(
@@ -1253,7 +1268,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
       }
 
       /* Same row-granular dirty region `do_paint_pixels()` records. `end_restamp()`'s seam fix
-       * reads these flags through `collect_dirty_tiles()`, and `mark_image_dirty()` clears them. */
+       * reads these flags through `collect_dirty_tiles()`, and `mark_image_dirty()` clears them.
+       */
       const int2 dirty_start(int(chunk.pixel_row.start_image_coordinate.x),
                              int(chunk.pixel_row.start_image_coordinate.y));
       const int2 dirty_end = dirty_start + int2(chunk.pixel_row.num_pixels + 1, 0);
@@ -1270,7 +1286,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   }
 
   /* Non-empty exactly when a chunk was written back above, i.e. when this pass put patch pixels on
-   * the canvas. The destructor reads this to tell a commit from a cancel; `restore()` clears it. */
+   * the canvas. The destructor reads this to tell a commit from a cancel; `restore()` clears it.
+   */
   if (!dirty_buffers.is_empty()) {
     patch_pixels_on_canvas_ = true;
   }
@@ -1335,7 +1352,8 @@ void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
    * total painted-pixel count this restamp (`pass_weight_accum`, cleared per restamp), `tiles` the
    * snapshot's live tile count. Times are wall-clock ms; the parallel phases (build/cull/phase1)
    * report elapsed span, not summed core time. Paired with the session-level `DEBUG-cpatch` line,
-   * whose `apply` column contains all of these plus the `do_symmetrical_brush_actions()` overhead. */
+   * whose `apply` column contains all of these plus the `do_symmetrical_brush_actions()` overhead.
+   */
   const double to_ms = 1000.0;
   /* `p1_sample`/`p1_read` are summed across threads (CPU-time), so they add up to more than the
    * wall-clock `phase1`; read their RATIO, not their sum. `cand` is pixels sampled, `pixels` is
@@ -1383,8 +1401,7 @@ void ImageColorEffect::commit(const Scene & /*scene*/,
 }  // namespace
 
 std::unique_ptr<CurvePatchEffect> curve_patch_effect_image_create(
-    Object &ob,
-    PaintModeSettings &paint_mode_settings)
+    Object &ob, PaintModeSettings &paint_mode_settings)
 {
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
   if (pbvh == nullptr || pbvh->type() != bke::pbvh::Type::Mesh) {

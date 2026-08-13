@@ -208,9 +208,9 @@ TEST(paint_curve_patch_ribbon, high_quality_refines_without_moving_the_mapping)
 
 TEST(paint_curve_patch_ribbon, quality_setting_participates_in_the_cache_hash)
 {
-  /* The build returns early when `source_hash` matches. If the quality setting were left out of it,
-   * the commit-time rebuild would be answered with the interactive table -- the very table it exists
-   * to replace. */
+  /* The build returns early when `source_hash` matches. If the quality setting were left out of
+   * it, the commit-time rebuild would be answered with the interactive table -- the very table it
+   * exists to replace. */
   CurvePatchSpline spline;
   Vector<float3> points;
   for (int i = 0; i <= 20; i++) {
@@ -248,7 +248,8 @@ TEST(paint_curve_patch_ribbon, closed_loop_strip_survives_the_join)
   }
 
   CurvePatchSpline spline;
-  /* As the evaluated points of a cyclic curve arrive: the first point is not repeated at the end. */
+  /* As the evaluated points of a cyclic curve arrive: the first point is not repeated at the end.
+   */
   spline.build_from_positions(points.as_span(), {}, /*cyclic=*/true);
   spline.plane_normal = float3(0.0f, 0.0f, 1.0f);
 

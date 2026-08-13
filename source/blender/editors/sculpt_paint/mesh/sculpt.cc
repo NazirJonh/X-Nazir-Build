@@ -3545,10 +3545,10 @@ void do_brush_action(const Depsgraph &depsgraph,
   /* Curve Patch's anchor-drag phase normally stamps an ordinary preview dab and lets
    * `restore_from_undo_step_if_necessary()` take it back before the next one. The image canvas has
    * no such restore: its pixels live in the image undo system, not the sculpt one, so
-   * `restore_color_from_undo_step()` finds no node to write back and the round dab stays baked into
-   * the texture -- and the handoff's `BKE_undosys_step_push_init_abort()` then discards the very
-   * image undo step that could have taken it back, leaving it not even undoable. Write nothing at
-   * all for that target instead; everything the patch handoff reads from this call
+   * `restore_color_from_undo_step()` finds no node to write back and the round dab stays baked
+   * into the texture -- and the handoff's `BKE_undosys_step_push_init_abort()` then discards the
+   * very image undo step that could have taken it back, leaving it not even undoable. Write
+   * nothing at all for that target instead; everything the patch handoff reads from this call
    * (#update_sculpt_normal, #update_brush_local_mat) has already run above. The other targets keep
    * their preview, which their own restore still cleans up. */
   if (use_pixels && brush.stroke_method == BRUSH_STROKE_CURVE_PATCH &&
@@ -3974,9 +3974,7 @@ bool sculpt_mode_and_brush_poll(bContext *C)
     return false;
   }
   const Object *ob = CTX_data_active_object(C);
-  if (ob && ob->runtime->sculpt_session &&
-      ob->runtime->sculpt_session->curve_patch_session)
-  {
+  if (ob && ob->runtime->sculpt_session && ob->runtime->sculpt_session->curve_patch_session) {
     ED_paint_curve_patch_modal_handlers_ensure(C);
     return false;
   }
@@ -5272,9 +5270,7 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   ED_paint_brush_type_update_sticky_shading_color(C, &ob);
 }
 
-void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph,
-                                         const Sculpt &sd,
-                                         Object &ob)
+void restore_from_undo_step_if_necessary(const Depsgraph &depsgraph, const Sculpt &sd, Object &ob)
 {
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *ob.runtime->sculpt_session;
@@ -5863,7 +5859,8 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
 
   /* Make copies of the mesh vertex locations and normals for some brushes. Curve Patch's
    * anchor-drag phase needs the same "read original coordinates" behavior as Anchored, since it
-   * is likewise recomputed from scratch every step (see `restore_from_undo_step_if_necessary()`). */
+   * is likewise recomputed from scratch every step (see `restore_from_undo_step_if_necessary()`).
+   */
   if (brush->stroke_method == BRUSH_STROKE_ANCHORED ||
       (brush->stroke_method == BRUSH_STROKE_CURVE_PATCH &&
        bke::brush::supports_curve_patch(*brush)))
@@ -6191,8 +6188,8 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
         }
         /* Launching the interactive editor is the CALLER's job: the session-publishing layer
          * cannot know whether its caller wants one at all, and starting a modal from there is what
-         * made a headless apply path impossible. `this->vc.C` is the real `bContext` the stroke was
-         * invoked with, required so the editor's `invoke()` can register its modal handler. */
+         * made a headless apply path impossible. `this->vc.C` is the real `bContext` the stroke
+         * was invoked with, required so the editor's `invoke()` can register its modal handler. */
         WM_operator_name_call(this->vc.C,
                               "SCULPT_OT_curve_patch_edit",
                               wm::OpCallContext::InvokeDefault,
@@ -6209,8 +6206,8 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   }
 
   /* Roll stroke method with "Edit After Stroke": hand the drawn contour off to the Curve Patch
-   * editor as an editable control curve (the bridge undoes the live roll relief first and re-stamps
-   * via the curve). Skipped for Dynamic Topology (no stable vertex index for the patch's
+   * editor as an editable control curve (the bridge undoes the live roll relief first and
+   * re-stamps via the curve). Skipped for Dynamic Topology (no stable vertex index for the patch's
    * `orig_positions`). Like the Curve Patch branch above, this keeps `ss.cache` alive for the
    * editor to own and discards the open undo transaction -- the editor builds its own step on
    * commit -- so it returns before the teardown below. */

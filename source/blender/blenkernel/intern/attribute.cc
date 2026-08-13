@@ -694,7 +694,8 @@ bool BKE_attribute_required(const AttributeOwner &owner, const StringRef name)
       return BKE_grease_pencil_drawing_attribute_required(owner.get_grease_pencil_drawing(), name);
     case AttributeOwnerType::PaintCurve:
       /* Same requirement as #Curves: everything that draws or samples a paint curve reads the
-       * positions, so removing them would leave an unusable data-block rather than an empty one. */
+       * positions, so removing them would leave an unusable data-block rather than an empty one.
+       */
       return name == "position";
   }
   return false;

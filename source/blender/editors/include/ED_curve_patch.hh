@@ -40,7 +40,8 @@ const ed::sculpt_paint::CurvePatchSession *ED_curve_patch_session_get(const Obje
 
 /** Control point count of the session's live control curve. Null session yields 0. */
 int ED_curve_patch_session_point_num(const ed::sculpt_paint::CurvePatchSession *session);
-/** Index of the point the modal editor last acted on, or -1. Already validated against the curve. */
+/** Index of the point the modal editor last acted on, or -1. Already validated against the curve.
+ */
 int ED_curve_patch_session_active_point(const ed::sculpt_paint::CurvePatchSession *session);
 /** Whether the live control curve closes back on itself. */
 bool ED_curve_patch_session_is_cyclic(const ed::sculpt_paint::CurvePatchSession *session);
@@ -84,7 +85,9 @@ void ED_curve_patch_overlay_data_get(const Object *ob, CurvePatchOverlayData &r_
 bool ED_curve_patch_session_active_point_handle_get(Object &ob, int handle_index, float r_co[3]);
 /** Write back one handle of the active point, object space. Does not itself re-stamp -- see
  * #ED_curve_patch_session_restamp, called once per transform step rather than once per handle. */
-bool ED_curve_patch_session_active_point_handle_set(Object &ob, int handle_index, const float co[3]);
+bool ED_curve_patch_session_active_point_handle_set(Object &ob,
+                                                    int handle_index,
+                                                    const float co[3]);
 /** Re-tessellate and re-stamp after one or more handle writes, so a live transform's
  * `recalc_data` sees the change immediately -- mirrors the modal editor's own
  * `curve_patch_restore_and_restamp()`. */

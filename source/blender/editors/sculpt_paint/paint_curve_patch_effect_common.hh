@@ -55,9 +55,9 @@ inline CurvePatchStrokeContext curve_patch_stroke_context_from_cache(const Strok
 /**
  * Build the falloff curve's lookup table before any worker thread can read it.
  *
- * `BKE_brush_curve_strength()` inside the sampler builds the table lazily for the CUSTOM preset, and
- * the gather phase of every effect runs in parallel -- a lazy init inside a worker would race. Doing
- * it here, once per pass, is what makes those reads safe.
+ * `BKE_brush_curve_strength()` inside the sampler builds the table lazily for the CUSTOM preset,
+ * and the gather phase of every effect runs in parallel -- a lazy init inside a worker would race.
+ * Doing it here, once per pass, is what makes those reads safe.
  */
 inline void curve_patch_effect_ensure_falloff_curve(const Brush &brush)
 {
@@ -149,18 +149,19 @@ inline float curve_patch_blend_across_passes(CurvePatchApplyState &apply,
  * the brush's Add/Subtract toggle a no-op on a color patch -- unify the two and the negative
  * heights break.
  *
- * The texture's own alpha further attenuates the factor, so a partially-transparent texel paints at
- * partial strength -- the same outcome a per-dab brush gets by multiplying the dab's alpha by the
- * texture's. `has_texture` is needed because `CurvePatchSample::tex_color` falls back to
+ * The texture's own alpha further attenuates the factor, so a partially-transparent texel paints
+ * at partial strength -- the same outcome a per-dab brush gets by multiplying the dab's alpha by
+ * the texture's. `has_texture` is needed because `CurvePatchSample::tex_color` falls back to
  * `{1, 1, 1, 1}` when no texture is assigned, which is indistinguishable from an opaque sample.
  *
  * `strength` is the brush's Strength (`BKE_brush_alpha_get()`). Unlike a relief patch, whose
- * Strength rides in through `bstrength` and thus through `blended`, a color/image patch does NOT get
- * it that way: `brush_strength()` deliberately omits `alpha` for `SCULPT_BRUSH_TYPE_PAINT`
- * (`mesh/sculpt.cc`), because the ordinary paint pipeline applies it as a separate final multiplier
- * instead (`sculpt_paint_color.cc`'s `buffer_color * alpha`). Fold it in here so the Strength slider
- * scales a color/image patch exactly as it scales an ordinary paint stroke; the modal editor already
- * re-stamps when the slider changes (`CurvePatchEditOpData::last_synced_alpha`).
+ * Strength rides in through `bstrength` and thus through `blended`, a color/image patch does NOT
+ * get it that way: `brush_strength()` deliberately omits `alpha` for `SCULPT_BRUSH_TYPE_PAINT`
+ * (`mesh/sculpt.cc`), because the ordinary paint pipeline applies it as a separate final
+ * multiplier instead (`sculpt_paint_color.cc`'s `buffer_color * alpha`). Fold it in here so the
+ * Strength slider scales a color/image patch exactly as it scales an ordinary paint stroke; the
+ * modal editor already re-stamps when the slider changes
+ * (`CurvePatchEditOpData::last_synced_alpha`).
  */
 inline float curve_patch_color_mix_factor(const float blended,
                                           const float4 &tex_color,
@@ -175,11 +176,13 @@ inline float curve_patch_color_mix_factor(const float blended,
  * Record the nodes one pass wrote, in both of the sets that track them.
  *
  * `last_restamp_nodes` describes only the latest re-stamp and is what the NEXT restore reverts;
- * `all_touched_nodes` accumulates over the patch's whole life and is what the commit-time undo step
- * is pushed over. `set_bits()` ORs in place: the orchestrator sizes and clears the former before the
- * first pass of a re-stamp and only ever sizes the latter, so neither may be cleared here.
+ * `all_touched_nodes` accumulates over the patch's whole life and is what the commit-time undo
+ * step is pushed over. `set_bits()` ORs in place: the orchestrator sizes and clears the former
+ * before the first pass of a re-stamp and only ever sizes the latter, so neither may be cleared
+ * here.
  */
-inline void curve_patch_record_touched_nodes(CurvePatchApplyState &apply, const IndexMask &tag_mask)
+inline void curve_patch_record_touched_nodes(CurvePatchApplyState &apply,
+                                             const IndexMask &tag_mask)
 {
   tag_mask.set_bits(apply.last_restamp_nodes);
   tag_mask.set_bits(apply.all_touched_nodes);

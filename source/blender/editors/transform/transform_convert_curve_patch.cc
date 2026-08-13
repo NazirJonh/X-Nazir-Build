@@ -215,7 +215,7 @@ static void flushTransCurvePatch(TransInfo *t)
         const TransData *td = &td_arr[i];
         const float angle = t->values_final[0];
         const float *center = transdata_check_local_center(t, t->around) ? td->center :
-                                                                            t->center2d;
+                                                                           t->center2d;
         const float dx = td->iloc[0] - center[0];
         const float dy = td->iloc[1] - center[1];
         const float cos_a = cosf(angle);

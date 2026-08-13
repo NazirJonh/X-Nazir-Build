@@ -160,15 +160,16 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
  * Core of #ED_paint_curve_screen_handles_build: operates directly on `geometry` so it can be
  * reused without a #PaintCurve (e.g. for a Curve Patch's standalone control curve).
  */
-void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
-                                                        const blender::bke::CurvesGeometry &geometry,
-                                                        bool use_3d_space,
-                                                        const Sculpt *sculpt,
-                                                        bool show_radius_handles,
-                                                        float2 mval_region,
-                                                        bool compute_segment_hover,
-                                                        bool show_insert_preview,
-                                                        PaintCurveScreenHandles &r_out);
+void ED_paint_curve_screen_handles_build_from_geometry(
+    const ViewContext &vc,
+    const blender::bke::CurvesGeometry &geometry,
+    bool use_3d_space,
+    const Sculpt *sculpt,
+    bool show_radius_handles,
+    float2 mval_region,
+    bool compute_segment_hover,
+    bool show_insert_preview,
+    PaintCurveScreenHandles &r_out);
 
 void ED_paint_curve_screen_silhouettes_build(const ViewContext &vc,
                                              float2 mval_region,

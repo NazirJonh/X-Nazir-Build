@@ -164,8 +164,9 @@ int64_t ColorEffect::snapshot_size() const
 
 void ColorEffect::restore(Object &ob, const CurvePatchSession &patch)
 {
-  /* No `element_num` check of its own -- `curve_patch_restore_only()` performs it for every caller.
-   * The attribute check below is NOT redundant with it: a same-size replacement changes no count. */
+  /* No `element_num` check of its own -- `curve_patch_restore_only()` performs it for every
+   * caller. The attribute check below is NOT redundant with it: a same-size replacement changes no
+   * count. */
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
   if (!this->attribute_matches(mesh)) {
     /* The active color attribute was swapped mid-session. The keys describe a different array
@@ -254,11 +255,11 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
    * writes happen here, so the reads inside `compute_vertex()` are race-free across threads
    * (texture sampling uses the per-thread pool slot `thread_id`). */
   struct ColorWrite {
-    int idx;        /* Domain element index. */
-    float4 orig;    /* Pre-patch color of that element. */
+    int idx;          /* Domain element index. */
+    float4 orig;      /* Pre-patch color of that element. */
     float4 tex_color; /* Brush-texture RGBA at this sample (`{1,1,1,1}` when no texture). */
-    float value;    /* Mix magnitude from the sampler. */
-    float weight;   /* Cross-pass claim weight. */
+    float value;      /* Mix magnitude from the sampler. */
+    float weight;     /* Cross-pass claim weight. */
   };
   struct LocalData {
     Vector<ColorWrite> writes;
@@ -317,16 +318,17 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
   const Paint &paint = *cache.paint;
   const float3 brush_color = BKE_brush_color_get(&paint, &brush);
   /* The RGB the patch paints is ALWAYS the brush's primary color. A brush texture contributes only
-   * its intensity -- already folded into `CurvePatchSample::value` by the sampler -- and its alpha,
-   * which attenuates the mix below (an image texture with transparent regions presses through
-   * weaker). `CurvePatchSample::tex_color`'s RGB is deliberately left unread until the color path
-   * grows real RGBA-texture support; `has_texture` exists only to tell a meaningful alpha from the
+   * its intensity -- already folded into `CurvePatchSample::value` by the sampler -- and its
+   * alpha, which attenuates the mix below (an image texture with transparent regions presses
+   * through weaker). `CurvePatchSample::tex_color`'s RGB is deliberately left unread until the
+   * color path grows real RGBA-texture support; `has_texture` exists only to tell a meaningful
+   * alpha from the
    * `{1,1,1,1}` the sampler leaves behind when no texture is assigned, since the texture field
    * alone cannot tell "color sampled" from "value sampled" (`paint_get_tex_pixel`'s return value
    * was verified not to encode that). */
   const bool has_texture = brush.mtex.tex != nullptr;
-  /* The Strength slider, applied as a separate factor exactly as the ordinary paint pipeline does --
-   * `brush_strength()` leaves it out of `bstrength` for a Paint brush. See
+  /* The Strength slider, applied as a separate factor exactly as the ordinary paint pipeline does
+   * -- `brush_strength()` leaves it out of `bstrength` for a Paint brush. See
    * #curve_patch_color_mix_factor. */
   const float strength = BKE_brush_alpha_get(&paint, &brush);
 
@@ -344,7 +346,8 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
 
       /* The original alpha is carried through untouched, textured or not: `BKE_brush_color_get()`
        * returns a `float3`, so writing an alpha would invent data the brush never specified (the
-       * Stage 3 invariant). Mix is from the pre-patch original, not from a previous patch's write. */
+       * Stage 3 invariant). Mix is from the pre-patch original, not from a previous patch's write.
+       */
       float4 mixed(math::interpolate(float3(write.orig), brush_color, factor), write.orig.w);
       /* `swap_gathered_colors()` is the generic writer as well as the reader: it exchanges the
        * element with `mixed`, leaving the previous value in `mixed`, which this path discards.
@@ -404,14 +407,16 @@ void ColorEffect::commit(const Scene &scene,
   IndexMaskMemory memory;
   color::swap_gathered_colors(indices, colors.span, values);
   undo::push_begin_ex(scene, ob, "Curve Patch Color");
-  undo::push_nodes(
-      depsgraph, ob, IndexMask::from_bits(patch.apply.all_touched_nodes, memory), undo::Type::Color);
+  undo::push_nodes(depsgraph,
+                   ob,
+                   IndexMask::from_bits(patch.apply.all_touched_nodes, memory),
+                   undo::Type::Color);
   color::swap_gathered_colors(indices, colors.span, values);
   colors.finish();
 
-  /* `false`, never forced: unlike relief there is no face-set step to follow, so the step must stay
-   * parked in `ustack->step_init` for `wm_operator_finished()`. Forcing it here would cost the user
-   * one dead Ctrl+Z before the color is undone. */
+  /* `false`, never forced: unlike relief there is no face-set step to follow, so the step must
+   * stay parked in `ustack->step_init` for `wm_operator_finished()`. Forcing it here would cost
+   * the user one dead Ctrl+Z before the color is undone. */
   undo::push_end_ex(ob, false);
 }
 

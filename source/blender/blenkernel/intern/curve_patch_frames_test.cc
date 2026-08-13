@@ -239,9 +239,8 @@ TEST(paint_curve_patch_frames, s_is_continuous_across_join)
     float3 frame_normal[2];
     /* The probe's normal comes from the curve itself, so it passes the orientation culling in the
      * window this stretch belongs to. */
-    const float3 probe_normal =
-        spline.normals_3d[std::min(int(spline.normals_3d.size()) - 1,
-                                   i * int(spline.poly_3d.size()) / 20)];
+    const float3 probe_normal = spline.normals_3d[std::min(int(spline.normals_3d.size()) - 1,
+                                                           i * int(spline.poly_3d.size()) / 20)];
     if (frames.sample(probe, probe_normal, uv, frame_normal) == 0) {
       continue;
     }
@@ -309,7 +308,8 @@ TEST(paint_curve_patch_frames, full_cyclic_frame_retains_closed_ribbon)
 {
   /* Surface snapshots use CurvePatchFrameSet rather than the single ribbon LUT. The full frame of
    * a cyclic spline must retain that topology; rebuilding its already-closed positions as open
-   * disables the ribbon's cyclic inward cap and lets opposite sides fight over the loop interior. */
+   * disables the ribbon's cyclic inward cap and lets opposite sides fight over the loop interior.
+   */
   constexpr float loop_radius = 2.0f;
   Vector<float3> points, normals;
   for (const int i : IndexRange(64)) {

@@ -21,9 +21,10 @@
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
-/* Must follow BLI_math_vector.hh: length_parameterize.hh pulls only scalar math (BLI_math_base.hh),
- * and MSVC resolves the vector `math::distance` used by accumulate_lengths<float2/float3> at this
- * header's definition point -- so the vector overload has to be visible first. */
+/* Must follow BLI_math_vector.hh: length_parameterize.hh pulls only scalar math
+ * (BLI_math_base.hh), and MSVC resolves the vector `math::distance` used by
+ * accumulate_lengths<float2/float3> at this header's definition point -- so the vector overload
+ * has to be visible first. */
 #include "BLI_array.hh"
 #include "BLI_index_range.hh"
 #include "BLI_length_parameterize.hh"
@@ -72,11 +73,8 @@ static constexpr int EVAL_ROW_MARGIN = 3;
  * \param farthest_first: if true, step count decreases with index (backward ext).
  * \param r_pressures: output vector to append to.
  */
-static void extrapolate_pressures(float base_p,
-                                  float ratio,
-                                  int n_points,
-                                  bool farthest_first,
-                                  Vector<float> &r_pressures)
+static void extrapolate_pressures(
+    float base_p, float ratio, int n_points, bool farthest_first, Vector<float> &r_pressures)
 {
   for (int i = 0; i < n_points; i++) {
     const int steps = farthest_first ? (n_points - i) : (i + 1);
@@ -108,8 +106,9 @@ static float roll_point_segment_distance(const float3 &point,
 }
 
 /**
- * Ramer-Douglas-Peucker on the real stroke knots. Marks interior points that can be removed without
- * deviating more than `epsilon` from the chord between kept neighbors. Endpoints are always kept.
+ * Ramer-Douglas-Peucker on the real stroke knots. Marks interior points that can be removed
+ * without deviating more than `epsilon` from the chord between kept neighbors. Endpoints are
+ * always kept.
  */
 static void roll_simplify_polyline_mask(const Span<float3> positions,
                                         const float epsilon,
@@ -680,8 +679,7 @@ void PaintStroke::make_roll_spline(bContext * /*C*/)
     if (roll_initial_radius_ > 0.0f) {
       const Span<float> pres = roll_spline_.pressures.as_span();
       float accum = 0.0f;
-      for (int i = 1; i <= n_virtual_poly_points_ - 1 &&
-                      i < int(roll_spline_.lengths_3d.size());
+      for (int i = 1; i <= n_virtual_poly_points_ - 1 && i < int(roll_spline_.lengths_3d.size());
            i++)
       {
         const float seg = roll_spline_.segment_length_3d(i);
@@ -909,8 +907,8 @@ static void catmull_clark_subdivide_grid(Vector<float3> &grid_pos,
     for (int c = 0; c < fC; c++) {
       fp[r * fC + c] = 0.25f * (grid_pos[oi(r, c)] + grid_pos[oi(r, c + 1)] +
                                 grid_pos[oi(r + 1, c)] + grid_pos[oi(r + 1, c + 1)]);
-      fu[r * fC + c] = 0.25f * (grid_uv[oi(r, c)] + grid_uv[oi(r, c + 1)] +
-                                grid_uv[oi(r + 1, c)] + grid_uv[oi(r + 1, c + 1)]);
+      fu[r * fC + c] = 0.25f * (grid_uv[oi(r, c)] + grid_uv[oi(r, c + 1)] + grid_uv[oi(r + 1, c)] +
+                                grid_uv[oi(r + 1, c + 1)]);
     }
   }
 
@@ -970,8 +968,9 @@ static void catmull_clark_subdivide_grid(Vector<float3> &grid_pos,
       }
       else if (r == 0 || r == oR - 1) {
         /* Boundary row, interior col: 1/8 rule along row. */
-        np[ni(2 * r, 2 * c)] = (1.0f / 8.0f) * (grid_pos[oi(r, c - 1)] + 6.0f * grid_pos[oi(r, c)] +
-                                                grid_pos[oi(r, c + 1)]);
+        np[ni(2 * r, 2 * c)] = (1.0f / 8.0f) *
+                               (grid_pos[oi(r, c - 1)] + 6.0f * grid_pos[oi(r, c)] +
+                                grid_pos[oi(r, c + 1)]);
         nu[ni(2 * r, 2 * c)] = (1.0f / 8.0f) * (grid_uv[oi(r, c - 1)] + 6.0f * grid_uv[oi(r, c)] +
                                                 grid_uv[oi(r, c + 1)]);
       }
@@ -1018,7 +1017,8 @@ struct RollCenterBuild {
 };
 
 /* Stage 1: where this dab sits on the stored polyline, and which stretch of it the per-vertex UV
- * lookup has to search. Returns false for an empty spline, with `roll_center_s` marked unusable. */
+ * lookup has to search. Returns false for an empty spline, with `roll_center_s` marked unusable.
+ */
 static bool roll_center_locate_on_spline(const RollSpline &spline,
                                          StrokeCache &cache,
                                          RollCenterBuild &build)
@@ -1231,9 +1231,8 @@ static void roll_borders_fix_self_intersections(const RollSpline &spline,
                 const float3 ab = poly[m + 1] - poly[m];
                 const float ab_dot = math::dot(ab, ab);
                 const float tp = (ab_dot > 1e-12f) ?
-                                     std::clamp(math::dot(orig[k] - poly[m], ab) / ab_dot,
-                                                0.0f,
-                                                1.0f) :
+                                     std::clamp(
+                                         math::dot(orig[k] - poly[m], ab) / ab_dot, 0.0f, 1.0f) :
                                      0.0f;
                 const float3 proj = math::interpolate(poly[m], poly[m + 1], tp);
                 min_dist_sq = std::min(min_dist_sq, math::distance_squared(orig[k], proj));
@@ -1496,12 +1495,12 @@ static void roll_grid_and_lut_build(const RollSpline &spline,
               /* Center column interior: smooth along the stroke direction. V_new = (1/8)(V_above +
                * 6V + V_below) -- the CC boundary vertex rule. This shifts the center along the
                * stroke, allowing cross-segments to curve at merge points. */
-              np[ni(2 * r, 2 * c)] = (1.0f / 8.0f) * (grid_pos[oi(r - 1, c)] +
-                                                      6.0f * grid_pos[oi(r, c)] +
-                                                      grid_pos[oi(r + 1, c)]);
-              nu[ni(2 * r, 2 * c)] = (1.0f / 8.0f) * (grid_uv[oi(r - 1, c)] +
-                                                      6.0f * grid_uv[oi(r, c)] +
-                                                      grid_uv[oi(r + 1, c)]);
+              np[ni(2 * r, 2 * c)] = (1.0f / 8.0f) *
+                                     (grid_pos[oi(r - 1, c)] + 6.0f * grid_pos[oi(r, c)] +
+                                      grid_pos[oi(r + 1, c)]);
+              nu[ni(2 * r, 2 * c)] = (1.0f / 8.0f) *
+                                     (grid_uv[oi(r - 1, c)] + 6.0f * grid_uv[oi(r, c)] +
+                                      grid_uv[oi(r + 1, c)]);
             }
             else {
               /* Corners, boundary rows, border columns: pinned. */
@@ -1540,10 +1539,12 @@ static void roll_grid_and_lut_build(const RollSpline &spline,
           for (int r = 1; r < cur_rows - 1; r++) {
             for (int c = 1; c < cur_cols - 1; c++) {
               const int idx = r * cur_cols + c;
-              float3 avg_p = 0.25f * (src_p[(r - 1) * cur_cols + c] + src_p[(r + 1) * cur_cols + c] +
-                                      src_p[r * cur_cols + c - 1] + src_p[r * cur_cols + c + 1]);
-              float2 avg_u = 0.25f * (src_u[(r - 1) * cur_cols + c] + src_u[(r + 1) * cur_cols + c] +
-                                      src_u[r * cur_cols + c - 1] + src_u[r * cur_cols + c + 1]);
+              float3 avg_p = 0.25f *
+                             (src_p[(r - 1) * cur_cols + c] + src_p[(r + 1) * cur_cols + c] +
+                              src_p[r * cur_cols + c - 1] + src_p[r * cur_cols + c + 1]);
+              float2 avg_u = 0.25f *
+                             (src_u[(r - 1) * cur_cols + c] + src_u[(r + 1) * cur_cols + c] +
+                              src_u[r * cur_cols + c - 1] + src_u[r * cur_cols + c + 1]);
               dst_p[idx] = (1.0f - mix) * src_p[idx] + mix * avg_p;
               dst_u[idx] = (1.0f - mix) * src_u[idx] + mix * avg_u;
             }
@@ -1736,8 +1737,8 @@ static void roll_grid_and_lut_build(const RollSpline &spline,
                 const int li = py * RES + px;
                 /* Prefer older rows on overlap to keep the LUT stable.
                  *
-                 * The loop iterates rows low->high, so a non-empty pixel was written by a row <= r.
-                 * Cases:
+                 * The loop iterates rows low->high, so a non-empty pixel was written by a row <=
+                 * r. Cases:
                  *   - empty: write
                  *   - same/adjacent row (within 2): use dsq (better fit wins)
                  *   - far row (existing < r - 2): keep older (don't write)
@@ -1991,7 +1992,8 @@ void PaintStroke::extract_roll_control_points(Vector<float3> &r_positions,
   const float total = len.last();
 
   /* Radius attribute mirrors the painted width: 1.0 == full brush size (see
-   * `paintcurve_geometry_add_point()`). Use pressure only when the stroke actually varied width. */
+   * `paintcurve_geometry_add_point()`). Use pressure only when the stroke actually varied width.
+   */
   const bool width_from_pressure = brush && brush->roll_pressure_scale &&
                                    BKE_brush_use_size_pressure(brush);
   auto radius_from_pressure = [&](const float p) {
@@ -1999,7 +2001,8 @@ void PaintStroke::extract_roll_control_points(Vector<float3> &r_positions,
   };
 
   if (total < 1e-6f) {
-    /* All knots coincident: emit a minimal 2-point curve so the handoff still has a valid curve. */
+    /* All knots coincident: emit a minimal 2-point curve so the handoff still has a valid curve.
+     */
     r_positions.append(pos[0]);
     r_positions.append(pos.last());
     r_radii.append(radius_from_pressure(pres[0]));
@@ -2016,7 +2019,7 @@ void PaintStroke::extract_roll_control_points(Vector<float3> &r_positions,
                                   math::normalize(roll_proj_normal_) :
                                   float3(0.0f);
   const float scale = roll_initial_radius_ > 1e-6f ? roll_initial_radius_ :
-                                                      std::max(total * 0.05f, 1e-4f);
+                                                     std::max(total * 0.05f, 1e-4f);
   const float epsilon = scale * 0.12f;
 
   Array<bool> keep(num_points_);
@@ -2206,9 +2209,10 @@ void PaintStroke::draw_debug_roll(bContext *C) const
 
       /* Points must be drawn with a shader that writes `gl_PointSize`: the Vulkan backend asserts
        * otherwise (`VKShader::ensure_and_get_graphics_pipeline()`), where OpenGL silently accepted
-       * the global `GPU_point_size()` state. Swap the line shader for the point shader -- both take
-       * the same `pos: in vec3` input, so `pos3d_attr` stays valid across the rebind (same pattern
-       * as `transform_mode_vert_slide.cc`). The trailing `immUnbindProgram()` below unbinds it. */
+       * the global `GPU_point_size()` state. Swap the line shader for the point shader -- both
+       * take the same `pos: in vec3` input, so `pos3d_attr` stays valid across the rebind (same
+       * pattern as `transform_mode_vert_slide.cc`). The trailing `immUnbindProgram()` below
+       * unbinds it. */
       immUnbindProgram();
       immBindBuiltinProgram(GPU_SHADER_3D_POINT_UNIFORM_COLOR);
 

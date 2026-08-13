@@ -364,13 +364,14 @@ void BKE_paint_invalidate_overlay_tex(const Main &bmain,
   }
 
   /* The Curve Patch stroke samples the brush's multi-texture data -- a list of stamp textures plus
-   * three ribbon cap textures -- through the same `ImagePool` as `mtex`, but none of those pointers
-   * live in `mtex`, so the two checks above never see them. Without this, editing the image on a
-   * list texture leaves the relief sampling a stale `ImBuf` until some unrelated watched setting
-   * happens to change.
+   * three ribbon cap textures -- through the same `ImagePool` as `mtex`, but none of those
+   * pointers live in `mtex`, so the two checks above never see them. Without this, editing the
+   * image on a list texture leaves the relief sampling a stale `ImBuf` until some unrelated
+   * watched setting happens to change.
    *
-   * A null `tex` is rejected up front: the cap pointers are null whenever the user has not assigned
-   * them, and a null-vs-null match would bump the counter on every unrelated texture edit.
+   * A null `tex` is rejected up front: the cap pointers are null whenever the user has not
+   * assigned them, and a null-vs-null match would bump the counter on every unrelated texture
+   * edit.
    *
    * Only the edit counter is bumped, NOT `PAINT_OVERLAY_INVALID_TEXTURE_PRIMARY`: that flag drives
    * the paint cursor's texture preview, which shows `mtex` alone and never these. */
@@ -1419,7 +1420,6 @@ void BKE_paint_palette_set(Paint *paint, Palette *palette)
     id_us_plus(id_cast<ID *>(paint->palette));
   }
 }
-
 
 void BKE_palette_color_remove(Palette *palette, PaletteColor *color)
 {

@@ -742,17 +742,15 @@ bool ED_paintcurve_convert_space_on_toggle(bContext *C, PaintCurve *pc)
 
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
   if (depsgraph == nullptr) {
-    BKE_report(CTX_wm_reports(C),
-               RPT_WARNING,
-               "Need an active 3D Viewport to convert paint curve space");
+    BKE_report(
+        CTX_wm_reports(C), RPT_WARNING, "Need an active 3D Viewport to convert paint curve space");
     return false;
   }
 
   ViewContext vc;
   if (!paintcurve_viewcontext_for_conversion(C, depsgraph, vc)) {
-    BKE_report(CTX_wm_reports(C),
-               RPT_WARNING,
-               "Need an active 3D Viewport to convert paint curve space");
+    BKE_report(
+        CTX_wm_reports(C), RPT_WARNING, "Need an active 3D Viewport to convert paint curve space");
     return false;
   }
 

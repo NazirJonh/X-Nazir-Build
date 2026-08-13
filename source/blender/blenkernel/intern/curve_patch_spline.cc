@@ -208,11 +208,8 @@ float CurvePatchSpline::distance_sq_to(const float3 &query) const
 /* Shared nearest-segment search: fills the winning segment index, its clamped parameter, and the
  * squared distance. Both public closest-point variants build on this so the math lives in one
  * place. */
-static void closest_segment(const Span<float3> poly_3d,
-                            const float3 &query,
-                            int &r_i,
-                            float &r_t,
-                            float &r_dist_sq)
+static void closest_segment(
+    const Span<float3> poly_3d, const float3 &query, int &r_i, float &r_t, float &r_dist_sq)
 {
   r_dist_sq = FLT_MAX;
   r_i = 0;
@@ -343,8 +340,8 @@ void curve_patch_spline_smooth_normals(CurvePatchSpline &spline, const float smo
     }
     const float len = math::length(accum);
     /* A window whose normals cancelled out (a turn of exactly 180 degrees) leaves the sample
-     * unsmoothed: every direction is equally arbitrary there, and the original at least agrees with
-     * its neighbours. */
+     * unsmoothed: every direction is equally arbitrary there, and the original at least agrees
+     * with its neighbours. */
     spline.normals_smooth_3d[i] = len > 1e-6f ? accum / len : spline.normals_3d[i];
   }
 }

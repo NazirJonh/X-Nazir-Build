@@ -433,9 +433,9 @@ void projectFloatViewEx(TransInfo *t, const float vec[3], float adr[2], const eV
        * 2D (screen-space) paint curves store t->center_global directly in region pixels, so
        * they must always take the passthrough branch below, even in a 3D viewport. */
       const bool is_3d_paint_curve_3d_transform = (t->options & CTX_PAINT_CURVE) &&
-                                                   (t->spacetype == SPACE_VIEW3D) &&
-                                                   ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION) &&
-                                                   paintcurve_transform_use_3d_viewport(t);
+                                                  (t->spacetype == SPACE_VIEW3D) &&
+                                                  ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION) &&
+                                                  paintcurve_transform_use_3d_viewport(t);
       if ((t->options & CTX_PAINT_CURVE) && !is_3d_paint_curve_3d_transform) {
         adr[0] = vec[0];
         adr[1] = vec[1];
@@ -976,9 +976,9 @@ static bool transform_event_modal_constraint(TransInfo *t, short modal_type)
   /* 3D paint curves in the viewport support full 3D axis constraints during rotation and
    * translation. */
   const bool is_3d_paint_curve_3d_transform = (t->options & CTX_PAINT_CURVE) &&
-                                               (t->spacetype == SPACE_VIEW3D) &&
-                                               ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION) &&
-                                               paintcurve_transform_use_3d_viewport(t);
+                                              (t->spacetype == SPACE_VIEW3D) &&
+                                              ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION) &&
+                                              paintcurve_transform_use_3d_viewport(t);
 
   if ((t->flag & T_2D_EDIT) && !is_3d_paint_curve_3d_transform &&
       ELEM(modal_type, TFM_MODAL_AXIS_Z, TFM_MODAL_PLANE_Z))

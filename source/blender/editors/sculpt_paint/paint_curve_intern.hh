@@ -224,13 +224,14 @@ float3 &paintcurve_geom_co(bke::CurvesGeometry &geom, int point_idx, int handle_
  * `CurvesGeometry` (`paint_curve_patch_edit.cc`).
  */
 int8_t paintcurve_resolve_handle_type(int8_t handle_type, ed::curves::SetHandleType dst_type);
-/** Check if the paint curve is cyclic (single-curve only, use paintcurve_is_curve_cyclic for multi-curve). */
+/** Check if the paint curve is cyclic (single-curve only, use paintcurve_is_curve_cyclic for
+ * multi-curve). */
 bool paintcurve_is_cyclic(const PaintCurve *pc);
 bool paintcurve_is_curve_cyclic(const PaintCurve *pc, int curve_index);
 bool paintcurve_has_multi_curves(const PaintCurve *pc);
 bool paintcurve_uses_3d_geometry(const PaintCurve *pc);
-void paintcurve_foreach_bezier_segment(
-    const PaintCurve *pc, FunctionRef<void(int point_index_a, int point_index_b)> fn);
+void paintcurve_foreach_bezier_segment(const PaintCurve *pc,
+                                       FunctionRef<void(int point_index_a, int point_index_b)> fn);
 /** Core of #paintcurve_foreach_bezier_segment: operates directly on `geom` so it can be reused
  * without a #PaintCurve (e.g. for a standalone control curve). */
 void paintcurve_foreach_bezier_segment_from_geometry(
@@ -313,17 +314,15 @@ void paintcurve_geometry_remove_points(bke::CurvesGeometry &geom,
  * #ed::curves::duplicate_points segment semantics). Returns the number of splines added.
  */
 int paintcurve_geometry_duplicate_selected_points(bke::CurvesGeometry &geom);
-/** Remove all selected control points from the geometry. Returns false when nothing was selected. */
+/** Remove all selected control points from the geometry. Returns false when nothing was selected.
+ */
 bool paintcurve_geometry_remove_selected_points(bke::CurvesGeometry &geom);
 /** Split splines at each selected point, creating new splines for each segment. */
 bool paintcurve_geometry_split_at_selected_points(bke::CurvesGeometry &geom,
                                                   int *r_selected_curve = nullptr);
 /** Join two splines at their selected endpoints, consuming the second spline. */
-bool paintcurve_geometry_merge_curve_endpoints(bke::CurvesGeometry &geom,
-                                               int curve_a,
-                                               bool a_is_start,
-                                               int curve_b,
-                                               bool b_is_start);
+bool paintcurve_geometry_merge_curve_endpoints(
+    bke::CurvesGeometry &geom, int curve_a, bool a_is_start, int curve_b, bool b_is_start);
 /** Select every point on splines that have at least one selected point. */
 void paintcurve_geometry_select_linked(bke::CurvesGeometry &geom);
 /** Close or re-open one spline. Returns false when `curve_index` is out of range. */
@@ -440,7 +439,9 @@ float paintcurve_get_point_radius(const PaintCurve *pc, int point_index);
  * Map paint-curve radius to brush pixel radius.
  * 0 -> 1 px, 1 -> full brush size, >1 -> brush size multiplied by radius.
  */
-float paintcurve_radius_to_pixel_radius(const Paint *paint, const Brush *brush, float point_radius);
+float paintcurve_radius_to_pixel_radius(const Paint *paint,
+                                        const Brush *brush,
+                                        float point_radius);
 /** Size factor relative to the brush radius, for stroke spacing along a paint curve. */
 float paintcurve_radius_to_size_factor(const Paint *paint, const Brush *brush, float point_radius);
 
@@ -485,14 +486,14 @@ void paintcurve_build_screen_segment_polyline(const PaintCurve *pc,
  * Patch) or a viewport-bound paint curve. When `use_3d_space` is false, tessellates from
  * `screen_points_fallback`; otherwise projects object-space geometry through `vc`.
  */
-void paintcurve_build_screen_segment_polyline_from_geometry(const bke::CurvesGeometry &geom,
-                                                             bool use_3d_space,
-                                                             const ViewContext *vc,
-                                                             int point_index_a,
-                                                             int point_index_b,
-                                                             Span<PaintCurvePoint>
-                                                                 screen_points_fallback,
-                                                             Vector<float2> &r_polyline);
+void paintcurve_build_screen_segment_polyline_from_geometry(
+    const bke::CurvesGeometry &geom,
+    bool use_3d_space,
+    const ViewContext *vc,
+    int point_index_a,
+    int point_index_b,
+    Span<PaintCurvePoint> screen_points_fallback,
+    Vector<float2> &r_polyline);
 
 /**
  * Screen hit on a tessellated segment, returning the Bezier parameter in [0, 1] for
@@ -509,15 +510,15 @@ bool paintcurve_bezier_param_at_screen_pos_on_segment(const ViewContext *vc,
                                                       float *r_min_dist = nullptr);
 
 /** Core of #paintcurve_bezier_param_at_screen_pos_on_segment for a standalone control curve. */
-bool paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(const ViewContext *vc,
-                                                                    const bke::CurvesGeometry &geom,
-                                                                    bool use_3d_space,
-                                                                    const float pos[2],
-                                                                    int point_index_a,
-                                                                    int point_index_b,
-                                                                    Span<PaintCurvePoint>
-                                                                        screen_points_fallback,
-                                                                    float &r_bezier_t);
+bool paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(
+    const ViewContext *vc,
+    const bke::CurvesGeometry &geom,
+    bool use_3d_space,
+    const float pos[2],
+    int point_index_a,
+    int point_index_b,
+    Span<PaintCurvePoint> screen_points_fallback,
+    float &r_bezier_t);
 
 /**
  * Project every bezier spline of `geom` (in object local space) into screen-space polylines,
@@ -525,11 +526,11 @@ bool paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(const ViewCo
  * `ob_to_world` is the curve object's transform; `vc` supplies the region used for projection.
  * Non-bezier splines are skipped. Coordinates are guarded against NaN/Inf.
  */
-void paintcurve_build_object_screen_polylines(const blender::bke::CurvesGeometry &geom,
-                                              const blender::float4x4 &ob_to_world,
-                                              const ViewContext *vc,
-                                              blender::Vector<blender::Vector<blender::float2>>
-                                                  &r_polylines);
+void paintcurve_build_object_screen_polylines(
+    const blender::bke::CurvesGeometry &geom,
+    const blender::float4x4 &ob_to_world,
+    const ViewContext *vc,
+    blender::Vector<blender::Vector<blender::float2>> &r_polylines);
 
 /**
  * Build screen-space polylines for a single scene curve object (#OB_CURVES or #OB_CURVES_LEGACY),
@@ -545,12 +546,12 @@ void paintcurve_object_screen_polylines(const ViewContext *vc,
  * `exclude` is skipped. When non-null, `r_polylines` receives the winning object's
  * screen polylines so the caller can draw them without recomputing.
  */
-Object *paintcurve_nearest_scene_curve(const ViewContext *vc,
-                                       blender::float2 mval,
-                                       float threshold,
-                                       const Object *exclude,
-                                       blender::Vector<blender::Vector<blender::float2>>
-                                           *r_polylines);
+Object *paintcurve_nearest_scene_curve(
+    const ViewContext *vc,
+    blender::float2 mval,
+    float threshold,
+    const Object *exclude,
+    blender::Vector<blender::Vector<blender::float2>> *r_polylines);
 
 /**
  * Distance-test `mval` against pre-projected cached polylines; returns the nearest object within
@@ -570,18 +571,18 @@ void paintcurve_radius_handle_screen_get(const PaintCurve *pc,
                                          PaintCurveRadiusHandleScreen *r_handle);
 /** Core of #paintcurve_radius_handle_screen_get for a standalone control curve. */
 void paintcurve_radius_handle_screen_get_from_geometry(const bke::CurvesGeometry &geom,
-                                                        const PaintCurvePoint *screen_points,
-                                                        int point_index,
-                                                        PaintCurveRadiusHandleScreen *r_handle);
+                                                       const PaintCurvePoint *screen_points,
+                                                       int point_index,
+                                                       PaintCurveRadiusHandleScreen *r_handle);
 int paintcurve_find_radius_handle_at_pos(const PaintCurve *pc,
                                          const PaintCurvePoint *screen_points,
                                          const float pos[2],
                                          float threshold);
 /** Core of #paintcurve_find_radius_handle_at_pos for a standalone control curve. */
 int paintcurve_find_radius_handle_at_pos_from_geometry(const bke::CurvesGeometry &geom,
-                                                        Span<PaintCurvePoint> screen_points,
-                                                        const float pos[2],
-                                                        float threshold);
+                                                       Span<PaintCurvePoint> screen_points,
+                                                       const float pos[2],
+                                                       float threshold);
 float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScreen *handle,
                                                const float pos[2]);
 
@@ -591,8 +592,8 @@ float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScree
 /** \name Constants
  * \{ */
 
-/* #PAINT_CURVE_NUM_SEGMENTS lives in `BKE_paint.hh`: the geometry stores it as its `resolution`, so
- * builders outside this module need it as well. */
+/* #PAINT_CURVE_NUM_SEGMENTS lives in `BKE_paint.hh`: the geometry stores it as its `resolution`,
+ * so builders outside this module need it as well. */
 
 /** Screen-space handle length at paint-curve radius factor 1.0. */
 constexpr float PAINT_CURVE_RADIUS_HANDLE_BASE_LEN = 40.0f;
@@ -609,8 +610,9 @@ constexpr float PAINT_CURVE_SEGMENT_HOVER_THRESHOLD = 30.0f;
 constexpr float PAINT_CURVE_POINT_SELECT_THRESHOLD = 40.0f;
 /** Fraction of the shorter adjacent segment length used to offset endpoints after split. */
 constexpr float PAINT_CURVE_SPLIT_ENDPOINT_SEPARATION = 0.05f;
-/** Screen-space pixel radius for Ctrl+RMB segment insertion. Wider than #PAINT_CURVE_SEGMENT_HOVER_THRESHOLD
- * so clicks near a tessellated curve wire reliably subdivide instead of extending the spline. */
+/** Screen-space pixel radius for Ctrl+RMB segment insertion. Wider than
+ * #PAINT_CURVE_SEGMENT_HOVER_THRESHOLD so clicks near a tessellated curve wire reliably subdivide
+ * instead of extending the spline. */
 constexpr float PAINT_CURVE_INSERT_SEGMENT_THRESHOLD = 30.0f;
 /** Bezier \a t range for subdividing a segment. Hits outside append/extend instead of insert. */
 constexpr float PAINT_CURVE_INSERT_T_MIN = 0.1f;

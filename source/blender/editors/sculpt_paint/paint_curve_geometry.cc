@@ -111,9 +111,7 @@ bool paintcurve_uses_3d_geometry(const PaintCurve *pc)
 
 int paintcurve_curve_of_point_from_geometry(const bke::CurvesGeometry &geom, const int point_index)
 {
-  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
-      point_index >= geom.points_num())
-  {
+  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 || point_index >= geom.points_num()) {
     return -1;
   }
   const OffsetIndices<int> points_by_curve = geom.points_by_curve();
@@ -186,8 +184,7 @@ void paintcurve_geometry_remove_points(bke::CurvesGeometry &geom,
 
   if (!curves_to_remove.is_empty()) {
     IndexMaskMemory memory;
-    const IndexMask curves_mask = IndexMask::from_indices<int>(curves_to_remove.as_span(),
-                                                                memory);
+    const IndexMask curves_mask = IndexMask::from_indices<int>(curves_to_remove.as_span(), memory);
     geom.remove_curves(curves_mask, {});
   }
 }
@@ -259,7 +256,9 @@ int paintcurve_geometry_duplicate_selected_points(bke::CurvesGeometry &geom)
   Vector<bool> dst_cyclic;
 
   bke::curves::foreach_selected_point_ranges_per_curve(
-      mask, points_by_curve, [&](const int curve, const IndexRange points, const Span<IndexRange> ranges) {
+      mask,
+      points_by_curve,
+      [&](const int curve, const IndexRange points, const Span<IndexRange> ranges) {
         paintcurve_curve_offsets_from_selection(ranges,
                                                 points,
                                                 curve,
@@ -308,11 +307,11 @@ int paintcurve_geometry_duplicate_selected_points(bke::CurvesGeometry &geom)
         break;
       }
       case bke::AttrDomain::Point: {
-        bke::attribute_math::gather_ranges_to_groups(src_ranges.as_span(),
-                                                    dst_offsets.as_span(),
-                                                    attribute.span,
-                                                    attribute.span.slice(
-                                                        IndexRange(old_points_num, num_points_to_add)));
+        bke::attribute_math::gather_ranges_to_groups(
+            src_ranges.as_span(),
+            dst_offsets.as_span(),
+            attribute.span,
+            attribute.span.slice(IndexRange(old_points_num, num_points_to_add)));
         break;
       }
       default: {
@@ -496,12 +495,12 @@ bool paintcurve_geometry_has_enough_selected_points_on_spline(const bke::CurvesG
   }
 
   const OffsetIndices<int> points_by_curve = geom.points_by_curve();
-  
+
   /* Check each spline for the minimum number of selected points. */
   for (const int curve_i : geom.curves_range()) {
     const IndexRange points = points_by_curve[curve_i];
     int selected_count = 0;
-    
+
     for (const int point_i : points) {
       if (paintcurve_geom_get_selection(geom, point_i) & 0x07) {
         selected_count++;
@@ -511,12 +510,13 @@ bool paintcurve_geometry_has_enough_selected_points_on_spline(const bke::CurvesG
       }
     }
   }
-  
+
   return false;
 }
 
 void paintcurve_foreach_bezier_segment_from_geometry(
-    const bke::CurvesGeometry &geom, const FunctionRef<void(int point_index_a, int point_index_b)> fn)
+    const bke::CurvesGeometry &geom,
+    const FunctionRef<void(int point_index_a, int point_index_b)> fn)
 {
   if (!paintcurve_geometry_runtime_is_initialized(geom) || geom.points_num() < 2) {
     return;
@@ -853,7 +853,8 @@ static void paintcurve_separate_split_curve_endpoints(bke::CurvesGeometry &geom,
   }
   if (left_points.size() >= 2) {
     ref_len = max_ff(
-        ref_len, math::distance(positions[left_end], positions[left_points[left_points.size() - 2]]));
+        ref_len,
+        math::distance(positions[left_end], positions[left_points[left_points.size() - 2]]));
   }
   if (right_points.size() >= 2) {
     ref_len = max_ff(ref_len, math::distance(positions[right_points[1]], positions[right_start]));
@@ -873,8 +874,7 @@ static void paintcurve_separate_split_curve_endpoints(bke::CurvesGeometry &geom,
   }
 }
 
-bool paintcurve_geometry_split_at_selected_points(bke::CurvesGeometry &geom,
-                                                  int *r_selected_curve)
+bool paintcurve_geometry_split_at_selected_points(bke::CurvesGeometry &geom, int *r_selected_curve)
 {
   if (!paintcurve_geometry_is_valid(geom)) {
     return false;
@@ -893,8 +893,7 @@ bool paintcurve_geometry_split_at_selected_points(bke::CurvesGeometry &geom,
       }
     }
     if (!split_indices_per_curve[curve_i].is_empty()) {
-      std::sort(split_indices_per_curve[curve_i].begin(),
-                split_indices_per_curve[curve_i].end());
+      std::sort(split_indices_per_curve[curve_i].begin(), split_indices_per_curve[curve_i].end());
     }
   }
 
@@ -1068,8 +1067,8 @@ bool paintcurve_geometry_merge_curve_endpoints(bke::CurvesGeometry &geom,
 
   if (reverse_removed) {
     IndexMaskMemory reverse_memory;
-    const IndexMask reverse_mask = IndexMask::from_indices<int>(
-        Span<int>(&remove_curve, 1), reverse_memory);
+    const IndexMask reverse_mask = IndexMask::from_indices<int>(Span<int>(&remove_curve, 1),
+                                                                reverse_memory);
     geom.reverse_curves(reverse_mask);
   }
 
@@ -1087,8 +1086,7 @@ bool paintcurve_geometry_merge_curve_endpoints(bke::CurvesGeometry &geom,
 
   bke::MutableAttributeAccessor attributes = geom.attributes_for_write();
   attributes.foreach_attribute([&](const bke::AttributeIter &iter) {
-    if (iter.domain != bke::AttrDomain::Point ||
-        iter.storage_type == bke::AttrStorageType::Single)
+    if (iter.domain != bke::AttrDomain::Point || iter.storage_type == bke::AttrStorageType::Single)
     {
       return;
     }
@@ -1096,16 +1094,13 @@ bool paintcurve_geometry_merge_curve_endpoints(bke::CurvesGeometry &geom,
     if (!dst_writer) {
       return;
     }
-    paintcurve_copy_point_range_to_dst(dst_writer.span,
-                                       remove_points,
-                                       dst_writer.span,
-                                       old_points_num);
+    paintcurve_copy_point_range_to_dst(
+        dst_writer.span, remove_points, dst_writer.span, old_points_num);
     dst_writer.finish();
   });
 
   IndexMaskMemory memory;
-  const IndexMask remove_mask = IndexMask::from_indices<int>(
-      Span<int>(&remove_curve, 1), memory);
+  const IndexMask remove_mask = IndexMask::from_indices<int>(Span<int>(&remove_curve, 1), memory);
   geom.remove_curves(remove_mask, {});
 
   geom.calculate_bezier_auto_handles();
@@ -1150,8 +1145,12 @@ int ED_paintcurve_geometry_add_point(PaintCurve *pc, const float position[3], co
    * sensibly mean "at the end of the active spline". */
   int add_index = create_new_spline ? 0 : int(geom.points_by_curve()[active_curve].size());
 
-  paintcurve_geometry_add_point(
-      geom, float3(position), float3(0.0f, 0.0f, 1.0f), create_new_spline, active_curve, add_index);
+  paintcurve_geometry_add_point(geom,
+                                float3(position),
+                                float3(0.0f, 0.0f, 1.0f),
+                                create_new_spline,
+                                active_curve,
+                                add_index);
 
   pc->active_curve = active_curve;
   pc->add_index = add_index;
@@ -1218,9 +1217,9 @@ void ED_paintcurve_geometry_points_set(PaintCurve *pc,
     geom.cyclic_for_write().fill(true);
   }
 
-  /* The same order #ED_paintcurve_control_curve_for_patch relies on: the handle position attributes
-   * have to exist before the recompute, which otherwise returns silently. One call for the whole
-   * curve is the entire point of this function. */
+  /* The same order #ED_paintcurve_control_curve_for_patch relies on: the handle position
+   * attributes have to exist before the recompute, which otherwise returns silently. One call for
+   * the whole curve is the entire point of this function. */
   geom.handle_positions_left_for_write();
   geom.handle_positions_right_for_write();
   geom.calculate_bezier_auto_handles();
@@ -1254,7 +1253,8 @@ bke::CurvesGeometry ED_paintcurve_control_curve_for_patch(const PaintCurve &pc,
   curve.tag_positions_changed();
   /* Paint curves carry a per-point radius on this codebase's own convention (1.0 = full brush
    * size), but a curve that reached #PaintCurve by some other route may not, and
-   * #blender::bke::CurvesGeometry::radius() then answers its generic hair-curve default of 0.01. */
+   * #blender::bke::CurvesGeometry::radius() then answers its generic hair-curve default of 0.01.
+   */
   if (!curve.attributes().contains("radius")) {
     curve.radius_for_write().fill(1.0f);
   }

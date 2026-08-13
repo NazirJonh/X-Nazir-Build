@@ -1078,9 +1078,9 @@ void calculateCenterMedian(TransInfo *t, float r_center[3])
    * 2D (screen-space) paint curves must skip this: their handle positions differ from the
    * point's pivot, so a raw position average would drift away from the pivot diamond. */
   const bool is_3d_paint_curve_3d_transform = (t->options & CTX_PAINT_CURVE) &&
-                                               (t->spacetype == SPACE_VIEW3D) &&
-                                               ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION) &&
-                                               paintcurve_transform_use_3d_viewport(t);
+                                              (t->spacetype == SPACE_VIEW3D) &&
+                                              ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION) &&
+                                              paintcurve_transform_use_3d_viewport(t);
   if (is_3d_paint_curve_3d_transform) {
     paintcurve_center_median_3d_get(t, r_center);
     return;
@@ -1115,9 +1115,9 @@ void calculateCenterMedian(TransInfo *t, float r_center[3])
 void calculateCenterBound(TransInfo *t, float r_center[3])
 {
   const bool is_3d_paint_curve_3d_transform = (t->options & CTX_PAINT_CURVE) &&
-                                               (t->spacetype == SPACE_VIEW3D) &&
-                                               ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION) &&
-                                               paintcurve_transform_use_3d_viewport(t);
+                                              (t->spacetype == SPACE_VIEW3D) &&
+                                              ELEM(t->mode, TFM_ROTATION, TFM_TRANSLATION) &&
+                                              paintcurve_transform_use_3d_viewport(t);
   if (is_3d_paint_curve_3d_transform) {
     paintcurve_center_median_3d_get(t, r_center);
     return;
@@ -1205,8 +1205,8 @@ bool calculateCenterActive(TransInfo *t, bool select_only, float r_center[3])
         copy_v3_v3(world_co, obj_co);
       }
       const bool is_3d_paint_curve_rotation = (t->options & CTX_PAINT_CURVE) &&
-                                               (t->spacetype == SPACE_VIEW3D) &&
-                                               (t->mode == TFM_ROTATION);
+                                              (t->spacetype == SPACE_VIEW3D) &&
+                                              (t->mode == TFM_ROTATION);
       if (is_3d_paint_curve_rotation) {
         copy_v3_v3(r_center, world_co);
       }

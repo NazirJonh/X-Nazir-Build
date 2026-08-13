@@ -174,12 +174,13 @@ struct CurvePatchSpline {
    * edge at an angle. */
   Vector<float3> normals_smooth_3d;
   /** Frozen projection normal for the whole patch (defines "left"/"right" of the curve for
-   * `closest_point()`'s signed lateral offset). Caller sets this before calling `closest_point`. */
+   * `closest_point()`'s signed lateral offset). Caller sets this before calling `closest_point`.
+   */
   float3 plane_normal = float3(0.0f, 0.0f, 1.0f);
   /** True when the polyline closes back on itself: `poly_3d.last() == poly_3d.first()` and the
-   * tangents run continuously through that join. Set by #build_from_positions. Consumers that treat
-   * the curve's two ends specially (end falloff, the along-length texture coordinate) must skip that
-   * handling when set -- a loop has no ends. */
+   * tangents run continuously through that join. Set by #build_from_positions. Consumers that
+   * treat the curve's two ends specially (end falloff, the along-length texture coordinate) must
+   * skip that handling when set -- a loop has no ends. */
   bool cyclic = false;
 
   void clear();
@@ -196,8 +197,8 @@ struct CurvePatchSpline {
    * and the tangents at the join are made continuous through it.
    *
    * `normals`, when non-empty, must match `positions` in size and populates `normals_3d`; the
-   * closing sample of a cyclic curve repeats the first normal, so the two arrays stay index-aligned
-   * with `poly_3d`. */
+   * closing sample of a cyclic curve repeats the first normal, so the two arrays stay
+   * index-aligned with `poly_3d`. */
   void build_from_positions(Span<float3> positions,
                             Span<float> radii = {},
                             bool cyclic = false,
@@ -266,18 +267,15 @@ struct CurvePatchSpline {
                      float *r_normal_dist = nullptr) const;
 
   /** Raw closest point: arc-length `r_s` (clamped to `[0, total_length()]`), unit `r_tangent`, and
-   * the true 3D Euclidean distance `r_dist`. Unlike #closest_point this does no plane decomposition
-   * and no past-the-end extension -- used by #RollSpline where only (s, tangent, distance) is
-   * needed. No-op (leaves outputs unchanged) when #is_empty(). */
-  void closest_point_dist(const float3 &query,
-                          float &r_s,
-                          float3 &r_tangent,
-                          float &r_dist) const;
+   * the true 3D Euclidean distance `r_dist`. Unlike #closest_point this does no plane
+   * decomposition and no past-the-end extension -- used by #RollSpline where only (s, tangent,
+   * distance) is needed. No-op (leaves outputs unchanged) when #is_empty(). */
+  void closest_point_dist(const float3 &query, float &r_s, float3 &r_tangent, float &r_dist) const;
 };
 
 /**
- * Smooths `spline.normals_3d` with a box filter over arc length in a `+/- smooth_length / 2` window
- * and writes the normalized result into `spline.normals_smooth_3d`.
+ * Smooths `spline.normals_3d` with a box filter over arc length in a `+/- smooth_length / 2`
+ * window and writes the normalized result into `spline.normals_smooth_3d`.
  *
  * A box rather than N Laplacian iterations: the smoothing width is then stated in world units and
  * depends neither on the tessellation density nor on an iteration count, so the result is
@@ -309,15 +307,17 @@ int curve_patch_stamp_pick_texture(Span<float> weights_cdf, float random01);
 /**
  * World-space length onto which one texture tile (`[-1, 1]`) is mapped along the control curve's
  * arc-length, selected by `length_mode` (see #CurvePatchLengthMode):
- * - Default: `min(total_length, 2 * radius_at_s)` — one tile on short curves, radius-tiled on long.
+ * - Default: `min(total_length, 2 * radius_at_s)` — one tile on short curves, radius-tiled on
+ * long.
  * - Repeat:  `total_length / max(1, repeat)` — a fixed integer number of tiles along the length.
  * - Stretch: `total_length` — exactly one tile across the whole curve.
  * An unrecognized `length_mode` falls back to Default. Callers still guard the degenerate
  * (near-zero) return before dividing by it.
  *
  * With `cyclic`, the resulting span is snapped so the loop holds a whole number of tiles, which is
- * what makes the pattern meet itself at the join without a seam. Repeat and Stretch already satisfy
- * that and are unaffected; DEFAULT's radius-driven tile is resized to the nearest whole count.
+ * what makes the pattern meet itself at the join without a seam. Repeat and Stretch already
+ * satisfy that and are unaffected; DEFAULT's radius-driven tile is resized to the nearest whole
+ * count.
  */
 float curve_patch_texture_tile_span(CurvePatchLengthMode length_mode,
                                     int repeat,
@@ -334,8 +334,8 @@ enum class CurvePatchTextureZone : int8_t {
 
 struct CurvePatchTextureZoneSample {
   CurvePatchTextureZone zone = CurvePatchTextureZone::Middle;
-  /** Texture coordinate along the curve, in the same `[-1, 1]`-per-tile domain the relief feeds into
-   * the mapping's size/offset. */
+  /** Texture coordinate along the curve, in the same `[-1, 1]`-per-tile domain the relief feeds
+   * into the mapping's size/offset. */
   float v = 0.0f;
   /** False for a degenerate zone (a middle squeezed to zero length by two oversized caps); the
    * relief leaves such a position untouched instead of dividing by zero. */
@@ -345,8 +345,8 @@ struct CurvePatchTextureZoneSample {
 /**
  * Resolve the texture zone and along-curve texture coordinate at arc length `s`.
  *
- * With `caps_enabled == false` this returns `{Middle, <the pre-caps formula>, true}` -- including the
- * cyclic `-1` tile centering and the REPEAT sawtooth wrap -- so the original Ribbon output is
+ * With `caps_enabled == false` this returns `{Middle, <the pre-caps formula>, true}` -- including
+ * the cyclic `-1` tile centering and the REPEAT sawtooth wrap -- so the original Ribbon output is
  * reproduced exactly and the caps feature cannot regress it.
  *
  * `cap_start_length` and `cap_end_length` are WORLD-space lengths; the UI stores them in brush
@@ -399,10 +399,10 @@ struct CurvePatchStamp {
   float angle = 0.0f;
   /** Per-stamp relief strength multiplier in `(0, 1]`. */
   float strength = 1.0f;
-  /** Index into the cache's `stamp_texture_variants`, or -1 when this stamp samples the brush's own
-   * texture (SINGLE mode, an empty list, or a list whose weights all sum to zero). Ghost copies made
-   * by #curve_patch_stamps_add_cyclic_wrap inherit it by whole-struct copy, so a seam stamp shows
-   * the same texture on both sides of the join. */
+  /** Index into the cache's `stamp_texture_variants`, or -1 when this stamp samples the brush's
+   * own texture (SINGLE mode, an empty list, or a list whose weights all sum to zero). Ghost
+   * copies made by #curve_patch_stamps_add_cyclic_wrap inherit it by whole-struct copy, so a seam
+   * stamp shows the same texture on both sides of the join. */
   int tex_index = -1;
   /** World-space frame of the stamp, frozen at layout time and used only by the PLANAR projection
    * (#CurvePatchStampProjection::Planar), which reads a vertex's stamp-local coordinates as
@@ -434,11 +434,11 @@ struct CurvePatchStamp {
  * `strength_random` are all fractions; size and strength randomization only ever REDUCE, which is
  * what lets the caller widen the ribbon for jitter alone.
  *
- * With `spline.cyclic`, the step is snapped so a whole number of stamps fits the loop and the final
- * stamp does not land on top of the first at the seam.
+ * With `spline.cyclic`, the step is snapped so a whole number of stamps fits the loop and the
+ * final stamp does not land on top of the first at the seam.
  *
- * `texture_weights_cdf` is the cumulative weight table of the brush's texture list, or empty for the
- * single-texture case. Each stamp draws its `tex_index` from it through
+ * `texture_weights_cdf` is the cumulative weight table of the brush's texture list, or empty for
+ * the single-texture case. Each stamp draws its `tex_index` from it through
  * #curve_patch_stamp_pick_texture on its own hash channel, so the choice is as stable across
  * re-stamps as every other per-stamp random quantity here.
  *
@@ -475,8 +475,8 @@ void curve_patch_stamps_build(const CurvePatchSpline &spline,
  * device, not stamps, which is why this is separate from #curve_patch_stamps_build, whose contract
  * stays "one entry per real stamp, a whole number of them around the loop".
  *
- * `stamps` comes back re-sorted by `center_v`, since the relief binary-searches it. Call only for a
- * cyclic spline; a no-op for a degenerate `total_length` or `max_extent`.
+ * `stamps` comes back re-sorted by `center_v`, since the relief binary-searches it. Call only for
+ * a cyclic spline; a no-op for a degenerate `total_length` or `max_extent`.
  */
 void curve_patch_stamps_add_cyclic_wrap(Vector<CurvePatchStamp> &stamps,
                                         float total_length,
@@ -516,7 +516,8 @@ struct CurvePatchRibbonLut {
   int res = 0;
   /** Per-pixel `(u, s)` of the PRIMARY branch: `u` in `[-1, 1]` across the strip (sign matches the
    * old `-lateral / radius` convention, positive toward `cross(tangent, plane_normal)`), `s` the
-   * world-space arc length along the curve. `u == FLT_MAX` marks a pixel no ribbon quad covered. */
+   * world-space arc length along the curve. `u == FLT_MAX` marks a pixel no ribbon quad covered.
+   */
   Vector<float2> uv;
   /** Squared distance between the pixel center and its bilinear fit -- overlap arbitration during
    * rasterization and anchor selection during sampling. */
@@ -587,16 +588,18 @@ struct CurvePatchRibbonLut {
  * Interactive re-stamps pass false and keep the cheaper table.
  *
  * \param end_margin_start, end_margin_end: world-space distances to extend the strip PAST the
- * corresponding end of a non-cyclic curve, along that end's tangent. Stamps mode needs this because
- * a stamp centered on the very first or last point reaches half its own size beyond the curve, and
- * the part outside the rasterized strip would get no UV and be clipped by a hard straight edge. The
- * extension carries the end radius, so the strip keeps its width through it, and the arc length it
- * reports runs from `-end_margin_start` to `total_length + end_margin_end` -- `v` is raw arc length
- * and is deliberately allowed outside `[0, total_length]` there. A cyclic curve has no ends and is
- * never extended. Both zero (the default) reproduces the unextended strip exactly.
+ * corresponding end of a non-cyclic curve, along that end's tangent. Stamps mode needs this
+ * because a stamp centered on the very first or last point reaches half its own size beyond the
+ * curve, and the part outside the rasterized strip would get no UV and be clipped by a hard
+ * straight edge. The extension carries the end radius, so the strip keeps its width through it,
+ * and the arc length it reports runs from `-end_margin_start` to `total_length + end_margin_end`
+ * -- `v` is raw arc length and is deliberately allowed outside `[0, total_length]` there. A cyclic
+ * curve has no ends and is never extended. Both zero (the default) reproduces the unextended strip
+ * exactly.
  *
- * The two are separate because a window of a multi-window build borders the curve's real end on one
- * side only -- extending the interior join would push the strip outside the window that serves it.
+ * The two are separate because a window of a multi-window build borders the curve's real end on
+ * one side only -- extending the interior join would push the strip outside the window that serves
+ * it.
  *
  * \param binormals: the across-curve direction for each `poly_3d` sample. An empty span means
  * "derive them as `cross(T, plane_normal)`" -- the default, bit-for-bit the previous behavior. A
@@ -675,8 +678,8 @@ bool curve_patch_ribbon_grid_build(const CurvePatchSpline &spline,
  * acceptable. */
 constexpr int CURVE_PATCH_MAX_FRAMES = 32;
 /** Total LUT pixel budget across all windows (~32 MB at 32 bytes per pixel). Capping the window
- * count alone is not enough: `res` is chosen adaptively from the extent, and a short slice does not
- * shrink it proportionally. */
+ * count alone is not enough: `res` is chosen adaptively from the extent, and a short slice does
+ * not shrink it proportionally. */
 constexpr int64_t CURVE_PATCH_MAX_LUT_PIXELS = 1024 * 1024;
 
 /** One window along the curve: a range of `poly_3d` indices and the SHARP normal of its dominant
@@ -703,11 +706,12 @@ struct CurvePatchFramesParams {
   /** Arc length by which every window is grown past each of its INTERIOR boundaries, so two
    * neighbours share a stretch to cross-fade over.
    *
-   * Windows used to meet edge to edge across a break, on the argument that each face's vertices are
-   * rejected by orientation in the other's window anyway. That turned out to be what produced the
-   * visible seam: with no shared stretch there is nothing to blend, so the handover from one window
-   * to the next is a step by construction -- and it lands exactly where BOTH LUTs sit on their
-   * outermost row, the worst place either can be sampled. 0 reproduces the old edge-to-edge cut. */
+   * Windows used to meet edge to edge across a break, on the argument that each face's vertices
+   * are rejected by orientation in the other's window anyway. That turned out to be what produced
+   * the visible seam: with no shared stretch there is nothing to blend, so the handover from one
+   * window to the next is a step by construction -- and it lands exactly where BOTH LUTs sit on
+   * their outermost row, the worst place either can be sampled. 0 reproduces the old edge-to-edge
+   * cut. */
   float overlap_length = 0.0f;
   int max_frames = CURVE_PATCH_MAX_FRAMES;
 };
@@ -766,12 +770,13 @@ struct CurvePatchFrameSet {
    * caller resolves them by max `|height|`.
    *
    * The depth culling is deliberately NOT done here: it needs `falloff_radius_at_s` and is applied
-   * by the caller per branch, after the relief has been evaluated -- moving it in here would change
-   * how many branches survive to that merge.
+   * by the caller per branch, after the relief has been evaluated -- moving it in here would
+   * change how many branches survive to that merge.
    *
-   * `r_frame_normal` reports the plane of the heaviest-weighted window behind each branch. It is an
-   * observable for tests and diagnostics only -- feeding it into the relief's own depth measurement
-   * is what produced the first version of the seam (see `CurvePatchSpline::normal_at`).
+   * `r_frame_normal` reports the plane of the heaviest-weighted window behind each branch. It is
+   * an observable for tests and diagnostics only -- feeding it into the relief's own depth
+   * measurement is what produced the first version of the seam (see
+   * `CurvePatchSpline::normal_at`).
    */
   int sample(const float3 &co,
              const float3 &vertex_normal,
@@ -783,9 +788,9 @@ struct CurvePatchFrameSet {
 /**
  * Partitions `spline` into windows and rasterizes one ribbon LUT per window.
  *
- * The ribbon is conceptually ONE strip over the whole curve: each window's binormals are taken from
- * the GLOBAL smoothed normal field and `u` is normalized by the half-width, so the pieces coincide
- * with the matching stretches of a single continuous strip.
+ * The ribbon is conceptually ONE strip over the whole curve: each window's binormals are taken
+ * from the GLOBAL smoothed normal field and `u` is normalized by the half-width, so the pieces
+ * coincide with the matching stretches of a single continuous strip.
  *
  * `end_margin` is applied only where a window borders a REAL end of the curve; interior joins are
  * never extended, since that would push the strip outside the window serving it.
@@ -841,9 +846,9 @@ struct CurvePatchSurfaceSnapshot {
 bool curve_patch_surface_snapshot_build(const Mesh &mesh, CurvePatchSurfaceSnapshot &r_snapshot);
 
 /**
- * Pulls each position onto the nearest point of the snapshot and reports the normal of the triangle
- * it hit. A sample farther away than `max_dist` is left where it is and its normal stays zero -- the
- * "no normal here" marker #curve_patch_surface_fill_invalid_normals looks for.
+ * Pulls each position onto the nearest point of the snapshot and reports the normal of the
+ * triangle it hit. A sample farther away than `max_dist` is left where it is and its normal stays
+ * zero -- the "no normal here" marker #curve_patch_surface_fill_invalid_normals looks for.
  */
 void curve_patch_surface_shrinkwrap(const CurvePatchSurfaceSnapshot &snapshot,
                                     float max_dist,
@@ -888,7 +893,8 @@ struct CurvePatchGeometry {
 
   /** Conservative arc-length half-window covering one stamp's footprint, resolved once per build
    * and shared by the per-vertex search window, the cyclic seam wrap and the ribbon's end
-   * extension. Their agreement is a correctness requirement, not a coincidence. 0 in Ribbon mode. */
+   * extension. Their agreement is a correctness requirement, not a coincidence. 0 in Ribbon mode.
+   */
   float stamp_search_reach = 0.0f;
 
   /** World-space distance the ribbon was extended past each end of a non-cyclic curve, so stamps
@@ -950,7 +956,8 @@ void curve_patch_geometry_build(Span<float3> evaluated_positions,
 
 /**
  * The ribbon as a mesh: one quad per cell of the strip #curve_patch_ribbon_grid_build produces,
- * with a `"UVMap"` corner layer carrying exactly the coordinates the relief samples its texture at.
+ * with a `"UVMap"` corner layer carrying exactly the coordinates the relief samples its texture
+ * at.
  *
  * The texture slot's own size/offset are NOT applied -- those are mapping settings, and the mesh
  * carries the patch's coordinates for the caller to map as they please.

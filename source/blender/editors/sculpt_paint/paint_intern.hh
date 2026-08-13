@@ -131,8 +131,8 @@ struct RollSpline {
    * the roll code directly -- the roll grid/LUT math relies on the #length_parameterize convention
    * below (no leading zero, one entry per segment). */
   bke::CurvePatchSpline core;
-  Vector<float3> poly_3d;     /* Recorded 3D knots (authoritative). */
-  Vector<float2> poly_2d;     /* Recorded screen-space knots. */
+  Vector<float3> poly_3d; /* Recorded 3D knots (authoritative). */
+  Vector<float2> poly_2d; /* Recorded screen-space knots. */
   /** Cumulative arc lengths in #length_parameterize convention: one entry per segment (size ==
    * knots - 1), `lengths_3d.last() == total`. NOT the leading-zero convention `core` uses. */
   Vector<float> lengths_2d;
@@ -155,7 +155,8 @@ struct RollSpline {
   float3 evaluate_3d(float s) const;              /* -> core.evaluate(s). */
   float2 tangent_2d_at_index(int poly_idx) const; /* 2D direction from `poly_2d`. */
 
-  /** Closest point on the 3D polyline: arc-length, tangent, distance. -> core.closest_point_dist. */
+  /** Closest point on the 3D polyline: arc-length, tangent, distance. -> core.closest_point_dist.
+   */
   void closest_point_3d(const float3 &query, float &r_s, float3 &r_tan, float &r_dis) const;
 };
 
@@ -247,15 +248,15 @@ struct PaintStroke : NonCopyable, NonMovable {
    * spline_uv() so the texture V coordinate stays continuous as the polyline shrinks. */
   float stroke_distance_world_ = 0.0f;
   bool need_roll_mapping_ = false;
-  bool roll_virtual_prepended_ = false;     /* True after virtual backward segments are prepended. */
-  int n_virtual_poly_points_ = 0;           /* Polyline points in virtual backward extension. */
-  float roll_virtual_length_ = 0.0f;        /* Arc length of virtual extension (subtracted from V). */
-  float roll_initial_radius_ = 0.0f;        /* cache.initial_radius, captured on first dab. */
+  bool roll_virtual_prepended_ = false; /* True after virtual backward segments are prepended. */
+  int n_virtual_poly_points_ = 0;       /* Polyline points in virtual backward extension. */
+  float roll_virtual_length_ = 0.0f;    /* Arc length of virtual extension (subtracted from V). */
+  float roll_initial_radius_ = 0.0f;    /* cache.initial_radius, captured on first dab. */
   float3 roll_proj_normal_ = float3(0.0f);  /* Projection normal, frozen on first dab. */
   float stroke_distance_normalized_ = 0.0f; /* Pressure-normalized V offset for consumed knots. */
   float roll_virtual_length_normalized_ = 0.0f; /* Normalized arc length of virtual extension. */
-  int initial_backward_ext_count_ = 0;      /* backward_ext knot count at creation, for budget. */
-  void *roll_cursor_ = nullptr;             /* Always-on preview of unflushed spline portion. */
+  int initial_backward_ext_count_ = 0; /* backward_ext knot count at creation, for budget. */
+  void *roll_cursor_ = nullptr;        /* Always-on preview of unflushed spline portion. */
   void *debug_cursor_ = nullptr;
   int stroke_sample_index_ = 0;
   int last_painted_roll_idx_ = -1; /* Ring buffer index of the last deferred dab placed. */

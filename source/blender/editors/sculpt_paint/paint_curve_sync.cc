@@ -96,7 +96,7 @@ static void paintcurve_build_screen_segment_polyline_from_screen_points(
   }
 
   r_polyline.reinitialize(PAINT_CURVE_NUM_SEGMENTS + 1);
-  const float(*v)[2] = reinterpret_cast<const float(*)[2]>(data);
+  const float (*v)[2] = reinterpret_cast<const float (*)[2]>(data);
   for (int j = 0; j <= PAINT_CURVE_NUM_SEGMENTS; j++) {
     r_polyline[j] = float2(v[j][0], v[j][1]);
   }
@@ -187,14 +187,14 @@ void paintcurve_build_screen_segment_polyline(const PaintCurve *pc,
       screen_points_fallback, point_index_a, point_index_b, r_polyline);
 }
 
-void paintcurve_build_screen_segment_polyline_from_geometry(const bke::CurvesGeometry &geom,
-                                                             const bool use_3d_space,
-                                                             const ViewContext *vc,
-                                                             const int point_index_a,
-                                                             const int point_index_b,
-                                                             const Span<PaintCurvePoint>
-                                                                 screen_points_fallback,
-                                                             Vector<float2> &r_polyline)
+void paintcurve_build_screen_segment_polyline_from_geometry(
+    const bke::CurvesGeometry &geom,
+    const bool use_3d_space,
+    const ViewContext *vc,
+    const int point_index_a,
+    const int point_index_b,
+    const Span<PaintCurvePoint> screen_points_fallback,
+    Vector<float2> &r_polyline)
 {
   r_polyline.clear();
   if (!use_3d_space) {
@@ -240,7 +240,7 @@ void paintcurve_build_screen_segment_polyline_from_geometry(const bke::CurvesGeo
   }
 
   const IndexRange segment_evaluated = IndexRange::from_begin_end(bezier_offsets[local_a],
-                                                                   range_end);
+                                                                  range_end);
 
   if (segment_evaluated.size() <= 1) {
     /* Vector segment: only one evaluated point is stored; draw the straight edge explicitly. */
@@ -306,24 +306,19 @@ static void paintcurve_update_edge_hit(const float point[2],
   }
 }
 
-bool paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(const ViewContext *vc,
-                                                                    const bke::CurvesGeometry &geom,
-                                                                    const bool use_3d_space,
-                                                                    const float pos[2],
-                                                                    const int point_index_a,
-                                                                    const int point_index_b,
-                                                                    const Span<PaintCurvePoint>
-                                                                        screen_points_fallback,
-                                                                    float &r_bezier_t)
+bool paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(
+    const ViewContext *vc,
+    const bke::CurvesGeometry &geom,
+    const bool use_3d_space,
+    const float pos[2],
+    const int point_index_a,
+    const int point_index_b,
+    const Span<PaintCurvePoint> screen_points_fallback,
+    float &r_bezier_t)
 {
   Vector<float2> polyline;
-  paintcurve_build_screen_segment_polyline_from_geometry(geom,
-                                                         use_3d_space,
-                                                         vc,
-                                                         point_index_a,
-                                                         point_index_b,
-                                                         screen_points_fallback,
-                                                         polyline);
+  paintcurve_build_screen_segment_polyline_from_geometry(
+      geom, use_3d_space, vc, point_index_a, point_index_b, screen_points_fallback, polyline);
   if (polyline.size() < 2) {
     return false;
   }
@@ -339,8 +334,14 @@ bool paintcurve_bezier_param_at_screen_pos_on_segment_from_geometry(const ViewCo
   const int segment_steps = int(polyline.size()) - 1;
   for (int j = 0; j < segment_steps; j++) {
     copy_v2_v2(point2, polyline[j + 1]);
-    paintcurve_update_edge_hit(
-        pos, point1, point2, point_index_a, j, &segment_min_dist, &discarded_segment_index, &param);
+    paintcurve_update_edge_hit(pos,
+                               point1,
+                               point2,
+                               point_index_a,
+                               j,
+                               &segment_min_dist,
+                               &discarded_segment_index,
+                               &param);
     copy_v2_v2(point1, point2);
   }
 
@@ -512,8 +513,7 @@ bool paintcurve_convert_geometry_space(bContext *C,
                                                             ts ? ts->sculpt : nullptr,
                                                             vc_ray,
                                                             base,
-                                                            float2(center_mval[0],
-                                                                   center_mval[1]),
+                                                            float2(center_mval[0], center_mval[1]),
                                                             false);
           if (gi.has_value()) {
             copy_v3_v3(hit_obj, gi->location);
@@ -620,7 +620,8 @@ void paintcurve_radius_handle_screen_get(const PaintCurve *pc,
   /* Offset the endpoint by a fixed minimum so it never collapses onto the pivot. Without this a
    * near-zero radius would draw and hit-test the handle directly on top of the pivot, shadowing
    * every click meant to grab the pivot itself. */
-  const float len = PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET + radius * PAINT_CURVE_RADIUS_HANDLE_BASE_LEN;
+  const float len = PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET +
+                    radius * PAINT_CURVE_RADIUS_HANDLE_BASE_LEN;
 
   r_handle->point = pivot;
   r_handle->perp = perp;
@@ -628,9 +629,9 @@ void paintcurve_radius_handle_screen_get(const PaintCurve *pc,
 }
 
 void paintcurve_radius_handle_screen_get_from_geometry(const bke::CurvesGeometry &geom,
-                                                        const PaintCurvePoint *screen_points,
-                                                        const int point_index,
-                                                        PaintCurveRadiusHandleScreen *r_handle)
+                                                       const PaintCurvePoint *screen_points,
+                                                       const int point_index,
+                                                       PaintCurveRadiusHandleScreen *r_handle)
 {
   const BezTriple &bez = screen_points[point_index].bez;
   const float2 pivot(bez.vec[1]);
@@ -644,7 +645,8 @@ void paintcurve_radius_handle_screen_get_from_geometry(const bke::CurvesGeometry
 
   const float2 perp(-tangent.y, tangent.x);
   const float radius = max_ff(geom.radius()[point_index], 0.0f);
-  const float len = PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET + radius * PAINT_CURVE_RADIUS_HANDLE_BASE_LEN;
+  const float len = PAINT_CURVE_RADIUS_HANDLE_MIN_OFFSET +
+                    radius * PAINT_CURVE_RADIUS_HANDLE_BASE_LEN;
 
   r_handle->point = pivot;
   r_handle->perp = perp;
@@ -652,9 +654,9 @@ void paintcurve_radius_handle_screen_get_from_geometry(const bke::CurvesGeometry
 }
 
 int paintcurve_find_radius_handle_at_pos_from_geometry(const bke::CurvesGeometry &geom,
-                                                        const Span<PaintCurvePoint> screen_points,
-                                                        const float pos[2],
-                                                        const float threshold)
+                                                       const Span<PaintCurvePoint> screen_points,
+                                                       const float pos[2],
+                                                       const float threshold)
 {
   if (!paintcurve_geometry_is_valid(geom) || screen_points.is_empty()) {
     return -1;
@@ -663,8 +665,9 @@ int paintcurve_find_radius_handle_at_pos_from_geometry(const bke::CurvesGeometry
   int best_index = -1;
   float best_dist = threshold;
 
-  const int point_num = (geom.points_num() < int(screen_points.size())) ? geom.points_num() :
-                                                                         int(screen_points.size());
+  const int point_num = (geom.points_num() < int(screen_points.size())) ?
+                            geom.points_num() :
+                            int(screen_points.size());
   for (const int i : IndexRange(point_num)) {
     PaintCurveRadiusHandleScreen handle;
     paintcurve_radius_handle_screen_get_from_geometry(geom, screen_points.data(), i, &handle);
@@ -707,16 +710,17 @@ float paintcurve_radius_from_handle_screen_pos(const PaintCurveRadiusHandleScree
                 0.0f);
 }
 
-bool paintcurve_find_closest_segment_from_geometry(const bke::CurvesGeometry &geom,
-                                                   const bool use_3d_space,
-                                                   const ViewContext *vc,
-                                                   const Span<PaintCurvePoint> screen_points_fallback,
-                                                   const float pos[2],
-                                                   const float threshold,
-                                                   int *r_segment_index,
-                                                   int *r_segment_index_next,
-                                                   float *r_edge_t,
-                                                   float *r_dist_sq)
+bool paintcurve_find_closest_segment_from_geometry(
+    const bke::CurvesGeometry &geom,
+    const bool use_3d_space,
+    const ViewContext *vc,
+    const Span<PaintCurvePoint> screen_points_fallback,
+    const float pos[2],
+    const float threshold,
+    int *r_segment_index,
+    int *r_segment_index_next,
+    float *r_edge_t,
+    float *r_dist_sq)
 {
   if (!paintcurve_geometry_is_valid(geom) || geom.points_num() < 2) {
     return false;
@@ -778,11 +782,8 @@ bool paintcurve_find_insert_segment_from_geometry(const bke::CurvesGeometry &geo
   paintcurve_build_screen_points_from_geometry(geom, use_3d_space, vc, screen_points);
 
   char point_selflag;
-  if (paintcurve_find_in_screen_points(screen_points.as_span(),
-                                       pos,
-                                       false,
-                                       PAINT_CURVE_HOVER_THRESHOLD,
-                                       &point_selflag) >= 0)
+  if (paintcurve_find_in_screen_points(
+          screen_points.as_span(), pos, false, PAINT_CURVE_HOVER_THRESHOLD, &point_selflag) >= 0)
   {
     return false;
   }
@@ -843,7 +844,8 @@ void paintcurve_build_object_screen_polylines(const bke::CurvesGeometry &geom,
     polyline.reserve(evaluated_points.size());
     for (const int eval_i : evaluated_points) {
       float2 screen;
-      if (!paintcurve_project_local_to_screen(vc, ob_to_world, evaluated_positions[eval_i], screen))
+      if (!paintcurve_project_local_to_screen(
+              vc, ob_to_world, evaluated_positions[eval_i], screen))
       {
         polyline.clear();
         break;

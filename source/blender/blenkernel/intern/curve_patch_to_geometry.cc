@@ -114,14 +114,14 @@ Mesh *curve_patch_geometry_to_mesh(const CurvePatchGeometry &geometry,
     const float u = grid.uv[i].x;
     const float s = grid.uv[i].y;
     const CurvePatchTextureZoneSample zone = curve_patch_texture_zone_at(s,
-                                                                        total_length,
-                                                                        params.radius,
-                                                                        caps_enabled,
-                                                                        world_cap_start,
-                                                                        world_cap_end,
-                                                                        params.length_mode,
-                                                                        params.length_repeat,
-                                                                        geometry.spline.cyclic);
+                                                                         total_length,
+                                                                         params.radius,
+                                                                         caps_enabled,
+                                                                         world_cap_start,
+                                                                         world_cap_end,
+                                                                         params.length_mode,
+                                                                         params.length_repeat,
+                                                                         geometry.spline.cyclic);
     vert_uv_valid[i] = zone.valid;
     float2 uv(u, zone.v);
     if (params.swap_axis) {
@@ -136,9 +136,9 @@ Mesh *curve_patch_geometry_to_mesh(const CurvePatchGeometry &geometry,
   if (uv_map) {
     for (const int corner : corner_verts.index_range()) {
       const int vert = corner_verts[corner];
-      /* A degenerate zone (two oversized caps squeezing the middle to nothing) has no coordinate to
-       * report; the relief leaves such a stretch untouched, and here the corner falls back to the
-       * across-curve coordinate alone rather than to an uninitialized value. */
+      /* A degenerate zone (two oversized caps squeezing the middle to nothing) has no coordinate
+       * to report; the relief leaves such a stretch untouched, and here the corner falls back to
+       * the across-curve coordinate alone rather than to an uninitialized value. */
       uv_map.span[corner] = vert_uv_valid[vert] ? vert_uv[vert] : float2(grid.uv[vert].x, 0.0f);
     }
     uv_map.finish();

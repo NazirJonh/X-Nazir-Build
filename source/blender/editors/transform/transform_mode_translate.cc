@@ -543,8 +543,7 @@ static void applyTranslation(TransInfo *t)
     copy_v3_v3(incr_dir, global_dir);
     const bool paint_curve_geom_snap = (t->options & CTX_PAINT_CURVE) &&
                                        (t->tsnap.mode & SCE_SNAP_TO_GEOM);
-    if (!paint_curve_geom_snap &&
-        !(transform_snap_is_active(t) && validSnap(t)) &&
+    if (!paint_curve_geom_snap && !(transform_snap_is_active(t) && validSnap(t)) &&
         translate_snap_increment(t, incr_dir))
     {
 
@@ -603,8 +602,8 @@ static void initTranslation(TransInfo *t, wmOperator * /*op*/)
   /* 3D paint curves in the viewport use true 3D axis constraints, so all three axes must be
    * available even though T_2D_EDIT is set (the flag is kept for other 2D-mode behaviour). */
   const bool is_3d_paint_curve_translation = (t->options & CTX_PAINT_CURVE) &&
-                                              (t->spacetype == SPACE_VIEW3D) &&
-                                              paintcurve_transform_use_3d_viewport(t);
+                                             (t->spacetype == SPACE_VIEW3D) &&
+                                             paintcurve_transform_use_3d_viewport(t);
   t->idx_max = ((t->flag & T_2D_EDIT) && !is_3d_paint_curve_translation) ? 1 : 2;
   t->num.flag = 0;
   t->num.idx_max = t->idx_max;

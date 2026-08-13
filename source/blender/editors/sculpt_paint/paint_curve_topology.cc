@@ -165,9 +165,7 @@ static bool paintcurve_geometry_make_segment(PaintCurve *pc,
                                              ReportList *reports)
 {
   if (!paintcurve_make_segment_selection_valid(geom)) {
-    BKE_report(reports,
-               RPT_ERROR,
-               "Select one endpoint on each of two different splines to join");
+    BKE_report(reports, RPT_ERROR, "Select one endpoint on each of two different splines to join");
     return false;
   }
 
@@ -207,11 +205,8 @@ static bool paintcurve_geometry_make_segment(PaintCurve *pc,
   const CurveEndpoint &ep0 = selected_endpoints[0];
   const CurveEndpoint &ep1 = selected_endpoints[1];
 
-  if (!paintcurve_geometry_merge_curve_endpoints(geom,
-                                                 ep0.curve_index,
-                                                 ep0.is_start,
-                                                 ep1.curve_index,
-                                                 ep1.is_start))
+  if (!paintcurve_geometry_merge_curve_endpoints(
+          geom, ep0.curve_index, ep0.is_start, ep1.curve_index, ep1.is_start))
   {
     return false;
   }
@@ -504,9 +499,7 @@ void PAINTCURVE_OT_toggle_cyclic(wmOperatorType *ot)
 /** \name Context Menu
  * \{ */
 
-static bool paintcurve_context_menu_point_hit(bContext *C,
-                                              const int mval[2],
-                                              int *r_point_index)
+static bool paintcurve_context_menu_point_hit(bContext *C, const int mval[2], int *r_point_index)
 {
   PaintCurve *pc = paintcurve_from_context(C);
   if (pc == nullptr || !paintcurve_geometry_is_valid(pc->geometry.wrap())) {
@@ -520,11 +513,8 @@ static bool paintcurve_context_menu_point_hit(bContext *C,
 
   const float mval_fl[2] = {float(mval[0]), float(mval[1])};
   char selflag = 0;
-  const int hit = paintcurve_find_in_screen_points(screen_points.as_span(),
-                                                   mval_fl,
-                                                   false,
-                                                   PAINT_CURVE_POINT_SELECT_THRESHOLD,
-                                                   &selflag);
+  const int hit = paintcurve_find_in_screen_points(
+      screen_points.as_span(), mval_fl, false, PAINT_CURVE_POINT_SELECT_THRESHOLD, &selflag);
   if (hit < 0) {
     return false;
   }

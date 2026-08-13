@@ -19,13 +19,7 @@
 #include <memory>
 #include <optional>
 
-/* Opt-in performance instrumentation for the whole Curve Patch re-stamp. Shared here so the single
- * toggle drives both the session-level timing in `paint_curve_patch_session.cc` (the `DEBUG-cpatch`
- * line: restore/ribbon/apply) and the per-sub-phase Image-effect breakdown in
- * `paint_curve_patch_effect_image.cc` (the `DEBUG-cpatch-image` line). Must stay 0 outside a
- * measurement pass: the reports write to stdout and flush on every interactive re-stamp. Grep
- * `DEBUG-cpatch` for every touch point. */
-#define CURVE_PATCH_PROFILING 0
+#include "paint_curve_patch_profile.hh"
 
 namespace blender {
 struct Brush;

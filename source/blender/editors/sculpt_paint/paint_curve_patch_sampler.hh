@@ -24,7 +24,7 @@
 
 #include "DNA_scene_enums.h"
 
-#include "paint_curve_patch_effect.hh" /* CURVE_PATCH_PROFILING */
+#include "paint_curve_patch_profile.hh"
 
 namespace blender {
 struct Brush;

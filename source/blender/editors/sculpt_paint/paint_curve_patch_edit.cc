@@ -886,8 +886,12 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
      * commits after a tool switch (see `curve_patch_edit_modal()`). */
     if (Brush *brush = BKE_paint_brush(&sd.paint)) {
       data->brush_at_invoke = brush;
-      data->last_synced = curve_patch_live_inputs_capture(sd.paint, *brush, *CTX_data_active_object(C));
-      data->last_synced_swap_axis = brush->curve_patch.swap_axis != 0;
+      /* Poll already requires an active object; keep the check so a missing context cannot
+       * dereference null before the modal's liveness guard runs. */
+      if (const Object *ob = CTX_data_active_object(C)) {
+        data->last_synced = curve_patch_live_inputs_capture(sd.paint, *brush, *ob);
+        data->last_synced_swap_axis = brush->curve_patch.swap_axis != 0;
+      }
     }
   }
   /* Snapshot the active tool of the viewport this patch belongs to (see
@@ -1137,8 +1141,10 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   /* Window-level modals freeze `CTX_wm_area()`/`CTX_wm_region()` at invoke time; the tracker above
    * already repointed them at the viewport actually under the cursor. Refresh the session's owned
    * `ViewContext` so hit-tests, screen projection and sculpt flushes all target the right region.
-   * During an in-flight drag that wanders over an N-panel, fall back to the last synced viewport. */
-  if (!tracker.found() && is_dragging && patch.view_context.region) {
+   * Drag over an N-panel, and modal-map keys with the cursor off the viewport (G/R/S, Alt+S),
+   * fall back to the last synced region -- otherwise transform starts against the invoke-frozen
+   * viewport after the user has been working in a split view. */
+  if (!tracker.found() && (is_dragging || is_modal_map) && patch.view_context.region) {
     tracker.use_fallback_region(patch.view_context.region);
   }
   if (tracker.found()) {
@@ -1176,6 +1182,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       }
       case CURVE_PATCH_MODAL_TRANSLATE:
       case CURVE_PATCH_MODAL_ROTATE:
+        /* Guard miss consumes the event: this is already #EVT_MODAL_MAP, so PASS_THROUGH would
+         * not re-deliver G/R to the View3D keymap the way a raw key used to. */
         if (!is_dragging && curve_patch_active_point_is_valid(patch)) {
           WM_operator_name_call(C,
                                 event->val == CURVE_PATCH_MODAL_TRANSLATE ? "transform.translate" :
@@ -1779,10 +1787,21 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         }
       }
       break;
+    case EVT_ZKEY:
+      /* Undo/redo live on the modal map. A raw Z with Ctrl/Cmd means the map did not convert
+       * the event: unbound, or a key-config (Industry Compatible) that never listed this map
+       * and so #WM_keymap_active falls back to the empty defaultconf map. Passing through
+       * would reach global undo and pop a committed step out from under `orig_positions` --
+       * already burned once when this modal let Ctrl+Z leak. Swallow the chord so the
+       * invariant holds in C regardless of whether the map has items. Plain Z still reaches
+       * Sculpt Mode's shading pie. Shift is included so Ctrl+Shift+Z cannot global-redo either. */
+      if (event->val == KM_PRESS && (event->modifier & (KM_CTRL | KM_OSKEY))) {
+        return OPERATOR_RUNNING_MODAL;
+      }
+      return OPERATOR_PASS_THROUGH;
     case EVT_RETKEY:
     case EVT_PADENTER:
     case EVT_ESCKEY:
-    case EVT_ZKEY:
     case EVT_CKEY:
     case EVT_YKEY:
     case EVT_GKEY:
@@ -1791,7 +1810,9 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     case EVT_DELKEY:
       /* Bound through #curve_patch_edit_modal_keymap; WM converts a match to #EVT_MODAL_MAP
        * before this function runs. Reaching here means the map did not claim the event (unbound,
-       * or a modifier combination the map does not own -- plain Z, Ctrl+S). */
+       * or a modifier combination the map does not own -- plain Z is handled above, Ctrl+S,
+       * Ctrl+C, Ctrl+Y). C/Y/G/R/S on the map are clean keys only; modified chords pass through
+       * so they can reach the rest of the keymap. */
       return OPERATOR_PASS_THROUGH;
     default:
       /* Anything we don't explicitly recognise here -- middle-mouse orbit, wheel/trackpad zoom,
@@ -1930,7 +1951,9 @@ wmKeyMap *curve_patch_edit_modal_keymap(wmKeyConfig *keyconf)
   keymap = WM_modalkeymap_ensure(keyconf, name, modal_items);
   /* Bindings live in `blender_default.py` so key-config merge cannot empty the map (the trap a
    * C-only tool keymap hit) and so the user can rebind them. This function only attaches the enum
-   * and assigns it to the operator. */
+   * and assigns it to the operator. Industry Compatible (and any preset that does not list this
+   * map) therefore has an empty item list; the modal still swallows Ctrl/Cmd+Z in the raw
+   * `EVT_ZKEY` case so global undo cannot leak. */
   WM_modalkeymap_assign(keymap, "SCULPT_OT_curve_patch_edit");
   return keymap;
 }

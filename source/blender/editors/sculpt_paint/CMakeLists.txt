@@ -135,6 +135,7 @@ set(SRC
   paint_curve_patch_apply.hh
   paint_curve_patch_effect.hh
   paint_curve_patch_effect_common.hh
+  paint_curve_patch_profile.hh
   paint_curve_patch_sampler.hh
   paint_curve_patch_session.hh
   paint_intern.hh

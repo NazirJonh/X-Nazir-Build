@@ -54,8 +54,9 @@
 #include "mesh/sculpt_undo.hh"
 
 /* `CURVE_PATCH_PROFILING` (the `DEBUG-cpatch` timing below) is defined in
- * `paint_curve_patch_effect.hh`, pulled in via `paint_curve_patch_session.hh`, so one toggle also
- * drives the Image-effect's `DEBUG-cpatch-image` sub-phase breakdown. */
+ * `paint_curve_patch_profile.hh`, pulled in via `paint_curve_patch_effect.hh` /
+ * `paint_curve_patch_session.hh`, so one toggle also drives the Image-effect's
+ * `DEBUG-cpatch-image` sub-phase breakdown. */
 
 namespace blender::ed::sculpt_paint {
 

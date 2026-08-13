@@ -836,6 +836,7 @@ void ED_keymap_paint(wmKeyConfig *keyconf)
     WM_keymap_add_item(keymap, "PAINTCURVE_OT_duplicate_move", &params);
   }
   paintcurve_slide_modal_keymap(keyconf);
+  curve_patch_edit_modal_keymap(keyconf);
 
   /* Sculpt mode */
   keymap = WM_keymap_ensure(keyconf, "Sculpt", SPACE_EMPTY, RGN_TYPE_WINDOW);

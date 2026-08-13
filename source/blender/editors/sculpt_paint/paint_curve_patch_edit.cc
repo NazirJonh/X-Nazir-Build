@@ -10,18 +10,16 @@
  *
  * A single, persistent modal operator (`SCULPT_OT_curve_patch_edit`) owns every event for the
  * whole live-edit session -- point/handle/segment/radius drag, insert, delete, texture-axis
- * toggle, and Enter/Esc commit/cancel are all plain internal function calls from one
- * `switch (event->type)`, not separate `wmOperatorType`s dispatched through a `wmKeyMap`. An
- * earlier version of this file *did* split each action into its own short-lived operator bound
- * via a procedural C++ keymap (matching how `builtin.curves_edit`'s `PAINTCURVE_OT_slide` etc.
- * work) -- that approach was reverted after it reliably left the installed keymap with zero
- * items at dispatch time (`WM_keymap_poll()` warning "empty keymap 'Curve Patch Edit'" on every
- * event, confirmed even with `--factory-startup`). Blender's key-config merge machinery
- * (`WM_keyconfig_update_ex()`, `wm_keymap.cc`) is built around keymaps a Python preset
- * (`blender_default.py`) knows about; a keymap that exists *only* on the C side and auto-installs
- * mid-session (rather than being a manually-selected tool keymap) falls into a poorly-exercised
- * corner of that system. Rather than keep fighting it, this file avoids `wmKeyMap`/`WM_keyconfig_*`
- * entirely for Curve Patch's own interactions.
+ * toggle, and Enter/Esc commit/cancel. Mouse interaction stays as `switch (event->type)` because
+ * hit-tests depend on cursor position. Keyboard actions go through a `WM_modalkeymap` attached to
+ * this operator (`curve_patch_edit_modal_keymap`), the same pattern as `PAINTCURVE_OT_slide`.
+ *
+ * That is NOT a tool `wmKeyMap` of small operators. An earlier version split each action into its
+ * own short-lived operator bound via a procedural C++ keymap; that left the installed keymap with
+ * zero items at dispatch time (`WM_keymap_poll()` warning "empty keymap 'Curve Patch Edit'").
+ * Blender's key-config merge is built around keymaps a Python preset knows about. A modal keymap
+ * assigned to the operator type does not go through that path; bindings live in
+ * `blender_default.py` so merge cannot empty the map, and so the user can rebind them.
  *
  * The mouse-delta drag math below mirrors the "move entire point" path of `paintcurve_slide`'s
  * modal (`paint_curve.cc`, `paintcurve_apply_handle_move_3d`) and the radius-handle math of
@@ -91,6 +89,7 @@
 #include "UI_interface_layout.hh"
 
 #include "WM_api.hh"
+#include "WM_keymap.hh"
 #include "WM_types.hh"
 
 #include "mesh/sculpt_intern.hh"
@@ -98,6 +97,20 @@
 #include "paint_curve_patch_session.hh"
 
 namespace blender::ed::sculpt_paint {
+
+enum {
+  CURVE_PATCH_MODAL_CONFIRM = 0,
+  CURVE_PATCH_MODAL_CANCEL = 1,
+  CURVE_PATCH_MODAL_UNDO = 2,
+  CURVE_PATCH_MODAL_REDO = 3,
+  CURVE_PATCH_MODAL_TOGGLE_CYCLIC = 4,
+  CURVE_PATCH_MODAL_SWAP_AXIS = 5,
+  CURVE_PATCH_MODAL_TRANSLATE = 6,
+  CURVE_PATCH_MODAL_ROTATE = 7,
+  CURVE_PATCH_MODAL_SCALE = 8,
+  CURVE_PATCH_MODAL_RADIUS = 9,
+  CURVE_PATCH_MODAL_DELETE = 10,
+};
 
 /* Cheap order-sensitive digest of a brush's Curve Patch texture list, used only to detect that the
  * list changed and the patch must be re-stamped. Not a hash with any security or collision
@@ -131,6 +144,81 @@ static uint64_t curve_patch_texture_pointer_digest(const Brush &brush)
   return digest;
 }
 
+/**
+ * Live inputs that affect a re-stamp but are not in #bke::CurvePatchParams.
+ *
+ * A new brush field that is not frozen must land in one of two places:
+ * - #bke::CurvePatchParams, if it participates in the geometry build
+ *   (#curve_patch_params_live_overlay / `operator==` then triggers the re-stamp).
+ * - Here, if it is sampling/strength/color/texture identity. Capture at invoke and compare
+ *   each poll; missing a field means the UI changes and the patch does not.
+ *
+ * `swap_axis` is neither: it is session-owned and lives on
+ * #CurvePatchEditOpData::last_synced_swap_axis so the poll can tell a brush change from a hotkey.
+ */
+struct CurvePatchLiveInputs {
+  float alpha = -1.0f;
+  bool dir_in = false;
+  int symm = -1;
+  int stamp_tex_source = -1;
+  int ribbon_tex_source = -1;
+  float cap_start_length = -1.0f;
+  float cap_end_length = -1.0f;
+  uint64_t texture_list_digest = 0;
+  uint64_t texture_pointer_digest = 0;
+  const void *cap_tex_start = nullptr;
+  const void *cap_tex_middle = nullptr;
+  const void *cap_tex_end = nullptr;
+  float2 tex_size = float2(0.0f);
+  float2 tex_ofs = float2(0.0f);
+  const void *tex = nullptr;
+  uint64_t tex_edit_count = 0;
+  float3 brush_color = float3(-1.0f);
+  int falloff_preset = -1;
+  int falloff_curve_ts = -1;
+
+  friend bool operator==(const CurvePatchLiveInputs &a, const CurvePatchLiveInputs &b) = default;
+
+  /** True when the set of sampled images or their mapping changed -- cap-length / slot-weight
+   * edits compare unequal above but return false here, so a slider drag does not rebuild the
+   * texture pool. */
+  bool needs_texture_pool_rebuild(const CurvePatchLiveInputs &prev) const
+  {
+    return tex != prev.tex || tex_edit_count != prev.tex_edit_count || tex_size != prev.tex_size ||
+           tex_ofs != prev.tex_ofs || texture_pointer_digest != prev.texture_pointer_digest ||
+           cap_tex_start != prev.cap_tex_start || cap_tex_middle != prev.cap_tex_middle ||
+           cap_tex_end != prev.cap_tex_end;
+  }
+};
+
+static CurvePatchLiveInputs curve_patch_live_inputs_capture(const Paint &paint,
+                                                            const Brush &brush,
+                                                            const Object &ob)
+{
+  CurvePatchLiveInputs in;
+  in.alpha = BKE_brush_alpha_get(&paint, &brush);
+  in.dir_in = (brush.flag & BRUSH_DIR_IN) != 0;
+  in.symm = mesh_symmetry_xyz_get(ob);
+  in.stamp_tex_source = brush.curve_patch.stamp_texture_source;
+  in.ribbon_tex_source = brush.curve_patch.ribbon_texture_source;
+  in.cap_start_length = brush.curve_patch.cap_start_length;
+  in.cap_end_length = brush.curve_patch.cap_end_length;
+  in.texture_list_digest = curve_patch_texture_list_digest(brush);
+  in.texture_pointer_digest = curve_patch_texture_pointer_digest(brush);
+  in.cap_tex_start = brush.curve_patch.tex_start;
+  in.cap_tex_middle = brush.curve_patch.tex_middle;
+  in.cap_tex_end = brush.curve_patch.tex_end;
+  in.tex_size = float2(brush.mtex.size[0], brush.mtex.size[1]);
+  in.tex_ofs = float2(brush.mtex.ofs[0], brush.mtex.ofs[1]);
+  in.tex = brush.mtex.tex;
+  in.tex_edit_count = BKE_paint_get_overlay_texture_edit_count();
+  in.brush_color = BKE_brush_color_get(&paint, &brush);
+  in.falloff_preset = brush.curve_distance_falloff_preset;
+  in.falloff_curve_ts = brush.curve_distance_falloff ? brush.curve_distance_falloff->changed_timestamp :
+                                                       0;
+  return in;
+}
+
 /* NOTE: the active point index lives on `CurvePatchSession`, not here -- the context menu's operators
  * cannot reach a running modal's `op->customdata`. See `CurvePatchEditState::active_point`. */
 struct CurvePatchEditOpData {
@@ -158,73 +246,15 @@ struct CurvePatchEditOpData {
    * `paintcurve_slide_radius_invoke`, `paint_curve.cc:2653-2656`); reused unchanged for every
    * MOUSEMOVE of that drag via `paintcurve_radius_from_handle_screen_pos()`. */
   PaintCurveRadiusHandleScreen radius_handle = {};
-  /* Last brush Strength slider value this modal re-stamped with. The brush strength is applied
-   * live (not frozen -- see `CurvePatchSession::params`), so `curve_patch_edit_modal()` compares
-   * the current `BKE_brush_alpha_get()` against this every event and re-stamps when it changes,
-   * making a slider drag update the relief in real time. Seeded at invoke to the current value so
-   * the first event does not re-stamp spuriously. */
-  float last_synced_alpha = -1.0f;
-  /* Last brush direction (Add vs Subtract, `BRUSH_DIR_IN`) this modal re-stamped with. Like the
-   * strength above, the direction is read live -- `brush_strength()` folds it in via
-   * `brush_flip()`, so `cache.bstrength` (and thus the relief's sign) flips with the brush's
-   * Add/Subtract toggle. Watched here so toggling it re-stamps in real time. Seeded at invoke. */
-  bool last_synced_dir_in = false;
-  /* Last mesh mirror symmetry this modal re-stamped with. Read live so toggling Mirror X/Y/Z
-   * re-projects immediately; it is applied by `do_symmetrical_brush_actions()` inside the re-stamp
-   * itself, so this only has to TRIGGER one. Seeded at invoke.
-   *
-   * Everything the brush contributes to #bke::CurvePatchParams -- Length mode/Repeats, end falloff,
-   * brush Size, the Stamps mode/projection/randomization, Spacing, Jitter and the stamp rotation --
-   * needs no watchdog of its own: the poll rebuilds the whole parameter block through
-   * #curve_patch_params_from_brush and compares it against the session's copy in one shot. Each of
-   * those used to be a hand-written pair of fields here that every new parameter had to remember to
-   * extend. */
-  int last_synced_symm = -1;
-  /* Multi-texture watch. The list's contents have no single scalar to compare, so two cheap
-   * digests stand in for one: `last_synced_texture_list_digest` folds in both slot pointers and
-   * weights and drives the re-stamp trigger (`multi_texture_changed`); the narrower
-   * `last_synced_texture_pointer_digest` folds in only the pointers and drives the `ImagePool`
-   * rebuild (`texture_identity_changed`) below, which only needs to notice a change to WHICH
-   * images are sampled, not how they are weighted. */
-  int last_synced_stamp_tex_source = -1;
-  int last_synced_ribbon_tex_source = -1;
-  float last_synced_cap_start_length = -1.0f;
-  float last_synced_cap_end_length = -1.0f;
-  uint64_t last_synced_texture_list_digest = 0;
-  uint64_t last_synced_texture_pointer_digest = 0;
-  const void *last_synced_cap_tex[3] = {nullptr, nullptr, nullptr};
-  /* Last `BrushCurvePatchSettings::swap_axis` this modal saw ON THE BRUSH -- and the one watchdog
-   * that
-   * is not merely a re-stamp trigger. `CurvePatchParams::swap_axis` is owned by the session as much
-   * as by the brush: the S hotkey and the session undo stack both write it without touching the
-   * brush, so the poll may only push the brush's value across when the BRUSH itself changed. That
-   * question cannot be answered from the two current values alone, which is why this one field
-   * survives the collapse into #curve_patch_params_from_brush. Seeded at invoke. */
+  /* Live inputs that are not in #bke::CurvePatchParams. Seeded at invoke so the first poll does
+   * not re-stamp against defaults. See #CurvePatchLiveInputs. */
+  CurvePatchLiveInputs last_synced;
+  /* Last `BrushCurvePatchSettings::swap_axis` this modal saw ON THE BRUSH -- the one watchdog
+   * that is not merely a re-stamp trigger. `CurvePatchParams::swap_axis` is owned by the session
+   * as much as by the brush: the Y hotkey and the session undo stack both write it without
+   * touching the brush, so the poll may only push the brush's value across when the BRUSH itself
+   * changed. That question cannot be answered from the two current values alone. Seeded at invoke. */
   bool last_synced_swap_axis = false;
-  /* Last texture and texture-mapping state this modal re-stamped with. The relief already reads
-   * `brush.mtex` live on every re-stamp (size/offset/`tex`), so these only need a re-stamp TRIGGER:
-   * when the assigned texture or its mapping size/offset changes, re-project. Edits to the texture
-   * DATABLOCK itself (procedural params, image swap, etc.) are caught via the
-   * `BKE_paint_get_overlay_texture_edit_count()` monotonic counter below -- the brush texture is
-   * not in the depsgraph, so `Tex_Runtime::last_update` on the original never bumps and cannot be
-   * used here. */
-  float last_synced_tex_size[2] = {0.0f, 0.0f};
-  float last_synced_tex_ofs[2] = {0.0f, 0.0f};
-  const void *last_synced_tex = nullptr;
-  uint64_t last_synced_tex_edit_count = 0;
-  /* Last brush primary color this modal re-stamped with. The color/image effects read
-   * `BKE_brush_color_get()` live on every re-stamp, but unlike strength or texture mapping there is
-   * no field in #bke::CurvePatchParams to compare -- a color-picker drag would otherwise leave the
-   * patch frozen until some unrelated brush setting changed. */
-  float3 last_synced_brush_color = float3(-1.0f);
-  /* Last brush Falloff (distance falloff) this modal re-stamped with. The relief reads the falloff
-   * live on every re-stamp via `BKE_brush_curve_strength()`, which folds in
-   * `Brush::curve_distance_falloff_preset` and the custom `curve_distance_falloff` CurveMapping.
-   * So, like the texture above, these only need to trigger a re-stamp on change: the preset for a
-   * shape switch, and the CurveMapping's `changed_timestamp` (bumped by any edit to the custom
-   * curve, see #BKE_curvemapping_changed). Seeded at invoke. */
-  int last_synced_falloff_preset = -1;
-  int last_synced_falloff_curve_ts = -1;
   /* Steady-cadence timer (see `curve_patch_edit_invoke`). The live-sync poll at the top of
    * `curve_patch_edit_modal` only runs on window events, so a discrete brush change made in a panel
    * with no follow-up event -- e.g. picking a texture or image from a browse menu -- would not
@@ -808,23 +838,34 @@ static void curve_patch_edit_context_menu_open(bContext *C)
 
 /** \} */
 
-/* The keys are still matched by name in the modal below rather than through a modal keymap, so
- * #WorkspaceStatus::opmodal (which reads one) cannot be used -- each entry names its key icon
- * directly. The gain over the raw status string this replaced is the key ICONS and the translation
- * of every label. */
+/* The keys are read from this operator's modal keymap, so #WorkspaceStatus::opmodal can show
+ * whatever the user rebound them to. */
 static void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &patch)
 {
   WorkspaceStatus status(C);
-  status.item(IFACE_("Commit"), ICON_EVENT_RETURN);
-  status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
-  status.item(IFACE_("Undo"), ICON_EVENT_CTRL, ICON_EVENT_Z);
-  /* Two whole strings rather than one with a substituted axis letter: a translator needs the
-   * sentence, and neither half reads as a sentence on its own. */
-  status.item(patch.active_item().params.swap_axis ? IFACE_("Swap Texture Axis (now U)") :
-                                       IFACE_("Swap Texture Axis (now V)"),
-              ICON_EVENT_Y);
-  status.item(curve_patch_is_cyclic(patch) ? IFACE_("Open Curve") : IFACE_("Close Curve"),
-              ICON_EVENT_C);
+  const wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_curve_patch_edit", true);
+  if (ot && ot->modalkeymap) {
+    status.opmodal(IFACE_("Commit"), ot, CURVE_PATCH_MODAL_CONFIRM);
+    status.opmodal(IFACE_("Cancel"), ot, CURVE_PATCH_MODAL_CANCEL);
+    status.opmodal(IFACE_("Undo"), ot, CURVE_PATCH_MODAL_UNDO);
+    status.opmodal(patch.active_item().params.swap_axis ? IFACE_("Swap Texture Axis (now U)") :
+                                                          IFACE_("Swap Texture Axis (now V)"),
+                   ot,
+                   CURVE_PATCH_MODAL_SWAP_AXIS);
+    status.opmodal(curve_patch_is_cyclic(patch) ? IFACE_("Open Curve") : IFACE_("Close Curve"),
+                   ot,
+                   CURVE_PATCH_MODAL_TOGGLE_CYCLIC);
+  }
+  else {
+    status.item(IFACE_("Commit"), ICON_EVENT_RETURN);
+    status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
+    status.item(IFACE_("Undo"), ICON_EVENT_CTRL, ICON_EVENT_Z);
+    status.item(patch.active_item().params.swap_axis ? IFACE_("Swap Texture Axis (now U)") :
+                                                       IFACE_("Swap Texture Axis (now V)"),
+                ICON_EVENT_Y);
+    status.item(curve_patch_is_cyclic(patch) ? IFACE_("Open Curve") : IFACE_("Close Curve"),
+                ICON_EVENT_C);
+  }
   /* Reseed has no shortcut -- this modal has no free key left -- so advertise the route that does
    * reach it. Meaningless in Ribbon mode, which has nothing random to re-roll. */
   if (patch.active_item().params.stamp_mode == CurvePatchStampMode::Stamps) {
@@ -836,9 +877,8 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
 {
   CurvePatchEditOpData *data = MEM_new<CurvePatchEditOpData>(__func__);
   op->customdata = data;
-  /* Seed the live-strength watchdog with the current slider value so the first modal event does
-   * not read a "change" against the default and re-stamp needlessly (see
-   * `CurvePatchEditOpData::last_synced_alpha`). */
+  /* Seed the live-input watchdog so the first poll does not re-stamp against defaults
+   * (see #CurvePatchLiveInputs). */
   ToolSettings *tool_settings = CTX_data_tool_settings(C);
   if (tool_settings && tool_settings->sculpt) {
     Sculpt &sd = *tool_settings->sculpt;
@@ -846,33 +886,9 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C, wmOperator *op, con
      * commits after a tool switch (see `curve_patch_edit_modal()`). */
     if (Brush *brush = BKE_paint_brush(&sd.paint)) {
       data->brush_at_invoke = brush;
-      data->last_synced_alpha = BKE_brush_alpha_get(&sd.paint, brush);
-      data->last_synced_dir_in = (brush->flag & BRUSH_DIR_IN) != 0;
-      data->last_synced_stamp_tex_source = brush->curve_patch.stamp_texture_source;
-      data->last_synced_ribbon_tex_source = brush->curve_patch.ribbon_texture_source;
-      data->last_synced_cap_start_length = brush->curve_patch.cap_start_length;
-      data->last_synced_cap_end_length = brush->curve_patch.cap_end_length;
-      data->last_synced_texture_list_digest = curve_patch_texture_list_digest(*brush);
-      data->last_synced_texture_pointer_digest = curve_patch_texture_pointer_digest(*brush);
-      data->last_synced_cap_tex[0] = brush->curve_patch.tex_start;
-      data->last_synced_cap_tex[1] = brush->curve_patch.tex_middle;
-      data->last_synced_cap_tex[2] = brush->curve_patch.tex_end;
+      data->last_synced = curve_patch_live_inputs_capture(sd.paint, *brush, *CTX_data_active_object(C));
       data->last_synced_swap_axis = brush->curve_patch.swap_axis != 0;
-      data->last_synced_tex_size[0] = brush->mtex.size[0];
-      data->last_synced_tex_size[1] = brush->mtex.size[1];
-      data->last_synced_tex_ofs[0] = brush->mtex.ofs[0];
-      data->last_synced_tex_ofs[1] = brush->mtex.ofs[1];
-      data->last_synced_tex = brush->mtex.tex;
-      data->last_synced_tex_edit_count = BKE_paint_get_overlay_texture_edit_count();
-      data->last_synced_brush_color = BKE_brush_color_get(&sd.paint, brush);
-      data->last_synced_falloff_preset = brush->curve_distance_falloff_preset;
-      data->last_synced_falloff_curve_ts = brush->curve_distance_falloff ?
-                                               brush->curve_distance_falloff->changed_timestamp :
-                                               0;
     }
-  }
-  if (const Object *ob = CTX_data_active_object(C)) {
-    data->last_synced_symm = mesh_symmetry_xyz_get(*ob);
   }
   /* Snapshot the active tool of the viewport this patch belongs to (see
    * `CurvePatchEditOpData::tool_idname_at_invoke`). `CTX_wm_area()` is that viewport both here and
@@ -952,12 +968,10 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
 
   /* The live patch's backing data can vanish out from under this modal operator without an
    * explicit Enter/Esc: unhandled keys (see the `default:` case below) deliberately pass through
-   * to the ordinary View3D keymap, and a global Undo (Ctrl+Z) reaching it that way tears down and
-   * reallocates the active object's `SculptSession` via the ordinary undo-restore path -- freeing
-   * `curve_patch_session` out from under this operator without ever calling
-   * #curve_patch_edit_finish. `curve_patch_edit_poll()` only guards the initial invoke, so without
-   * this re-check here, the very next event (even a plain MOUSEMOVE) dereferences a dangling
-   * `SculptSession`/`curve_patch_session` in #patch_cache_of and crashes. */
+   * to the ordinary View3D keymap. A session teardown that never calls #curve_patch_edit_finish
+   * (object free, a committed undo from another operator) would otherwise leave the next event
+   * dereferencing a dangling `SculptSession`/`curve_patch_session` in #patch_cache_of.
+   * `curve_patch_edit_poll()` only guards the initial invoke. */
   const Object *ob_check = CTX_data_active_object(C);
   if (!ob_check || !ob_check->runtime->sculpt_session ||
       !ob_check->runtime->sculpt_session->curve_patch_session)
@@ -1012,171 +1026,47 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   CurvePatchSession &patch = patch_cache_of(C);
   Object &ob = *CTX_data_active_object(C);
 
-  /* Live brush sync. Neither the Strength slider nor the Add/Subtract direction is frozen into the
-   * patch (unlike radius/axis -- see `CurvePatchSession::params`): every re-stamp reads them live
-   * via `brush_strength()` (which folds the direction in through `brush_flip()`, so `cache.bstrength`
-   * -- and thus the relief's sign -- flips with the Add/Subtract toggle). So whenever either changes
-   * -- typically a slider drag or a direction toggle in the Properties/N-panel/header, whose events
-   * this window-level modal sees before they pass through to the UI -- re-stamp so the relief tracks
-   * the brush in real time. Only re-stamp on an ACTUAL change (exact compares), so ordinary events
-   * stay free. `BKE_brush_alpha_get()` is the same UI value `brush_strength()` reads (unified-strength
-   * aware). Deliberately kept ABOVE the pass-through gate below, so a change made OUTSIDE the viewport
-   * (which the gate would otherwise pass straight through) is still caught here first. */
+  /* Live brush sync. Frozen per-patch fields stay on `item.params`; everything else is overlaid
+   * from the live brush by #curve_patch_params_live_overlay, plus #CurvePatchLiveInputs for
+   * strength/color/textures/falloff/symmetry which are not in params. Only re-stamp on an actual
+   * change. Deliberately ABOVE the pass-through gate so a panel edit outside the viewport is
+   * still caught. */
   const ToolSettings *tool_settings = CTX_data_tool_settings(C);
   if (tool_settings && tool_settings->sculpt) {
     const Sculpt &sd = *tool_settings->sculpt;
     if (const Brush *brush = BKE_paint_brush_for_read(&sd.paint)) {
-      const float alpha = BKE_brush_alpha_get(&sd.paint, brush);
-      const bool dir_in = (brush->flag & BRUSH_DIR_IN) != 0;
-      /* Multi-texture settings. The relief reads all of them live off the brush and the session, so
-       * these exist purely to trigger a re-stamp -- nothing is copied into `params`. */
-      const int stamp_tex_source = brush->curve_patch.stamp_texture_source;
-      const int ribbon_tex_source = brush->curve_patch.ribbon_texture_source;
-      const float cap_start_length = brush->curve_patch.cap_start_length;
-      const float cap_end_length = brush->curve_patch.cap_end_length;
-      const uint64_t texture_list_digest = curve_patch_texture_list_digest(*brush);
-      const uint64_t texture_pointer_digest = curve_patch_texture_pointer_digest(*brush);
-      const void *cap_tex[3] = {brush->curve_patch.tex_start,
-                                brush->curve_patch.tex_middle,
-                                brush->curve_patch.tex_end};
-      const bool multi_texture_changed =
-          stamp_tex_source != data.last_synced_stamp_tex_source ||
-          ribbon_tex_source != data.last_synced_ribbon_tex_source ||
-          cap_start_length != data.last_synced_cap_start_length ||
-          cap_end_length != data.last_synced_cap_end_length ||
-          texture_list_digest != data.last_synced_texture_list_digest ||
-          cap_tex[0] != data.last_synced_cap_tex[0] ||
-          cap_tex[1] != data.last_synced_cap_tex[1] ||
-          cap_tex[2] != data.last_synced_cap_tex[2];
-      /* Narrower than `multi_texture_changed` above: true only when the set of sampled IMAGES
-       * changed -- a cap texture reassignment or a list slot added/removed/retargeted/reordered --
-       * as opposed to a cap-length drag or a slot weight edit, which re-stamp but keep sampling the
-       * same images. Drives the texture-pool rebuild gate below; a cap-length or weight-only change
-       * must not free/reallocate the pool on every tick of a slider drag. */
-      const bool texture_identity_changed =
-          texture_pointer_digest != data.last_synced_texture_pointer_digest ||
-          cap_tex[0] != data.last_synced_cap_tex[0] ||
-          cap_tex[1] != data.last_synced_cap_tex[1] ||
-          cap_tex[2] != data.last_synced_cap_tex[2];
-      /* Mesh mirror symmetry is read live too, so toggling Mirror X/Y/Z re-projects immediately; it
-       * is applied by `do_symmetrical_brush_actions()` inside the re-stamp itself. */
-      const int symm = mesh_symmetry_xyz_get(ob);
+      const CurvePatchLiveInputs live_inputs = curve_patch_live_inputs_capture(
+          sd.paint, *brush, ob);
       /* The one watchdog that arbitrates rather than merely triggers -- see
        * `CurvePatchEditOpData::last_synced_swap_axis`. Recorded unconditionally: it tracks the
-       * BRUSH's value, and the S hotkey may well have already made the session agree with the new
+       * BRUSH's value, and the Y hotkey may well have already made the session agree with the new
        * one, in which case the parameter compare below finds nothing to do and must not leave this
        * reporting a change forever. */
       const bool swap_axis = brush->curve_patch.swap_axis != 0;
       const bool brush_swap_axis_changed = swap_axis != data.last_synced_swap_axis;
       data.last_synced_swap_axis = swap_axis;
-      const void *tex = brush->mtex.tex;
-      /* Any edit to the brush's primary texture -- assign/clear, a mapping tweak, or an edit to
-       * the texture datablock itself -- bumps this monotonic counter (see
-       * `BKE_paint_invalidate_overlay_tex`). It replaces the original texture's `last_update`,
-       * which never bumps because brush textures are not evaluated by the depsgraph. */
-      const uint64_t tex_edit_count = BKE_paint_get_overlay_texture_edit_count();
-      /* Brush Falloff (distance falloff) is read live by the relief through
-       * `BKE_brush_curve_strength()`, so watch it as a re-stamp trigger only: the preset for a
-       * shape switch, and the custom curve's `changed_timestamp` for point edits. */
-      const int falloff_preset = brush->curve_distance_falloff_preset;
-      const int falloff_curve_ts = brush->curve_distance_falloff ?
-                                       brush->curve_distance_falloff->changed_timestamp :
-                                       0;
-      const bool tex_changed = tex != data.last_synced_tex ||
-                               tex_edit_count != data.last_synced_tex_edit_count ||
-                               brush->mtex.size[0] != data.last_synced_tex_size[0] ||
-                               brush->mtex.size[1] != data.last_synced_tex_size[1] ||
-                               brush->mtex.ofs[0] != data.last_synced_tex_ofs[0] ||
-                               brush->mtex.ofs[1] != data.last_synced_tex_ofs[1];
-      const float3 brush_color = BKE_brush_color_get(&sd.paint, brush);
-      const bool color_changed = brush_color != data.last_synced_brush_color;
-      /* Every brush-driven build parameter in one shot, instead of the two dozen hand-written field
-       * compares this used to be. The values the brush cannot supply come from the session: the
-       * frozen ones, and `swap_axis`, which the brush may only overwrite when the BRUSH is what
-       * changed (the S hotkey and the session undo stack write it too).
-       *
-       * A zero `radius_per_size` means the patch started with a zero brush size, which cannot happen
-       * through the UI; guard anyway rather than collapse the patch to nothing. */
+
       const int brush_size = BKE_brush_size_get(&sd.paint, brush);
-
-      /* Check if any parameter changed by comparing against the ACTIVE patch. All patches share
-       * the same brush-driven parameters, so we only need to check once. */
       CurvePatchItem &active_item = patch.active_item();
-      const float radius = active_item.params.radius_per_size > 0.0f ?
-                               active_item.params.radius_per_size * float(brush_size) :
-                               active_item.params.radius;
-      bke::CurvePatchParams live = curve_patch_params_from_brush(
-          *brush,
-          radius,
-          active_item.params.radius_per_size,
-          active_item.params.plane_normal,
-          active_item.params.stamp_seed,
-          brush_swap_axis_changed ? swap_axis : active_item.params.swap_axis);
-      /* Carried across rather than defaulted: this poll never runs inside the commit's
-       * final-quality build, but making the compare depend on that would be a trap. */
-      live.final_quality = active_item.params.final_quality;
+      const bke::CurvePatchParams live = curve_patch_params_live_overlay(
+          *brush, active_item.params, brush_size, brush_swap_axis_changed);
 
-      if (live != active_item.params || alpha != data.last_synced_alpha ||
-          dir_in != data.last_synced_dir_in || symm != data.last_synced_symm || tex_changed ||
-          color_changed || falloff_preset != data.last_synced_falloff_preset ||
-          falloff_curve_ts != data.last_synced_falloff_curve_ts || multi_texture_changed)
-      {
-        /* Update params for ALL patches, not just the active one. Each patch keeps its own
-         * plane_normal, radius_per_size, stamp_seed, and final_quality, but all other parameters
-         * come from the brush and must be synchronized across all patches. */
+      if (live != active_item.params || live_inputs != data.last_synced) {
+        /* Brush-driven fields onto every patch; frozen fields stay per-item. */
         for (CurvePatchItem &item : patch.patches) {
-          const float item_radius = item.params.radius_per_size > 0.0f ?
-                                        item.params.radius_per_size * float(brush_size) :
-                                        item.params.radius;
-          bke::CurvePatchParams item_live = curve_patch_params_from_brush(
-              *brush,
-              item_radius,
-              item.params.radius_per_size,
-              item.params.plane_normal,
-              item.params.stamp_seed,
-              brush_swap_axis_changed ? swap_axis : item.params.swap_axis);
-          item_live.final_quality = item.params.final_quality;
-          item.params = item_live;
+          item.params = curve_patch_params_live_overlay(
+              *brush, item.params, brush_size, brush_swap_axis_changed);
         }
-        data.last_synced_alpha = alpha;
-        data.last_synced_dir_in = dir_in;
-        data.last_synced_symm = symm;
-        data.last_synced_tex = tex;
-        data.last_synced_tex_edit_count = tex_edit_count;
-        data.last_synced_brush_color = brush_color;
-        data.last_synced_tex_size[0] = brush->mtex.size[0];
-        data.last_synced_tex_size[1] = brush->mtex.size[1];
-        data.last_synced_tex_ofs[0] = brush->mtex.ofs[0];
-        data.last_synced_tex_ofs[1] = brush->mtex.ofs[1];
-        data.last_synced_falloff_preset = falloff_preset;
-        data.last_synced_falloff_curve_ts = falloff_curve_ts;
-        data.last_synced_stamp_tex_source = stamp_tex_source;
-        data.last_synced_ribbon_tex_source = ribbon_tex_source;
-        data.last_synced_cap_start_length = cap_start_length;
-        data.last_synced_cap_end_length = cap_end_length;
-        data.last_synced_texture_list_digest = texture_list_digest;
-        data.last_synced_texture_pointer_digest = texture_pointer_digest;
-        data.last_synced_cap_tex[0] = cap_tex[0];
-        data.last_synced_cap_tex[1] = cap_tex[1];
-        data.last_synced_cap_tex[2] = cap_tex[2];
-        /* The relief samples the texture through the session's `ImagePool`, which caches ImBuf
-         * handles for the whole sculpt session (#SculptSession::tex_pool_ensure). A changed image --
-         * a different Image datablock on the texture, or edited pixels -- would otherwise keep
-         * sampling the old buffer. Rebuild the pool whenever the set of sampled textures' IDENTITY
-         * changes: the brush's own texture (`tex_changed`), or a cap/list texture reassignment
-         * (`texture_identity_changed`, a list/cap counterpart of the same idea). Deliberately NOT
-         * gated on the broader `multi_texture_changed`: a cap-length drag or a slot WEIGHT edit
-         * re-stamps (see `multi_texture_changed` above) but samples the same images as before, so
-         * rebuilding the pool for those would only free and reallocate it needlessly on every tick
-         * of a slider drag.
-         *
-         * Only dropped here, never rebuilt: the re-stamp two lines below reaches the effect, which
-         * creates the pool it needs through `SculptSession::tex_pool_ensure()`. */
-        if (tex_changed || texture_identity_changed) {
+        const bool rebuild_tex_pool = live_inputs.needs_texture_pool_rebuild(data.last_synced);
+        data.last_synced = live_inputs;
+        /* The relief samples through the session's `ImagePool`. Rebuild only when the set of
+         * sampled images or their mapping changed -- a cap-length or slot-weight edit re-stamps
+         * but keeps the same images, so it must not free/reallocate the pool on every slider tick.
+         * Only dropped here; the re-stamp below creates the pool through
+         * `SculptSession::tex_pool_ensure()`. */
+        if (rebuild_tex_pool) {
           ob.runtime->sculpt_session->tex_pool_invalidate();
         }
-        /* `swap_axis` and `stamp_mode` both feed the status text, so it has to be rebuilt here and
-         * not only where the modal's own hotkeys change them. */
         curve_patch_edit_status_set(C, patch);
         curve_patch_restore_and_restamp(*C, ob, patch);
         curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
@@ -1219,23 +1109,18 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
    * #ModalViewportTracker resolves that the same way the window manager itself routes events to
    * regions (#ED_area_find_region_xy_visual).
    *
-   * Enter/Esc are exempt so commit/cancel works even with the cursor off the viewport. An active
-   * drag is exempt too, so dragging a point over the N-panel or past the viewport edge does not
-   * orphan the drag or eat the `LEFTMOUSE` release that ends it. */
+   * Modal-keymap actions (Enter/Esc, undo, G/R/S, ...) are exempt so they work with the cursor
+   * off the viewport. An active drag is exempt too, so dragging a point over the N-panel or past
+   * the viewport edge does not orphan the drag or eat the `LEFTMOUSE` release that ends it. */
   const bool is_dragging = data.dragging_point || data.dragging_radius || data.dragging_handle ||
                            data.dragging_segment;
-  /* The undo chord is ours no matter where the cursor is, and `EVT_ZKEY`'s case below swallows it.
-   * Global undo while a patch is live would pop a previously committed step and move mesh vertices
-   * out from under this patch's `orig_positions` snapshot, leaving every later restore and the
-   * commit itself writing against a surface that no longer matches what was recorded. That case
-   * sits BEHIND this gate, so without lifting the chord above it the chord escaped to the global
-   * keymap whenever the cursor sat over a panel or the header -- doing exactly what it exists to
-   * prevent. Plain Z is deliberately not exempt: it belongs to Sculpt Mode's shading pie, and the
-   * case below passes it through on its own. */
-  const bool is_undo_chord = (event->type == EVT_ZKEY) &&
-                             (event->modifier & (KM_CTRL | KM_OSKEY)) != 0;
-  const bool is_commit_key = ELEM(event->type, EVT_RETKEY, EVT_PADENTER, EVT_ESCKEY) ||
-                             is_undo_chord;
+  /* Keyboard actions arrive as #EVT_MODAL_MAP once the modal keymap is assigned. Undo/confirm/
+   * cancel must reach this operator even with the cursor over a panel: global undo would pop a
+   * previously committed step out from under `orig_positions`, and Enter/Esc are the only way to
+   * leave the session from outside the viewport. Other modal-map items are exempt too -- once WM
+   * has converted the original key, passing the map event through would deliver nothing useful to
+   * the panel underneath. Plain Z is not in the map, so it still reaches Sculpt Mode's shading pie. */
+  const bool is_modal_map = event->type == EVT_MODAL_MAP;
 
   /* Constructed before the pass-through decision (not after, as the two locals it replaces used
    * to be computed): a "not found" construction never touches `CTX_wm_area()`/`CTX_wm_region()`,
@@ -1244,7 +1129,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
    * that path too, as a no-op. */
   ed::ModalViewportTracker tracker(*C, *event, SPACE_VIEW3D, RGN_TYPE_WINDOW);
   const bool over_viewport = tracker.found();
-  const bool should_pass_through = !is_dragging && !over_viewport && !is_commit_key;
+  const bool should_pass_through = !is_dragging && !over_viewport && !is_modal_map;
   if (should_pass_through) {
     return OPERATOR_PASS_THROUGH;
   }
@@ -1261,6 +1146,80 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   }
   const int event_mval[2] = {tracker.mval().x, tracker.mval().y};
 
+  if (event->type == EVT_MODAL_MAP) {
+    switch (event->val) {
+      case CURVE_PATCH_MODAL_CONFIRM:
+        return curve_patch_edit_finish(C, op, false) ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+      case CURVE_PATCH_MODAL_CANCEL:
+        curve_patch_edit_finish(C, op, true);
+        return OPERATOR_CANCELLED;
+      case CURVE_PATCH_MODAL_UNDO:
+        if (!curve_patch_undo_step_back(*C, ob, patch)) {
+          curve_patch_edit_finish(C, op, true);
+          return OPERATOR_CANCELLED;
+        }
+        break;
+      case CURVE_PATCH_MODAL_REDO:
+        curve_patch_undo_step_forward(*C, ob, patch);
+        break;
+      case CURVE_PATCH_MODAL_TOGGLE_CYCLIC:
+        curve_patch_toggle_cyclic(*C, ob, patch);
+        break;
+      case CURVE_PATCH_MODAL_SWAP_AXIS: {
+        bke::CurvePatchParams &params = patch.active_item().params;
+        params.swap_axis = !params.swap_axis;
+        curve_patch_undo_push(patch);
+        curve_patch_edit_status_set(C, patch);
+        curve_patch_restore_and_restamp(*C, ob, patch);
+        curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
+        break;
+      }
+      case CURVE_PATCH_MODAL_TRANSLATE:
+      case CURVE_PATCH_MODAL_ROTATE:
+        if (!is_dragging && curve_patch_active_point_is_valid(patch)) {
+          WM_operator_name_call(C,
+                                event->val == CURVE_PATCH_MODAL_TRANSLATE ? "transform.translate" :
+                                                                            "transform.rotate",
+                                wm::OpCallContext::InvokeDefault,
+                                nullptr,
+                                event);
+        }
+        break;
+      case CURVE_PATCH_MODAL_SCALE:
+        if (!is_dragging && curve_patch_active_point_is_valid(patch)) {
+          WM_operator_name_call(
+              C, "transform.resize", wm::OpCallContext::InvokeDefault, nullptr, event);
+        }
+        break;
+      case CURVE_PATCH_MODAL_RADIUS:
+        if (!is_dragging && curve_patch_active_point_is_valid(patch)) {
+          bke::CurvesGeometry &geom = patch.active_item().control_curve;
+          Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+          ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+          Vector<PaintCurvePoint> screen_points;
+          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+          if (!screen_points.is_empty()) {
+            data.dragging_radius = true;
+            paintcurve_radius_handle_screen_get_from_geometry(
+                geom, screen_points.data(), patch.edit.active_point, &data.radius_handle);
+          }
+        }
+        break;
+      case CURVE_PATCH_MODAL_DELETE:
+        if (curve_patch_delete_active_point(*C, ob, patch, op->reports)) {
+          data.dragging_point = false;
+          data.dragging_radius = false;
+          data.dragging_handle = false;
+          data.dragging_segment = false;
+          curve_patch_edit_snap_ctx_free(data);
+        }
+        break;
+      default:
+        break;
+    }
+    return OPERATOR_RUNNING_MODAL;
+  }
+
   /* Below this point the modal only ever ends via an explicit Enter (commit) or Esc (cancel) -- no
    * click and no mouse-leaving-the-viewport implicitly ends it. Events that don't match anything
    * below are simply consumed like any other event while the patch is live; the user must press
@@ -1273,7 +1232,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
       if (event->val == KM_PRESS && data.dragging_radius && !data.dragging_point &&
           !data.dragging_handle && !data.dragging_segment)
       {
-        /* A radius drag started by Alt+S (see `EVT_SKEY` below) has no mouse button held down
+        /* A radius drag started by Alt+S (`CURVE_PATCH_MODAL_RADIUS`) has no mouse button held down
          * the way a click-started drag does, so there is no RELEASE to end it on -- the next
          * click confirms it instead, mirroring how G/R/S transform modals confirm on click. */
         data.dragging_radius = false;
@@ -1820,124 +1779,20 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         }
       }
       break;
-    case EVT_DELKEY:
-      if (event->val == KM_PRESS) {
-        if (curve_patch_delete_active_point(*C, ob, patch, op->reports)) {
-          data.dragging_point = false;
-          data.dragging_radius = false;
-          data.dragging_handle = false;
-          data.dragging_segment = false;
-          curve_patch_edit_snap_ctx_free(data);
-        }
-      }
-      break;
-    case EVT_ZKEY:
-      /* Ctrl+Z / Ctrl+Shift+Z (Cmd on macOS) drive the SESSION undo stack, and are swallowed
-       * whatever the outcome. Letting them reach the global keymap lets `ED_OT_undo` pop the
-       * PREVIOUS committed step -- moving mesh vertices out from under this patch's
-       * `orig_positions` snapshot and leaving the session inconsistent. */
-      if ((event->modifier & (KM_CTRL | KM_OSKEY)) == 0) {
-        /* Plain Z belongs to Sculpt Mode's shading pie menu; only the undo chord is ours. */
-        return OPERATOR_PASS_THROUGH;
-      }
-      if (event->val == KM_PRESS) {
-        if (event->modifier & KM_SHIFT) {
-          curve_patch_undo_step_forward(*C, ob, patch);
-        }
-        else if (!curve_patch_undo_step_back(*C, ob, patch)) {
-          /* Back at the state the anchor stroke produced: there is no earlier in-session state, so
-           * undoing once more discards the patch itself. */
-          curve_patch_edit_finish(C, op, true);
-          return OPERATOR_CANCELLED;
-        }
-      }
-      break;
-    case EVT_CKEY:
-      /* Matches Blender's curve-editing convention for toggling a curve closed. */
-      if (event->val == KM_PRESS) {
-        curve_patch_toggle_cyclic(*C, ob, patch);
-      }
-      break;
-    case EVT_YKEY:
-      /* Deliberately NOT Tab, which this used to answer to as well: Tab belongs to the mode toggle,
-       * and swallowing it left no way to leave Sculpt Mode for the whole session. X is not an
-       * option either -- away from the curve it swaps brush colors (see `EVT_XKEY` above). S is not
-       * an option either -- this modal runs over the viewport and would swallow the S of Ctrl+S /
-       * Cmd+S save. */
-      if (event->val == KM_PRESS) {
-        bke::CurvePatchParams &params = patch.active_item().params;
-        params.swap_axis = !params.swap_axis;
-        curve_patch_undo_push(patch);
-        curve_patch_edit_status_set(C, patch);
-        curve_patch_restore_and_restamp(*C, ob, patch);
-        curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
-      }
-      break;
-    case EVT_GKEY:
-    case EVT_RKEY:
-      /* Move/Rotate the active point through the real `transform.translate`/`transform.rotate`
-       * modals -- see `TransConvertType_CurvePatch` (`transform_convert_curve_patch.cc`) for how
-       * the transform system reaches this session's active point at all. Gives axis locks,
-       * numeric input and snapping for free, matching Curve Edit's own G/R (`km_paint_curve`/
-       * `km_3d_view_tool_sculpt_curves_edit`). This modal keeps running underneath: the nested
-       * transform modal takes over event handling until its own confirm/cancel, then control
-       * returns here on the next event exactly as it does after any other pass-through. */
-      if (event->val == KM_PRESS && !is_dragging && curve_patch_active_point_is_valid(patch)) {
-        WM_operator_name_call(C,
-                              event->type == EVT_GKEY ? "transform.translate" : "transform.rotate",
-                              wm::OpCallContext::InvokeDefault,
-                              nullptr,
-                              event);
-        break;
-      }
-      return OPERATOR_PASS_THROUGH;
-    case EVT_SKEY:
-      /* Alt+S: radius drag (see below). Plain S: Scale the active point through the real
-       * `transform.resize` modal, same reasoning as G/R above -- matches Curve Edit's own S
-       * shortcut. Overrides Sculpt Mode's plain-S brush-size shortcut while a point is active,
-       * the same trade #EVT_YKEY's comment already accepts for Y over Tab. */
-      if (event->val == KM_PRESS && !(event->modifier & (KM_CTRL | KM_SHIFT | KM_OSKEY)) &&
-          !is_dragging && curve_patch_active_point_is_valid(patch))
-      {
-        if (event->modifier & KM_ALT) {
-          /* Matches Curve Edit's own radius shortcut (`transform.transform` / CURVE_SHRINKFATTEN,
-           * bound Alt+S in `km_paint_curve`/`km_3d_view_tool_sculpt_curves_edit`), implemented as
-           * a plain screen-space drag here rather than through the transform system: Curve
-           * Patch's radius is a per-point scalar attribute, not a position #TransDataPaintCurve
-           * has anywhere to carry. */
-          bke::CurvesGeometry &geom = patch.active_item().control_curve;
-          Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
-          ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
-          Vector<PaintCurvePoint> screen_points;
-          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
-          if (!screen_points.is_empty()) {
-            /* No mouse button is held for this drag (unlike grabbing the radius handle directly),
-             * so `MOUSEMOVE`'s existing `data.dragging_radius` branch is reused unchanged and the
-             * `LEFTMOUSE` press guard above confirms it on the next click instead of a release. */
-            data.dragging_radius = true;
-            paintcurve_radius_handle_screen_get_from_geometry(
-                geom, screen_points.data(), patch.edit.active_point, &data.radius_handle);
-          }
-        }
-        else {
-          WM_operator_name_call(
-              C, "transform.resize", wm::OpCallContext::InvokeDefault, nullptr, event);
-        }
-        break;
-      }
-      return OPERATOR_PASS_THROUGH;
     case EVT_RETKEY:
     case EVT_PADENTER:
-      if (event->val == KM_PRESS) {
-        return curve_patch_edit_finish(C, op, false) ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
-      }
-      break;
     case EVT_ESCKEY:
-      if (event->val == KM_PRESS) {
-        curve_patch_edit_finish(C, op, true);
-        return OPERATOR_CANCELLED;
-      }
-      break;
+    case EVT_ZKEY:
+    case EVT_CKEY:
+    case EVT_YKEY:
+    case EVT_GKEY:
+    case EVT_RKEY:
+    case EVT_SKEY:
+    case EVT_DELKEY:
+      /* Bound through #curve_patch_edit_modal_keymap; WM converts a match to #EVT_MODAL_MAP
+       * before this function runs. Reaching here means the map did not claim the event (unbound,
+       * or a modifier combination the map does not own -- plain Z, Ctrl+S). */
+      return OPERATOR_PASS_THROUGH;
     default:
       /* Anything we don't explicitly recognise here -- middle-mouse orbit, wheel/trackpad zoom,
        * NDOF motion, numpad view keys, etc. -- is not something Curve Patch editing cares about,
@@ -1957,9 +1812,10 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
        * block view navigation" -- see `editmesh_knife.cc`'s `WHEELUPMOUSE`/`WHEELDOWNMOUSE`/
        * `MOUSEPAN`/`MOUSEZOOM`/`MOUSEROTATE`/`NDOF_MOTION` cases, which return bare
        * `OPERATOR_PASS_THROUGH` for exactly this reason (knife tool famously still lets you orbit
-       * mid-cut). LEFTMOUSE, RIGHTMOUSE, MOUSEMOVE and the explicit hotkeys above are still fully
-       * consumed even on a miss (see the case bodies, all ending in a plain `break;`), so a stray
-       * click still cannot leak through to start a brush stroke on the mesh. */
+       * mid-cut). LEFTMOUSE, RIGHTMOUSE and MOUSEMOVE are still fully consumed even on a miss
+       * (see the case bodies, all ending in a plain `break;`), so a stray click still cannot leak
+       * through to start a brush stroke on the mesh. Keyboard actions go through the modal keymap;
+       * an unbound leftover (plain Z, Ctrl+S) falls through here. */
       return OPERATOR_PASS_THROUGH;
   }
 
@@ -2044,6 +1900,38 @@ static bool curve_patch_edit_finish(bContext *C, wmOperator *op, const bool is_c
 static void curve_patch_edit_cancel(bContext *C, wmOperator *op)
 {
   curve_patch_edit_finish(C, op, true);
+}
+
+wmKeyMap *curve_patch_edit_modal_keymap(wmKeyConfig *keyconf)
+{
+  static const EnumPropertyItem modal_items[] = {
+      {CURVE_PATCH_MODAL_CONFIRM, "CONFIRM", 0, "Confirm", "Commit the patch"},
+      {CURVE_PATCH_MODAL_CANCEL, "CANCEL", 0, "Cancel", "Discard the patch"},
+      {CURVE_PATCH_MODAL_UNDO, "UNDO", 0, "Undo", "Undo the last in-session edit"},
+      {CURVE_PATCH_MODAL_REDO, "REDO", 0, "Redo", "Redo the last in-session edit"},
+      {CURVE_PATCH_MODAL_TOGGLE_CYCLIC, "TOGGLE_CYCLIC", 0, "Toggle Cyclic", "Close or open the curve"},
+      {CURVE_PATCH_MODAL_SWAP_AXIS, "SWAP_AXIS", 0, "Swap Texture Axis", "Swap the texture U/V axes"},
+      {CURVE_PATCH_MODAL_TRANSLATE, "TRANSLATE", 0, "Move", "Move the active point"},
+      {CURVE_PATCH_MODAL_ROTATE, "ROTATE", 0, "Rotate", "Rotate the active point"},
+      {CURVE_PATCH_MODAL_SCALE, "SCALE", 0, "Scale", "Scale the active point"},
+      {CURVE_PATCH_MODAL_RADIUS, "RADIUS", 0, "Radius", "Drag the active point's radius"},
+      {CURVE_PATCH_MODAL_DELETE, "DELETE", 0, "Delete Point", "Delete the active point"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const char *name = "Curve Patch Edit Modal Map";
+  wmKeyMap *keymap = WM_modalkeymap_find(keyconf, name);
+  if (keymap && keymap->modal_items) {
+    WM_modalkeymap_assign(keymap, "SCULPT_OT_curve_patch_edit");
+    return keymap;
+  }
+
+  keymap = WM_modalkeymap_ensure(keyconf, name, modal_items);
+  /* Bindings live in `blender_default.py` so key-config merge cannot empty the map (the trap a
+   * C-only tool keymap hit) and so the user can rebind them. This function only attaches the enum
+   * and assigns it to the operator. */
+  WM_modalkeymap_assign(keymap, "SCULPT_OT_curve_patch_edit");
+  return keymap;
 }
 
 void SCULPT_OT_curve_patch_edit(wmOperatorType *ot)

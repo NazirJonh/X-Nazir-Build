@@ -6826,6 +6826,33 @@ def km_sculpt_mesh_filter_modal_map(_params):
     return keymap
 
 
+def km_curve_patch_edit_modal_map(_params):
+    items = []
+    keymap = (
+        "Curve Patch Edit Modal Map",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW', "modal": True},
+        {"items": items},
+    )
+
+    items.extend([
+        ("CONFIRM", {"type": 'RET', "value": 'PRESS', "any": True}, None),
+        ("CONFIRM", {"type": 'NUMPAD_ENTER', "value": 'PRESS', "any": True}, None),
+        ("CANCEL", {"type": 'ESC', "value": 'PRESS', "any": True}, None),
+        ("UNDO", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
+        ("UNDO", {"type": 'Z', "value": 'PRESS', "oskey": True}, None),
+        ("REDO", {"type": 'Z', "value": 'PRESS', "ctrl": True, "shift": True}, None),
+        ("REDO", {"type": 'Z', "value": 'PRESS', "oskey": True, "shift": True}, None),
+        ("TOGGLE_CYCLIC", {"type": 'C', "value": 'PRESS'}, None),
+        ("SWAP_AXIS", {"type": 'Y', "value": 'PRESS'}, None),
+        ("TRANSLATE", {"type": 'G', "value": 'PRESS'}, None),
+        ("ROTATE", {"type": 'R', "value": 'PRESS'}, None),
+        ("SCALE", {"type": 'S', "value": 'PRESS'}, None),
+        ("RADIUS", {"type": 'S', "value": 'PRESS', "alt": True}, None),
+        ("DELETE", {"type": 'DEL', "value": 'PRESS'}, None),
+    ])
+    return keymap
+
+
 def km_curve_pen_modal_map(_params):
     items = []
     keymap = (
@@ -9132,6 +9159,7 @@ def generate_keymaps(params=None):
         km_paint_stroke_modal(params),
         km_sculpt_expand_modal(params),
         km_sculpt_mesh_filter_modal_map(params),
+        km_curve_patch_edit_modal_map(params),
         km_curve_pen_modal_map(params),
         km_pen_tool_modal_map(params),
         km_node_link_modal_map(params),

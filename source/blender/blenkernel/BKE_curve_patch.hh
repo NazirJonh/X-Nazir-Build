@@ -72,6 +72,14 @@ enum class CurvePatchStampProjection : int8_t {
  * Three producers: the brush (curve_patch_params_from_brush(), editor layer), a Python caller
  * (Stage 5+), and the session's own frozen copy. Having one type for all three is what lets the
  * core be driven without a brush at all.
+ *
+ * Frozen at patch start (re-applied by the editor's live overlay, never overwritten from the
+ * live brush except `swap_axis` when the BRUSH itself changed):
+ *   `radius`, `radius_per_size`, `plane_normal`, `stamp_seed`, `swap_axis`, `final_quality`.
+ * Live from the brush on every modal poll (`operator==` triggers a re-stamp):
+ *   length, end falloff, stamps mode/projection/random, spacing, jitter, texture angles.
+ * Live but not in this struct (editor watchdogs on the modal): strength, Add/Subtract, mirror
+ * symmetry, textures/`MTex`, color, falloff curve.
  */
 struct CurvePatchParams {
   /** World-space brush radius, frozen when the patch starts. */

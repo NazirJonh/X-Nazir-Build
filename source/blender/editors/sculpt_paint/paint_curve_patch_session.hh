@@ -250,10 +250,9 @@ struct CurvePatchItem {
    * NOTE: brush *strength* is deliberately NOT frozen here -- it is read live from the brush on
    * every re-stamp (see `curve_patch_restore_and_restamp()`, which passes `std::nullopt` as
    * `do_symmetrical_brush_actions()`'s `forced_bstrength` so it recomputes `brush_strength()` from
-   * the current UI slider), and the modal editor re-stamps whenever the slider changes. `radius`,
-   * `radius_per_size`, `swap_axis`, `plane_normal` and `stamp_seed` stay frozen; every other field
-   * is re-synced LIVE from the brush by `curve_patch_edit_modal()`'s poll, so changing e.g. the
-   * Length mode or the Stamps randomization re-projects the texture immediately. */
+   * the current UI slider). Frozen vs live fields are classified by
+   * #curve_patch_params_live_overlay; the modal poll calls that helper rather than picking fields
+   * by hand. */
   bke::CurvePatchParams params;
 
   bke::CurvePatchGeometry geometry;
@@ -371,6 +370,29 @@ bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,
                                                     const float3 &plane_normal,
                                                     uint32_t stamp_seed,
                                                     bool swap_axis);
+
+/**
+ * Live poll overlay: brush-driven fields from `brush`, frozen per-patch fields from `frozen`.
+ *
+ * This is the live/frozen contract in one place. A new brush field must be classified here:
+ *
+ * - **Frozen per patch** (`radius` / `radius_per_size`, `plane_normal`, `stamp_seed`,
+ *   `final_quality`): copied from `frozen`. `radius` is rebuilt from `radius_per_size * brush_size`
+ *   so a Size slider still scales a started patch without unfreezing the captured ratio.
+ * - **Session-owned** (`swap_axis`): taken from the brush only when `apply_brush_swap_axis` is
+ *   true (the brush itself changed). Otherwise kept from `frozen`, so the Y hotkey and session
+ *   undo are not overwritten on the next poll.
+ * - **Live in params** (length, falloff, stamps mode, spacing, jitter, angles): come from
+ *   #curve_patch_params_from_brush. `operator==` on the result triggers a re-stamp.
+ * - **Live, not in params** (strength, Add/Subtract, symmetry, textures, color, falloff curve):
+ *   stay on the modal's #CurvePatchLiveInputs. Do not add them here.
+ *
+ * Writes the same overlay onto every patch; only the frozen fields differ per item.
+ */
+bke::CurvePatchParams curve_patch_params_live_overlay(const Brush &brush,
+                                                      const bke::CurvePatchParams &frozen,
+                                                      int brush_size,
+                                                      bool apply_brush_swap_axis);
 
 /**
  * The half of starting a session that owes nothing to a stroke: reset the per-session bookkeeping,

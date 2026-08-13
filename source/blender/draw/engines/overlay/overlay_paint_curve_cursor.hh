@@ -19,6 +19,7 @@
 #include "DEG_depsgraph_query.hh"
 #include "DNA_brush_types.h"
 #include "DNA_curve_types.h"
+#include "DNA_curves_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 
@@ -29,6 +30,7 @@
 
 #include "UI_resources.hh"
 
+#include "BLI_hash_mm2a.hh"
 #include "BLI_math_angle_types.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_matrix.hh"
@@ -36,11 +38,11 @@
 
 #include "overlay_base.hh"
 
-/* Opt-in measurement for the per-frame batch churn. Handle, point and radius-handle batches are
- * rebuilt on every sync (only the scene-curve silhouettes are cached, keyed on
- * #silhouette_batches_key_), so this reports what one redraw costs and how many batches it built.
- * Must stay 0 outside a measurement pass: the report writes to stdout on every overlay redraw.
- * Grep `DEBUG-pccursor` to find every touch point. */
+/* Opt-in measurement for the per-frame batch churn. Handle/point/radius GPU batches are reused
+ * across redraws while screen-space geometry is unchanged (hover/selection only retints them);
+ * insert-preview and snap-marker batches still rebuild every sync. Scene-curve silhouettes are
+ * keyed on #silhouette_batches_key_. Must stay 0 outside a measurement pass: the report writes to
+ * stdout on every overlay redraw. Grep `DEBUG-pccursor` to find every touch point. */
 #define PAINT_CURVE_CURSOR_PROFILING 0
 
 #if PAINT_CURVE_CURSOR_PROFILING
@@ -66,7 +68,8 @@ class PaintCurveCursor : Overlay {
   Vector<ed::sculpt_paint::PaintCurveCachedObjectSilhouette> silhouette_cache_;
   uint64_t silhouette_cache_key_ = 0;
 
-  /** GPU batches created during begin_sync. Freed at the start of the next begin_sync. */
+  /** Ephemeral GPU batches (insert preview, snap marker). Freed at the start of the next
+   * begin_sync. Handle/segment/radius batches live in #handle_gpu_ instead. */
   Vector<gpu::Batch *> batches_;
 
   /** Persistent GPU batches for scene-curve silhouettes, keyed on #silhouette_cache_key_.
@@ -79,6 +82,29 @@ class PaintCurveCursor : Overlay {
   Vector<CachedSilhouetteBatches> silhouette_batches_;
   uint64_t silhouette_batches_key_ = 0;
 
+  /**
+   * Persistent GPU batches for handles/segments/radius, rebuilt only when screen-space geometry
+   * changes. Hover and selection retint these batches; they do not move vertices. Insert preview
+   * and the snap marker stay in #batches_ because they track the cursor.
+   */
+  struct HandleGpuCache {
+    Vector<gpu::Batch *> segments;
+    Vector<gpu::Batch *> point_underlay;
+    Vector<gpu::Batch *> point_left;
+    Vector<gpu::Batch *> point_right;
+    Vector<gpu::Batch *> point_diamond;
+    Vector<gpu::Batch *> point_end_left;
+    Vector<gpu::Batch *> point_end_right;
+    Vector<gpu::Batch *> radius_line;
+    Vector<gpu::Batch *> radius_circle;
+  };
+  HandleGpuCache handle_gpu_;
+  /** Murmur2A of handle geometry. The field is 64-bit for storage, but #BLI_hash_mm2a_end is
+   * 32-bit; a collision would keep stale batches until the next real geometry change. Same trade
+   * as #silhouette_batches_key_. #handle_gpu_valid_ distinguishes "hashed to 0" from "empty". */
+  uint64_t handle_gpu_key_ = 0;
+  bool handle_gpu_valid_ = false;
+
   /** Region-space snap marker shown during a 3D paint-curve slide (set by the slide modal). */
   bool snap_marker_active_ = false;
   float2 snap_marker_pos_ = float2(0.0f);
@@ -90,6 +116,7 @@ class PaintCurveCursor : Overlay {
   {
     free_batches();
     free_silhouette_batches();
+    free_handle_gpu();
   }
 
   void begin_sync(Resources &res, const State &state) final
@@ -104,14 +131,17 @@ class PaintCurveCursor : Overlay {
     snap_marker_active_ = false;
 
     if (!state.is_space_v3d() && !state.is_space_image()) {
+      free_handle_gpu();
       return;
     }
     if (state.hide_overlays || state.is_depth_only_drawing || state.is_material_select) {
+      free_handle_gpu();
       return;
     }
     if (state.region == nullptr || state.depsgraph == nullptr || state.scene == nullptr ||
         state.view_layer == nullptr)
     {
+      free_handle_gpu();
       return;
     }
 
@@ -124,6 +154,7 @@ class PaintCurveCursor : Overlay {
     if (!ed::sculpt_paint::ED_paint_curve_overlay_is_relevant(
             brush, state.active_tool_idname, state.is_space_v3d(), state.is_space_image()))
     {
+      free_handle_gpu();
       return;
     }
 
@@ -278,16 +309,36 @@ class PaintCurveCursor : Overlay {
     fill_pass_from_pod(res, state);
 
 #if PAINT_CURVE_CURSOR_PROFILING
-    /* DEBUG-pccursor: `screen` is the CPU-side projection of the curve into region space,
-     * `batches` is the GPU upload this measurement exists to judge. `n` is what the count scales
-     * with; a cache would only pay off if `batches` dominates and `n` is large. */
+    /* DEBUG-pccursor: `screen` is the CPU-side projection. `ephemeral` is insert-preview /
+     * snap-marker batches rebuilt every sync; `cached` is the handle/segment/radius GPU cache,
+     * which this measurement exists to judge. A cache only pays off if the GPU upload dominated. */
+    auto owned_count = [](const Vector<gpu::Batch *> &v) {
+      int n = 0;
+      for (gpu::Batch *b : v) {
+        if (b) {
+          n++;
+        }
+      }
+      return n;
+    };
+    const int cached_batches = owned_count(handle_gpu_.segments) +
+                               owned_count(handle_gpu_.point_underlay) +
+                               owned_count(handle_gpu_.point_left) +
+                               owned_count(handle_gpu_.point_right) +
+                               owned_count(handle_gpu_.point_diamond) +
+                               owned_count(handle_gpu_.point_end_left) +
+                               owned_count(handle_gpu_.point_end_right) +
+                               owned_count(handle_gpu_.radius_line) +
+                               owned_count(handle_gpu_.radius_circle);
     const double prof_t_end = BLI_time_now_seconds();
-    printf("[DEBUG-pccursor] total=%.3fms | screen=%.3f batches=%.3f | points=%d batches=%d\n",
+    printf("[DEBUG-pccursor] total=%.3fms | screen=%.3f batches=%.3f | points=%d ephemeral=%d "
+           "cached=%d\n",
            (prof_t_end - prof_t0) * 1000.0,
            (prof_t_build - prof_t0) * 1000.0,
            (prof_t_end - prof_t_build) * 1000.0,
            int(handles_.points.size()),
-           int(batches_.size()));
+           int(batches_.size()),
+           cached_batches);
     fflush(stdout);
 #endif
   }
@@ -319,6 +370,63 @@ class PaintCurveCursor : Overlay {
     }
     silhouette_batches_.clear();
     silhouette_batches_key_ = 0;
+  }
+
+  void free_handle_gpu()
+  {
+    auto discard = [](Vector<gpu::Batch *> &v) {
+      for (gpu::Batch *b : v) {
+        if (b) {
+          GPU_batch_discard(b);
+        }
+      }
+      v.clear();
+    };
+    discard(handle_gpu_.segments);
+    discard(handle_gpu_.point_underlay);
+    discard(handle_gpu_.point_left);
+    discard(handle_gpu_.point_right);
+    discard(handle_gpu_.point_diamond);
+    discard(handle_gpu_.point_end_left);
+    discard(handle_gpu_.point_end_right);
+    discard(handle_gpu_.radius_line);
+    discard(handle_gpu_.radius_circle);
+    handle_gpu_key_ = 0;
+    handle_gpu_valid_ = false;
+  }
+
+  /** Geometry-only key: positions, handle types, polylines. Hover/selection/colors are push
+   * constants and must not invalidate the cache. Digest is 32-bit Murmur2A, see #handle_gpu_key_. */
+  uint64_t hash_handle_geometry() const
+  {
+    BLI_HashMurmur2A mm2;
+    BLI_hash_mm2a_init(&mm2, 0);
+    auto add_bytes = [&](const void *data, const size_t len) {
+      BLI_hash_mm2a_add(&mm2, static_cast<const unsigned char *>(data), len);
+    };
+    auto add_float2 = [&](const float2 &v) { add_bytes(&v, sizeof(v)); };
+
+    BLI_hash_mm2a_add_int(&mm2, int(handles_.points.size()));
+    BLI_hash_mm2a_add_int(&mm2, int(handles_.segments.size()));
+    BLI_hash_mm2a_add_int(&mm2, int(handles_.radius_handles.size()));
+    for (const ed::sculpt_paint::PaintCurveHandleDrawData &hd : handles_.points) {
+      add_float2(hd.position);
+      add_float2(hd.handle_left);
+      add_float2(hd.handle_right);
+      BLI_hash_mm2a_add_int(&mm2, int(hd.h1));
+      BLI_hash_mm2a_add_int(&mm2, int(hd.h2));
+    }
+    for (const ed::sculpt_paint::PaintCurveSegmentDrawData &seg : handles_.segments) {
+      BLI_hash_mm2a_add_int(&mm2, int(seg.polyline.size()));
+      if (!seg.polyline.is_empty()) {
+        add_bytes(seg.polyline.data(), sizeof(float2) * seg.polyline.size());
+      }
+    }
+    for (const ed::sculpt_paint::PaintCurveRadiusHandleDrawData &rd : handles_.radius_handles) {
+      add_float2(rd.point);
+      add_float2(rd.end);
+    }
+    return uint64_t(BLI_hash_mm2a_end(&mm2));
   }
 
   /** Cached silhouette batches for `object`, or null when not cached. */
@@ -370,6 +478,112 @@ class PaintCurveCursor : Overlay {
     return make_line_strip(closed);
   }
 
+  gpu::Batch *ensure_owned_strip(Vector<gpu::Batch *> &owner, Span<float2> verts)
+  {
+    if (verts.size() < 2) {
+      owner.append(nullptr);
+      return nullptr;
+    }
+    return make_line_strip_owned(owner, verts);
+  }
+
+  gpu::Batch *ensure_owned_strip_closed(Vector<gpu::Batch *> &owner, Span<float2> verts)
+  {
+    if (verts.size() < 2) {
+      owner.append(nullptr);
+      return nullptr;
+    }
+    Vector<float2> closed;
+    closed.reserve(verts.size() + 1);
+    closed.extend(verts);
+    closed.append(verts[0]);
+    return make_line_strip_owned(owner, closed);
+  }
+
+  void ensure_handle_gpu()
+  {
+    const uint64_t key = hash_handle_geometry();
+    if (handle_gpu_valid_ && key == handle_gpu_key_) {
+      return;
+    }
+    free_handle_gpu();
+
+    handle_gpu_.segments.reserve(handles_.segments.size());
+    for (const ed::sculpt_paint::PaintCurveSegmentDrawData &seg : handles_.segments) {
+      ensure_owned_strip(handle_gpu_.segments, seg.polyline);
+    }
+
+    handle_gpu_.point_underlay.reserve(handles_.points.size());
+    handle_gpu_.point_left.reserve(handles_.points.size());
+    handle_gpu_.point_right.reserve(handles_.points.size());
+    handle_gpu_.point_diamond.reserve(handles_.points.size());
+    handle_gpu_.point_end_left.reserve(handles_.points.size());
+    handle_gpu_.point_end_right.reserve(handles_.points.size());
+    for (const ed::sculpt_paint::PaintCurveHandleDrawData &hd : handles_.points) {
+      const float2 strip3[3] = {hd.handle_left, hd.position, hd.handle_right};
+      ensure_owned_strip(handle_gpu_.point_underlay, {strip3, 3});
+      const float2 left2[2] = {hd.handle_left, hd.position};
+      ensure_owned_strip(handle_gpu_.point_left, {left2, 2});
+      const float2 right2[2] = {hd.position, hd.handle_right};
+      ensure_owned_strip(handle_gpu_.point_right, {right2, 2});
+
+      const float w = 10.0f * 0.5f;
+      const float2 diamond[4] = {
+          {hd.position.x - w, hd.position.y},
+          {hd.position.x, hd.position.y + w},
+          {hd.position.x + w, hd.position.y},
+          {hd.position.x, hd.position.y - w}};
+      ensure_owned_strip_closed(handle_gpu_.point_diamond, {diamond, 4});
+
+      auto make_endpoint = [&](const float2 &co, const int8_t htype, Vector<gpu::Batch *> &owner) {
+        const float ew = 8.0f * 0.5f;
+        if (htype == BEZIER_HANDLE_VECTOR) {
+          const float2 tri[3] = {
+              {co.x, co.y + ew}, {co.x - ew, co.y - ew}, {co.x + ew, co.y - ew}};
+          ensure_owned_strip_closed(owner, {tri, 3});
+        }
+        else {
+          const float2 box[4] = {
+              {co.x - ew, co.y - ew},
+              {co.x + ew, co.y - ew},
+              {co.x + ew, co.y + ew},
+              {co.x - ew, co.y + ew}};
+          ensure_owned_strip_closed(owner, {box, 4});
+        }
+      };
+      make_endpoint(hd.handle_left, hd.h1, handle_gpu_.point_end_left);
+      make_endpoint(hd.handle_right, hd.h2, handle_gpu_.point_end_right);
+    }
+
+    constexpr int CIRCLE_SEGS = 16;
+    const float r = ed::sculpt_paint::PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS;
+    handle_gpu_.radius_line.reserve(handles_.radius_handles.size());
+    handle_gpu_.radius_circle.reserve(handles_.radius_handles.size());
+    for (const ed::sculpt_paint::PaintCurveRadiusHandleDrawData &rd : handles_.radius_handles) {
+      const float2 line2[2] = {rd.point, rd.end};
+      ensure_owned_strip(handle_gpu_.radius_line, {line2, 2});
+      float2 circle[CIRCLE_SEGS];
+      for (int i = 0; i < CIRCLE_SEGS; i++) {
+        const float angle = float(i) / float(CIRCLE_SEGS) * float(M_PI) * 2.0f;
+        circle[i] = {rd.end.x + r * cosf(angle), rd.end.y + r * sinf(angle)};
+      }
+      ensure_owned_strip_closed(handle_gpu_.radius_circle, {circle, CIRCLE_SEGS});
+    }
+
+    handle_gpu_key_ = key;
+    handle_gpu_valid_ = true;
+
+    BLI_assert(handle_gpu_.segments.size() == handles_.segments.size());
+    BLI_assert(handle_gpu_.point_underlay.size() == handles_.points.size());
+    BLI_assert(handle_gpu_.point_left.size() == handles_.points.size());
+    BLI_assert(handle_gpu_.point_right.size() == handles_.points.size());
+    BLI_assert(handle_gpu_.point_diamond.size() == handles_.points.size());
+    BLI_assert(handle_gpu_.point_end_left.size() == handles_.points.size());
+    BLI_assert(handle_gpu_.point_end_right.size() == handles_.points.size());
+    BLI_assert(handle_gpu_.radius_line.size() == handles_.radius_handles.size());
+    BLI_assert(handle_gpu_.radius_circle.size() == handles_.radius_handles.size());
+  }
+
   /**
    * Draw a line-strip batch with the polyline shader.
    * Must be used instead of ps_.draw() because the polyline shader requires
@@ -409,6 +623,8 @@ class PaintCurveCursor : Overlay {
     ps_.push_constant("lineSmooth", true);
     polyline_workaround_push_constants(ps_);
 
+    ensure_handle_gpu();
+
     /* --- 1. Faint silhouettes --- */
     {
       float faint_col[4];
@@ -444,18 +660,11 @@ class PaintCurveCursor : Overlay {
     }
 
     /* --- 3 & 4. Bezier segment outlines then wires --- */
-    /* Build batches once, draw in order: outline → wire → hover (on top). */
     {
-      Vector<gpu::Batch *> seg_batches;
-      seg_batches.reserve(handles_.segments.size());
-      for (const ed::sculpt_paint::PaintCurveSegmentDrawData &seg : handles_.segments) {
-        seg_batches.append(make_line_strip(seg.polyline));
-      }
-
       /* Segment outlines (black, width 3). */
       ps_.push_constant("lineWidth", 3.0f);
       ps_.push_constant("color", float4(0.0f, 0.0f, 0.0f, 0.5f));
-      for (gpu::Batch *b : seg_batches) {
+      for (gpu::Batch *b : handle_gpu_.segments) {
         if (b) {
           draw_strip(b);
         }
@@ -464,10 +673,10 @@ class PaintCurveCursor : Overlay {
       /* Segment wires. All use the same wire_color (TH_WIRE) stored per-segment. */
       ps_.push_constant("lineWidth", 1.0f);
       for (const int i : IndexRange(handles_.segments.size())) {
-        if (seg_batches[i]) {
+        if (handle_gpu_.segments[i]) {
           const float4 &wc = handles_.segments[i].wire_color;
           ps_.push_constant("color", wc);
-          draw_strip(seg_batches[i]);
+          draw_strip(handle_gpu_.segments[i]);
         }
       }
 
@@ -482,8 +691,8 @@ class PaintCurveCursor : Overlay {
       ps_.push_constant(
           "color", float4(hover_col[0], hover_col[1], hover_col[2], hover_col[3]));
       for (const int i : IndexRange(handles_.segments.size())) {
-        if (seg_batches[i] && handles_.segments[i].hovered) {
-          draw_strip(seg_batches[i]);
+        if (handle_gpu_.segments[i] && handles_.segments[i].hovered) {
+          draw_strip(handle_gpu_.segments[i]);
         }
       }
     }
@@ -532,31 +741,22 @@ class PaintCurveCursor : Overlay {
     }
 
     /* --- 5 & 6. Handle lines (black underlay then colored) --- */
-    for (const ed::sculpt_paint::PaintCurveHandleDrawData &hd : handles_.points) {
-      /* Black underlay: 3-vert strip (left → center → right). */
-      float2 strip3[3] = {hd.handle_left, hd.position, hd.handle_right};
-      if (gpu::Batch *b = make_line_strip({strip3, 3})) {
+    for (const int i : IndexRange(handles_.points.size())) {
+      const ed::sculpt_paint::PaintCurveHandleDrawData &hd = handles_.points[i];
+      if (gpu::Batch *b = handle_gpu_.point_underlay[i]) {
         ps_.push_constant("lineWidth", 3.0f);
         ps_.push_constant("color", float4(0.0f, 0.0f, 0.0f, 0.5f));
         draw_strip(b);
       }
-      /* Colored left segment. */
-      {
-        float2 left2[2] = {hd.handle_left, hd.position};
-        if (gpu::Batch *b = make_line_strip({left2, 2})) {
-          ps_.push_constant("lineWidth", 1.0f);
-          ps_.push_constant("color", hd.color_left);
-          draw_strip(b);
-        }
+      if (gpu::Batch *b = handle_gpu_.point_left[i]) {
+        ps_.push_constant("lineWidth", 1.0f);
+        ps_.push_constant("color", hd.color_left);
+        draw_strip(b);
       }
-      /* Colored right segment. */
-      {
-        float2 right2[2] = {hd.position, hd.handle_right};
-        if (gpu::Batch *b = make_line_strip({right2, 2})) {
-          ps_.push_constant("lineWidth", 1.0f);
-          ps_.push_constant("color", hd.color_right);
-          draw_strip(b);
-        }
+      if (gpu::Batch *b = handle_gpu_.point_right[i]) {
+        ps_.push_constant("lineWidth", 1.0f);
+        ps_.push_constant("color", hd.color_right);
+        draw_strip(b);
       }
     }
 
@@ -566,113 +766,69 @@ class PaintCurveCursor : Overlay {
       ui::theme::get_color_type_4fv(TH_VERTEX_SELECT, SPACE_VIEW3D, selec_col);
       ui::theme::get_color_type_4fv(TH_VERTEX, SPACE_VIEW3D, vert_col);
 
-      auto draw_endpoint = [&](const float2 &co, float width, int8_t htype, const float4 &col) {
-        const float w = width * 0.5f;
-        if (htype == BEZIER_HANDLE_VECTOR) {
-          const float2 tri[3] = {{co.x, co.y + w},
-                                  {co.x - w, co.y - w},
-                                  {co.x + w, co.y - w}};
-          if (gpu::Batch *b = make_line_strip_closed({tri, 3})) {
-            ps_.push_constant("lineWidth", 3.0f);
-            ps_.push_constant("color", col);
-            draw_strip(b);
-            ps_.push_constant("lineWidth", 1.0f);
-            ps_.push_constant("color", float4(1.0f, 1.0f, 1.0f, 0.5f));
-            draw_strip(b);
-          }
+      auto draw_cached_closed = [&](gpu::Batch *b, const float4 &outer, const float4 &inner) {
+        if (!b) {
+          return;
         }
-        else {
-          const float2 box[4] = {{co.x - w, co.y - w},
-                                  {co.x + w, co.y - w},
-                                  {co.x + w, co.y + w},
-                                  {co.x - w, co.y + w}};
-          if (gpu::Batch *b = make_line_strip_closed({box, 4})) {
-            ps_.push_constant("lineWidth", 3.0f);
-            ps_.push_constant("color", col);
-            draw_strip(b);
-            ps_.push_constant("lineWidth", 1.0f);
-            ps_.push_constant("color", float4(1.0f, 1.0f, 1.0f, 0.5f));
-            draw_strip(b);
-          }
-        }
+        ps_.push_constant("lineWidth", 3.0f);
+        ps_.push_constant("color", outer);
+        draw_strip(b);
+        ps_.push_constant("lineWidth", 1.0f);
+        ps_.push_constant("color", inner);
+        draw_strip(b);
       };
 
-      for (const ed::sculpt_paint::PaintCurveHandleDrawData &hd : handles_.points) {
-        const float w = 10.0f * 0.5f;
-        const float2 &co = hd.position;
+      for (const int i : IndexRange(handles_.points.size())) {
+        const ed::sculpt_paint::PaintCurveHandleDrawData &hd = handles_.points[i];
 
-        /* Control point diamond. */
-        {
-          const bool hovered = hd.hovered_center;
-          float4 cp_col = hd.selected_center ?
-                              float4(selec_col[0], selec_col[1], selec_col[2], selec_col[3]) :
-                              float4(vert_col[0], vert_col[1], vert_col[2], vert_col[3]);
-          if (hovered) {
-            const float hover_t = 0.65f;
-            cp_col = float4(cp_col.x + (1.0f - cp_col.x) * hover_t,
-                            cp_col.y + (1.0f - cp_col.y) * hover_t,
-                            cp_col.z + (1.0f - cp_col.z) * hover_t,
-                            1.0f);
-          }
-          const float4 inner_col = hovered ? float4(1.0f, 1.0f, 1.0f, 0.8f) :
-                                             float4(1.0f, 1.0f, 1.0f, 0.5f);
-          const float2 diamond[4] = {
-              {co.x - w, co.y}, {co.x, co.y + w}, {co.x + w, co.y}, {co.x, co.y - w}};
-          if (gpu::Batch *b = make_line_strip_closed({diamond, 4})) {
-            ps_.push_constant("lineWidth", 3.0f);
-            ps_.push_constant("color", cp_col);
-            draw_strip(b);
-            ps_.push_constant("lineWidth", 1.0f);
-            ps_.push_constant("color", inner_col);
-            draw_strip(b);
-          }
+        const bool hovered = hd.hovered_center;
+        float4 cp_col = hd.selected_center ?
+                            float4(selec_col[0], selec_col[1], selec_col[2], selec_col[3]) :
+                            float4(vert_col[0], vert_col[1], vert_col[2], vert_col[3]);
+        if (hovered) {
+          const float hover_t = 0.65f;
+          cp_col = float4(cp_col.x + (1.0f - cp_col.x) * hover_t,
+                          cp_col.y + (1.0f - cp_col.y) * hover_t,
+                          cp_col.z + (1.0f - cp_col.z) * hover_t,
+                          1.0f);
         }
+        const float4 inner_col = hovered ? float4(1.0f, 1.0f, 1.0f, 0.8f) :
+                                           float4(1.0f, 1.0f, 1.0f, 0.5f);
+        draw_cached_closed(handle_gpu_.point_diamond[i], cp_col, inner_col);
 
-        /* Handle endpoints. */
-        draw_endpoint(hd.handle_left, 8.0f, hd.h1, hd.color_left);
-        draw_endpoint(hd.handle_right, 8.0f, hd.h2, hd.color_right);
+        draw_cached_closed(
+            handle_gpu_.point_end_left[i], hd.color_left, float4(1.0f, 1.0f, 1.0f, 0.5f));
+        draw_cached_closed(
+            handle_gpu_.point_end_right[i], hd.color_right, float4(1.0f, 1.0f, 1.0f, 0.5f));
       }
     }
 
     /* --- 8. Radius handles --- */
-    for (const ed::sculpt_paint::PaintCurveRadiusHandleDrawData &rd : handles_.radius_handles) {
-      /* Line from pivot to end. */
-      {
-        float2 line2[2] = {rd.point, rd.end};
-        if (gpu::Batch *b = make_line_strip({line2, 2})) {
-          ps_.push_constant("lineWidth", 3.0f);
-          ps_.push_constant("color", float4(0.0f, 0.0f, 0.0f, 0.5f));
-          draw_strip(b);
-          ps_.push_constant("lineWidth", 1.0f);
-          ps_.push_constant("color", rd.color);
-          draw_strip(b);
-        }
+    for (const int i : IndexRange(handles_.radius_handles.size())) {
+      const ed::sculpt_paint::PaintCurveRadiusHandleDrawData &rd = handles_.radius_handles[i];
+      if (gpu::Batch *b = handle_gpu_.radius_line[i]) {
+        ps_.push_constant("lineWidth", 3.0f);
+        ps_.push_constant("color", float4(0.0f, 0.0f, 0.0f, 0.5f));
+        draw_strip(b);
+        ps_.push_constant("lineWidth", 1.0f);
+        ps_.push_constant("color", rd.color);
+        draw_strip(b);
       }
-      /* Circle at endpoint. */
-      {
-        constexpr int CIRCLE_SEGS = 16;
-        const float r = ed::sculpt_paint::PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS;
-        float2 circle[CIRCLE_SEGS];
-        for (int i = 0; i < CIRCLE_SEGS; i++) {
-          const float angle = float(i) / float(CIRCLE_SEGS) * float(M_PI) * 2.0f;
-          circle[i] = {rd.end.x + r * cosf(angle), rd.end.y + r * sinf(angle)};
-        }
-        if (gpu::Batch *b = make_line_strip_closed({circle, CIRCLE_SEGS})) {
-          const float4 underlay_col = rd.hovered ? float4(1.0f, 1.0f, 1.0f, 0.8f) :
-                                                   float4(1.0f, 1.0f, 1.0f, 0.5f);
-          const float hover_t = 0.65f;
-          const float4 circle_col = rd.hovered ?
-                                          float4(rd.color.x + (1.0f - rd.color.x) * hover_t,
-                                                 rd.color.y + (1.0f - rd.color.y) * hover_t,
-                                                 rd.color.z + (1.0f - rd.color.z) * hover_t,
-                                                 1.0f) :
-                                          rd.color;
-          ps_.push_constant("lineWidth", 1.0f);
-          ps_.push_constant("color", underlay_col);
-          draw_strip(b);
-          ps_.push_constant("color", circle_col);
-          draw_strip(b);
-        }
+      if (gpu::Batch *b = handle_gpu_.radius_circle[i]) {
+        const float4 underlay_col = rd.hovered ? float4(1.0f, 1.0f, 1.0f, 0.8f) :
+                                                 float4(1.0f, 1.0f, 1.0f, 0.5f);
+        const float hover_t = 0.65f;
+        const float4 circle_col = rd.hovered ?
+                                      float4(rd.color.x + (1.0f - rd.color.x) * hover_t,
+                                             rd.color.y + (1.0f - rd.color.y) * hover_t,
+                                             rd.color.z + (1.0f - rd.color.z) * hover_t,
+                                             1.0f) :
+                                      rd.color;
+        ps_.push_constant("lineWidth", 1.0f);
+        ps_.push_constant("color", underlay_col);
+        draw_strip(b);
+        ps_.push_constant("color", circle_col);
+        draw_strip(b);
       }
     }
 

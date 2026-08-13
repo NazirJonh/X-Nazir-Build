@@ -5,6 +5,7 @@
 #include "testing/testing.h"
 
 #include "BLI_array.hh"
+#include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
 
@@ -77,6 +78,42 @@ TEST(paint_curve_patch_surface, shrinkwrap_uses_snapshotted_topology_not_live_me
 
   snapshot.clear();
   BKE_id_free(nullptr, mesh);
+}
+
+TEST(paint_curve_patch_surface, fill_invalid_normals_all_zero_uses_fallback)
+{
+  Array<float3> normals = {float3(0.0f), float3(0.0f), float3(0.0f)};
+  const float3 fallback(0.0f, 1.0f, 0.0f);
+  curve_patch_surface_fill_invalid_normals(normals, fallback);
+  for (const float3 &n : normals) {
+    EXPECT_EQ(n, fallback);
+  }
+}
+
+TEST(paint_curve_patch_surface, fill_invalid_normals_copies_first_and_last_valid)
+{
+  Array<float3> normals = {float3(0.0f), float3(0.0f), float3(0.0f, 0.0f, 1.0f), float3(0.0f)};
+  curve_patch_surface_fill_invalid_normals(normals, float3(1.0f, 0.0f, 0.0f));
+  EXPECT_NEAR(normals[0].z, 1.0f, 1e-5f);
+  EXPECT_NEAR(normals[1].z, 1.0f, 1e-5f);
+  EXPECT_NEAR(normals[2].z, 1.0f, 1e-5f);
+  EXPECT_NEAR(normals[3].z, 1.0f, 1e-5f);
+}
+
+TEST(paint_curve_patch_surface, fill_invalid_normals_interpolates_a_gap)
+{
+  Array<float3> normals = {float3(1.0f, 0.0f, 0.0f), float3(0.0f), float3(0.0f, 1.0f, 0.0f)};
+  curve_patch_surface_fill_invalid_normals(normals, float3(0.0f, 0.0f, 1.0f));
+  EXPECT_NEAR(normals[1].x, 0.5f * float(M_SQRT2), 1e-4f);
+  EXPECT_NEAR(normals[1].y, 0.5f * float(M_SQRT2), 1e-4f);
+}
+
+TEST(paint_curve_patch_surface, fill_invalid_normals_opposed_neighbours_keep_previous)
+{
+  /* Midpoint of (0,0,1) and (0,0,-1) is zero; the fill must stay finite. */
+  Array<float3> normals = {float3(0.0f, 0.0f, 1.0f), float3(0.0f), float3(0.0f, 0.0f, -1.0f)};
+  curve_patch_surface_fill_invalid_normals(normals, float3(1.0f, 0.0f, 0.0f));
+  EXPECT_NEAR(normals[1].z, 1.0f, 1e-5f);
 }
 
 }  // namespace blender::bke::tests

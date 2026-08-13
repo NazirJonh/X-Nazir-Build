@@ -9,6 +9,8 @@
 
 #include "BKE_name_matching.hh"
 
+#include "DNA_userdef_types.h"
+
 #include "AS_asset_catalog_path.hh"
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
@@ -165,38 +167,6 @@ void AssetGridItem::on_activate(bContext &C)
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Catalog-filter helpers
- * \{ */
-
-static Vector<asset_system::AssetCatalogFilter> build_catalog_filters(
-    const Set<std::string> &enabled_catalogs, const asset_system::AssetLibrary &library)
-{
-  Vector<asset_system::AssetCatalogFilter> filters;
-  filters.reserve(enabled_catalogs.size());
-  for (const std::string &path : enabled_catalogs) {
-    asset_system::AssetCatalog *catalog = library.catalog_service().find_catalog_by_path(
-        path.c_str());
-    if (catalog) {
-      filters.append(library.catalog_service().create_catalog_filter(catalog->catalog_id));
-    }
-  }
-  return filters;
-}
-
-static bool asset_passes_catalog_filter(const asset_system::AssetRepresentation &asset,
-                                        const Vector<asset_system::AssetCatalogFilter> &filters)
-{
-  for (const asset_system::AssetCatalogFilter &f : filters) {
-    if (f.contains(asset.get_metadata().catalog_id)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
 /** \name Name-match filter helpers
  * \{ */
 
@@ -208,6 +178,16 @@ static bool asset_passes_name_match(const NameMatchResolvedFilter &resolved,
     metadata_tags.append(tag.name);
   }
   return BKE_name_match_resolved_asset_passes(resolved, asset.get_name(), metadata_tags);
+}
+
+static bool asset_grid_extra_poll(const asset_system::AssetRepresentation &asset,
+                                  const Set<short> &filter_id_types,
+                                  const NameMatchResolvedFilter &name_match_resolved)
+{
+  if (!filter_id_types.is_empty() && !filter_id_types.contains(asset.get_id_type())) {
+    return false;
+  }
+  return asset_passes_name_match(name_match_resolved, asset);
 }
 
 /** \} */
@@ -233,35 +213,20 @@ AssetGridDataSource::AssetGridDataSource(const AssetLibraryReference &library_re
 
 int AssetGridDataSource::item_count(const bContext & /*C*/) const
 {
-  const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
-      library_ref_);
-  if (!library) {
-    return 0;
-  }
-
-  const bool filter_enabled = !enabled_catalogs_.is_empty();
-  const Vector<asset_system::AssetCatalogFilter> filters =
-      filter_enabled ? build_catalog_filters(enabled_catalogs_, *library) :
-                       Vector<asset_system::AssetCatalogFilter>{};
   const NameMatchResolvedFilter name_match_resolved = BKE_name_match_filter_resolve(name_match_,
                                                                                     U);
-
   int count = 0;
-  ed::asset::list::iterate(library_ref_, [&](asset_system::AssetRepresentation &asset) -> bool {
-    if (filter_enabled) {
-      if (filters.is_empty() || !asset_passes_catalog_filter(asset, filters)) {
+  ed::asset::foreach_filtered_asset(
+      library_ref_,
+      enabled_catalogs_.is_empty() ? nullptr : &enabled_catalogs_,
+      ed::asset::CatalogContainment::IncludeChildren,
+      [&](const asset_system::AssetRepresentation &asset) {
+        return asset_grid_extra_poll(asset, filter_id_types_, name_match_resolved);
+      },
+      [&](asset_system::AssetRepresentation & /*asset*/, int /*filtered_index*/) {
+        count++;
         return true;
-      }
-    }
-    if (!filter_id_types_.is_empty() && !filter_id_types_.contains(asset.get_id_type())) {
-      return true;
-    }
-    if (!asset_passes_name_match(name_match_resolved, asset)) {
-      return true;
-    }
-    count++;
-    return true;
-  });
+      });
   return count;
 }
 
@@ -274,48 +239,38 @@ void AssetGridDataSource::build_window(const bContext &C,
                                        AbstractGridView &view,
                                        const IndexRange window)
 {
+  this->build_window_and_count(C, view, window);
+}
+
+int AssetGridDataSource::build_window_and_count(const bContext &C,
+                                                AbstractGridView &view,
+                                                const IndexRange window)
+{
   ed::asset::list::storage_fetch(&library_ref_, &C);
 
-  const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
-      library_ref_);
-  if (!library) {
-    return;
-  }
-
-  const bool filter_enabled = !enabled_catalogs_.is_empty();
-  const Vector<asset_system::AssetCatalogFilter> filters =
-      filter_enabled ? build_catalog_filters(enabled_catalogs_, *library) :
-                       Vector<asset_system::AssetCatalogFilter>{};
   const NameMatchResolvedFilter name_match_resolved = BKE_name_match_filter_resolve(name_match_,
                                                                                     U);
-
-  int filtered_index = 0;
-  ed::asset::list::iterate(library_ref_, [&](asset_system::AssetRepresentation &asset) -> bool {
-    if (filter_enabled) {
-      if (filters.is_empty() || !asset_passes_catalog_filter(asset, filters)) {
+  int count = 0;
+  ed::asset::foreach_filtered_asset(
+      library_ref_,
+      enabled_catalogs_.is_empty() ? nullptr : &enabled_catalogs_,
+      ed::asset::CatalogContainment::IncludeChildren,
+      [&](const asset_system::AssetRepresentation &asset) {
+        return asset_grid_extra_poll(asset, filter_id_types_, name_match_resolved);
+      },
+      [&](asset_system::AssetRepresentation &asset, const int filtered_index) {
+        if (window.contains(filtered_index)) {
+          view.add_item<AssetGridItem>(asset,
+                                       library_ref_,
+                                       asset.library_relative_identifier(),
+                                       asset.get_name(),
+                                       activate_operator_,
+                                       drag_operator_);
+        }
+        count++;
         return true;
-      }
-    }
-    if (!filter_id_types_.is_empty() && !filter_id_types_.contains(asset.get_id_type())) {
-      return true;
-    }
-    if (!asset_passes_name_match(name_match_resolved, asset)) {
-      return true;
-    }
-
-    if (window.contains(filtered_index)) {
-      view.add_item<AssetGridItem>(asset,
-                                   library_ref_,
-                                   asset.library_relative_identifier(),
-                                   asset.get_name(),
-                                   activate_operator_,
-                                   drag_operator_);
-    }
-
-    filtered_index++;
-    /* Stop iterating once the window is fully built. */
-    return filtered_index < int(window.one_after_last());
-  });
+      });
+  return count;
 }
 
 /** \} */

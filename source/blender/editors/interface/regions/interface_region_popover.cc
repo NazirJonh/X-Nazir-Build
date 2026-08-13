@@ -349,6 +349,15 @@ PopupBlockHandle *popover_panel_create(bContext *C,
     handle->popup = true;
   }
   handle->srna_owner = panel_type->rna_ext.srna;
+  if (panel_type->popover_close) {
+    handle->close_func = [](bContext *C, void *arg) {
+      const PanelType *pt = static_cast<const PanelType *>(arg);
+      if (pt && pt->popover_close) {
+        pt->popover_close(C, pt);
+      }
+    };
+    handle->close_arg = const_cast<PanelType *>(panel_type);
+  }
   return handle;
 }
 

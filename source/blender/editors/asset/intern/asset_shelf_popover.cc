@@ -46,6 +46,7 @@
 #include "ED_asset_filter.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
+#include "ED_asset_name_matching.hh"
 #include "ED_asset_shelf.hh"
 #include "ED_screen.hh"
 #include "ED_image_grid.hh"
@@ -1450,42 +1451,19 @@ static void ASSETSHELF_OT_name_match_clear(wmOperatorType *ot)
 
 static void popover_name_match_panel_draw(const bContext *C, Panel *panel)
 {
-  ui::Layout &layout = *panel->layout;
-
   AssetShelf *shelf = popover_name_match_shelf_from_context(C);
   if (shelf == nullptr || shelf->type == nullptr) {
     return;
   }
 
-  /* Keep the popover interactive while the filter is disabled. Selecting a map type or tag
-   * enables the filter, whereas disabling the whole panel would mark all descendants disabled. */
-  layout.enabled_set(true);
-  const bool filter_enabled = settings_name_match_filter_enabled(shelf->settings);
-
-  /* Preferences map types are seeded once at defaults/versioning/homefile-read time and, since
-   * built-in rows can't be removed, stay valid for the session -- no per-draw repair needed. */
   const StringRef idname = shelf->type->idname;
-  if (shelf_name_match_filter_includes_map_types(idname)) {
-    {
-      ui::Layout &label_row = layout.row(false);
-      label_row.enabled_set(filter_enabled);
-      label_row.label(IFACE_("Map Types"), ICON_NONE);
-    }
-    for (const bUserNameMatchMapType &map_type : U.name_match_map_types) {
-      const bool active = settings_name_match_map_type_is_active(shelf->settings,
-                                                                 map_type.identifier);
-      ui::Layout &row = layout.row(false);
-      PointerRNA props = row.op("ASSETSHELF_OT_name_match_map_type_toggle",
-                                map_type.name,
-                                active ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT);
-      if (props.type != nullptr) {
-        RNA_string_set(&props, "identifier", map_type.identifier);
-      }
-    }
-    layout.separator();
-  }
+  const bool show_map_types = shelf_name_match_filter_includes_map_types(idname);
+  const bool show_tags = shelf_name_match_filter_includes_tags(idname);
 
-  if (shelf_name_match_filter_includes_tags(idname)) {
+  auto draw_tags = [&](ui::Layout &layout) {
+    if (!show_tags) {
+      return;
+    }
     layout.label(IFACE_("Tags"), ICON_NONE);
     Set<std::string> shown_tags_lower;
     auto append_tag_row = [&](const char *tag_name) {
@@ -1518,10 +1496,25 @@ static void popover_name_match_panel_draw(const bContext *C, Panel *panel)
       append_tag_row(tag_name.c_str());
     }
     layout.separator();
+  };
+
+  if (show_map_types) {
+    name_match_filter_draw(*panel->layout,
+                           settings_name_match_filter_enabled(shelf->settings),
+                           "ASSETSHELF_OT_name_match_map_type_toggle",
+                           "ASSETSHELF_OT_name_match_clear",
+                           [&](const StringRef identifier) {
+                             return settings_name_match_map_type_is_active(shelf->settings,
+                                                                           std::string(identifier).c_str());
+                           },
+                           draw_tags);
+    return;
   }
 
-  /* Always interactive: clearing the map-type/tag selection should not require the filter to be
-   * enabled first, matching the "always clickable" map type buttons above. */
+  /* Tags-only shelves: keep Clear / Preferences, skip the map-type list. */
+  ui::Layout &layout = *panel->layout;
+  layout.enabled_set(true);
+  draw_tags(layout);
   layout.op("ASSETSHELF_OT_name_match_clear", IFACE_("Clear Filter"), ICON_X);
   layout.separator();
   PointerRNA preferences_props = layout.op(

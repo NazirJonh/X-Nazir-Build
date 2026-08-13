@@ -11,6 +11,7 @@
 #include "DNA_ID.h"
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
+#include "DNA_space_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_texture_types.h"
 #include "DNA_userdef_types.h"
@@ -43,6 +44,7 @@
 #include "BKE_paint.hh"
 #include "BKE_screen.hh"
 
+#include "ED_asset_filter.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
@@ -53,6 +55,8 @@
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
+#include "WM_api.hh"
+#include "WM_types.hh"
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 
@@ -75,12 +79,12 @@ static bool image_grid_catalog_path_enabled_for_library(
   if (enabled_ids.is_empty()) {
     return true;
   }
-  if (!asset_catalog_path) {
-    return false;
-  }
   const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(lib_ref);
   if (!library) {
     /* Library still loading: keep the asset hidden rather than flashing an unfiltered list. */
+    return false;
+  }
+  if (!asset_catalog_path) {
     return false;
   }
   const asset_system::AssetCatalog *catalog = library->catalog_service().find_catalog_by_path(
@@ -88,17 +92,14 @@ static bool image_grid_catalog_path_enabled_for_library(
   if (!catalog) {
     return false;
   }
-  for (const bUUID &id : enabled_ids) {
-    if (BLI_uuid_equal(id, catalog->catalog_id)) {
-      return true;
-    }
-  }
-  return false;
+  return ed::asset::catalog_id_is_in_enabled_set(
+      library, catalog->catalog_id, enabled_ids, ed::asset::CatalogContainment::IncludeChildren);
 }
 
 static int image_grid_cols_clamp(const int cols)
 {
-  return clamp_i(cols, 1, 16);
+  /* Column-count bucket, not a row cap. See #IMAGE_GRID_LAYOUT_BUCKET_MAX_COLS. */
+  return clamp_i(cols, 1, IMAGE_GRID_LAYOUT_BUCKET_MAX_COLS);
 }
 
 /* Map a grid layout to its per-layout scroll/focus bucket index, keyed by column count only.
@@ -131,28 +132,6 @@ void image_grid_focus_clear(ImageGridViewport &viewport)
 void image_grid_focus_mark_applied(ImageGridViewport &viewport, const int cols, const int rows)
 {
   viewport.focus_applied_by_layout[image_grid_layout_bucket_index(cols, rows)] = true;
-}
-
-static bool image_grid_browse_popover_is_open(const bContext &C)
-{
-  /* Fast path: the browse popover is the current popup context (e.g. an event handled inside it). */
-  if (ui::region_popup_has_panel(CTX_wm_region_popup(&C), "ASSETSHELF_PT_popover_panel")) {
-    return true;
-  }
-  /* The catalog clobber runs from the N-panel image-grid draw, where the popup is not the context
-   * region (#CTX_wm_region_popup is null). Popup regions live in #bScreen::regionbase as
-   * #RGN_TYPE_TEMPORARY, so scan them to detect the open browse popover window-wide. */
-  const bScreen *screen = CTX_wm_screen(&C);
-  if (screen) {
-    for (const ARegion &region : screen->regionbase) {
-      if (region.regiontype == RGN_TYPE_TEMPORARY &&
-          ui::region_popup_has_panel(&region, "ASSETSHELF_PT_popover_panel"))
-      {
-        return true;
-      }
-    }
-  }
-  return false;
 }
 
 static int image_grid_find_asset_filtered_index(const bContext &C,
@@ -276,7 +255,15 @@ bool image_grid_asset_is_visible_in_state(const ImageGridUIState &state,
   if (!asset_catalog_path) {
     return false;
   }
-  return state.filter.enabled_catalog_paths.contains(*asset_catalog_path);
+  const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(
+      asset_lib_ref);
+  if (!library) {
+    return false;
+  }
+  return ed::asset::catalog_path_is_in_enabled_set(
+      *asset_catalog_path,
+      state.filter.enabled_catalog_paths,
+      ed::asset::CatalogContainment::IncludeChildren);
 }
 
 std::optional<std::string> image_grid_catalog_path_from_shelf(const AssetShelf &shelf)
@@ -549,45 +536,60 @@ static void image_grid_pending_apply_slot(bContext &C, ImageGridUIState &state)
 
 void image_grid_pending_apply_if_ready(bContext &C)
 {
-  if (image_grid_browse_popover_is_open(C)) {
+  auto apply_owner = [&](ImageGridOwner owner) {
+    if (!owner.runtime_state_slot()) {
+      return;
+    }
+
+    bool applied_texture = false;
+    bool applied_mask = false;
+    for (const bool is_mask_slot : {false, true}) {
+      ImageGridUIState &state = image_grid_state_get(owner, is_mask_slot);
+      if (!state.pending.apply_after_popover) {
+        continue;
+      }
+      image_grid_pending_apply_slot(C, state);
+      if (is_mask_slot) {
+        applied_mask = true;
+      }
+      else {
+        applied_texture = true;
+      }
+    }
+
+    if (applied_texture) {
+      image_grid_state_persist(owner, image_grid_state_get(owner, false), false);
+      image_grid_notify_change(C, false);
+    }
+    if (applied_mask) {
+      image_grid_state_persist(owner, image_grid_state_get(owner, true), true);
+      image_grid_notify_change(C, true);
+    }
+  };
+
+  if (const std::optional<ImageGridOwner> owner = image_grid_owner_from_context(C)) {
+    apply_owner(*owner);
     return;
   }
 
-  const std::optional<image_grid::ImageGridOwner> owner = image_grid::image_grid_owner_from_context(
-      C);
-  if (!owner) {
+  /* Popover close can run without a View3D/SpaceImage as the context area (the popup region is
+   * current). Walk loaded screens so a pending apply scheduled from the browse popover still
+   * lands. */
+  Main *bmain = CTX_data_main(&C);
+  if (!bmain) {
     return;
   }
-
-  bool applied_texture = false;
-  bool applied_mask = false;
-  for (const bool is_mask_slot : {false, true}) {
-    ImageGridUIState &state = image_grid::image_grid_state_get(*owner, is_mask_slot);
-    if (!state.pending.apply_after_popover) {
-      continue;
+  for (bScreen &screen : bmain->screens) {
+    for (ScrArea &area : screen.areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        if (sl.spacetype == SPACE_VIEW3D) {
+          apply_owner(ImageGridOwner::from(reinterpret_cast<View3D &>(sl)));
+        }
+        else if (sl.spacetype == SPACE_IMAGE) {
+          apply_owner(ImageGridOwner::from(reinterpret_cast<SpaceImage &>(sl)));
+        }
+      }
     }
-    image_grid_pending_apply_slot(C, state);
-    if (is_mask_slot) {
-      applied_mask = true;
-    }
-    else {
-      applied_texture = true;
-    }
-  }
-
-  if (!applied_texture && !applied_mask) {
-    return;
-  }
-
-  if (applied_texture) {
-    image_grid::image_grid_state_persist(
-        *owner, image_grid::image_grid_state_get(*owner, false), false);
-    image_grid_notify_change(C, false);
-  }
-  if (applied_mask) {
-    image_grid::image_grid_state_persist(
-        *owner, image_grid::image_grid_state_get(*owner, true), true);
-    image_grid_notify_change(C, true);
   }
 }
 
@@ -780,6 +782,14 @@ void image_grid_shelf_sync_register()
   type->active_asset_name_fallback_matches = image_texture_shelf_active_asset_name_fallback_matches;
   type->grid_tile_activate_extra_params = image_texture_shelf_grid_tile_activate_extra_params;
   type->flag |= ASSET_SHELF_TYPE_FLAG_CENTER_ACTIVE_ASSET_ON_OPEN;
+
+  /* Apply deferred catalog/library follow when this (shared) browse popover closes. Harmless
+   * no-op for other shelf types that reuse the same panel idname. */
+  if (PanelType *pt = WM_paneltype_find("ASSETSHELF_PT_popover_panel", true)) {
+    pt->popover_close = [](bContext *C, const PanelType * /*pt*/) {
+      image_grid_pending_apply_if_ready(*C);
+    };
+  }
 }
 
 void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState &state)
@@ -813,6 +823,29 @@ void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState 
     ed::asset::shelf::settings_set_all_catalog_active(shelf.settings);
   }
   ed::asset::shelf::settings_catalog_commit_active(shelf);
+}
+
+static bool image_grid_browse_popover_is_open(const bContext &C)
+{
+  /* Fast path: the browse popover is the current popup context (e.g. an event handled inside it). */
+  if (ui::region_popup_has_panel(CTX_wm_region_popup(&C), "ASSETSHELF_PT_popover_panel")) {
+    return true;
+  }
+  /* #image_grid_prepare_browse_shelf runs from the N-panel image-grid draw, where the popup is
+   * not the context region (#CTX_wm_region_popup is null). Popup regions live in
+   * #bScreen::regionbase as #RGN_TYPE_TEMPORARY, so scan them to detect the open browse popover
+   * window-wide. Pending-apply no longer uses this: it runs from #PanelType.popover_close. */
+  const bScreen *screen = CTX_wm_screen(&C);
+  if (screen) {
+    for (const ARegion &region : screen->regionbase) {
+      if (region.regiontype == RGN_TYPE_TEMPORARY &&
+          ui::region_popup_has_panel(&region, "ASSETSHELF_PT_popover_panel"))
+      {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
@@ -893,8 +926,8 @@ void image_grid_popover_layout_context_set(ui::Layout &layout,
    * picking a catalog in the popover must not move the image grid off the user's current catalog
    * (and scroll away from the assigned texture). The grid follows the shelf only once an asset is
    * actually activated — #VIEW3D_OT_image_shelf_activate_asset schedules it via
-   * #image_grid_pending_schedule_from_asset, applied by #image_grid_pending_apply_if_ready after
-   * the popover closes. */
+   * #image_grid_pending_schedule_from_asset, applied by #image_grid_pending_apply_if_ready from
+   * the popover's #PanelType.popover_close. */
   layout.context_ptr_set("image_grid_target", &target_ptr);
   layout.context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
 }

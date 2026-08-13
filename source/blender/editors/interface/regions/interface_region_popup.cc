@@ -1230,6 +1230,10 @@ void popup_block_free(bContext *C, PopupBlockHandle *handle)
     ED_workspace_status_text(C, nullptr);
   }
 
+  if (handle->close_func) {
+    handle->close_func(C, handle->close_arg);
+  }
+
   if (handle->popup_create_vars.arg_free) {
     handle->popup_create_vars.arg_free(handle->popup_create_vars.arg);
   }

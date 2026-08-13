@@ -13,6 +13,7 @@
 #include "DNA_listBase.h"
 #include "DNA_asset_types.h"
 
+#include "BLI_function_ref.hh"
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 
@@ -27,7 +28,13 @@ struct FileAssetSelectParams;
 struct Main;
 struct UserDef;
 
-namespace blender::ed::asset {
+namespace blender {
+
+namespace ui {
+struct Layout;
+}
+
+namespace ed::asset {
 
 /**
  * Re-point (\a new_id non-empty) or drop (\a new_id empty) every stored selection of the map type
@@ -86,4 +93,30 @@ bool ED_asset_browser_name_match_entry_visible(bool filter_enabled,
 
 void ED_asset_browser_name_match_panel_register();
 
+/**
+ * Toggle \a identifier in \a state and enable the filter. Shared host policy: picking a map type
+ * implies intent to filter, so the master toggle turns on without a second click.
+ */
+inline void name_match_host_toggle_map_type(NameMatchFilterState &state, const StringRef identifier)
+{
+  BKE_name_match_filter_toggle_map_type(state, identifier);
+  state.enabled = true;
+}
+
+/**
+ * Shared map-types popover body used by image grid, generic grid, Asset Browser, and the asset
+ * shelf. The panel stays interactive while the filter is off; the "Map Types" label is dimmed.
+ * Selecting a type is what enables the filter (#name_match_host_toggle_map_type).
+ *
+ * \param draw_extra_before_clear: optional block drawn after the map-type list and before Clear
+ *        (the shelf uses this for tag checkboxes).
+ */
+void name_match_filter_draw(ui::Layout &layout,
+                            bool filter_enabled,
+                            StringRef map_type_toggle_op,
+                            StringRef clear_op,
+                            FunctionRef<bool(StringRef identifier)> map_type_is_active,
+                            FunctionRef<void(ui::Layout &layout)> draw_extra_before_clear = {});
+
 }  // namespace blender::ed::asset
+}  // namespace blender

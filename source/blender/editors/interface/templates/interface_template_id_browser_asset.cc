@@ -36,6 +36,7 @@
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
 
+#include "ED_asset_filter.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
@@ -258,12 +259,8 @@ static void id_browser_catalog_selection_sanitize(const AssetLibraryReference &l
 
 static bool catalog_id_in_span(const Span<bUUID> ids, const bUUID &catalog_id)
 {
-  for (const bUUID &id : ids) {
-    if (BLI_uuid_equal(id, catalog_id)) {
-      return true;
-    }
-  }
-  return false;
+  return ed::asset::catalog_id_is_in_enabled_set(
+      nullptr, catalog_id, ids, ed::asset::CatalogContainment::Exact);
 }
 
 void id_browser_foreach_asset(const bContext &C,
@@ -376,8 +373,9 @@ void id_browser_foreach_asset(const bContext &C,
     if (all_libraries) {
       /* Catalog ids are only unique within a library, so filtering across #ASSET_LIBRARY_ALL
        * must resolve each asset's *actual* source library rather than trusting the merged "All"
-       * pseudo-library's own catalog id space. Mirrors
-       * #image_grid_asset_is_visible_in_state (view3d_image_shelf_sync.cc). */
+       * pseudo-library's own catalog id space. Child catalogs of an enabled SET entry are
+       * included (#CatalogContainment::IncludeChildren), matching #foreach_filtered_asset and
+       * #image_grid_asset_is_visible_in_state. */
       const std::optional<AssetLibraryReference> asset_lib_ref =
           asset.owner_asset_library().library_reference();
       if (!asset_lib_ref.has_value()) {
@@ -387,7 +385,11 @@ void id_browser_foreach_asset(const bContext &C,
               BKE_preferences_asset_library_identifier_from_ref(&U, &*asset_lib_ref)))
       {
         const AssetMetaData &metadata = asset.get_metadata();
-        if (!catalog_id_in_span(*per_lib_ids, metadata.catalog_id)) {
+        if (!ed::asset::catalog_id_is_in_enabled_set(&asset.owner_asset_library(),
+                                                     metadata.catalog_id,
+                                                     *per_lib_ids,
+                                                     ed::asset::CatalogContainment::IncludeChildren))
+        {
           return true;
         }
       }

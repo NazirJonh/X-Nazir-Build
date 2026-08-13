@@ -56,6 +56,9 @@ class AssetGridDataSource : public GridDataSource {
   int item_count(const bContext &C) const override;
   bool item_count_ready(const bContext &C) const override;
   void build_window(const bContext &C, AbstractGridView &view, IndexRange window) override;
+  int build_window_and_count(const bContext &C,
+                             AbstractGridView &view,
+                             IndexRange window) override;
 };
 
 /** \} */

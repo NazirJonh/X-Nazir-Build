@@ -145,13 +145,22 @@ struct ImageGridFilter {
  * now live in the shared session registry (one #GridSessionState per grid variant, keyed by
  * #image_grid_session_id); only host-specific focus bookkeeping remains here.
  */
+/**
+ * Max distinct column counts that get their own focus/scroll bucket. This is a column-count
+ * key, not a visible-row cap (#ui::GRID_VIEW_DEFAULT_MAX_ROWS): the N-Panel and Texture popover
+ * usually differ in width, and each width must keep its own pending-focus flag. Independent of
+ * how tall the grip is.
+ */
+inline constexpr int IMAGE_GRID_LAYOUT_BUCKET_MAX_COLS = 16;
+
 struct ImageGridViewport {
   /**
-   * Number of focus-tracking buckets: one per column count (clamped to 1..16). The N-Panel and
-   * Texture popover grids share one #ImageGridUIState but usually differ in width, so keying the
-   * focus-applied flag by column count keeps each host from clearing the other's pending focus.
+   * Number of focus-tracking buckets: one per column count, clamped to
+   * 1..#IMAGE_GRID_LAYOUT_BUCKET_MAX_COLS. The N-Panel and Texture popover grids share one
+   * #ImageGridUIState but usually differ in width, so keying the focus-applied flag by column
+   * count keeps each host from clearing the other's pending focus.
    */
-  static constexpr int layout_bucket_num = 16 * 16;
+  static constexpr int layout_bucket_num = IMAGE_GRID_LAYOUT_BUCKET_MAX_COLS;
 
   /**
    * When non-empty, the grid should scroll to this asset's filtered index (session-only).
@@ -289,6 +298,18 @@ blender::Vector<asset_system::AssetLibrary *> image_grid_all_mode_libraries();
 void image_grid_fetch_all_mode_libraries(const bContext &C);
 void image_grid_notify_change(bContext &C, bool is_mask_slot = false);
 
+/**
+ * Catalog-selector tree callbacks for the shared #CatalogCheckboxSetConfig host.
+ * After a checkbox write to UserDef catalog memory: reload runtime paths, persist, notify.
+ */
+void image_grid_catalog_selector_after_change(bContext &C);
+void image_grid_catalog_selector_cleared_all(bContext &C);
+bool image_grid_catalog_selector_is_all_active(bContext &C);
+bool image_grid_catalog_section_is_expanded(bContext &C, const char *library_key);
+void image_grid_catalog_section_set_expanded(bContext &C,
+                                             const char *library_key,
+                                             bool expanded);
+
 /** Copy grid library/catalog filter into popup asset shelf before opening browse UI. */
 void image_grid_sync_shelf_from_state(AssetShelf &shelf, const ImageGridUIState &state);
 
@@ -299,6 +320,11 @@ AssetShelf *image_grid_prepare_browse_shelf(const bContext &C,
 
 void image_grid_pending_clear(ImageGridUIState &state);
 
+/**
+ * True when \a asset is visible under the grid's library + catalog SET.
+ * Catalog matching uses #ed::asset::CatalogContainment::IncludeChildren, the same rule as
+ * #image_grid_foreach_filtered_item — a selected catalog includes its descendants.
+ */
 bool image_grid_asset_is_visible_in_state(const ImageGridUIState &state,
                                           const AssetLibraryReference &asset_lib_ref,
                                           const std::optional<std::string> &asset_catalog_path);
@@ -394,8 +420,8 @@ int image_grid_apply_focus_scroll(const bContext &C,
                                   int effective_rows_hint);
 
 /**
- * Apply pending shelf selection when the browse popover is closed.
- * Safe to call every image grid redraw.
+ * Apply pending shelf selection. Invoked from the browse popover's #PanelType.popover_close
+ * (not from grid draw, which used to scan #RGN_TYPE_TEMPORARY for the panel idname).
  */
 void image_grid_pending_apply_if_ready(bContext &C);
 

@@ -154,6 +154,7 @@ void ED_asset_browser_name_match_map_type_toggle(FileAssetSelectParams &params,
   if (!name_match_map_type_deactivate(params, id.c_str())) {
     name_match_map_type_activate(params, id.c_str());
   }
+  ED_asset_browser_name_match_filter_set_enabled(params, true);
 }
 
 void ED_asset_browser_name_match_clear_selection(FileAssetSelectParams &params)
@@ -194,6 +195,59 @@ static FileAssetSelectParams *browser_name_match_params_from_context(const bCont
   return sfile ? ED_fileselect_get_asset_params(sfile) : nullptr;
 }
 
+void name_match_filter_draw(ui::Layout &layout,
+                            const bool filter_enabled,
+                            const StringRef map_type_toggle_op,
+                            const StringRef clear_op,
+                            const FunctionRef<bool(StringRef identifier)> map_type_is_active,
+                            const FunctionRef<void(ui::Layout &layout)> draw_extra_before_clear)
+{
+  /* The popover remains interactive while the filter is disabled so the user can select a map
+   * type and enable the filter in one action. A disabled panel layout would recursively mark all
+   * descendant buttons as disabled during Layout::resolve(). */
+  layout.enabled_set(true);
+
+  {
+    ui::Layout &label_row = layout.row(false);
+    label_row.enabled_set(filter_enabled);
+    label_row.label(IFACE_("Map Types"), ICON_NONE);
+  }
+
+  ui::Layout &types_layout = layout.column(false);
+  types_layout.enabled_set(true);
+  types_layout.active_set(true);
+
+  const std::string toggle_op(map_type_toggle_op);
+  for (const bUserNameMatchMapType &map_type : U.name_match_map_types) {
+    if (map_type.identifier[0] == '\0') {
+      continue;
+    }
+    const bool active = map_type_is_active(map_type.identifier);
+    const char *display_name = map_type.name[0] != '\0' ? map_type.name : map_type.identifier;
+    ui::Layout &row = types_layout.row(false);
+    PointerRNA props = row.op(toggle_op.c_str(),
+                              display_name,
+                              active ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT);
+    if (props.type != nullptr) {
+      RNA_string_set(&props, "identifier", map_type.identifier);
+    }
+  }
+
+  if (draw_extra_before_clear) {
+    draw_extra_before_clear(layout);
+  }
+
+  layout.separator();
+  const std::string clear_op_str(clear_op);
+  layout.op(clear_op_str.c_str(), IFACE_("Clear Filter"), ICON_X);
+  layout.separator();
+  PointerRNA preferences_props = layout.op(
+      "SCREEN_OT_userpref_show", IFACE_("Open Preferences..."), ICON_PREFERENCES);
+  if (preferences_props.type != nullptr) {
+    RNA_enum_set(&preferences_props, "section", USER_SECTION_ASSETS);
+  }
+}
+
 static void asset_browser_name_match_panel_draw(const bContext *C, Panel *panel)
 {
   FileAssetSelectParams *params = browser_name_match_params_from_context(C);
@@ -201,42 +255,14 @@ static void asset_browser_name_match_panel_draw(const bContext *C, Panel *panel)
     return;
   }
 
-  ui::Layout &layout = *panel->layout;
-  /* The popover remains interactive while the filter is disabled so the user can select a map
-   * type and enable the filter in one action. A disabled panel layout would recursively mark all
-   * descendant buttons as disabled during Layout::resolve(). */
-  layout.enabled_set(true);
-
-  const bool filter_enabled = ED_asset_browser_name_match_filter_enabled(*params);
-  {
-    ui::Layout &label_row = layout.row(false);
-    label_row.enabled_set(filter_enabled);
-    label_row.label(IFACE_("Map Types"), ICON_NONE);
-  }
-  for (const bUserNameMatchMapType &map_type : U.name_match_map_types) {
-    if (map_type.identifier[0] == '\0') {
-      continue;
-    }
-    const bool active = name_match_map_type_is_active(*params, map_type.identifier);
-    ui::Layout &row = layout.row(false);
-    const char *display_name = map_type.name[0] != '\0' ? map_type.name : map_type.identifier;
-    PointerRNA props = row.op("ASSET_OT_browser_name_match_map_type_toggle",
-                              display_name,
-                              active ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT);
-    if (props.type != nullptr) {
-      RNA_string_set(&props, "identifier", map_type.identifier);
-    }
-  }
-  layout.separator();
-  /* Always interactive: clearing the map-type selection should not require the filter to be
-   * enabled first, matching the "always clickable" map type buttons above. */
-  layout.op("ASSET_OT_browser_name_match_clear", IFACE_("Clear Filter"), ICON_X);
-  layout.separator();
-  PointerRNA preferences_props = layout.op(
-      "SCREEN_OT_userpref_show", IFACE_("Open Preferences..."), ICON_PREFERENCES);
-  if (preferences_props.type != nullptr) {
-    RNA_enum_set(&preferences_props, "section", USER_SECTION_ASSETS);
-  }
+  name_match_filter_draw(*panel->layout,
+                         ED_asset_browser_name_match_filter_enabled(*params),
+                         "ASSET_OT_browser_name_match_map_type_toggle",
+                         "ASSET_OT_browser_name_match_clear",
+                         [&](const StringRef identifier) {
+                           const std::string id(identifier);
+                           return name_match_map_type_is_active(*params, id.c_str());
+                         });
 }
 
 void ED_asset_browser_name_match_panel_register()

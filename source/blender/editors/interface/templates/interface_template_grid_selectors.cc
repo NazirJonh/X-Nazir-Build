@@ -35,7 +35,9 @@
 
 #include "BLT_translation.hh"
 
+#include "ED_asset_filter.hh"
 #include "ED_asset_list.hh"
+#include "ED_asset_name_matching.hh"
 #include "ED_screen.hh"
 
 #include "WM_api.hh"
@@ -94,67 +96,41 @@ static void ensure_grid_panels_registered()
  * \{ */
 
 static bool id_browser_catalog_id_enabled(const AssetLibraryReference &library_ref,
+                                          const char *domain,
                                           const bUUID catalog_id)
 {
-  /* #ASSET_CATALOG_MEMORY_SET is an explicit include-list (see its use as a filter in
-   * #id_browser_asset_visible, interface_template_id_browser_asset.cc): with no entry (or the
-   * default #ASSET_CATALOG_MEMORY_ALL mode) every catalog is shown, so no checkbox should read as
-   * checked -- checking one is what opts it into the include-list. */
-  if (BKE_asset_catalog_memory_get_mode(
-          &U, library_ref, grid_settings::id_browser_catalog_memory_domain) !=
-      ASSET_CATALOG_MEMORY_SET)
-  {
-    return false;
-  }
-  const Vector<bUUID> enabled = BKE_asset_catalog_memory_get_set(
-      &U, library_ref, grid_settings::id_browser_catalog_memory_domain);
-  for (const bUUID &id : enabled) {
-    if (BLI_uuid_equal(id, catalog_id)) {
-      return true;
-    }
-  }
-  return false;
+  return ed::asset::catalog_memory_id_is_enabled(library_ref, domain, catalog_id);
 }
 
 static void id_browser_catalog_id_set_enabled(const AssetLibraryReference &library_ref,
+                                              const char *domain,
                                               const bUUID catalog_id,
                                               const bool enabled)
 {
-  Vector<bUUID> ids;
-  if (BKE_asset_catalog_memory_get_mode(
-          &U, library_ref, grid_settings::id_browser_catalog_memory_domain) ==
-      ASSET_CATALOG_MEMORY_SET)
-  {
-    ids = BKE_asset_catalog_memory_get_set(
-        &U, library_ref, grid_settings::id_browser_catalog_memory_domain);
+  ed::asset::catalog_memory_id_set_enabled(library_ref, domain, catalog_id, enabled);
+}
+
+static void catalog_checkbox_notify_or_after(bContext *C, void (*after_change)(bContext *))
+{
+  if (after_change) {
+    after_change(C);
+    return;
   }
-  if (enabled) {
-    bool found = false;
-    for (const bUUID &id : ids) {
-      if (BLI_uuid_equal(id, catalog_id)) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      ids.append(catalog_id);
-    }
+  WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST, nullptr);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+    ED_region_tag_refresh_ui(region);
   }
-  else {
-    for (int64_t i = ids.size() - 1; i >= 0; i--) {
-      if (BLI_uuid_equal(ids[i], catalog_id)) {
-        ids.remove_and_reorder(i);
-      }
-    }
+}
+
+static bool catalog_checkbox_section_expanded(const bContext &C,
+                                              const CatalogCheckboxSetConfig &config,
+                                              const char *library_key)
+{
+  if (config.is_section_expanded) {
+    return config.is_section_expanded(const_cast<bContext *>(&C), library_key);
   }
-  if (ids.is_empty()) {
-    BKE_asset_catalog_memory_set_all(
-        &U, library_ref, grid_settings::id_browser_catalog_memory_domain);
-  }
-  else {
-    BKE_asset_catalog_memory_set_set(
-        &U, library_ref, grid_settings::id_browser_catalog_memory_domain, ids.as_span());
-  }
+  return grid_settings::is_library_section_expanded(config.settings, library_key);
 }
 
 /* #AssetLibrary::name() is empty for built-ins (Current File / Essentials / Online Essentials);
@@ -185,6 +161,7 @@ static std::string grid_catalog_library_section_name(const asset_system::AssetLi
 
 class GridCatalogSelectorTree : public AbstractTreeView {
   const bContext &C_;
+  CatalogCheckboxSetConfig config_;
   PointerRNA settings_;
   /* Single-library mode only; see #library_sections_ for All-Libraries mode. */
   std::shared_ptr<const asset_system::AssetCatalogTree> catalog_tree_;
@@ -199,55 +176,22 @@ class GridCatalogSelectorTree : public AbstractTreeView {
   Vector<LibrarySection> library_sections_;
   bool all_libraries_mode_ = false;
 
- public:
-  class AllItem;
-  class LibrarySectionItem;
-  class Item;
-
-  bool all_libraries_catalog_filters_empty() const
+  const char *domain() const
   {
-    for (const LibrarySection &section : library_sections_) {
-      if (BKE_asset_catalog_memory_get_mode(
-              &U, section.library_ref, grid_settings::id_browser_catalog_memory_domain) ==
-          ASSET_CATALOG_MEMORY_SET)
-      {
-        return false;
-      }
+    return config_.catalog_memory_domain;
+  }
+
+  void fill_library_sections()
+  {
+    Vector<asset_system::AssetLibrary *> libraries;
+    if (config_.all_mode_libraries_fn) {
+      libraries = config_.all_mode_libraries_fn();
     }
-    return true;
-  }
-
-  void clear_all_libraries_catalog_filters()
-  {
-    for (const LibrarySection &section : library_sections_) {
-      BKE_asset_catalog_memory_set_all(
-          &U, section.library_ref, grid_settings::id_browser_catalog_memory_domain);
+    else {
+      libraries = ed::asset::all_mode_libraries(/*exclude_image_libraries=*/false,
+                                                /*only_image_libraries=*/false);
     }
-    /* Exit Recent/Favorites membership stored under #ASSET_LIBRARY_ALL as well. */
-    BKE_asset_catalog_memory_set_all(&U,
-                                     asset_system::all_library_reference(),
-                                     grid_settings::id_browser_catalog_memory_domain);
-  }
-
-  /** Single-library mode constructor (unchanged behavior). */
-  GridCatalogSelectorTree(const bContext &C,
-                          PointerRNA settings,
-                          const asset_system::AssetLibrary &library)
-      : C_(C), settings_(settings)
-  {
-    catalog_tree_ = library.catalog_service().catalog_tree();
-  }
-
-  /** All-Libraries mode constructor: one section per real library. */
-  struct AllLibrariesTag {
-  };
-  GridCatalogSelectorTree(const bContext &C, PointerRNA settings, AllLibrariesTag /*all_libraries*/)
-      : C_(C), settings_(settings), all_libraries_mode_(true)
-  {
-    for (asset_system::AssetLibrary *library :
-         ed::asset::all_mode_libraries(/*exclude_image_libraries=*/false,
-                                       /*only_image_libraries=*/false))
-    {
+    for (asset_system::AssetLibrary *library : libraries) {
       const std::optional<AssetLibraryReference> lib_ref = library->library_reference();
       if (!lib_ref.has_value()) {
         continue;
@@ -261,6 +205,72 @@ class GridCatalogSelectorTree : public AbstractTreeView {
     }
   }
 
+ public:
+  class AllItem;
+  class LibrarySectionItem;
+  class Item;
+
+  bool all_libraries_catalog_filters_empty() const
+  {
+    for (const LibrarySection &section : library_sections_) {
+      if (BKE_asset_catalog_memory_get_mode(&U, section.library_ref, domain()) ==
+          ASSET_CATALOG_MEMORY_SET)
+      {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void clear_all_libraries_catalog_filters()
+  {
+    for (const LibrarySection &section : library_sections_) {
+      BKE_asset_catalog_memory_set_all(&U, section.library_ref, domain());
+    }
+    /* Exit Recent/Favorites membership stored under #ASSET_LIBRARY_ALL as well. */
+    BKE_asset_catalog_memory_set_all(&U, asset_system::all_library_reference(), domain());
+  }
+
+  explicit GridCatalogSelectorTree(const bContext &C, CatalogCheckboxSetConfig config)
+      : C_(C),
+        config_(std::move(config)),
+        settings_(config_.settings),
+        all_libraries_mode_(config_.all_libraries_mode)
+  {
+    if (all_libraries_mode_) {
+      fill_library_sections();
+    }
+    else if (config_.single_library) {
+      catalog_tree_ = config_.single_library->catalog_service().catalog_tree();
+    }
+  }
+
+  /** Single-library mode constructor (generic grid / ID browser). */
+  GridCatalogSelectorTree(const bContext &C,
+                          PointerRNA settings,
+                          const asset_system::AssetLibrary &library)
+      : GridCatalogSelectorTree(C, [&]() {
+          CatalogCheckboxSetConfig config;
+          config.settings = settings;
+          config.single_library = &library;
+          return config;
+        }())
+  {
+  }
+
+  /** All-Libraries mode constructor: one section per real library. */
+  struct AllLibrariesTag {
+  };
+  GridCatalogSelectorTree(const bContext &C, PointerRNA settings, AllLibrariesTag /*all_libraries*/)
+      : GridCatalogSelectorTree(C, [&]() {
+          CatalogCheckboxSetConfig config;
+          config.settings = settings;
+          config.all_libraries_mode = true;
+          return config;
+        }())
+  {
+  }
+
   void build_tree() override;
 
   static Item &build_catalog_items_recursive(
@@ -268,7 +278,8 @@ class GridCatalogSelectorTree : public AbstractTreeView {
       const asset_system::AssetCatalogTreeItem &catalog_item,
       PointerRNA settings,
       StringRef library_key,
-      const AssetLibraryReference &library_ref);
+      const AssetLibraryReference &library_ref,
+      const char *domain);
 
   class AllItem : public BasicTreeViewItem {
     PointerRNA settings_;
@@ -278,28 +289,29 @@ class GridCatalogSelectorTree : public AbstractTreeView {
     {
       set_on_activate_fn([this](bContext &C, BasicTreeViewItem & /*item*/) {
         GridCatalogSelectorTree &tree = dynamic_cast<GridCatalogSelectorTree &>(get_tree_view());
+        if (tree.config_.on_cleared_all) {
+          tree.config_.on_cleared_all(&C);
+          return;
+        }
         if (tree.all_libraries_mode_) {
           tree.clear_all_libraries_catalog_filters();
         }
         else {
-          BKE_asset_catalog_memory_set_all(&U,
-                                           grid_settings::library_ref_get(settings_),
-                                           grid_settings::id_browser_catalog_memory_domain);
+          BKE_asset_catalog_memory_set_all(
+              &U, grid_settings::library_ref_get(settings_), tree.domain());
         }
-        WM_event_add_notifier(&C, NC_ASSET | ND_ASSET_LIST, nullptr);
-        if (ARegion *region = CTX_wm_region(&C)) {
-          ED_region_tag_redraw(region);
-          ED_region_tag_refresh_ui(region);
-        }
+        catalog_checkbox_notify_or_after(&C, tree.config_.after_change);
       });
       set_is_active_fn([this]() -> bool {
         GridCatalogSelectorTree &tree = dynamic_cast<GridCatalogSelectorTree &>(get_tree_view());
+        if (tree.config_.is_all_active) {
+          return tree.config_.is_all_active(const_cast<bContext *>(&tree.C_));
+        }
         if (tree.all_libraries_mode_) {
           return tree.all_libraries_catalog_filters_empty();
         }
-        return BKE_asset_catalog_memory_get_mode(&U,
-                                                 grid_settings::library_ref_get(settings_),
-                                                 grid_settings::id_browser_catalog_memory_domain) !=
+        return BKE_asset_catalog_memory_get_mode(
+                   &U, grid_settings::library_ref_get(settings_), tree.domain()) !=
                ASSET_CATALOG_MEMORY_SET;
       });
     }
@@ -307,10 +319,7 @@ class GridCatalogSelectorTree : public AbstractTreeView {
 
   /** Parent row for one real library's catalogs in All-Libraries mode. Its row also
    * carries the per-library "All" checkbox, clearing only this library's saved filter -- distinct
-   * from #AllItem, which clears every library at once. Mirrors
-   * #ImageGridCatalogSelectorTree::LibrarySectionItem (image_grid_panels.cc), which uses the
-   * same generic #AbstractTreeViewItem collapse-chevron mechanism as #Item below and is proven to
-   * work in a nested popover.
+   * from #AllItem, which clears every library at once.
    *
    * An earlier version of this item disabled the generic chevron (#supports_collapsing() ->
    * `false`) and only built its children while expanded, driving expansion through its own
@@ -373,6 +382,10 @@ class GridCatalogSelectorTree : public AbstractTreeView {
       void *settings_data;
       char library_key[MAX_NAME];
       AssetLibraryReference library_ref;
+      const char *domain;
+      void (*after_change)(bContext *);
+      bool (*is_section_expanded)(bContext *, const char *);
+      void (*set_section_expanded)(bContext *, const char *, bool);
     };
     using ExpandArg = ToggleArg;
 
@@ -380,17 +393,16 @@ class GridCatalogSelectorTree : public AbstractTreeView {
     LibrarySectionItem(PointerRNA settings,
                        std::string library_key,
                        const AssetLibraryReference &library_ref,
-                       std::string name)
+                       std::string name,
+                       const char *domain,
+                       const bool expanded)
         : BasicTreeViewItem(std::move(name)), settings_(settings), library_key_(std::move(library_key)),
           library_ref_(library_ref),
-          showing_all_((BKE_asset_catalog_memory_get_mode(
-                            &U,
-                            library_ref_,
-                            grid_settings::id_browser_catalog_memory_domain) !=
+          showing_all_((BKE_asset_catalog_memory_get_mode(&U, library_ref_, domain) !=
                         ASSET_CATALOG_MEMORY_SET) ?
                            1 :
                            0),
-          expanded_(grid_settings::is_library_section_expanded(settings_, library_key_))
+          expanded_(expanded)
     {
       BLI_assert(!library_key_.empty());
     }
@@ -438,10 +450,22 @@ class GridCatalogSelectorTree : public AbstractTreeView {
       expand_arg->settings_type = settings_.type;
       expand_arg->settings_data = settings_.data;
       BLI_strncpy(expand_arg->library_key, library_key_.c_str(), sizeof(expand_arg->library_key));
+      {
+        GridCatalogSelectorTree &tree = dynamic_cast<GridCatalogSelectorTree &>(get_tree_view());
+        expand_arg->domain = tree.domain();
+        expand_arg->after_change = tree.config_.after_change;
+        expand_arg->is_section_expanded = tree.config_.is_section_expanded;
+        expand_arg->set_section_expanded = tree.config_.set_section_expanded;
+      }
       button_funcN_set(
           expand_but,
           [](bContext *C, void *argN, void * /*arg2*/) {
             auto *arg = static_cast<ExpandArg *>(argN);
+            if (arg->is_section_expanded && arg->set_section_expanded) {
+              const bool expanded = arg->is_section_expanded(C, arg->library_key);
+              arg->set_section_expanded(C, arg->library_key, !expanded);
+              return;
+            }
             PointerRNA settings{arg->settings_owner_id, arg->settings_type, arg->settings_data};
             const bool expanded = grid_settings::is_library_section_expanded(settings,
                                                                                 arg->library_key);
@@ -475,18 +499,19 @@ class GridCatalogSelectorTree : public AbstractTreeView {
       toggle_arg->settings_data = settings_.data;
       BLI_strncpy(toggle_arg->library_key, library_key_.c_str(), sizeof(toggle_arg->library_key));
       toggle_arg->library_ref = library_ref_;
+      {
+        GridCatalogSelectorTree &tree = dynamic_cast<GridCatalogSelectorTree &>(get_tree_view());
+        toggle_arg->domain = tree.domain();
+        toggle_arg->after_change = tree.config_.after_change;
+        toggle_arg->is_section_expanded = tree.config_.is_section_expanded;
+        toggle_arg->set_section_expanded = tree.config_.set_section_expanded;
+      }
       button_funcN_set(
           toggle_but,
           [](bContext *C, void *argN, void * /*arg2*/) {
             auto *arg = static_cast<ToggleArg *>(argN);
-            BKE_asset_catalog_memory_set_all(&U,
-                                             arg->library_ref,
-                                             grid_settings::id_browser_catalog_memory_domain);
-            WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST, nullptr);
-            if (ARegion *region = CTX_wm_region(C)) {
-              ED_region_tag_redraw(region);
-              ED_region_tag_refresh_ui(region);
-            }
+            BKE_asset_catalog_memory_set_all(&U, arg->library_ref, arg->domain);
+            catalog_checkbox_notify_or_after(C, arg->after_change);
           },
           toggle_arg,
           nullptr);
@@ -510,6 +535,8 @@ class GridCatalogSelectorTree : public AbstractTreeView {
     struct ToggleArg {
       AssetLibraryReference library_ref;
       bUUID catalog_id;
+      const char *domain;
+      void (*after_change)(bContext *);
     };
 
     struct ExpandArg {
@@ -534,19 +561,25 @@ class GridCatalogSelectorTree : public AbstractTreeView {
     Item(const asset_system::AssetCatalogTreeItem &catalog_item,
          PointerRNA settings,
          std::string library_key,
-         const AssetLibraryReference &library_ref)
+         const AssetLibraryReference &library_ref,
+         const char *domain)
         : BasicTreeViewItem(catalog_item.get_name()),
           catalog_item_(catalog_item),
           settings_(settings),
           library_key_(std::move(library_key)),
           library_ref_(library_ref),
-          catalog_path_enabled_(id_browser_catalog_id_enabled(library_ref_,
-                                                               catalog_item.get_catalog_id()) ?
+          catalog_path_enabled_(id_browser_catalog_id_enabled(
+                                    library_ref_, domain, catalog_item.get_catalog_id()) ?
                                     1 :
                                     0),
+          /* No #GridViewSettings (image grid): start expanded, same as the old
+           * #uncollapse_by_default(). Nested catalog collapse is only persisted when settings
+           * exist. */
           expanded_(catalog_item.has_children() &&
-                    grid_settings::is_catalog_item_expanded(settings, expansion_key(
-                        library_key_, catalog_item.catalog_path().str())))
+                    (settings.data == nullptr ||
+                     grid_settings::is_catalog_item_expanded(
+                         settings,
+                         expansion_key(library_key_, catalog_item.catalog_path().str()))))
     {
       /* The checkbox is the only way to toggle this item. A row-wide activation handler can race
        * the checkbox click: updating the filter requests a redraw while the current event is still
@@ -627,8 +660,11 @@ class GridCatalogSelectorTree : public AbstractTreeView {
        * #AbstractTreeViewItem::add_collapse_chevron(), which is always drawn before
        * #build_row() runs and therefore before the #EmbossType::Emboss switch below. Creating the
        * chevron after that switch was what gave it a filled-box look unlike every other chevron in
-       * the tree (library sections, and every other tree view in Blender). */
-      if (catalog_item_.has_children()) {
+       * the tree (library sections, and every other tree view in Blender).
+       *
+       * Hosts without #GridViewSettings (image grid) have nowhere to persist nested catalog
+       * collapse, so the chevron is omitted and children stay expanded. */
+      if (catalog_item_.has_children() && settings_.data != nullptr) {
         Button *expand_but = uiDefIconBut(block,
                                           ButtonType::ButToggle,
                                           expanded_ ? ICON_DOWNARROW_HLT : ICON_RIGHTARROW,
@@ -687,19 +723,21 @@ class GridCatalogSelectorTree : public AbstractTreeView {
       ToggleArg *toggle_arg = MEM_new<ToggleArg>(__func__);
       toggle_arg->library_ref = library_ref_;
       toggle_arg->catalog_id = catalog_item_.get_catalog_id();
+      {
+        GridCatalogSelectorTree &tree = dynamic_cast<GridCatalogSelectorTree &>(get_tree_view());
+        toggle_arg->domain = tree.domain();
+        toggle_arg->after_change = tree.config_.after_change;
+      }
       button_funcN_set(
           toggle_but,
           [](bContext *C, void *argN, void * /*arg2*/) {
             auto *arg = static_cast<ToggleArg *>(argN);
             id_browser_catalog_id_set_enabled(
                 arg->library_ref,
+                arg->domain,
                 arg->catalog_id,
-                !id_browser_catalog_id_enabled(arg->library_ref, arg->catalog_id));
-            WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST, nullptr);
-            if (ARegion *region = CTX_wm_region(C)) {
-              ED_region_tag_redraw(region);
-              ED_region_tag_refresh_ui(region);
-            }
+                !id_browser_catalog_id_enabled(arg->library_ref, arg->domain, arg->catalog_id));
+            catalog_checkbox_notify_or_after(C, arg->after_change);
           },
           toggle_arg,
           nullptr);
@@ -717,8 +755,9 @@ void GridCatalogSelectorTree::build_tree()
 
   if (all_libraries_mode_) {
     for (const LibrarySection &section : library_sections_) {
+      const bool expanded = catalog_checkbox_section_expanded(C_, config_, section.key.c_str());
       LibrarySectionItem &section_item = add_tree_item<LibrarySectionItem>(
-          settings_, section.key, section.library_ref, section.name);
+          settings_, section.key, section.library_ref, section.name, domain(), expanded);
       /* Children are built only while expanded: this tree draws its own explicit chevrons (see
        * the class comment on #LibrarySectionItem) instead of using the generic collapse
        * mechanism, so there is no framework-level gate to hide built children of a collapsed
@@ -729,7 +768,7 @@ void GridCatalogSelectorTree::build_tree()
       }
       section.catalog_tree->foreach_root_item([&](const asset_system::AssetCatalogTreeItem &cat_item) {
         build_catalog_items_recursive(
-            section_item, cat_item, settings_, section.key, section.library_ref);
+            section_item, cat_item, settings_, section.key, section.library_ref, domain());
       });
     }
     return;
@@ -739,10 +778,21 @@ void GridCatalogSelectorTree::build_tree()
     return;
   }
 
-  const AssetLibraryReference library_ref = grid_settings::library_ref_get(settings_);
-  catalog_tree_->foreach_root_item([this, &library_ref](const asset_system::AssetCatalogTreeItem &cat_item) {
-    build_catalog_items_recursive(*this, cat_item, settings_, "", library_ref);
-  });
+  AssetLibraryReference library_ref{};
+  if (settings_.data) {
+    library_ref = grid_settings::library_ref_get(settings_);
+  }
+  else if (config_.single_library) {
+    if (const std::optional<AssetLibraryReference> ref =
+            config_.single_library->library_reference())
+    {
+      library_ref = *ref;
+    }
+  }
+  catalog_tree_->foreach_root_item(
+      [this, &library_ref](const asset_system::AssetCatalogTreeItem &cat_item) {
+        build_catalog_items_recursive(*this, cat_item, settings_, "", library_ref, domain());
+      });
 }
 
 GridCatalogSelectorTree::Item &GridCatalogSelectorTree::build_catalog_items_recursive(
@@ -750,22 +800,29 @@ GridCatalogSelectorTree::Item &GridCatalogSelectorTree::build_catalog_items_recu
     const asset_system::AssetCatalogTreeItem &catalog_item,
     PointerRNA settings,
     StringRef library_key,
-    const AssetLibraryReference &library_ref)
+    const AssetLibraryReference &library_ref,
+    const char *domain)
 {
   Item &item = parent.add_tree_item<Item>(
-      catalog_item, settings, std::string(library_key), library_ref);
+      catalog_item, settings, std::string(library_key), library_ref, domain);
 
   /* Grandchildren are built only while this item is expanded -- see the class comment on
    * #LibrarySectionItem for why (explicit chevron, no framework-level hide-when-collapsed gate).
    * The item itself is always added regardless of its own expanded state; only its descendants
-   * are conditional. */
+   * are conditional. Hosts without settings keep every nested catalog expanded. */
   if (item.is_expanded()) {
     catalog_item.foreach_child([&](const asset_system::AssetCatalogTreeItem &child) {
-      build_catalog_items_recursive(item, child, settings, library_key, library_ref);
+      build_catalog_items_recursive(item, child, settings, library_key, library_ref, domain);
     });
   }
 
   return item;
+}
+
+std::unique_ptr<AbstractTreeView> catalog_checkbox_set_tree_create(const bContext &C,
+                                                                   CatalogCheckboxSetConfig config)
+{
+  return std::make_unique<GridCatalogSelectorTree>(C, std::move(config));
 }
 
 static void grid_catalog_selector_panel_draw(const bContext *C, Panel *panel)
@@ -990,58 +1047,15 @@ static void grid_name_match_panel_draw(const bContext *C, Panel *panel)
     return;
   }
 
-  Layout &layout = *panel->layout;
-  /* The popover is a separate interactive surface. Its panel layout must not inherit a disabled
-   * state from the button/layout that opened it, otherwise Layout::resolve() disables every item
-   * recursively and child enabled_set(true) calls cannot undo that. */
-  layout.enabled_set(true);
-  /* Builtins are seeded once at defaults/versioning/homefile-read time
-   * (#BKE_name_matching_userdef_ensure_defaults) and, since built-in rows can't be removed (see
-   * #BKE_name_matching_map_type_remove), the list is guaranteed well-formed here without
-   * re-checking on every redraw. */
-  Vector<std::pair<std::string, std::string>> map_type_rows;
-  for (const bUserNameMatchMapType &map_type : U.name_match_map_types) {
-    if (map_type.identifier[0] != '\0') {
-      map_type_rows.append(
-          {map_type.identifier, map_type.name[0] != '\0' ? map_type.name : map_type.identifier});
-    }
-  }
-
   const NameMatchFilterState state = grid_settings::name_match_filter_get(settings);
-  /* Map Types are always interactive: clicking one auto-enables the filter (see
-   * #name_match_map_type_toggle_exec). The label is dimmed to indicate the filter is off,
-   * but the buttons remain clickable. */
-  {
-    Layout &label_row = layout.row(false);
-    label_row.enabled_set(state.enabled);
-    label_row.label(IFACE_("Map Types"), ICON_NONE);
-  }
-
-  /* Create map type buttons in a separate layout that is never disabled. */
-  Layout &types_layout = layout.column(false);
-  types_layout.enabled_set(true);
-  types_layout.active_set(true);
-
-  for (const auto &[identifier, name] : map_type_rows) {
-    const bool active = BKE_name_match_filter_map_type_is_active(state, identifier);
-    Layout &row = types_layout.row(false);
-    PointerRNA props = row.op("GRIDVIEW_OT_name_match_map_type_toggle",
-                              name,
-                              active ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT);
-    if (props.type != nullptr) {
-      RNA_string_set(&props, "identifier", identifier.c_str());
-    }
-  }
-  layout.separator();
-  /* Always interactive: clearing the map-type selection should not require the filter to be
-   * enabled first, matching the "always clickable" map type buttons above. */
-  layout.op("GRIDVIEW_OT_name_match_clear", IFACE_("Clear Filter"), ICON_X);
-  layout.separator();
-  PointerRNA preferences_props = layout.op(
-      "SCREEN_OT_userpref_show", IFACE_("Open Preferences..."), ICON_PREFERENCES);
-  if (preferences_props.type != nullptr) {
-    RNA_enum_set(&preferences_props, "section", USER_SECTION_ASSETS);
-  }
+  ed::asset::name_match_filter_draw(
+      *panel->layout,
+      state.enabled,
+      "GRIDVIEW_OT_name_match_map_type_toggle",
+      "GRIDVIEW_OT_name_match_clear",
+      [&](const StringRef identifier) {
+        return BKE_name_match_filter_map_type_is_active(state, identifier);
+      });
 }
 
 static void grid_name_match_filter_panel_register()

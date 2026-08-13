@@ -1122,7 +1122,14 @@ struct PopupBlockHandle {
   bool popup = false;
   void (*popup_func)(bContext *C, void *arg, int event) = nullptr;
   void (*cancel_func)(bContext *C, void *arg) = nullptr;
+  /**
+   * Called from #popup_block_free for both OK and cancel, before #PopupBlockCreate.arg_free.
+   * Used by popover panels that need a close hook (#PanelType.popover_close) rather than only
+   * the cancel path.
+   */
+  void (*close_func)(bContext *C, void *arg) = nullptr;
   void *popup_arg = nullptr;
+  void *close_arg = nullptr;
 
   /**
    * The StructRNA type that owns this popup, this popup should be removed if this type gets

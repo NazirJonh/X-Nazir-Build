@@ -293,7 +293,11 @@ class GridStateAccess {
 
   /* --- Idname --- */
 
-  /** Stable key used as the #AbstractGridView idname and for #uiViewState persistence. */
+  /**
+   * Stable identity of this grid instance, used as the #AbstractGridView idname.
+   * Session UI state (grip/scroll) is keyed by the same string in the process-global
+   * #GridSessionState registry, not by #uiViewState.
+   */
   virtual StringRef grid_idname() const = 0;
 };
 

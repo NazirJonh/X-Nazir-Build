@@ -96,6 +96,7 @@ add_dependencies(bf_editor_asset bf_rna)
 if(WITH_GTESTS)
   set(TEST_SRC
     intern/tests/asset_browser_name_match_test.cc
+    intern/tests/asset_catalog_containment_test.cc
     intern/tests/asset_catalog_test.cc
     intern/tests/asset_catalog_validation_test.cc
     intern/tests/asset_shelf_asset_lists_test.cc

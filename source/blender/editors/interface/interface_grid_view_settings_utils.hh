@@ -15,7 +15,7 @@
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
-#include <algorithm>
+#include <memory>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -32,6 +32,8 @@
 #include "ED_asset_library.hh"
 
 #include "AS_asset_library.hh"
+
+struct bContext;
 
 namespace blender::ui::grid_settings {
 
@@ -249,9 +251,11 @@ inline void enabled_catalogs_clear(PointerRNA &settings)
 /** Domain string for ID Browser entries in #UserDef.catalog_memory. */
 constexpr const char *id_browser_catalog_memory_domain = "id_browser";
 
-inline bool is_library_section_expanded(PointerRNA &settings, StringRef library_key)
+inline bool is_library_section_expanded(const PointerRNA &settings, StringRef library_key)
 {
-  RNA_BEGIN(&settings, item, "expanded_library_sections") {
+  /* #RNA_BEGIN takes a mutable #PointerRNA *; collection iteration does not write the pointer. */
+  PointerRNA settings_mut = settings;
+  RNA_BEGIN(&settings_mut, item, "expanded_library_sections") {
     if (RNA_string_get(&item, "key") == library_key) {
       return true;
     }
@@ -450,6 +454,7 @@ inline void name_match_settings_toggle_map_type(PointerRNA &settings, const Stri
 {
   NameMatchFilterState state = name_match_filter_get(settings);
   blender::BKE_name_match_filter_toggle_map_type(state, identifier);
+  state.enabled = true;
   name_match_filter_set(settings, state);
 }
 
@@ -461,3 +466,32 @@ inline void name_match_settings_clear_selection(PointerRNA &settings)
 }
 
 }  // namespace blender::ui::grid_settings
+
+namespace blender::ui {
+
+/**
+ * Host adapter for the shared checkbox-SET catalog tree (#GridCatalogSelectorTree).
+ * Image grid and ID browser / generic grid differ only in catalog-memory domain, after-change
+ * side effects, which libraries appear in All mode, and where library-section expand state lives.
+ */
+struct CatalogCheckboxSetConfig {
+  const char *catalog_memory_domain = grid_settings::id_browser_catalog_memory_domain;
+  PointerRNA settings{};
+  bool all_libraries_mode = false;
+  const asset_system::AssetLibrary *single_library = nullptr;
+  Vector<asset_system::AssetLibrary *> (*all_mode_libraries_fn)() = nullptr;
+  void (*after_change)(bContext *C) = nullptr;
+  void (*on_cleared_all)(bContext *C) = nullptr;
+  /** When set, #AllItem uses this instead of "UserDef SET is empty". Image grid needs it so
+   * Recent/Favorites membership does not light up the All row. */
+  bool (*is_all_active)(bContext *C) = nullptr;
+  bool (*is_section_expanded)(bContext *C, const char *library_key) = nullptr;
+  void (*set_section_expanded)(bContext *C, const char *library_key, bool expanded) = nullptr;
+};
+
+class AbstractTreeView;
+
+std::unique_ptr<AbstractTreeView> catalog_checkbox_set_tree_create(const bContext &C,
+                                                                   CatalogCheckboxSetConfig config);
+
+}  // namespace blender::ui

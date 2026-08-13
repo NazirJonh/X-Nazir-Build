@@ -919,7 +919,7 @@ static void id_browser_add_resize_grip(Layout &layout, wmWindowManager &wm, cons
  * #ND_ASSET_LIST_PREVIEW and #ND_ASSET_CATALOGS (the asynchronous library-loading notifiers). The
  * #GRIDVIEW_PT_catalog_selector and #UI_OT_id_browser_set_library instead send plain #ND_ASSET_LIST
  * on every synchronous filter change (see #id_browser_set_library_exec,
- * #GridCatalogSelectorTree::update_enabled_catalogs_from_items, and #GridCatalogSelectorTree::AllItem
+ * #catalog_checkbox_notify_or_after, and #GridCatalogSelectorTree::AllItem
  * activate). The catalog selector is a separate nested popup region and tags *its own* region for
  * redraw, but #ND_ASSET_LIST is what reaches this block's region (#ED_region_do_listen ->
  * #block_listen -> this listener) so the ID browser grid behind the popover rebuilds without

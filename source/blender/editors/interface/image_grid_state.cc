@@ -32,9 +32,11 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "ED_asset_filter.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_image_grid.hh"
+#include "ED_screen.hh"
 
 #include "intern/asset_shelf_asset_lists.hh"
 
@@ -322,74 +324,48 @@ int image_grid_foreach_filtered_item(
 {
   const bool catalog_filtering_enabled = !enabled_catalog_paths.is_empty();
 
-  /* Build catalog filters once from the enabled paths; reused for every asset. */
-  const asset_system::AssetLibrary *library = ed::asset::list::library_get_once_available(lib_ref);
-  blender::Vector<asset_system::AssetCatalogFilter> catalog_filters;
-  if (catalog_filtering_enabled && library) {
-    catalog_filters.reserve(enabled_catalog_paths.size());
-    for (const std::string &path : enabled_catalog_paths) {
-      asset_system::AssetCatalog *catalog = library->catalog_service().find_catalog_by_path(
-          path.c_str());
-      if (catalog) {
-        catalog_filters.append(
-            library->catalog_service().create_catalog_filter(catalog->catalog_id));
-      }
-    }
-  }
-
   blender::Set<ID *> seen_ids;
   int filtered_index = 0;
   bool continue_iter = true;
 
-  /* Phase 1: image assets from the library list. */
-  if (library) {
-    ed::asset::list::iterate(lib_ref, [&](asset_system::AssetRepresentation &asset) {
-      if (!continue_iter) {
-        return false;
-      }
-      if (asset.get_id_type() != ID_IM) {
+  /* Phase 1: image assets from the library list. Catalog SET uses IncludeChildren — same helper
+   * as #image_grid_asset_is_visible_in_state and #AssetGridDataSource. */
+  ed::asset::foreach_filtered_asset(
+      lib_ref,
+      catalog_filtering_enabled ? &enabled_catalog_paths : nullptr,
+      ed::asset::CatalogContainment::IncludeChildren,
+      [&](const asset_system::AssetRepresentation &asset) -> bool {
+        if (asset.get_id_type() != ID_IM) {
+          return false;
+        }
+        if (ID *id = asset.local_id()) {
+          if (GS(id->name) == ID_IM) {
+            const Image *image = id_cast<const Image *>(id);
+            if (!image_grid_is_assignable_texture(*image)) {
+              return false;
+            }
+          }
+          if (seen_ids.contains(id)) {
+            return false;
+          }
+        }
         return true;
-      }
-      /* Catalog filter: when enabled but filters could not be built (library still loading),
-       * skip all assets so the display remains consistent with filter intent. */
-      if (catalog_filtering_enabled) {
-        if (catalog_filters.is_empty()) {
-          return true;
+      },
+      [&](asset_system::AssetRepresentation &asset, int /*inner*/) -> bool {
+        if (ID *id = asset.local_id()) {
+          seen_ids.add_new(id);
         }
-        bool in_any = false;
-        for (const asset_system::AssetCatalogFilter &f : catalog_filters) {
-          if (f.contains(asset.get_metadata().catalog_id)) {
-            in_any = true;
-            break;
-          }
+        if (!continue_iter) {
+          return false;
         }
-        if (!in_any) {
-          return true;
+        ImageGridFilteredItem item;
+        item.asset = &asset;
+        if (!fn(item, filtered_index)) {
+          continue_iter = false;
         }
-      }
-      /* Assignability check and dedup for locally-loaded assets. */
-      if (ID *id = asset.local_id()) {
-        if (GS(id->name) == ID_IM) {
-          const Image *image = id_cast<const Image *>(id);
-          if (!image_grid_is_assignable_texture(*image)) {
-            return true;
-          }
-        }
-        if (seen_ids.contains(id)) {
-          return true;
-        }
-        seen_ids.add_new(id);
-      }
-
-      ImageGridFilteredItem item;
-      item.asset = &asset;
-      if (!fn(item, filtered_index)) {
-        continue_iter = false;
-      }
-      filtered_index++;
-      return continue_iter;
-    });
-  }
+        filtered_index++;
+        return continue_iter;
+      });
 
   /* Phase 2: non-asset images from the current file (LOCAL library only). */
   if (lib_ref.type == ASSET_LIBRARY_LOCAL) {
@@ -727,6 +703,109 @@ void image_grid_foreach_live_name_match_ids(
   }
   fn(image_grid_state_get(owner, false).filter.name_match.active_map_type_ids);
   fn(image_grid_state_get(owner, true).filter.name_match.active_map_type_ids);
+}
+
+void image_grid_catalog_selector_after_change(bContext &C)
+{
+  const std::optional<ImageGridOwner> owner = image_grid_owner_from_context(C);
+  if (!owner) {
+    return;
+  }
+  const bool is_mask_slot = image_grid_is_mask_slot_from_context(C);
+  ImageGridUIState &state = image_grid_state_get(*owner, is_mask_slot);
+  image_grid_catalog_load_active(state, state.filter.lib_ref);
+  /* A catalog checkbox exits Recent/Favorites membership the same way the old tree did. */
+  state.filter.catalog_mode = state.filter.enabled_catalog_paths.is_empty() ?
+                                  ImageGridCatalogMode::All :
+                                  ImageGridCatalogMode::CatalogPath;
+  image_grid_focus_clear(state.viewport);
+  image_grid_pending_clear(state);
+  image_grid_reset_scroll(*owner, is_mask_slot);
+  image_grid_state_persist(*owner, state, is_mask_slot);
+  image_grid_notify_change(C, is_mask_slot);
+}
+
+void image_grid_catalog_selector_cleared_all(bContext &C)
+{
+  const std::optional<ImageGridOwner> owner = image_grid_owner_from_context(C);
+  if (!owner) {
+    return;
+  }
+  const bool is_mask_slot = image_grid_is_mask_slot_from_context(C);
+  ImageGridUIState &state = image_grid_state_get(*owner, is_mask_slot);
+  if (state.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
+    image_grid_filter_set_show_all_for_all_libraries(state);
+  }
+  else {
+    image_grid_filter_set_show_all(state);
+  }
+  image_grid_focus_clear(state.viewport);
+  image_grid_pending_clear(state);
+  image_grid_reset_scroll(*owner, is_mask_slot);
+  image_grid_state_persist(*owner, state, is_mask_slot);
+  image_grid_notify_change(C, is_mask_slot);
+}
+
+bool image_grid_catalog_selector_is_all_active(bContext &C)
+{
+  const std::optional<ImageGridOwner> owner = image_grid_owner_from_context(C);
+  if (!owner) {
+    return false;
+  }
+  const ImageGridUIState &state = image_grid_state_get(
+      *owner, image_grid_is_mask_slot_from_context(C));
+  if (state.filter.lib_ref.type == ASSET_LIBRARY_ALL) {
+    for (asset_system::AssetLibrary *library : image_grid_all_mode_libraries()) {
+      if (const std::optional<AssetLibraryReference> lib_ref = library->library_reference()) {
+        if (BKE_asset_catalog_memory_get_mode(
+                &U, *lib_ref, image_grid_catalog_memory_domain) == ASSET_CATALOG_MEMORY_SET)
+        {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+  return state.filter.catalog_mode == ImageGridCatalogMode::All &&
+         state.filter.enabled_catalog_paths.is_empty();
+}
+
+bool image_grid_catalog_section_is_expanded(bContext &C, const char *library_key)
+{
+  if (library_key == nullptr || library_key[0] == '\0') {
+    return false;
+  }
+  const std::optional<ImageGridOwner> owner = image_grid_owner_from_context(C);
+  if (!owner) {
+    return false;
+  }
+  const ImageGridUIState &state = image_grid_state_get(
+      *owner, image_grid_is_mask_slot_from_context(C));
+  return state.filter.expanded_library_section_keys.contains(library_key);
+}
+
+void image_grid_catalog_section_set_expanded(bContext &C,
+                                             const char *library_key,
+                                             const bool expanded)
+{
+  if (library_key == nullptr || library_key[0] == '\0') {
+    return;
+  }
+  const std::optional<ImageGridOwner> owner = image_grid_owner_from_context(C);
+  if (!owner) {
+    return;
+  }
+  ImageGridUIState &state = image_grid_state_get(*owner, image_grid_is_mask_slot_from_context(C));
+  if (expanded) {
+    state.filter.expanded_library_section_keys.add(library_key);
+  }
+  else {
+    state.filter.expanded_library_section_keys.remove(library_key);
+  }
+  if (ARegion *region = CTX_wm_region(&C)) {
+    ED_region_tag_redraw(region);
+    ED_region_tag_refresh_ui(region);
+  }
 }
 
 }  // namespace blender::ed::image_grid

@@ -1216,6 +1216,7 @@ static void draw_header_row(Layout &layout,
      * produce a double chevron. */
     Layout &popover_row = nm_row.row(false);
     popover_row.emboss_set(EmbossType::Emboss);
+    popover_row.enabled_set(true);
     popover_row.context_int_set("image_grid_is_mask_slot", is_mask_slot ? 1 : 0);
     popover_row.popover(&C, "VIEW3D_PT_image_grid_name_match_filter", "", ICON_DOWNARROW_HLT);
   }
@@ -1379,7 +1380,6 @@ void template_asset_image_grid(
   ed::image_grid::ImageGridUIState &state = ed::image_grid::image_grid_state_get(*owner, is_mask_slot);
 
   ed::image_grid::image_grid_catalog_sanitize_selection(state);
-  ed::image_grid::image_grid_pending_apply_if_ready(*C);
   /* Called inside the template redraw; NC_BRUSH already triggered this pass, so
    * #image_grid_notify_change must not be called here to avoid a recursive refresh. */
   ed::image_grid::image_grid_auto_focus_on_brush_change(*C, is_mask_slot);

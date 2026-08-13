@@ -851,6 +851,7 @@ void settings_name_match_map_type_toggle(AssetShelfSettings &settings, const cha
   if (!settings_name_match_map_type_deactivate(settings, identifier)) {
     settings_name_match_map_type_activate(settings, identifier);
   }
+  settings.display_flag |= ASSETSHELF_FILTER_NAME_MATCH_ENABLED;
 }
 
 void settings_name_match_map_type_clear(AssetShelfSettings &settings)

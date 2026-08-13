@@ -394,6 +394,11 @@ struct PanelType {
    * in popover regions.
    */
   void (*listener)(const wmRegionListenerParams *params);
+  /**
+   * Called when a popover created from this panel type is closed (OK or cancel). Optional.
+   * Only popovers invoke this; regular region panels never do.
+   */
+  void (*popover_close)(bContext *C, const PanelType *pt);
 
   /* For instanced panels corresponding to a list: */
 

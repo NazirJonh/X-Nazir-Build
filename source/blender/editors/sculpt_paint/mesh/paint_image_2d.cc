@@ -48,6 +48,8 @@
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
+#include "BLT_translation.hh"
+
 #include "DEG_depsgraph.hh"
 
 #include "../paint_intern.hh"
@@ -2473,9 +2475,9 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
      * below, and removes that whole class of staleness. */
     BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(ob, ob->actcol));
 
-    /* Auto-create and wire up an Image Texture on the Principled BSDF for each enabled
-     * channel that doesn't already resolve to one, matching the View3D Sculpt path. */
-    Main *bmain = CTX_data_main(C);
+    /* Maps are created by #PAINT_OT_material_paint_images_ensure, not by the stroke. Missing
+     * images are skipped by #BKE_paint_material_image_targets_get; warn so a silent no-op is
+     * not mistaken for a successful stroke. */
     for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
       if (info.socket_name == nullptr) {
         continue;
@@ -2485,12 +2487,14 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       }
       Image *channel_image;
       ImageUser *channel_iuser;
-      BKE_paint_principled_channel_image_ensure(*bmain,
-                                                *ob,
-                                                info.channel,
-                                                paint_mode.new_channel_image_size,
-                                                &channel_image,
-                                                &channel_iuser);
+      if (!BKE_paint_principled_channel_image_get(
+              *ob, info.channel, &channel_image, &channel_iuser))
+      {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    TIP_("%s channel has no paintable image texture on the active material"),
+                    IFACE_(info.ui_name));
+      }
     }
 
     const Vector<PaintMaterialImageTarget> targets = BKE_paint_material_image_targets_get(
@@ -2550,7 +2554,8 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       const short channel_blend = BKE_paint_material_channel_blend_mode(
           brush_paint, target.channel, invert);
       if (target.is_color_channel) {
-        const float3 rgb = BKE_paint_material_base_color_get(brush_paint, *paint, *brush, invert);
+        const float3 rgb = BKE_paint_material_channel_color_get(
+            brush_paint, *paint, *brush, target.channel, invert);
         copy_v3_v3(rgb_storage, rgb);
         rgb_ptr = rgb_storage;
       }

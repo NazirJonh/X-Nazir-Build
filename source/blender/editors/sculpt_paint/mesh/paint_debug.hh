@@ -48,4 +48,11 @@
 #  define PBR_PAINT_IMAGE_UPDATE_PROFILE 0
 #endif
 
+/** sculpt_paint_material.cc – per-dab vertex-paint printf profiling. */
+#if PBR_PAINT_DEBUG_LOG
+#  define PBR_PAINT_MATERIAL_PROFILE 1
+#else
+#  define PBR_PAINT_MATERIAL_PROFILE 0
+#endif
+
 /** \} */

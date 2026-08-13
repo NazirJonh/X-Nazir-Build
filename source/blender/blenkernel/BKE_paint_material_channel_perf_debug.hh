@@ -7,18 +7,19 @@
  *
  * Opt-in compile-time instrumentation for multi-channel material paint.
  *
- * Disabled by default: every macro below compiles to nothing, so no timing call survives in a
- * regular build. Enabling it is a two-step, deliberate act — uncomment the define here to compile
- * the timers in, then set the `BLENDER_PAINT_CHANNEL_PERF_LOG` environment variable at runtime to
- * actually emit the report (see #logging_enabled for why the reporting is gated separately).
+ * Disabled by default (`PAINT_MATERIAL_CHANNEL_PERF_DEBUG` is 0): the `#else` branch compiles
+ * every public macro to a no-op, so no timing call survives in a regular build. Enabling it is a
+ * two-step, deliberate act — set the define to 1 here to compile the timers in, then enable the
+ * `bke.paint_channel_perf` CLOG category at runtime to actually emit the report (see
+ * #logging_enabled for why the reporting is gated separately).
  */
 
 #pragma once
 
-/* Uncomment to compile in multi-channel paint performance instrumentation. */
+/* Set to 1 to compile in multi-channel paint performance instrumentation. */
 #define PAINT_MATERIAL_CHANNEL_PERF_DEBUG 0
 
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
 
 #  include <cstdint>
 

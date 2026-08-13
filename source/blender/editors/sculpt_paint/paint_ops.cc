@@ -21,6 +21,8 @@
 #include "IMB_interp.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_object_enums.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "BKE_brush.hh"
@@ -29,6 +31,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -642,6 +645,87 @@ void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
+static wmOperatorStatus material_paint_images_ensure_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr || ob->type != OB_MESH) {
+    BKE_report(op->reports, RPT_ERROR, "Active object must be a mesh");
+    return OPERATOR_CANCELLED;
+  }
+
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint brush");
+    return OPERATOR_CANCELLED;
+  }
+  BKE_brush_material_paint_ensure(brush);
+  if (brush->material_paint == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Scene *scene = CTX_data_scene(C);
+  const PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
+  Main *bmain = CTX_data_main(C);
+  const BrushMaterialPaint &brush_paint = *brush->material_paint;
+  int created = 0;
+  int missing = 0;
+
+  BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(ob, ob->actcol));
+
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.socket_name == nullptr) {
+      continue;
+    }
+    if (!BKE_paint_material_channel_writes_to_target(brush_paint, mode_settings, info.channel)) {
+      continue;
+    }
+    Image *existing = nullptr;
+    ImageUser *existing_iuser = nullptr;
+    const bool already_had = BKE_paint_principled_channel_image_get(
+        *ob, info.channel, &existing, &existing_iuser);
+
+    Image *image = nullptr;
+    ImageUser *iuser = nullptr;
+    if (!BKE_paint_principled_channel_image_ensure(
+            *bmain, *ob, info.channel, mode_settings.new_channel_image_size, &image, &iuser))
+    {
+      missing++;
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "%s channel has no paintable image texture on the active material",
+                  info.ui_name);
+      continue;
+    }
+    if (!already_had) {
+      created++;
+    }
+  }
+
+  if (created == 0 && missing == 0) {
+    BKE_report(op->reports, RPT_INFO, "All enabled channels already have image maps");
+  }
+  else if (created > 0) {
+    BKE_reportf(op->reports, RPT_INFO, "Created %d material paint image map(s)", created);
+  }
+
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, nullptr);
+  WM_event_add_notifier(C, NC_NODE | NA_EDITED, nullptr);
+  return (created > 0 || missing == 0) ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+void PAINT_OT_material_paint_images_ensure(wmOperatorType *ot)
+{
+  ot->name = "Create PBR Paint Maps";
+  ot->idname = "PAINT_OT_material_paint_images_ensure";
+  ot->description =
+      "Create missing Image Texture nodes on the active material's Principled BSDF for enabled "
+      "PBR Paint channels";
+  ot->exec = material_paint_images_ensure_exec;
+  ot->poll = ED_operator_object_active_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
 static wmOperatorStatus material_paint_brush_sync_exec(bContext *C, wmOperator *op)
 {
   Scene *scene = CTX_data_scene(C);
@@ -786,6 +870,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_from_view);
   WM_operatortype_append(PAINT_OT_brush_colors_flip);
   WM_operatortype_append(PAINT_OT_material_paint_brush_ensure);
+  WM_operatortype_append(PAINT_OT_material_paint_images_ensure);
   WM_operatortype_append(PAINT_OT_material_paint_brush_sync);
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);

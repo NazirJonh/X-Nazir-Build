@@ -803,13 +803,6 @@ short BKE_paint_material_channel_blend_mode(const BrushMaterialPaint &brush_pain
  */
 float BKE_paint_material_channel_default_value(eMaterialPaintChannel channel);
 
-/** True for color-managed channels; false for data channels (Metallic, Roughness, Specular,
- * Normal). */
-inline bool BKE_paint_material_channel_is_color(eMaterialPaintChannel channel)
-{
-  return channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
-}
-
 /**
  * Pack a tangent-space normal for storage in an ImBuf.
  * Byte buffers use (n * 0.5 + 0.5); float buffers store n directly.
@@ -907,8 +900,12 @@ void BKE_paint_material_brush_preset_apply(Scene &scene, Brush &brush);
 void BKE_paint_material_brush_preset_snapshot(Scene &scene, const Brush &brush);
 
 /** Frees \a preset and everything it owns. No-op if \a preset is null. The caller is responsible
- *  for unlinking it from its list first. */
-void BKE_paint_material_brush_preset_free(PaintMaterialBrushPreset *preset);
+ *  for unlinking it from its list first.
+ *  \param do_user_refcount: forwarded to #BKE_brush_material_paint_free. True for remove/purge
+ *  (no ID foreach_id will run). False when freeing a Scene (foreach_id already dropped the Tex
+ *  counts). */
+void BKE_paint_material_brush_preset_free(PaintMaterialBrushPreset *preset,
+                                          bool do_user_refcount = false);
 
 /** Removes and frees the preset in \a scene matching \a brush's identity, if any. Call when a
  *  brush is deleted, so its preset does not outlive it and keep #Tex references alive. */
@@ -1008,6 +1005,17 @@ float3 BKE_paint_material_base_color_get(const BrushMaterialPaint &brush_paint,
                                          bool invert);
 
 /**
+ * Effective RGB for a color channel (#MaterialPaintChannelInfo.is_color).
+ * Base Color delegates to #BKE_paint_material_base_color_get. Other color channels (Emission)
+ * read #BrushMaterialPaintChannel.value; invert interpolates toward the channel default.
+ */
+float3 BKE_paint_material_channel_color_get(const BrushMaterialPaint &brush_paint,
+                                            const Paint &paint,
+                                            const Brush &brush,
+                                            eMaterialPaintChannel channel,
+                                            bool invert);
+
+/**
  * Clears per-material Principled-socket image resolution cache entries.
  * Call after node-tree or material slot changes that can alter resolved targets.
  */
@@ -1031,6 +1039,8 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
  * socket exists and has no incoming link, creates a generated blank Image with the color space
  * required by the channel, adds an Image Texture node for it, and links it to the socket, then
  * returns it.
+ * Intended for #PAINT_OT_material_paint_images_ensure (an undoable operator). Do not call from
+ * stroke init: creating Image IDs and nodetree links must be a memfile undo step.
  * Does nothing and returns false when there is no material, no node tree, no Principled
  * BSDF, no matching socket, or the socket is already driven by something other than a
  * (missing/invalid) Image Texture. Channels without a socket (Custom) always return false.

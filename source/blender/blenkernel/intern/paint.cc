@@ -790,12 +790,13 @@ void BKE_paint_material_brush_preset_snapshot(Scene &scene, const Brush &brush)
   BKE_brush_material_paint_copy_into(*preset->material_paint, *brush.material_paint);
 }
 
-void BKE_paint_material_brush_preset_free(PaintMaterialBrushPreset *preset)
+void BKE_paint_material_brush_preset_free(PaintMaterialBrushPreset *preset,
+                                          const bool do_user_refcount)
 {
   if (preset == nullptr) {
     return;
   }
-  BKE_brush_material_paint_free(preset->material_paint);
+  BKE_brush_material_paint_free(preset->material_paint, do_user_refcount);
   MEM_delete(preset->asset_ref);
   MEM_delete(preset->local_name);
   MEM_delete(preset);
@@ -808,7 +809,7 @@ void BKE_paint_material_brush_preset_remove(Scene &scene, const Brush &brush)
     return;
   }
   BLI_remlink(&scene.toolsettings->paint_mode.material_paint_brush_presets, preset);
-  BKE_paint_material_brush_preset_free(preset);
+  BKE_paint_material_brush_preset_free(preset, true);
 }
 
 /**
@@ -830,7 +831,7 @@ static void paint_material_brush_presets_purge_unused(Main *bmain, Scene &scene)
                                        bmain, ID_BR, preset.local_name, nullptr) == nullptr;
     if (is_malformed || is_orphaned_local) {
       BLI_remlink(&presets, &preset);
-      BKE_paint_material_brush_preset_free(&preset);
+      BKE_paint_material_brush_preset_free(&preset, true);
     }
   }
 }
@@ -1734,7 +1735,12 @@ void BKE_paint_brushes_ensure(Main *bmain, Scene *scene, Paint *paint)
     BKE_paint_brush_set_default(bmain, scene, paint);
   }
 
-  if (scene != nullptr && paint->brush != nullptr) {
+  /* Apply a scene preset only when the brush has no live PBR state yet. #BKE_paint_brushes_ensure
+   * is an init path (mode enter, paint_init); re-applying here would overwrite channel edits that
+   * have not been snapshotted. Brush switches go through #BKE_paint_brush_set_synced, which
+   * snapshots then applies. Asset restore already applies in
+   * #paint_brush_update_from_asset_reference. */
+  if (scene != nullptr && paint->brush != nullptr && paint->brush->material_paint == nullptr) {
     BKE_paint_material_brush_preset_apply(*scene, *paint->brush);
   }
 }
@@ -2695,7 +2701,7 @@ void BKE_sculpt_update_object_before_eval(Object *ob_eval)
     const IndexMask node_mask = bke::pbvh::all_leaf_nodes(*pbvh, memory);
     pbvh->tag_positions_changed(node_mask);
     BKE_pbvh_mark_rebuild_pixels(*pbvh);
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
     bke::paint_material_channel_perf::stroke_eval_rebuild();
 #endif
   }
@@ -3171,6 +3177,11 @@ bool BKE_paint_material_channel_writes_to_target(const BrushMaterialPaint &brush
   if (channel == PAINT_MATERIAL_CHANNEL_ALPHA) {
     return brush_paint.use_alpha_map != 0;
   }
+  /* A channel with no Principled socket and no vertex backend has nowhere to write (Height). */
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  if (info.socket_name == nullptr && !info.supports_vertex_paint) {
+    return false;
+  }
   return true;
 }
 
@@ -3456,6 +3467,23 @@ float3 BKE_paint_material_base_color_get(const BrushMaterialPaint &brush_paint,
   return float3(brush_paint.base_color);
 }
 
+float3 BKE_paint_material_channel_color_get(const BrushMaterialPaint &brush_paint,
+                                            const Paint &paint,
+                                            const Brush &brush,
+                                            const eMaterialPaintChannel channel,
+                                            const bool invert)
+{
+  BLI_assert(BKE_paint_material_channel_info(channel).is_color);
+  if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    return BKE_paint_material_base_color_get(brush_paint, paint, brush, invert);
+  }
+  if (invert) {
+    const float value = BKE_paint_material_channel_default_value(channel);
+    return float3(value);
+  }
+  return float3(brush_paint.channels[channel].value);
+}
+
 /**
  * Finds Principled BSDF connected to Material Output Surface, else the first
  * Principled in the tree. Returns nullptr when none exist.
@@ -3690,19 +3718,26 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
   }
 
   bNode *tex_node = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_IMAGE);
-  tex_node->id = &image->id;
-  bke::node_position_relative(*tex_node, *principled, nullptr, *socket);
-
   bNodeSocket *tex_out = bke::node_find_socket(*tex_node, SOCK_OUT, UString("Color"));
   if (tex_out == nullptr) {
+    bke::node_remove_node(&bmain, ntree, *tex_node, false);
+    BKE_id_free(&bmain, image);
     return false;
   }
+  /* Assign the Image only after the Color socket is known to exist, so a failed setup cannot
+   * leave a node pointing at an ID that is about to be freed. */
+  tex_node->id = &image->id;
+  bke::node_position_relative(*tex_node, *principled, nullptr, *socket);
 
   if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
     bNode *nor_node = bke::node_add_static_node(nullptr, ntree, SH_NODE_NORMAL_MAP);
     bNodeSocket *nor_color_in = bke::node_find_socket(*nor_node, SOCK_IN, "Color"_ustr);
     bNodeSocket *nor_out = bke::node_find_socket(*nor_node, SOCK_OUT, "Normal"_ustr);
     if (nor_color_in == nullptr || nor_out == nullptr) {
+      bke::node_remove_node(&bmain, ntree, *nor_node, false);
+      tex_node->id = nullptr;
+      bke::node_remove_node(&bmain, ntree, *tex_node, false);
+      BKE_id_free(&bmain, image);
       return false;
     }
     bke::node_add_link(ntree, *tex_node, *tex_out, *nor_node, *nor_color_in);
@@ -3763,7 +3798,12 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     target.is_color_channel = info.is_color;
     target.is_normal_channel = (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL);
     if (info.is_color) {
-      copy_v3_v3(target.color, brush_paint->base_color);
+      if (info.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+        copy_v3_v3(target.color, brush_paint->base_color);
+      }
+      else {
+        copy_v3_v3(target.color, brush_paint->channels[info.channel].value);
+      }
       target.value = 0.0f;
     }
     else if (target.is_normal_channel) {

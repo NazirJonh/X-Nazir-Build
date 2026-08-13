@@ -538,6 +538,20 @@ TEST_F(PaintMaterialChannelTest, alpha_write_and_mask_modes)
   EXPECT_TRUE(BKE_paint_material_channel_masks_stroke(brush_paint, mode_settings));
 }
 
+TEST_F(PaintMaterialChannelTest, HeightDoesNotWriteToTarget)
+{
+  PaintModeSettings mode_settings{};
+  mode_settings.visible_material_channels = paint_material_channel_test_default_visibility();
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 1;
+
+  EXPECT_TRUE(BKE_paint_material_channel_is_enabled(
+      brush_paint, mode_settings, PAINT_MATERIAL_CHANNEL_HEIGHT))
+      << "visibility/use still describe the channel; writes_to_target is the backend gate";
+  EXPECT_FALSE(BKE_paint_material_channel_writes_to_target(
+      brush_paint, mode_settings, PAINT_MATERIAL_CHANNEL_HEIGHT));
+}
+
 TEST_F(PaintMaterialChannelTest, BaseColorEnabledAndName)
 {
   PaintModeSettings mode_settings;
@@ -572,6 +586,39 @@ TEST_F(PaintMaterialChannelTest, BaseColorGetRespectsInvert)
   EXPECT_FLOAT_EQ(inverted.x, 0.1f);
   EXPECT_FLOAT_EQ(inverted.y, 0.3f);
   EXPECT_FLOAT_EQ(inverted.z, 0.5f);
+
+  MEM_delete(paint.runtime);
+}
+
+TEST_F(PaintMaterialChannelTest, ChannelColorGetEmissionUsesChannelValueNotBaseColor)
+{
+  BrushMaterialPaint brush_paint;
+  copy_v3_fl3(brush_paint.base_color, 1.0f, 0.0f, 0.0f);
+  copy_v3_fl3(brush_paint.channels[PAINT_MATERIAL_CHANNEL_EMISSION].value, 0.2f, 0.4f, 0.8f);
+
+  Paint paint{};
+  paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  paint.runtime->ob_mode = OB_MODE_SCULPT;
+  Brush brush{};
+  copy_v3_fl3(brush.secondary_color, 0.0f, 1.0f, 0.0f);
+
+  const float3 emission = BKE_paint_material_channel_color_get(
+      brush_paint, paint, brush, PAINT_MATERIAL_CHANNEL_EMISSION, false);
+  EXPECT_FLOAT_EQ(emission.x, 0.2f);
+  EXPECT_FLOAT_EQ(emission.y, 0.4f);
+  EXPECT_FLOAT_EQ(emission.z, 0.8f);
+
+  const float3 emission_erase = BKE_paint_material_channel_color_get(
+      brush_paint, paint, brush, PAINT_MATERIAL_CHANNEL_EMISSION, true);
+  EXPECT_FLOAT_EQ(emission_erase.x, 0.0f);
+  EXPECT_FLOAT_EQ(emission_erase.y, 0.0f);
+  EXPECT_FLOAT_EQ(emission_erase.z, 0.0f);
+
+  const float3 base = BKE_paint_material_channel_color_get(
+      brush_paint, paint, brush, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false);
+  EXPECT_FLOAT_EQ(base.x, 1.0f);
+  EXPECT_FLOAT_EQ(base.y, 0.0f);
+  EXPECT_FLOAT_EQ(base.z, 0.0f);
 
   MEM_delete(paint.runtime);
 }
@@ -1255,9 +1302,9 @@ TEST_F(PaintMaterialChannelTest, ApplyThenSnapshotRoundTripsAndDoesNotLeakTexUse
   BKE_id_free(bmain, scene);
 }
 
-TEST_F(PaintMaterialChannelTest, BrushesEnsureAppliesMatchingPresetOnResolve)
+TEST_F(PaintMaterialChannelTest, BrushesEnsureDoesNotOverwriteLiveChannelEdits)
 {
-  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "EnsureAppliesScene"));
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "EnsurePreservesScene"));
   Brush *brush = BKE_brush_add(bmain, "PreExisting", OB_MODE_SCULPT);
   BKE_brush_material_paint_ensure(brush);
   brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_AO].use = 1;
@@ -1274,8 +1321,35 @@ TEST_F(PaintMaterialChannelTest, BrushesEnsureAppliesMatchingPresetOnResolve)
 
   BKE_paint_brushes_ensure(bmain, scene, paint);
 
+  EXPECT_FALSE(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_AO].use)
+      << "ensure() must not re-apply a stale preset over live channel edits";
+
+  BKE_id_free(bmain, scene);
+}
+
+TEST_F(PaintMaterialChannelTest, BrushesEnsureAppliesPresetWhenBrushHasNoMaterialPaint)
+{
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "EnsureAppliesNullScene"));
+  Brush *brush = BKE_brush_add(bmain, "NeedsPreset", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+  brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_AO].use = 1;
+  BKE_paint_material_brush_preset_snapshot(*scene, *brush);
+
+  BKE_brush_material_paint_free(brush->material_paint);
+  brush->material_paint = nullptr;
+
+  Sculpt *sculpt_data = MEM_new<Sculpt>(__func__);
+  scene->toolsettings->sculpt = sculpt_data;
+  Paint *paint = &sculpt_data->paint;
+  paint->runtime = MEM_new<bke::PaintRuntime>(__func__);
+  paint->runtime->ob_mode = OB_MODE_SCULPT;
+  paint->brush = brush;
+
+  BKE_paint_brushes_ensure(bmain, scene, paint);
+
+  ASSERT_NE(brush->material_paint, nullptr);
   EXPECT_TRUE(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_AO].use)
-      << "ensure() must re-apply the scene's preset onto the already-resolved brush";
+      << "ensure() must still apply the scene preset when the brush has no live PBR state";
 
   BKE_id_free(bmain, scene);
 }
@@ -1381,6 +1455,32 @@ TEST_F(PaintMaterialChannelTest, PresetRemoveDropsMatchingPresetOnly)
   EXPECT_EQ(BKE_paint_material_brush_preset_find(*scene, *brush_a), nullptr);
   EXPECT_NE(BKE_paint_material_brush_preset_find(*scene, *brush_b), nullptr);
   EXPECT_EQ(scene->toolsettings->paint_mode.material_paint_brush_presets.count(), 1);
+
+  BKE_id_free(bmain, scene);
+}
+
+TEST_F(PaintMaterialChannelTest, PresetRemoveReleasesTexUserCount)
+{
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "RemoveTexScene"));
+  Brush *brush = BKE_brush_add(bmain, "RemoveTexBrush", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+
+  Image *image = add_image("RemoveTexImage");
+  Tex *tex = BKE_texture_add(bmain, "RemoveTexWrapper");
+  tex->type = TEX_IMAGE;
+  tex->ima = image;
+  id_us_plus(&image->id);
+  brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].source_mtex.tex = tex;
+  id_us_plus(&tex->id);
+  const int us_before_snapshot = tex->id.us;
+
+  BKE_paint_material_brush_preset_snapshot(*scene, *brush);
+  EXPECT_EQ(tex->id.us, us_before_snapshot + 1)
+      << "snapshot copy_into must take a counted reference on the preset";
+
+  BKE_paint_material_brush_preset_remove(*scene, *brush);
+  EXPECT_EQ(tex->id.us, us_before_snapshot)
+      << "remove must drop the preset's Tex user count; foreach_id will not run";
 
   BKE_id_free(bmain, scene);
 }

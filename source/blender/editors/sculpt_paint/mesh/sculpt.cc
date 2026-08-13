@@ -3034,7 +3034,7 @@ static bool sculpt_pbvh_update_pixels(const Depsgraph &depsgraph,
   const bool need_rebuild = pbvh.pixels_ == nullptr || pbvh.pixels_->flags.dirty ||
                             pbvh.pixels_->layout_key != layout_key;
 
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   PAINT_CHANNEL_PERF_SCOPE(SculptPbvhUpdatePixels);
   if (!need_rebuild) {
     paint_material_channel_perf::set_pbvh_update_rebuilt(false);
@@ -3593,7 +3593,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
   IndexMaskMemory memory;
   IndexMask texnode_mask;
 
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   const bool perf_trace = brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
                           SCULPT_use_image_paint_brush(paint_mode_settings, ob, &brush);
   double perf_dab_start = 0.0;
@@ -3615,7 +3615,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
       return;
     }
 
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
     {
       PAINT_CHANNEL_PERF_SCOPE(PbvGatherTexpaint);
       texnode_mask = pbvh_gather_texpaint(ob, brush, use_original, 1.0f, memory);
@@ -3626,7 +3626,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
 #endif
 
     if (texnode_mask.is_empty()) {
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
       if (perf_trace) {
         paint_material_channel_perf::add_section_us(
             paint_material_channel_perf::Section::DoBrushActionTotal,
@@ -3645,7 +3645,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
 
   /* Only act if some verts are inside the brush area. */
   if (node_mask.is_empty()) {
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
     if (perf_trace) {
       paint_material_channel_perf::add_section_us(
           paint_material_channel_perf::Section::DoBrushActionTotal,
@@ -3912,7 +3912,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
   /* Update last stroke position. */
   paint_runtime.last_stroke_valid = true;
 
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   if (perf_trace) {
     paint_material_channel_perf::add_section_us(
         paint_material_channel_perf::Section::DoBrushActionTotal,
@@ -5476,17 +5476,14 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
     }
   }
 
-  /* Material: auto-create and wire up an Image Texture on the Principled BSDF for each
-   * enabled channel that doesn't already resolve to one, so painting doesn't silently no-op
-   * just because the material's node graph wasn't hand-authored for paint. */
+  /* Material canvas: do not create Image IDs or nodetree links here. That mutates Main without
+   * a memfile undo step; maps are created by #PAINT_OT_material_paint_images_ensure. Invalidate
+   * the resolve cache so this stroke does not write into a stale Image after undo or a Shader
+   * Editor edit. */
   if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
       paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL && ob.type == OB_MESH)
   {
-    Main *bmain = CTX_data_main(C);
     BKE_brush_material_paint_ensure(BKE_paint_brush(&sd.paint));
-    /* See the matching comment in paint_image_2d.cc's #paint_2d_new_stroke: without this,
-     * #Material.paint_channel_cache can keep pointing paint at an Image the Principled BSDF no
-     * longer reads from after an undo/redo or a manual node-tree edit. */
     BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
     if (brush->material_paint != nullptr) {
       const BrushMaterialPaint &brush_paint = *brush->material_paint;
@@ -5501,9 +5498,7 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
         }
         Image *image;
         ImageUser *iuser;
-        if (!BKE_paint_principled_channel_image_ensure(
-                *bmain, ob, info.channel, paint_mode_init.new_channel_image_size, &image, &iuser))
-        {
+        if (!BKE_paint_principled_channel_image_get(ob, info.channel, &image, &iuser)) {
           BKE_reportf(op->reports,
                       RPT_WARNING,
                       TIP_("%s channel has no paintable image texture on the active material"),
@@ -6150,7 +6145,7 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
     cache->image_paint_targets = paint::image::init_image_paint_targets(
         ob, this->scene->toolsettings->paint_mode, brush);
 
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
     {
       const Vector<paint::image::ImagePaintTarget> &targets = cache->image_paint_targets;
       const int target_count = targets.size();

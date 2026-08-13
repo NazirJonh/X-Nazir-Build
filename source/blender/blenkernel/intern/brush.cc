@@ -900,9 +900,16 @@ BrushMaterialPaint *BKE_brush_material_paint_copy(const BrushMaterialPaint &src,
   return dst;
 }
 
-void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint)
+void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint,
+                                   const bool do_user_refcount)
 {
-  MEM_SAFE_DELETE(material_paint);
+  if (material_paint == nullptr) {
+    return;
+  }
+  if (do_user_refcount) {
+    material_paint_all_mtex_user_adjust(*material_paint, -1);
+  }
+  MEM_delete(material_paint);
 }
 
 void BKE_brush_material_paint_copy_into(BrushMaterialPaint &dst, const BrushMaterialPaint &src)

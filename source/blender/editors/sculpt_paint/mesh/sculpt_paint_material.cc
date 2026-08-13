@@ -36,6 +36,7 @@
 #include <cstdio>
 
 #include "mesh_brush_common.hh"
+#include "paint_debug.hh"
 #include "paint_material_source.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_color.hh"
@@ -44,13 +45,8 @@
 
 namespace blender::ed::sculpt_paint::material {
 
-/* WORKAROUND: temporary printf profiling, paired with the one in paint_material_source.cc, to
- * see where time goes *within* a single #do_paint_material_brush call (one call per brush dab
- * per channel per symmetry pass, so many more data points per stroke than the sampler's one
- * per-stroke summary). Remove once the perf work is done. */
-#define PBR_PAINT_MATERIAL_PROFILE 1
-
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+/* Per-dab printf profiling. Master switch is #PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
+#if PBR_PAINT_MATERIAL_PROFILE
 namespace {
 struct MaterialPaintProfile {
   std::atomic<int64_t> vert_num{0};
@@ -165,7 +161,7 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
   const MutableSpan<float> factors = tls.factors;
   const MutableSpan<float> distances = tls.distances;
 
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
   const double factors_start = BLI_time_now_seconds();
 #endif
   calc_factors_common_mesh_indexed(depsgraph,
@@ -177,7 +173,7 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
                                    node,
                                    factors,
                                    distances);
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
   g_scalar_profile.factors_seconds.fetch_add(BLI_time_now_seconds() - factors_start);
   const double automask_start = BLI_time_now_seconds();
 #endif
@@ -185,7 +181,7 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
   if (cache.automasking) {
     auto_mask::calc_vert_factors(depsgraph, object, *cache.automasking, node, verts, factors);
   }
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
   g_scalar_profile.automask_seconds.fetch_add(BLI_time_now_seconds() - automask_start);
   const double sample_start = BLI_time_now_seconds();
   int64_t active_num = 0;
@@ -216,11 +212,11 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
     mix = accumulate_scalar_coverage(mix, target, factor * alpha_factor);
     const float blended = apply_scalar_blend(orig[i], mix, blend_mode);
     attribute[vert] = math::clamp(blended, value_range.x, value_range.y);
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
     active_num++;
 #endif
   }
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
   g_scalar_profile.sample_and_blend_seconds.fetch_add(BLI_time_now_seconds() - sample_start);
   g_scalar_profile.vert_num.fetch_add(verts.size());
   g_scalar_profile.active_vert_num.fetch_add(active_num);
@@ -258,7 +254,7 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
   const MutableSpan<float> factors = tls.factors;
   const MutableSpan<float> distances = tls.distances;
 
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
   const double factors_start = BLI_time_now_seconds();
 #endif
   calc_factors_common_mesh_indexed(depsgraph,
@@ -270,7 +266,7 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
                                    node,
                                    factors,
                                    distances);
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
   g_color_profile.factors_seconds.fetch_add(BLI_time_now_seconds() - factors_start);
   const double automask_start = BLI_time_now_seconds();
 #endif
@@ -278,7 +274,7 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
   if (cache.automasking) {
     auto_mask::calc_vert_factors(depsgraph, object, *cache.automasking, node, verts, factors);
   }
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
   g_color_profile.automask_seconds.fetch_add(BLI_time_now_seconds() - automask_start);
   const double sample_start = BLI_time_now_seconds();
   int64_t active_num = 0;
@@ -326,7 +322,7 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
     if (factor <= 0.0f) {
       continue;
     }
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
     active_num++;
 #endif
 
@@ -361,7 +357,7 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
                           result,
                           color_attribute.span);
   }
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
   g_color_profile.sample_and_blend_seconds.fetch_add(BLI_time_now_seconds() - sample_start);
   g_color_profile.vert_num.fetch_add(verts.size());
   g_color_profile.active_vert_num.fetch_add(active_num);
@@ -537,10 +533,8 @@ static void paint_color_channel(
   }
 
   SculptSession &ss = *ob.runtime->sculpt_session;
-  const float3 target_rgb = (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) ?
-                                BKE_paint_material_base_color_get(
-                                    brush_paint, sd.paint, brush, ss.cache->toggle_settings.invert) :
-                                float3(brush_paint.channels[channel].value);
+  const float3 target_rgb = BKE_paint_material_channel_color_get(
+      brush_paint, sd.paint, brush, channel, ss.cache->toggle_settings.invert);
 
   Array<float4> &mix_colors = ss.cache->material_mix_base_color;
   if (mix_colors.is_empty()) {
@@ -604,7 +598,7 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
     return;
   }
 
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
   const double step_start = BLI_time_now_seconds();
   g_scalar_profile.reset();
   g_color_profile.reset();
@@ -702,7 +696,7 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
                          all_tls);
   }
 
-#ifdef PBR_PAINT_MATERIAL_PROFILE
+#if PBR_PAINT_MATERIAL_PROFILE
   const double step_seconds = BLI_time_now_seconds() - step_start;
   /* One line per brush dab step per symmetry pass: cheap enough to leave on for a whole stroke
    * and shows the factors/automasking/sample+blend split, which the per-stroke sampler summary

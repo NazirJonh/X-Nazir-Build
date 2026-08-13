@@ -386,7 +386,7 @@ static bool update_pixels(const Depsgraph &depsgraph,
     return false;
   }
 
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   blender::bke::paint_material_channel_perf::set_build_pixels_leaf_nodes_updated(
       nodes_to_update.size());
 #endif
@@ -423,7 +423,7 @@ static bool update_pixels(const Depsgraph &depsgraph,
     BKE_image_release_ibuf(&image, tile_buffer, nullptr);
   }
 
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   {
     PAINT_CHANNEL_PERF_SCOPE(BuildPixelsUvIslands);
 #endif
@@ -433,7 +433,7 @@ static bool update_pixels(const Depsgraph &depsgraph,
     islands.extract_borders();
     islands.extend_borders(mesh_data, uv_masks);
     update_geom_primitives(pbvh, mesh_data);
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   }
 #endif
 
@@ -442,7 +442,7 @@ static bool update_pixels(const Depsgraph &depsgraph,
   MutableSpan<MeshNode> nodes = pbvh.nodes<MeshNode>();
   MutableSpan<PixelNode> pixel_nodes = pbvh.pixels_->nodes;
 
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   {
     PAINT_CHANNEL_PERF_SCOPE(BuildPixelsEncode);
 #endif
@@ -450,7 +450,7 @@ static bool update_pixels(const Depsgraph &depsgraph,
       do_encode_pixels(
           mesh_data, uv_masks, uv_primitive_lookup, image, image_user, nodes[i], pixel_nodes[i]);
     });
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   }
 #endif
   if (USE_WATERTIGHT_CHECK) {
@@ -458,12 +458,12 @@ static bool update_pixels(const Depsgraph &depsgraph,
   }
 
   /* Add solution for non-manifold parts of the model. */
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   {
     PAINT_CHANNEL_PERF_SCOPE(BuildPixelsCopyUpdate);
 #endif
     copy_update(pbvh, image, image_user, mesh_data);
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
   }
 #endif
 

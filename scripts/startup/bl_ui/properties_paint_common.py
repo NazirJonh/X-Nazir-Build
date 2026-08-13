@@ -1151,6 +1151,8 @@ def brush_settings(layout, context, brush, popover=False):
 # range callback and by the Custom channel's user-defined range.
 
 # Display order for Material Paint toggles and channel panels (independent of DNA enum indices).
+# Height has no write backend yet (no Principled socket, no vertex storage) and is omitted until
+# one exists; leaving it here would offer a toggle that silently no-ops.
 _MATERIAL_PAINT_CHANNEL_UI_ORDER = (
     'BASE_COLOR',
     'METALLIC',
@@ -1159,7 +1161,6 @@ _MATERIAL_PAINT_CHANNEL_UI_ORDER = (
     'ALPHA',
     'AO',
     'EMISSION',
-    'HEIGHT',
     'SPECULAR',
 )
 # Channels the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color) canvas can store: one float (or
@@ -1542,9 +1543,10 @@ def material_paint_writable_channels(brush, paint_mode_settings):
     Mirrors #BKE_paint_material_channel_writes_to_target combined with the
     `MaterialPaintChannelInfo.socket_name` gate that excludes Custom for the image canvas (see
     `paint.cc`'s `BKE_paint_material_image_targets_get`): enabled, listed in
-    `visible_material_channels`, and - for Alpha only - `use_alpha_map`. Custom has no Principled
-    socket for this canvas and is excluded via `_MATERIAL_PAINT_CHANNEL_UI_ORDER`, which already
-    omits it. If the C++ conditions above change, update this function to match.
+    `visible_material_channels`, and - for Alpha only - `use_alpha_map`. Custom and Height have
+    no Principled socket for this canvas: Custom is omitted from
+    `_MATERIAL_PAINT_CHANNEL_UI_ORDER`; Height is omitted until a displacement backend exists.
+    If the C++ conditions above change, update this function to match.
 
     Returns ``None`` when there is no usable brush/channel configuration (distinct from an empty
     set, which means a brush exists but currently writes no channels).
@@ -1648,6 +1650,16 @@ def draw_material_paint_channels(
     # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.
     _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels)
 
+    # Image maps are created by an undoable operator, not by the first stroke.
+    if not show_custom and paint_mode is not None:
+        row = layout.row(align=True)
+        row.operator(
+            "paint.material_paint_images_ensure",
+            text="Create Missing Maps",
+            icon='IMAGE_DATA',
+        )
+        row.prop(paint_mode, "new_channel_image_size", text="")
+
     if any(channels[channel_id].use for channel_id in toggle_ids):
         layout.separator()
 
@@ -1703,12 +1715,6 @@ def draw_material_paint_channels(
     if channel.use and 'SPECULAR' in visible:
         _channel_panel_sep()
         _draw_material_paint_value_ramp(channel_col, context, channel, 'SPECULAR')
-
-    if not show_custom:
-        channel = channels['HEIGHT']
-        if channel.use and 'HEIGHT' in visible:
-            _channel_panel_sep()
-            _draw_material_paint_value_ramp(channel_col, context, channel, 'HEIGHT')
 
     if show_custom:
         channel = channels['CUSTOM']

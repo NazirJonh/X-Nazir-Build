@@ -108,12 +108,14 @@ BrushMaterialPaint *BKE_brush_material_paint_copy(const BrushMaterialPaint &src,
 /**
  * Frees \a material_paint. No-op if \a material_paint is null.
  *
- * \note Does not release the #Tex references it holds, matching #BKE_paint_free and
- * #brush_free_data: user counts of sub-data are dropped by the owning ID's unlink pass, which
- * reaches these #MTex through the owner's `foreach_id` callback. Decrementing here as well would
- * double-count, and would underflow for copies made with #LIB_ID_CREATE_NO_USER_REFCOUNT.
+ * \param do_user_refcount: When true, drop a counted reference (#id_us_min) on every #Tex the
+ * struct holds. Required when the owner is not an ID whose `foreach_id` pass already walked those
+ * pointers — notably #PaintMaterialBrushPreset on remove/purge. Must stay false for
+ * #brush_free_data / #scene_free (foreach_id already ran) and for copies made with
+ * #LIB_ID_CREATE_NO_USER_REFCOUNT, or user counts double-decrement.
  */
-void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint);
+void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint,
+                                   bool do_user_refcount = false);
 
 /**
  * Overwrites \a dst's channels/base_color/flags/shared_source_mapping from \a src,

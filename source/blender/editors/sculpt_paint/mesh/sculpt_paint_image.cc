@@ -110,7 +110,7 @@ struct PairPaintProfile {
 }  // namespace
 
 /* Indexed by eMaterialPaintChannel; PAINT_MATERIAL_CHANNEL_NUM channels max. */
-static ChannelWriteProfile g_channel_write_profile[7];
+static ChannelWriteProfile g_channel_write_profile[PAINT_MATERIAL_CHANNEL_NUM];
 static PairPaintProfile g_pair_paint_profile;
 #endif
 
@@ -656,8 +656,11 @@ static float4 paint_brush_color(const ImagePaintTarget &target,
                                const float4 &brush_color_default)
 {
   if (target.is_color_channel) {
-    return float4(BKE_paint_material_base_color_get(
-                      *brush.material_paint, sd.paint, brush, cache.toggle_settings.invert),
+    return float4(BKE_paint_material_channel_color_get(*brush.material_paint,
+                                                       sd.paint,
+                                                       brush,
+                                                       target.channel,
+                                                       cache.toggle_settings.invert),
                   1.0f);
   }
   if (target.is_normal_channel) {
@@ -1820,6 +1823,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     }
     ImagePaintTarget &target = cache.image_paint_targets[target_i];
     ImageData &image_data = *target.data;
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
     ImageUser tile_user = *image_data.image_user;
     ImBuf *tile_buffer = BKE_image_acquire_ibuf(image_data.image, &tile_user, nullptr);
     const int res_x = tile_buffer ? tile_buffer->x : 0;
@@ -1827,8 +1831,10 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     if (tile_buffer) {
       BKE_image_release_ibuf(image_data.image, tile_buffer, nullptr);
     }
-
     paint_material_channel_perf::target_begin(target_index, target.channel_name, res_x, res_y);
+#else
+    paint_material_channel_perf::target_begin(target_index, target.channel_name, 0, 0);
+#endif
     PAINT_CHANNEL_PERF_SCOPE(TargetTotal);
 
     /* Base Color and scalars honor invert each dab; Normal erase blends toward flat tangent.
@@ -1840,8 +1846,11 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
         *brush->material_paint, target.channel, cache.toggle_settings.invert));
     if (target.is_color_channel) {
       BLI_assert(brush->material_paint != nullptr);
-      const float3 rgb = BKE_paint_material_base_color_get(
-          *brush->material_paint, sd.paint, *brush, cache.toggle_settings.invert);
+      const float3 rgb = BKE_paint_material_channel_color_get(*brush->material_paint,
+                                                              sd.paint,
+                                                              *brush,
+                                                              target.channel,
+                                                              cache.toggle_settings.invert);
       brush_color_storage = float4(rgb, 1.0f);
       brush_color_ptr = &brush_color_storage;
     }
@@ -1894,7 +1903,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
        * dab no longer line up with it. */
       factor_caches_valid = false;
     }
-#ifdef PAINT_MATERIAL_CHANNEL_PERF_DEBUG
+#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
     else {
       paint_material_channel_perf::set_build_pixels_leaf_nodes_updated(0);
     }

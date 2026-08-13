@@ -66,8 +66,8 @@ struct StepData;
  * \param material_created_attribute_names: Subset of \a material_attribute_names that the current
  * stroke itself created (didn't exist before it started). Fixed by the first push of a step, same
  * as \a material_attribute_names. Undoing the step removes these attributes instead of leaving a
- * zero-valued one behind; redoing does not recreate them (the Add Attribute operator, or another
- * stroke, does that).
+ * zero-valued one behind; redoing recreates them via #BKE_paint_mesh_material_attribute_ensure
+ * before the per-node buffers are swapped back.
  */
 void push_node(const Depsgraph &depsgraph,
                const Object &object,

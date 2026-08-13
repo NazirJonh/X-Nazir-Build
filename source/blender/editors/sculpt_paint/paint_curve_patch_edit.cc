@@ -701,6 +701,41 @@ static bool curve_patch_reseed_stamps(bContext &C, Object &ob, CurvePatchSession
   return true;
 }
 
+/* Switch Direction: reverse the active patch's control curve, like Curve Edit Mode's own
+ * `CURVE_OT_switch_direction`. `CurvesGeometry::reverse_curves()` is the generic, already-shared
+ * implementation -- it reverses point order plus every point-domain attribute (radius, our custom
+ * `paintcurve_surface_normal`, handle types/positions with the correct left/right swap so the
+ * curve's shape is unchanged) in one pass, and tags topology changed itself. Reversing the point
+ * order swaps which end is `s == 0` and which is `s == total_length`, so it is what actually
+ * flips the along-length texture (Start/End caps swap, and Default/Repeat tiling runs backward)
+ * instead of merely negating a normal vector, which a Mesh patch's per-restamp shrinkwrap
+ * (`curve_patch_surface_shrinkwrap()`) would silently overwrite with the real surface direction
+ * anyway. Returns false only when there is no usable curve at all. */
+static bool curve_patch_switch_direction(bContext &C, Object &ob, CurvePatchSession &patch)
+{
+  bke::CurvesGeometry &geom = patch.active_item().control_curve;
+  if (!paintcurve_geometry_is_valid(geom) || geom.points_num() == 0) {
+    return false;
+  }
+  /* `CurvePatchEditState::control_curve` is always a single spline (built via
+   * `paintcurve_geometry_init_bezier()`), so the curve to reverse is always index 0. */
+  const int curve_index = 0;
+  IndexMaskMemory memory;
+  const IndexMask reverse_mask = IndexMask::from_indices<int>(Span<int>(&curve_index, 1), memory);
+  geom.reverse_curves(reverse_mask);
+  /* The active point followed its old index; after a reversal that index now names a different
+   * point (or none, if it pointed past the end of a shorter curve elsewhere in the session -- not
+   * possible here, but kept for symmetry with the other whole-curve actions above). */
+  if (patch.edit.active_point >= 0) {
+    patch.edit.active_point = geom.points_num() - 1 - patch.edit.active_point;
+  }
+
+  curve_patch_undo_push(patch);
+  curve_patch_restore_and_restamp(C, ob, patch);
+  curve_patch_tag_viewports_redraw_after_edit(C, ob, patch);
+  return true;
+}
+
 static bool curve_patch_is_cyclic(const CurvePatchSession &patch)
 {
   const bke::CurvesGeometry &geom = patch.active_item().control_curve;
@@ -725,6 +760,7 @@ static void curve_patch_edit_context_menu_open(bContext *C)
   layout.op("SCULPT_OT_curve_patch_toggle_cyclic",
             is_cyclic ? IFACE_("Open Curve") : IFACE_("Close Curve"),
             ICON_NONE);
+  layout.op("SCULPT_OT_curve_patch_switch_direction", IFACE_("Switch Direction"), ICON_NONE);
 
   /* Ribbon mode has no randomization, so the entry would poll false and only ever show greyed
    * out -- leave it out entirely there. */
@@ -2087,6 +2123,29 @@ void SCULPT_OT_curve_patch_toggle_cyclic(wmOperatorType *ot)
 
   ot->exec = curve_patch_toggle_cyclic_exec;
   /* Unlike the two point operators this one acts on the whole curve, so it needs no active point. */
+  ot->poll = curve_patch_edit_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
+}
+
+static wmOperatorStatus curve_patch_switch_direction_exec(bContext *C, wmOperator * /*op*/)
+{
+  Object &ob = *CTX_data_active_object(C);
+  CurvePatchSession &patch = patch_cache_of(C);
+  if (!curve_patch_switch_direction(*C, ob, patch)) {
+    return OPERATOR_CANCELLED;
+  }
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_curve_patch_switch_direction(wmOperatorType *ot)
+{
+  ot->name = "Switch Curve Patch Direction";
+  ot->description = "Reverse the active Curve Patch control curve's direction";
+  ot->idname = "SCULPT_OT_curve_patch_switch_direction";
+
+  ot->exec = curve_patch_switch_direction_exec;
+  /* Acts on the whole curve rather than a point, like #SCULPT_OT_curve_patch_toggle_cyclic. */
   ot->poll = curve_patch_edit_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;

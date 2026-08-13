@@ -171,28 +171,6 @@ void ED_paint_curve_screen_handles_build_from_geometry(const ViewContext &vc,
                                                         bool show_insert_preview,
                                                         PaintCurveScreenHandles &r_out);
 
-/**
- * Barrier accessor into the ACTIVE patch's control curve for the draw module: `draw/`'s CMake
- * include path does not reach `editors/sculpt_paint/`, so it cannot see the full
- * `CurvePatchSession` definition (`paint_curve_patch_session.hh`) -- only the
- * `bke::CurvesGeometry` it owns is returned. Returns nullptr when `ob` is null, has no live
- * Curve Patch, or that patch has no active item yet.
- */
-const blender::bke::CurvesGeometry *ED_paint_curve_patch_active_control_curve(const Object *ob);
-
-/**
- * Returns the number of patches (splines) in the active Curve Patch session on `ob`.
- * Returns 0 when there is no live session.
- */
-int ED_paint_curve_patch_control_curves_num(const Object *ob);
-
-/**
- * Returns the control curve of patch at `index` in the active Curve Patch session.
- * Returns nullptr when `ob` has no session or `index` is out of range.
- */
-const blender::bke::CurvesGeometry *ED_paint_curve_patch_control_curve_at(const Object *ob,
-                                                                           int index);
-
 void ED_paint_curve_screen_silhouettes_build(const ViewContext &vc,
                                              float2 mval_region,
                                              const Object *source_object,

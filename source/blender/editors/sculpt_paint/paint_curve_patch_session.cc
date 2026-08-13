@@ -71,44 +71,6 @@ int curve_patch_index_for_source_curve(const CurvePatchSession &session, const i
   return -1;
 }
 
-const bke::CurvesGeometry *ED_paint_curve_patch_active_control_curve(const Object *ob)
-{
-  if (ob == nullptr || ob->runtime->sculpt_session == nullptr ||
-      ob->runtime->sculpt_session->curve_patch_session == nullptr)
-  {
-    return nullptr;
-  }
-  const CurvePatchSession &session = *ob->runtime->sculpt_session->curve_patch_session;
-  if (!session.has_active_item()) {
-    return nullptr;
-  }
-  return &session.active_item().control_curve;
-}
-
-int ED_paint_curve_patch_control_curves_num(const Object *ob)
-{
-  if (ob == nullptr || ob->runtime->sculpt_session == nullptr ||
-      ob->runtime->sculpt_session->curve_patch_session == nullptr)
-  {
-    return 0;
-  }
-  return int(ob->runtime->sculpt_session->curve_patch_session->patches.size());
-}
-
-const bke::CurvesGeometry *ED_paint_curve_patch_control_curve_at(const Object *ob, const int index)
-{
-  if (ob == nullptr || ob->runtime->sculpt_session == nullptr ||
-      ob->runtime->sculpt_session->curve_patch_session == nullptr)
-  {
-    return nullptr;
-  }
-  const CurvePatchSession &session = *ob->runtime->sculpt_session->curve_patch_session;
-  if (index < 0 || index >= int(session.patches.size())) {
-    return nullptr;
-  }
-  return &session.patches[index].control_curve;
-}
-
 static bool curve_patch_apply_target_changed(Object &ob, const CurvePatchSession &session)
 {
   if (session.effect->element_num(ob) != session.apply.element_num) {
@@ -1068,6 +1030,28 @@ Span<float3> ED_curve_patch_session_positions(const ed::sculpt_paint::CurvePatch
 {
   const ed::sculpt_paint::CurvePatchItem *item = active_item_from_session(session);
   return item != nullptr ? item->control_curve.positions() : Span<float3>();
+}
+
+void ED_curve_patch_overlay_data_get(const ed::sculpt_paint::CurvePatchSession *session,
+                                     CurvePatchOverlayData &r_data)
+{
+  r_data.splines.clear();
+  r_data.active_index = -1;
+  if (session == nullptr) {
+    return;
+  }
+  r_data.splines.reserve(session->patches.size());
+  for (const ed::sculpt_paint::CurvePatchItem &item : session->patches) {
+    r_data.splines.append(&item.control_curve);
+  }
+  if (session->has_active_item()) {
+    r_data.active_index = session->active_patch;
+  }
+}
+
+void ED_curve_patch_overlay_data_get(const Object *ob, CurvePatchOverlayData &r_data)
+{
+  ED_curve_patch_overlay_data_get(ob ? ED_curve_patch_session_get(*ob) : nullptr, r_data);
 }
 
 /** \} */

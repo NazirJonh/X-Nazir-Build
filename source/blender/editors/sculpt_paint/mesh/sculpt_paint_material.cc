@@ -20,6 +20,8 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
+#include "BLI_array.hh"
+#include "BLI_assert.h"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_execution_mode.hh"
 #include "BLI_math_color.hh"
@@ -144,45 +146,53 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
                                  const float2 value_range,
                                  const IMB_BlendMode blend_mode,
                                  const Span<float> alpha_cache,
+                                 const Span<float> precomputed_factors,
+                                 const Span<TexelSampleContext> precomputed_contexts,
                                  bke::pbvh::MeshNode &node,
                                  MaterialPaintLocalData &tls,
                                  const MutableSpan<float4> mix_scalars,
                                  MutableSpan<float> attribute)
 {
-  SculptSession &ss = *object.runtime->sculpt_session;
-  const StrokeCache &cache = *ss.cache;
   const int thread_id = BLI_task_parallel_thread_id(nullptr);
 
   const Span<int> verts = node.verts();
 
-  tls.factors.resize(verts.size());
-  tls.distances.resize(verts.size());
-
-  const MutableSpan<float> factors = tls.factors;
-  const MutableSpan<float> distances = tls.distances;
-
+  Span<float> factors;
+  if (!precomputed_factors.is_empty()) {
+    BLI_assert(precomputed_factors.size() == verts.size());
+    factors = precomputed_factors;
+  }
+  else {
+    const StrokeCache &cache = *object.runtime->sculpt_session->cache;
+    tls.factors.resize(verts.size());
+    tls.distances.resize(verts.size());
+    const MutableSpan<float> local_factors = tls.factors;
+    const MutableSpan<float> distances = tls.distances;
 #if PBR_PAINT_MATERIAL_PROFILE
-  const double factors_start = BLI_time_now_seconds();
+    const double factors_start = BLI_time_now_seconds();
 #endif
-  calc_factors_common_mesh_indexed(depsgraph,
-                                   brush,
-                                   object,
-                                   attribute_data,
-                                   vert_positions,
-                                   vert_normals,
-                                   node,
-                                   factors,
-                                   distances);
+    calc_factors_common_mesh_indexed(depsgraph,
+                                     brush,
+                                     object,
+                                     attribute_data,
+                                     vert_positions,
+                                     vert_normals,
+                                     node,
+                                     local_factors,
+                                     distances);
 #if PBR_PAINT_MATERIAL_PROFILE
-  g_scalar_profile.factors_seconds.fetch_add(BLI_time_now_seconds() - factors_start);
-  const double automask_start = BLI_time_now_seconds();
+    g_scalar_profile.factors_seconds.fetch_add(BLI_time_now_seconds() - factors_start);
+    const double automask_start = BLI_time_now_seconds();
 #endif
-
-  if (cache.automasking) {
-    auto_mask::calc_vert_factors(depsgraph, object, *cache.automasking, node, verts, factors);
+    if (cache.automasking) {
+      auto_mask::calc_vert_factors(depsgraph, object, *cache.automasking, node, verts, local_factors);
+    }
+#if PBR_PAINT_MATERIAL_PROFILE
+    g_scalar_profile.automask_seconds.fetch_add(BLI_time_now_seconds() - automask_start);
+#endif
+    factors = local_factors;
   }
 #if PBR_PAINT_MATERIAL_PROFILE
-  g_scalar_profile.automask_seconds.fetch_add(BLI_time_now_seconds() - automask_start);
   const double sample_start = BLI_time_now_seconds();
   int64_t active_num = 0;
 #endif
@@ -202,7 +212,9 @@ static void do_paint_scalar_task(const Depsgraph &depsgraph,
     /* A source texture replaces the slider value; the brush falloff still rides in the blend
      * alpha, so the stroke shape is unchanged. */
     const float target = sampler != nullptr ?
-                             sampler->scalar(channel, vert_positions[vert], thread_id) :
+                             (precomputed_contexts.is_empty() ?
+                                  sampler->scalar(channel, vert_positions[vert], thread_id) :
+                                  sampler->scalar(channel, precomputed_contexts[i], thread_id)) :
                              target_value;
     /* Alpha does not mask its own write; only every other channel's write is scaled. */
     const float alpha_factor = (!alpha_cache.is_empty() && channel != PAINT_MATERIAL_CHANNEL_ALPHA) ?
@@ -237,45 +249,54 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
                                 const float3 &target_rgb,
                                 const IMB_BlendMode blend_mode,
                                 const Span<float> alpha_cache,
+                                const Span<float> precomputed_factors,
+                                const Span<TexelSampleContext> precomputed_contexts,
                                 bke::pbvh::MeshNode &node,
                                 MaterialPaintLocalData &tls,
                                 const MutableSpan<float4> mix_colors,
                                 bke::GSpanAttributeWriter &color_attribute)
 {
-  SculptSession &ss = *object.runtime->sculpt_session;
-  const StrokeCache &cache = *ss.cache;
   const int thread_id = BLI_task_parallel_thread_id(nullptr);
 
   const Span<int> verts = node.verts();
 
-  tls.factors.resize(verts.size());
-  tls.distances.resize(verts.size());
-
-  const MutableSpan<float> factors = tls.factors;
-  const MutableSpan<float> distances = tls.distances;
-
+  Span<float> factors;
+  if (!precomputed_factors.is_empty()) {
+    BLI_assert(precomputed_factors.size() == verts.size());
+    factors = precomputed_factors;
+  }
+  else {
+    const StrokeCache &cache = *object.runtime->sculpt_session->cache;
+    tls.factors.resize(verts.size());
+    tls.distances.resize(verts.size());
+    const MutableSpan<float> local_factors = tls.factors;
+    const MutableSpan<float> distances = tls.distances;
 #if PBR_PAINT_MATERIAL_PROFILE
-  const double factors_start = BLI_time_now_seconds();
+    const double factors_start = BLI_time_now_seconds();
 #endif
-  calc_factors_common_mesh_indexed(depsgraph,
-                                   brush,
-                                   object,
-                                   attribute_data,
-                                   vert_positions,
-                                   vert_normals,
-                                   node,
-                                   factors,
-                                   distances);
+    calc_factors_common_mesh_indexed(depsgraph,
+                                     brush,
+                                     object,
+                                     attribute_data,
+                                     vert_positions,
+                                     vert_normals,
+                                     node,
+                                     local_factors,
+                                     distances);
 #if PBR_PAINT_MATERIAL_PROFILE
-  g_color_profile.factors_seconds.fetch_add(BLI_time_now_seconds() - factors_start);
-  const double automask_start = BLI_time_now_seconds();
+    g_color_profile.factors_seconds.fetch_add(BLI_time_now_seconds() - factors_start);
+    const double automask_start = BLI_time_now_seconds();
 #endif
-
-  if (cache.automasking) {
-    auto_mask::calc_vert_factors(depsgraph, object, *cache.automasking, node, verts, factors);
+    if (cache.automasking) {
+      auto_mask::calc_vert_factors(
+          depsgraph, object, *cache.automasking, node, verts, local_factors);
+    }
+#if PBR_PAINT_MATERIAL_PROFILE
+    g_color_profile.automask_seconds.fetch_add(BLI_time_now_seconds() - automask_start);
+#endif
+    factors = local_factors;
   }
 #if PBR_PAINT_MATERIAL_PROFILE
-  g_color_profile.automask_seconds.fetch_add(BLI_time_now_seconds() - automask_start);
   const double sample_start = BLI_time_now_seconds();
   int64_t active_num = 0;
 #endif
@@ -293,10 +314,10 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
       if (factors[i] <= 0.0f) {
         continue;
       }
-      tls.raw_source_colors.append(sampler->color(channel,
-                                                   vert_positions[verts[i]],
-                                                   thread_id,
-                                                   /*decode_linear=*/false));
+      tls.raw_source_colors.append(
+          precomputed_contexts.is_empty() ?
+              sampler->color(channel, vert_positions[verts[i]], thread_id, false) :
+              sampler->color(channel, precomputed_contexts[i], thread_id, false));
     }
     ChannelSourceSampler::decode_linear_batch(tls.raw_source_colors,
                                               sampler->colorspace(channel));
@@ -329,7 +350,9 @@ static void do_paint_color_task(const Depsgraph &depsgraph,
     const int vert = verts[i];
     const float3 target = batch_decode_color ? tls.raw_source_colors[decoded_i++] :
                           sampler != nullptr ?
-                              sampler->color(channel, vert_positions[vert], thread_id) :
+                              (precomputed_contexts.is_empty() ?
+                                   sampler->color(channel, vert_positions[vert], thread_id) :
+                                   sampler->color(channel, precomputed_contexts[i], thread_id)) :
                               target_rgb;
     /* Alpha does not mask its own write; only every other channel's write is scaled. */
     const float alpha_factor = (!alpha_cache.is_empty() && channel != PAINT_MATERIAL_CHANNEL_ALPHA) ?
@@ -416,6 +439,8 @@ static void paint_scalar_channel(const Depsgraph &depsgraph,
                                  const float2 value_range,
                                  const IMB_BlendMode blend_mode,
                                  const Span<float> alpha_cache,
+                                 const Span<Array<float>> node_factors,
+                                 const Span<Array<TexelSampleContext>> node_contexts,
                                  const Span<float3> vert_positions,
                                  const Span<float3> vert_normals,
                                  const MeshAttributeData &attribute_data,
@@ -453,6 +478,9 @@ static void paint_scalar_channel(const Depsgraph &depsgraph,
                              value_range,
                              blend_mode,
                              alpha_cache,
+                             node_factors[i],
+                             node_contexts.is_empty() ? Span<TexelSampleContext>() :
+                                                        node_contexts[i].as_span(),
                              nodes[i],
                              tls.local(),
                              mix_scalars,
@@ -510,6 +538,8 @@ static void paint_color_channel(
     const ChannelSourceSampler *sampler,
     const IMB_BlendMode blend_mode,
     const Span<float> alpha_cache,
+    const Span<Array<float>> node_factors,
+    const Span<Array<TexelSampleContext>> node_contexts,
     const Span<float3> vert_positions,
     const Span<float3> vert_normals,
     const MeshAttributeData &attribute_data,
@@ -561,6 +591,9 @@ static void paint_color_channel(
                             target_rgb,
                             blend_mode,
                             alpha_cache,
+                            node_factors[i],
+                            node_contexts.is_empty() ? Span<TexelSampleContext>() :
+                                                       node_contexts[i].as_span(),
                             nodes[i],
                             tls.local(),
                             mix_colors,
@@ -633,6 +666,49 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
                                       ss.cache->material_alpha_cache.as_span() :
                                       Span<float>();
 
+  Array<Array<float>> node_factors(nodes.size());
+  Array<Array<TexelSampleContext>> node_contexts;
+  if (active_sampler != nullptr) {
+    node_contexts.reinitialize(nodes.size());
+  }
+#if PBR_PAINT_MATERIAL_PROFILE
+  const double shared_factors_start = BLI_time_now_seconds();
+#endif
+  node_mask.foreach_index(
+      [&](const int i) {
+        bke::pbvh::MeshNode &node = nodes[i];
+        const Span<int> verts = node.verts();
+        Array<float> &factors = node_factors[i];
+        factors.reinitialize(verts.size());
+        MaterialPaintLocalData &tls = all_tls.local();
+        tls.distances.resize(verts.size());
+        calc_factors_common_mesh_indexed(depsgraph,
+                                         brush,
+                                         ob,
+                                         attribute_data,
+                                         vert_positions,
+                                         vert_normals,
+                                         node,
+                                         factors,
+                                         tls.distances);
+        if (ss.cache->automasking) {
+          auto_mask::calc_vert_factors(
+              depsgraph, ob, *ss.cache->automasking, node, verts, factors);
+        }
+        if (!node_contexts.is_empty()) {
+          Array<TexelSampleContext> &contexts = node_contexts[i];
+          contexts.reinitialize(verts.size());
+          for (const int vert_i : verts.index_range()) {
+            contexts[vert_i] = sculpt_texel_sample_context(ss, vert_positions[verts[vert_i]]);
+          }
+        }
+      },
+      exec_mode::grain_size(1));
+#if PBR_PAINT_MATERIAL_PROFILE
+  const double shared_factors_ms = (BLI_time_now_seconds() - shared_factors_start) * 1000.0;
+  g_scalar_profile.factors_seconds.fetch_add(shared_factors_ms / 1000.0);
+#endif
+
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (!BKE_paint_material_channel_writes_to_target(brush_paint, settings, info.channel)) {
       continue;
@@ -653,6 +729,8 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
                           active_sampler,
                           channel_blend_mode,
                           alpha_cache,
+                          node_factors,
+                          node_contexts,
                           vert_positions,
                           vert_normals,
                           attribute_data,
@@ -687,6 +765,8 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
                          range,
                          channel_blend_mode,
                          alpha_cache,
+                         node_factors,
+                         node_contexts,
                          vert_positions,
                          vert_normals,
                          attribute_data,

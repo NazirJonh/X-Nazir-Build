@@ -95,6 +95,48 @@ AreaPlaneMesh::AreaPlaneMesh(const Depsgraph &depsgraph,
     }
     triangles_.append(out);
   }
+  build_uv_bins();
+}
+
+void AreaPlaneMesh::build_uv_bins()
+{
+  uv_bins_valid_ = false;
+  uv_bins_ = {};
+  if (triangles_.is_empty()) {
+    return;
+  }
+  float2 uv_max = triangles_[0].uv[0];
+  uv_min_ = triangles_[0].uv[0];
+  for (const AreaPlaneTriangle &tri : triangles_) {
+    for (const int i : IndexRange(3)) {
+      uv_min_ = math::min(uv_min_, tri.uv[i]);
+      uv_max = math::max(uv_max, tri.uv[i]);
+    }
+  }
+  const float2 size = uv_max - uv_min_;
+  if (size.x <= 1e-12f || size.y <= 1e-12f) {
+    return;
+  }
+  uv_inv_cell_ = float2(float(uv_bin_res_) / size.x, float(uv_bin_res_) / size.y);
+  uv_bins_ = Array<Vector<int>>(uv_bin_res_ * uv_bin_res_);
+  for (const AreaPlaneTriangle &tri : triangles_) {
+    float2 tmin = tri.uv[0];
+    float2 tmax = tri.uv[0];
+    for (const int i : IndexRange(1, 2)) {
+      tmin = math::min(tmin, tri.uv[i]);
+      tmax = math::max(tmax, tri.uv[i]);
+    }
+    const int bx0 = math::clamp(int(std::floor((tmin.x - uv_min_.x) * uv_inv_cell_.x)), 0, uv_bin_res_ - 1);
+    const int by0 = math::clamp(int(std::floor((tmin.y - uv_min_.y) * uv_inv_cell_.y)), 0, uv_bin_res_ - 1);
+    const int bx1 = math::clamp(int(std::floor((tmax.x - uv_min_.x) * uv_inv_cell_.x)), 0, uv_bin_res_ - 1);
+    const int by1 = math::clamp(int(std::floor((tmax.y - uv_min_.y) * uv_inv_cell_.y)), 0, uv_bin_res_ - 1);
+    for (int by = by0; by <= by1; by++) {
+      for (int bx = bx0; bx <= bx1; bx++) {
+        uv_bins_[by * uv_bin_res_ + bx].append(tri.index);
+      }
+    }
+  }
+  uv_bins_valid_ = true;
 }
 
 bool AreaPlaneMesh::is_valid() const
@@ -113,17 +155,32 @@ bool AreaPlaneMesh::hit_at_uv(const float2 &uv, AreaPlaneHit &r_hit) const
   int best_index = -1;
   float best_w[3] = {};
 
-  for (const AreaPlaneTriangle &tri : triangles_) {
+  auto consider = [&](const AreaPlaneTriangle &tri) {
     float w[3];
     barycentric_weights_v2(tri.uv[0], tri.uv[1], tri.uv[2], uv, w);
     if (!barycentric_contains(w, AREA_PLANE_HIT_EPS)) {
-      continue;
+      return;
     }
     if (best_index < 0 || tri.index < best_index) {
       best_index = tri.index;
       best_w[0] = w[0];
       best_w[1] = w[1];
       best_w[2] = w[2];
+    }
+  };
+
+  if (uv_bins_valid_) {
+    const int bx = math::clamp(
+        int(std::floor((uv.x - uv_min_.x) * uv_inv_cell_.x)), 0, uv_bin_res_ - 1);
+    const int by = math::clamp(
+        int(std::floor((uv.y - uv_min_.y) * uv_inv_cell_.y)), 0, uv_bin_res_ - 1);
+    for (const int tri_index : uv_bins_[by * uv_bin_res_ + bx]) {
+      consider(triangles_[tri_index]);
+    }
+  }
+  else {
+    for (const AreaPlaneTriangle &tri : triangles_) {
+      consider(tri);
     }
   }
 
@@ -218,6 +275,23 @@ float3 area_plane_triangle_face_normal(const AreaPlaneTriangle &tri)
 {
   return math::normalize(
       math::cross(tri.position[1] - tri.position[0], tri.position[2] - tri.position[0]));
+}
+
+float area_plane_triangle_radius_uv(const AreaPlaneTriangle &tri, const float radius_object)
+{
+  if (radius_object <= 1e-12f) {
+    return 0.0f;
+  }
+  float3 dpdu;
+  float3 dpdv;
+  if (!area_plane_triangle_uv_jacobian(tri, dpdu, dpdv)) {
+    return 0.0f;
+  }
+  const float jac = std::sqrt(math::length(math::cross(dpdu, dpdv)));
+  if (jac <= 1e-12f) {
+    return 0.0f;
+  }
+  return radius_object / jac;
 }
 
 static float4x4 area_plane_object_to_local_from_axes(const float3 &origin,
@@ -519,17 +593,20 @@ static bool is_top_left_edge(const float2 &a, const float2 &b)
   return dy > 0.0f;
 }
 
-bool area_plane_uv_pixel_inside_triangle(const float2 uv[3], const float2 &p)
+bool area_plane_uv_pixel_inside_triangle(const float2 uv[3], const float2 &p, float r_w[3])
 {
-  float w[3];
-  barycentric_weights_v2(uv[0], uv[1], uv[2], p, w);
-  if (w[0] < -AREA_PLANE_EDGE_EPS || w[1] < -AREA_PLANE_EDGE_EPS || w[2] < -AREA_PLANE_EDGE_EPS) {
+  barycentric_weights_v2(uv[0], uv[1], uv[2], p, r_w);
+  if (r_w[0] < -AREA_PLANE_EDGE_EPS || r_w[1] < -AREA_PLANE_EDGE_EPS ||
+      r_w[2] < -AREA_PLANE_EDGE_EPS)
+  {
     return false;
   }
-  if (w[0] > AREA_PLANE_EDGE_EPS && w[1] > AREA_PLANE_EDGE_EPS && w[2] > AREA_PLANE_EDGE_EPS) {
+  if (r_w[0] > AREA_PLANE_EDGE_EPS && r_w[1] > AREA_PLANE_EDGE_EPS && r_w[2] > AREA_PLANE_EDGE_EPS)
+  {
     return true;
   }
 
+  float w[3] = {r_w[0], r_w[1], r_w[2]};
   float2 v0 = uv[0];
   float2 v1 = uv[1];
   float2 v2 = uv[2];
@@ -549,6 +626,12 @@ bool area_plane_uv_pixel_inside_triangle(const float2 uv[3], const float2 &p)
     return false;
   }
   return true;
+}
+
+bool area_plane_uv_pixel_inside_triangle(const float2 uv[3], const float2 &p)
+{
+  float w[3];
+  return area_plane_uv_pixel_inside_triangle(uv, p, w);
 }
 
 }  // namespace blender::ed::sculpt_paint

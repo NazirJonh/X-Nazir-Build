@@ -36,6 +36,7 @@
  *   Coplanar steps are identity. Falloff still uses the original object-space point.
  */
 
+#include "BLI_array.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
@@ -73,11 +74,20 @@ struct AreaPlaneHit {
 /**
  * Stroke-local copy of UV triangles and object-space positions/normals.
  *
- * Built once per stroke from the evaluated mesh. Immutable afterwards. Has no UV BVH and no
- * per-texel UV→surface query.
+ * Built once per stroke from the evaluated mesh. Immutable afterwards. Has a uniform UV grid
+ * for #hit_at_uv; coverage (#triangles_in_sphere) stays an object-space test so UV-distant
+ * islands that still sit in the 3D dab are not dropped.
  */
 class AreaPlaneMesh {
   Vector<AreaPlaneTriangle> triangles_;
+  /** Uniform UV bins so #hit_at_uv is not a linear scan of every triangle. */
+  Array<Vector<int>> uv_bins_;
+  float2 uv_min_ = float2(0.0f);
+  float2 uv_inv_cell_ = float2(0.0f);
+  static constexpr int uv_bin_res_ = 32;
+  bool uv_bins_valid_ = false;
+
+  void build_uv_bins();
 
  public:
   AreaPlaneMesh(const Depsgraph &depsgraph, const Object &ob, StringRef uv_map_name);
@@ -165,10 +175,22 @@ float4x4 area_plane_local_mat(const float3 &position,
 float3 area_plane_triangle_face_normal(const AreaPlaneTriangle &tri);
 
 /**
+ * UV-space radius on \a tri matching an object-space dab of \a radius_object.
+ * Zero when the triangle is degenerate in UV.
+ */
+float area_plane_triangle_radius_uv(const AreaPlaneTriangle &tri, float radius_object);
+
+/**
  * Half-open UV coverage: strict interior, or a boundary texel whose supporting edges are
  * top-left after the triangle is oriented counter-clockwise in UV. Shared edges go to exactly
  * one of the two triangles; overlapping interiors can both return true.
  */
 bool area_plane_uv_pixel_inside_triangle(const float2 uv[3], const float2 &p);
+/**
+ * Same as above, and writes the unswapped barycentric weights of \a p (for interpolating
+ * object-space position). Fill-rule orientation may swap a local copy; \a r_w stays in
+ * \a uv[0,1,2] order.
+ */
+bool area_plane_uv_pixel_inside_triangle(const float2 uv[3], const float2 &p, float r_w[3]);
 
 }  // namespace blender::ed::sculpt_paint

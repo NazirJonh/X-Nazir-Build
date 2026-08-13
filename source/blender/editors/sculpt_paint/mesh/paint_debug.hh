@@ -34,6 +34,13 @@
 #  define PBR_PAINT_IMAGE_PROFILE 1
 #endif
 
+/** paint_image_2d.cc – Area Plane hit/unfold/raster timing. Use #if, not #ifdef. */
+#if PBR_PAINT_DEBUG_LOG
+#  define PBR_PAINT_2D_PROFILE 1
+#else
+#  define PBR_PAINT_2D_PROFILE 0
+#endif
+
 /** paint_material_source.cc – ChannelSourceSampler construction and image-pool probe timing. */
 #if PBR_PAINT_DEBUG_LOG
 #  define PBR_PAINT_SOURCE_PROFILE 1

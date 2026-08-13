@@ -2552,7 +2552,8 @@ void sculpt_apply_texture(const SculptSession &ss,
 
   if (mtex.brush_map_mode == MTEX_MAP_MODE_3D) {
     /* Get strength by feeding the vertex location directly into a texture. */
-    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, &mtex, ctx.point, r_rgba, 0, pool);
+    *r_value = BKE_brush_sample_tex_3d(
+        cache.paint, &brush, &mtex, ctx.point, r_rgba, thread_id, pool);
   }
   else if (mtex.brush_map_mode == MTEX_MAP_MODE_AREA) {
     /* Similar to fixed mode, but projects from brush angle
@@ -2579,7 +2580,8 @@ void sculpt_apply_texture(const SculptSession &ss,
     /* Still no symmetry supported for other paint modes.
      * Sculpt does it DIY. */
     const float point_3d[3] = {ctx.view_point_2d[0], ctx.view_point_2d[1], 0.0f};
-    *r_value = BKE_brush_sample_tex_3d(cache.paint, &brush, &mtex, point_3d, r_rgba, 0, pool);
+    *r_value = BKE_brush_sample_tex_3d(
+        cache.paint, &brush, &mtex, point_3d, r_rgba, thread_id, pool);
   }
 }
 

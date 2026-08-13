@@ -8,8 +8,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
+#include <utility>
 
 #include "MEM_guardedalloc.h"
 
@@ -30,8 +33,10 @@
 #include "BLI_math_matrix.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.hh"
+#include "BLI_mutex.hh"
 #include "BLI_stack.h"
 #include "BLI_task.h"
+#include "BLI_task.hh"
 #include "BLI_time.h"
 #include "BLI_vector.hh"
 
@@ -768,6 +773,8 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
           const float *otf = oldtexibuf_float_data +
                              ((y - origy + yt) * oldtexibuf->x + (x - origx + xt)) * 4;
           copy_v4_v4(rgba, otf);
+          /* Brush coverage/falloff is reused; channel sources are dab-dependent. */
+          paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
         }
 
         /* write to new texture buffer */
@@ -792,6 +799,9 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
           crgba[1] = ot[1];
           crgba[2] = ot[2];
           crgba[3] = ot[3];
+          rgba_uchar_to_float(rgba, crgba);
+          paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
+          rgba_float_to_uchar(crgba, rgba);
         }
         else {
           rgba_float_to_uchar(crgba, rgba);
@@ -959,7 +969,7 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
   float tex_rotation = -brush->mtex.rot;
   float mask_rotation = -brush->mask_mtex.rot;
 
-  painter->pool = BKE_image_pool_new();
+  painter->pool = painter->pool ? painter->pool : BKE_image_pool_new();
 
   const bool use_2d_channel_source =
       paint_2d_channel_source_usable_2d(painter, painter->material_channel);
@@ -1044,20 +1054,25 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
   paint_curve_mask_cache_update(&cache->curve_mask_cache, brush, diameter, size, pos);
 
   /* detect if we need to recreate image brush buffer */
-  if (do_source_rebuild) {
-    do_partial_update = false;
-  }
-  if (diameter != cache->lastdiameter || (tex_rotation != cache->last_tex_rotation) || do_random ||
-      do_source_rebuild || update_color)
+  const bool stamp_shape_changed = diameter != cache->lastdiameter ||
+                                   (tex_rotation != cache->last_tex_rotation) || do_random ||
+                                   update_color;
+  if (stamp_shape_changed || do_source_rebuild)
   {
-    if (cache->ibuf) {
+    if (stamp_shape_changed && cache->ibuf) {
       IMB_freeImBuf(cache->ibuf);
       cache->ibuf = nullptr;
     }
 
     if (do_partial_update) {
-      /* do partial update of texture */
+      /* do partial update of texture; material sources are resampled on the reused overlap */
       brush_painter_imbuf_partial_update(painter, tile, pos, diameter);
+    }
+    else if (do_source_rebuild && cache->ibuf != nullptr && cache->texibuf != nullptr &&
+             !stamp_shape_changed)
+    {
+      brush_painter_imbuf_update(
+          painter, tile, nullptr, 0, 0, cache->ibuf->x, cache->ibuf->y, 0, 0);
     }
     else {
       /* create brush from scratch */
@@ -1077,9 +1092,6 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
       brush_painter_imbuf_partial_update(painter, tile, pos, diameter);
     }
   }
-
-  BKE_image_pool_free(painter->pool);
-  painter->pool = nullptr;
 }
 
 static bool paint_2d_ensure_tile_canvas(ImagePaintState *s, int i)
@@ -1819,13 +1831,18 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
                                                const int thread,
                                                ImagePool *pool,
                                                const PaintModeSettings &paint_mode,
+                                               const bool decode_linear,
+                                               const bool encode_canvas,
+                                               const bool apply_flip,
                                                float3 &r_rgb)
 {
   if (!paint_2d_channel_source_usable_2d(painter, channel)) {
     r_rgb = float3(painter->material_channel_color[0],
                    painter->material_channel_color[1],
                    painter->material_channel_color[2]);
-    paint_2d_area_encode_canvas_rgb(cache, channel == PAINT_MATERIAL_CHANNEL_NORMAL, r_rgb);
+    if (encode_canvas) {
+      paint_2d_area_encode_canvas_rgb(cache, channel == PAINT_MATERIAL_CHANNEL_NORMAL, r_rgb);
+    }
     return;
   }
 
@@ -1837,12 +1854,12 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
 
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
-  if (!is_normal && source.do_linear_conversion &&
+  if (decode_linear && !is_normal && source.do_linear_conversion &&
       (paint_runtime == nullptr || !paint_runtime->do_linear_conversion))
   {
     IMB_colormanagement_colorspace_to_scene_linear_v3(sampled, source.colorspace);
   }
-  if (source.flip_green_channel) {
+  if (apply_flip && source.flip_green_channel) {
     sampled[1] = 1.0f - sampled[1];
   }
 
@@ -1858,7 +1875,9 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
     const float intensity = math::clamp(value, range.x, range.y);
     r_rgb = float3(intensity, intensity, intensity);
   }
-  paint_2d_area_encode_canvas_rgb(cache, is_normal, r_rgb);
+  if (encode_canvas) {
+    paint_2d_area_encode_canvas_rgb(cache, is_normal, r_rgb);
+  }
 }
 
 static float paint_2d_area_sample_alpha_factor(const BrushPainter *painter,
@@ -1890,10 +1909,12 @@ static void paint_2d_blend_area_buffer(ImagePaintState *s,
                                        const int desty,
                                        ImBuf *frombuf,
                                        ushort *mask,
-                                       const short blend)
+                                       const short blend,
+                                       const int width,
+                                       const int height)
 {
   ImagePaintRegion region;
-  paint_2d_set_region(&region, destx, desty, 0, 0, frombuf->x, frombuf->y);
+  paint_2d_set_region(&region, destx, desty, 0, 0, width, height);
   ED_imapaint_dirty_region(s->image,
                            tile->canvas,
                            &tile->iuser,
@@ -1951,29 +1972,75 @@ static void paint_2d_blend_area_buffer(ImagePaintState *s,
 /** Largest rasterized triangle bbox along one axis, in texels. */
 static constexpr int AREA_PLANE_TRIANGLE_MAX_SIZE = 8192;
 
-static bool paint_2d_area_plane_rasterize_triangle(
-    ImagePaintState *s,
-    ImagePaintTile *tile,
-    const ed::sculpt_paint::AreaPlaneTriangle &tri,
-    const float4x4 &object_to_brush,
-    const float4x4 &channel_local_mat,
-    const float4x4 &alpha_local_mat,
-    const float4x4 &unfold_mat,
-    const float3 &dab_origin,
-    const float3 &dab_normal,
-    const bool sample_alpha,
-    ImagePool *pool)
-{
-  const BrushPainter *painter = s->painter;
-  const BrushPainterCache *cache = &tile->cache;
-  const PaintModeSettings &paint_mode = s->scene->toolsettings->paint_mode;
-  const int thread = 0;
+/**
+ * One covered texel of an Area Plane dab. Falloff, alpha and the unfolded sample position are
+ * independent of the destination channel, so extras reuse this list and only sample RGB.
+ */
+struct AreaPlaneCoveragePixel {
+  float3 sample_position = {};
+  uint16_t lx = 0;
+  uint16_t ly = 0;
+  uint16_t falloff = 0;
+  uint16_t alpha = 65535;
+};
 
-  const float3 face_normal = ed::sculpt_paint::area_plane_triangle_face_normal(tri);
-  if (math::length_squared(face_normal) < 1e-12f) {
-    return false;
+struct AreaPlaneTriCoverage {
+  int x0 = 0;
+  int y0 = 0;
+  int w = 0;
+  int h = 0;
+  Vector<AreaPlaneCoveragePixel> pixels;
+};
+
+struct AreaPlaneTileCoverage {
+  int size[2] = {0, 0};
+  float uv_origin[2] = {0.0f, 0.0f};
+  Vector<AreaPlaneTriCoverage> tris;
+};
+
+struct AreaPlaneImBufDeleter {
+  void operator()(ImBuf *ibuf) const
+  {
+    if (ibuf) {
+      IMB_freeImBuf(ibuf);
+    }
   }
+};
 
+struct AreaPlaneDabGeom {
+  bool valid = false;
+  ed::sculpt_paint::AreaPlaneHit hit;
+  float radius_object = 0.0f;
+  float4x4 object_to_brush = float4x4::identity();
+  Vector<int> accepted;
+  Vector<float4x4> unfold_mats;
+  float3 dab_normal = {};
+  ed::sculpt_paint::AreaPlaneTriangle dab_tri;
+  /** Built on the first destination; extra maps reuse it when the tile grid matches. */
+  Vector<AreaPlaneTileCoverage> coverage_tiles;
+  /**
+   * Grown to the largest triangle AABB this dab has rasterized. Extra channels reuse it instead
+   * of allocating a new ImBuf per triangle. #IMB_rectblend uses ImBuf.x as row stride, so writes
+   * must use that stride even when the used sub-rect is smaller.
+   */
+  std::unique_ptr<ImBuf, AreaPlaneImBufDeleter> scratch_float;
+  std::unique_ptr<ImBuf, AreaPlaneImBufDeleter> scratch_byte;
+  Vector<ushort> scratch_mask;
+};
+
+/**
+ * UV AABB of \a tri on \a tile, clipped to the dab's projection.
+ * \return false when the triangle does not overlap this tile.
+ */
+static bool paint_2d_area_plane_triangle_aabb(const ImagePaintTile *tile,
+                                              const ed::sculpt_paint::AreaPlaneTriangle &tri,
+                                              const float3 &dab_origin,
+                                              const float radius_object,
+                                              int &r_x0,
+                                              int &r_y0,
+                                              int &r_w,
+                                              int &r_h)
+{
   float min_u = tri.uv[0].x;
   float max_u = tri.uv[0].x;
   float min_v = tri.uv[0].y;
@@ -1990,6 +2057,25 @@ static bool paint_2d_area_plane_rasterize_triangle(
     return false;
   }
 
+  /* Clip the UV AABB to the dab's projection onto this triangle. Neighbor islands sit far from
+   * the cursor UV, so clipping to the cursor would drop them; the 3D closest point mapped back
+   * to this triangle's UV is the right center. */
+  float2 uv_c((min_u + max_u) * 0.5f, (min_v + max_v) * 0.5f);
+  float3 closest;
+  closest_on_tri_to_point_v3(
+      closest, dab_origin, tri.position[0], tri.position[1], tri.position[2]);
+  float bary_p[3];
+  interp_weights_tri_v3(bary_p, tri.position[0], tri.position[1], tri.position[2], closest);
+  uv_c = tri.uv[0] * bary_p[0] + tri.uv[1] * bary_p[1] + tri.uv[2] * bary_p[2];
+  const float r_uv = ed::sculpt_paint::area_plane_triangle_radius_uv(tri, radius_object);
+  if (r_uv > 0.0f) {
+    const float pad = r_uv * 1.05f;
+    min_u = std::max(min_u, uv_c.x - pad);
+    max_u = std::min(max_u, uv_c.x + pad);
+    min_v = std::max(min_v, uv_c.y - pad);
+    max_v = std::min(max_v, uv_c.y + pad);
+  }
+
   int x0 = int(std::floor((min_u - tile->uv_origin[0]) * float(tile->size[0]))) - 1;
   int y0 = int(std::floor((min_v - tile->uv_origin[1]) * float(tile->size[1]))) - 1;
   int x1 = int(std::ceil((max_u - tile->uv_origin[0]) * float(tile->size[0]))) + 1;
@@ -1998,135 +2084,456 @@ static bool paint_2d_area_plane_rasterize_triangle(
   y0 = std::max(y0, 0);
   x1 = std::min(x1, tile->size[0]);
   y1 = std::min(y1, tile->size[1]);
-  const int w = x1 - x0;
-  const int h = y1 - y0;
+  int w = x1 - x0;
+  int h = y1 - y0;
   if (w <= 0 || h <= 0) {
     return false;
   }
+  /* Clamp to the max raster size around the dab UV instead of silently skipping the triangle. */
   if (w > AREA_PLANE_TRIANGLE_MAX_SIZE || h > AREA_PLANE_TRIANGLE_MAX_SIZE) {
+    const int cx = int(std::floor((uv_c.x - tile->uv_origin[0]) * float(tile->size[0])));
+    const int cy = int(std::floor((uv_c.y - tile->uv_origin[1]) * float(tile->size[1])));
+    if (w > AREA_PLANE_TRIANGLE_MAX_SIZE) {
+      x0 = std::max(x0, cx - AREA_PLANE_TRIANGLE_MAX_SIZE / 2);
+      x1 = std::min(x1, x0 + AREA_PLANE_TRIANGLE_MAX_SIZE);
+      x0 = std::max(0, x1 - AREA_PLANE_TRIANGLE_MAX_SIZE);
+      x1 = std::min(x1, tile->size[0]);
+    }
+    if (h > AREA_PLANE_TRIANGLE_MAX_SIZE) {
+      y0 = std::max(y0, cy - AREA_PLANE_TRIANGLE_MAX_SIZE / 2);
+      y1 = std::min(y1, y0 + AREA_PLANE_TRIANGLE_MAX_SIZE);
+      y0 = std::max(0, y1 - AREA_PLANE_TRIANGLE_MAX_SIZE);
+      y1 = std::min(y1, tile->size[1]);
+    }
+    w = x1 - x0;
+    h = y1 - y0;
+    if (w <= 0 || h <= 0) {
+      return false;
+    }
+  }
+  r_x0 = x0;
+  r_y0 = y0;
+  r_w = w;
+  r_h = h;
+  return true;
+}
+
+static const AreaPlaneTileCoverage *paint_2d_area_plane_find_tile_coverage(
+    const AreaPlaneDabGeom &geom, const ImagePaintTile *tile)
+{
+  for (const AreaPlaneTileCoverage &cov : geom.coverage_tiles) {
+    if (cov.size[0] == tile->size[0] && cov.size[1] == tile->size[1] &&
+        cov.uv_origin[0] == tile->uv_origin[0] && cov.uv_origin[1] == tile->uv_origin[1])
+    {
+      return &cov;
+    }
+  }
+  return nullptr;
+}
+
+static ushort paint_2d_area_plane_pixel_strength(const AreaPlaneCoveragePixel &pixel,
+                                                 const bool is_alpha_dest)
+{
+  const uint32_t alpha_mul = is_alpha_dest ? 65535u : uint32_t(pixel.alpha);
+  return ushort((uint32_t(pixel.falloff) * alpha_mul) / 65535u);
+}
+
+static void paint_2d_area_plane_write_rgb(float *float_data,
+                                          uchar *byte_data,
+                                          const int idx,
+                                          const float3 &rgb)
+{
+  if (float_data) {
+    float *dst = float_data + idx * 4;
+    dst[0] = rgb.x;
+    dst[1] = rgb.y;
+    dst[2] = rgb.z;
+    dst[3] = 1.0f;
+  }
+  else {
+    uchar *dst = byte_data + idx * 4;
+    rgb_float_to_uchar(dst, rgb);
+    dst[3] = 255;
+  }
+}
+
+/** Shrink the raster AABB to the covered pixels so blend/alloc do not walk empty padding. */
+static void paint_2d_area_plane_tighten_coverage(AreaPlaneTriCoverage &cov)
+{
+  if (cov.pixels.is_empty()) {
+    cov.w = 0;
+    cov.h = 0;
+    return;
+  }
+  int min_lx = cov.w;
+  int min_ly = cov.h;
+  int max_lx = 0;
+  int max_ly = 0;
+  for (const AreaPlaneCoveragePixel &pixel : cov.pixels) {
+    min_lx = std::min(min_lx, int(pixel.lx));
+    min_ly = std::min(min_ly, int(pixel.ly));
+    max_lx = std::max(max_lx, int(pixel.lx));
+    max_ly = std::max(max_ly, int(pixel.ly));
+  }
+  if (min_lx == 0 && min_ly == 0 && max_lx == cov.w - 1 && max_ly == cov.h - 1) {
+    return;
+  }
+  cov.x0 += min_lx;
+  cov.y0 += min_ly;
+  cov.w = max_lx - min_lx + 1;
+  cov.h = max_ly - min_ly + 1;
+  for (AreaPlaneCoveragePixel &pixel : cov.pixels) {
+    pixel.lx = uint16_t(int(pixel.lx) - min_lx);
+    pixel.ly = uint16_t(int(pixel.ly) - min_ly);
+  }
+}
+
+static ImBuf *paint_2d_area_plane_ensure_scratch(AreaPlaneDabGeom &geom,
+                                                 const bool is_float,
+                                                 const int w,
+                                                 const int h)
+{
+  std::unique_ptr<ImBuf, AreaPlaneImBufDeleter> &slot = is_float ? geom.scratch_float :
+                                                                  geom.scratch_byte;
+  if (!slot || slot->x < w || slot->y < h) {
+    const int nw = slot ? std::max(w, slot->x) : w;
+    const int nh = slot ? std::max(h, slot->y) : h;
+    slot.reset(IMB_allocImBuf(
+        nw, nh, is_float ? ImBufFlags::FloatData : ImBufFlags::ByteData));
+  }
+  if (!slot) {
+    return nullptr;
+  }
+  const int stride = slot->x;
+  const int64_t mask_len = int64_t(stride) * int64_t(slot->y);
+  if (int64_t(geom.scratch_mask.size()) < mask_len) {
+    geom.scratch_mask.resize(mask_len, ushort(0));
+  }
+  /* #IMB_rectblend reads mask with stride = frombuf->x. Only the used sub-rect is blended. */
+  ushort *mask = geom.scratch_mask.data();
+  for (int y = 0; y < h; y++) {
+    memset(mask + y * stride, 0, size_t(w) * sizeof(ushort));
+  }
+  return slot.get();
+}
+
+/**
+ * Walk the triangle AABB once: inside-test, barycentric, falloff, unfold, optional alpha.
+ * Destination channels then only sample RGB at #AreaPlaneCoveragePixel.sample_position.
+ */
+static bool paint_2d_area_plane_build_tri_coverage(
+    const ImagePaintTile *tile,
+    const BrushPainter *painter,
+    const ed::sculpt_paint::AreaPlaneTriangle &tri,
+    const float4x4 &object_to_brush,
+    const float4x4 &alpha_local_mat,
+    const float4x4 &unfold_mat,
+    const float3 &dab_origin,
+    const float3 &dab_normal,
+    const float radius_object,
+    const bool capture_alpha,
+    ImagePool *pool,
+    AreaPlaneTriCoverage &r_cov)
+{
+  r_cov = AreaPlaneTriCoverage{};
+  const float3 face_normal = ed::sculpt_paint::area_plane_triangle_face_normal(tri);
+  if (math::length_squared(face_normal) < 1e-12f) {
+    return false;
+  }
+  if (!paint_2d_area_plane_triangle_aabb(tile,
+                                         tri,
+                                         dab_origin,
+                                         radius_object,
+                                         r_cov.x0,
+                                         r_cov.y0,
+                                         r_cov.w,
+                                         r_cov.h))
+  {
     return false;
   }
 
-  ImBuf *raster_buf = IMB_allocImBuf(
-      w, h, tile->cache.is_float ? ImBufFlags::FloatData : ImBufFlags::ByteData);
-  Array<ushort> triangle_mask(w * h, ushort(0));
+  const int w = r_cov.w;
+  const int h = r_cov.h;
+  const int x0 = r_cov.x0;
+  const int y0 = r_cov.y0;
+  const float inv_sx = 1.0f / float(tile->size[0]);
+  const float inv_sy = 1.0f / float(tile->size[1]);
+  const float uv_origin_x = tile->uv_origin[0];
+  const float uv_origin_y = tile->uv_origin[1];
+  const Brush *brush = painter->brush;
+  r_cov.pixels.reserve(size_t(std::min(int64_t(w) * int64_t(h), int64_t(1 << 20))));
+
+  Mutex mutex;
+  threading::parallel_for(IndexRange(h), 8, [&](const IndexRange y_range) {
+    Vector<AreaPlaneCoveragePixel> local;
+    const int thread = BLI_task_parallel_thread_id(nullptr);
+    for (const int64_t ly64 : y_range) {
+      const int ly = int(ly64);
+      const float uv_y = uv_origin_y + (float(y0 + ly) + 0.5f) * inv_sy;
+      for (int lx = 0; lx < w; lx++) {
+        const float2 uv(uv_origin_x + (float(x0 + lx) + 0.5f) * inv_sx, uv_y);
+        float bary[3];
+        if (!ed::sculpt_paint::area_plane_uv_pixel_inside_triangle(tri.uv, uv, bary)) {
+          continue;
+        }
+
+        const float3 position = tri.position[0] * bary[0] + tri.position[1] * bary[1] +
+                                tri.position[2] * bary[2];
+        float strength;
+        if (!paint_2d_area_plane_falloff(brush, object_to_brush, position, &strength)) {
+          continue;
+        }
+        float3 sample_position = math::transform_point(unfold_mat, position);
+        sample_position += dab_normal * (math::dot(dab_normal, dab_origin) -
+                                         math::dot(dab_normal, sample_position));
+        float alpha = 1.0f;
+        if (capture_alpha) {
+          alpha = paint_2d_area_sample_alpha_factor(
+              painter, alpha_local_mat, sample_position, thread, pool);
+        }
+
+        AreaPlaneCoveragePixel pixel;
+        pixel.sample_position = sample_position;
+        pixel.lx = uint16_t(lx);
+        pixel.ly = uint16_t(ly);
+        pixel.falloff = ushort(65535.0f * strength);
+        pixel.alpha = ushort(65535.0f * alpha);
+        local.append(pixel);
+      }
+    }
+    if (local.is_empty()) {
+      return;
+    }
+    std::lock_guard lock(mutex);
+    r_cov.pixels.extend(local);
+  });
+  paint_2d_area_plane_tighten_coverage(r_cov);
+  return !r_cov.pixels.is_empty();
+}
+
+static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
+                                               ImagePaintTile *tile,
+                                               const AreaPlaneTriCoverage &cov,
+                                               const float4x4 &channel_local_mat,
+                                               ImagePool *pool,
+                                               AreaPlaneDabGeom &geom)
+{
+  if (cov.w <= 0 || cov.h <= 0 || cov.pixels.is_empty()) {
+    return false;
+  }
+
+  const BrushPainter *painter = s->painter;
+  const BrushPainterCache *cache = &tile->cache;
+  const PaintModeSettings &paint_mode = s->scene->toolsettings->paint_mode;
+  const eMaterialPaintChannel channel = painter->material_channel;
+  const bool is_alpha_dest = channel == PAINT_MATERIAL_CHANNEL_ALPHA;
+  const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+  const bool is_color = ELEM(channel,
+                             PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                             PAINT_MATERIAL_CHANNEL_EMISSION,
+                             PAINT_MATERIAL_CHANNEL_NORMAL);
+
+  ImBuf *raster_buf = paint_2d_area_plane_ensure_scratch(
+      geom, tile->cache.is_float, cov.w, cov.h);
+  if (raster_buf == nullptr) {
+    return false;
+  }
+  ushort *triangle_mask = geom.scratch_mask.data();
   uchar *byte_data = raster_buf->byte_data_for_write();
   float *float_data = raster_buf->float_data_for_write();
-  bool any_written = false;
+  const int stride = raster_buf->x;
 
-  for (int ly = 0; ly < h; ly++) {
-    for (int lx = 0; lx < w; lx++) {
-      const float2 uv(tile->uv_origin[0] + (float(x0 + lx) + 0.5f) / float(tile->size[0]),
-                      tile->uv_origin[1] + (float(y0 + ly) + 0.5f) / float(tile->size[1]));
-      if (!ed::sculpt_paint::area_plane_uv_pixel_inside_triangle(tri.uv, uv)) {
-        continue;
+  const bool usable = paint_2d_channel_source_usable_2d(painter, channel);
+  if (!usable) {
+    float3 rgb(painter->material_channel_color[0],
+               painter->material_channel_color[1],
+               painter->material_channel_color[2]);
+    paint_2d_area_encode_canvas_rgb(cache, is_normal, rgb);
+    threading::parallel_for(cov.pixels.index_range(), 4096, [&](const IndexRange range) {
+      for (const int64_t i : range) {
+        const AreaPlaneCoveragePixel &pixel = cov.pixels[i];
+        const ushort strength = paint_2d_area_plane_pixel_strength(pixel, is_alpha_dest);
+        if (strength == 0) {
+          continue;
+        }
+        const int idx = int(pixel.ly) * stride + int(pixel.lx);
+        paint_2d_area_plane_write_rgb(float_data, byte_data, idx, rgb);
+        triangle_mask[idx] = strength;
       }
-
-      float bary[3];
-      barycentric_weights_v2(tri.uv[0], tri.uv[1], tri.uv[2], uv, bary);
-      const float3 position = tri.position[0] * bary[0] + tri.position[1] * bary[1] +
-                              tri.position[2] * bary[2];
-      float strength;
-      if (!paint_2d_area_plane_falloff(painter->brush, object_to_brush, position, &strength)) {
-        continue;
-      }
-      float3 sample_position = math::transform_point(unfold_mat, position);
-      sample_position += dab_normal *
-                         (math::dot(dab_normal, dab_origin) - math::dot(dab_normal, sample_position));
-      if (sample_alpha) {
-        strength *= paint_2d_area_sample_alpha_factor(
-            painter, alpha_local_mat, sample_position, thread, pool);
-      }
-
-      float3 rgb;
-      paint_2d_area_sample_channel_color(painter,
-                                         cache,
-                                         painter->material_channel,
-                                         channel_local_mat,
-                                         sample_position,
-                                         thread,
-                                         pool,
-                                         paint_mode,
-                                         rgb);
-
-      const int idx = ly * w + lx;
-      if (float_data) {
-        float *dst = float_data + idx * 4;
-        dst[0] = rgb.x;
-        dst[1] = rgb.y;
-        dst[2] = rgb.z;
-        dst[3] = 1.0f;
-      }
-      else {
-        uchar *dst = byte_data + idx * 4;
-        rgb_float_to_uchar(dst, rgb);
-        dst[3] = 255;
-      }
-      triangle_mask[idx] = ushort(65535.0f * strength);
-      any_written = true;
+    });
+  }
+  else {
+    const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
+        painter->channel_sources->source(channel);
+    const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
+    const bool batch_decode = is_color && !is_normal && source.do_linear_conversion &&
+                              (paint_runtime == nullptr || !paint_runtime->do_linear_conversion);
+    if (batch_decode) {
+      Array<float3> raw(cov.pixels.size());
+      Array<ushort> strengths(cov.pixels.size());
+      threading::parallel_for(cov.pixels.index_range(), 1024, [&](const IndexRange range) {
+        const int thread = BLI_task_parallel_thread_id(nullptr);
+        for (const int64_t i : range) {
+          const AreaPlaneCoveragePixel &pixel = cov.pixels[i];
+          strengths[i] = paint_2d_area_plane_pixel_strength(pixel, is_alpha_dest);
+          if (strengths[i] == 0) {
+            raw[i] = float3(0.0f);
+            continue;
+          }
+          paint_2d_area_sample_channel_color(painter,
+                                             cache,
+                                             channel,
+                                             channel_local_mat,
+                                             pixel.sample_position,
+                                             thread,
+                                             pool,
+                                             paint_mode,
+                                             false,
+                                             false,
+                                             false,
+                                             raw[i]);
+        }
+      });
+      ed::sculpt_paint::material::ChannelSourceSampler::decode_linear_batch(raw, source.colorspace);
+      threading::parallel_for(cov.pixels.index_range(), 4096, [&](const IndexRange range) {
+        for (const int64_t i : range) {
+          if (strengths[i] == 0) {
+            continue;
+          }
+          float3 rgb = raw[i];
+          if (source.flip_green_channel) {
+            rgb.y = 1.0f - rgb.y;
+          }
+          paint_2d_area_encode_canvas_rgb(cache, false, rgb);
+          const int idx = int(cov.pixels[i].ly) * stride + int(cov.pixels[i].lx);
+          paint_2d_area_plane_write_rgb(float_data, byte_data, idx, rgb);
+          triangle_mask[idx] = strengths[i];
+        }
+      });
+    }
+    else {
+      threading::parallel_for(cov.pixels.index_range(), 1024, [&](const IndexRange range) {
+        const int thread = BLI_task_parallel_thread_id(nullptr);
+        for (const int64_t i : range) {
+          const AreaPlaneCoveragePixel &pixel = cov.pixels[i];
+          const ushort strength = paint_2d_area_plane_pixel_strength(pixel, is_alpha_dest);
+          if (strength == 0) {
+            continue;
+          }
+          float3 rgb;
+          paint_2d_area_sample_channel_color(painter,
+                                             cache,
+                                             channel,
+                                             channel_local_mat,
+                                             pixel.sample_position,
+                                             thread,
+                                             pool,
+                                             paint_mode,
+                                             true,
+                                             true,
+                                             true,
+                                             rgb);
+          const int idx = int(pixel.ly) * stride + int(pixel.lx);
+          paint_2d_area_plane_write_rgb(float_data, byte_data, idx, rgb);
+          triangle_mask[idx] = strength;
+        }
+      });
     }
   }
 
-  if (any_written) {
-    paint_2d_blend_area_buffer(
-        s, tile, x0, y0, raster_buf, triangle_mask.data(), s->blend);
-  }
-  IMB_freeImBuf(raster_buf);
-  return any_written;
+  paint_2d_blend_area_buffer(
+      s, tile, cov.x0, cov.y0, raster_buf, triangle_mask, s->blend, cov.w, cov.h);
+  return true;
 }
 
-static void paint_2d_area_plane_stroke(ImagePaintState *s,
-                                       const float uv_center[2],
-                                       const float base_size)
+static bool paint_2d_area_plane_prepare(ImagePaintState *s,
+                                        const float uv_center[2],
+                                        const float base_size,
+                                        AreaPlaneDabGeom &r_geom)
 {
+  r_geom = AreaPlaneDabGeom{};
   BrushPainter *painter = s->painter;
   const ed::sculpt_paint::AreaPlaneMesh &mesh = *painter->area_plane_mesh;
 
-  ed::sculpt_paint::AreaPlaneHit hit;
-  if (!mesh.hit_at_uv(float2(uv_center[0], uv_center[1]), hit)) {
-    return;
+#if PBR_PAINT_2D_PROFILE
+  const double t0 = BLI_time_now_seconds();
+#endif
+  if (!mesh.hit_at_uv(float2(uv_center[0], uv_center[1]), r_geom.hit)) {
+    return false;
   }
   if (s->tiles[0].size[0] <= 0) {
-    return;
+    return false;
   }
 
   const float radius_uv = base_size / float(s->tiles[0].size[0]);
-  const float radius_object = mesh.radius_object(hit, radius_uv);
-  if (radius_object <= 1e-12f) {
-    return;
+  r_geom.radius_object = mesh.radius_object(r_geom.hit, radius_uv);
+  if (r_geom.radius_object <= 1e-12f) {
+    return false;
   }
 
-  const float4x4 object_to_brush = ed::sculpt_paint::area_plane_local_mat(
-      hit.position, hit.normal, radius_object, 0.0f);
-  const ed::sculpt_paint::AreaPlaneTriangle dab_tri = mesh.triangle(hit.tri_index);
+  r_geom.object_to_brush = ed::sculpt_paint::area_plane_local_mat(
+      r_geom.hit.position, r_geom.hit.normal, r_geom.radius_object, 0.0f);
+  r_geom.dab_tri = mesh.triangle(r_geom.hit.tri_index);
+
+#if PBR_PAINT_2D_PROFILE
+  const double t1 = BLI_time_now_seconds();
+#endif
+  r_geom.accepted = mesh.triangles_in_sphere(r_geom.object_to_brush);
+  if (r_geom.accepted.is_empty()) {
+    return false;
+  }
+
+#if PBR_PAINT_2D_PROFILE
+  const double t2 = BLI_time_now_seconds();
+#endif
+  r_geom.unfold_mats = ed::sculpt_paint::area_plane_unfold_matrices(
+      mesh.triangles(), r_geom.hit.tri_index, r_geom.accepted);
+  r_geom.dab_normal = ed::sculpt_paint::area_plane_triangle_face_normal(r_geom.dab_tri);
+  if (math::length_squared(r_geom.dab_normal) < 1e-12f) {
+    r_geom.dab_normal = r_geom.hit.normal;
+  }
+  r_geom.valid = true;
+#if PBR_PAINT_2D_PROFILE
+  printf("[pbr_paint_2d] area_plane prepare hit=%.3fms sphere=%.3fms unfold=%.3fms "
+         "accepted=%d tris=%d radius_obj=%.6g\n",
+         (t1 - t0) * 1000.0,
+         (t2 - t1) * 1000.0,
+         (BLI_time_now_seconds() - t2) * 1000.0,
+         int(r_geom.accepted.size()),
+         int(mesh.triangles().size()),
+         double(r_geom.radius_object));
+#endif
+  return true;
+}
+
+static void paint_2d_area_plane_apply(ImagePaintState *s, AreaPlaneDabGeom &geom)
+{
+  BrushPainter *painter = s->painter;
+  const ed::sculpt_paint::AreaPlaneMesh &mesh = *painter->area_plane_mesh;
   const ed::sculpt_paint::AreaPlaneFrame channel_frame = paint_2d_area_channel_frame(
-      painter, painter->material_channel, dab_tri, hit.position, radius_object);
+      painter, painter->material_channel, geom.dab_tri, geom.hit.position, geom.radius_object);
   const float4x4 channel_local_mat = ed::sculpt_paint::area_plane_object_to_local(channel_frame);
-  const bool sample_alpha = painter->material_alpha_masking &&
-                            painter->material_channel != PAINT_MATERIAL_CHANNEL_ALPHA;
+  const bool capture_alpha = painter->material_alpha_masking;
   const float4x4 alpha_local_mat =
-      sample_alpha ? ed::sculpt_paint::area_plane_object_to_local(paint_2d_area_channel_frame(
-                         painter,
-                         PAINT_MATERIAL_CHANNEL_ALPHA,
-                         dab_tri,
-                         hit.position,
-                         radius_object)) :
-                     object_to_brush;
-
-  const Vector<int> accepted = mesh.triangles_in_sphere(object_to_brush);
-  if (accepted.is_empty()) {
-    return;
-  }
-
-  const Vector<float4x4> unfold_mats = ed::sculpt_paint::area_plane_unfold_matrices(
-      mesh.triangles(), hit.tri_index, accepted);
-  float3 dab_normal = ed::sculpt_paint::area_plane_triangle_face_normal(dab_tri);
-  if (math::length_squared(dab_normal) < 1e-12f) {
-    dab_normal = hit.normal;
-  }
+      capture_alpha ? ed::sculpt_paint::area_plane_object_to_local(paint_2d_area_channel_frame(
+                          painter,
+                          PAINT_MATERIAL_CHANNEL_ALPHA,
+                          geom.dab_tri,
+                          geom.hit.position,
+                          geom.radius_object)) :
+                      geom.object_to_brush;
 
   ImagePool *pool = painter->channel_sources != nullptr ? painter->channel_sources->pool() :
                                                           nullptr;
+
+#if PBR_PAINT_2D_PROFILE
+  const double t0 = BLI_time_now_seconds();
+  double coverage_seconds = 0.0;
+  int64_t raster_tri_num = 0;
+  int64_t pixel_num = 0;
+  int64_t built_tris = 0;
+  int64_t reused_tris = 0;
+#endif
 
   for (int i = 0; i < s->num_tiles; i++) {
     if (!paint_2d_ensure_tile_canvas(s, i)) {
@@ -2149,19 +2556,92 @@ static void paint_2d_area_plane_stroke(ImagePaintState *s,
                                    byte_colorspace,
                                    painter->cache_invert);
 
-    for (int tri_i = 0; tri_i < accepted.size(); tri_i++) {
-      paint_2d_area_plane_rasterize_triangle(s,
-                                             tile,
-                                             mesh.triangle(accepted[tri_i]),
-                                             object_to_brush,
-                                             channel_local_mat,
-                                             alpha_local_mat,
-                                             unfold_mats[tri_i],
-                                             hit.position,
-                                             dab_normal,
-                                             sample_alpha,
-                                             pool);
+    const AreaPlaneTileCoverage *shared_cov = paint_2d_area_plane_find_tile_coverage(geom, tile);
+    AreaPlaneTileCoverage local_cov;
+    const AreaPlaneTileCoverage *tile_cov = shared_cov;
+    if (tile_cov == nullptr) {
+      local_cov.size[0] = tile->size[0];
+      local_cov.size[1] = tile->size[1];
+      local_cov.uv_origin[0] = tile->uv_origin[0];
+      local_cov.uv_origin[1] = tile->uv_origin[1];
+      local_cov.tris.resize(geom.accepted.size());
+      tile_cov = &local_cov;
     }
+
+    for (int tri_i = 0; tri_i < geom.accepted.size(); tri_i++) {
+      const AreaPlaneTriCoverage *tri_cov = &tile_cov->tris[tri_i];
+      if (shared_cov == nullptr) {
+#if PBR_PAINT_2D_PROFILE
+        const double t_cov = BLI_time_now_seconds();
+#endif
+        paint_2d_area_plane_build_tri_coverage(tile,
+                                               painter,
+                                               mesh.triangle(geom.accepted[tri_i]),
+                                               geom.object_to_brush,
+                                               alpha_local_mat,
+                                               geom.unfold_mats[tri_i],
+                                               geom.hit.position,
+                                               geom.dab_normal,
+                                               geom.radius_object,
+                                               capture_alpha,
+                                               pool,
+                                               local_cov.tris[tri_i]);
+        tri_cov = &local_cov.tris[tri_i];
+#if PBR_PAINT_2D_PROFILE
+        coverage_seconds += BLI_time_now_seconds() - t_cov;
+        built_tris++;
+#endif
+      }
+#if PBR_PAINT_2D_PROFILE
+      else {
+        reused_tris++;
+      }
+#endif
+      if (paint_2d_area_plane_fill_and_blend(s, tile, *tri_cov, channel_local_mat, pool, geom)) {
+#if PBR_PAINT_2D_PROFILE
+        raster_tri_num++;
+        pixel_num += int64_t(tri_cov->pixels.size());
+#endif
+      }
+    }
+
+    if (shared_cov == nullptr) {
+      geom.coverage_tiles.append(std::move(local_cov));
+    }
+  }
+#if PBR_PAINT_2D_PROFILE
+  printf("[pbr_paint_2d] area_plane raster channel=%d written_tris=%lld pixels=%lld "
+         "built_tris=%lld reused_tris=%lld coverage=%.3fms fill=%.3fms elapsed=%.3fms\n",
+         int(painter->material_channel),
+         static_cast<long long>(raster_tri_num),
+         static_cast<long long>(pixel_num),
+         static_cast<long long>(built_tris),
+         static_cast<long long>(reused_tris),
+         coverage_seconds * 1000.0,
+         ((BLI_time_now_seconds() - t0) - coverage_seconds) * 1000.0,
+         (BLI_time_now_seconds() - t0) * 1000.0);
+#endif
+}
+
+static void paint_2d_area_plane_stroke(ImagePaintState *s,
+                                       const float uv_center[2],
+                                       const float base_size,
+                                       AreaPlaneDabGeom *shared_geom)
+{
+  if (shared_geom != nullptr && shared_geom->valid) {
+    paint_2d_area_plane_apply(s, *shared_geom);
+    return;
+  }
+  AreaPlaneDabGeom local;
+  if (!paint_2d_area_plane_prepare(s, uv_center, base_size, local)) {
+    return;
+  }
+  if (shared_geom != nullptr) {
+    *shared_geom = std::move(local);
+    paint_2d_area_plane_apply(s, *shared_geom);
+  }
+  else {
+    paint_2d_area_plane_apply(s, local);
   }
 }
 
@@ -2171,7 +2651,8 @@ static void paint_2d_stroke_single(ImagePaintState *s,
                                    const bool eraser,
                                    float pressure,
                                    float distance,
-                                   float base_size)
+                                   float base_size,
+                                   AreaPlaneDabGeom *area_plane_geom)
 {
   float new_uv[2], old_uv[2];
   BrushPainter *painter = s->painter;
@@ -2189,7 +2670,7 @@ static void paint_2d_stroke_single(ImagePaintState *s,
   ui::view2d_region_to_view(s->v2d, prev_mval[0], prev_mval[1], &old_uv[0], &old_uv[1]);
 
   if (!eraser && paint_2d_use_area_plane(painter)) {
-    paint_2d_area_plane_stroke(s, new_uv, base_size);
+    paint_2d_area_plane_stroke(s, new_uv, base_size, area_plane_geom);
     painter->firsttouch = false;
     return;
   }
@@ -2286,10 +2767,18 @@ void paint_2d_stroke(void *ps,
                      float base_size)
 {
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
-  paint_2d_stroke_single(s, prev_mval, mval, eraser, pressure, distance, base_size);
+  AreaPlaneDabGeom area_plane_geom;
+  paint_2d_stroke_single(
+      s, prev_mval, mval, eraser, pressure, distance, base_size, &area_plane_geom);
   for (int i = 0; i < s->material_extra_states_num; i++) {
-    paint_2d_stroke_single(
-        s->material_extra_states[i], prev_mval, mval, eraser, pressure, distance, base_size);
+    paint_2d_stroke_single(s->material_extra_states[i],
+                           prev_mval,
+                           mval,
+                           eraser,
+                           pressure,
+                           distance,
+                           base_size,
+                           &area_plane_geom);
   }
 }
 
@@ -2427,6 +2916,10 @@ static void paint_2d_stroke_done_single(ImagePaintState *s, const bool exit_brus
   paint_2d_canvas_free(s);
   for (int i = 0; i < s->num_tiles; i++) {
     brush_painter_cache_2d_free(&s->tiles[i].cache);
+  }
+  if (s->painter->pool) {
+    BKE_image_pool_free(s->painter->pool);
+    s->painter->pool = nullptr;
   }
   MEM_delete(s->painter);
   MEM_delete(s->tiles);

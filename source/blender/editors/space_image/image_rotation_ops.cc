@@ -250,7 +250,9 @@ static void image_rotate_draw_pivot(bContext *C,
   auto draw_axis_indicator = [&](const bool show_labels, const float scale_factor) {
     const float axis_size = 100.0f * scale_factor;
     const float axis_handle_size = 0.12f;
-    const float rotation = sima->rotation;
+    /* The canvas is displayed as `screen = Rot(-rotation) * view` (see #ED_image_point_pos__reverse),
+     * so the indicator axes must use the negated angle to stay aligned with the canvas X/Y axes. */
+    const float rotation = -sima->rotation;
     const float cos_r = cosf(rotation);
     const float sin_r = sinf(rotation);
 

@@ -2193,7 +2193,7 @@ def km_image(params):
         ("image.view_rotate_cw", {"type": 'PERIOD', "value": 'PRESS'}, None),
         ("image.view_rotate_ccw", {"type": 'COMMA', "value": 'PRESS'}, None),
         ("image.view_rotate_reset", {"type": 'HOME', "value": 'PRESS', "alt": True}, None),
-        ("image.view_rotate_interactive", {"type": 'MIDDLEMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("image.view_rotate_interactive", {"type": 'LEFTMOUSE', "value": 'PRESS', "alt": True}, None),
         *((
             "image.view_zoom_ratio",
             {"type": key, "value": 'PRESS', **mod},

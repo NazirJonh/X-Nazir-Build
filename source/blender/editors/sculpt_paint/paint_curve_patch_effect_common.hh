@@ -104,6 +104,30 @@ inline IndexMask curve_patch_effect_node_mask(const Depsgraph &depsgraph,
  *
  * `key` is whatever index the effect's snapshot is keyed by -- a mesh vertex, a color-domain
  * element, or the image effect's packed tile-and-offset id.
+ *
+ * TODO(I10): overlap policy for TWO PATCHES vs symmetry of ONE patch. The session feeds every
+ * `CurvePatchItem` through this same accumulator (`curve_patch_apply_effect_action`), so
+ * multi-patch overlap inherits the symmetry rule. Decide before interactive multi-curve edit;
+ * do not change the mix until then. Self-overlap of one curve (sampler `relief_at` keeps max
+ * |height|) and symmetry averaging (this function, one patch, two passes) stay as they are.
+ *
+ * What is true today:
+ * - Relief: `value` is height; the returned average IS the written displacement. Two patches
+ *   on one vertex average, they do not stack and the last does not win.
+ * - Color and Image: `value` is only the mix factor. RGB is `lerp(orig, current_brush_color,
+ *   factor)` against the pre-patch original, so the last item's color identity wins while
+ *   the opacities average. (Color does call this function; it does not skip it.)
+ *
+ * Policy options when returning to this:
+ * 1. Keep as-is. Document it. Cheap. Two reliefs blend; two colors: last RGB, blended factor.
+ * 2. Align Color/Image to average: accumulate RGB (or the finished lerp) so a red+blue overlap
+ *    mixes like two heights mix. More consistent accumulator; less like a paint stroke.
+ * 3. Align Relief to last-wins: the later patch owns the overlap (with its own falloff). Closer
+ *    to "upper ribbon on top". MUST keep averaging for symmetry or the mirror seam returns --
+ *    that means splitting this accumulator into per-patch symmetry blend vs cross-patch rule.
+ *
+ * Additive stacking (h1+h2) is not one of the three: this function also serves symmetry, and
+ * adding two mirrored claims would double the seam.
  */
 inline float curve_patch_blend_across_passes(CurvePatchApplyState &apply,
                                              const int key,

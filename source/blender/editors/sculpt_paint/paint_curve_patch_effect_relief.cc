@@ -407,6 +407,9 @@ void ReliefEffect::apply_pass(const Depsgraph &depsgraph,
        * it below. */
       orig_positions_.lookup_or_add(write.idx, write.orig);
 
+      /* TODO(I10): this average IS the written height, including overlap with another patch in
+       * the same restamp. Last-wins / keep / Color-to-average are listed on
+       * #curve_patch_blend_across_passes; symmetry of one patch must keep averaging. */
       const float blended_height = curve_patch_blend_across_passes(
           patch.apply, write.idx, write.weight, write.height);
       positions[write.idx] = write.orig + normals[write.idx] * blended_height;

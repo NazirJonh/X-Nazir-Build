@@ -508,7 +508,9 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
    * mode dropdown, see `sculpt_mode_toggle_exec()`); this only ever fires for the teardown paths
    * that have no `bContext` to commit through -- `ed_object_mode_generic_exit_ex()`
    * (`object_modes.cc`), reached by clicking another object in the viewport or Outliner. Placed
-   * BEFORE the flushes below, while the session it restores through is still intact. */
+   * BEFORE the flushes below, while the session it restores through is still intact.
+   * Object deletion never reaches this function; #BKE_sculptsession_free invokes the same discard
+   * via `SculptSession::free_curve_patch_session`. */
   curve_patch_discard_on_session_end(ob);
 
   mesh->runtime->corner_tris_cache.unfreeze();

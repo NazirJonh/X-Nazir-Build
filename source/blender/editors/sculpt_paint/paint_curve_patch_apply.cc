@@ -251,6 +251,7 @@ bool curve_patch_apply(const Scene &scene,
   curve_patch_apply_release(*ss);
   MEM_delete(session);
   ss->curve_patch_session = nullptr;
+  ss->free_curve_patch_session = nullptr;
 
   if (applied && effect_type != CurvePatchEffectType::Image) {
     /* No viewport flush was issued (a caller with no window manager has nothing to repaint), so the
@@ -532,6 +533,8 @@ void SCULPT_OT_curve_patch_apply(wmOperatorType *ot)
               -1,
               INT_MAX);
 
+  /* TODO(I10): user-facing string describes the Relief average; Color/Image last-RGB is the
+   * undecided policy on #curve_patch_blend_across_passes. Do not reword this as a "fix". */
   RNA_def_boolean(ot->srna,
                   "use_all_splines",
                   false,

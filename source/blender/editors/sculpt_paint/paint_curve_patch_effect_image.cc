@@ -1215,6 +1215,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
          * needs exactly. */
         BLI_assert(snapshot.slot_id < (1 << 20));
         const int accum_key = int((uint32_t(snapshot.slot_id) << 12) | uint32_t(in_tile_offset));
+        /* TODO(I10): same Color/Image last-RGB + averaged-factor split as ColorEffect. Image is
+         * not grouped with Relief for this policy; see #curve_patch_blend_across_passes. */
         const float blended = curve_patch_blend_across_passes(
             patch.apply, accum_key, pixel.weight, pixel.value);
         const float factor = curve_patch_color_mix_factor(

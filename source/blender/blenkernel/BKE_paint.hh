@@ -447,6 +447,16 @@ struct SculptSession : NonCopyable, NonMovable {
   ed::sculpt_paint::filter::Cache *filter_cache = nullptr;
   ed::sculpt_paint::expand::Cache *expand_cache = nullptr;
   ed::sculpt_paint::CurvePatchSession *curve_patch_session = nullptr;
+  /**
+   * Editor-owned restore+free for #curve_patch_session. Set when a session is published; invoked
+   * from #BKE_sculptsession_free so object deletion and other teardowns that never go through
+   * sculpt mode-exit still restore uncommitted relief and free the session.
+   *
+   * A function pointer, not a destructor call: `CurvePatchSession` is an editor type that
+   * blenkernel only forward-declares, so ~SculptSession cannot `MEM_delete` it. No-op when the
+   * session was already discarded (pointer null).
+   */
+  void (*free_curve_patch_session)(Object &ob) = nullptr;
 
   /* Cursor data and active vertex for tools */
   std::optional<int> active_face_index;

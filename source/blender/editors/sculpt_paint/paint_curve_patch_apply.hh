@@ -83,8 +83,10 @@ struct CurvePatchApplyInput {
  * bezier handle positions -- build them with #curve_patch_control_curve_from_points when starting
  * from raw points. `params` runs parallel to it, one entry per curve, because a patch freezes the
  * brush values its own curve was drawn with. Several curves are stamped one after another within
- * each symmetry pass and blend through the same accumulator the passes themselves use, so
- * overlapping patches average rather than stack.
+ * each symmetry pass and blend through the same accumulator the passes themselves use.
+ * Relief overlapping patches average rather than stack; Color/Image average the mix factor
+ * and the last item's brush RGB wins. TODO(I10): that split is an undecided product policy,
+ * documented on #curve_patch_blend_across_passes -- do not "fix" it here.
  * The brush the patch is stamped with is the active one of `sd.paint`, because that is the one the
  * symmetry machinery (`do_symmetrical_brush_actions()`) reads regardless of what a caller passes.
  *

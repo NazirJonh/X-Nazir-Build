@@ -334,6 +334,9 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
     for (const ColorWrite &write : local.writes) {
       orig_colors_.lookup_or_add(write.idx, write.orig);
 
+      /* TODO(I10): `blended` averages every claiming pass/patch's mix factor; `brush_color` is
+       * this call's brush, so a later overlapping patch replaces the RGB. Options on
+       * #curve_patch_blend_across_passes. */
       const float blended = curve_patch_blend_across_passes(
           patch.apply, write.idx, write.weight, write.value);
       const float factor = curve_patch_color_mix_factor(
@@ -341,7 +344,7 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
 
       /* The original alpha is carried through untouched, textured or not: `BKE_brush_color_get()`
        * returns a `float3`, so writing an alpha would invent data the brush never specified (the
-       * Stage 3 invariant). */
+       * Stage 3 invariant). Mix is from the pre-patch original, not from a previous patch's write. */
       float4 mixed(math::interpolate(float3(write.orig), brush_color, factor), write.orig.w);
       /* `swap_gathered_colors()` is the generic writer as well as the reader: it exchanges the
        * element with `mixed`, leaving the previous value in `mixed`, which this path discards.

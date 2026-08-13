@@ -2244,6 +2244,14 @@ void BKE_sculptsession_free(Object *ob)
   if (ob && ob->runtime->sculpt_session) {
     SculptSession *ss = ob->runtime->sculpt_session;
 
+    /* Curve Patch is an editor type this file only forward-declares, so the destructor cannot
+     * free it. The editor registers #SculptSession::free_curve_patch_session on publish. Run it
+     * before the PBVH goes away: discard restores uncommitted writes through the live mesh/PBVH.
+     * No-op when mode-exit already discarded (pointer null). */
+    if (ss->curve_patch_session && ss->free_curve_patch_session) {
+      ss->free_curve_patch_session(*ob);
+    }
+
     if (ss->bm) {
       BKE_sculptsession_bm_to_me(ob);
       BM_mesh_free(ss->bm);

@@ -199,7 +199,10 @@ struct CurvePatchApplyState {
    * overwriting an earlier pass's contribution (see `ReliefEffect::apply_pass()`). Unlike
    * the effect's snapshot, this does NOT persist for the patch's whole life -- cleared at the start
    * of every `curve_patch_restore_and_restamp()`, since blending is only meaningful between passes
-   * of the SAME restamp. */
+   * of the SAME restamp.
+   *
+   * Also shared across every `CurvePatchItem` of this restamp. TODO(I10): that reuse is the
+   * Color-vs-Relief overlap policy; options on #curve_patch_blend_across_passes. */
   Map<int, float2> pass_weight_accum;
 
   /** PBVH node indices displaced by the PREVIOUS restamp (one bit per `bke::pbvh::Tree` node).
@@ -494,10 +497,11 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob);
  * session.
  *
  * `SculptSession::curve_patch_session` is owned by `SCULPT_OT_curve_patch_edit` and freed when that
- * modal commits or cancels, but leaving sculpt mode frees the session without consulting the modal
- * -- so without this the session (and the `SculptSession::cache` the patch took over) leaked, and
- * the mesh kept the uncommitted relief. #SculptSession's destructor cannot do it: `CurvePatchSession`
- * is an editor type that blenkernel only forward-declares.
+ * modal commits or cancels, but leaving sculpt mode -- and `BKE_object_free` -- destroy the sculpt
+ * session without consulting the modal. #SculptSession's destructor cannot `MEM_delete` it:
+ * `CurvePatchSession` is an editor type that blenkernel only forward-declares. Publish therefore
+ * registers this function on `SculptSession::free_curve_patch_session`, and #BKE_sculptsession_free
+ * invokes it whenever the pointer is still live.
  *
  * Cancel rather than commit is deliberate. Committing needs a `bContext` to re-stamp and push an
  * undo step, and the session is also freed from paths that have none -- object deletion

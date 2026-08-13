@@ -224,7 +224,11 @@ static void curve_patch_apply_effect_action(const Depsgraph &depsgraph,
   /* One pass per patch, inside this symmetry pass. Overlapping patches meet in
    * `CurvePatchApplyState::pass_weight_accum` exactly as two symmetry passes do -- which is why
    * this is a plain loop and not a restore between patches: restoring would erase the previous
-   * patch's contribution. */
+   * patch's contribution.
+   *
+   * TODO(I10): this is the call site that makes two patches share the symmetry accumulator.
+   * Policy options (keep / Color-to-average / Relief-to-last-wins) are listed on
+   * #curve_patch_blend_across_passes. Do not change the mix here until that is decided. */
   for (const CurvePatchItem &item : session.patches) {
     if (!session_item_is_buildable(item)) {
       /* Skipped rather than refused: asking for every spline of a curve must not fail because one
@@ -565,6 +569,7 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
   ss->cache = nullptr;
   MEM_delete(session);
   ss->curve_patch_session = nullptr;
+  ss->free_curve_patch_session = nullptr;
 
   /* Republish the relief to the EVALUATED mesh, which is what Object Mode draws. Without this the
    * mode exit left the original mesh correct -- the .blend saves and reloads with the relief, and a
@@ -619,6 +624,7 @@ void curve_patch_discard_on_session_end(Object &ob)
   ss->cache = nullptr;
   MEM_delete(ss->curve_patch_session);
   ss->curve_patch_session = nullptr;
+  ss->free_curve_patch_session = nullptr;
 }
 
 void curve_patch_finish_commit(const Scene &scene,
@@ -707,6 +713,7 @@ bool curve_patch_session_publish(Object &ob,
   }
 
   ss.curve_patch_session = &session;
+  ss.free_curve_patch_session = curve_patch_discard_on_session_end;
   session.apply.element_num = session.effect->element_num(ob);
   session.apply.faces_num = -1;
   session.apply.corners_num = -1;

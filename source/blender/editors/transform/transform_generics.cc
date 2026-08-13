@@ -35,9 +35,9 @@
 #include "SEQ_transform.hh"
 
 #include "ED_clip.hh"
+#include "ED_curve_patch.hh"
 #include "ED_image.hh"
 #include "ED_object.hh"
-#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_uvedit.hh"

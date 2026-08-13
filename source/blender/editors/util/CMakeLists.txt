@@ -36,6 +36,7 @@ set(SRC
   ../include/ED_buttons.hh
   ../include/ED_clip.hh
   ../include/ED_curve.hh
+  ../include/ED_curve_patch.hh
   ../include/ED_curves.hh
   ../include/ED_curves_sculpt.hh
   ../include/ED_datafiles.h

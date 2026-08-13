@@ -1125,6 +1125,11 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
    * has converted the original key, passing the map event through would deliver nothing useful to
    * the panel underneath. Plain Z is not in the map, so it still reaches Sculpt Mode's shading pie. */
   const bool is_modal_map = event->type == EVT_MODAL_MAP;
+  /* The raw chord must clear the gate too: with an empty modal map it is not #EVT_MODAL_MAP,
+   * and off-viewport it would pass through to global undo before the `EVT_ZKEY` case can
+   * swallow it. */
+  const bool is_raw_undo_chord = event->type == EVT_ZKEY && event->val == KM_PRESS &&
+                                 (event->modifier & (KM_CTRL | KM_OSKEY)) != 0;
 
   /* Constructed before the pass-through decision (not after, as the two locals it replaces used
    * to be computed): a "not found" construction never touches `CTX_wm_area()`/`CTX_wm_region()`,
@@ -1133,7 +1138,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
    * that path too, as a no-op. */
   ed::ModalViewportTracker tracker(*C, *event, SPACE_VIEW3D, RGN_TYPE_WINDOW);
   const bool over_viewport = tracker.found();
-  const bool should_pass_through = !is_dragging && !over_viewport && !is_modal_map;
+  const bool should_pass_through = !is_dragging && !over_viewport && !is_modal_map &&
+                                   !is_raw_undo_chord;
   if (should_pass_through) {
     return OPERATOR_PASS_THROUGH;
   }

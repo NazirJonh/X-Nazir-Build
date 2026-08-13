@@ -44,6 +44,7 @@
 
 #include "DEG_depsgraph.hh"
 
+#include "ED_curve_patch.hh"
 #include "ED_paint.hh"
 #include "ED_view3d.hh"
 
@@ -1001,18 +1002,12 @@ namespace blender {
 /* -------------------------------------------------------------------- */
 /** \name Public Read-Only View of a Running Session
  *
- * Declared in `ED_paint.hh`, which puts the `ED_*` API in `blender` rather than in this file's own
- * `blender::ed::sculpt_paint` -- hence the separate namespace block. The handle is `const void *`
- * so that the RNA layer, which cannot include this module's private header, still has something to
- * hold; every accessor casts it back and tolerates null.
+ * Declared in `ED_curve_patch.hh`. The handle is a forward-declared `CurvePatchSession *` so RNA
+ * and transform can hold a typed pointer without this module's private header. Every accessor
+ * tolerates null.
  * \{ */
 
-static const ed::sculpt_paint::CurvePatchSession *session_from_handle(const void *session)
-{
-  return static_cast<const ed::sculpt_paint::CurvePatchSession *>(session);
-}
-
-const void *ED_curve_patch_session_get(const Object &ob)
+const ed::sculpt_paint::CurvePatchSession *ED_curve_patch_session_get(const Object &ob)
 {
   const SculptSession *ss = ob.runtime ? ob.runtime->sculpt_session : nullptr;
   return ss != nullptr ? ss->curve_patch_session : nullptr;
@@ -1021,58 +1016,57 @@ const void *ED_curve_patch_session_get(const Object &ob)
 /* Every accessor below reports the ACTIVE patch, which is what a script asking "the running Curve
  * Patch" means: the one the modal editor is acting on. Null when the session is half-built and has
  * no active patch yet. */
-static const ed::sculpt_paint::CurvePatchItem *active_item_from_handle(const void *session)
+static const ed::sculpt_paint::CurvePatchItem *active_item_from_session(
+    const ed::sculpt_paint::CurvePatchSession *session)
 {
-  const ed::sculpt_paint::CurvePatchSession *patch = session_from_handle(session);
-  if (patch == nullptr || !patch->has_active_item()) {
+  if (session == nullptr || !session->has_active_item()) {
     return nullptr;
   }
-  return &patch->active_item();
+  return &session->active_item();
 }
 
-int ED_curve_patch_session_point_num(const void *session)
+int ED_curve_patch_session_point_num(const ed::sculpt_paint::CurvePatchSession *session)
 {
-  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_session(session);
   return item != nullptr ? item->control_curve.points_num() : 0;
 }
 
-int ED_curve_patch_session_active_point(const void *session)
+int ED_curve_patch_session_active_point(const ed::sculpt_paint::CurvePatchSession *session)
 {
-  const ed::sculpt_paint::CurvePatchSession *patch = session_from_handle(session);
-  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_session(session);
   if (item == nullptr) {
     return -1;
   }
   /* Validated here rather than trusted: the index outlives the modal that set it, and is only
    * reset when a session ends or a new control curve is built. */
   const int point_num = item->control_curve.points_num();
-  return patch->edit.active_point < point_num ? patch->edit.active_point : -1;
+  return session->edit.active_point < point_num ? session->edit.active_point : -1;
 }
 
-bool ED_curve_patch_session_is_cyclic(const void *session)
+bool ED_curve_patch_session_is_cyclic(const ed::sculpt_paint::CurvePatchSession *session)
 {
-  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_session(session);
   if (item == nullptr || item->control_curve.curves_num() == 0) {
     return false;
   }
   return item->control_curve.cyclic()[0];
 }
 
-float ED_curve_patch_session_radius(const void *session)
+float ED_curve_patch_session_radius(const ed::sculpt_paint::CurvePatchSession *session)
 {
-  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_session(session);
   return item != nullptr ? item->params.radius : 0.0f;
 }
 
-int ED_curve_patch_session_stamp_num(const void *session)
+int ED_curve_patch_session_stamp_num(const ed::sculpt_paint::CurvePatchSession *session)
 {
-  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_session(session);
   return item != nullptr ? int(item->geometry.stamps.size()) : 0;
 }
 
-Span<float3> ED_curve_patch_session_positions(const void *session)
+Span<float3> ED_curve_patch_session_positions(const ed::sculpt_paint::CurvePatchSession *session)
 {
-  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_handle(session);
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_session(session);
   return item != nullptr ? item->control_curve.positions() : Span<float3>();
 }
 

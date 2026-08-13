@@ -337,10 +337,10 @@ const EnumPropertyItem rna_enum_object_axis_flip_items[] = {
 #  include "DEG_depsgraph_build.hh"
 
 #  include "ED_curve.hh"
+#  include "ED_curve_patch.hh"
 #  include "ED_lattice.hh"
 #  include "ED_mesh.hh"
 #  include "ED_object.hh"
-#  include "ED_paint.hh"
 #  include "ED_particle.hh"
 
 #  include "DEG_depsgraph_query.hh"
@@ -353,41 +353,47 @@ static void rna_Object_internal_update(Main * /*bmain*/, Scene * /*scene*/, Poin
 }
 
 /* Live Curve Patch session. Read-only throughout: this is running modal state, not object data.
- * `ptr->data` of the returned pointer is the opaque session handle -- see `ED_paint.hh`. */
+ * `ptr->data` is `ed::sculpt_paint::CurvePatchSession *` -- see `ED_curve_patch.hh`. */
+
+static const ed::sculpt_paint::CurvePatchSession *rna_curve_patch_session_from_ptr(PointerRNA *ptr)
+{
+  return static_cast<const ed::sculpt_paint::CurvePatchSession *>(ptr->data);
+}
 
 static PointerRNA rna_Object_curve_patch_session_get(PointerRNA *ptr)
 {
   const Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
-  const void *session = ED_curve_patch_session_get(*ob);
+  const ed::sculpt_paint::CurvePatchSession *session = ED_curve_patch_session_get(*ob);
   if (session == nullptr) {
     return PointerRNA_NULL;
   }
-  return RNA_pointer_create_with_parent(*ptr, RNA_CurvePatchSession, const_cast<void *>(session));
+  return RNA_pointer_create_with_parent(
+      *ptr, RNA_CurvePatchSession, const_cast<ed::sculpt_paint::CurvePatchSession *>(session));
 }
 
 static int rna_CurvePatchSession_point_count_get(PointerRNA *ptr)
 {
-  return ED_curve_patch_session_point_num(ptr->data);
+  return ED_curve_patch_session_point_num(rna_curve_patch_session_from_ptr(ptr));
 }
 
 static int rna_CurvePatchSession_active_point_get(PointerRNA *ptr)
 {
-  return ED_curve_patch_session_active_point(ptr->data);
+  return ED_curve_patch_session_active_point(rna_curve_patch_session_from_ptr(ptr));
 }
 
 static bool rna_CurvePatchSession_is_cyclic_get(PointerRNA *ptr)
 {
-  return ED_curve_patch_session_is_cyclic(ptr->data);
+  return ED_curve_patch_session_is_cyclic(rna_curve_patch_session_from_ptr(ptr));
 }
 
 static float rna_CurvePatchSession_radius_get(PointerRNA *ptr)
 {
-  return ED_curve_patch_session_radius(ptr->data);
+  return ED_curve_patch_session_radius(rna_curve_patch_session_from_ptr(ptr));
 }
 
 static int rna_CurvePatchSession_stamp_count_get(PointerRNA *ptr)
 {
-  return ED_curve_patch_session_stamp_num(ptr->data);
+  return ED_curve_patch_session_stamp_num(rna_curve_patch_session_from_ptr(ptr));
 }
 
 static void rna_CurvePatchSession_positions_begin(CollectionPropertyIterator *iter,
@@ -395,7 +401,8 @@ static void rna_CurvePatchSession_positions_begin(CollectionPropertyIterator *it
 {
   /* The span points into the session, which outlives this call: the modal that owns it only
    * rebuilds the curve in response to events, and RNA iteration is not one. */
-  const Span<float3> positions = ED_curve_patch_session_positions(ptr->data);
+  const Span<float3> positions = ED_curve_patch_session_positions(
+      rna_curve_patch_session_from_ptr(ptr));
   rna_iterator_array_begin(iter,
                            ptr,
                            const_cast<float3 *>(positions.data()),
@@ -407,7 +414,7 @@ static void rna_CurvePatchSession_positions_begin(CollectionPropertyIterator *it
 
 static int rna_CurvePatchSession_positions_length(PointerRNA *ptr)
 {
-  return int(ED_curve_patch_session_positions(ptr->data).size());
+  return int(ED_curve_patch_session_positions(rna_curve_patch_session_from_ptr(ptr)).size());
 }
 
 static void rna_Object_internal_update_draw(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
@@ -3882,8 +3889,8 @@ static void rna_def_object(BlenderRNA *brna)
 
 /* Observable state of a running Curve Patch edit.
  *
- * Deliberately not `sdna`-backed: the session type lives in a private editor header, so the struct
- * carries the opaque handle in `ptr->data` and every property reads it through `ED_paint.hh`. Also
+ * Deliberately not `sdna`-backed: the session type is an editor runtime object, exposed through
+ * `ED_curve_patch.hh` as a forward-declared pointer in `ptr->data`. Also
  * deliberately read-only -- a script watching a modal must not be able to steer it. */
 static void rna_def_curve_patch_session(BlenderRNA *brna)
 {

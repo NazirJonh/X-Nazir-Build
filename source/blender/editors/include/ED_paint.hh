@@ -264,53 +264,7 @@ bke::CurvePatchParams ED_curve_patch_params_from_brush(const Paint &paint,
  */
 Array<float> ED_curve_patch_stamp_texture_weights_from_brush(const Brush &brush, float radius);
 
-/* `paint_curve_patch_session.cc`: read-only view of a RUNNING Curve Patch edit, for the RNA layer.
- *
- * The session type itself lives in this module's private header, so the handle below is opaque and
- * everything about it is read through these accessors. Every one of them tolerates a null handle,
- * which is what "no patch is being edited" looks like. */
-
-/** The live session published on `ob`, or null when no Curve Patch edit is running on it. */
-const void *ED_curve_patch_session_get(const Object &ob);
-
-/** Control point count of the session's live control curve. */
-int ED_curve_patch_session_point_num(const void *session);
-/** Index of the point the modal editor last acted on, or -1. Already validated against the curve. */
-int ED_curve_patch_session_active_point(const void *session);
-/** Whether the live control curve closes back on itself. */
-bool ED_curve_patch_session_is_cyclic(const void *session);
-/** World-space brush radius frozen when the patch started. */
-float ED_curve_patch_session_radius(const void *session);
-/** Stamp count of the last build; zero in Ribbon mode, which lays out none. */
-int ED_curve_patch_session_stamp_num(const void *session);
-
-/**
- * The live control point positions, in object space.
- *
- * The span points INTO the session and is invalidated by the next re-stamp, so a caller must copy
- * anything it intends to keep. Empty for a null handle.
- */
-Span<float3> ED_curve_patch_session_positions(const void *session);
-
-/* Mutable point access for the Transform system (`transform_convert_curve_patch.cc`), so
- * `transform.translate/rotate/resize` can drag a live Curve Patch's active point without
- * `editors/transform` depending on this module's internal headers. Every function tolerates "no
- * session"/"no valid active point" by returning false or doing nothing. */
-
-/** Object-space position of the active point's `handle_index` (0 = left handle, 1 = pivot,
- * 2 = right handle). */
-bool ED_curve_patch_session_active_point_handle_get(Object &ob, int handle_index, float r_co[3]);
-/** Write back one handle of the active point, object space. Does not itself re-stamp -- see
- * #ED_curve_patch_session_restamp, called once per transform step rather than once per handle. */
-bool ED_curve_patch_session_active_point_handle_set(Object &ob, int handle_index, const float co[3]);
-/** Re-tessellate and re-stamp after one or more handle writes, so a live transform's
- * `recalc_data` sees the change immediately -- mirrors the modal editor's own
- * `curve_patch_restore_and_restamp()`. */
-void ED_curve_patch_session_restamp(bContext &C, Object &ob);
-/** Record the session's current state as a new step on its own undo stack (see the modal editor's
- * `curve_patch_undo_push()`), so Ctrl+Z inside a live Curve Patch edit can step back over a
- * finished G/R/S transform. */
-void ED_curve_patch_session_undo_push(Object &ob);
+/* Running Curve Patch session: typed public API in `ED_curve_patch.hh`. */
 
 /**
  * Return true when `mval` is over a paint-curve handle that is currently selected.

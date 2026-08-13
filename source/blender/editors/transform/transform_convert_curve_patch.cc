@@ -38,7 +38,7 @@
 #include "BKE_layer.hh"
 #include "BKE_object_types.hh"
 
-#include "ED_paint.hh"
+#include "ED_curve_patch.hh"
 #include "ED_view3d.hh"
 
 #include "transform.hh"

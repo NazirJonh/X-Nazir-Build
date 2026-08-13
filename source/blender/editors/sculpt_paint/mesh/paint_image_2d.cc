@@ -1812,6 +1812,30 @@ static void paint_2d_area_encode_canvas_rgb(const BrushPainterCache *cache,
   }
 }
 
+/**
+ * True when a byte source is already stored in the canvas encoding, so decode-to-linear then
+ * encode-to-canvas is an identity. The common Image Editor case is sRGB PNG onto an sRGB Base
+ * Color map; skipping that roundtrip (and its extra buffers) is what fill ch0 actually spends
+ * after source sampling was taken off #RE_texture_evaluate. Float canvases store scene linear
+ * and never match an encoded byte source.
+ */
+static bool paint_2d_area_source_matches_canvas_encoding(
+    const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source,
+    const BrushPainterCache *cache)
+{
+  if (cache->is_data) {
+    return false;
+  }
+  if (cache->is_srgb) {
+    return source.colorspace == nullptr ||
+           IMB_colormanagement_space_is_srgb(source.colorspace);
+  }
+  if (cache->byte_colorspace != nullptr) {
+    return source.colorspace == cache->byte_colorspace;
+  }
+  return false;
+}
+
 static ed::sculpt_paint::AreaPlaneFrame paint_2d_area_channel_frame(
     const BrushPainter *painter,
     const eMaterialPaintChannel channel,
@@ -2372,7 +2396,9 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
     const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
     const bool batch_decode = is_color && !is_normal && source.do_linear_conversion &&
                               (paint_runtime == nullptr || !paint_runtime->do_linear_conversion);
-    if (batch_decode) {
+    const bool skip_colorspace = batch_decode &&
+                                 paint_2d_area_source_matches_canvas_encoding(source, cache);
+    if (batch_decode && !skip_colorspace) {
       Array<float3> raw(cov.pixels.size());
       Array<ushort> strengths(cov.pixels.size());
       threading::parallel_for(cov.pixels.index_range(), 1024, [&](const IndexRange range) {
@@ -2433,8 +2459,8 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
                                              thread,
                                              pool,
                                              paint_mode,
-                                             true,
-                                             true,
+                                             !skip_colorspace,
+                                             !skip_colorspace,
                                              true,
                                              rgb);
           const int idx = int(pixel.ly) * stride + int(pixel.lx);

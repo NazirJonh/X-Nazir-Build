@@ -20,6 +20,7 @@ set(SRC
   transform_convert_armature.cc
   transform_convert_cursor.cc
   transform_convert_curve.cc
+  transform_convert_curve_patch.cc
   transform_convert_curves.cc
   transform_convert_graph.cc
   transform_convert_grease_pencil.cc

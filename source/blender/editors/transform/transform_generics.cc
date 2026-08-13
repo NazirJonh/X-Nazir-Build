@@ -37,6 +37,7 @@
 #include "ED_clip.hh"
 #include "ED_image.hh"
 #include "ED_object.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 #include "ED_uvedit.hh"
@@ -293,6 +294,21 @@ void initTransInfo(bContext *C, TransInfo *t, wmOperator *op, const wmEvent *eve
       }
       if (use_paint_curve) {
         t->options |= CTX_PAINT_CURVE;
+      }
+    }
+
+    /* A live Curve Patch runs in plain `OB_MODE_SCULPT`, which the block above does not cover
+     * (`OB_MODE_ALL_PAINT` and `OB_MODE_SCULPT_CURVES`/`OB_MODE_SCULPT_GREASE_PENCIL` do not
+     * include it) -- detected separately here. Sets #CTX_PAINT_CURVE too, alongside
+     * #CTX_CURVE_PATCH: every OTHER `CTX_PAINT_CURVE` check throughout the transform system
+     * (view3d/snap/orientation handling) is exactly what a Curve Patch point transform also
+     * needs, and #convert_type_get() (`transform_convert.cc`) checks #CTX_CURVE_PATCH FIRST to
+     * pick the actual data converter over both `TransConvertType_Sculpt` and
+     * `TransConvertType_PaintCurve`. */
+    if (object_mode == OB_MODE_SCULPT) {
+      Object *ob = CTX_data_active_object(C);
+      if (ob && ED_curve_patch_session_get(*ob) != nullptr) {
+        t->options |= CTX_PAINT_CURVE | CTX_CURVE_PATCH;
       }
     }
 

@@ -41,28 +41,11 @@
 
 namespace blender::ed::transform {
 
-/* -------------------------------------------------------------------- */
-/** \name Paint Curve Transform Data
- * \{ */
+/* `TransDataPaintCurve` itself now lives in `transform_convert.hh`: `transform_convert_curve_patch.cc`
+ * populates the same struct for a live Curve Patch's active point, so every generic helper below that
+ * only reads/writes its fields (`paintcurve_trans_data_is_pivot`, `paintcurve_snap_source_world_get`,
+ * `paintcurve_center_median_3d_get`) works unchanged for both data sources. */
 
-struct TransDataPaintCurve {
-  /** Index into #PaintCurve::geometry points. */
-  int point_index;
-  /** 0 = left handle, 1 = pivot, 2 = right handle. */
-  int handle_index;
-  /** World-space position before transform; used as depth reference when unprojecting. */
-  float co_orig_world[3];
-  /** World-space position of the pivot (handle_index == 1) for this curve point.
-   * Used as the local rotation center when individual origins is active. */
-  float pivot_world[3];
-  /**
-   * Radius factor at the time the transform started.
-   * `td->val` points here for #TFM_CURVE_SHRINKFATTEN so the system can modify it in-place.
-   */
-  float radius;
-};
-
-/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Helpers
@@ -557,6 +540,13 @@ bool paintcurve_transform_use_3d_viewport(const TransInfo *t)
 {
   if ((t->options & CTX_PAINT_CURVE) == 0 || t->spacetype != SPACE_VIEW3D) {
     return false;
+  }
+  /* A live Curve Patch's control curve is never screen-bound the way a 2D `PaintCurve` can be --
+   * it always lives in object space, like a `PaintCurve` with `use_3d_space` set. Short-circuit
+   * here rather than looking up `br->paint_curve` below: that brush pointer has nothing to do
+   * with Curve Patch's session-local curve and may be null or unrelated. */
+  if (t->options & CTX_CURVE_PATCH) {
+    return true;
   }
   Paint *paint = t->context ? BKE_paint_get_active_from_context(t->context) :
                               BKE_paint_get_active(*t->bmain, t->scene, t->view_layer);

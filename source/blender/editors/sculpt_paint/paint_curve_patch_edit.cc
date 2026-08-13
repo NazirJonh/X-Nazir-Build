@@ -532,8 +532,10 @@ static void curve_patch_tag_viewports_redraw_after_edit(bContext &C,
 static constexpr int CURVE_PATCH_UNDO_STEPS_MAX = 64;
 
 /* Record the CURRENT state as a new step. Called after an action completes -- once per action, not
- * once per event, so a drag is a single step. */
-static void curve_patch_undo_push(CurvePatchSession &patch)
+ * once per event, so a drag is a single step. Not file-static: declared in
+ * `paint_curve_patch_session.hh` and also called from `paint_curve_patch_session.cc`'s
+ * #ED_curve_patch_session_undo_push, for the Transform system's G/R/S handle drags. */
+void curve_patch_undo_push(CurvePatchSession &patch)
 {
   /* Anything above the cursor is a redo branch the new edit invalidates. */
   patch.edit.undo_steps.resize(patch.edit.undo_step_current + 1);
@@ -1871,28 +1873,55 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
       }
       break;
+    case EVT_GKEY:
+    case EVT_RKEY:
+      /* Move/Rotate the active point through the real `transform.translate`/`transform.rotate`
+       * modals -- see `TransConvertType_CurvePatch` (`transform_convert_curve_patch.cc`) for how
+       * the transform system reaches this session's active point at all. Gives axis locks,
+       * numeric input and snapping for free, matching Curve Edit's own G/R (`km_paint_curve`/
+       * `km_3d_view_tool_sculpt_curves_edit`). This modal keeps running underneath: the nested
+       * transform modal takes over event handling until its own confirm/cancel, then control
+       * returns here on the next event exactly as it does after any other pass-through. */
+      if (event->val == KM_PRESS && !is_dragging && curve_patch_active_point_is_valid(patch)) {
+        WM_operator_name_call(C,
+                              event->type == EVT_GKEY ? "transform.translate" : "transform.rotate",
+                              wm::OpCallContext::InvokeDefault,
+                              nullptr,
+                              event);
+        break;
+      }
+      return OPERATOR_PASS_THROUGH;
     case EVT_SKEY:
-      /* Alt+S only -- matches Curve Edit's own radius shortcut (`transform.transform` /
-       * CURVE_SHRINKFATTEN, bound Alt+S in `km_paint_curve`/`km_3d_view_tool_sculpt_curves_edit`).
-       * Plain S is deliberately left alone (see the `EVT_YKEY` comment above: this modal runs over
-       * the whole viewport and would otherwise swallow Ctrl+S/Cmd+S save, and plain S is Sculpt
-       * Mode's brush-size shortcut). */
-      if (event->val == KM_PRESS && (event->modifier & KM_ALT) &&
-          !(event->modifier & (KM_CTRL | KM_SHIFT | KM_OSKEY)) && !is_dragging &&
-          curve_patch_active_point_is_valid(patch))
+      /* Alt+S: radius drag (see below). Plain S: Scale the active point through the real
+       * `transform.resize` modal, same reasoning as G/R above -- matches Curve Edit's own S
+       * shortcut. Overrides Sculpt Mode's plain-S brush-size shortcut while a point is active,
+       * the same trade #EVT_YKEY's comment already accepts for Y over Tab. */
+      if (event->val == KM_PRESS && !(event->modifier & (KM_CTRL | KM_SHIFT | KM_OSKEY)) &&
+          !is_dragging && curve_patch_active_point_is_valid(patch))
       {
-        bke::CurvesGeometry &geom = patch.active_item().control_curve;
-        Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
-        ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
-        Vector<PaintCurvePoint> screen_points;
-        paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
-        if (!screen_points.is_empty()) {
-          /* No mouse button is held for this drag (unlike grabbing the radius handle directly),
-           * so `MOUSEMOVE`'s existing `data.dragging_radius` branch is reused unchanged and the
-           * `LEFTMOUSE` press guard above confirms it on the next click instead of a release. */
-          data.dragging_radius = true;
-          paintcurve_radius_handle_screen_get_from_geometry(
-              geom, screen_points.data(), patch.edit.active_point, &data.radius_handle);
+        if (event->modifier & KM_ALT) {
+          /* Matches Curve Edit's own radius shortcut (`transform.transform` / CURVE_SHRINKFATTEN,
+           * bound Alt+S in `km_paint_curve`/`km_3d_view_tool_sculpt_curves_edit`), implemented as
+           * a plain screen-space drag here rather than through the transform system: Curve
+           * Patch's radius is a per-point scalar attribute, not a position #TransDataPaintCurve
+           * has anywhere to carry. */
+          bke::CurvesGeometry &geom = patch.active_item().control_curve;
+          Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+          ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+          Vector<PaintCurvePoint> screen_points;
+          paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+          if (!screen_points.is_empty()) {
+            /* No mouse button is held for this drag (unlike grabbing the radius handle directly),
+             * so `MOUSEMOVE`'s existing `data.dragging_radius` branch is reused unchanged and the
+             * `LEFTMOUSE` press guard above confirms it on the next click instead of a release. */
+            data.dragging_radius = true;
+            paintcurve_radius_handle_screen_get_from_geometry(
+                geom, screen_points.data(), patch.edit.active_point, &data.radius_handle);
+          }
+        }
+        else {
+          WM_operator_name_call(
+              C, "transform.resize", wm::OpCallContext::InvokeDefault, nullptr, event);
         }
         break;
       }

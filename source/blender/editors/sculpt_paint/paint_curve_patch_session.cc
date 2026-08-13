@@ -1047,4 +1047,86 @@ Span<float3> ED_curve_patch_session_positions(const void *session)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Public Mutable Access for Transform
+ *
+ * Lets `editors/transform` (`transform_convert_curve_patch.cc`) drag a live Curve Patch's active
+ * point via `transform.translate/rotate/resize`, without depending on this module's private
+ * header the way the modal editor itself does.
+ * \{ */
+
+static ed::sculpt_paint::CurvePatchSession *mutable_session_from_object(Object &ob)
+{
+  SculptSession *ss = ob.runtime ? ob.runtime->sculpt_session : nullptr;
+  return ss != nullptr ? ss->curve_patch_session : nullptr;
+}
+
+/** Null when there is no running session or no valid active point -- the two conditions every
+ * function below tolerates by returning false/doing nothing. */
+static ed::sculpt_paint::CurvePatchItem *active_item_with_valid_point(Object &ob)
+{
+  ed::sculpt_paint::CurvePatchSession *patch = mutable_session_from_object(ob);
+  if (patch == nullptr || !patch->has_active_item()) {
+    return nullptr;
+  }
+  ed::sculpt_paint::CurvePatchItem &item = patch->active_item();
+  const int point_num = item.control_curve.points_num();
+  if (patch->edit.active_point < 0 || patch->edit.active_point >= point_num) {
+    return nullptr;
+  }
+  return &item;
+}
+
+bool ED_curve_patch_session_active_point_handle_get(Object &ob,
+                                                     const int handle_index,
+                                                     float r_co[3])
+{
+  ed::sculpt_paint::CurvePatchItem *item = active_item_with_valid_point(ob);
+  if (item == nullptr) {
+    return false;
+  }
+  const ed::sculpt_paint::CurvePatchSession &patch = *ob.runtime->sculpt_session->curve_patch_session;
+  const float3 &co = paintcurve_geom_co(
+      item->control_curve, patch.edit.active_point, handle_index);
+  r_co[0] = co.x;
+  r_co[1] = co.y;
+  r_co[2] = co.z;
+  return true;
+}
+
+bool ED_curve_patch_session_active_point_handle_set(Object &ob,
+                                                     const int handle_index,
+                                                     const float co[3])
+{
+  ed::sculpt_paint::CurvePatchItem *item = active_item_with_valid_point(ob);
+  if (item == nullptr) {
+    return false;
+  }
+  const ed::sculpt_paint::CurvePatchSession &patch = *ob.runtime->sculpt_session->curve_patch_session;
+  paintcurve_geom_co(item->control_curve, patch.edit.active_point, handle_index) =
+      float3(co[0], co[1], co[2]);
+  item->control_curve.tag_positions_changed();
+  return true;
+}
+
+void ED_curve_patch_session_restamp(bContext &C, Object &ob)
+{
+  ed::sculpt_paint::CurvePatchSession *patch = mutable_session_from_object(ob);
+  if (patch == nullptr) {
+    return;
+  }
+  ed::sculpt_paint::curve_patch_restore_and_restamp(C, ob, *patch);
+}
+
+void ED_curve_patch_session_undo_push(Object &ob)
+{
+  ed::sculpt_paint::CurvePatchSession *patch = mutable_session_from_object(ob);
+  if (patch == nullptr) {
+    return;
+  }
+  ed::sculpt_paint::curve_patch_undo_push(*patch);
+}
+
+/** \} */
+
 }  // namespace blender

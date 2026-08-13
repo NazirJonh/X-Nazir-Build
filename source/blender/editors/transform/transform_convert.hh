@@ -403,6 +403,28 @@ extern TransConvertTypeInfo TransConvertType_ObjectTexSpace;
 
 /* `transform_convert_paintcurve.cc` */
 
+/** One handle's worth of transform data for a paint-curve-shaped point (classic `PaintCurve` OR
+ * a live Curve Patch's control curve, see `transform_convert_curve_patch.cc`). Shared so the
+ * generic helpers below (`paintcurve_trans_data_is_pivot`, `paintcurve_snap_source_world_get`,
+ * `paintcurve_center_median_3d_get`), which only ever read/write these fields and never touch a
+ * `PaintCurve` directly, work unchanged for either data source. */
+struct TransDataPaintCurve {
+  /** Index into the source curve's points. */
+  int point_index;
+  /** 0 = left handle, 1 = pivot, 2 = right handle. */
+  int handle_index;
+  /** World-space position before transform; used as depth reference when unprojecting. */
+  float co_orig_world[3];
+  /** World-space position of the pivot (handle_index == 1) for this curve point.
+   * Used as the local rotation center when individual origins is active. */
+  float pivot_world[3];
+  /**
+   * Radius factor at the time the transform started.
+   * `td->val` points here for #TFM_CURVE_SHRINKFATTEN so the system can modify it in-place.
+   */
+  float radius;
+};
+
 extern TransConvertTypeInfo TransConvertType_PaintCurve;
 bool paintcurve_transform_use_3d_viewport(const TransInfo *t);
 bool paintcurve_trans_data_is_pivot(const TransDataContainer *tc, int data_index);
@@ -410,6 +432,10 @@ void paintcurve_snap_source_world_get(const TransDataContainer *tc,
                                       int data_index,
                                       float r_world[3]);
 void paintcurve_center_median_3d_get(const TransInfo *t, float r_center[3]);
+
+/* `transform_convert_curve_patch.cc` */
+
+extern TransConvertTypeInfo TransConvertType_CurvePatch;
 
 /* `transform_convert_particle.cc` */
 

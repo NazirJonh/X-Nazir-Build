@@ -292,6 +292,26 @@ int ED_curve_patch_session_stamp_num(const void *session);
  */
 Span<float3> ED_curve_patch_session_positions(const void *session);
 
+/* Mutable point access for the Transform system (`transform_convert_curve_patch.cc`), so
+ * `transform.translate/rotate/resize` can drag a live Curve Patch's active point without
+ * `editors/transform` depending on this module's internal headers. Every function tolerates "no
+ * session"/"no valid active point" by returning false or doing nothing. */
+
+/** Object-space position of the active point's `handle_index` (0 = left handle, 1 = pivot,
+ * 2 = right handle). */
+bool ED_curve_patch_session_active_point_handle_get(Object &ob, int handle_index, float r_co[3]);
+/** Write back one handle of the active point, object space. Does not itself re-stamp -- see
+ * #ED_curve_patch_session_restamp, called once per transform step rather than once per handle. */
+bool ED_curve_patch_session_active_point_handle_set(Object &ob, int handle_index, const float co[3]);
+/** Re-tessellate and re-stamp after one or more handle writes, so a live transform's
+ * `recalc_data` sees the change immediately -- mirrors the modal editor's own
+ * `curve_patch_restore_and_restamp()`. */
+void ED_curve_patch_session_restamp(bContext &C, Object &ob);
+/** Record the session's current state as a new step on its own undo stack (see the modal editor's
+ * `curve_patch_undo_push()`), so Ctrl+Z inside a live Curve Patch edit can step back over a
+ * finished G/R/S transform. */
+void ED_curve_patch_session_undo_push(Object &ob);
+
 /**
  * Return true when `mval` is over a paint-curve handle that is currently selected.
  * Used to block #transform.translate CLICK_DRAG from moving selected points without a

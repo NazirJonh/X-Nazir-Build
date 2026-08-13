@@ -122,6 +122,13 @@ enum eTContext {
   CTX_OBMODE_XFORM_SKIP_CHILDREN = (1 << 14),
   /** Enable edge scrolling in 2D views. */
   CTX_VIEW2D_EDGE_PAN = (1 << 15),
+  /** Target a live Curve Patch's active control point (`CurvePatchSession`) instead of a brush's
+   * `PaintCurve` -- see `TransConvertType_CurvePatch` (`transform_convert_curve_patch.cc`). Kept
+   * distinct from #CTX_PAINT_CURVE: the two data sources are unrelated (Curve Patch's control
+   * curve is session-local, never a `PaintCurve` ID), and Curve Patch runs in plain
+   * `OB_MODE_SCULPT`, which #convert_type_get() would otherwise route to
+   * `TransConvertType_Sculpt` before ever reaching the `CTX_PAINT_CURVE` checks. */
+  CTX_CURVE_PATCH = (1 << 16),
 };
 ENUM_OPERATORS(eTContext)
 

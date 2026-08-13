@@ -893,6 +893,16 @@ static TransConvertTypeInfo *convert_type_get(const TransInfo *t, Object **r_obj
   Object *ob = BKE_view_layer_active_object_get(view_layer);
 
   /* If tests must match recalc_data for correct updates. */
+  /* Checked before every other branch below (including the plain `OB_MODE_SCULPT` ->
+   * `TransConvertType_Sculpt` fallback right after #CTX_CURSOR, and the `CTX_PAINT_CURVE`
+   * dispatch further down): a live Curve Patch runs in plain Sculpt Mode, and its detector in
+   * `setTransformViewMatrices()`/`init_TransInfo` (`transform_generics.cc`) sets #CTX_PAINT_CURVE
+   * alongside #CTX_CURVE_PATCH precisely so every OTHER `CTX_PAINT_CURVE` check throughout the
+   * transform system (view3d/snap/orientation handling) treats it exactly like a 3D paint curve --
+   * only the actual DATA CONVERTER has to differ, which is what this early return picks. */
+  if (t->options & CTX_CURVE_PATCH) {
+    return &TransConvertType_CurvePatch;
+  }
   if (t->options & CTX_CURSOR) {
     if (t->spacetype == SPACE_IMAGE) {
       return &TransConvertType_CursorImage;

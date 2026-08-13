@@ -6775,6 +6775,7 @@ def km_paint_stroke_modal(_params):
 
     items.extend([
         ("CANCEL", {"type": 'ESC', "value": 'PRESS', "any": True}, None),
+        ("ANCHOR_REPOSITION", {"type": 'SPACE', "value": 'ANY', "any": True}, None),
     ])
 
     return keymap

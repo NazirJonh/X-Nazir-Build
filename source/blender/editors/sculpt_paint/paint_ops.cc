@@ -785,6 +785,11 @@ void ED_keymap_paint(wmKeyConfig *keyconf)
   WM_modalkeymap_assign(keymap, "PAINT_OT_vertex_paint");
   WM_modalkeymap_assign(keymap, "PAINT_OT_weight_paint");
   WM_modalkeymap_assign(keymap, "PAINT_OT_image_paint");
+  WM_modalkeymap_assign(keymap, "GREASE_PENCIL_OT_brush_stroke");
+  WM_modalkeymap_assign(keymap, "GREASE_PENCIL_OT_sculpt_paint");
+  WM_modalkeymap_assign(keymap, "GREASE_PENCIL_OT_weight_brush_stroke");
+  WM_modalkeymap_assign(keymap, "GREASE_PENCIL_OT_vertex_brush_stroke");
+  WM_modalkeymap_assign(keymap, "SCULPT_CURVES_OT_brush_stroke");
 
   /* Curves Sculpt mode. */
   keymap = WM_keymap_ensure(keyconf, "Sculpt Curves", SPACE_EMPTY, RGN_TYPE_WINDOW);

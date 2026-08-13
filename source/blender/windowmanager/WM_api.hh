@@ -764,6 +764,14 @@ wmEventHandler_Op *WM_event_add_modal_handler_ex(wmWindow *win,
                                                  ARegion *region,
                                                  wmOperator *op) ATTR_NONNULL(1, 4);
 wmEventHandler_Op *WM_event_add_modal_handler(bContext *C, wmOperator *op) ATTR_NONNULL(1, 2);
+
+/**
+ * Swallow events of \a event_type until the matching #KM_RELEASE.
+ *
+ * Use when a modal operator finishes while a hold-key is still down, so leftover key-repeat
+ * #KM_PRESS or synthesized #KM_CLICK events cannot invoke other operators bound to the same key.
+ */
+void WM_event_type_lock_until_release(wmWindow *win, int event_type) ATTR_NONNULL(1);
 void WM_event_remove_modal_handler(ListBaseT<wmEventHandler> *handlers,
                                    const wmOperator *op,
                                    bool postpone) ATTR_NONNULL(1, 2);

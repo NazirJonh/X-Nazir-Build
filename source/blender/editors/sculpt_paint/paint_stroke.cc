@@ -1006,8 +1006,13 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
   paint_runtime->draw_anchored = false;
   paint_runtime->stroke_active = false;
 
-  /* Restore the default cursor if repositioning mode was still active when the stroke ended. */
+  /* Restore the default cursor if repositioning mode was still active when the stroke ended.
+   * If Space (or the remapped hold-key) is still down, lock it until release so leftover
+   * key-repeat / click events cannot invoke keymap items such as the asset shelf popover. */
   if (anchored_repositioning_) {
+    if (anchored_reposition_event_type_ != EVENT_NONE) {
+      WM_event_type_lock_until_release(CTX_wm_window(C), anchored_reposition_event_type_);
+    }
     WM_cursor_set(CTX_wm_window(C), WM_CURSOR_DEFAULT);
     anchored_repositioning_ = false;
   }
@@ -1150,21 +1155,45 @@ bool paint_supports_dynamic_tex_coords(const Brush &br, const PaintMode mode)
   return true;
 }
 
-#define PAINT_STROKE_MODAL_CANCEL 1
+enum {
+  PAINT_STROKE_MODAL_CANCEL = 1,
+  PAINT_STROKE_MODAL_ANCHOR_REPOSITION,
+};
+
+static bool paint_stroke_modal_item_poll(const wmOperator *op, const int value)
+{
+  if (value != PAINT_STROKE_MODAL_ANCHOR_REPOSITION) {
+    return true;
+  }
+  const PaintStroke *stroke = static_cast<const PaintStroke *>(op->customdata);
+  if (stroke == nullptr || stroke->brush == nullptr) {
+    return false;
+  }
+  return stroke->brush->stroke_method == BRUSH_STROKE_ANCHORED;
+}
 
 wmKeyMap *paint_stroke_modal_keymap(wmKeyConfig *keyconf)
 {
   static const EnumPropertyItem modal_items[] = {
       {PAINT_STROKE_MODAL_CANCEL, "CANCEL", 0, "Cancel", "Cancel and undo a stroke in progress"},
-      {0}};
+      {PAINT_STROKE_MODAL_ANCHOR_REPOSITION,
+       "ANCHOR_REPOSITION",
+       0,
+       "Reposition Anchor",
+       "Hold to move the anchored brush without changing size or rotation"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
 
-  static const char *name = "Paint Stroke Modal";
+  wmKeyMap *keymap = WM_modalkeymap_ensure(keyconf, "Paint Stroke Modal", modal_items);
+  keymap->poll_modal_item = paint_stroke_modal_item_poll;
 
-  wmKeyMap *keymap = WM_modalkeymap_find(keyconf, name);
-
-  /* This function is called for each space-type, only needs to add map once. */
-  if (!keymap) {
-    keymap = WM_modalkeymap_ensure(keyconf, name, modal_items);
+  if (WM_modalkeymap_find_propvalue(keymap, PAINT_STROKE_MODAL_ANCHOR_REPOSITION) == nullptr) {
+    KeyMapItem_Params params{};
+    params.type = EVT_SPACEKEY;
+    params.value = KM_ANY;
+    params.modifier = KM_ANY;
+    params.direction = KM_ANY;
+    WM_modalkeymap_add_item(keymap, &params, PAINT_STROKE_MODAL_ANCHOR_REPOSITION);
   }
 
   return keymap;
@@ -1433,6 +1462,37 @@ static void paint_stroke_line_constrain(float2 last_mouse_position,
   mouse[1] = constrained_pos[1] = len * sinf(angle) + last_mouse_position[1];
 }
 
+void PaintStroke::anchored_reposition_begin(bContext *C, const float2 &mouse, const short event_type)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  bke::PaintRuntime &paint_runtime = *paint->runtime;
+
+  anchored_repositioning_ = true;
+  anchored_reposition_event_type_ = event_type;
+  anchored_saved_radius_ = paint_runtime.anchored_size;
+  anchored_saved_rotation_ = paint_runtime.brush_rotation;
+  anchored_visual_offset_ = initial_mouse_ - mouse;
+
+  WM_cursor_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
+  {
+    WorkspaceStatus status(C);
+    status.item(IFACE_("Release Space to confirm position"), ICON_EVENT_SPACEKEY);
+  }
+}
+
+void PaintStroke::anchored_reposition_end(bContext *C)
+{
+  /* initial_mouse_ is already at the correct new anchor position, so the radius equals the
+   * length of anchored_visual_offset_ (= original radius). */
+  anchored_repositioning_ = false;
+
+  WM_cursor_set(CTX_wm_window(C), WM_CURSOR_DEFAULT);
+  {
+    WorkspaceStatus status(C);
+    status.item(IFACE_("Hold Space to reposition"), ICON_EVENT_SPACEKEY);
+  }
+}
+
 wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
   PRF_scope(ProfileCategory::Editor);
@@ -1565,6 +1625,18 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
     }
     BKE_report(op->reports, RPT_WARNING, "Cancelling this stroke is unsupported");
   }
+  else if (event->type == EVT_MODAL_MAP && event->val == PAINT_STROKE_MODAL_ANCHOR_REPOSITION) {
+    if (br->stroke_method == BRUSH_STROKE_ANCHORED && stroke_started_) {
+      if (event->prev_val == KM_PRESS && !anchored_repositioning_) {
+        this->anchored_reposition_begin(C, sample_average.mouse, event->prev_type);
+      }
+      else if (event->prev_val == KM_RELEASE && anchored_repositioning_) {
+        this->anchored_reposition_end(C);
+      }
+    }
+    /* Consume press, release, repeat and click so Space cannot leak to the window keymap. */
+    return OPERATOR_RUNNING_MODAL;
+  }
 
   /* Handles shift-key active smooth toggling during a grease pencil stroke. */
   if (mode == PaintMode::GPencil) {
@@ -1604,41 +1676,18 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
   else if (event->type == EVT_SPACEKEY) {
     if (br->stroke_method == BRUSH_STROKE_ANCHORED && stroke_started_) {
       if (event->val == KM_PRESS && !anchored_repositioning_) {
-        anchored_repositioning_ = true;
-        /* Save the current screen-space radius (before zoom adjustment) and rotation. */
-        anchored_saved_radius_ = paint_runtime.anchored_size;
-        anchored_saved_rotation_ = paint_runtime.brush_rotation;
-        /* Vector from the current mouse position to the anchor point. */
-        anchored_visual_offset_ = initial_mouse_ - sample_average.mouse;
-
-        WM_cursor_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
-        {
-          WorkspaceStatus status(C);
-          status.item(IFACE_("Release Space to confirm position"), ICON_EVENT_SPACEKEY);
-        }
-
-        return OPERATOR_RUNNING_MODAL;
+        this->anchored_reposition_begin(C, sample_average.mouse, event->type);
       }
       else if (event->val == KM_RELEASE && anchored_repositioning_) {
-        /* Exit repositioning. initial_mouse_ is already at the correct new anchor position,
-         * so the radius equals the length of anchored_visual_offset_ (= original radius). */
-        anchored_repositioning_ = false;
-
-        WM_cursor_set(CTX_wm_window(C), WM_CURSOR_DEFAULT);
-        {
-          WorkspaceStatus status(C);
-          status.item(IFACE_("Hold Space to reposition"), ICON_EVENT_SPACEKEY);
-        }
-
-        return OPERATOR_RUNNING_MODAL;
+        this->anchored_reposition_end(C);
       }
+      /* Fallback when this operator has no modal keymap: eat every Space event. */
+      return OPERATOR_RUNNING_MODAL;
     }
-    else {
-      /* Normal Space behavior: finish line strokes and other non-ANCHORED strokes. */
-      this->line_end(C, op, sample_average.mouse);
-      this->done(C, false);
-      return OPERATOR_FINISHED;
-    }
+    /* Normal Space behavior: finish line strokes and other non-ANCHORED strokes. */
+    this->line_end(C, op, sample_average.mouse);
+    this->done(C, false);
+    return OPERATOR_FINISHED;
   }
   else if (br->stroke_method == BRUSH_STROKE_LINE) {
     if (event->modifier & KM_ALT) {

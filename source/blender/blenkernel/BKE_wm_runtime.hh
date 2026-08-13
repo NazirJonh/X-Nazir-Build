@@ -191,6 +191,13 @@ struct WindowRuntime {
    */
   uint64_t eventstate_prev_press_time_ms = 0;
 
+  /**
+   * Eat events of this type until a matching #KM_RELEASE.
+   * Prevents a key held during a modal operator from firing keymap items after the operator ends
+   * (key-repeat #KM_PRESS or a synthesized #KM_CLICK). #EVENT_NONE means unlocked.
+   */
+  short event_type_consume_until_release = 0;
+
   /** Private runtime info to show text in the status bar. */
   void *cursor_keymap_status = nullptr;
 

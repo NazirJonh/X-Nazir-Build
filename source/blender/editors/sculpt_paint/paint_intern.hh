@@ -180,12 +180,17 @@ struct PaintStroke : NonCopyable, NonMovable {
 
   /* Anchored brush repositioning via Space key. */
   bool anchored_repositioning_ = false;
+  /* Original event type that entered repositioning (#EVENT_NONE if unused). */
+  short anchored_reposition_event_type_ = 0;
   /* Vector from current mouse position to anchor point, saved when entering repositioning. */
   float2 anchored_visual_offset_ = float2(0.0f, 0.0f);
   /* Brush radius in screen pixels (before zoom_2d_ adjustment), locked during repositioning. */
   float anchored_saved_radius_ = 0.0f;
   /* Brush rotation at the time Space was pressed, locked during repositioning. */
   float anchored_saved_rotation_ = 0.0f;
+
+  void anchored_reposition_begin(bContext *C, const float2 &mouse, short event_type);
+  void anchored_reposition_end(bContext *C);
 
  public:
   PaintStroke() = delete;

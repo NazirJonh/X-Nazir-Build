@@ -4013,6 +4013,32 @@ static bool wm_event_pie_filter(wmWindow *win, const wmEvent *event)
 }
 
 /**
+ * Swallow a hold-key after a modal operator ends until that key is released.
+ * Unlike #wm_event_pie_filter, the matching #KM_RELEASE is also consumed so it cannot become a
+ * #KM_CLICK or invoke keymap items bound to release.
+ */
+static bool wm_event_type_lock_filter(wmWindow *win, const wmEvent *event)
+{
+  if (win->runtime->event_type_consume_until_release == EVENT_NONE) {
+    return false;
+  }
+  if (win->runtime->event_type_consume_until_release != event->type) {
+    return false;
+  }
+  if (event->val == KM_RELEASE) {
+    win->runtime->event_type_consume_until_release = EVENT_NONE;
+  }
+  return true;
+}
+
+void WM_event_type_lock_until_release(wmWindow *win, const int event_type)
+{
+  win->runtime->event_type_consume_until_release = short(event_type);
+  win->event_queue_check_click = false;
+  win->event_queue_check_drag = false;
+}
+
+/**
  * Account for the special case when events are being handled and a file is loaded.
  * In this case event handling exits early, however when "Load UI" is disabled
  * the even will still be in #wmWindow.event_queue.
@@ -4307,6 +4333,15 @@ void wm_event_do_handlers(bContext *C)
       if (wm_event_pie_filter(&win, event)) {
         if (!ISMOUSE_MOTION(event->type)) {
           CLOG_DEBUG(WM_LOG_EVENTS, "Event filtered due to pie button pressed");
+        }
+        BLI_remlink(&win.runtime->event_queue, event);
+        wm_event_free_last_handled(&win, event);
+        continue;
+      }
+
+      if (wm_event_type_lock_filter(&win, event)) {
+        if (!ISMOUSE_MOTION(event->type)) {
+          CLOG_DEBUG(WM_LOG_EVENTS, "Event filtered due to key lock until release");
         }
         BLI_remlink(&win.runtime->event_queue, event);
         wm_event_free_last_handled(&win, event);

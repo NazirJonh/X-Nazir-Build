@@ -9,7 +9,10 @@
 #include <fmt/format.h>
 
 #include "BKE_context.hh"
+#include "BKE_global.hh"
 #include "BKE_sculpt_layers.hh"
+
+#include "ED_sculpt.hh"
 
 #include "BLI_listbase.h"
 #include "BLI_vector.hh"
@@ -363,7 +366,27 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
      * contribution through the ancestor cascade. */
     Mesh &mesh = *id_cast<Mesh *>(object_->data);
     PointerRNA group_ptr = RNA_pointer_create_discrete(&mesh.id, RNA_SculptLayerGroup, group_);
+
+    /* Reserved at a fixed width whether or not the drag icon is actually drawn, so the slider
+     * beside it never shifts with hover state. Unlike the layer row, #SCULPT_OT_layer_group_influence_drag
+     * is addressed by uid, not by "the active node", so it needs no active-row restriction: any
+     * folder under the cursor can be dragged directly. */
+    ui::Layout &drag = right.row(true);
+    drag.ui_units_x_set(1.0f);
+    if (this->is_hovered() && (object_->mode & OB_MODE_SCULPT)) {
+      PointerRNA drag_op_ptr = drag.op("SCULPT_OT_layer_group_influence_drag",
+                                       "",
+                                       ICON_ARROW_LEFTRIGHT,
+                                       wm::OpCallContext::InvokeDefault,
+                                       UI_ITEM_NONE);
+      RNA_int_set(&drag_op_ptr, "group_uid", uid_);
+    }
+
     ui::Layout &sub = right.row(true);
+    /* Fixed width, not just right-aligned: an indent-dependent row width would otherwise leave the
+     * slider free to grow or shrink with the available space, sliding its value text out of column
+     * with sibling rows at a different tree depth. */
+    sub.ui_units_x_set(4.0f);
     sub.use_property_decorate_set(false);
     sub.active_set(object_->mode != OB_MODE_EDIT);
     sub.prop(&group_ptr, "influence", ui::ITEM_R_SLIDER, "", ICON_NONE);
@@ -424,6 +447,9 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
   {
     AbstractViewItem::set_selected(select);
     SET_FLAG_FROM_TEST(group_->base.flag, select, SCULPT_LAYER_GROUP_SELECTED);
+    if (G_MAIN != nullptr) {
+      sync_group_propagate_node_selection(*G_MAIN, *object_, group_->base, select);
+    }
   }
 
   bool matches_single(const ui::AbstractTreeViewItem &other) const override
@@ -628,7 +654,35 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
 
     mask_button_draw(right, *layer_ref_.object, layer.base);
 
+    /* Reserved at a fixed width whether or not the drag icon is actually drawn, so the slider
+     * beside it never shifts with hover state, same reasoning as the slider's own fixed width
+     * below. Skipped entirely when invalid: there is no slider to match it there either, just the
+     * error icon. */
+    if (valid) {
+      ui::Layout &drag = right.row(true);
+      drag.ui_units_x_set(1.0f);
+      /* #SCULPT_OT_layer_influence_drag only ever moves the *active* layer's geometry — its GPU
+       * and CPU position paths, sync-group propagation and undo step are all written in terms of
+       * #bke::sculpt_layers::active_get, not an arbitrary uid. #SCULPT_OT_layer_select_and_drag_influence
+       * is the macro that makes this row's layer active first (#SCULPT_OT_layer_select) and then
+       * runs the drag, so the icon works from any row, not just the one already active. Only runs
+       * in Sculpt Mode (#layers_poll, inherited by both halves of the macro). */
+      const bool sculpt_mode = (layer_ref_.object->mode & OB_MODE_SCULPT) != 0;
+      if (this->is_hovered() && sculpt_mode) {
+        PointerRNA drag_op_ptr = drag.op("SCULPT_OT_layer_select_and_drag_influence",
+                                         "",
+                                         ICON_ARROW_LEFTRIGHT,
+                                         wm::OpCallContext::InvokeDefault,
+                                         UI_ITEM_NONE);
+        RNA_int_set(&drag_op_ptr, "uid", uid_);
+      }
+    }
+
     ui::Layout &sub = right.row(true);
+    /* Fixed width, not just right-aligned: an indent-dependent row width would otherwise leave the
+     * slider free to grow or shrink with the available space, sliding its value text out of column
+     * with sibling rows at a different tree depth. */
+    sub.ui_units_x_set(4.0f);
     sub.use_property_decorate_set(false);
     if (valid) {
       sub.active_set(values_editable);
@@ -699,6 +753,10 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
   {
     AbstractViewItem::set_selected(select);
     SET_FLAG_FROM_TEST(layer_ref_.layer->base.flag, select, SCULPT_LAYER_SELECTED);
+    if (G_MAIN != nullptr) {
+      sync_group_propagate_node_selection(
+          *G_MAIN, *layer_ref_.object, layer_ref_.layer->base, select);
+    }
   }
 
   bool matches_single(const ui::AbstractTreeViewItem &other) const override

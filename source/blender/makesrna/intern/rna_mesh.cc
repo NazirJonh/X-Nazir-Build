@@ -367,6 +367,32 @@ static void rna_SculptLayer_name_set(PointerRNA *ptr, const char *value)
   }
 }
 
+static void rna_SculptLayer_select_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  SculptLayer *layer = static_cast<SculptLayer *>(ptr->data);
+  if (G_MAIN == nullptr) {
+    return;
+  }
+  if (Object *ob = rna_sculpt_layer_sync_source_object(*G_MAIN, *rna_mesh(ptr))) {
+    const bool select = (layer->base.flag & SCULPT_LAYER_SELECTED) != 0;
+    ed::sculpt_paint::layers::sync_group_propagate_node_selection(
+        *G_MAIN, *ob, layer->base, select);
+  }
+}
+
+static void rna_SculptLayerGroup_select_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  SculptLayerGroup *group = static_cast<SculptLayerGroup *>(ptr->data);
+  if (G_MAIN == nullptr) {
+    return;
+  }
+  if (Object *ob = rna_sculpt_layer_sync_source_object(*G_MAIN, *rna_mesh(ptr))) {
+    const bool select = (group->base.flag & SCULPT_LAYER_GROUP_SELECTED) != 0;
+    ed::sculpt_paint::layers::sync_group_propagate_node_selection(
+        *G_MAIN, *ob, group->base, select);
+  }
+}
+
 /* Every folder of the mesh, depth-first, the root excluded (it is not a row: see
  * #bke::sculpt_layers::root_group).
  *
@@ -3535,7 +3561,7 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
       prop, "Select", "Sculpt layer selection state, used for drag and drop reordering");
   /* Notifier only: selection is a list-drawing concern and contributes nothing to the evaluated
    * shape. Same reasoning as #SculptLayerGroup.color_tag. */
-  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, "rna_SculptLayer_select_update");
 
   /* Read-only, and with no update callback: both answer questions about state the mask operators
    * own, so there is nothing for a write or a re-evaluation to do here. Mirrors #is_valid. */
@@ -3629,7 +3655,7 @@ static void rna_def_sculpt_layer_group(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Select", "Sculpt layer group selection state, used for drag and drop reordering");
   /* Notifier only, matching the sibling #color_tag and #SculptLayer.select. */
-  RNA_def_property_update(prop, NC_GEOM | ND_DATA, nullptr);
+  RNA_def_property_update(prop, NC_GEOM | ND_DATA, "rna_SculptLayerGroup_select_update");
 
   prop = RNA_def_property(srna, "is_expanded", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "base.flag", SCULPT_LAYER_GROUP_EXPANDED);

@@ -64,6 +64,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_context.hh"
+#include "BKE_global.hh"
 #include "BKE_key.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
@@ -1073,6 +1074,88 @@ void sync_group_propagate_node_name(Main &bmain,
   }
 }
 
+/**
+ * Arm REC on \a source_ob and every other sync-group member that is in sculpt mode with a
+ * supported session. No-op when \a source_ob is not grouped or not in sculpt mode.
+ */
+static void sync_group_arm_rec_for_sculpt_members(Main &bmain,
+                                                  Depsgraph *depsgraph,
+                                                  Object &source_ob)
+{
+  if (source_ob.sculpt_layer_sync_group == 0 || !(source_ob.mode & OB_MODE_SCULPT)) {
+    return;
+  }
+
+  Vector<Object *> targets;
+  targets.append(&source_ob);
+  targets.extend(sync_group_members(bmain, source_ob));
+
+  for (Object *ob : targets) {
+    if (ob->type != OB_MESH || ob->data == nullptr) {
+      continue;
+    }
+    if (!(ob->mode & OB_MODE_SCULPT)) {
+      continue;
+    }
+    if (ob->runtime->sculpt_session == nullptr) {
+      BKE_object_sculpt_data_create(ob);
+    }
+    if (depsgraph != nullptr && ob->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(depsgraph, ob, false);
+    }
+    if (!is_supported(*ob)) {
+      continue;
+    }
+    SculptSession *ss = session_of(*ob);
+    if (ss && !ss->layers.rec_active) {
+      rec_active_set(*ob, true);
+    }
+  }
+}
+
+/**
+ * When \a source_ob already has REC armed, arm every other sculpt-ready sync-group member too.
+ */
+static void sync_group_propagate_rec_if_active(Main &bmain,
+                                               Depsgraph *depsgraph,
+                                               Object &source_ob)
+{
+  const SculptSession *source_ss = session_of(source_ob);
+  if (source_ss == nullptr || !source_ss->layers.rec_active) {
+    return;
+  }
+  sync_group_arm_rec_for_sculpt_members(bmain, depsgraph, source_ob);
+}
+
+void sync_group_propagate_node_selection(Main &bmain,
+                                         Object &source_ob,
+                                         const SculptLayerTreeNode &source_node,
+                                         const bool select)
+{
+  if (source_node.sync_uid == 0 || source_ob.sculpt_layer_sync_group == 0) {
+    return;
+  }
+  const int sync_uid = source_node.sync_uid;
+  const int select_flag = source_node.type == SCULPT_LAYER_TREE_NODE_TYPE_GROUP ?
+                              SCULPT_LAYER_GROUP_SELECTED :
+                              SCULPT_LAYER_SELECTED;
+
+  for (Object *member_ob : sync_group_members(bmain, source_ob)) {
+    if (!bke::sculpt_layers::sync_group_is_valid_mesh_member(*member_ob)) {
+      continue;
+    }
+    Mesh &member_mesh = mesh_of(*member_ob);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(member_mesh,
+                                                                                  sync_uid);
+    if (member_node == nullptr || member_node->type != source_node.type) {
+      continue;
+    }
+    SET_FLAG_FROM_TEST(member_node->flag, select, select_flag);
+    WM_main_add_notifier(NC_GEOM | ND_DATA, &member_mesh.id);
+    WM_main_add_notifier(NC_OBJECT | ND_DRAW, member_ob);
+  }
+}
+
 /* -------------------------------------------------------------------------------------------------
  * Base view (base edits only — never while recording into a layer, see #stroke_record_begin)
  *
@@ -1636,6 +1719,23 @@ void rec_active_set(Object &object, const bool armed)
   }
 }
 
+void rec_active_preserve_after_undo(Object &object, const bool was_armed)
+{
+  if (!was_armed) {
+    return;
+  }
+  SculptSession *ss = session_of(object);
+  if (ss == nullptr) {
+    return;
+  }
+  if (!ss->layers.rec_active) {
+    rec_active_set(object, true);
+  }
+  else if (rec_exemption_refresh(object)) {
+    commit_layers_change(object);
+  }
+}
+
 /* Create the layer REC needs when the mesh has none, and make it active.
  *
  * REC can be armed on a mesh with an empty layer tree — nothing refuses it — and every stroke then
@@ -1644,9 +1744,9 @@ void rec_active_set(Object &object, const bool armed)
  * them. Named apart from the "+" button's "Layer" so the tree shows at a glance which layers the
  * user made and which appeared on their behalf.
  *
- * Only creates and names. The caller owns the undo bracket and is responsible for recording the
- * creation into it, because the two call sites bracket their work very differently: the REC toggle
- * opens its own sculpt undo step, while the stroke start is already inside one it does not own.
+ * Only creates and names. The caller owns any undo bracket and is responsible for recording the
+ * creation into it when one is open (#stroke_ensure_rec_layer, a stroke about to start). The REC
+ * toggle itself deliberately does not record either the layer or the arm state in undo.
  *
  * Requires no PBVH of its own — #bke::sculpt_layers::add is pure tree work — but the grid branch
  * reads the subdivision level off the session, so a session must exist. The new layer carries zero
@@ -1669,7 +1769,10 @@ static SculptLayer *auto_layer_create(Object &object)
       mesh, DATA_("Auto Layer"), domain_for(object), element_count(object));
 }
 
-void stroke_ensure_rec_layer(const Scene &scene, Object &object)
+void stroke_ensure_rec_layer(const Scene &scene,
+                             Main &bmain,
+                             Object &object,
+                             const Span<Object *> stroke_objects)
 {
   SculptSession *ss = session_of(object);
   if (ss == nullptr || !ss->layers.rec_active) {
@@ -1697,15 +1800,55 @@ void stroke_ensure_rec_layer(const Scene &scene, Object &object)
    *
    * #session_state_ensure before the bracket, mirroring #layer_add_exec: it inverts the composite to
    * recover the runtime base and has to measure the pre-change state. */
-  session_state_ensure(object);
-  undo::push_begin_ex(scene, object, "Auto Layer");
-  SculptLayer *layer = auto_layer_create(object);
-  undo::push_sculpt_layer_list_change(object, {}, Vector<int>({layer->base.uid}), false);
-  /* The new layer is active now, so the exemption has to follow it — the same reason
-   * #layer_add_exec refreshes. No recompose is owed: the layer carries zero displacement, and the
-   * refresh only moves a bit that composes nothing while REC is armed on it. */
-  rec_exemption_refresh(object);
-  undo::push_end(object);
+  Vector<Object *> targets;
+  targets.append(&object);
+  if (object.sculpt_layer_sync_group != 0) {
+    for (Object *member : sync_group_members(bmain, object)) {
+      if (!stroke_objects.contains(member)) {
+        continue;
+      }
+      SculptSession *member_ss = session_of(*member);
+      if (member_ss == nullptr || !member_ss->layers.rec_active) {
+        continue;
+      }
+      if (member->type != OB_MESH || member->data == nullptr) {
+        continue;
+      }
+      Mesh &member_mesh = mesh_of(*member);
+      if (bke::sculpt_layers::active_get(member_mesh) != nullptr) {
+        continue;
+      }
+      if (!is_supported(*member)) {
+        continue;
+      }
+      targets.append(member);
+    }
+  }
+
+  const int new_sync_uid = object.sculpt_layer_sync_group != 0 ?
+                               bke::sculpt_layers::layer_sync_uid_unique(bmain) :
+                               0;
+
+  for (const int64_t i : targets.index_range()) {
+    Object *target = targets[i];
+    session_state_ensure(*target);
+    if (i == 0) {
+      undo::push_begin_ex(scene, *target, "Auto Layer");
+    }
+    else {
+      undo::push_begin_add_object(*target);
+    }
+    SculptLayer *layer = auto_layer_create(*target);
+    if (new_sync_uid != 0) {
+      layer->base.sync_uid = new_sync_uid;
+    }
+    undo::push_sculpt_layer_list_change(*target, {}, Vector<int>({layer->base.uid}), false);
+    /* The new layer is active now, so the exemption has to follow it — the same reason
+     * #layer_add_exec refreshes. No recompose is owed: the layer carries zero displacement, and the
+     * refresh only moves a bit that composes nothing while REC is armed on it. */
+    rec_exemption_refresh(*target);
+  }
+  undo::push_end_all_ex(false, true);
 }
 
 Vector<Object *> sync_group_members(const Main &bmain, const Object &active_ob)
@@ -7540,6 +7683,272 @@ void SCULPT_OT_layer_influence_drag(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_BLOCKING;
 }
 
+/* #SCULPT_OT_layer_influence_drag only ever drags the *active* sculpt layer, so the tree-view
+ * drag icon on a row that is not already active needs to make its layer active first. This is
+ * hand-rolled rather than a macro: a macro step's property is a fixed default set once at
+ * registration time (#WM_operatortype_macro_define's own #PointerRNA — see the "mode" example on
+ * #SCULPT_OT_lasso_select_and_enter), not a value a caller can set per invocation, so the row's
+ * uid could never reach #SCULPT_OT_layer_select that way. Calling both operators by hand instead
+ * lets this operator expose its own "uid" and forward it explicitly. */
+static wmOperatorStatus layer_select_and_drag_influence_invoke(bContext *C,
+                                                               wmOperator *op,
+                                                               const wmEvent *event)
+{
+  const int uid = RNA_int_get(op->ptr, "uid");
+
+  PointerRNA select_props = WM_operator_properties_create("SCULPT_OT_layer_select");
+  RNA_int_set(&select_props, "uid", uid);
+  const wmOperatorStatus select_status = WM_operator_name_call(
+      C, "SCULPT_OT_layer_select", wm::OpCallContext::ExecDefault, &select_props, event);
+  WM_operator_properties_free(&select_props);
+  if (select_status & OPERATOR_CANCELLED) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* #SCULPT_OT_layer_influence_drag adds its own modal handler and becomes the window's running
+   * operator; this operator's own invoke returns whatever that call reports and is not itself
+   * modal. */
+  return WM_operator_name_call(
+      C, "SCULPT_OT_layer_influence_drag", wm::OpCallContext::InvokeDefault, nullptr, event);
+}
+
+void SCULPT_OT_layer_select_and_drag_influence(wmOperatorType *ot)
+{
+  ot->name = "Select and Drag Sculpt Layer Influence";
+  ot->idname = "SCULPT_OT_layer_select_and_drag_influence";
+  ot->description =
+      "Make this sculpt layer active, then interactively adjust its influence by dragging the "
+      "mouse";
+  ot->invoke = layer_select_and_drag_influence_invoke;
+  ot->poll = layers_poll;
+  /* No #OPTYPE_UNDO: both delegated operators push their own sculpt undo steps. */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_BLOCKING;
+  RNA_def_int(ot->srna,
+             "uid",
+             0,
+             0,
+             INT_MAX,
+             "Item ID",
+             "Unique id of the sculpt layer to select and drag",
+             0,
+             INT_MAX);
+}
+
+/* The folder counterpart of #InfluenceDragData. Unlike a single layer, a folder's influence
+ * scales every descendant layer's #effective at once (see #rna_SculptLayerGroup_influence_set),
+ * so the per-tick state is one accounted-effective value per descendant rather than one. There is
+ * no GPU / multires / shape-key fast path here — #SCULPT_OT_layer_influence_drag's GPU compute
+ * targets a single layer's buffers, and extending it to an arbitrary descendant set is future
+ * work. Descendants that cannot take the direct CPU write (grid domain, or the whole mesh under a
+ * shape key / deform modifier) simply see no incremental visual update during the drag; releasing
+ * the drag always ends with a #commit_layers_change, which recomposes every descendant honestly
+ * regardless. */
+struct GroupInfluenceDragData {
+  Object *object;
+  Mesh *mesh;
+  SculptLayerGroup *group;
+  float start_influence;
+  /* Mirrors #InfluenceDragData::clamp_min/max. */
+  float clamp_min;
+  float clamp_max;
+  int start_mouse_x;
+  Vector<SculptLayer *> descendants;
+  /* Parallel to #descendants: each one's effective influence already reflected in the CPU
+   * positions. */
+  Vector<float> accounted_eff;
+  /* Mirrors #InfluenceDragData::ticks_since_normal_refresh. */
+  int ticks_since_normal_refresh;
+  /* False for an edit-mesh, a mesh under a shape key, or an empty mesh — the same gate
+   * #layer_group_toggle_visibility_object_mode_exec uses before writing positions directly. */
+  bool positions_writable;
+};
+
+static void layer_group_influence_drag_finish(bContext *C, wmOperator *op, const bool cancel)
+{
+  GroupInfluenceDragData *data = static_cast<GroupInfluenceDragData *>(op->customdata);
+  Object &object = *data->object;
+  SculptLayerGroup &group = *data->group;
+
+  if (cancel) {
+    group.influence = data->start_influence;
+  }
+  /* One honest recompose settles every descendant precisely — including grid / shape-key ones the
+   * per-tick CPU path above could not touch — and doubles as the cancel revert once the influence
+   * itself has been put back. Cheaper to pay once here than to chase per-descendant incremental
+   * correctness for every domain during the drag itself. */
+  bke::sculpt_layers::resync_group_state(*data->mesh);
+  commit_layers_change(object);
+
+  undo::push_end(object);
+
+  DEG_id_tag_update(&object.id, ID_RECALC_SHADING);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &object);
+  WM_event_add_notifier(C, NC_GEOM | ND_DATA, &data->mesh->id);
+
+  if (!cancel) {
+    if (G_MAIN != nullptr) {
+      sync_group_propagate_group_influence(*G_MAIN, object, group);
+    }
+  }
+
+  MEM_delete(data);
+  op->customdata = nullptr;
+}
+
+static wmOperatorStatus layer_group_influence_drag_invoke(bContext *C,
+                                                          wmOperator *op,
+                                                          const wmEvent *event)
+{
+  Object &object = *CTX_data_active_object(C);
+  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  BKE_sculpt_update_object_for_edit(depsgraph, &object, false);
+  if (!is_supported(object)) {
+    BKE_report(op->reports, RPT_ERROR, "Sculpt layers are not available for this object");
+    return OPERATOR_CANCELLED;
+  }
+  Mesh &mesh = mesh_of(object);
+  const int group_uid = RNA_int_get(op->ptr, "group_uid");
+  SculptLayerGroup *group = group_row_lookup(mesh, group_uid);
+  if (!group) {
+    BKE_report(op->reports, RPT_ERROR, "No sculpt layer group with that id");
+    return OPERATOR_CANCELLED;
+  }
+  session_state_ensure(object);
+
+  GroupInfluenceDragData *data = MEM_new<GroupInfluenceDragData>(__func__);
+  data->object = &object;
+  data->mesh = &mesh;
+  data->group = group;
+  data->start_influence = group->influence;
+  data->clamp_min = group->influence < influence_drag_default_min ? influence_drag_hard_min :
+                                                                     influence_drag_default_min;
+  data->clamp_max = group->influence > influence_drag_default_max ? influence_drag_hard_max :
+                                                                     influence_drag_default_max;
+  data->start_mouse_x = event->xy[0];
+  data->ticks_since_normal_refresh = 0;
+  data->positions_writable = mesh.verts_num > 0 && mesh.runtime->edit_mesh == nullptr &&
+                             mesh.key == nullptr;
+  for (SculptLayer *layer : bke::sculpt_layers::layers(*group)) {
+    data->descendants.append(layer);
+    data->accounted_eff.append(bke::sculpt_layers::effective(*layer));
+  }
+  op->customdata = data;
+
+  /* Capture the pre-drag folder metadata so Ctrl+Z reverts the influence change, exactly as
+   * #layer_influence_drag_invoke does for a single layer. */
+  undo::push_begin(*CTX_data_scene(C), object, op);
+  undo::push_sculpt_layer_metadata(object, group->base);
+
+  WM_event_add_modal_handler(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus layer_group_influence_drag_modal(bContext *C,
+                                                         wmOperator *op,
+                                                         const wmEvent *event)
+{
+  GroupInfluenceDragData *data = static_cast<GroupInfluenceDragData *>(op->customdata);
+
+  switch (event->type) {
+    case MOUSEMOVE: {
+      Object &object = *data->object;
+      Mesh &mesh = *data->mesh;
+      SculptLayerGroup &group = *data->group;
+      const float value = std::clamp(
+          data->start_influence +
+              float(event->xy[0] - data->start_mouse_x) * influence_drag_sensitivity,
+          data->clamp_min,
+          data->clamp_max);
+      group.influence = value;
+      /* Re-bakes #SculptLayer::group_influence_cached on every descendant, mirroring
+       * #rna_SculptLayerGroup_influence_set, so #effective below reflects the new folder
+       * influence. */
+      bke::sculpt_layers::resync_group_state(mesh);
+
+      if (data->positions_writable) {
+        MutableSpan<float3> positions = mesh.vert_positions_for_write();
+        bool moved = false;
+        for (const int64_t i : data->descendants.index_range()) {
+          SculptLayer &layer = *data->descendants[i];
+          if (layer.domain != SCULPT_LAYER_DOMAIN_VERT) {
+            continue;
+          }
+          const float new_eff = bke::sculpt_layers::effective(layer);
+          const float delta = new_eff - data->accounted_eff[i];
+          if (delta == 0.0f) {
+            continue;
+          }
+          bke::sculpt_layers::apply_delta_mesh(layer, delta, positions);
+          data->accounted_eff[i] = new_eff;
+          moved = true;
+        }
+        if (moved) {
+          mesh.tag_positions_changed_no_normals();
+        }
+      }
+
+      DEG_id_tag_update(&object.id, ID_RECALC_SHADING);
+      ED_region_tag_redraw(CTX_wm_region(C));
+      WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &object.id);
+
+      /* Mirrors #influence_drag_normal_refresh_interval: the (expensive) normal buffers lag this
+       * many ticks behind the (cheap) position writes above, so shading still visibly tracks the
+       * drag without paying the full normal re-extract on every tick. */
+      if (data->positions_writable &&
+          ++data->ticks_since_normal_refresh >= influence_drag_normal_refresh_interval)
+      {
+        data->ticks_since_normal_refresh = 0;
+        mesh.tag_positions_changed();
+        if (bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object)) {
+          IndexMaskMemory memory;
+          const IndexMask node_mask = bke::pbvh::all_leaf_nodes(*pbvh, memory);
+          pbvh->tag_normals_changed(node_mask);
+        }
+      }
+      break;
+    }
+    case LEFTMOUSE:
+      if (event->val == KM_RELEASE) {
+        layer_group_influence_drag_finish(C, op, false);
+        return OPERATOR_FINISHED;
+      }
+      break;
+    case RIGHTMOUSE:
+    case EVT_ESCKEY:
+      /* Mirrors #layer_influence_drag_modal's own NOTE: #layer_group_influence_drag_finish
+       * reverts the influence and still calls #undo::push_end, leaving a content-neutral step on
+       * the stack even though this reports as cancelled — #push_begin already ran in invoke and
+       * the sculpt undo API offers no way to discard an open step. */
+      layer_group_influence_drag_finish(C, op, true);
+      return OPERATOR_CANCELLED;
+    default:
+      break;
+  }
+  return OPERATOR_RUNNING_MODAL;
+}
+
+void SCULPT_OT_layer_group_influence_drag(wmOperatorType *ot)
+{
+  ot->name = "Drag Sculpt Layer Group Influence";
+  ot->idname = "SCULPT_OT_layer_group_influence_drag";
+  ot->description =
+      "Interactively adjust a sculpt layer folder's influence by dragging the mouse";
+  ot->invoke = layer_group_influence_drag_invoke;
+  ot->modal = layer_group_influence_drag_modal;
+  ot->poll = layers_poll;
+  /* No #OPTYPE_UNDO: the metadata sculpt undo step pushed across invoke/finish handles Ctrl+Z. */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_BLOCKING;
+  RNA_def_int(ot->srna,
+             "group_uid",
+             0,
+             0,
+             INT_MAX,
+             "Group ID",
+             "Unique id of the sculpt layer group to act on",
+             0,
+             INT_MAX);
+}
+
 /* The object-mode half of #layer_toggle_visibility_exec — mirrors
  * #layer_group_toggle_visibility_object_mode_exec. */
 static wmOperatorStatus layer_toggle_visibility_object_mode_exec(bContext *C,
@@ -10100,6 +10509,8 @@ static wmOperatorStatus layer_select_exec(bContext *C, wmOperator *op)
     }
   }
 
+  sync_group_propagate_rec_if_active(*bmain, ctx.depsgraph, *ctx.object);
+
   /* #commit_layers_change is conditional on #rec_exemption_refresh and commonly skipped, so
    * #finish_multi_object is not used: it would call #flush_update_done per object, inventing work
    * (PBVH ensure, viewport/geometry tags) the single-object do-path never performed when refresh
@@ -10202,6 +10613,28 @@ static wmOperatorStatus layer_sync_group_create_exec(bContext *C, wmOperator *op
   for (Object *ob : selected) {
     WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
   }
+
+  Object *active = CTX_data_active_object(C);
+  Object *rec_source = nullptr;
+  if (active != nullptr && active->sculpt_layer_sync_group != 0 && (active->mode & OB_MODE_SCULPT)) {
+    rec_source = active;
+  }
+  else {
+    for (Object *ob : selected) {
+      if (ob->mode & OB_MODE_SCULPT) {
+        rec_source = ob;
+        break;
+      }
+    }
+  }
+  if (rec_source != nullptr) {
+    Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+    sync_group_arm_rec_for_sculpt_members(*bmain, depsgraph, *rec_source);
+    for (Object *ob : selected) {
+      layers_ui_notify(C, *ob);
+    }
+  }
+
   return OPERATOR_FINISHED;
 }
 
@@ -10380,6 +10813,11 @@ static wmOperatorStatus layer_sync_group_select_members_exec(bContext *C, wmOper
       }
     }
 
+    sync_group_arm_rec_for_sculpt_members(*bmain, depsgraph, *active);
+    for (Object *ob : selected_objects) {
+      layers_ui_notify(C, *ob);
+    }
+
     WM_event_add_notifier(C, NC_SCENE | ND_MODE, scene);
     WM_toolsystem_update_from_context_view3d(C);
   }
@@ -10548,58 +10986,27 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
    * creation as a fallback, for the ways this state can be reached without passing through here (the
    * last layer removed while REC stays armed).
    *
-   * Before the undo bracket opens, mirroring #layer_add_exec: #session_state_ensure inverts the
-   * composite to recover the runtime base and must measure the pre-change state. */
+   * Before the toggle, mirroring #layer_add_exec: #session_state_ensure inverts the composite to
+   * recover the runtime base and must measure the pre-change state. */
   const bool create_layer = new_active && layer == nullptr;
   if (create_layer) {
     session_state_ensure(*ctx.object);
   }
 
-  /* Unconditional, unlike the original single-object bracket, which opened #undo::push_begin only
-   * `if (layer || create_layer)` -- skipping it entirely when disarming with nothing active. A
-   * multi-object span cannot compose that fine-grained a per-object conditional, and an eligible
-   * member that ends up with nothing pushed into the step is harmless: #layer_add_exec's own
-   * gather-then-gate comment already relies on exactly that degenerate case (a member surviving
-   * eligibility but contributing no undo data) being fine. */
-  undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());
-
-  /* Active object: unchanged from the single-object path. */
+  /* REC is session/UI state, not sculpt undo state: toggling it does not open a step, so Ctrl+Z
+   * after unrelated edits (symmetry, layer selection, strokes) cannot disarm it. Only an explicit
+   * second press of this operator turns REC off. */
   if (create_layer) {
     layer = auto_layer_create(*ctx.object);
-    /* Recorded as a list change, exactly as #layer_add_exec does, so undoing the REC toggle also
-     * removes the layer it brought into being. #bke::sculpt_layers::add already made it active. */
-    undo::push_sculpt_layer_list_change(
-        *ctx.object, {}, Vector<int>({layer->base.uid}), false);
   }
-  else if (layer) {
-    undo::push_sculpt_layer_metadata(*ctx.object, layer->base);
-  }
-  /* The whole state change lives there, shared with the mask-editing entry so that both go through
-   * one ordering of the multires flush, the exemption refresh and the recompose. Only the undo
-   * bracket, the refusals above and the notifier below are this operator's own. */
   rec_active_set(*ctx.object, new_active);
 
   for (const RecFanoutMember &member : fanout_members) {
-    /* Mirrors the active object's own body immediately above, scoped to this member. Eligibility
-     * (#is_supported, #mask_edit_refuse_ccg_rebuild, the arming refusals) already ran for every
-     * member of `fanout_members` in the gather pass above -- nothing here can fail or need
-     * skipping (mirrors #layer_add_exec's own second loop). */
     if (member.create_layer) {
       session_state_ensure(*member.object);
-      SculptLayer *member_layer = auto_layer_create(*member.object);
-      undo::push_sculpt_layer_list_change(
-          *member.object, {}, Vector<int>({member_layer->base.uid}), false);
+      auto_layer_create(*member.object);
     }
-    else if (member.layer) {
-      undo::push_sculpt_layer_metadata(*member.object, member.layer->base);
-    }
-    /* Already a safe no-op if this member turns out to already be at #new_active, or lost its
-     * session between the gather pass and here -- #rec_active_set checks both itself. */
     rec_active_set(*member.object, new_active);
-    /* #rec_active_set short-circuits when this member was already at #new_active, taking its own
-     * #rec_exemption_refresh with it -- so a layer created for an already-armed member would keep
-     * neither #SCULPT_LAYER_REC_ARMED nor the exemption. Mirrors #layer_add_exec /
-     * #stroke_ensure_rec_layer. A no-op when #rec_active_set already refreshed. */
     if (member.create_layer && rec_exemption_refresh(*member.object)) {
       commit_layers_change(*ctx.depsgraph, *member.object);
     }
@@ -10607,14 +11014,15 @@ static wmOperatorStatus layer_toggle_rec_exec(bContext *C, wmOperator *op)
 
   /* #rec_active_set recomposes internally (via #commit_layers_change) whenever the toggle actually
    * moves the surface -- a masked layer's exemption flipping, or the enabled/influence
-   * normalization on arming -- for the active object and every fanned-out member alike, so
-   * #UpdateType::Position is required the same way #layer_add_exec requires it. */
-  undo::finish_multi_object(C, eligible.as_span(), UpdateType::Position);
-  /* Active-object-only, matching #layer_add_exec / #layer_clear_exec and every other
-   * #finish_multi_object-based fan-out in this file: #finish_multi_object already sent
-   * `NC_OBJECT | ND_DRAW` for every member above, so the only thing still missing is the
-   * `NC_GEOM | ND_DATA` notifier the original always sent for the active object's own mesh, and
-   * #layers_ui_notify sends exactly that pair. */
+   * normalization on arming -- for the active object and every fanned-out member alike, so each
+   * object needs the same #UpdateType::Position flush (#fake_neighbors_free, bounds-orig capture,
+   * PBVH position tag) #layer_add_exec needs for the same reason. No undo bracket is open here
+   * (see above), so #flush_update_done is called directly per object rather than through
+   * #undo::finish_multi_object, which would also close a step that was never begun. */
+  for (Object *ob : eligible) {
+    flush_update_done(C, *ob, UpdateType::Position);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  }
   layers_ui_notify(C, *ctx.object);
   return OPERATOR_FINISHED;
 }

@@ -209,6 +209,10 @@ void sync_group_propagate_group_influence(Main &bmain,
 void sync_group_propagate_node_name(Main &bmain,
                                     Object &source_ob,
                                     const SculptLayerTreeNode &source_node);
+void sync_group_propagate_node_selection(Main &bmain,
+                                         Object &source_ob,
+                                         const SculptLayerTreeNode &source_node,
+                                         bool select);
 
 /**
  * Drop the cached runtime mesh base (#SculptSession::layers::mesh_base) and mark the session

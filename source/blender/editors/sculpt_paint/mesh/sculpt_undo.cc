@@ -111,6 +111,21 @@ namespace blender {
 
 static CLG_LogRef LOG = {"undo.sculpt"};
 
+/** Never snapshotted or swapped by sculpt-layer undo; always re-derived from live REC session state. */
+static constexpr int sculpt_layer_rec_undo_excluded_flags =
+    SCULPT_LAYER_REC_ARMED | SCULPT_LAYER_REC_EXEMPT;
+
+static void sculpt_layer_flag_undo_swap(int &live_flag, int &stored_flag)
+{
+  const int live_rec = live_flag & sculpt_layer_rec_undo_excluded_flags;
+  const int stored_rec = stored_flag & sculpt_layer_rec_undo_excluded_flags;
+  int live_other = live_flag & ~sculpt_layer_rec_undo_excluded_flags;
+  int stored_other = stored_flag & ~sculpt_layer_rec_undo_excluded_flags;
+  std::swap(live_other, stored_other);
+  live_flag = live_other | live_rec;
+  stored_flag = stored_other | stored_rec;
+}
+
 namespace ed::sculpt_paint::undo {
 
 /* Implementation of undo system for objects in sculpt mode.
@@ -1736,7 +1751,7 @@ static void payload_metadata_from_node(SculptLayerUndoPayload &payload,
 {
   payload.type = node.type;
   payload.name = node.name;
-  payload.flag = node.flag;
+  payload.flag = node.flag & ~sculpt_layer_rec_undo_excluded_flags;
   payload.color_tag = node.color_tag;
   payload.uid = node.uid;
   payload.sync_uid = node.sync_uid;
@@ -1767,7 +1782,8 @@ static void node_metadata_from_payload(SculptLayerTreeNode &node,
    * fixed-size #SculptLayerTreeNode::name (see #payload_metadata_from_node), so it can never exceed
    * what this copy back can hold. */
   STRNCPY_UTF8(node.name, payload.name.c_str());
-  node.flag = payload.flag;
+  node.flag = (payload.flag & ~sculpt_layer_rec_undo_excluded_flags) |
+              (node.flag & sculpt_layer_rec_undo_excluded_flags);
   node.color_tag = payload.color_tag;
   node.uid = payload.uid;
   node.sync_uid = payload.sync_uid;
@@ -2038,7 +2054,7 @@ void push_sculpt_layer_metadata(Object &object, const SculptLayerTreeNode &node)
   BLI_assert(node.uid != 0);
   step_data->special_type = Type::SculptLayer;
   step_data->sculpt_layer_op.uid = node.uid;
-  step_data->sculpt_layer_op.flag = node.flag;
+  step_data->sculpt_layer_op.flag = node.flag & ~sculpt_layer_rec_undo_excluded_flags;
   step_data->sculpt_layer_op.color_tag = node.color_tag;
   /* Always read out of the fixed-size #SculptLayerTreeNode::name, never from a caller-supplied
    * string, so the stored copy can never exceed what the swap on restore can write back — otherwise
@@ -2082,6 +2098,9 @@ void push_sculpt_layer_flags_batch(Object &object, Vector<int> &&uids, Vector<in
   }
   BLI_assert(uids.size() == flags.size());
   step_data->special_type = Type::SculptLayer;
+  for (int &flag : flags) {
+    flag &= ~sculpt_layer_rec_undo_excluded_flags;
+  }
   step_data->sculpt_layer_op.flags_batch_uids = std::move(uids);
   step_data->sculpt_layer_op.flags_batch_flags = std::move(flags);
 }
@@ -2095,7 +2114,7 @@ void push_sculpt_layer_data(Object &object, const SculptLayer &layer)
   step_data->special_type = Type::SculptLayer;
   step_data->sculpt_layer_op.uid = layer.base.uid;
   step_data->sculpt_layer_op.influence = layer.influence;
-  step_data->sculpt_layer_op.flag = layer.base.flag;
+  step_data->sculpt_layer_op.flag = layer.base.flag & ~sculpt_layer_rec_undo_excluded_flags;
   step_data->sculpt_layer_op.name = layer.base.name;
   if (layer.data && layer.totelem > 0) {
     const Span<float3> src(static_cast<const float3 *>(layer.data), layer.totelem);
@@ -2689,6 +2708,15 @@ static void restore_list_object(bContext *C,
   }
 
   SculptSession &ss = *object.runtime->sculpt_session;
+  const bool rec_was_armed = ss.layers.rec_active;
+  struct RecUndoPreserveGuard {
+    Object &object;
+    bool preserve;
+    ~RecUndoPreserveGuard()
+    {
+      layers::rec_active_preserve_after_undo(object, preserve);
+    }
+  } rec_guard{object, rec_was_armed};
   /* Called here for its side effect alone — the session hook below needs a tree to already exist,
    * since #layers::mask_edit_begin refuses when #bke::object::pbvh_get hands it null — and
    * deliberately not bound to a reference: reopening a grid session re-evaluates the depsgraph and
@@ -2787,7 +2815,7 @@ static void restore_list_object(bContext *C,
      * #bke::sculpt_layers::node_find_by_uid, where it resolves to the root folder. */
     if (op.uid != 0) {
       if (SculptLayerTreeNode *node = bke::sculpt_layers::node_find_by_uid(mesh, op.uid)) {
-        std::swap(node->flag, op.flag);
+        sculpt_layer_flag_undo_swap(node->flag, op.flag);
         /* #SCULPT_LAYER_GROUP_MASK_DISABLED rides in the word just swapped, and it decides whether
          * this folder's own mask is folded into the cached chain product. Without this the bit
          * would be restored while the cache kept the product built under the other state, and the
@@ -2897,7 +2925,7 @@ static void restore_list_object(bContext *C,
      * layers rather than on the folders that caused it. */
     for (const int64_t i : op.flags_batch_uids.index_range()) {
       if (SculptLayer *layer = sculpt_layer_find(mesh, op.flags_batch_uids[i])) {
-        std::swap(layer->base.flag, op.flags_batch_flags[i]);
+        sculpt_layer_flag_undo_swap(layer->base.flag, op.flags_batch_flags[i]);
       }
     }
 

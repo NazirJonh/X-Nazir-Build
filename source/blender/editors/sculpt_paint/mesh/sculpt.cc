@@ -5247,7 +5247,7 @@ using BrushActionFunc = void (*)(const Depsgraph &depsgraph,
 
 static void apply_deferred_texture_data(const Depsgraph &depsgraph,
                                         const Scene & /*scene*/,
-                                        Sculpt &sd,
+                                        Sculpt & /*sd*/,
                                         Object &ob,
                                         const Brush &brush,
                                         PaintModeSettings & /*paint_mode_settings*/)
@@ -8428,6 +8428,15 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     const bool records_into_layer = brush && !brush_type_is_paint(brush->sculpt_brush_type) &&
                                     brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK;
 
+    /* When REC is armed but no layer is active yet, mint an Auto Layer before the sync_uid
+     * fan-out below. In a sync group this fans out to every stroke participant the same way
+     * #layer_add_exec and #layer_toggle_rec_exec do, stamping one shared #sync_uid so members
+     * can be picked up by the recording set. */
+    if (records_into_layer) {
+      layers::stroke_ensure_rec_layer(
+          *this->scene, *this->bmain_, ob, this->multi_.mode_objects);
+    }
+
     this->layer_recording_objects_.clear();
     this->layer_recording_saved_active_uid_.clear();
     this->layer_recording_objects_.append(&ob);
@@ -8497,13 +8506,6 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
         }
       }
 
-      /* Before the stroke's undo step opens, and that ordering is required rather than tidy: the
-       * layer this may create is recorded in a step of its own, because a layer-list record and
-       * the stroke's position records cannot share one step's type field. See
-       * #layers::stroke_ensure_rec_layer. */
-      if (records_into_layer) {
-        layers::stroke_ensure_rec_layer(*this->scene, rec_ob);
-      }
     }
 
     stroke_undo_begin(

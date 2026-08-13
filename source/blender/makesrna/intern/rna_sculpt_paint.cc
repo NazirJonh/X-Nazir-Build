@@ -942,9 +942,8 @@ static void rna_def_paint(BlenderRNA *brna)
       prop, "rna_Paint_mirror_snap_distance_get", "rna_Paint_mirror_snap_distance_set", nullptr);
   RNA_def_property_range(prop, 1.0f, 10.0f);
   RNA_def_property_ui_range(prop, 1.0f, 4.0f, 0.1f, 2);
-  /* Without this, "Reset to Default Value" would write 0 and get clamped to the 1.0 hard minimum,
-   * silently disagreeing with the DNA default that #BKE_paint_mirror_snap_distance_get returns. */
-  RNA_def_property_float_default(prop, 2.0f);
+  /* Default comes from DNA (#Paint.mirror_snap_distance = 2.0f); legacy files store 0 in the
+   * former padding and #BKE_paint_mirror_snap_distance_get maps that back to 2.0f at runtime. */
   RNA_def_property_ui_text(prop,
                            "Snap Distance",
                            "How far a mirrored brush daub may travel along the surface normal to "

@@ -1414,6 +1414,14 @@ void session_state_ensure(Object &object);
 bool rec_exemption_refresh(Object &object);
 
 /**
+ * After an undo/redo restore, put REC back the way it was when the restore started if it was armed.
+ * REC is session state that no sculpt step records; without this, a metadata or flag swap from an
+ * unrelated undo (layer selection, influence, a stroke's auto layer, etc.) can leave the mesh bits
+ * or even #SculptSession::layers::rec_active out of sync with what the user armed.
+ */
+void rec_active_preserve_after_undo(Object &object, const bool was_armed);
+
+/**
  * Set #SculptSession::layers::rec_active to \a armed, running the whole state change the flag is
  * part of. A no-op when it already holds that value.
  *
@@ -1457,8 +1465,14 @@ void stroke_record_cancel(const Depsgraph &depsgraph, Object &object);
  * The common source of the armed-but-empty state is handled at the source instead — arming REC
  * creates the layer (see #SCULPT_OT_layer_toggle_rec). This covers what happens afterwards: the last
  * layer removed, or an undo restoring a layer-less tree, while REC stays armed.
+ *
+ * When \a object is in a sync group, every other group member that is in \a stroke_objects with
+ * REC armed and no active layer receives a matching Auto Layer stamped with the same #sync_uid.
  */
-void stroke_ensure_rec_layer(const Scene &scene, Object &object);
+void stroke_ensure_rec_layer(const Scene &scene,
+                             Main &bmain,
+                             Object &object,
+                             Span<Object *> stroke_objects);
 
 /**
  * Every other object sharing \a active_ob's #Object::sculpt_layer_sync_group, excluding
@@ -1897,6 +1911,8 @@ void SCULPT_OT_layer_mask_edit_cancel(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_toggle(wmOperatorType *ot);
 void SCULPT_OT_layer_set_influence(wmOperatorType *ot);
 void SCULPT_OT_layer_influence_drag(wmOperatorType *ot);
+void SCULPT_OT_layer_select_and_drag_influence(wmOperatorType *ot);
+void SCULPT_OT_layer_group_influence_drag(wmOperatorType *ot);
 void SCULPT_OT_layer_toggle_visibility(wmOperatorType *ot);
 void SCULPT_OT_layer_select(wmOperatorType *ot);
 void SCULPT_OT_layer_sync_group_create(wmOperatorType *ot);

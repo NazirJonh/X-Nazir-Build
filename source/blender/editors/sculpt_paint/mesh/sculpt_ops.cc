@@ -2131,6 +2131,8 @@ void operatortypes_sculpt()
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_toggle);
   WM_operatortype_append(layers::SCULPT_OT_layer_set_influence);
   WM_operatortype_append(layers::SCULPT_OT_layer_influence_drag);
+  WM_operatortype_append(layers::SCULPT_OT_layer_select_and_drag_influence);
+  WM_operatortype_append(layers::SCULPT_OT_layer_group_influence_drag);
   WM_operatortype_append(layers::SCULPT_OT_layer_toggle_visibility);
   WM_operatortype_append(layers::SCULPT_OT_layer_select);
   WM_operatortype_append(layers::SCULPT_OT_layer_toggle_rec);

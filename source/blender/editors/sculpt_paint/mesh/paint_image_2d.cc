@@ -7,24 +7,32 @@
  */
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <memory>
 
 #include "MEM_guardedalloc.h"
 
 #include "DNA_brush_types.h"
+#include "DNA_object_enums.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 #include "DNA_texture_types.h"
 
+#include "BLI_array.hh"
 #include "BLI_bitmap.h"
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
 #include "BLI_math_color_blend.h"
+#include "BLI_math_geom.h"
+#include "BLI_math_matrix.h"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_stack.h"
 #include "BLI_task.h"
 #include "BLI_time.h"
+#include "BLI_vector.hh"
 
 /* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
 #include "paint_debug.hh"
@@ -34,11 +42,16 @@
 #include "BKE_context.hh"
 #include "BKE_image.hh"
 #include "BKE_material.hh"
+#include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
 #include "DEG_depsgraph.hh"
+
+#include "../paint_intern.hh"
+#include "paint_area_plane_2d.hh"
+#include "paint_material_source.hh"
 
 #include "ED_paint.hh"
 #include "ED_screen.hh"
@@ -51,9 +64,6 @@
 #include "WM_types.hh"
 
 #include "UI_view2d.hh"
-
-#include "../paint_intern.hh"
-#include "paint_material_source.hh"
 
 namespace blender {
 
@@ -123,6 +133,12 @@ struct BrushPainter {
    * this is not a Mode=`Material` stroke, or when invert/erase must not read sources.
    */
   std::shared_ptr<ed::sculpt_paint::material::ChannelSourceSet> channel_sources;
+  /**
+   * Evaluated-mesh triangles for #MTEX_MAP_MODE_AREA in the Image Editor. Shared by extra
+   * material-map painters. Null when this stroke does not use Area Plane, or when the mesh/UV
+   * could not be copied (then AREA falls back to View Plane).
+   */
+  std::shared_ptr<ed::sculpt_paint::AreaPlaneMesh> area_plane_mesh;
   /** Which material paint channel this painter writes. Only meaningful when
    * #use_material_channel_color is set. */
   eMaterialPaintChannel material_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
@@ -272,9 +288,10 @@ static void brush_imbuf_tex_co(const rctf *mapping, int x, int y, float texco[3]
 }
 
 /**
- * Image Editor has no 3D surface for Area Plane / 3D mapping. Stamp those sources with View
- * Plane (dab-relative) until the UV→surface path exists. Shared mapping defaults to Area Plane,
- * so skipping it would silently paint the slider instead of the assigned source image.
+ * Image Editor 3D mapping has no view ray. Area Plane is handled by the surface→UV rasterizer
+ * when #BrushPainter.area_plane_mesh is valid; this remap is only the fallback (no mesh/UV, or
+ * 3D mapping which is out of scope for this path). Shared mapping defaults to Area Plane, so
+ * skipping the fallback would silently paint the slider instead of the assigned source image.
  */
 static short paint_2d_source_map_mode_for_2d(const short map_mode)
 {
@@ -1722,6 +1739,403 @@ static void paint_2d_uv_to_coord(ImagePaintTile *tile, const float uv[2], float 
   coord[1] = (uv[1] - tile->uv_origin[1]) * tile->size[1];
 }
 
+static bool paint_2d_use_area_plane(const BrushPainter *painter)
+{
+  return painter->use_material_channel_color && painter->area_plane_mesh != nullptr &&
+         painter->area_plane_mesh->is_valid();
+}
+
+static void paint_2d_sample_area_mtex(const BrushPainter *painter,
+                                      const MTex *mtex,
+                                      const float4x4 &local_mat,
+                                      const float3 &position,
+                                      const int thread,
+                                      ImagePool *pool,
+                                      float *r_value,
+                                      float4 &r_rgba)
+{
+  float3 point = position;
+  mul_m4_v3(local_mat.ptr(), point);
+  const float tex_x = point.x * mtex->size[0] + mtex->ofs[0];
+  const float tex_y = point.y * mtex->size[1] + mtex->ofs[1];
+  paint_get_tex_pixel(mtex, tex_x, tex_y, pool, thread, r_value, r_rgba);
+  add_v3_fl(r_rgba, painter->brush->texture_sample_bias);
+  *r_value -= painter->brush->texture_sample_bias;
+}
+
+static bool paint_2d_area_plane_falloff(const Brush *brush,
+                                        const float4x4 &object_to_brush,
+                                        const float3 &position,
+                                        float *r_strength)
+{
+  float3 local = position;
+  mul_m4_v3(object_to_brush.ptr(), local);
+  const float distance = math::length(local);
+  if (distance > 1.0f) {
+    return false;
+  }
+  *r_strength = BKE_brush_curve_strength_clamped(brush, distance, 1.0f);
+  return *r_strength > 0.0f;
+}
+
+static void paint_2d_area_encode_canvas_rgb(const BrushPainterCache *cache,
+                                            const bool is_normal,
+                                            float rgb[3])
+{
+  if (is_normal || cache->is_data) {
+    return;
+  }
+  if (cache->is_srgb) {
+    IMB_colormanagement_scene_linear_to_srgb_v3(rgb, rgb);
+  }
+  else if (cache->byte_colorspace) {
+    IMB_colormanagement_scene_linear_to_colorspace_v3(rgb, cache->byte_colorspace);
+  }
+}
+
+static float4x4 paint_2d_area_channel_local_mat(const BrushPainter *painter,
+                                                const eMaterialPaintChannel channel,
+                                                const float3 &position,
+                                                const float3 &normal,
+                                                const float radius_object)
+{
+  float rotation = 0.0f;
+  if (paint_2d_channel_source_usable_2d(painter, channel)) {
+    rotation = painter->channel_sources->source(channel).mtex->rot;
+  }
+  return ed::sculpt_paint::area_plane_local_mat(position, normal, radius_object, rotation);
+}
+
+static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
+                                               const BrushPainterCache *cache,
+                                               const eMaterialPaintChannel channel,
+                                               const float4x4 &local_mat,
+                                               const float3 &position,
+                                               const int thread,
+                                               ImagePool *pool,
+                                               const PaintModeSettings &paint_mode,
+                                               float3 &r_rgb)
+{
+  if (!paint_2d_channel_source_usable_2d(painter, channel)) {
+    r_rgb = float3(painter->material_channel_color[0],
+                   painter->material_channel_color[1],
+                   painter->material_channel_color[2]);
+    paint_2d_area_encode_canvas_rgb(cache, channel == PAINT_MATERIAL_CHANNEL_NORMAL, r_rgb);
+    return;
+  }
+
+  const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
+      painter->channel_sources->source(channel);
+  float value;
+  float4 sampled;
+  paint_2d_sample_area_mtex(painter, source.mtex, local_mat, position, thread, pool, &value, sampled);
+
+  const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+  const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
+  if (!is_normal && source.do_linear_conversion &&
+      (paint_runtime == nullptr || !paint_runtime->do_linear_conversion))
+  {
+    IMB_colormanagement_colorspace_to_scene_linear_v3(sampled, source.colorspace);
+  }
+  if (source.flip_green_channel) {
+    sampled[1] = 1.0f - sampled[1];
+  }
+
+  const bool is_color = ELEM(channel,
+                             PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                             PAINT_MATERIAL_CHANNEL_EMISSION,
+                             PAINT_MATERIAL_CHANNEL_NORMAL);
+  if (is_color) {
+    r_rgb = float3(sampled[0], sampled[1], sampled[2]);
+  }
+  else {
+    const float2 range = BKE_paint_material_channel_range(paint_mode, channel);
+    const float intensity = math::clamp(value, range.x, range.y);
+    r_rgb = float3(intensity, intensity, intensity);
+  }
+  paint_2d_area_encode_canvas_rgb(cache, is_normal, r_rgb);
+}
+
+static float paint_2d_area_sample_alpha_factor(const BrushPainter *painter,
+                                               const float4x4 &alpha_local_mat,
+                                               const float3 &position,
+                                               const int thread,
+                                               ImagePool *pool)
+{
+  float alpha_factor = painter->material_alpha_fallback;
+  if (paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)) {
+    float value;
+    float4 sampled;
+    paint_2d_sample_area_mtex(painter,
+                              painter->channel_sources->source(PAINT_MATERIAL_CHANNEL_ALPHA).mtex,
+                              alpha_local_mat,
+                              position,
+                              thread,
+                              pool,
+                              &value,
+                              sampled);
+    alpha_factor = value;
+  }
+  return math::clamp(alpha_factor, 0.0f, 1.0f);
+}
+
+static void paint_2d_blend_area_buffer(ImagePaintState *s,
+                                       ImagePaintTile *tile,
+                                       const int destx,
+                                       const int desty,
+                                       ImBuf *frombuf,
+                                       ushort *mask,
+                                       const short blend)
+{
+  ImagePaintRegion region;
+  paint_2d_set_region(&region, destx, desty, 0, 0, frombuf->x, frombuf->y);
+  ED_imapaint_dirty_region(s->image,
+                           tile->canvas,
+                           &tile->iuser,
+                           region.destx,
+                           region.desty,
+                           region.width,
+                           region.height,
+                           true);
+
+  const float mask_max = BKE_brush_alpha_get(s->paint, s->brush);
+  if (s->do_masking) {
+    ushort *saved_curve_mask = tile->cache.curve_mask_cache.curve_mask;
+    ushort *saved_tex_mask = tile->cache.tex_mask;
+    tile->cache.curve_mask_cache.curve_mask = mask;
+    tile->cache.tex_mask = nullptr;
+
+    int tilex, tiley, tilew, tileh;
+    imapaint_region_tiles(tile->canvas,
+                          region.destx,
+                          region.desty,
+                          region.width,
+                          region.height,
+                          &tilex,
+                          &tiley,
+                          &tilew,
+                          &tileh);
+    paint_2d_do_making_brush(
+        s, tile, &region, frombuf, mask_max, blend, tilex, tiley, tilew, tileh);
+
+    tile->cache.curve_mask_cache.curve_mask = saved_curve_mask;
+    tile->cache.tex_mask = saved_tex_mask;
+  }
+  else {
+    IMB_rectblend_threaded(tile->canvas,
+                           tile->canvas,
+                           frombuf,
+                           nullptr,
+                           mask,
+                           nullptr,
+                           mask_max,
+                           region.destx,
+                           region.desty,
+                           region.destx,
+                           region.desty,
+                           region.srcx,
+                           region.srcy,
+                           region.width,
+                           region.height,
+                           IMB_BlendMode(blend),
+                           false);
+  }
+  tile->need_redraw = true;
+}
+
+/** Largest rasterized triangle bbox along one axis, in texels. */
+static constexpr int AREA_PLANE_TRIANGLE_MAX_SIZE = 8192;
+
+static bool paint_2d_area_plane_rasterize_triangle(
+    ImagePaintState *s,
+    ImagePaintTile *tile,
+    const ed::sculpt_paint::AreaPlaneTriangle &tri,
+    const float4x4 &object_to_brush,
+    const float4x4 &channel_local_mat,
+    const float4x4 &alpha_local_mat,
+    const bool sample_alpha,
+    ImagePool *pool)
+{
+  const BrushPainter *painter = s->painter;
+  const BrushPainterCache *cache = &tile->cache;
+  const PaintModeSettings &paint_mode = s->scene->toolsettings->paint_mode;
+  const int thread = 0;
+
+  float min_u = tri.uv[0].x;
+  float max_u = tri.uv[0].x;
+  float min_v = tri.uv[0].y;
+  float max_v = tri.uv[0].y;
+  for (int i = 1; i < 3; i++) {
+    min_u = std::min(min_u, tri.uv[i].x);
+    max_u = std::max(max_u, tri.uv[i].x);
+    min_v = std::min(min_v, tri.uv[i].y);
+    max_v = std::max(max_v, tri.uv[i].y);
+  }
+  if (max_u < tile->uv_origin[0] || min_u > tile->uv_origin[0] + 1.0f ||
+      max_v < tile->uv_origin[1] || min_v > tile->uv_origin[1] + 1.0f)
+  {
+    return false;
+  }
+
+  int x0 = int(std::floor((min_u - tile->uv_origin[0]) * float(tile->size[0]))) - 1;
+  int y0 = int(std::floor((min_v - tile->uv_origin[1]) * float(tile->size[1]))) - 1;
+  int x1 = int(std::ceil((max_u - tile->uv_origin[0]) * float(tile->size[0]))) + 1;
+  int y1 = int(std::ceil((max_v - tile->uv_origin[1]) * float(tile->size[1]))) + 1;
+  x0 = std::max(x0, 0);
+  y0 = std::max(y0, 0);
+  x1 = std::min(x1, tile->size[0]);
+  y1 = std::min(y1, tile->size[1]);
+  const int w = x1 - x0;
+  const int h = y1 - y0;
+  if (w <= 0 || h <= 0) {
+    return false;
+  }
+  if (w > AREA_PLANE_TRIANGLE_MAX_SIZE || h > AREA_PLANE_TRIANGLE_MAX_SIZE) {
+    return false;
+  }
+
+  ImBuf *raster_buf = IMB_allocImBuf(
+      w, h, tile->cache.is_float ? ImBufFlags::FloatData : ImBufFlags::ByteData);
+  Array<ushort> triangle_mask(w * h, ushort(0));
+  uchar *byte_data = raster_buf->byte_data_for_write();
+  float *float_data = raster_buf->float_data_for_write();
+  bool any_written = false;
+
+  for (int ly = 0; ly < h; ly++) {
+    for (int lx = 0; lx < w; lx++) {
+      const float2 uv(tile->uv_origin[0] + (float(x0 + lx) + 0.5f) / float(tile->size[0]),
+                      tile->uv_origin[1] + (float(y0 + ly) + 0.5f) / float(tile->size[1]));
+      if (!ed::sculpt_paint::area_plane_uv_pixel_inside_triangle(tri.uv, uv)) {
+        continue;
+      }
+
+      float bary[3];
+      barycentric_weights_v2(tri.uv[0], tri.uv[1], tri.uv[2], uv, bary);
+      const float3 position = tri.position[0] * bary[0] + tri.position[1] * bary[1] +
+                              tri.position[2] * bary[2];
+      float strength;
+      if (!paint_2d_area_plane_falloff(painter->brush, object_to_brush, position, &strength)) {
+        continue;
+      }
+      if (sample_alpha) {
+        strength *= paint_2d_area_sample_alpha_factor(
+            painter, alpha_local_mat, position, thread, pool);
+      }
+
+      float3 rgb;
+      paint_2d_area_sample_channel_color(painter,
+                                         cache,
+                                         painter->material_channel,
+                                         channel_local_mat,
+                                         position,
+                                         thread,
+                                         pool,
+                                         paint_mode,
+                                         rgb);
+
+      const int idx = ly * w + lx;
+      if (float_data) {
+        float *dst = float_data + idx * 4;
+        dst[0] = rgb.x;
+        dst[1] = rgb.y;
+        dst[2] = rgb.z;
+        dst[3] = 1.0f;
+      }
+      else {
+        uchar *dst = byte_data + idx * 4;
+        rgb_float_to_uchar(dst, rgb);
+        dst[3] = 255;
+      }
+      triangle_mask[idx] = ushort(65535.0f * strength);
+      any_written = true;
+    }
+  }
+
+  if (any_written) {
+    paint_2d_blend_area_buffer(
+        s, tile, x0, y0, raster_buf, triangle_mask.data(), s->blend);
+  }
+  IMB_freeImBuf(raster_buf);
+  return any_written;
+}
+
+static void paint_2d_area_plane_stroke(ImagePaintState *s,
+                                       const float uv_center[2],
+                                       const float base_size)
+{
+  BrushPainter *painter = s->painter;
+  const ed::sculpt_paint::AreaPlaneMesh &mesh = *painter->area_plane_mesh;
+
+  ed::sculpt_paint::AreaPlaneHit hit;
+  if (!mesh.hit_at_uv(float2(uv_center[0], uv_center[1]), hit)) {
+    return;
+  }
+  if (s->tiles[0].size[0] <= 0) {
+    return;
+  }
+
+  const float radius_uv = base_size / float(s->tiles[0].size[0]);
+  const float radius_object = mesh.radius_object(hit, radius_uv);
+  if (radius_object <= 1e-12f) {
+    return;
+  }
+
+  const float4x4 object_to_brush = ed::sculpt_paint::area_plane_local_mat(
+      hit.position, hit.normal, radius_object, 0.0f);
+  const float4x4 channel_local_mat = paint_2d_area_channel_local_mat(
+      painter, painter->material_channel, hit.position, hit.normal, radius_object);
+  const bool sample_alpha = painter->material_alpha_masking &&
+                            painter->material_channel != PAINT_MATERIAL_CHANNEL_ALPHA;
+  const float4x4 alpha_local_mat = sample_alpha ?
+                                       paint_2d_area_channel_local_mat(painter,
+                                                                       PAINT_MATERIAL_CHANNEL_ALPHA,
+                                                                       hit.position,
+                                                                       hit.normal,
+                                                                       radius_object) :
+                                       object_to_brush;
+
+  const Vector<int> accepted = mesh.triangles_in_sphere(object_to_brush);
+  if (accepted.is_empty()) {
+    return;
+  }
+
+  ImagePool *pool = painter->channel_sources != nullptr ? painter->channel_sources->pool() :
+                                                          nullptr;
+
+  for (int i = 0; i < s->num_tiles; i++) {
+    if (!paint_2d_ensure_tile_canvas(s, i)) {
+      continue;
+    }
+    ImagePaintTile *tile = &s->tiles[i];
+    ImBuf *ibuf = tile->canvas;
+    const bool is_data = ibuf->colorspace_is_data();
+    const bool is_float = (ibuf->float_data() != nullptr);
+    const ColorSpace *byte_colorspace = (is_float || is_data) ? nullptr :
+                                                                ibuf->byte_buffer.colorspace;
+    const bool is_srgb = (is_float || is_data) ?
+                             false :
+                             IMB_colormanagement_space_is_srgb(byte_colorspace);
+    brush_painter_2d_require_imbuf(painter->brush,
+                                   tile,
+                                   is_float,
+                                   is_data,
+                                   is_srgb,
+                                   byte_colorspace,
+                                   painter->cache_invert);
+
+    for (const int tri_index : accepted) {
+      paint_2d_area_plane_rasterize_triangle(s,
+                                             tile,
+                                             mesh.triangle(tri_index),
+                                             object_to_brush,
+                                             channel_local_mat,
+                                             alpha_local_mat,
+                                             sample_alpha,
+                                             pool);
+    }
+  }
+}
+
 static void paint_2d_stroke_single(ImagePaintState *s,
                                    const float prev_mval[2],
                                    const float mval[2],
@@ -1744,6 +2158,12 @@ static void paint_2d_stroke_single(ImagePaintState *s,
 
   ui::view2d_region_to_view(s->v2d, mval[0], mval[1], &new_uv[0], &new_uv[1]);
   ui::view2d_region_to_view(s->v2d, prev_mval[0], prev_mval[1], &old_uv[0], &old_uv[1]);
+
+  if (!eraser && paint_2d_use_area_plane(painter)) {
+    paint_2d_area_plane_stroke(s, new_uv, base_size);
+    painter->firsttouch = false;
+    return;
+  }
 
   float last_uv[2], start_uv[2];
   ui::view2d_region_to_view(s->v2d, 0.0f, 0.0f, &start_uv[0], &start_uv[1]);
@@ -2068,6 +2488,31 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     const float alpha_fallback = BKE_paint_material_channel_value(
         brush_paint, paint_mode, PAINT_MATERIAL_CHANNEL_ALPHA);
 
+    std::shared_ptr<ed::sculpt_paint::AreaPlaneMesh> area_plane_mesh;
+    if (channel_sources != nullptr) {
+      bool use_area = false;
+      for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+        const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
+            channel_sources->source(i);
+        if (source.usable && source.mtex != nullptr &&
+            source.mtex->brush_map_mode == MTEX_MAP_MODE_AREA)
+        {
+          use_area = true;
+          break;
+        }
+      }
+      if (use_area && ob != nullptr && ob->type == OB_MESH) {
+        Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+        if (depsgraph != nullptr) {
+          area_plane_mesh = std::make_shared<ed::sculpt_paint::AreaPlaneMesh>(
+              *depsgraph, *ob, "");
+          if (!area_plane_mesh->is_valid()) {
+            area_plane_mesh.reset();
+          }
+        }
+      }
+    }
+
     ImagePaintState *primary = nullptr;
     Vector<ImagePaintState *> extras;
     for (const PaintMaterialImageTarget &target : targets) {
@@ -2118,6 +2563,7 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       }
       state->painter->material_channel = target.channel;
       state->painter->channel_sources = channel_sources;
+      state->painter->area_plane_mesh = area_plane_mesh;
       state->painter->material_alpha_masking = alpha_masking;
       state->painter->material_alpha_fallback = alpha_fallback;
       if (primary == nullptr) {

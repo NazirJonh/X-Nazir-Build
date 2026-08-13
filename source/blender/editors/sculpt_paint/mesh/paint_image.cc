@@ -752,7 +752,7 @@ void ED_object_texture_paint_mode_enter_ex(Main &bmain,
 
   BKE_paint_init(&bmain, &scene, PaintMode::Texture3D);
 
-  BKE_paint_brushes_validate(&bmain, &imapaint.paint);
+  BKE_paint_brushes_validate(&bmain, &scene, &imapaint.paint);
 
   if (U.glreslimit != 0) {
     BKE_image_free_all_gputextures(&bmain);

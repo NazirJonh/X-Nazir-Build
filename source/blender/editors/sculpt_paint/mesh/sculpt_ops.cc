@@ -580,7 +580,7 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
       depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
     }
     object_sculpt_mode_enter(bmain, *depsgraph, scene, ob, false, op->reports);
-    BKE_paint_brushes_validate(&bmain, &ts.sculpt->paint);
+    BKE_paint_brushes_validate(&bmain, &scene, &ts.sculpt->paint);
 
     if (ob.mode & mode_flag) {
       Mesh *mesh = id_cast<Mesh *>(ob.data);

@@ -1469,11 +1469,11 @@ def _draw_material_paint_emission_panel(layout, context, channel):
 
 
 def draw_material_paint_visibility_popover(_context, layout, paint_mode_settings):
-    """Popover body: checkboxes for which channels appear in the Paint PBR list, plus (for the
+    """Popover body: checkboxes for which channels appear in the PBR Paint list, plus (for the
     Material Paint vertex color canvas) a second checkbox for whether each channel's painted data
     is displayed in the 3D Viewport.
 
-    The "Paint PBR list" checkbox is independent of each channel's `use` (paint-enabled) flag -
+    The "PBR Paint list" checkbox is independent of each channel's `use` (paint-enabled) flag -
     hiding a channel here does not clear its value or source texture, but it removes the channel
     from the UI and skips it during painting until shown again.
 
@@ -1508,7 +1508,7 @@ def draw_material_paint_visibility_popover(_context, layout, paint_mode_settings
 
 
 def draw_material_paint_visibility_chevron(context, layout, paint_mode_settings, *, panel=None):
-    """Chevron icon button opening the channel-visibility popover, for Paint PBR headers."""
+    """Chevron icon button opening the channel-visibility popover, for PBR Paint headers."""
     if panel is None:
         panel = "PAINT_PT_material_paint_channel_visibility"
     layout.popover(
@@ -1522,7 +1522,7 @@ def draw_material_paint_sync_toggle(layout, paint_mode_settings):
     """Icon toggle for sharing one brush between Sculpt Mode and the Image Editor.
 
     Only meaningful for the Material canvas - the other canvas sources are painted by a single
-    editor - so it is drawn next to the canvas source in the Paint PBR headers and hidden
+    editor - so it is drawn next to the canvas source in the PBR Paint headers and hidden
     elsewhere.
     """
     if paint_mode_settings.canvas_source != 'MATERIAL':

@@ -478,7 +478,7 @@ static void paint_scalar_channel(const Depsgraph &depsgraph,
  * No-op (and the cache is left empty) when \a sampler is null, matching how erase/invert and a
  * disabled Alpha channel are already handled by the caller.
  */
-static void precompute_alpha_cache(Object &ob,
+static void precompute_alpha_cache(Object & /*ob*/,
                                    const IndexMask &node_mask,
                                    const ChannelSourceSampler *sampler,
                                    const Span<float3> vert_positions,

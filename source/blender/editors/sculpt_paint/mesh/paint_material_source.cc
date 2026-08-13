@@ -20,6 +20,7 @@
 #include "BLI_index_range.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_time.h"
+#include "BLI_utildefines.h"
 
 #include <cstdio>
 
@@ -293,6 +294,7 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   const bool is_base_color = channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   const bool is_emission = channel == PAINT_MATERIAL_CHANNEL_EMISSION;
+  UNUSED_VARS_NDEBUG(is_emission);
   /* Base Color and Emission are the non-Normal channels that sample as a color; any other
    * channel reaching here would need its own fallback rather than silently reusing Base Color's.
    */
@@ -335,6 +337,7 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   const bool is_base_color = channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   const bool is_emission = channel == PAINT_MATERIAL_CHANNEL_EMISSION;
+  UNUSED_VARS_NDEBUG(is_emission);
   BLI_assert(is_normal || is_base_color || is_emission);
   const float3 fallback = is_normal ? float3(brush_paint_.channels[channel].value) :
                           is_base_color ? BKE_paint_material_base_color_get(

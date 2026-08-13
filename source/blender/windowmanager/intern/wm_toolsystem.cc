@@ -324,7 +324,7 @@ bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *bru
 
   /* Do after switching tool, since switching tool will attempt to restore the last used brush of
    * that tool (in #toolsystem_brush_activate_from_toolref_for_object_paint()). */
-  if (!BKE_paint_brush_set(paint, brush)) {
+  if (!BKE_paint_brush_set_synced(*CTX_data_scene(C), *paint, brush)) {
     return false;
   }
 
@@ -425,7 +425,7 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
     if (std::optional<AssetWeakReference> brush_asset_reference =
             WM_toolsystem_last_brush_asset_from_brush_type(scene, tref_rt->brush_type, paint_mode))
     {
-      BKE_paint_brush_set(bmain, paint, *brush_asset_reference);
+      BKE_paint_brush_set_synced(*bmain, *scene, *paint, *brush_asset_reference);
       if (tref_rt->brush_type == -1) {
         /* Update the bindings so the main brush reference matches the currently active brush. */
         toolsystem_main_brush_binding_update_from_active(paint);

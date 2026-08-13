@@ -24,6 +24,7 @@ namespace blender {
 
 enum class PaintMode : int8_t;
 struct Brush;
+struct BrushMaterialPaint;
 struct ImBuf;
 struct ImagePool;
 struct Main;
@@ -81,10 +82,45 @@ void BKE_brush_init_mesh_automasking_settings(Brush *brush);
 void BKE_brush_init_curves_sculpt_settings(Brush *brush);
 
 /**
+ * Allocates a #BrushMaterialPaint holding the default per-channel state, owned by the caller.
+ * Used both for #Brush.material_paint and for the scene-level per-brush presets, so that the
+ * defaults are defined in exactly one place.
+ */
+BrushMaterialPaint *BKE_brush_material_paint_create_default();
+
+/**
  * Lazily allocates #Brush.material_paint if null.
  * Call before reading/writing per-channel material paint values.
  */
 void BKE_brush_material_paint_ensure(Brush *brush);
+
+/**
+ * Deep-copies channels/base_color/flags/shared_source_mapping from \a src. The caller owns the
+ * result and must eventually pass it to #BKE_brush_material_paint_free.
+ *
+ * \param flag: #LIB_ID_CREATE_ / #LIB_ID_COPY_ flags, as passed to the surrounding copy
+ * function. Unless #LIB_ID_CREATE_NO_USER_REFCOUNT is set, a counted reference (#id_us_plus) is
+ * taken on every #Tex any channel's #BrushMaterialPaintChannel.source_mtex.tex or
+ * #BrushMaterialPaint.shared_source_mapping.tex points at.
+ */
+BrushMaterialPaint *BKE_brush_material_paint_copy(const BrushMaterialPaint &src, int flag);
+
+/**
+ * Frees \a material_paint. No-op if \a material_paint is null.
+ *
+ * \note Does not release the #Tex references it holds, matching #BKE_paint_free and
+ * #brush_free_data: user counts of sub-data are dropped by the owning ID's unlink pass, which
+ * reaches these #MTex through the owner's `foreach_id` callback. Decrementing here as well would
+ * double-count, and would underflow for copies made with #LIB_ID_CREATE_NO_USER_REFCOUNT.
+ */
+void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint);
+
+/**
+ * Overwrites \a dst's channels/base_color/flags/shared_source_mapping from \a src,
+ * adjusting #Tex user counts for every reference gained or dropped. \a dst == \a src
+ * (self-assignment) is a defined no-op.
+ */
+void BKE_brush_material_paint_copy_into(BrushMaterialPaint &dst, const BrushMaterialPaint &src);
 
 /**
  * Copy the brush's paint color into the Base Color channel, when the brush has material paint

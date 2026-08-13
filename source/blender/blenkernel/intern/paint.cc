@@ -653,7 +653,7 @@ bool BKE_paint_use_unified_color(const Paint *paint)
  * After changing #Paint.brush_asset_reference, call this to activate the matching brush, importing
  * it if necessary. Has no effect if #Paint.brush is set already.
  */
-static bool paint_brush_update_from_asset_reference(Main *bmain, Paint *paint)
+static bool paint_brush_update_from_asset_reference(Main *bmain, Scene *scene, Paint *paint)
 {
   /* Don't resolve this during file read, it will be done after. */
   if (bmain->is_locked_for_linking) {
@@ -680,6 +680,9 @@ static bool paint_brush_update_from_asset_reference(Main *bmain, Paint *paint)
   }
 
   paint->brush = brush;
+  if (scene != nullptr) {
+    BKE_paint_material_brush_preset_apply(*scene, *brush);
+  }
   return true;
 }
 
@@ -710,6 +713,144 @@ static AssetWeakReference *asset_reference_create_from_brush(Brush *brush)
   }
 
   return nullptr;
+}
+
+static bool material_brush_preset_matches(const PaintMaterialBrushPreset &preset,
+                                          const Brush &brush)
+{
+  if (ID_IS_LINKED(&brush.id)) {
+    if (preset.asset_ref == nullptr) {
+      return false;
+    }
+    const std::optional<AssetWeakReference> brush_ref = bke::asset_edit_weak_reference_from_id(
+        brush.id);
+    return brush_ref.has_value() && *preset.asset_ref == *brush_ref;
+  }
+  return preset.local_name != nullptr && STREQ(preset.local_name, brush.id.name + 2);
+}
+
+PaintMaterialBrushPreset *BKE_paint_material_brush_preset_find(Scene &scene, const Brush &brush)
+{
+  for (PaintMaterialBrushPreset &preset :
+       scene.toolsettings->paint_mode.material_paint_brush_presets)
+  {
+    if (preset.asset_ref == nullptr && preset.local_name == nullptr) {
+      /* Malformed node (hand-edited or corrupted file); never matches. */
+      continue;
+    }
+    if (material_brush_preset_matches(preset, brush)) {
+      return &preset;
+    }
+  }
+  return nullptr;
+}
+
+PaintMaterialBrushPreset *BKE_paint_material_brush_preset_ensure(Scene &scene, const Brush &brush)
+{
+  if (PaintMaterialBrushPreset *existing = BKE_paint_material_brush_preset_find(scene, brush)) {
+    return existing;
+  }
+
+  PaintMaterialBrushPreset *preset = MEM_new<PaintMaterialBrushPreset>(__func__);
+  if (ID_IS_LINKED(&brush.id)) {
+    if (const std::optional<AssetWeakReference> brush_ref = bke::asset_edit_weak_reference_from_id(
+            brush.id))
+    {
+      preset->asset_ref = MEM_new<AssetWeakReference>(__func__, *brush_ref);
+    }
+  }
+  else {
+    preset->local_name = BLI_strdup(brush.id.name + 2);
+  }
+
+  if (brush.material_paint != nullptr) {
+    preset->material_paint = BKE_brush_material_paint_copy(*brush.material_paint, 0);
+  }
+  else {
+    preset->material_paint = BKE_brush_material_paint_create_default();
+  }
+
+  BLI_addtail(&scene.toolsettings->paint_mode.material_paint_brush_presets, preset);
+  return preset;
+}
+
+void BKE_paint_material_brush_preset_apply(Scene &scene, Brush &brush)
+{
+  PaintMaterialBrushPreset *preset = BKE_paint_material_brush_preset_ensure(scene, brush);
+  BKE_brush_material_paint_ensure(&brush);
+  BKE_brush_material_paint_copy_into(*brush.material_paint, *preset->material_paint);
+}
+
+void BKE_paint_material_brush_preset_snapshot(Scene &scene, const Brush &brush)
+{
+  if (brush.material_paint == nullptr) {
+    return;
+  }
+  PaintMaterialBrushPreset *preset = BKE_paint_material_brush_preset_ensure(scene, brush);
+  BKE_brush_material_paint_copy_into(*preset->material_paint, *brush.material_paint);
+}
+
+void BKE_paint_material_brush_preset_free(PaintMaterialBrushPreset *preset)
+{
+  if (preset == nullptr) {
+    return;
+  }
+  BKE_brush_material_paint_free(preset->material_paint);
+  MEM_delete(preset->asset_ref);
+  MEM_delete(preset->local_name);
+  MEM_delete(preset);
+}
+
+void BKE_paint_material_brush_preset_remove(Scene &scene, const Brush &brush)
+{
+  PaintMaterialBrushPreset *preset = BKE_paint_material_brush_preset_find(scene, brush);
+  if (preset == nullptr) {
+    return;
+  }
+  BLI_remlink(&scene.toolsettings->paint_mode.material_paint_brush_presets, preset);
+  BKE_paint_material_brush_preset_free(preset);
+}
+
+/**
+ * Drops presets that can no longer belong to any brush: malformed nodes, and local-brush presets
+ * whose brush is gone from \a bmain. Asset presets are kept even when the asset brush is not
+ * currently loaded into \a bmain, since not being loaded says nothing about the asset still
+ * existing on disk.
+ */
+static void paint_material_brush_presets_purge_unused(Main *bmain, Scene &scene)
+{
+  ListBaseT<PaintMaterialBrushPreset> &presets =
+      scene.toolsettings->paint_mode.material_paint_brush_presets;
+  for (PaintMaterialBrushPreset &preset : presets.items_mutable()) {
+    const bool is_malformed = preset.asset_ref == nullptr && preset.local_name == nullptr;
+    /* Passing null for the library restricts the lookup to local IDs, which is what a
+     * #PaintMaterialBrushPreset.local_name key refers to. */
+    const bool is_orphaned_local = preset.local_name != nullptr &&
+                                   BKE_libblock_find_name(
+                                       bmain, ID_BR, preset.local_name, nullptr) == nullptr;
+    if (is_malformed || is_orphaned_local) {
+      BLI_remlink(&presets, &preset);
+      BKE_paint_material_brush_preset_free(&preset);
+    }
+  }
+}
+
+void BKE_paint_material_brush_presets_prepare_for_save(Main *bmain)
+{
+  for (Scene &scene : bmain->scenes) {
+    if (scene.toolsettings == nullptr) {
+      continue;
+    }
+    if (scene.toolsettings->sculpt != nullptr) {
+      if (Brush *brush = scene.toolsettings->sculpt->paint.brush) {
+        BKE_paint_material_brush_preset_snapshot(scene, *brush);
+      }
+    }
+    if (Brush *brush = scene.toolsettings->imapaint.paint.brush) {
+      BKE_paint_material_brush_preset_snapshot(scene, *brush);
+    }
+    paint_material_brush_presets_purge_unused(bmain, scene);
+  }
 }
 
 bool BKE_paint_brush_set(Main *bmain,
@@ -763,6 +904,44 @@ bool BKE_paint_brush_set(Paint *paint, Brush *brush)
 
   BKE_paint_invalidate_overlay_all();
 
+  return true;
+}
+
+bool BKE_paint_brush_set_synced(Scene &scene, Paint &paint, Brush *brush)
+{
+  Brush *previous = paint.brush;
+  if (!BKE_paint_brush_set(&paint, brush)) {
+    return false;
+  }
+  if (previous != brush) {
+    if (previous != nullptr) {
+      BKE_paint_material_brush_preset_snapshot(scene, *previous);
+    }
+    if (brush != nullptr) {
+      BKE_paint_material_brush_preset_apply(scene, *brush);
+    }
+  }
+  return true;
+}
+
+bool BKE_paint_brush_set_synced(Main &bmain,
+                                Scene &scene,
+                                Paint &paint,
+                                const AssetWeakReference &brush_asset_reference)
+{
+  Brush *previous = paint.brush;
+  if (!BKE_paint_brush_set(&bmain, &paint, brush_asset_reference)) {
+    return false;
+  }
+  Brush *current = paint.brush;
+  if (previous != current) {
+    if (previous != nullptr) {
+      BKE_paint_material_brush_preset_snapshot(scene, *previous);
+    }
+    if (current != nullptr) {
+      BKE_paint_material_brush_preset_apply(scene, *current);
+    }
+  }
   return true;
 }
 
@@ -1111,16 +1290,16 @@ void BKE_paint_brushes_set_default_references(ToolSettings *ts)
   paint_brush_set_default_reference(&ts->imapaint.paint);
 }
 
-bool BKE_paint_brush_set_default(Main *bmain, Paint *paint)
+bool BKE_paint_brush_set_default(Main *bmain, Scene *scene, Paint *paint)
 {
   paint_brush_set_default_reference(paint, true);
-  return paint_brush_update_from_asset_reference(bmain, paint);
+  return paint_brush_update_from_asset_reference(bmain, scene, paint);
 }
 
 bool BKE_paint_brush_set_essentials(Main *bmain, Paint *paint, const char *name)
 {
   paint_brush_set_essentials_reference(paint, name);
-  return paint_brush_update_from_asset_reference(bmain, paint);
+  return paint_brush_update_from_asset_reference(bmain, nullptr, paint);
 }
 
 void BKE_paint_previous_asset_reference_set(Paint *paint,
@@ -1137,14 +1316,14 @@ void BKE_paint_previous_asset_reference_clear(Paint *paint)
   MEM_SAFE_DELETE(paint->runtime->previous_active_brush_reference);
 }
 
-void BKE_paint_brushes_validate(Main *bmain, Paint *paint)
+void BKE_paint_brushes_validate(Main *bmain, Scene *scene, Paint *paint)
 {
   /* Clear brush with invalid mode. Unclear if this can still happen,
    * but kept from old paint tool-slots code. */
   Brush *brush = BKE_paint_brush(paint);
   if (brush && (paint->runtime->ob_mode & brush->ob_mode) == 0) {
     BKE_paint_brush_set(paint, nullptr);
-    BKE_paint_brush_set_default(bmain, paint);
+    BKE_paint_brush_set_default(bmain, scene, paint);
   }
 }
 
@@ -1545,14 +1724,18 @@ bool BKE_paint_ensure(ToolSettings *ts, Paint **r_paint)
   return false;
 }
 
-void BKE_paint_brushes_ensure(Main *bmain, Paint *paint)
+void BKE_paint_brushes_ensure(Main *bmain, Scene *scene, Paint *paint)
 {
   if (paint->brush_asset_reference) {
-    paint_brush_update_from_asset_reference(bmain, paint);
+    paint_brush_update_from_asset_reference(bmain, scene, paint);
   }
 
   if (!paint->brush) {
-    BKE_paint_brush_set_default(bmain, paint);
+    BKE_paint_brush_set_default(bmain, scene, paint);
+  }
+
+  if (scene != nullptr && paint->brush != nullptr) {
+    BKE_paint_material_brush_preset_apply(*scene, *paint->brush);
   }
 }
 
@@ -1571,7 +1754,7 @@ void BKE_paint_init(Main *bmain, Scene *sce, PaintMode mode, const bool ensure_b
   Paint *paint = BKE_paint_get_active_from_paintmode(sce, mode);
 
   if (ensure_brushes) {
-    BKE_paint_brushes_ensure(bmain, paint);
+    BKE_paint_brushes_ensure(bmain, sce, paint);
   }
 
   if (!paint->cavity_curve) {
@@ -3786,7 +3969,7 @@ void BKE_paint_material_brush_sync(Scene *scene, Paint *source)
     BKE_brush_tag_unsaved_changes(src_brush);
   }
 
-  if (!BKE_paint_brush_set(dst_paint, src_brush)) {
+  if (!BKE_paint_brush_set_synced(*scene, *dst_paint, src_brush)) {
     /* The brush stays unusable in the receiving mode, so the two editors would keep different
      * brushes. Mirroring the remaining settings on top of that would only obscure the mismatch. */
     return;

@@ -46,6 +46,7 @@
 #include "BLI_math_base.h"
 #include "BLI_math_rotation.h"
 #include "BLI_path_utils.hh"
+#include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
 #include "BLI_threads.h"
@@ -58,7 +59,9 @@
 #include "BKE_action.hh"
 #include "BKE_anim_data.hh"
 #include "BKE_animsys.h"
+#include "BKE_asset.hh"
 #include "BKE_bpath.hh"
+#include "BKE_brush.hh"
 #include "BKE_callbacks.hh"
 #include "BKE_collection.hh"
 #include "BKE_colortools.hh"
@@ -595,6 +598,36 @@ static void scene_foreach_paint(LibraryForeachIDData *data,
                                                     IDWALK_CB_USER);
 }
 
+/**
+ * ID pointers of one #MTex owned by a #PaintMaterialBrushPreset, the scene-side equivalent of
+ * #BKE_texture_mtex_foreach_id.
+ *
+ * In the 'undo_preserve' case there is no counterpart #MTex in the newly read tool-settings to
+ * pair \a mtex up with (the preset list has no fixed length), so the same address is passed as
+ * both the current and the old pointer: #SCENE_FOREACH_UNDO_RESTORE then resolves the pointer to
+ * the ID's new address, or clears it when the ID is gone from the newly read Main.
+ */
+static void scene_foreach_material_paint_mtex(LibraryForeachIDData *data,
+                                              MTex *mtex,
+                                              const bool do_undo_restore,
+                                              BlendLibReader *reader)
+{
+  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                    &mtex->object,
+                                                    do_undo_restore,
+                                                    SCENE_FOREACH_UNDO_RESTORE,
+                                                    reader,
+                                                    &mtex->object,
+                                                    IDWALK_CB_NOP);
+  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                    &mtex->tex,
+                                                    do_undo_restore,
+                                                    SCENE_FOREACH_UNDO_RESTORE,
+                                                    reader,
+                                                    &mtex->tex,
+                                                    IDWALK_CB_USER);
+}
+
 static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                        ToolSettings *toolsett,
                                        const bool do_undo_restore,
@@ -772,6 +805,23 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
       reader,
       &toolsett_old->gp_sculpt.guide.reference_object,
       IDWALK_CB_NOP);
+
+  /* PBR Paint presets are a variable-length list, so unlike every pointer above there is no
+   * reliable way to pair a node up with its counterpart in the other tool-settings. Only the list
+   * that survives the swap in #scene_undo_preserve needs processing. */
+  ToolSettings *toolsett_presets = do_undo_restore ? toolsett_old : toolsett;
+  for (PaintMaterialBrushPreset &preset :
+       toolsett_presets->paint_mode.material_paint_brush_presets)
+  {
+    if (preset.material_paint == nullptr) {
+      continue;
+    }
+    for (BrushMaterialPaintChannel &channel : preset.material_paint->channels) {
+      scene_foreach_material_paint_mtex(data, &channel.source_mtex, do_undo_restore, reader);
+    }
+    scene_foreach_material_paint_mtex(
+        data, &preset.material_paint->shared_source_mapping, do_undo_restore, reader);
+  }
 }
 
 #undef BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER
@@ -1231,6 +1281,19 @@ static void scene_blend_write(BlendWriter *writer, ID *id, const void *id_addres
     writer->write_struct(ts->sequencer_tool_settings);
   }
 
+  writer->write_struct_list(&ts->paint_mode.material_paint_brush_presets);
+  for (PaintMaterialBrushPreset &preset : ts->paint_mode.material_paint_brush_presets) {
+    if (preset.asset_ref) {
+      BKE_asset_weak_reference_write(writer, preset.asset_ref);
+    }
+    if (preset.local_name) {
+      writer->write_string(preset.local_name);
+    }
+    if (preset.material_paint) {
+      writer->write_struct(preset.material_paint);
+    }
+  }
+
   BKE_paint_blend_write(writer, &ts->imapaint.paint);
 
   Editing *ed = sce->ed;
@@ -1438,6 +1501,20 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
 
     BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.canvas_image);
     BLO_read_struct(reader, SequencerToolSettings, &sce->toolsettings->sequencer_tool_settings);
+
+    BLO_read_struct_list(reader,
+                         PaintMaterialBrushPreset,
+                         &sce->toolsettings->paint_mode.material_paint_brush_presets);
+    for (PaintMaterialBrushPreset &preset :
+         sce->toolsettings->paint_mode.material_paint_brush_presets)
+    {
+      BLO_read_struct(reader, AssetWeakReference, &preset.asset_ref);
+      if (preset.asset_ref) {
+        BKE_asset_weak_reference_read(reader, preset.asset_ref);
+      }
+      BLO_read_string(reader, &preset.local_name);
+      BLO_read_struct(reader, BrushMaterialPaint, &preset.material_paint);
+    }
   }
 
   if (sce->ed) {
@@ -1778,6 +1855,24 @@ ToolSettings *BKE_toolsettings_copy(ToolSettings *toolsettings, const int flag)
       toolsettings->custom_bevel_profile_preset);
 
   ts->sequencer_tool_settings = seq::tool_settings_copy(toolsettings->sequencer_tool_settings);
+
+  ts->paint_mode.material_paint_brush_presets.clear_no_delete();
+  for (const PaintMaterialBrushPreset &src_preset :
+       toolsettings->paint_mode.material_paint_brush_presets)
+  {
+    PaintMaterialBrushPreset *dst_preset = MEM_new<PaintMaterialBrushPreset>(__func__);
+    if (src_preset.asset_ref) {
+      dst_preset->asset_ref = MEM_new<AssetWeakReference>(__func__, *src_preset.asset_ref);
+    }
+    if (src_preset.local_name) {
+      dst_preset->local_name = BLI_strdup(src_preset.local_name);
+    }
+    if (src_preset.material_paint) {
+      dst_preset->material_paint = BKE_brush_material_paint_copy(*src_preset.material_paint, flag);
+    }
+    BLI_addtail(&ts->paint_mode.material_paint_brush_presets, dst_preset);
+  }
+
   return ts;
 }
 
@@ -1860,6 +1955,13 @@ void BKE_toolsettings_free(ToolSettings *toolsettings)
   if (toolsettings->sequencer_tool_settings) {
     seq::tool_settings_free(toolsettings->sequencer_tool_settings);
   }
+
+  for (PaintMaterialBrushPreset &preset :
+       toolsettings->paint_mode.material_paint_brush_presets.items_mutable())
+  {
+    BKE_paint_material_brush_preset_free(&preset);
+  }
+  toolsettings->paint_mode.material_paint_brush_presets.clear_no_delete();
 
   MEM_delete(toolsettings);
 }

@@ -615,9 +615,14 @@ static wmOperatorStatus brush_asset_delete_exec(bContext *C, wmOperator *op)
                                        paint->brush_asset_reference->asset_library_identifier) :
                                    nullptr;
 
+  Scene *scene = CTX_data_scene(C);
+  /* Drop the brush's PBR Paint preset before the brush is gone: afterwards it could no longer be
+   * matched, and would keep its source texture references alive for the rest of the session. */
+  BKE_paint_material_brush_preset_remove(*scene, *brush);
+
   bke::asset_edit_id_delete(*bmain, brush->id, *op->reports);
 
-  BKE_paint_brush_set_default(bmain, paint);
+  BKE_paint_brush_set_default(bmain, scene, paint);
 
   if (library) {
     asset::refresh_asset_library(C, *library);
@@ -774,12 +779,12 @@ static wmOperatorStatus brush_asset_revert_exec(bContext *C, wmOperator *op)
 
   if (ID *reverted_id = bke::asset_edit_id_revert(*bmain, brush->id, *op->reports)) {
     BLI_assert(GS(reverted_id->name) == ID_BR);
-    BKE_paint_brush_set(paint, reinterpret_cast<Brush *>(reverted_id));
+    BKE_paint_brush_set_synced(*CTX_data_scene(C), *paint, reinterpret_cast<Brush *>(reverted_id));
   }
   else {
     /* bke::asset_edit_id_revert() deleted the brush for sure, even on failure. Fall back to the
      * default. */
-    BKE_paint_brush_set_default(bmain, paint);
+    BKE_paint_brush_set_default(bmain, CTX_data_scene(C), paint);
   }
 
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, nullptr);

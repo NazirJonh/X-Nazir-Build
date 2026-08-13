@@ -344,7 +344,7 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
 
     def draw_header(self, context):
         layout = self.layout
-        layout.label(text="Paint PBR")
+        layout.label(text="PBR Paint")
         row = layout.row(align=True)
         row.prop(context.tool_settings.paint_mode, "canvas_source", text="")
         draw_material_paint_sync_toggle(row, context.tool_settings.paint_mode)
@@ -716,7 +716,7 @@ class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
         pass
 
     def draw_header(self, context):
-        self.bl_label = iface_("Paint PBR")
+        self.bl_label = iface_("PBR Paint")
 
 
 class VIEW3D_PT_slots_color_attributes(Panel):

@@ -816,17 +816,19 @@ void BKE_brush_init_curves_sculpt_settings(Brush *brush)
   settings->curve_parameter_falloff = BKE_curvemapping_add(1, 0.0f, 0.0f, 1.0f, 1.0f);
 }
 
-void BKE_brush_material_paint_ensure(Brush *brush)
+BrushMaterialPaint *BKE_brush_material_paint_create_default()
 {
-  if (brush->material_paint != nullptr) {
-    return;
-  }
   BrushMaterialPaint *settings = MEM_new<BrushMaterialPaint>(__func__);
-  /* Match former scene-level #PaintModeSettings defaults. */
+  /* Match former scene-level #PaintModeSettings defaults. Base Color, Metallic, Roughness and
+   * Normal are the channels a PBR material is almost always painted through, so they start
+   * enabled; the rest stay opt-in. */
+  settings->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].use = 1;
   settings->channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
   settings->channels[PAINT_MATERIAL_CHANNEL_METALLIC].value[0] = 0.5f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].use = 1;
   settings->channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].value[0] = 0.5f;
   settings->channels[PAINT_MATERIAL_CHANNEL_SPECULAR].value[0] = 0.5f;
+  settings->channels[PAINT_MATERIAL_CHANNEL_NORMAL].use = 1;
   settings->channels[PAINT_MATERIAL_CHANNEL_NORMAL].value[0] = 0.0f;
   settings->channels[PAINT_MATERIAL_CHANNEL_NORMAL].value[1] = 0.0f;
   settings->channels[PAINT_MATERIAL_CHANNEL_NORMAL].value[2] = 1.0f;
@@ -846,7 +848,71 @@ void BKE_brush_material_paint_ensure(Brush *brush)
   settings->use_alpha_map = 0;
   settings->use_alpha_stroke_mask = 1;
   settings->shared_source_mapping.brush_map_mode = MTEX_MAP_MODE_AREA;
-  brush->material_paint = settings;
+  return settings;
+}
+
+void BKE_brush_material_paint_ensure(Brush *brush)
+{
+  if (brush->material_paint != nullptr) {
+    return;
+  }
+  brush->material_paint = BKE_brush_material_paint_create_default();
+}
+
+/** Adjusts the counted reference on \a mtex's #MTex.tex by \a delta (+1 or -1). No-op if
+ *  #MTex.tex is null. */
+static void material_paint_mtex_tex_user_adjust(MTex &mtex, const int delta)
+{
+  if (mtex.tex == nullptr) {
+    return;
+  }
+  BLI_assert(ELEM(delta, 1, -1));
+  if (delta > 0) {
+    id_us_plus(&mtex.tex->id);
+  }
+  else {
+    id_us_min(&mtex.tex->id);
+  }
+}
+
+/** Runs \a material_paint_mtex_tex_user_adjust over every #MTex embedded in \a material_paint:
+ *  each channel's #BrushMaterialPaintChannel.source_mtex and
+ *  #BrushMaterialPaint.shared_source_mapping. */
+static void material_paint_all_mtex_user_adjust(BrushMaterialPaint &material_paint,
+                                                const int delta)
+{
+  for (BrushMaterialPaintChannel &channel : material_paint.channels) {
+    material_paint_mtex_tex_user_adjust(channel.source_mtex, delta);
+  }
+  /* #BrushMaterialPaint.shared_source_mapping.tex is documented as always null (see
+   * DNA_brush_types.h), but adjust it defensively rather than assume the invariant holds for
+   * every future caller — the adjust helper is already a no-op when tex is null, so this
+   * costs nothing when the invariant does hold. */
+  material_paint_mtex_tex_user_adjust(material_paint.shared_source_mapping, delta);
+}
+
+BrushMaterialPaint *BKE_brush_material_paint_copy(const BrushMaterialPaint &src, const int flag)
+{
+  BrushMaterialPaint *dst = MEM_new<BrushMaterialPaint>(__func__, dna::shallow_copy(src));
+  if ((flag & LIB_ID_CREATE_NO_USER_REFCOUNT) == 0) {
+    material_paint_all_mtex_user_adjust(*dst, 1);
+  }
+  return dst;
+}
+
+void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint)
+{
+  MEM_SAFE_DELETE(material_paint);
+}
+
+void BKE_brush_material_paint_copy_into(BrushMaterialPaint &dst, const BrushMaterialPaint &src)
+{
+  if (&dst == &src) {
+    return;
+  }
+  material_paint_all_mtex_user_adjust(dst, -1);
+  dst = dna::shallow_copy(src);
+  material_paint_all_mtex_user_adjust(dst, 1);
 }
 
 /**

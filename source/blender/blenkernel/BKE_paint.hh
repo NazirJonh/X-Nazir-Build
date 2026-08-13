@@ -229,7 +229,22 @@ bool BKE_paint_brush_set(Paint *paint, Brush *brush);
 bool BKE_paint_brush_set(Main *bmain,
                          Paint *paint,
                          const AssetWeakReference &brush_asset_reference);
-bool BKE_paint_brush_set_default(Main *bmain, Paint *paint);
+/**
+ * Like #BKE_paint_brush_set(Paint*, Brush*), but also snapshots the outgoing brush's PBR
+ * Paint state into \a scene's preset list before switching, and applies the incoming
+ * brush's matching preset after. Use this at genuine user-facing brush-activation sites
+ * (tool system, brush-asset revert, cross-editor brush sync); the plain
+ * #BKE_paint_brush_set() remains the right call for transient Sculpt/Grease-Pencil
+ * modifier-key brush toggles, which never touch material-paint-capable brushes.
+ */
+bool BKE_paint_brush_set_synced(Scene &scene, Paint &paint, Brush *brush);
+
+/** Asset-reference-taking counterpart of #BKE_paint_brush_set_synced(Scene&, Paint&, Brush*). */
+bool BKE_paint_brush_set_synced(Main &bmain,
+                                Scene &scene,
+                                Paint &paint,
+                                const AssetWeakReference &brush_asset_reference);
+bool BKE_paint_brush_set_default(Main *bmain, Scene *scene, Paint *paint);
 bool BKE_paint_brush_set_essentials(Main *bmain, Paint *paint, const char *name);
 void BKE_paint_previous_asset_reference_set(Paint *paint,
                                             AssetWeakReference &&asset_weak_reference);
@@ -248,8 +263,8 @@ void BKE_paint_brushes_set_default_references(ToolSettings *ts);
  *
  * Also handles the active eraser brush asset.
  */
-void BKE_paint_brushes_ensure(Main *bmain, Paint *paint);
-void BKE_paint_brushes_validate(Main *bmain, Paint *paint);
+void BKE_paint_brushes_ensure(Main *bmain, Scene *scene, Paint *paint);
+void BKE_paint_brushes_validate(Main *bmain, Scene *scene, Paint *paint);
 
 /* Secondary eraser brush. */
 
@@ -870,6 +885,43 @@ bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
  */
 float2 BKE_paint_material_channel_range(const PaintModeSettings &settings,
                                         eMaterialPaintChannel channel);
+
+/** Finds the preset in \a scene matching \a brush's identity, or null if none exists yet.
+ *  See #PaintMaterialBrushPreset for the matching rule. */
+PaintMaterialBrushPreset *BKE_paint_material_brush_preset_find(Scene &scene, const Brush &brush);
+
+/** Like #BKE_paint_material_brush_preset_find, but creates and appends a new preset —
+ *  seeded from \a brush's current #Brush.material_paint state, or from
+ *  #BKE_brush_material_paint_ensure's defaults if \a brush has none yet — when none is
+ *  found. Never returns null. */
+PaintMaterialBrushPreset *BKE_paint_material_brush_preset_ensure(Scene &scene, const Brush &brush);
+
+/** Overwrites \a brush's #Brush.material_paint (creating it via
+ *  #BKE_brush_material_paint_ensure if needed) from the preset in \a scene matching \a brush's
+ *  identity, creating that preset (seeded from \a brush's current state) if none exists yet. */
+void BKE_paint_material_brush_preset_apply(Scene &scene, Brush &brush);
+
+/** Overwrites the preset in \a scene matching \a brush's identity (creating it if needed) from
+ *  \a brush's current #Brush.material_paint. No-op — does not create or touch any preset — if
+ *  \a brush.material_paint is null. */
+void BKE_paint_material_brush_preset_snapshot(Scene &scene, const Brush &brush);
+
+/** Frees \a preset and everything it owns. No-op if \a preset is null. The caller is responsible
+ *  for unlinking it from its list first. */
+void BKE_paint_material_brush_preset_free(PaintMaterialBrushPreset *preset);
+
+/** Removes and frees the preset in \a scene matching \a brush's identity, if any. Call when a
+ *  brush is deleted, so its preset does not outlive it and keep #Tex references alive. */
+void BKE_paint_material_brush_preset_remove(Scene &scene, const Brush &brush);
+
+/**
+ * Brings every Scene's preset list in \a bmain into the state that should be written to disk:
+ * snapshots the currently active brush of every material-paint-capable Paint (Sculpt, Image
+ * Paint) — so edits made without ever switching away from the active brush are not lost — and
+ * drops presets that can no longer belong to any brush. Intended to run immediately before a
+ * blend-file write, alongside #ed::asset::pre_save_assets().
+ */
+void BKE_paint_material_brush_presets_prepare_for_save(Main *bmain);
 
 /**
  * The #Paint that should mirror \a source while brush sync is active, or null when nothing should

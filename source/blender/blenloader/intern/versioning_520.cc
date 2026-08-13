@@ -626,38 +626,26 @@ static void version_material_paint_channel_alpha_ao_emission_defaults(Main &bmai
  */
 static void version_material_paint_channel_visibility_defaults(Main &bmain)
 {
-  /* BASE_COLOR, METALLIC, ROUGHNESS, NORMAL only; other channels are hidden until enabled
-   * in the Visible Channels popover. CUSTOM is not part of this bitmask. */
-  const int default_visible = (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
-                              (1 << PAINT_MATERIAL_CHANNEL_METALLIC) |
-                              (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
-                              (1 << PAINT_MATERIAL_CHANNEL_NORMAL);
   for (Scene &scene : bmain.scenes) {
     ToolSettings *ts = scene.toolsettings;
     if (ts == nullptr) {
       continue;
     }
-    ts->paint_mode.visible_material_channels = default_visible;
+    ts->paint_mode.visible_material_channels = PAINT_MATERIAL_CHANNELS_VISIBLE_DEFAULT;
   }
 }
 
 static void version_material_paint_channel_shader_visibility_defaults(Main &bmain)
 {
-  /* Every vertex-storable channel visible by default, matching the shading behavior before this
-   * bitmask existed (display was driven purely by whether the channel's attribute was present).
-   * CUSTOM has no shader representation and is not part of this bitmask. */
-  const int default_shader_visible = (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
-                                     (1 << PAINT_MATERIAL_CHANNEL_METALLIC) |
-                                     (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
-                                     (1 << PAINT_MATERIAL_CHANNEL_SPECULAR) |
-                                     (1 << PAINT_MATERIAL_CHANNEL_AO) |
-                                     (1 << PAINT_MATERIAL_CHANNEL_ALPHA);
+  /* The default matches the shading behavior before this bitmask existed, where display was
+   * driven purely by whether the channel's attribute was present. */
   for (Scene &scene : bmain.scenes) {
     ToolSettings *ts = scene.toolsettings;
     if (ts == nullptr) {
       continue;
     }
-    ts->paint_mode.material_shader_visible_channels = default_shader_visible;
+    ts->paint_mode.material_shader_visible_channels =
+        PAINT_MATERIAL_CHANNELS_SHADER_VISIBLE_DEFAULT;
   }
 }
 
@@ -675,6 +663,31 @@ static void version_material_paint_brush_sync_defaults(Main &bmain)
       continue;
     }
     ts->paint_mode.material_paint_flag |= PAINT_MATERIAL_BRUSH_SYNC;
+  }
+}
+
+/**
+ * Both visibility bitmasks only gained a non-zero DNA default in subversion 57; scenes created by
+ * an in-between build were written with zero, which the UI reads as "every channel hidden". Unlike
+ * the two functions above this one cannot overwrite unconditionally, because by 57 a zero may also
+ * be a deliberate all-hidden choice - so an all-zero mask is restored to the default and any other
+ * value is left alone. Only ever runs on pre-57 files, where a deliberate all-hidden choice was
+ * not yet expressible.
+ */
+static void version_material_paint_channel_visibility_fix_zeros(Main &bmain)
+{
+  for (Scene &scene : bmain.scenes) {
+    ToolSettings *ts = scene.toolsettings;
+    if (ts == nullptr) {
+      continue;
+    }
+    if (ts->paint_mode.visible_material_channels == 0) {
+      ts->paint_mode.visible_material_channels = PAINT_MATERIAL_CHANNELS_VISIBLE_DEFAULT;
+    }
+    if (ts->paint_mode.material_shader_visible_channels == 0) {
+      ts->paint_mode.material_shader_visible_channels =
+          PAINT_MATERIAL_CHANNELS_SHADER_VISIBLE_DEFAULT;
+    }
   }
 }
 
@@ -1146,6 +1159,10 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 56)) {
     version_material_paint_brush_sync_defaults(*bmain);
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 57)) {
+    version_material_paint_channel_visibility_fix_zeros(*bmain);
   }
 
   /**

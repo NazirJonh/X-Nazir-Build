@@ -89,6 +89,7 @@
 #include "BKE_node.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_packedFile.hh"
+#include "BKE_paint.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
@@ -2150,6 +2151,7 @@ static bool wm_file_write(bContext *C,
   }
 
   ed::asset::pre_save_assets(bmain);
+  BKE_paint_material_brush_presets_prepare_for_save(bmain);
 
   /* Enforce full override check/generation on file save. */
   BKE_lib_override_library_main_operations_create(bmain, true, nullptr);
@@ -2335,6 +2337,9 @@ bool WM_autosave_write(wmWindowManager *wm, Main *bmain, ReportList *reports)
 {
   ED_editors_flush_edits(bmain);
   ED_image_internal_autosave_flush(bmain);
+  /* Auto-save does not go through #wm_file_write, so the presets need bringing up to date here as
+   * well - otherwise a recovered file would lose PBR Paint edits made to the active brush. */
+  BKE_paint_material_brush_presets_prepare_for_save(bmain);
 
   char filepath[FILE_MAX];
   wm_autosave_location(filepath);
@@ -2529,6 +2534,7 @@ static wmOperatorStatus wm_homefile_write_exec(bContext *C, wmOperator *op)
    * Runs at the end of this function, don't return beforehand. */
   BKE_callback_exec_string(bmain, "", BKE_CB_EVT_SAVE_PRE);
   ed::asset::pre_save_assets(bmain);
+  BKE_paint_material_brush_presets_prepare_for_save(bmain);
 
   /* Check current window and close it if temp. */
   if (win && WM_window_is_temp_screen(win)) {

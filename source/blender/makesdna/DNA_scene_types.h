@@ -38,6 +38,7 @@ namespace blender {
 
 struct AnimData;
 struct Brush;
+struct BrushMaterialPaint;
 struct Collection;
 struct CurveMapping;
 struct CurveProfile;
@@ -1228,6 +1229,25 @@ enum eMaterialPaintChannel : int8_t {
 /** Number of #eMaterialPaintChannel values. Sizes the per-channel arrays in DNA. */
 #define PAINT_MATERIAL_CHANNEL_NUM 10
 
+/**
+ * Default value of #PaintModeSettings.visible_material_channels: the channels a PBR material is
+ * almost always painted through. Also used as the RNA property default, so that both agree.
+ */
+#define PAINT_MATERIAL_CHANNELS_VISIBLE_DEFAULT \
+  ((1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) | (1 << PAINT_MATERIAL_CHANNEL_METALLIC) | \
+   (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) | (1 << PAINT_MATERIAL_CHANNEL_NORMAL))
+
+/**
+ * Default value of #PaintModeSettings.material_shader_visible_channels. Wider than
+ * #PAINT_MATERIAL_CHANNELS_VISIBLE_DEFAULT because a channel that is not currently painted can
+ * still hold data worth displaying; Normal is excluded as the vertex color canvas has no
+ * tangent-space normal representation.
+ */
+#define PAINT_MATERIAL_CHANNELS_SHADER_VISIBLE_DEFAULT \
+  ((1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) | (1 << PAINT_MATERIAL_CHANNEL_METALLIC) | \
+   (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS) | (1 << PAINT_MATERIAL_CHANNEL_SPECULAR) | \
+   (1 << PAINT_MATERIAL_CHANNEL_AO) | (1 << PAINT_MATERIAL_CHANNEL_ALPHA))
+
 struct MeshAutomaskingSettings {
   DNA_DEFINE_CXX_METHODS(MeshAutomaskingSettings)
 
@@ -1376,6 +1396,47 @@ struct ImagePaintSettings {
 /** \name Paint Mode Settings
  * \{ */
 
+/**
+ * One brush's persisted PBR Paint channel state: which channels are enabled, their
+ * values/blend modes, and any source textures, plus the shared texture mapping and base
+ * color. Authoritative storage for this data — #Brush.material_paint is a synced runtime
+ * cache of whichever preset matches the currently active brush, refreshed at brush
+ * activation/deactivation and before file save. See
+ * #BKE_paint_material_brush_preset_find() / #_ensure() / #BKE_paint_material_brush_preset_apply()
+ * / #_snapshot().
+ *
+ * Exists because #Brush is frequently a linked Brush Asset (remains #ID_IS_LINKED even
+ * though marked editable), and a normal file save only writes a stub for linked IDs — so
+ * #Brush.material_paint on an asset brush is not actually persisted by a normal project
+ * save unless the user separately invokes #BRUSH_OT_asset_save. Storing the data on the
+ * always-local #Scene instead means it round-trips through a normal save regardless of
+ * brush locality.
+ */
+struct PaintMaterialBrushPreset {
+  PaintMaterialBrushPreset *next, *prev;
+
+  /**
+   * Identifies which brush this preset belongs to. Exactly one of the two is set:
+   * #asset_ref for a brush asset (#ID_IS_LINKED brush; compared by #AssetWeakReference's
+   * own #operator==), #local_name for a local (non-asset) Brush ID (compared against
+   * #ID.name + 2 with #STREQ). A node with both null is malformed (can only happen from a
+   * hand-edited or corrupted file) and must be skipped, never matched, by lookup code.
+   */
+  struct AssetWeakReference *asset_ref;
+  char *local_name;
+
+  /**
+   * Owned. Same type and copy/free contract as #Brush.material_paint, but — unlike that
+   * field — never benefits from an outer #BKE_id_copy() pipeline to fix up user counts, so
+   * every function that copies into/out of/frees this field must do its own
+   * #id_us_plus()/#id_us_min() bookkeeping. See #BKE_brush_material_paint_copy(),
+   * #BKE_brush_material_paint_copy_into(), #BKE_brush_material_paint_free().
+   * Never null for a node reachable through #BKE_paint_material_brush_preset_find()/#_ensure()
+   * in normal operation.
+   */
+  struct BrushMaterialPaint *material_paint;
+};
+
 struct PaintModeSettings {
   /** Source to select canvas from to paint on. */
   ePaintCanvasSource canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
@@ -1386,8 +1447,10 @@ struct PaintModeSettings {
   ImageUser image_user;
 
   /* Multi-channel material paint (Modes Material + Material Paint).
-   * Per-channel enable/value/blend live on #BrushMaterialPaint; only Custom's attribute
-   * name and value range stay scene-level. */
+   * Per-channel enable/value/blend/source-texture state is authoritatively stored in
+   * #material_paint_brush_presets, keyed by brush identity; #BrushMaterialPaint on the
+   * active #Brush is a synced runtime cache of the matching preset. Custom's attribute
+   * name and value range stay scene-level regardless, as before. */
 
   /**
    * Value range of the Custom channel. The fixed channels take their range from the descriptor
@@ -1412,22 +1475,26 @@ struct PaintModeSettings {
    * matching how the preview-priority list (#BKE_paint_material_preview_mtex_get) already
    * excludes Custom.
    */
-  int visible_material_channels = 0;
+  int visible_material_channels = PAINT_MATERIAL_CHANNELS_VISIBLE_DEFAULT;
 
   /**
    * Bitmask of #eMaterialPaintChannel values controlling which channels the
    * #PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color) canvas actually displays in the 3D
    * Viewport, independent of both #BrushMaterialPaintChannel.use (whether strokes currently write
-   * to the channel) and #visible_material_channels (whether the channel is shown in the Paint PBR
+   * to the channel) and #visible_material_channels (whether the channel is shown in the PBR Paint
    * list and participates in strokes at all): a channel can keep painted data and stay hidden from
    * shading, or be actively painted while a previous pass's data on another channel keeps
    * displaying. #PAINT_MATERIAL_CHANNEL_CUSTOM has no shader representation and is not
    * represented in this bitmask.
    */
-  int material_shader_visible_channels = 0;
+  int material_shader_visible_channels = PAINT_MATERIAL_CHANNELS_SHADER_VISIBLE_DEFAULT;
 
   /** Bitmask of #ePaintMaterialFlag. */
   ePaintMaterialFlag material_paint_flag = PAINT_MATERIAL_BRUSH_SYNC;
+
+  /** Per-brush PBR Paint channel/texture presets, keyed by brush identity.
+   *  See #PaintMaterialBrushPreset. */
+  ListBaseT<PaintMaterialBrushPreset> material_paint_brush_presets = {nullptr, nullptr};
 };
 
 /** #PaintModeSettings::new_channel_image_size */

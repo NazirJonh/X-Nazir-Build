@@ -11,6 +11,7 @@
 #include "BKE_paint.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_image_types.h"
 #include "DNA_texture_types.h"
 
 #include "IMB_colormanagement.hh"
@@ -34,11 +35,8 @@ namespace blender::ed::sculpt_paint::material {
  * Toggle all logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
 #include "paint_debug.hh"
 
-ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
-                                           const Brush &brush,
-                                           const BrushMaterialPaint &brush_paint,
-                                           const PaintModeSettings &settings)
-    : ss_(ss), brush_(brush), settings_(settings), brush_paint_(brush_paint)
+ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
+                                   const PaintModeSettings &settings)
 {
   bool any_source = false;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
@@ -70,6 +68,7 @@ ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
 
 #if PBR_PAINT_SOURCE_PROFILE
   const double construct_start = BLI_time_now_seconds();
+  int probed_image_num = 0;
 #endif
 
   /* Usability is decided once here rather than per sample, so the UI warning and the engine can
@@ -111,7 +110,7 @@ ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
              ibuf != nullptr ? ibuf->y : 0,
              acquire_seconds * 1000.0,
              acquire_seconds > 0.001 ? "(likely decode)" : "(cache hit)");
-      probed_image_num_++;
+      probed_image_num++;
 #endif
       source.usable = ibuf != nullptr;
       if (ibuf && ibuf->float_data() == nullptr) {
@@ -127,32 +126,65 @@ ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
   }
 
 #if PBR_PAINT_SOURCE_PROFILE
-  construct_seconds_ = BLI_time_now_seconds() - construct_start;
-  printf("[pbr_paint] ChannelSourceSampler construct: %d image probe(s), %.3fms total\n",
-         probed_image_num_,
-         construct_seconds_ * 1000.0);
+  const double construct_seconds = BLI_time_now_seconds() - construct_start;
+  printf("[pbr_paint] ChannelSourceSet construct: %d image probe(s), %.3fms total\n",
+         probed_image_num,
+         construct_seconds * 1000.0);
 #endif
 }
 
-ChannelSourceSampler::~ChannelSourceSampler()
+ChannelSourceSet::~ChannelSourceSet()
 {
   if (pool_ != nullptr) {
     BKE_image_pool_free(pool_);
   }
 }
 
-bool ChannelSourceSampler::is_active() const
+bool ChannelSourceSet::is_active() const
 {
   return active_;
 }
 
+bool ChannelSourceSet::channel_source_failed(const eMaterialPaintChannel channel) const
+{
+  const ChannelSource &source = sources_[channel];
+  return source.mtex != nullptr && !source.usable;
+}
+
+const ChannelSourceSet::ChannelSource &ChannelSourceSet::source(const int channel) const
+{
+  return sources_[channel];
+}
+
+ImagePool *ChannelSourceSet::pool() const
+{
+  return pool_;
+}
+
+ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
+                                           const Brush &brush,
+                                           const BrushMaterialPaint &brush_paint,
+                                           const PaintModeSettings &settings)
+    : ss_(ss),
+      brush_(brush),
+      settings_(settings),
+      brush_paint_(brush_paint),
+      sources_(brush_paint, settings)
+{
+}
+
+bool ChannelSourceSampler::is_active() const
+{
+  return sources_.is_active();
+}
+
 void ChannelSourceSampler::update_area_local_mats(const Object &ob)
 {
-  if (!active_) {
+  if (!sources_.is_active()) {
     return;
   }
   for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-    const ChannelSource &source = sources_[i];
+    const ChannelSource &source = sources_.source(i);
     if (!source.usable || source.mtex->brush_map_mode != MTEX_MAP_MODE_AREA) {
       continue;
     }
@@ -162,8 +194,7 @@ void ChannelSourceSampler::update_area_local_mats(const Object &ob)
 
 bool ChannelSourceSampler::channel_source_failed(const eMaterialPaintChannel channel) const
 {
-  const ChannelSource &source = sources_[channel];
-  return source.mtex != nullptr && !source.usable;
+  return sources_.channel_source_failed(channel);
 }
 
 const float4x4 *ChannelSourceSampler::area_local_mat_for(const int channel,
@@ -182,7 +213,7 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
   const float2 range = BKE_paint_material_channel_range(settings_, channel);
   const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
 
-  const ChannelSource &source = sources_[channel];
+  const ChannelSource &source = sources_.source(channel);
   if (!source.usable) {
     return fallback;
   }
@@ -196,7 +227,7 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
                        thread,
                        &value,
                        rgba,
-                       pool_,
+                       sources_.pool(),
                        area_local_mat_for(channel, source));
   /* Scalar channels use the texture's intensity (mask/factor), not its color, so unlike
    * #color() below there is no RGB to decode here. */
@@ -210,7 +241,7 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
   const float2 range = BKE_paint_material_channel_range(settings_, channel);
   const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
 
-  const ChannelSource &source = sources_[channel];
+  const ChannelSource &source = sources_.source(channel);
   if (!source.usable) {
     return fallback;
   }
@@ -224,19 +255,19 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
                        thread,
                        &value,
                        rgba,
-                       pool_,
+                       sources_.pool(),
                        area_local_mat_for(channel, source));
   return math::clamp(value, range.x, range.y);
 }
 
 bool ChannelSourceSampler::needs_linear_conversion(const eMaterialPaintChannel channel) const
 {
-  return sources_[channel].do_linear_conversion;
+  return sources_.source(channel).do_linear_conversion;
 }
 
 const ocio::ColorSpace *ChannelSourceSampler::colorspace(const eMaterialPaintChannel channel) const
 {
-  return sources_[channel].colorspace;
+  return sources_.source(channel).colorspace;
 }
 
 void ChannelSourceSampler::decode_linear_batch(MutableSpan<float3> colors,
@@ -304,7 +335,7 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                                               brush_paint_, *ss_.cache->paint, brush_, false) :
                                           float3(brush_paint_.channels[channel].value);
 
-  const ChannelSource &source = sources_[channel];
+  const ChannelSource &source = sources_.source(channel);
   if (!source.usable) {
     return fallback;
   }
@@ -318,7 +349,7 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                        thread,
                        &value,
                        rgba,
-                       pool_,
+                       sources_.pool(),
                        area_local_mat_for(channel, source));
   return finish_color_sample(is_normal,
                              fallback,
@@ -344,7 +375,7 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                                               brush_paint_, *ss_.cache->paint, brush_, false) :
                                           float3(brush_paint_.channels[channel].value);
 
-  const ChannelSource &source = sources_[channel];
+  const ChannelSource &source = sources_.source(channel);
   if (!source.usable) {
     return fallback;
   }
@@ -358,7 +389,7 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                        thread,
                        &value,
                        rgba,
-                       pool_,
+                       sources_.pool(),
                        area_local_mat_for(channel, source));
   return finish_color_sample(is_normal,
                              fallback,

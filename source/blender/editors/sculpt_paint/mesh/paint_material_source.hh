@@ -33,16 +33,18 @@ namespace blender::ed::sculpt_paint::material {
 struct TexelSampleContext;
 
 /**
- * Per-stroke source texture sampling for material paint channels.
+ * Which #MTex each material paint channel samples from, and whether it is usable.
  *
- * Owns the image pool shared by every channel, so a stroke acquires each source ImBuf once
- * instead of once per dab per channel. Callers never branch on whether a channel has a usable
- * source: the sampler falls back to the channel's own value.
+ * Resolved once per stroke and read-only afterwards. Owns the #ImagePool used to probe image
+ * sources, because that probe is part of deciding usability: keeping it here is what makes the
+ * answer stable for the whole stroke, so the UI warning can never disagree with what actually gets
+ * painted.
  *
- * Only channels that are enabled at construction time are registered, so a disabled channel can
- * never make the sampler active or cause an image to be acquired.
+ * Has no dependency on #SculptSession, so both the Sculpt path (through #ChannelSourceSampler) and
+ * the Image Editor 2D path can use it.
  */
-class ChannelSourceSampler {
+class ChannelSourceSet {
+ public:
   struct ChannelSource {
     /** #BKE_paint_material_channel_effective_mtex for this channel: its own #Tex combined with
      * the mapping shared by every channel. Owned here (not a pointer into the channel's DNA
@@ -69,35 +71,47 @@ class ChannelSourceSampler {
     bool flip_green_channel = false;
   };
 
+ private:
+  std::array<ChannelSource, PAINT_MATERIAL_CHANNEL_NUM> sources_;
+  ImagePool *pool_ = nullptr;
+  bool active_ = false;
+
+ public:
+  ChannelSourceSet(const BrushMaterialPaint &brush_paint, const PaintModeSettings &settings);
+  ~ChannelSourceSet();
+
+  bool is_active() const;
+  bool channel_source_failed(eMaterialPaintChannel channel) const;
+  const ChannelSource &source(int channel) const;
+  ImagePool *pool() const;
+};
+
+/**
+ * Per-stroke source texture sampling for material paint channels.
+ *
+ * Owns the image pool shared by every channel, so a stroke acquires each source ImBuf once
+ * instead of once per dab per channel. Callers never branch on whether a channel has a usable
+ * source: the sampler falls back to the channel's own value.
+ *
+ * Only channels that are enabled at construction time are registered, so a disabled channel can
+ * never make the sampler active or cause an image to be acquired.
+ */
+class ChannelSourceSampler {
   const SculptSession &ss_;
   const Brush &brush_;
   const PaintModeSettings &settings_;
   const BrushMaterialPaint &brush_paint_;
-  std::array<ChannelSource, PAINT_MATERIAL_CHANNEL_NUM> sources_;
+  ChannelSourceSet sources_;
   /** Per-channel #MTEX_MAP_MODE_AREA local matrix; only valid for channels whose source uses
    * Area Plane mapping (see #update_area_local_mats). Unlike #sources_, recomputed every dab. */
   std::array<float4x4, PAINT_MATERIAL_CHANNEL_NUM> area_local_mats_;
-  ImagePool *pool_ = nullptr;
-  bool active_ = false;
-
-  /* Temporary stroke-scoped profiling (see printf output in the .cc file); intentionally NOT
-   * per-pixel-call atomics - an earlier version counted every #scalar/#color call with atomics
-   * and the resulting cross-thread contention (hundreds of thousands of calls per dab) was
-   * itself a measurable slowdown, on top of making the numbers unreliable. Construction happens
-   * once per dab (not per pixel), so timing it here is cheap and safe. */
-  double construct_seconds_ = 0.0;
-  int probed_image_num_ = 0;
-
-  /** Null unless \a source uses Area Plane mapping, in which case it is the channel's own
-   * #area_local_mats_ entry rather than the brush's shared local matrix. */
-  const float4x4 *area_local_mat_for(int channel, const ChannelSource &source) const;
 
  public:
   ChannelSourceSampler(const SculptSession &ss,
                        const Brush &brush,
                        const BrushMaterialPaint &brush_paint,
                        const PaintModeSettings &settings);
-  ~ChannelSourceSampler();
+  ~ChannelSourceSampler() = default;
 
   /** Whether any enabled channel has a usable source, so callers can skip the sampling path. */
   bool is_active() const;
@@ -163,6 +177,13 @@ class ChannelSourceSampler {
 
   /** Batched counterpart to the per-pixel decode #color skips when `decode_linear = false`. */
   static void decode_linear_batch(MutableSpan<float3> colors, const ocio::ColorSpace *colorspace);
+
+ private:
+  using ChannelSource = ChannelSourceSet::ChannelSource;
+
+  /** Null unless \a source uses Area Plane mapping, in which case it is the channel's own
+   * #area_local_mats_ entry rather than the brush's shared local matrix. */
+  const float4x4 *area_local_mat_for(int channel, const ChannelSource &source) const;
 };
 
 }  // namespace blender::ed::sculpt_paint::material

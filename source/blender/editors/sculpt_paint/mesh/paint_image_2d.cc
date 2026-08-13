@@ -8,17 +8,20 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 
 #include "MEM_guardedalloc.h"
 
 #include "DNA_brush_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
+#include "DNA_texture_types.h"
 
 #include "BLI_bitmap.h"
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
 #include "BLI_math_color_blend.h"
+#include "BLI_math_vector.hh"
 #include "BLI_stack.h"
 #include "BLI_task.h"
 #include "BLI_time.h"
@@ -50,6 +53,7 @@
 #include "UI_view2d.hh"
 
 #include "../paint_intern.hh"
+#include "paint_material_source.hh"
 
 namespace blender {
 
@@ -113,6 +117,21 @@ struct BrushPainter {
    */
   short material_channel_blend = -1;
   float material_channel_color[3] = {};
+
+  /**
+   * Shared across the root Image Editor stroke and every extra material-map painter. Null when
+   * this is not a Mode=`Material` stroke, or when invert/erase must not read sources.
+   */
+  std::shared_ptr<ed::sculpt_paint::material::ChannelSourceSet> channel_sources;
+  /** Which material paint channel this painter writes. Only meaningful when
+   * #use_material_channel_color is set. */
+  eMaterialPaintChannel material_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  /** True when Alpha is set to mask the stroke; other channels' dab coverage is scaled by the
+   * Alpha source (or its slider fallback). The Alpha channel itself is never clipped this way. */
+  bool material_alpha_masking = false;
+  float material_alpha_fallback = 1.0f;
+  /** Canvas-space mapping for the shared source #MTex (View / Tiled / Stencil). */
+  rctf source_mapping = {};
 };
 
 struct ImagePaintRegion {
@@ -250,6 +269,134 @@ static void brush_imbuf_tex_co(const rctf *mapping, int x, int y, float texco[3]
   texco[0] = mapping->xmin + x * mapping->xmax;
   texco[1] = mapping->ymin + y * mapping->ymax;
   texco[2] = 0.0f;
+}
+
+/**
+ * Image Editor has no 3D surface for Area Plane / 3D mapping. Stamp those sources with View
+ * Plane (dab-relative) until the UV→surface path exists. Shared mapping defaults to Area Plane,
+ * so skipping it would silently paint the slider instead of the assigned source image.
+ */
+static short paint_2d_source_map_mode_for_2d(const short map_mode)
+{
+  if (ELEM(map_mode, MTEX_MAP_MODE_AREA, MTEX_MAP_MODE_3D)) {
+    return MTEX_MAP_MODE_VIEW;
+  }
+  return map_mode;
+}
+
+static bool paint_2d_channel_source_usable_2d(const BrushPainter *painter,
+                                              const eMaterialPaintChannel channel)
+{
+  if (painter->channel_sources == nullptr) {
+    return false;
+  }
+  const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
+      painter->channel_sources->source(channel);
+  return source.usable && source.mtex != nullptr;
+}
+
+/**
+ * Sample one channel source at a dab-buffer pixel using Image Editor 2D mapping
+ * (View / Tiled / Stencil / Random; Area Plane and 3D are remapped to View).
+ *
+ * \return Texture intensity (mask/factor). RGB is written to \a r_rgba in scene-linear for color
+ * sources; Normal skips colorspace decode.
+ */
+static float paint_2d_sample_channel_source(const BrushPainter *painter,
+                                            const eMaterialPaintChannel channel,
+                                            const int x,
+                                            const int y,
+                                            const int thread,
+                                            float4 &r_rgba)
+{
+  const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
+      painter->channel_sources->source(channel);
+  float3 texco;
+  brush_imbuf_tex_co(&painter->source_mapping, x, y, texco);
+  ImagePool *pool = painter->channel_sources->pool() != nullptr ?
+                        painter->channel_sources->pool() :
+                        painter->pool;
+  /* #BKE_brush_sample_tex_3d has no Area Plane branch: AREA would sample (0,0) on every pixel.
+   * Copy and remap so the default shared mapping actually reads the source image. */
+  MTex mtex_2d = dna::shallow_copy(*source.mtex);
+  mtex_2d.brush_map_mode = eMTex_BrushMapMode(
+      paint_2d_source_map_mode_for_2d(mtex_2d.brush_map_mode));
+  const float intensity = BKE_brush_sample_tex_3d(
+      painter->paint, painter->brush, &mtex_2d, texco, r_rgba, thread, pool);
+
+  const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+  const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
+  /* #BKE_brush_sample_tex_3d decodes with the brush texture's colorspace when that flag is set,
+   * which is the wrong space for a per-channel source. Only apply the source's own decode when
+   * that brush-level conversion did not already run. */
+  if (!is_normal && source.do_linear_conversion &&
+      (paint_runtime == nullptr || !paint_runtime->do_linear_conversion))
+  {
+    IMB_colormanagement_colorspace_to_scene_linear_v3(r_rgba, source.colorspace);
+  }
+  if (source.flip_green_channel) {
+    r_rgba[1] = 1.0f - r_rgba[1];
+  }
+  return intensity;
+}
+
+/** Replace slider RGB with the channel source (canvas colorspace), then clip coverage by Alpha. */
+static void paint_2d_apply_material_sources(const BrushPainter *painter,
+                                            const BrushPainterCache *cache,
+                                            const int x,
+                                            const int y,
+                                            const int thread,
+                                            float4 &rgba)
+{
+  if (!painter->use_material_channel_color || painter->channel_sources == nullptr) {
+    return;
+  }
+
+  if (paint_2d_channel_source_usable_2d(painter, painter->material_channel)) {
+    const float coverage = rgba[3];
+    float4 sampled;
+    const float intensity = paint_2d_sample_channel_source(
+        painter, painter->material_channel, x, y, thread, sampled);
+    const bool is_normal = painter->material_channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+    const bool is_color = ELEM(painter->material_channel,
+                               PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                               PAINT_MATERIAL_CHANNEL_EMISSION,
+                               PAINT_MATERIAL_CHANNEL_NORMAL);
+    if (is_color) {
+      rgba[0] = sampled[0];
+      rgba[1] = sampled[1];
+      rgba[2] = sampled[2];
+    }
+    else {
+      rgba[0] = intensity;
+      rgba[1] = intensity;
+      rgba[2] = intensity;
+    }
+    if (!is_normal && !cache->is_data) {
+      if (cache->is_srgb) {
+        IMB_colormanagement_scene_linear_to_srgb_v3(rgba, rgba);
+      }
+      else if (cache->byte_colorspace) {
+        IMB_colormanagement_scene_linear_to_colorspace_v3(rgba, cache->byte_colorspace);
+      }
+    }
+    rgba[3] = coverage;
+  }
+
+  if (!painter->material_alpha_masking ||
+      painter->material_channel == PAINT_MATERIAL_CHANNEL_ALPHA)
+  {
+    return;
+  }
+
+  float alpha_factor = painter->material_alpha_fallback;
+  if (paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)) {
+    float4 sampled;
+    alpha_factor = paint_2d_sample_channel_source(
+        painter, PAINT_MATERIAL_CHANNEL_ALPHA, x, y, thread, sampled);
+  }
+  alpha_factor = math::clamp(alpha_factor, 0.0f, 1.0f);
+  rgba[3] *= alpha_factor;
 }
 
 /* create a mask with the mask texture */
@@ -484,6 +631,8 @@ static ImBuf *brush_painter_imbuf_new(
         rgba[3] = 1.0f;
       }
 
+      paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
+
       if (is_float) {
         /* write to float pixel */
         float *dstf = float_data + (y * size + x) * 4;
@@ -585,6 +734,8 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
           copy_v3_v3(rgba, brush_rgb);
           rgba[3] = 1.0f;
         }
+
+        paint_2d_apply_material_sources(painter, cache, x, y, thread, rgba);
       }
 
       if (is_float) {
@@ -790,6 +941,31 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
   painter->pool = BKE_image_pool_new();
 
+  const bool use_2d_channel_source =
+      paint_2d_channel_source_usable_2d(painter, painter->material_channel);
+  if (painter->channel_sources != nullptr && painter->use_material_channel_color) {
+    short source_map_mode = MTEX_MAP_MODE_VIEW;
+    bool have_map = false;
+    if (use_2d_channel_source) {
+      source_map_mode = paint_2d_source_map_mode_for_2d(
+          painter->channel_sources->source(painter->material_channel).mtex->brush_map_mode);
+      have_map = true;
+    }
+    else if (paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)) {
+      source_map_mode = paint_2d_source_map_mode_for_2d(
+          painter->channel_sources->source(PAINT_MATERIAL_CHANNEL_ALPHA).mtex->brush_map_mode);
+      have_map = true;
+    }
+    if (have_map) {
+      brush_painter_2d_tex_mapping(
+          s, tile, diameter, pos, mouse, source_map_mode, &painter->source_mapping);
+    }
+  }
+  /* Source samples change with the dab; never reuse a previous buffer. */
+  const bool do_source_rebuild = painter->channel_sources != nullptr &&
+                                 painter->use_material_channel_color &&
+                                 (use_2d_channel_source || painter->material_alpha_masking);
+
   /* determine how can update based on textures used */
   if (cache->is_texbrush) {
     if (brush->mtex.brush_map_mode == MTEX_MAP_MODE_VIEW) {
@@ -848,8 +1024,11 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
   paint_curve_mask_cache_update(&cache->curve_mask_cache, brush, diameter, size, pos);
 
   /* detect if we need to recreate image brush buffer */
+  if (do_source_rebuild) {
+    do_partial_update = false;
+  }
   if (diameter != cache->lastdiameter || (tex_rotation != cache->last_tex_rotation) || do_random ||
-      update_color)
+      do_source_rebuild || update_color)
   {
     if (cache->ibuf) {
       IMB_freeImBuf(cache->ibuf);
@@ -1876,6 +2055,19 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     const Paint *paint = BKE_paint_get_active_from_context(C);
     const bool invert = mode == BrushStrokeMode::Invert;
 
+    std::shared_ptr<ed::sculpt_paint::material::ChannelSourceSet> channel_sources;
+    if (!invert) {
+      channel_sources = std::make_shared<ed::sculpt_paint::material::ChannelSourceSet>(
+          brush_paint, paint_mode);
+      if (!channel_sources->is_active()) {
+        channel_sources.reset();
+      }
+    }
+    const bool alpha_masking = channel_sources != nullptr &&
+                               BKE_paint_material_channel_masks_stroke(brush_paint, paint_mode);
+    const float alpha_fallback = BKE_paint_material_channel_value(
+        brush_paint, paint_mode, PAINT_MATERIAL_CHANNEL_ALPHA);
+
     ImagePaintState *primary = nullptr;
     Vector<ImagePaintState *> extras;
     for (const PaintMaterialImageTarget &target : targets) {
@@ -1924,6 +2116,10 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
                    BKE_paint_material_channel_info(target.channel).ui_name);
         continue; /* Skip missing / unloadable maps. */
       }
+      state->painter->material_channel = target.channel;
+      state->painter->channel_sources = channel_sources;
+      state->painter->material_alpha_masking = alpha_masking;
+      state->painter->material_alpha_fallback = alpha_fallback;
       if (primary == nullptr) {
         primary = state;
       }

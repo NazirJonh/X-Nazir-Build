@@ -16,9 +16,11 @@
 #include "BKE_object.hh"
 
 #include "BLI_index_range.hh"
+#include "BLI_math_base.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
+#include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
 #include "BLI_virtual_array.hh"
@@ -84,6 +86,7 @@ AreaPlaneMesh::AreaPlaneMesh(const Depsgraph &depsgraph,
     out.index = i;
     for (const int j : IndexRange(3)) {
       const int corner = tri[j];
+      out.vert[j] = corner_verts[corner];
       out.uv[j] = uv_map[corner];
       out.position[j] = positions[corner_verts[corner]];
       out.normal[j] = corner_normals[corner];
@@ -142,7 +145,9 @@ bool AreaPlaneMesh::hit_at_uv(const float2 &uv, AreaPlaneHit &r_hit) const
   return true;
 }
 
-static float radius_object_from_triangle(const AreaPlaneTriangle &tri, const float radius_uv)
+static bool area_plane_triangle_uv_jacobian(const AreaPlaneTriangle &tri,
+                                            float3 &r_dpdu,
+                                            float3 &r_dpdv)
 {
   const float2 duv1 = tri.uv[1] - tri.uv[0];
   const float2 duv2 = tri.uv[2] - tri.uv[0];
@@ -150,11 +155,21 @@ static float radius_object_from_triangle(const AreaPlaneTriangle &tri, const flo
   const float3 e2 = tri.position[2] - tri.position[0];
   const float det = duv1.x * duv2.y - duv2.x * duv1.y;
   if (std::abs(det) <= 1e-20f) {
-    return 0.0f;
+    return false;
   }
   const float inv_det = 1.0f / det;
-  const float3 dpdu = (e1 * duv2.y - e2 * duv1.y) * inv_det;
-  const float3 dpdv = (e2 * duv1.x - e1 * duv2.x) * inv_det;
+  r_dpdu = (e1 * duv2.y - e2 * duv1.y) * inv_det;
+  r_dpdv = (e2 * duv1.x - e1 * duv2.x) * inv_det;
+  return true;
+}
+
+static float radius_object_from_triangle(const AreaPlaneTriangle &tri, const float radius_uv)
+{
+  float3 dpdu;
+  float3 dpdv;
+  if (!area_plane_triangle_uv_jacobian(tri, dpdu, dpdv)) {
+    return 0.0f;
+  }
   return radius_uv * std::sqrt(math::length(math::cross(dpdu, dpdv)));
 }
 
@@ -192,31 +207,184 @@ AreaPlaneTriangle AreaPlaneMesh::triangle(const int index) const
   return triangles_[index];
 }
 
-float4x4 area_plane_local_mat(const float3 &position,
-                              const float3 &normal,
-                              const float radius_object,
-                              const float rotation)
+float3 area_plane_triangle_face_normal(const AreaPlaneTriangle &tri)
 {
-  const float3 reference = std::abs(normal.x) < 0.9f ? float3(1.0f, 0.0f, 0.0f) :
-                                                       float3(0.0f, 0.0f, 1.0f);
-  const float3 axis_y = math::normalize(math::cross(normal, reference));
-  const float3 axis_x = math::cross(axis_y, normal);
-  const float cos_rot = std::cos(rotation);
-  const float sin_rot = std::sin(rotation);
-  const float3 rotated_axis_x = axis_x * cos_rot + axis_y * sin_rot;
-  const float3 rotated_axis_y = axis_y * cos_rot - axis_x * sin_rot;
+  return math::normalize(
+      math::cross(tri.position[1] - tri.position[0], tri.position[2] - tri.position[0]));
+}
 
+static float4x4 area_plane_object_to_local_from_axes(const float3 &origin,
+                                                     const float3 &axis_x,
+                                                     const float3 &axis_y,
+                                                     const float3 &axis_z,
+                                                     const float radius_object)
+{
   float4x4 mat = float4x4::identity();
-  mat[0] = float4(rotated_axis_x, 0.0f);
-  mat[1] = float4(rotated_axis_y, 0.0f);
-  mat[2] = float4(normal, 0.0f);
-  mat[3] = float4(position, 1.0f);
+  mat[0] = float4(axis_x, 0.0f);
+  mat[1] = float4(axis_y, 0.0f);
+  mat[2] = float4(axis_z, 0.0f);
+  mat[3] = float4(origin, 1.0f);
 
   normalize_m4(mat.ptr());
   float4x4 scale = float4x4::identity();
   scale_m4_fl(scale.ptr(), radius_object);
   const float4x4 tmat = mat * scale;
   return math::invert(tmat);
+}
+
+AreaPlaneFrame area_plane_frame(const float3 &position,
+                                const float3 &normal,
+                                const float radius_object,
+                                const float rotation)
+{
+  AreaPlaneFrame frame;
+  frame.origin = position;
+  frame.radius = radius_object;
+  frame.axis_z = math::normalize(normal);
+
+  const float3 reference = std::abs(frame.axis_z.x) < 0.9f ? float3(1.0f, 0.0f, 0.0f) :
+                                                             float3(0.0f, 0.0f, 1.0f);
+  const float3 axis_y = math::normalize(math::cross(frame.axis_z, reference));
+  const float3 axis_x = math::cross(axis_y, frame.axis_z);
+  const float cos_rot = std::cos(rotation);
+  const float sin_rot = std::sin(rotation);
+  frame.axis_x = math::normalize(axis_x * cos_rot + axis_y * sin_rot);
+  frame.axis_y = math::normalize(axis_y * cos_rot - axis_x * sin_rot);
+  return frame;
+}
+
+AreaPlaneFrame area_plane_frame_from_triangle(const AreaPlaneTriangle &tri,
+                                              const float3 &position,
+                                              const float radius_object,
+                                              const float rotation)
+{
+  float3 dpdu;
+  float3 dpdv;
+  const float3 face_normal = area_plane_triangle_face_normal(tri);
+  if (!area_plane_triangle_uv_jacobian(tri, dpdu, dpdv)) {
+    return area_plane_frame(position, face_normal, radius_object, rotation);
+  }
+
+  float3 axis_x = dpdu;
+  if (math::length_squared(axis_x) < 1e-20f) {
+    return area_plane_frame(position, face_normal, radius_object, rotation);
+  }
+  axis_x = math::normalize(axis_x);
+
+  float3 axis_y = dpdv - axis_x * math::dot(axis_x, dpdv);
+  if (math::length_squared(axis_y) < 1e-20f) {
+    axis_y = math::cross(face_normal, axis_x);
+    if (math::length_squared(axis_y) < 1e-20f) {
+      return area_plane_frame(position, face_normal, radius_object, rotation);
+    }
+  }
+  axis_y = math::normalize(axis_y);
+
+  AreaPlaneFrame frame;
+  frame.origin = position;
+  frame.radius = radius_object;
+  frame.axis_z = math::normalize(math::cross(axis_x, axis_y));
+  const float cos_rot = std::cos(rotation);
+  const float sin_rot = std::sin(rotation);
+  frame.axis_x = math::normalize(axis_x * cos_rot + axis_y * sin_rot);
+  frame.axis_y = math::normalize(axis_y * cos_rot - axis_x * sin_rot);
+  return frame;
+}
+
+float4x4 area_plane_object_to_local(const AreaPlaneFrame &frame)
+{
+  return area_plane_object_to_local_from_axes(
+      frame.origin, frame.axis_x, frame.axis_y, frame.axis_z, frame.radius);
+}
+
+static bool area_plane_shared_edge(const AreaPlaneTriangle &a,
+                                   const AreaPlaneTriangle &b,
+                                   float3 &r_p0,
+                                   float3 &r_p1)
+{
+  float3 pts[2];
+  int n = 0;
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      if (a.vert[i] == b.vert[j] && a.vert[i] >= 0) {
+        pts[n++] = a.position[i];
+        if (n == 2) {
+          r_p0 = pts[0];
+          r_p1 = pts[1];
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+float3 area_plane_unfold_to_dab_plane(const float3 &point,
+                                      const AreaPlaneTriangle &face,
+                                      const AreaPlaneTriangle &dab,
+                                      const float3 &dab_origin)
+{
+  if (face.index == dab.index) {
+    return point;
+  }
+
+  const float3 n_d = area_plane_triangle_face_normal(dab);
+  const float3 n_f = area_plane_triangle_face_normal(face);
+  if (math::length_squared(n_d) < 1e-12f || math::length_squared(n_f) < 1e-12f) {
+    return point;
+  }
+
+  /* Axis n_f × n_d rotates the face normal onto the dab normal (right-hand). */
+  const float3 n_cross = math::cross(n_f, n_d);
+  const float sin_a = math::length(n_cross);
+  const float cos_a = math::clamp(math::dot(n_f, n_d), -1.0f, 1.0f);
+  /* Parallel (or anti-parallel): no unique hinge. */
+  if (sin_a < 1e-5f) {
+    return point;
+  }
+
+  float3 axis = n_cross / sin_a;
+  const float theta = std::atan2(sin_a, cos_a);
+  if (theta < 1e-5f) {
+    return point;
+  }
+
+  const float d_d = math::dot(n_d, dab_origin);
+  float3 hinge_point;
+  float3 edge_p0;
+  float3 edge_p1;
+  if (area_plane_shared_edge(face, dab, edge_p0, edge_p1)) {
+    const float3 edge = edge_p1 - edge_p0;
+    if (math::length_squared(edge) > 1e-20f) {
+      const float3 edge_dir = math::normalize(edge);
+      hinge_point = edge_p0 + edge_dir * math::dot(edge_dir, dab_origin - edge_p0);
+    }
+    else {
+      hinge_point = edge_p0;
+    }
+  }
+  else {
+    const float d_f = math::dot(n_f, face.position[0]);
+    const float3 n1xn2 = math::cross(n_d, n_f);
+    const float3 hinge_any = math::cross(d_d * n_f - d_f * n_d, n1xn2) /
+                             math::length_squared(n1xn2);
+    hinge_point = hinge_any + axis * math::dot(axis, dab_origin - hinge_any);
+  }
+
+  float3 v = point - hinge_point;
+  float3 v_rot;
+  rotate_normalized_v3_v3v3fl(v_rot, v, axis, theta);
+  float3 unfolded = hinge_point + v_rot;
+  unfolded += n_d * (d_d - math::dot(n_d, unfolded));
+  return unfolded;
+}
+
+float4x4 area_plane_local_mat(const float3 &position,
+                              const float3 &normal,
+                              const float radius_object,
+                              const float rotation)
+{
+  return area_plane_object_to_local(area_plane_frame(position, normal, radius_object, rotation));
 }
 
 static bool is_top_left_edge(const float2 &a, const float2 &b)

@@ -1793,17 +1793,19 @@ static void paint_2d_area_encode_canvas_rgb(const BrushPainterCache *cache,
   }
 }
 
-static float4x4 paint_2d_area_channel_local_mat(const BrushPainter *painter,
-                                                const eMaterialPaintChannel channel,
-                                                const float3 &position,
-                                                const float3 &normal,
-                                                const float radius_object)
+static ed::sculpt_paint::AreaPlaneFrame paint_2d_area_channel_frame(
+    const BrushPainter *painter,
+    const eMaterialPaintChannel channel,
+    const ed::sculpt_paint::AreaPlaneTriangle &tri,
+    const float3 &position,
+    const float radius_object)
 {
   float rotation = 0.0f;
   if (paint_2d_channel_source_usable_2d(painter, channel)) {
     rotation = painter->channel_sources->source(channel).mtex->rot;
   }
-  return ed::sculpt_paint::area_plane_local_mat(position, normal, radius_object, rotation);
+  return ed::sculpt_paint::area_plane_frame_from_triangle(
+      tri, position, radius_object, rotation);
 }
 
 static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
@@ -1950,9 +1952,11 @@ static bool paint_2d_area_plane_rasterize_triangle(
     ImagePaintState *s,
     ImagePaintTile *tile,
     const ed::sculpt_paint::AreaPlaneTriangle &tri,
+    const ed::sculpt_paint::AreaPlaneTriangle &dab_tri,
     const float4x4 &object_to_brush,
     const float4x4 &channel_local_mat,
     const float4x4 &alpha_local_mat,
+    const float3 &dab_origin,
     const bool sample_alpha,
     ImagePool *pool)
 {
@@ -1960,6 +1964,11 @@ static bool paint_2d_area_plane_rasterize_triangle(
   const BrushPainterCache *cache = &tile->cache;
   const PaintModeSettings &paint_mode = s->scene->toolsettings->paint_mode;
   const int thread = 0;
+
+  const float3 face_normal = ed::sculpt_paint::area_plane_triangle_face_normal(tri);
+  if (math::length_squared(face_normal) < 1e-12f) {
+    return false;
+  }
 
   float min_u = tri.uv[0].x;
   float max_u = tri.uv[0].x;
@@ -2017,9 +2026,11 @@ static bool paint_2d_area_plane_rasterize_triangle(
       if (!paint_2d_area_plane_falloff(painter->brush, object_to_brush, position, &strength)) {
         continue;
       }
+      const float3 sample_position = ed::sculpt_paint::area_plane_unfold_to_dab_plane(
+          position, tri, dab_tri, dab_origin);
       if (sample_alpha) {
         strength *= paint_2d_area_sample_alpha_factor(
-            painter, alpha_local_mat, position, thread, pool);
+            painter, alpha_local_mat, sample_position, thread, pool);
       }
 
       float3 rgb;
@@ -2027,7 +2038,7 @@ static bool paint_2d_area_plane_rasterize_triangle(
                                          cache,
                                          painter->material_channel,
                                          channel_local_mat,
-                                         position,
+                                         sample_position,
                                          thread,
                                          pool,
                                          paint_mode,
@@ -2082,17 +2093,20 @@ static void paint_2d_area_plane_stroke(ImagePaintState *s,
 
   const float4x4 object_to_brush = ed::sculpt_paint::area_plane_local_mat(
       hit.position, hit.normal, radius_object, 0.0f);
-  const float4x4 channel_local_mat = paint_2d_area_channel_local_mat(
-      painter, painter->material_channel, hit.position, hit.normal, radius_object);
+  const ed::sculpt_paint::AreaPlaneTriangle dab_tri = mesh.triangle(hit.tri_index);
+  const ed::sculpt_paint::AreaPlaneFrame channel_frame = paint_2d_area_channel_frame(
+      painter, painter->material_channel, dab_tri, hit.position, radius_object);
+  const float4x4 channel_local_mat = ed::sculpt_paint::area_plane_object_to_local(channel_frame);
   const bool sample_alpha = painter->material_alpha_masking &&
                             painter->material_channel != PAINT_MATERIAL_CHANNEL_ALPHA;
-  const float4x4 alpha_local_mat = sample_alpha ?
-                                       paint_2d_area_channel_local_mat(painter,
-                                                                       PAINT_MATERIAL_CHANNEL_ALPHA,
-                                                                       hit.position,
-                                                                       hit.normal,
-                                                                       radius_object) :
-                                       object_to_brush;
+  const float4x4 alpha_local_mat =
+      sample_alpha ? ed::sculpt_paint::area_plane_object_to_local(paint_2d_area_channel_frame(
+                         painter,
+                         PAINT_MATERIAL_CHANNEL_ALPHA,
+                         dab_tri,
+                         hit.position,
+                         radius_object)) :
+                     object_to_brush;
 
   const Vector<int> accepted = mesh.triangles_in_sphere(object_to_brush);
   if (accepted.is_empty()) {
@@ -2127,9 +2141,11 @@ static void paint_2d_area_plane_stroke(ImagePaintState *s,
       paint_2d_area_plane_rasterize_triangle(s,
                                              tile,
                                              mesh.triangle(tri_index),
+                                             dab_tri,
                                              object_to_brush,
                                              channel_local_mat,
                                              alpha_local_mat,
+                                             hit.position,
                                              sample_alpha,
                                              pool);
     }

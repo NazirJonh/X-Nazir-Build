@@ -26,10 +26,14 @@
  *   texels. The same object-space point samples the same Area Plane coordinate.
  * - Overlapping UV islands: interior texels of every accepted triangle may write. Order is
  *   #AreaPlaneTriangle::index.
- * - Tangent frame: Z = surface normal at the dab center. X/Y from a stable object-space
- *   reference axis projected into the tangent plane (object X, or object Z near the singularity
- *   |Z·X| >= 0.9). Not UV stroke direction, not the UV Jacobian axes. #MTex.rot then rotates in
- *   that tangent plane. The |Z·X| threshold can flip the frame; scale and projection stay valid.
+ * - Tangent frame: 3D falloff uses a sphere at the dab center. Source sample uses one Area
+ *   Plane whose X/Y are the image-texture axes of the dab triangle (object-space ∂P/∂u, ∂P/∂v
+ *   from that triangle's UV, then #MTex.rot in that plane). Not object X/Z — those axes ignore
+ *   how the image sits on the island and turn ±90° at a cube fold.
+ * - A neighbor folded ~90° is rotated into the dab plane around the shared 3D edge when the
+ *   triangles share two vertices, otherwise around the plane–plane intersection. Three faces
+ *   at a vertex each unfold onto the dab around their own shared edge (a cube-net). Coplanar
+ *   faces are a no-op. Falloff still uses the original object-space point.
  */
 
 #include "BLI_math_matrix_types.hh"
@@ -49,6 +53,8 @@ namespace blender::ed::sculpt_paint {
 struct AreaPlaneTriangle {
   /** Index into the evaluated mesh's corner triangles. */
   int index = -1;
+  /** Evaluated-mesh vertex indices of the three corners (for shared-edge unfold). */
+  int vert[3] = {-1, -1, -1};
   float2 uv[3] = {};
   /** Object space. */
   float3 position[3] = {};
@@ -101,6 +107,48 @@ class AreaPlaneMesh {
 };
 
 /**
+ * Unscaled object-space Area Plane frame: origin at the dab center, orthonormal X/Y/Z, and the
+ * object-space radius that maps to local length 1.
+ */
+struct AreaPlaneFrame {
+  float3 origin = float3(0.0f);
+  float3 axis_x = float3(1.0f, 0.0f, 0.0f);
+  float3 axis_y = float3(0.0f, 1.0f, 0.0f);
+  float3 axis_z = float3(0.0f, 0.0f, 1.0f);
+  float radius = 1.0f;
+};
+
+AreaPlaneFrame area_plane_frame(const float3 &position,
+                                const float3 &normal,
+                                float radius_object,
+                                float rotation);
+
+/**
+ * Area Plane whose X/Y follow the image texture on \a tri (∂P/∂u, ∂P/∂v), with \a rotation
+ * (#MTex.rot) in that plane. Falls back to #area_plane_frame when the UV Jacobian is degenerate.
+ */
+AreaPlaneFrame area_plane_frame_from_triangle(const AreaPlaneTriangle &tri,
+                                              const float3 &position,
+                                              float radius_object,
+                                              float rotation);
+
+/**
+ * Object space → brush-local for \a frame, matching #calc_brush_local_mat's scale convention:
+ * a point #frame.radius from the origin along the tangent plane maps to local length 1.
+ */
+float4x4 area_plane_object_to_local(const AreaPlaneFrame &frame);
+
+/**
+ * Rotate \a point from \a face into the geometric plane of \a dab around their shared 3D edge,
+ * or around the plane–plane intersection when they do not share two vertices. Identity when the
+ * planes are parallel. Falloff callers must still use the un-rotated point.
+ */
+float3 area_plane_unfold_to_dab_plane(const float3 &point,
+                                      const AreaPlaneTriangle &face,
+                                      const AreaPlaneTriangle &dab,
+                                      const float3 &dab_origin);
+
+/**
  * Object space → brush-local, matching #calc_brush_local_mat's scale convention: a point
  * #radius_object from \a position along the tangent plane maps to local length 1.
  *
@@ -110,6 +158,9 @@ float4x4 area_plane_local_mat(const float3 &position,
                               const float3 &normal,
                               float radius_object,
                               float rotation);
+
+/** Geometric face normal of \a tri (object space), or zero if the triangle is degenerate. */
+float3 area_plane_triangle_face_normal(const AreaPlaneTriangle &tri);
 
 /**
  * Half-open UV coverage: strict interior, or a boundary texel whose supporting edges are

@@ -2512,6 +2512,19 @@ bool WM_paint_cursor_end(wmPaintCursor *handle)
   return false;
 }
 
+void WM_paint_cursor_suppress_push()
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);
+  wm->runtime->paintcursors_suppress_count++;
+}
+
+void WM_paint_cursor_suppress_pop()
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);
+  BLI_assert(wm->runtime->paintcursors_suppress_count > 0);
+  wm->runtime->paintcursors_suppress_count--;
+}
+
 void WM_paint_cursor_remove_by_type(wmWindowManager *wm, void *draw_fn, void (*free)(void *))
 {
   for (wmPaintCursor &pc : wm->runtime->paintcursors.items_mutable()) {

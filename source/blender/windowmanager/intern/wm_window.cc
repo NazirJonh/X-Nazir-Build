@@ -2470,6 +2470,9 @@ eWM_CapabilitiesFlag WM_capabilities_flag()
   if (ghost_flag & GHOST_kCapabilityDesktopSample) {
     flag |= WM_CAPABILITY_DESKTOP_SAMPLE;
   }
+  if (ghost_flag & GHOST_kCapabilityDesktopSampleContinuous) {
+    flag |= WM_CAPABILITY_DESKTOP_SAMPLE_CONTINUOUS;
+  }
   if (ghost_flag & GHOST_kCapabilityInputIME) {
     flag |= WM_CAPABILITY_INPUT_IME;
   }

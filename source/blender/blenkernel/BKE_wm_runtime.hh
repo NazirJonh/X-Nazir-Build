@@ -92,6 +92,11 @@ struct WindowManagerRuntime {
 
   /** Extra overlay cursors to draw, like circles. */
   ListBaseT<wmPaintCursor> paintcursors = {nullptr, nullptr};
+  /**
+   * Number of active requests to hide the #paintcursors, see #WM_paint_cursor_suppress_push.
+   * Counted so multiple operators can request this at the same time.
+   */
+  int paintcursors_suppress_count = 0;
 
   /**
    * Known key configurations.

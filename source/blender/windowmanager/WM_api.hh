@@ -226,6 +226,11 @@ enum eWM_CapabilitiesFlag {
   WM_CAPABILITY_WINDOW_PATH = (1 << 13),
   /** Support for window server side decorations (SSD). */
   WM_CAPABILITY_WINDOW_DECORATION_SERVER_SIDE = (1 << 14),
+  /**
+   * #WM_desktop_cursor_sample_read returns without user interaction and is cheap enough to be
+   * called repeatedly, so the color outside of Blender windows can be sampled continuously.
+   */
+  WM_CAPABILITY_DESKTOP_SAMPLE_CONTINUOUS = (1 << 15),
   /** The initial value, indicates the value needs to be set by inspecting GHOST. */
   WM_CAPABILITY_INITIALIZED = (1u << 31),
 };
@@ -595,6 +600,13 @@ void WM_paint_cursor_remove_by_type(wmWindowManager *wm, void *draw_fn, void (*f
 void WM_paint_cursor_tag_redraw(wmWindow *win, ARegion *region);
 
 /**
+ * Hide all #wmPaintCursor drawing until a matching #WM_paint_cursor_suppress_pop.
+ * Calls are counted, so nested requests (e.g. from unrelated modal operators) are supported.
+ */
+void WM_paint_cursor_suppress_push();
+void WM_paint_cursor_suppress_pop();
+
+/**
  * Set the cursor location in window coordinates (compatible with #wmEvent.xy).
  *
  * \note Some platforms don't support this, check: #WM_CAPABILITY_WINDOW_POSITION
@@ -764,6 +776,13 @@ wmEventHandler_Op *WM_event_add_modal_handler_ex(wmWindow *win,
                                                  ARegion *region,
                                                  wmOperator *op) ATTR_NONNULL(1, 4);
 wmEventHandler_Op *WM_event_add_modal_handler(bContext *C, wmOperator *op) ATTR_NONNULL(1, 2);
+/**
+ * Like #WM_event_add_modal_handler, but also receives events from other windows, as a fall-back
+ * for events their own handlers did not use. Intended for operators like the eyedropper, where
+ * the user is expected to move the cursor to a different window before confirming or canceling.
+ */
+wmEventHandler_Op *WM_event_add_modal_handler_cross_window(bContext *C, wmOperator *op)
+    ATTR_NONNULL(1, 2);
 void WM_event_remove_modal_handler(ListBaseT<wmEventHandler> *handlers,
                                    const wmOperator *op,
                                    bool postpone) ATTR_NONNULL(1, 2);

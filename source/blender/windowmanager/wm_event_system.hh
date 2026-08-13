@@ -119,6 +119,12 @@ struct wmEventHandler_Op {
   /** Workaround: special case for file-select. */
   bool is_fileselect;
 
+  /**
+   * Keep receiving events even when the window they land in has no modal handler of its own,
+   * see #WM_event_add_modal_handler_cross_window.
+   */
+  bool is_cross_window;
+
   /** Store context for this handler for derived/modal handlers. */
   struct {
     /**

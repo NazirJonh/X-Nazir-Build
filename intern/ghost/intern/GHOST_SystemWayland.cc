@@ -9885,7 +9885,9 @@ GHOST_TCapabilityFlag GHOST_SystemWayland::getCapabilities() const
           /* No support for window path meta-data. */
           GHOST_kCapabilityWindowPath |
           /* Check if we should use Client Side Decorations (CSD.) */
-          (use_window_frame_csd_get() ? GHOST_kCapabilityWindowDecorationServerSide : 0)));
+          (use_window_frame_csd_get() ? GHOST_kCapabilityWindowDecorationServerSide : 0) |
+          /* Implied by the lack of #GHOST_kCapabilityDesktopSample. */
+          GHOST_kCapabilityDesktopSampleContinuous));
 }
 
 bool GHOST_SystemWayland::cursor_grab_use_software_display_get(const GHOST_TGrabCursorMode mode)

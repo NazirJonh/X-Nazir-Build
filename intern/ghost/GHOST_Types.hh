@@ -184,6 +184,16 @@ enum GHOST_TCapabilityFlag {
    * Otherwise client-side-decorations should be used, see: `WITH_GHOST_CSD`.
    */
   GHOST_kCapabilityWindowDecorationServerSide = (1 << 14),
+  /**
+   * Set when #GHOST_ISystem::getPixelAtCursor returns without user interaction and is cheap
+   * enough to be called repeatedly, so a color outside of the Blender windows can be sampled
+   * continuously (for example to preview the color under a moving cursor).
+   *
+   * Back-ends where sampling opens a system provided picker must not set this, as each call
+   * blocks until the user confirms a selection. Back-ends without
+   * #GHOST_kCapabilityDesktopSample must not set it either.
+   */
+  GHOST_kCapabilityDesktopSampleContinuous = (1 << 15),
 };
 
 /**
@@ -197,7 +207,8 @@ enum GHOST_TCapabilityFlag {
    GHOST_kCapabilityTrackpadPhysicalDirection | GHOST_kCapabilityWindowDecorationStyles | \
    GHOST_kCapabilityKeyboardHyperKey | GHOST_kCapabilityCursorRGBA | \
    GHOST_kCapabilityCursorGenerator | GHOST_kCapabilityMultiMonitorPlacement | \
-   GHOST_kCapabilityWindowPath | GHOST_kCapabilityWindowDecorationServerSide)
+   GHOST_kCapabilityWindowPath | GHOST_kCapabilityWindowDecorationServerSide | \
+   GHOST_kCapabilityDesktopSampleContinuous)
 
 /* Xtilt and Ytilt represent how much the pen is tilted away from
  * vertically upright in either the X or Y direction, with X and Y the

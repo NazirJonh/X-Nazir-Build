@@ -4214,6 +4214,36 @@ static eHandlerActionFlag wm_event_do_handlers_area_regions(bContext *C,
   return wm_event_do_region_handlers(C, event, region_hovered);
 }
 
+/**
+ * Modal handlers are normally only reachable from the window that owns them, so a click made
+ * after switching to another window falls through to that window's regular UI instead of
+ * reaching the operator. Operators added with #WM_event_add_modal_handler_cross_window opt into
+ * being found here instead.
+ *
+ * This is only ever used as a fall-back, after the handlers of `win` itself had a chance to
+ * handle the event, so nothing owned by `win` (its own modal operators, open popups, the
+ * screen-editing key-maps, ...) is bypassed.
+ */
+static ListBaseT<wmEventHandler> *wm_event_cross_window_modalhandlers(wmWindowManager *wm,
+                                                                      const wmWindow *win)
+{
+  for (wmWindow &other_win : wm->windows) {
+    if (&other_win == win) {
+      continue;
+    }
+    for (wmEventHandler &handler_base : other_win.runtime->modalhandlers) {
+      if (handler_base.type != WM_HANDLER_TYPE_OP) {
+        continue;
+      }
+      wmEventHandler_Op *handler = reinterpret_cast<wmEventHandler_Op *>(&handler_base);
+      if (handler->is_cross_window) {
+        return &other_win.runtime->modalhandlers;
+      }
+    }
+  }
+  return nullptr;
+}
+
 void wm_event_do_handlers(bContext *C)
 {
   PRF_scope(ProfileCategory::Core);
@@ -4352,6 +4382,23 @@ void wm_event_do_handlers(bContext *C)
         wm_event_free_and_remove_from_queue_if_valid(event);
         GPU_render_end();
         return;
+      }
+
+      /* Only once this window had its chance, offer the event to a modal operator running in
+       * another window that opted into cross-window events. */
+      ListBaseT<wmEventHandler> *cross_window_handlers = (action & WM_HANDLER_BREAK) ?
+                                                             nullptr :
+                                                             wm_event_cross_window_modalhandlers(
+                                                                 wm, &win);
+      if (cross_window_handlers) {
+        action |= wm_handlers_do(C, event, cross_window_handlers);
+
+        /* File-read case. */
+        if (CTX_wm_window(C) == nullptr) {
+          wm_event_free_and_remove_from_queue_if_valid(event);
+          GPU_render_end();
+          return;
+        }
       }
 
       /* Check for a tool-tip. */
@@ -4794,6 +4841,18 @@ wmEventHandler_Op *WM_event_add_modal_handler(bContext *C, wmOperator *op)
   ScrArea *area = CTX_wm_area(C);
   ARegion *region = CTX_wm_region(C);
   return WM_event_add_modal_handler_ex(win, area, region, op);
+}
+
+wmEventHandler_Op *WM_event_add_modal_handler_cross_window(bContext *C, wmOperator *op)
+{
+  wmWindow *win = CTX_wm_window(C);
+  wmEventHandler_Op *handler = WM_event_add_modal_handler(C, op);
+  /* Freeze the invoking window so #wm_handler_op_context_get_if_valid resolves the area/region
+   * from it even while handling events forwarded from another window, see
+   * #wm_event_cross_window_modalhandlers. */
+  handler->context.win = win;
+  handler->is_cross_window = true;
+  return handler;
 }
 
 void WM_event_remove_modal_handler(ListBaseT<wmEventHandler> *handlers,

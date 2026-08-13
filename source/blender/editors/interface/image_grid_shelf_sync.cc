@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /** \file
- * \ingroup spview3d
+ * \ingroup edinterface
+ *
+ * Keep the image-texture asset shelf in sync with the compact image grid.
  */
 
 #include "DNA_ID.h"
@@ -54,9 +56,9 @@
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 
-#include "intern/asset_library_reference.hh"
+#include "interface_grid_view.hh"
 
-#include "view3d_intern.hh"
+#include "intern/asset_library_reference.hh"
 
 namespace blender::ed::image_grid {
 
@@ -208,7 +210,7 @@ int image_grid_apply_focus_scroll(const bContext &C,
   }
 
   const int cols_clamped = image_grid_cols_clamp(cols);
-  const int rows_clamped = clamp_i(effective_rows_hint, 1, 16);
+  const int rows_clamped = clamp_i(effective_rows_hint, 1, ui::GRID_VIEW_DEFAULT_MAX_ROWS);
   const int layout_idx = image_grid_layout_bucket_index(cols_clamped, rows_clamped);
 
   /* Skip if already applied for this layout — the session scroll is already correct.

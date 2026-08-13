@@ -265,6 +265,11 @@ int AssetGridDataSource::item_count(const bContext & /*C*/) const
   return count;
 }
 
+bool AssetGridDataSource::item_count_ready(const bContext & /*C*/) const
+{
+  return ed::asset::list::is_loaded(&library_ref_);
+}
+
 void AssetGridDataSource::build_window(const bContext &C,
                                        AbstractGridView &view,
                                        const IndexRange window)

@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /** \file
- * \ingroup spview3d
+ * \ingroup edinterface
+ *
+ * Image-grid operators and the numpad-period focus handler.
  */
 
 #include "BLI_listbase.h"
@@ -72,11 +74,11 @@
 #include "UI_interface_layout.hh"
 #include "UI_tree_view.hh"
 
+#include "interface_grid_view.hh"
+
 #include "WM_api.hh"
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
-
-#include "view3d_intern.hh"
 
 namespace blender::ed::image_grid {
 
@@ -340,7 +342,7 @@ void image_grid_auto_focus_on_brush_change(bContext &C, const bool is_mask_slot)
 int image_grid_effective_rows(const ImageGridOwner owner, const bool is_mask_slot)
 {
   const int stored = owner.slot_dna(is_mask_slot).rows;
-  return clamp_i(stored ? stored : 1, 1, 16);
+  return clamp_i(stored ? stored : 1, 1, ui::GRID_VIEW_DEFAULT_MAX_ROWS);
 }
 
 int image_grid_preview_size_get(const ImageGridOwner owner)
@@ -1480,3 +1482,32 @@ void IMAGE_GRID_OT_open(wmOperatorType *ot)
 /** \} */
 
 }  // namespace blender
+
+namespace blender::ed::image_grid {
+
+static int image_grid_ui_event_handler(bContext *C, const wmEvent *event, ARegion *region)
+{
+  return handle_image_grid_focus_active_event(C, event, region);
+}
+
+void image_grid_operatortypes()
+{
+  WM_operatortype_append(IMAGE_GRID_OT_set_library);
+  WM_operatortype_append(IMAGE_GRID_OT_set_membership);
+  WM_operatortype_append(IMAGE_GRID_OT_assign_texture);
+  WM_operatortype_append(IMAGE_GRID_OT_mark_asset);
+  WM_operatortype_append(IMAGE_GRID_OT_new);
+  WM_operatortype_append(IMAGE_GRID_OT_open);
+  WM_operatortype_append(IMAGE_GRID_OT_assign_catalog);
+  WM_operatortype_append(IMAGE_GRID_OT_copy_to_library);
+  WM_operatortype_append(IMAGE_GRID_OT_move_to_library);
+  WM_operatortype_append(IMAGE_GRID_OT_drop_import);
+  WM_operatortype_append(VIEW3D_OT_image_shelf_activate_asset);
+  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_enabled_toggle);
+  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_map_type_toggle);
+  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_clear);
+
+  ui::region_pre_button_handler_add(image_grid_ui_event_handler);
+}
+
+}  // namespace blender::ed::image_grid

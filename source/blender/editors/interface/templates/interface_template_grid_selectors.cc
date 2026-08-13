@@ -308,7 +308,7 @@ class GridCatalogSelectorTree : public AbstractTreeView {
   /** Parent row for one real library's catalogs in All-Libraries mode. Its row also
    * carries the per-library "All" checkbox, clearing only this library's saved filter -- distinct
    * from #AllItem, which clears every library at once. Mirrors
-   * #ImageGridCatalogSelectorTree::LibrarySectionItem (view3d_image_grid_panels.cc), which uses the
+   * #ImageGridCatalogSelectorTree::LibrarySectionItem (image_grid_panels.cc), which uses the
    * same generic #AbstractTreeViewItem collapse-chevron mechanism as #Item below and is proven to
    * work in a nested popover.
    *

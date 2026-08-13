@@ -43,7 +43,7 @@
 
 /* Recent/Favorites asset-list registry (#ShelfAssetRef, #shelf_asset_lists_recent/favorites).
  * Internal to `editors/asset/`, but already reused outside it the same way (see
- * `view3d_image_grid_state.cc`, `brush_asset_ops.cc`) for the same Recent/Favorites feature. */
+ * `image_grid_state.cc`, `brush_asset_ops.cc`) for the same Recent/Favorites feature. */
 #include "../../asset/intern/asset_shelf_asset_lists.hh"
 
 #include "RNA_access.hh"
@@ -178,7 +178,7 @@ void id_browser_foreach_membership_asset(const bContext &C,
 
   /* Park matches at their list index, then emit in list order (most-recent/favorite-order first),
    * not asset-library iteration order. Mirrors #image_grid_foreach_membership_item
-   * (view3d_image_grid_state.cc), the same pattern for the Image Grid's Recent/Favorites. */
+   * (image_grid_state.cc), the same pattern for the Image Grid's Recent/Favorites. */
   VectorSet<ed::asset::shelf::ShelfAssetRef> ordered;
   ordered.add_multiple(membership);
 

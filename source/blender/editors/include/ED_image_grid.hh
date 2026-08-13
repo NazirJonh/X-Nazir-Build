@@ -35,7 +35,9 @@ struct Image;
 struct PointerRNA;
 struct Main;
 struct ARegion;
+struct ARegionType;
 struct wmEvent;
+struct wmOperatorType;
 
 namespace blender {
 struct BlendDataReader;
@@ -499,4 +501,33 @@ bool image_grid_set_library(bContext &C,
                             bool is_mask_slot,
                             const AssetLibraryReference &new_ref);
 
+/**
+ * Register #IMAGE_GRID_OT_* / remaining #VIEW3D_OT_image_grid_* operators and the numpad-period
+ * focus-active pre-button handler. Called from #operatortypes_ui.
+ */
+void image_grid_operatortypes();
+
 }  // namespace blender::ed::image_grid
+
+namespace blender {
+
+void IMAGE_GRID_OT_set_library(wmOperatorType *ot);
+void IMAGE_GRID_OT_set_membership(wmOperatorType *ot);
+void IMAGE_GRID_OT_assign_texture(wmOperatorType *ot);
+void IMAGE_GRID_OT_mark_asset(wmOperatorType *ot);
+void IMAGE_GRID_OT_new(wmOperatorType *ot);
+void IMAGE_GRID_OT_open(wmOperatorType *ot);
+void IMAGE_GRID_OT_assign_catalog(wmOperatorType *ot);
+void IMAGE_GRID_OT_copy_to_library(wmOperatorType *ot);
+void IMAGE_GRID_OT_move_to_library(wmOperatorType *ot);
+void IMAGE_GRID_OT_drop_import(wmOperatorType *ot);
+void VIEW3D_OT_image_shelf_activate_asset(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_name_match_enabled_toggle(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_name_match_map_type_toggle(wmOperatorType *ot);
+void VIEW3D_OT_image_grid_name_match_clear(wmOperatorType *ot);
+
+void image_grid_catalog_selector_panel_register(ARegionType *region_type);
+void image_grid_display_panel_register(ARegionType *region_type);
+void image_grid_name_match_filter_panel_register(ARegionType *region_type);
+
+}  // namespace blender

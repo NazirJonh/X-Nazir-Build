@@ -77,6 +77,7 @@
 
 /* Only for #UI_OT_editsource. */
 #include "ED_screen.hh"
+#include "ED_image_grid.hh"
 
 #include "NOD_socket.hh"
 
@@ -3372,6 +3373,8 @@ void operatortypes_ui()
   WM_operatortype_append(UI_OT_eyedropper_bone);
   WM_operatortype_append(UI_OT_eyedropper_grease_pencil_color);
   WM_menutype_add(UI_MT_color_space_select());
+
+  ed::image_grid::image_grid_operatortypes();
 }
 
 void keymap_ui(wmKeyConfig *keyconf)

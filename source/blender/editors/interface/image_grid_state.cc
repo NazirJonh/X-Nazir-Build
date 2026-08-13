@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /** \file
- * \ingroup spview3d
+ * \ingroup edinterface
  */
 
 #include "DNA_ID.h"
@@ -39,8 +39,6 @@
 #include "intern/asset_shelf_asset_lists.hh"
 
 #include "UI_grid_view.hh"
-
-#include "view3d_intern.hh"
 
 namespace blender::ed::image_grid {
 

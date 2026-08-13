@@ -10,12 +10,14 @@ namespace blender::ui {
 int grid_build_window_size(const int grip_px,
                            const int tile_h,
                            const int cols,
-                           const int max_items)
+                           const int max_items,
+                           const int max_rows)
 {
   const int safe_cols = max_ii(1, cols);
   const int safe_tile_h = max_ii(1, tile_h);
+  const int safe_max_rows = max_ii(1, max_rows);
   const int effective_rows = clamp_i(
-      int(divide_ceil_u(uint(max_ii(grip_px, 0)), uint(safe_tile_h))), 1, 16);
+      int(divide_ceil_u(uint(max_ii(grip_px, 0)), uint(safe_tile_h))), 1, safe_max_rows);
   const int visible_slots = max_ii(1, (effective_rows + 1) * safe_cols);
   return min_ii(visible_slots, max_items);
 }

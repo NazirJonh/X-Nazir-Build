@@ -8,12 +8,14 @@
  *
  * Public API for the reusable grid view:
  *
- * - #GridDataSource — data provider interface consumed by #build_grid_view.
+ * - #GridDataSource — data provider interface consumed by #build_grid_view /
+ *   #grid_view_fill_from_source.
+ * - #GridViewHostParams — per-host caps (max rows / max items / resize grip).
  * - Pure windowing/scroll math — #grid_build_window_size, #grid_total_rows,
  *   #grid_max_scroll_px, #grid_clamp_scroll_px, #grid_rows_to_build. Isolated so they can be
  *   unit-tested without a GPU/window context.
  * - #GridSessionState — grid_id-keyed session state registry (scroll/grip state outliving the
- *   per-redraw views), implemented in `views/grid_view.cc`.
+ *   per-redraw views), implemented in `views/grid_view_session.cc`.
  * - #GridStateAccess — session UI state interface (grip height, scroll, layout buckets).
  * - #build_grid_view — generic core renderer: tiles + smooth scroll + resize grip +
  *   overlay scrollbar. Knows nothing about View3D / assets / images.
@@ -36,6 +38,26 @@ namespace ui {
 class AbstractGridView;
 struct Layout;
 struct TooltipData;
+struct GridSessionState;
+
+/* -------------------------------------------------------------------- */
+/** \name Host parameters
+ * \{ */
+
+/**
+ * Caps and chrome for one grid host. Defaults match the original hard-coded window used by the
+ * generic Python grid and the brush-texture image grid.
+ */
+inline constexpr int GRID_VIEW_DEFAULT_MAX_ROWS = 16;
+inline constexpr int GRID_VIEW_DEFAULT_MAX_ITEMS = 512;
+
+struct GridViewHostParams {
+  int max_rows = GRID_VIEW_DEFAULT_MAX_ROWS;
+  int max_items = GRID_VIEW_DEFAULT_MAX_ITEMS;
+  bool show_grip = true;
+};
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name GridDataSource — data provider interface
@@ -54,14 +76,47 @@ class GridDataSource {
   virtual int item_count(const bContext &C) const = 0;
 
   /**
+   * True when #item_count reflects a stable list. Return false while an async fetch is in flight:
+   * a transient 0 would collapse #grid_max_scroll_px and clamp scroll to the top. Default true.
+   */
+  virtual bool item_count_ready(const bContext & /*C*/) const
+  {
+    return true;
+  }
+
+  /**
    * Build #PreviewGridItem objects for the visible window only, by adding them to \a view via
    * #AbstractGridView::add_item(). The window is [window.first(), window.one_after_last()).
    * Building only the visible window keeps per-redraw cost bounded.
    */
   virtual void build_window(const bContext &C, AbstractGridView &view, IndexRange window) = 0;
 
+  /**
+   * Combined count + fill. Default: #item_count then #build_window (two walks). Sources that
+   * iterate an expensive list can override for a single pass.
+   */
+  virtual int build_window_and_count(const bContext &C,
+                                     AbstractGridView &view,
+                                     const IndexRange window)
+  {
+    const int count = item_count(C);
+    build_window(C, view, window);
+    return count;
+  }
+
   /** Item activation, tooltips, and context menus are owned by concrete #PreviewGridItem types. */
 };
+
+/**
+ * Fill \a view from \a source for the visible window. Commits #GridSessionState::cached_item_count
+ * only when #GridDataSource::item_count_ready.
+ */
+void grid_view_fill_from_source(AbstractGridView &view,
+                                GridDataSource &source,
+                                const bContext &C,
+                                GridSessionState *session,
+                                int cols,
+                                const GridViewHostParams &params);
 
 /** \} */
 
@@ -72,9 +127,10 @@ class GridDataSource {
 /**
  * Number of items to build for the current scroll window: visible rows plus one buffer row, times
  * \a cols, capped at \a max_items. Visible rows are derived from \a grip_px / \a tile_h, clamped
- * to 1..16.
+ * to 1..\a max_rows (default 16).
  */
-int grid_build_window_size(int grip_px, int tile_h, int cols, int max_items);
+int grid_build_window_size(
+    int grip_px, int tile_h, int cols, int max_items, int max_rows = GRID_VIEW_DEFAULT_MAX_ROWS);
 
 /** ceil(item_count / cols); returns \a fallback_rows when there are no items. */
 int grid_total_rows(int item_count, int cols, int fallback_rows = 1);
@@ -133,6 +189,8 @@ struct GridSessionState {
  * least as long as a caller holds a reference via #grid_session_acquire.
  */
 GridSessionState &grid_session_state_ensure(StringRef grid_id);
+/** Null when no session exists for \a grid_id. */
+GridSessionState *grid_session_state_lookup(StringRef grid_id);
 void grid_session_acquire(GridSessionState &session);
 void grid_session_release(GridSessionState &session);
 
@@ -151,11 +209,13 @@ void grid_session_state_foreach(
  * \{ */
 
 /**
- * Abstracts the per-grid session UI state (grip height, scroll row, sub-row pixel offset, focus,
- * layout-bucket persistence) so the generic core (#build_grid_view) does not depend on #View3D.
+ * Abstracts the per-grid session UI state (grip height, scroll, layout-bucket persistence) so the
+ * generic core (#build_grid_view) does not depend on a space type.
  *
- * Stage 2a backs this with the existing View3D state for byte-for-byte identical behavior.
- * Stage 2b swaps the backend to #uiViewState without touching the core.
+ * Backed by the process-global #GridSessionState registry keyed by grid_id (see
+ * `views/grid_view_session.cc`). Not #uiViewState: that only round-trips through
+ * #block_views_end() / #block_view_persistent_state_restore(), which cannot serve a live
+ * #ButtonType::Grip / #ButtonType::Scroll drag.
  */
 class GridStateAccess {
  public:
@@ -209,8 +269,7 @@ class GridStateAccess {
 
   /**
    * Returns the whole-row count stored in DNA (or a sensible default) for use only when
-   * #grip_pixel_height has not been set yet (first frame / after file reload). Stage 2b
-   * derives this from #uiViewState::custom_height instead.
+   * #grip_pixel_height has not been set yet (first frame / after file reload).
    */
   virtual int effective_rows_dna_fallback() const = 0;
 
@@ -248,6 +307,7 @@ class GridStateAccess {
  *        inside the view's build_items() during this frame.
  * \param cols_est column estimate derived from the panel width by the caller.
  * \param panel_width layout width in pixels, 0 when unknown.
+ * \param host per-host caps (max rows / max items) and whether to draw the resize grip.
  */
 void build_grid_view(const bContext &C,
                      Layout &layout,
@@ -255,7 +315,8 @@ void build_grid_view(const bContext &C,
                      GridStateAccess &state,
                      int item_count,
                      int cols_est,
-                     int panel_width);
+                     int panel_width,
+                     const GridViewHostParams &host = {});
 
 /** \} */
 

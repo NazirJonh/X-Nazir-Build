@@ -42,9 +42,26 @@
 
 namespace blender::ui {
 
-namespace {
+void grid_view_fill_from_source(AbstractGridView &view,
+                                GridDataSource &source,
+                                const bContext &C,
+                                GridSessionState *session,
+                                const int cols,
+                                const GridViewHostParams &params)
+{
+  const int tile_h = max_ii(view.get_style().tile_height, 1);
+  const int safe_cols = max_ii(1, cols);
+  const int grip = session ? session->grip_pixel_height : 0;
+  const int item_window = grid_build_window_size(
+      grip, tile_h, safe_cols, params.max_items, params.max_rows);
+  const int first_index = session ? (session->scroll_px / tile_h) * safe_cols : 0;
+  const int count = source.build_window_and_count(C, view, IndexRange(first_index, item_window));
+  if (session && source.item_count_ready(C)) {
+    session->cached_item_count = count;
+  }
+}
 
-constexpr int GRID_MAX_ITEMS = 512;
+namespace {
 
 /* -------------------------------------------------------------------- */
 /** \name Generic grid view
@@ -70,6 +87,7 @@ class GenericGridView : public AbstractGridView {
   const bContext &context_;
   std::unique_ptr<GridDataSource> source_;
   int cols_hint_ = 1;
+  GridViewHostParams host_params_;
 
  public:
   GenericGridView(const bContext &context,
@@ -103,9 +121,9 @@ class GenericGridView : public AbstractGridView {
     return session_->grip_pixel_height;
   }
 
-  int tile_h_safe() const
+  int host_max_rows() const
   {
-    return max_ii(1, this->get_style().tile_height);
+    return host_params_.max_rows;
   }
 
   int cached_item_count() const
@@ -115,15 +133,8 @@ class GenericGridView : public AbstractGridView {
 
   void build_items() override
   {
-    const int cols = cols_hint_;
-    const int tile_h = this->tile_h_safe();
-    const int item_window = grid_build_window_size(
-        session_->grip_pixel_height, tile_h, cols, GRID_MAX_ITEMS);
-    const int first_index = (session_->scroll_px / tile_h) * cols;
-    const IndexRange window(first_index, item_window);
-
-    session_->cached_item_count = source_->item_count(context_);
-    source_->build_window(context_, *this, window);
+    grid_view_fill_from_source(
+        *this, *source_, context_, session_, cols_hint_, host_params_);
   }
 
   int get_cached_item_count_for_build() const
@@ -211,7 +222,9 @@ class ViewGridStateAccess : public GridStateAccess {
   {
     const int tile_h = max_ii(1, view_.get_style().tile_height);
     return clamp_i(
-        int(divide_ceil_u(uint(max_ii(view_.grip_pixel_height(), tile_h)), uint(tile_h))), 1, 16);
+        int(divide_ceil_u(uint(max_ii(view_.grip_pixel_height(), tile_h)), uint(tile_h))),
+        1,
+        view_.host_max_rows());
   }
 
   std::function<void(bContext &)> make_scroll_widget_fn(const int /*store_cols*/,
@@ -271,7 +284,8 @@ void build_grid_view(const bContext &C,
                      GridStateAccess &state,
                      const int item_count,
                      const int cols_est,
-                     const int panel_width)
+                     const int panel_width,
+                     const GridViewHostParams &host)
 {
   Block *block = layout.block();
 
@@ -285,11 +299,12 @@ void build_grid_view(const bContext &C,
     state.grip_pixel_height_set(state.effective_rows_dna_fallback() * tile_h);
   }
 
-  /* Clamp the raw grip to the 1..16-row range for display; preserve the raw value so a temporary
+  /* Clamp the raw grip to the 1..max_rows range for display; preserve the raw value so a temporary
    * preview-size change does not permanently shrink a height the user set at a smaller tile. */
-  const int visible_height = clamp_i(state.grip_pixel_height(), tile_h, 16 * tile_h);
+  const int visible_height = clamp_i(
+      state.grip_pixel_height(), tile_h, host.max_rows * tile_h);
   const int effective_rows = clamp_i(
-      int(divide_ceil_u(uint(visible_height), uint(tile_h))), 1, 16);
+      int(divide_ceil_u(uint(visible_height), uint(tile_h))), 1, host.max_rows);
 
   /* Total rows from the previous-frame item count (updated inside build_items this frame).
    * Falls back to effective_rows when the grid is empty so the grip does not collapse. */
@@ -427,23 +442,25 @@ void build_grid_view(const bContext &C,
 
   /* --- Resize grip --- */
 
-  Layout &grip_row = layout.row(false);
-  grip_row.scale_x_set(1.0f);
-  block_layout_set_current(block, &grip_row);
-  Button *grip_but = uiDefIconButV(block,
-                                   ButtonType::Grip,
-                                   ICON_GRIP,
-                                   0,
-                                   0,
-                                   short(max_ii(panel_width, int(UI_UNIT_X * 10))),
-                                   short(UI_UNIT_Y * 0.5f),
-                                   state.grip_pixel_height_ptr(),
-                                   0.0f,
-                                   0.0f,
-                                   "");
-  button_flag_disable(grip_but, BUT_UNDO);
-  button_func_set(grip_but, state.make_grip_change_fn());
-  block_layout_set_current(block, &layout);
+  if (host.show_grip) {
+    Layout &grip_row = layout.row(false);
+    grip_row.scale_x_set(1.0f);
+    block_layout_set_current(block, &grip_row);
+    Button *grip_but = uiDefIconButV(block,
+                                     ButtonType::Grip,
+                                     ICON_GRIP,
+                                     0,
+                                     0,
+                                     short(max_ii(panel_width, int(UI_UNIT_X * 10))),
+                                     short(UI_UNIT_Y * 0.5f),
+                                     state.grip_pixel_height_ptr(),
+                                     0.0f,
+                                     0.0f,
+                                     "");
+    button_flag_disable(grip_but, BUT_UNDO);
+    button_func_set(grip_but, state.make_grip_change_fn());
+    block_layout_set_current(block, &layout);
+  }
 }
 
 void template_grid_view_asset(Layout *layout,

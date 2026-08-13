@@ -52,6 +52,12 @@ set(SRC
   interface_icons.cc
   interface_icons_event.cc
   interface_id_filter.cc
+  image_grid_asset_ops.cc
+  image_grid_dna.cc
+  image_grid_ops.cc
+  image_grid_panels.cc
+  image_grid_shelf_sync.cc
+  image_grid_state.cc
   interface_image_grid_owner.cc
   interface_layout.cc
   interface_ops.cc
@@ -120,6 +126,7 @@ set(SRC
   views/abstract_view.cc
   views/abstract_view_item.cc
   views/grid_view.cc
+  views/grid_view_session.cc
   views/grid_view_reorder.cc
   views/interface_view.cc
   views/tree_view.cc

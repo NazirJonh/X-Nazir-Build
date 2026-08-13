@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /** \file
- * \ingroup spview3d
+ * \ingroup edinterface
  *
  * Shared free/duplicate/blend_read/blend_write logic for #ImageGridSlotDNA,
  * factored out so both #View3D (its own two slots) and #SpaceImage can call

@@ -54,6 +54,7 @@ class AssetGridDataSource : public GridDataSource {
                       std::string drag_operator = "");
 
   int item_count(const bContext &C) const override;
+  bool item_count_ready(const bContext &C) const override;
   void build_window(const bContext &C, AbstractGridView &view, IndexRange window) override;
 };
 

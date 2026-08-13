@@ -402,13 +402,14 @@ class BrushTextureSlotDropTarget : public ui::DropTargetInterface {
 
   bool can_drop(bContext & /*C*/, const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
   {
-    /* Local image data-block or image asset (imported on drop). */
+    /* Local image ID, or an image-typed #WM_DRAG_ASSET. #WM_drag_is_ID_type covers both
+     * #WM_DRAG_ID and #WM_DRAG_ASSET (via #WM_drag_get_asset_data with ID_IM); assets of any
+     * other type are rejected. */
     if (WM_drag_is_ID_type(&drag, ID_IM)) {
       return true;
     }
-    /* The Asset Browser drags a #WM_DRAG_ASSET_LIST alongside the #WM_DRAG_ASSET above; both must
-     * be accepted since #drop_target_apply_drop() requires every drag in the shared list to pass
-     * this check (see #first_image_item_in_list). */
+    /* Multi-select from the Asset Browser is a separate #WM_DRAG_ASSET_LIST drag. Every drag in
+     * the shared list must pass this check; accept the list when it contains at least one image. */
     if (drag.type == WM_DRAG_ASSET_LIST) {
       return first_image_item_in_list(drag) != nullptr;
     }

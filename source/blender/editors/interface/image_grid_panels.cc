@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /** \file
- * \ingroup spview3d
+ * \ingroup edinterface
+ *
+ * Image-grid header popover panels (catalog selector, display, name-match filter).
  */
 
 #include "BLI_listbase.h"
@@ -40,8 +42,6 @@
 
 #include "WM_api.hh"
 #include "WM_types.hh"
-
-#include "view3d_intern.hh"
 
 #include <string>
 #include <utility>

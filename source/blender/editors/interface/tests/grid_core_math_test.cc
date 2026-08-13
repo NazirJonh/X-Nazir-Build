@@ -17,6 +17,14 @@ TEST(grid_core_math, window_size_clamps_rows_to_16)
   EXPECT_EQ(grid_build_window_size(/*grip_px*/ 100000, /*tile_h*/ 1, /*cols*/ 1, /*max*/ 512), 17);
 }
 
+TEST(grid_core_math, window_size_honors_max_rows)
+{
+  /* 4 visible rows + 1 buffer, 1 col. */
+  EXPECT_EQ(grid_build_window_size(
+                /*grip_px*/ 100000, /*tile_h*/ 1, /*cols*/ 1, /*max*/ 512, /*max_rows*/ 4),
+            5);
+}
+
 TEST(grid_core_math, total_rows_ceil)
 {
   EXPECT_EQ(grid_total_rows(/*item_count*/ 9, /*cols*/ 4), 3);

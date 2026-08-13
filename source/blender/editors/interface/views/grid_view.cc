@@ -563,128 +563,17 @@ void AbstractGridView::clear_drop_linehint()
   has_drop_linehint_ = false;
 }
 
-/* -------------------------------------------------------------------- */
-/** \name Grid Session State Registry
- *
- * Process-lifetime scroll/grip state keyed by grid_id, outliving the per-redraw view
- * instances. A #unique_ptr value keeps each state at a fixed address, so widgets bound to
- * its fields from an earlier redraw stay valid even when the #Map rehashes on inserting a
- * different grid_id. Bounded by capacity with LRU eviction of unreferenced entries, so
- * dynamically minted grid_ids cannot grow the registry without limit while scroll/grip
- * state still survives closing and reopening a popover.
- * \{ */
-
-static constexpr int64_t GRID_SESSION_CAPACITY = 64;
-
-struct GridSessionRuntime {
-  Map<std::string, std::unique_ptr<GridSessionState>> sessions;
-  uint64_t use_seq = 0;
-};
-
-static GridSessionRuntime &grid_session_runtime()
-{
-  static GridSessionRuntime runtime;
-  return runtime;
-}
-
-GridSessionState &grid_session_state_ensure(const StringRef grid_id)
-{
-  GridSessionRuntime &runtime = grid_session_runtime();
-  std::unique_ptr<GridSessionState> &slot = runtime.sessions.lookup_or_add_cb(
-      std::string(grid_id), [] { return std::make_unique<GridSessionState>(); });
-  slot->last_used_seq = ++runtime.use_seq;
-
-  if (runtime.sessions.size() > GRID_SESSION_CAPACITY) {
-    /* Evict the least recently used unreferenced entry. Linear scan is fine at this size. */
-    const std::string *oldest_key = nullptr;
-    uint64_t oldest_seq = std::numeric_limits<uint64_t>::max();
-    GridSessionState *kept = slot.get();
-    for (auto item : runtime.sessions.items()) {
-      const GridSessionState &session = *item.value;
-      if (session.refcount == 0 && item.value.get() != kept &&
-          session.last_used_seq < oldest_seq)
-      {
-        oldest_seq = session.last_used_seq;
-        oldest_key = &item.key;
-      }
-    }
-    if (oldest_key) {
-      runtime.sessions.remove(*oldest_key);
-    }
-  }
-  return *slot;
-}
-
-void grid_session_acquire(GridSessionState &session)
-{
-  session.refcount++;
-}
-
-void grid_session_release(GridSessionState &session)
-{
-  BLI_assert(session.refcount > 0);
-  session.refcount--;
-}
-
-void grid_session_state_foreach(
-    const FunctionRef<bool(StringRef grid_id, GridSessionState &session)> fn)
-{
-  for (auto item : grid_session_runtime().sessions.items()) {
-    if (!fn(item.key, *item.value)) {
-      return;
-    }
-  }
-}
-
-void grid_view_session_remove(const StringRef grid_id)
-{
-  GridSessionRuntime &runtime = grid_session_runtime();
-  /* Only safe when nothing references it (the owning space is being freed). */
-  if (std::unique_ptr<GridSessionState> *slot = runtime.sessions.lookup_ptr_as(grid_id)) {
-    if ((*slot)->refcount == 0) {
-      runtime.sessions.remove_as(grid_id);
-    }
-  }
-}
-
-void grid_view_session_reset_scroll(const StringRef grid_id)
-{
-  GridSessionRuntime &runtime = grid_session_runtime();
-  /* Reset an existing session to the top and drop its per-column pins (e.g. a View3D grid whose
-   * filter/library changed, so the old position is meaningless). No-op if the session was never
-   * created — a fresh one already starts at the top. */
-  if (std::unique_ptr<GridSessionState> *slot = runtime.sessions.lookup_ptr_as(grid_id)) {
-    (*slot)->scroll_px = 0;
-    (*slot)->scroll_px_by_cols.clear();
-  }
-}
-
-int grid_view_session_cols(const StringRef grid_id)
-{
-  /* Column count of an existing session (0 when never drawn). Lets space code that owns its own
-   * per-grid bookkeeping (e.g. the View3D focus-applied flags) query a grid's layout without
-   * reaching into the interface-internal session registry. */
-  GridSessionRuntime &runtime = grid_session_runtime();
-  if (std::unique_ptr<GridSessionState> *slot = runtime.sessions.lookup_ptr_as(grid_id)) {
-    return (*slot)->cols;
-  }
-  return 0;
-}
-
 bool grid_view_session_scroll_button_under_mouse(const ARegion *region,
                                                  const int xy[2],
                                                  const StringRef grid_id)
 {
   /* Hit-test a session grid's overlay scrollbar without exposing the session's transitional
    * scroll-widget field to callers outside the interface layer (View3D numpad-focus hotkey). */
-  GridSessionRuntime &runtime = grid_session_runtime();
-  if (std::unique_ptr<GridSessionState> *slot = runtime.sessions.lookup_ptr_as(grid_id)) {
-    return region_scroll_button_under_mouse(region, xy, &(*slot)->scroll_px);
+  if (GridSessionState *session = grid_session_state_lookup(grid_id)) {
+    return region_scroll_button_under_mouse(region, xy, &session->scroll_px);
   }
   return false;
 }
-
-/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Unified grid input (wheel + touch drag + kinetic fling)

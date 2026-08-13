@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /** \file
- * \ingroup spview3d
+ * \ingroup edinterface
  *
  * Image grid context-menu operators: mark/clear, assign catalog, copy/move to libraries.
  */
@@ -52,8 +52,6 @@
 
 #include "WM_api.hh"
 #include "WM_types.hh"
-
-#include "view3d_intern.hh"
 
 namespace blender::ed::image_grid {
 

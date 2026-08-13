@@ -31,9 +31,6 @@
 #include "ED_screen.hh"
 #include "ED_transform.hh"
 #include "ED_view3d.hh"
-#include "ED_image_grid.hh"
-
-#include "UI_interface_c.hh"
 
 #include "view3d_intern.hh"
 #include "view3d_navigate.hh"
@@ -190,17 +187,6 @@ static void VIEW3D_OT_pastebuffer(wmOperatorType *ot)
 /** \name Registration
  * \{ */
 
-/**
- * Pre-button UI handler for the brush texture image grid: a numpad-period shortcut to recenter on
- * the active texture (including inside popovers), before button activation. Wheel and pen/tablet
- * drag scrolling are now handled by the shared #grid_view_register_pre_button_handler (Stage 4);
- * this stays only for the View3D-specific focus key.
- */
-static int view3d_image_grid_ui_event_handler(bContext *C, const wmEvent *event, ARegion *region)
-{
-  return ed::image_grid::handle_image_grid_focus_active_event(C, event, region);
-}
-
 void view3d_operatortypes()
 {
   WM_operatortype_append(VIEW3D_OT_rotate);
@@ -276,26 +262,6 @@ void view3d_operatortypes()
 #ifdef WITH_XR_OPENXR
   WM_operatortype_append(VIEW3D_OT_vr_location_scouting_capture_review);
 #endif
-
-  WM_operatortype_append(IMAGE_GRID_OT_set_library);
-  WM_operatortype_append(IMAGE_GRID_OT_set_membership);
-  WM_operatortype_append(IMAGE_GRID_OT_assign_texture);
-  WM_operatortype_append(IMAGE_GRID_OT_mark_asset);
-  WM_operatortype_append(IMAGE_GRID_OT_new);
-  WM_operatortype_append(IMAGE_GRID_OT_open);
-  WM_operatortype_append(IMAGE_GRID_OT_assign_catalog);
-  WM_operatortype_append(IMAGE_GRID_OT_copy_to_library);
-  WM_operatortype_append(IMAGE_GRID_OT_move_to_library);
-  WM_operatortype_append(IMAGE_GRID_OT_drop_import);
-  WM_operatortype_append(VIEW3D_OT_image_shelf_activate_asset);
-  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_enabled_toggle);
-  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_map_type_toggle);
-  WM_operatortype_append(VIEW3D_OT_image_grid_name_match_clear);
-
-  /* Invert the UI→view3d dependency: register the image-grid focus interceptor (numpad-period
-   * focus-active) with the generic UI layer instead of having #interface_handlers call into view3d
-   * directly. Wheel/drag scrolling is handled by the shared grid input handler. */
-  ui::region_pre_button_handler_add(view3d_image_grid_ui_event_handler);
 
   ed::transform::transform_operatortypes();
 }

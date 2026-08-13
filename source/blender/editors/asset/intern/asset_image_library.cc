@@ -433,17 +433,8 @@ static void scan_directory_recursive(const char *dir_abs,
   }
 }
 
-/**
- * Resolve the user asset library that owns `library_root_path`.
- *
- * Unlike #BKE_preferences_asset_library_containing_path (which returns the *first* library whose
- * directory contains the path), this returns the most specific match -- the one with the longest
- * matching directory. That matters for nested libraries: a library added inside another library's
- * directory must resolve to itself, not to its enclosing parent, otherwise its type flags (image /
- * brush / remote) would be read from the wrong library and, for image libraries, its index would be
- * treated as stale and deleted. For the common non-nested case exactly one library matches, so the
- * result is identical to a first-match lookup.
- */
+/** Most-specific user library for \a library_root_path; see
+ * #BKE_preferences_asset_library_deepest_containing_path. */
 static const bUserAssetLibrary *image_library_owner_of_root(const char *library_root_path)
 {
   return BKE_preferences_asset_library_deepest_containing_path(&U, library_root_path);

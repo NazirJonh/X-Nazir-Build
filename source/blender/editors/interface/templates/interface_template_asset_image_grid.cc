@@ -75,11 +75,7 @@ namespace blender::ui {
 
 using ed::image_grid::IMAGE_TEXTURE_SHELF_IDNAME;
 
-/**
- * Upper bound on tiles built per redraw (16 rows × wide N-panel). The actual window is
- * #image_grid_build_item_window_size() from visible rows × columns.
- */
-constexpr int IMAGE_GRID_MAX_ITEMS = 512;
+constexpr GridViewHostParams IMAGE_GRID_HOST{};
 
 /* -------------------------------------------------------------------- */
 /** \name Helpers
@@ -589,13 +585,14 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
 
   bool can_drop(bContext & /*C*/, const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
   {
-    /* Local image data-block or image asset (imported on drop). */
+    /* Local image ID, or an image-typed #WM_DRAG_ASSET. #WM_drag_is_ID_type covers both
+     * #WM_DRAG_ID and #WM_DRAG_ASSET (via #WM_drag_get_asset_data with ID_IM); assets of any
+     * other type are rejected. */
     if (WM_drag_is_ID_type(&drag, ID_IM)) {
       return true;
     }
-    /* The Asset Browser drags a #WM_DRAG_ASSET_LIST alongside the single-item #WM_DRAG_ASSET
-     * above (multi-select support); both must be accepted since #drop_target_apply_drop()
-     * requires every drag in the shared list to pass this check, applying whichever is first. */
+    /* Multi-select from the Asset Browser is a separate #WM_DRAG_ASSET_LIST drag. Every drag in
+     * the shared list must pass this check; accept the list when it contains at least one image. */
     if (drag.type == WM_DRAG_ASSET_LIST) {
       return first_image_item_in_list(drag) != nullptr;
     }
@@ -733,19 +730,88 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Image-grid data source
+ * \{ */
+
+/**
+ * Product tiles (#ImageAssetGridItem: asset or local #Image) over
+ * #image_grid_foreach_filtered_item. One walk fills the window and returns the filtered count.
+ */
+class ImageGridDataSource : public GridDataSource {
+  ed::image_grid::ImageGridUIState &state_;
+  AssetLibraryReference library_ref_;
+  PointerRNA target_ptr_;
+  PropertyRNA *target_prop_ = nullptr;
+  bool is_popover_ = false;
+
+ public:
+  ImageGridDataSource(ed::image_grid::ImageGridUIState &state,
+                      const AssetLibraryReference &library_ref,
+                      const PointerRNA &target_ptr,
+                      PropertyRNA *target_prop,
+                      const bool is_popover)
+      : state_(state),
+        library_ref_(library_ref),
+        target_ptr_(target_ptr),
+        target_prop_(target_prop),
+        is_popover_(is_popover)
+  {
+  }
+
+  bool item_count_ready(const bContext & /*C*/) const override
+  {
+    return ed::asset::list::is_loaded(&library_ref_);
+  }
+
+  int item_count(const bContext &C) const override
+  {
+    Main *bmain = CTX_data_main(&C);
+    return ed::image_grid::image_grid_foreach_filtered_item(
+        *bmain, state_, [](const ed::image_grid::ImageGridFilteredItem &, int) { return true; });
+  }
+
+  void build_window(const bContext &C, AbstractGridView &view, const IndexRange window) override
+  {
+    this->build_window_and_count(C, view, window);
+  }
+
+  int build_window_and_count(const bContext &C,
+                             AbstractGridView &view,
+                             const IndexRange window) override
+  {
+    Main *bmain = CTX_data_main(&C);
+    ed::asset::list::storage_fetch(&library_ref_, &C);
+    return ed::image_grid::image_grid_foreach_filtered_item(
+        *bmain,
+        state_,
+        [&](const ed::image_grid::ImageGridFilteredItem &item, const int filtered_index) -> bool {
+          if (window.contains(filtered_index)) {
+            if (item.asset) {
+              view.add_item<ImageAssetGridItem>(
+                  *item.asset, target_ptr_, target_prop_, library_ref_, is_popover_);
+            }
+            else {
+              view.add_item<ImageAssetGridItem>(
+                  *item.image, target_ptr_, target_prop_, library_ref_, is_popover_);
+            }
+          }
+          return true;
+        });
+  }
+};
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Grid View
  * \{ */
 
 class ImageAssetGridView : public AbstractGridView {
   const bContext &context_;
-  ed::image_grid::ImageGridUIState &state_;
-  AssetLibraryReference library_ref_;
+  std::unique_ptr<GridDataSource> source_;
   PointerRNA target_ptr_;
-  PropertyRNA *target_prop_ = nullptr;
-  /** Column estimate when #state_.cached_cols is not yet known (first redraw). */
+  /** Column estimate when the session has not yet recorded cols (first redraw). */
   int cols_hint_ = 1;
-  /** Popover keeps its own grip height; the build window must use it, not the sidebar's. */
-  bool is_popover_ = false;
 
  public:
   ImageAssetGridView(const bContext &context,
@@ -756,58 +822,16 @@ class ImageAssetGridView : public AbstractGridView {
                      const int cols_hint,
                      const bool is_popover)
       : context_(context),
-        state_(state),
-        library_ref_(library_ref),
+        source_(std::make_unique<ImageGridDataSource>(
+            state, library_ref, target_ptr, target_prop, is_popover)),
         target_ptr_(target_ptr),
-        target_prop_(target_prop),
-        cols_hint_(max_ii(1, cols_hint)),
-        is_popover_(is_popover)
+        cols_hint_(max_ii(1, cols_hint))
   {
   }
 
   void build_items() override
   {
-    Main *bmain = CTX_data_main(&context_);
-
-    ed::asset::list::storage_fetch(&library_ref_, &context_);
-
-    const int cols = cols_hint_;
-    const int tile_h = max_ii(this->get_style().tile_height, 1);
-    /* Scroll/grip are the session's pixel truth (Stage 4); the visible window starts at the whole
-     * row #scroll_px falls in (the sub-row offset only shifts the draw, not item selection). */
-    const int scroll_px = session_ ? session_->scroll_px : 0;
-    const int first_index = (scroll_px / tile_h) * cols;
-    const int grip_height = session_ ? session_->grip_pixel_height : 0;
-    const int item_window = grid_build_window_size(
-        grip_height, this->get_style().tile_height, cols, IMAGE_GRID_MAX_ITEMS);
-    const int last_index = first_index + item_window;
-
-    const int filtered_count = ed::image_grid::image_grid_foreach_filtered_item(
-        *bmain,
-        state_,
-        [&](const ed::image_grid::ImageGridFilteredItem &item, int filtered_index) -> bool {
-          if (filtered_index >= first_index && filtered_index < last_index) {
-            if (item.asset) {
-              this->add_item<ImageAssetGridItem>(
-                  *item.asset, target_ptr_, target_prop_, library_ref_, is_popover_);
-            }
-            else {
-              this->add_item<ImageAssetGridItem>(
-                  *item.image, target_ptr_, target_prop_, library_ref_, is_popover_);
-            }
-          }
-          return true;
-        });
-
-    /* While the asset list is mid-(re)fetch the iteration above transiently yields zero (or a
-     * partial count of) items even though the library is still populated. Committing that
-     * transient value to #cached_item_count collapses #grid_max_scroll_px, which clamps
-     * #scroll_px to the top and momentarily shrinks the grid (the shrink in turn lets the wheel
-     * leak into the region's View2D pan, collapsing the panel to a single visible row). Keep the
-     * last known good count until the list is ready again. */
-    if (ed::asset::list::is_loaded(&library_ref_) && session_) {
-      session_->cached_item_count = filtered_count;
-    }
+    grid_view_fill_from_source(*this, *source_, context_, session_, cols_hint_, IMAGE_GRID_HOST);
   }
 
   std::unique_ptr<DropTargetInterface> create_drop_target() override
@@ -819,7 +843,7 @@ class ImageAssetGridView : public AbstractGridView {
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Owner-backed GridStateAccess adapter (Stage 2a)
+/** \name Owner-backed GridStateAccess adapter
  * \{ */
 
 /** Forwards #GridStateAccess reads/writes to this grid variant's #GridSessionState (the single
@@ -1254,7 +1278,9 @@ static void build_image_grid(Layout &layout,
   const int tile_h_hint = ui::preview_tile_size_y_no_label(preview_size);
   const int effective_rows_hint =
       (grip_height >= tile_h_hint) ?
-          clamp_i(int(divide_ceil_u(uint(grip_height), uint(tile_h_hint))), 1, 16) :
+          clamp_i(int(divide_ceil_u(uint(grip_height), uint(tile_h_hint))),
+                  1,
+                  IMAGE_GRID_HOST.max_rows) :
           (is_popover ? 3 : ed::image_grid::image_grid_effective_rows(*owner, is_mask_slot));
 
   /* Column count for this panel's width; falls back to the session's last count when the width is
@@ -1314,7 +1340,9 @@ static void build_image_grid(Layout &layout,
     const int tile_h = max_ii(1, style.tile_height);
     const int grip = session.grip_pixel_height;
     if (grip >= tile_h) {
-      const short row_count = short(clamp_i(round_fl_to_int(float(grip) / float(tile_h)), 1, 16));
+      const short row_count = short(clamp_i(round_fl_to_int(float(grip) / float(tile_h)),
+                                            1,
+                                            IMAGE_GRID_HOST.max_rows));
       owner->slot_dna(is_mask_slot).rows = row_count;
     }
   }
@@ -1326,7 +1354,8 @@ static void build_image_grid(Layout &layout,
                   state_access,
                   session.cached_item_count,
                   cols_est,
-                  panel_width);
+                  panel_width,
+                  IMAGE_GRID_HOST);
 }
 
 void template_asset_image_grid(

@@ -670,7 +670,7 @@ class IDBrowserView : public AbstractGridView {
            * returns null when #AssetRepresentation::full_library_path is empty, which is the case
            * for an image browsed straight from disk (a loose file in an on-disk asset library, not
            * wrapped in a .blend). Mirror the third resolution step of
-           * #image_grid_resolve_image_from_asset (view3d_image_grid.cc) and load it directly. */
+           * #image_grid_resolve_image_from_asset (image_grid_ops.cc) and load it directly. */
           if (id == nullptr && idcode == ID_IM) {
             if (Image *image = BKE_image_load_exists(
                     bmain, asset_ptr->full_path().c_str(), nullptr))

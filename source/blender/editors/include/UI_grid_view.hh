@@ -432,6 +432,11 @@ void grid_view_register_pre_button_handler();
  * per-space dynamic grid_ids whose owner is being freed (e.g. a #View3D closing).
  */
 void grid_view_session_remove(StringRef grid_id);
+/**
+ * Drop unreferenced sessions whose id starts with \a prefix. Used when a Python #UIGrid type
+ * unregisters so region-scoped `pygrid:<idname>:` keys do not outlive the type.
+ */
+void grid_view_session_remove_prefix(StringRef prefix);
 
 /**
  * Reset an existing session's scroll to the top and drop its per-column pins. For owners (e.g. a

@@ -7,6 +7,7 @@
  */
 
 #include <cstdlib>
+#include <fmt/format.h>
 
 #include "DNA_asset_types.h"
 #include "DNA_screen_types.h"
@@ -25,10 +26,12 @@
 
 #include "ED_asset_shelf.hh"
 
+#include "UI_grid_view.hh"
 #include "UI_interface.hh"
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 
+#include "WM_api.hh"
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
@@ -699,6 +702,71 @@ static void uilist_filter_items(uiList *ui_list,
 
 /* UIGrid */
 
+static void uigrid_draw_item(uiGrid *ui_grid,
+                             const bContext *C,
+                             ui::Layout &layout,
+                             PointerRNA *dataptr,
+                             const char *identifier,
+                             int index)
+{
+  extern FunctionRNA *rna_UIGrid_draw_item_func;
+
+  PointerRNA grid_ptr = RNA_pointer_create_discrete(
+      C ? &CTX_wm_screen(C)->id : nullptr, ui_grid->type->rna_ext.srna, ui_grid);
+  FunctionRNA *func = rna_UIGrid_draw_item_func;
+  ParameterList list;
+  RNA_parameter_list_create(&list, &grid_ptr, func);
+  RNA_parameter_set_lookup(&list, "context", &C);
+  ui::Layout *layout_ptr = &layout;
+  RNA_parameter_set_lookup(&list, "layout", &layout_ptr);
+  RNA_parameter_set_lookup(&list, "data", dataptr);
+  RNA_parameter_set_lookup(&list, "identifier", &identifier);
+  RNA_parameter_set_lookup(&list, "index", &index);
+  ui_grid->type->rna_ext.call(const_cast<bContext *>(C), &grid_ptr, func, &list);
+  RNA_parameter_list_free(&list);
+}
+
+static void uigrid_draw_filter(uiGrid *ui_grid, const bContext *C, ui::Layout &layout)
+{
+  extern FunctionRNA *rna_UIGrid_draw_filter_func;
+
+  PointerRNA grid_ptr = RNA_pointer_create_discrete(
+      C ? &CTX_wm_screen(C)->id : nullptr, ui_grid->type->rna_ext.srna, ui_grid);
+  FunctionRNA *func = rna_UIGrid_draw_filter_func;
+  ParameterList list;
+  RNA_parameter_list_create(&list, &grid_ptr, func);
+  RNA_parameter_set_lookup(&list, "context", &C);
+  ui::Layout *layout_ptr = &layout;
+  RNA_parameter_set_lookup(&list, "layout", &layout_ptr);
+  ui_grid->type->rna_ext.call(const_cast<bContext *>(C), &grid_ptr, func, &list);
+  RNA_parameter_list_free(&list);
+}
+
+static bool uigrid_listen(uiGrid *ui_grid, const wmNotifier *notifier)
+{
+  extern FunctionRNA *rna_UIGrid_listen_func;
+  if (!notifier) {
+    return false;
+  }
+  FunctionRNA *func = rna_UIGrid_listen_func;
+
+  PointerRNA grid_ptr = RNA_pointer_create_discrete(
+      nullptr, ui_grid->type->rna_ext.srna, ui_grid);
+  ParameterList list;
+  RNA_parameter_list_create(&list, &grid_ptr, func);
+  const int category = int(notifier->category);
+  const int data = int(notifier->data);
+  RNA_parameter_set_lookup(&list, "category", &category);
+  RNA_parameter_set_lookup(&list, "data", &data);
+  ui_grid->type->rna_ext.call(nullptr, &grid_ptr, func, &list);
+
+  void *ret;
+  RNA_parameter_get(&list, RNA_function_find_parameter(nullptr, func, "result"), &ret);
+  const bool redraw = ret ? *static_cast<bool *>(ret) : false;
+  RNA_parameter_list_free(&list);
+  return redraw;
+}
+
 static bool rna_UIGrid_unregister(Main *bmain, StructRNA *type)
 {
   uiGridType *ugt = static_cast<uiGridType *>(RNA_struct_blender_type_get(type));
@@ -707,6 +775,7 @@ static bool rna_UIGrid_unregister(Main *bmain, StructRNA *type)
     return false;
   }
   ui::refresh_for_srna_unregister(bmain, type);
+  ui::grid_view_session_remove_prefix(fmt::format("pygrid:{}:", ugt->idname));
   RNA_struct_free_extension(type, &ugt->rna_ext);
   RNA_struct_free(&RNA_blender_rna_get(), type);
 
@@ -728,7 +797,7 @@ static StructRNA *rna_UIGrid_register(Main *bmain,
   uiGridType *ugt;
   uiGridType dummy_ugt = {};
   uiGrid dummy_ug = {};
-  bool have_function[3];
+  bool have_function[6];
 
   dummy_ug.type = &dummy_ugt;
   PointerRNA dummy_ug_ptr = RNA_pointer_create_discrete(nullptr, RNA_UIGrid, &dummy_ug);
@@ -788,6 +857,10 @@ static StructRNA *rna_UIGrid_register(Main *bmain,
   ugt->rna_ext.call = call;
   ugt->rna_ext.free = free;
   RNA_struct_blender_type_set(ugt->rna_ext.srna, ugt);
+
+  ugt->draw_item = have_function[3] ? uigrid_draw_item : nullptr;
+  ugt->draw_filter = have_function[4] ? uigrid_draw_filter : nullptr;
+  ugt->listen = have_function[5] ? uigrid_listen : nullptr;
 
   WM_uigridtype_add(ugt);
 
@@ -2735,7 +2808,11 @@ static void rna_def_uigrid(BlenderRNA *brna)
   FunctionRNA *func;
 
   srna = RNA_def_struct(brna, "UIGrid", nullptr);
-  RNA_def_struct_ui_text(srna, "UIGrid", "Python item provider for reusable grid views");
+  RNA_def_struct_ui_text(
+      srna,
+      "UIGrid",
+      "Python item provider for reusable grid views (draw/filter/listen like UIList; "
+      "scroll is region-scoped, not file-persisted)");
   RNA_def_struct_sdna(srna, "uiGrid");
   RNA_def_struct_refine_func(srna, "rna_UIGrid_refine");
   RNA_def_struct_register_funcs(srna, "rna_UIGrid_register", "rna_UIGrid_unregister", nullptr);
@@ -2773,10 +2850,10 @@ static void rna_def_uigrid(BlenderRNA *brna)
   parm = RNA_def_pointer(func, "context", "Context", "", "The context");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_pointer(
-      func, "data", "AnyType", "", "Data from which to take the collection property");
+      func, "data", "AnyType", "", "Data passed through from template_grid_view_custom (may be None)");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
   parm = RNA_def_string(
-      func, "propname", nullptr, 0, "", "Identifier of the collection property on data");
+      func, "propname", nullptr, 0, "", "Optional property identifier on data (need not be a collection)");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   RNA_def_function_return(func, RNA_def_int(func, "result", 0, 0, INT_MAX, "", "", 0, INT_MAX));
 
@@ -2787,10 +2864,10 @@ static void rna_def_uigrid(BlenderRNA *brna)
   parm = RNA_def_pointer(func, "context", "Context", "", "The context");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_pointer(
-      func, "data", "AnyType", "", "Data from which to take the collection property");
+      func, "data", "AnyType", "", "Data passed through from template_grid_view_custom (may be None)");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
   parm = RNA_def_string(
-      func, "propname", nullptr, 0, "", "Identifier of the collection property on data");
+      func, "propname", nullptr, 0, "", "Optional property identifier on data (need not be a collection)");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_int(func, "index", 0, 0, INT_MAX, "", "Item index", 0, INT_MAX);
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
@@ -2800,8 +2877,13 @@ static void rna_def_uigrid(BlenderRNA *brna)
    * #RNA_DYN_DESCR_MAX is the buffer length the THICK_WRAP copy is bounded by; the C++ reader in
    * #PyCallbackGridDataSource reads straight out of this same buffer, so there is no second
    * length to keep in sync. */
-  parm = RNA_def_string(
-      func, "identifier", nullptr, RNA_DYN_DESCR_MAX, "", "Stable item identifier");
+  parm = RNA_def_string(func,
+                        "identifier",
+                        nullptr,
+                        RNA_DYN_DESCR_MAX,
+                        "",
+                        "Stable item identifier. Empty still occupies this index "
+                        "(scrollbar stays in sync with get_item_count)");
   RNA_def_parameter_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
   RNA_def_function_output(func, parm);
   parm = RNA_def_string(func, "label", nullptr, RNA_DYN_DESCR_MAX, "", "Item label");
@@ -2831,6 +2913,46 @@ static void rna_def_uigrid(BlenderRNA *brna)
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_pointer(func, "layout", "UILayout", "", "Layout to draw into");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "draw_item", nullptr);
+  RNA_def_function_ui_description(
+      func,
+      "Draw one grid tile. When defined, this replaces the default preview icon tile");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL);
+  parm = RNA_def_pointer(func, "context", "Context", "", "The context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "layout", "UILayout", "", "Layout for this tile");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_pointer(
+      func, "data", "AnyType", "", "Data passed to template_grid_view_custom");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_string(func, "identifier", nullptr, 0, "", "Item identifier from get_item");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "index", 0, 0, INT_MAX, "", "Item index", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "draw_filter", nullptr);
+  RNA_def_function_ui_description(func, "Draw filtering options below the grid");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL);
+  parm = RNA_def_pointer(func, "context", "Context", "", "The context");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "layout", "UILayout", "", "Layout to draw into");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "listen", nullptr);
+  RNA_def_function_ui_description(
+      func,
+      "Called for window notifiers. Return True to redraw the region. "
+      "category and data are #wmNotifier::category and #wmNotifier::data");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL);
+  parm = RNA_def_int(func, "category", 0, INT_MIN, INT_MAX, "", "Notifier category", INT_MIN, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "data", 0, INT_MIN, INT_MAX, "", "Notifier data", INT_MIN, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(
+      func, RNA_def_boolean(func, "result", false, "", "True to redraw the region"));
+
+  RNA_define_verify_sdna(true);
 }
 
 static void rna_def_header(BlenderRNA *brna)

@@ -628,6 +628,23 @@ struct uiListType {
   ExtensionRNA rna_ext;
 };
 
+/** Ephemeral instance used when dispatching Python #UIGrid callbacks. */
+struct uiGrid;
+
+/** Draw one tile of a #uiGrid. */
+using uiGridDrawItemFunc = void (*)(uiGrid *ui_grid,
+                                    const bContext *C,
+                                    ui::Layout &layout,
+                                    PointerRNA *dataptr,
+                                    const char *identifier,
+                                    int index);
+
+/** Draw the filtering row of a #uiGrid. */
+using uiGridDrawFilterFunc = void (*)(uiGrid *ui_grid, const bContext *C, ui::Layout &layout);
+
+/** Listen to a notifier. Return true to redraw. */
+using uiGridListenFunc = bool (*)(uiGrid *ui_grid, const wmNotifier *notifier);
+
 /** Registered Python grid provider type (no file persistence). */
 struct uiGridType {
   uiGridType *next, *prev;
@@ -637,6 +654,11 @@ struct uiGridType {
   char drag_operator[BKE_ST_MAXNAME];
   char reorder_operator[BKE_ST_MAXNAME];
 
+  uiGridDrawItemFunc draw_item;
+  uiGridDrawFilterFunc draw_filter;
+  uiGridListenFunc listen;
+
+  /** RNA integration. */
   ExtensionRNA rna_ext;
 };
 

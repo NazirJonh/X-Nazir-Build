@@ -2179,8 +2179,8 @@ void RNA_api_ui_layout(StructRNA *srna)
                         nullptr,
                         0,
                         "",
-                        "Identifier the grid's scroll and resize state is stored under; must be "
-                        "globally unique, as two grids sharing an id share that state");
+                        "Identifier of this grid in the region (like UIList list_id). Combined "
+                        "with the region so two editors do not share scroll");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
@@ -2196,18 +2196,23 @@ void RNA_api_ui_layout(StructRNA *srna)
                         nullptr,
                         0,
                         "",
-                        "Identifier the grid's scroll and resize state is stored under; must be "
-                        "globally unique, as two grids sharing an id share that state");
+                        "Identifier of this grid in the region (like UIList list_id). Combined "
+                        "with the region and grid type so two editors do not share scroll");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_string(
       func, "gridtype_name", nullptr, 0, "", "Identifier of the UIGrid type to use");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
-  parm = RNA_def_pointer(func, "data", "AnyType", "", "Data owning the collection property");
-  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
-  parm = RNA_def_string(func, "propname", nullptr, 0, "", "Collection property identifier");
-  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
-  parm = RNA_def_pointer(func, "settings", "GridViewSettings", "", "Persistent grid settings");
-  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  parm = RNA_def_pointer(
+      func, "data", "AnyType", "", "Data passed to UIGrid.get_item_count / get_item (optional)");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  parm = RNA_def_string(
+      func, "propname", nullptr, 0, "", "Optional property identifier on data (need not be a collection)");
+  parm = RNA_def_pointer(func,
+                         "settings",
+                         "GridViewSettings",
+                         "",
+                         "Optional; only preview_size is read. Asset-library fields are unused");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
 
   func = RNA_def_function(srna, "template_matrix", "template_matrix");
   RNA_def_function_ui_description(

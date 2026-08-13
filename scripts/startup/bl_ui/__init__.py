@@ -211,9 +211,10 @@ def register():
 
     # Ready-to-use settings storage for `UILayout.template_grid_view_asset()` /
     # `template_grid_library_selector()` / `template_grid_catalog_selector()` /
-    # `template_grid_preview_size()` / `template_grid_name_match_filter()` /
-    # `template_grid_view_custom()`. Add-ons needing an
-    # independent grid instance can attach their own `PointerProperty(type=GridViewSettings)`
+    # `template_grid_preview_size()` / `template_grid_name_match_filter()`.
+    # `template_grid_view_custom()` does not need this: collection and settings are optional,
+    # and only preview_size is read when settings are passed. Add-ons needing an
+    # independent asset-grid instance can attach their own `PointerProperty(type=GridViewSettings)`
     # elsewhere (e.g. on their own PropertyGroup) instead of sharing this one.
     WindowManager.grid_view_settings = PointerProperty(type=GridViewSettings)
 

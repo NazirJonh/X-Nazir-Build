@@ -7,6 +7,8 @@
 
 #include "interface_grid_view_sources.hh"
 
+#include <string>
+
 #include "BKE_context.hh"
 #include "BKE_screen.hh"
 
@@ -114,6 +116,8 @@ class PyGridReorderDragController : public AbstractViewItemDragController {
 
 class PyGridItem : public PreviewGridItem {
   uiGridType *grid_type_;
+  PointerRNA dataptr_;
+  int index_ = 0;
   std::string activate_operator_;
   std::string drag_operator_;
   std::string reorder_operator_;
@@ -121,12 +125,16 @@ class PyGridItem : public PreviewGridItem {
 
  public:
   PyGridItem(StringRef identifier,
-            StringRef label,
-            const int icon,
-            const int badge_icon,
-            uiGridType *grid_type)
+             StringRef label,
+             const int icon,
+             const int badge_icon,
+             uiGridType *grid_type,
+             const PointerRNA &dataptr,
+             const int index)
       : PreviewGridItem(identifier, label, icon),
         grid_type_(grid_type),
+        dataptr_(dataptr),
+        index_(index),
         activate_operator_(grid_type->activate_operator),
         drag_operator_(grid_type->drag_operator),
         reorder_operator_(grid_type->reorder_operator),
@@ -201,6 +209,15 @@ class PyGridItem : public PreviewGridItem {
 
   void build_grid_tile(const bContext &C, Layout &layout) const override
   {
+    if (grid_type_->draw_item) {
+      uiGrid grid_inst;
+      grid_inst.type = grid_type_;
+      PointerRNA dataptr = dataptr_;
+      grid_type_->draw_item(
+          &grid_inst, &C, layout, &dataptr, identifier_.c_str(), index_);
+      return;
+    }
+
     if (badge_icon_ == ICON_NONE) {
       PreviewGridItem::build_grid_tile(C, layout);
       return;
@@ -291,11 +308,9 @@ static bool pygrid_get_item_desc(const bContext &C,
   RNA_parameter_get(&list, RNA_function_find_parameter(nullptr, func, "identifier"), &ret);
   const char *identifier = ret ? static_cast<const char *>(ret) : "";
 
-  if (!identifier[0]) {
-    RNA_parameter_list_free(&list);
-    return false;
-  }
-  r_desc.identifier = identifier;
+  /* Empty identifier used to skip the tile while #get_item_count still counted it, which
+   * desynced the scrollbar. Occupy the index with a stable fallback id instead. */
+  r_desc.identifier = identifier[0] ? identifier : std::to_string(index);
 
   RNA_parameter_get(&list, RNA_function_find_parameter(nullptr, func, "label"), &ret);
   r_desc.label = ret ? static_cast<const char *>(ret) : "";
@@ -384,7 +399,8 @@ void PyCallbackGridDataSource::build_window(const bContext &C,
     if (!pygrid_get_item_desc(C, grid_type_, dataptr_, propname_, index, desc)) {
       continue;
     }
-    view.add_item<PyGridItem>(desc.identifier, desc.label, desc.icon, desc.badge_icon, grid_type_);
+    view.add_item<PyGridItem>(
+        desc.identifier, desc.label, desc.icon, desc.badge_icon, grid_type_, dataptr_, int(index));
   }
 }
 

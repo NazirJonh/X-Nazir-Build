@@ -16,6 +16,7 @@
 #include "BLI_map.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_sys_types.h"
+#include "BLI_vector.hh"
 
 #include "UI_grid_view.hh"
 #include "interface_grid_view.hh"
@@ -121,6 +122,23 @@ void grid_view_session_remove(const StringRef grid_id)
     if ((*slot)->refcount == 0) {
       runtime.sessions.remove_as(grid_id);
     }
+  }
+}
+
+void grid_view_session_remove_prefix(const StringRef prefix)
+{
+  if (prefix.is_empty()) {
+    return;
+  }
+  GridSessionRuntime &runtime = grid_session_runtime();
+  Vector<std::string> stale;
+  for (auto item : runtime.sessions.items()) {
+    if (item.value->refcount == 0 && StringRef(item.key).startswith(prefix)) {
+      stale.append(item.key);
+    }
+  }
+  for (const std::string &key : stale) {
+    runtime.sessions.remove(key);
   }
 }
 

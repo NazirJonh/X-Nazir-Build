@@ -2717,7 +2717,8 @@ void template_grid_view_asset(Layout *layout,
                               const char *drag_operator);
 
 /**
- * Reusable grid driven by a registered Python #UIGrid type over a collection property.
+ * Reusable grid driven by a registered Python #UIGrid type.
+ * \a dataptr / \a propname / \a settings_ptr are optional (not a required collection).
  */
 void template_grid_view_custom(Layout *layout,
                                bContext *C,

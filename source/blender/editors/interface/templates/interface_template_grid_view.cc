@@ -40,6 +40,8 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include <fmt/format.h>
+
 namespace blender::ui {
 
 void grid_view_fill_from_source(AbstractGridView &view,
@@ -78,23 +80,28 @@ namespace {
  * sidesteps the save/restore round-trip entirely: the drag and the next redraw's read both go
  * through the same storage.
  *
- * Keyed by `grid_id`: two draw sites passing the *same* grid_id deliberately share one
- * scroll/grip state, so callers wanting independent grids must pass distinct, globally-unique
- * grid_id strings (spelled out in the docstrings of #template_grid_view_asset /
- * #template_grid_view_custom).
+ * Keyed by `grid_id` within a region for Python templates (see #py_grid_session_id).
+ * Two draw sites in the same region passing the same grid_id share scroll, like #uiList
+ * `list_id`. Different regions do not. #template_grid_view_asset uses a region-scoped key;
+ * the image-grid product uses its own owner-based session id.
  */
 class GenericGridView : public AbstractGridView {
   const bContext &context_;
   std::unique_ptr<GridDataSource> source_;
   int cols_hint_ = 1;
   GridViewHostParams host_params_;
+  uiGridType *grid_type_ = nullptr;
 
  public:
   GenericGridView(const bContext &context,
                   std::unique_ptr<GridDataSource> source,
                   const int cols_hint,
-                  const StringRef grid_id)
-      : context_(context), source_(std::move(source)), cols_hint_(max_ii(1, cols_hint))
+                  const StringRef grid_id,
+                  uiGridType *grid_type = nullptr)
+      : context_(context),
+        source_(std::move(source)),
+        cols_hint_(max_ii(1, cols_hint)),
+        grid_type_(grid_type)
   {
     /* Attach to (acquire) the shared session; the base destructor releases it when
      * #block_free_views drops the owning #ViewLink — the teardown signal the session
@@ -140,6 +147,16 @@ class GenericGridView : public AbstractGridView {
   int get_cached_item_count_for_build() const
   {
     return session_->cached_item_count;
+  }
+
+  bool listen(const wmNotifier &notifier) const override
+  {
+    if (!grid_type_ || !grid_type_->listen) {
+      return false;
+    }
+    uiGrid grid_inst;
+    grid_inst.type = grid_type_;
+    return grid_type_->listen(&grid_inst, &notifier);
   }
 };
 
@@ -463,6 +480,31 @@ void build_grid_view(const bContext &C,
   }
 }
 
+static const ARegion *py_grid_layout_region(const bContext &C, const Block *block)
+{
+  /* Same region the grid geometry snapshot uses: popup when this layout is inside one,
+   * otherwise the editor region. Matches #uiList living on the drawn #ARegion. */
+  const ARegion *region = CTX_wm_region_popup(&C) ? CTX_wm_region_popup(&C) :
+                                                    CTX_wm_region(&C);
+  if (block && block->handle && block->handle->region) {
+    region = block->handle->region;
+  }
+  return region;
+}
+
+static std::string py_grid_session_id(const ARegion *region,
+                                      const StringRef kind,
+                                      const StringRef type_or_empty,
+                                      const StringRef grid_id)
+{
+  /* Region-scoped like #uiList DNA on #ARegion: same grid_id in two areas does not share
+   * scroll. Kind prefixes (`pygrid` / `pygrid-asset`) let unregister drop a type's sessions. */
+  if (type_or_empty.is_empty()) {
+    return fmt::format("{}:{}:{}", kind, fmt::ptr(region), grid_id);
+  }
+  return fmt::format("{}:{}:{}:{}", kind, type_or_empty, fmt::ptr(region), grid_id);
+}
+
 void template_grid_view_asset(Layout *layout,
                               bContext *C,
                               const char *grid_id,
@@ -494,17 +536,21 @@ void template_grid_view_asset(Layout *layout,
                                                       activate_operator ? activate_operator : "",
                                                       drag_operator ? drag_operator : "");
 
-  auto view_unique = std::make_unique<GenericGridView>(*C, std::move(source), cols_est, grid_id);
+  const std::string session_id = py_grid_session_id(
+      py_grid_layout_region(*C, block), "pygrid-asset", "", grid_id);
+
+  auto view_unique = std::make_unique<GenericGridView>(
+      *C, std::move(source), cols_est, session_id);
   GenericGridView *view_ptr = view_unique.get();
   view_unique->set_tile_size(tile_w, tile_h);
   view_unique->set_cols_per_row_hint(cols_est);
 
-  AbstractGridView *grid_view = block_add_view(*block, grid_id, std::move(view_unique));
+  AbstractGridView *grid_view = block_add_view(*block, session_id, std::move(view_unique));
 
   block_add_dynamic_listener(block, ed::asset::list::asset_reading_region_listen_fn);
   block_add_dynamic_listener(block, grid_view_block_listener);
 
-  ViewGridStateAccess state_access(*view_ptr, grid_id);
+  ViewGridStateAccess state_access(*view_ptr, session_id);
   build_grid_view(*C,
                   *layout,
                   *grid_view,
@@ -522,9 +568,7 @@ void template_grid_view_custom(Layout *layout,
                                const char *propname,
                                PointerRNA *settings_ptr)
 {
-  if (!layout || !C || !grid_id || !grid_id[0] || !gridtype_name || !gridtype_name[0] ||
-      !dataptr || !dataptr->data || !propname || !propname[0])
-  {
+  if (!layout || !C || !grid_id || !grid_id[0] || !gridtype_name || !gridtype_name[0]) {
     return;
   }
 
@@ -534,11 +578,18 @@ void template_grid_view_custom(Layout *layout,
     return;
   }
 
-  PropertyRNA *prop = RNA_struct_find_property(dataptr, propname);
-  if (!prop || RNA_property_type(prop) != PROP_COLLECTION) {
-    RNA_warning(
-        "Expected a collection property: %s.%s", RNA_struct_identifier(dataptr->type), propname);
-    return;
+  PointerRNA empty_data = PointerRNA_NULL;
+  if (!dataptr) {
+    dataptr = &empty_data;
+  }
+  const char *propname_use = propname ? propname : "";
+  /* Collection is optional: #UIGrid.get_item_count / #get_item are the source. When a
+   * property name is given it must exist, but it need not be a collection. */
+  if (propname_use[0] && dataptr->data && dataptr->type) {
+    if (!RNA_struct_find_property(dataptr, propname_use)) {
+      RNA_warning("Property not found: %s.%s", RNA_struct_identifier(dataptr->type), propname_use);
+      return;
+    }
   }
 
   Block *block = layout->block();
@@ -551,16 +602,20 @@ void template_grid_view_custom(Layout *layout,
   const int panel_width = max_ii(layout->width(), 0);
   const int cols_est = (panel_width > 0) ? max_ii(1, panel_width / max_ii(tile_w, 1)) : 1;
 
-  auto source = std::make_unique<PyCallbackGridDataSource>(grid_type, *dataptr, propname);
+  const std::string session_id = py_grid_session_id(
+      py_grid_layout_region(*C, block), "pygrid", gridtype_name, grid_id);
 
-  auto view_unique = std::make_unique<GenericGridView>(*C, std::move(source), cols_est, grid_id);
+  auto source = std::make_unique<PyCallbackGridDataSource>(grid_type, *dataptr, propname_use);
+
+  auto view_unique = std::make_unique<GenericGridView>(
+      *C, std::move(source), cols_est, session_id, grid_type);
   GenericGridView *view_ptr = view_unique.get();
   view_unique->set_tile_size(tile_w, tile_h);
   view_unique->set_cols_per_row_hint(cols_est);
 
-  AbstractGridView *grid_view = block_add_view(*block, grid_id, std::move(view_unique));
+  AbstractGridView *grid_view = block_add_view(*block, session_id, std::move(view_unique));
 
-  ViewGridStateAccess state_access(*view_ptr, grid_id);
+  ViewGridStateAccess state_access(*view_ptr, session_id);
   build_grid_view(*C,
                   *layout,
                   *grid_view,
@@ -568,6 +623,12 @@ void template_grid_view_custom(Layout *layout,
                   view_ptr->get_cached_item_count_for_build(),
                   cols_est,
                   panel_width);
+
+  if (grid_type->draw_filter) {
+    uiGrid grid_inst;
+    grid_inst.type = grid_type;
+    grid_type->draw_filter(&grid_inst, C, *layout);
+  }
 }
 
 } /* namespace blender::ui */

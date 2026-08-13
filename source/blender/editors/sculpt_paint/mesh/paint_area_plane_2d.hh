@@ -30,14 +30,15 @@
  *   Plane whose X/Y are the image-texture axes of the dab triangle (object-space ∂P/∂u, ∂P/∂v
  *   from that triangle's UV, then #MTex.rot in that plane). Not object X/Z — those axes ignore
  *   how the image sits on the island and turn ±90° at a cube fold.
- * - A neighbor folded ~90° is rotated into the dab plane around the shared 3D edge when the
- *   triangles share two vertices, otherwise around the plane–plane intersection. Three faces
- *   at a vertex each unfold onto the dab around their own shared edge (a cube-net). Coplanar
- *   faces are a no-op. Falloff still uses the original object-space point.
+ * - A neighbor is unfolded into the dab plane along a path of UV-sewn edges first (the image
+ *   net), then 3D-only seams. Direct 3D hinges that are not sewn in UV (front–top at a cube
+ *   corner while the net goes front–right–top) rotate the stamp 90° on the third island.
+ *   Coplanar steps are identity. Falloff still uses the original object-space point.
  */
 
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 
@@ -104,6 +105,8 @@ class AreaPlaneMesh {
   Vector<int> triangles_in_sphere(const float4x4 &object_to_brush) const;
 
   AreaPlaneTriangle triangle(int index) const;
+
+  Span<AreaPlaneTriangle> triangles() const;
 };
 
 /**
@@ -139,14 +142,13 @@ AreaPlaneFrame area_plane_frame_from_triangle(const AreaPlaneTriangle &tri,
 float4x4 area_plane_object_to_local(const AreaPlaneFrame &frame);
 
 /**
- * Rotate \a point from \a face into the geometric plane of \a dab around their shared 3D edge,
- * or around the plane–plane intersection when they do not share two vertices. Identity when the
- * planes are parallel. Falloff callers must still use the un-rotated point.
+ * One object-space rigid transform per \a accepted triangle that maps that triangle's plane
+ * onto the dab triangle's plane along the UV net (then 3D seams). Identity for the dab itself
+ * and for coplanar faces.
  */
-float3 area_plane_unfold_to_dab_plane(const float3 &point,
-                                      const AreaPlaneTriangle &face,
-                                      const AreaPlaneTriangle &dab,
-                                      const float3 &dab_origin);
+Vector<float4x4> area_plane_unfold_matrices(Span<AreaPlaneTriangle> triangles,
+                                            int dab_index,
+                                            Span<int> accepted);
 
 /**
  * Object space → brush-local, matching #calc_brush_local_mat's scale convention: a point

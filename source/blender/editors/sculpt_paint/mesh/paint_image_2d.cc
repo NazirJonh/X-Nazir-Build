@@ -27,6 +27,7 @@
 #include "BLI_math_color_blend.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.h"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_stack.h"
@@ -1952,11 +1953,12 @@ static bool paint_2d_area_plane_rasterize_triangle(
     ImagePaintState *s,
     ImagePaintTile *tile,
     const ed::sculpt_paint::AreaPlaneTriangle &tri,
-    const ed::sculpt_paint::AreaPlaneTriangle &dab_tri,
     const float4x4 &object_to_brush,
     const float4x4 &channel_local_mat,
     const float4x4 &alpha_local_mat,
+    const float4x4 &unfold_mat,
     const float3 &dab_origin,
+    const float3 &dab_normal,
     const bool sample_alpha,
     ImagePool *pool)
 {
@@ -2026,8 +2028,9 @@ static bool paint_2d_area_plane_rasterize_triangle(
       if (!paint_2d_area_plane_falloff(painter->brush, object_to_brush, position, &strength)) {
         continue;
       }
-      const float3 sample_position = ed::sculpt_paint::area_plane_unfold_to_dab_plane(
-          position, tri, dab_tri, dab_origin);
+      float3 sample_position = math::transform_point(unfold_mat, position);
+      sample_position += dab_normal *
+                         (math::dot(dab_normal, dab_origin) - math::dot(dab_normal, sample_position));
       if (sample_alpha) {
         strength *= paint_2d_area_sample_alpha_factor(
             painter, alpha_local_mat, sample_position, thread, pool);
@@ -2113,6 +2116,13 @@ static void paint_2d_area_plane_stroke(ImagePaintState *s,
     return;
   }
 
+  const Vector<float4x4> unfold_mats = ed::sculpt_paint::area_plane_unfold_matrices(
+      mesh.triangles(), hit.tri_index, accepted);
+  float3 dab_normal = ed::sculpt_paint::area_plane_triangle_face_normal(dab_tri);
+  if (math::length_squared(dab_normal) < 1e-12f) {
+    dab_normal = hit.normal;
+  }
+
   ImagePool *pool = painter->channel_sources != nullptr ? painter->channel_sources->pool() :
                                                           nullptr;
 
@@ -2137,15 +2147,16 @@ static void paint_2d_area_plane_stroke(ImagePaintState *s,
                                    byte_colorspace,
                                    painter->cache_invert);
 
-    for (const int tri_index : accepted) {
+    for (int tri_i = 0; tri_i < accepted.size(); tri_i++) {
       paint_2d_area_plane_rasterize_triangle(s,
                                              tile,
-                                             mesh.triangle(tri_index),
-                                             dab_tri,
+                                             mesh.triangle(accepted[tri_i]),
                                              object_to_brush,
                                              channel_local_mat,
                                              alpha_local_mat,
+                                             unfold_mats[tri_i],
                                              hit.position,
+                                             dab_normal,
                                              sample_alpha,
                                              pool);
     }

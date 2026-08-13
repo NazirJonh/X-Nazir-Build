@@ -15,11 +15,13 @@
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 
+#include "BLI_array.hh"
 #include "BLI_index_range.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
@@ -207,6 +209,11 @@ AreaPlaneTriangle AreaPlaneMesh::triangle(const int index) const
   return triangles_[index];
 }
 
+Span<AreaPlaneTriangle> AreaPlaneMesh::triangles() const
+{
+  return triangles_;
+}
+
 float3 area_plane_triangle_face_normal(const AreaPlaneTriangle &tri)
 {
   return math::normalize(
@@ -297,86 +304,201 @@ float4x4 area_plane_object_to_local(const AreaPlaneFrame &frame)
       frame.origin, frame.axis_x, frame.axis_y, frame.axis_z, frame.radius);
 }
 
+static int area_plane_shared_verts(const AreaPlaneTriangle &a,
+                                   const AreaPlaneTriangle &b,
+                                   int r_ia[2],
+                                   int r_ib[2])
+{
+  int n = 0;
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      if (a.vert[i] == b.vert[j] && a.vert[i] >= 0) {
+        r_ia[n] = i;
+        r_ib[n] = j;
+        n++;
+        if (n == 2) {
+          return 2;
+        }
+      }
+    }
+  }
+  return n;
+}
+
 static bool area_plane_shared_edge(const AreaPlaneTriangle &a,
                                    const AreaPlaneTriangle &b,
                                    float3 &r_p0,
                                    float3 &r_p1)
 {
-  float3 pts[2];
-  int n = 0;
-  for (int i = 0; i < 3; i++) {
-    for (int j = 0; j < 3; j++) {
-      if (a.vert[i] == b.vert[j] && a.vert[i] >= 0) {
-        pts[n++] = a.position[i];
-        if (n == 2) {
-          r_p0 = pts[0];
-          r_p1 = pts[1];
-          return true;
-        }
-      }
-    }
+  int ia[2];
+  int ib[2];
+  if (area_plane_shared_verts(a, b, ia, ib) < 2) {
+    return false;
   }
-  return false;
+  r_p0 = a.position[ia[0]];
+  r_p1 = a.position[ia[1]];
+  return true;
 }
 
-float3 area_plane_unfold_to_dab_plane(const float3 &point,
-                                      const AreaPlaneTriangle &face,
-                                      const AreaPlaneTriangle &dab,
-                                      const float3 &dab_origin)
+static bool area_plane_uv_sewn_edge(const AreaPlaneTriangle &a, const AreaPlaneTriangle &b)
 {
-  if (face.index == dab.index) {
-    return point;
+  int ia[2];
+  int ib[2];
+  if (area_plane_shared_verts(a, b, ia, ib) < 2) {
+    return false;
+  }
+  const float uv_eps_sq = AREA_PLANE_HIT_EPS * AREA_PLANE_HIT_EPS;
+  return math::distance_squared(a.uv[ia[0]], b.uv[ib[0]]) <= uv_eps_sq &&
+         math::distance_squared(a.uv[ia[1]], b.uv[ib[1]]) <= uv_eps_sq;
+}
+
+static float4x4 area_plane_hinge_matrix(const float3 &axis,
+                                        const float theta,
+                                        const float3 &hinge)
+{
+  float4x4 rot = float4x4::identity();
+  axis_angle_to_mat4(rot.ptr(), axis, theta);
+  return math::from_location<float4x4>(hinge) * rot * math::from_location<float4x4>(-hinge);
+}
+
+static float4x4 area_plane_unfold_step_matrix(const AreaPlaneTriangle &from,
+                                              const AreaPlaneTriangle &to)
+{
+  const float3 n_to = area_plane_triangle_face_normal(to);
+  const float3 n_from = area_plane_triangle_face_normal(from);
+  if (math::length_squared(n_to) < 1e-12f || math::length_squared(n_from) < 1e-12f) {
+    return float4x4::identity();
   }
 
-  const float3 n_d = area_plane_triangle_face_normal(dab);
-  const float3 n_f = area_plane_triangle_face_normal(face);
-  if (math::length_squared(n_d) < 1e-12f || math::length_squared(n_f) < 1e-12f) {
-    return point;
-  }
-
-  /* Axis n_f × n_d rotates the face normal onto the dab normal (right-hand). */
-  const float3 n_cross = math::cross(n_f, n_d);
+  const float3 n_cross = math::cross(n_from, n_to);
   const float sin_a = math::length(n_cross);
-  const float cos_a = math::clamp(math::dot(n_f, n_d), -1.0f, 1.0f);
-  /* Parallel (or anti-parallel): no unique hinge. */
+  const float cos_a = math::clamp(math::dot(n_from, n_to), -1.0f, 1.0f);
   if (sin_a < 1e-5f) {
-    return point;
+    return float4x4::identity();
   }
 
-  float3 axis = n_cross / sin_a;
+  const float3 axis = n_cross / sin_a;
   const float theta = std::atan2(sin_a, cos_a);
   if (theta < 1e-5f) {
-    return point;
+    return float4x4::identity();
   }
 
-  const float d_d = math::dot(n_d, dab_origin);
   float3 hinge_point;
   float3 edge_p0;
   float3 edge_p1;
-  if (area_plane_shared_edge(face, dab, edge_p0, edge_p1)) {
+  if (area_plane_shared_edge(from, to, edge_p0, edge_p1)) {
     const float3 edge = edge_p1 - edge_p0;
     if (math::length_squared(edge) > 1e-20f) {
       const float3 edge_dir = math::normalize(edge);
-      hinge_point = edge_p0 + edge_dir * math::dot(edge_dir, dab_origin - edge_p0);
+      hinge_point = edge_p0 + edge_dir * math::dot(edge_dir, from.position[0] - edge_p0);
     }
     else {
       hinge_point = edge_p0;
     }
   }
   else {
-    const float d_f = math::dot(n_f, face.position[0]);
-    const float3 n1xn2 = math::cross(n_d, n_f);
-    const float3 hinge_any = math::cross(d_d * n_f - d_f * n_d, n1xn2) /
+    const float d_to = math::dot(n_to, to.position[0]);
+    const float d_from = math::dot(n_from, from.position[0]);
+    const float3 n1xn2 = math::cross(n_to, n_from);
+    const float3 hinge_any = math::cross(d_to * n_from - d_from * n_to, n1xn2) /
                              math::length_squared(n1xn2);
-    hinge_point = hinge_any + axis * math::dot(axis, dab_origin - hinge_any);
+    hinge_point = hinge_any + axis * math::dot(axis, from.position[0] - hinge_any);
   }
 
-  float3 v = point - hinge_point;
-  float3 v_rot;
-  rotate_normalized_v3_v3v3fl(v_rot, v, axis, theta);
-  float3 unfolded = hinge_point + v_rot;
-  unfolded += n_d * (d_d - math::dot(n_d, unfolded));
-  return unfolded;
+  return area_plane_hinge_matrix(axis, theta, hinge_point);
+}
+
+Vector<float4x4> area_plane_unfold_matrices(const Span<AreaPlaneTriangle> triangles,
+                                            const int dab_index,
+                                            const Span<int> accepted)
+{
+  Vector<float4x4> result(accepted.size(), float4x4::identity());
+  if (accepted.is_empty() || dab_index < 0 || dab_index >= triangles.size()) {
+    return result;
+  }
+
+  const int tri_num = triangles.size();
+  Array<Vector<int>> uv_adj(tri_num);
+  Array<Vector<int>> seam_adj(tri_num);
+  for (int i = 0; i < accepted.size(); i++) {
+    for (int j = i + 1; j < accepted.size(); j++) {
+      const int ia = accepted[i];
+      const int ib = accepted[j];
+      int ca[2];
+      int cb[2];
+      if (area_plane_shared_verts(triangles[ia], triangles[ib], ca, cb) < 2) {
+        continue;
+      }
+      if (area_plane_uv_sewn_edge(triangles[ia], triangles[ib])) {
+        uv_adj[ia].append(ib);
+        uv_adj[ib].append(ia);
+      }
+      else {
+        seam_adj[ia].append(ib);
+        seam_adj[ib].append(ia);
+      }
+    }
+  }
+
+  /* -2 unvisited, -1 dab root, otherwise parent triangle index. UV-sewn paths first. */
+  Array<int> parent(tri_num, -2);
+  Vector<int> queue;
+  parent[dab_index] = -1;
+  queue.append(dab_index);
+  int head = 0;
+  while (head < queue.size()) {
+    const int u = queue[head++];
+    for (const int v : uv_adj[u]) {
+      if (parent[v] == -2) {
+        parent[v] = u;
+        queue.append(v);
+      }
+    }
+  }
+
+  Vector<int> queue2;
+  for (const int i : accepted) {
+    if (parent[i] != -2) {
+      queue2.append(i);
+    }
+  }
+  head = 0;
+  while (head < queue2.size()) {
+    const int u = queue2[head++];
+    for (const int v : seam_adj[u]) {
+      if (parent[v] == -2) {
+        parent[v] = u;
+        queue2.append(v);
+      }
+    }
+    for (const int v : uv_adj[u]) {
+      if (parent[v] == -2) {
+        parent[v] = u;
+        queue2.append(v);
+      }
+    }
+  }
+
+  for (int i = 0; i < accepted.size(); i++) {
+    const int face = accepted[i];
+    if (face == dab_index) {
+      continue;
+    }
+    float4x4 mat = float4x4::identity();
+    if (parent[face] == -2) {
+      mat = area_plane_unfold_step_matrix(triangles[face], triangles[dab_index]);
+    }
+    else {
+      int cur = face;
+      while (parent[cur] >= 0) {
+        const int nxt = parent[cur];
+        mat = area_plane_unfold_step_matrix(triangles[cur], triangles[nxt]) * mat;
+        cur = nxt;
+      }
+    }
+    result[i] = mat;
+  }
+  return result;
 }
 
 float4x4 area_plane_local_mat(const float3 &position,
